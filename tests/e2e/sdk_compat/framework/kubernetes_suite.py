@@ -18,5 +18,8 @@ def select_post_install_tests(items):
         include = bool(item.get_closest_marker("k8s_post_install")) or any(
             nodeid.endswith("/" + case) for case in SHARED_CASES
         )
+        callspec = getattr(item, "callspec", None)
+        backend = callspec.params.get("sdk_backend") if callspec else None
+        include = include and backend in (None, "cubesandbox")
         (selected if include else deselected).append(item)
     return selected, deselected

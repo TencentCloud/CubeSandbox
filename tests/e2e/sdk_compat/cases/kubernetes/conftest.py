@@ -41,6 +41,7 @@ def k8s_service(sdk_backend, k8s_environment, sdk_e2e_reporter):
 
 @pytest.fixture()
 def sdk_create_options(request, sdk_create_options):
+    # Same-name override: the argument resolves to the root conftest fixture.
     options = dict(sdk_create_options)
     if request.node.get_closest_marker("k8s_service"):
         service = request.getfixturevalue("k8s_service")
@@ -49,4 +50,12 @@ def sdk_create_options(request, sdk_create_options):
             allow_internet_access=False,
             network={"allow_out": [*service["dns_ips"], service["ip"]]},
         )
+    elif request.node.get_closest_marker("requires_internet"):
+        # Public egress does not implicitly allow a private cluster DNS IP.
+        environment = request.getfixturevalue("k8s_environment")
+        network = dict(options.get("network") or {})
+        network["allow_out"] = list(
+            dict.fromkeys([*network.get("allow_out", []), *environment["dns_ips"]])
+        )
+        options.update(allow_internet_access=True, network=network)
     return options

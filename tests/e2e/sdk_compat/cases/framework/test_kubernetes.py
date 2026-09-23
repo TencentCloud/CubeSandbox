@@ -218,12 +218,20 @@ def test_suite_reuses_shared_cases():
 
 
 @pytest.mark.parametrize(
-    "runtime", ["present:kvm\npresent:runtime\npresent:socket", "denied", "missing:kvm"]
+    "runtime",
+    [
+        "present:kvm\npresent:runtime\npresent:socket",
+        "denied",
+        "missing:kvm",
+        "no-cubelet",
+    ],
 )
 def test_preflight_uses_scheduler_view_and_distinguishes_unavailable_exec(
     monkeypatch, runtime
 ):
     compute = pod()
+    if runtime == "no-cubelet":
+        compute["spec"]["containers"][0]["name"] = "other"
     dns = {"spec": {"clusterIPs": ["10.96.0.10"]}}
     ops = {
         "metadata": {
@@ -270,9 +278,15 @@ def test_preflight_uses_scheduler_view_and_distinguishes_unavailable_exec(
         ),
     )
     reporter = Reporter()
-    if runtime == "missing:kvm":
-        with pytest.raises(RuntimeError, match="/dev/kvm is absent"):
+    if runtime in ("missing:kvm", "no-cubelet"):
+        message = (
+            "/dev/kvm is absent"
+            if runtime == "missing:kvm"
+            else "cubelet container is absent"
+        )
+        with pytest.raises(RuntimeError, match=message):
             run_kubernetes_preflight(KubernetesConfig("test", "cube", "cube"), reporter)
+        assert reporter.events[-1][0] == "kubernetes_preflight_failed"
     else:
         report = run_kubernetes_preflight(
             KubernetesConfig("test", "cube", "cube"), reporter
@@ -304,6 +318,108 @@ def test_namespace_created_before_client_timeout_is_cleaned():
     ):
         pytest.fail("setup should not yield")
     assert any(c[:2] == ("delete", "namespace") for c in kube.calls)
+
+
+@pytest.mark.parametrize("observed", ["", "null", "{}", '{"metadata": null}'])
+def test_failed_namespace_create_preserves_error_when_not_found(observed):
+    class NotFoundKube(MockKube):
+        def run(self, *args, payload=None, **kwargs):
+            if args[:2] == ("get", "namespace"):
+                return observed
+            return super().run(*args, payload=payload, **kwargs)
+
+    kube, reporter = NotFoundKube(fail_at="create"), Reporter()
+    with (
+        pytest.raises(RuntimeError, match="injected failure"),
+        mock_service(kube, reporter),
+    ):
+        pytest.fail("setup should not yield")
+    assert not any(c[0] == "delete" for c in kube.calls)
+    assert reporter.events[-1][0] == "kubernetes_mock_setup_failed"
+
+
+def test_namespace_cleanup_error_includes_original_failure():
+    kube, reporter = MockKube(fail_at="delete"), Reporter()
+    with pytest.raises(RuntimeError) as caught, mock_service(kube, reporter):
+        raise ValueError("test body failed")
+    assert "namespace cleanup failed: injected failure" in str(caught.value)
+    assert "original failure: ValueError: test body failed" in str(caught.value)
+    assert reporter.events[-1][1]["outcome"] == "failed"
+
+
+def test_post_install_selects_only_native_backend():
+    def item(backend, marked=False):
+        return SimpleNamespace(
+            nodeid=f"cases/lifecycle/test_create.py::test_create_returns_usable_sandbox[{backend}]",
+            get_closest_marker=lambda name: marked,
+            callspec=SimpleNamespace(params={"sdk_backend": backend}),
+        )
+
+    native, e2b, marked_e2b = item("cubesandbox"), item("e2b"), item("e2b", True)
+    assert select_post_install_tests([native, e2b, marked_e2b]) == (
+        [native],
+        [e2b, marked_e2b],
+    )
+
+
+def test_post_install_without_live_flag_is_usage_error():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--k8s-post-install", "-q"],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert "--k8s-post-install requires --run-e2e" in result.stderr
+
+
+def test_post_install_config_ignores_unused_backend_dependencies(pytestconfig):
+    from pathlib import Path
+
+    root_conftest = Path(__file__).resolve().parents[2] / "conftest.py"
+    plugin = pytestconfig.pluginmanager.getplugin(str(root_conftest))
+
+    options = {
+        "--sdk-e2e-backends": "cubesandbox,e2b",
+        "--cube-api-url": None,
+        "--cube-template-id": None,
+        "--k8s-post-install": True,
+    }
+    config = SimpleNamespace(getoption=options.get)
+    assert plugin._config_from_pytest(config).backends == ("cubesandbox",)
+    options["--sdk-e2e-backends"] = "e2b"
+    with pytest.raises(pytest.UsageError, match="requires the cubesandbox backend"):
+        plugin._config_from_pytest(config)
+
+
+def test_public_probe_allows_cluster_dns_without_mutating_inherited_options():
+    import runpy
+    from pathlib import Path
+
+    namespace = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "kubernetes" / "conftest.py")
+    )
+    request = SimpleNamespace(
+        node=SimpleNamespace(
+            get_closest_marker=lambda name: name == "requires_internet"
+        ),
+        getfixturevalue=lambda name: {"dns_ips": ["10.43.0.10", "fd00::a"]},
+    )
+    inherited = {"network": {"allow_out": ["10.43.0.10"], "deny_out": ["192.0.2.1"]}}
+    original = deepcopy(inherited)
+    options = namespace["sdk_create_options"].__wrapped__(request, inherited)
+    assert options["allow_internet_access"] is True
+    assert options["network"] == {
+        "allow_out": ["10.43.0.10", "fd00::a"],
+        "deny_out": ["192.0.2.1"],
+    }
+    assert inherited == original
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -293,13 +294,14 @@ def run_kubernetes_preflight(config: KubernetesConfig, reporter) -> dict:
     ops = [
         s
         for s in services
-        if s["metadata"].get("labels", {}).get("app.kubernetes.io/component")
-        == "ops"
+        if s["metadata"].get("labels", {}).get("app.kubernetes.io/component") == "ops"
     ]
     registry = (
         observe(
             "CubeOps scheduler node view",
-            lambda: kube.service_get(ops[0], "/internal/v1/nodes"),
+            lambda: kube.service_get(
+                min(ops, key=lambda s: s["metadata"]["name"]), "/internal/v1/nodes"
+            ),
             [],
         )
         if ops
@@ -371,7 +373,14 @@ def run_kubernetes_preflight(config: KubernetesConfig, reporter) -> dict:
         if not ready(pod):
             continue
         name = pod["metadata"]["name"]
-        cubelet = next(c for c in pod["spec"]["containers"] if c["name"] == "cubelet")
+        cubelet = next(
+            (c for c in pod["spec"]["containers"] if c["name"] == "cubelet"), None
+        )
+        if cubelet is None:
+            errors.append(
+                f"{name}: cubelet container is absent; check cube-node labels and chart"
+            )
+            continue
         data_dir = next(
             (
                 m["mountPath"]
@@ -452,7 +461,7 @@ def mock_service(kube: Kubectl, reporter, *, avoid_node: str | None = None):
                 "get", "namespace", name, "--ignore-not-found", "-o", "json"
             )
             if observed:
-                metadata = json.loads(observed)["metadata"]
+                metadata = (json.loads(observed) or {}).get("metadata") or {}
                 if all(
                     metadata.get("labels", {}).get(k) == v for k, v in labels.items()
                 ):
@@ -559,6 +568,7 @@ def mock_service(kube: Kubectl, reporter, *, avoid_node: str | None = None):
         reporter.record("kubernetes_mock_ready", **result)
         yield result
     finally:
+        original_error = sys.exc_info()[1]
         if uid is not None:
             # A timeout may have created resources. The namespace owns all of
             # them, including a partially provisioned Service or Pending Pod.
@@ -586,4 +596,9 @@ def mock_service(kube: Kubectl, reporter, *, avoid_node: str | None = None):
                     outcome="failed",
                     error=str(exc),
                 )
+                if original_error is not None:
+                    raise RuntimeError(
+                        f"namespace cleanup failed: {exc}; "
+                        f"original failure: {type(original_error).__name__}: {original_error}"
+                    ) from exc
                 raise
