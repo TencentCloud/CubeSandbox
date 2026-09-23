@@ -8,7 +8,8 @@ end
 local balancer = require "ngx.balancer"
 local ok, err = balancer.set_current_peer(ngx.var.backend_ip, ngx.var.backend_port)
 if not ok then
-    ngx.log(ngx.ERR, "LEVEL_ERROR||", string.format("connect to backend (%s:%s) err: %s"), ngx.var.backend_ip,
-        ngx.var.backend_port, err)
+    ngx.log(ngx.ERR, "LEVEL_ERROR||",
+        string.format("connect to backend (%s:%s) err: %s",
+            ngx.var.backend_ip, ngx.var.backend_port, tostring(err)))
     ngx.exit(503)
 end
