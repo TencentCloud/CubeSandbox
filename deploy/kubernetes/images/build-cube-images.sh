@@ -54,8 +54,8 @@ ONE_CLICK_ARCH="${ONE_CLICK_ARCH:-amd64}"
 # Explicit ONE_CLICK_URL / PVM_KERNEL_*_URL overrides still win.
 MIRROR="${MIRROR:-}"
 ONE_CLICK_ARTIFACT="${ONE_CLICK_ARTIFACT:-cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}.tar.gz}"
-PVM_KERNEL_RPM_ARTIFACT="${PVM_KERNEL_RPM_ARTIFACT:-kernel-6.6.69_opencloudos9.cubesandbox.pvm.host_gb85200d80fa2-1.x86_64.rpm}"
-PVM_KERNEL_DEB_ARTIFACT="${PVM_KERNEL_DEB_ARTIFACT:-linux-image-6.6.69-opencloudos9.cubesandbox.pvm.host-gb85200d80fa2_6.6.69-gb85200d80fa2-1_amd64.deb}"
+PVM_KERNEL_RPM_ARTIFACT="${PVM_KERNEL_RPM_ARTIFACT:-kernel-6.6.117_opencloudos9.cubesandbox.pvm.host_gbc75224fca7e-1.x86_64.rpm}"
+PVM_KERNEL_DEB_ARTIFACT="${PVM_KERNEL_DEB_ARTIFACT:-linux-image-6.6.117-opencloudos9.cubesandbox.pvm.host-gbc75224fca7e_6.6.117-gbc75224fca7e-1_amd64.deb}"
 case "${MIRROR}" in
   cn|CN|cnb|CNB)
     RELEASE_DOWNLOAD_BASE="https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/download/${VERSION}"

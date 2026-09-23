@@ -23,7 +23,7 @@ permissions:
 env:
   KERNEL_TAG: 6.6.119-49.6
   KERNEL_ARCHIVE_URL: https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel/-/git/archive/6.6.119-49.6.zip
-  PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
+  PVM_KERNEL_TAG: 6.6.117-45.16.cubesandbox
   PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
 
 defaults:
