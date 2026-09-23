@@ -35,6 +35,8 @@ const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
 const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
 const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
+/// Matches CubeMaster's maxLogLimit / Cubelet's maxEventLimit.
+const MAX_SANDBOX_LOG_LIMIT: i32 = 2000;
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -426,7 +428,7 @@ impl SandboxService {
     ) -> AppResult<SandboxLogs> {
         match self
             .cubemaster
-            .get_sandbox_logs(&self.build_logs_request(sandbox_id, start, limit))
+            .get_sandbox_logs(&self.build_logs_request(sandbox_id, start, None, limit))
             .await
         {
             Ok(resp) => {
@@ -446,16 +448,10 @@ impl SandboxService {
                     log_entries: resp.logs.into_iter().map(to_log_entry).collect(),
                 })
             }
-            Err(e) if e.is_endpoint_missing() => Ok(SandboxLogs {
-                logs: vec![SandboxLog {
-                    timestamp: chrono::Utc::now(),
-                    line: "(log streaming not yet available — CubeMaster endpoint pending implementation)".to_string(),
-                }],
-                log_entries: vec![],
-            }),
-            Err(e) if e.is_not_found() => {
-                Err(AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
-            }
+            Err(e) if e.is_not_found() => Err(AppError::NotFound(format!(
+                "sandbox {} not found",
+                sandbox_id
+            ))),
             Err(e) => Err(params_error_or_internal(e)),
         }
     }
@@ -464,11 +460,14 @@ impl SandboxService {
         &self,
         sandbox_id: &str,
         cursor: Option<i64>,
+        tail: Option<bool>,
         limit: i32,
     ) -> AppResult<SandboxLogsV2Response> {
+        // Cap the upper bound only; limit<=0 is forwarded for the backend default.
+        let limit = limit.min(MAX_SANDBOX_LOG_LIMIT);
         match self
             .cubemaster
-            .get_sandbox_logs(&self.build_logs_request(sandbox_id, cursor, limit))
+            .get_sandbox_logs(&self.build_logs_request(sandbox_id, cursor, tail, limit))
             .await
         {
             Ok(resp) => {
@@ -478,17 +477,10 @@ impl SandboxService {
 
                 Ok(SandboxLogsV2Response {
                     logs: resp.logs.into_iter().map(to_log_entry).collect(),
+                    next_cursor: (resp.next_cursor > 0).then_some(resp.next_cursor),
+                    has_more: resp.has_more,
                 })
             }
-            Err(e) if e.is_endpoint_missing() => Ok(SandboxLogsV2Response {
-                logs: vec![SandboxLogEntry {
-                    timestamp: chrono::Utc::now(),
-                    message: "(log streaming pending — CubeMaster endpoint not yet implemented)"
-                        .to_string(),
-                    level: ModelLogLevel::Info,
-                    fields: HashMap::new(),
-                }],
-            }),
             Err(e) if e.is_not_found() => Err(AppError::NotFound(format!(
                 "sandbox {} not found",
                 sandbox_id
@@ -672,11 +664,13 @@ impl SandboxService {
         &self,
         sandbox_id: &str,
         cursor: Option<i64>,
+        tail: Option<bool>,
         limit: i32,
     ) -> SandboxLogsRequest {
         SandboxLogsRequest {
             sandbox_id: sandbox_id.to_string(),
             cursor,
+            tail,
             limit,
         }
     }
@@ -1034,11 +1028,17 @@ fn to_log_entry(log: crate::cubemaster::SandboxLogLine) -> SandboxLogEntry {
         "error" => ModelLogLevel::Error,
         _ => ModelLogLevel::Info,
     };
+    let mut fields = HashMap::new();
+    if let Some(module) = log.module {
+        if !module.is_empty() {
+            fields.insert("module".to_string(), module);
+        }
+    }
     SandboxLogEntry {
         timestamp: log.timestamp,
         message: log.message,
         level,
-        fields: HashMap::new(),
+        fields,
     }
 }
 

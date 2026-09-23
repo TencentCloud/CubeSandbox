@@ -751,6 +751,12 @@ pub struct SandboxLogs {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SandboxLogsV2Response {
     pub logs: Vec<SandboxLogEntry>,
+    /// Last entry's cursor; pass back as `cursor` to fetch the next page.
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+    /// True when more matching entries exist beyond the returned page.
+    #[serde(rename = "hasMore", default)]
+    pub has_more: bool,
 }
 
 /// Query params for v1 sandbox logs.
@@ -765,14 +771,16 @@ pub struct SandboxLogsQuery {
 /// Query params for v2 sandbox logs.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
-#[allow(dead_code)]
 pub struct SandboxLogsV2Query {
     pub cursor: Option<i64>,
     #[serde(default = "default_log_limit")]
     pub limit: i32,
-    pub direction: Option<String>,
+    /// tail returns the newest entries; mutually exclusive with cursor.
+    pub tail: Option<bool>,
 }
 
+/// Public v2 default; CubeMaster/Cubelet's internal default is 200. Both are
+/// established contracts — do not "align" them without a breaking-change note.
 fn default_log_limit() -> i32 {
     1000
 }
