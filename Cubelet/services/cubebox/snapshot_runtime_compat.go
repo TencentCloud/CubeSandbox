@@ -9,36 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
-
-const (
-	coordinatedSnapshotShimVersion    = "0.7.2"
-	coordinatedSnapshotShimRC2Version = "0.7.2-rc2"
-)
-
-func useCoordinatedSnapshotPath(cb *cubeboxstore.CubeBox) bool {
-	if cb == nil {
-		return false
-	}
-	version := strings.TrimSpace(cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
-	if version == "" && cb.LocalRunTemplate != nil {
-		if shim, ok := cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim]; ok {
-			version = strings.TrimSpace(shim.Component.Version)
-		}
-	}
-	switch strings.TrimPrefix(version, "v") {
-	case coordinatedSnapshotShimVersion, coordinatedSnapshotShimRC2Version:
-		return true
-	default:
-		return false
-	}
-}
 
 // runSnapshotWithRootfs captures memory and rootfs in one frozen window.
 func runSnapshotWithRootfs(snapshot, rootfs, resume func() error) (snapshotErr, rootfsErr, resumeErr error) {
@@ -58,6 +33,23 @@ func runLegacySnapshot(first, second func() error) (firstErr, secondErr error) {
 	}
 	secondErr = second()
 	return
+}
+
+// captureLegacyMemory captures the memory artifact with the cube-runtime CLI and
+// then repairs the image and agent versions it wrote into metadata.json from the
+// sandbox's pins. The CLI freezes and resumes the VM on its own, so callers must
+// not hold a freeze window across it.
+func (s *service) captureLegacyMemory(
+	ctx context.Context,
+	cb *cubeboxstore.CubeBox,
+	sandboxID string,
+	spec *CubeboxSnapshotSpec,
+	workDir, memoryVol, snapshotType string,
+) error {
+	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, workDir, memoryVol, snapshotType); err != nil {
+		return err
+	}
+	return correctLegacySnapshotMetadataVersions(cb, workDir)
 }
 
 func captureLegacyCommitMemory(cb *cubeboxstore.CubeBox, snapshotID string, invalidate, capture func() error) error {

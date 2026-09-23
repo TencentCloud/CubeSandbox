@@ -324,7 +324,24 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 	var snapshotErr, rootfsErr, resumeErr error
-	if useCoordinatedSnapshotPath(cb) {
+	shimCapability := resolveShimSnapshotCapability(cb)
+
+	// The legacy sequence: capture memory with the cube-runtime CLI, then commit
+	// rootfs. Used both as the ordinary path for a shim below the coordinated
+	// boundary and as the one-shot retry described below.
+	runLegacy := func() (snapshotErr, rootfsErr error) {
+		return runLegacySnapshot(
+			func() error {
+				return s.captureLegacyMemory(frozenCtx, cb, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+			},
+			func() (err error) {
+				rootfsObject, err = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
+				return err
+			},
+		)
+	}
+
+	if shimCapability.Coordinated {
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
@@ -356,20 +373,20 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 			defer cancel()
 			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, templateID))
 		})
+		// A shim whose recorded pin is at or above the boundary but which rejects
+		// the action means the version gate guessed wrong about it. The shim
+		// rejects an unknown action at update_route's match arm, before entering
+		// any handler (CubeShim/shim/src/service/update_ext.rs), so the VM was
+		// never frozen and no artifact was committed -- the whole transaction can
+		// safely be redone on the legacy path. The legacy path never re-enters
+		// the coordinated one, so this retries at most once.
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+			logShimDegradedToLegacy(stepLog, shimCapability.Version)
+			snapshotErr, rootfsErr = runLegacy()
+		}
 	} else {
-		stepLog.Info("CubeShim version is not v0.7.2/v0.7.2-rc2; using the legacy best-effort snapshot path")
-		snapshotErr, rootfsErr = runLegacySnapshot(
-			func() error {
-				if err := s.executeCubeRuntimeSnapshot(frozenCtx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull); err != nil {
-					return err
-				}
-				return correctLegacySnapshotMetadataVersions(cb, layout.MetaWork)
-			},
-			func() (err error) {
-				rootfsObject, err = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
-				return err
-			},
-		)
+		logSnapshotPathSelection(stepLog, shimCapability)
+		snapshotErr, rootfsErr = runLegacy()
 	}
 	if snapshotErr != nil || rootfsErr != nil {
 		cleanupSnapshotObjects()
@@ -742,15 +759,10 @@ func (s *service) resolveCubeRuntimePath(ctx context.Context, sandboxID string) 
 		return path, nil
 	}
 
-	var shimVer string
-	if cb.ComponentVersions != nil {
-		shimVer = strings.TrimSpace(cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
-	}
-	if shimVer == "" && cb.LocalRunTemplate != nil && cb.LocalRunTemplate.Componts != nil {
-		if shim, ok := cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim]; ok {
-			shimVer = strings.TrimSpace(shim.Component.Version)
-		}
-	}
+	// Read the pinned version through the same resolver the snapshot path
+	// selection uses, so the gate and the runtime we exec can never disagree
+	// about which shim is in play.
+	shimVer, _ := pinnedShimVersion(cb)
 	if shimVer != "" {
 		candidate := templatetypes.VersionedLocalPath(
 			templatetypes.DefaultVersionedBaseDir,

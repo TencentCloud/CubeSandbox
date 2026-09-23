@@ -198,7 +198,39 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	defer frozenCancel()
 	var bindingErr error
 	var snapshotErr, rootfsErr, resumeErr error
-	if useCoordinatedSnapshotPath(cb) {
+	shimCapability := resolveShimSnapshotCapability(cb)
+
+	// The legacy sequence: commit rootfs first, then capture memory, which is
+	// v0.7.1 behaviour for this entry point and deliberately differs from
+	// AppSnapshot's order. Used both as the ordinary path for a shim below the
+	// coordinated boundary and as the one-shot retry described below.
+	runLegacy := func() (snapshotErr, rootfsErr error) {
+		rootfsErr, snapshotErr = runLegacySnapshot(
+			func() (err error) {
+				rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+				return err
+			},
+			func() error {
+				return captureLegacyCommitMemory(cb, rsp.TemplateID, func() error {
+					// Legacy cube-runtime clears soft-dirty state as soon as
+					// memory capture succeeds. Durably invalidate the old
+					// baseline before starting so metadata-fixup failures
+					// force the next commit to take a full snapshot.
+					bindingErr = persistRuntimeSnapshotBinding(
+						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+					)
+					return bindingErr
+				}, func() error {
+					return s.captureLegacyMemory(
+						frozenCtx, cb, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd,
+					)
+				})
+			},
+		)
+		return snapshotErr, rootfsErr
+	}
+
+	if shimCapability.Coordinated {
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
@@ -244,33 +276,21 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			defer cancel()
 			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, rsp.TemplateID))
 		})
+		// A shim whose recorded pin is at or above the boundary but which rejects
+		// the action means the version gate guessed wrong about it. The shim
+		// rejects an unknown action at update_route's match arm, before entering
+		// any handler (CubeShim/shim/src/service/update_ext.rs), so the VM was
+		// never frozen and no artifact was committed -- the whole transaction can
+		// safely be redone on the legacy path, which also preserves this entry
+		// point's rootfs-then-memory order. The legacy path never re-enters the
+		// coordinated one, so this retries at most once.
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+			logShimDegradedToLegacy(stepLog, shimCapability.Version)
+			snapshotErr, rootfsErr = runLegacy()
+		}
 	} else {
-		stepLog.Info("CubeShim version is not v0.7.2/v0.7.2-rc2; using the legacy best-effort snapshot path")
-		rootfsErr, snapshotErr = runLegacySnapshot(
-			func() (err error) {
-				rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
-				return err
-			},
-			func() error {
-				return captureLegacyCommitMemory(cb, rsp.TemplateID, func() error {
-					// Legacy cube-runtime clears soft-dirty state as soon as
-					// memory capture succeeds. Durably invalidate the old
-					// baseline before starting so metadata-fixup failures
-					// force the next commit to take a full snapshot.
-					bindingErr = persistRuntimeSnapshotBinding(
-						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
-					)
-					return bindingErr
-				}, func() error {
-					if err := s.executeCubeRuntimeSnapshot(
-						frozenCtx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd,
-					); err != nil {
-						return err
-					}
-					return correctLegacySnapshotMetadataVersions(cb, layout.MetaWork)
-				})
-			},
-		)
+		logSnapshotPathSelection(stepLog, shimCapability)
+		snapshotErr, rootfsErr = runLegacy()
 	}
 	if snapshotErr != nil {
 		if resumeErr != nil {
