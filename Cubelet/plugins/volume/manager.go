@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/containerd/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
 )
 
@@ -170,8 +171,19 @@ func (m *Manager) Detach(ctx context.Context, req *DetachRequest) error {
 	if err != nil {
 		// Unknown driver during Detach: release ref-count and continue.
 		if rc := m.rcStore; rc != nil {
-			rr, _ := rc.Release(req.Namespace, req.VolumeID, req.SandboxID)
-			req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
+			rr, rErr := rc.Release(req.Namespace, req.VolumeID, req.SandboxID)
+			if rErr == nil {
+				req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
+			} else {
+				// Refcount store failure: the count is unknown; suppress
+				// the 1→0 event so CubeMaster does not incorrectly remove
+				// this node from the volume's holder list.
+				log.G(ctx).WithError(rErr).
+					WithField("driver", req.Driver).
+					WithField("volume_id", req.VolumeID).
+					WithField("sandbox_id", req.SandboxID).
+					Warn("volume: refcount release failed during unknown-driver detach; suppressing last-detach event")
+			}
 		}
 		return nil
 	}
@@ -187,13 +199,30 @@ func (m *Manager) Detach(ctx context.Context, req *DetachRequest) error {
 	if rc := m.rcStore; rc != nil {
 		rr, err := rc.Release(req.Namespace, volID, req.SandboxID)
 		if err != nil {
-			_ = err // non-fatal; don't block Destroy
-		} else if !rr.NotHeld {
-			released = true
+			// Refcount store I/O failed — the true count is unknown.
+			// Conservatively tell the plugin the volume is still held so
+			// it will NOT tear down shared host resources that other
+			// sandboxes on this node may still be using, and clear
+			// NodeRefLastDetach so CubeMaster does NOT observe a spurious
+			// 1→0 transition. Detach itself still succeeds so the caller
+			// can reclaim the per-sandbox bind. Operators must clean up
+			// the refcount store manually once the underlying I/O issue
+			// is resolved.
+			log.G(ctx).WithError(err).
+				WithField("driver", req.Driver).
+				WithField("volume_id", volID).
+				WithField("sandbox_id", req.SandboxID).
+				Warn("volume: refcount release failed; degrading to safe mode (RefCount=1)")
+			req.RefCount = 1
+			req.NodeRefLastDetach = false
+		} else {
+			if !rr.NotHeld {
+				released = true
+			}
+			req.RefCount = rr.After // 0 = last detach
+			// 1 → 0 on this node: last sandbox here stopped referencing the volume.
+			req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
 		}
-		req.RefCount = rr.After // 0 = last detach
-		// 1 → 0 on this node: last sandbox here stopped referencing the volume.
-		req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
 	}
 
 	if pluginErr := p.Detach(ctx, req); pluginErr != nil {
