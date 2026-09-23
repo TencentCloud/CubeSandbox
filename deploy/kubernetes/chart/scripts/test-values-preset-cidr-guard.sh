@@ -1,6 +1,8 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Guard: the cubevs/sandbox CIDR a provider preset pins must not overlap any
 # range this repo itself provisions or documents for that provider.
+#
+# bash, not sh: this sources cubevs-cidr-preflight.sh, which uses [[ ]].
 #
 # Regression for #1555: values-tke.yaml pinned 192.168.0.0/18, which fully
 # contains the Service CIDR this repo's own one-click Terraform provisions by
@@ -49,10 +51,12 @@ is_valid_cidr() {
 
 # Pull the cubevs CIDR a values file pins (top-level cubeNode.network.cidr),
 # without depending on a YAML parser — the chart values stay flat here.
+# Reset both flags on a new top-level key: leaving in_net set past the
+# cubeNode: block would let a later section's "  cidr:" match.
 pinned_cidr() {
   awk '
-    /^cubeNode:/ { in_node = 1; next }
-    in_node && /^[^ ]/ { in_node = 0 }
+    /^cubeNode:/ { in_node = 1; in_net = 0; next }
+    in_node && /^[^ ]/ { in_node = 0; in_net = 0 }
     in_node && /^  network:/ { in_net = 1; next }
     in_net && /^  [^ ]/ { in_net = 0 }
     in_net && /^    cidr:/ { gsub(/"/, "", $2); print $2; exit }
@@ -73,14 +77,16 @@ TF_VARS="$REPO_ROOT/deploy/one-click/terraform/tencentcloud/variables.tf"
 [ -f "$TF_VARS" ] || guard_fail "missing $TF_VARS — the ranges this repo provisions for TKE"
 
 # CIDRs the TKE Terraform provisions, read from the same defaults the deployer
-# uses, so a bumped default keeps this guard honest.
+# uses, so a bumped default keeps this guard honest. Anchor on the assignment
+# (`default =`) rather than any line containing "default" — a description that
+# happens to use the word would otherwise be read as the value.
 tke_service_cidr="$(sed -n '/variable "tke_service_cidr"/,/^}/p' "$TF_VARS" \
-  | awk '/default/ { gsub(/"/, "", $3); print $3; exit }')"
+  | awk '/^[[:space:]]*default[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }')"
 tke_pod_cidr="$(sed -n '/variable "tke_cluster_cidr"/,/^}/p' "$TF_VARS" \
-  | awk '/default/ { gsub(/"/, "", $3); print $3; exit }')"
+  | awk '/^[[:space:]]*default[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }')"
 vpc_cidr="$(sed -n '/resource "tencentcloud_vpc" "cluster"/,/^}/p' \
   "$REPO_ROOT/deploy/one-click/terraform/tencentcloud/main.tf" \
-  | awk '/cidr_block/ { gsub(/"/, "", $3); print $3; exit }')"
+  | awk '/^[[:space:]]*cidr_block[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }')"
 
 [ -n "$tke_service_cidr" ] || guard_fail "could not read tke_service_cidr default from $TF_VARS"
 [ -n "$tke_pod_cidr" ] || guard_fail "could not read tke_cluster_cidr default from $TF_VARS"

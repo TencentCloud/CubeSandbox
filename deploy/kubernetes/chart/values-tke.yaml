@@ -20,13 +20,14 @@
 #      set it to "" if you manage CLB SGs outside Helm).
 #   5. Uses a cubevs/sandbox CIDR (10.244.0.0/18) that stays clear of the
 #      ranges this repo's one-click Terraform provisions for TKE — VPC
-#      10.0.0.0/16, Pod CIDR 10.200.0.0/16 and Service CIDR 192.168.0.0/20
-#      (deploy/one-click/terraform/tencentcloud/variables.tf). cube-node
+#      10.0.0.0/16 (hard-coded in main.tf), Pod CIDR 10.200.0.0/16 and
+#      Service CIDR 192.168.0.0/20 (defaults in variables.tf). cube-node
 #      installs a host route to the cubevs bridge, so a cubevs range that
 #      swallows the Service CIDR routes every ClusterIP (cube-ops:3010,
 #      cube-master:8089, kube-dns:53, ...) into the bridge on hostNetwork
 #      compute nodes. The cubevs-cidr-preflight Hook catches that and fails
-#      the install; this preset is chosen so the default TKE path passes it.
+#      the install; this preset is chosen so a cluster built from that
+#      Terraform does not trip it.
 #      See the cubeNode.network / cubeEgress.network sections below. No
 #      cubevs range can be non-overlapping for every cluster — the TKE
 #      Service CIDR is operator-configurable and spans the private ranges —
