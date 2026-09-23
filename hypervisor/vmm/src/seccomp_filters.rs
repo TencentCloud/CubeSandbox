@@ -62,6 +62,13 @@ const BLKPBSZGET: u64 = 0x127b;
 const BLKIOMIN: u64 = 0x1278;
 const BLKIOOPT: u64 = 0x1279;
 
+// fadvise64 backs the restore hotset prewarm (posix_fadvise WILLNEED).
+// aarch64 libc does not export SYS_fadvise64; 223 is the asm-generic number.
+#[cfg(target_arch = "x86_64")]
+const SYS_FADVISE64: libc::c_long = libc::SYS_fadvise64;
+#[cfg(target_arch = "aarch64")]
+const SYS_FADVISE64: libc::c_long = 223;
+
 // See include/uapi/linux/if_tun.h in the kernel code.
 const TUNGETIFF: u64 = 0x8004_54d2;
 const TUNSETIFF: u64 = 0x4004_54ca;
@@ -518,6 +525,7 @@ fn vmm_thread_rules(
         (libc::SYS_eventfd2, vec![]),
         (libc::SYS_exit, vec![]),
         (libc::SYS_exit_group, vec![]),
+        (SYS_FADVISE64, vec![]),
         (libc::SYS_fallocate, vec![]),
         (libc::SYS_fcntl, vec![]),
         (libc::SYS_fdatasync, vec![]),

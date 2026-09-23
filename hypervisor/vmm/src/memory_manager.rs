@@ -1340,11 +1340,17 @@ impl MemoryManager {
             let fast_restore = Self::support_fast_restore_check(config);
             let memory_file = if fast_restore {
                 info!("restore non-shared map, speed up restore by share map memory file");
-                Some(
-                    memory_file_target
-                        .open_read()
-                        .map_err(Error::SnapshotOpen)?,
-                )
+                let file = memory_file_target
+                    .open_read()
+                    .map_err(Error::SnapshotOpen)?;
+                // Optional hotset prewarm: kick async page-cache reads for
+                // the profiled boot set before the guest starts faulting.
+                // No-op (and never fatal) when no valid profile exists.
+                match url_to_path(source_url) {
+                    Ok(snapshot_dir) => crate::hotset::restore_prewarm(&file, &snapshot_dir),
+                    Err(e) => debug!("restore memory hotset: bad snapshot url: {e}"),
+                }
+                Some(file)
             } else {
                 None
             };
