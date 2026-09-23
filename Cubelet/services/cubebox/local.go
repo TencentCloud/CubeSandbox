@@ -460,14 +460,14 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 		ctrLists = append(ctrLists, ctr)
 	}
 	ctrLists = append(ctrLists, info.FirstContainer())
-	runtimePIDs := l.collectSandboxRuntimePIDs(ctx, info)
+	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, info)
 	for _, ctr := range ctrLists {
 		err = l.stopTask(ctx, ctr.Container)
 		if err != nil {
 			stepLog.Warnf("CleanUp stopTask %s fail: %v", sandBoxID, err)
 		}
 	}
-	if err := waitSandboxRuntimeGone(ctx, sandBoxID, runtimePIDs); err != nil {
+	if err := waitSandboxRuntimeGone(ctx, sandBoxID, runtimeEvidence); err != nil {
 		return fmt.Errorf("shim process still Exists [%s]: %w", sandBoxID, err)
 	}
 

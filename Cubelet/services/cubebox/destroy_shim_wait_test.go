@@ -17,7 +17,23 @@ import (
 
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
+
+// startSleeper starts a process that outlives the test body and returns its
+// identity, so tests can exercise "still running" without racing the reaper.
+func startSleeper(t *testing.T) utils.ProcessIdentity {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	id, err := utils.ReadProcessIdentity(cmd.Process.Pid)
+	require.NoError(t, err)
+	return id
+}
 
 func TestReadPidFile(t *testing.T) {
 	dir := t.TempDir()
@@ -31,63 +47,97 @@ func TestReadPidFile(t *testing.T) {
 	assert.Zero(t, readPidFile(path))
 }
 
-func TestCollectSandboxRuntimePIDsUsesRecordedPids(t *testing.T) {
-	sb := newCubeboxWithStatusForTest("sb-wait", cubeboxstore.Status{Pid: 4242, StartedAt: 1})
-	sb.Endpoint = sandboxstore.Endpoint{Pid: 4242}
-
-	l := &local{}
-	assert.Equal(t, []int{4242}, l.collectSandboxRuntimePIDs(context.Background(), sb))
-}
-
-func TestCollectSandboxRuntimePIDsReadsBundlePidFiles(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, shimPidFileName), []byte("88001"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, vmmPidFileName), []byte("88002"), 0o644))
-
-	sb := newCubeboxWithStatusForTest("sb-bundle", cubeboxstore.Status{Pid: 88001, StartedAt: 1})
-	pids := recordedSandboxPIDs(sb)
-	require.Contains(t, pids, 88001)
-
-	got := map[int]struct{}{}
-	for _, pid := range []int{
-		readPidFile(filepath.Join(dir, shimPidFileName)),
-		readPidFile(filepath.Join(dir, vmmPidFileName)),
-	} {
-		if pid > 1 {
-			got[pid] = struct{}{}
-		}
+func TestCollectEvidenceFindsLiveRecordedProcess(t *testing.T) {
+	live := startSleeper(t)
+	sb := newCubeboxWithStatusForTest("sb-live", cubeboxstore.Status{Pid: uint32(live.Pid), StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{
+		Pid:          uint32(live.Pid),
+		PidStartTime: live.StartTime,
+		ShimSpawned:  true,
 	}
-	assert.Contains(t, got, 88001)
-	assert.Contains(t, got, 88002)
+
+	ev := (&local{}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.unresolved)
+	assert.Equal(t, []int{live.Pid}, ev.pids(), "the live pid must be waited on, and only once")
 }
 
-func TestWaitSandboxRuntimeGoneNoPIDs(t *testing.T) {
-	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-empty", nil))
+func TestCollectEvidenceDropsExitedProcess(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-exited", cubeboxstore.Status{Pid: 1000000000, StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{Pid: 1000000000, PidStartTime: 42, ShimSpawned: true}
+
+	ev := (&local{}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.identities)
+	assert.Empty(t, ev.unresolved, "a recorded pid that is provably gone is conclusive, not unknown")
+	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-exited", ev))
+}
+
+// A pid number that has been recycled must not make us wait on a stranger.
+func TestCollectEvidenceIgnoresRecycledPid(t *testing.T) {
+	live := startSleeper(t)
+	sb := newCubeboxWithStatusForTest("sb-recycled", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{
+		Pid:          uint32(live.Pid),
+		PidStartTime: live.StartTime + 1, // same number, different incarnation
+		ShimSpawned:  true,
+	}
+
+	ev := (&local{}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.identities)
+	assert.Empty(t, ev.unresolved)
+}
+
+// The regression this whole change exists for: a shim was started but its pid
+// never reached the store. There is no process to point at, and that absence
+// must not be read as "safe to reclaim the tap and IP".
+func TestCollectEvidenceFlagsSpawnedShimWithoutRecordedPid(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-orphan", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+
+	ev := (&local{}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.identities)
+	require.NotEmpty(t, ev.unresolved)
+
+	err := waitSandboxRuntimeGone(context.Background(), "sb-orphan", ev)
+	require.Error(t, err, "empty evidence from an unresolved sandbox must not pass the gate")
+	assert.Contains(t, err.Error(), "unresolved")
+}
+
+// Sandboxes created before this change have no ShimSpawned flag. They keep the
+// old behaviour rather than becoming undeletable after an upgrade.
+func TestCollectEvidenceAllowsPreUpgradeSandboxWithoutPid(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-legacy", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{}
+
+	ev := (&local{}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.identities)
+	assert.Empty(t, ev.unresolved)
+	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-legacy", ev))
+}
+
+func TestWaitSandboxRuntimeGoneEmptyEvidence(t *testing.T) {
+	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-empty", sandboxRuntimeEvidence{}))
 }
 
 func TestWaitSandboxRuntimeGoneBlocksUntilExit(t *testing.T) {
 	cmd := exec.Command("sleep", "0.15")
 	require.NoError(t, cmd.Start())
-	pid := cmd.Process.Pid
+	id, err := utils.ReadProcessIdentity(cmd.Process.Pid)
+	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	require.NoError(t, waitSandboxRuntimeGone(ctx, "sb-sleep", []int{pid}))
+	ev := sandboxRuntimeEvidence{identities: []utils.ProcessIdentity{id}}
+	require.NoError(t, waitSandboxRuntimeGone(ctx, "sb-sleep", ev))
 	_ = cmd.Wait()
 }
 
 func TestWaitSandboxRuntimeGoneTimesOut(t *testing.T) {
-	cmd := exec.Command("sleep", "5")
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	live := startSleeper(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
-	err := waitSandboxRuntimeGone(ctx, "sb-timeout", []int{cmd.Process.Pid})
-	require.Error(t, err)
+	ev := sandboxRuntimeEvidence{identities: []utils.ProcessIdentity{live}}
+	require.Error(t, waitSandboxRuntimeGone(ctx, "sb-timeout", ev))
 }
 
 func TestSandboxShimLookupIDsDedups(t *testing.T) {
