@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -231,19 +232,11 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 	if src == nil {
 		return fmt.Errorf("dao: instance_db_config is not set")
 	}
-	daoCfg := dao.Config{
-		Driver:                      src.Driver,
-		Addr:                        src.Addr,
-		User:                        src.User,
-		Pwd:                         src.Pwd,
-		DBName:                      src.DBName,
-		ConnTimeoutSeconds:          src.ConnTimeout,
-		ReadTimeoutSeconds:          src.ReadTimeout,
-		WriteTimeoutSeconds:         src.WriteTimeout,
-		MaxIdleConns:                src.MaxIdleConns,
-		MaxOpenConns:                src.MaxOpenConns,
-		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
-		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
+	// Build the dao config through the shared helper, as CubeMaster does, so
+	// the mapping (including ssl_mode) cannot drift between the two processes.
+	daoCfg, err := db.ConfigFromDBConfig(src)
+	if err != nil {
+		return fmt.Errorf("dao: %w", err)
 	}
 	if _, err := dao.Open(ctx, daoCfg); err != nil {
 		return fmt.Errorf("dao open: %w", err)
