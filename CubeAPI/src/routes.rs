@@ -36,16 +36,7 @@ const PAUSE_RESUME_ROUTE_TIMEOUT: Duration = Duration::from_secs(120);
 const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 
 pub fn build_router(state: AppState) -> Router {
-    let auth_configured = state
-        .config
-        .auth_callback_url
-        .as_deref()
-        .is_some_and(|u| !u.is_empty())
-        || state
-            .config
-            .cube_api_key
-            .as_deref()
-            .is_some_and(|k| !k.is_empty());
+    let auth_configured = state.config.auth_is_configured();
 
     let standard_router = apply_http_layers(
         Router::new().merge(build_e2b_router(&state, auth_configured)),
@@ -254,12 +245,169 @@ mod tests {
     };
     use axum::{
         extract::Json,
-        http::{header::RETRY_AFTER, StatusCode},
+        http::{
+            header::{AUTHORIZATION, RETRY_AFTER},
+            HeaderName, HeaderValue, StatusCode,
+        },
         routing::delete,
         Router,
     };
     use axum_test::TestServer;
     use serde_json::Value;
+
+    async fn spawn_approving_callback() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("callback listener should bind");
+        let address = listener.local_addr().expect("callback address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/auth", axum::routing::any(|| async { StatusCode::OK })),
+            )
+            .await
+            .expect("callback server should run");
+        });
+        format!("http://{address}/auth")
+    }
+
+    async fn callback_mode_server(callback_url: &str, rate_limit_per_sec: u32) -> TestServer {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = Some(callback_url.to_string());
+        config.cube_api_key = None;
+        config.rate_limit_per_sec = rate_limit_per_sec;
+
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    async fn throttled_count(server: &TestServer, token: &str, requests: usize) -> usize {
+        let mut throttled = 0;
+        for _ in 0..requests {
+            let response = server
+                .get("/sandboxes")
+                .add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {token}")).expect("valid header"),
+                )
+                .await;
+            if response.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        throttled
+    }
+
+    #[tokio::test]
+    async fn callback_mode_gives_distinct_tokens_independent_buckets() {
+        let callback_url = spawn_approving_callback().await;
+        let server = callback_mode_server(&callback_url, 3).await;
+
+        let noisy = throttled_count(&server, "tenant-a-token", 30).await;
+        assert!(
+            noisy > 20,
+            "an abusive tenant was not throttled: {noisy}/30"
+        );
+
+        let quiet = throttled_count(&server, "tenant-b-token", 3).await;
+        assert_eq!(
+            quiet, 0,
+            "a quiet tenant was starved by another tenant's traffic: {quiet}/3 throttled"
+        );
+    }
+
+    async fn rate_limited_server(rate_limit_per_sec: u32) -> TestServer {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = None;
+        config.cube_api_key = Some("supersecret".to_string());
+        config.rate_limit_per_sec = rate_limit_per_sec;
+
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[tokio::test]
+    async fn rotating_an_unvalidated_api_key_header_cannot_refresh_the_bucket() {
+        let server = rate_limited_server(3).await;
+
+        let mut statuses = Vec::new();
+        for i in 0..30 {
+            let response = server
+                .get("/sandboxes")
+                .add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer supersecret"),
+                )
+                .add_header(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_str(&format!("rotating-{i}")).expect("valid header"),
+                )
+                .await;
+            statuses.push(response.status_code());
+        }
+
+        let throttled = statuses
+            .iter()
+            .filter(|s| **s == StatusCode::TOO_MANY_REQUESTS)
+            .count();
+        assert!(
+            throttled > 20,
+            "rotating X-API-Key bypassed the limiter: only {throttled}/30 throttled, statuses {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_client_is_throttled_without_any_api_key_header() {
+        let server = rate_limited_server(3).await;
+
+        let mut throttled = 0;
+        for _ in 0..30 {
+            let response = server
+                .get("/sandboxes")
+                .add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer supersecret"),
+                )
+                .await;
+            if response.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        assert!(
+            throttled > 20,
+            "bearer client was not throttled: {throttled}/30"
+        );
+    }
+
+    #[tokio::test]
+    async fn alternating_header_styles_share_one_bucket_in_simple_key_mode() {
+        let server = rate_limited_server(3).await;
+
+        let mut throttled = 0;
+        for i in 0..30 {
+            let request = server.get("/sandboxes");
+            let request = if i % 2 == 0 {
+                request.add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer supersecret"),
+                )
+            } else {
+                request.add_header(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_static("supersecret"),
+                )
+            };
+            if request.await.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        assert!(
+            throttled > 20,
+            "alternating Bearer and X-API-Key doubled the quota: only {throttled}/30 throttled"
+        );
+    }
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
