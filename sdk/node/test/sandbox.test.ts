@@ -375,6 +375,42 @@ describe("Sandbox list / health", () => {
     expect(await Sandbox.listV2(makeConfig())).toEqual([]);
   });
 
+  it("follows x-next-token so 'list all' really is all", async () => {
+    // 250 sandboxes over a 100-per-page endpoint: three pages.
+    const page = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => ({
+        sandboxID: `sb-${String(from + i).padStart(3, "0")}`,
+      }));
+
+    setHandler((req) => {
+      const cursor = req.url.searchParams.get("nextToken");
+      if (cursor === "c100") {
+        return {
+          status: 200,
+          json: page(100, 200),
+          headers: { "x-next-token": "c200" },
+        };
+      }
+      if (cursor === "c200") {
+        // No header on the last page: that is the end of the list.
+        return { status: 200, json: page(200, 250) };
+      }
+      return { status: 200, json: page(0, 100), headers: { "x-next-token": "c100" } };
+    });
+
+    const result = await Sandbox.listV2(makeConfig());
+    expect(result).toHaveLength(250);
+    expect(result.map((sb) => sb.sandboxID)).toEqual(
+      Array.from({ length: 250 }, (_, i) => `sb-${String(i).padStart(3, "0")}`),
+    );
+    // The cursor rides back as the query parameter the endpoint declares.
+    const sent = requests.filter((r) => r.pathname === "/v2/sandboxes");
+    expect(sent).toHaveLength(3);
+    expect(sent[0].url.searchParams.get("nextToken")).toBeNull();
+    expect(sent[1].url.searchParams.get("nextToken")).toBe("c100");
+    expect(sent[2].url.searchParams.get("nextToken")).toBe("c200");
+  });
+
   it("reports health", async () => {
     setHandler((req) => {
       expect(req.pathname).toBe("/health");

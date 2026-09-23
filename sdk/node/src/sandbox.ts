@@ -469,12 +469,30 @@ export class Sandbox {
     return (await resp.json()) as Record<string, any>[];
   }
 
-  /** GET /v2/sandboxes — list all running sandboxes (v2). */
+  /**
+   * GET /v2/sandboxes — list all running sandboxes (v2).
+   *
+   * The endpoint answers one page at a time (`limit`, 100 by default) and
+   * reports the next page's position in the `x-next-token` response header.
+   * This follows that cursor until it is absent, so the result is every
+   * matching sandbox rather than only the first page.
+   */
   static async listV2(config?: Config | ConfigOptions): Promise<Record<string, any>[]> {
     const cfg = resolveConfig(config);
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/v2/sandboxes`);
-    await checkControlResponse(resp);
-    return (await resp.json()) as Record<string, any>[];
+    const collected: Record<string, any>[] = [];
+    // `nextToken` is the query parameter the endpoint declares; the first
+    // request carries none, which is what fetches page one.
+    let nextToken: string | null = null;
+    do {
+      const url = new URL(`${cfg.apiUrl}/v2/sandboxes`);
+      if (nextToken) url.searchParams.set("nextToken", nextToken);
+      const resp = await controlFetch(cfg, url.toString());
+      await checkControlResponse(resp);
+      collected.push(...((await resp.json()) as Record<string, any>[]));
+      // Absent (or blank) header means the last page has been returned.
+      nextToken = resp.headers.get("x-next-token") || null;
+    } while (nextToken);
+    return collected;
   }
 
   /** GET /health — check the health of the CubeAPI service. */
