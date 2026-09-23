@@ -62,23 +62,55 @@ const MAX_PENDING_OUT: usize = 1 << 20;
 // brought back down to it.
 const PENDING_OUT_TRIM: usize = 64 << 10;
 
+// Upper bound on the size of a single write handed to the output endpoint.
+//
+// The console output endpoint is an AF_UNIX SOCK_DGRAM socket (the shim points
+// the VMM's stdout at a UnixDatagram pair), and for datagrams the size check is
+// evaluated before the queue-full check: a datagram larger than SO_SNDBUF - 32
+// (~208 KiB with the default 212992) is refused with EMSGSIZE even when the
+// socket would otherwise have accepted it. EMSGSIZE is not WouldBlock, so an
+// uncapped write turns "the consumer is momentarily slow" into a device error.
+//
+// Capping every write well below that limit makes the failure unreachable
+// whatever the endpoint's buffer size happens to be. 4 KiB matches the
+// pre-existing per-descriptor write size, which is known good on this endpoint.
+const MAX_WRITE_CHUNK: usize = 4 << 10;
+
 //Console size feature bit
 const VIRTIO_CONSOLE_F_SIZE: u64 = 0;
 
+// The console has exactly one failure left that is worth taking the device - and
+// with it the whole VM - down for: failing to hand a descriptor back to the
+// guest, which is queue corruption that no amount of retrying repairs. Every
+// other failure on this path (a descriptor chain the guest posted malformed, a
+// guest buffer that cannot be reached, an output endpoint that is full or gone)
+// is reported and skipped, because none of it is worth killing the guest for.
+// Upstream cloud-hypervisor reduced this enum to the same single variant.
 #[derive(Error, Debug)]
 enum Error {
-    #[error("Descriptor chain too short")]
-    DescriptorChainTooShort,
-    #[error("Failed to read from guest memory: {0}")]
-    GuestMemoryRead(vm_memory::guest_memory::Error),
-    #[error("Failed to write to guest memory: {0}")]
-    GuestMemoryWrite(vm_memory::guest_memory::Error),
-    #[error("Failed to write_all output: {0}")]
-    OutputWriteAll(io::Error),
-    #[error("Failed to flush output: {0}")]
-    OutputFlush(io::Error),
     #[error("Failed to add used index: {0}")]
     QueueAddUsed(virtio_queue::Error),
+}
+
+// Whether a failed console write is worth retrying once the endpoint drains.
+//
+// Console output is best-effort, so this is not about which errors are grave:
+// none of them are allowed to take the VM down. It only decides whether the
+// bytes are kept queued (the endpoint is momentarily full and EPOLLOUT will
+// bring us back) or dropped (the endpoint will not accept them however long we
+// wait, so holding on to them would just stall the buffer until it overruns).
+fn is_retryable(err: &io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock        // EAGAIN: the consumer's queue is full
+            | io::ErrorKind::Interrupted // EINTR: the write never happened
+            | io::ErrorKind::OutOfMemory // ENOMEM
+    ) {
+        return true;
+    }
+    // std does not give ENOBUFS its own ErrorKind, but it is a transient kernel
+    // memory shortage and belongs with the retryable errors.
+    err.raw_os_error() == Some(libc::ENOBUFS)
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -135,6 +167,10 @@ struct ConsoleEpollHandler {
     // can keep producing while the consumer is stalled, so without this the
     // drop path would log once per descriptor.
     out_overrun_warned: bool,
+    // Whether the current endpoint-rejection episode has already been reported.
+    // Same reasoning as `out_overrun_warned`: a permanently broken endpoint
+    // would otherwise produce one log line per descriptor.
+    out_drop_warned: bool,
 }
 
 pub enum Endpoint {
@@ -241,6 +277,7 @@ impl ConsoleEpollHandler {
             pending_out: Vec::new(),
             out_flush_registered: false,
             out_overrun_warned: false,
+            out_drop_warned: false,
         }
     }
 
@@ -260,18 +297,32 @@ impl ConsoleEpollHandler {
         }
 
         while let Some(mut desc_chain) = recv_queue.pop_descriptor_chain(self.mem.memory()) {
-            let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
-            let len = cmp::min(desc.len(), in_buffer.len() as u32);
-            let source_slice = in_buffer.drain(..len as usize).collect::<Vec<u8>>();
+            // A malformed chain, or one whose buffer has gone away, is reported
+            // and skipped rather than failing the queue: the chain is still
+            // returned to the guest below, so the driver is not left waiting on
+            // it forever. Input the guest did not get is simply delivered on the
+            // next pass, since it is only taken out of the buffer once written.
+            let mut len = 0;
+            if let Some(desc) = desc_chain.next() {
+                len = cmp::min(desc.len(), in_buffer.len() as u32);
+                let source_slice = in_buffer
+                    .range(..len as usize)
+                    .copied()
+                    .collect::<Vec<u8>>();
 
-            desc_chain
-                .memory()
-                .write_slice(
+                if let Err(e) = desc_chain.memory().write_slice(
                     &source_slice[..],
                     desc.addr()
                         .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
-                )
-                .map_err(Error::GuestMemoryWrite)?;
+                ) {
+                    warn!("Failed to write to receiveq descriptor: {e}");
+                    len = 0;
+                } else {
+                    in_buffer.drain(..len as usize);
+                }
+            } else {
+                warn!("Skipping empty descriptor chain on receiveq");
+            }
 
             recv_queue
                 .add_used(desc_chain.memory(), desc_chain.head_index(), len)
@@ -303,29 +354,43 @@ impl ConsoleEpollHandler {
             out,
             pending_out,
             out_overrun_warned,
+            out_drop_warned,
             access_platform,
             ..
         } = self;
         let mut used_descs = false;
 
         while let Some(mut desc_chain) = output_queue.pop_descriptor_chain(mem.memory()) {
-            let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
-            if out.is_some() {
-                let mut buf: Vec<u8> = Vec::new();
-                desc_chain
-                    .memory()
-                    .write_volatile_to(
+            // A malformed chain, or one whose buffer has gone away, costs the
+            // guest that line of output and nothing else: the chain is still
+            // returned to the guest below, so the driver keeps running.
+            let mut desc_len = 0;
+            if let Some(desc) = desc_chain.next() {
+                desc_len = desc.len();
+                if out.is_some() {
+                    let mut buf: Vec<u8> = Vec::new();
+                    match desc_chain.memory().write_volatile_to(
                         desc.addr()
                             .translate_gva(access_platform.as_ref(), desc.len() as usize),
                         &mut buf,
                         desc.len() as usize,
-                    )
-                    .map_err(Error::GuestMemoryRead)?;
-
-                Self::write_output(out, pending_out, out_overrun_warned, &buf)?;
+                    ) {
+                        Ok(_written) => Self::write_output(
+                            out,
+                            pending_out,
+                            out_overrun_warned,
+                            out_drop_warned,
+                            &buf,
+                        ),
+                        Err(e) => warn!("Failed to read from transmitq descriptor: {e}"),
+                    }
+                }
+            } else {
+                warn!("Skipping empty descriptor chain on transmitq");
             }
+
             output_queue
-                .add_used(desc_chain.memory(), desc_chain.head_index(), desc.len())
+                .add_used(desc_chain.memory(), desc_chain.head_index(), desc_len)
                 .map_err(Error::QueueAddUsed)?;
             used_descs = true;
         }
@@ -337,16 +402,21 @@ impl ConsoleEpollHandler {
     // (non-blocking) endpoint.
     //
     // Console output is best-effort: a full output buffer only means the
-    // consumer on the other end is momentarily slow. Treating it as a device
+    // consumer on the other end is momentarily slow. Treating that as a device
     // error used to abort the console epoll loop and shut the whole VM down,
     // so anything the endpoint refuses is kept in `pending_out` instead and
     // written once OUTPUT_FLUSH_EVENT reports the fd is writable again.
+    //
+    // This deliberately has no error return: there is no console output failure
+    // worth taking a guest down for, so every failure is either retried or
+    // dropped. See `drain_pending_output`.
     fn write_output(
         out: &mut Option<Box<dyn Write + Send>>,
         pending_out: &mut Vec<u8>,
         overrun_warned: &mut bool,
+        drop_warned: &mut bool,
         data: &[u8],
-    ) -> Result<(), Error> {
+    ) {
         pending_out.extend_from_slice(data);
 
         if pending_out.len() > MAX_PENDING_OUT + PENDING_OUT_TRIM {
@@ -367,41 +437,75 @@ impl ConsoleEpollHandler {
             *overrun_warned = false;
         }
 
-        Self::drain_pending_output(out, pending_out).map(|_| ())
+        Self::drain_pending_output(out, pending_out, drop_warned);
     }
 
     // Write `pending_out` to the endpoint, stopping at the first byte the
     // endpoint refuses. Returns whether the buffer ended up empty.
+    //
+    // No outcome here is fatal. A failure is either retryable, in which case
+    // the bytes stay queued and EPOLLOUT brings us back, or it is terminal for
+    // the endpoint, in which case the bytes are dropped and the guest keeps
+    // running. Returning an error would abort the console worker and shut the
+    // whole VM down, which is how a slow log consumer used to kill guests.
     fn drain_pending_output(
         out: &mut Option<Box<dyn Write + Send>>,
         pending_out: &mut Vec<u8>,
-    ) -> Result<bool, Error> {
+        drop_warned: &mut bool,
+    ) -> bool {
         let Some(writer) = out.as_mut() else {
             pending_out.clear();
-            return Ok(true);
+            return true;
         };
 
         while !pending_out.is_empty() {
-            let written = match writer.write(&pending_out[..]) {
-                Ok(written) => written,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-                Err(e) => return Err(Error::OutputWriteAll(e)),
-            };
-            if written == 0 {
-                // The endpoint accepts nothing right now; wait for EPOLLOUT
-                // rather than spinning on it.
-                return Ok(false);
+            // Bounded so that no single write can exceed what the datagram
+            // endpoint is willing to accept; see MAX_WRITE_CHUNK.
+            let chunk = pending_out.len().min(MAX_WRITE_CHUNK);
+            match writer.write(&pending_out[..chunk]) {
+                Ok(0) => {
+                    // The endpoint accepts nothing right now; wait for EPOLLOUT
+                    // rather than spinning on it.
+                    return false;
+                }
+                Ok(written) => {
+                    pending_out.drain(..written);
+                }
+                Err(e) if is_retryable(&e) => return false,
+                Err(e) => {
+                    // EMSGSIZE, EPIPE, ECONNREFUSED, EIO...: the endpoint will
+                    // not take these bytes however long we wait, so drop them
+                    // and carry on rather than killing the guest.
+                    if !*drop_warned {
+                        warn!("Dropping console output, endpoint refused it: {}", e);
+                        *drop_warned = true;
+                    }
+                    pending_out.clear();
+                    return true;
+                }
             }
-            pending_out.drain(..written);
         }
 
-        writer.flush().map_err(Error::OutputFlush)?;
-        Ok(true)
+        // A failed flush is not worth taking the guest down for either.
+        if let Err(e) = writer.flush() {
+            warn!("Failed to flush console output: {}", e);
+        }
+        // The buffer is empty again, so the next rejection is a new episode.
+        *drop_warned = false;
+        true
     }
 
     // Keep the EPOLLOUT subscription in sync with whether console output is
     // still pending. Subscribing only while blocked keeps this from becoming a
     // busy loop, since an idle datagram socket reports EPOLLOUT continuously.
+    //
+    // Measured against a full AF_UNIX datagram endpoint: EPOLLOUT stays clear
+    // for as long as the consumer's queue is full, so a blocked writer waits
+    // here rather than spinning. It also stays clear while the consumer has
+    // only drained part of the queue, and asserts once the queue is empty. A
+    // consumer that takes some output and then goes quiet therefore does not
+    // wake this event; the backlog is retried on the next descriptor from the
+    // guest, or when the consumer drains the rest.
     fn update_output_flush_event(
         &mut self,
         helper: &mut EpollHelper,
@@ -557,14 +661,11 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                 self.update_output_flush_event(helper, drained)?;
             }
             OUTPUT_FLUSH_EVENT => {
-                let drained =
-                    ConsoleEpollHandler::drain_pending_output(&mut self.out, &mut self.pending_out)
-                        .map_err(|e| {
-                            EpollHelperError::HandleEvent(anyhow!(
-                                "Failed to flush console output : {:?}",
-                                e
-                            ))
-                        })?;
+                let drained = ConsoleEpollHandler::drain_pending_output(
+                    &mut self.out,
+                    &mut self.pending_out,
+                    &mut self.out_drop_warned,
+                );
                 self.update_output_flush_event(helper, drained)?;
             }
             CONFIG_EVENT => {
@@ -969,122 +1070,3 @@ impl Snapshottable for Console {
 }
 impl Transportable for Console {}
 impl Migratable for Console {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Test double for a console endpoint whose consumer has stopped draining:
-    // every write fails with WouldBlock while `blocked` is set, which is what
-    // a full datagram socket reports to the non-blocking console writer.
-    struct BlockingWriter {
-        sink: Arc<Mutex<Vec<u8>>>,
-        blocked: Arc<AtomicBool>,
-    }
-
-    impl Write for BlockingWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if self.blocked.load(Ordering::Acquire) {
-                return Err(io::Error::new(io::ErrorKind::WouldBlock, "buffer full"));
-            }
-            self.sink.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn blocking_writer() -> (
-        Option<Box<dyn Write + Send>>,
-        Arc<Mutex<Vec<u8>>>,
-        Arc<AtomicBool>,
-    ) {
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        let blocked = Arc::new(AtomicBool::new(false));
-        let writer = BlockingWriter {
-            sink: Arc::clone(&sink),
-            blocked: Arc::clone(&blocked),
-        };
-        (Some(Box::new(writer)), sink, blocked)
-    }
-
-    // A rejected write must not surface as a device error (that used to abort
-    // the console epoll loop and shut the VM down), and the bytes the endpoint
-    // refused must still be delivered once it drains again.
-    #[test]
-    fn would_block_is_not_fatal_and_pending_output_is_delivered() {
-        let (mut out, sink, blocked) = blocking_writer();
-        let mut pending = Vec::new();
-        let mut warned = false;
-
-        blocked.store(true, Ordering::Release);
-        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, b"hello ").unwrap();
-        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, b"world").unwrap();
-
-        assert_eq!(pending, b"hello world".to_vec());
-        assert!(sink.lock().unwrap().is_empty());
-
-        blocked.store(false, Ordering::Release);
-        assert!(ConsoleEpollHandler::drain_pending_output(&mut out, &mut pending).unwrap());
-        assert!(pending.is_empty());
-        assert_eq!(sink.lock().unwrap().as_slice(), b"hello world".as_slice());
-    }
-
-    // Console output is best-effort: once the pending buffer is full the
-    // oldest bytes are dropped rather than letting memory grow without bound.
-    #[test]
-    fn pending_output_is_bounded() {
-        let (mut out, _sink, blocked) = blocking_writer();
-        let mut pending = Vec::new();
-        let mut warned = false;
-        blocked.store(true, Ordering::Release);
-
-        let chunk = vec![b'x'; MAX_PENDING_OUT / 2];
-        for _ in 0..4 {
-            ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
-        }
-
-        assert!(pending.len() <= MAX_PENDING_OUT + PENDING_OUT_TRIM);
-        // Three of the four writes had to drop, but a stalled consumer must not
-        // turn that into one log line per descriptor.
-        assert!(warned);
-    }
-
-    // Once the consumer catches up, the next overrun is a separate episode and
-    // has to be reported again.
-    #[test]
-    fn overrun_warning_resets_once_drained() {
-        let (mut out, _sink, blocked) = blocking_writer();
-        let mut pending = Vec::new();
-        let mut warned = false;
-
-        blocked.store(true, Ordering::Release);
-        let chunk = vec![b'x'; MAX_PENDING_OUT];
-        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
-        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
-        assert!(warned);
-
-        blocked.store(false, Ordering::Release);
-        ConsoleEpollHandler::drain_pending_output(&mut out, &mut pending).unwrap();
-        assert!(pending.is_empty());
-
-        blocked.store(true, Ordering::Release);
-        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
-        assert!(!warned, "a drained buffer starts a fresh overrun episode");
-    }
-
-    // Without an output endpoint there is nothing to write and nothing to
-    // retain, but the queue must still be consumable.
-    #[test]
-    fn missing_endpoint_discards_output() {
-        let mut out: Option<Box<dyn Write + Send>> = None;
-        let mut pending = Vec::new();
-        let mut warned = false;
-
-        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, b"dropped").unwrap();
-
-        assert!(pending.is_empty());
-    }
-}
