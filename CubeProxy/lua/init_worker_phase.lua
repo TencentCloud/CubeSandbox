@@ -26,4 +26,5 @@ proxy_registry.setup({
     redis_master_name = os.getenv("CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME"),
     redis_sentinel_nodes = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES"),
     redis_sentinel_pd = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD"),
+    redis_ssl   = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SSL"),
 })

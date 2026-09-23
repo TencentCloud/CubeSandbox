@@ -86,6 +86,7 @@ local function load_sandbox_proxy_metadata(ins_id)
         redis_master_name = ngx.var.redis_master_name,
         redis_sentinel_nodes = ngx.var.redis_sentinel_nodes,
         redis_sentinel_pd = ngx.var.redis_sentinel_pd,
+        redis_ssl = ngx.var.redis_ssl,
     })
 
     -- During migration we try the new namespaced key first and fall back to the

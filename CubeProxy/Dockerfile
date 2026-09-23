@@ -10,7 +10,8 @@ LABEL maintainer="staryxchen <staryxchen@tencent.com>"
 RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /etc/apk/repositories \
     && mkdir -p /data/log/cube-proxy/ \
     && apk update \
-    && apk add --no-cache tzdata curl wget \
+    && apk add --no-cache tzdata curl wget ca-certificates \
+    && update-ca-certificates \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone
 

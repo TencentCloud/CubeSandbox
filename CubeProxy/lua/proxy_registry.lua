@@ -44,6 +44,7 @@ local function publish(premature, cfg, state)
         redis_master_name = cfg.redis_master_name,
         redis_sentinel_nodes = cfg.redis_sentinel_nodes,
         redis_sentinel_pd = cfg.redis_sentinel_pd,
+        redis_ssl   = cfg.redis_ssl,
         timeout     = 1, -- seconds
     })
 
