@@ -50,7 +50,7 @@ func lookupSentinelMaster(conf *config.RedisConf) (string, error) {
 	sentinelPwd := conf.SentinelPassword
 	var lastErr error
 	for _, sentinelAddr := range sentinels {
-		addr, err := sentinelGetMaster(sentinelAddr, conf.MasterName, sentinelPwd)
+		addr, err := sentinelGetMaster(sentinelAddr, conf.MasterName, sentinelPwd, conf.TLS)
 		if err == nil {
 			return addr, nil
 		}
@@ -59,12 +59,18 @@ func lookupSentinelMaster(conf *config.RedisConf) (string, error) {
 	return "", fmt.Errorf("sentinel lookup for master %q failed: %w", conf.MasterName, lastErr)
 }
 
-func sentinelGetMaster(sentinelAddr, masterName, password string) (string, error) {
-	c, err := redis.Dial("tcp", sentinelAddr,
+func sentinelGetMaster(sentinelAddr, masterName, password string, useTLS bool) (string, error) {
+	opts := []redis.DialOption{
 		redis.DialConnectTimeout(dialTimeout),
 		redis.DialReadTimeout(dialTimeout),
 		redis.DialWriteTimeout(dialTimeout),
-	)
+	}
+	// Sentinel talks to the same protected network as the master, so it
+	// inherits the TLS setting rather than having its own.
+	if useTLS {
+		opts = append(opts, redis.DialUseTLS(true))
+	}
+	c, err := redis.Dial("tcp", sentinelAddr, opts...)
 	if err != nil {
 		return "", fmt.Errorf("dial sentinel %s: %w", sentinelAddr, err)
 	}
