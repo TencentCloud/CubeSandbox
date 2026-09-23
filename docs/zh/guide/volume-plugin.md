@@ -40,6 +40,8 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 
 参考实现：[COS 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)（one-click 会将 binary 插件放到 `CubeMaster/plugin/` 与 `Cubelet/plugin/`）。
 
+> **第三方插件请安装到 cubetoolbox 目录之外**，否则升级Cube的时候会被重置，详见 [注册与配置](#注册与配置) 与 [插件开发要点](#插件开发要点)。
+
 ### 配置 CubeMaster / Cubelet 并重启
 
 两侧 `volume_plugins` 使用相同的 `driver` 名，`binary_path` / `socket_path` 指向已部署的插件；修改后重启 CubeMaster 与 Cubelet 使配置生效。见 [注册与配置](#注册与配置)。
@@ -606,6 +608,8 @@ volume_plugins:
 
 **`volume_plugin_base_dir`：** 所有插件返回的 `host_path` **必须**落在该目录内（未配置时默认 `/data/cube-shared/volume`）。Cubelet 经 `volumeBaseDir`（rpc）/ `--volume-base-dir`（binary）传给插件；`host_path` 越界则 attach 被拒绝并回滚。
 
+> **`binary_path` / `socket_path` 位置：** 第三方插件请安装到 cubetoolbox 目录之外，否则升级 Cube 时会被重置。
+
 **`name` 必须唯一**：同一进程内不能有两条相同 `name` 的 `volume_plugins`。列表顺序决定省略 `driver` 时的默认插件。
 
 ---
@@ -641,6 +645,7 @@ rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSand
 | 4 | Detach 范围 | Node Detach 只拆除宿主机侧挂载（如 FUSE unmount）；不删除后端持久数据 |
 | 5 | 凭证 | 访问密钥、桶名、地域等由**插件自行管理**（配置文件、环境变量等）；框架不规定布局 |
 | 6 | CubeMaster / Cubelet 一致 | 两侧 `volume_plugins` 须注册**相同的 `driver` 名**；同一 Volume 的管理面 Hook（Create/Destroy）与数据面 Hook（Attach/Detach）须指向**同一套插件** |
+| 7 | 升级安全路径 | 第三方插件请安装到 cubetoolbox 目录之外，否则升级 Cube 时会被重置 |
 
 ---
 

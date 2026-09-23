@@ -120,6 +120,8 @@ The install script runs similar checks when using `--cosfs` / `--coscmd` / `--jq
 
 One-click install places the binary plugin under **`/usr/local/services/cubetoolbox/CubeMaster/plugin/`** (Controller) and **`/usr/local/services/cubetoolbox/Cubelet/plugin/`** (Node), and seeds `volume-cos.conf` from `volume-cos.conf.example` in each directory. After install, edit credentials on the matching node:
 
+> **Third-party plugins:** install outside the cubetoolbox tree, otherwise they are reset on Cube upgrade.
+
 ```bash
 # CubeMaster node (create / destroy)
 sudo chmod 600 /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf

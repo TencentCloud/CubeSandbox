@@ -118,6 +118,8 @@ printf '%s' '{"ok":true}' | jq -r '.ok'   # 应输出 true
 
 一键部署（one-click）会把 binary 插件分别放到 **`/usr/local/services/cubetoolbox/CubeMaster/plugin/`**（Controller）与 **`/usr/local/services/cubetoolbox/Cubelet/plugin/`**（Node），并在各目录从 `volume-cos.conf.example` 生成 `volume-cos.conf`。安装后只需在对应节点编辑凭证：
 
+> **第三方插件请安装到 cubetoolbox 目录之外**，否则升级 Cube 时会被重置。
+
 ```bash
 # CubeMaster 节点（create / destroy）
 sudo chmod 600 /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf

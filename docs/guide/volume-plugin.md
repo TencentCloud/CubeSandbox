@@ -40,6 +40,8 @@ Implement Create / Destroy (Controller) and Attach / Detach (Node) per the [Hook
 
 Reference: [COS plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) (one-click packages the binary under `CubeMaster/plugin/` and `Cubelet/plugin/`).
 
+> **Install third-party plugins outside the cubetoolbox tree**, otherwise they are reset on Cube upgrade. See [Registration and Configuration](#registration-and-configuration) and [Plugin Development Guidelines](#plugin-development-guidelines).
+
 ### Configure CubeMaster / Cubelet and restart
 
 Register the same `driver` name on both sides (`volume_plugins`), point `binary_path` / `socket_path` at the deployed plugin, then restart CubeMaster and Cubelet so the config is loaded. See [Registration and Configuration](#registration-and-configuration).
@@ -608,6 +610,8 @@ volume_plugins:
 
 **`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/cube-shared/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
 
+> **`binary_path` / `socket_path` location:** install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade.
+
 **`name` must be unique** within each process: no two `volume_plugins` entries with the same `name`. List order sets the default plugin when API/SDK omits `driver`.
 
 ---
@@ -643,6 +647,7 @@ When implementing a custom Volume plugin, follow these platform rules:
 | 4 | Detach scope | Tear down host mount only (e.g. FUSE unmount); do not delete backend data |
 | 5 | Credentials | Keys, bucket, region, etc. managed by the **plugin** (config file, env, …); the framework does not mandate layout |
 | 6 | CubeMaster / Cubelet alignment | Both must register the **same `driver` names** in `volume_plugins`; Controller hooks (Create/Destroy) and Node hooks (Attach/Detach) must refer to the **same plugin** for a given Volume |
+| 7 | Upgrade-safe path | Install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade |
 
 ---
 

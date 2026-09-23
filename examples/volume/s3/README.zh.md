@@ -126,6 +126,8 @@ cd examples/volume/s3 && make    # 产物：bin/cube-volume-s3
 one-click 发布包与容器镜像已内置编译好的二进制，位于
 `<prefix>/{CubeMaster,Cubelet}/plugin/cube-volume-s3`。
 
+> **第三方插件请安装到 cubetoolbox 目录之外**，否则升级 Cube 时会被重置。
+
 把二进制安装到两个 `plugin/` 目录：
 
 ```bash
