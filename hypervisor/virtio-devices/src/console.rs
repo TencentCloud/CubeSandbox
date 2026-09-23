@@ -65,16 +65,19 @@ const PENDING_OUT_TRIM: usize = 64 << 10;
 // Upper bound on the size of a single write handed to the output endpoint.
 //
 // The console output endpoint is an AF_UNIX SOCK_DGRAM socket (the shim points
-// the VMM's stdout at a UnixDatagram pair), and for datagrams the size check is
-// evaluated before the queue-full check: a datagram larger than SO_SNDBUF - 32
-// (~208 KiB with the default 212992) is refused with EMSGSIZE even when the
-// socket would otherwise have accepted it. EMSGSIZE is not WouldBlock, so an
-// uncapped write turns "the consumer is momentarily slow" into a device error.
+// the VMM's stdout at a UnixDatagram pair), so one write here is one datagram
+// and its size is a contract with the reader at the other end:
 //
-// Capping every write well below that limit makes the failure unreachable
-// whatever the endpoint's buffer size happens to be. 4 KiB matches the
-// pre-existing per-descriptor write size, which is known good on this endpoint.
-const MAX_WRITE_CHUNK: usize = 4 << 10;
+//  - The shim receives into a fixed 1024-byte buffer
+//    (CubeShim/shim/src/log/mod.rs) with a plain recv(), so a larger datagram
+//    is truncated and the excess dropped without an error.
+//  - On a datagram socket the size check runs before the queue-full check, so
+//    a write larger than SO_SNDBUF - 32 (~208 KiB with the default 212992) is
+//    refused with EMSGSIZE rather than WouldBlock.
+//
+// Chunking at the reader's buffer size keeps every write under both limits,
+// whatever size the guest's descriptors are.
+const MAX_WRITE_CHUNK: usize = 1024;
 
 //Console size feature bit
 const VIRTIO_CONSOLE_F_SIZE: u64 = 0;
@@ -496,36 +499,38 @@ impl ConsoleEpollHandler {
     }
 
     // Keep the EPOLLOUT subscription in sync with whether console output is
-    // still pending. Subscribing only while blocked keeps this from becoming a
-    // busy loop, since an idle datagram socket reports EPOLLOUT continuously.
+    // still pending. An idle datagram socket reports EPOLLOUT continuously, so
+    // subscribing only while the endpoint is refusing data is what keeps this
+    // from becoming a busy loop.
     //
-    // Measured against a full AF_UNIX datagram endpoint: EPOLLOUT stays clear
-    // for as long as the consumer's queue is full, so a blocked writer waits
-    // here rather than spinning. It also stays clear while the consumer has
-    // only drained part of the queue, and asserts once the queue is empty. A
-    // consumer that takes some output and then goes quiet therefore does not
-    // wake this event; the backlog is retried on the next descriptor from the
-    // guest, or when the consumer drains the rest.
-    fn update_output_flush_event(
-        &mut self,
-        helper: &mut EpollHelper,
-        drained: bool,
-    ) -> result::Result<(), EpollHelperError> {
+    // For an AF_UNIX datagram socket, unix_dgram_poll() clears EPOLLOUT while
+    // the peer's receive queue is full -- the same condition that makes the
+    // write return EAGAIN -- and wakes the sender when the peer next reads, so
+    // the subscription tracks exactly what blocked the write.
+    //
+    // A failed epoll_ctl is logged and ignored: without the subscription a
+    // blocked write is retried on the next descriptor from the guest instead.
+    fn update_output_flush_event(&mut self, helper: &mut EpollHelper, drained: bool) {
         let Some(fd) = self.out_fd else {
-            return Ok(());
+            return;
         };
 
-        if drained {
-            if self.out_flush_registered {
-                helper.del_event_custom(fd, OUTPUT_FLUSH_EVENT, epoll::Events::EPOLLOUT)?;
-                self.out_flush_registered = false;
+        let result = if drained {
+            if !self.out_flush_registered {
+                return;
             }
-        } else if !self.out_flush_registered {
-            helper.add_event_custom(fd, OUTPUT_FLUSH_EVENT, epoll::Events::EPOLLOUT)?;
-            self.out_flush_registered = true;
-        }
+            helper.del_event_custom(fd, OUTPUT_FLUSH_EVENT, epoll::Events::EPOLLOUT)
+        } else {
+            if self.out_flush_registered {
+                return;
+            }
+            helper.add_event_custom(fd, OUTPUT_FLUSH_EVENT, epoll::Events::EPOLLOUT)
+        };
 
-        Ok(())
+        match result {
+            Ok(()) => self.out_flush_registered = !drained,
+            Err(e) => warn!("Failed to update console output flush event: {:?}", e),
+        }
     }
 
     fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
@@ -658,7 +663,7 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                     })?;
                 }
                 let drained = self.pending_out.is_empty();
-                self.update_output_flush_event(helper, drained)?;
+                self.update_output_flush_event(helper, drained);
             }
             OUTPUT_FLUSH_EVENT => {
                 let drained = ConsoleEpollHandler::drain_pending_output(
@@ -666,7 +671,7 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                     &mut self.pending_out,
                     &mut self.out_drop_warned,
                 );
-                self.update_output_flush_event(helper, drained)?;
+                self.update_output_flush_event(helper, drained);
             }
             CONFIG_EVENT => {
                 self.config_evt.read().map_err(|e| {
