@@ -31,6 +31,10 @@ type Config struct {
 	// (RedisPassword still authenticates to the Redis master).
 	RedisSentinelPassword string
 
+	// RedisTLS turns on TLS for the Redis connection (CUBE_LCM_REDIS_TLS).
+	// Required by managed Redis that enforces in-transit encryption.
+	RedisTLS bool
+
 	// CubeProxy admin endpoints to push to and pull from. Multiple endpoints
 	// are supported even though the recommended deployment is one CLM
 	// per CubeProxy: future operators may consolidate.
@@ -170,6 +174,14 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("CUBE_LCM_REDIS_SENTINEL_PASSWORD"); v != "" {
 		c.RedisSentinelPassword = v
+	}
+	if v := os.Getenv("CUBE_LCM_REDIS_TLS"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			addErr("CUBE_LCM_REDIS_TLS", err)
+		} else {
+			c.RedisTLS = on
+		}
 	}
 	if v := os.Getenv("CUBE_LCM_PROXY_ADMIN_URLS"); v != "" {
 		c.CubeProxyAdminURLs = splitAndTrim(v)
