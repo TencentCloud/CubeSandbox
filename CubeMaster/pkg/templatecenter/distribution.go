@@ -190,10 +190,11 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
 func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
-	// Always give Cubelets the CubeMaster download endpoint. That keeps the
-	// node-facing address uniform across local-disk and S3-backed artifacts and
-	// avoids per-node dependence on the object-store endpoint's reachability.
-	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
+	// Use S3 presigned URL for direct download; fall back to CubeMaster proxy.
+	downloadURL := directS3DownloadURL(ctx, artifact)
+	if downloadURL == "" {
+		downloadURL = buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
+	}
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
 		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),

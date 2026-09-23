@@ -236,6 +236,15 @@ func ArtifactDownloadURL(ctx context.Context, artifact *models.RootfsArtifact) s
 	return artifactDownloadURL(ctx, artifact)
 }
 
+// directS3DownloadURL returns a fresh S3 presigned URL for cubelets to
+// download directly from the object store, or "" for local-disk artifacts.
+func directS3DownloadURL(ctx context.Context, artifact *models.RootfsArtifact) string {
+	if u := artifactDownloadURL(ctx, artifact); u != "" && !blobstore.IsObjectLocator(u) {
+		return u
+	}
+	return ""
+}
+
 // ArtifactUsesObjectStore reports whether the durable copy lives in blobstore.
 func ArtifactUsesObjectStore(artifact *models.RootfsArtifact) bool {
 	if artifact == nil {
