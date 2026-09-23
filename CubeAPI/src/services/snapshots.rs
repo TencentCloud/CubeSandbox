@@ -85,7 +85,9 @@ impl SnapshotService {
             sandbox_id: sandbox_id.map(str::to_string),
             name: None,
             status: None,
-            limit,
+            // Apply the documented "default 100, max 100" contract here so an
+            // oversized or non-positive `limit` never reaches CubeMaster.
+            limit: Some(normalize_limit(limit)),
             // Normalise an empty cursor (e.g. the client sent `?nextToken=`)
             // back to `None` so we don't relay a meaningless pagination token
             // to CubeMaster (Bug 3).  Whitespace-only tokens get the same
@@ -224,6 +226,45 @@ fn normalize_next_token(token: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
+}
+
+/// Page size `GET /snapshots` falls back to when the caller omits `limit`.
+///
+/// This matches the "default 100" that `ListSnapshotsQuery` and `openapi.yml`
+/// advertise. Note that it is a *change* for callers that omit `limit`: they
+/// used to receive CubeMaster's own default of 20 items
+/// (`normalizeListSnapshotsOptions` in
+/// `CubeMaster/pkg/templatecenter/snapshot_view.go`), and now get 100.
+/// `openapi.yml` is a manually exported artifact, so keeping the two in step
+/// is a convention rather than something enforced here.
+const SNAPSHOT_PAGE_LIMIT_DEFAULT: i32 = 100;
+
+/// Largest page size `GET /snapshots` will ask CubeMaster for.
+///
+/// CubeMaster already clamps anything above 100 back down to 100, so this is
+/// defence in depth rather than a bound that was previously missing.
+/// Keep this aligned with `normalizeListSnapshotsOptions` in
+/// `CubeMaster/pkg/templatecenter/snapshot_view.go`.
+const SNAPSHOT_PAGE_LIMIT_MAX: i32 = 100;
+
+/// Normalise the `limit` query parameter against the documented contract
+/// ("default 100, max 100") before it reaches CubeMaster.
+///
+/// CubeMaster already enforces a contract of its own on this endpoint —
+/// `normalizeListSnapshotsOptions` turns `Limit <= 0` into 20 and clamps
+/// anything above 100 down to 100 — so this does not fix a missing bound. It
+/// makes CubeAPI agree with what `ListSnapshotsQuery` / `openapi.yml`
+/// advertise, at the cost of moving the default page size for callers that
+/// omit `limit` from 20 to 100.
+///
+/// Non-positive values fall back to the default rather than being forwarded,
+/// mirroring how `normalize_next_token` strips an empty cursor instead of
+/// relaying it.
+fn normalize_limit(limit: Option<i32>) -> i32 {
+    match limit {
+        Some(value) if value > 0 => value.min(SNAPSHOT_PAGE_LIMIT_MAX),
+        _ => SNAPSHOT_PAGE_LIMIT_DEFAULT,
+    }
 }
 
 fn internal_error(e: impl std::fmt::Display) -> AppError {
@@ -509,5 +550,19 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("snap-name")
         );
+    }
+
+    #[test]
+    fn normalize_limit_applies_default_and_caps_the_maximum() {
+        // `ListSnapshotsQuery` documents "default 100, max 100". CubeMaster
+        // already enforces its own contract (20 default, 100 cap), so this
+        // pins what CubeAPI sends rather than fixing a missing bound.
+        assert_eq!(normalize_limit(None), 100);
+        assert_eq!(normalize_limit(Some(100)), 100);
+        assert_eq!(normalize_limit(Some(1)), 1);
+        assert_eq!(normalize_limit(Some(101)), 100);
+        assert_eq!(normalize_limit(Some(i32::MAX)), 100);
+        assert_eq!(normalize_limit(Some(0)), 100);
+        assert_eq!(normalize_limit(Some(-5)), 100);
     }
 }
