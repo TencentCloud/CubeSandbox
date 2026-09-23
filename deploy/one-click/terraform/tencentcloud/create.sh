@@ -866,6 +866,32 @@ setup_env() {
 	CUBE_USER="${TENCENTCLOUD_CUBE_USER:-cube}"
 	CUBE_PASSWORD="${TENCENTCLOUD_CUBE_PASSWORD:-cube_pass}"
 	CUBELET_NODE_STATUS_UPDATE_FREQUENCY="${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}"
+	BALLOON_FREE_PAGE_REPORTING="${TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING:-}"
+	BALLOON_FREE_PAGE_REPORTING="${BALLOON_FREE_PAGE_REPORTING#"${BALLOON_FREE_PAGE_REPORTING%%[![:space:]]*}"}"
+	BALLOON_FREE_PAGE_REPORTING="${BALLOON_FREE_PAGE_REPORTING%"${BALLOON_FREE_PAGE_REPORTING##*[![:space:]]}"}"
+	BALLOON_FREE_PAGE_REPORTING_LC="$(printf '%s' "${BALLOON_FREE_PAGE_REPORTING}" | tr '[:upper:]' '[:lower:]')"
+	BALLOON_FREE_PAGE_REPORTING_RESET=0
+	case "${BALLOON_FREE_PAGE_REPORTING_LC}" in
+	"") BALLOON_FREE_PAGE_REPORTING="" ;;
+	default | unset)
+		BALLOON_FREE_PAGE_REPORTING=""
+		BALLOON_FREE_PAGE_REPORTING_RESET=1
+		;;
+	1 | on | true | yes) BALLOON_FREE_PAGE_REPORTING="on" ;;
+	0 | off | false | no) BALLOON_FREE_PAGE_REPORTING="off" ;;
+	*)
+		echo -e "${RED}✗ TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING must be on/off, true/false, yes/no, 1/0, default/unset, or empty.${NC}" >&2
+		return 1
+		;;
+	esac
+	BALLOON_FREE_PAGE_REPORTING_ENV=""
+	BALLOON_FREE_PAGE_REPORTING_SELECTION="${BALLOON_FREE_PAGE_REPORTING}"
+	if [ "${BALLOON_FREE_PAGE_REPORTING_RESET}" = "1" ]; then
+		BALLOON_FREE_PAGE_REPORTING_ENV=" CUBE_BALLOON_FREE_PAGE_REPORTING="
+		BALLOON_FREE_PAGE_REPORTING_SELECTION="default"
+	elif [ -n "${BALLOON_FREE_PAGE_REPORTING}" ]; then
+		BALLOON_FREE_PAGE_REPORTING_ENV=" CUBE_BALLOON_FREE_PAGE_REPORTING=${BALLOON_FREE_PAGE_REPORTING}"
+	fi
 	# Wire the cube DB name/user/password into Terraform so the MySQL account +
 	# database (main.tf), the cube-master conf Secret (tke-addons.tf) and the health
 	# checks below all use the SAME values. Without this the control plane would
@@ -3967,8 +3993,11 @@ step8_init_compute_nodes() {
 		echo -e "  ${CYAN}Local internal IP: ${compute_private_ip}${NC}"
 		echo ""
 
-		# Pre-check: if `cubecli ls` works, CubeSandbox compute is already installed
-		# But if the bundle has been updated or RESET_DB=1, it needs to be redistributed and reinstalled
+		# Pre-check: if `cubecli ls` works, CubeSandbox compute is already installed.
+		# Re-registering restarts Cubelet, so also reconcile an explicitly requested
+		# balloon override before starting it again. An unset deployer option leaves
+		# the installed policy untouched.
+		# But if the bundle has been updated or RESET_DB=1, it needs to be redistributed and reinstalled.
 		if [ "${BUNDLE_UPDATED:-0}" != "1" ] && [ "${REINSTALL:-0}" != "1" ] && [ "${REINSTALL:-0}" != "true" ] && [ "${RESET_DB:-0}" != "1" ] && [ "${RESET_DB:-0}" != "true" ]; then
 			local preflight_out
 			preflight_out=$(ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "cubecli ls 2>&1" 2>&1) || true
@@ -3978,6 +4007,13 @@ step8_init_compute_nodes() {
 				sleep 3
 				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sed -i 's/^ONE_CLICK_CONTROL_PLANE_IP=.*/ONE_CLICK_CONTROL_PLANE_IP=\"${cm_clb_ip}\"/' /usr/local/services/cubetoolbox/.one-click.env 2>&1" 2>&1 || true
 				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sed -i 's/^ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=.*/ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=\"${ops_clb_ip}:3010\"/' /usr/local/services/cubetoolbox/.one-click.env 2>&1" 2>&1 || true
+				if [ "${BALLOON_FREE_PAGE_REPORTING_RESET:-0}" = "1" ]; then
+					ssh "${ssh_opts[@]}" root@"${compute_private_ip}" \
+						"sed -i '/^CUBE_BALLOON_FREE_PAGE_REPORTING=/d' /usr/local/services/cubetoolbox/.one-click.env" 2>&1 || true
+				elif [ -n "${BALLOON_FREE_PAGE_REPORTING:-}" ]; then
+					ssh "${ssh_opts[@]}" root@"${compute_private_ip}" \
+						"if grep -q '^CUBE_BALLOON_FREE_PAGE_REPORTING=' /usr/local/services/cubetoolbox/.one-click.env; then sed -i 's/^CUBE_BALLOON_FREE_PAGE_REPORTING=.*/CUBE_BALLOON_FREE_PAGE_REPORTING=${BALLOON_FREE_PAGE_REPORTING}/' /usr/local/services/cubetoolbox/.one-click.env; else printf '%s\\n' 'CUBE_BALLOON_FREE_PAGE_REPORTING=${BALLOON_FREE_PAGE_REPORTING}' >> /usr/local/services/cubetoolbox/.one-click.env; fi" 2>&1 || true
+				fi
 				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sh /usr/local/services/cubetoolbox/scripts/one-click/up-compute.sh 2>&1" 2>&1 || true
 				echo -e "  ${GREEN}✓ Compute node re-registered${NC}"
 				continue
@@ -4074,7 +4110,15 @@ CUBE_PVM_ENABLE=1
 ONE_CLICK_CONTROL_PLANE_IP=\"${control_plane_ip}\"
 ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=\"${ops_clb_ip}:3010\"
 MIRROR=${egress_mirror}
-EOF
+EOF"
+				if [ "${BALLOON_FREE_PAGE_REPORTING_RESET:-0}" = "1" ]; then
+					remote_cmd+="
+printf '%s\\n' 'CUBE_BALLOON_FREE_PAGE_REPORTING=' >> .env"
+				elif [ -n "${BALLOON_FREE_PAGE_REPORTING:-}" ]; then
+					remote_cmd+="
+printf '%s\\n' 'CUBE_BALLOON_FREE_PAGE_REPORTING=${BALLOON_FREE_PAGE_REPORTING}' >> .env"
+				fi
+				remote_cmd+="
 echo '[local-bundle] .env created:'
 cat .env"
 
@@ -4101,6 +4145,7 @@ echo '[local-bundle] Done'"
 			set +e
 			ssh "${ssh_opts[@]}" -o ConnectTimeout=15 root@"${compute_private_ip}" \
 				"set -o pipefail; curl -fsSL --connect-timeout 10 --max-time 60 '${cn_url}' | \
+         env${BALLOON_FREE_PAGE_REPORTING_ENV} \
          ONE_CLICK_DEPLOY_ROLE=compute \
          CUBE_SANDBOX_NODE_IP='${compute_private_ip}' \
          ONE_CLICK_CONTROL_PLANE_IP='${cm_clb_ip}' \
@@ -4385,6 +4430,7 @@ TENCENTCLOUD_CUBE_DB='${TENCENTCLOUD_CUBE_DB:-cube_mvp}'
 TENCENTCLOUD_CUBE_USER='${TENCENTCLOUD_CUBE_USER:-cube}'
 TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
 TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}'
+TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING='${BALLOON_FREE_PAGE_REPORTING_SELECTION:-}'
 TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.2-rc1}'
 TENCENTCLOUD_IMAGE_REGISTRY='${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}}'
 TENCENTCLOUD_IMAGE_NAMESPACE='${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}'

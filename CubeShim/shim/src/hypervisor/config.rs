@@ -33,6 +33,12 @@ pub const DEFAULT_AGENT_PATH: &str = "/usr/local/services/cubetoolbox/cube-agent
 
 pub const VIRTIO_FS_TAG: &str = "cubeShared";
 pub const VIRTIO_FS_ID: &str = "cube-fs";
+
+/// Overrides the architecture default for virtio-balloon free page reporting.
+/// Accepts `on|true|yes|1` to force-enable and `off|false|no|0` to force-disable;
+/// any other value falls back to the architecture default used for newly
+/// created VM configurations.
+pub const ENV_BALLOON_FREE_PAGE_REPORTING: &str = "CUBE_BALLOON_FREE_PAGE_REPORTING";
 const KI_B: u64 = 1 << 10;
 const MI_B: u64 = KI_B << 10;
 #[derive(Clone)]
@@ -156,6 +162,24 @@ impl Default for VmConfig {
 
 impl VmConfig {
     pub fn to_vm_config(&self) -> VC {
+        let value = std::env::var(ENV_BALLOON_FREE_PAGE_REPORTING).ok();
+        self.to_vm_config_with_balloon_env(value.as_deref(), cfg!(target_arch = "aarch64"))
+    }
+
+    fn to_vm_config_with_balloon_env(&self, value: Option<&str>, is_aarch64: bool) -> VC {
+        let free_page_reporting = Self::free_page_reporting_enabled_from(value, is_aarch64);
+        let normalized = value.map(|value| value.trim().to_ascii_lowercase());
+        let source = match normalized.as_deref() {
+            Some("1" | "on" | "true" | "yes" | "0" | "off" | "false" | "no") => {
+                ENV_BALLOON_FREE_PAGE_REPORTING
+            }
+            _ => "architecture default",
+        };
+        eprintln!("balloon free_page_reporting={free_page_reporting} (source: {source})");
+        self.to_vm_config_with_free_page_reporting(free_page_reporting)
+    }
+
+    fn to_vm_config_with_free_page_reporting(&self, free_page_reporting: bool) -> VC {
         let mut vc = VC::default();
 
         vc.cpus.max_vcpus = self.vcpus as u8;
@@ -173,7 +197,7 @@ impl VmConfig {
         vc.balloon = Some(BalloonConfig {
             size: 0,
             deflate_on_oom: false,
-            free_page_reporting: true,
+            free_page_reporting,
         });
 
         let cmds = self.cmdlines.join(" ").to_string();
@@ -205,6 +229,42 @@ impl VmConfig {
             vc.ivshmem = Some(ivshmem)
         }
         vc
+    }
+
+    /// Decide whether newly created VMs negotiate virtio-balloon free page
+    /// reporting.
+    ///
+    /// Free page reporting lets the guest hand kernel-free pages back to the
+    /// host. On aarch64 this proved to be a net loss for the current sandbox
+    /// workloads: empty and short-lived sandboxes have little free memory
+    /// worth reclaiming, while a freshly booted guest reports almost all of
+    /// its RAM at once. Servicing that cold-boot burst floods the VMM balloon
+    /// worker with `MADV_DONTNEED` / hole-punch calls, which can significantly
+    /// increase TLB-invalidation overhead and regress startup performance.
+    ///
+    /// It is therefore disabled by default on aarch64 and left enabled on
+    /// x86_64. Either default
+    /// can be overridden with the
+    /// [`ENV_BALLOON_FREE_PAGE_REPORTING`] env var (`on|off`), e.g. to
+    /// re-enable it on aarch64 for a memory-density workload that can amortize
+    /// the reporting cost.
+    fn free_page_reporting_enabled_from(value: Option<&str>, is_aarch64: bool) -> bool {
+        if let Some(value) = value {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "" => {}
+                "1" | "on" | "true" | "yes" => return true,
+                "0" | "off" | "false" | "no" => return false,
+                other => {
+                    eprintln!(
+                        "Ignoring unrecognized {ENV_BALLOON_FREE_PAGE_REPORTING}={other:?}; \
+                         falling back to the architecture default"
+                    );
+                }
+            }
+        }
+
+        // Architecture default: enabled on x86_64, disabled on aarch64.
+        !is_aarch64
     }
 
     /// Enable ivshmem shared memory channel with a caller-supplied backend
@@ -492,7 +552,7 @@ mod tests {
     #[test]
     fn utils_config_dft() {
         let config = VmConfig::default();
-        let hypervisor_config = config.to_vm_config();
+        let hypervisor_config = config.to_vm_config_with_free_page_reporting(false);
 
         //default: pmem0=OS, pmem1=agent
         assert!(config.pmems.is_some());
@@ -509,7 +569,7 @@ mod tests {
         let balloon = hypervisor_config.balloon.unwrap();
         assert_eq!(balloon.size, 0);
         assert!(!balloon.deflate_on_oom);
-        assert!(balloon.free_page_reporting);
+        assert!(!balloon.free_page_reporting);
 
         let mut params = vec![
             "root=/dev/pmem0".to_string(),
@@ -535,6 +595,43 @@ mod tests {
             "mitigations=off".to_string(),
         ]);
         assert_eq!(config.cmdlines, params);
+    }
+
+    #[test]
+    fn balloon_free_page_reporting_env_override() {
+        let reporting = VmConfig::free_page_reporting_enabled_from;
+        let config = VmConfig::default();
+
+        assert!(
+            config
+                .to_vm_config_with_balloon_env(Some("on"), true)
+                .balloon
+                .unwrap()
+                .free_page_reporting
+        );
+        assert!(
+            !config
+                .to_vm_config_with_balloon_env(Some("off"), false)
+                .balloon
+                .unwrap()
+                .free_page_reporting
+        );
+
+        // Explicit on/off wins over the architecture default, in any case.
+        assert!(reporting(Some("on"), true));
+        assert!(reporting(Some("TRUE"), true));
+        assert!(reporting(Some(" 1 "), true));
+        assert!(!reporting(Some("off"), false));
+        assert!(!reporting(Some("false"), false));
+        assert!(!reporting(Some("0"), false));
+
+        // Unrecognized values and an unset var fall back to the arch default.
+        assert!(!reporting(Some("maybe"), true));
+        assert!(reporting(Some("maybe"), false));
+        assert!(!reporting(Some("  "), true));
+        assert!(reporting(Some(""), false));
+        assert!(!reporting(None, true));
+        assert!(reporting(None, false));
     }
 
     #[test]

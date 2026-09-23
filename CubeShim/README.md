@@ -63,6 +63,26 @@ make all-docker
 
 The release binary is output to `target/release/containerd-shim-cube-rs`.
 
+## Runtime Configuration
+
+### Balloon free-page reporting
+
+`CUBE_BALLOON_FREE_PAGE_REPORTING` overrides whether newly created VMs negotiate
+virtio-balloon free-page reporting. Accepted values are `1`, `on`, `true`, and
+`yes` to enable it, or `0`, `off`, `false`, and `no` to disable it (case
+insensitive, with surrounding whitespace ignored). An unset or unrecognized
+value uses the architecture default: disabled on aarch64 and enabled on other
+architectures.
+
+The variable must be present in Cubelet's environment. Cubelet's embedded
+containerd passes that environment to newly launched shim processes. For Helm
+installations, set it through `cubeNode.env`; for one-click installations, set
+it in the bundle `.env` before installing or upgrading. Changing it requires a
+Cubelet restart and affects only shims and VM configurations created afterward;
+running sandboxes and the device topology stored in existing snapshots are not
+changed. On aarch64, templates created before the upgrade retain reporting
+enabled and must be redone to adopt the new disabled default.
+
 ## Development Notes
 
 ### Rust Toolchain

@@ -220,6 +220,28 @@ Before installation, you can explicitly set the current node's internal IP in `.
 
 If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use that value directly; otherwise, the auto-detected node IP is persisted in the runtime environment and used to render `cube proxy` / DNS addresses.
 
+### Balloon free-page reporting
+
+Virtio-balloon free-page reporting is disabled by default on aarch64 and enabled
+on other architectures. Override either default for newly created VMs by adding
+one of the following to the bundle `.env` before running `install.sh` or
+`install-compute.sh`:
+
+```bash
+CUBE_BALLOON_FREE_PAGE_REPORTING=on  # or off
+```
+
+The parser also accepts `1`/`0`, `true`/`false`, and `yes`/`no`. The installer
+persists a non-empty value in `/usr/local/services/cubetoolbox/.one-click.env`, which the
+Cubelet service loads. Cubelet's embedded containerd then passes it to new
+CubeShim processes. To change an installed node, update the bundle `.env` and
+rerun the installer in upgrade mode. Set the key to an empty value to remove a
+previously persisted override and restore the architecture default. The Cubelet
+restart affects only shims and VM configurations created afterward. Running
+sandboxes and existing snapshot device topology are unchanged. On aarch64,
+templates created before the upgrade retain reporting enabled and must be redone
+to adopt the new disabled default.
+
 ### CubeS3lvol stop/upgrade semantics
 
 CubeS3lvol (s3lvol) is a `Wants=` member of the `cube-sandbox-*` role target. It
@@ -274,9 +296,11 @@ inherit one.
   before upgrade — that resets this switch to `0`. Hand-editing
   `.one-click.env` is no longer required. `systemctl enable/disable
   cube-sandbox-s3lvol.service` still works as a direct systemd toggle.
-  `CUBE_PVM_ENABLE` follows the same rule: appearing in `.env` or the
-  process environment always counts as an explicit choice (so a full
-  `cp env.example .env` before an upgrade also resets it to `0`).
+  `CUBE_PVM_ENABLE` and `CUBE_BALLOON_FREE_PAGE_REPORTING` follow the same
+  rule: appearing in `.env` or the process environment always counts as an
+  explicit choice (so a full `cp env.example .env` before an upgrade also
+  resets `CUBE_PVM_ENABLE` to `0`; an empty balloon value restores its
+  architecture default).
 - **S3 backend**: when enabled, `install.sh` writes `/data/cubelet/s3.cfg`
   from `CUBE_S3_*` (bundled MinIO fill, or the operator's external store).
   s3lvol uses its own bucket (`CUBE_S3LVOL_BUCKET`, default `cube-s3lvol`)
@@ -769,6 +793,7 @@ export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
 export TENCENTCLOUD_COMPUTE_NODE_COUNT=2          # CVM PVM compute nodes (default 2)
 export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker nodes (default 2)
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
+export TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING=on # unset keeps policy; default clears override
 export TENCENTCLOUD_USE_TCR=false                 # default: public pre-built images
 export TENCENTCLOUD_USE_CFS=false                 # default: no CFS, cubemaster single replica
 export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.2-rc1

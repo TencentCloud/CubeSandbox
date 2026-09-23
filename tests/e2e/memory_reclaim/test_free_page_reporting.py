@@ -66,6 +66,34 @@ class FreePageReportingRunnerTests(unittest.TestCase):
             with mock.patch.object(target, "is_sandbox_shim_pid", return_value=True):
                 self.assertEqual(target.read_live_pid(pidfile, "sbx-test"), 123)
 
+    def test_free_page_reporting_matches_shim_parser(self) -> None:
+        for value in (b"on", b"TRUE", b" 1 ", b"yes"):
+            self.assertTrue(target.free_page_reporting_enabled(value, "aarch64"))
+        for value in (b"off", b"FALSE", b" 0 ", b"no"):
+            self.assertFalse(target.free_page_reporting_enabled(value, "x86_64"))
+        for value in (None, b"", b"maybe"):
+            self.assertFalse(target.free_page_reporting_enabled(value, "aarch64"))
+            self.assertTrue(target.free_page_reporting_enabled(value, "x86_64"))
+
+    def test_require_free_page_reporting_rejects_disabled_shim(self) -> None:
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            return_value=b"A=B\0CUBE_BALLOON_FREE_PAGE_REPORTING=off\0",
+        ):
+            with mock.patch.object(target.platform, "machine", return_value="aarch64"):
+                with self.assertRaisesRegex(RuntimeError, "reporting is disabled"):
+                    target.require_free_page_reporting(123)
+
+    def test_require_free_page_reporting_detects_missing_override(self) -> None:
+        with mock.patch.object(Path, "read_bytes", return_value=b"A=B\0"):
+            with mock.patch.dict(
+                target.os.environ,
+                {"CUBE_BALLOON_FREE_PAGE_REPORTING": "on"},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "missing from the shim"):
+                    target.require_free_page_reporting(123)
+
     def test_reclaim_cycle_waits_for_fully_touched_workload_before_release(self) -> None:
         events: list[str] = []
         sandbox = FakeSandbox()
@@ -201,6 +229,9 @@ class FreePageReportingRunnerTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(target, "run_reclaim_cycle", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(target, "require_free_page_reporting")
             )
             stack.enter_context(
                 mock.patch.object(

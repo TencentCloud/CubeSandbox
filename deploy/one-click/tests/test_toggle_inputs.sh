@@ -41,7 +41,7 @@ assert_toggle_keys() {
 # Reset the toggle variables so leftovers from a previous scenario cannot
 # leak into the next snapshot as process-env intent.
 reset_toggle_vars() {
-  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_BALLOON_FREE_PAGE_REPORTING
 }
 
 # Simulate what install.sh does around the upgrade merge for the toggle keys:
@@ -50,13 +50,18 @@ reset_toggle_vars() {
 run_toggle_roundtrip() {
   local dotenv="$1"
   snapshot_one_click_toggles "${dotenv}"
+  if [[ -f "${dotenv}" ]]; then
+    load_env_file "${dotenv}" 2>/dev/null
+    capture_one_click_toggle_dotenv_values
+  fi
   ONE_CLICK_ENABLE_S3LVOL="${MERGED_S3LVOL:-}"
   CUBE_PVM_ENABLE="${MERGED_PVM:-}"
+  CUBE_BALLOON_FREE_PAGE_REPORTING="${MERGED_BALLOON:-}"
   apply_one_click_toggles 2>/dev/null
 }
 
 test_toggle_keys_registry() {
-  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_BALLOON_FREE_PAGE_REPORTING
 }
 
 # Core regression: a .env value that equals the env.example default (0) must
@@ -75,6 +80,60 @@ EOF
     || fail "expected .env ONE_CLICK_ENABLE_S3LVOL=0 to disable the runtime 1"
   [[ "${CUBE_PVM_ENABLE}" == "1" ]] \
     || fail "expected .env CUBE_PVM_ENABLE=1 to win over the runtime 0"
+}
+
+# Optional string-valued switches need the same upgrade semantics: an explicit
+# .env or process value must replace the previously persisted policy.
+test_balloon_override_normalization() {
+  local value normalized
+  for value in on ON " true " yes 1; do
+    normalized="$(normalize_balloon_free_page_reporting "${value}")" \
+      || fail "expected '${value}' to be a valid enabled value"
+    [[ "${normalized}" == "on" ]] \
+      || fail "expected '${value}' to normalize to on, got '${normalized}'"
+  done
+  for value in off OFF " false " no 0; do
+    normalized="$(normalize_balloon_free_page_reporting "${value}")" \
+      || fail "expected '${value}' to be a valid disabled value"
+    [[ "${normalized}" == "off" ]] \
+      || fail "expected '${value}' to normalize to off, got '${normalized}'"
+  done
+  normalized="$(normalize_balloon_free_page_reporting "  ")" \
+    || fail "expected an empty value to be valid"
+  [[ -z "${normalized}" ]] || fail "expected an empty value to stay empty"
+  if normalize_balloon_free_page_reporting onn >/dev/null; then
+    fail "expected an invalid balloon override to be rejected"
+  fi
+}
+
+test_balloon_override_is_explicit() {
+  local dotenv="${TMP_DIR}/dotenv-balloon.env"
+  cat > "${dotenv}" <<'EOF'
+CUBE_BALLOON_FREE_PAGE_REPORTING="off" # disable reporting
+EOF
+  reset_toggle_vars
+  MERGED_BALLOON=on
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_BALLOON_FREE_PAGE_REPORTING}" == "off" ]] \
+    || fail "expected quoted/commented .env balloon override off to replace runtime on"
+
+  reset_toggle_vars
+  CUBE_BALLOON_FREE_PAGE_REPORTING=on
+  MERGED_BALLOON=off
+  run_toggle_roundtrip "${TMP_DIR}/absent-balloon.env"
+  [[ "${CUBE_BALLOON_FREE_PAGE_REPORTING}" == "on" ]] \
+    || fail "expected process-env balloon override on to replace runtime off"
+
+  cat > "${dotenv}" <<'EOF'
+CUBE_BALLOON_FREE_PAGE_REPORTING=
+EOF
+  reset_toggle_vars
+  MERGED_BALLOON=on
+  run_toggle_roundtrip "${dotenv}"
+  [[ -z "${CUBE_BALLOON_FREE_PAGE_REPORTING}" ]] \
+    || fail "expected an explicit empty override to restore the architecture default"
+  [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[CUBE_BALLOON_FREE_PAGE_REPORTING]+x}" ]] \
+    || fail "expected an explicit empty override to retain presence intent"
 }
 
 # `VAR=x ./install.sh`: process-environment intent survives the merge even
@@ -141,6 +200,8 @@ EOF
 
 test_toggle_keys_registry
 test_dotenv_default_value_is_explicit
+test_balloon_override_normalization
+test_balloon_override_is_explicit
 test_process_env_is_explicit
 test_dotenv_beats_process_env
 test_no_intent_keeps_merged_value

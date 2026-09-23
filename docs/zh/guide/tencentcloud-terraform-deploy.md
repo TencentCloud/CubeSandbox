@@ -287,6 +287,7 @@ export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
 export TENCENTCLOUD_COMPUTE_NODE_COUNT=2              # CVM PVM 计算节点数
 export TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE=200        # 每个计算节点的 CBS 数据盘大小（GB）
 export TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY=1s
+export TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING=on   # 不设置保留策略；default 清除覆盖
 export TENCENTCLOUD_TKE_NODE_COUNT=2                 # TKE worker 节点数（运行控制面 Pod）
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # 默认：公网预置镜像
@@ -310,6 +311,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=2
 | `TENCENTCLOUD_COMPUTE_NODE_COUNT` | `2` | **PVM 计算节点**数（运行 Cubelet / sandbox） |
 | `TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE` | `200` | 每个计算节点的 CBS 数据盘大小（GB，XFS，挂载于 `/data/cubelet`）。计算节点的沙箱镜像模板、快照及运行时数据均存放于此目录，请按实际需求调整 |
 | `TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY` | `1s` | Cubelet 向 CubeMaster 上报节点状态/资源的间隔。`create.sh` 会在每台计算节点上写入 `Cubelet/config/config.toml` |
+| `TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING` | 未设置 | 可选的 `on`/`off` 覆盖值，会传递给每台计算节点上的 CubeShim。首次部署时未设置会使用架构默认值（aarch64 关闭，其他架构开启）；重新运行部署器时未设置则不改变已安装策略。设置为 `default` 可删除已持久化的覆盖值。该设置仅影响新启动的 shim 进程和新生成的 VM 配置 |
 | `TENCENTCLOUD_TKE_NODE_COUNT` | `2` | **TKE worker** 数（运行控制面 Pod；对应 `worker_config.count`） |
 | `TENCENTCLOUD_USE_TCR` | `false` | `true` 时创建 TCR 并在跳板机构建/推送镜像；`false` 时使用公网预置镜像 |
 | `TENCENTCLOUD_USE_CFS` | `false` | `true` 且 cubemaster 多副本时创建 CFS NFS 共享存储 |

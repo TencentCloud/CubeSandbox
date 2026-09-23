@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shlex
 import sys
 import time
@@ -116,6 +117,48 @@ def process_rss_kib(pid: int) -> int:
         if line.startswith("VmRSS:"):
             return int(line.split()[1])
     raise RuntimeError(f"VmRSS is missing for pid {pid}")
+
+
+def free_page_reporting_enabled(value: bytes | None, machine: str) -> bool:
+    architecture_default = machine.lower() not in {"aarch64", "arm64"}
+    if value is None:
+        return architecture_default
+    normalized = value.strip().lower()
+    if normalized in {b"1", b"on", b"true", b"yes"}:
+        return True
+    if normalized in {b"0", b"off", b"false", b"no"}:
+        return False
+    return architecture_default
+
+
+def require_free_page_reporting(pid: int) -> None:
+    try:
+        environ = (Path(f"/proc/{pid}") / "environ").read_bytes().split(b"\0")
+    except (FileNotFoundError, PermissionError) as exc:
+        raise RuntimeError(
+            f"cannot inspect shim environment for pid {pid}: {exc}"
+        ) from exc
+    value = next(
+        (
+            entry.partition(b"=")[2]
+            for entry in environ
+            if entry.startswith(b"CUBE_BALLOON_FREE_PAGE_REPORTING=")
+        ),
+        None,
+    )
+    expected = os.environ.get("CUBE_BALLOON_FREE_PAGE_REPORTING")
+    if expected and value is None:
+        raise RuntimeError(
+            "CUBE_BALLOON_FREE_PAGE_REPORTING is set for the E2E runner but "
+            "missing from the shim environment; restart Cubelet and verify its "
+            "environment propagation"
+        )
+    if not free_page_reporting_enabled(value, platform.machine()):
+        raise RuntimeError(
+            "free-page reporting is disabled in the sandbox shim; set "
+            "CUBE_BALLOON_FREE_PAGE_REPORTING=on, restart Cubelet, and create "
+            "or rebuild the template before running this E2E"
+        )
 
 
 def is_sandbox_shim_pid(pid: int, sandbox_id: str) -> bool:
@@ -441,6 +484,7 @@ def main() -> int:
         result["sandbox_id"] = sandbox_id
         sandbox = wait_for_data_plane(sandbox_id, config, args.poll_timeout)
         cold_pid = wait_for_vmm_pid(roots, sandbox_id, args.poll_timeout)
+        require_free_page_reporting(cold_pid)
         result["samples"]["cold_boot"] = run_reclaim_cycle(
             sandbox, cold_pid, "cold boot", args
         )
@@ -455,6 +499,7 @@ def main() -> int:
             args.poll_timeout,
             previous_pid=cold_pid,
         )
+        require_free_page_reporting(restored_pid)
         result["samples"]["pause_resume"] = run_reclaim_cycle(
             sandbox, restored_pid, "pause resume", args
         )

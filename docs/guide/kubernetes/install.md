@@ -155,6 +155,26 @@ Cube writes data to the host at `/data/cubelet`, which must be an **XFS** filesy
 
 For production deployments, or to adjust related configuration, see [8.2 Compute node data disk configuration](#_8-2-compute-node-data-disk-configuration).
 
+**Balloon free-page reporting**
+
+Free-page reporting is disabled by default on aarch64 and enabled on other
+architectures. To override either default for newly created sandboxes, add the
+following to `runtime-values.yaml`:
+
+```yaml
+cubeNode:
+  env:
+    - name: CUBE_BALLOON_FREE_PAGE_REPORTING
+      value: "on" # use "off" to disable it
+```
+
+This changes the `cube-node` Pod template. Follow the compute-plane upgrade
+procedure before applying it to an existing deployment. The new value affects
+only shim processes and VM configurations created after the Pod replacement;
+running sandboxes and existing snapshot device topology are unchanged. On
+aarch64, templates created before this upgrade retain reporting enabled in their
+snapshots and must be redone to adopt the new disabled default.
+
 **Compute node networking**
 
 ::: warning Decide before you deploy
