@@ -1,0 +1,39 @@
+{
+  "experiment": "locality_scenario",
+  "status": "NO_IMPROVEMENT",
+  "cache_presence": {
+    "node-c": true,
+    "node-b": false,
+    "node-d": true,
+    "node-a": true
+  },
+  "arms": [
+    {
+      "arm": "default",
+      "n": 6,
+      "success": 6,
+      "cache_hit_rate": 1.0,
+      "node_distribution": {
+        "node-c": 2,
+        "node-a": 3,
+        "node-d": 1
+      },
+      "usable_p50_ms": 2095.5,
+      "usable_p95_ms": 4572.75
+    },
+    {
+      "arm": "template_locality_first",
+      "n": 6,
+      "success": 6,
+      "cache_hit_rate": 1.0,
+      "node_distribution": {
+        "node-c": 2,
+        "node-a": 3,
+        "node-d": 1
+      },
+      "usable_p50_ms": 1353.5,
+      "usable_p95_ms": 1538.75
+    }
+  ],
+  "title": "镜像局部性：有缓存/无缓存命中对照"
+}

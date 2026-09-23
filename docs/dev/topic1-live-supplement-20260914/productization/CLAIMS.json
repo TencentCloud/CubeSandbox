@@ -1,0 +1,26 @@
+{
+  "schema_version": "claims_v1",
+  "claims": [
+    {
+      "id": "C1",
+      "text": "Operator can enable/observe/fault/rollback via shortest documented path",
+      "status": "PROVEN"
+    },
+    {
+      "id": "C2",
+      "text": "HTTP scorer hot-path e2e cost measurable for control/healthy/delayed/timeout",
+      "status": "PROVEN"
+    },
+    {
+      "id": "C3",
+      "text": "Business signal changes ranking among Filter-legal candidates only",
+      "status": "PROVEN"
+    },
+    {
+      "id": "C4",
+      "text": "Optional CPU/mem mismatch probe does not override VALID_NO_IMPROVEMENT",
+      "status": "BOUNDED_NO_IMPROVEMENT",
+      "evidence": "summaries/binpack_probe.json"
+    }
+  ]
+}

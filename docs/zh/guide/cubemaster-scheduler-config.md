@@ -79,11 +79,108 @@ scheduler:
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
 | `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。 |
-| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
+| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。列出因子型 / affinity 评分器或 `external_http_score` 但缺少匹配的 `score.plugin_conf.<name>` 块时**配置加载失败**（空 Profile 同样适用；`binpack_score` 可省略该块并使用默认）。当设置了非空 `scheduler.profile` 时，因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`，否则配置加载失败。 |
+| `score.resource_weights` | 占用率类评分器的因子权重（MVM 数、创建并发、CPU/内存 quota 使用率等）。权重越高影响越大；使用因子的评分器还需把对应因子列在 `plugin_conf.<name>.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。因子名必须在允许列表内（如 `quota_cpu_usage`、`cpu_util`，**不是** `cpu_usage` 这类笔误）；非空 Profile 下 `enable_weight_factors` 出现未知名会配置加载失败。启用 Profile 前请先 grep 现有配置中的漂移因子名。插件型评分器（如 `external_http_score` / `binpack_score`）**不**再把该映射当作加载器前置条件。 |
+| `score.plugin_conf.external_http_score` | 可选的 HTTP sidecar 评分器。见 [External HTTP score 插件](#external-http-score-插件)。 |
+| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。插件级 `weight` 为指针：省略 → 默认 1；显式 `0` 禁用 Select；负值在配置加载阶段被拒绝。子权重 `cpu_weight`/`mem_weight`/`mvm_weight` 同样是指针：省略 → 该维默认 1；显式 `0` 排除该维；负值在配置加载阶段被拒绝。 |
+| `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | 控制按 cluster label、zone、CPU 类型、机型等做亲和或约束选择。 |
+
+## 运行时 Profile 与 binpack_score
+
+CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
+空 Profile 会保留现有 Filter/Score 列表和 `plugin_conf` 块，但这不是对 master
+行为的逐字节冻结：`plugin_conf.<scorer>.weight: 0` 仍会禁用该评分器。异步
+`loopAsyncScore` feeder（`node.Score` / `pscore` 的写入方）仅在存在
+`multi_factor_weighted_average` 插件块 **且** `score.resource_weights` 非 nil
+时启动——与 master 在省略 `resource_weights` 时提前返回的行为一致。内置名
+（`balanced_spread`、`template_locality_first`、`binpack_utilization`）
+会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
+`scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
+
+**注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
+`scheduler.filter.enable_filters`（不会合并）。Profile 丢掉基础过滤器会配置加载
+失败，除非设置 `allow_dropped_filters: true`。`score.enable_scorers` /
+`allow_dropped_scorers` 同理（例如丢掉运维的 `external_http_score`）。内置预设使用
+短过滤器/评分器列表，且**不会**预置这些 opt-in——在现成四过滤器配置上选用内置时，需显式写同名
+`profiles.<builtin>.allow_dropped_filters: true`（或在 Profile 列表中保留被丢掉的
+名称）。若你依赖 `disk` / `thirtparty`，仍请审查生效列表。
+
+## 升级说明（空 Profile / 重启）
+
+**发版 / 升级踩坑（滚动前必读）：**
+
+- 在 `enable_scorers` 中列出因子型 / affinity / `external_http_score` 但缺少对应
+  `plugin_conf`，或任意**负 / 非有限**插件 `weight`，现在会**导致 `config.Init`
+  失败**（CubeMaster 无法启动）。热加载写 FATAL（`CubeLog.Fatalf` **不会**
+  `os.Exit`）并保留旧 Config。
+- 四个遗留 float64 评分器（`real_time_weighted_average`、
+  `multi_factor_weighted_average`、`affinity_score`、`image_score`）省略 `weight`
+  会 YAML 解码为 `0`，且 **`Disable()` 会跳过该评分器**（master 在 weight 0 时仍会
+  跑 Select）。要保持活跃请显式写正的 `weight`；weight 为 0 且未设 `disable: true`
+  时，加载会打 Warn。
+- 一键 Terraform `cpu_usage` → `quota_cpu_usage`：下一次重写 `cubemaster-conf`
+  的 `terraform apply` 经配置热加载即可改变放置——**无需**重启 CubeMaster。无关
+  infra 的 apply 也可能触发。
+
+即使 `scheduler.profile` 为空，以下 Init 校验也会在**进程启动**时让 CubeMaster
+退出（热加载仅写 FATAL 并保留旧 Config）：
+
+- `enable_scorers` 列出了因子型 / affinity 评分器或 `external_http_score` 但缺少
+  对应 `plugin_conf`
+- 任意 `plugin_conf.<scorer>.weight < 0`
+
+此前能带着静默无评分或反转排序启动的配置，升级后需先修好 YAML 才能启动。
+
+对四个遗留 Score 插件以及 `binpack_score`，`plugin_conf.<scorer>.weight: 0`
+会禁用该评分器并跳过 Select。`external_http_score` 不同：`weight: 0` 时
+`Disable()` 仍为 false，但 Select 为惰性空操作（不发 HTTP）；显式关闭请用
+`disable: true`。**负的** `plugin_conf.<scorer>.weight` 会对所有已注册评分器在
+配置加载阶段拒绝（不只是 `binpack_score`）；升级前能带着负权重启动的配置，升级后
+会在 `config.Init` 失败。对 `binpack_score` 而言，`weight` 是指针字段：在已有
+`plugin_conf.binpack_score` 块中省略 `weight` 会保留运行时默认 `1`（启用）；
+只有显式写 `0` 才禁用。其他 float64 评分器（以及 `external_http_score`）省略
+`weight` 仍会 YAML 解码为 `0`——要保持活跃请显式写正的 `weight`（HTTP 在 `0`
+时是惰性空操作，而不是经 `Disable()` 跳过）。在 `enable_scorers` 中列出因子型 /
+affinity 评分器或 `external_http_score` 但缺少对应 `plugin_conf` 块时，配置加载
+也会失败（空 Profile 同样适用）；`binpack_score` 可省略该块并使用运行时默认。更改
+Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑 `preHandle`，成功
+则更新内存 Config；失败时写 FATAL 日志（`CubeLog.Fatalf` **不会** `os.Exit`）
+并保留旧 Config，错误的 Profile 覆盖不会生效。`InitScheduler` 仍不会在热加载时
+重建 Filter/Score 切片，因此选择器集合变更仍需进程重启。
+
+**一键 Terraform（`deploy/one-click/terraform/tencentcloud/tke-addons.tf`）：**
+`real_time_weighted_average` 现已对 `quota_cpu_usage` 加权（此前是会被
+`getFactorWeight` 忽略的错误键 `cpu_usage`）。时机：**不是**跟 CubeMaster 二进制
+发版绑定。下一次会重写 `cubemaster-conf` secret 的 `terraform apply`（常由无关
+infra 变更触发）就够——`resource_weights` 在每次打分时**热读**，secret 热加载后
+**无需**重启 CubeMaster 即可改变放置。只升级 CubeMaster、不动 secret 时，仍保持
+旧的惰性 `cpu_usage` 行为。
+
+`binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
+中列出（直接或经 Profile）启用。插件参数仍放在
+`scheduler.score.plugin_conf.binpack_score`。不要把 `binpack_score` 与
+spread 风格评分器（`real_time_weighted_average`、
+`multi_factor_weighted_average`）放进同一 `enable_scorers`：binpack 返回占用率
+（越高越满），后者返回剩余容量风格分数，加权后会互相抵消。非空
+`scheduler.profile` 下该混用会配置加载失败；空 Profile 仍可加载（升级兼容）但
+排序接近噪声。内置 `binpack_utilization` 只启用 `binpack_score`。
+
+**内置预设放置前提：** `balanced_spread` / `template_locality_first` /
+`binpack_utilization` 只有在 `scheduler.priority_select_num >= 1` 和/或
+`least_select_name` 为权重感知（`sw` / `rw` / `rrw`）时才会影响*选哪台节点*。
+当 `priority_select_num` **省略**（代码回退 `-1`）或小于 `1` 且
+`least_select_name: random` 时，分数排序仅可观测（在已评分集合上均匀选取）。
+**仓库交付的** `conf.yaml` / Helm / 单机配置 / 一键 Terraform 将
+`priority_select_num` 设为 `1` 或更大，因此 stock 部署上是 top-1 选点（并非仅可观测）；
+预设对 filter 列表的变更在两种情况下仍可生效。离线 simulator 的 argmax 仅在约
+`priority_select_num: 1` 时与生产等价。
+
+运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
+可复制 YAML 与完整契约见
+[Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。
 
 ## 节点元数据如何影响调度
 
@@ -263,6 +360,113 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 - 将 `priority_select_num` 设置为大于 `1`。
 - 检查 `local_create_num`、`mvm_num`、`quota_cpu_usage`、`quota_mem_usage` 权重是否存在。
 - 确认各节点模板副本都可用，否则 `template_locality` 会让候选节点集合变小。
+
+## External HTTP score 插件
+
+`external_http_score` 是可选评分插件。当它出现在 `score.enable_scorers` 中时，
+CubeMaster 会把**当前候选节点列表**（经过 filter 之后）以 HTTP POST 发给运营配置的
+sidecar，并把返回的逐节点分数并入加权总分。候选集宽度由
+`scheduler.pre_select_num` 控制（默认 `-1` = 不限制）；大集群若不限制该值，每次
+创建都会把整批可调度节点发给 sidecar（默认超时 200ms；熔断默认开启，除非显式关闭）。启用
+`enable_scorers: external_http_score` **必须**同时提供匹配的
+`score.plugin_conf.external_http_score`；否则**配置加载失败**
+（`validateListedScorerPluginConfPresent`）。它**不**要求
+`score.resource_weights`——该映射仍只作为遗留 affinity / 因子型评分器的构造门槛
+（以及启动异步 `multi_factor_weighted_average` feeder 的门槛）。
+
+### 配置
+
+```yaml
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1.0
+        endpoint: "http://127.0.0.1:18080/score"
+        timeout: 200ms   # 可选；为 0/省略时默认 200ms
+        mode: ""         # 可选，原样转发给 sidecar
+        disable: false
+        allow_insecure: false
+        failure_policy: fail_open   # 省略时默认；设 fail_closed 可中止整段 Score
+        circuit_breaker:            # 可选；省略时使用默认阈值
+          disable: false
+          failure_threshold: 5
+          open_duration: 5s
+          half_open_max_probes: 1
+```
+
+| 字段 | 含义 |
+|------|------|
+| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 与 `disable: true` 一样是静默空操作：`Select` 立即返回，不要求合法 endpoint，也不会发出 `empty_endpoint` / HTTP 失败信号。若要在保留真实 endpoint 的同时关闭插件，请用 `disable: true`。**负 / 非有限** weight 会在 `config.Init` / 热更新 `preHandle` 失败（与其他已注册评分器相同的失败关闭规则）；不会带着永久惰性 scorer 启动。热更新成功后每次 `Weight()` / `Select` 仍从 `plugin_conf` 热读；`runScoreFilter` 在 `Select` **之前**只采样一次 `Weight()`，保证本轮并入 `totalPluginWeight` 的权重与逐节点乘数一致（并不会冻结 `external_http_score` 在 `Select` 内可能再读的其它 live-config 字段）。 |
+| `endpoint` | Sidecar URL。在 **正 weight** 下为空（含仅空白）时 fail-open，发出限流 Warn（日志类别 `empty_endpoint`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`——不会静默跳过。`weight: 0` 或 `disable: true` 时不会走到该检查。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在 endpoint 非空时令 `config.Init` / 热更新 `preHandle` 失败。明文 **`http://` 到非 loopback host** 也会在配置加载失败，除非设置 `allow_insecure: true`（loopback 的 `http://127.0.0.1` / `localhost` / `::1` 仍允许本地 sidecar）。远程 sidecar 优先 **`https://`**：create 路径会 POST 候选节点清单。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo、path token 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host。 |
+| `allow_insecure` | 为 `true` 时允许对非 loopback host 使用明文 `http://`。默认 `false`。不会关闭 `https://` 的 TLS 校验。 |
+| `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` 按 **`failure_policy`** 失败（默认 fail-open 跳过该 scorer；`fail_closed` 中止整段 Score/create——不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再按该 policy 失败（熔断已打开时除外）。 |
+| `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
+| `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。有意关闭请优先用 `disable: true`（立即生效）。**不要**在 `enable_scorers` 仍保留该名字时删掉整个 `plugin_conf.external_http_score` 块：`validateListedScorerPluginConfPresent` 会在启动与热加载时**拒绝**该配置（`preHandle` 失败；`CubeLog.Fatalf` **不会** `os.Exit`，因此旧 Config 继续生效，评分仍按旧块进行）。要停用该评分器：设 `disable: true`，或从 `enable_scorers` 去掉该名字并**重启** CubeMaster（选择器集合仅在启动时构建）。nil-`plugin_conf` / 日志类别 `plugin_conf_absent` 路径实质上是**测试 / 陈旧实例**场景：只有热加载成功同时去掉名字与块、而旧 scorer 实例仍留在内存直到重启时才会触发——并非「删块但保留名字」。 |
+| `failure_policy` | Sidecar 失败处理。**省略 / 空 / 未知值默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，使 `runScoreFilter` **中止整段 Score**（调度器范围，而非插件局部）：已聚合的先前 scorer 分数会被丢弃，创建以失败关闭结束（`ErrorCode_SelectNodesFailed`，消息为脱敏类别）。无法把 `fail_closed` 限定到「仅金丝雀 sidecar、其它 scorer 继续」。 |
+| `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；**半开探测**成功才关闭熔断，失败则重新打开。在熔断仍关闭时已准入、但返回时电路已打开的请求成功，**不会**取消已打开的窗口。省略该块或字段为 `0` 时使用默认（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 关闭熔断（同时清除该 host 的 `circuit_state` 序列）。将 `endpoint` 改到不同 host 会废弃旧 host 的进程内熔断条目与 gauge。 |
+
+### 传输协议
+
+请求（`POST`，`Content-Type: application/json`）：
+
+| 字段 | 单位 / 说明 |
+|------|-------------|
+| `mode` | 可选，来自配置。 |
+| `instance_type` | 请求实例类型。 |
+| `template_id` | 若存在则为请求模板 ID。 |
+| `nodes[]` | filter 之后传给 scorer 的候选集合；每个节点一条。 |
+| `nodes[].node_id` | 节点身份；请求中的每个候选都必须出现在 `scores` 中。 |
+| `nodes[].quota_cpu` / `quota_mem` | 节点快照中的容量计数。 |
+| `nodes[].quota_cpu_usage` / `quota_mem_usage` | **原始**上报占用计数（不经过 `EffectiveAllocated`）。当 `ignore_redis_allocation: true` 时，内置 scorer 可能把 allocated 视为 0，但这些传输协议字段仍携带 Redis 上报的原始值。 |
+| 其他 `nodes[]` 字段 | `mvm_num`、创建计数、`cpu_util`、`mem_usage`、IP/类型等快照可用字段。 |
+
+响应：
+
+```json
+{ "scores": { "node-a": 10.0, "node-b": 90.0 } }
+```
+
+- `scores` 必须包含**每一个**请求候选的 `node_id`。额外的 key 会被忽略（不会因此失败）；
+  日志最多记录被忽略 key 的**数量**，不记录 key 名或响应正文。额外 key 上的 JSON
+  `null` 或越界数值同样会被忽略。
+- 已知候选的每个分数必须是**非 null** 的有限数值，范围 **`[0, 100]`**（数值 `0`
+  合法；JSON `null` 不合法），越大越好（与内置 scorer 方向一致）。`scores` 下任意
+  非数值 JSON（字符串、对象、数组）会在解码阶段视为畸形响应。
+- 响应体超过 **1 MiB** 会被拒绝；**不跟随** HTTP 重定向。
+
+### 失败 / 回退语义
+
+scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误、熔断打开、recover 后的
+panic）会返回错误。默认 **`failure_policy: fail_open`**（字段省略时亦然）下，
+`runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
+**fail-open**）。设为 **`failure_policy: fail_closed`** 时，插件返回类型化
+`FailClosedError`，`runScoreFilter` **中止**整段 Score——包括 `Select` 上的空/非法
+`endpoint`、越界 `timeout`、非有限 `weight`，不仅限于 sidecar HTTP 失败。该中止是
+**调度器范围**：任一 scorer 返回 `FailClosedError` 都会短路后续 Score（以及创建），
+并丢弃已为先前 roster scorer 计算的分数——运营方无法把 `fail_closed` 限定到单个
+金丝雀 sidecar。（`plugin_conf` 缺失 / nil 选择器上下文仍走 fail-open 可观测路径，
+因为读不到 policy 字段。）调用方取消与父级 deadline 放弃**不会**增加熔断的连续失败
+计数（仅释放已占用的半开探测名额）。
+结果会递增
+`cube_scheduler_external_http_score_outcomes_total{reason=...}`（含
+`reason="success"`），HTTP 往返还会观察
+`cube_scheduler_external_http_score_request_duration_seconds{reason=...}`。
+固定 `reason`：`success`、`timeout`、`connection`、`http_status`、`invalid_json`、
+`missing_candidate`、`circuit_open`、`other`（空 endpoint、非法 weight 等配置类 /
+未分类失败归入 `other`）。熔断状态暴露为
+`cube_scheduler_external_http_score_circuit_state{target="host:port"}`
+（`0=closed`，`1=half-open`，`2=open`）。失败在 scorer 边界记录日志（不记录
+endpoint URL、URL userinfo、query token，也不记录请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条
+（同类别后续失败降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求
+候选缺少分数会使整次尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在
+创建路径上是**同步**的。共享 HTTP transport **不**遵循 `HTTP_PROXY` /
+`HTTPS_PROXY` / `ALL_PROXY`（仅直连，避免环境代理看到带 token 的 sidecar URL 或
+节点清单 body），并用 `MaxConnsPerHost = 8`（与每 host 空闲池同级）限制对 sidecar
+的在途连接，避免挂起时无界拨号风暴；每次尝试仍可能等待至多 `timeout`（默认 200ms，
+上限 2s）再 fail-open（熔断已打开时除外）。
 
 ## 相关文档
 
