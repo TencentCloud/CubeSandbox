@@ -18,7 +18,7 @@
 #      security-groups value defaults to CHANGE_ME_TKE_CLB_SECURITY_GROUP;
 #      helm fails render until you override it in a local values file (or
 #      set it to "" if you manage CLB SGs outside Helm).
-#   5. Uses a cubevs/sandbox CIDR (10.244.0.0/18) that stays clear of the
+#   5. Uses a cubevs/sandbox CIDR (10.187.0.0/18) that stays clear of the
 #      ranges this repo's one-click Terraform provisions for TKE — VPC
 #      10.0.0.0/16 (hard-coded in main.tf), Pod CIDR 10.200.0.0/16 and
 #      Service CIDR 192.168.0.0/20 (defaults in variables.tf). cube-node
@@ -32,7 +32,7 @@
 #      cubevs range can be non-overlapping for every cluster — the TKE
 #      Service CIDR is operator-configurable and spans the private ranges —
 #      so override in your runtime values if your Service CIDR, VPC or host
-#      LAN covers 10.244.0.0/18 (10.244.x) — including your Pod/CNI CIDR,
+#      LAN covers 10.187.0.0/18 (10.187.x) — including your Pod/CNI CIDR,
 #      which the preflight Hook does not inspect.
 #
 # Nothing else about the release is TKE-specific — Cube-owned images default
@@ -83,19 +83,19 @@ minio:
 
 # cubevs/sandbox CIDR must not overlap the cluster Service CIDR — that is the
 # case the cubevs-cidr-preflight Hook guards, and under hostNetwork the only
-# one that also breaks the node's own traffic. 10.244.0.0/18 is clear of the
+# one that also breaks the node's own traffic. 10.187.0.0/18 is clear of the
 # ranges this repo's TKE Terraform provisions (VPC 10.0.0.0/16, Pod CIDR
 # 10.200.0.0/16, Service CIDR 192.168.0.0/20), so the default TKE path passes
 # the preflight. The Service CIDR is operator-configurable, so this is a
 # default, not a guarantee: override in your runtime values if your Service
-# CIDR, VPC, Pod/CNI CIDR or host LAN covers 10.244.x. tproxyOnIP is the cube-dev gateway =
+# CIDR, VPC, Pod/CNI CIDR or host LAN covers 10.187.x. tproxyOnIP is the cube-dev gateway =
 # first usable IP of cubeNode.network.cidr — keep the two in sync.
 cubeNode:
   network:
-    cidr: "10.244.0.0/18"
+    cidr: "10.187.0.0/18"
 cubeEgress:
   network:
-    tproxyOnIP: "10.244.0.1"
+    tproxyOnIP: "10.187.0.1"
 
 cubeProxy:
   service:

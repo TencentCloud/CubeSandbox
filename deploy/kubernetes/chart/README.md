@@ -358,19 +358,19 @@ are provisioned in the same zone as the scheduled control-plane Pod on
 multi-AZ TKE clusters. On non-TKE clusters do NOT include this file;
 provide the cluster's own StorageClass name instead.
 
-It also pins `cubeNode.network.cidr` to `10.244.0.0/18` (and
-`cubeEgress.network.tproxyOnIP` to its gateway `10.244.0.1`). The cubevs
+It also pins `cubeNode.network.cidr` to `10.187.0.0/18` (and
+`cubeEgress.network.tproxyOnIP` to its gateway `10.187.0.1`). The cubevs
 range must not overlap the cluster **Service CIDR**: under `hostNetwork`
 cube-node installs a host route to the cubevs bridge, so an overlap
 swallows ClusterIPs and breaks in-cluster DNS / node registration — the
-`cubevs-cidr-preflight` Hook fails the install when it does. `10.244.0.0/18`
+`cubevs-cidr-preflight` Hook fails the install when it does. `10.187.0.0/18`
 is clear of the ranges this repo's TKE Terraform provisions (VPC
 `10.0.0.0/16`, Pod CIDR `10.200.0.0/16`, Service CIDR `192.168.0.0/20`), so a
 cluster built from that Terraform does not trip the preflight. The Service
 CIDR is operator-configurable and spans the private ranges, so this is a
 default and not a guarantee: override `cubeNode.network.cidr` (and keep
 `tproxyOnIP` in sync as the first usable IP of the range) if your Service
-CIDR, VPC, Pod/CNI CIDR or host LAN covers `10.244.x` — the preflight only
+CIDR, VPC, Pod/CNI CIDR or host LAN covers `10.187.x` — the preflight only
 inspects the Service CIDR and existing ClusterIPs, so a Pod/CNI collision is
 not caught at install
 time.
