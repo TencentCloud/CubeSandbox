@@ -197,51 +197,81 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
 	defer frozenCancel()
 	var bindingErr error
-	captureStarted := false
-	var freezeLease *snapshotFreezeLease
-	snapshotErr, rootfsErr, resumeErr := runSnapshotWithRootfs(func() error {
-		// Invalidate only once memory capture is about to start.
-		previousLabels := copyCubeBoxLabels(cb)
-		bindingErr = persistRuntimeSnapshotBinding(
-			frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
-		)
-		if bindingErr != nil {
-			return bindingErr
-		}
-		captureStarted = true
-		captureErr := s.captureSnapshotWithShim(frozenCtx, cb, rsp.TemplateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd)
-		if shimSnapshotUnsupported(captureErr) {
-			captureStarted = false
-			// The old shim rejected the action before touching the VM, so its
-			// previous incremental baseline is still valid.
-			restoreCubeBoxLabels(cb, previousLabels)
-			if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
-				setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
-				return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+	var snapshotErr, rootfsErr, resumeErr error
+	if useCoordinatedSnapshotPath(cb) {
+		captureStarted := false
+		var freezeLease *snapshotFreezeLease
+		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
+			// Invalidate only once memory capture is about to start.
+			previousLabels := copyCubeBoxLabels(cb)
+			bindingErr = persistRuntimeSnapshotBinding(
+				frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+			)
+			if bindingErr != nil {
+				return bindingErr
 			}
-		}
-		if captureErr == nil {
-			freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, rsp.TemplateID, frozenCancel)
-		}
-		return snapshotCaptureError(captureErr)
-	}, func() error {
-		rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
-		if err != nil {
-			return err
-		}
-		return frozenCtx.Err()
-	}, func() error {
-		var leaseErr error
-		if freezeLease != nil {
-			leaseErr = freezeLease.Stop()
-		}
-		if !captureStarted {
-			return leaseErr
-		}
-		resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
-		defer cancel()
-		return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, rsp.TemplateID))
-	})
+			captureStarted = true
+			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, rsp.TemplateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd)
+			if shimSnapshotUnsupported(captureErr) {
+				captureStarted = false
+				// A mislabeled shim rejected the action before touching the VM,
+				// so its previous incremental baseline is still valid.
+				restoreCubeBoxLabels(cb, previousLabels)
+				if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
+					setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
+					return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+				}
+			}
+			if captureErr == nil {
+				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, rsp.TemplateID, frozenCancel)
+			}
+			return snapshotCaptureError(captureErr)
+		}, func() error {
+			rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+			if err != nil {
+				return err
+			}
+			return frozenCtx.Err()
+		}, func() error {
+			var leaseErr error
+			if freezeLease != nil {
+				leaseErr = freezeLease.Stop()
+			}
+			if !captureStarted {
+				return leaseErr
+			}
+			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+			defer cancel()
+			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, rsp.TemplateID))
+		})
+	} else {
+		stepLog.Info("CubeShim version is not v0.7.2/v0.7.2-rc2; using the legacy best-effort snapshot path")
+		rootfsErr, snapshotErr = runLegacySnapshot(
+			func() (err error) {
+				rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+				return err
+			},
+			func() error {
+				return captureLegacyCommitMemory(cb, rsp.TemplateID, func() error {
+					// Legacy cube-runtime clears soft-dirty state as soon as
+					// memory capture succeeds. Durably invalidate the old
+					// baseline before starting so metadata-fixup failures
+					// force the next commit to take a full snapshot.
+					bindingErr = persistRuntimeSnapshotBinding(
+						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+					)
+					return bindingErr
+				}, func() error {
+					if err := s.executeCubeRuntimeSnapshot(
+						frozenCtx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd,
+					); err != nil {
+						return err
+					}
+					return correctLegacySnapshotMetadataVersions(cb, layout.MetaWork)
+				})
+			},
+		)
+	}
 	if snapshotErr != nil {
 		if resumeErr != nil {
 			stepLog.Warnf("best-effort resume after snapshot failure failed: %v", resumeErr)

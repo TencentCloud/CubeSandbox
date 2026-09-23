@@ -323,37 +323,54 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to load sandbox for snapshot: %v", err)
 		return rsp, nil
 	}
-	captureStarted := false
-	var freezeLease *snapshotFreezeLease
-	snapshotErr, rootfsErr, resumeErr := runSnapshotWithRootfs(func() error {
-		captureStarted = true
-		captureErr := s.captureSnapshotWithShim(frozenCtx, cb, templateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
-		if shimSnapshotUnsupported(captureErr) {
-			captureStarted = false
-		}
-		if captureErr == nil {
-			freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, templateID, frozenCancel)
-		}
-		return snapshotCaptureError(captureErr)
-	}, func() error {
-		var commitErr error
-		rootfsObject, commitErr = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
-		if commitErr != nil {
-			return commitErr
-		}
-		return frozenCtx.Err()
-	}, func() error {
-		var leaseErr error
-		if freezeLease != nil {
-			leaseErr = freezeLease.Stop()
-		}
-		if !captureStarted {
-			return leaseErr
-		}
-		resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
-		defer cancel()
-		return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, templateID))
-	})
+	var snapshotErr, rootfsErr, resumeErr error
+	if useCoordinatedSnapshotPath(cb) {
+		captureStarted := false
+		var freezeLease *snapshotFreezeLease
+		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
+			captureStarted = true
+			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, templateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+			if shimSnapshotUnsupported(captureErr) {
+				captureStarted = false
+			}
+			if captureErr == nil {
+				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, templateID, frozenCancel)
+			}
+			return snapshotCaptureError(captureErr)
+		}, func() error {
+			var commitErr error
+			rootfsObject, commitErr = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
+			if commitErr != nil {
+				return commitErr
+			}
+			return frozenCtx.Err()
+		}, func() error {
+			var leaseErr error
+			if freezeLease != nil {
+				leaseErr = freezeLease.Stop()
+			}
+			if !captureStarted {
+				return leaseErr
+			}
+			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+			defer cancel()
+			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, templateID))
+		})
+	} else {
+		stepLog.Info("CubeShim version is not v0.7.2/v0.7.2-rc2; using the legacy best-effort snapshot path")
+		snapshotErr, rootfsErr = runLegacySnapshot(
+			func() error {
+				if err := s.executeCubeRuntimeSnapshot(frozenCtx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull); err != nil {
+					return err
+				}
+				return correctLegacySnapshotMetadataVersions(cb, layout.MetaWork)
+			},
+			func() (err error) {
+				rootfsObject, err = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
+				return err
+			},
+		)
+	}
 	if snapshotErr != nil || rootfsErr != nil {
 		cleanupSnapshotObjects()
 		layout.discardTmpDir()
@@ -456,9 +473,12 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rsp.RootfsKind = rootfsObject.Kind
 	rsp.MemoryKind = memoryObject.Kind
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
-	// One live inventory scan fills both the RPC response and catalog pins.
-	frozenVersions := inventoryVersionsFromLive()
-	versions := guestEnvironmentVersionsFromComponentMap(frozenVersions, guestEnvironmentVersions{})
+	// Preserve component versions captured when the sandbox was created.
+	// Missing values may be filled from the live toolbox, but existing pins
+	// must not be replaced after a host upgrade.
+	CaptureForCubeBox(cb)
+	frozenVersions := cloneStringMap(cb.ComponentVersions)
+	versions := guestEnvironmentVersionsFromCubeBox(cb)
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
