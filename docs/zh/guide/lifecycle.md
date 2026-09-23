@@ -289,6 +289,7 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 ## 下一步
 
+- [Agent 平台 freeze / resume](./agent-platform-freeze.md) — 手动 pause 保留、envd 前先 connect、Volume 与 snapshot 区别。
 - [模板概览](./templates.md) —— 沙箱基于模板启动，模板的构建过程也会影响首次冷启动开销。
 - [快速开始](./quickstart.md) —— 完整跑通"创建沙箱 → 执行代码 → 销毁"的最短路径。
 - 上游参考：[e2b · Sandbox lifecycle](https://e2b.dev/docs/sandbox)、[e2b · Auto-resume](https://e2b.dev/docs/sandbox/auto-resume)。

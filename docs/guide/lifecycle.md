@@ -289,6 +289,7 @@ The rejection travels through the following chain to reach the client: `Cubelet 
 
 ## Next Steps
 
+- [Agent platform freeze / resume](./agent-platform-freeze.md) — manual pause retention, `connect` before envd, Volume vs snapshot.
 - [Templates Overview](./templates.md) — sandboxes boot from templates; the template's build also shapes cold-start cost.
 - [Quick Start](./quickstart.md) — the shortest path through "create sandbox → run code → tear down".
 - Upstream references: [e2b · Sandbox lifecycle](https://e2b.dev/docs/sandbox), [e2b · Auto-resume](https://e2b.dev/docs/sandbox/auto-resume).

@@ -204,6 +204,7 @@ export default withMermaid(defineConfig({
               text: 'Core Concepts',
               items: [
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
+                { text: 'Agent Platform Freeze / Resume', link: '/guide/agent-platform-freeze' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
@@ -420,6 +421,7 @@ export default withMermaid(defineConfig({
               text: '核心概念',
               items: [
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
+                { text: 'Agent 平台 Freeze / Resume', link: '/zh/guide/agent-platform-freeze' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }
