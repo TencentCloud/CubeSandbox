@@ -91,6 +91,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
+        tini \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
 
@@ -100,6 +101,8 @@ COPY --from=builder-ops    --chmod=0755 /out/cubeopscli   /usr/local/bin/cubeops
 # Fail early if either binary cannot exec in this image.
 RUN ["/usr/local/bin/cubemastercli", "--help"]
 RUN ["/usr/local/bin/cubeopscli", "--help"]
+# tini is the PID 1 the whole Pod depends on; fail the build if missing.
+RUN ["/usr/bin/tini", "--version"]
 
 # Interactive bash helper for kubectl exec -it ... -- bash:
 # inject CUBEMASTERCLI_ADDRESS / CUBEMASTERCLI_PORT when flags are omitted.
@@ -177,4 +180,8 @@ RUN { \
       } >/etc/cubeopscli-interactive.bashrc \
     && printf '\n%s\n' '[ -f /etc/cubeopscli-interactive.bashrc ] && . /etc/cubeopscli-interactive.bashrc' >>/root/.bashrc
 
+# tini runs as PID 1 and reaps orphaned children: kubectl exec / probe
+# invocations of cubemastercli/cubeopscli would otherwise pile up as
+# <defunct> zombies under "sleep infinity", which never calls wait().
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["sleep", "infinity"]
