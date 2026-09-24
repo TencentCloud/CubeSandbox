@@ -462,6 +462,9 @@ cubemastercli:
   enabled: true
   replicas: 1
   podAnnotations: {}
+  # NOTE: `command:` REPLACES the image ENTRYPOINT. The image uses tini as
+  # PID 1 to reap orphaned children (kubectl exec / exec probes); do NOT set
+  # this back to ["sleep", "infinity"] or zombie processes will accumulate.
   command: []
   args: []
   env: []
