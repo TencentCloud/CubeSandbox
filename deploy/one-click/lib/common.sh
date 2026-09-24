@@ -1163,8 +1163,9 @@ _remove_env_keys() {
 }
 
 # patch_cubemaster_instance_db_config rewrites instance_db_config.{driver,addr,user,pwd,db_name}
-# in a CubeMaster conf.yaml. Patterns are anchored at line start so keys like
-# common.cube_ops_addr (which contain the substring "addr:") are never matched.
+# in one component conf.yaml (CubeMaster or CubeTemplateCenter). The rewrite is
+# confined to the instance_db_config: block, so an unrelated driver:/addr: key
+# elsewhere in the file (e.g. a plugin entry) is never touched.
 patch_cubemaster_instance_db_config() {
   local cfg="$1"
   local driver="$2"
@@ -1179,12 +1180,57 @@ patch_cubemaster_instance_db_config() {
   pwd_esc="$(escape_sed "${pwd}")"
   db_esc="$(escape_sed "${db_name}")"
   sed -i \
-    -e "s|^\([[:space:]]*\)driver: \".*\"|\1driver: \"${driver}\"|" \
-    -e "s|^\([[:space:]]*\)addr: \".*\"|\1addr: \"${addr_esc}\"|" \
-    -e "s|^\([[:space:]]*\)user: \".*\"|\1user: \"${user_esc}\"|" \
-    -e "s|^\([[:space:]]*\)pwd: \".*\"|\1pwd: \"${pwd_esc}\"|" \
-    -e "s|^\([[:space:]]*\)db_name: \".*\"|\1db_name: \"${db_esc}\"|" \
+    -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)driver: \".*\"|\1driver: \"${driver}\"|" \
+    -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)addr: \".*\"|\1addr: \"${addr_esc}\"|" \
+    -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)user: \".*\"|\1user: \"${user_esc}\"|" \
+    -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)pwd: \".*\"|\1pwd: \"${pwd_esc}\"|" \
+    -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)db_name: \".*\"|\1db_name: \"${db_esc}\"|" \
     "${cfg}"
+}
+
+# patch_conf_external_instance_db points one component conf.yaml (CubeMaster or
+# CubeTemplateCenter) at the external SQL endpoint. Both must share it:
+# TemplateCenter has no environment override for the database. No-op without an
+# external host or without the file (older packages omit TC); otherwise the
+# instance_db_config block must exist and end up on the requested driver, or it
+# dies. PostgreSQL wins if both hosts are set.
+patch_conf_external_instance_db() {
+  local cfg="$1"
+  [[ -f "${cfg}" ]] || return 0
+  if [[ -z "${CUBE_EXTERNAL_POSTGRES_HOST:-}" && -z "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+    return 0
+  fi
+
+  local block driver
+  block="$(sed -n '/^instance_db_config:/,/^[^[:space:]#]/p' "${cfg}")"
+  [[ -n "${block}" ]] \
+    || die "${cfg}: instance_db_config block not found; cannot point it at the external database"
+
+  if ! grep -qE '^[[:space:]]*driver:' <<<"${block}"; then
+    sed -i '/^instance_db_config:/a\  driver: "mysql"' "${cfg}"
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+    driver="postgres"
+    log "patching ${cfg} for external PostgreSQL: ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT:-5432}/${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}"
+    patch_cubemaster_instance_db_config "${cfg}" "${driver}" \
+      "${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT:-5432}" \
+      "${CUBE_EXTERNAL_POSTGRES_USER:-cube}" \
+      "${CUBE_EXTERNAL_POSTGRES_PASSWORD:-}" \
+      "${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}"
+  else
+    driver="mysql"
+    log "patching ${cfg} for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT:-3306}/${CUBE_EXTERNAL_MYSQL_DB:-cube_mvp}"
+    patch_cubemaster_instance_db_config "${cfg}" "${driver}" \
+      "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT:-3306}" \
+      "${CUBE_EXTERNAL_MYSQL_USER:-cube}" \
+      "${CUBE_EXTERNAL_MYSQL_PASSWORD:-}" \
+      "${CUBE_EXTERNAL_MYSQL_DB:-cube_mvp}"
+  fi
+
+  block="$(sed -n '/^instance_db_config:/,/^[^[:space:]#]/p' "${cfg}")"
+  grep -qE "^[[:space:]]*driver: \"${driver}\"" <<<"${block}" \
+    || die "${cfg}: instance_db_config.driver is not ${driver} after patching"
 }
 
 # one_click_skip_local_mysql is true when an external DB endpoint is configured.

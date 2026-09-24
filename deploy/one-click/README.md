@@ -399,8 +399,8 @@ When `CUBE_EXTERNAL_MYSQL_HOST`, `CUBE_EXTERNAL_POSTGRES_HOST` (with
 `CUBE_DATABASE_DRIVER=postgres`), and/or `CUBE_EXTERNAL_REDIS_HOST` is set,
 `install.sh`:
 
-- patches `CubeMaster/conf.yaml` with the external endpoint and sets
-  `instance_db_config.driver` for SQL engines;
+- patches `instance_db_config` (`driver`, address, user, password, database) in
+  both `CubeMaster/conf.yaml` and `CubeTemplateCenter/conf.yaml`;
 - writes `DATABASE_URL` (`mysql://` or `postgresql://`) and `CUBE_PROXY_REDIS_*`
   to `.one-click.env` so every service consumes the external endpoint;
 - masks the corresponding `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`
@@ -411,8 +411,8 @@ When `CUBE_EXTERNAL_MYSQL_HOST`, `CUBE_EXTERNAL_POSTGRES_HOST` (with
   local containers were never started for the external dependency.)
 
 The external database must already grant the configured user access to the
-target database. CubeMaster runs its own embedded schema migrations on first
-start.
+target database. CubeMaster and CubeTemplateCenter both open that database and
+run embedded schema migrations on first start.
 
 ### Bundled MinIO vs the S3 volume plugin
 

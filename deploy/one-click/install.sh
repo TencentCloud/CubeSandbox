@@ -568,9 +568,9 @@ generate_cubemaster_config_ports() {
   log "CubeMaster redis db_no=${redis_db} (CUBE_EXTERNAL_REDIS_DB)"
 }
 
-# When external MySQL/PostgreSQL/Redis is configured, patch CubeMaster conf.yaml
-# to replace the default 127.0.0.1 endpoints with the external connection
-# details. Must run after generate_cubemaster_config_ports so the port
+# When external MySQL/PostgreSQL/Redis is configured, patch CubeMaster and
+# CubeTemplateCenter conf.yaml with the external endpoints. Must run after
+# generate_cubemaster_config_ports / generate_templatecenter_config so the port
 # placeholders are resolved.
 patch_cubemaster_external_deps() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
@@ -600,7 +600,7 @@ patch_cubemaster_external_deps() {
   # PKG_ROOT is a fresh unpack every run, so the template already has driver=mysql
   # and addr=127.0.0.1:<port>. (Upgrade does not restore an old conf.yaml into PKG_ROOT.)
 
-  # Validate once up front; both branches patch the same file.
+  # Nothing to patch: no external endpoint, no stale Sentinel keys.
   if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_POSTGRES_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
@@ -610,41 +610,21 @@ patch_cubemaster_external_deps() {
 
   ensure_file "${cfg}"
 
-  # Older packages may lack instance_db_config.driver; insert before addr so
-  # subsequent s||| patches always have a target (mirrors Helm conf template).
-  if ! grep -qE '^[[:space:]]*driver:' "${cfg}"; then
-    sed -i '/^instance_db_config:/a\  driver: "mysql"' "${cfg}"
-  fi
-
   if [[ "${scrub_stale_sentinel}" -eq 1 ]]; then
     log "removing stale Redis Sentinel keys from conf.yaml (not in Sentinel mode)"
     sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-    log "patching conf.yaml for external PostgreSQL: ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT}/${CUBE_EXTERNAL_POSTGRES_DB}"
-    patch_cubemaster_instance_db_config "${cfg}" "postgres" \
-      "${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT}" \
-      "${CUBE_EXTERNAL_POSTGRES_USER}" \
-      "${CUBE_EXTERNAL_POSTGRES_PASSWORD}" \
-      "${CUBE_EXTERNAL_POSTGRES_DB}"
-  elif [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "patching conf.yaml for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}/${CUBE_EXTERNAL_MYSQL_DB}"
-    # Anchored line-start patterns (see patch_cubemaster_instance_db_config) so
-    # common.cube_ops_addr is not clobbered by the addr: rewrite.
-    patch_cubemaster_instance_db_config "${cfg}" "mysql" \
-      "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}" \
-      "${CUBE_EXTERNAL_MYSQL_USER}" \
-      "${CUBE_EXTERNAL_MYSQL_PASSWORD}" \
-      "${CUBE_EXTERNAL_MYSQL_DB}"
-  fi
+  # No-op when no external SQL host is set (Redis-only).
+  patch_conf_external_instance_db "${cfg}"
 
   one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster" "${restore_bundled_redis}"
 
-  # TemplateCenter writes progress snapshots through the same Redis cache and
-  # has no environment override for its endpoint. Patch both endpoint and DB.
+  # TemplateCenter shares the SQL database and the Redis keyspace and has no
+  # env override for either endpoint.
   local tc_cfg="${PKG_ROOT}/CubeTemplateCenter/conf.yaml"
   if [[ -f "${tc_cfg}" ]]; then
+    patch_conf_external_instance_db "${tc_cfg}"
     one_click_patch_conf_redis_endpoint "${tc_cfg}" "CubeTemplateCenter" "${restore_bundled_redis}"
   fi
 }
@@ -2127,10 +2107,10 @@ if [[ -n "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_EGRESS_IMAGE" "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE}"
 fi
 
-# Persist database driver + engine endpoints. CubeMaster reads the patched
-# conf.yaml; CubeAPI/CubeOps consume DATABASE_URL from .one-click.env.
-# Opposite-engine CUBE_EXTERNAL_* keys are scrubbed so a driver switch cannot
-# keep the previous endpoint alive via ":-" fallbacks.
+# Persist database driver + engine endpoints. CubeMaster and CubeTemplateCenter
+# read the patched conf.yaml; CubeAPI/CubeOps consume DATABASE_URL from
+# .one-click.env. Opposite-engine CUBE_EXTERNAL_* keys are scrubbed so a driver
+# switch cannot keep the previous endpoint alive via ":-" fallbacks.
 persist_one_click_database_runtime_env "${RUNTIME_ENV_FILE}"
 
 # Persist Redis for the current mode (Sentinel / standalone / local) and
