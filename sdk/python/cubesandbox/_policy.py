@@ -135,7 +135,11 @@ class Inject:
     def render(self) -> str:
         """Render the final injected header value (preview helper)."""
         fmt = self.format or "${SECRET}"
-        return fmt.replace("${SECRET}", self.secret)
+        # Substitute only the first placeholder, matching CubeEgress
+        # (`string.gsub(fmt, "%${SECRET}", escaped, 1)` in
+        # CubeEgress/lua/access_phase.lua). Replacing every occurrence would
+        # preview a credential the sandbox's upstream never receives.
+        return fmt.replace("${SECRET}", self.secret, 1)
 
     def to_wire(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"header": self.header, "secret": self.secret}
