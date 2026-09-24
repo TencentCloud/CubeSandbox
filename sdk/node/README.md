@@ -224,6 +224,7 @@ on a single `create` call — not both.
 // Read & write
 await sb.files.write("/tmp/hello.txt", "Hello, world!");
 console.log(await sb.files.read("/tmp/hello.txt")); // "Hello, world!"
+const png = await sb.files.read("/tmp/chart.png", { format: "bytes" }); // Uint8Array
 
 // Batch write
 await sb.files.writeFiles([
@@ -456,7 +457,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 
 | Method | Description |
 |---|---|
-| `read(path, options?)` | Download file content via `GET /files` |
+| `read(path, options?)` | Download file content via `GET /files`; `options.format` is `text` (default) / `bytes` / `blob` / `stream` (e2b-compatible) |
 | `write(path, data, options?)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `writeFiles(files, options?)` | Batch write, stops on first error, returns count |
 | `list(path)` | List directory entries |
