@@ -106,6 +106,26 @@ sb.pause(timeout=60, interval=0.5) # custom poll params
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
 
+### Fork
+
+```python
+sb = Sandbox.create()
+
+# One server-side call: the backend snapshots sb once and derives N copies.
+forks = sb.fork(count=3)              # list[Sandbox | Exception], one per fork
+forks = sb.fork(count=3, timeout=60)  # timeout: per-fork idle TTL in seconds
+
+for f in forks:
+    if isinstance(f, Sandbox):
+        f.run_code("print('alive')")  # a running copy
+    else:
+        print(f)                      # that fork's exception
+```
+
+Partial success keeps the copies and does not raise; only whole-request
+failures raise (e.g. unknown sandbox). `count` is 1..100 (default 1). Unlike
+`clone`, the temporary snapshot is managed by the server.
+
 ### Compute node placement
 
 Restrict scheduling to one or more compute node IDs or host IPs. A single

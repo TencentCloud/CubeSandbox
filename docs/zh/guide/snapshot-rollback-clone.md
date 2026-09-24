@@ -109,6 +109,37 @@ clones = src.clone(n=10, concurrency=5)
 | **隔离性** | 副本之间的写入互不可见，与源沙箱也互相隔离 |
 | **连续性** | 源沙箱在 `clone()` 返回后仍在运行，状态不受影响 |
 
+## 分叉（Fork）
+
+`sb.fork(count=N)` 通过**一次服务端调用**派生 N 个运行中的副本：后端对源沙箱只打一次快照，所有副本都从该快照派生。源沙箱继续运行，临时快照由服务端管理，客户端无需清理。
+
+```python
+src = Sandbox.create(template=TEMPLATE_ID)
+forks = src.fork(count=3)
+for sb in forks:
+    if isinstance(sb, Sandbox):
+        sb.run_code("print('alive')")  # 运行中的副本
+    else:
+        print(f"fork failed: {sb}")    # 该槽位的异常
+```
+
+每个 fork 独立成败。返回值恰好有 `count` 个元素——`Sandbox`，或阻止该 fork 启动的 `Exception`。部分成功会保留副本且不抛异常；只有整体失败才抛异常（如源沙箱不存在）。
+
+### clone 与 fork 的区别
+
+| | `clone(n=N)` | `fork(count=N)` |
+|---|---|---|
+| 失败语义 | 全成或全败：任一失败即回收兄弟并抛异常 | 各自独立：部分成功保留成功项 |
+| 编排方式 | 客户端：打快照 + N 次 create | 一次服务端调用（单次快照，N 路派生） |
+| 临时快照 | 最后一个克隆被杀后由 SDK 删除 | 由服务端管理 |
+| 并发 | `concurrency` 参数（默认 1） | 由服务端决定 |
+
+### 参数与错误
+
+- `count`：1..100，默认 1。越界在所有 SDK 中都会抛错。
+- `timeout` —— 新派生沙箱的空闲存活时长，不影响源沙箱。各 SDK 单位不同：Python 为**秒**，Node 为 `timeoutMs` **毫秒**，Go 为 `time.Duration`；线上传输单位是秒。
+- `404` 源沙箱不存在；`409` 源沙箱当前状态不可 fork——刚创建的沙箱可能需要片刻才能打快照，稍后重试即可。
+
 ## 回滚（Rollback）
 
 `sb.rollback(snapshot_id)` 把当前沙箱**原地**恢复到指定快照的状态：文件系统完全还原，**沙箱 ID 不变**，`sb` 对象可以继续使用。
@@ -142,7 +173,7 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 - **快照不是免费的**。每个快照对应底层的一份完整镜像，记得用完即删，或定期调用 `list_snapshots()` 清理。
 - **`with` 语句不会自动删快照**。上下文管理器只负责 `kill` 沙箱，快照需要显式调用 `Sandbox.delete_snapshot()` 清理。
 - **`clone()` 会自动清理内部快照**。临时派生几个副本时直接用 `clone()`，无需手动管理快照生命周期。
-- **大批量并发派生**优先用 `clone(n=N, concurrency=C)`，SDK 内部统一处理失败回滚，不会留下孤儿资源。
+- **大批量派生**优先用 `fork(count=N)`——一次往返、各自独立成败、服务端统一清理。需要全成或全败语义时再用 `clone(n=N, concurrency=C)`。
 
 ## 参考
 

@@ -465,6 +465,266 @@ func TestCloneKillsSiblingsOnFailure(t *testing.T) {
 	}
 }
 
+func TestForkRejectsCountOutOfRange(t *testing.T) {
+	sb := &Sandbox{}
+	for _, count := range []int{0, -3, 101} {
+		if _, err := sb.Fork(context.Background(), ForkOptions{Count: IntPtr(count)}); err == nil {
+			t.Fatalf("Fork(count=%d) returned nil error", count)
+		}
+	}
+}
+
+func TestForkNilCountDefaultsToOne(t *testing.T) {
+	var gotCount any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/fork":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotCount = body["count"]
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `[{%s}]`, sandboxField("fork-1"))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 1 || forks[0].Err != nil || forks[0].Sandbox == nil {
+		t.Fatalf("forks=%#v, want one success", forks)
+	}
+	if gotCount != float64(1) {
+		t.Fatalf("count=%v, want 1", gotCount)
+	}
+}
+
+func TestForkForwardsCountAndTimeout(t *testing.T) {
+	var gotCount, gotTimeout any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/fork":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotCount = body["count"]
+			gotTimeout = body["timeout"]
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `[{%s},{%s}]`, sandboxField("fork-1"), sandboxField("fork-2"))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{Count: IntPtr(2), Timeout: DurationPtr(60 * time.Second)})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 2 || forks[0].Err != nil || forks[0].Sandbox == nil {
+		t.Fatalf("forks=%#v", forks)
+	}
+	if gotCount != float64(2) {
+		t.Fatalf("count=%v, want 2", gotCount)
+	}
+	if gotTimeout != float64(60) {
+		t.Fatalf("timeout=%v, want 60", gotTimeout)
+	}
+	if err := forks[0].Sandbox.Kill(context.Background()); err != nil {
+		t.Fatalf("kill fork: %v", err)
+	}
+}
+
+func TestForkRejectsResultCountMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/fork":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `[{%s}]`, sandboxField("fork-1")) // 1 entry, count=3
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	_, err := sb.Fork(context.Background(), ForkOptions{Count: IntPtr(3)})
+	if err == nil || !strings.Contains(err.Error(), "expected 3") {
+		t.Fatalf("err=%v, want result count mismatch", err)
+	}
+}
+
+func TestForkKeepsSuccessfulSiblingsAndReportsFailures(t *testing.T) {
+	var killed atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/fork":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `[`+
+				`{`+sandboxField("fork-1")+`},`+
+				`{"error":{"code":130409,"message":"fork 2 failed"}},`+
+				`{`+sandboxField("fork-3")+`},`+
+				`{`+sandboxField("fork-4")+`},`+
+				`{"error":{"code":130409,"message":"fork 5 failed"}}`+
+				`]`)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
+			killed.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{Count: IntPtr(5)})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 5 {
+		t.Fatalf("len(forks)=%d, want 5", len(forks))
+	}
+	var ok []*Sandbox
+	for _, f := range forks {
+		if f.Err != nil {
+			continue
+		}
+		ok = append(ok, f.Sandbox)
+	}
+	if len(ok) != 3 {
+		t.Fatalf("successful forks=%d, want 3", len(ok))
+	}
+	if got := killed.Load(); got != 0 {
+		t.Fatalf("fork killed %d successful siblings, want 0", got)
+	}
+	for _, f := range forks {
+		if f.Err == nil {
+			continue
+		}
+		if !strings.Contains(f.Err.Error(), "fork ") {
+			t.Fatalf("unexpected error: %v", f.Err)
+		}
+	}
+	// Fork results are independent running sandboxes; a Kill succeeds and does
+	// not touch any shared snapshot (the backend manages the snapshot lifecycle).
+	for _, f := range ok {
+		if err := f.Kill(context.Background()); err != nil {
+			t.Fatalf("kill fork %s: %v", f.SandboxID, err)
+		}
+	}
+	if got := killed.Load(); got != int32(len(ok)) {
+		t.Fatalf("killed=%d, want %d after explicit kills", got, len(ok))
+	}
+}
+
+func TestForkReturnsErrorsWhenEveryForkFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/fork":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `[`+
+				`{"error":{"code":130409,"message":"boom"}},`+
+				`{"error":{"code":130409,"message":"boom"}},`+
+				`{"error":{"code":130409,"message":"boom"}}`+
+				`]`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{Count: IntPtr(3)})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 3 {
+		t.Fatalf("len(forks)=%d, want 3", len(forks))
+	}
+	for _, f := range forks {
+		if f.Err == nil {
+			t.Fatalf("expected an error, got sandbox %#v", f.Sandbox)
+		}
+		apiErr, ok := f.Err.(*APIError)
+		if !ok || apiErr.RetCode != 130409 || apiErr.StatusCode != 0 {
+			t.Fatalf("fork error=%v, want APIError RetCode=130409 StatusCode=0", f.Err)
+		}
+	}
+}
+
+// Fork must not inherit the control-plane RequestTimeout: the fork route is
+// budgeted for minutes server-side.
+func TestForkIgnoresControlRequestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `[{"sandbox":{"sandboxID":"sb-fork-1"}}]`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, RequestTimeout: 50 * time.Millisecond})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 1 || forks[0].Err != nil || forks[0].Sandbox == nil {
+		t.Fatalf("forks=%#v, want one success", forks)
+	}
+}
+
+func TestForkRequestTimeoutOverride(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `[{"sandbox":{"sandboxID":"sb-fork-1"}}]`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	if _, err := sb.Fork(context.Background(), ForkOptions{RequestTimeout: DurationPtr(100 * time.Millisecond)}); err == nil {
+		t.Fatal("Fork: want deadline error, got nil")
+	}
+}
+
+func TestForkWholeRequestFailureRaises(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/fork":
+			http.Error(w, `{"message":"sandbox not found"}`, http.StatusNotFound)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	if _, err := sb.Fork(context.Background(), ForkOptions{Count: IntPtr(3)}); err == nil {
+		t.Fatal("Fork with a failing whole request returned nil error")
+	}
+}
+
 func TestFilesWriteOctetStreamThenMultipartFallback(t *testing.T) {
 	var contentTypes []string
 	var usernames []string

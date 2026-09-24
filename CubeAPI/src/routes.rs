@@ -35,6 +35,9 @@ const PAUSE_RESUME_ROUTE_TIMEOUT: Duration = Duration::from_secs(120);
 /// delete (`DELETE /templates/:id`).
 const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 
+/// Fork = snapshot + derive fan-out on CubeMaster.
+const FORK_ROUTE_TIMEOUT: Duration = Duration::from_secs(1560);
+
 pub fn build_router(state: AppState) -> Router {
     let auth_configured = state
         .config
@@ -59,11 +62,16 @@ pub fn build_router(state: AppState) -> Router {
         Router::new().merge(build_e2b_snapshot_long_router(&state, auth_configured)),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
+    let fork_router = apply_http_layers(
+        Router::new().merge(build_fork_routes(&state, auth_configured)),
+        FORK_ROUTE_TIMEOUT,
+    );
 
     Router::new()
         .merge(standard_router)
         .merge(pause_resume_router)
         .merge(snapshot_long_router)
+        .merge(fork_router)
         .with_state(state)
 }
 
@@ -146,6 +154,14 @@ fn build_long_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<
             "/sandboxes/:sandboxID/rollback",
             post(snapshots::rollback_sandbox),
         );
+
+    with_auth_and_rate_limit(routes, state, auth_configured)
+}
+
+/// Fork runs on its own budget: the snapshot step alone may take the full
+/// 15-minute snapshot budget, before any derivation starts.
+fn build_fork_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new().route("/sandboxes/:sandboxID/fork", post(sandboxes::fork_sandbox));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
 }
