@@ -140,6 +140,16 @@ jobs:
           docker exec "${cid}" /usr/bin/envd -version
           docker exec "${cid}" /usr/bin/envd -commit
 
+      - name: Test Go image lifecycle
+        env:
+          CUBE_ENVD_IMAGE: cubesandbox-base:ci-smoke
+          CUBE_ENVD_ARCH: ${{ matrix.arch }}
+          CUBE_ENVD_PROVIDER: upstream
+          ENVD_REF: ${{ steps.meta_ref.outputs.envd_ref }}
+        run: |
+          export CUBE_ENVD_COMMIT="$(docker run --rm --entrypoint /usr/bin/envd "$CUBE_ENVD_IMAGE" -commit)"
+          python3 -B -m unittest discover -s docker/tests -v
+
       - name: Push per-arch image
         if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
         uses: docker/build-push-action@v6
