@@ -851,6 +851,10 @@ cubeNode:
       # off for the whole guest DNS config (search/options are not copied either).
       followNodeDns: true
       nameservers: []
+      # Explicit operator opt-in: admit configured default resolvers through
+      # CubeVS even when an IP-only sandbox policy has no domain/L7 target.
+      # This is CIDR-wide with the current data plane, not DNS-port-only.
+      autoAllowDefaultResolvers: false
 
   env: []
   # Resource defaults for the cubelet run container.

@@ -17,6 +17,9 @@ common:
   # dns_config.searches / dns_config.options fall back to the defaults below.
   default_dns_servers:
     - 119.29.29.29
+  # Opt in only when the operator wants CubeVS to admit the configured default
+  # resolver for guests without an explicit DNS allow_out rule.
+  auto_allow_default_dns_servers: false
   # Default search domains / options for guest resolv.conf (e.g. followNodeDns).
   default_dns_searches: []
   default_dns_options: []
