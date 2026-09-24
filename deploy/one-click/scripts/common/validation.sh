@@ -76,3 +76,30 @@ normalize_redis_db() {
   esac
   printf '%s' "${value}"
 }
+
+# normalize_redis_tls maps the Redis TLS switch to 1 or 0. It accepts the
+# spellings every Redis client in the stack parses (1/0/true/false; empty is
+# off) and fails on anything else, so a typo cannot leave some clients on TLS
+# and others on plaintext against the same endpoint.
+normalize_redis_tls() {
+  local value="$1"
+  local name="${2:-Redis TLS switch}"
+  case "${value}" in
+    1|true) printf '1' ;;
+    ""|0|false) printf '0' ;;
+    *) die "${name} must be 0, 1, true or false, got: ${value}" ;;
+  esac
+}
+
+# validate_postgres_ssl_mode accepts the sslmode values that pgx (CubeMaster,
+# CubeTemplateCenter and CubeOps) parses, or empty for the driver default. The
+# value is written as is into conf.yaml and DATABASE_URL, so a typo fails the
+# install instead of reaching the clients.
+validate_postgres_ssl_mode() {
+  local value="$1"
+  local name="${2:-PostgreSQL sslmode}"
+  case "${value}" in
+    ""|disable|allow|prefer|require|verify-ca|verify-full) ;;
+    *) die "${name} must be empty or one of disable, allow, prefer, require, verify-ca, verify-full, got: ${value}" ;;
+  esac
+}
