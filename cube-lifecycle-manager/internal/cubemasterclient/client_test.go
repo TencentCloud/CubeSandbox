@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +47,92 @@ func TestKill_Success(t *testing.T) {
 	}
 	if capturedBody.KillReason != KillReasonTimeout {
 		t.Fatalf("kill_reason should be propagated, got %q", capturedBody.KillReason)
+	}
+}
+
+func TestPauseSupersededWireContract(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"superseded", `{"ret":{"ret_code":130409,"ret_msg":"auto-pause superseded by lifecycle state change"}}`, true},
+		{"lock contention", `{"ret":{"ret_code":130409,"ret_msg":"sandbox lifecycle operation in progress; retry later"}}`, false},
+		{"wrong code", `{"ret":{"ret_code":130500,"ret_msg":"auto-pause superseded by lifecycle state change"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			err := New(server.URL, time.Second).Pause(context.Background(), "sbx", "cubebox")
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.IsPauseSuperseded() != tc.want {
+				t.Fatalf("unexpected classification: err=%v wantSuperseded=%v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestOnlyAutoPauseCarriesLifecyclePrecondition(t *testing.T) {
+	for _, action := range []string{"pause", "resume"} {
+		t.Run(action, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				expected, exists := body["expected_lifecycle_state"]
+				if action == "pause" && expected != "pausing" {
+					t.Error("auto-pause lost precondition")
+				}
+				if action == "resume" && exists {
+					t.Error("resume must not carry pause precondition")
+				}
+				_, _ = w.Write([]byte(`{"ret":{"ret_code":200}}`))
+			}))
+			defer server.Close()
+			if err := New(server.URL, time.Second).update(context.Background(), "sbx", "cubebox", action); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestResumeCompletedSurvivesErrorDecoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ret":{"ret_code":130500,"ret_msg":"state synchronization failed"},"resume_completed":true}`))
+	}))
+	defer server.Close()
+	client := New(server.URL, time.Second)
+	var apiErr *APIError
+	if err := client.Resume(context.Background(), "sbx", "cubebox"); !errors.As(err, &apiErr) || !apiErr.ResumeCompleted {
+		t.Fatalf("partial result lost: %v", err)
+	}
+	if err := client.Pause(context.Background(), "sbx", "cubebox"); !errors.As(err, &apiErr) || apiErr.ResumeCompleted {
+		t.Fatalf("pause misclassified as completed resume: %v", err)
+	}
+}
+
+func TestSandboxStateRequiresConfirmedTerminalState(t *testing.T) {
+	for _, status := range []int{1, 5, 4} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("sandbox_id") != "sbx" || r.URL.Query().Get("instance_type") != "cubebox" {
+				t.Error("missing sandbox identity")
+			}
+			_, _ = fmt.Fprintf(w, `{"ret":{"ret_code":200},"data":[{"sandbox_id":"sbx","status":%d}]}`, status)
+		}))
+		state, err := New(server.URL, time.Second).SandboxState(context.Background(), "sbx", "cubebox")
+		server.Close()
+		if status == 4 {
+			if err == nil {
+				t.Fatal("unconfirmed state accepted")
+			}
+			continue
+		}
+		if err != nil || (status == 1 && state != "running") || (status == 5 && state != "paused") {
+			t.Fatalf("state=%s err=%v", state, err)
+		}
 	}
 }
 

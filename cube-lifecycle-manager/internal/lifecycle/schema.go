@@ -4,7 +4,11 @@
 
 // Package lifecycle is the CLM-local mirror of
 // CubeMaster/pkg/lifecycle. The two MUST stay byte-compatible: CubeMaster is
-// the single writer, CLM is a pure consumer.
+// the writer of lifecycle metadata/events, CLM consumes them.
+// State keys are normally written by CLM. After restore, CubeMaster writes a
+// 60s running marker under its sandbox lifecycle lock before publishing the
+// running event and unlocking. This invalidates queued auto-pauses; CLM must
+// CAS pausing -> paused and reconcile when running supersedes its transition.
 //
 // We do not import the CubeMaster module directly because it would drag in
 // MySQL, gRPC, scheduler, and a host of other heavy dependencies that have no
