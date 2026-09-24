@@ -692,7 +692,44 @@ impl Vmm {
     ) -> result::Result<(), VmError> {
         self.vm_pause()?;
         self.vm_snapshot(snapshot_config)?;
-        self.vm_delete()
+        // Stop phase, before the reply: the baseline teardown runs here
+        // in full -- workers woken (the resume kick may surface pending
+        // requests, as on the delete path), vcpus joined, then the drop
+        // kills the workers (only net joins them, the rest exit on
+        // their own), removes the vsock and vhost-user socket files,
+        // and closes the tap and disk fds and the queue eventfds.
+        let mut vm = self.vm.take().ok_or(VmError::VmNotRunning)?;
+        match vm.counters() {
+            Ok(info) => info!("counters details: {:?}", info),
+            Err(e) => info!("counter failed {}", e),
+        }
+        // The memory manager owns both the guest RAM and the hypervisor
+        // VM handle, so holding one reference defers the unmap and the
+        // KVM fd close past the reply.
+        let memory_manager = vm.memory_manager();
+        let shutdown_res = vm.shutdown();
+        drop(vm);
+        shutdown_res?;
+        // Cleared only on success: on failure the VM is already gone
+        // and only deleting the sandbox recovers.
+        self.vm_config = None;
+
+        event!("vm", "deleted");
+        // Release phase, after the reply: drop the held reference --
+        // the guest RAM unmap and the KVM fd close happen when the
+        // last reference goes, normally right here.
+        if let Err(e) = std::thread::Builder::new()
+            .name("pause-release".to_string())
+            .spawn(move || {
+                drop(memory_manager);
+                info!("pause release done");
+            })
+        {
+            // A failed spawn drops the closure and the reference with
+            // it: the release already ran inline.
+            error!("spawning pause release failed: {}", e);
+        }
+        Ok(())
     }
 
     fn vm_resume(&mut self) -> result::Result<(), VmError> {
