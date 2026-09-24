@@ -132,12 +132,11 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 // mergePauseBindings adds Master's pause state to the node-scan result.
 //
 // A paused sandbox has no shim, so the node scan cannot be trusted to report
-// it, and t_cube_pause_snapshot is the source of truth. Scanned rows are
-// always enriched with pause_snap／remote. Shimless READY／DELETE_FAILED
-// rows that the scan missed are appended only on the last node page (or
-// when --hostid selects one node), so they sit after running sandboxes
-// instead of repeating on every page. Label-filtered lists still do not
-// invent rows (labels only exist on the node).
+// it, and t_cube_pause_snapshot is the source of truth for pause state.
+// Scanned rows are always enriched. Shimless READY／DELETE_FAILED rows that
+// the scan missed are appended only on the last node page (or when --hostid
+// selects one node). Their identity comes from the persisted create spec;
+// a label selector is matched against those labels.
 func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) {
 	records, err := pausesnap.List(ctx, pausesnap.ListOptions{
 		HostID:       req.HostID,
@@ -149,8 +148,20 @@ func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp 
 		}
 		return
 	}
-	labelFiltered := req.Filter != nil && len(req.Filter.LabelSelector) > 0
-	rsp.Data = applyPauseBindings(rsp.Data, records, labelFiltered, shouldAppendShimlessPauseRows(req, rsp))
+	opts := pauseBindingMerge{appendMissing: shouldAppendShimlessPauseRows(req, rsp)}
+	if req != nil && req.Filter != nil {
+		opts.labelSelector = req.Filter.LabelSelector
+	}
+	if opts.appendMissing {
+		if ids := missingShimlessBindingIDs(rsp.Data, records); len(ids) > 0 {
+			specs, specErr := sandboxspec.GetMany(ctx, ids)
+			if specErr != nil && !errors.Is(specErr, sandboxspec.ErrSandboxSpecStoreNotReady) {
+				log.G(ctx).Warnf("ListSandbox: read sandbox specs: %v", specErr)
+			}
+			opts.specs = specs
+		}
+	}
+	rsp.Data = applyPauseBindings(ctx, rsp.Data, records, opts)
 }
 
 // shouldAppendShimlessPauseRows is true for a single-host list and for the
@@ -170,39 +181,93 @@ func shouldAppendShimlessPauseRows(req *types.ListCubeSandboxReq, rsp *types.Lis
 	return rsp.EndIdx >= rsp.Total
 }
 
-func applyPauseBindings(items []*types.SandboxBriefData, records []*pausesnap.Record,
-	labelFiltered, appendMissing bool) []*types.SandboxBriefData {
+// pauseBindingMerge is the extra input applyPauseBindings needs beyond the
+// node scan: specs for shimless rows, and whether this page may append them.
+type pauseBindingMerge struct {
+	specs         map[string]*types.CreateCubeSandboxReq
+	labelSelector map[string]string
+	appendMissing bool
+}
+
+func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, records []*pausesnap.Record,
+	opts pauseBindingMerge) []*types.SandboxBriefData {
+	known := indexBriefs(items)
+	for _, rec := range records {
+		if rec == nil || rec.SandboxID == "" {
+			continue
+		}
+		if item, ok := known[rec.SandboxID]; ok {
+			// Pause fields are filled even when the node says RUNNING. PauseStatus
+			// stays READY so an operator can see the stale binding; Status itself
+			// stays RUNNING. Info has no PauseStatus field and does not add a
+			// pause annotation in that case.
+			applyPauseBinding(item, rec)
+			view := decidePauseView(rec, item.Status, true)
+			switch {
+			case view.stale:
+				recordStalePauseBinding(ctx, "list", rec.SandboxID, rec)
+			case view.override:
+				item.Status = view.status
+				item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
+			default:
+				// Node status stands, but the binding still names the pause snapshot.
+				item.Annotations = overlayPauseAnnotations(item.Annotations, rec, "")
+			}
+			continue
+		}
+		// CREATING / FAILED leave the shim running, so a row the scan missed
+		// is a sandbox that is gone. DELETE_FAILED has no shim either.
+		if !opts.appendMissing || !isShimlessPauseStatus(rec.Status) {
+			continue
+		}
+		spec := opts.specs[rec.SandboxID]
+		item := briefFromPauseBinding(rec, spec)
+		if item == nil || !labelsMatchSelector(item.Labels, opts.labelSelector) || matchFilter(item.Labels) {
+			continue
+		}
+		item.Annotations = overlayPauseAnnotations(item.Annotations, rec, "")
+		known[rec.SandboxID] = item
+		items = append(items, item)
+	}
+	return items
+}
+
+func indexBriefs(items []*types.SandboxBriefData) map[string]*types.SandboxBriefData {
 	known := make(map[string]*types.SandboxBriefData, len(items))
 	for _, item := range items {
 		if item != nil && item.SandboxID != "" {
 			known[item.SandboxID] = item
 		}
 	}
-	for _, rec := range records {
-		if rec == nil || rec.SandboxID == "" {
+	return known
+}
+
+// labelsMatchSelector mirrors how doOneList forwards the selector to Cubelet:
+// pairs with an empty key or value are ignored.
+func labelsMatchSelector(labels, selector map[string]string) bool {
+	for k, v := range selector {
+		if k == "" || v == "" {
 			continue
 		}
-		if item, ok := known[rec.SandboxID]; ok {
-			applyPauseBinding(item, rec)
-			continue
+		if labels[k] != v {
+			return false
 		}
-		// CREATING / FAILED leave the sandbox running, so the node scan owns
-		// that row and its absence here means the sandbox is gone.
-		// DELETE_FAILED has no shim either and its leftover package is exactly
-		// what an operator needs to see, so it is rendered like READY.
-		if !isShimlessPauseStatus(rec.Status) {
-			continue
-		}
-		// Labels only exist on the node, so a label-filtered list cannot tell
-		// whether this binding would have matched.
-		if labelFiltered || !appendMissing {
-			continue
-		}
-		item := pauseBindingRow(rec)
-		known[rec.SandboxID] = item
-		items = append(items, item)
 	}
-	return items
+	return true
+}
+
+func missingShimlessBindingIDs(items []*types.SandboxBriefData, records []*pausesnap.Record) []string {
+	known := indexBriefs(items)
+	var ids []string
+	for _, rec := range records {
+		if rec == nil || rec.SandboxID == "" || !isShimlessPauseStatus(rec.Status) {
+			continue
+		}
+		if _, ok := known[rec.SandboxID]; !ok {
+			ids = append(ids, rec.SandboxID)
+		}
+	}
+	return ids
 }
 
 func applyPauseBinding(item *types.SandboxBriefData, rec *pausesnap.Record) {
@@ -215,34 +280,6 @@ func applyPauseBinding(item *types.SandboxBriefData, rec *pausesnap.Record) {
 	if strings.TrimSpace(item.Backend) == "" {
 		item.Backend = strings.TrimSpace(rec.Backend)
 	}
-}
-
-// isShimlessPauseStatus reports whether the binding, not a node scan, is the
-// only remaining evidence of the sandbox.
-func isShimlessPauseStatus(status string) bool {
-	status = strings.TrimSpace(status)
-	return strings.EqualFold(status, pausesnap.StatusReady) ||
-		strings.EqualFold(status, pausesnap.StatusDeleteFailed)
-}
-
-// pauseBindingRow renders a binding the node did not report. CreateAt stays
-// empty: the binding only knows when the pause happened, not when the sandbox
-// was created, and a wrong creation time is worse than none.
-func pauseBindingRow(rec *pausesnap.Record) *types.SandboxBriefData {
-	item := &types.SandboxBriefData{
-		SandboxID:       rec.SandboxID,
-		Status:          int32(cubebox.ContainerState_CONTAINER_PAUSED),
-		HostID:          rec.NodeID,
-		HostIP:          rec.NodeIP,
-		Backend:         strings.TrimSpace(rec.Backend),
-		PauseSnapshotID: rec.SnapshotID,
-		RemoteStatus:    rec.RemoteStatus,
-		PauseStatus:     strings.TrimSpace(rec.Status),
-	}
-	if !rec.UpdatedAt.IsZero() {
-		item.PauseAt = rec.UpdatedAt.UnixNano()
-	}
-	return item
 }
 
 func enrichSandboxListEndAts(ctx context.Context, items []*types.SandboxBriefData) {
@@ -266,11 +303,9 @@ func enrichSandboxListEndAts(ctx context.Context, items []*types.SandboxBriefDat
 // enrichSandboxListBackends fills Backend from t_cube_sandbox_spec (DB source of
 // truth for create-time xfs|s3). Missing specs leave Backend empty.
 func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefData) {
+	var ids []string
 	for _, item := range items {
-		if item == nil || item.SandboxID == "" {
-			continue
-		}
-		if b := strings.TrimSpace(item.Backend); b != "" {
+		if item == nil || item.SandboxID == "" || strings.TrimSpace(item.Backend) != "" {
 			continue
 		}
 		if item.Annotations != nil {
@@ -279,8 +314,24 @@ func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefD
 				continue
 			}
 		}
-		spec, err := sandboxspec.Get(ctx, item.SandboxID)
-		if err != nil || spec == nil {
+		ids = append(ids, item.SandboxID)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	specs, err := sandboxspec.GetMany(ctx, ids)
+	if err != nil {
+		if !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+			log.G(ctx).Warnf("ListSandbox: read sandbox specs for backend: %v", err)
+		}
+		return
+	}
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.Backend) != "" {
+			continue
+		}
+		spec := specs[item.SandboxID]
+		if spec == nil {
 			continue
 		}
 		item.Backend = strings.TrimSpace(spec.Backend)
@@ -388,7 +439,11 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 }
 
 func matchFilter(labels map[string]string) bool {
-	tmpFilter := config.GetConfig().Common.ListFilterOutLables
+	cfg := config.GetConfig()
+	if cfg == nil || cfg.Common == nil {
+		return false
+	}
+	tmpFilter := cfg.Common.ListFilterOutLables
 	if len(tmpFilter) == 0 || len(labels) == 0 {
 		return false
 	}
