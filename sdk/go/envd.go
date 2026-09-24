@@ -103,8 +103,8 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, apiErrorFromResponse(resp)
+	if err := validateConnectResponse(resp); err != nil {
+		return nil, err
 	}
 
 	result, err := parseProcessStartStream(resp.Body)
@@ -526,10 +526,10 @@ func (s *Sandbox) watchDir(ctx context.Context, path string, options ...fileRequ
 		cancel()
 		return nil, err
 	}
-	if resp.StatusCode >= http.StatusBadRequest {
+	if err := validateConnectResponse(resp); err != nil {
 		defer resp.Body.Close()
 		cancel()
-		return nil, apiErrorFromResponse(resp)
+		return nil, err
 	}
 
 	events := make(chan WatchEvent, 64)

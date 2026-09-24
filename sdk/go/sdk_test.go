@@ -1828,3 +1828,214 @@ func TestSetTimeoutServerError(t *testing.T) {
 		t.Fatalf("StatusCode=%d, want 500", apiErr.StatusCode)
 	}
 }
+
+func TestCommandsRunHTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>Welcome to Web UI</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with HTML response returned nil error")
+	}
+	if !strings.Contains(err.Error(), "received HTML") {
+		t.Fatalf("err=%v, want HTML diagnostic message", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+	}
+}
+
+func TestCommandsRunNon200Status(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, `{"message":"bad gateway"}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with 502 returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode=%d, want 502", apiErr.StatusCode)
+	}
+}
+
+func TestWatchDirHTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>Proxy Error</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Files().WatchDir(context.Background(), "/tmp")
+	if err == nil {
+		t.Fatal("WatchDir with HTML response returned nil error")
+	}
+	if !strings.Contains(err.Error(), "received HTML") {
+		t.Fatalf("err=%v, want HTML diagnostic message", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+	}
+}
+
+func TestPtyCreateHTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>Welcome</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Pty().Create(context.Background(), PtySize{Rows: 24, Cols: 80}, PtyCreateOptions{})
+	if err == nil {
+		t.Fatal("Pty.Create with HTML response returned nil error")
+	}
+	if !strings.Contains(err.Error(), "received HTML") {
+		t.Fatalf("err=%v, want HTML diagnostic message", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+	}
+}
+
+func TestCommandsRunNon200HTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with 502 HTML returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode=%d, want 502", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Message, "502 Bad Gateway") {
+		t.Fatalf("message=%q, want original gateway error", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Message, "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("message=%q, want CUBE_PROXY_NODE_IP hint", apiErr.Message)
+	}
+
+	// Also verify 404 HTML error page clears ErrSandboxNotFound classification
+	server404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>404 Not Found (Portal)</body></html>")
+	}))
+	defer server404.Close()
+
+	host404, port404 := serverHostPort(t, server404.URL)
+	client404 := NewClient(Config{
+		ProxyNodeIP:    host404,
+		ProxyPortHTTP:  port404,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb404 := &Sandbox{client: client404, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err = sb404.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with 404 HTML returned nil error")
+	}
+	if errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("err=%v should not be classified as ErrSandboxNotFound", err)
+	}
+	if !errors.As(err, &apiErr) || apiErr.Kind != apiErrorKindAPI {
+		t.Fatalf("apiErr.Kind=%q, want %q", apiErr.Kind, apiErrorKindAPI)
+	}
+}
+
+func TestCommandsRunOmittedContentTypeSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Force an empty header value so Header.Get returns "" without net/http sniffing
+		w.Header()["Content-Type"] = []string{""}
+		w.WriteHeader(http.StatusOK)
+		w.Write(connectEnvelope(0, `{"event":{"start":{"pid":100}}}`))
+		w.Write(connectEnvelope(0, fmt.Sprintf(`{"event":{"data":{"stdout":%q}}}`, base64.StdEncoding.EncodeToString([]byte("success\n")))))
+		w.Write(connectEnvelope(0, `{"event":{"end":{"exitCode":0,"exited":true}}}`))
+		w.Write(connectEnvelope(connectEndStreamFlag, `{}`))
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	res, err := sb.Commands().Run(context.Background(), "echo success", CommandOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("Commands.Run without Content-Type header failed: %v", err)
+	}
+	if res.Stdout != "success\n" || res.ExitCode != 0 {
+		t.Fatalf("result=%+v, want stdout 'success\\n' and exitCode 0", res)
+	}
+}
