@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -25,8 +26,55 @@ type Client struct {
 	inner  *minio.Client
 }
 
-// New builds an S3 client from plugin config.
-func New(cfg *config.Config) (*Client, error) {
+// imdsEndpoint is where the instance-role provider asks for credentials;
+// empty means the EC2 default. Tests point it at a fake IMDS.
+var imdsEndpoint = ""
+
+// imdsProbeTimeout bounds the startup credential fetch. minio-go's default
+// HTTP client has no timeout of its own, so without this a host that cannot
+// reach IMDS would hang instead of failing.
+const imdsProbeTimeout = 5 * time.Second
+
+// credentialsFor decides where the credentials come from: the configured
+// static keys, or the EC2 instance role with CREDENTIALS=instance_role. The
+// latter is minio-go's IAM provider, not the full AWS credential chain:
+// AWS_ACCESS_KEY_ID and ~/.aws/credentials are ignored, so a node with stray
+// keys cannot act as the wrong identity. Kept apart from New so the choice can
+// be tested without a network.
+func credentialsFor(cfg *config.Config) *credentials.Credentials {
+	if cfg.UseInstanceRole() {
+		return credentials.NewIAM(imdsEndpoint)
+	}
+	return credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, "")
+}
+
+// CheckInstanceRole fetches credentials once when cfg uses the instance role,
+// so a host that is not on EC2, has IMDS disabled or has no role attached
+// fails with a clear error up front instead of as an s3fs mount or S3 request
+// failure later. It is a no-op with static keys.
+func CheckInstanceRole(ctx context.Context, cfg *config.Config) error {
+	if !cfg.UseInstanceRole() {
+		return nil
+	}
+	return probeInstanceRole(ctx, credentialsFor(cfg))
+}
+
+// probeInstanceRole resolves creds within imdsProbeTimeout. On success the
+// value stays cached in creds, so a client built on them does not ask again.
+func probeInstanceRole(ctx context.Context, creds *credentials.Credentials) error {
+	ctx, cancel := context.WithTimeout(ctx, imdsProbeTimeout)
+	defer cancel()
+	if _, err := creds.GetWithContext(&credentials.CredContext{Context: ctx}); err != nil {
+		return fmt.Errorf("CREDENTIALS=%s: no credentials from the EC2 instance metadata service "+
+			"(is this host on EC2, with IMDS enabled and an instance role attached?): %w",
+			config.CredentialsInstanceRole, err)
+	}
+	return nil
+}
+
+// New builds an S3 client from plugin config. With the instance role it
+// fetches credentials before returning; see CheckInstanceRole.
+func New(ctx context.Context, cfg *config.Config) (*Client, error) {
 	host, secure, err := ParseEndpoint(cfg.Endpoint)
 	if err != nil {
 		return nil, err
@@ -37,8 +85,14 @@ func New(cfg *config.Config) (*Client, error) {
 		lookup = minio.BucketLookupPath
 	}
 
+	creds := credentialsFor(cfg)
+	if cfg.UseInstanceRole() {
+		if err := probeInstanceRole(ctx, creds); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := minio.New(host, &minio.Options{
-		Creds:        credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		Creds:        creds,
 		Secure:       secure,
 		Region:       cfg.Region,
 		BucketLookup: lookup,

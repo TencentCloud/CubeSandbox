@@ -147,12 +147,30 @@ Then edit `volume-s3.conf` on each node:
 
 | Field | Description | Required |
 |-------|-------------|----------|
-| `ACCESS_KEY_ID` | Access key ID | yes |
-| `SECRET_ACCESS_KEY` | Secret access key | yes |
+| `ACCESS_KEY_ID` | Access key ID | yes¹ |
+| `SECRET_ACCESS_KEY` | Secret access key | yes¹ |
+| `CREDENTIALS` | `static` (default) or `instance_role`¹ | no |
 | `BUCKET` | Bucket holding all volumes | yes |
 | `ENDPOINT` | S3-compatible endpoint URL (see table below) | yes |
 | `REGION` | SigV4 signing region; default `us-east-1` | no |
 | `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO). Multi-option values may be quoted so the file stays `source`-compatible; the plugin strips the quotes. Setting `-ouse_path_request_style` also switches the plugin's own S3 client to path-style addressing. | no |
+
+¹Set `CREDENTIALS=instance_role` and remove both keys to use the host's EC2 instance role instead of a static key. The control-plane client then gets credentials from the instance metadata service (IMDS) and s3fs mounts with `-oiam_role=auto`; no passwd file is written, and one left from earlier static keys is removed. Empty keys without `CREDENTIALS=instance_role` are an error, as are keys together with it, and `ENDPOINT` must be an AWS S3 host (`*.amazonaws.com` or `*.amazonaws.com.cn`). Create, destroy and attach fetch credentials once up front and fail with an IMDS error if the host has no role or cannot reach IMDS.
+
+> **Which deployments can use this.** Only the manual install on this page. `deploy/one-click/install.sh`
+> refuses a config with `CUBE_S3_ENDPOINT` set and the keys empty, and re-renders `volume-s3.conf` on every
+> install and upgrade, so a hand-added `CREDENTIALS` line would not survive; the Helm chart likewise requires
+> `volumeS3.accessKeyId` / `secretAccessKey` unless you supply the whole file through `volumeS3.existingSecret`.
+>
+> **Which identity this is.** The EC2 instance role through IMDS — not the wider AWS credential chain:
+> `AWS_ACCESS_KEY_ID` and `~/.aws/credentials` are ignored. (The control-plane client would honour
+> `AWS_WEB_IDENTITY_TOKEN_FILE` or `AWS_CONTAINER_CREDENTIALS_*` if they were set in the plugin's environment;
+> they are not on a normal host, and s3fs only uses IMDS.) The other backends in the table above (COS, R2,
+> MinIO) therefore still need a static key pair.
+>
+> **Where the role has to exist.** On every CubeMaster *and* Cubelet host: create and destroy run with
+> CubeMaster's identity, attach with the node's. Scope it to `BUCKET` — an instance role is usually much
+> broader than the bucket-scoped key pair the prerequisites ask for.
 
 Common backends:
 
