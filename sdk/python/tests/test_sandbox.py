@@ -925,6 +925,20 @@ class TestGetInfo:
         assert result.state == "paused"
         assert str(result.state) == "paused"
 
+    def test_get_info_state_covers_every_documented_state(self):
+        """Every state CubeAPI documents resolves to a member, not a raw str."""
+        sb = make_sandbox()
+        for state in ("running", "paused", "pausing", "unknown"):
+            info = {**FULL_INFO_DATA, "state": state}
+            with patch.object(sb._session, "get", return_value=mock_response(info)):
+                result = sb.get_info()
+            assert result.state is SandboxState(state), state
+            assert result.state == state
+
+    def test_sandbox_state_lookup_is_case_insensitive(self):
+        assert SandboxState("PAUSING") is SandboxState.PAUSING
+        assert SandboxState("Unknown") is SandboxState.UNKNOWN
+
     def test_get_info_unknown_state_falls_back_to_string(self):
         sb = make_sandbox()
         info = {**FULL_INFO_DATA, "state": "hibernating"}
