@@ -68,7 +68,7 @@ expect_validate_fail() {
   shift
   if (
     unset CUBE_DATABASE_DRIVER \
-      CUBE_EXTERNAL_MYSQL_HOST CUBE_EXTERNAL_POSTGRES_HOST
+      CUBE_EXTERNAL_MYSQL_HOST CUBE_EXTERNAL_POSTGRES_HOST CUBE_POSTGRES_SSL_MODE
     # shellcheck disable=SC1091
     source "${ONE_CLICK_DIR}/lib/common.sh"
     export "$@"
@@ -97,6 +97,33 @@ test_validate_mysql_rejects_postgres_host_without_driver() {
   expect_validate_fail "postgres host with mysql driver" \
     CUBE_DATABASE_DRIVER=mysql \
     CUBE_EXTERNAL_POSTGRES_HOST=pg.example.com
+}
+
+# CUBE_POSTGRES_SSL_MODE is written verbatim into conf.yaml and DATABASE_URL:
+# a value pgx does not know, or one set for MySQL, fails validation.
+test_validate_rejects_bad_ssl_mode() {
+  expect_validate_fail "unknown ssl_mode" \
+    CUBE_DATABASE_DRIVER=postgres \
+    CUBE_EXTERNAL_POSTGRES_HOST=pg.example.com \
+    CUBE_POSTGRES_SSL_MODE=requre
+  expect_validate_fail "ssl_mode with mysql" \
+    CUBE_DATABASE_DRIVER=mysql \
+    CUBE_POSTGRES_SSL_MODE=require
+}
+
+test_validate_postgres_ssl_modes_ok() {
+  local mode
+  for mode in "" disable allow prefer require verify-ca verify-full; do
+    (
+      unset CUBE_EXTERNAL_MYSQL_HOST
+      # shellcheck disable=SC1091
+      source "${ONE_CLICK_DIR}/lib/common.sh"
+      export CUBE_DATABASE_DRIVER=postgres
+      export CUBE_EXTERNAL_POSTGRES_HOST=pg.example.com
+      export CUBE_POSTGRES_SSL_MODE="${mode}"
+      validate_one_click_database_config
+    ) >/dev/null 2>&1 || fail "ssl_mode '${mode}' must pass validation"
+  done
 }
 
 test_validate_postgres_ok() {
@@ -351,6 +378,47 @@ EOF
   fi
 }
 
+# PostgreSQL -> MySQL upgrade: the merge re-injects the previous
+# CUBE_POSTGRES_SSL_MODE with the other PostgreSQL markers. It is dropped with
+# them unless this run declared it, in which case validation rejects it.
+test_upgrade_intent_drops_preserved_ssl_mode_on_mysql() {
+  local env_file="${TMP_DIR}/ssl-stale.env"
+  cat > "${env_file}" <<'EOF'
+CUBE_DATABASE_DRIVER=mysql
+CUBE_EXTERNAL_MYSQL_HOST=db.example.com
+EOF
+  (
+    unset CUBE_POSTGRES_SSL_MODE
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    run_db_intent_roundtrip "${env_file}"
+    # Simulate upgrade merge re-injecting the previous PostgreSQL markers.
+    export CUBE_DATABASE_DRIVER=postgres
+    export CUBE_EXTERNAL_POSTGRES_HOST=stale.pg
+    export CUBE_POSTGRES_SSL_MODE=require
+    apply_one_click_database_intent
+    [[ -z "${CUBE_POSTGRES_SSL_MODE:-}" ]] \
+      || fail "preserved ssl_mode must be dropped with the PostgreSQL markers"
+    validate_one_click_database_config
+  ) || fail "upgrade intent postgres->mysql with preserved ssl_mode failed"
+
+  cat > "${env_file}" <<'EOF'
+CUBE_DATABASE_DRIVER=mysql
+CUBE_EXTERNAL_MYSQL_HOST=db.example.com
+CUBE_POSTGRES_SSL_MODE=require
+EOF
+  if (
+    unset CUBE_POSTGRES_SSL_MODE
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    run_db_intent_roundtrip "${env_file}"
+    apply_one_click_database_intent
+    validate_one_click_database_config
+  ) >/dev/null 2>&1; then
+    fail "ssl_mode declared with mysql must still fail validation"
+  fi
+}
+
 test_upgrade_intent_noop_without_dotenv_keys() {
   local env_file="${TMP_DIR}/empty.env"
   : > "${env_file}"
@@ -477,6 +545,40 @@ test_external_mysql_patches_templatecenter() {
   assert_not_contains "${tc}" "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
 }
 
+# CUBE_POSTGRES_SSL_MODE reaches both confs on the PostgreSQL branch: dao reads
+# instance_db_config.ssl_mode in CubeMaster and in CubeTemplateCenter. The
+# MySQL branch ignores it.
+test_external_postgres_ssl_mode_patches_both_confs() {
+  local files master tc f n
+  files="$(apply_external_db_to_shipped_templates \
+    CUBE_EXTERNAL_POSTGRES_HOST=pg.example.internal \
+    CUBE_EXTERNAL_POSTGRES_PORT=5432 \
+    CUBE_EXTERNAL_POSTGRES_USER=pguser \
+    CUBE_EXTERNAL_POSTGRES_PASSWORD=secret \
+    CUBE_EXTERNAL_POSTGRES_DB=cube_ext \
+    CUBE_POSTGRES_SSL_MODE=require
+  )" || fail "postgres ssl_mode template patch setup failed"
+  master="${files%%$'\n'*}"
+  tc="${files#*$'\n'}"
+  for f in "${master}" "${tc}"; do
+    n="$(sed -n '/^instance_db_config:/,/^[^[:space:]#]/p' "${f}" | grep -c '^  ssl_mode: "require"$')"
+    [[ "${n}" -eq 1 ]] || fail "${f}: expected one instance_db_config.ssl_mode, got ${n}"
+  done
+
+  files="$(apply_external_db_to_shipped_templates \
+    CUBE_EXTERNAL_MYSQL_HOST=mysql.example.internal \
+    CUBE_EXTERNAL_MYSQL_PORT=3306 \
+    CUBE_EXTERNAL_MYSQL_USER=extuser \
+    CUBE_EXTERNAL_MYSQL_PASSWORD=ext-secret \
+    CUBE_EXTERNAL_MYSQL_DB=cube_ext \
+    CUBE_POSTGRES_SSL_MODE=require
+  )" || fail "mysql template patch setup failed"
+  master="${files%%$'\n'*}"
+  tc="${files#*$'\n'}"
+  assert_not_contains "${master}" "ssl_mode:"
+  assert_not_contains "${tc}" "ssl_mode:"
+}
+
 test_external_db_patch_noop_without_host() {
   local tc="${TMP_DIR}/noop-templatecenter.yaml"
   local repo_root before
@@ -574,6 +676,114 @@ test_control_plane_patch_order() {
     || fail "config generation must precede patching (cm=${cm} tc=${tc} patch=${patch})"
 }
 
+# Managed PostgreSQL (Aurora rds.force_ssl=1): CubeMaster and CubeTemplateCenter
+# read ssl_mode from conf.yaml. The patch must insert it when absent, update it
+# when present (quoted or not), leave it alone when empty, and fail when there
+# is no instance_db_config block to hold it.
+test_patch_conf_postgres_sets_ssl_mode() {
+  local cfg="${TMP_DIR}/cubemaster-pg-ssl.conf.yaml"
+  cat > "${cfg}" <<'EOF'
+common:
+  cube_ops_addr: "http://127.0.0.1:3010"
+instance_db_config:
+  driver: "mysql"
+  addr: "127.0.0.1:3306"
+  user: "cube"
+  pwd: "cube_pass"
+  db_name: "cube_mvp"
+EOF
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    # Insert (no ssl_mode line yet).
+    patch_cubemaster_instance_db_config "${cfg}" "postgres" \
+      "10.0.0.20:5432" "pg" "x" "cube_mvp" "require"
+  ) || fail "patch postgres+ssl failed"
+  grep -Fq 'ssl_mode: "require"' "${cfg}" || fail "ssl_mode not inserted"
+  # Only one ssl_mode line (insert must not duplicate on re-run).
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    patch_cubemaster_instance_db_config "${cfg}" "postgres" \
+      "10.0.0.20:5432" "pg" "x" "cube_mvp" "verify-full"
+  ) || fail "re-patch postgres+ssl failed"
+  local n
+  n="$(grep -cE '^[[:space:]]*ssl_mode:' "${cfg}")"
+  [[ "${n}" -eq 1 ]] || fail "ssl_mode must be single line after update (got ${n})"
+  grep -Fq 'ssl_mode: "verify-full"' "${cfg}" || fail "ssl_mode not updated"
+  # Empty ssl_mode leaves the line untouched.
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    patch_cubemaster_instance_db_config "${cfg}" "postgres" \
+      "10.0.0.20:5432" "pg" "x" "cube_mvp" ""
+  ) || fail "patch postgres without ssl failed"
+  grep -Fq 'ssl_mode: "verify-full"' "${cfg}" || fail "empty ssl_mode must not clear the line"
+  # A hand-written unquoted value is updated, not left stale.
+  sed -i 's|ssl_mode: "verify-full"|ssl_mode: require|' "${cfg}"
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    patch_cubemaster_instance_db_config "${cfg}" "postgres" \
+      "10.0.0.20:5432" "pg" "x" "cube_mvp" "verify-ca"
+  ) || fail "patch over an unquoted ssl_mode failed"
+  n="$(grep -cE '^[[:space:]]*ssl_mode:' "${cfg}")"
+  [[ "${n}" -eq 1 ]] || fail "ssl_mode must stay a single line (got ${n})"
+  grep -Fq 'ssl_mode: "verify-ca"' "${cfg}" || fail "unquoted ssl_mode not updated; got: $(cat "${cfg}")"
+  # Without an instance_db_config block the write cannot land; it fails instead
+  # of leaving CubeMaster on plaintext.
+  local bare="${TMP_DIR}/cubemaster-no-db.conf.yaml"
+  printf 'common:\n  cube_ops_addr: "http://127.0.0.1:3010"\n' > "${bare}"
+  if (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    patch_cubemaster_instance_db_config "${bare}" "postgres" \
+      "10.0.0.20:5432" "pg" "x" "cube_mvp" "require"
+  ) >/dev/null 2>&1; then
+    fail "ssl_mode into a conf.yaml without instance_db_config must fail"
+  fi
+}
+
+# CubeOps/CubeAPI read sslmode from DATABASE_URL's query string; the persist
+# helper must append it and drop the marker when TLS is not requested.
+test_persist_postgres_ssl_mode_in_url() {
+  local env_file="${TMP_DIR}/pg-ssl.env"
+  : > "${env_file}"
+  persist_db_clean "${env_file}" \
+    CUBE_DATABASE_DRIVER=postgres \
+    CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20 \
+    CUBE_EXTERNAL_POSTGRES_PORT=5432 \
+    CUBE_EXTERNAL_POSTGRES_USER=cube \
+    CUBE_EXTERNAL_POSTGRES_PASSWORD=secret \
+    CUBE_EXTERNAL_POSTGRES_DB=cube_mvp \
+    CUBE_POSTGRES_SSL_MODE=require
+
+  assert_value "${env_file}" CUBE_POSTGRES_SSL_MODE require
+  # `?` forces upsert_env_kv to persist DATABASE_URL quoted; systemd and
+  # `set -a; source` strip the quotes at load, so assert the effective value
+  # by sourcing rather than matching the raw persisted bytes.
+  local url
+  url="$(
+    set -a
+    # shellcheck disable=SC1090
+    source "${env_file}"
+    set +a
+    printf '%s' "${DATABASE_URL}"
+  )"
+  [[ "${url}" == 'postgresql://cube:secret@10.0.0.20:5432/cube_mvp?sslmode=require' ]] \
+    || fail "expected sslmode in DATABASE_URL, got '${url}'"
+
+  # Without the switch there must be no sslmode query and no marker key.
+  : > "${env_file}"
+  persist_db_clean "${env_file}" \
+    CUBE_DATABASE_DRIVER=postgres \
+    CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20 \
+    CUBE_EXTERNAL_POSTGRES_USER=cube \
+    CUBE_EXTERNAL_POSTGRES_PASSWORD=secret
+  assert_not_contains "${env_file}" "sslmode="
+  assert_not_contains "${env_file}" "CUBE_POSTGRES_SSL_MODE="
+}
+
 test_patch_conf_mysql_preserves_cube_ops_addr() {
   local cfg="${TMP_DIR}/cubemaster-mysql.conf.yaml"
   cat > "${cfg}" <<'EOF'
@@ -628,7 +838,10 @@ test_validate_postgres_requires_host
 test_validate_postgres_rejects_mysql_host
 test_validate_mysql_rejects_postgres_host_without_driver
 test_validate_postgres_ok
+test_validate_rejects_bad_ssl_mode
+test_validate_postgres_ssl_modes_ok
 test_persist_postgres_url_and_scrub_mysql
+test_persist_postgres_ssl_mode_in_url
 test_persist_mysql_scrubs_postgres
 test_persist_local_mysql_default
 test_skip_local_mysql_helper
@@ -640,12 +853,15 @@ test_upgrade_intent_bundled_via_empty_host
 test_upgrade_intent_quoted_password_survives
 test_upgrade_intent_host_implies_driver
 test_upgrade_intent_rejects_driver_host_conflict
+test_upgrade_intent_drops_preserved_ssl_mode_on_mysql
 test_upgrade_intent_noop_without_dotenv_keys
 test_persist_postgres_skips_empty_host
 test_patch_conf_postgres_preserves_cube_ops_addr
+test_patch_conf_postgres_sets_ssl_mode
 test_patch_conf_mysql_preserves_cube_ops_addr
 test_external_postgres_patches_templatecenter
 test_external_mysql_patches_templatecenter
+test_external_postgres_ssl_mode_patches_both_confs
 test_external_db_patch_noop_without_host
 test_external_db_patch_missing_file_ok
 test_external_db_patch_ignores_foreign_driver

@@ -594,6 +594,12 @@ ONE_CLICK_DB_ENGINE_INTENT_KEYS=(
 ONE_CLICK_DB_INTENT_KEYS=(
   "${ONE_CLICK_DB_ENGINE_INTENT_KEYS[@]}"
   CUBE_EXTERNAL_REDIS_DB
+  # TLS switches are commented out of env.example and persisted into
+  # .one-click.env, so they hit the same merge trap as CUBE_EXTERNAL_REDIS_DB:
+  # without re-applying this-run intent, an upgrade would pin the previous
+  # value over the new .env. Re-applied only; they never drive engine scrubbing.
+  CUBE_POSTGRES_SSL_MODE
+  CUBE_EXTERNAL_REDIS_TLS
 )
 
 # snapshot_one_click_database_intent records process-env values and which DB
@@ -743,6 +749,12 @@ apply_one_click_database_intent() {
       log "database intent: driver=postgres host=${CUBE_EXTERNAL_POSTGRES_HOST:-}; cleared opposite CUBE_EXTERNAL_MYSQL_*"
     else
       _clear_one_click_external_postgres_env
+      # CUBE_POSTGRES_SSL_MODE is a PostgreSQL-only marker: a merge-preserved
+      # value goes with the other PostgreSQL markers, while a value this run
+      # declared stays so that validate_one_click_database_config rejects it.
+      if ! _one_click_db_intent_declared CUBE_POSTGRES_SSL_MODE; then
+        CUBE_POSTGRES_SSL_MODE=""
+      fi
       if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
         log "database intent: external MySQL host=${CUBE_EXTERNAL_MYSQL_HOST}; cleared opposite CUBE_EXTERNAL_POSTGRES_*"
       else
@@ -1173,6 +1185,7 @@ patch_cubemaster_instance_db_config() {
   local user="$4"
   local pwd="$5"
   local db_name="$6"
+  local ssl_mode="${7:-}"
   local addr_esc user_esc pwd_esc db_esc
   ensure_file "${cfg}"
   addr_esc="$(escape_sed "${addr}")"
@@ -1186,6 +1199,30 @@ patch_cubemaster_instance_db_config() {
     -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)pwd: \".*\"|\1pwd: \"${pwd_esc}\"|" \
     -e "/^instance_db_config:/,/^[^[:space:]#]/ s|^\([[:space:]]*\)db_name: \".*\"|\1db_name: \"${db_esc}\"|" \
     "${cfg}"
+  # ssl_mode is postgres-only (Aurora rds.force_ssl=1). Update in place when the
+  # key exists (quoted or not), otherwise insert it under instance_db_config;
+  # both are scoped to that block. The result is read back so a conf.yaml of
+  # another shape fails instead of leaving the component on plaintext. Empty
+  # leaves the file untouched so bundled/plaintext deployments are unchanged.
+  if [[ -n "${ssl_mode}" ]]; then
+    local ssl_esc written_ssl block
+    local db_block='/^instance_db_config:/,/^[^[:space:]#]/'
+    ssl_esc="$(escape_sed "${ssl_mode}")"
+    block="$(sed -n "${db_block}p" "${cfg}")"
+    if grep -qE '^[[:space:]]+ssl_mode:' <<<"${block}"; then
+      sed -i -e "${db_block}s|^\([[:space:]]*\)ssl_mode:.*|\1ssl_mode: \"${ssl_esc}\"|" "${cfg}"
+    else
+      # Insert under the section header. Use a literal-newline s||| replacement
+      # (like the external-Redis Sentinel insert) so it works on both GNU and
+      # BSD sed, unlike the `a\` append form.
+      sed -i -e "s|^\(instance_db_config:\)[[:space:]]*\$|\1\\
+  ssl_mode: \"${ssl_esc}\"|" "${cfg}"
+    fi
+    written_ssl="$(sed -n "${db_block}p" "${cfg}" \
+      | awk '/^[[:space:]]+ssl_mode:/ { v = $0; sub(/^[[:space:]]+ssl_mode:[[:space:]]*/, "", v); print v }')"
+    [[ "${written_ssl}" == "\"${ssl_mode}\"" ]] \
+      || die "failed to verify instance_db_config.ssl_mode=${ssl_mode} in ${cfg}"
+  fi
 }
 
 # patch_conf_external_instance_db points one component conf.yaml (CubeMaster or
@@ -1193,7 +1230,8 @@ patch_cubemaster_instance_db_config() {
 # TemplateCenter has no environment override for the database. No-op without an
 # external host or without the file (older packages omit TC); otherwise the
 # instance_db_config block must exist and end up on the requested driver, or it
-# dies. PostgreSQL wins if both hosts are set.
+# dies. PostgreSQL wins if both hosts are set. CUBE_POSTGRES_SSL_MODE is written
+# on the PostgreSQL branch only; the MySQL driver has no ssl_mode.
 patch_conf_external_instance_db() {
   local cfg="$1"
   [[ -f "${cfg}" ]] || return 0
@@ -1217,7 +1255,8 @@ patch_conf_external_instance_db() {
       "${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT:-5432}" \
       "${CUBE_EXTERNAL_POSTGRES_USER:-cube}" \
       "${CUBE_EXTERNAL_POSTGRES_PASSWORD:-}" \
-      "${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}"
+      "${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}" \
+      "${CUBE_POSTGRES_SSL_MODE:-}"
   else
     driver="mysql"
     log "patching ${cfg} for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT:-3306}/${CUBE_EXTERNAL_MYSQL_DB:-cube_mvp}"
@@ -1269,6 +1308,12 @@ validate_one_click_database_config() {
       die "CUBE_EXTERNAL_POSTGRES_HOST requires CUBE_DATABASE_DRIVER=postgres"
     fi
   fi
+
+  # ssl_mode only reaches PostgreSQL clients; on MySQL it would be dropped.
+  validate_postgres_ssl_mode "${CUBE_POSTGRES_SSL_MODE:-}" "CUBE_POSTGRES_SSL_MODE"
+  if [[ -n "${CUBE_POSTGRES_SSL_MODE:-}" && "${driver}" != "postgres" ]]; then
+    die "CUBE_POSTGRES_SSL_MODE requires CUBE_DATABASE_DRIVER=postgres"
+  fi
 }
 
 # persist_one_click_database_runtime_env writes CUBE_DATABASE_DRIVER, the active
@@ -1302,9 +1347,19 @@ persist_one_click_database_runtime_env() {
     database_url_host="$(urlencode "${CUBE_EXTERNAL_POSTGRES_HOST}")"
     database_url_port="$(urlencode "${CUBE_EXTERNAL_POSTGRES_PORT:-5432}")"
     database_url_db="$(urlencode "${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}")"
+    # Managed PostgreSQL that enforces TLS (Aurora rds.force_ssl=1) needs
+    # sslmode in the URL; CubeOps reads it from DATABASE_URL's query.
+    # Empty keeps libpq's historical default (no requirement).
+    local database_url_query=""
+    if [[ -n "${CUBE_POSTGRES_SSL_MODE:-}" ]]; then
+      upsert_env_kv "${env_file}" "CUBE_POSTGRES_SSL_MODE" "${CUBE_POSTGRES_SSL_MODE}"
+      database_url_query="?sslmode=$(urlencode "${CUBE_POSTGRES_SSL_MODE}")"
+    else
+      _remove_env_keys "${env_file}" CUBE_POSTGRES_SSL_MODE
+    fi
     # Scheme matches Helm cube.databaseURL (postgresql://...).
     upsert_env_kv "${env_file}" "DATABASE_URL" \
-      "postgresql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+      "postgresql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}${database_url_query}"
     _remove_env_keys "${env_file}" \
       CUBE_EXTERNAL_MYSQL_HOST \
       CUBE_EXTERNAL_MYSQL_PORT \
@@ -1325,6 +1380,7 @@ persist_one_click_database_runtime_env() {
     upsert_env_kv "${env_file}" "DATABASE_URL" \
       "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
     _remove_env_keys "${env_file}" \
+      CUBE_POSTGRES_SSL_MODE \
       CUBE_EXTERNAL_POSTGRES_HOST \
       CUBE_EXTERNAL_POSTGRES_PORT \
       CUBE_EXTERNAL_POSTGRES_USER \
@@ -1344,6 +1400,7 @@ persist_one_click_database_runtime_env() {
       CUBE_EXTERNAL_MYSQL_USER \
       CUBE_EXTERNAL_MYSQL_PASSWORD \
       CUBE_EXTERNAL_MYSQL_DB \
+      CUBE_POSTGRES_SSL_MODE \
       CUBE_EXTERNAL_POSTGRES_HOST \
       CUBE_EXTERNAL_POSTGRES_PORT \
       CUBE_EXTERNAL_POSTGRES_USER \
@@ -1540,6 +1597,123 @@ one_click_patch_conf_redis_db() {
   printf '%s' "${redis_db}"
 }
 
+# Read redis.tls from a YAML file. Only a direct child of the redis block
+# counts (a tls: nested deeper in the block is not redis.tls); the redis block
+# may itself be indented.
+one_click_conf_redis_tls() {
+  local cfg="$1"
+  [[ -f "${cfg}" ]] || return 1
+  awk '
+    function indentation(line) {
+      match(line, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    /^[[:space:]]*redis:[[:space:]]*(#.*)?$/ {
+      redis_count++
+      in_redis = 1
+      redis_indent = indentation($0)
+      child_indent = -1
+      next
+    }
+    in_redis && $0 !~ /^[[:space:]]*(#.*)?$/ {
+      if (indentation($0) <= redis_indent) {
+        in_redis = 0
+      } else {
+        if (child_indent < 0) {
+          child_indent = indentation($0)
+        }
+        if (indentation($0) == child_indent && $0 ~ /^[[:space:]]*tls:[[:space:]]*/) {
+          value = $0
+          sub(/^[[:space:]]*tls:[[:space:]]*/, "", value)
+          sub(/[[:space:]]*(#.*)?$/, "", value)
+          print value
+          tls_count++
+        }
+      }
+    }
+    END {
+      if (redis_count != 1 || tls_count != 1) {
+        exit 1
+      }
+    }
+  ' "${cfg}"
+}
+
+# one_click_patch_conf_redis_tls writes redis.tls (true/false) into a
+# CubeMaster / CubeTemplateCenter conf.yaml the same way
+# one_click_patch_conf_redis_db writes db_no: awk keeps the block's own
+# indentation, an existing key is updated in place, a missing one is appended
+# at the children's indentation, and the result is read back. A conf.yaml of
+# another shape fails the install instead of silently leaving CubeMaster/TC on
+# plaintext while the other clients use TLS.
+one_click_patch_conf_redis_tls() {
+  local cfg="$1"
+  local want="$2"
+  local tmp
+  [[ -n "${cfg}" && -f "${cfg}" ]] || die "one_click_patch_conf_redis_tls: conf path required"
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  cp -p "${cfg}" "${tmp}"
+  if ! awk -v tls="${want}" '
+    function indentation(line) {
+      match(line, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    function finish_redis_block() {
+      if (in_redis && tls_count == 0) {
+        print (child_prefix != "" ? child_prefix : redis_prefix "  ") "tls: " tls
+        tls_count = 1
+      }
+      in_redis = 0
+    }
+    /^[[:space:]]*redis:[[:space:]]*(#.*)?$/ {
+      finish_redis_block()
+      redis_count++
+      in_redis = 1
+      match($0, /^[[:space:]]*/)
+      redis_prefix = substr($0, 1, RLENGTH)
+      redis_indent = RLENGTH
+      child_prefix = ""
+      print
+      next
+    }
+    {
+      if (in_redis && $0 !~ /^[[:space:]]*(#.*)?$/) {
+        if (indentation($0) <= redis_indent) {
+          finish_redis_block()
+        } else {
+          if (child_prefix == "") {
+            match($0, /^[[:space:]]*/)
+            child_prefix = substr($0, 1, RLENGTH)
+          }
+          if (indentation($0) == length(child_prefix) && $0 ~ /^[[:space:]]*tls:[[:space:]]*/) {
+            print child_prefix "tls: " tls
+            tls_count++
+            next
+          }
+        }
+      }
+      print
+    }
+    END {
+      finish_redis_block()
+      if (redis_count != 1 || tls_count != 1) {
+        exit 1
+      }
+    }
+  ' "${cfg}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to patch redis.tls in ${cfg}: expected exactly one redis block and tls key"
+  fi
+
+  local written_tls
+  written_tls="$(one_click_conf_redis_tls "${tmp}" || true)"
+  if [[ "${written_tls}" != "${want}" ]]; then
+    rm -f "${tmp}"
+    die "failed to verify redis.tls=${want} in ${cfg}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+}
+
 one_click_sed_in_place() {
   local cfg="$1"
   shift
@@ -1606,6 +1780,26 @@ one_click_patch_conf_redis_endpoint() {
       -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
       -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|"
   fi
+
+  # Render redis.tls so CubeMaster/TC do not connect in plaintext while
+  # proxy/LCM/CubeOps use TLS -- managed Redis that enforces in-transit
+  # encryption accepts the socket then times out the first read, hanging the
+  # control plane. one_click_patch_conf_redis_tls scopes the write to the
+  # redis block, keeps its indentation and verifies the result. Only touched
+  # when this call rewrites the endpoint; the untouched bundled default keeps
+  # the template's implicit tls:false. Idempotent on re-run.
+  local want_tls=""
+  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" || -n "${CUBE_EXTERNAL_REDIS_HOST:-}" ]]; then
+    want_tls="false"
+    if one_click_external_redis_tls_enabled; then
+      want_tls="true"
+    fi
+  elif [[ "${restore_bundled}" == "1" ]]; then
+    want_tls="false"
+  fi
+  if [[ -n "${want_tls}" ]]; then
+    one_click_patch_conf_redis_tls "${cfg}" "${want_tls}"
+  fi
 }
 
 # persist_one_click_redis_runtime_env writes Redis keys for systemd
@@ -1631,6 +1825,12 @@ persist_one_click_redis_runtime_env() {
   local redis_db
   redis_db="$(one_click_redis_db)"
   upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_DB" "${redis_db}"
+  # Persist the single TLS switch so it is discoverable in .one-click.env. The
+  # start scripts derive every per-component TLS value from it, so per-component
+  # TLS keys are stripped like the legacy per-component DB keys: one source of
+  # truth, and no client left on plaintext while the others use TLS. The
+  # bundled-Redis branch below also strips the switch itself.
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_TLS" "${CUBE_EXTERNAL_REDIS_TLS:-0}"
   # CubeOps prefers REDIS_URL over REDIS_DB; stripping without a trail makes
   # "where did my metrics go" hard to debug when the URL pointed elsewhere.
   if [[ -f "${env_file}" ]] && grep -q '^REDIS_URL=..*' "${env_file}"; then
@@ -1640,7 +1840,11 @@ persist_one_click_redis_runtime_env() {
     REDIS_URL \
     REDIS_DB \
     CUBE_PROXY_REGISTRY_REDIS_DB \
-    CUBE_LCM_REDIS_DB
+    CUBE_LCM_REDIS_DB \
+    REDIS_TLS \
+    CUBE_PROXY_REDIS_SSL \
+    CUBE_PROXY_REGISTRY_REDIS_SSL \
+    CUBE_LCM_REDIS_TLS
 
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
@@ -1677,6 +1881,10 @@ persist_one_click_redis_runtime_env() {
     # local container actually uses (operator override or ceuhvu123).
     # Keep CUBE_EXTERNAL_REDIS_DB — it is the shared logical-DB knob even
     # when using the bundled Redis instance.
+    #
+    # The TLS switch is dropped too: a stale CUBE_EXTERNAL_REDIS_TLS would point
+    # TLS at the plaintext local Redis and take every connection down (same
+    # stale-marker reasoning the PG side applies to CUBE_POSTGRES_SSL_MODE).
     _remove_env_keys "${env_file}" \
       CUBE_EXTERNAL_REDIS_MASTER_NAME \
       CUBE_EXTERNAL_REDIS_SENTINEL_NODES \
@@ -1684,6 +1892,7 @@ persist_one_click_redis_runtime_env() {
       CUBE_EXTERNAL_REDIS_HOST \
       CUBE_EXTERNAL_REDIS_PORT \
       CUBE_EXTERNAL_REDIS_PASSWORD \
+      CUBE_EXTERNAL_REDIS_TLS \
       CUBE_PROXY_REDIS_MASTER_NAME \
       CUBE_PROXY_REDIS_SENTINEL_NODES \
       CUBE_PROXY_REDIS_SENTINEL_PASSWORD \
@@ -1692,6 +1901,26 @@ persist_one_click_redis_runtime_env() {
       CUBE_PROXY_REDIS_PASSWORD
     upsert_env_kv "${env_file}" "CUBE_SANDBOX_REDIS_PASSWORD" \
       "${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  fi
+}
+
+# one_click_external_redis_tls_enabled is true when the single Redis TLS
+# switch CUBE_EXTERNAL_REDIS_TLS is on. It accepts the same spellings as
+# normalize_redis_tls ("1", "true"), so the installer, the rendered conf.yaml
+# and every client agree on whether TLS is on.
+one_click_external_redis_tls_enabled() {
+  [[ "${CUBE_EXTERNAL_REDIS_TLS:-0}" == "1" || "${CUBE_EXTERNAL_REDIS_TLS:-0}" == "true" ]]
+}
+
+# one_click_warn_ignored_redis_tls reports a Redis TLS switch that has no
+# effect: without CUBE_EXTERNAL_REDIS_HOST or CUBE_EXTERNAL_REDIS_MASTER_NAME
+# the stack uses the bundled Redis, which is plaintext, and
+# persist_one_click_redis_runtime_env drops the switch.
+one_click_warn_ignored_redis_tls() {
+  if one_click_external_redis_tls_enabled \
+      && [[ -z "${CUBE_EXTERNAL_REDIS_HOST:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
+    log "WARNING: CUBE_EXTERNAL_REDIS_TLS is on, but neither CUBE_EXTERNAL_REDIS_HOST nor CUBE_EXTERNAL_REDIS_MASTER_NAME is set."
+    log "WARNING: the bundled Redis is plaintext, so CUBE_EXTERNAL_REDIS_TLS is ignored."
   fi
 }
 

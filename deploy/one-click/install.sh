@@ -95,10 +95,17 @@ init_external_dep_defaults() {
   # redis unit).
   CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
   CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
-  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+  # `-` (not `:-`): unset still defaults to the bundled password, but an
+  # explicitly empty value means "no AUTH" (e.g. ElastiCache without AuthToken)
+  # and must reach the preflight and every client as empty.
+  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD-ceuhvu123}"
   CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+  # Single Redis TLS switch for every Redis client, normalized to 1/0. The
+  # per-component values (Master/TC redis.tls, Ops REDIS_TLS, Proxy
+  # redis_ssl, LCM CUBE_LCM_REDIS_TLS) are derived from it.
+  CUBE_EXTERNAL_REDIS_TLS="$(normalize_redis_tls "${CUBE_EXTERNAL_REDIS_TLS:-0}" "CUBE_EXTERNAL_REDIS_TLS")"
 
   # CUBE_SANDBOX_MINIO_* only deploys the MinIO container. The S3 volume plugin
   # always reads CUBE_S3_*. When MinIO is enabled, install.sh fills CUBE_S3_*
@@ -727,6 +734,18 @@ EOF
       if command -v timeout >/dev/null 2>&1; then
         use_timeout_wrapper=1
       fi
+      # TLS-only Redis (CUBE_EXTERNAL_REDIS_TLS) rejects a plaintext probe, so
+      # the preflight must speak TLS too. A redis-cli built without TLS cannot,
+      # so skip rather than report a healthy TLS endpoint as unreachable. The
+      # Redis check is the last step of this preflight, so returning is safe.
+      local redis_tls_args=()
+      if one_click_external_redis_tls_enabled; then
+        if ! redis_cli_help_supports_flag "${redis_help_output}" "--tls"; then
+          log "redis-cli has no TLS support; skipping external Redis Sentinel connectivity preflight (CUBE_EXTERNAL_REDIS_TLS=${CUBE_EXTERNAL_REDIS_TLS})"
+          return 0
+        fi
+        redis_tls_args+=(--tls)
+      fi
 
       # Do not fall back to the Redis master password: many deployments only
       # set requirepass on the master, while Sentinel has no AUTH.
@@ -757,6 +776,7 @@ EOF
           -h "${sentinel_host}"
           -p "${sentinel_port}"
           "${redis_timeout_args[@]}"
+          "${redis_tls_args[@]}"
         )
         if [[ -n "${sentinel_pd}" ]]; then
           local auth_reply
@@ -805,6 +825,7 @@ EOF
         -h "${master_host}"
         -p "${master_port}"
         "${redis_timeout_args[@]}"
+        "${redis_tls_args[@]}"
       )
       if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
         local redis_reply
@@ -864,11 +885,21 @@ EOF
           log "timeout command not found; Redis preflight may block longer when redis-cli lacks timeout flags"
         fi
       fi
+      # Same TLS handling as the Sentinel branch above.
+      local redis_tls_args=()
+      if one_click_external_redis_tls_enabled; then
+        if ! redis_cli_help_supports_flag "${redis_help_output}" "--tls"; then
+          log "redis-cli has no TLS support; skipping external Redis connectivity preflight (CUBE_EXTERNAL_REDIS_TLS=${CUBE_EXTERNAL_REDIS_TLS})"
+          return 0
+        fi
+        redis_tls_args+=(--tls)
+      fi
       redis_base_cmd=(
         redis-cli
         -h "${CUBE_EXTERNAL_REDIS_HOST}"
         -p "${CUBE_EXTERNAL_REDIS_PORT}"
         "${redis_timeout_args[@]}"
+        "${redis_tls_args[@]}"
       )
       if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
         # SECURITY: PING is NOT an authenticated command. A reachable server that
@@ -1762,6 +1793,7 @@ export CUBE_SANDBOX_CUBE_ROUTER_ENABLE
 install_required_dependencies
 check_install_preflight
 warn_default_external_credentials
+one_click_warn_ignored_redis_tls
 check_external_deps_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror

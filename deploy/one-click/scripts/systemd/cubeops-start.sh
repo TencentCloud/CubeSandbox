@@ -93,7 +93,15 @@ fi
 unset REDIS_URL
 export REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-${CUBE_SANDBOX_REDIS_HOST:-127.0.0.1}}"
 export REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
-export REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
+# `-` (not `:-`): an explicitly empty password means "no AUTH" and must stay
+# empty. Managed Redis without AUTH (e.g. ElastiCache without AuthToken) rejects
+# a single-argument AUTH, so falling back to the bundled password would take
+# every CubeOps connection down. Mirrors up-cube-proxy.sh / up-cube-lifecycle-manager.sh.
+export REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD-${CUBE_SANDBOX_REDIS_PASSWORD-ceuhvu123}}"
+# TLS for CubeOps' Redis client, derived only from CUBE_EXTERNAL_REDIS_TLS (same
+# endpoint as every other Redis client, so it cannot differ per component).
+export REDIS_TLS
+REDIS_TLS="$(normalize_redis_tls "${CUBE_EXTERNAL_REDIS_TLS:-0}" "CUBE_EXTERNAL_REDIS_TLS")"
 export REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
 export REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
 export REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"

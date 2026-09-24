@@ -101,11 +101,16 @@ func TestParseRedisAddrs(t *testing.T) {
 }
 
 func TestBuildRedisURLUsesConfiguredDatabase(t *testing.T) {
-	if got := buildRedisURL("redis.example", 6380, 7, "secret"); got != "redis://:secret@redis.example:6380/7" {
+	if got := buildRedisURL("redis.example", 6380, 7, "secret", false); got != "redis://:secret@redis.example:6380/7" {
 		t.Fatalf("buildRedisURL() = %q, want configured database", got)
 	}
-	if got := buildRedisURL("redis.example", 0, 0, ""); got != "redis://redis.example:6379/0" {
+	if got := buildRedisURL("redis.example", 0, 0, "", false); got != "redis://redis.example:6379/0" {
 		t.Fatalf("buildRedisURL() default = %q, want database 0", got)
+	}
+	// TLS switches the scheme, which is what redigo's DialURL keys the
+	// handshake off of.
+	if got := buildRedisURL("redis.example", 6380, 7, "secret", true); got != "rediss://:secret@redis.example:6380/7" {
+		t.Fatalf("buildRedisURL() with TLS = %q, want rediss scheme", got)
 	}
 }
 
@@ -159,6 +164,49 @@ func TestDialSentinelSelectsConfiguredDatabase(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for master SELECT")
+	}
+}
+
+// TestDialSentinelHonoursRedisTLS pins that REDIS_TLS reaches the Sentinel
+// probe: with RedisTLS set, the first byte on the sentinel socket must open a
+// TLS handshake instead of a plaintext RESP command. The fake sentinel cannot
+// complete a verified handshake (the client trusts only the system roots), so
+// dialSentinel is expected to fail; what matters is what it sent first.
+func TestDialSentinelHonoursRedisTLS(t *testing.T) {
+	sentinelLn := listenTestRedis(t)
+	firstByte := make(chan byte, 1)
+	go func() {
+		conn, err := sentinelLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return
+		}
+		firstByte <- buf[0]
+	}()
+
+	cfg := &config.Config{
+		RedisMasterName:    "mymaster",
+		RedisSentinelNodes: sentinelLn.Addr().String(),
+		RedisTLS:           true,
+	}
+	if conn, err := dialSentinel(cfg); err == nil {
+		conn.Close()
+		t.Fatal("dialSentinel must fail against a plaintext fake sentinel when RedisTLS is set")
+	}
+
+	select {
+	case b := <-firstByte:
+		// 0x16 is the TLS handshake record type; plaintext RESP starts with '*'.
+		if b != 0x16 {
+			t.Fatalf("sentinel probe sent first byte %#x, want TLS handshake record 0x16", b)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the sentinel probe")
 	}
 }
 

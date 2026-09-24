@@ -169,6 +169,12 @@ type DBConfig struct {
 	// MigrationLockTimeoutSeconds bounds the cluster-wide GET_LOCK wait
 	// at startup. Defaults to 60 seconds when zero.
 	MigrationLockTimeoutSeconds int `yaml:"migration_lock_timeout_seconds"`
+
+	// SSLMode is the libpq sslmode used when Driver is "postgres" (e.g.
+	// "disable", "require", "verify-full"). Empty keeps the historical
+	// default of "disable". Managed PostgreSQL that enforces TLS
+	// (Aurora with rds.force_ssl=1) needs "require" or stricter.
+	SSLMode string `yaml:"ssl_mode"`
 }
 
 type ExtraConf struct {
@@ -235,6 +241,12 @@ type RedisConf struct {
 	// sandbox lifetime, otherwise a live route would expire and break routing.
 	// Normal teardown removes the key via DEL.
 	SandboxProxyTTLSec int `yaml:"sandbox_proxy_ttl_sec"`
+
+	// TLS turns on TLS for the connection to Redis. Managed Redis that
+	// requires in-transit encryption (ElastiCache with
+	// TransitEncryptionEnabled, Azure Cache, Memorystore) refuses plaintext,
+	// so this must be set for those. Sentinel hops use it too.
+	TLS bool `yaml:"tls"`
 }
 
 type SchedulerConf struct {

@@ -1077,6 +1077,37 @@ test_external_redis_sentinel_wiring() {
   assert_contains "${lcm_compose}" "CUBE_LCM_REDIS_SENTINEL_NODES"
 }
 
+# Contract checks for managed-Redis TLS wiring (Aurora/ElastiCache enforce
+# in-transit encryption). Source-level so the suite stays docker/redis-free;
+# they catch an accidental drop of the SSL/TLS pass-through on any hop.
+test_managed_redis_tls_wiring() {
+  local up_proxy="${ONE_CLICK_DIR}/scripts/one-click/up-cube-proxy.sh"
+  local up_lcm="${ONE_CLICK_DIR}/scripts/one-click/up-cube-lifecycle-manager.sh"
+  local global_conf="${ONE_CLICK_DIR}/cubeproxy/global.conf.template"
+  local proxy_compose="${ONE_CLICK_DIR}/cubeproxy/docker-compose.yaml.template"
+  local lcm_compose="${ONE_CLICK_DIR}/cube-lifecycle-manager/docker-compose.yaml.template"
+
+  # CubeProxy: the Lua data-plane reads $redis_ssl; the registry timer reads the
+  # env var. Both must be rendered and substituted.
+  assert_contains "${global_conf}" "redis_ssl"
+  assert_contains "${global_conf}" "__CUBE_PROXY_REDIS_SSL__"
+  assert_contains "${proxy_compose}" "CUBE_PROXY_REGISTRY_REDIS_SSL"
+  assert_contains "${up_proxy}" "__CUBE_PROXY_REDIS_SSL__"
+  assert_contains "${up_proxy}" "__CUBE_PROXY_REGISTRY_REDIS_SSL__"
+  # Empty password must stay empty (managed Redis with no AuthToken): a `:-`
+  # fallback would restore the bundled password and break AUTH.
+  if grep -E 'CUBE_PROXY_REDIS_PASSWORD:-' "${up_proxy}" >/dev/null; then
+    fail "up-cube-proxy.sh must not :- fall back CUBE_PROXY_REDIS_PASSWORD (empty means no AUTH)"
+  fi
+
+  # cube-lifecycle-manager: go-redis TLS switch.
+  assert_contains "${lcm_compose}" "CUBE_LCM_REDIS_TLS"
+  assert_contains "${up_lcm}" "__CUBE_LCM_REDIS_TLS__"
+  if grep -E 'CUBE_LCM_REDIS_PASSWORD:-' "${up_lcm}" >/dev/null; then
+    fail "up-cube-lifecycle-manager.sh must not :- fall back CUBE_LCM_REDIS_PASSWORD (empty means no AUTH)"
+  fi
+}
+
 test_webui_postcheck_skips_when_disabled() {
   local stub_dir="${TMP_DIR}/webui-disabled/bin"
 
@@ -1160,6 +1191,7 @@ test_cube_proxy_postcheck_fails_when_grpc_port_not_ready
 test_postcheck_skips_when_external_host_set
 test_webui_postcheck_skips_when_disabled
 test_external_redis_sentinel_wiring
+test_managed_redis_tls_wiring
 test_mask_external_dep_services_remove_then_mask
 
 echo "runtime file safety tests OK"

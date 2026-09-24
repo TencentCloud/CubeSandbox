@@ -88,7 +88,7 @@ func resolveRedisConnection(cfg *config.Config) (string, bool, error) {
 		return "", true, nil
 	}
 	if cfg.RedisHost != "" {
-		return buildRedisURL(cfg.RedisHost, cfg.RedisPort, cfg.RedisDB, cfg.RedisPassword), false, nil
+		return buildRedisURL(cfg.RedisHost, cfg.RedisPort, cfg.RedisDB, cfg.RedisPassword, cfg.RedisTLS), false, nil
 	}
 	return "", false, errors.New("nodemetric: redis is not configured (set REDIS_URL or REDIS_HOST/REDIS_MASTER_NAME)")
 }
@@ -96,7 +96,7 @@ func resolveRedisConnection(cfg *config.Config) (string, bool, error) {
 // dialSentinel resolves the current master via SENTINEL get-master-addr-by-name,
 // then dials it directly.
 func dialSentinel(cfg *config.Config) (redis.Conn, error) {
-	addr, err := lookupSentinelMaster(cfg.RedisSentinelNodes, cfg.RedisMasterName, cfg.RedisSentinelPassword)
+	addr, err := lookupSentinelMaster(cfg.RedisSentinelNodes, cfg.RedisMasterName, cfg.RedisSentinelPassword, cfg.RedisTLS)
 	if err != nil {
 		return nil, err
 	}
@@ -106,11 +106,14 @@ func dialSentinel(cfg *config.Config) (redis.Conn, error) {
 		redis.DialWriteTimeout(redisDialTimeout),
 		redis.DialDatabase(cfg.RedisDB),
 		redis.DialPassword(cfg.RedisPassword),
+		redis.DialUseTLS(cfg.RedisTLS),
 	)
 }
 
-// lookupSentinelMaster queries each sentinel for the master address.
-func lookupSentinelMaster(sentinelNodes, masterName, sentinelPwd string) (string, error) {
+// lookupSentinelMaster queries each sentinel for the master address. useTLS
+// applies to the sentinel connections themselves, so a Sentinel deployment with
+// in-transit encryption is not silently downgraded to plaintext on this probe.
+func lookupSentinelMaster(sentinelNodes, masterName, sentinelPwd string, useTLS bool) (string, error) {
 	sentinels := parseRedisAddrs(sentinelNodes)
 	if len(sentinels) == 0 {
 		return "", fmt.Errorf("sentinel_nodes is required when master_name is set")
@@ -121,6 +124,7 @@ func lookupSentinelMaster(sentinelNodes, masterName, sentinelPwd string) (string
 			redis.DialConnectTimeout(redisDialTimeout),
 			redis.DialReadTimeout(redisDialTimeout),
 			redis.DialWriteTimeout(redisDialTimeout),
+			redis.DialUseTLS(useTLS),
 		)
 		if err != nil {
 			lastErr = fmt.Errorf("dial sentinel %s: %w", s, err)
@@ -166,13 +170,20 @@ func parseRedisAddrs(raw string) []string {
 	return out
 }
 
-// buildRedisURL assembles a redis:// URL from split host/port/db/password.
-func buildRedisURL(host string, port int, db int, password string) string {
+// buildRedisURL assembles a redis:// (or rediss:// when useTLS) URL from split
+// host/port/db/password. useTLS switches the scheme to rediss://, which is what redigo's DialURL keys
+// the TLS handshake off of — managed Redis that enforces in-transit encryption
+// refuses a plaintext connection.
+func buildRedisURL(host string, port int, db int, password string, useTLS bool) string {
 	if port == 0 {
 		port = 6379
 	}
+	scheme := "redis"
+	if useTLS {
+		scheme = "rediss"
+	}
 	u := &url.URL{
-		Scheme: "redis",
+		Scheme: scheme,
 		Host:   fmt.Sprintf("%s:%d", host, port),
 		Path:   fmt.Sprintf("/%d", db),
 	}

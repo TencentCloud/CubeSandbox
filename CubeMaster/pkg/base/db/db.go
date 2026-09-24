@@ -45,5 +45,16 @@ func ConfigFromDBConfig(src *config.DBConfig) (dao.Config, error) {
 		MaxOpenConns:                src.MaxOpenConns,
 		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
 		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
+		Extra:                       extraFromDBConfig(src),
 	}, nil
+}
+
+// extraFromDBConfig carries the engine-specific knobs that dao.Config takes
+// through its Extra map instead of named fields. Only set keys are emitted, so
+// dao keeps its own defaults when the yaml leaves them empty.
+func extraFromDBConfig(src *config.DBConfig) map[string]string {
+	if src.SSLMode == "" {
+		return nil
+	}
+	return map[string]string{"sslmode": src.SSLMode}
 }
