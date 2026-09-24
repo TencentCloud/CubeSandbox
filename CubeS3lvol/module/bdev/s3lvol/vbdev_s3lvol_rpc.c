@@ -2841,7 +2841,7 @@ SPDK_RPC_REGISTER("rcow_materialise_export", rpc_rcow_materialise_export,
  *
  * Both lists come from the in-memory registries, as a JSON array in
  * string_value; see the note on rpc_json_buf. There is no listing of what a
- * *bucket* holds -- that needs s3_list_objects(), which is still -ENOTSUP.
+ * *bucket* holds.
  *
  * rcow_get_exports is the source side: every reference (and dense) export this
  * node still owes. The uuid is what

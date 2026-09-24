@@ -52,26 +52,16 @@ typedef void (*s3_bs_dev_cb)(void *cb_arg, int status);
  *     the create-time value, or the cluster count rebuilt by spdk_bs_load
  *     conflicts with the size recorded in the super block.
  * Internally sets base.blocklen = 4096, base.blockcnt = capacity / 4096, with
- * blockcnt rounded down to cluster_size alignment.
+ * blockcnt rounded down to cluster_size alignment. The WAL and cache are
+ * attached afterwards; this call only builds the S3-backed device.
  *
- * \param wal_desc    the opened WAL bdev descriptor
- * \param cache_desc  the opened cache bdev descriptor; same as wal_desc for
- *                    the single-bdev layout
  * \param out         the resulting bs_dev, ready to pass to spdk_lvs_init /
  *                    spdk_lvs_load_ext
  */
 int s3_bs_dev_create(const struct s3_lvs_opts *opts,
-		     struct spdk_bdev_desc *wal_desc,
-		     struct spdk_bdev_desc *cache_desc,
 		     struct s3_client *client,
 		     uint64_t capacity_bytes,
 		     struct spdk_bs_dev **out);
-
-/**
- * Retrieve the internal context from a bs_dev (for flusher / checkpoint / GC
- * and other submodules).
- */
-struct s3_ctx *s3_bs_dev_get_ctx(struct spdk_bs_dev *bs_dev);
 
 /* ==========================================================================
  * WAL write path
@@ -223,12 +213,6 @@ void s3_bs_dev_resume_flusher(struct spdk_bs_dev *bs_dev);
  */
 void s3_bs_dev_schedule_flusher_resume(struct spdk_bs_dev *bs_dev,
 				       uint64_t delay_us);
-
-/**
- * Nudge the flusher. Only useful for tests and for shutdown paths that want to
- * start uploads without waiting for the next tick.
- */
-void s3_bs_dev_kick_flusher(struct spdk_bs_dev *bs_dev);
 
 /* ==========================================================================
  * Chunk map persistence

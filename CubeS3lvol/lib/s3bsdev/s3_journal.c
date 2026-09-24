@@ -1039,10 +1039,4 @@ s3_journal_get_capacity_bytes(struct s3_journal *journal)
 	return journal ? journal->region_size : 0;
 }
 
-uint64_t
-s3_journal_get_next_lsn(struct s3_journal *journal)
-{
-	return journal ? journal->next_lsn : 0;
-}
-
 SPDK_LOG_REGISTER_COMPONENT(s3_journal)

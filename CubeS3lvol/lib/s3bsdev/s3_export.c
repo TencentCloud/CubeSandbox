@@ -811,13 +811,6 @@ s3_export_manifest_key(const char *uuid_str, char *out, size_t out_len)
 }
 
 void
-s3_export_chunk_prefix(const char *prefix, const char *uuid_str,
-		       char *out, size_t out_len)
-{
-	snprintf(out, out_len, "%s/exports/%s/", prefix, uuid_str);
-}
-
-void
 s3_export_chunk_key(const char *prefix, const char *uuid_str,
 		    uint64_t chunk_index, char *out, size_t out_len)
 {

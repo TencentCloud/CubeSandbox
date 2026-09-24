@@ -154,10 +154,10 @@ struct lvs_setup_ctx {
  * Unloads the lvstore and then deletes the S3 objects it owned, as opposed to
  * unload, which keeps everything and expects a later attach.
  *
- * The object list is derived rather than listed: s3_list_objects() is still
- * -ENOTSUP, so the data objects come from walking the chunk map (which names
- * every chunk this lvstore has written) and the metadata objects are the four
- * fixed keys, plus one manifest per registered export.
+ * The object list is derived rather than listed: the data objects come from
+ * walking the chunk map (which names every chunk this lvstore has written)
+ * and the metadata objects are the four fixed keys, plus one manifest per
+ * registered export.
  *
  * What it does *not* cover is orphans -- an object whose mapping never made it
  * into the chunk map, e.g. a create-once delete that failed, or a flush that
@@ -934,7 +934,7 @@ lvs_create_start_blobstore(struct lvs_setup_ctx *ctx)
 	struct spdk_lvs_opts lvs_opts;
 	int rc;
 
-	rc = s3_bs_dev_create(&ctx->opts, NULL, NULL, lvs->client,
+	rc = s3_bs_dev_create(&ctx->opts, lvs->client,
 			      ctx->opts.capacity_bytes, &lvs->bs_dev);
 	if (rc != 0) {
 		SPDK_ERRLOG("Failed to create bs_dev for '%s': %d\n", lvs->name, rc);
@@ -1230,8 +1230,7 @@ lvs_create_after_owner(struct lvs_setup_ctx *ctx)
  *
  * `<prefix>/meta/checkpoint` is the marker used because it is the only object with
  * a deterministic name that outlives a clean shutdown: data objects are uuid-named
- * (and s3_list_objects() is still -ENOTSUP, so they cannot be enumerated), and
- * meta/owner is by design transient.
+ * and cannot be enumerated, and meta/owner is by design transient.
  *
  * What this does not cover: an lvstore created and cleanly stopped before its first
  * checkpoint ever ran. Its prefix holds nothing but uuid-named data objects, and
@@ -1873,7 +1872,7 @@ lvs_attach_wal_opened(void *cb_arg, struct s3_wal *wal, int status)
 
 	lvs->wal = wal;
 
-	rc = s3_bs_dev_create(&ctx->opts, NULL, NULL, lvs->client,
+	rc = s3_bs_dev_create(&ctx->opts, lvs->client,
 			      ctx->opts.capacity_bytes, &lvs->bs_dev);
 	if (rc != 0) {
 		SPDK_ERRLOG("Failed to create bs_dev for '%s': %d\n", lvs->name, rc);
@@ -3772,12 +3771,46 @@ s3lvol_lvstore_of_lvol(struct spdk_lvol *lvol)
  *      deleted depends on whether the blobstore passes unmap down to the
  *      bs_dev when releasing clusters (lvols are created with
  *      LVOL_CLEAR_WITH_UNMAP here, which suggests it does), but that chain is
- *      **unverified**. Guessing wrong orphans the objects, and reclaiming
- *      orphans relies on s3_gc.c, which does not exist yet -- i.e. paying
- *      storage forever.
+ *      **unverified**. Guessing wrong orphans the objects. Nothing scans the
+ *      prefix to reclaim them, so they are paid for forever.
  *
- * Reconsider lifting the guard once GC has landed and a real machine confirms
- * unmap propagates.
+ *      A scan that did exist would not be "delete every data object absent
+ *      from the chunk map". The live set is all four of these:
+ *
+ *        1. everything under <lvs>/meta/ -- super block, checkpoint, owner,
+ *           imports.json, exports.json
+ *        2. the unreclaimed segments under <lvs>/wal/
+ *        3. <lvs>/data/<uuid> present in the chunk map
+ *        4. when <lvs>/exports/<uuid>.json exists:
+ *             a. dense layout: everything under <lvs>/exports/<uuid>/
+ *             b. ref layout: every <lvs>/data/<uuid> that manifest names,
+ *                even after that uuid has left the chunk map
+ *
+ *      4b is the case intuition misses. A ref manifest names this lvstore's
+ *      objects, not copies of them. Deleting the exported snapshot merges its
+ *      clusters into the remaining clone; once that clone overwrites them,
+ *      create-once issues a new uuid and the old one leaves the chunk map,
+ *      while an importer still holds the old manifest text. The imports
+ *      registry caches that text and loads it on attach without re-GETting.
+ *      Deleting those objects by rule 3 alone makes the importer read zeroes,
+ *      and only a checksum can catch it.
+ *
+ *      Copying the objects into the export and rewriting the manifest into
+ *      dense form does not fix that. The importer cached the ref manifest,
+ *      and the export read path treats a parsed manifest as immutable, so the
+ *      rewrite would still point it at objects about to be deleted. Rule 4b
+ *      needs no copy and no refresh: a manifest that is still there keeps the
+ *      objects it names alive. The dense layout stays for cross-bucket and
+ *      cross-region exports, where the importer cannot read this bucket.
+ *
+ *      The scan also has no paged prefix list to start from. An explicit
+ *      snapshot delete releases that snapshot's ref exports internally once
+ *      no live lease remains, so a successful delete removes the manifest
+ *      before those objects can become orphans. Rule 4b remains the rule for
+ *      a crash or an incomplete state in which a live ref manifest outlived
+ *      its source snapshot.
+ *
+ * Reconsider lifting the guard once a real machine confirms unmap propagates.
  * ========================================================================== */
 
 struct lvol_resize_ctx {

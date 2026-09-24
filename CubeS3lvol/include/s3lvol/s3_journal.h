@@ -288,13 +288,4 @@ uint64_t s3_journal_get_used_bytes(struct s3_journal *journal);
  */
 uint64_t s3_journal_get_capacity_bytes(struct s3_journal *journal);
 
-/**
- * The LSN the next record will use.
- *
- * Note that LSNs are assigned when a record is *queued*, so this includes
- * records that are submitted but whose callbacks have not fired yet. It answers
- * "what will the next record get", not "how far has durability reached".
- */
-uint64_t s3_journal_get_next_lsn(struct s3_journal *journal);
-
 #endif /* S3LVOL_JOURNAL_H */

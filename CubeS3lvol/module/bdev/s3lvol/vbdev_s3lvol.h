@@ -285,11 +285,6 @@ int rcow_namespace_add(const char *name, const struct s3_target *target);
  */
 const struct s3_target *rcow_namespace_to_target(const char *name);
 
-typedef void (*rcow_ns_iter_fn)(const char *name, const struct s3_target *target,
-				void *ctx);
-
-void rcow_namespace_for_each(rcow_ns_iter_fn fn, void *ctx);
-
 /* ==========================================================================
  * State files
  *

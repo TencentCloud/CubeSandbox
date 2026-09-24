@@ -903,57 +903,6 @@ s3_cache_destroy(struct s3_cache *cache)
  * Read
  * ========================================================================== */
 
-bool
-s3_cache_lookup(struct s3_cache *cache, uint64_t chunk_index,
-		const struct spdk_uuid *uuid)
-{
-	struct cache_slot *slot;
-	struct cache_hot *hot;
-	struct cache_alias *alias;
-
-	if (!cache || !uuid) {
-		return false;
-	}
-
-	pthread_mutex_lock(&cache->lock);
-	hot = hot_for_chunk(cache, chunk_index);
-	if (hot && spdk_uuid_compare(&hot->uuid, uuid) == 0) {
-		pthread_mutex_unlock(&cache->lock);
-		return true;
-	}
-	slot = slot_for_chunk(cache, chunk_index);
-	if (!slot || !slot->resident ||
-	    spdk_uuid_compare(&slot->uuid, uuid) != 0) {
-		alias = cache->object_io_stopped ? NULL :
-			alias_find_locked(cache, chunk_index, uuid);
-		if (!alias) {
-			pthread_mutex_unlock(&cache->lock);
-			return false;
-		}
-		slot = alias->slot;
-	}
-
-	/* Whole object present. Anything less is a legitimate cache state but not
-	 * something this coarse question can report, so say no rather than let a
-	 * caller read "cached" as "will hit". */
-	bool hit = slot->filled_blocks ==
-		   spdk_divide_round_up(slot->valid_bytes, cache->block_size);
-	if (!hit && !cache->object_io_stopped) {
-		/* A partial native entry does not hide a complete CopyObject
-		 * source alias; read-ahead admission should avoid the same
-		 * unnecessary destination GET as the demand path. */
-		alias = alias_find_locked(cache, chunk_index, uuid);
-		if (alias) {
-			slot = alias->slot;
-			hit = slot->filled_blocks ==
-			      spdk_divide_round_up(slot->valid_bytes,
-						   cache->block_size);
-		}
-	}
-	pthread_mutex_unlock(&cache->lock);
-	return hit;
-}
-
 static void
 cache_read_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {

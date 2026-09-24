@@ -428,8 +428,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   refused" would be indistinguishable from "this lvstore is dead", which is the
   most common secondary failure a guard like this causes. The window the guard
   cannot see is written in the code comment: a clean shutdown after create but
-  before any checkpoint leaves a prefix holding only uuid-named objects, which
-  `s3_list_objects()` still cannot list (`-ENOTSUP`).
+  before any checkpoint leaves a prefix holding only uuid-named objects, and
+  no prefix listing exists that could see them.
 
 - `run_control_test.sh` -- drives `scripts/rcow_{start,stop,recovery}.sh`, so it
   tests **order** rather than individual RPCs. 48 assertions in nine sections:
