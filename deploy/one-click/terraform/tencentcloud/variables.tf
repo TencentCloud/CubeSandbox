@@ -536,3 +536,15 @@ variable "cube_proxy_heartbeat_interval_ms" {
     error_message = "cube_proxy_heartbeat_interval_ms must be an integer >= 1000."
   }
 }
+
+variable "cube_proxy_metrics_enabled" {
+  description = "Enable CubeProxy Prometheus request metrics (opt-in; disabled by default). When enabled, CubeProxy serves GET /metrics on cube_proxy_metrics_listen."
+  type        = bool
+  default     = false
+}
+
+variable "cube_proxy_metrics_listen" {
+  description = "Address the CubeProxy metrics listener binds to. Default loopback keeps the endpoint off the Pod network; set an address reachable from Prometheus (e.g. \"0.0.0.0:18082\") to scrape it. Ignored when cube_proxy_metrics_enabled is false."
+  type        = string
+  default     = "127.0.0.1:18082"
+}
