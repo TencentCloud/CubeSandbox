@@ -264,10 +264,16 @@ impl PciConfigIo {
                     device.deref_mut(),
                     params.region_type,
                 ) {
-                    error!(
-                        "Failed moving device BAR: {}: 0x{:x}->0x{:x}(0x{:x})",
+                    warn!(
+                        "Failed moving device BAR: {}: 0x{:x}->0x{:x}(0x{:x}), keeping old BAR",
                         e, params.old_base, params.new_base, params.len
                     );
+                    // Rollback: detect_bar_reprogramming() already committed
+                    // new_base into the BAR slots. Restore the old address and
+                    // drop this config write, so neither the BAR state nor the
+                    // config register points at an address the bus never mapped.
+                    device.restore_bar_addr(&params);
+                    return None;
                 }
             }
 
@@ -388,10 +394,12 @@ impl PciConfigMmio {
                     device.deref_mut(),
                     params.region_type,
                 ) {
-                    error!(
-                        "Failed moving device BAR: {}: 0x{:x}->0x{:x}(0x{:x})",
+                    warn!(
+                        "Failed moving device BAR: {}: 0x{:x}->0x{:x}(0x{:x}), keeping old BAR",
                         e, params.old_base, params.new_base, params.len
                     );
+                    device.restore_bar_addr(&params);
+                    return;
                 }
             }
 

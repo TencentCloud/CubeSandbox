@@ -1037,6 +1037,66 @@ impl PciConfiguration {
 
         None
     }
+
+    /// Restore BAR address after a failed move. This undoes the premature
+    /// address update in detect_bar_reprogramming() so that config space
+    /// stays consistent with the actual MMIO mapping.
+    pub fn restore_bar_addr(&mut self, params: &BarReprogrammingParams) {
+        match params.region_type {
+            PciBarRegionType::Memory64BitRegion => {
+                // 64-bit BAR spans two slots: bars[i] (low, type Memory64BitRegion)
+                // and bars[i+1] (high, type None). Mirror detect_bar_reprogramming
+                // by matching the combined address and restoring both halves.
+                // Only the low register has been committed at this point, but
+                // rewriting the high one with its old value is harmless.
+                for i in 0..NUM_BAR_REGS - 1 {
+                    if self.bars[i].r#type != Some(PciBarRegionType::Memory64BitRegion) {
+                        continue;
+                    }
+                    let low_mask = self.writable_bits[BAR0_REG + i];
+                    let high_mask = self.writable_bits[BAR0_REG + i + 1];
+                    let current = (u64::from(self.bars[i + 1].addr & high_mask) << 32)
+                        | u64::from(self.bars[i].addr & low_mask);
+                    if current == params.new_base {
+                        let old_low = params.old_base as u32;
+                        let old_high = (params.old_base >> 32) as u32;
+                        self.bars[i].addr = old_low;
+                        self.bars[i + 1].addr = old_high;
+                        self.registers[BAR0_REG + i] =
+                            (self.registers[BAR0_REG + i] & !low_mask) | (old_low & low_mask);
+                        self.registers[BAR0_REG + i + 1] = (self.registers[BAR0_REG + i + 1]
+                            & !high_mask)
+                            | (old_high & high_mask);
+                        return;
+                    }
+                }
+            }
+            _ => {
+                // 32-bit Memory or IO BAR
+                for i in 0..NUM_BAR_REGS {
+                    let mask = self.writable_bits[BAR0_REG + i];
+                    if self.bars[i].r#type == Some(params.region_type)
+                        && u64::from(self.bars[i].addr & mask) == params.new_base
+                    {
+                        let old = params.old_base as u32;
+                        self.bars[i].addr = old;
+                        self.registers[BAR0_REG + i] =
+                            (self.registers[BAR0_REG + i] & !mask) | (old & mask);
+                        return;
+                    }
+                }
+
+                // The expansion ROM BAR is tracked separately from bars[].
+                let rom_mask = self.writable_bits[ROM_BAR_REG];
+                if u64::from(self.rom_bar_addr & rom_mask) == params.new_base {
+                    let old = params.old_base as u32;
+                    self.rom_bar_addr = old;
+                    self.registers[ROM_BAR_REG] =
+                        (self.registers[ROM_BAR_REG] & !rom_mask) | (old & rom_mask);
+                }
+            }
+        }
+    }
 }
 
 impl Pausable for PciConfiguration {}
@@ -1240,5 +1300,91 @@ mod tests {
         assert_eq!(class_code, 0x04);
         assert_eq!(subclass, 0x01);
         assert_eq!(prog_if, 0x5a);
+    }
+
+    fn test_config() -> PciConfiguration {
+        PciConfiguration::new(
+            0x1234,
+            0x5678,
+            0x1,
+            PciClassCode::MultimediaController,
+            &PciMultimediaSubclass::AudioController,
+            None,
+            PciHeaderType::Device,
+            0xABCD,
+            0x2468,
+            None,
+        )
+    }
+
+    #[test]
+    fn restore_bar_addr_32bit() {
+        const OLD_BASE: u64 = 0x1000_0000;
+        const NEW_BASE: u64 = 0x2000_0000;
+
+        let mut cfg = test_config();
+        cfg.add_pci_bar(
+            &PciBarConfiguration::default()
+                .set_index(0)
+                .set_address(OLD_BASE)
+                .set_size(0x1000)
+                .set_region_type(PciBarRegionType::Memory32BitRegion),
+        )
+        .unwrap();
+
+        let data = (NEW_BASE as u32).to_le_bytes();
+        let params = cfg.detect_bar_reprogramming(BAR0_REG, &data).unwrap();
+        assert_eq!(params.old_base, OLD_BASE);
+        assert_eq!(params.new_base, NEW_BASE);
+
+        // move_bar() failed, so the bus drops the config register write and
+        // rolls back the address detect_bar_reprogramming() already committed.
+        cfg.restore_bar_addr(&params);
+        assert_eq!(
+            u64::from(cfg.read_reg(BAR0_REG) & BAR_MEM_ADDR_MASK),
+            OLD_BASE
+        );
+
+        // Without the rollback the BAR slot would still hold NEW_BASE and a
+        // retry would be swallowed as an unchanged write, wedging the device.
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG, &data).is_some());
+    }
+
+    #[test]
+    fn restore_bar_addr_64bit() {
+        const OLD_BASE: u64 = 0x4_1000_0000;
+        const NEW_BASE: u64 = 0x8_2000_0000;
+
+        let mut cfg = test_config();
+        cfg.add_pci_bar(
+            &PciBarConfiguration::default()
+                .set_index(0)
+                .set_address(OLD_BASE)
+                .set_size(0x1000)
+                .set_region_type(PciBarRegionType::Memory64BitRegion),
+        )
+        .unwrap();
+
+        // The guest programs the low half first; that write alone is not a
+        // relocation yet, so it only lands in the register.
+        let low = (NEW_BASE as u32).to_le_bytes();
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG, &low).is_none());
+        cfg.write_config_register(BAR0_REG, 0, &low);
+
+        let high = ((NEW_BASE >> 32) as u32).to_le_bytes();
+        let params = cfg.detect_bar_reprogramming(BAR0_REG + 1, &high).unwrap();
+        assert_eq!(params.old_base, OLD_BASE);
+        assert_eq!(params.new_base, NEW_BASE);
+
+        cfg.restore_bar_addr(&params);
+        let restored = (u64::from(cfg.read_reg(BAR0_REG + 1)) << 32)
+            | u64::from(cfg.read_reg(BAR0_REG) & BAR_MEM_ADDR_MASK);
+        assert_eq!(restored, OLD_BASE);
+
+        // Both halves are back in sync, so replaying the sequence is detected
+        // as a fresh relocation rather than being ignored.
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG, &low).is_none());
+        cfg.write_config_register(BAR0_REG, 0, &low);
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG + 1, &high).is_some());
     }
 }
