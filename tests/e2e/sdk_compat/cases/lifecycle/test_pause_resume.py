@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import pytest
 
+from adapters import list_sandboxes
 from framework.assertions import assert_code_ok, assert_command_ok
 from framework.capabilities import PAUSE_RESUME, RUN_CODE
 from framework.lifecycle import (
+    metadata_from_info,
     wait_until_data_plane_ready,
     wait_until_paused,
     wait_until_running,
@@ -33,6 +35,37 @@ def _pause_and_resume(sdk_sandbox, sdk_e2e_config):
         command_timeout=sdk_e2e_config.command_timeout,
     )
     return resumed
+
+
+def _listed_sandbox_id(entry: dict) -> str:
+    for key in ("sandbox_id", "sandboxID", "id"):
+        value = entry.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+@pytest.mark.sandbox_create_options(metadata={"sdk_compat_pause_meta": "keep-me"})
+def test_pause_preserves_metadata(sdk_sandbox, sdk_backend, sdk_e2e_config):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+    wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout)
+
+    metadata = metadata_from_info(sdk_sandbox.info().raw)
+    assert metadata.get("sdk_compat_pause_meta") == "keep-me"
+    assert metadata.get("test_suite") == "sdk_compat"
+
+    entries = list_sandboxes(sdk_backend, sdk_e2e_config)
+    paused = [entry for entry in entries if _listed_sandbox_id(entry) == sdk_sandbox.sandbox_id]
+    assert paused, "paused sandbox must stay visible in list"
+    assert paused[0].get("metadata", {}).get("sdk_compat_pause_meta") == "keep-me"
+
+    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    try:
+        wait_until_running(resumed, timeout=sdk_e2e_config.default_timeout)
+        metadata = metadata_from_info(resumed.info().raw)
+        assert metadata.get("sdk_compat_pause_meta") == "keep-me"
+    finally:
+        resumed.close()
 
 
 def test_pause_sets_state_paused(sdk_sandbox, sdk_e2e_config):

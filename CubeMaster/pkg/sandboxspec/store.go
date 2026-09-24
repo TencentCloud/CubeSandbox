@@ -193,6 +193,74 @@ func Get(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandbox
 		}
 		return nil, err
 	}
+	return decodeSpec(&rec)
+}
+
+// getManyBatchSize bounds one IN list. Tests lower it to exercise batching.
+var getManyBatchSize = 500
+
+// GetMany returns the canonical requests for the given sandbox ids. Ids
+// without a spec are absent from the result; a row that fails to decode is
+// skipped rather than failing the whole batch.
+func GetMany(ctx context.Context, sandboxIDs []string) (map[string]*sandboxtypes.CreateCubeSandboxReq, error) {
+	client := getDB()
+	if client == nil {
+		return nil, ErrSandboxSpecStoreNotReady
+	}
+	ids := uniqueTrimmedIDs(sandboxIDs)
+	out := make(map[string]*sandboxtypes.CreateCubeSandboxReq, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	batchSize := getManyBatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var recs []models.SandboxSpec
+		if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+			Where("sandbox_id IN ?", ids[start:end]).Find(&recs).Error; err != nil {
+			return nil, err
+		}
+		for i := range recs {
+			req, err := decodeSpec(&recs[i])
+			if err != nil {
+				continue
+			}
+			out[recs[i].SandboxID] = req
+		}
+	}
+	return out, nil
+}
+
+func uniqueTrimmedIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func decodeSpec(rec *models.SandboxSpec) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	if rec == nil {
+		return nil, errors.New("sandboxspec: nil record")
+	}
 	out := &sandboxtypes.CreateCubeSandboxReq{}
 	if err := json.Unmarshal([]byte(rec.RequestJSON), out); err != nil {
 		return nil, err

@@ -31,9 +31,12 @@ const (
 	KindPauseSnapshot = "pause_snapshot"
 	// StatusReady marks a completed pause: the shim is gone and the sandbox
 	// exists only as this binding plus the node-local package.
-	StatusReady    = "READY"
-	statusReady    = StatusReady
-	statusCreating = "CREATING"
+	StatusReady = "READY"
+	statusReady = StatusReady
+	// StatusCreating marks a pause in flight: the binding is written before the
+	// node call and completed or failed after it.
+	StatusCreating = "CREATING"
+	statusCreating = StatusCreating
 	// StatusFailed is a terminal Pause failure. Binding and sandbox proxy are
 	// kept so the user can see the failure; Resume is rejected until Delete.
 	StatusFailed = "FAILED"
