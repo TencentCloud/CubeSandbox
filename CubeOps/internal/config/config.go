@@ -73,6 +73,10 @@ type Config struct {
 	RedisMasterName       string `yaml:"redis_master_name"`
 	RedisSentinelNodes    string `yaml:"redis_sentinel_nodes"`
 	RedisSentinelPassword string `yaml:"redis_sentinel_password"`
+	// RedisTLS turns on TLS for the Redis connection. It applies to the
+	// REDIS_URL path (no-op there — put rediss:// in the URL), the split
+	// host/port path (switches the built URL to rediss://) and Sentinel.
+	RedisTLS bool `yaml:"redis_tls"`
 
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
@@ -523,6 +527,11 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("REDIS_SENTINEL_PASSWORD"); v != "" {
 		cfg.RedisSentinelPassword = v
+	}
+	if v := os.Getenv("REDIS_TLS"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.RedisTLS = *p
+		}
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v

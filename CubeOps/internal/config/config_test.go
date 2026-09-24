@@ -107,6 +107,30 @@ func TestLoad_NoYAML_UsesEnvAndDefaults(t *testing.T) {
 	}
 }
 
+// TestLoad_RedisTLSEnv pins REDIS_TLS to parseEnvBool, like the other boolean
+// env overrides: yes/on enable TLS, and an unrecognized value leaves the
+// default in place.
+func TestLoad_RedisTLSEnv(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/config.yaml")
+	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/envdb")
+	for _, tc := range []struct {
+		env  string
+		want bool
+	}{
+		{"1", true}, {"true", true}, {"yes", true}, {"on", true},
+		{"0", false}, {"false", false}, {"off", false}, {"bogus", false},
+	} {
+		t.Setenv("REDIS_TLS", tc.env)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load with REDIS_TLS=%q: %v", tc.env, err)
+		}
+		if cfg.RedisTLS != tc.want {
+			t.Errorf("REDIS_TLS=%q: RedisTLS = %v, want %v", tc.env, cfg.RedisTLS, tc.want)
+		}
+	}
+}
+
 func TestLoad_WarehouseSection(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "config.yaml")
