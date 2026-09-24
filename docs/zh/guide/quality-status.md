@@ -1,5 +1,5 @@
 ---
-title: 质量状态
+title: 每日性能测试报告
 ---
 
 <script setup>
@@ -7,6 +7,43 @@ import { data } from '../../quality-status.data.js'
 </script>
 
 <QualityStatusPage :data="data" locale="zh" />
+
+## 使用 Python 获取最新报告
+
+报告以公开 JSON 提供，无需 API Key。下面的最小示例会获取最新结果，并输出整体状态、E2E 测试统计和性能指标：
+
+```python
+import json
+from urllib.request import urlopen
+
+REPORT_URL = (
+    "https://cubesandbox-1253970226.cos.ap-singapore.myqcloud.com/"
+    "page-data/quality-status.json"
+)
+
+# 获取并解析最新的每日测试报告。
+with urlopen(REPORT_URL, timeout=10) as response:
+    report = json.load(response)
+
+print(f"日期：{report.get('date', '未知')}")
+print(f"整体状态：{report.get('status', '未知')}")
+
+# 汇总 E2E 测试结果。
+tests = report.get("e2e", {}).get("tests", {})
+print(
+    "E2E："
+    f"通过 {tests.get('passed', 0)}/{tests.get('total', 0)}，"
+    f"失败 {tests.get('failed', 0)}"
+)
+
+# 逐项输出当前性能、公开基线和对比结论。
+for metric in report.get("performance", {}).get("metrics", []):
+    label = metric.get("label", "未命名指标")
+    current = metric.get("current_text", metric.get("current", "—"))
+    baseline = metric.get("baseline_text", metric.get("baseline", "—"))
+    verdict = metric.get("verdict", "未知")
+    print(f"{label}：本次={current}，基线={baseline}，结论={verdict}")
+```
 
 ## 数据源
 
