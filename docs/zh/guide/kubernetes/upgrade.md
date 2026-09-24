@@ -70,10 +70,10 @@ cubeNode:
 ```yaml
 images:
   cubelet:
-    tag: v0.7.2-rc2
+    tag: v0.7.2-rc3
   # 需要一起升再写上，例如：
   # cubeShim:
-  #   tag: v0.7.2-rc2
+  #   tag: v0.7.2-rc3
 ```
 
 只改你真正要升的键；其它镜像保持不动即可。完整键名见文末[附录](#附录-镜像键速查)。
