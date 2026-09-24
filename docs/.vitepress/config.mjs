@@ -351,7 +351,9 @@ export default withMermaid(defineConfig({
               text: 'Developer Docs',
               items: [
                 { text: 'Overview', link: '/dev/' },
-                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' },
+                { text: 'Scheduler Profile Config Example', link: '/dev/scheduler-profile-config-example' },
+                { text: 'External HTTP Score Operator Path', link: '/dev/external-http-score-operator' }
               ]
             }
           ]
@@ -568,7 +570,9 @@ export default withMermaid(defineConfig({
               text: '开发者文档',
               items: [
                 { text: '概览', link: '/zh/dev/' },
-                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
+                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' },
+                { text: 'Scheduler Profile 配置示例', link: '/zh/dev/scheduler-profile-config-example' },
+                { text: 'External HTTP Score 运维路径', link: '/zh/dev/external-http-score-operator' }
               ]
             }
           ]
