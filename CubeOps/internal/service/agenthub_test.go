@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -36,6 +37,8 @@ type fakeAgentStore struct {
 	getAgentSnapshot           func(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
 	deleteAgentSnapshot        func(ctx context.Context, agentID, snapshotID string) error
 	getAgentTemplate           func(ctx context.Context, templateID string) (*store.AgentTemplate, error)
+	getRecommendedTemplate     func(ctx context.Context) (*store.AgentTemplate, error)
+	listAgentTemplates         func(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
 	recordOperation            func(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
 	latestHealthySnapshot      func(ctx context.Context, agentID string) (string, error)
 	setBaseSnapshotID          func(ctx context.Context, agentID, snapshotID string) error
@@ -108,6 +111,18 @@ func (f *fakeAgentStore) GetAgentTemplate(ctx context.Context, templateID string
 		return nil, nil
 	}
 	return f.getAgentTemplate(ctx, templateID)
+}
+func (f *fakeAgentStore) GetRecommendedAgentTemplate(ctx context.Context) (*store.AgentTemplate, error) {
+	if f.getRecommendedTemplate == nil {
+		return nil, nil // default: none marked recommended
+	}
+	return f.getRecommendedTemplate(ctx)
+}
+func (f *fakeAgentStore) ListAgentTemplates(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error) {
+	if f.listAgentTemplates == nil {
+		return nil, nil // default: no template registered
+	}
+	return f.listAgentTemplates(ctx, limit, offset)
 }
 func (f *fakeAgentStore) RecordOperation(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error {
 	if f.recordOperation == nil {
@@ -343,6 +358,527 @@ func TestCreateInstance_ValidationErrors(t *testing.T) {
 				t.Error("CreateSandbox should not have been called for a validation error")
 			}
 		})
+	}
+}
+
+// llmKeyStore returns a fakeAgentStore whose only wired method resolves the
+// LLM API key, which CreateInstance requires before it reaches CubeMaster.
+func llmKeyStore() *fakeAgentStore {
+	return &fakeAgentStore{
+		getSetting: func(_ context.Context, key string) (string, error) {
+			if key == "llm_api_key" {
+				return "test-key", nil
+			}
+			return "", nil
+		},
+	}
+}
+
+// rootfsSourceID returns the resolved rootfs source id CreateInstance sent to
+// CubeMaster, which BuildCreateSandboxRequest carries as a label.
+func rootfsSourceID(t *testing.T, cm *fakeServiceCM) string {
+	t.Helper()
+	if cm.createSandboxBody == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	labels, _ := cm.createSandboxBody["labels"].(map[string]interface{})
+	id, _ := labels["agenthub.rootfs_source_id"].(string)
+	return id
+}
+
+// TestCreateInstance_DefaultTemplateSelection verifies which template
+// CreateInstance uses when the request names neither a snapshot nor a
+// templateId: the operator-marked recommended template if there is one, else
+// the most recently registered one. Before this, the request always went out
+// with the hardcoded defaultAgentTemplateID, which nothing provisions.
+func TestCreateInstance_DefaultTemplateSelection(t *testing.T) {
+	tests := []struct {
+		name        string
+		recommended *store.AgentTemplate
+		newest      []store.AgentTemplate
+		want        string
+	}{
+		{
+			name:        "prefers the recommended template over a newer one",
+			recommended: &store.AgentTemplate{TemplateID: "tpl-recommended", Recommended: true},
+			newest:      []store.AgentTemplate{{TemplateID: "tpl-newest"}},
+			want:        "tpl-recommended",
+		},
+		{
+			name:   "falls back to the most recent when none is recommended",
+			newest: []store.AgentTemplate{{TemplateID: "tpl-newest"}},
+			want:   "tpl-newest",
+		},
+		{
+			name: "uses the built-in identifier when nothing is registered",
+			want: defaultAgentTemplateID,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := &fakeServiceCM{}
+			st := llmKeyStore()
+			st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+				return tt.recommended, nil
+			}
+			st.listAgentTemplates = func(_ context.Context, limit, _ int) ([]store.AgentTemplate, error) {
+				if limit != 1 {
+					t.Errorf("ListAgentTemplates limit = %d, want 1 — only the newest is needed", limit)
+				}
+				return tt.newest, nil
+			}
+			svc := newTestService(st, cm)
+
+			if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+				Name:   "my-agent",
+				Engine: "openclaw",
+			}); err != nil {
+				t.Fatalf("CreateInstance returned error: %v", err)
+			}
+			if got := rootfsSourceID(t, cm); got != tt.want {
+				t.Errorf("rootfs_source_id = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCreateInstance_RecommendedIsNotWindowLimited verifies that the
+// recommended preference does not depend on how many newer templates were
+// registered after it: the flag is resolved by its own query, so any number of
+// non-recommended registrations cannot bury it.
+func TestCreateInstance_RecommendedIsNotWindowLimited(t *testing.T) {
+	cm := &fakeServiceCM{}
+	st := llmKeyStore()
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		return &store.AgentTemplate{TemplateID: "tpl-recommended", Recommended: true}, nil
+	}
+	listed := false
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		listed = true
+		return []store.AgentTemplate{{TemplateID: "tpl-newest"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	}); err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if got := rootfsSourceID(t, cm); got != "tpl-recommended" {
+		t.Errorf("rootfs_source_id = %q, want tpl-recommended", got)
+	}
+	if listed {
+		t.Error("the registry should not be listed once a recommended template is found")
+	}
+}
+
+// TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered verifies
+// that a failed *listing* is not turned into "no agent template is registered":
+// that query never completed, so the registry's contents are unknown and
+// CubeMaster's own error is what the caller gets.
+//
+// The recommended-flag query is deliberately not covered here — losing it does
+// not leave the registry unknown, since a marked template is also a listed one.
+// The two tests below pin what a failure there does instead.
+func TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 502 {
+		t.Errorf("status = %d, want 502", svcErr.Status)
+	}
+	if strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, should not claim an empty registry when the read failed", svcErr.Message)
+	}
+}
+
+// TestCreateInstance_RecommendedReadFailureFallsBackToNewest verifies that
+// losing the recommended-flag query does not fail a create the registry can
+// still satisfy. The flag says which registered template to prefer, not whether
+// one exists, so a transient failure there falls through to the newest instead
+// of handing CubeMaster an identifier no install has to carry.
+func TestCreateInstance_RecommendedReadFailureFallsBackToNewest(t *testing.T) {
+	cm := &fakeServiceCM{}
+	st := llmKeyStore()
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: "tpl-newest"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	}); err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if got := rootfsSourceID(t, cm); got != "tpl-newest" {
+		t.Errorf("rootfs_source_id = %q, want tpl-newest", got)
+	}
+}
+
+// TestCreateInstance_EmptyListingSettlesEmptinessDespiteRecommendedFailure
+// verifies the other half: when the recommended query fails but the listing
+// completes and comes back empty, the registry really is empty — a marked
+// template would have been listed too — so the caller still gets the actionable
+// registration hint rather than a 502 naming the built-in identifier.
+func TestCreateInstance_EmptyListingSettlesEmptinessDespiteRecommendedFailure(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+	}
+	st := llmKeyStore()
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return nil, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 400 {
+		t.Errorf("status = %d, want 400", svcErr.Status)
+	}
+	if !strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, want it to name the missing registration", svcErr.Message)
+	}
+}
+
+// TestCreateInstance_ExplicitTemplateIDWins verifies that an explicit
+// templateId is used as-is and the registered-template lookup is skipped.
+func TestCreateInstance_ExplicitTemplateIDWins(t *testing.T) {
+	cm := &fakeServiceCM{}
+	st := llmKeyStore()
+	consulted := false
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		consulted = true
+		return &store.AgentTemplate{TemplateID: "tpl-recommended", Recommended: true}, nil
+	}
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		consulted = true
+		return []store.AgentTemplate{{TemplateID: "tpl-newest"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:       "my-agent",
+		Engine:     "openclaw",
+		TemplateID: "tpl-explicit",
+	}); err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if got := rootfsSourceID(t, cm); got != "tpl-explicit" {
+		t.Errorf("rootfs_source_id = %q, want tpl-explicit", got)
+	}
+	if consulted {
+		t.Error("the template registry should not be consulted when templateId is explicit")
+	}
+}
+
+// TestCreateInstance_NoTemplateRegisteredReportsMissingRegistration verifies
+// that when no template is registered and CubeMaster cannot resolve the
+// built-in identifier either, the caller gets an actionable 400 instead of a
+// 502 naming an identifier they never supplied.
+func TestCreateInstance_NoTemplateRegisteredReportsMissingRegistration(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{
+			RetCode: 130404,
+			RetMsg:  `failed to resolve template identifier "` + defaultAgentTemplateID + `": template not found`,
+		},
+	}
+	svc := newTestService(llmKeyStore(), cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 400 {
+		t.Errorf("status = %d, want 400", svcErr.Status)
+	}
+	if !strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, want it to name the missing registration", svcErr.Message)
+	}
+	if strings.Contains(svcErr.Message, defaultAgentTemplateID) {
+		t.Errorf("message = %q, should not surface the built-in identifier to the caller", svcErr.Message)
+	}
+	if svcErr.Cause == nil {
+		t.Error("Cause is nil; the CubeMaster error must stay attached for diagnosis")
+	}
+}
+
+// cmTemplateGone is CubeMaster's real not-found for a tpl-/snap- identifier
+// whose definition is gone. Such ids skip alias resolution
+// (ResolveTemplateIdentifier returns them unchanged), so the failure surfaces
+// from GetTemplateRequest wrapped in a message that names no identifier at all —
+// which is why the rewrite below keys on the ret_code, not on the text.
+const cmTemplateGone = "failed to get template param from store: template not found"
+
+// rootfsSourceType returns the rootfs source type CreateInstance sent to
+// CubeMaster, carried as a label next to the source id.
+func rootfsSourceType(t *testing.T, cm *fakeServiceCM) string {
+	t.Helper()
+	if cm.createSandboxBody == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	labels, _ := cm.createSandboxBody["labels"].(map[string]interface{})
+	typ, _ := labels["agenthub.rootfs_source_type"].(string)
+	return typ
+}
+
+// assertDefaultedConflict checks the 409 the defaulted-template branch returns:
+// a conflict that names neither the registry state wrongly nor any identifier
+// the caller never chose, and keeps CubeMaster's error attached.
+func assertDefaultedConflict(t *testing.T, err error, hidden ...string) {
+	t.Helper()
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 409 {
+		t.Errorf("status = %d, want 409", svcErr.Status)
+	}
+	for _, id := range hidden {
+		if strings.Contains(svcErr.Message, id) {
+			t.Errorf("message = %q, should not surface %q, which the caller never chose", svcErr.Message, id)
+		}
+	}
+	if strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, should not claim an empty registry when one was registered", svcErr.Message)
+	}
+	if svcErr.Cause == nil {
+		t.Error("Cause is nil; the CubeMaster error must stay attached for diagnosis")
+	}
+}
+
+// TestCreateInstance_DefaultedTemplateVanishingIsAConflict covers the race the
+// registry read cannot close: a template that was registered when the request
+// started and gone by the time CubeMaster resolved it. The caller named no
+// template, so reporting a not-found for the one we picked would hand them an
+// error about an identifier they never chose — the failure class this path
+// exists to remove — and it is not a missing registration either, because one
+// was registered. The CubeMaster error is the one it really sends for a missing
+// tpl- id, which does not name the id.
+func TestCreateInstance_DefaultedTemplateVanishingIsAConflict(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: cmTemplateGone},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: "tpl-vanished"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	assertDefaultedConflict(t, err, "tpl-vanished")
+}
+
+// TestCreateInstance_FastPathDefaultedNotFoundIsAConflict covers the defaulted
+// branch when the template picked from the registry is a published one: the
+// fast-path swaps the source to that template's rootfs snapshot before the
+// request goes out, so the identifier CubeMaster fails to resolve is the
+// snapshot, not the template. The conflict must still apply — the snapshot is
+// what we sent on the caller's behalf — and must name neither identifier.
+func TestCreateInstance_FastPathDefaultedNotFoundIsAConflict(t *testing.T) {
+	const (
+		published  = "tpl-published"
+		sourceSnap = "snap-source"
+		rootfsSnap = "snap-rootfs"
+	)
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: cmTemplateGone},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: published}}, nil
+	}
+	st.getAgentTemplate = func(_ context.Context, id string) (*store.AgentTemplate, error) {
+		if id != published {
+			return nil, nil
+		}
+		// Not a market registration: published from a running agent, which is
+		// what makes the fast-path apply.
+		return &store.AgentTemplate{TemplateID: published, SourceAgentID: "agent-source", SourceSnapshotID: sourceSnap}, nil
+	}
+	st.getAgentSnapshot = func(_ context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error) {
+		if agentID != "agent-source" || snapshotID != sourceSnap {
+			return nil, nil
+		}
+		id := rootfsSnap
+		return &store.AgentSnapshot{SnapshotID: sourceSnap, RootfsSnapshotID: &id}, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	// The fast-path really ran, so this is the branch under test and not the
+	// plain vanished-template case above.
+	if got := rootfsSourceID(t, cm); got != rootfsSnap {
+		t.Fatalf("rootfs_source_id = %q, want %q (the fast-path did not swap the source)", got, rootfsSnap)
+	}
+	if got := rootfsSourceType(t, cm); got != "snapshot" {
+		t.Fatalf("rootfs_source_type = %q, want snapshot", got)
+	}
+	assertDefaultedConflict(t, err, published, rootfsSnap)
+}
+
+// TestCreateInstance_NotFoundInWordsOnlyIsPassedThrough pins that the rewrite
+// keys on how CubeMaster classifies a failure rather than on how it words it.
+// Asking for a pause snapshot as a create source reads "snapshot not found",
+// but CubeMaster raises it as ErrSnapshotNotFound, which it reports as 130400 —
+// not a template resolution failure, so it must reach the caller unchanged.
+func TestCreateInstance_NotFoundInWordsOnlyIsPassedThrough(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130400, RetMsg: "snapshot not found: snap-paused"},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: "tpl-registered"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 502 {
+		t.Errorf("status = %d, want 502", svcErr.Status)
+	}
+	if !strings.Contains(svcErr.Message, "snap-paused") {
+		t.Errorf("message = %q, want CubeMaster's own words", svcErr.Message)
+	}
+}
+
+// TestCreateInstance_HTTPStatusShapeReachesTheRewrite pins the seam HTTPError
+// exists for, end to end: a CubeMaster failure that arrives as an HTTP status
+// rather than as a ret_code in a 200 body must reach the same outcomes. The
+// predicate is unit-tested on its own; this checks the create path acts on it.
+func TestCreateInstance_HTTPStatusShapeReachesTheRewrite(t *testing.T) {
+	envelope := func(msg string) string {
+		b, _ := json.Marshal(map[string]interface{}{"ret": map[string]interface{}{"ret_code": 130404, "ret_msg": msg}})
+		return string(b)
+	}
+	registered := func(st *fakeAgentStore) {
+		st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+			return []store.AgentTemplate{{TemplateID: "tpl-registered"}}, nil
+		}
+	}
+	empty := func(*fakeAgentStore) {}
+	tests := []struct {
+		name       string
+		registry   func(*fakeAgentStore)
+		err        *cubemaster.HTTPError
+		wantStatus int
+	}{
+		{
+			name:     "empty registry, 404 stating the alias did not resolve",
+			registry: empty,
+			err: &cubemaster.HTTPError{Status: 404, Body: envelope(
+				`failed to resolve template identifier "` + defaultAgentTemplateID + `": template not found`)},
+			wantStatus: 400,
+		},
+		{
+			name:       "registered template gone, 400 carrying the envelope",
+			registry:   registered,
+			err:        &cubemaster.HTTPError{Status: 400, Body: envelope(cmTemplateGone)},
+			wantStatus: 409,
+		},
+		{
+			// A route 404 says nothing about any resource: nothing is rewritten.
+			name:       "opaque 404 from something in the path",
+			registry:   empty,
+			err:        &cubemaster.HTTPError{Status: 404, Body: "404 page not found"},
+			wantStatus: 502,
+		},
+		{
+			// The boundary IsNotFound documents: a 5xx is never a not-found.
+			name:       "5xx carrying a not-found envelope",
+			registry:   registered,
+			err:        &cubemaster.HTTPError{Status: 503, Body: envelope(cmTemplateGone)},
+			wantStatus: 502,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := &fakeServiceCM{createSandboxErr: tt.err}
+			st := llmKeyStore()
+			tt.registry(st)
+			svc := newTestService(st, cm)
+
+			_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+				Name:   "my-agent",
+				Engine: "openclaw",
+			})
+			var svcErr *Error
+			if !errors.As(err, &svcErr) {
+				t.Fatalf("error is not *service.Error: %v", err)
+			}
+			if svcErr.Status != tt.wantStatus {
+				t.Errorf("status = %d, want %d (message %q)", svcErr.Status, tt.wantStatus, svcErr.Message)
+			}
+		})
+	}
+}
+
+// TestCreateInstance_ExplicitTemplateNotFoundStaysBadGateway guards the
+// narrowness of the case above: a not-found for a template the caller did name
+// is still reported as-is, not rewritten into the registration hint.
+func TestCreateInstance_ExplicitTemplateNotFoundStaysBadGateway(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+	}
+	svc := newTestService(llmKeyStore(), cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:       "my-agent",
+		Engine:     "openclaw",
+		TemplateID: "tpl-typo",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 502 {
+		t.Errorf("status = %d, want 502", svcErr.Status)
+	}
+	if strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, should not claim a missing registration", svcErr.Message)
 	}
 }
 
@@ -651,6 +1187,77 @@ func TestWrapCMError(t *testing.T) {
 			}
 			if tt.wantCode != "" && got.Code != tt.wantCode {
 				t.Errorf("code = %q, want %q", got.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
+// TestIsCMNotFoundCoversBothShapes pins that a not-found is recognised whenever
+// CubeMaster states one in its envelope — under a 200 body or under any >=400
+// status — and is NOT inferred from a bare 404 whose body says nothing.
+// Only the first shape appears in the #1327 repro; keying on it alone would let
+// the actionable 400 silently regress into a 502 leaking an identifier the
+// requester never supplied, which is what this path exists to prevent.
+func TestIsCMNotFoundCoversBothShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"business 130404", &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"}, true},
+		{"business 404", &cubemaster.CMError{RetCode: 404, RetMsg: "template not found"}, true},
+		{
+			"http 404 stating it in the envelope",
+			&cubemaster.HTTPError{Status: 404, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			true,
+		},
+		{
+			"http 404 wrapped",
+			fmt.Errorf("create sandbox: %w", &cubemaster.HTTPError{Status: 404, Body: `{"ret":{"ret_code":130404}}`}),
+			true,
+		},
+		// A bare 404 is evidence about the route, not the resource: CubeMaster
+		// states resource-not-found in the envelope, so an opaque one came from a
+		// proxy or a misconfigured base URL. Classifying it as a missing template
+		// would answer "register a template" to an operator whose real problem is
+		// that CubeOps never reached CubeMaster.
+		{"http 404 from something in the path", &cubemaster.HTTPError{Status: 404, Body: "404 page not found"}, false},
+		{"http 500", &cubemaster.HTTPError{Status: 500, Body: "boom"}, false},
+		// A server-side failure is not the caller's to fix, whatever its body
+		// says — otherwise a transient 5xx is rewritten into "register a
+		// template", advice the operator cannot act on and that hides an outage.
+		{
+			"http 500 carrying 130404",
+			&cubemaster.HTTPError{Status: 500, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			false,
+		},
+		{
+			"http 503 carrying 130404",
+			&cubemaster.HTTPError{Status: 503, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			false,
+		},
+		// The status line and the ret_code are chosen independently on the
+		// CubeMaster side, so a not-found can arrive under some other >=400
+		// status. Recognise it by content, not by which channel carried it.
+		{
+			"http 400 carrying 130404",
+			&cubemaster.HTTPError{Status: 400, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			true,
+		},
+		{
+			"http 400 carrying a non-not-found code",
+			&cubemaster.HTTPError{Status: 400, Body: `{"ret":{"ret_code":130400,"ret_msg":"bad instance_type"}}`},
+			false,
+		},
+		{"http 500 with a non-envelope body", &cubemaster.HTTPError{Status: 500, Body: "130404"}, false},
+		{"business conflict", &cubemaster.CMError{RetCode: 130409, RetMsg: "exists"}, false},
+		{"unrelated", errors.New("network timeout"), false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCMNotFound(tt.err); got != tt.want {
+				t.Errorf("isCMNotFound(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

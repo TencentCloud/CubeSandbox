@@ -42,6 +42,19 @@ type CubeMasterClient interface {
 // SDKInstanceType is the CubeMaster instance_type used for AgentHub sandboxes.
 const SDKInstanceType = "cubebox"
 
+// defaultAgentTemplateID is the last-resort template identifier CreateInstance
+// uses when the caller supplies neither a snapshot nor a templateId and no
+// AgentHub template is registered to default to.
+//
+// Nothing in this repository provisions a template under this identifier: it is
+// not a tpl-/snap- id, so CubeMaster resolves it through GetTemplateByAlias,
+// and it only resolves on installs where an operator happened to claim it as a
+// template alias. Reaching it therefore means "no template is registered",
+// which CreateInstance reports as such instead of surfacing CubeMaster's
+// not-found. Kept as a fallback rather than dropped so that installs which do
+// carry the alias keep working.
+const defaultAgentTemplateID = "wecom-ds-openclaw"
+
 // ── Error ───────────────────────────────────────────────────────────────────
 
 // Error is the service-layer error type. It carries an HTTP status code so
@@ -105,6 +118,26 @@ func wrapCMError(err error) *Error {
 	}
 }
 
+// isCMNotFound reports whether err is a CubeMaster not-found, in either shape
+// CubeMaster uses it: the business code 130404 carried in a 200 body, and an
+// HTTP-level 404. The repro in #1327 is the first shape, but keying only on it
+// would make this silently stop working the day CubeMaster answers with an HTTP
+// status instead — and the caller's whole purpose is to avoid leaking an
+// identifier the requester never supplied.
+//
+// Callers that need the full status mapping should use wrapCMError instead. Note
+// that wrapCMError deliberately still maps HTTPError to 502: widening the
+// service-wide status mapping is a larger behavioural change than this fix and
+// belongs in its own patch.
+func isCMNotFound(err error) bool {
+	var cmErr *cubemaster.CMError
+	if errors.As(err, &cmErr) && cmErr.IsNotFound() {
+		return true
+	}
+	var httpErr *cubemaster.HTTPError
+	return errors.As(err, &httpErr) && httpErr.IsNotFound()
+}
+
 // ── AgentStore interface ────────────────────────────────────────────────────
 
 // AgentStore is the subset of *store.Store that AgentHubService depends on.
@@ -123,6 +156,8 @@ type AgentStore interface {
 	GetAgentSnapshot(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
 	DeleteAgentSnapshot(ctx context.Context, agentID, snapshotID string) error
 	GetAgentTemplate(ctx context.Context, templateID string) (*store.AgentTemplate, error)
+	GetRecommendedAgentTemplate(ctx context.Context) (*store.AgentTemplate, error)
+	ListAgentTemplates(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
 	RecordOperation(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
 	LatestHealthySnapshot(ctx context.Context, agentID string) (string, error)
 	SetBaseSnapshotID(ctx context.Context, agentID, snapshotID string) error
@@ -391,6 +426,75 @@ type CreateInstanceResult struct {
 	Instance *store.AgentInstance
 }
 
+// templateOrigin says where a defaulted template identifier came from, which is
+// what decides how to report a CubeMaster not-found for it: whether nothing is
+// registered, whether what was registered vanished under us, or whether we
+// simply do not know because the read failed.
+type templateOrigin int
+
+const (
+	// templateFromRegistry: a real registered template was picked.
+	templateFromRegistry templateOrigin = iota
+	// templateFallbackEmptyRegistry: the listing completed and held nothing, so
+	// the built-in identifier is in play and nothing is registered.
+	templateFallbackEmptyRegistry
+	// templateFallbackRegistryUnknown: the listing failed, so the built-in
+	// identifier is in play but the registry's contents are unknown — nothing
+	// may be claimed about them.
+	templateFallbackRegistryUnknown
+)
+
+// defaultTemplateID picks the template CreateInstance uses when the caller
+// omits templateId: the template an operator marked recommended if there is
+// one, otherwise the most recently registered one.
+//
+// Both are single bounded queries — the recommended preference is exact
+// without reading the registry, which matters because nothing sets the flag
+// automatically (see store.GetRecommendedAgentTemplate), so an install can
+// accumulate any number of newer non-recommended templates after the marked
+// one.
+//
+// The origin tells the caller what a CubeMaster not-found would mean. The
+// listing settles emptiness — a marked template is also a listed one, so a
+// successful empty listing rules out both — and yields
+// templateFallbackEmptyRegistry. A failed listing yields
+// templateFallbackRegistryUnknown instead, because the caller must not report
+// "nothing is registered" on the strength of a query that never completed. In
+// both cases the returned id is defaultAgentTemplateID, which the caller still
+// passes to CubeMaster — kept as a last resort for the install that has claimed
+// that alias, not as a default.
+// This does change behaviour for one corner install: where the alias is claimed
+// AND templates are registered, the registered one now wins. That is the point
+// of the fix — a template an operator actually registered beats a hand-claimed
+// identifier — but "installs carrying the alias are unaffected" only holds while
+// their registry is empty.
+//
+// A failed recommended-flag read is not fatal: the flag expresses which
+// registered template to prefer, not whether one exists, so losing it falls
+// through to the newest rather than failing a create the registry can still
+// satisfy.
+func (s *AgentHubService) defaultTemplateID(ctx context.Context) (string, templateOrigin) {
+	recommended, err := s.Store.GetRecommendedAgentTemplate(ctx)
+	switch {
+	case err != nil:
+		// Log rather than return: an operator's marked choice is about to be
+		// passed over, and this is the only place that knows it happened.
+		logging.G(ctx).Warnf("failed to read the recommended agent template, "+
+			"falling back to the newest registered one: %v", err)
+	case recommended != nil:
+		return recommended.TemplateID, templateFromRegistry
+	}
+	newest, err := s.Store.ListAgentTemplates(ctx, 1, 0)
+	if err != nil {
+		logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
+		return defaultAgentTemplateID, templateFallbackRegistryUnknown
+	}
+	if len(newest) > 0 {
+		return newest[0].TemplateID, templateFromRegistry
+	}
+	return defaultAgentTemplateID, templateFallbackEmptyRegistry
+}
+
 // CreateInstance orchestrates the full agent creation flow:
 //
 //  1. Resolve LLM config + domain + egress network config from settings.
@@ -431,6 +535,12 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	snapshotID := strings.TrimSpace(req.SnapshotID)
 	rootfsSourceType := "template"
 	rootfsSourceID := ""
+	// Set whenever the template was chosen for the caller rather than named by
+	// them — including when a real registered template was picked. Either way
+	// the identifier is not one the caller can be told about usefully, so a
+	// not-found for it must not be reported verbatim.
+	templateDefaulted := false
+	origin := templateFromRegistry
 	if snapshotID != "" {
 		rootfsSourceType = "snapshot"
 		rootfsSourceID = snapshotID
@@ -438,7 +548,8 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		if req.TemplateID != "" {
 			rootfsSourceID = req.TemplateID
 		} else {
-			rootfsSourceID = "wecom-ds-openclaw"
+			rootfsSourceID, origin = s.defaultTemplateID(ctx)
+			templateDefaulted = true
 		}
 	}
 	templateID := rootfsSourceID
@@ -535,6 +646,76 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	// --- Create sandbox ---
 	sandboxResp, err := s.CM.CreateSandbox(ctx, cmReq)
 	if err != nil {
+		// A not-found for a template the caller did not choose is rewritten
+		// below, because reporting it verbatim can name an identifier they never
+		// supplied and cannot act on (#1327). The original is logged and kept as
+		// Cause — writeServiceError serialises only Message — so an operator
+		// loses nothing.
+		//
+		// Only not-founds are rewritten, and that is a deliberate stop. Other
+		// failures to use the template we picked still reach the caller as the
+		// 502 below, naming it: a template with no schedulable replica reads
+		// `template <id> is not ready on any healthy node: template has no ready
+		// replica` (ErrTemplateHasNoReadyReplica, reported as 130400). 130400 is
+		// CubeMaster's catch-all, so attributing it would mean matching wording,
+		// and the identifier there is a template an operator registered and can
+		// look up, not the unprovisioned fallback #1327 is about.
+		//
+		// Attribution rests on how CubeMaster classifies the failure, not on how
+		// it words it. Both halves are worth stating because neither is enforced
+		// here:
+		//
+		//   - A 130404 out of CreateSandbox is template resolution failing:
+		//     sandbox_create.go raises it only for ErrTemplateNotFound, and the
+		//     run phase forwards cubelet ret codes from an enum with no 130404.
+		//     Failures that merely *say* "not found" are not rewritten: a pause
+		//     snapshot requested as a create source reads `snapshot not found:
+		//     <id>` (ErrSnapshotNotFound) and arrives as 130400.
+		//   - The wording does not reliably name the identifier. An alias that
+		//     fails to resolve reads `failed to resolve template identifier
+		//     "<alias>": template not found`, but a tpl-/snap- id skips alias
+		//     resolution (ResolveTemplateIdentifier returns it unchanged) and a
+		//     missing one surfaces from GetTemplateRequest as `failed to get
+		//     template param from store: template not found`, naming nothing.
+		//     Requiring the identifier in the text would miss exactly the
+		//     vanished-template case the conflict branch exists for.
+		if templateDefaulted && isCMNotFound(err) && origin != templateFallbackRegistryUnknown {
+			if origin == templateFallbackEmptyRegistry {
+				// 400 rather than the 409 below, deliberately. Both are state
+				// problems behind a well-formed request, but they are different
+				// states: here AgentHub has not been set up, and this service
+				// already answers missing setup with 400 and an actionable
+				// message (an unconfigured LLM key, ResolveLLMConfig above). The
+				// 409 is for setup that exists but disagrees with CubeMaster.
+				logging.G(ctx).Warnf("agenthub: create failed with an empty template registry, "+
+					"reporting it as a missing registration; cubemaster said: %v", err)
+				return nil, &Error{
+					Status: http.StatusBadRequest,
+					Message: "no agent template is registered: register one from the template " +
+						"market (POST /api/v1/agenthub/templates/market) or publish one from a running agent " +
+						"(POST /api/v1/agenthub/instances/{agentID}/publish-template), or pass templateId explicitly",
+					Cause: err,
+				}
+			}
+			// The registry did hold a template when we read it, and CubeMaster
+			// could not resolve what we sent for it: that template, or — via the
+			// published-template fast-path above — its rootfs snapshot. Reported
+			// as a conflict rather than a bad request, because the request was
+			// fine and the state is not. The message states the observable fact
+			// and lists the causes rather than picking one; which of them applies
+			// is in the log.
+			logging.G(ctx).Warnf("agenthub: cubemaster could not resolve the default template %q "+
+				"selected from the registry; cubemaster said: %v", rootfsSourceID, err)
+			return nil, &Error{
+				Status: http.StatusConflict,
+				Code:   "conflict",
+				Message: "the agent template selected by default could not be resolved: it may have been " +
+					"deleted, its registration may be invalid, or the snapshot it publishes may be gone. " +
+					"Pass templateId explicitly to choose one yourself — retrying re-runs the same " +
+					"selection and picks the same template until the registry changes",
+				Cause: err,
+			}
+		}
 		return nil, NewBadGateway("failed to create sandbox: " + err.Error())
 	}
 	var sbResult struct {

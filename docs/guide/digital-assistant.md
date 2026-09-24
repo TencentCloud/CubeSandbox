@@ -8,11 +8,11 @@ The Digital Assistant is a preview feature intended for demos and early validati
 
 ## Digital Assistant Template
 
-AgentHub creates assistants from a CubeSandbox template. Before deployment, build the Digital Assistant template (see the command below), then copy the auto-generated `tpl-` prefixed template ID into `.env`:
+AgentHub creates assistants from a CubeSandbox template. Before deployment, build the Digital Assistant template (see the command below), then register it with AgentHub. Building it is not enough on its own: AgentHub only picks templates that are registered with it. See [Choosing a Template When None Is Specified](#choosing-a-template-when-none-is-specified).
 
-```bash
-AGENTHUB_DS_OPENCLAW_TEMPLATE=<your-digital-assistant-template-id>
-```
+::: tip
+Earlier versions of this guide asked you to put the template ID in `.env` as `AGENTHUB_DS_OPENCLAW_TEMPLATE`. Nothing reads that variable, so setting it has no effect. Register the template instead.
+:::
 
 A custom template must be built from the **same Digital Assistant / OpenClaw image** as `wecom-ds-openclaw`. The image is expected to contain the OpenClaw runtime, `supervisorctl` service wiring, and the ports used by AgentHub:
 
@@ -56,6 +56,41 @@ curl -fsS http://127.0.0.1:18789/ >/dev/null
 ```
 
 If the template is missing, built from a different image, or does not include the OpenClaw service layout, assistant creation may fail during setup, restart, token reading, or gateway URL generation.
+
+## Choosing a Template When None Is Specified
+
+When a create request names neither `templateId` nor a snapshot, AgentHub picks the template in this order:
+
+1. The template marked **Recommended** on the AgentHub page (the **Recommend** action on a template). If several are marked, the most recently registered of them.
+2. Otherwise, the most recently registered template.
+3. Otherwise, the built-in identifier `wecom-ds-openclaw`, which CubeMaster resolves as a template alias. It only resolves on an install where a template carries that alias; a standard install does not create one.
+
+Registering a template therefore changes the default: once any template is registered, it is used instead of the `wecom-ds-openclaw` alias.
+
+### "no agent template is registered"
+
+If nothing is registered and the built-in identifier does not resolve either, creation fails with HTTP `400`:
+
+```text
+no agent template is registered: register one from the template market (POST /api/v1/agenthub/templates/market) or publish one from a running agent (POST /api/v1/agenthub/instances/{agentID}/publish-template), or pass templateId explicitly
+```
+
+Any one of the following fixes it:
+
+- **Template Store (WebUI).** Click **Enable Assistant** on an installed OpenClaw template, or **Install and Enable Assistant** to build and register it in one step. The install dialog registers the template only after the build finishes: if you close it while the image is still downloading, the template ends up ready in CubeSandbox but not registered with AgentHub. Open the Template Store again and click **Enable Assistant** on it.
+- **API.** Register an existing template with `POST /api/v1/agenthub/templates/market`. Only `templateId` is required, for example `{"templateId": "<tpl-id>", "name": "OpenClaw"}`. The endpoint does not check that the template exists in CubeSandbox, so a mistyped ID is accepted and, as the newest registration, becomes the default.
+
+  A template ID whose registration was removed earlier cannot currently be registered again, whether through this endpoint or **Enable Assistant**. The removed registration still holds the ID, so the request fails with HTTP `500` and a duplicate-key error. Register a different template, or publish one from an assistant.
+- **Publish from an assistant.** On an existing assistant, **Publish assistant template** publishes one of its snapshots as a template (`POST /api/v1/agenthub/instances/{agentID}/publish-template`).
+- **Per request.** Pass `templateId` explicitly; the registry is then not consulted.
+
+Registering from the Template Store does not mark the template **Recommended**. Use the **Recommend** action if a specific template should stay the default after newer ones are registered.
+
+### "the agent template selected by default could not be resolved"
+
+If a template is registered but CubeMaster can no longer resolve it — it was deleted from CubeSandbox, the registration names a template ID that does not exist, or the snapshot behind a published template is gone — creation fails with HTTP `409`. Retrying does not help: the same template is selected again until the registry changes. It is the default described above — the template marked **Recommended**, or the most recently registered one if none is — so the AgentHub page and `GET /api/v1/agenthub/templates` show which one it is. Mark a working template **Recommended**, or pass `templateId`. You can also remove the broken registration (`DELETE /api/v1/agenthub/templates/{templateID}`), but its template ID then cannot be registered again (see above). CubeOps logs the identifier it sent together with CubeMaster's original error, which does not always name it.
+
+Only a not-found is rewritten this way. Other failures to use the selected template — for example one that exists but has no ready replica on a healthy node — surface as HTTP `502` with CubeMaster's message, which names the template AgentHub picked. Check that template in CubeSandbox, or pass `templateId`.
 
 ## Environment Variables
 
