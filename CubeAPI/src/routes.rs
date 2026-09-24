@@ -580,4 +580,101 @@ mod tests {
             resp.text(),
         );
     }
+
+    /// `GET /snapshots` documents `limit` as "default 100, max 100". CubeAPI
+    /// used to forward the value to CubeMaster untouched, so CubeAPI's own
+    /// documented default was never applied — callers omitting `limit` got
+    /// CubeMaster's default of 20 instead of the advertised 100.
+    ///
+    /// This exercises the whole handler → service → CubeMaster path and
+    /// asserts the value that actually leaves the process, so removing the
+    /// normalisation at any layer turns this red.
+    #[tokio::test]
+    async fn list_snapshots_clamps_limit_before_reaching_cubemaster() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{extract::Query, routing::get, Json, Router};
+        use serde_json::Value;
+
+        // CubeMaster receives `limit` as a query parameter (see
+        // `cubemaster::CubeMasterClient::list_snapshots`), so recording the
+        // observed query string is enough to pin the value end to end.
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_handler = Arc::clone(&seen);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            let router = Router::new().route(
+                "/cube/snapshot",
+                get(move |Query(params): Query<Value>| {
+                    let seen = Arc::clone(&seen_for_handler);
+                    async move {
+                        seen.lock().unwrap().push(
+                            params
+                                .get("limit")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                        );
+                        Json(serde_json::json!({
+                            "requestID": "list-snapshots-request",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "data": [],
+                            "next_token": "",
+                        }))
+                    }
+                }),
+            );
+            axum::serve(listener, router)
+                .await
+                .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (query, expected) in [
+            // Omitted → documented default.
+            (None, "100"),
+            // Oversized → capped at the documented maximum.
+            (Some("100000"), "100"),
+            (Some("101"), "100"),
+            // Non-positive → falls back to the default rather than asking
+            // CubeMaster for no page at all.
+            (Some("0"), "100"),
+            (Some("-5"), "100"),
+            // In-range values pass through untouched.
+            (Some("1"), "1"),
+            (Some("100"), "100"),
+        ] {
+            // `axum_test`'s `get()` treats a `?`-bearing string as a path, so
+            // the parameter is attached through `add_query_param` instead.
+            let mut request = server.get("/snapshots");
+            if let Some(limit) = query {
+                request = request.add_query_param("limit", limit);
+            }
+            let resp = request.await;
+            assert_eq!(
+                resp.status_code(),
+                StatusCode::OK,
+                "GET /snapshots?limit={query:?} should succeed (got {} body={:?})",
+                resp.status_code(),
+                resp.text(),
+            );
+            let observed = seen.lock().unwrap().last().cloned().flatten();
+            assert_eq!(
+                observed.as_deref(),
+                Some(expected),
+                "GET /snapshots?limit={query:?} must send limit={expected} to \
+                 CubeMaster, got {observed:?} — the documented \"default 100, \
+                 max 100\" contract is not being applied"
+            );
+        }
+    }
 }
