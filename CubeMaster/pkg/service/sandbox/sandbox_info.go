@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -62,19 +64,22 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 	}()
 
 	cubeletReq := &cubebox.ListCubeSandboxRequest{}
-	rt.CalleeEndpoint = checkValidAndGetReq(ctx, req, cubeletReq, rsp)
-	if rt.CalleeEndpoint == "" {
+	endpoint, rec, ok := checkValidAndGetReq(ctx, req, cubeletReq, rsp)
+	if !ok {
 		return
 	}
-	err := doget(ctx, rt.CalleeEndpoint, cubeletReq, rsp)
-	if err != nil {
-		setError(errorcode.ErrorCode_ReqCubeAPIFailed, rsp)
-		return
+	rt.CalleeEndpoint = endpoint
+	if endpoint != "" {
+		if err := doget(ctx, endpoint, cubeletReq, rsp); err != nil {
+			setError(errorcode.ErrorCode_ReqCubeAPIFailed, rsp)
+			return
+		}
 	}
 
-	// Pause binding wins over Cubelet EXITED flicker / empty List: READY →
-	// paused tombstone view; FAILED → keep sandbox record with error.
-	if fillPauseBindingInfoFromMaster(ctx, req, rsp) {
+	// Pause binding overlays status onto the node view. It does not replace
+	// identity fields. A shimless binding whose node cannot be asked is
+	// rendered from the persisted create spec.
+	if applyPauseBindingToInfo(ctx, req, rsp, rec) {
 		return
 	}
 	if len(rsp.Data) == 0 {
@@ -94,57 +99,90 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 	rsp.Ret.RetMsg = code.String()
 	return ""
 }
+
+// checkValidAndGetReq locates the cubelet that should answer an Info query.
+//
+// ok is false when rsp already carries the error. An empty endpoint with ok
+// means the node cannot be asked, but a shimless pause binding can still be
+// rendered from Master. rec is the pause binding read for this sandbox, or
+// nil when there is none; callers must not read it again.
 func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cubeletReq *cubebox.ListCubeSandboxRequest,
-	rsp *types.GetCubeSandboxRes) string {
-	var n *node.Node
-	var exist bool
-	var calleeEndpoint string
-
-	if req.SandboxID != "" && req.HostID != "" {
-		cubeletReq.Id = &req.SandboxID
-		n, exist = localcache.GetNode(req.HostID)
-		if !exist {
-			return setError(errorcode.ErrorCode_NotFound, rsp)
-		}
-		if !n.Healthy {
-			return setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
-		}
-		return cubelet.GetCubeletAddr(n.IP)
+	rsp *types.GetCubeSandboxRes) (endpoint string, rec *pausesnap.Record, ok bool) {
+	if req.SandboxID == "" && req.HostID == "" {
+		setError(errorcode.ErrorCode_MasterParamsError, rsp)
+		return "", nil, false
 	}
 
-	switch {
-	case req.SandboxID != "":
-		var hostIP string
-		if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
-			hostIP = v.HostIP
-		} else if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID); ok {
-			hostIP = proxyMap.HostIP
-		} else {
-			return setError(errorcode.ErrorCode_NotFound, rsp)
-		}
+	if req.SandboxID != "" {
 		cubeletReq.Id = &req.SandboxID
-		calleeEndpoint = cubelet.GetCubeletAddr(hostIP)
+		rec = lookupPauseBinding(ctx, req.SandboxID)
+	}
+
+	var (
+		n      *node.Node
+		exist  bool
+		hostIP string
+	)
+	if req.HostID != "" {
+		n, exist = localcache.GetNode(req.HostID)
+		if !exist {
+			setError(errorcode.ErrorCode_NotFound, rsp)
+			return "", nil, false
+		}
+		hostIP = n.IP
+	} else {
+		hostIP = cachedSandboxHostIP(ctx, req.SandboxID)
+		if hostIP == "" && rec != nil {
+			hostIP = strings.TrimSpace(rec.NodeIP)
+		}
+		if hostIP == "" {
+			setError(errorcode.ErrorCode_NotFound, rsp)
+			return "", nil, false
+		}
 		n, exist = localcache.GetNodesByIp(hostIP)
-	case req.HostID != "":
-		n, exist = localcache.GetNode(req.HostID)
-		if !exist {
-			return setError(errorcode.ErrorCode_NotFound, rsp)
-		}
-		if req.SandboxID != "" {
-			cubeletReq.Id = &req.SandboxID
-		}
-		calleeEndpoint = cubelet.GetCubeletAddr(n.IP)
-	default:
-		return setError(errorcode.ErrorCode_MasterParamsError, rsp)
 	}
 
-	if !exist {
-		return setError(errorcode.ErrorCode_NotFound, rsp)
+	if !exist || !n.Healthy {
+		// A caller-pinned host keeps the old error. Only an unpinned Info of a
+		// shimless pause can be answered without the node.
+		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) {
+			return "", rec, true
+		}
+		if !exist {
+			setError(errorcode.ErrorCode_NotFound, rsp)
+		} else {
+			setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
+		}
+		return "", nil, false
 	}
-	if !n.Healthy {
-		return setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
+	return cubelet.GetCubeletAddr(hostIP), rec, true
+}
+
+// cachedSandboxHostIP is where the sandbox was last seen running. It wins
+// over the pause binding's node: after a cross-node resume whose binding
+// cleanup failed, the binding still names the origin node.
+func cachedSandboxHostIP(ctx context.Context, sandboxID string) string {
+	if v := localcache.GetSandboxCache(sandboxID); v != nil {
+		return v.HostIP
 	}
-	return calleeEndpoint
+	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
+		return proxyMap.HostIP
+	}
+	return ""
+}
+
+func lookupPauseBinding(ctx context.Context, sandboxID string) *pausesnap.Record {
+	rec, err := pausesnap.GetBySandbox(ctx, sandboxID)
+	if err != nil {
+		if !errors.Is(err, pausesnap.ErrNotFound) && !errors.Is(err, pausesnap.ErrNotReady) {
+			log.G(ctx).Warnf("GetSandboxInfo: read pause binding %s: %v", sandboxID, err)
+		}
+		return nil
+	}
+	if rec == nil || strings.TrimSpace(rec.SnapshotID) == "" {
+		return nil
+	}
+	return rec
 }
 
 func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSandboxRequest,
@@ -244,97 +282,110 @@ func getContainerName(label map[string]string) string {
 	return ""
 }
 
-// fillPauseBindingInfoFromMaster synthesizes Info from the pausesnap binding
-// when present. READY → PAUSED. CREATING/FAILED prefer Cubelet PAUSING/PAUSED
-// when the node already finished Pause (Master RPC may have timed out); otherwise
-// CREATING → PAUSING and FAILED → UNKNOWN + pause error. Overrides Cubelet
-// EXITED flicker during CoW Pause.
-func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes) bool {
-	if req == nil || rsp == nil || req.SandboxID == "" {
+// applyPauseBindingToInfo lets the pause binding decide the reported status
+// of an Info view without replacing its identity. It returns true when it
+// has produced the final response.
+func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
+	rsp *types.GetCubeSandboxRes, rec *pausesnap.Record) bool {
+	if rec == nil || req == nil || rsp == nil || req.SandboxID == "" {
 		return false
 	}
-	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
-	if !ok || proxyMap == nil {
+	item := findSandboxData(rsp.Data, req.SandboxID)
+	var observed int32
+	if item != nil {
+		observed = item.Status
+	}
+	view := decidePauseView(rec, observed, item != nil)
+	switch {
+	case view.stale:
+		recordStalePauseBinding(ctx, "info", req.SandboxID, rec)
 		return false
-	}
-	rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID)
-	if err != nil || rec == nil || strings.TrimSpace(rec.SnapshotID) == "" {
-		return false
-	}
-	status := strings.ToUpper(strings.TrimSpace(rec.Status))
-	ann := map[string]string{
-		constants.CubeAnnotationPauseSnapshotID: rec.SnapshotID,
-	}
-	var st int32
-	switch status {
-	case "READY":
-		st = int32(cubebox.ContainerState_CONTAINER_PAUSED)
-	case pausesnap.StatusFailed:
-		// Master timed out / failed, but Cubelet may still have reached PAUSED.
-		// Prefer the node view so Info/List stay usable; Resume heals separately.
-		if cubeletReportsPauseState(rsp) {
+	case !view.override:
+		// No observation and a binding status we do not synthesize (unknown
+		// status): leave the response alone so Info can report not found.
+		if item == nil {
 			return false
 		}
-		st = int32(cubebox.ContainerState_CONTAINER_UNKNOWN)
-		errMsg := strings.TrimSpace(rec.LastError)
-		if errMsg == "" {
-			errMsg = "pause failed; sandbox may be unrecoverable"
-		}
-		ann[constants.CubeAnnotationPauseError] = errMsg
-	case "CREATING":
-		// Still in flight. Prefer Cubelet PAUSING/PAUSED when present.
-		if cubeletReportsPauseState(rsp) {
-			return false
-		}
-		st = int32(cubebox.ContainerState_CONTAINER_PAUSING)
-	default:
+		item.Annotations = overlayPauseAnnotations(item.Annotations, rec, "")
 		return false
 	}
-	endAt := int64(0)
-	for _, item := range rsp.Data {
-		if item != nil && item.SandboxID == req.SandboxID {
-			endAt = item.EndAt
-			break
+	if item == nil {
+		// The caller named a host that does not hold this binding. An empty
+		// list from that host means the sandbox is not there; do not invent a
+		// paused sandbox and stamp the caller's host on it. An unpinned Info,
+		// or a pin that matches the binding's node, still synthesizes: that is
+		// how CREATING/FAILED stay visible when the node has not reported a row.
+		if req.HostID != "" && !pauseBindingOnHost(rec, req.HostID) {
+			return false
 		}
+		item = sandboxDataFromSpec(req.SandboxID, loadSandboxSpec(ctx, req.SandboxID))
+		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
 	}
-	if endAt == 0 {
-		endAt = LookupSandboxEndAt(ctx, req.SandboxID)
+	setSandboxDataStatus(item, view.status)
+	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
+	setPauseLocation(ctx, req, item, rec)
+	rsp.Data = []*types.SandboxData{item}
+	if rsp.Ret == nil {
+		rsp.Ret = &types.Ret{}
 	}
-	one := &types.SandboxData{
-		SandboxID:   req.SandboxID,
-		Status:      st,
-		HostIP:      proxyMap.HostIP,
-		SandboxIP:   proxyMap.SandboxIP,
-		Annotations: ann,
-		EndAt:       endAt,
-		Containers: []*types.ContainerInfo{
-			{
-				ContainerID: req.SandboxID,
-				Status:      st,
-			},
-		},
-	}
-	if n, exist := localcache.GetNodesByIp(proxyMap.HostIP); exist {
-		one.HostID = n.ID()
-	}
-	rsp.Data = []*types.SandboxData{one}
 	rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
 	rsp.Ret.RetMsg = errorcode.ErrorCode_Success.String()
 	return true
 }
 
-func cubeletReportsPauseState(rsp *types.GetCubeSandboxRes) bool {
-	if rsp == nil {
+func pauseBindingOnHost(rec *pausesnap.Record, hostID string) bool {
+	hostID = strings.TrimSpace(hostID)
+	if rec == nil || hostID == "" {
 		return false
 	}
-	for _, d := range rsp.Data {
-		if d == nil {
-			continue
-		}
-		if d.Status == int32(cubebox.ContainerState_CONTAINER_PAUSING) ||
-			d.Status == int32(cubebox.ContainerState_CONTAINER_PAUSED) {
-			return true
+	return rec.NodeID == hostID || rec.NodeIP == hostID
+}
+
+func findSandboxData(items []*types.SandboxData, sandboxID string) *types.SandboxData {
+	for _, item := range items {
+		if item != nil && item.SandboxID == sandboxID {
+			return item
 		}
 	}
-	return false
+	return nil
+}
+
+func loadSandboxSpec(ctx context.Context, sandboxID string) *types.CreateCubeSandboxReq {
+	spec, err := sandboxspec.Get(ctx, sandboxID)
+	if err != nil {
+		if !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) &&
+			!errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+			log.G(ctx).Warnf("GetSandboxInfo: read sandbox spec %s: %v", sandboxID, err)
+		}
+		return nil
+	}
+	return spec
+}
+
+// setPauseLocation reports where the sandbox lives. A shimless binding names
+// the node holding the pause package; otherwise the proxy map does.
+func setPauseLocation(ctx context.Context, req *types.GetCubeSandboxReq, item *types.SandboxData, rec *pausesnap.Record) {
+	if item == nil || rec == nil {
+		return
+	}
+	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
+	hostIP := ""
+	if isShimlessPauseStatus(rec.Status) {
+		hostIP = strings.TrimSpace(rec.NodeIP)
+	}
+	if hostIP == "" && ok && proxyMap != nil {
+		hostIP = proxyMap.HostIP
+	}
+	if ok && proxyMap != nil {
+		item.SandboxIP = proxyMap.SandboxIP
+	}
+	item.HostIP = hostIP
+	if n, exist := localcache.GetNodesByIp(hostIP); exist && n != nil {
+		item.HostID = n.ID()
+	} else if isShimlessPauseStatus(rec.Status) {
+		item.HostID = rec.NodeID
+	}
+	if req.HostID != "" {
+		item.HostID = req.HostID
+	}
 }
