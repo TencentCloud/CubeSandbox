@@ -176,6 +176,9 @@ void s3_bs_dev_set_reap_cb(struct spdk_bs_dev *bs_dev, s3_bs_dev_reap_cb cb_fn,
 int s3_bs_dev_wal_apply(struct spdk_bs_dev *bs_dev,
 			const struct s3_wal_entry_hdr *hdr, const void *payload);
 
+/** Overlay occupancy after WAL replay, for attach diagnostics. */
+void s3_bs_dev_log_overlay(struct spdk_bs_dev *bs_dev);
+
 /**
  * Wait until everything acknowledged so far has reached S3 (INV2).
  *
@@ -183,8 +186,32 @@ int s3_bs_dev_wal_apply(struct spdk_bs_dev *bs_dev,
  * while blobstore is still up, but it is not sufficient on its own: unloading
  * writes more metadata, which destroy() then has to flush. Without a WAL this
  * completes immediately, since a finished write is already in S3.
+ *
+ * \param timeout_us 0 selects S3_FLUSHER_DRAIN_TIMEOUT_US. A caller that is
+ *                   about to pause I/O for the length of this call wants a
+ *                   shorter one: a workload that keeps writing never lets the
+ *                   overlay go clean, so the drain runs to its deadline and the
+ *                   whole of it is added to the pause.
  */
-void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, s3_bs_dev_cb cb_fn, void *cb_arg);
+void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
+		     s3_bs_dev_cb cb_fn, void *cb_arg);
+
+/** Stop background uploads after current uploads have completed. */
+void s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev,
+			       s3_bs_dev_cb cb_fn, void *cb_arg);
+
+/** Re-enable a flusher suspended by s3_bs_dev_suspend_flusher(). */
+void s3_bs_dev_resume_flusher(struct spdk_bs_dev *bs_dev);
+
+/**
+ * Re-enable a suspended flusher after a fallback grace period.
+ *
+ * Attach uses this to keep a large replay backlog from competing with active
+ * volume restoration and listener creation. Calling resume directly cancels
+ * the pending grace period.
+ */
+void s3_bs_dev_schedule_flusher_resume(struct spdk_bs_dev *bs_dev,
+				       uint64_t delay_us);
 
 /**
  * Nudge the flusher. Only useful for tests and for shutdown paths that want to

@@ -453,6 +453,12 @@ if [ "${DO_REPLAY}" -eq 1 ] && [ "${DO_CONNECT}" -eq 1 ]; then
 	rcow_tune_readahead
 fi
 
+# Attach holds WAL-replay uploads while namespaces and listeners are restored.
+# Release that hold on the actual recovery milestone instead of waiting for the
+# attach-side fallback timer. Failure is non-fatal: the fallback still fires.
+rcow_rpc rcow_resume_flushers '{}' >/dev/null 2>&1 ||
+	rcow_warn "could not resume background uploads; attach fallback will retry"
+
 # ==========================================================================
 rcow_step "up"
 
