@@ -43,9 +43,22 @@ For each sandbox create request, scheduling roughly follows four steps:
 1. **Resolve request constraints**: read `instance_type`, template ID, resource requirements, explicit host IPs, node affinity / annotations, and similar constraints.
 2. **Filter nodes**: remove unhealthy nodes, stale metric nodes, nodes over MVM limits, nodes without local template replicas, nodes with too many real-time or locally observed creates, nodes that do not satisfy affinity, and, when the disk filter or backoff path is active, nodes with high disk usage.
 3. **Score nodes**: score remaining candidates, for example using weighted `mvm_num`, `local_create_num`, `quota_cpu_usage`, and `quota_mem_usage`.
-4. **Pick the final node**: choose from the highest-scored candidate set. `priority_select_num` controls how many top nodes are eligible for final random selection, and `least_select_name` defaults to `random`.
+4. **Pick the final node**: choose from the highest-scored candidate set. Under the legacy configuration, `priority_select_num` controls how many top nodes are eligible for final random selection, and `least_select_name` defaults to `random`. Under scheduler Profiles, the equivalent knobs are the per-Profile `selection.method` (`highest` / `spread` / `random`) and `selection.top_n` — see [Extensible scheduler plugins](./scheduler-plugin.md).
 
 Without scoring, CubeMaster still filters nodes but may choose from the filtered order, which can concentrate new sandboxes on the first eligible node until resource filters push traffic elsewhere.
+
+## Which scheduling strategy is active
+
+CubeMaster decides its scheduling strategy from the configuration as follows:
+
+1. **`scheduler.profiles` set** — those Profiles are used. Requests are routed by the allowed route labels (`scheduler.profile_route_label_keys`) or instance types, and requests matching no route fall back to the Profile marked `default: true`.
+2. **No profiles, but any of the legacy `scheduler.filter` / `scheduler.score` / `scheduler.postscore` blocks set** — the legacy configuration is compiled into a compatible `default` Profile with the old tolerance semantics; `priority_select_num` and `least_select_name` keep working as before.
+3. **Nothing scheduler-policy related set at all** — CubeMaster injects the factory Profiles `burst_balance`, `template_reuse` (routed by the request label `workload`) and `mixed_binpack` (default), and logs a startup warning, because this changes placement compared to the old empty-config behavior (no filters, no scorers, random pick). Set `scheduler.disable_factory_profiles: true` to keep the old behavior.
+
+Two cross-cutting details operators should know:
+
+- **Where scorer factor switches live**: the built-in scorers `real_time_weighted_average`, `image_score`, and `multi_factor_weighted_average` read their `enable_weight_factors` / factor weights from the legacy `scheduler.score.plugin_conf` and `scheduler.score.resource_weights` blocks even when they are referenced from a Profile. A Profile that references them without the required legacy block fails to compile at startup or hot reload. The factory Profiles embed a matching legacy score subtree, so zero-config deployments are covered.
+- **Reservation behavior**: the reservation ledger and synchronous Redis reservation check have been removed from the create path. CubeMaster performs local admission checks and dispatches to Cubelet; metrics update independently, so cross-replica admission can over-admit during the reporting window. When that happens, the create fails on the chosen node instead of failing over to another one — Cubelet does not enforce node-wide quotas on the create path, and the resulting error codes are not retryable. Delete the obsolete `scheduler.reservation_redis_error_policy` setting. See [scheduler plugins](./scheduler-plugin.md) for details.
 
 ## Key scheduler fields
 

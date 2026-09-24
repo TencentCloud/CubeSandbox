@@ -81,6 +81,12 @@ redis:
 
 scheduler:
   priority_select_num: 1
+  # Optional scenario profiles are documented in
+  # docs/guide/scheduler-plugin.md. This file configures the legacy
+  # filter/score path below, which is compiled as the compatible default
+  # profile. When neither profiles nor filter/score is configured at all,
+  # three built-in profiles embedded in the binary take effect instead
+  # (pkg/base/config/scheduler_factory.yaml).
   metric_update_timeout: 300s
   local_metric_update_timeout: 300s
   # Whether to ignore the per-node allocated CPU/Mem usage recorded in Redis

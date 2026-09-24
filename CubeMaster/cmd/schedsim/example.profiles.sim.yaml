@@ -1,0 +1,135 @@
+# Example CubeMaster config for schedsim using the profile-based scheduler
+# plugin system (scheduler.profiles, merged from PR #1), contrasted with the
+# legacy flat config in example.sim.yaml.
+#
+# Usage (single run):
+#   go run ./cmd/schedsim --trace /path/to/trace.json \
+#     --config cmd/schedsim/example.profiles.sim.yaml \
+#     --nodes 300 --template-preload 0.3 --seed 42 --rounds 3 -o report.json
+#
+# A/B against the legacy config (same trace/fleet/seed, markdown report):
+#   schedsim --compare legacy=cmd/schedsim/example.sim.yaml,spread=cmd/schedsim/example.profiles.sim.yaml \
+#     --trace /path/to/trace.json --nodes 300 --rounds 3 -o compare.md
+#
+# Only the scheduler-relevant sections matter; see example.sim.yaml for the
+# simulation-specific caveats (metric freshness, determinism). With `profiles`
+# present the scheduler compiles each profile into a pipeline:
+# mandatory guards (node_safety/cpu/mem/disk/template_locality/realtime_create_num)
+# always run first, then the profile's optional filters, then its scores; the
+# `selection` block replaces legacy least_select_name/priority_select_num.
+
+common:
+  http_port: 18089
+  collect_metric_interval: 1s
+  report_local_create_num: false
+  report_stdev_metric: false
+
+log:
+  module: "schedsim"
+  path: "/tmp/schedsim-log"
+  level: "error"
+  file_size: 100
+  file_num: 2
+
+cubelet_conf:
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 50
+
+scheduler:
+  pre_select_num: -1
+
+  # Legacy picker knobs are ignored when profiles are configured; they stay
+  # here only because a few built-in plugins still read the legacy sections
+  # below (scorer internals come from score.plugin_conf).
+  priority_select_num: 1
+  least_select_name: "random"
+
+  metric_update_timeout: 86400s
+  local_metric_update_timeout: 86400s
+
+  ignore_redis_allocation: false
+  overcommit_ratio:
+    cpu_ratio: 3.0
+    mem_ratio: 2.0
+  node_max_mem_reserved_in_mb: 256
+
+  # Built-in score plugins still take their factor weights from the legacy
+  # score section; the profile only selects WHICH plugins run and with what
+  # pipeline weight.
+  score:
+    resource_weights:
+      req_cpu: 1.0
+      req_mem: 1.0
+      quota_cpu_usage: 1.0
+      quota_mem_usage: 1.0
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - "quota_cpu_usage"
+          - "quota_mem_usage"
+
+  instance_type_conf:
+    sim:
+      oss_cluster_labels:
+        schedsim-sim: {}
+
+  # Allow-listed request labels that profile routes may match on.
+  profile_route_label_keys:
+    - "bench_lane"
+
+  profiles:
+    # sim-spread: same least-loaded scorer as the legacy example, but the
+    # picker uniformly spreads over the top 3 instead of always taking the
+    # best node. This trades a little balance for protection against
+    # thundering-herd when scores go stale (many requests reading the same
+    # snapshot all picking the same "best" node); on this sim's fresh-score
+    # workload it shows up as slightly worse CV/jain vs the legacy
+    # deterministic-best pick, which is the expected, honest trade-off.
+    # NOTE: top_n > 1 draws from a time-seeded RNG, so per-run results vary;
+    # aggregate over --rounds >= 3.
+    - name: sim-spread
+      default: true
+      scores:
+        - name: real_time_weighted_average
+          weight: 1
+      selection:
+        method: spread
+        top_n: 3
+      failure:
+        filter: fail-closed
+        score: default-score
+        no_candidate: fail
+
+    # Routed variant example: requests whose labels carry bench_lane=strict
+    # (and only those) take the deterministic highest-score pick with no
+    # backoff. Delete this profile to run the sim without label routing.
+    - name: sim-strict
+      route:
+        labels:
+          bench_lane: strict
+      scores:
+        - name: real_time_weighted_average
+          weight: 1
+      selection:
+        method: highest
+        top_n: 1
+      failure:
+        filter: fail-closed
+        score: fail-closed
+        no_candidate: fail
+
+    # Expression (CEL) plugin example, disabled by default. Enable to score
+    # nodes by remaining CPU fraction without writing Go:
+    #   - name: sim-cel
+    #     default: true
+    #     scores:
+    #       - name: remaining_cpu
+    #         type: expr
+    #         weight: 1
+    #         default_score: 50
+    #         expr: >-
+    #           node.quota_cpu > 0 ?
+    #           100.0 * (1.0 - double(node.allocated_cpu) / double(node.quota_cpu)) :
+    #           0.0
+    #     selection: { method: highest, top_n: 1 }

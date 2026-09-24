@@ -7,6 +7,7 @@ package score
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -16,26 +17,44 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 const (
 	mb                    int64 = 1024 * 1024
-	minThreshold          int64 = 23 * mb
-	maxContainerThreshold int64 = 80000 * mb
+	minThreshold          int64 = 23 * mb    // 镜像总大小低于该值按该值计分（下限保护）
+	maxContainerThreshold int64 = 80000 * mb // 单个容器镜像大小超过该值按该值计分（上限保护）
 )
 
+// imageScore 镜像本地化评分插件：
+// 节点上已缓存请求镜像时得分更高，优先选择镜像已就绪的节点，避免调度后拉镜像
 type imageScore struct {
 	weight float64
 }
 
+// getImageStateByNode 查询节点上镜像状态的函数（可替换，便于测试）
 var getImageStateByNode = localcache.GetImageStateByNode
 
+func imageScoreConf() *config.ImageScore {
+	sched := config.GetConfig().Scheduler
+	if sched == nil || sched.Score == nil {
+		return nil
+	}
+	return sched.Score.ScorePluginConf.ImageScore
+}
+
+// NewImageScore tolerates a missing legacy plugin_conf block: the scorer then
+// has no weight of its own (a profile entry must carry one) and Select reports
+// ErrNotApplicable until the block is configured, because enable_weight_factors
+// only exists in the legacy config tree.
 func NewImageScore() *imageScore {
-	if config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore == nil {
-		panic("config.Scheduler.Score.ScorePluginConf.ImageScore is nil")
+	conf := imageScoreConf()
+	if conf == nil {
+		CubeLog.Warnf("scheduler.score.plugin_conf.image_score is not configured; image_score scores nothing until it is")
+		return &imageScore{}
 	}
 	return &imageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore.Weight,
+		weight: conf.Weight,
 	}
 }
 
@@ -50,10 +69,14 @@ func (l *imageScore) String() string {
 func (l *imageScore) Weight() float64 {
 	return l.weight
 }
+
 func (l *imageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore.Disable
+	conf := imageScoreConf()
+	return conf == nil || conf.Disable
 }
 
+// Select 按启用因子计算每个节点的镜像得分并归一化：
+// 支持按请求镜像列表（ImageID）与按模板 ID 两种维度打分
 func (l *imageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
 	err error) {
 	defer func() {
@@ -64,19 +87,19 @@ func (l *imageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreLis
 
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil || sconf.Score == nil || sconf.Score.ScorePluginConf.ImageScore == nil {
-		return nodes, nil
+		return nil, fmt.Errorf("image_score legacy plugin_conf is not configured: %w", ErrNotApplicable)
 	}
 
 	if l.Disable() {
-		return nil, nil
+		return nil, fmt.Errorf("image_score is disabled in the legacy plugin_conf: %w", ErrNotApplicable)
 	}
 
 	if selCtx.ReqRes == nil {
-		return nil, nil
+		return nil, fmt.Errorf("image_score requires the request resource spec: %w", ErrNotApplicable)
 	}
 	totalWeight, err := getImageScoreTotalWeight()
 	if err != nil || totalWeight == 0 {
-		return nodes, nil
+		return nil, fmt.Errorf("image_score has no enabled factor with a non-zero resource weight: %w", ErrNotApplicable)
 	}
 
 	inList := selCtx.Nodes()
@@ -93,6 +116,8 @@ func (l *imageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreLis
 
 	return nodes, nil
 }
+
+// getImageScoreTotalWeight 计算镜像评分启用因子的权重总和
 func getImageScoreTotalWeight() (float64, error) {
 	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
 	if sconf == nil {
@@ -105,6 +130,7 @@ func getImageScoreTotalWeight() (float64, error) {
 	return w, nil
 }
 
+// getImageWeightedAverageScore 按启用因子计算节点镜像加权得分
 func getImageWeightedAverageScore(ctx context.Context, res *selctx.RequestResource, nodeInfo *node.Node) float64 {
 	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
 	if sconf == nil || res == nil || nodeInfo == nil {
@@ -122,6 +148,8 @@ func getImageWeightedAverageScore(ctx context.Context, res *selctx.RequestResour
 	}
 	return scores
 }
+
+// getImageScore 按请求镜像列表给节点打分：已缓存镜像越多得分越高
 func getImageScore(ctx context.Context, images []*selctx.ImageSpec, nodeInfo *node.Node) float64 {
 	_ = ctx
 	if images == nil || nodeInfo == nil {
@@ -133,16 +161,25 @@ func getImageScore(ctx context.Context, images []*selctx.ImageSpec, nodeInfo *no
 	return float64(score)
 }
 
+// getTemplateScore 按模板 ID 给节点打分：节点已缓存该模板镜像得满分，否则 0 分。
+// 模板因子是布尔化的：此前按"模板字节数 × 副本比例"经 calculatePriority 线性映射，
+// 常见 GiB 级模板在 [23MB, 80GB] 尺度上只得 1-2 分，会被任意资源类因子碾压，
+// 使 locality 偏好在数值上失效。该变化对 legacy `enable_scorers: [image_score]`
+// 路径同样生效，升级行为见 docs/guide/scheduler-plugin.md 的升级说明；
+// calculatePriority 的 min/max 阈值仍服务于 getImageScore 的镜像因子，不受影响。
 func getTemplateScore(ctx context.Context, templateID string, nodeInfo *node.Node) float64 {
 	_ = ctx
 	if templateID == "" || nodeInfo == nil {
 		return 0
 	}
-	imageScores := sumTemplateScores(nodeInfo, templateID)
-	score := calculatePriority(imageScores, 1)
-	return float64(score)
+	if getImageStateByNode(templateID, nodeInfo.ID()) != nil {
+		return float64(fwk.MaxNodeScore)
+	}
+	return 0
 }
 
+// calculatePriority 将镜像总分映射到 0~MaxNodeScore 区间：
+// 低于下限保底为 minThreshold 对应的分数，高于上限封顶
 func calculatePriority(sumScores int64, numContainers int) int64 {
 	maxThreshold := maxContainerThreshold * int64(numContainers)
 	if sumScores < minThreshold {
@@ -154,20 +191,13 @@ func calculatePriority(sumScores int64, numContainers int) int64 {
 	return fwk.MaxNodeScore * (sumScores - minThreshold) / (maxThreshold - minThreshold)
 }
 
+// sumImageScores 汇总节点上已缓存的请求镜像的得分
 func sumImageScores(nodeInfo *node.Node, images []*selctx.ImageSpec) int64 {
 	var sum int64 = 0
 	for _, image := range images {
 		if state := getImageStateByNode(image.ImageID, nodeInfo.ID()); state != nil {
 			sum += int64(state.ScaledImageScore)
 		}
-	}
-	return sum
-}
-
-func sumTemplateScores(nodeInfo *node.Node, templateID string) int64 {
-	var sum int64 = 0
-	if state := getImageStateByNode(templateID, nodeInfo.ID()); state != nil {
-		sum += int64(state.ScaledImageScore)
 	}
 	return sum
 }
