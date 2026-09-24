@@ -514,6 +514,47 @@ EOF
   fi
 }
 
+test_external_redis_tls_preflight() {
+  # The canonical switch accepts exactly the spellings the CubeProxy Lua client
+  # understands, so installer and clients agree on whether TLS is on.
+  ( CUBE_EXTERNAL_REDIS_TLS=1; one_click_external_redis_tls_enabled ) \
+    || fail "CUBE_EXTERNAL_REDIS_TLS=1 must enable TLS"
+  ( CUBE_EXTERNAL_REDIS_TLS=true; one_click_external_redis_tls_enabled ) \
+    || fail "CUBE_EXTERNAL_REDIS_TLS=true must enable TLS"
+  if ( CUBE_EXTERNAL_REDIS_TLS=0; one_click_external_redis_tls_enabled ); then
+    fail "CUBE_EXTERNAL_REDIS_TLS=0 must leave TLS off"
+  fi
+  if ( unset CUBE_EXTERNAL_REDIS_TLS; one_click_external_redis_tls_enabled ); then
+    fail "unset CUBE_EXTERNAL_REDIS_TLS must leave TLS off"
+  fi
+
+  # --tls is detected as its own flag, not through --tls-* siblings.
+  local help_with_tls help_without_tls
+  help_with_tls=$'  --tls              Establish a secure TLS connection.\n  --tls-ciphers <list>'
+  help_without_tls=$'  --tls-ciphers <list>\n  --connect-timeout <seconds>'
+  redis_cli_help_supports_flag "${help_with_tls}" "--tls" \
+    || fail "redis_cli_help_supports_flag should detect --tls"
+  if redis_cli_help_supports_flag "${help_without_tls}" "--tls"; then
+    fail "redis_cli_help_supports_flag should not match --tls through --tls-ciphers"
+  fi
+
+  # Both preflight branches (Sentinel + host) speak TLS when the switch is on,
+  # and skip instead of dying when redis-cli has no TLS support.
+  local f="${ONE_CLICK_DIR}/install.sh"
+  [[ "$(grep -cF 'redis_cli_help_supports_flag "${redis_help_output}" "--tls"' "${f}")" -eq 2 ]] \
+    || fail "both Redis preflight branches must probe redis-cli for --tls"
+  [[ "$(grep -cF 'redis_tls_args+=(--tls)' "${f}")" -eq 2 ]] \
+    || fail "both Redis preflight branches must add --tls when CUBE_EXTERNAL_REDIS_TLS is on"
+  # sentinel_base_cmd, master_base_cmd and redis_base_cmd all carry the TLS args.
+  [[ "$(grep -cF '"${redis_tls_args[@]}"' "${f}")" -eq 3 ]] \
+    || fail "every preflight redis-cli invocation must carry the TLS args"
+  # An explicitly empty external password ("no AUTH") must survive the
+  # installer defaults instead of becoming the bundled ceuhvu123.
+  assert_contains "${f}" 'CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD-ceuhvu123}"'
+  assert_contains "${ONE_CLICK_DIR}/scripts/one-click/up-with-deps.sh" \
+    'CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD-ceuhvu123}"'
+}
+
 test_run_with_timeout_if_available() {
   local timeout_log="${TMP_DIR}/timeout-wrapper.log"
   local direct_log="${TMP_DIR}/timeout-direct.log"
@@ -640,6 +681,7 @@ test_patch_cubelet_config_template_refuses_symlink
 test_upgrade_preflight_and_backup
 test_validation_library_fallback_die
 test_redis_cli_help_supports_flag
+test_external_redis_tls_preflight
 test_run_with_timeout_if_available
 test_install_sh_wires_upgrade_flow
 
