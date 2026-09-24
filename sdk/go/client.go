@@ -97,12 +97,54 @@ func (c *Client) List(ctx context.Context) ([]SandboxInfo, error) {
 	return sandboxes, nil
 }
 
+// ListV2 lists every running sandbox through the v2 endpoint.
+//
+// `GET /v2/sandboxes` answers one page at a time (`limit`, 100 by default) and
+// reports the next page's position in the `x-next-token` response header. This
+// follows that cursor until it is absent, so the result is every matching
+// sandbox rather than only the first page.
 func (c *Client) ListV2(ctx context.Context) ([]SandboxInfo, error) {
-	var sandboxes []SandboxInfo
-	if err := c.doJSON(ctx, http.MethodGet, "/v2/sandboxes", nil, &sandboxes, http.StatusOK); err != nil {
-		return nil, err
+	var collected []SandboxInfo
+	// `nextToken` is the query parameter the endpoint declares; the first
+	// request carries none, which is what fetches page one.
+	nextToken := ""
+	for {
+		path := "/v2/sandboxes"
+		if nextToken != "" {
+			path += "?nextToken=" + url.QueryEscape(nextToken)
+		}
+		req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.controlHTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var page []SandboxInfo
+		// Status first: an error body is not the array this decodes.
+		if !statusOK(resp.StatusCode, []int{http.StatusOK}) {
+			err := apiErrorFromResponse(resp)
+			resp.Body.Close()
+			return nil, err
+		}
+		decErr := json.NewDecoder(resp.Body).Decode(&page)
+		closeErr := resp.Body.Close()
+		if decErr != nil {
+			return nil, decErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		collected = append(collected, page...)
+
+		// Absent (or blank) header means the last page has been returned.
+		nextToken = resp.Header.Get("x-next-token")
+		if nextToken == "" {
+			return collected, nil
+		}
 	}
-	return sandboxes, nil
 }
 
 func (c *Client) Health(ctx context.Context) (map[string]any, error) {

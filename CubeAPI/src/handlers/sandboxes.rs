@@ -4,7 +4,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -85,7 +85,12 @@ pub async fn list_sandboxes(
     path = "/v2/sandboxes",
     params(ListSandboxesV2Query),
     responses(
-        (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox]),
+        (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox],
+            headers(
+                ("x-next-token", description = "Continuation cursor for the next page. Omitted on the last page.")
+            )
+        ),
+        (status = 400, description = "Malformed nextToken", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
@@ -103,12 +108,13 @@ pub async fn list_sandboxes_v2(
         )
         .await;
 
-    let list = state
+    let page = state
         .services
         .sandboxes
-        .list(
+        .list_v2(
             params.metadata.as_deref(),
             params.state.as_deref(),
+            params.next_token.as_deref(),
             params.limit,
         )
         .await?;
@@ -118,10 +124,29 @@ pub async fn list_sandboxes_v2(
         .log(
             LogEvent::new(LogLevel::Info, "api.response")
                 .field("handler", "list_sandboxes_v2")
-                .field_value("count", list.len()),
+                .field_value("count", page.items.len())
+                .field(
+                    "has_next_token",
+                    if page.next_token.is_some() {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
         )
         .await;
-    Ok(Json(list))
+
+    // The continuation cursor rides in a header, matching `GET /snapshots`, so
+    // the body stays a plain sandbox array. It is omitted on the last page
+    // rather than sent empty, which reads as "keep going" to some clients.
+    let mut headers = HeaderMap::new();
+    if let Some(next_token) = page.next_token {
+        if let Ok(value) = HeaderValue::from_str(&next_token) {
+            headers.insert("x-next-token", value);
+        }
+    }
+
+    Ok((StatusCode::OK, headers, Json(page.items)))
 }
 
 // ─── GET /sandboxes/:sandboxID ────────────────────────────────────────────────

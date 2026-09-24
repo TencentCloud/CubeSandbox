@@ -903,10 +903,10 @@ pub struct ListSandboxesQuery {
 /// Query params for GET /v2/sandboxes.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
-#[allow(dead_code)]
 pub struct ListSandboxesV2Query {
     pub metadata: Option<String>,
     pub state: Option<String>,
+    /// Continuation cursor from the previous response's `x-next-token` header.
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
     #[serde(default = "default_page_limit")]

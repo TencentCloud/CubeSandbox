@@ -115,6 +115,134 @@ impl SandboxService {
             .collect())
     }
 
+    /// One page of `GET /v2/sandboxes` plus the cursor for the following page.
+    ///
+    /// CubeMaster paginates its sandbox list over *nodes* — `start_idx`/`size`
+    /// select a window of healthy nodes and every sandbox on those nodes is
+    /// returned, while `Total` counts nodes rather than sandboxes (see
+    /// `CubeMaster/pkg/service/sandbox/sandbox_list.go`, which resolves the
+    /// window through `localcache.RangeDBHost`). Those fields therefore cannot
+    /// express sandbox-level pagination, and forwarding a client offset into
+    /// `start_idx` would silently page over the wrong unit.
+    ///
+    /// So the page is cut here, over the filtered sandbox set: the backend is
+    /// walked until it has covered every node, and the cursor names an offset
+    /// into that set. That keeps the page boundary aligned with what the client
+    /// actually sees, which matters because `metadata`/`state` filtering
+    /// happens on this side and would otherwise shift the window under the
+    /// client's feet.
+    ///
+    /// Walking the node windows instead of asking for one huge window is
+    /// deliberate. A window that stops short of the last node makes CubeMaster
+    /// treat the response as a non-final node page, and it only appends
+    /// shimless paused rows on the final one
+    /// (`shouldAppendShimlessPauseRows`), so a short window would silently drop
+    /// exactly the sandboxes the `state=paused` filter exists to find. The
+    /// window stays bounded because each one costs a cubelet `List` RPC per
+    /// node; the loop stops as soon as the backend reports the last node.
+    pub async fn list_v2(
+        &self,
+        metadata_filter: Option<&str>,
+        state_filter: Option<&str>,
+        next_token: Option<&str>,
+        limit: i32,
+    ) -> AppResult<SandboxListPage> {
+        let start = parse_sandbox_list_cursor(next_token)?;
+        let state_filter = parse_state_filter(state_filter);
+
+        let mut matching: Vec<crate::models::ListedSandbox> = Vec::new();
+        // CubeMaster's own all-pages walker dedups by `sandbox_id`
+        // (`cubemastercli/commands/cubebox/list.go`), because a tombstone the
+        // origin node reported on an earlier page reappears on the last one.
+        // Belt-and-braces here: a duplicate would be counted twice by the
+        // cursor offset, so a paging client would see the same sandbox twice.
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut node_window_start = 1;
+        loop {
+            let req = ListSandboxRequest {
+                request_id: new_request_id(),
+                instance_type: self.instance_type.clone(),
+                // `start_idx` is 1-based over nodes; CubeMaster rewrites a 0
+                // into 1 and rejects a negative one.
+                start_idx: Some(node_window_start),
+                // Must be positive: CubeMaster answers `size <= 0` with
+                // MasterParamsError.
+                size: Some(SANDBOX_LIST_NODE_WINDOW),
+                host_id: None,
+                filter: None,
+            };
+
+            let resp = self
+                .cubemaster
+                .list_sandboxes(&req)
+                .await
+                .map_err(params_error_or_internal)?;
+
+            ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
+
+            matching.extend(
+                resp.sandboxes
+                    .into_iter()
+                    .map(from_cubemaster_info)
+                    .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
+                    .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state))
+                    .filter(|sb| seen_ids.insert(sb.sandbox_id.clone())),
+            );
+
+            // Advance on the backend's own cursor, not on the window size.
+            // `IndexByPage` matches `start_idx` against each node's `Index`
+            // (`Index: int(elem.ID)`), so ids carry the gaps left by deleted
+            // node rows and the walk cannot assume `start + window` skips
+            // exactly one window — on a sparse cluster it lands back inside
+            // the window just returned and re-lists the same sandboxes.
+            // `end_idx` is the Index of the last node the window covered, so
+            // `end_idx + 1` is the next node's position in *both* branches
+            // (`node.go`). The size test below stays as the termination rule:
+            // a short window is the last one, and `size == 0` means the cursor
+            // ran past the end.
+            //
+            // A missing, zero or negative `end_idx` means the backend did not
+            // report a cursor at all, so there is nothing to advance on and
+            // the loop must stop rather than spin on the same window forever.
+            match (resp.size, resp.end_idx) {
+                (Some(covered), Some(end_idx)) if covered >= SANDBOX_LIST_NODE_WINDOW => {
+                    if end_idx <= 0 {
+                        break;
+                    }
+                    node_window_start = end_idx + 1;
+                }
+                _ => break,
+            }
+        }
+
+        // Sorting removes one source of drift — without it the same cursor
+        // could surface different items as CubeMaster's own ordering shifts
+        // between two requests. It does not make the offset immune to
+        // concurrent writes: the offset is recomputed against a fresh snapshot
+        // each call, so a create or delete before the boundary can make a
+        // later page repeat or skip an item. A cursor that survives that would
+        // have to name the last-seen key rather than a position, which is a
+        // larger change than this fix.
+        matching.sort_by(|a, b| a.sandbox_id.cmp(&b.sandbox_id));
+
+        let total = matching.len();
+        let page: Vec<crate::models::ListedSandbox> = matching
+            .into_iter()
+            .skip(start)
+            .take(limit.max(1) as usize)
+            .collect();
+
+        let next_token = match start + page.len() {
+            consumed if consumed < total => Some(encode_sandbox_list_cursor(consumed)),
+            _ => None,
+        };
+
+        Ok(SandboxListPage {
+            items: page,
+            next_token,
+        })
+    }
+
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
         let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;
@@ -966,6 +1094,54 @@ pub(crate) fn map_volume_mounts(
         None
     } else {
         Some(mapped)
+    }
+}
+
+/// One page of `GET /v2/sandboxes` plus the cursor that continues it.
+#[derive(Debug)]
+pub(crate) struct SandboxListPage {
+    pub(crate) items: Vec<crate::models::ListedSandbox>,
+    /// `None` once the page holds the last matching sandbox.
+    pub(crate) next_token: Option<String>,
+}
+
+/// Prefix that marks a well-formed sandbox-list cursor. Kept opaque to clients:
+/// only the offset inside is meaningful, and the prefix lets a truncated or
+/// foreign token be rejected instead of being read as offset 0, which would
+/// silently restart pagination — the exact bug this replaces.
+const SANDBOX_LIST_CURSOR_PREFIX: &str = "sbx-offset-";
+
+/// Node window requested from CubeMaster per round while collecting sandboxes
+/// for v2 pagination. CubeMaster's `start_idx`/`size` window selects *nodes*
+/// and every sandbox on those nodes is returned, so this bounds the cubelet
+/// fan-out per request; `list_v2` walks further windows until the backend
+/// reports the last node.
+const SANDBOX_LIST_NODE_WINDOW: i32 = 100;
+
+/// Encode the offset the next page starts at.
+pub(crate) fn encode_sandbox_list_cursor(offset: usize) -> String {
+    format!("{SANDBOX_LIST_CURSOR_PREFIX}{offset}")
+}
+
+/// Decode a client-supplied cursor into the offset it names.
+///
+/// An empty or whitespace-only token means "start from the beginning", matching
+/// how `nextToken=` is treated elsewhere in the API. Anything that carries the
+/// prefix but not a usable offset is a client error rather than a silent restart.
+pub(crate) fn parse_sandbox_list_cursor(token: Option<&str>) -> AppResult<usize> {
+    let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(0);
+    };
+
+    match token.strip_prefix(SANDBOX_LIST_CURSOR_PREFIX) {
+        Some(offset) => offset.parse::<usize>().map_err(|_| {
+            AppError::BadRequest(format!(
+                "nextToken is malformed: {token:?} is not a pagination cursor"
+            ))
+        }),
+        None => Err(AppError::BadRequest(format!(
+            "nextToken is malformed: {token:?} is not a pagination cursor"
+        ))),
     }
 }
 
@@ -3319,5 +3495,396 @@ mod tests {
         let mounts: Vec<crate::models::SandboxVolumeMount> = vec![];
         let has_mounts = !mounts.is_empty();
         assert!(!has_mounts, "no mounts → containers should stay empty");
+    }
+
+    // ── GET /v2/sandboxes cursor pagination ────────────────────────────────
+    //
+    // `nextToken` used to be declared by ListSandboxesV2Query and then dropped:
+    // the handler never read it and the service hardcoded `start_idx: Some(0)`,
+    // so every page returned the first `limit` items and clients could never
+    // reach past it.
+    //
+    // CubeMaster's own `start_idx`/`size` window is expressed in *nodes*, not
+    // sandboxes (ListSandbox → localcache.RangeDBHost), and `Total` counts
+    // healthy nodes, so those fields cannot express sandbox-level pagination.
+    // The pagination therefore has to be completed over the sandbox set inside
+    // CubeAPI.
+
+    fn list_page() -> Json<Value> {
+        // `from_cubemaster_info` projects CubeMaster's `labels` onto the listed
+        // sandbox's `metadata`, so the filter input has to be sent as labels.
+        // Five sandboxes: sb-0/sb-2/sb-4 carry team=alpha, sb-1/sb-3 team=beta.
+        // `size` below the node-window bound marks this as the final window, so
+        // the collection loop stops after one round.
+        Json(serde_json::json!({
+            "requestID": "req-list",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "size": 1,
+            "data": (0..5).map(|i| serde_json::json!({
+                "sandbox_id": format!("sb-{i}"),
+                "host_id": "host-1",
+                "status": 1,
+                "template_id": "tpl-1",
+                "labels": { "team": if i % 2 == 0 { "alpha" } else { "beta" } }
+            })).collect::<Vec<_>>()
+        }))
+    }
+
+    async fn list_service() -> SandboxService {
+        spawn_fake_cubemaster(
+            Router::new().route("/cube/sandbox/list", post(|| async { list_page() })),
+        )
+        .await
+    }
+
+    /// CubeMaster's window is over nodes, so a cluster wider than one window
+    /// needs several rounds. Stopping at the first window would silently drop
+    /// every sandbox on the remaining nodes — and, because CubeMaster only
+    /// appends shimless paused rows on the *last* node page, it would also hide
+    /// the paused sandboxes the `state=paused` filter exists to find.
+    #[tokio::test]
+    async fn list_v2_walks_every_node_window_before_paging() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|Json(body): Json<Value>| async move {
+                let start = body["start_idx"].as_i64().unwrap_or(0);
+                match start {
+                    // First window: full — 100 of 100 nodes, so more remain.
+                    // `end_idx` is the last covered node's Index, which is what
+                    // the walker advances on (`IndexByPage`, `node.go`).
+                    1 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": 100,
+                        "end_idx": 100,
+                        "data": [
+                            { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" },
+                            { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    // Second window: short — the last one.
+                    101 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": 2,
+                        "end_idx": 102,
+                        "data": [
+                            { "sandbox_id": "sb-3", "host_id": "h3", "status": 1, "template_id": "t" },
+                            { "sandbox_id": "sb-4", "host_id": "h4", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    other => panic!("unexpected node window start: {other}"),
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("a single page should hold every sandbox");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sb-1", "sb-2", "sb-3", "sb-4"],
+            "both node windows must be walked before the sandbox-level page is cut"
+        );
+        assert!(
+            page.next_token.is_none(),
+            "nothing is left once every node window has been walked"
+        );
+    }
+
+    /// `end_idx` is a node *row id* (`Index: int(elem.ID)`), so deleted node
+    /// rows leave gaps and it is not comparable with the healthy-node count.
+    /// An implementation that stopped on `end_idx < total` would call this
+    /// full window final and silently drop every sandbox on the remaining
+    /// nodes — the regression this test pins. Advancing on `end_idx + 1` is
+    /// still correct here: the ids are sparse, so the cursor lands at 600,
+    /// which is exactly the window that would have been skipped.
+    #[tokio::test]
+    async fn list_v2_keeps_walking_when_node_ids_are_sparse() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|Json(body): Json<Value>| async move {
+                let start = body["start_idx"].as_i64().unwrap_or(0);
+                match start {
+                    // Full window, but its ids (500..599) already exceed the
+                    // healthy-node count — the shape that defeats an
+                    // `end_idx < total` termination test.
+                    1 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 599,
+                        "total": 120,
+                        "size": 100,
+                        "data": [
+                            { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    // The window that would have been skipped: the cursor
+                    // advanced to 600, past the gap in node ids.
+                    600 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 620,
+                        "total": 120,
+                        "size": 20,
+                        "data": [
+                            { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    other => panic!("unexpected node window start: {other}"),
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("both windows must be collected");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sb-1", "sb-2"],
+            "a full window must be followed by another even when its node ids \
+             already exceed the healthy-node count"
+        );
+    }
+
+    /// `IndexByPage` matches `start_idx` against each node's `Index` (a row id
+    /// left with gaps by deleted nodes), and returns the *last covered node's
+    /// Index* as `end_idx` (`node.go`, pinned by `node_test.go`). So advancing
+    /// by the window size re-reads nodes whenever ids carry gaps, and the same
+    /// sandboxes come back twice — inflating `total`, and counted twice by the
+    /// cursor offset so a paging client sees repeats. Advancing on the backend
+    /// cursor (`end_idx + 1`) is correct in both `IndexByPage` branches.
+    ///
+    /// The mock below reproduces the real semantics: `start_idx` selects the
+    /// first node whose `Index >= start_idx`, `end_idx` is that window's last
+    /// node Index, and a `start_idx` that resolves inside an already-returned
+    /// window is *legal* — it yields an empty window, which is how the backend
+    /// signals "past the end". The previous advance logic asks exactly that.
+    #[tokio::test]
+    async fn list_v2_does_not_repeat_sandboxes_when_node_ids_are_sparse() {
+        // 120 live nodes whose ids start at 500: a single gap of 499 rows is
+        // enough to make `+= window` land back inside the previous window.
+        let node_ids: Vec<i64> = (500..620).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    // `IndexByPage`: first node with Index >= start, then the
+                    // next `window` nodes; end_idx is the last one's Index.
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    if covered.is_empty() {
+                        return Json(serde_json::json!({
+                            "requestID": "req-list",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "size": 0,
+                            "end_idx": 0,
+                            "data": []
+                        }));
+                    }
+                    let end_idx = *covered.last().expect("window is non-empty");
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 500)
+            .await
+            .expect("every sandbox should be reachable");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "sparse node ids must not re-read a window: got {ids:?}"
+        );
+        assert_eq!(
+            ids.len(),
+            120,
+            "every node's sandbox should be listed exactly once, got {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_first_page_is_limited_and_reports_a_next_cursor() {
+        let service = list_service().await;
+
+        let page = service
+            .list_v2(None, None, None, 2)
+            .await
+            .expect("first page should list");
+
+        assert_eq!(page.items.len(), 2, "limit must cap the returned page");
+        assert_eq!(page.items[0].sandbox_id, "sb-0");
+        assert_eq!(page.items[1].sandbox_id, "sb-1");
+        assert!(
+            page.next_token.is_some(),
+            "more items remain, so a continuation cursor must be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_second_page_differs_from_the_first() {
+        let service = list_service().await;
+
+        let first = service.list_v2(None, None, None, 2).await.expect("page 1");
+        let cursor = first.next_token.expect("page 1 must hand back a cursor");
+        let second = service
+            .list_v2(None, None, Some(&cursor), 2)
+            .await
+            .expect("page 2");
+
+        assert_eq!(second.items.len(), 2);
+        assert_eq!(second.items[0].sandbox_id, "sb-2");
+        assert_eq!(second.items[1].sandbox_id, "sb-3");
+        assert_ne!(
+            first.items[0].sandbox_id, second.items[0].sandbox_id,
+            "the cursor must advance the window instead of repeating page 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_final_page_omits_the_cursor() {
+        let service = list_service().await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("single page covering every sandbox");
+
+        assert_eq!(page.items.len(), 5, "only 5 sandboxes exist");
+        assert!(
+            page.next_token.is_none(),
+            "nothing is left, so no continuation cursor may be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_rejects_a_malformed_cursor() {
+        let service = list_service().await;
+
+        let err = service
+            .list_v2(None, None, Some("not-a-cursor"), 2)
+            .await
+            .expect_err("a malformed cursor must not be silently ignored");
+
+        match err {
+            AppError::BadRequest(message) => {
+                assert!(
+                    message.contains("nextToken"),
+                    "the error should name the offending parameter, got: {message}"
+                );
+            }
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_v2_metadata_filter_paginates_over_matching_items_only() {
+        // The filter is applied after CubeMaster answers, so a page boundary has
+        // to be computed over the *filtered* set. Paging over the raw set would
+        // let a filter hide items that the client was told were on the next page.
+        let service = list_service().await;
+
+        let first = service
+            .list_v2(Some("team=alpha"), None, None, 2)
+            .await
+            .expect("filtered page 1");
+
+        assert_eq!(first.items.len(), 2, "sb-0, sb-2 and sb-4 match team=alpha");
+        assert!(
+            first.items.iter().all(|sb| sb.sandbox_id != "sb-1"),
+            "a non-matching sandbox must never appear on a filtered page"
+        );
+
+        let cursor = first.next_token.expect("a third match remains");
+        let second = service
+            .list_v2(Some("team=alpha"), None, Some(&cursor), 2)
+            .await
+            .expect("filtered page 2");
+
+        assert_eq!(
+            second.items.len(),
+            1,
+            "only sb-4 is left after sb-0 and sb-2"
+        );
+        assert_eq!(second.items[0].sandbox_id, "sb-4");
+        assert!(second.next_token.is_none(), "the filtered set is exhausted");
+    }
+
+    #[tokio::test]
+    async fn list_v2_state_filter_paginates_over_matching_items_only() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-list",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
+                    "data": [
+                        { "sandbox_id": "sb-run-1", "host_id": "h", "status": 1, "template_id": "t" },
+                        { "sandbox_id": "sb-paused-1", "host_id": "h", "status": 5, "template_id": "t" },
+                        { "sandbox_id": "sb-run-2", "host_id": "h", "status": 1, "template_id": "t" },
+                        { "sandbox_id": "sb-paused-2", "host_id": "h", "status": 5, "template_id": "t" }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+
+        let first = service
+            .list_v2(None, Some("paused"), None, 1)
+            .await
+            .expect("paused page 1");
+
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].sandbox_id, "sb-paused-1");
+
+        let cursor = first.next_token.expect("a second paused sandbox remains");
+        let second = service
+            .list_v2(None, Some("paused"), Some(&cursor), 1)
+            .await
+            .expect("paused page 2");
+
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].sandbox_id, "sb-paused-2");
+        assert!(
+            second.next_token.is_none(),
+            "both paused sandboxes are listed"
+        );
     }
 }
