@@ -183,6 +183,15 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 			return err
 		}
 
+		// Validate target nodes before creating a new build job. While distribution
+		// re-checks node availability after the build, failing fast here avoids
+		// minutes of image pulling and ext4 creation for an unreachable scope.
+		// Kept after active-job lookup so idempotent retries reuse an in-flight job
+		// even during transient node cache blips.
+		if _, err := resolveTemplateNodes(normalized.InstanceType, normalized.DistributionScope); err != nil {
+			return err
+		}
+
 		var latestJob *models.TemplateImageJob
 		if job, err := getLatestTemplateImageJobByTemplateID(ctx, normalized.TemplateID); err == nil {
 			latestJob = job
