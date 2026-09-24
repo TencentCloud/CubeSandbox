@@ -70,10 +70,10 @@ Upgrade PVM kernel swap     →  only change images.pvmHostBootstrap.tag
 ```yaml
 images:
   cubelet:
-    tag: v0.7.2-rc3
+    tag: v0.7.2
   # Add others only if you need them together, e.g.:
   # cubeShim:
-  #   tag: v0.7.2-rc3
+  #   tag: v0.7.2
 ```
 
 Only change the keys you truly need to bump; leave other images alone. Full key names are in the [appendix](#appendix-image-key-cheat-sheet) at the end.
