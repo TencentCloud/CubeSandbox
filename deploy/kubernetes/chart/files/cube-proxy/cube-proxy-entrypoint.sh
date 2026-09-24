@@ -96,6 +96,9 @@ sidecar_addr="${CUBE_SIDECAR_LISTEN_ADDR:-}"
   exit 1
 }
 
+# redis_ssl is read by the Lua Redis client. The chart has no Redis TLS
+# setting yet, so it is declared off here; one-click renders it from
+# CUBE_EXTERNAL_REDIS_TLS.
 cat > /usr/local/openresty/nginx/conf/global/global.conf <<EOF
 resolver ${resolver_addrs} valid=${CUBE_PROXY_RESOLVER_VALID} ipv6=${CUBE_PROXY_RESOLVER_IPV6};
 resolver_timeout ${CUBE_PROXY_RESOLVER_TIMEOUT};
@@ -106,6 +109,7 @@ set \$redis_master_name "$(escape_nginx_value "${REDIS_MASTER_NAME:-}")";
 set \$redis_sentinel_nodes "$(escape_nginx_value "${REDIS_SENTINEL_NODES:-}")";
 set \$redis_sentinel_pd "$(escape_nginx_value "${REDIS_SENTINEL_PASSWORD:-}")";
 set \$redis_index "$(escape_nginx_value "${REDIS_DB:-0}")";
+set \$redis_ssl "0";
 set \$timeout_min "$(escape_nginx_value "${TIMEOUT_MIN}")";
 set \$timeout_max "$(escape_nginx_value "${TIMEOUT_MAX}")";
 set \$cube_proxy_host_ip "$(escape_nginx_value "${NODE_IP}")";
