@@ -4,6 +4,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"time"
 )
@@ -94,17 +95,43 @@ type RegisterNodeRequest struct {
 
 // UpdateNodeStatusRequest is the cubelet heartbeat payload.
 type UpdateNodeStatusRequest struct {
-	RequestID           string              `json:"requestID,omitempty"`
-	Conditions          []NodeCondition     `json:"conditions,omitempty"`
-	Images              []ContainerImage    `json:"images,omitempty"`
-	LocalTemplates      []LocalTemplate     `json:"local_templates,omitempty"`
-	HeartbeatTime       time.Time           `json:"heartbeat_time,omitempty"`
-	Allocated           *AllocatedResources `json:"allocated,omitempty"`
-	DiskUsage           *DiskUsage          `json:"disk_usage,omitempty"`
-	MetricTime          time.Time           `json:"metric_time,omitempty"`
-	Versions            []ComponentVersion  `json:"versions,omitempty"`
-	InventoryIncomplete bool                `json:"inventory_incomplete,omitempty"`
-	HostFacts           *HostFacts          `json:"host_facts,omitempty"`
+	RequestID      string           `json:"requestID,omitempty"`
+	Conditions     []NodeCondition  `json:"conditions,omitempty"`
+	Images         []ContainerImage `json:"images,omitempty"`
+	LocalTemplates []LocalTemplate  `json:"local_templates,omitempty"`
+	// LocalTemplatesReported is true only when the heartbeat JSON actually
+	// carried the "local_templates" key. It distinguishes an omitted field
+	// (legacy/partial cubelet -> keep the last known inventory) from an
+	// explicit empty list (node really has no templates). Derived by
+	// UnmarshalJSON from key presence; never serialized.
+	LocalTemplatesReported bool                `json:"-"`
+	HeartbeatTime          time.Time           `json:"heartbeat_time,omitempty"`
+	Allocated              *AllocatedResources `json:"allocated,omitempty"`
+	DiskUsage              *DiskUsage          `json:"disk_usage,omitempty"`
+	MetricTime             time.Time           `json:"metric_time,omitempty"`
+	Versions               []ComponentVersion  `json:"versions,omitempty"`
+	InventoryIncomplete    bool                `json:"inventory_incomplete,omitempty"`
+	HostFacts              *HostFacts          `json:"host_facts,omitempty"`
+}
+
+// UnmarshalJSON decodes the heartbeat and records whether local_templates was
+// reported as an array. Go's default unmarshal cannot tell an absent field from
+// an empty one, so the payload is scanned a second time. An omitted or null
+// value is not an authoritative inventory.
+func (r *UpdateNodeStatusRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateNodeStatusRequest
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*r = UpdateNodeStatusRequest(decoded)
+	rawLocalTemplates, present := fields["local_templates"]
+	r.LocalTemplatesReported = present && !bytes.Equal(bytes.TrimSpace(rawLocalTemplates), []byte("null"))
+	return nil
 }
 
 // AllocatedResources carries quota usage reported by cubelet.
@@ -127,31 +154,34 @@ type DiskUsage struct {
 
 // NodeSnapshot is the authoritative per-node view owned by CubeOps.
 type NodeSnapshot struct {
-	NodeID              string             `json:"node_id,omitempty"`
-	HostIP              string             `json:"host_ip,omitempty"`
-	GRPCPort            int                `json:"grpc_port,omitempty"`
-	Labels              map[string]string  `json:"labels,omitempty"`
-	Capacity            ResourceSnapshot   `json:"capacity,omitempty"`
-	Allocatable         ResourceSnapshot   `json:"allocatable,omitempty"`
-	InstanceType        string             `json:"instance_type,omitempty"`
-	ClusterLabel        string             `json:"cluster_label,omitempty"`
-	QuotaCPU            int64              `json:"quota_cpu,omitempty"`
-	QuotaMemMB          int64              `json:"quota_mem_mb,omitempty"`
-	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
-	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
-	Conditions          []NodeCondition    `json:"conditions,omitempty"`
-	Images              []ContainerImage   `json:"images,omitempty"`
-	LocalTemplates      []LocalTemplate    `json:"local_templates,omitempty"`
-	Versions            []ComponentVersion `json:"versions,omitempty"`
-	HeartbeatTime       time.Time          `json:"heartbeat_time,omitempty"`
-	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
-	ReportedReady       bool               `json:"reported_ready,omitempty"`
-	Healthy             bool               `json:"healthy"`
-	UnhealthyReason     string             `json:"unhealthy_reason,omitempty"`
-	SchedulingDisabled  bool               `json:"scheduling_disabled"`
-	Score               float64            `json:"score,omitempty"`
-	MetricUpdate        time.Time          `json:"metric_update,omitempty"`
-	MetricLocalUpdateAt time.Time          `json:"metric_local_update_at,omitempty"`
+	NodeID                  string             `json:"node_id,omitempty"`
+	HostIP                  string             `json:"host_ip,omitempty"`
+	GRPCPort                int                `json:"grpc_port,omitempty"`
+	Labels                  map[string]string  `json:"labels,omitempty"`
+	Capacity                ResourceSnapshot   `json:"capacity,omitempty"`
+	Allocatable             ResourceSnapshot   `json:"allocatable,omitempty"`
+	InstanceType            string             `json:"instance_type,omitempty"`
+	ClusterLabel            string             `json:"cluster_label,omitempty"`
+	QuotaCPU                int64              `json:"quota_cpu,omitempty"`
+	QuotaMemMB              int64              `json:"quota_mem_mb,omitempty"`
+	CreateConcurrentNum     int64              `json:"create_concurrent_num,omitempty"`
+	MaxMvmNum               int64              `json:"max_mvm_num,omitempty"`
+	Conditions              []NodeCondition    `json:"conditions,omitempty"`
+	Images                  []ContainerImage   `json:"images,omitempty"`
+	LocalTemplates          []LocalTemplate    `json:"local_templates,omitempty"`
+	LocalTemplatesReported  bool               `json:"local_templates_reported,omitempty"`
+	Versions                []ComponentVersion `json:"versions,omitempty"`
+	HeartbeatTime           time.Time          `json:"heartbeat_time,omitempty"`
+	HeartbeatOrder          time.Time          `json:"heartbeat_order,omitempty"`
+	HeartbeatOrderUnixMilli int64              `json:"heartbeat_order_unix_milli,omitempty"`
+	HostFacts               *HostFacts         `json:"host_facts,omitempty"`
+	ReportedReady           bool               `json:"reported_ready,omitempty"`
+	Healthy                 bool               `json:"healthy"`
+	UnhealthyReason         string             `json:"unhealthy_reason,omitempty"`
+	SchedulingDisabled      bool               `json:"scheduling_disabled"`
+	Score                   float64            `json:"score,omitempty"`
+	MetricUpdate            time.Time          `json:"metric_update,omitempty"`
+	MetricLocalUpdateAt     time.Time          `json:"metric_local_update_at,omitempty"`
 
 	// Static scheduler fields recovered from the legacy host registry tables.
 	Zone                  string  `json:"zone,omitempty"`
@@ -229,55 +259,98 @@ type NodeOperation struct {
 
 // SchedulerNode is the shape exported to CubeMaster (matches CubeMaster pkg/base/node.Node).
 type SchedulerNode struct {
-	Index                 int                `json:"Index,omitempty"`
-	InsID                 string             `json:"InstanceID,omitempty"`
-	UUID                  string             `json:"uuid,omitempty"`
-	IP                    string             `json:"IP,omitempty"`
-	CpuTotal              int                `json:"CpuTotal,omitempty"`
-	MemMBTotal            int64              `json:"MemMBTotal,omitempty"`
-	Zone                  string             `json:"Zone,omitempty"`
-	Region                string             `json:"Region,omitempty"`
-	SystemDiskSize        int64              `json:"SystemDiskSize,omitempty"`
-	DataDiskSize          int64              `json:"DataDiskSize,omitempty"`
-	CPUType               string             `json:"CpuType,omitempty"`
-	ClusterLabel          string             `json:"ClusterLabel,omitempty"`
-	InstanceType          string             `json:"InstanceType,omitempty"`
-	OssClusterLabel       string             `json:"OssClusterLabel,omitempty"`
-	DeviceClass           string             `json:"DeviceClass,omitempty"`
-	DeviceID              int64              `json:"DeviceId,omitempty"`
-	MachineHostIP         string             `json:"MachineHostIP,omitempty"`
-	InstanceFamily        string             `json:"InstanceFamily,omitempty"`
-	DedicatedClusterId    string             `json:"DedicatedClusterId,omitempty"`
-	VirtualNodeQuotaArray []int64            `json:"VirtualNodeQuotaArray,omitempty"`
-	HostStatus            string             `json:"HostStatus,omitempty"`
-	CreateConcurrentNum   int64              `json:"CreateConcurrentNum,omitempty"`
-	MaxMvmLimit           int64              `json:"MaxMvmLimit,omitempty"`
-	QuotaCpu              int64              `json:"QuotaCpu,omitempty"`
-	QuotaMem              int64              `json:"QuotaMem,omitempty"`
-	MetaDataUpdateAt      time.Time          `json:"MetaDataUpdateAt,omitempty"`
-	ReportedReady         bool               `json:"ReportedReady,omitempty"`
-	Healthy               bool               `json:"Healthy"`
-	UnhealthyReason       string             `json:"UnhealthyReason,omitempty"`
-	Score                 float64            `json:"Score,omitempty"`
-	QuotaCpuUsage         int64              `json:"QuotaCpuUsage,omitempty"`
-	QuotaMemUsage         int64              `json:"QuotaMemUsage,omitempty"`
-	CpuUtil               float64            `json:"CpuUtil,omitempty"`
-	CpuLoadUsage          float64            `json:"CpuLoadUsage,omitempty"`
-	MemUsage              int64              `json:"MemUsage,omitempty"`
-	DataDiskUsagePer      float64            `json:"DataDiskUsagePer,omitempty"`
-	StorageDiskUsagePer   float64            `json:"StorageDiskUsagePer,omitempty"`
-	SysDiskUsagePer       float64            `json:"SysDiskUsagePer,omitempty"`
-	MvmNum                int64              `json:"mvm_num,omitempty"`
-	MetricUpdate          time.Time          `json:"MetricUpdateAt,omitempty"`
-	MetricLocalUpdateAt   time.Time          `json:"MetricLocalUpdateAt,omitempty"`
-	RealTimeCreateNum     int64              `json:"RealTimeCreateNum,omitempty"`
-	LocalCreateNum        int64              `json:"LocalCreateNum,omitempty"`
-	NicQueues             int64              `json:"nic_queues,omitempty"`
-	NodeLabels            map[string]string  `json:"NodeLabels,omitempty"`
-	SchedulingDisabled    bool               `json:"SchedulingDisabled"`
-	LocalTemplates        []string           `json:"LocalTemplates,omitempty"`
-	Versions              []ComponentVersion `json:"Versions,omitempty"`
-	HostFacts             *HostFacts         `json:"HostFacts,omitempty"`
+	Index                  int                `json:"Index,omitempty"`
+	InsID                  string             `json:"InstanceID,omitempty"`
+	UUID                   string             `json:"uuid,omitempty"`
+	IP                     string             `json:"IP,omitempty"`
+	CpuTotal               int                `json:"CpuTotal,omitempty"`
+	MemMBTotal             int64              `json:"MemMBTotal,omitempty"`
+	Zone                   string             `json:"Zone,omitempty"`
+	Region                 string             `json:"Region,omitempty"`
+	SystemDiskSize         int64              `json:"SystemDiskSize,omitempty"`
+	DataDiskSize           int64              `json:"DataDiskSize,omitempty"`
+	CPUType                string             `json:"CpuType,omitempty"`
+	ClusterLabel           string             `json:"ClusterLabel,omitempty"`
+	InstanceType           string             `json:"InstanceType,omitempty"`
+	OssClusterLabel        string             `json:"OssClusterLabel,omitempty"`
+	DeviceClass            string             `json:"DeviceClass,omitempty"`
+	DeviceID               int64              `json:"DeviceId,omitempty"`
+	MachineHostIP          string             `json:"MachineHostIP,omitempty"`
+	InstanceFamily         string             `json:"InstanceFamily,omitempty"`
+	DedicatedClusterId     string             `json:"DedicatedClusterId,omitempty"`
+	VirtualNodeQuotaArray  []int64            `json:"VirtualNodeQuotaArray,omitempty"`
+	HostStatus             string             `json:"HostStatus,omitempty"`
+	CreateConcurrentNum    int64              `json:"CreateConcurrentNum,omitempty"`
+	MaxMvmLimit            int64              `json:"MaxMvmLimit,omitempty"`
+	QuotaCpu               int64              `json:"QuotaCpu,omitempty"`
+	QuotaMem               int64              `json:"QuotaMem,omitempty"`
+	MetaDataUpdateAt       time.Time          `json:"MetaDataUpdateAt,omitempty"`
+	ReportedReady          bool               `json:"ReportedReady,omitempty"`
+	Healthy                bool               `json:"Healthy"`
+	UnhealthyReason        string             `json:"UnhealthyReason,omitempty"`
+	Score                  float64            `json:"Score,omitempty"`
+	QuotaCpuUsage          int64              `json:"QuotaCpuUsage,omitempty"`
+	QuotaMemUsage          int64              `json:"QuotaMemUsage,omitempty"`
+	CpuUtil                float64            `json:"CpuUtil,omitempty"`
+	CpuLoadUsage           float64            `json:"CpuLoadUsage,omitempty"`
+	MemUsage               int64              `json:"MemUsage,omitempty"`
+	DataDiskUsagePer       float64            `json:"DataDiskUsagePer,omitempty"`
+	StorageDiskUsagePer    float64            `json:"StorageDiskUsagePer,omitempty"`
+	SysDiskUsagePer        float64            `json:"SysDiskUsagePer,omitempty"`
+	MvmNum                 int64              `json:"mvm_num,omitempty"`
+	MetricUpdate           time.Time          `json:"MetricUpdateAt,omitempty"`
+	MetricLocalUpdateAt    time.Time          `json:"MetricLocalUpdateAt,omitempty"`
+	RealTimeCreateNum      int64              `json:"RealTimeCreateNum,omitempty"`
+	LocalCreateNum         int64              `json:"LocalCreateNum,omitempty"`
+	NicQueues              int64              `json:"nic_queues,omitempty"`
+	NodeLabels             map[string]string  `json:"NodeLabels,omitempty"`
+	SchedulingDisabled     bool               `json:"SchedulingDisabled"`
+	LocalTemplates         []string           `json:"-"`
+	LocalTemplatesReported bool               `json:"-"`
+	Versions               []ComponentVersion `json:"Versions,omitempty"`
+	HostFacts              *HostFacts         `json:"HostFacts,omitempty"`
+}
+
+func (n *SchedulerNode) MarshalJSON() ([]byte, error) {
+	type alias SchedulerNode
+	if !n.LocalTemplatesReported {
+		return json.Marshal(&struct {
+			*alias
+			LocalTemplatesReported bool `json:"LocalTemplatesReported"`
+		}{alias: (*alias)(n), LocalTemplatesReported: false})
+	}
+	localTemplates := n.LocalTemplates
+	if localTemplates == nil {
+		localTemplates = []string{}
+	}
+	return json.Marshal(&struct {
+		*alias
+		LocalTemplates         []string `json:"LocalTemplates"`
+		LocalTemplatesReported bool     `json:"LocalTemplatesReported"`
+	}{alias: (*alias)(n), LocalTemplates: localTemplates, LocalTemplatesReported: true})
+}
+
+func (n *SchedulerNode) UnmarshalJSON(data []byte) error {
+	type alias SchedulerNode
+	var decoded alias
+	aux := struct {
+		*alias
+		LocalTemplates         *[]string `json:"LocalTemplates"`
+		LocalTemplatesReported *bool     `json:"LocalTemplatesReported"`
+	}{alias: &decoded}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*n = SchedulerNode(decoded)
+	if aux.LocalTemplates != nil {
+		n.LocalTemplates = *aux.LocalTemplates
+	}
+	if aux.LocalTemplatesReported != nil {
+		n.LocalTemplatesReported = *aux.LocalTemplatesReported
+	} else {
+		n.LocalTemplatesReported = aux.LocalTemplates != nil
+	}
+	return nil
 }
 
 func (n *SchedulerNode) ID() string {

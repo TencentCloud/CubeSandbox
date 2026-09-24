@@ -350,6 +350,30 @@ func TestNodeCloneNilHostFacts(t *testing.T) {
 	}
 }
 
+func TestNodeLocalTemplatesReportedJSONSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   string
+		reported  bool
+		templates []string
+	}{
+		{name: "omitted", payload: `{}`, reported: false},
+		{name: "legacy empty", payload: `{"LocalTemplates":[]}`, reported: false, templates: []string{}},
+		{name: "reported empty", payload: `{"LocalTemplates":[],"LocalTemplatesReported":true}`, reported: true, templates: []string{}},
+		{name: "reported non-empty", payload: `{"LocalTemplates":["tpl-a"],"LocalTemplatesReported":true}`, reported: true, templates: []string{"tpl-a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var n Node
+			if err := json.Unmarshal([]byte(tt.payload), &n); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			assert.Equal(t, tt.reported, n.LocalTemplatesReported)
+			assert.Equal(t, tt.templates, n.LocalTemplates)
+		})
+	}
+}
+
 func TestNodeHostFactsJSONRoundTrip(t *testing.T) {
 	n := &Node{
 		InsID: "node-1",

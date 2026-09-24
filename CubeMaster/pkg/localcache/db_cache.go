@@ -71,9 +71,13 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 			} else {
 				l.addNodeCache(n)
 			}
-			if n.InsID != "" {
+			// Only reconcile when the loader reported the field (present, even if
+			// empty); an omitted inventory must not erase known locality. The
+			// MetaDataUpdateAt value is the heartbeat ordering key for staleness
+			// detection, so the CubeOps loader must not overwrite it with load time.
+			if n.InsID != "" && n.LocalTemplatesReported {
 				log.G(ctx).Debugf("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
-				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
+				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates, n.MetaDataUpdateAt)
 			}
 			allFromDb[n.InsID] = struct{}{}
 		}

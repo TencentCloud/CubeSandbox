@@ -93,6 +93,8 @@ type Cubelet struct {
 	updateRuntimeMux sync.Mutex
 
 	lastStatusReportTime time.Time
+	statusRequestID      string
+	statusRequest        *masterclient.UpdateNodeStatusRequest
 
 	containerRuntimeReadyExpected bool
 

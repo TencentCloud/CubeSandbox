@@ -58,6 +58,43 @@ func TestRegisterNode(t *testing.T) {
 	}
 }
 
+func TestRegisterNode_PreservesStatusOnReregistration(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	req := &model.RegisterNodeRequest{NodeID: "node-1", HostIP: "10.0.0.1"}
+	first, err := svc.RegisterNode(ctx, req)
+	if err != nil {
+		t.Fatalf("initial register: %v", err)
+	}
+	if !first.HeartbeatTime.IsZero() || first.LocalTemplatesReported {
+		t.Fatalf("new registration invented status: %+v", first)
+	}
+
+	heartbeat := time.Now().Add(-time.Second)
+	status, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		Conditions:             []model.NodeCondition{{Type: "Ready", Status: "True"}},
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-1"}},
+		LocalTemplatesReported: true,
+		HeartbeatTime:          heartbeat,
+	})
+	if err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	reregistered, err := svc.RegisterNode(ctx, req)
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if !reregistered.LocalTemplatesReported || len(reregistered.LocalTemplates) != 1 ||
+		reregistered.LocalTemplates[0].TemplateID != "tpl-1" {
+		t.Fatalf("re-registration lost inventory provenance: %+v", reregistered)
+	}
+	if !reregistered.HeartbeatTime.Equal(status.HeartbeatTime) ||
+		!reregistered.HeartbeatOrder.Equal(status.HeartbeatOrder) {
+		t.Fatalf("re-registration changed heartbeat ordering: got=%+v want=%+v", reregistered, status)
+	}
+}
+
 func TestRegisterNode_RejectsSchedulingLabel(t *testing.T) {
 	svc, _ := newTestService(t)
 	req := &model.RegisterNodeRequest{
@@ -121,6 +158,77 @@ func TestUpdateNodeStatus(t *testing.T) {
 	}
 	if !snap.Healthy {
 		t.Errorf("expected healthy")
+	}
+}
+
+func TestUpdateNodeStatusRequestReplayKeepsOrder(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+
+	first, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		RequestID:              "request-1",
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-1"}},
+		LocalTemplatesReported: true,
+		HeartbeatTime:          time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("first status: %v", err)
+	}
+	replayed, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		RequestID:              "request-1",
+		LocalTemplates:         []model.LocalTemplate{},
+		LocalTemplatesReported: true,
+		HeartbeatTime:          time.Now().Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("replayed status: %v", err)
+	}
+	if !replayed.HeartbeatOrder.Equal(first.HeartbeatOrder) || len(replayed.LocalTemplates) != 1 {
+		t.Fatalf("replay changed observation: first=%+v replayed=%+v", first, replayed)
+	}
+}
+
+func TestUpdateNodeStatusPreservesUnreportedLocalTemplates(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+
+	first, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-1"}},
+		LocalTemplatesReported: true,
+		HeartbeatTime:          time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	if len(first.LocalTemplates) != 1 {
+		t.Fatalf("seed templates = %v", first.LocalTemplates)
+	}
+	if !first.LocalTemplatesReported || first.HeartbeatOrder.IsZero() {
+		t.Fatalf("seed status lost provenance/order: %+v", first)
+	}
+
+	legacy, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		HeartbeatTime: time.Now().Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("legacy status: %v", err)
+	}
+	if len(legacy.LocalTemplates) != 1 || legacy.LocalTemplates[0].TemplateID != "tpl-1" {
+		t.Fatalf("legacy heartbeat erased templates: %v", legacy.LocalTemplates)
+	}
+
+	empty, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		LocalTemplates:         []model.LocalTemplate{},
+		LocalTemplatesReported: true,
+		HeartbeatTime:          time.Now().Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("empty status: %v", err)
+	}
+	if len(empty.LocalTemplates) != 0 {
+		t.Fatalf("explicit empty inventory was not applied: %v", empty.LocalTemplates)
 	}
 }
 
@@ -333,6 +441,62 @@ func TestListNodes_NoRedisPool(t *testing.T) {
 	}
 }
 
+func TestListNodes_DBRebuildFailureRejectsPartialView(t *testing.T) {
+	injectedErr := errors.New("temporary DB read failure")
+	cases := []struct {
+		name   string
+		inject func(*fakeNodeStore)
+	}{
+		{
+			name: "status",
+			inject: func(fs *fakeNodeStore) {
+				fs.failOnGetStatus = injectedErr
+			},
+		},
+		{
+			name: "component versions",
+			inject: func(fs *fakeNodeStore) {
+				fs.failOnListVersionsByNode = injectedErr
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, fs := newTestService(t)
+			ctx := context.Background()
+			if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"}); err != nil {
+				t.Fatalf("register: %v", err)
+			}
+			tc.inject(fs)
+
+			nodes, err := svc.ListNodes(ctx)
+			if !errors.Is(err, injectedErr) {
+				t.Fatalf("list nodes error = %v, want %v", err, injectedErr)
+			}
+			if nodes != nil {
+				t.Fatalf("partial node view returned on error: %+v", nodes)
+			}
+		})
+	}
+}
+
+func TestListNodes_ConcurrentRegistrationDeletionIsSkipped(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	fs.failOnGetRegistration = store.ErrNotFound
+
+	nodes, err := svc.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("concurrent deletion should not fail the node list: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("deleted registration returned in node list: %+v", nodes)
+	}
+}
+
 func TestListNodes_PartialRedisSnapshotBackfilled(t *testing.T) {
 	// Regression: a node absent from Redis (TTL expired) must be backfilled
 	// from DB.
@@ -451,9 +615,10 @@ func TestRegisterNode_WithLocalTemplates(t *testing.T) {
 
 	now := time.Now()
 	_, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
-		Conditions:     []model.NodeCondition{{Type: "Ready", Status: "True"}},
-		HeartbeatTime:  now,
-		LocalTemplates: []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
+		Conditions:             []model.NodeCondition{{Type: "Ready", Status: "True"}},
+		HeartbeatTime:          now,
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
+		LocalTemplatesReported: true,
 	})
 	if err != nil {
 		t.Fatalf("update status: %v", err)
@@ -554,17 +719,19 @@ func TestUpdateNodeStatus_LocalTemplatesReconciled(t *testing.T) {
 	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
 
 	_, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
-		Conditions:     []model.NodeCondition{{Type: "Ready", Status: "True"}},
-		HeartbeatTime:  time.Now(),
-		LocalTemplates: []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
+		Conditions:             []model.NodeCondition{{Type: "Ready", Status: "True"}},
+		HeartbeatTime:          time.Now(),
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
+		LocalTemplatesReported: true,
 	})
 	if err != nil {
 		t.Fatalf("first update: %v", err)
 	}
 	_, err = svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
-		Conditions:     []model.NodeCondition{{Type: "Ready", Status: "True"}},
-		HeartbeatTime:  time.Now(),
-		LocalTemplates: []model.LocalTemplate{{TemplateID: "tpl-2"}, {TemplateID: "tpl-3"}},
+		Conditions:             []model.NodeCondition{{Type: "Ready", Status: "True"}},
+		HeartbeatTime:          time.Now(),
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-2"}, {TemplateID: "tpl-3"}},
+		LocalTemplatesReported: true,
 	})
 	if err != nil {
 		t.Fatalf("second update: %v", err)

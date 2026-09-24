@@ -112,8 +112,9 @@ type Node struct {
 	LocalCreateNum int64 `json:"LocalCreateNum,omitempty"`
 	NicQueues      int64 `json:"nic_queues,omitempty"`
 
-	NodeLabels     map[string]string `json:"NodeLabels,omitempty"`
-	LocalTemplates []string          `json:"LocalTemplates,omitempty"`
+	NodeLabels             map[string]string `json:"NodeLabels,omitempty"`
+	LocalTemplates         []string          `json:"LocalTemplates,omitempty"`
+	LocalTemplatesReported bool              `json:"LocalTemplatesReported"`
 
 	// Versions carries the real version of each component installed on the
 	// node. Populated by CubeOps /internal/v1/nodes; consumed by templatecenter
@@ -218,6 +219,9 @@ func (n *Node) Clone() *Node {
 	cloned.labelsCache = nil
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
+	}
+	if n.LocalTemplates != nil {
+		cloned.LocalTemplates = append([]string(nil), n.LocalTemplates...)
 	}
 	if n.NodeLabels != nil {
 		cloned.NodeLabels = make(map[string]string, len(n.NodeLabels))
