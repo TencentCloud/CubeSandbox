@@ -817,8 +817,10 @@ cubeNode:
     # Default 172.16.0.0/18 keeps the historical /18 size while avoiding the common
     # cluster Service CIDR 192.168.0.0/16 (and typical host LAN 192.168.x). Prefer a
     # non-overlapping private range if this collides with your VPC (often 172.16/12).
-    # Empty falls back to the packaged Cubelet config.toml CIDR (192.168.0.0/18).
+    # Empty falls back to the packaged Cubelet config.toml CIDR (192.168.0.0/18),
+    # which is a common Service CIDR — check it against your cluster first.
     # Helm pre-install/pre-upgrade Hook fails fast when this overlaps Service CIDR.
+    # Provider presets (values-tke.yaml) layer a range matched to what they provision.
     cidr: "172.16.0.0/18"
     # Skip the CIDR conflict checks (cube-node-init) and the Service CIDR
     # preflight Hook. Use only when you accept blackhole / routing risk. The

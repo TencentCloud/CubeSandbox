@@ -239,11 +239,11 @@ cubevs/sandbox CIDR ${sandbox} 与集群 Service CIDR ${svc_cidr} 重叠。
 
   if [ -n "$hit" ]; then
     fail "cubevs/sandbox CIDR ${sandbox} contains existing Service ClusterIP(s):${hit}
-This usually means the sandbox CIDR overlaps the cluster Service CIDR (often 192.168.0.0/16 on TKE/single-node).
+This usually means the sandbox CIDR overlaps the cluster Service CIDR (any private range can be the Service CIDR — it is operator-configurable, including on TKE).
 Set cubeNode.network.cidr to a non-overlapping private range (chart default: 172.16.0.0/18).
 
 cubevs/sandbox CIDR ${sandbox} 覆盖了已有 Service ClusterIP（见上）。
-通常表示沙箱网段与集群 Service CIDR 重叠（单节点/TKE 常见 192.168.0.0/16）。
+通常表示沙箱网段与集群 Service CIDR 重叠（Service CIDR 由运维配置，可能是任意私网段，TKE 亦然）。
 请将 cubeNode.network.cidr 改为不冲突的私网段（Chart 默认 172.16.0.0/18）。"
   fi
 

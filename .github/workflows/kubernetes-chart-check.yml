@@ -7,6 +7,10 @@ on:
       - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
+      # See the pull_request note below: the preset CIDR guard reads the TKE
+      # Terraform defaults, so those paths belong to this workflow too.
+      - 'deploy/one-click/terraform/tencentcloud/variables.tf'
+      - 'deploy/one-click/terraform/tencentcloud/main.tf'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   pull_request:
@@ -14,6 +18,12 @@ on:
       - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
+      # test-values-preset-cidr-guard.sh reads the ranges this repo provisions
+      # for TKE out of the one-click Terraform, so a Terraform-only change that
+      # bumps those defaults must re-run it — otherwise a preset can silently
+      # start overlapping the new range and the guard never sees it.
+      - 'deploy/one-click/terraform/tencentcloud/variables.tf'
+      - 'deploy/one-click/terraform/tencentcloud/main.tf'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   workflow_dispatch:

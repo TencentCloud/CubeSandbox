@@ -155,7 +155,7 @@ can set it to `false`.
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary NIC of the Pod's netns (the host's under `hostNetwork`) and patches Cubelet `eth_name`;
 - `cubeNode.hostNetwork` (default `true`) puts the Big Pod on the host network: the netns is the host's, so sandbox tap devices and cubevs hooks stay across Pod recreation (drain until cubelet-restart survival is live-validated). Trade-offs: NetworkPolicy cannot govern sandbox traffic, and cubelet / egress / s3lvol bind on the host. `cube-node-init` preflights cubelet's ports and, with `cubeS3lvol.enabled`, its listen port (`bootstrap.nodeInit.checkHostPorts`, independent of `cidrSkipConflictCheck`); CubeEgress ports are not in that check. Set `false` for the Pod network: NetworkPolicy then applies, but a Pod recreate breaks networking for every sandbox on the node.
-- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk. Under `hostNetwork` this CIDR becomes a host route, so an overlap also affects the node's own traffic — on a cluster whose Service CIDR is `172.16.0.0/16` (e.g. TKE) layer the provider preset, such as `values-tke.yaml`.
+- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk. Under `hostNetwork` this CIDR becomes a host route, so an overlap also affects the node's own traffic — no cubevs range is non-overlapping for every cluster (the Service CIDR is operator-configurable and spans the private ranges), so layer the provider preset, such as `values-tke.yaml`, and check the range against your own cluster.
 - `cubeNode.network.mtu` patches Cubelet `mvm_mtu`, the MTU the sandbox tap is created with and, via `VIRTIO_NET_F_MTU`, the MTU the guest configures. It must not exceed the MTU of the interface the traffic leaves through: on the host network that interface is the node uplink, so `auto` is normally a no-op; on the Pod network it is the CNI interface, which encapsulates below 1500 (Flannel VXLAN is 1450; Calico's documented IPIP default is 1480). A guest on a 1500 tap emits frames the uplink drops, and it cannot recover on its own, because inbound ICMP fragmentation-needed is not forwarded into it, so connections stall rather than fail. The default `auto` lowers `mvm_mtu` to the detected NIC's MTU and never raises it, so it is a no-op wherever the uplink is already >= the packaged value; set an integer in `1280`..`65535` to pin it, or `0` to keep the packaged Cubelet `config.toml` value.
 - `cubeNode.hostNetworkChangeAck` (default `false`) is read only by the `cube-node-hostnet-preflight` Hook (`pre-install`/`pre-upgrade`/`pre-rollback`): an existing release may change `cubeNode.hostNetwork` — recreating every Big Pod — only with it set. Remove the key once that upgrade has gone through. See the upgrade guide for the `helm rollback` caveat.
 
@@ -357,6 +357,23 @@ The preset uses `volumeBindingMode: WaitForFirstConsumer` so CBS disks
 are provisioned in the same zone as the scheduled control-plane Pod on
 multi-AZ TKE clusters. On non-TKE clusters do NOT include this file;
 provide the cluster's own StorageClass name instead.
+
+It also pins `cubeNode.network.cidr` to `10.187.0.0/18` (and
+`cubeEgress.network.tproxyOnIP` to its gateway `10.187.0.1`). The cubevs
+range must not overlap the cluster **Service CIDR**: under `hostNetwork`
+cube-node installs a host route to the cubevs bridge, so an overlap
+swallows ClusterIPs and breaks in-cluster DNS / node registration — the
+`cubevs-cidr-preflight` Hook fails the install when it does. `10.187.0.0/18`
+is clear of the ranges this repo's TKE Terraform provisions (VPC
+`10.0.0.0/16`, Pod CIDR `10.200.0.0/16`, Service CIDR `192.168.0.0/20`), so a
+cluster built from that Terraform does not trip the preflight. The Service
+CIDR is operator-configurable and spans the private ranges, so this is a
+default and not a guarantee: override `cubeNode.network.cidr` (and keep
+`tproxyOnIP` in sync as the first usable IP of the range) if your Service
+CIDR, VPC, Pod/CNI CIDR or host LAN covers `10.187.x` — the preflight only
+inspects the Service CIDR and existing ClusterIPs, so a Pod/CNI collision is
+not caught at install
+time.
 
 It also exposes CubeProxy as a `LoadBalancer` Service (CLB) with Ingress
 disabled, and sets TKE CLB annotations for `pass-to-target` plus a

@@ -173,6 +173,13 @@ spec:
                 - DAC_READ_SEARCH
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
+            # start.sh (this image's ENTRYPOINT) derives its nginx transparent
+            # listen IP from CUBE_SANDBOX_NETWORK_CIDR, falling back to the
+            # packaged 192.168.0.0/18 → 192.168.0.1 when unset — the Service
+            # CIDR range the CIDR override exists to avoid. CUBE_TPROXY_ON_IP
+            # is rendered but read by nothing.
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: {{ .Values.cubeNode.network.cidr | quote }}
             - name: CUBE_EGRESS_BOOTSTRAP_URL
               value: {{ .Values.cubeEgress.bootstrapURL | quote }}
             - name: CUBE_EGRESS_DEBUG_DUMP
@@ -237,6 +244,16 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_INGRESS_IFACE
               value: {{ .Values.cubeEgress.network.ingressInterface | quote }}
+            # The egress dataplane derives its TPROXY target from
+            # CUBE_SANDBOX_NETWORK_CIDR (sandbox_gateway_ip_from_cidr), not
+            # from CUBE_TPROXY_ON_IP — nothing reads that. Without this the
+            # script falls back to the packaged 192.168.0.0/18 and keeps its
+            # listener on 192.168.0.1 even when cubeNode.network.cidr was
+            # overridden, which is exactly the Service-CIDR range the CIDR
+            # override exists to avoid. Keep it in sync with the cubelet
+            # container below.
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: {{ .Values.cubeNode.network.cidr | quote }}
             - name: CUBE_TPROXY_ON_IP
               value: {{ .Values.cubeEgress.network.tproxyOnIP | quote }}
             - name: CUBE_EGRESS_NET_INITIAL_WAIT_SECONDS
