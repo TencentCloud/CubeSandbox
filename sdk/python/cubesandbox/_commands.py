@@ -28,6 +28,9 @@ class CommandResult:
     stdout: str
     stderr: str
     exit_code: int
+    signal: int | None = None
+    oom_killed: bool = False
+    killed_by: str | None = None
 
 
 class Commands:
@@ -138,6 +141,9 @@ def _parse_process_start_stream(chunks) -> CommandResult:
     stdout: list[str] = []
     stderr: list[str] = []
     exit_code: int | None = None
+    signal: int | None = None
+    oom_killed = False
+    killed_by: str | None = None
     buffer = bytearray()
 
     for chunk in chunks:
@@ -179,13 +185,23 @@ def _parse_process_start_stream(chunks) -> CommandResult:
                     raise RuntimeError(f"process failed: {end['error']}")
                 else:
                     raise RuntimeError("process EndEvent missing exit code")
+                signal = int(end["signal"]) if end.get("signal") is not None else None
+                oom_killed = end.get("oomKilled") is True
+                killed_by = end.get("killedBy") or None
 
     if buffer:
         raise RuntimeError("Connect stream ended with a partial message")
     if exit_code is None:
         raise RuntimeError("process stream ended without EndEvent")
 
-    return CommandResult(stdout="".join(stdout), stderr="".join(stderr), exit_code=exit_code)
+    return CommandResult(
+        stdout="".join(stdout),
+        stderr="".join(stderr),
+        exit_code=exit_code,
+        signal=signal,
+        oom_killed=oom_killed,
+        killed_by=killed_by,
+    )
 
 
 def _encode_connect_envelope(data: bytes, flags: int = 0) -> bytes:
