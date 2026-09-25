@@ -193,8 +193,10 @@ mod tests {
     use libc::EFD_NONBLOCK;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+    use virtio_queue::QueueT;
     use vm_memory::{GuestAddress, GuestMemoryAtomic};
     use vm_migration::Pausable;
     use vm_virtio::queue::testing::VirtQueue as GuestQ;
@@ -207,6 +209,23 @@ mod tests {
             &self,
             _int_type: VirtioInterruptType,
         ) -> std::result::Result<(), std::io::Error> {
+            Ok(())
+        }
+    }
+
+    /// Interrupt stub that counts how many times the device raised an IRQ, so tests can
+    /// observe used-ring interrupt suppression.
+    #[derive(Default)]
+    pub struct CountingVirtioInterrupt {
+        pub count: AtomicUsize,
+    }
+
+    impl VirtioInterrupt for CountingVirtioInterrupt {
+        fn trigger(
+            &self,
+            _int_type: VirtioInterruptType,
+        ) -> std::result::Result<(), std::io::Error> {
+            self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -311,14 +330,28 @@ mod tests {
         }
 
         pub fn create_epoll_handler_context(&self) -> EpollHandlerContext {
+            self.create_epoll_handler_context_with_event_idx(false)
+        }
+
+        pub fn create_epoll_handler_context_eventidx(&self) -> EpollHandlerContext {
+            self.create_epoll_handler_context_with_event_idx(true)
+        }
+
+        fn create_epoll_handler_context_with_event_idx(
+            &self,
+            event_idx: bool,
+        ) -> EpollHandlerContext {
             const QSIZE: u16 = 2;
 
             let guest_rxvq = GuestQ::new(GuestAddress(0x0010_0000), &self.mem, QSIZE);
             let guest_txvq = GuestQ::new(GuestAddress(0x0020_0000), &self.mem, QSIZE);
             let guest_evvq = GuestQ::new(GuestAddress(0x0030_0000), &self.mem, QSIZE);
-            let rxvq = guest_rxvq.create_queue();
-            let txvq = guest_txvq.create_queue();
-            let evvq = guest_evvq.create_queue();
+            let mut rxvq = guest_rxvq.create_queue();
+            let mut txvq = guest_txvq.create_queue();
+            let mut evvq = guest_evvq.create_queue();
+            rxvq.set_event_idx(event_idx);
+            txvq.set_event_idx(event_idx);
+            evvq.set_event_idx(event_idx);
 
             // Set up one available descriptor in the RX queue.
             guest_rxvq.dtable[0].set(
@@ -348,12 +381,14 @@ mod tests {
                 EventFd::new(EFD_NONBLOCK).unwrap(),
                 EventFd::new(EFD_NONBLOCK).unwrap(),
             ];
-            let interrupt_cb = Arc::new(NoopVirtioInterrupt {});
+            let interrupt = Arc::new(CountingVirtioInterrupt::default());
+            let interrupt_cb = interrupt.clone();
 
             EpollHandlerContext {
                 guest_rxvq,
                 guest_txvq,
                 guest_evvq,
+                interrupt,
                 handler: VsockEpollHandler {
                     mem: GuestMemoryAtomic::new(self.mem.clone()),
                     queues,
@@ -373,16 +408,22 @@ mod tests {
         pub guest_rxvq: GuestQ<'a>,
         pub guest_txvq: GuestQ<'a>,
         pub guest_evvq: GuestQ<'a>,
+        pub interrupt: Arc<CountingVirtioInterrupt>,
     }
 
     impl<'a> EpollHandlerContext<'a> {
+        pub fn irq_count(&self) -> usize {
+            self.interrupt.count.load(Ordering::SeqCst)
+        }
         pub fn signal_txq_event(&mut self) {
             self.handler.queue_evts[1].write(1).unwrap();
             let events = epoll::Events::EPOLLIN;
             let event = epoll::Event::new(events, TX_QUEUE_EVENT as u64);
             let mut epoll_helper =
                 EpollHelper::new(&self.handler.kill_evt, &self.handler.pause_evt).unwrap();
-            self.handler.handle_event(&mut epoll_helper, &event).ok();
+            self.handler
+                .handle_event(&mut epoll_helper, &event)
+                .expect("handle_event() should have succeeded");
         }
         pub fn signal_rxq_event(&mut self) {
             self.handler.queue_evts[0].write(1).unwrap();
@@ -390,7 +431,9 @@ mod tests {
             let event = epoll::Event::new(events, RX_QUEUE_EVENT as u64);
             let mut epoll_helper =
                 EpollHelper::new(&self.handler.kill_evt, &self.handler.pause_evt).unwrap();
-            self.handler.handle_event(&mut epoll_helper, &event).ok();
+            self.handler
+                .handle_event(&mut epoll_helper, &event)
+                .expect("handle_event() should have succeeded");
         }
     }
 }
