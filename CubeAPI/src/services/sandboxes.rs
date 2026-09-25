@@ -1419,6 +1419,102 @@ mod tests {
         assert_bad_request(err, reason);
     }
 
+    #[tokio::test]
+    async fn list_sandboxes_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "limit is out of range";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .list(None, None, i32::MAX)
+            .await
+            .expect_err("rejected list should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn get_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "invalid sandbox id";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .get_sandbox("../invalid")
+            .await
+            .expect_err("rejected detail request should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn kill_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "invalid delete filter";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            delete(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .kill_sandbox("../invalid")
+            .await
+            .expect_err("rejected delete should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn get_logs_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "log limit is out of range";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/logs",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .get_logs("sbx-1", None, i32::MAX)
+            .await
+            .expect_err("rejected logs request should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn update_network_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "network policy is invalid";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/network",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .update_network("sbx-1", None, None)
+            .await
+            .expect_err("rejected network update should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn pause_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "sandbox id is invalid";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/update",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .pause_sandbox("../invalid")
+            .await
+            .expect_err("rejected lifecycle update should not succeed");
+        assert_bad_request(err, reason);
+    }
+
     // Negative control: genuine backend faults must keep counting as 5xx, and
     // 130408 CubeletUnHealthy must not be swept up by the 1304xx prefix.
     #[tokio::test]

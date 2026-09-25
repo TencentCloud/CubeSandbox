@@ -571,12 +571,12 @@ agent-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
 
 # Only unit tests (--lib --bins) run here; the tests/integration.rs target
-# needs a full VM. This does not pass /dev/kvm into the builder, so the
-# runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
-# hypervisor-kvm for those).
+# needs a full VM. The root package command does not execute workspace member
+# tests, so block_util runs explicitly. This does not pass /dev/kvm into the
+# builder; see tests/unittest/run.sh hypervisor-kvm for runtime-KVM tests.
 .PHONY: hypervisor-test
 hypervisor-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins && cargo test -p block_util --lib'
 
 .PHONY: shim
 shim: builder-image
