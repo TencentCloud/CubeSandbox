@@ -1041,6 +1041,84 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: create_sandbox_v2
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewSandboxV2'
+        required: true
+      responses:
+        '201':
+          description: Sandbox created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v2/sandboxes/{sandboxID}/connect:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: connect_sandbox_v2
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectSandboxV2'
+        required: true
+      responses:
+        '200':
+          description: Sandbox connection info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Paused sandbox cannot be resumed during a conflicting lifecycle transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /v2/sandboxes/{sandboxID}/logs:
     get:
       tags:
@@ -1258,6 +1336,24 @@ components:
           - 'null'
           format: int32
           description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry, and a positive value ensures at least that much remaining lifetime. For an already-running sandbox, a shorter positive window is ignored; use POST /sandboxes/{id}/timeout to shorten it. Zero and values below -1 are invalid.
+    ConnectSandboxV2:
+      allOf:
+      - $ref: '#/components/schemas/ConnectSandbox'
+      - type: object
+        properties:
+          memory:
+            type:
+            - boolean
+            - 'null'
+            description: |-
+              Resume from the memory snapshot. Defaults to true. `false` (cold-boot
+              from disk) is not supported and is rejected by the handler.
+      description: |-
+        Request body for POST /v2/sandboxes/{id}/connect (E2B SDK >= 2.51.0).
+
+        Reuses the v1 [`ConnectSandbox`] shape and adds the v2-only `memory` flag.
+        CubeSandbox always resumes from the memory snapshot, so `memory=false`
+        (cold-boot from disk) is rejected by the handler.
     CreateSnapshotRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
@@ -1698,6 +1794,26 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+    NewSandboxV2:
+      allOf:
+      - $ref: '#/components/schemas/NewSandbox'
+      - type: object
+        properties:
+          autoPauseMemory:
+            type:
+            - boolean
+            - 'null'
+            description: |-
+              Keep the full memory snapshot when auto-pausing. Defaults to true.
+              `false` (filesystem-only, cold-boot on resume) is not supported and is
+              rejected by the handler.
+      description: |-
+        Request body for POST /v2/sandboxes (E2B SDK >= 2.51.0).
+
+        Reuses the v1 [`NewSandbox`] shape and adds the v2-only
+        `autoPauseMemory` flag. CubeSandbox always keeps the full memory snapshot
+        on pause, so `autoPauseMemory=false` (filesystem-only snapshot) is rejected
+        by the handler rather than silently ignored.
     NewVolume:
       type: object
       description: |-
