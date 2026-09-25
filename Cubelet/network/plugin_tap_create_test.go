@@ -240,6 +240,21 @@ func TestTapCreateDoesNotReleaseRuntimeAfterPreCommitEnsureError(t *testing.T) {
 	}
 }
 
+func TestNetworkRequestPayloadForLogTruncatesOversizedPayload(t *testing.T) {
+	short := `{"Version":1}`
+	if got := networkRequestPayloadForLog(short); got != short {
+		t.Fatalf("short payload=%q, want %q", got, short)
+	}
+
+	oversized := strings.Repeat("x", maxLoggedNetworkRequestPayload+1)
+	got := networkRequestPayloadForLog(oversized)
+	if len(got) != maxLoggedNetworkRequestPayload+len("...(truncated)") ||
+		!strings.HasPrefix(got, strings.Repeat("x", maxLoggedNetworkRequestPayload)) ||
+		!strings.HasSuffix(got, "...(truncated)") {
+		t.Fatalf("oversized payload was not bounded: len=%d suffix=%q", len(got), got[len(got)-16:])
+	}
+}
+
 func TestGetTapFileForShimGetsFreshRuntimeFDForEveryRequest(t *testing.T) {
 	oldDNM := dnm
 	defer func() {
@@ -332,6 +347,34 @@ func TestTapCreateWithNetworkRuntimeAddsDNSAllowOutCIDRsForDomainAllow(t *testin
 	wantAllowOut := []string{"172.67.0.0/16", "api.example.com", "1.1.1.1/32", "8.8.8.8/32"}
 	if strings.Join(fakeClient.lastEnsureRequest.CubeNetworkConfig.AllowOut, ",") != strings.Join(wantAllowOut, ",") {
 		t.Fatalf("AllowOut=%v, want %v", fakeClient.lastEnsureRequest.CubeNetworkConfig.AllowOut, wantAllowOut)
+	}
+}
+
+func TestTapCreateWithNetworkRuntimeForwardsQosToShim(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
+	l := &local{
+		Config:         &Config{MvmGwDestIP: "169.254.68.5", MVMInnerIP: "169.254.68.6", MvmMask: 30},
+		networkRuntime: fakeClient,
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-qos"},
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			RequestID: "qos-request",
+			Annotations: map[string]string{
+				"cube.master.net": `{"Version":1,"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100},"OPS":{"Size":5000,"RefillTime":1000}}}`,
+			},
+		},
+	}
+	if err := l.Create(context.Background(), opts); err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	shimReq, ok := opts.NetworkInfo.(*networktypes.ShimNetReq)
+	if !ok || shimReq == nil || len(shimReq.Interfaces) != 1 || shimReq.Interfaces[0].Qos == nil {
+		t.Fatalf("shim request missing qos: %#v", opts.NetworkInfo)
+	}
+	got := shimReq.Interfaces[0].Qos
+	if got.BwSize != 1250000 || got.BwRefillTime != 100 || got.OpsSize != 5000 || got.OpsRefillTime != 1000 {
+		t.Fatalf("shim qos=%+v, want bandwidth and packet buckets", got)
 	}
 }
 

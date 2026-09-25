@@ -33,7 +33,8 @@ var (
 )
 
 const (
-	eth0 = "eth0"
+	eth0                           = "eth0"
+	maxLoggedNetworkRequestPayload = 1024
 )
 
 type Config struct {
@@ -175,11 +176,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	if request == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "RunCubeSandboxRequest nil")
 	}
-	req, err := decodeNetRequest(request.Annotations[constants.MasterAnnotationsNetWork])
+	rawNetworkRequest := request.Annotations[constants.MasterAnnotationsNetWork]
+	req, err := decodeNetRequest(rawNetworkRequest)
 	if err != nil {
+		log.G(ctx).Errorf("decode network request failed: sandbox_id=%s raw=%q err=%v",
+			opts.SandboxID, networkRequestPayloadForLog(rawNetworkRequest), err)
 		return err
 	}
-	log.G(ctx).Debugf("network request for %s: %s", opts.SandboxID, request.Annotations[constants.MasterAnnotationsNetWork])
+	log.G(ctx).Debugf("network request for %s: %s", opts.SandboxID, rawNetworkRequest)
 
 	cubeNetworkConfigBeforeDNS, cubeNetworkConfig, resolvedDNSServers, dnsAllowOutCIDRs, err := buildRuntimePolicy(ctx, request)
 	if err != nil {
@@ -229,13 +233,21 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 }
 
 func decodeNetRequest(raw string) (*NetRequest, error) {
-	req := &NetRequest{}
-	if raw != "" {
-		if err := utils.Decode(raw, req); err != nil {
-			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "decode network params failed: %+v, raw: %s", err, raw)
-		}
+	if raw == "" {
+		return &NetRequest{}, nil
+	}
+	req, err := DecodeNetRequest(raw)
+	if err != nil {
+		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "decode network params failed: %+v", err)
 	}
 	return req, nil
+}
+
+func networkRequestPayloadForLog(raw string) string {
+	if len(raw) <= maxLoggedNetworkRequestPayload {
+		return raw
+	}
+	return raw[:maxLoggedNetworkRequestPayload] + "...(truncated)"
 }
 
 func buildRuntimePolicy(ctx context.Context, request *cubebox.RunCubeSandboxRequest) (*networkruntime.CubeNetworkConfig, *networkruntime.CubeNetworkConfig, []string, []string, error) {
