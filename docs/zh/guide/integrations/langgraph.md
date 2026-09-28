@@ -201,9 +201,20 @@ def strip_code_fence(text: str) -> str | None:
     fence = "`" * 3                      # 三个反引号，避免字面量围栏
     if not text:
         return None
-    # 围栏开启符可能与说明文字同行（如 `` 代码如下：```python ``），因此要在
-    # 全文任意位置查找第一个围栏 token，而不是只在行首匹配。
+    # 围栏开启符可能与说明文字同行（如 `` 代码如下：```python ``），因此不能要求它
+    # 一定在行首。但仅仅在散文中*引用*围栏标记（如 `` 我会用 ```python 代码块 ``）
+    # 时，同一行在反引号之后还会有更多文字；而真正的开启符其后最多跟一个语言标签。
+    # 跳过那些同行余文含有多个词的围栏，避免把被引用的标记误当成开启符。
     start = text.find(fence)
+    while start != -1:
+        run = len(fence)
+        while start + run < len(text) and text[start + run] == "`":
+            run += 1
+        rest = text[start + run:]
+        nl = rest.find("\n")
+        if len((rest[:nl] if nl != -1 else rest).strip().split()) <= 1:
+            break
+        start = text.find(fence, start + 1)
     if start == -1:
         return None
     # 读取完整的反引号连串长度（```、````、……），避免把 4 反引号围栏误当成
@@ -234,7 +245,11 @@ def strip_code_fence(text: str) -> str | None:
         if run == fence_len and (len(s) == run or s[run].isspace()) and len(line) - len(s) == opener_indent:
             break
         inner.append(line)
-    return "\n".join(inner).strip() or None  # 空围栏（```\n```）视为无代码
+    # 收集到的行仍带有开启符的缩进（嵌套在 Markdown 列表里的缩进围栏是整体缩进的）。
+    # 逐行去掉开启符的缩进，让整个代码块作为单一顶层脚本解析——缩进不足的行（或空行）
+    # 保持原样。只去掉换行符，这样围栏两侧的空行会被删除，而不会误删有意义的缩进。
+    inner = [l[opener_indent:] if l[:opener_indent].isspace() else l for l in inner]
+    return "\n".join(inner).strip("\n") or None  # 空围栏（```\n```）视为无代码
 
 
 def coder(state: AgentState, run_python) -> dict:

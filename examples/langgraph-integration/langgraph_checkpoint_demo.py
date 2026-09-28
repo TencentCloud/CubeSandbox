@@ -110,9 +110,22 @@ def strip_code_fence(text: str) -> str | None:
     fence = "`" * 3                      # three backticks, without a literal fence
     if not text:
         return None
-    # The opener may share a line with prose (`` The code is: ```python ``), so
-    # search for the first fence token anywhere rather than only at a line start.
+    # The opener may share a line with prose (`` The code is: ```python ``), so it
+    # can't be required to start a line. But a fence merely *quoted* in prose —
+    # `` I'll write it in a ```python block `` — is followed by more words on the
+    # same line, whereas a real opener's line carries at most a language tag after
+    # the backticks. Skip any fence whose same-line remainder has extra words so
+    # the quoted marker isn't mistaken for the opener.
     start = text.find(fence)
+    while start != -1:
+        run = len(fence)
+        while start + run < len(text) and text[start + run] == "`":
+            run += 1
+        rest = text[start + run:]
+        nl = rest.find("\n")
+        if len((rest[:nl] if nl != -1 else rest).strip().split()) <= 1:
+            break
+        start = text.find(fence, start + 1)
     if start == -1:
         return None
     # Read the full backtick-run length (```, ````, ...) so a 4-backtick fence is
@@ -145,7 +158,13 @@ def strip_code_fence(text: str) -> str | None:
         if run == fence_len and (len(s) == run or s[run].isspace()) and len(line) - len(s) == opener_indent:
             break
         inner.append(line)
-    return "\n".join(inner).strip() or None  # empty fence (```\n```) counts as no code
+    # The collected lines still carry the opener's indentation (an indented fence
+    # nested in a markdown list is indented as a whole). Dedent each line by the
+    # opener's indent so the block parses as one top-level script — a line with
+    # less indent (or a blank line) is left as-is. Strip only newlines so the
+    # fence's surrounding blank lines are dropped without eating real indentation.
+    inner = [l[opener_indent:] if l[:opener_indent].isspace() else l for l in inner]
+    return "\n".join(inner).strip("\n") or None  # empty fence (```\n```) counts as no code
 
 
 def coder(state: AgentState, run_python) -> dict:
