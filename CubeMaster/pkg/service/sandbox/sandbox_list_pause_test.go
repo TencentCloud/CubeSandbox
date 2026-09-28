@@ -49,6 +49,7 @@ func TestApplyPauseBindingsEnrichesScannedRow(t *testing.T) {
 
 func TestApplyPauseBindingsAppendsRowMissingFromNodeScan(t *testing.T) {
 	pausedAt := time.Now().Add(-time.Minute)
+	before := pauseViewWithoutSpecCount("list")
 
 	got := applyPauseBindings(t.Context(), nil, []*pausesnap.Record{{
 		SandboxID:    "sb-2",
@@ -69,6 +70,7 @@ func TestApplyPauseBindingsAppendsRowMissingFromNodeScan(t *testing.T) {
 	require.Equal(t, constants.RemoteStatusInProgress, got[0].RemoteStatus)
 	require.Equal(t, pausedAt.UnixNano(), got[0].PauseAt)
 	require.Zero(t, got[0].CreateAt)
+	require.Equal(t, before+1, pauseViewWithoutSpecCount("list"))
 }
 
 func TestEnrichSandboxListEndAtsUsesOneBatchLookup(t *testing.T) {

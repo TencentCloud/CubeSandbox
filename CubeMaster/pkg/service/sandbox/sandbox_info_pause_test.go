@@ -130,7 +130,7 @@ func TestApplyPauseBindingToInfoKeepsTombstoneIdentity(t *testing.T) {
 	require.Equal(t, "snap-info", got.Annotations[constants.CubeAnnotationPauseSnapshotID])
 	require.Equal(t, "tpl-1", got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	require.Equal(t, "10.0.0.1", got.HostIP)
-	require.Equal(t, "192.168.0.9", got.SandboxIP)
+	require.Empty(t, got.SandboxIP)
 }
 
 func TestApplyPauseBindingToInfoStaleReadyReportsRunning(t *testing.T) {
@@ -178,6 +178,7 @@ func TestApplyPauseBindingToInfoReadyWithoutSpecIsMinimal(t *testing.T) {
 	patches.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
 		return nil, sandboxspec.ErrSandboxSpecNotFound
 	})
+	before := pauseViewWithoutSpecCount("info")
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
 	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID))
 	require.True(t, filled)
@@ -185,6 +186,7 @@ func TestApplyPauseBindingToInfoReadyWithoutSpecIsMinimal(t *testing.T) {
 	require.Equal(t, sandboxID, rsp.Data[0].SandboxID)
 	require.Empty(t, rsp.Data[0].Labels)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
+	require.Equal(t, before+1, pauseViewWithoutSpecCount("info"))
 }
 
 func TestApplyPauseBindingToInfoCreatingOverRunningKeepsIdentity(t *testing.T) {
@@ -427,6 +429,7 @@ func TestSandboxInfoUnhealthyNodeServesSpecView(t *testing.T) {
 	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
 	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
+	require.Equal(t, "192.168.0.8", rsp.Data[0].SandboxIP)
 }
 
 func TestSandboxInfoUnhealthyOtherNodeDoesNotSynthesize(t *testing.T) {

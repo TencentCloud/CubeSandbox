@@ -246,6 +246,14 @@ func TestOverlayPauseAnnotationsKeepsIdentity(t *testing.T) {
 	require.Equal(t, "disk full", ann[constants.CubeAnnotationPauseError])
 }
 
+func pauseViewWithoutSpecCount(path string) float64 {
+	metric := &dto.Metric{}
+	if err := pauseViewWithoutSpecTotal.WithLabelValues(path).Write(metric); err != nil {
+		return -1
+	}
+	return metric.GetCounter().GetValue()
+}
+
 func pauseStaleCount(path string) float64 {
 	metric := &dto.Metric{}
 	if err := pauseBindingStaleTotal.WithLabelValues(path).Write(metric); err != nil {

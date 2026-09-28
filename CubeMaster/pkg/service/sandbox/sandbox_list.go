@@ -225,6 +225,9 @@ func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, re
 		if item == nil || !labelsMatchSelector(item.Labels, opts.labelSelector) || matchFilter(item.Labels) {
 			continue
 		}
+		if spec == nil {
+			recordPauseViewWithoutSpec("list")
+		}
 		item.Annotations = overlayPauseAnnotations(item.Annotations, rec, "")
 		known[rec.SandboxID] = item
 		items = append(items, item)

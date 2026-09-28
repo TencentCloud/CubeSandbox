@@ -321,7 +321,11 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		if req.HostID != "" && !pauseBindingOnHost(rec, req.HostID) {
 			return false
 		}
-		item = sandboxDataFromSpec(req.SandboxID, loadSandboxSpec(ctx, req.SandboxID))
+		spec := loadSandboxSpec(ctx, req.SandboxID)
+		if spec == nil {
+			recordPauseViewWithoutSpec("info")
+		}
+		item = sandboxDataFromSpec(req.SandboxID, spec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
 	}
 	setSandboxDataStatus(item, view.status)
@@ -379,7 +383,7 @@ func setPauseLocation(ctx context.Context, req *types.GetCubeSandboxReq, item *t
 	if hostIP == "" && ok && proxyMap != nil {
 		hostIP = proxyMap.HostIP
 	}
-	if ok && proxyMap != nil {
+	if ok && proxyMap != nil && strings.TrimSpace(proxyMap.HostIP) == hostIP {
 		item.SandboxIP = proxyMap.SandboxIP
 	}
 	item.HostIP = hostIP

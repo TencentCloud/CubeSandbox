@@ -262,3 +262,12 @@ func recordStalePauseBinding(ctx context.Context, path, sandboxID string, rec *p
 	log.G(ctx).Debugf("stale pause binding: sandbox=%s snapshot=%s node=%s reported running",
 		sandboxID, rec.SnapshotID, rec.NodeIP)
 }
+
+var pauseViewWithoutSpecTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "cube_pause_view_without_spec_total",
+	Help: "Pause views rendered without a persisted sandbox spec, by read path.",
+}, []string{"path"})
+
+func recordPauseViewWithoutSpec(path string) {
+	pauseViewWithoutSpecTotal.WithLabelValues(path).Inc()
+}
