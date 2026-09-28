@@ -3,6 +3,7 @@
 //
 
 pub mod health;
+pub mod metrics;
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
