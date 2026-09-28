@@ -399,13 +399,13 @@ func TestCheckValidAndGetReqKeepsUnhealthyErrorOtherwise(t *testing.T) {
 
 func TestSandboxInfoUnhealthyNodeServesSpecView(t *testing.T) {
 	const sandboxID = "sb-info-unhealthy"
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.8"})
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"})
 	t.Cleanup(func() { localcache.DeleteSandboxCache(sandboxID) })
 	var listed int
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
-		return &basetypes.SandboxProxyMap{HostIP: "10.0.0.8", SandboxIP: "192.168.0.8"}, true
+		return &basetypes.SandboxProxyMap{HostIP: "10.0.0.1", SandboxIP: "192.168.0.8"}, true
 	})
 	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
 		return readyInfoRecord(sandboxID), nil
@@ -427,6 +427,33 @@ func TestSandboxInfoUnhealthyNodeServesSpecView(t *testing.T) {
 	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
 	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
+}
+
+func TestSandboxInfoUnhealthyOtherNodeDoesNotSynthesize(t *testing.T) {
+	const sandboxID = "sb-info-unhealthy-other"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.8"})
+	t.Cleanup(func() { localcache.DeleteSandboxCache(sandboxID) })
+	var listed int
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
+		return &basetypes.SandboxProxyMap{HostIP: "10.0.0.8"}, true
+	})
+	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
+		return readyInfoRecord(sandboxID), nil
+	})
+	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
+		return &node.Node{IP: ip, InsID: "node-b", Healthy: false}, true
+	})
+	patches.ApplyFunc(cubelet.List, func(context.Context, string, *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
+		listed++
+		return nil, errors.New("should not be called")
+	})
+
+	ctx := CubeLog.WithRequestTrace(context.Background(), &CubeLog.RequestTrace{RequestID: "req-unhealthy-other"})
+	rsp := SandboxInfo(ctx, &types.GetCubeSandboxReq{RequestID: "req-unhealthy-other", SandboxID: sandboxID})
+	require.Zero(t, listed)
+	require.Equal(t, int(errorcode.ErrorCode_CubeletUnHealthy), rsp.Ret.RetCode)
 }
 
 func TestSandboxInfoCubeletErrorStillFails(t *testing.T) {

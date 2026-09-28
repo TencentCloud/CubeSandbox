@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -356,6 +357,32 @@ func TestMergePauseBindingsSkipsSpecReadOnIntermediatePage(t *testing.T) {
 	require.Zero(t, gets)
 	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, &types.ListCubeSandboxRes{Total: 4, Size: 2, EndIdx: 4})
 	require.Equal(t, 1, gets)
+}
+
+func TestPartialSpecReadKeepsIdentityAndBackend(t *testing.T) {
+	spec := specWithIdentity()
+	partialErr := errors.New("batch failed")
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return []*pausesnap.Record{{
+			SandboxID:  "sb-spec",
+			SnapshotID: "snap-spec",
+			Status:     pausesnap.StatusReady,
+		}}, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return map[string]*types.CreateCubeSandboxReq{"sb-spec": spec}, partialErr
+	})
+
+	rsp := &types.ListCubeSandboxRes{Total: 1, Size: 1, EndIdx: 1}
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Len(t, rsp.Data, 1)
+	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
+
+	items := []*types.SandboxBriefData{{SandboxID: "sb-spec"}}
+	enrichSandboxListBackends(t.Context(), items)
+	require.Equal(t, constants.SnapshotBackendXFS, items[0].Backend)
 }
 
 func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {

@@ -147,7 +147,11 @@ def test_pause_preserves_metadata(sdk_sandbox, sdk_backend, sdk_e2e_config):
     assert metadata.get("test_suite") == "sdk_compat"
 
     entries = list_sandboxes(sdk_backend, sdk_e2e_config)
-    paused = [entry for entry in entries if _listed_sandbox_id(entry) == sdk_sandbox.sandbox_id]
+    paused = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and _listed_sandbox_id(entry) == sdk_sandbox.sandbox_id
+    ]
     assert paused, "paused sandbox must stay visible in list"
     assert paused[0].get("metadata", {}).get("sdk_compat_pause_meta") == "keep-me"
 

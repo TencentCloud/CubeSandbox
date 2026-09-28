@@ -143,9 +143,12 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 	}
 
 	if !exist || !n.Healthy {
-		// A caller-pinned host keeps the old error. Only an unpinned Info of a
-		// shimless pause can be answered without the node.
-		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) {
+		// A caller-pinned host keeps the old error. An unpinned Info of a
+		// shimless pause is answered from Master only when the located host is
+		// the binding's own node. A cache entry that names some other node
+		// (leftover READY after a cross-node resume) stays an error, so a
+		// running sandbox is not reported paused while that node is down.
+		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) && pauseBindingOnHost(rec, hostIP) {
 			return "", rec, true
 		}
 		if !exist {

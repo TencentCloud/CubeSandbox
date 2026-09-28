@@ -197,10 +197,10 @@ func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, re
 			continue
 		}
 		if item, ok := known[rec.SandboxID]; ok {
-			// Pause fields are filled even when the node says RUNNING. PauseStatus
-			// stays READY so an operator can see the stale binding; Status itself
-			// stays RUNNING. Info has no PauseStatus field and does not add a
-			// pause annotation in that case.
+			// Always record the binding. Status stays RUNNING only for a stale READY
+			// whose node reports RUNNING; PauseStatus stays READY so the leftover
+			// is visible, and Info adds no pause annotation in that case. FAILED
+			// over RUNNING still overrides Status to UNKNOWN so List matches Info.
 			applyPauseBinding(item, rec)
 			view := decidePauseView(rec, item.Status, true)
 			switch {
@@ -320,12 +320,6 @@ func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefD
 		return
 	}
 	specs, err := sandboxspec.GetMany(ctx, ids)
-	if err != nil {
-		if !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
-			log.G(ctx).Warnf("ListSandbox: read sandbox specs for backend: %v", err)
-		}
-		return
-	}
 	for _, item := range items {
 		if item == nil || strings.TrimSpace(item.Backend) != "" {
 			continue
@@ -335,6 +329,9 @@ func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefD
 			continue
 		}
 		item.Backend = strings.TrimSpace(spec.Backend)
+	}
+	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+		log.G(ctx).Warnf("ListSandbox: read sandbox specs for backend: %v", err)
 	}
 }
 

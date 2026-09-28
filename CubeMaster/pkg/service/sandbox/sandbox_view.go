@@ -259,6 +259,6 @@ func recordStalePauseBinding(ctx context.Context, path, sandboxID string, rec *p
 		return
 	}
 	pauseBindingStaleTotal.WithLabelValues(path).Inc()
-	log.G(ctx).Warnf("stale pause binding: sandbox=%s snapshot=%s node=%s reported running",
+	log.G(ctx).Debugf("stale pause binding: sandbox=%s snapshot=%s node=%s reported running",
 		sandboxID, rec.SnapshotID, rec.NodeIP)
 }

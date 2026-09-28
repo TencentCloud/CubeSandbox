@@ -201,7 +201,8 @@ var getManyBatchSize = 500
 
 // GetMany returns the canonical requests for the given sandbox ids. Ids
 // without a spec are absent from the result; a row that fails to decode is
-// skipped rather than failing the whole batch.
+// skipped rather than failing the whole batch. A query error stops further
+// batches and returns the rows already decoded together with the error.
 func GetMany(ctx context.Context, sandboxIDs []string) (map[string]*sandboxtypes.CreateCubeSandboxReq, error) {
 	client := getDB()
 	if client == nil {
@@ -224,7 +225,7 @@ func GetMany(ctx context.Context, sandboxIDs []string) (map[string]*sandboxtypes
 		var recs []models.SandboxSpec
 		if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
 			Where("sandbox_id IN ?", ids[start:end]).Find(&recs).Error; err != nil {
-			return nil, err
+			return out, err
 		}
 		for i := range recs {
 			req, err := decodeSpec(&recs[i])
