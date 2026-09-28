@@ -192,6 +192,81 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 	return nil
 }
 
+func buildSnapshotReadinessProbeConfig(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) (*telnet.ProbeConfig, error) {
+	if ci == nil || ci.IP == "" || ci.IP == "<nil>" {
+		return nil, ret.Err(errorcode.ErrorCode_CreateNetworkFailed, "invalid NetworkInfo")
+	}
+	probe := c.GetProbe()
+	if probe == nil || probe.GetProbeHandler() == nil {
+		return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
+	}
+	if probe.TimeoutMs <= 0 {
+		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe TimeoutMs[%v]", probe.TimeoutMs)
+	}
+
+	probeTimeoutMs := probe.GetProbeTimeoutMs()
+	if probeTimeoutMs <= 5 {
+		probeTimeoutMs = 100
+	}
+	cfg := &telnet.ProbeConfig{
+		Addr:             ci.IP,
+		InitialDelay:     0,
+		Timeout:          time.Duration(probeTimeoutMs) * time.Millisecond,
+		Period:           0,
+		SuccessThreshold: 1,
+		FailureThreshold: 1,
+		InstanceType:     ci.InstanceType,
+		ProbeTimeout:     time.Duration(probeTimeoutMs) * time.Millisecond,
+	}
+
+	handler := probe.GetProbeHandler()
+	if tcp := handler.GetTcpSocket(); tcp != nil {
+		cfg.Action = telnet.ActionTCPSocket
+		cfg.Port = tcp.GetPort()
+		if cfg.Port <= 0 {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe port[%v]", cfg.Port)
+		}
+	} else if ping := handler.GetPing(); ping != nil {
+		cfg.Action = telnet.ActionPing
+		cfg.PingUDP = ping.GetUdp()
+	} else if httpGet := handler.GetHttpGet(); httpGet != nil {
+		cfg.Action = telnet.ActionHTTPGet
+		cfg.Port = httpGet.GetPort()
+		req, err := NewRequestForHTTPGetAction(ctx, httpGet, cfg.Addr)
+		if err != nil {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid http probe[%d]:%v", cfg.Port, err)
+		}
+		cfg.HttpGetRequest = req
+	} else {
+		return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
+	}
+	return cfg, nil
+}
+
+// doSnapshotReadinessProbe runs the template's declared readiness handler once
+// immediately before snapshotting. It intentionally ignores initial delay and
+// thresholds already satisfied by Create; this is a fail-fast revalidation, not
+// a second readiness wait.
+func (l *local) doSnapshotReadinessProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) error {
+	cfg, err := buildSnapshotReadinessProbeConfig(ctx, c, ci)
+	if err != nil {
+		return err
+	}
+	return waitSnapshotReadinessProbe(ctx, telnet.Telnet(ctx, cfg))
+}
+
+// waitSnapshotReadinessProbe always observes ctx completion. telnet.Telnet
+// may return without sending when its context is already cancelled, so a bare
+// receive would leak the temporary app-snapshot sandbox by blocking forever.
+func waitSnapshotReadinessProbe(ctx context.Context, result <-chan error) error {
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) error {
 	if req == nil || sandBox == nil || req.Annotations == nil {
 		return nil
