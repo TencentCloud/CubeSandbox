@@ -98,6 +98,10 @@ pub async fn list_sandboxes_v2(
     State(state): State<AppState>,
     Query(params): Query<ListSandboxesV2Query>,
 ) -> AppResult<impl IntoResponse> {
+    params
+        .validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     state
         .logger
         .log(

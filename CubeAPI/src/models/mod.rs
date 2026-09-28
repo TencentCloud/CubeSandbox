@@ -901,7 +901,14 @@ pub struct ListSandboxesQuery {
 }
 
 /// Query params for GET /v2/sandboxes.
-#[derive(Debug, Deserialize, IntoParams)]
+///
+/// `limit` is validated rather than silently clamped: `limit=0`/`-1` used to
+/// fall through `.max(1)` to a one-item page, and because every page costs a
+/// full node-window walk (see `SandboxService::list_v2`), a client paging one
+/// item at a time forced one cluster sweep *per sandbox*. Rejecting it with a
+/// 400 also tells the caller its own request was wrong instead of quietly
+/// returning less than it asked for.
+#[derive(Debug, Deserialize, Validate, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListSandboxesV2Query {
     pub metadata: Option<String>,
@@ -910,6 +917,7 @@ pub struct ListSandboxesV2Query {
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
     #[serde(default = "default_page_limit")]
+    #[validate(range(min = 1, max = 1000, message = "limit must be between 1 and 1000"))]
     pub limit: i32,
 }
 

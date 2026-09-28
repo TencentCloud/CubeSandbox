@@ -158,6 +158,16 @@ impl SandboxService {
         // cursor offset, so a paging client would see the same sandbox twice.
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut node_window_start = 1;
+        // Bound the walk rather than trusting the backend's cursor alone. A
+        // cluster whose node row ids have drifted far above its node count can
+        // make the cursor advance by more than one window per round without
+        // ever reporting a short window, so the loop needs a stop that does not
+        // depend on `size`. Without it the request runs until
+        // `DEFAULT_ROUTE_TIMEOUT` (30 s, `routes.rs`) kills it and the client
+        // gets a generic timeout with no page and no way to tell that apart
+        // from a slow backend. Exceeding the budget is reported as a
+        // `ServiceUnavailable` with a `Retry-After`, so it fails predictably.
+        let mut nodes_covered = 0usize;
         loop {
             let req = ListSandboxRequest {
                 request_id: new_request_id(),
@@ -179,6 +189,11 @@ impl SandboxService {
                 .map_err(params_error_or_internal)?;
 
             ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
+
+            // Read the two fields that decide whether the walk continues before
+            // `sandboxes` is moved out of the response below.
+            let covered_nodes = resp.size.filter(|s| *s > 0);
+            let backend_cursor = resp.end_idx.filter(|e| *e > 0);
 
             matching.extend(
                 resp.sandboxes
@@ -204,14 +219,37 @@ impl SandboxService {
             // A missing, zero or negative `end_idx` means the backend did not
             // report a cursor at all, so there is nothing to advance on and
             // the loop must stop rather than spin on the same window forever.
-            match (resp.size, resp.end_idx) {
+            let keeps_walking = match (covered_nodes, backend_cursor) {
                 (Some(covered), Some(end_idx)) if covered >= SANDBOX_LIST_NODE_WINDOW => {
-                    if end_idx <= 0 {
-                        break;
-                    }
                     node_window_start = end_idx + 1;
+                    true
                 }
-                _ => break,
+                _ => false,
+            };
+
+            // Budget the walk rather than trusting the backend's cursor alone.
+            // A cluster whose node row ids have drifted far above its node
+            // count can advance the cursor by more than one window per round
+            // without ever reporting a short window, so the loop needs a stop
+            // that does not depend on `size`. Without it the request runs until
+            // `DEFAULT_ROUTE_TIMEOUT` (30 s, `routes.rs`) kills it and the
+            // client gets a generic timeout with no page and no way to tell
+            // that apart from a slow backend. Exceeding the budget is reported
+            // as a `ServiceUnavailable` with a `Retry-After`, so it fails
+            // predictably instead of as a timeout.
+            nodes_covered = nodes_covered.saturating_add(covered_nodes.unwrap_or(0) as usize);
+            if nodes_covered > SANDBOX_LIST_MAX_NODES {
+                return Err(AppError::ServiceUnavailable {
+                    message: format!(
+                        "sandbox list spans more than {SANDBOX_LIST_MAX_NODES} nodes; \
+                         narrow the request with a metadata or state filter"
+                    ),
+                    retry_after: 30,
+                });
+            }
+
+            if !keeps_walking {
+                break;
             }
         }
 
@@ -1117,6 +1155,15 @@ const SANDBOX_LIST_CURSOR_PREFIX: &str = "sbx-offset-";
 /// fan-out per request; `list_v2` walks further windows until the backend
 /// reports the last node.
 const SANDBOX_LIST_NODE_WINDOW: i32 = 100;
+
+/// Total nodes `list_v2` is willing to walk for one request. The walk costs a
+/// cubelet `List` RPC per node (serialized per node by CubeMaster's
+/// `CubeletListLock`) and sits behind the default 30 s route timeout, so a
+/// cluster wider than this fails with a `ServiceUnavailable` that names the
+/// cause instead of a generic timeout the client cannot interpret. Past this
+/// point the caller should narrow the request with a `metadata`/`state` filter
+/// rather than paging through an ever-growing cluster.
+const SANDBOX_LIST_MAX_NODES: usize = 10_000;
 
 /// Encode the offset the next page starts at.
 pub(crate) fn encode_sandbox_list_cursor(offset: usize) -> String {
@@ -3597,12 +3644,13 @@ mod tests {
     }
 
     /// `end_idx` is a node *row id* (`Index: int(elem.ID)`), so deleted node
-    /// rows leave gaps and it is not comparable with the healthy-node count.
-    /// An implementation that stopped on `end_idx < total` would call this
-    /// full window final and silently drop every sandbox on the remaining
-    /// nodes — the regression this test pins. Advancing on `end_idx + 1` is
-    /// still correct here: the ids are sparse, so the cursor lands at 600,
-    /// which is exactly the window that would have been skipped.
+    /// rows leave gaps and it is not comparable with the healthy-node count
+    /// CubeMaster also reports. An implementation that stopped on
+    /// `end_idx < total` would call this full window final and silently drop
+    /// every sandbox on the remaining nodes — the regression this test pins.
+    /// Advancing on `end_idx + 1` is still correct here: the ids are sparse,
+    /// so the cursor lands at 600, which is exactly the window that would have
+    /// been skipped.
     #[tokio::test]
     async fn list_v2_keeps_walking_when_node_ids_are_sparse() {
         let service = spawn_fake_cubemaster(Router::new().route(
@@ -3611,8 +3659,10 @@ mod tests {
                 let start = body["start_idx"].as_i64().unwrap_or(0);
                 match start {
                     // Full window, but its ids (500..599) already exceed the
-                    // healthy-node count — the shape that defeats an
-                    // `end_idx < total` termination test.
+                    // healthy-node count of 120 — the shape that defeats an
+                    // `end_idx < total` termination test. The healthy-node
+                    // count is deliberately not deserialized by this PR, so
+                    // only `end_idx`/`size` reach the walker.
                     1 => Json(serde_json::json!({
                         "requestID": "req-list",
                         "ret": { "ret_code": 0, "ret_msg": "ok" },
@@ -3736,6 +3786,137 @@ mod tests {
             ids.len(),
             120,
             "every node's sandbox should be listed exactly once, got {ids:?}"
+        );
+    }
+
+    /// The result-set assertions above cannot tell a correct advance from a
+    /// wrong one: `seen_ids` hides the repeats and every window is eventually
+    /// reached either way, so `+= window` and `end_idx + 1` both produce the
+    /// same 120 sandboxes. What separates them is the *round count* — with node
+    /// row ids starting at 500, `+= window` asks for 1, 101, 201, 301, 401,
+    /// 501, 601 and fans out seven windows' worth of cubelet RPCs, while
+    /// `end_idx + 1` asks for exactly 1 and 601. That difference is what makes
+    /// a churned cluster with high node ids usable, so the requested sequence
+    /// is asserted here.
+    #[tokio::test]
+    async fn list_v2_advances_the_window_on_the_backend_cursor() {
+        // Records every `start_idx` the walk asks CubeMaster for.
+        let seen_starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let node_ids: Vec<i64> = (500..620).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+        let recorder = seen_starts.clone();
+
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                let seen_starts = seen_starts.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    seen_starts.lock().expect("mutex").push(start);
+
+                    // Same `IndexByPage` model as the test above.
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    let end_idx = covered.last().copied().unwrap_or(0);
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        service
+            .list_v2(None, None, None, 500)
+            .await
+            .expect("every sandbox should be reachable");
+
+        let starts = recorder.lock().expect("mutex");
+        assert_eq!(
+            *starts,
+            vec![1, 600],
+            "the walk must advance on the backend cursor (end_idx + 1), not on a \
+             fixed window stride — a stride re-reads the same window once node \
+             row ids drift above the window size"
+        );
+    }
+
+    /// The walk is bounded by `SANDBOX_LIST_MAX_NODES` rather than by the
+    /// backend's cursor alone, so a cluster (or a misbehaving backend) that
+    /// keeps reporting full windows fails with a clear error instead of running
+    /// until the route timeout turns it into a generic 500-ish failure with no
+    /// page at all.
+    #[tokio::test]
+    async fn list_v2_stops_when_the_walk_exceeds_the_node_budget() {
+        // Node ids 1..=N, always reporting a full window: `size` never drops
+        // below the window, so only the budget can end the loop.
+        let node_ids: Vec<i64> = (1..=super::SANDBOX_LIST_MAX_NODES as i64 + 500).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    let end_idx = covered.last().copied().unwrap_or(0);
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let err = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect_err("a walk past the node budget must not return a page");
+
+        assert!(
+            matches!(err, AppError::ServiceUnavailable { .. }),
+            "expected a ServiceUnavailable naming the budget, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("nodes") && message.contains("filter"),
+            "the error should name the budget and the way to narrow the request, \
+             got {message:?}"
         );
     }
 

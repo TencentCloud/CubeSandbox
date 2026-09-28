@@ -1097,15 +1097,11 @@ pub struct ListSandboxResponse {
     /// Last node `Index` this window covered — the backend's own cursor, and
     /// what the walker advances on (`end_idx + 1` is the next node's position
     /// in both `IndexByPage` branches, `node.go`). It is a node *row id*
-    /// (`Index: int(elem.ID)`), **not** a position or a healthy-node count, so
-    /// it must not be compared against `total` to decide whether more nodes
-    /// remain — `size` answers that.
+    /// (`Index: int(elem.ID)`), **not** a position, so it must not be compared
+    /// against the healthy-node count the backend also reports as `Total` to
+    /// decide whether more nodes remain — `size` answers that.
     #[serde(default, alias = "EndIdx")]
     pub end_idx: Option<i32>,
-    /// Number of healthy nodes for the instance type — a *node* count, not a
-    /// sandbox count.
-    #[serde(default, alias = "Total")]
-    pub total: Option<i32>,
 }
 
 /// One sandbox entry as returned by /cube/sandbox/list.

@@ -674,6 +674,38 @@ mod tests {
         assert_eq!(error.code, 400);
     }
 
+    /// `limit` used to fall through `.max(1)`, so `limit=0`/`-1` silently
+    /// returned one item per page — and because every page costs a full
+    /// node-window walk, a client paging one item at a time forced one cluster
+    /// sweep *per sandbox*. It is rejected instead.
+    #[tokio::test]
+    async fn list_sandboxes_v2_rejects_an_out_of_range_limit() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [{ "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" }]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+        for limit in ["0", "-1", "1001"] {
+            let response = server
+                .get("/v2/sandboxes")
+                .add_query_param("limit", limit)
+                .await;
+
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "limit={limit} must be rejected rather than silently clamped"
+            );
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 400);
+        }
+    }
+
     async fn sandbox_list_server<F, Fut>(list_handler: F) -> TestServer
     where
         F: Fn(Json<Value>) -> Fut + Clone + Send + 'static,
