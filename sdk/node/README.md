@@ -303,6 +303,20 @@ const clones = await sb.clone(3, { concurrency: 3 });
 `concurrency`), then deletes the ephemeral snapshot. If any create fails, all
 successful siblings are killed and the first error is re-thrown.
 
+```ts
+// One server-side call: the backend snapshots sb once and derives N copies.
+const forks = await sb.fork({ count: 3, timeoutMs: 60_000 });
+for (const f of forks) {
+  if (f instanceof Sandbox) await f.runCode("print('alive')");
+  else console.error(f); // that fork's Error
+}
+```
+
+`fork` returns exactly `count` entries (`Sandbox | Error`), so partial success
+keeps copies without throwing. `count` is 1..100 (default 1); `timeoutMs` is the
+per-fork idle TTL in milliseconds. Only whole-request failures throw (e.g. 404
+unknown sandbox, 409 source not forkable yet).
+
 ### Volumes
 
 Persistent volumes survive sandbox lifecycles and are mounted at creation via
@@ -449,6 +463,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | `sb.createSnapshot(name?)` | `POST /sandboxes/:id/snapshots` — create a snapshot |
 | `sb.rollback(snapshotId)` | `POST /sandboxes/:id/rollback` — roll back to a snapshot |
 | `sb.clone(n?, options?)` | Snapshot + create ×n + cleanup |
+| `sb.fork(options?)` | `POST /sandboxes/:id/fork` — server-side fork, per-fork `Sandbox \| Error` |
 | `sb.getHost(port)` | Return virtual hostname `{port}-{id}.{domain}` |
 | `sb.commands` / `sb.files` / `sb.pty` | Shell / filesystem / PTY namespaces (see below) |
 

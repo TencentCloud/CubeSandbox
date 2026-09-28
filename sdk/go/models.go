@@ -102,6 +102,12 @@ func DurationPtr(d time.Duration) *time.Duration {
 	return &d
 }
 
+// IntPtr returns a pointer to i, for optional int fields such as
+// ForkOptions.Count, where nil means "not provided; use the default".
+func IntPtr(i int) *int {
+	return &i
+}
+
 // NeverTimeout requests a sandbox that never idle-times-out. See docs/guide/lifecycle.md.
 const NeverTimeout time.Duration = -1
 

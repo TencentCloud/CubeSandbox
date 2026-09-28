@@ -4,11 +4,13 @@
 /** Base class for all CubeSandbox SDK errors. */
 export class CubeSandboxError extends Error {
   readonly statusCode?: number;
+  readonly retCode?: number;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, retCode?: number) {
     super(message);
     this.name = new.target.name;
     this.statusCode = statusCode;
+    this.retCode = retCode;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

@@ -7,6 +7,7 @@ package cube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -437,9 +438,13 @@ func handleSandboxRollbackAction(c *gin.Context) {
 }
 
 func extendSnapshotWriteDeadline(w http.ResponseWriter) {
-	deadline := time.Now().Add(templatecenter.SnapshotOperationTimeout() + snapshotResponseWriteDeadlineBuffer)
+	extendWriteDeadline(w, templatecenter.SnapshotOperationTimeout()+snapshotResponseWriteDeadlineBuffer)
+}
+
+func extendWriteDeadline(w http.ResponseWriter, budget time.Duration) {
+	deadline := time.Now().Add(budget)
 	if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		log.G(context.Background()).Warnf("set snapshot response write deadline failed: %v", err)
+		log.G(context.Background()).Warnf("set response write deadline failed: %v", err)
 	}
 }
 
@@ -679,6 +684,10 @@ func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string
 	}
 }
 
+// errSandboxNotFound signals that a source sandbox does not exist. snapshotErrorCode
+// maps it to NotFound so fork / create-snapshot return 404 instead of 400.
+var errSandboxNotFound = errors.New("sandbox not found")
+
 func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (string, string, error) {
 	hostIP := ""
 	if cache := localcache.GetSandboxCache(sandboxID); cache != nil {
@@ -691,6 +700,9 @@ func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (strin
 			SandboxID: sandboxID,
 		})
 		if infoRsp == nil || infoRsp.Ret == nil || infoRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) || len(infoRsp.Data) == 0 {
+			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetCode == int(errorcode.ErrorCode_NotFound) {
+				return "", "", fmt.Errorf("%w: %s", errSandboxNotFound, sandboxID)
+			}
 			msg := "sandbox not found"
 			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetMsg != "" {
 				msg = infoRsp.Ret.RetMsg
@@ -719,12 +731,15 @@ func snapshotErrorCode(err error) int {
 		return int(errorcode.ErrorCode_Conflict)
 	case errors.Is(err, templatecenter.ErrSnapshotNotFound),
 		errors.Is(err, templatecenter.ErrSnapshotOperationNotFound),
-		errors.Is(err, templatecenter.ErrTemplateNotFound):
+		errors.Is(err, templatecenter.ErrTemplateNotFound),
+		errors.Is(err, errSandboxNotFound):
 		return int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
 		return int(errorcode.ErrorCode_DBError)
 	case isMySQLLockError(err):
 		return int(errorcode.ErrorCode_DBError)
+	case errors.Is(err, context.DeadlineExceeded):
+		return int(errorcode.ErrorCode_MasterInternalError)
 	default:
 		return int(errorcode.ErrorCode_MasterParamsError)
 	}
