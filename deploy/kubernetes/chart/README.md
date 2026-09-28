@@ -276,6 +276,27 @@ volumeS3:
 When `minio.rootPassword` is set, it must be at least 8 characters (MinIO
 requirement).
 
+## Trusted CA certificates for private image registries
+
+`trustedCACerts.*` handles registries whose serving certificate is signed by a
+private CA (self-hosted Harbor, offline test registries). It affects exactly
+one consumer: the CubeTemplateCenter container, which pulls OCI images from
+inside the cluster for `template create-from-image` (node-side kubelet /
+containerd pulls are configured on the host, not here).
+
+With `trustedCACerts.enabled=true` the chart renders a `<release>-trusted-ca`
+ConfigMap from the inline PEM `certs` (or references `existingConfigMap`),
+injects a `merge-ca` init container that concatenates the TemplateCenter
+image's system CA bundle with those certs into an `emptyDir`, and points the
+main container at it via `SSL_CERT_FILE` (honored by Go's `crypto/x509`).
+TLS verification stays on — this adds trust, it does not disable it.
+
+- Changing `trustedCACerts.certs` rolls the Deployment automatically
+  (`checksum/trusted-ca` annotation). With `existingConfigMap` the ConfigMap is
+  yours: update it and restart the pods yourself. Keys must end in `.crt` and
+  contain PEM documents.
+- Publicly-trusted registries (Docker Hub, TCR, GCR, ...) need nothing here.
+
 ## CubeMaster configuration
 
 The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.

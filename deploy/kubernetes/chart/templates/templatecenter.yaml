@@ -91,13 +91,19 @@ spec:
         # emptyDir so image pulls from registries with private CA certificates
         # succeed (the main container reads it via SSL_CERT_FILE).
         - name: merge-ca
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.cubemastercli.pullPolicy }}
+          # Use the TemplateCenter image itself: SSL_CERT_FILE replaces the
+          # main container's OS trust store, so the merged bundle must be
+          # built from the same image's CA set (also already cached on the
+          # node -- no extra image dependency).
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.templateCenter.pullPolicy }}
           command: ["/bin/sh", "-ec"]
           args:
             - |-
               cp /etc/ssl/certs/ca-certificates.crt /merged/ca-bundle.crt \
                 || { echo "system CA bundle missing from init image; refusing to build a partial trust store" >&2; exit 1; }
+              ls /trusted-ca/*.crt >/dev/null 2>&1 \
+                || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
               cat /trusted-ca/*.crt >> /merged/ca-bundle.crt
           volumeMounts:
             - name: trusted-ca

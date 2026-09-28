@@ -1,4 +1,7 @@
-{{- if and .Values.trustedCACerts.enabled (not .Values.trustedCACerts.existingConfigMap) }}
+{{- /* Only rendered when its consumer exists: the TemplateCenter Deployment
+    lives under controlPlane.enabled, so anything else leaves a dangling
+    ConfigMap. */ -}}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled (not .Values.trustedCACerts.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

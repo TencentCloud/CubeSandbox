@@ -70,7 +70,9 @@ if grep -q 'name: guard-existing-cube-trusted-ca' "$TMP_DIR/existing.yaml"; then
   exit 1
 fi
 
-# 4. Lint passes with the feature enabled.
-helm lint "$CHART_DIR" $COMMON_SETS --set trustedCACerts.enabled=true >/dev/null
+# 4. Lint passes with the feature enabled (must include a cert, otherwise the
+#    validate.yaml guard from 2c correctly rejects the render).
+helm lint "$CHART_DIR" $COMMON_SETS --set trustedCACerts.enabled=true \
+  --set-string trustedCACerts.certs[0]="-----BEGIN CERTIFICATE----- guard" >/dev/null
 
 echo "trusted-ca guard OK"
