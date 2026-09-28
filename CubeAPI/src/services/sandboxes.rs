@@ -277,9 +277,17 @@ impl SandboxService {
             .cubemaster
             .create_sandbox(&req)
             .await
-            .map_err(params_error_or_internal)?;
+            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
 
-        resp.ret.into_result().map_err(internal_error)?;
+        // Belt-and-suspenders: parse_response already flattens every non-success
+        // ret_code into CubeMasterError::Api on the transport path above, so the
+        // envelope here is necessarily a success and into_result() is a no-op today.
+        // It is kept only so the mapping stays correct if parse_response is ever
+        // relaxed to pass a non-success envelope through; the functional 130404/409
+        // mapping lives on the transport error above.
+        resp.ret
+            .into_result()
+            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
@@ -777,6 +785,54 @@ fn params_error_or_internal(e: CubeMasterError) -> AppError {
         AppError::BadRequest(e.to_string())
     } else {
         internal_error(e)
+    }
+}
+
+// parse_response raises CubeMasterError::Api before the create envelope is
+// visible, so business codes must be classified here rather than by the typed
+// ret.into_result() check further down (which, for the same reason, never
+// observes a non-success ret_code). create_sandbox applies this mapper on both
+// the transport error and the into_result() envelope path as belt-and-suspenders.
+// Restoring from a deleted / tombstoned snapshot returns 130404: it must surface
+// as 404 so the SDK raises TemplateNotFoundError, not a generic 500 that clients
+// would keep retrying and that would charge a client-caused not-found against the
+// server error-rate SLI. The only reachable create-time 130404 is a template /
+// snapshot lookup miss: CubeMaster maps just templatecenter.ErrTemplateNotFound to
+// 130404 (sandbox_create.go), and every other create-phase failure is downgraded to
+// 130400 or surfaces as ErrorCode_Unknown (-1) → 500. In particular an unresolvable
+// volume is a plain error that ret.FromError turns into -1, never 130404, so a
+// create 404 always names a template/snapshot.
+fn map_create_cubemaster_err(e: CubeMasterError, template_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_NOT_FOUND => {
+            // Name the missing template/snapshot the client sent (mirroring the delete
+            // path's "sandbox {id} not found"), then append CubeMaster's reason when it
+            // relayed one. The backend reason ("failed to get template param from store:
+            // template not found") never carries the requested id, so prefixing lets an
+            // SDK-version-neutral classifier that keys off the message (the e2e e2b
+            // adapter) identify the resource, while keeping "template" in the message so
+            // the SDK substring classifier still raises TemplateNotFoundError.
+            let detail = if ret_msg.trim().is_empty() {
+                format!("template {} not found", template_id)
+            } else {
+                format!("template {} not found: {}", template_id, ret_msg)
+            };
+            AppError::NotFound(detail)
+        }
+        // A create-time 130409 is not necessarily about the template: the run phase
+        // relays Cubelet's ret_code verbatim and Cubelet also defines Conflict=130409.
+        // A non-blank ret_msg is relayed as-is; the blank fallback names the requested
+        // template/snapshot id only as the create request's subject, not as a claim
+        // that the template itself is the conflicting resource.
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_CONFLICT => {
+            let detail = if ret_msg.trim().is_empty() {
+                format!("template {} conflict", template_id)
+            } else {
+                ret_msg
+            };
+            AppError::Conflict(detail)
+        }
+        other => params_error_or_internal(other),
     }
 }
 
@@ -1361,6 +1417,123 @@ mod tests {
             .await
             .expect_err("rejected create should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    // Restoring from a snapshot that was deleted/tombstoned makes CubeMaster fail
+    // getTemplateParam with 130404 ("template not found"). That must surface as a
+    // 404 so the SDK raises TemplateNotFoundError, not a generic 500 that clients
+    // would keep retrying and that would charge a client-caused not-found against
+    // the server error-rate SLI. Regression for the sdk_compat lifecycle contract
+    // test_delete_referenced_snapshot_retires_new_use_but_keeps_runtime_alive.
+    #[tokio::test]
+    async fn create_sandbox_maps_cubemaster_not_found_to_not_found() {
+        let reason = "failed to get template param from store: template not found";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130404, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("restoring a deleted snapshot must not succeed");
+        match err {
+            AppError::NotFound(ref message) => {
+                // The 404 body prefixes the requested template/snapshot id (mirroring the
+                // delete path) and appends CubeMaster's reason. The reason already carries
+                // "template not found", so the SDKs still classify it as
+                // TemplateNotFoundError.
+                assert_eq!(*message, format!("template tpl-1 not found: {reason}"));
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    // The only reachable create-time 130404 is a template/snapshot lookup miss, and
+    // CubeMaster's reason never names the id the client sent
+    // ("failed to get template param from store: template not found"). The 404 body
+    // must therefore prefix the requested id — mirroring the delete path's
+    // "sandbox {id} not found" — so an SDK-version-neutral classifier keyed off the
+    // message (the e2e e2b adapter) can identify the missing resource, while the
+    // relayed reason keeps "template" in the message for the SDK substring classifier.
+    #[tokio::test]
+    async fn create_sandbox_not_found_names_requested_resource() {
+        let reason = "failed to get template param from store: template not found";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130404, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("restoring a deleted snapshot must not succeed");
+        match err {
+            AppError::NotFound(ref message) => {
+                assert!(
+                    message.contains("tpl-1"),
+                    "the 404 body must name the requested resource, got {message:?}"
+                );
+                assert!(
+                    message.contains(reason),
+                    "the backend reason must be relayed, got {message:?}"
+                );
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    // A template in a conflicting state (130409) must surface as 409, mirroring
+    // the delete/update paths, instead of a generic 500. The conflict arm returns
+    // the backend reason verbatim so the client sees why creation was refused.
+    #[tokio::test]
+    async fn create_sandbox_maps_cubemaster_conflict_to_conflict() {
+        let reason = "template is still building";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130409, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("a conflicting template must not create a sandbox");
+        match err {
+            AppError::Conflict(ref message) => assert_eq!(message, reason),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    // When CubeMaster returns an empty ret_msg, both branches must fall back to a
+    // synthesized detail that still names the template, rather than an empty body.
+    #[tokio::test]
+    async fn create_sandbox_synthesizes_detail_when_cubemaster_message_is_blank() {
+        for (ret_code, expected) in [
+            (130404, "template tpl-1 not found"),
+            (130409, "template tpl-1 conflict"),
+        ] {
+            let service = spawn_fake_cubemaster(Router::new().route(
+                "/cube/sandbox",
+                post(move || async move { ret_envelope(ret_code, "   ") }),
+            ))
+            .await;
+
+            let err = service
+                .create_sandbox(probe_sandbox())
+                .await
+                .expect_err("a rejected create must not succeed");
+            let message = match err {
+                AppError::NotFound(m) | AppError::Conflict(m) => m,
+                other => panic!("ret_code {ret_code} expected NotFound/Conflict, got {other:?}"),
+            };
+            assert_eq!(message, expected, "ret_code {ret_code} fallback detail");
+        }
     }
 
     #[tokio::test]

@@ -75,6 +75,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Template or snapshot not found (e.g. deleted/tombstoned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: A referenced resource is in a conflicting state and cannot be used to create a sandbox
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
           content:

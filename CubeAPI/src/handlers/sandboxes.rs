@@ -172,6 +172,8 @@ pub async fn get_sandbox(
     responses(
         (status = 201, description = "Sandbox created", body = Sandbox),
         (status = 400, description = "Invalid request", body = ApiError),
+        (status = 404, description = "Template or snapshot not found (e.g. deleted/tombstoned)", body = ApiError),
+        (status = 409, description = "A referenced resource is in a conflicting state and cannot be used to create a sandbox", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
