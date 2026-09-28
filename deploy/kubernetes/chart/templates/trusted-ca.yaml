@@ -1,0 +1,14 @@
+{{- if and .Values.trustedCACerts.enabled (not .Values.trustedCACerts.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.trustedCAName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trusted-ca
+data:
+  {{- range $i, $pem := .Values.trustedCACerts.certs }}
+  ca-{{ $i }}.crt: |-
+{{ $pem | indent 4 }}
+  {{- end }}
+{{- end }}

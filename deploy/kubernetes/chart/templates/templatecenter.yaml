@@ -77,6 +77,26 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- end }}
+      {{- if .Values.trustedCACerts.enabled }}
+      initContainers:
+        # Merge the pod image's system CA bundle with trustedCACerts into an
+        # emptyDir so image pulls from registries with private CA certificates
+        # succeed (the main container reads it via SSL_CERT_FILE).
+        - name: merge-ca
+          image: {{ include "cube.image" .Values.images.cubemastercli | quote }}
+          imagePullPolicy: {{ .Values.images.cubemastercli.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              cat /etc/ssl/certs/ca-certificates.crt /trusted-ca/*.crt > /merged/ca-bundle.crt 2>/dev/null \
+                || cat /trusted-ca/*.crt > /merged/ca-bundle.crt
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /trusted-ca
+              readOnly: true
+            - name: merged-ca
+              mountPath: /merged
+      {{- end }}
       containers:
         - name: cube-templatecenter
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
@@ -95,6 +115,10 @@ spec:
           securityContext:
             privileged: true
           env:
+            {{- if .Values.trustedCACerts.enabled }}
+            - name: SSL_CERT_FILE
+              value: /merged/ca-bundle.crt
+            {{- end }}
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             # All CUBE_TEMPLATE_CENTER_*: the pre-rename CUBE_TC_* /
             # CUBEMASTER_* spellings still work as a fallback and log a
@@ -186,6 +210,11 @@ spec:
               mountPath: /etc/cube/ca
               readOnly: true
           {{- end }}
+          {{- if .Values.trustedCACerts.enabled }}
+            - name: merged-ca
+              mountPath: /merged
+              readOnly: true
+          {{- end }}
             - name: cube-templatecenter-log
               mountPath: /data/log/CubeTemplateCenter
             - name: cube-master-storage
@@ -202,6 +231,13 @@ spec:
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
+      {{- end }}
+      {{- if .Values.trustedCACerts.enabled }}
+        - name: trusted-ca
+          configMap:
+            name: {{ include "cube.trustedCAName" . }}
+        - name: merged-ca
+          emptyDir: {}
       {{- end }}
         - name: cube-templatecenter-log
           emptyDir: {}
