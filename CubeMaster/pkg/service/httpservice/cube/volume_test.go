@@ -28,7 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -109,7 +109,9 @@ func newVolumeTestEngine(t *testing.T) (*gin.Engine, *gorm.DB, *fakeControllerPl
 
 	origDB := volumeDB
 	volumeDB = func() *gorm.DB { return db }
-	t.Cleanup(func() { volumeDB = origDB })
+	t.Cleanup(func() {
+		volumeDB = origDB
+	})
 
 	fake := newFakeControllerPlugin("fake-vol")
 	plugin.Register(fake)

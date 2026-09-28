@@ -18,15 +18,17 @@ ARG CUBE_BUILD_TIME=unknown
 WORKDIR /src
 
 COPY CubeMaster/go.mod CubeMaster/go.sum ./
-COPY cubelog/go.mod cubelog/go.sum /cubelog/
-COPY CubeDB/go.mod CubeDB/go.sum /CubeDB/
-COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
+COPY pkgs/CubeLog/go.mod pkgs/CubeLog/go.sum /pkgs/CubeLog/
+COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
+COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
+COPY pkgs/proto/go.mod pkgs/proto/go.sum /pkgs/proto/
 RUN go mod download
 
 COPY CubeMaster/ ./
-COPY cubelog/ /cubelog/
-COPY CubeDB/ /CubeDB/
-COPY Cubelet/ /Cubelet/
+COPY pkgs/CubeLog/ /pkgs/CubeLog/
+COPY pkgs/blobstore/ /pkgs/blobstore/
+COPY pkgs/cubedb/ /pkgs/cubedb/
+COPY pkgs/proto/ /pkgs/proto/
 
 ENV CGO_ENABLED=0
 RUN set -eux; \

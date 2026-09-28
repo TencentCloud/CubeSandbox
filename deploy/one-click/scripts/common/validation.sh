@@ -47,3 +47,32 @@ validate_host_port() {
   (( 10#${port} >= 1 && 10#${port} <= 65535 )) \
     || die "invalid ${name}: ${value} (port out of range)"
 }
+
+normalize_redis_db() {
+  local value="$1"
+  local name="${2:-Redis DB}"
+  # systemd EnvironmentFile and shell `source` strip quotes / trailing
+  # comments; read_env_key returns the raw text. Tolerate the same forms
+  # before the strict 0-15 check so a previously working install can upgrade.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ "${#value}" -ge 2 ]]; then
+    case "${value}" in
+      \"*\") value="${value:1:$((${#value} - 2))}" ;;
+      \'*\') value="${value:1:$((${#value} - 2))}" ;;
+    esac
+  fi
+  value="${value%%#*}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  [[ "${value}" =~ ^[0-9]+$ ]] \
+    || die "${name} must be an integer in 0-15, got: ${value}"
+  while [[ "${#value}" -gt 1 && "${value:0:1}" == "0" ]]; do
+    value="${value:1}"
+  done
+  case "${value}" in
+    [0-9]|1[0-5]) ;;
+    *) die "${name} must be an integer in 0-15, got: ${value}" ;;
+  esac
+  printf '%s' "${value}"
+}

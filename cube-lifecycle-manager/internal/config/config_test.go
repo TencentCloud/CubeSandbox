@@ -6,6 +6,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,42 @@ func TestEventBusEnabledRejectsInvalidValue(t *testing.T) {
 	_, err := Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CUBE_LCM_EVENTBUS_ENABLED")
+}
+
+func TestLeaderElectionConfig(t *testing.T) {
+	t.Setenv("CUBE_LCM_LEADER_ELECTION_ENABLED", "true")
+	t.Setenv("CUBE_LCM_LEADER_LEASE_TTL", "12s")
+	t.Setenv("CUBE_LCM_LEADER_RENEW_INTERVAL", "4s")
+	t.Setenv("CUBE_LCM_LEADER_RETRY_INTERVAL", "2s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.LeaderElectionEnabled)
+	assert.Equal(t, 12*time.Second, cfg.LeaderLeaseTTL)
+	assert.Equal(t, 4*time.Second, cfg.LeaderRenewInterval)
+	assert.Equal(t, 2*time.Second, cfg.LeaderRetryInterval)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestLeaderElectionRejectsUnsafeIntervals(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.LeaderLeaseTTL = 10 * time.Second
+	cfg.LeaderRenewInterval = 5 * time.Second
+	require.ErrorContains(t, cfg.Validate(), "less than half")
+
+	cfg.LeaderRenewInterval = 3 * time.Second
+	cfg.LeaderRetryInterval = 10 * time.Second
+	require.ErrorContains(t, cfg.Validate(), "leader retry interval")
+}
+
+func TestStateLockTTLExceedsHTTPTimeout(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.HTTPTimeout = 10 * time.Second
+	cfg.StateLockTTL = 10 * time.Second
+	require.ErrorContains(t, cfg.Validate(), "state lock ttl")
+
+	cfg.StateLockTTL = 11 * time.Second
+	require.NoError(t, cfg.Validate())
 }
 
 func TestParseSentinelAddrs(t *testing.T) {

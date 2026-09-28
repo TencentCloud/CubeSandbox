@@ -9,7 +9,7 @@
 ::: tip 适用场景
 本部署利用云上资源**快速搭建一套高可用的 CubeSandbox 沙箱服务**：所有云资源默认按量计费（详见下文[计费模式](#计费模式)），用完即可通过 `destroy.sh` 一键释放。如果想长期使用，推荐改用**包年包月**资源以获得更优的成本节省（见[计费模式](#计费模式)）。如果只需要单机部署验证，请参阅之前的部署文档：[PVM 部署](./pvm-deploy.md)或[裸金属部署](./bare-metal-deploy.md)。
 
-**注意**：默认配置为 **POC / 功能验证**（2 台 `SA9.MEDIUM8` 计算节点、控制面单副本、无 CFS）。承载沙箱数量有限。生产或压测请调整计算节点与 TKE worker 的规格和数量，详见[节点规格与容量规划](#节点规格与容量规划)与[默认部署模式](#默认部署模式)。
+**注意**：默认配置为 **POC / 功能验证**（2 台 `SA9.MEDIUM8` 计算节点、控制面以单副本为主、无 CFS）。承载沙箱数量有限。生产或压测请调整计算节点与 TKE worker 的规格和数量，详见[节点规格与容量规划](#节点规格与容量规划)与[默认部署模式](#默认部署模式)。
 :::
 
 ## 架构概览
@@ -74,13 +74,13 @@
 
 ## 默认部署模式
 
-与 `env.example` / `variables.tf` 一致，**默认是公网镜像 + 单副本控制面 + 无 CFS 的 POC 配置**：
+与 `env.example` / `variables.tf` 一致，**默认是公网镜像 + 以单副本为主的控制面 + 无 CFS 的 POC 配置**：
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `TENCENTCLOUD_USE_TCR` | `false` | 不创建 TCR；使用公网预置镜像，不在跳板机构建 |
 | `TENCENTCLOUD_USE_CFS` | `false` | 不创建 CFS；cubemaster 使用 Pod 本地存储 |
-| `TENCENTCLOUD_CUBEMASTER_REPLICAS` 等 | `1` | 控制面组件默认单副本 |
+| `TENCENTCLOUD_CUBEMASTER_REPLICAS` 等 | `1` | 控制面组件默认单副本；cube-ops 与 cube-lifecycle-manager 为两个副本 |
 | `TENCENTCLOUD_COMPUTE_NODE_COUNT` | `2` | PVM 计算节点 |
 | `TENCENTCLOUD_TKE_NODE_COUNT` | `2` | TKE worker（`worker_config.count`） |
 | `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | cube-api / cube-proxy / cube-webui 使用 VPC 内网 CLB |
@@ -291,8 +291,8 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2                 # TKE worker 节点数（�
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # 默认：公网预置镜像
 export TENCENTCLOUD_USE_CFS=false                    # 默认：无 CFS
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.0
-export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.2
+export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=2
 ```
 
 ### 常用变量
@@ -319,13 +319,17 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / 演示值 | 应用库名 / 账号 / 密码 |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master 副本数 |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api 副本数 |
-| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops 副本数。节点状态存储在共享 MySQL/Redis 中，副本数可大于 1。cube-webui 的 `/opsapi/` 与 `/cubeapi/v1/` 会转发到该集群内服务 |
+| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops 副本数。默认栈不带对象存储，组件仓库保持禁用，给 cube-ops 接上 COS（或其他 S3）后才可用（见[组件多版本](/zh/guide/component-multiversion)）。cube-webui 的 `/opsapi/` 与 `/cubeapi/v1/` 会转发到该集群内服务 |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。支持设置为大于 `1`；每个副本都会注册到 Redis，供 cube-lifecycle-manager 发现 |
-| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager 副本数。除非已验证 CLM 高可用行为，否则建议保持 `1` |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `2` | cube-lifecycle-manager 副本数。默认双副本主备（需开启选主）。降到 `1` 时必须同时把 `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_ELECTION_ENABLED` 设为 `false` |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui 副本数 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT` | `5m` | lifecycle metadata 未指定 `TimeoutSeconds` 时使用的默认空闲超时 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL` | `15s` | cube-proxy Redis 注册心跳的过期时间 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH` | `3s` | cube-lifecycle-manager 扫描 Redis 注册表的间隔 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_ELECTION_ENABLED` | `true` | 用 Redis 租约以主备方式运行 cube-lifecycle-manager。要求 `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` >= 2 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_LEASE_TTL` | `10s` | cube-lifecycle-manager 选主租约 TTL |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RENEW_INTERVAL` | `3s` | leader 续约间隔。必须小于租约 TTL 的一半 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RETRY_INTERVAL` | `1s` | 备副本重试抢租约的间隔。必须大于 0 且小于租约 TTL |
 | `TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS` | `5000` | cube-proxy 注册心跳间隔（毫秒） |
 | `TENCENTCLOUD_CUBE_ADMIN_TOKEN` | 空 | cube-lifecycle-manager 调用 cube-proxy `/admin/*` 接口时使用的共享 token。留空则自动生成；自定义值至少 16 个字符 |
 | `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | cube-api / cube-proxy / cube-webui 的网络暴露模式。**默认 `false`**：关联内网 CLB，仅 VPC 内网（经跳板机 / VPN）可访问；设为 `true` 则关联公网 CLB，对公网开放，安全组同步放行 `0.0.0.0/0`。cube-master 始终为内网 CLB，不受此开关影响。开启公网前请阅读[公网服务加固建议](#公网服务加固建议) |

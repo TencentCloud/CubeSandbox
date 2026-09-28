@@ -7,17 +7,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/tombstone"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/warehouse"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/tombstone"
+
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/fs"
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/s3"
 )
 
 func main() {
@@ -41,8 +47,20 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// A whitespace-only DATABASE_URL counts as unset; warn so a mis-quoted
+	// env file doesn't silently fall back to the split fields (possibly the
+	// one-click defaults pointing at a local database).
+	if cfg.DatabaseURL != "" && strings.TrimSpace(cfg.DatabaseURL) == "" {
+		slog.Warn("database_url is blank (whitespace only); using the CUBE_SANDBOX_MYSQL_* split fields")
+	}
+
 	// Initialise database + migrations + master key
-	s, err := store.New(ctx, cfg.DaoConfig())
+	daoCfg, err := cfg.DaoConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cubeops: invalid database config: %v\n", err)
+		os.Exit(1)
+	}
+	s, err := store.New(ctx, daoCfg)
 	if err != nil {
 		logging.G(ctx).Errorf("failed to initialise database: err=%q", err.Error())
 		os.Exit(1)
@@ -76,7 +94,7 @@ func main() {
 	}
 	cfg.JWTSecret = jwtSecret
 
-	srv := server.New(cfg, s)
+	srv := server.New(cfg, s, initWarehouseBlobs(ctx, cfg))
 
 	// Graceful shutdown
 	go func() {
@@ -98,4 +116,76 @@ func main() {
 	}
 
 	logging.G(ctx).Info("CubeOps stopped")
+}
+
+func initWarehouseBlobs(ctx context.Context, cfg *config.Config) warehouse.BlobStore {
+	switch cfg.Store.Backend {
+	case config.StoreBackendFS:
+		fs := cfg.Store.FSBackend
+		blobs, err := warehouse.OpenFS(fs, cfg.Warehouse.PresignTTL)
+		if err != nil {
+			slog.Warn("component warehouse disabled: fs backend", "error", err)
+			return nil
+		}
+		if err := blobs.EnsureBucket(ctx); err != nil {
+			slog.Warn("warehouse fs prepare failed", "error", err)
+			return nil
+		}
+		slog.Info("storage backend selected", "backend", "fs", "reason", "explicit", "root", fs.Root)
+		return blobs
+	case config.StoreBackendS3:
+		if !cfg.S3Configured() {
+			slog.Warn("storage backend degraded",
+				"requested", "s3", "effective", "disabled",
+				"reason", "incomplete CUBE_OPS_S3_* credentials")
+			slog.Warn("component warehouse disabled: S3 is not configured")
+			return nil
+		}
+		blobs, err := warehouse.OpenS3(cfg.S3, cfg.Warehouse.UploadTimeout)
+		if err != nil {
+			slog.Warn("component warehouse disabled: s3 client", "error", err)
+			return nil
+		}
+		slog.Info("storage backend selected", "backend", "s3", "reason", "explicit")
+		if err := probeWarehouseBucket(ctx, blobs); err != nil {
+			return blobs
+		}
+		lctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		if err := blobs.EnsureLifecycle(lctx); err != nil {
+			slog.Warn("warehouse bucket lifecycle", "error", err)
+		}
+		if err := blobs.GC(lctx); err != nil {
+			slog.Warn("warehouse blobstore gc", "error", err)
+		}
+		return blobs
+	default:
+		slog.Error("component warehouse disabled: unsupported store.backend", "backend", cfg.Store.Backend)
+		return nil
+	}
+}
+
+func probeWarehouseBucket(ctx context.Context, blobs warehouse.BlobStore) error {
+	delay := time.Second
+	var last error
+	for i := 0; i < 8; i++ {
+		pctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		last = blobs.EnsureBucket(pctx)
+		cancel()
+		if last == nil {
+			return nil
+		}
+		slog.Warn("warehouse s3 probe failed", "attempt", i+1, "error", last)
+		select {
+		case <-ctx.Done():
+			slog.Warn("warehouse s3 probe canceled; continuing with client")
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 15*time.Second {
+			delay *= 2
+		}
+	}
+	slog.Warn("warehouse s3 still unreachable; continuing with client", "error", last)
+	return last
 }

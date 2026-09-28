@@ -642,6 +642,8 @@ pub struct BackendFsConfig {
     pub security_label: bool,
     #[serde(default)]
     pub allowed_dirs: Option<Vec<String>>,
+    #[serde(default)]
+    pub remap_filter: bool,
 }
 
 impl Default for BackendFsConfig {
@@ -662,6 +664,7 @@ impl Default for BackendFsConfig {
             killpriv_v2: false,
             security_label: false,
             allowed_dirs: None,
+            remap_filter: false,
         }
     }
 }
@@ -953,20 +956,20 @@ impl Fs {
                     "Failed to create internal ro filesystem representation: {e:?}",
                 )))
             })?;
-            Ok(Arc::new(ServerType::PassthroughFsRo(
-                Server::new(fs, &self.backendfs_config.allowed_dirs)
-                    .map_err(ActivateError::InvalidServerConfig)?,
-            )))
+            let server = Server::new(fs, &self.backendfs_config.allowed_dirs)
+                .map_err(ActivateError::InvalidServerConfig)?;
+            server.set_remap_filter_enabled(self.backendfs_config.remap_filter);
+            Ok(Arc::new(ServerType::PassthroughFsRo(server)))
         } else {
             let fs = PassthroughFs::new(fs_cfg).map_err(|e| {
                 ActivateError::ActivateVirtioFs(io::Error::other(format!(
                     "Failed to create internal filesystem representation: {e:?}",
                 )))
             })?;
-            Ok(Arc::new(ServerType::PassthroughFs(
-                Server::new(fs, &self.backendfs_config.allowed_dirs)
-                    .map_err(ActivateError::InvalidServerConfig)?,
-            )))
+            let server = Server::new(fs, &self.backendfs_config.allowed_dirs)
+                .map_err(ActivateError::InvalidServerConfig)?;
+            server.set_remap_filter_enabled(self.backendfs_config.remap_filter);
+            Ok(Arc::new(ServerType::PassthroughFs(server)))
         }
     }
 

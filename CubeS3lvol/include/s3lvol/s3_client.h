@@ -64,6 +64,32 @@ typedef void (*s3_op_cb)(void *cb_arg, int status);
  */
 typedef void (*s3_get_cb)(void *cb_arg, uint64_t bytes_read, int status);
 
+/**
+ * Process-wide admission control for whole-object GETs.
+ *
+ * The budget is shared by every S3 client and export in the process.  A
+ * successful acquire returns 1 when the caller owns a token immediately, or
+ * 0 when queued; in the latter case cb_fn is invoked on the submitting SPDK
+ * thread once ownership is transferred.  The owner must release exactly once.
+ * If that bounce cannot be queued, the callback is not run on the releaser's
+ * thread: acquire_ex invokes cancel_fn there instead, while the compatibility
+ * wrapper drops that notification. The token is then given to the next waiter.
+ *
+ * Low-priority users (read-ahead) never queue and leave one token available
+ * for demand; they receive -EAGAIN when no opportunistic token is available.
+ */
+typedef void (*s3_get_token_cb)(void *cb_arg);
+typedef void (*s3_get_token_cancel_cb)(void *cb_arg, int status);
+
+#define S3_WHOLE_GET_MAX_INFLIGHT 256
+
+int s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
+			       void *cb_arg);
+int s3_whole_get_token_acquire_ex(bool low_priority, s3_get_token_cb cb_fn,
+				  s3_get_token_cancel_cb cancel_fn,
+				  void *cb_arg);
+void s3_whole_get_token_release(void);
+
 /* ==========================================================================
  * Lifecycle
  * ========================================================================== */
@@ -88,6 +114,21 @@ void s3_crt_global_fini(void);
 int s3_client_get_or_create(const struct s3_target *target, struct s3_client **out);
 
 void s3_client_put(struct s3_client *client);
+
+/**
+ * Take another reference on an existing client.
+ *
+ * Unload drops the lvstore's reference. An in-flight HEAD or GET started
+ * against that lvstore still needs the CRT client until its callback runs, so
+ * the load path holds an extra ref for the lifetime of that request.
+ */
+void s3_client_get(struct s3_client *client);
+
+/**
+ * Bucket this client signs requests for. CopyObject names the source bucket
+ * separately; this is the destination.
+ */
+const char *s3_client_bucket(const struct s3_client *client);
 
 /* ==========================================================================
  * Object operations
@@ -180,17 +221,16 @@ int s3_delete_batch(struct s3_client *client, const char **keys, uint32_t count,
  * not modified by inflate / decouple can be copied server-side directly, saving
  * all data-plane traffic and leaving only control-plane RTT.
  *
- * **There is currently no caller, and that is deliberate** (2026-08-05). It was
- * meant for export "materialisation" (copying the objects into the exports
- * prefix before deleting a snapshot referenced by a zero-copy export); that
- * approach was rejected -- the reasoning and the alternative are in the header
- * comment of lib/s3bsdev/s3_gc.c. The inflate optimisation above still holds;
- * it just is not done yet.
+ * Used by decouple ingest: same-bucket CopyObject of export chunks into the
+ * destination lvstore's data/ prefix, so materialise does not GET+WAL the
+ * bytes. Export-prefix materialisation (copying into exports/ before deleting
+ * a referenced snapshot) was rejected -- see lib/s3bsdev/s3_gc.c.
  *
- * Before actually using it, know one trap: CopyObject returns **HTTP 200 with
- * `<Error>` in the body**. A DEFAULT-type meta request probably does not parse
- * the body, so after every object copy a HEAD verification is required -- the
- * status code alone is not enough.
+ * CopyObject can return HTTP 200 with `<Error>` in the body (S3 keeps the
+ * connection alive during a long server-side copy). The status code alone is
+ * not enough: this call accumulates up to 8 KiB of response XML and succeeds
+ * only when that prefix contains a complete CopyObjectResult opening tag.
+ * A truncated body without that tag is an error, not success.
  */
 int s3_copy_object(struct s3_client *client,
 		   const char *src_bucket, const char *src_key,

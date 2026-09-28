@@ -6,6 +6,8 @@ package localcache
 
 import (
 	"context"
+	"sort"
+	"strconv"
 	"strings"
 
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
@@ -23,24 +25,47 @@ func SyncNodeTemplates(ctx context.Context, nodeID string, templateIDs []string)
 		previous = discoverNodeTemplateSet(nodeID)
 	}
 
-	log.G(ctx).Infof("SyncNodeTemplates nodeID=%s current=%v previous=%v previousCached=%v", nodeID, current, previous, ok)
-
+	deregistered := make([]string, 0)
+	registered := make([]string, 0)
 	for templateID := range previous {
 		if _, exists := current[templateID]; exists {
 			continue
 		}
-		log.G(ctx).Infof("SyncNodeTemplates deregister nodeID=%s templateID=%s", nodeID, templateID)
 		deregisterTemplateReplica(templateID, nodeID, false)
+		deregistered = append(deregistered, templateID)
 	}
 	for templateID := range current {
 		if _, exists := previous[templateID]; exists && GetImageStateByNode(templateID, nodeID) != nil {
-			log.G(ctx).Infof("SyncNodeTemplates skip nodeID=%s templateID=%s (already registered)", nodeID, templateID)
 			continue
 		}
-		log.G(ctx).Infof("SyncNodeTemplates register nodeID=%s templateID=%s", nodeID, templateID)
 		registerTemplateReplica(templateID, nodeID, 1, false)
+		registered = append(registered, templateID)
 	}
 	setCachedNodeTemplateSet(nodeID, current)
+
+	if len(deregistered) == 0 && len(registered) == 0 {
+		log.G(ctx).Debugf("SyncNodeTemplates nodeID=%s unchanged current=%d previousCached=%v", nodeID, len(current), ok)
+		return
+	}
+	log.G(ctx).Infof("SyncNodeTemplates nodeID=%s registered=%d deregistered=%d current=%d previous=%d previousCached=%v registered_templates=%s deregistered_templates=%s",
+		nodeID, len(registered), len(deregistered), len(current), len(previous), ok,
+		summarizeTemplateIDChanges(registered), summarizeTemplateIDChanges(deregistered))
+	if log.IsDebug() {
+		log.G(ctx).Debugf("SyncNodeTemplates detail nodeID=%s current=%v previous=%v", nodeID, current, previous)
+	}
+}
+
+func summarizeTemplateIDChanges(templateIDs []string) string {
+	if len(templateIDs) == 0 {
+		return "[]"
+	}
+	sorted := append([]string(nil), templateIDs...)
+	sort.Strings(sorted)
+	const maxItems = 8
+	if len(sorted) <= maxItems {
+		return "[" + strings.Join(sorted, " ") + "]"
+	}
+	return "[" + strings.Join(sorted[:maxItems], " ") + " ... +" + strconv.Itoa(len(sorted)-maxItems) + " more]"
 }
 
 func normalizeTemplateIDSet(templateIDs []string) map[string]struct{} {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 

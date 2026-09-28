@@ -58,9 +58,14 @@
  *
  *   === Threading ===
  *
- *   Same contract as the chunk map, the journal and the WAL: one overlay belongs
- *   to one lvstore and is only touched on that lvstore's owner thread. No
- *   internal locking.
+ *   Writes, apply, flush, and destroy stay on the lvstore owner thread, same
+ *   contract as the chunk map, the journal and the WAL. There is no internal
+ *   lock around the block arrays.
+ *
+ *   The chunk pointer table is the one exception: create publishes a pointer
+ *   with release, free stores NULL before releasing the struct, and
+ *   s3_overlay_chunk_is_live() is an acquire load. Off-owner dest cache uses
+ *   that to skip only the dirty chunk rather than every dest read.
  */
 
 #ifndef S3LVOL_OVERLAY_H
@@ -212,8 +217,13 @@ uint32_t s3_overlay_apply(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 bool s3_overlay_covers(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks);
 
 /**
- * True when the chunk holds anything at all. is_zeroes() must consult this:
- * claiming an overlaid chunk reads as zero makes blobstore skip copy-on-write.
+ * True when this chunk has a published overlay entry (dirty blocks, or a flush
+ * still holding the struct). Safe on any thread: it is an acquire load of the
+ * pointer table, not a walk of the blocks.
+ *
+ * is_zeroes() must consult this: claiming an overlaid chunk reads as zero makes
+ * blobstore skip copy-on-write. Dest cache uses the same bit to bypass only
+ * this chunk while other chunks stay on the immutable path.
  */
 bool s3_overlay_chunk_is_live(struct s3_overlay *ov, uint64_t chunk_index);
 

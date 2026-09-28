@@ -7,9 +7,9 @@ import (
 	"context"
 	"testing"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestRefreshProxyMapAfterResumeRewritesSandboxIP(t *testing.T) {

@@ -10,11 +10,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime/systemnet"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -52,8 +53,9 @@ var unixIoctlSetTunOffload = func(fd int, features uintptr) error {
 var enableTapTXTCPMangleIDSegmentation = enableTXTCPMangleIDSegmentation
 
 const (
-	// TAP names are derived from sandbox IPs so recovery can match live devices
-	// back to allocator addresses without a separate registry.
+	// TAP names are the sandbox IPv4 so recovery can match live devices back to
+	// allocator addresses without a separate registry. Older runtimes prefixed
+	// the same IP with tapNamePrefix; recover still accepts those names.
 	tapNamePrefix    = "z"
 	virtioNetHdrSize = 12
 	tunDevicePath    = "/dev/net/tun"
@@ -87,11 +89,20 @@ type TapDeviceAdapter interface {
 }
 
 // realTapDeviceAdapter forwards calls to the Linux TAP implementation below.
-type realTapDeviceAdapter struct{}
+type realTapDeviceAdapter struct {
+	sandboxCIDR *net.IPNet
+}
 
-// newRealTapDeviceAdapter returns the production TAP adapter.
-func newRealTapDeviceAdapter() TapDeviceAdapter {
-	return realTapDeviceAdapter{}
+// newRealTapDeviceAdapter returns the production TAP adapter. sandboxCIDR
+// limits recover/list to TAP names whose decoded IPv4 sits in the configured
+// sandbox network; devices outside that prefix are treated as unrelated host
+// TAPs. If cidr does not parse, listCubeTaps claims no devices.
+func newRealTapDeviceAdapter(cidr string) TapDeviceAdapter {
+	var sandboxCIDR *net.IPNet
+	if _, n, err := net.ParseCIDR(cidr); err == nil {
+		sandboxCIDR = n
+	}
+	return realTapDeviceAdapter{sandboxCIDR: sandboxCIDR}
 }
 
 func (realTapDeviceAdapter) Create(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx int) (*tapDevice, error) {
@@ -110,12 +121,12 @@ func (realTapDeviceAdapter) Close(file *os.File) {
 	closeTapFile(file)
 }
 
-func (realTapDeviceAdapter) List() (map[string]*tapDevice, error) {
-	return listCubeTaps()
+func (a realTapDeviceAdapter) List() (map[string]*tapDevice, error) {
+	return listCubeTaps(a.sandboxCIDR)
 }
 
-func (realTapDeviceAdapter) GetByName(name string) (*tapDevice, error) {
-	return getTapByName(name)
+func (a realTapDeviceAdapter) GetByName(name string) (*tapDevice, error) {
+	return getTapByName(name, a.sandboxCIDR)
 }
 
 func (realTapDeviceAdapter) Destroy(ifIdx int) error {
@@ -301,8 +312,10 @@ func restoreTap(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*ta
 }
 
 // listCubeTaps returns live TAP devices whose names follow the runtime's
-// IP-derived naming convention, keyed by sandbox IP string.
-func listCubeTaps() (map[string]*tapDevice, error) {
+// IP-derived naming convention (bare IPv4 or legacy z+IPv4), keyed by sandbox
+// IP string. When sandboxCIDR is set, names that decode to an address outside
+// that prefix are ignored.
+func listCubeTaps(sandboxCIDR *net.IPNet) (map[string]*tapDevice, error) {
 	links, err := netlinkLinkList()
 	if err != nil {
 		return nil, err
@@ -313,12 +326,11 @@ func listCubeTaps() (map[string]*tapDevice, error) {
 		if !ok || tap.Mode != netlink.TUNTAP_MODE_TAP {
 			continue
 		}
-		ipStr, err := extractIP(tap.Name)
+		ip, err := parseCubeTapIP(tap.Name)
 		if err != nil {
 			continue
 		}
-		ip := net.ParseIP(ipStr).To4()
-		if ip == nil {
+		if sandboxCIDR == nil || !sandboxCIDR.Contains(ip) {
 			continue
 		}
 		ipToTap[ip.String()] = &tapDevice{
@@ -341,7 +353,7 @@ func isTapNotFound(err error) bool {
 }
 
 // getTapByName returns identity for one runtime-managed TAP by name.
-func getTapByName(name string) (*tapDevice, error) {
+func getTapByName(name string, sandboxCIDR *net.IPNet) (*tapDevice, error) {
 	link, err := netlinkLinkByName(name)
 	if err != nil {
 		return nil, err
@@ -350,13 +362,12 @@ func getTapByName(name string) (*tapDevice, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s is not tap", name)
 	}
-	ipStr, err := extractIP(tap.Name)
+	ip, err := parseCubeTapIP(tap.Name)
 	if err != nil {
 		return nil, err
 	}
-	ip := net.ParseIP(ipStr).To4()
-	if ip == nil {
-		return nil, fmt.Errorf("invalid tap ip for %s", name)
+	if sandboxCIDR != nil && !sandboxCIDR.Contains(ip) {
+		return nil, fmt.Errorf("not cube tap: %s", name)
 	}
 	return &tapDevice{
 		Name:  tap.Name,
@@ -444,14 +455,30 @@ func deletePersistentTapByName(name string) error {
 }
 
 // tapName derives the deterministic host TAP name for a sandbox IP.
+// New devices use the dotted IPv4; that string is at most 15 bytes and always
+// fits in kernel IFNAMSIZ (16 including the trailing NUL).
 func tapName(ip string) string {
+	return ip
+}
+
+// legacyTapName is the pre-rename host TAP name (z + IPv4). Recover and
+// conflict cleanup still look this up; new creates never use it.
+func legacyTapName(ip string) string {
 	return tapNamePrefix + ip
 }
 
-// extractIP reverses tapName and rejects unrelated host TAP devices.
-func extractIP(name string) (string, error) {
-	if len(name) <= len(tapNamePrefix) || name[:len(tapNamePrefix)] != tapNamePrefix {
-		return "", fmt.Errorf("not cube tap: %s", name)
+// candidateTapNames is the lookup order for an allocated sandbox IP: the
+// current name first, then the leftover z-prefixed device after upgrade.
+func candidateTapNames(ip string) []string {
+	return []string{tapName(ip), legacyTapName(ip)}
+}
+
+// parseCubeTapIP reverses tapName / legacyTapName. A leftover z prefix is
+// stripped and the remainder is parsed as IPv4.
+func parseCubeTapIP(name string) (net.IP, error) {
+	ip := net.ParseIP(strings.TrimPrefix(name, tapNamePrefix)).To4()
+	if ip == nil {
+		return nil, fmt.Errorf("not cube tap: %s", name)
 	}
-	return name[len(tapNamePrefix):], nil
+	return ip, nil
 }

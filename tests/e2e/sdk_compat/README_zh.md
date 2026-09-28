@@ -302,6 +302,9 @@ cp env.example .env
 - `SDK_E2E_SKIP_INTERNET_TESTS`：当 runner 或环境没有稳定公网出站时，
   跳过 `requires_internet` 测试，默认 `false`；
 - `SDK_E2E_REPORT_DIR`：JSONL 报告目录；
+- `CUBE_PYTHON_SDK_PATH`：覆盖本地 CubeSandbox Python SDK 路径。该目录必须
+  直接包含 `cubesandbox/__init__.py`，并会在 collection 阶段校验；未设置时使用
+  仓库内的 `sdk/python`；
 - `SDK_E2E_WORKERS`：`--run-e2e` 的 pytest-xdist worker 数量。并行需显式开启，
   未设置（或 `0`/`1`/`no`/`off`）时串行运行，避免压垮同机的控制面；传整数、
   `auto` 或 `logical` 才会并行；显式 `-n`/`--numprocesses`（或 `-p no:xdist`）

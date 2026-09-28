@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -19,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
@@ -47,6 +47,11 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	if req.Action != "pause" && req.Action != "resume" {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "action should be pause or resume"
+		return
+	}
+	if req.Action == "resume" && req.Timeout != nil && *req.Timeout < types.NeverTimeout {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "timeout must be >= -1 (use -1 for never timeout)"
 		return
 	}
 	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
@@ -91,6 +96,9 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 			*rsp = *pauseSandbox(ctx, req, hostIP)
 		case "resume":
 			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
+			if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+				publishUpdateTimeout(ctx, req)
+			}
 		}
 		return nil
 	})
@@ -98,6 +106,22 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		applyLifecycleLockError(rsp, err)
 	}
 	return
+}
+
+// publishUpdateTimeout persists a resume-supplied timeout into lifecycle
+// metadata once the sandbox is running again. A positive Timeout replaces the
+// stored timeout and opens a new window from now; -1 (NeverTimeout) marks the
+// sandbox as never expiring. Nil or 0 keeps the stored timeout unchanged.
+// Best effort by design: metadata failures are logged and never alter the
+// already-successful resume response.
+func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
+	if req == nil || req.Action != "resume" || req.Timeout == nil || *req.Timeout == 0 {
+		return
+	}
+	// refreshTimeoutMeta updates lifecycle metadata through the timeout
+	// provider. Resume does not return endAt, so the computed value is
+	// intentionally ignored.
+	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
 }
 
 func applyLifecycleLockError(rsp *types.Res, err error) {

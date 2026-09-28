@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/services/cubebox"
 )
 
 func init() {
@@ -100,6 +101,7 @@ func registerCubelet() {
 			if err != nil {
 				return nil, fmt.Errorf("failed to create cubelet: %w", err)
 			}
+			cubebox.StartWarehouseSync(cl.StopChannel(), cfg.CubeOpsAddr, tomlext.ToStdTime(cfg.CubeOpsTimeout))
 
 			readyHook := ic.RegisterReadiness()
 			go func() {

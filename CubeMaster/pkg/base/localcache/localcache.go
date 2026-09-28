@@ -15,7 +15,7 @@ import (
 
 	"github.com/patrickmn/go-cache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/localcache/util"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"golang.org/x/time/rate"
 )
 

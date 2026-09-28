@@ -35,7 +35,7 @@ package log
 import (
 	"context"
 
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 var (

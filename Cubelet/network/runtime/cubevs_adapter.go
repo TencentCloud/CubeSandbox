@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // CubeVSAdapter is the controller's boundary to CubeNet/cubevs. Keeping it as

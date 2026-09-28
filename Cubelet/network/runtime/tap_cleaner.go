@@ -11,7 +11,7 @@ import (
 	"net"
 	"time"
 
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // cleanupAttemptContext bounds one synchronous cleanup attempt. A failed

@@ -53,7 +53,7 @@ type DescribeInstancesQuery struct {
 
 func Init(ctx context.Context) error {
 	_ = ctx
-	// Schema is owned by pkg/base/dao/migrate and applied at startup
+	// Schema is owned by pkgs/cubedb/migrate and applied at startup
 	// before this package's Init runs.
 	l.db = db.Init(config.GetDbConfig())
 	l.dbAddr = config.GetDbConfig().Addr

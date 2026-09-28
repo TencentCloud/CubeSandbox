@@ -13,7 +13,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
-	snapshotv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1"
+	snapshotv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )

@@ -38,14 +38,17 @@ Go: `cubesandbox.NeverTimeout`; Python: `from cubesandbox import NEVER_TIMEOUT`.
    create()       ┌────▼────┐   timeout & on_timeout=pause   ┌─────────┐
   ───────────────►│ running │ ──────────────────────────────►│ paused  │
                   │         │◄──────── connect() or          │         │
-                  └─┬─────┬─┘    auto_resume-triggered req   └────┬────┘
-                    │     │                                       │
-        kill()      │     │ timeout & on_timeout=kill             │ kill()
-        ────────────┘     └─────────────────┐                     │
-                                            ▼                     ▼
-                                      ┌────────────┐
-                                      │ terminated │
-                                      └────────────┘
+                  └──┬────┬─┘    auto_resume-triggered req   └──┬────┬─┘
+                     │    │                                     │    │
+                     │    │ timeout & on_timeout=kill           │    │ timeout & on_timeout=kill
+                     │    └────────────────┐                    │    └──────────────┐
+                     │                     ▼                    │                   ▼
+                     │               ┌────────────┐◄────────────┘
+                     │               │ terminated │
+                     │               └──────▲─────┘
+                     │                      │
+                     │ kill()               │ kill()
+                     └──────────────────────┘
 ```
 
 ## Create
@@ -91,7 +94,7 @@ print(info)
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
+`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). Pausing does not cancel a finite idle deadline, so both detail and list APIs continue to return the same `endAt` while the sandbox is paused. For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
 
 ## List Running Sandboxes
 
@@ -134,9 +137,32 @@ Existing `404 Not Found`, `408 Request Timeout`, and `running` sandbox delete be
 ```python
 sandbox.pause()                       # snapshot manually, free CPU/memory
 # ... time passes ...
-sandbox.connect()                     # restore from snapshot
+sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # restore and reset the idle timeout
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
+
+`pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
+
+`connect(timeout=...)` can update the idle timeout whether the sandbox is already running or must first resume from a pause. For a running sandbox, a positive timeout only extends the deadline when the requested window is longer; use `set_timeout(...)` when you intentionally need to shorten it:
+
+| `connect(timeout=...)` | Effect |
+|---|---|
+| omitted / `None` | keep the current timeout |
+| `NEVER_TIMEOUT` (`-1`) | never time out after connecting |
+| `N > 0` | ensure at least N seconds remain; a running or paused sandbox keeps a longer existing deadline, otherwise the timeout starts a new N-second window after connecting |
+| `0` or `N < -1` | reject the request with HTTP 400 |
+
+When connecting a paused sandbox, the underlying Resume may return HTTP 409 while another lifecycle operation is still settling; retry after the sandbox reaches a stable state.
+
+The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
+
+| `resume(timeout=...)` | Effect |
+|---|---|
+| omitted / `None` | keep the current timeout |
+| `0` | keep the current timeout (use `set_timeout(0)` for immediate expiry) |
+| `NEVER_TIMEOUT` (`-1`) | never time out after resume |
+| `N > 0` | start a new N-second window from resume |
+| `N < -1` | reject the request with HTTP 400 |
 
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
 
@@ -176,7 +202,7 @@ sandbox = Sandbox.create(
 
 ### Timeout reset on auto-resume
 
-Each successful auto-resume gives the sandbox a **fresh** `timeout` countdown (matching e2b semantics). The "resume → short use → idle out → pause again" loop can repeat indefinitely.
+Each successful auto-resume **resets the idle clock** while keeping the same timeout length. The "resume → short use → idle out → pause again" loop can repeat indefinitely.
 
 ### What counts as activity
 
@@ -185,7 +211,7 @@ Any of these resets the idle clock:
 - SDK calls: `sandbox.run_code(...)`, `sandbox.commands.run(...)`, `sandbox.files.read(...)` / `write(...)`.
 - Direct HTTP traffic to a service inside the sandbox (e.g. via the URL returned by `getHost()`).
 
-Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for the effective `timeout` the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. To avoid automatic reclamation, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), set a high `timeout`, or send periodic activity to reset the idle clock.
+Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for the effective `timeout` the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. Manual `pause()` does **not** cancel that kill: a later-paused sandbox is still destroyed when idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), set a high `timeout`, or send periodic activity to reset the idle clock.
 
 ### End-to-end examples
 
@@ -220,7 +246,7 @@ The repository ships with **no cluster-wide idle timeout** (`default_timeout_ins
 `create_timeout_insec` in the same section is unrelated: it only bounds the create/scheduling RPC deadline, not sandbox idle TTL. See [Service management — CubeMaster settings](service-management.md#cubemaster-settings).
 
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
-- **Cluster coordination**: auto-pause is driven by the `cube-lifecycle-manager` service that runs on the control node. It consumes lifecycle events CubeMaster publishes via Redis stream, discovers every live CubeProxy replica through a Redis-backed registration table, and broadcasts state to each of them. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.
+- **Cluster coordination**: auto-pause is driven by `cube-lifecycle-manager`. The Helm chart and Terraform one-click both default to two warm replicas. Both replicas consume lifecycle events, discover CubeProxy replicas, and serve resume callbacks, while a Redis lease elects one replica for idle sweep/kill and stale-registry pruning. After a leader failover a sandbox may pause or resume once more; the next request auto-resumes it as usual (see the [Kubernetes FAQ](kubernetes/faq.md)). Per-sandbox Redis state transitions and CubeMaster lifecycle locks serialize effective pause/resume work across replicas.
 - **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout. When the sandbox has already been killed (`killing` / `killed`) the proxy returns `410 Gone` instead, telling SDK clients to stop retrying.
 - **Diagnostics**: `docker logs cube-lifecycle-manager` (control node) is the runtime log for the auto-pause coordinator. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`. Each CubeProxy replica additionally exposes `GET http://<node-ip>:8082/admin/healthz` reporting `heartbeat_last_pushed_ms` (the last time it announced itself to the manager). The admin port defaults to `8082`; override it with `CUBE_PROXY_ADMIN_PORT` when that port is already in use on the host (CubeProxy uses host networking).
 
@@ -263,6 +289,7 @@ The rejection travels through the following chain to reach the client: `Cubelet 
 
 ## Next Steps
 
+- [Agent platform freeze / resume](./agent-platform-freeze.md) — manual pause retention, `connect` before envd, Volume vs snapshot.
 - [Templates Overview](./templates.md) — sandboxes boot from templates; the template's build also shapes cold-start cost.
 - [Quick Start](./quickstart.md) — the shortest path through "create sandbox → run code → tear down".
 - Upstream references: [e2b · Sandbox lifecycle](https://e2b.dev/docs/sandbox), [e2b · Auto-resume](https://e2b.dev/docs/sandbox/auto-resume).

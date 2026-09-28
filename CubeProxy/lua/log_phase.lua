@@ -2,7 +2,7 @@
 --
 -- 1. Records the access time for the access log (preserved).
 -- 2. Stamps the per-sandbox "last active" timestamp into a worker-shared
---    lua dict. The CubeProxy-sidecar polls /admin/last_active to learn
+--    lua dict. Cube Lifecycle Manager (CLM) polls /admin/last_active to learn
 --    which sandboxes are still receiving traffic, so this is the entire
 --    feed for the auto-pause decision. Failure modes:
 --      - Empty ngx.var.ins_id (request bypassed sandbox routing): skip.
@@ -25,9 +25,9 @@ end
 
 ngx.var.access_time = get_currtime()
 
--- Record per-sandbox activity for the auto-pause sidecar. Sandboxes that
--- haven't opted into auto_pause are still cheap to record here — the
--- sidecar simply ignores their entries when computing pause decisions.
+-- Record per-sandbox activity for CLM's auto-pause sweeper. Sandboxes that
+-- haven't opted into auto_pause are still cheap to record here — CLM
+-- simply ignores their entries when computing pause decisions.
 local ins_id = ngx.var.ins_id
 if ins_id and ins_id ~= "" then
     local active = ngx.shared.cube_sandbox_last_active
@@ -35,7 +35,7 @@ if ins_id and ins_id ~= "" then
         -- Coalesce sub-second writes: a single sandbox handling 1k QPS would
         -- otherwise issue 1k dict writes per second per worker. The dict is
         -- already keyed per-sandbox, so we only need a "good enough" most-
-        -- recent-second timestamp for the sidecar's idle calculation. Skip
+        -- recent-second timestamp for CLM's idle calculation. Skip
         -- if our last write was less than 1s ago.
         local now_ms = math.floor(ngx.now() * 1000)
         local prev = active:get(ins_id)

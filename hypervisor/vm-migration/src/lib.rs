@@ -111,7 +111,8 @@ pub enum SnapshotType {
     /// Full snapshot - saves complete VM memory
     #[default]
     Full,
-    /// Incremental snapshot - only saves CoW anonymous pages via pagemap + kpageflags
+    /// Incremental snapshot - only saves CoW anonymous pages, classified from
+    /// pagemap bit 61 (`PM_FILE`)
     Incremental,
     /// Soft-dirty snapshot - only saves pages written since the previous
     /// soft-dirty snapshot (true delta), via /proc/self/clear_refs +

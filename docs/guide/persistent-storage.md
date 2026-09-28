@@ -4,69 +4,36 @@ Cube Sandbox runs inside lightweight MicroVMs — by default, all data written i
 
 ## Concept
 
-```
-Sandbox host node
-┌────────────────────────────────────────────────────────────────┐
-│  /data/shared/models  ────────► /models   (read-only)          │
-│  /data/shared/output  ────────► /output   (read-write)         │
-│                                                                │
-│              KVM MicroVM (sandbox)                              │
-└────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Host["Sandbox host node"]
+        HostModels["/data/shared/models"]
+        HostOutput["/data/shared/output"]
+
+        subgraph VM["KVM MicroVM (sandbox)"]
+            VMModels["Internal directory<br/>/models"]
+            VMOutput["Internal directory<br/>/output"]
+        end
+
+        HostModels -->|"Read-only mapping"| VMModels
+        HostOutput -->|"Read-write mapping"| VMOutput
+    end
 ```
 
 A host mount maps an **absolute path on the sandbox host node** to a **path inside the sandbox VM**. Changes to a read-write mount are visible on both sides immediately — no sync, no upload, no delay.
 
-| Property | Description |
-|----------|-------------|
-| **Mechanism** | Linux bind-mount performed by Cubelet before the VM boots |
-| **Scope** | Node-local — the `hostPath` must exist on the sandbox host node that runs the sandbox |
-| **Multiplicity** | Multiple mounts can be specified in a single `Sandbox.create()` call |
-| **Access mode** | Each mount can be independently `readOnly: true` or `readOnly: false` |
-| **Path restriction** | `hostPath` must be under an allowed directory prefix (default `/data/shared/`) |
-| **Compatibility** | Works with both E2B SDK (`e2b_code_interpreter`) and Cube SDK (`cubesandbox`) |
-
-::: tip Volume Plugin (e2b Volume API)
-For **user-scoped persistent volumes** (`POST /volumes` + `volumeMounts`) backed by COS, NFS, etc., see the [Volume Plugin Development guide](./volume-plugin.md). Host Mount is best for pre-existing directories on the node; Volume Plugins fit cloud storage and e2b-compatible volume lifecycle.
-:::
-
 ## Use Cases
 
-- **Large datasets** — mount a multi-GB dataset directory into many sandboxes without copying
-- **Model weights** — share a read-only model directory across concurrent inference sandboxes
-- **Output persistence** — write sandbox results to a host path so they survive sandbox teardown
-- **Source code workspace** — mount a code repository for on-demand execution or analysis
+Host Mount is suitable when a sandbox needs direct access to existing data on its host node or needs to preserve generated data on that node. Common use cases include:
 
-## Mount Descriptor
+- **Shared datasets and model weights**: mount large data directories read-only so multiple sandboxes on the same node can reuse them without copying.
+- **Persistent task output**: mount an output directory read-write so logs, build artifacts, and computation results remain after sandbox teardown.
+- **Reusable source workspaces**: mount a code repository for development, build, test, or code-analysis tasks.
+- **Shared dependencies and caches**: reuse packages, toolchains, or build caches from the host to reduce repeated downloads and initialization.
 
-Host mounts are requested through the `metadata` field of `Sandbox.create()` using the key `host-mount`. The value is a **JSON-encoded array** of mount descriptors:
-
-```json
-[
-  {
-    "hostPath":  "/data/shared/mydir",
-    "mountPath": "/mnt/data",
-    "readOnly":  false
-  }
-]
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `hostPath` | string | Yes | Absolute path on the **sandbox host node**, must be under an allowed prefix |
-| `mountPath` | string | Yes | Target path inside the sandbox VM |
-| `readOnly` | bool | Yes | `true` = read-only; `false` = read-write |
-
-::: warning
-`hostPath` refers to the filesystem of the **sandbox host node** running the sandbox, not the machine where your SDK script executes. If you are calling the API from a remote machine, make sure the path exists on the sandbox host node, not on your laptop.
-:::
+> Host Mount is best for quickly sharing directories that already exist on a node. For cloud storage managed across sandbox lifecycles, consider **user-scoped persistent volumes** backed by COS, NFS, or another backend; see the [Volume Plugin Development guide](./volume-plugin.md).
 
 ## Quick Start
-
-### Prerequisites
-
-- A running Cube Sandbox deployment
-- Python 3.8+
-- The host directories must exist on the sandbox host node before creating the sandbox
 
 Prepare the host directories on the sandbox host node:
 
@@ -76,25 +43,19 @@ echo "hello from host" | sudo tee /data/shared/ro/greeting.txt
 sudo chown -R 1000:1000 /data/shared/rw
 ```
 
-Install the SDK:
-
-```bash
-pip install e2b-code-interpreter
-# or
-pip install cubesandbox
-```
-
 ### Create a Sandbox with Host Mounts
+
+Specify Host Mount through the `host-mount` key in the `metadata` argument to `Sandbox.create()`. Its value is a **JSON-encoded array** in which each item is a mount descriptor, so one sandbox can request multiple mounts.
+
+Every descriptor requires three fields: `hostPath` is an absolute path on the sandbox host node and must be under an allowed directory prefix; `mountPath` is the target path inside the sandbox VM; and `readOnly` selects the access mode, where `true` means read-only and `false` means read-write.
 
 ```python
 import json
 import os
-from e2b_code_interpreter import Sandbox
-
-template_id = os.environ["CUBE_TEMPLATE_ID"]
+from cubesandbox import Sandbox
 
 with Sandbox.create(
-    template=template_id,
+    template=os.environ["CUBE_TEMPLATE_ID"],
     metadata={
         "host-mount": json.dumps([
             {
@@ -126,6 +87,7 @@ greeting.txt
 
 ```python
 import json
+import os
 from cubesandbox import Sandbox
 
 mounts = json.dumps([
@@ -133,28 +95,38 @@ mounts = json.dumps([
 ])
 
 with Sandbox.create(
-    template=template_id,
+    template=os.environ["CUBE_TEMPLATE_ID"],
     metadata={"host-mount": mounts},
 ) as sandbox:
-    sandbox.commands.run("echo 'result data' > /mnt/rw/output.txt")
-
-# The sandbox is gone, but the file persists on the host:
-# cat /data/shared/rw/output.txt  →  result data
+    sandbox.commands.run("echo 'persist data' > /mnt/rw/output.txt")
 ```
 
-## How It Works
+```bash
+# The sandbox is gone, but the file persists on the host:
+$ cat /data/shared/rw/output.txt
+persist data
+```
 
-| Step | What happens |
-|------|-------------|
-| `Sandbox.create(metadata=...)` | CubeAPI passes the `host-mount` JSON to CubeMaster |
-| CubeMaster validates paths | Checks `hostPath` is under allowed prefixes, resolves `..` to prevent traversal |
-| Cubelet receives the request | Parses the mount list and performs bind-mounts before booting the VM |
-| VM boots | The paths appear inside the sandbox at the specified `mountPath` locations |
-| Read-only mount | The kernel enforces `MS_RDONLY`; writes are rejected with `EROFS` |
+## Snapshots of Host Mount Sandboxes
+
+A host mount is an **external reference** to a directory on the host. When Cube creates a snapshot, it saves the VM's memory, root filesystem state, and mount configuration, but it does not copy files from `hostPath` into the snapshot. The host directory remains independent and follows these semantics:
+
+- **Pause / Resume and FromSnap**: restore reuses the original mount configuration and remounts the same `hostPath` on the origin node. A sandbox with a host mount is pinned to its origin node and cannot restore across nodes; restore fails if the origin node is unavailable or the host directory no longer exists.
+- **Rollback**: VM memory and root-filesystem state outside host-mounted paths return to the state at snapshot creation, but host-mounted data does not roll back. Files added, modified, or deleted in the host directory after the snapshot retain their latest state.
+- **Clone**: each clone has independent VM state but references the same host directories. Changes to a read-write mount are accessible to the source sandbox and other clones through the shared directory, subject to the backing filesystem's consistency semantics; read-only mounts remain read-only in every clone.
+- **Deleting a sandbox or snapshot**: does not delete the host directory or its files.
+
+::: warning Concurrent writes
+FromSnap or Clone can leave multiple running sandboxes accessing the same writable `hostPath`. Host Mount does not automatically provide locking, versioning, or write-conflict coordination; applications must coordinate concurrent access themselves and may use locking supported by the backing filesystem.
+:::
 
 ## Path Restriction
 
 For security, `hostPath` is restricted to a set of **allowed directory prefixes**. By default, only paths under `/data/shared/` are permitted. Attempts to mount paths outside the allowed prefixes will be **rejected at sandbox creation time**.
+
+::: warning
+`hostPath` refers to the filesystem of the **sandbox host node** running the sandbox, not the machine where your SDK script executes. If you call the API from a remote machine, make sure the path exists on the sandbox host node, not on your local computer.
+:::
 
 ### Default Behavior
 
@@ -176,19 +148,22 @@ Out of the box, only the following paths are valid:
 If a disallowed path is specified, the SDK raises an `ApiError`:
 
 ```python
+from cubesandbox import Sandbox
 from cubesandbox import ApiError
+import os
+import json
 
 try:
     sandbox = Sandbox.create(
-        template=template_id,
+        template=os.environ["CUBE_TEMPLATE_ID"],
         metadata={"host-mount": json.dumps([
             {"hostPath": "/etc/passwd", "mountPath": "/mnt/x", "readOnly": True}
         ])}
     )
 except ApiError as e:
-    print(e.status_code)  # 500
+    print(e.status_code)  # 400
     print(str(e))
-    # "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
+    # CubeMaster returned error code 130400: "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
 ```
 
 ### Custom Allowed Prefixes
@@ -205,14 +180,9 @@ extra_conf:
 
 When the list is empty or omitted, the default `["/data/shared/"]` applies. The root path `/` is explicitly forbidden — CubeMaster will refuse to start if it appears in the list.
 
-### Security Mechanisms
-
-| Mechanism | Purpose |
-|-----------|---------|
-| `filepath.Clean` | Resolves `..` segments to prevent path-traversal bypass |
-| Trailing `/` in prefix match | Prevents prefix spoofing (e.g. `/data/shared_evil` won't match `/data/shared/`) |
-| Startup validation | Rejects `/` in config to prevent accidental full-host exposure |
-| Dual enforcement | Both annotation path (CubeAPI → CubeMaster) and direct volume path are validated |
+> CubeMaster first normalizes `hostPath` with `filepath.Clean` to remove components such as `..`, then matches it against directory prefixes with a trailing `/`. This prevents a path such as `/data/shared_evil` from masquerading as a child of `/data/shared/`. At startup, CubeMaster also rejects `/` as an allowed prefix to prevent accidental exposure of the entire host filesystem.
+>
+> The same path validation applies whether the mount request comes from an annotation forwarded by CubeAPI or from a directly specified volume path, preventing bypass through a different entry point.
 
 ## Permissions
 
@@ -300,6 +270,7 @@ Each tenant's sandbox only mounts its own subdirectory:
 
 ```python
 import json
+import os
 from cubesandbox import Sandbox
 
 tenant_id = "tenant-a"
@@ -318,7 +289,7 @@ mounts = json.dumps([
 ])
 
 with Sandbox.create(
-    template=template_id,
+    template=os.environ["CUBE_TEMPLATE_ID"],
     metadata={"host-mount": mounts},
 ) as sandbox:
     sandbox.commands.run("ls /datasets /output")
@@ -418,7 +389,7 @@ This is a **shared-readable, writer-scoped** model. “Writer-scoped” means on
 - `readOnly` applies to each mount independently, but normal Linux UID, GID, mode, and ACL checks still apply. A read-write child can still return `Permission denied` if its host permissions reject the sandbox user.
 - Prefer one read-only parent and explicit read-write children. Avoid duplicate destinations and overlapping writable mounts, because ownership and the visible result become difficult to reason about.
 - Use canonical absolute `mountPath` values without `.` or `..` segments. Do not rely on input order to resolve overlapping destinations.
-- Host mounts are node-local and remain outside the sandbox snapshot. On restore, every `hostPath` must be available on the scheduled node; use a shared filesystem at the same path on every node when required.
+- Host mounts are node-local and remain outside the sandbox snapshot. Snapshot FromSnap and Pause/Resume with a raw host mount are pinned to the origin node; an identical path on another node is not treated as the same storage. For portable cross-node snapshot restore, use a plugin Volume backed by storage that every eligible node can attach.
 
 ::: warning Authorization boundary
 The platform calling `Sandbox.create()` must derive `hostPath` from the authenticated sandbox owner and the applicable group boundary, such as a tenant, team, or project. Do not accept an arbitrary host path from the user, and do not mount a global root such as `/data/shared/tenants/` into a tenant sandbox: a read-only mount prevents writes but does not prevent the sandbox from reading other tenants' data.

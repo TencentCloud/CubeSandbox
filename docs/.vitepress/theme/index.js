@@ -14,5 +14,9 @@ export default {
       'ContributorsWall',
       defineAsyncComponent(() => import('./ContributorsWall.vue'))
     )
+    app.component(
+      'QualityStatusPage',
+      defineAsyncComponent(() => import('./QualityStatusPage.vue'))
+    )
   }
 }

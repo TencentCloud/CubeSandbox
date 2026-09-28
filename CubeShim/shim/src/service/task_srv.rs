@@ -701,6 +701,17 @@ impl Task for TaskService {
                 errf!(self.log, "sandbox not in normal state");
                 return Err(Others(format!("sandbox not in normal state")));
             }
+            if sb.snapshot_is_frozen().await {
+                let action = req
+                    .annotations
+                    .get("cube.shimapi.update.action")
+                    .map(String::as_str);
+                if req.resources.is_some()
+                    || !matches!(action, Some("SnapshotCapture" | "SnapshotResume"))
+                {
+                    return Err(Others("sandbox is frozen for snapshot".to_string()));
+                }
+            }
             if let Some(resource) = req.resources.as_ref() {
                 let res = Utils::get_oci_res(resource.value.as_slice())
                     .map_err(|e| Error::Other(format!("Invalid format process config:{}", e)))?;

@@ -20,7 +20,6 @@ type TemplateDefinition struct {
 	OriginNodeID              string `json:"origin_node_id" gorm:"column:origin_node_id"`
 	DisplayName               string `json:"display_name" gorm:"column:display_name"`
 	StorageBackend            string `json:"storage_backend" gorm:"column:storage_backend"`
-	Retain                    bool   `json:"retain" gorm:"column:retain"`
 	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
 	RootfsArtifactID          string `json:"rootfs_artifact_id" gorm:"column:rootfs_artifact_id"`
 	OriginHostFactsJSON       string `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`

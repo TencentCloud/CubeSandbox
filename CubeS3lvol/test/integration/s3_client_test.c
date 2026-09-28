@@ -484,6 +484,12 @@ main(int argc, char **argv)
 		s3_client_put(client2);   /* drop the extra reference */
 	}
 
+	/* An explicit extra ref must not destroy the pooled client on the
+	 * matching put -- the same contract the pending-delete load uses so a
+	 * HEAD/GET can outlive the lvstore that started it. */
+	s3_client_get(client);
+	s3_client_put(client);
+
 	/* ---------- 3. prepare data and keys ---------- */
 	uint8_t *wbuf = malloc(TEST_OBJECT_SIZE);
 	uint8_t *rbuf = malloc(TEST_OBJECT_SIZE);

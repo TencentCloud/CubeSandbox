@@ -7,22 +7,23 @@
     "compat": "兼容性"
   },
   "compat": {
-    "banner": "{{templates}} 个模板的 {{replicas}} 个副本已因节点环境变化失效，需要重建。",
-    "view": "查看兼容性",
-    "adoptBaseline": "采用当前为基线",
-    "adoptConfirm": "确认将当前节点版本作为该模板 UNKNOWN 副本的新基线？这只适用于你已确认模板可在当前环境运行的场景。",
+    "banner": "{{count}} 个模板需要重建。节点升级后，用它们新建沙箱可能失败。请打开模板，点击「重建模板」。",
+    "view": "去重建",
+    "openRebuild": "打开并重建",
+    "driftHint": "仍可直接创建沙箱。如果想用节点上的新环境，再点「重建模板」。",
     "status": {
-      "OK": "正常",
-      "STALE": "需重建",
-      "UNKNOWN": "未知",
-      "MISSING": "缺失"
+      "OK": "可用",
+      "STALE": "可用",
+      "UNKNOWN": "需重建",
+      "MISSING": "此节点没有副本"
     },
     "kpi": {
-      "staleTemplates": "失效模板",
-      "staleReplicas": "失效副本",
-      "affectedNodes": "受影响节点",
-      "missingReplicas": "缺失副本",
-      "unknownReplicas": "未知副本"
+      "staleTemplates": "需重建的模板",
+      "staleReplicas": "需重建的副本",
+      "affectedNodes": "涉及节点",
+      "missingReplicas": "缺少副本",
+      "unknownReplicas": "需重建的副本",
+      "driftReplicas": "环境已更新（可选重建）"
     }
   },
   "col": {

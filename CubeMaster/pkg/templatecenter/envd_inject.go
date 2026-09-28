@@ -64,6 +64,13 @@ func validateEnvdPayloadBytes(data []byte) error {
 	return nil
 }
 
+// InjectEnvdPayloadIntoRootfs exports injectEnvdPayloadIntoRootfs so the
+// standalone CubeTemplateCenter process can bake envd into the rootfs during
+// remote builds (same code path as local mode).
+func InjectEnvdPayloadIntoRootfs(ctx context.Context, rootfsDir string, payload *EnvdInjectionPayload) (string, error) {
+	return injectEnvdPayloadIntoRootfs(ctx, rootfsDir, payload)
+}
+
 func injectEnvdPayloadIntoRootfs(ctx context.Context, rootfsDir string, payload *EnvdInjectionPayload) (string, error) {
 	if payload == nil {
 		return "", nil

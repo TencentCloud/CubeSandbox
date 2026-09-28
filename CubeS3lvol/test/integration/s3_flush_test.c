@@ -385,6 +385,20 @@ test_overlay_basics(void)
 	check_true("write one block", rc == 0, NULL);
 	check_true("that block is covered", s3_overlay_covers(ov, 0, 1), NULL);
 	check_true("the next block is not", !s3_overlay_covers(ov, 1, 1), NULL);
+	check_true("chunk 0 is live", s3_overlay_chunk_is_live(ov, 0), NULL);
+	check_true("an untouched chunk is not live",
+		   !s3_overlay_chunk_is_live(ov, 1), NULL);
+	rc = s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 102);
+	check_true("write one block of chunk 2", rc == 0, NULL);
+	check_true("chunk 2 is live independently",
+		   s3_overlay_chunk_is_live(ov, 2), NULL);
+	check_true("chunk 1 stays clean while 0 and 2 are dirty",
+		   !s3_overlay_chunk_is_live(ov, 1), NULL);
+	check_u64("two live chunks", s3_overlay_get_live_chunks(ov), 2);
+	s3_overlay_drop_chunk(ov, 2);
+	check_true("dropping chunk 2 does not clear chunk 0",
+		   s3_overlay_chunk_is_live(ov, 0) &&
+		   !s3_overlay_chunk_is_live(ov, 2), NULL);
 	check_u64("bytes held", s3_overlay_get_bytes(ov), BLOCK_SIZE);
 	check_u64("min_seq", s3_overlay_min_seq(ov), 100);
 
@@ -793,6 +807,68 @@ test_flusher(void)
 
 		check_true("drain completed", probe.done, NULL);
 		check_true("drain reported success", probe.status == 0, NULL);
+	}
+
+	/* --- a drain with writes still arriving gives up rather than hanging --- */
+	printf("\n[10] a drain that cannot converge reports instead of hanging\n");
+	{
+		/* A write stream that outruns the uploads: four chunks dirtied per
+		 * round against the two the concurrency cap can retire, and a chunk
+		 * written while its own upload is in flight is dirtied again. The
+		 * overlay therefore never goes clean, so no completion ever leaves the
+		 * drain the quiet moment it would need to notice its deadline -- which
+		 * is the state a sandbox under load puts it in. A 1 us deadline is
+		 * already past by the time the drain reads the clock. */
+		struct drain_probe probe = { .status = -1, .done = false };
+		uint32_t chunk = 6;
+
+		for (uint32_t c = 0; c < 5; c++) {
+			fill_pattern(blk, 1, (uint64_t)(6 + c) * BLOCKS_PER_CHUNK,
+				     (uint8_t)(0xA0 + c));
+			s3_overlay_write(ov, (uint64_t)(6 + c) * BLOCKS_PER_CHUNK, 1,
+					 blk, 600 + c);
+		}
+
+		s3_flusher_drain(fl, 1, drain_cb, &probe);
+		check_true("a drain with uploads outstanding does not report yet",
+			   !probe.done, NULL);
+
+		for (uint32_t round = 0; round < 12 && !probe.done; round++) {
+			for (uint32_t w = 0; w < 4; w++) {
+				fill_pattern(blk, 1, (uint64_t)chunk * BLOCKS_PER_CHUNK,
+					     (uint8_t)(0xB0 + round));
+				s3_overlay_write(ov, (uint64_t)chunk * BLOCKS_PER_CHUNK,
+						 1, blk, 700 + round);
+				chunk = (chunk + 1) % TEST_CHUNKS;
+			}
+			s3_flusher_kick(fl);
+			fake_complete_all(&fake, 0);
+		}
+
+		check_true("the drain reported rather than waiting for a quiet \
+overlay", probe.done, NULL);
+		check_true("it reported the deadline, not success",
+			   probe.status == -ETIMEDOUT, NULL);
+		check_true("what it could not push is still dirty for replay",
+			   s3_overlay_has_dirty(ov), NULL);
+
+		/* And an expired drain leaves the flusher usable: once the writes stop
+		 * and everything is pushed, a later drain still completes. Keeping the
+		 * expiry separate from `stopping` is what buys this. */
+		{
+			struct drain_probe again = { .status = -1, .done = false };
+
+			s3_flusher_kick(fl);
+			while (fake.n_pending > 0) {
+				fake_complete_all(&fake, 0);
+			}
+			check_true("the overlay is clean once the writes stop",
+				   !s3_overlay_has_dirty(ov), NULL);
+
+			s3_flusher_drain(fl, 0, drain_cb, &again);
+			check_true("the flusher still drains after an expired drain",
+				   again.done && again.status == 0, NULL);
+		}
 	}
 
 	s3_flusher_destroy(fl);

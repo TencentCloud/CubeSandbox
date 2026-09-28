@@ -8,8 +8,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/sandboxid"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestResolveSandboxIDFromListBySandboxPrefix(t *testing.T) {

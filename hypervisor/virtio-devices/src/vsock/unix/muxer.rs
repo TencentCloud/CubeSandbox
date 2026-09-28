@@ -1552,6 +1552,15 @@ mod tests {
         file
     }
 
+    fn fd_identity(fd: RawFd) -> Option<(libc::dev_t, libc::ino_t)> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } == 0 {
+            Some((stat.st_dev, stat.st_ino))
+        } else {
+            None
+        }
+    }
+
     #[test]
     fn test_passfd_validation_accepts_supported_fd_types() {
         let file = temp_file();
@@ -1586,6 +1595,8 @@ mod tests {
         let invalid_fd = unsafe { libc::dup(invalid.as_raw_fd()) };
         assert!(valid_fd >= 0);
         assert!(invalid_fd >= 0);
+        let valid_identity = fd_identity(valid_fd).unwrap();
+        let invalid_identity = fd_identity(invalid_fd).unwrap();
 
         let initial_port = ctx.muxer.local_port_last;
         let initial_ports = ctx.muxer.local_port_set.len();
@@ -1610,10 +1621,10 @@ mod tests {
             assert_eq!(ctx.muxer.conn_map.len(), initial_connections);
         }
 
-        // The rejected requests retain ownership until the whole batch is
-        // dropped, at which point every received fd is closed.
-        assert_eq!(unsafe { libc::fcntl(valid_fd, libc::F_GETFD) }, -1);
-        assert_eq!(unsafe { libc::fcntl(invalid_fd, libc::F_GETFD) }, -1);
+        // The fd numbers can be reused immediately by another parallel test.
+        // Verify that they no longer refer to the received file descriptions.
+        assert_ne!(fd_identity(valid_fd), Some(valid_identity));
+        assert_ne!(fd_identity(invalid_fd), Some(invalid_identity));
     }
 
     #[test]

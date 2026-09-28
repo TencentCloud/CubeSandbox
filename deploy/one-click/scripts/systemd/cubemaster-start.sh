@@ -26,4 +26,12 @@ else
   log "cubemaster artifact store ${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR} unavailable, fallback handled by cubemaster"
 fi
 
+# CubeTemplateCenter's address. Can be set here (ad-hoc override) or in
+# conf.yaml as template_center_addr (persistent, per-deployment). Env wins
+# over yaml. The default points at the TC unit the same bundle installs on
+# this host, so split deployments need only edit this export or the conf.yaml
+# field. Export unconditionally: the binary reads it on every request, and
+# having it set keeps the later enable to a single edit.
+export CUBE_TEMPLATE_CENTER_ADDR="${CUBE_TEMPLATE_CENTER_ADDR:-http://127.0.0.1:8090}"
+
 exec "${CUBEMASTER_BIN}"

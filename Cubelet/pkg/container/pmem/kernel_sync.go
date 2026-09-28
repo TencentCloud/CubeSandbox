@@ -19,6 +19,7 @@ import (
 
 var compareKernelFiles = sameFileSHA256
 var writeKernelVersionFile = writeKernelVersionFileImpl
+var kernelFileLocks = utils.NewResourceLocks()
 
 const (
 	kernelVersionFileName = "version"
@@ -50,6 +51,15 @@ func EnsureKernelFilePresent(ctx context.Context, sharedKernelPath, targetKernel
 
 // RefreshKernelFile rewrites the target from the current shared kernel.
 func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
+	// CreateImage and concurrent CreateSandbox calls can refresh the same
+	// artifact kernel through different entry points. Serialize by final target
+	// path so the fixed .tmp file remains private to one writer at a time.
+	unlock, err := kernelFileLocks.LockContext(ctx, targetKernelPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	if err := requireValidSharedKernel(sharedKernelPath); err != nil {
 		return err
 	}

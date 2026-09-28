@@ -889,11 +889,12 @@ setup_env() {
 	TENCENTCLOUD_USE_CFS="${TENCENTCLOUD_USE_CFS:-false}"
 	export TF_VAR_use_tcr="$TENCENTCLOUD_USE_TCR"
 	export TF_VAR_use_cfs="$TENCENTCLOUD_USE_CFS"
-	CUBE_IMAGE_TAG="${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.0}"
+	CUBE_IMAGE_TAG="${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.2}"
 	export TF_VAR_image_tag="$CUBE_IMAGE_TAG"
 	export TF_VAR_image_registry="${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}"
 	export TF_VAR_image_namespace="${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}"
 	export TF_VAR_cubemaster_image="${TENCENTCLOUD_CUBEMASTER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_templatecenter_image="${TENCENTCLOUD_CUBETEMPLATECENTER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-templatecenter:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeops_image="${TENCENTCLOUD_CUBEOPS_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:${CUBE_IMAGE_TAG}}"
@@ -905,14 +906,26 @@ setup_env() {
 	export TF_VAR_tke_cluster_version="${TENCENTCLOUD_TKE_CLUSTER_VERSION:-1.34.1}"
 	export TF_VAR_tke_node_count="$TKE_NODE_COUNT"
 	export TF_VAR_cubemaster_replicas="${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}"
+	# TC 默认单副本（hostPath 模式强制）；use_cfs=true 时可调大，见
+	# variables.tf 的 templatecenter_replicas 说明。旧名
+	# TENCENTCLOUD_TEMPLATECENTER_REPLICAS 仍作 fallback（env.example 已改用
+	# 与 TENCENTCLOUD_CUBETEMPLATECENTER_IMAGE 一致的 CUBE 前缀命名）。
+	export TF_VAR_templatecenter_replicas="${TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}"
 	export TF_VAR_cube_api_replicas="${TENCENTCLOUD_CUBE_API_REPLICAS:-1}"
 	export TF_VAR_cube_ops_replicas="${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}"
 	export TF_VAR_cube_proxy_replicas="${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}"
-	export TF_VAR_cube_lifecycle_manager_replicas="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}"
+	export TF_VAR_cube_lifecycle_manager_replicas="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-2}"
 	export TF_VAR_cube_webui_replicas="${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}"
 	export TF_VAR_cube_lifecycle_manager_default_idle_timeout="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}"
 	export TF_VAR_cube_lifecycle_manager_heartbeat_ttl="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}"
 	export TF_VAR_cube_lifecycle_manager_discovery_refresh="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}"
+	# CLM active-standby. Election must stay in step with the replica count:
+	# 2 replicas without it means two uncoordinated actors, not HA. tke-addons.tf
+	# has preconditions on both directions.
+	export TF_VAR_cube_lifecycle_manager_leader_election_enabled="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_ELECTION_ENABLED:-true}"
+	export TF_VAR_cube_lifecycle_manager_leader_lease_ttl="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_LEASE_TTL:-10s}"
+	export TF_VAR_cube_lifecycle_manager_leader_renew_interval="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RENEW_INTERVAL:-3s}"
+	export TF_VAR_cube_lifecycle_manager_leader_retry_interval="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RETRY_INTERVAL:-1s}"
 	export TF_VAR_cube_admin_token="${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}"
 	export TF_VAR_cube_proxy_heartbeat_interval_ms="${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}"
 	# cube-proxy admin port (host-network admin listener, auto-pause coordination).
@@ -1575,7 +1588,7 @@ build_and_push_images() {
 	reg=$(terraform output -raw tcr_registry_name 2>/dev/null || echo "")
 	ns=$(terraform output -raw tcr_namespace 2>/dev/null || echo "")
 	user=$(terraform output -raw tcr_token_user 2>/dev/null || echo "")
-	tag="${CUBE_IMAGE_TAG:-v0.7.0}"
+	tag="${CUBE_IMAGE_TAG:-v0.7.2}"
 
 	if [ -z "$js_pub_ip" ] || [ -z "$reg" ] || [ -z "$ns" ]; then
 		echo -e "  ${RED}✗ Missing jumpserver / TCR info; cannot build images${NC}"
@@ -1686,7 +1699,7 @@ tcr_build_and_push() {
 	# The image tag was already resolved earlier (env / saved selection /
 	# prompt_deployment_env / default), so don't ask again — just remind which tag
 	# will be built & pushed.
-	echo -e "  ${GREEN}✓ Image tag to build & push: ${CUBE_IMAGE_TAG:-v0.7.0}${NC}"
+	echo -e "  ${GREEN}✓ Image tag to build & push: ${CUBE_IMAGE_TAG:-v0.7.2}${NC}"
 	echo ""
 
 	# Pre-pull the base images the build needs from the in-VPC TCR mirror first
@@ -1939,7 +1952,7 @@ prompt_deployment_env() {
 	select_env TENCENTCLOUD_CUBE_DB "Cube database name" "cube_mvp"
 	select_env TENCENTCLOUD_CUBE_USER "Cube database user" "cube"
 	select_env_secret TENCENTCLOUD_CUBE_PASSWORD "Cube database password" "cube_pass"
-	select_env TENCENTCLOUD_CUBE_IMAGE_TAG "Cube component image tag" "v0.7.0" "dev"
+	select_env TENCENTCLOUD_CUBE_IMAGE_TAG "Cube component image tag" "v0.7.2" "dev"
 
 	# Ask whether to print verbose terraform logs (defaults to off). Runs before
 	# setup_env so the resolved value feeds VERBOSE. An explicit
@@ -3477,7 +3490,7 @@ step6_replace_kernel() {
 	local key_file js_public_ip
 	key_file="${TENCENTCLOUD_SSH_PRIVATE_KEY_PATH:-$SSH_PRI_KEY}"
 	js_public_ip=$(terraform output -raw jumpserver_public_ip 2>/dev/null || echo "")
-	local pvm_kernel_url="${TENCENTCLOUD_PVM_KERNEL_RPM_URL:-https://mirrors.opencloudos.tech/opencloudos/9.6/extras/x86_64/os/Packages/kernel-core-6.6.69-1.2.cubesandbox.oc9.x86_64.rpm}"
+	local pvm_kernel_url="${TENCENTCLOUD_PVM_KERNEL_RPM_URL:-https://mirrors.opencloudos.tech/opencloudos/9.6/extras/x86_64/os/Packages/kernel-core-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
 	local rpm_name
 	rpm_name=$(basename "$pvm_kernel_url")
 	local rpm_file="/tmp/${rpm_name}"
@@ -4190,10 +4203,12 @@ REMOTE_CUBELET_FREQ
 
 	if [ -z "${cm_clb_ip}" ]; then
 		echo -e "  ${YELLOW}⚠ cube-master CLB unavailable, skipping verification${NC}"
+	elif [ -z "${ops_clb_ip}" ]; then
+		echo -e "  ${YELLOW}⚠ cube-ops CLB unavailable, skipping node registration verification and template creation${NC}"
 	else
 		local nodes_json
-		# Query CubeOps through the jumpserver (ClusterIP, not exposed via CLB)
-		nodes_json=$(_jump_exec "kubectl -n cubesandbox exec deploy/cube-ops -- curl -s --connect-timeout 10 'http://127.0.0.1:3010/internal/v1/nodes' 2>&1" 2>&1) || true
+		# Query CubeOps via its VPC-internal CLB (same address compute nodes use).
+		nodes_json=$(_jump_exec "curl -s --connect-timeout 10 --max-time 10 'http://${ops_clb_ip}:3010/internal/v1/nodes' 2>&1" 2>&1) || true
 
 		# Output the registered nodes (with health status)
 		local node_ips node_count node_status
@@ -4217,9 +4232,9 @@ REMOTE_CUBELET_FREQ
 			mysql_db="${CUBE_DB:-cube_mvp}"
 
 			if [ -n "$mysql_host" ]; then
-				# Only query nodes with healthy=true
+				# Only query healthy nodes; `.InstanceID` is the DB `node_id`.
 				local healthy_node_ips node_list
-				healthy_node_ips=$(echo "$nodes_json" | jq -r '.data[] | select(.healthy == true) | .node_id' 2>/dev/null || echo "")
+				healthy_node_ips=$(echo "$nodes_json" | jq -r '.[] | select(.Healthy == true) | .InstanceID' 2>/dev/null || echo "")
 				if [ -z "$healthy_node_ips" ]; then
 					echo -e "  ${YELLOW}⚠ No healthy nodes${NC}"
 				else
@@ -4233,9 +4248,9 @@ REMOTE_CUBELET_FREQ
 
 		# Check the number of existing templates; create one if it is 0 (requires at least 1 registered node)
 		if [ -n "${cm_clb_ip}" ]; then
-			# Get the number of registered healthy nodes
+			# Get the number of registered healthy nodes.
 			local healthy_count
-			healthy_count=$(echo "$nodes_json" | jq -r '[.data[]? | select(.healthy == true)] | length' 2>/dev/null || echo "0")
+			healthy_count=$(echo "$nodes_json" | jq -r '[.[]? | select(.Healthy == true)] | length' 2>/dev/null || echo "0")
 			healthy_count=$(echo "$healthy_count" | tr -d ' \n\r')
 			echo -e "  ${CYAN}Registered healthy nodes: ${healthy_count:-0}${NC}"
 
@@ -4268,7 +4283,8 @@ REMOTE_CUBELET_FREQ
 	# failures and continue instead of aborting an otherwise-working deployment.
 	if [ "${#failed_nodes[@]}" -gt 0 ] && [ -n "${nodes_json:-}" ]; then
 		local _expected_ip _healthy_ips _all_registered=1 _expected_n=0
-		_healthy_ips=$(echo "$nodes_json" | jq -r '.data[]? | select(.healthy == true) | .node_id' 2>/dev/null || echo "")
+		# Healthy node's registered host IP (`.IP`), matched against private IPs.
+		_healthy_ips=$(echo "$nodes_json" | jq -r '.[]? | select(.Healthy == true) | .IP' 2>/dev/null || echo "")
 		while IFS= read -r _expected_ip; do
 			[ -n "$_expected_ip" ] || continue
 			_expected_n=$((_expected_n + 1))
@@ -4369,10 +4385,11 @@ TENCENTCLOUD_CUBE_DB='${TENCENTCLOUD_CUBE_DB:-cube_mvp}'
 TENCENTCLOUD_CUBE_USER='${TENCENTCLOUD_CUBE_USER:-cube}'
 TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
 TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}'
-TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.0}'
+TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.2}'
 TENCENTCLOUD_IMAGE_REGISTRY='${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}}'
 TENCENTCLOUD_IMAGE_NAMESPACE='${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}'
 TENCENTCLOUD_CUBEMASTER_IMAGE='${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}'
+TENCENTCLOUD_CUBETEMPLATECENTER_IMAGE='${TF_VAR_templatecenter_image:-${TENCENTCLOUD_CUBETEMPLATECENTER_IMAGE:-}}'
 TENCENTCLOUD_CUBEAPI_IMAGE='${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}'
 TENCENTCLOUD_CUBEOPS_IMAGE='${TF_VAR_cubeops_image:-${TENCENTCLOUD_CUBEOPS_IMAGE:-}}'
 TENCENTCLOUD_CUBEPROXY_IMAGE='${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}'
@@ -4381,14 +4398,19 @@ TENCENTCLOUD_WEBUI_IMAGE='${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
+TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS='${TF_VAR_templatecenter_replicas:-${TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_OPS_REPLICAS='${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}}'
 TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
-TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS='${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS='${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-2}}'
 TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT='${TF_VAR_cube_lifecycle_manager_default_idle_timeout:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL='${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH='${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_ELECTION_ENABLED='${TF_VAR_cube_lifecycle_manager_leader_election_enabled:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_ELECTION_ENABLED:-true}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_LEASE_TTL='${TF_VAR_cube_lifecycle_manager_leader_lease_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_LEASE_TTL:-10s}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RENEW_INTERVAL='${TF_VAR_cube_lifecycle_manager_leader_renew_interval:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RENEW_INTERVAL:-3s}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RETRY_INTERVAL='${TF_VAR_cube_lifecycle_manager_leader_retry_interval:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RETRY_INTERVAL:-1s}}'
 TENCENTCLOUD_CUBE_ADMIN_TOKEN='${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}'
 TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS='${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}'
 TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT='${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}'
@@ -4586,24 +4608,30 @@ write_resolved_tfvars_file() {
 		--argjson enable_public_network "$(_bool_json "${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}")" \
 		--argjson use_tcr "$(_bool_json "${TF_VAR_use_tcr:-${TENCENTCLOUD_USE_TCR:-false}}")" \
 		--argjson use_cfs "$(_bool_json "${TF_VAR_use_cfs:-${TENCENTCLOUD_USE_CFS:-false}}")" \
-		--arg image_tag "${TF_VAR_image_tag:-${CUBE_IMAGE_TAG:-${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.0}}}" \
+		--arg image_tag "${TF_VAR_image_tag:-${CUBE_IMAGE_TAG:-${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.7.2}}}" \
 		--arg image_registry "${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}}" \
 		--arg image_namespace "${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}" \
 		--arg cubemaster_image "${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}" \
+		--arg templatecenter_image "${TF_VAR_templatecenter_image:-${TENCENTCLOUD_CUBETEMPLATECENTER_IMAGE:-}}" \
 		--arg cubeapi_image "${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}" \
 		--arg cubeops_image "${TF_VAR_cubeops_image:-${TENCENTCLOUD_CUBEOPS_IMAGE:-}}" \
 		--arg cubeproxy_image "${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}" \
 		--arg cube_lifecycle_manager_image "${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}" \
 		--arg webui_image "${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}" \
 		--argjson cubemaster_replicas "$(_number_or_default "${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}}" 1)" \
+		--argjson templatecenter_replicas "$(_number_or_default "${TF_VAR_templatecenter_replicas:-${TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}}" 1)" \
 		--argjson cube_api_replicas "$(_number_or_default "${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}" 1)" \
 		--argjson cube_ops_replicas "$(_number_or_default "${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}}" 2)" \
 		--argjson cube_proxy_replicas "$(_number_or_default "${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}" 1)" \
-		--argjson cube_lifecycle_manager_replicas "$(_number_or_default "${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}" 1)" \
+		--argjson cube_lifecycle_manager_replicas "$(_number_or_default "${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-2}}" 2)" \
 		--argjson cube_webui_replicas "$(_number_or_default "${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}" 1)" \
 		--arg cube_lifecycle_manager_default_idle_timeout "${TF_VAR_cube_lifecycle_manager_default_idle_timeout:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}}" \
 		--arg cube_lifecycle_manager_heartbeat_ttl "${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}" \
 		--arg cube_lifecycle_manager_discovery_refresh "${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}" \
+		--argjson cube_lifecycle_manager_leader_election_enabled "$(_bool_json "${TF_VAR_cube_lifecycle_manager_leader_election_enabled:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_ELECTION_ENABLED:-true}}")" \
+		--arg cube_lifecycle_manager_leader_lease_ttl "${TF_VAR_cube_lifecycle_manager_leader_lease_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_LEASE_TTL:-10s}}" \
+		--arg cube_lifecycle_manager_leader_renew_interval "${TF_VAR_cube_lifecycle_manager_leader_renew_interval:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RENEW_INTERVAL:-3s}}" \
+		--arg cube_lifecycle_manager_leader_retry_interval "${TF_VAR_cube_lifecycle_manager_leader_retry_interval:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_LEADER_RETRY_INTERVAL:-1s}}" \
 		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
 		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
 		--argjson cube_proxy_admin_port "$(_number_or_default "${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}" 8082)" \
@@ -4642,12 +4670,14 @@ write_resolved_tfvars_file() {
 			image_registry: $image_registry,
 			image_namespace: $image_namespace,
 			cubemaster_image: $cubemaster_image,
+			templatecenter_image: $templatecenter_image,
 			cubeapi_image: $cubeapi_image,
 			cubeops_image: $cubeops_image,
 			cubeproxy_image: $cubeproxy_image,
 			cube_lifecycle_manager_image: $cube_lifecycle_manager_image,
 			webui_image: $webui_image,
 			cubemaster_replicas: $cubemaster_replicas,
+			templatecenter_replicas: $templatecenter_replicas,
 			cube_api_replicas: $cube_api_replicas,
 			cube_ops_replicas: $cube_ops_replicas,
 			cube_proxy_replicas: $cube_proxy_replicas,
@@ -4656,6 +4686,10 @@ write_resolved_tfvars_file() {
 			cube_lifecycle_manager_default_idle_timeout: $cube_lifecycle_manager_default_idle_timeout,
 			cube_lifecycle_manager_heartbeat_ttl: $cube_lifecycle_manager_heartbeat_ttl,
 			cube_lifecycle_manager_discovery_refresh: $cube_lifecycle_manager_discovery_refresh,
+			cube_lifecycle_manager_leader_election_enabled: $cube_lifecycle_manager_leader_election_enabled,
+			cube_lifecycle_manager_leader_lease_ttl: $cube_lifecycle_manager_leader_lease_ttl,
+			cube_lifecycle_manager_leader_renew_interval: $cube_lifecycle_manager_leader_renew_interval,
+			cube_lifecycle_manager_leader_retry_interval: $cube_lifecycle_manager_leader_retry_interval,
 			cube_admin_token: $cube_admin_token,
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 			cube_proxy_admin_port: $cube_proxy_admin_port,
@@ -5034,18 +5068,21 @@ _reconcile_addons() {
 	local entries='
 kubernetes_secret.cube_egress_ca|-n cubesandbox delete secret cube-egress-ca
 kubernetes_secret.cubemaster_conf|-n cubesandbox delete secret cubemaster-conf
+kubernetes_secret.templatecenter_conf|-n cubesandbox delete secret cube-templatecenter-conf
 kubernetes_secret.cube_lifecycle_manager_conf|-n cubesandbox delete secret cube-lifecycle-manager-conf
 kubernetes_secret.cubeproxy_global|-n cubesandbox delete secret cubeproxy-global
 kubernetes_secret.cubeproxy_certs|-n cubesandbox delete secret cubeproxy-certs
 kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubeproxy-nginx-conf
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
+kubernetes_service.templatecenter|-n cubesandbox delete svc cube-templatecenter
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api
 kubernetes_service.cube_ops|-n cubesandbox delete svc cube-ops
 kubernetes_service.cube_lifecycle_manager|-n cubesandbox delete svc cube-lifecycle-manager
 kubernetes_service.cube_proxy|-n cubesandbox delete svc cube-proxy
 kubernetes_service.cube_webui|-n cubesandbox delete svc cube-webui
 kubernetes_deployment.cubemaster|-n cubesandbox delete deploy cubemaster
+kubernetes_deployment.templatecenter|-n cubesandbox delete deploy cube-templatecenter
 kubernetes_deployment.cube_api|-n cubesandbox delete deploy cube-api
 kubernetes_deployment.cube_ops|-n cubesandbox delete deploy cube-ops
 kubernetes_deployment.cube_lifecycle_manager|-n cubesandbox delete deploy cube-lifecycle-manager
@@ -5087,7 +5124,7 @@ EOF
 #   orchestrator can fail-fast.
 # ---------------------------------------------------------------
 phase7_health_check() {
-	banner "Step: Health check — cube-master / cube-api / cube-ops / cube-lifecycle-manager / cube-proxy / cube-webui"
+	banner "Step: Health check — cube-master / cube-templatecenter / cube-api / cube-ops / cube-lifecycle-manager / cube-proxy / cube-webui"
 
 	local ns="cubesandbox"
 	# The namespace must be present (created by the addons apply in Step 6).
@@ -5108,7 +5145,7 @@ phase7_health_check() {
 	# ---- 1) Wait for each Deployment to roll out (synchronous, fail-fast) ---
 	#     On failure, dump pod state + events + container logs to explain why.
 	local dep out ready ok=1
-	for dep in cubemaster cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
+	for dep in cubemaster cube-templatecenter cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
 		echo -e "  ${CYAN}▶ deployment/${dep}: waiting for rollout (timeout 300s)...${NC}"
 		out=$(_js_kubectl -n "${ns}" rollout status deploy/"${dep}" --timeout=300s 2>&1)
 		if echo "$out" | grep -qi "successfully rolled out"; then
@@ -5132,9 +5169,10 @@ phase7_health_check() {
 	echo ""
 
 	# ---- 2) Probe the component endpoints through the CLBs (from jumpserver) -
-	local cm_ip api_ip proxy_ip webui_ip
+	local cm_ip api_ip ops_ip proxy_ip webui_ip
 	cm_ip=$(terraform output -raw tke_cubemaster_clb_ip 2>/dev/null || echo "")
 	api_ip=$(terraform output -raw tke_cube_api_clb_ip 2>/dev/null || echo "")
+	ops_ip=$(terraform output -raw tke_cube_ops_clb_ip 2>/dev/null || echo "")
 	proxy_ip=$(terraform output -raw tke_cube_proxy_clb_ip 2>/dev/null || echo "")
 	webui_ip=$(terraform output -raw tke_cube_webui_clb_ip 2>/dev/null || echo "")
 
@@ -5151,8 +5189,12 @@ phase7_health_check() {
 		fi
 		# Informational: how many compute nodes have registered so far. The
 		# standalone compute nodes only register in Step 8, so 0 here is normal.
-		local nodes_json ncount
-		nodes_json=$(_jump_exec "kubectl -n cubesandbox exec deploy/cube-ops -- curl -s --connect-timeout 5 --max-time 10 'http://127.0.0.1:3010/internal/v1/nodes' 2>/dev/null" 2>/dev/null)
+		# Query CubeOps via its VPC-internal CLB (same as other endpoint probes).
+		# Keep nodes_json bound (→ count 0) if the cube-ops CLB is not ready yet.
+		local nodes_json="[]" ncount
+		if [ -n "$ops_ip" ]; then
+			nodes_json=$(_jump_exec "curl -s --connect-timeout 5 --max-time 10 'http://${ops_ip}:3010/internal/v1/nodes' 2>/dev/null" 2>/dev/null)
+		fi
 		ncount=$(echo "$nodes_json" | jq 'if type=="array" then length else 0 end' 2>/dev/null || echo "0")
 		echo -e "    ${CYAN}registered compute nodes so far: ${ncount:-0} (they register in Step 8)${NC}"
 	else
@@ -5599,8 +5641,11 @@ main() {
 		tls_self_signed_cert.cube_egress_ca[0]
 		kubernetes_secret.cube_egress_ca[0]
 		kubernetes_secret.cubemaster_conf[0]
+		kubernetes_secret.templatecenter_conf[0]
 		kubernetes_deployment.cubemaster[0]
 		kubernetes_service.cubemaster[0]
+		kubernetes_deployment.templatecenter[0]
+		kubernetes_service.templatecenter[0]
 		kubernetes_deployment.cube_api[0]
 		kubernetes_service.cube_api[0]
 		kubernetes_deployment.cube_ops[0]
@@ -5631,7 +5676,7 @@ main() {
 	# Restart the Deployments so any ConfigMap changes take effect.
 	if _js_kubectl get ns cubesandbox 2>/dev/null | grep -q Active; then
 		echo -e "  ${CYAN}Restarting Deployments...${NC}"
-		for _dep in cubemaster cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
+		for _dep in cubemaster cube-templatecenter cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
 			_js_kubectl -n cubesandbox rollout restart deploy ${_dep} 2>/dev/null || true
 		done
 	fi

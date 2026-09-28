@@ -99,7 +99,9 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
     fetch(url, {
       ...rest,
       headers: {
-        ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
+        ...(rest.body != null && !(rest.body instanceof FormData)
+          ? { 'Content-Type': 'application/json' }
+          : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(headers ?? {}),
       },
@@ -145,7 +147,9 @@ export async function ops<T = unknown>(path: string, init: ApiInit = {}): Promis
     fetch(url, {
       ...rest,
       headers: {
-        ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
+        ...(rest.body != null && !(rest.body instanceof FormData)
+          ? { 'Content-Type': 'application/json' }
+          : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(headers ?? {}),
       },

@@ -41,7 +41,7 @@ func writeManifest(t *testing.T, dir string) {
   "guest_image": {"version": "cube-image/2026.01", "agent_version": "agent-1.2.3"},
   "kernel": {
     "version": "5.10.0-100",
-    "pvm_version": "6.6.69-1.2.cubesandbox",
+    "pvm_version": "6.6.117-45.16.cubesandbox",
     "vmlinux_digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "vmlinux_pvm_digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   }

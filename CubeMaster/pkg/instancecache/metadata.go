@@ -13,7 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 func trace(ctx context.Context, action string, op string, start time.Time, err error) {

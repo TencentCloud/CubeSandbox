@@ -55,7 +55,6 @@ func (m *Manager) EnsurePasswdFile() error {
 //	-o passwd_file  per-bucket credential file
 //	-o allow_other  Cubelet (a different user) must traverse the mount to bind
 //	                it into the microVM via virtiofs
-//	-o nonempty     the mountpoint may already hold a stale dir entry
 //
 // Create already PUT volumes/<id>/, the same object s3fs mkdir would write, so
 // no compat_dir option is needed.
@@ -67,7 +66,6 @@ func (m *Manager) MountArgs(mnt, volumeID string) []string {
 		"-oendpoint=" + m.cfg.Region,
 		"-opasswd_file=" + m.cfg.PasswdFile,
 		"-oallow_other",
-		"-ononempty",
 	}
 	return append(args, m.cfg.S3FSExtraOpts...)
 }

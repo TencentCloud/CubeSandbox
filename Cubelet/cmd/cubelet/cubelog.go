@@ -10,7 +10,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 func initCubeLog(module string, logCfg srvconfig.CubeLogConfig) {

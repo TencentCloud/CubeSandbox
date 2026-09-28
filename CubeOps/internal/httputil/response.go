@@ -26,6 +26,10 @@ func WriteError(c *gin.Context, status int, msg string) {
 	c.JSON(status, model.APIError{Error: msg})
 }
 
+func WriteErrorCode(c *gin.Context, status int, code, msg string) {
+	c.JSON(status, model.APIError{Error: msg, Code: code})
+}
+
 // WriteRawJSON writes a pre-encoded JSON body verbatim (used when proxying
 // CubeMaster responses without re-marshalling).
 func WriteRawJSON(c *gin.Context, status int, raw json.RawMessage) {

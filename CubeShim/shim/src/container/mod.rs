@@ -135,6 +135,56 @@ fn validate_log_path_component(id: &str) -> CResult<()> {
     Ok(())
 }
 
+/// Host directory for regular-sandbox init logs. Template builds stay under
+/// `/data/log/template`. cubecli reads this path without entering a mount ns.
+pub const SANDBOX_LOG_ROOT: &str = "/data/cubelet/log";
+
+pub fn sandbox_log_dir(sandbox_id: &str) -> CResult<PathBuf> {
+    validate_log_path_component(sandbox_id)?;
+    Ok(PathBuf::from(SANDBOX_LOG_ROOT).join(sandbox_id))
+}
+
+pub async fn create_sandbox_log_paths(sandbox_id: &str) -> CResult<(String, String)> {
+    let dir = sandbox_log_dir(sandbox_id)?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("create log dir {}: {}", dir.display(), e))?;
+    let stdout = dir.join("stdout");
+    let stderr = dir.join("stderr");
+    // Pause reaps the previous shim via binary delete and removes this
+    // directory. Resume is a new shim and must recreate the files.
+    for path in [&stdout, &stderr] {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(path)
+            .await
+            .map_err(|e| format!("create log file {}: {}", path.display(), e))?;
+    }
+    Ok((
+        stdout.to_string_lossy().into_owned(),
+        stderr.to_string_lossy().into_owned(),
+    ))
+}
+
+/// Sync cleanup used by the shim `delete` subcommand (`clean_sandbox_resource`)
+/// so a crashed shim still drops `/data/cubelet/log/<id>` when containerd
+/// reaps the leftover task.
+pub fn remove_sandbox_log_dir_sync(sandbox_id: &str) -> CResult<()> {
+    let dir = sandbox_log_dir(sandbox_id)?;
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("del {} failed:{}", dir.display(), e)),
+    }
+}
+
+pub async fn remove_sandbox_log_dir(sandbox_id: &str, log: &Log) {
+    if let Err(e) = remove_sandbox_log_dir_sync(sandbox_id) {
+        warnf!(log, "remove sandbox log dir: {}", e);
+    }
+}
+
 #[derive(Clone)]
 pub struct Container {
     sandbox_id: String,
@@ -151,8 +201,8 @@ pub struct Container {
     execs: Arc<Mutex<HashMap<String, Exec>>>,
     app_snapshot: bool,
     /// Background task forwarding container stdout/stderr to log files.
-    /// Template creation: /data/log/template/<id>/stdout|stderr (755 dir).
-    /// Normal sandbox: ./stdout and ./stderr relative to the bundle directory.
+    /// Template creation: /data/log/template/<id>/stdout|stderr.
+    /// Normal sandbox: /data/cubelet/log/<sandbox-id>/stdout|stderr.
     /// Clones share the task ownership so exactly one caller takes and awaits
     /// it; start/stop are serialized across clones by an internal semaphore.
     log_forward: LogForwardHandle,
@@ -510,12 +560,14 @@ impl Container {
         self.id == self.real_id
     }
 
-    /// Template creation writes stdout/stderr to regular files under
-    /// /data/log/template. Regular files cannot be registered with epoll, so
-    /// keep that path on the legacy RPC log forwarder even when passfd is the
-    /// sandbox default.
+    /// Passfd stays compiled in but is opt-in. Cubelet must set
+    /// `cube.use_passfd_io=true` and publish nonempty stdout/stderr paths.
+    /// Template builds and the default cubelet path keep the RPC log forwarder.
     fn passfd_io_enabled(&self) -> bool {
-        self.sb_conf.use_passfd_io && !self.sb_conf.app_snapshot_create
+        self.sb_conf.use_passfd_io
+            && !self.sb_conf.app_snapshot_create
+            && !self.info.stdout.is_empty()
+            && !self.info.stderr.is_empty()
     }
 
     pub async fn create_container(&mut self) -> CResult<()> {
@@ -641,8 +693,7 @@ impl Container {
     /// Spawn a background task that streams container stdout/stderr from the
     /// agent (via a fresh vsock connection) and appends them to log files.
     /// Template creation writes to `/data/log/template/<id>/stdout|stderr`;
-    /// normal sandbox restore writes to `./stdout` and `./stderr` relative
-    /// to the shim's current working directory (the bundle directory).
+    /// normal sandboxes write to `/data/cubelet/log/<sandbox-id>/stdout|stderr`.
     ///
     /// The task exits cleanly when `stop_log_forward` is called (pause /
     /// snapshot / kill / destroy): a watch cancel signal is sent first so the
@@ -675,7 +726,7 @@ impl Container {
 
         // Write log files:
         //   - template creation: /data/log/template/<id>/stdout|stderr
-        //   - sandbox (restore): current working directory (bundle dir)
+        //   - regular sandbox: /data/cubelet/log/<sandbox-id>/stdout|stderr
         let (stdout_path, stderr_path) = if self.sb_conf.app_snapshot_create {
             validate_log_path_component(&self.info.id)?;
             let log_dir = format!("/data/log/template/{}", self.info.id);
@@ -688,7 +739,7 @@ impl Container {
             // already restrictive enough for log files.
             (format!("{}/stdout", log_dir), format!("{}/stderr", log_dir))
         } else {
-            ("stdout".to_string(), "stderr".to_string())
+            create_sandbox_log_paths(&self.sandbox_id).await?
         };
 
         // Init log forwarding is separate from exec I/O relay (forward_std).
@@ -1294,5 +1345,33 @@ mod log_forward_tests {
             observed, 1,
             "stop must drain the task the start installed, not abort it"
         );
+    }
+}
+
+#[cfg(test)]
+mod sandbox_log_path_tests {
+    use super::{sandbox_log_dir, SANDBOX_LOG_ROOT};
+
+    #[test]
+    fn sandbox_log_dir_joins_root() {
+        let dir = sandbox_log_dir("aabbccddeeff00112233445566778899").unwrap();
+        assert_eq!(
+            dir,
+            std::path::Path::new(SANDBOX_LOG_ROOT).join("aabbccddeeff00112233445566778899")
+        );
+    }
+
+    #[test]
+    fn sandbox_log_dir_rejects_traversal() {
+        assert!(sandbox_log_dir("../etc").is_err());
+        assert!(sandbox_log_dir("a/b").is_err());
+        assert!(sandbox_log_dir("").is_err());
+    }
+
+    #[test]
+    fn remove_sandbox_log_dir_sync_rejects_traversal() {
+        assert!(super::remove_sandbox_log_dir_sync("../etc").is_err());
+        assert!(super::remove_sandbox_log_dir_sync("a/b").is_err());
+        assert!(super::remove_sandbox_log_dir_sync("").is_err());
     }
 }

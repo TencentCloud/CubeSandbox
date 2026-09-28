@@ -34,7 +34,6 @@ type SnapshotInfo struct {
 	StorageBackend            string                             `json:"storage_backend,omitempty"`
 	Backend                   string                             `json:"backend,omitempty"`
 	RemoteStatus              string                             `json:"remote_status,omitempty"`
-	Retain                    bool                               `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                             `json:"last_error,omitempty"`
 	CreatedAt                 string                             `json:"created_at,omitempty"`
@@ -111,12 +110,13 @@ func ListSnapshots(ctx context.Context, opts *ListSnapshotsOptions) ([]SnapshotI
 }
 
 func GetSnapshotInfo(ctx context.Context, snapshotID string, includeRequest bool) (*SnapshotInfo, error) {
-	rec, err := getSnapshotRecord(ctx, strings.TrimSpace(snapshotID))
+	snapshotID = strings.TrimSpace(snapshotID)
+	rec, err := getSnapshotRecord(ctx, snapshotID)
 	if err != nil {
-		if errors.Is(err, ErrTemplateNotFound) {
-			return nil, ErrSnapshotNotFound
-		}
 		return nil, err
+	}
+	if snapshotRejectsNewUse(rec.Status) {
+		return nil, wrapSnapshotNotFound(snapshotID)
 	}
 	var createReq *sandboxtypes.CreateCubeSandboxReq
 	if includeRequest {
@@ -161,11 +161,13 @@ func GetTemplateKind(ctx context.Context, templateID string) (string, error) {
 	if kind, ok := getCachedTemplateKind(id); ok {
 		return kind, nil
 	}
-	if rec, err := getSnapshotRecord(ctx, id); err == nil && rec != nil {
+	rec, snapErr := getSnapshotRecord(ctx, id)
+	if snapErr != nil && !errors.Is(snapErr, ErrSnapshotNotFound) && !errors.Is(snapErr, ErrTemplateStoreNotInitialized) {
+		return "", snapErr
+	}
+	if rec != nil && !snapshotRejectsNewUse(rec.Status) {
 		setTemplateKindCache(id, TemplateKindSnapshot)
 		return TemplateKindSnapshot, nil
-	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrTemplateStoreNotInitialized) {
-		return "", err
 	}
 	if rec, err := pausesnap.GetBySnapshotID(ctx, id); err == nil && rec != nil {
 		setTemplateKindCache(id, pausesnap.KindPauseSnapshot)
@@ -343,13 +345,9 @@ func matchesSnapshotRecordListOptions(rec *models.SnapshotRecord, opts ListSnaps
 		return false
 	}
 	if opts.Status != "" {
-		if !strings.EqualFold(strings.TrimSpace(rec.Status), opts.Status) {
-			return false
-		}
-	} else if strings.EqualFold(strings.TrimSpace(rec.Status), StatusDeleting) {
-		return false
+		return strings.EqualFold(strings.TrimSpace(rec.Status), opts.Status)
 	}
-	return true
+	return !snapshotRejectsNewUse(rec.Status)
 }
 
 func decodeSnapshotNextToken(token string) (int, error) {

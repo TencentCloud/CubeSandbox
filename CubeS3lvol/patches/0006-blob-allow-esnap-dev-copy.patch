@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CubeS3lvol <cubes3lvol@local>
+Date: Fri, 4 Sep 2026 16:55:00 +0800
+Subject: [PATCH] blob: scope esnap bs_dev->copy to materialize operation
+
+blob_can_copy() normally refuses a device-level copy for every external-
+snapshot clone. A materialize operation whose destination implements
+copy() needs to opt in so it can bind a server-side copied object instead
+of doing GET+write.
+
+The authorization must belong to that operation, not to the blob. A
+blob-wide gate also redirects an ordinary CoW write submitted while
+materialization is running. If the materializer already owns the ingest
+slot, that foreground write receives -EBUSY and surfaces EIO to the host.
+
+Pass the opt-in through the internal allocation call. Existing writes and
+inflate operations retain the old behavior; only
+spdk_blob_materialize_cluster() may use copy() for an esnap.
+
+Assisted-by: Cursor:Grok-4.6
+---
+
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -2838,11 +2838,13 @@ blob_write_copy_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ }
+ 
+ static bool
+-blob_can_copy(struct spdk_blob *blob, uint64_t cluster_start_io_unit, uint64_t *base_lba)
++blob_can_copy(struct spdk_blob *blob, uint64_t cluster_start_io_unit, uint64_t *base_lba,
++	      bool allow_esnap_copy)
+ {
+ 	uint64_t lba = bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit);
+ 
+-	return (!blob_is_esnap_clone(blob) && blob->bs->dev->copy != NULL) &&
++	return (!blob_is_esnap_clone(blob) || allow_esnap_copy) &&
++	       blob->bs->dev->copy != NULL &&
+ 	       blob->back_bs_dev->translate_lba(blob->back_bs_dev, lba, base_lba);
+ }
+ 
+@@ -2862,7 +2864,8 @@ blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_
+ static void
+ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 			     struct spdk_io_channel *_ch,
+-			     uint64_t io_unit, spdk_bs_user_op_t *op)
++			     uint64_t io_unit, spdk_bs_user_op_t *op,
++			     bool allow_esnap_copy)
+ {
+ 	struct spdk_bs_cpl cpl;
+ 	struct spdk_bs_channel *ch;
+@@ -2912,7 +2915,8 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 			 bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit),
+ 			 bs_dev_byte_to_lba(blob->back_bs_dev, blob->bs->cluster_sz));
+ 
+-	can_copy = is_valid_range && blob_can_copy(blob, cluster_start_io_unit, &copy_src_lba);
++	can_copy = is_valid_range && blob_can_copy(blob, cluster_start_io_unit, &copy_src_lba,
++						   allow_esnap_copy);
+ 
+ 	is_zeroes = is_valid_range && blob->back_bs_dev->is_zeroes(blob->back_bs_dev,
+ 			bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit),
+@@ -3252,7 +3256,7 @@ blob_request_submit_op(struct spdk_blob *blob, struct spdk_io_channel *_ch,
+ 				return;
+ 			}
+ 
+-			bs_allocate_and_copy_cluster(blob, _ch, offset, op);
++			bs_allocate_and_copy_cluster(blob, _ch, offset, op, false);
+ 		}
+ 		break;
+ 	}
+@@ -3575,7 +3579,7 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_ch,
+ 
+ 				op->ext_io_opts = ext_io_opts;
+ 
+-				bs_allocate_and_copy_cluster(blob, _channel, offset, op);
++				bs_allocate_and_copy_cluster(blob, _channel, offset, op, false);
+ 			}
+ 		}
+ 	} else {
+@@ -7238,7 +7242,7 @@ bs_inflate_blob_touch_next(void *cb_arg, int bserrno)
+ 			return;
+ 		}
+ 
+-		bs_allocate_and_copy_cluster(_blob, ctx->channel, offset, op);
++		bs_allocate_and_copy_cluster(_blob, ctx->channel, offset, op, false);
+ 	} else {
+ 		bs_inflate_blob_done(ctx);
+ 	}

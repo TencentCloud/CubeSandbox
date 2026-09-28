@@ -238,6 +238,76 @@ check_deletable()
 	fi
 }
 
+export_list_field()
+{
+	# Unwrapped: get_exports answers the array as string_value.
+	raw_rpc rcow_get_exports 2>/dev/null | python3 -c '
+import json, sys
+want, field = sys.argv[1:3]
+try:
+    for e in json.load(sys.stdin):
+        if e.get("export_uuid") == want:
+            v = e.get(field, "")
+            print("" if v is None else v)
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+' "$1" "$2"
+}
+
+export_pin_field()
+{
+	export_list_field "$1" pin
+}
+
+wait_export_pin()
+{
+	local uuid="$1"
+	local want="$2"
+	local where="$3"
+	local deadline=$(( $(date +%s) + 40 ))
+	local got=""
+
+	while :; do
+		got="$(export_pin_field "${uuid}" 2>/dev/null || true)"
+		if [ "${got}" = "${want}" ]; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			fail "pin=${got:-missing}, expected ${want} for ${uuid} (${where})"
+			return 1
+		fi
+		sleep 1
+	done
+}
+
+# Lease checks run at a fixed 20-second cadence. Poll until the field matches
+# rather than assuming when the source has observed a reader or its absence.
+wait_deletable()
+{
+	local uuid="$1"
+	local want="$2"
+	local where="$3"
+	local deadline=$(( $(date +%s) + 150 ))
+	local got
+
+	while :; do
+		if ! got="$(export_status_field "${uuid}" deletable)"; then
+			fail "cannot read deletable: export ${uuid} does not exist (${where})"
+			return 1
+		fi
+		if [ "${got}" = "${want}" ]; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			fail "deletable=${got}, expected ${want} for ${uuid} (${where})"
+			return 1
+		fi
+		sleep 1
+	done
+}
+
 now_ns()
 {
 	date +%s%N
@@ -527,6 +597,18 @@ read_md5()
 	dd if="${dev}" of="${out}" bs=1M count="${IO_LEN_MB}" skip="${IO_OFF_MB}" \
 		iflag=direct status=none 2>/dev/null && \
 		md5sum "${out}" | cut -d' ' -f1
+}
+
+lvstore_write_stat()
+{
+	local lvs_name="$1" field="$2"
+
+	raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+row = next(r for r in rows if r.get("lvs_name") == sys.argv[1])
+print((row.get("write_path") or {}).get(sys.argv[2], 0))
+' "${lvs_name}" "${field}" 2>/dev/null
 }
 
 # Did the operation actually happen? The exit status answers that on its own
@@ -833,32 +915,101 @@ wait_export_done "${EXPORT_UUID}" "step 3" || exit 1
 EXPORT_MS="$(since_ms "${EXPORT_T0}")"
 report_timing "export/1-layer" "${EXPORT_MS}"
 
-# A live zero-copy export pins its snapshot, so deletable must say NO -- and it
-# must say so for the same reason rcow_delete_lvol refuses, which is why the two
-# are checked against each other. This is the case a clone count on its own gets
-# wrong: there is exactly one clone here, and the snapshot is still undeletable.
-check_deletable "${EXPORT_UUID}" "NO" "live zero-copy export"
+# An idle REF export does not pin its snapshot. Cubelet deletes the snapshot
+# without rcow_release_export; the delete path releases the export itself. The
+# rest of this suite still needs ${EXPORT_SNAP_NAME}, so the actual delete is
+# exercised on a throwaway snapshot, then a live lease is shown to pin.
+wait_deletable "${EXPORT_UUID}" "YES" "idle zero-copy export" || exit 1
+check_deletable "${EXPORT_UUID}" "YES" "idle zero-copy export"
 
-# The same snapshot, asked for by name: the two forms must agree, since they are
-# answering about one thing. It also proves the snapshot form notices an export
-# without being told its uuid.
 SNAP_ST2="$(snapshot_status_field "${EXPORT_SNAP_NAME}" export_status)" \
 	&& [ "${SNAP_ST2}" = "DONE" ] \
 	&& pass "the snapshot form reports DONE for an exported snapshot" \
 	|| fail "the snapshot form reports '${SNAP_ST2}', expected DONE"
 SNAP_DEL2="$(snapshot_status_field "${EXPORT_SNAP_NAME}" deletable)" \
-	&& [ "${SNAP_DEL2}" = "NO" ] \
-	&& pass "both forms agree that it is not deletable" \
-	|| fail "the snapshot form says deletable='${SNAP_DEL2}', expected NO"
+	&& [ "${SNAP_DEL2}" = "YES" ] \
+	&& pass "both forms agree that an idle export does not pin the snapshot" \
+	|| fail "the snapshot form says deletable='${SNAP_DEL2}', expected YES"
 
-if raw_rpc rcow_delete_lvol \
-		"$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" \
-		>/dev/null 2>&1; then
-	fail "deleting the snapshot behind a live export succeeded"
+IDLE_SNAP="${SRC_VOL}-idle"
+if ! raw_rpc rcow_create_snapshot \
+		"$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
+			"${SRC_VOL}" "${IDLE_SNAP}")" >/dev/null 2>&1; then
+	fail "could not take throwaway snapshot ${IDLE_SNAP}"
+	exit 1
+fi
+IDLE_UUID="$(raw_rpc rcow_export_snapshot \
+	"$(printf '{"snapshot_name":"%s"}' "${IDLE_SNAP}")" \
+	2>/dev/null | tr -d ' \t\r\n')"
+if [ -z "${IDLE_UUID}" ]; then
+	fail "rcow_export_snapshot (${IDLE_SNAP})"
+	exit 1
+fi
+wait_export_done "${IDLE_UUID}" "idle export" || exit 1
+wait_deletable "${IDLE_UUID}" "YES" "throwaway idle export" || exit 1
+
+IDLE_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${IDLE_SNAP}")" 2>&1)"
+if echo "${IDLE_DEL}" | grep -q '"deferred": *true'; then
+	fail "idle snapshot delete was deferred: ${IDLE_DEL}"
+	exit 1
+elif echo "${IDLE_DEL}" | grep -q '"bool_value": *false'; then
+	fail "idle snapshot delete was refused: ${IDLE_DEL}"
 	exit 1
 else
-	pass "rcow_delete_lvol refuses it too (deletable agrees with the delete path)"
+	pass "snapshot delete of an idle export completed without release_export"
 fi
+for _ in $(seq 40); do
+	export_status_field "${IDLE_UUID}" export_status >/dev/null 2>&1 || break
+	sleep 0.5
+done
+if export_status_field "${IDLE_UUID}" export_status >/dev/null 2>&1; then
+	fail "the throwaway export survived its snapshot delete"
+	exit 1
+else
+	pass "snapshot delete released the throwaway export"
+fi
+
+if ! python3 "${TOOLS_DIR}/s3_put_lease.py" \
+		"${ENDPOINT}" "${BUCKET}" "${REGION}" \
+		"${SRC_LVS}/meta/exports/${EXPORT_UUID}.lease" 20 0 \
+		>"${WORKDIR}/put_lease.log" 2>&1; then
+	fail "could not write an importer lease: $(tail -1 "${WORKDIR}/put_lease.log")"
+	exit 1
+fi
+wait_export_pin "${EXPORT_UUID}" "lease" "live importer" || exit 1
+pass "the source observed a live importer lease"
+wait_deletable "${EXPORT_UUID}" "NO" "leased zero-copy export" || exit 1
+check_deletable "${EXPORT_UUID}" "NO" "leased zero-copy export"
+SNAP_DEL3="$(snapshot_status_field "${EXPORT_SNAP_NAME}" deletable)" \
+	&& [ "${SNAP_DEL3}" = "NO" ] \
+	&& pass "both forms agree that a live lease pins the snapshot" \
+	|| fail "the snapshot form says deletable='${SNAP_DEL3}', expected NO"
+
+# --raw, not raw_rpc: that helper unwraps the {bool_value, string_value}
+# envelope, which is what hides the deferred flag this has to look at.
+DEL_OUT="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" 2>&1)"
+if echo "${DEL_OUT}" | grep -q '"deferred": *true'; then
+	pass "rcow_delete_lvol defers it while a live lease pins the snapshot"
+elif echo "${DEL_OUT}" | grep -q '"bool_value": *false'; then
+	pass "rcow_delete_lvol refuses it while a live lease pins the snapshot"
+else
+	fail "deleting the snapshot behind a leased export was accepted: ${DEL_OUT}"
+	exit 1
+fi
+
+if snapshot_status_field "${EXPORT_SNAP_NAME}" export_status >/dev/null 2>&1; then
+	pass "the leased snapshot is still there"
+else
+	fail "the snapshot behind a live lease is gone"
+	exit 1
+fi
+
+# Withdraw the intent: the rest of this suite still needs the snapshot. The
+# importer below will keep the lease alive itself.
+raw_rpc rcow_cancel_pending_delete \
+	"$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" >/dev/null 2>&1
 check_target "step 3, deletable" || exit 1
 
 # An uuid nobody exported is refused rather than described: the reply carries
@@ -1777,7 +1928,7 @@ fi
 check_target "step 11c" || exit 1
 
 # ==========================================================================
-# [11d] default decouple, idempotent export, TTL expiry
+# [11d] default decouple, idempotent export, snapshot-bound lifetime
 #
 # Three behaviours the suite did not cover:
 #
@@ -1787,16 +1938,15 @@ check_target "step 11c" || exit 1
 #      call is now the common case, and only the explicit decouple:true and
 #      decouple:false forms were being exercised.
 #
-#   2. exporting the same snapshot twice while the first export is still in
-#      flight answers the same uuid (idempotence, so a timed-out caller that
-#      retries keeps polling the right uuid), and a fresh export after DONE gets
-#      a fresh uuid (re-exporting is deliberately legal).
+#   2. exporting the same snapshot twice always answers the same uuid: in flight
+#      and after DONE. Releasing it is what allows a later export to mint a new
+#      one.
 #
-#   3. a reference export with a ttl stops pinning its snapshot once the ttl
-#      expires -- deletable flips to YES while the export status stays DONE.
+#   3. ttl_sec is ignored: a reference export has expires_at=0 and remains DONE
+#      while its snapshot exists.
 # ==========================================================================
 echo
-echo "[11d] default decouple, idempotent export, TTL expiry"
+echo "[11d] default decouple, idempotent export, snapshot-bound lifetime"
 
 IDEM_VOL="${SRC_VOL}-idem"
 IDEM_SNAP="${IDEM_VOL}-snap"
@@ -1942,29 +2092,59 @@ else
 fi
 wait_export_done "${IDEM_U1}" "step 11d.3" || exit 1
 
-# A completed export is not blocked from re-exporting: a fresh call gets a fresh
-# uuid, which is what exporting to a second target wants.
+# A completed export is still the snapshot's only export. A retry, or a second
+# importer, must keep using that uuid; releasing it is what allows a new one.
 IDEM_U3="$(raw_rpc rcow_export_snapshot \
 		"$(printf '{"snapshot_name":"%s"}' "${IDEM_SNAP}")" \
 		2>"${WORKDIR}/idem_export3.err" | tr -d ' \t\r\n')"
-if [ -n "${IDEM_U3}" ] && [ "${IDEM_U3}" != "${IDEM_U1}" ]; then
-	pass "a fresh export after DONE got a fresh uuid (${IDEM_U3})"
+if [ -n "${IDEM_U3}" ] && [ "${IDEM_U3}" = "${IDEM_U1}" ]; then
+	pass "a re-export after DONE returned the same uuid (${IDEM_U3})"
 else
-	fail "a re-export after DONE answered '${IDEM_U3}'"
+	fail "a re-export after DONE answered '${IDEM_U3}', expected ${IDEM_U1}"
 fi
-wait_export_done "${IDEM_U3}" "step 11d.3" || exit 1
+
+IDEM_SAME="$(raw_rpc rcow_export_snapshot \
+		"$(printf '{"snapshot_name":"%s","export_id":"%s"}' \
+			"${IDEM_SNAP}" "${IDEM_U1}")" \
+		2>"${WORKDIR}/idem_export_same.err" | tr -d ' \t\r\n')"
+if [ -n "${IDEM_SAME}" ] && [ "${IDEM_SAME}" = "${IDEM_U1}" ]; then
+	pass "an explicit export_id matching the live uuid is idempotent"
+else
+	fail "matching export_id answered '${IDEM_SAME}', expected ${IDEM_U1}"
+fi
+if IDEM_MISMATCH_ERR="$(raw_rpc rcow_export_snapshot \
+		"$(printf '{"snapshot_name":"%s","export_id":"%s"}' \
+			"${IDEM_SNAP}" "ffffffff-ffff-ffff-ffff-ffffffffffff")" \
+		2>&1 >/dev/null)"; then
+	fail "a mismatched export_id was accepted"
+else
+	case "${IDEM_MISMATCH_ERR}" in
+	*"File exists"*)
+		pass "a mismatched export_id is refused with EEXIST"
+		;;
+	*)
+		fail "mismatched export_id refused with an unexpected message: ${IDEM_MISMATCH_ERR}"
+		;;
+	esac
+fi
 check_target "step 11d.3" || exit 1
 
 # --------------------------------------------------------------------------
-# 11d.4 TTL expiry: the pin lifts on its own
+# 11d.4 snapshot lifetime, not ttl_sec, governs the export
 # --------------------------------------------------------------------------
-# Release the two above first so deletable is driven by this export alone.
-for _u in "${IDEM_U1}" "${IDEM_U3}"; do
-	if ! raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-			"${_u}" "${SRC_LVS}")" >/dev/null 2>&1; then
-		fail "rcow_release_export (${_u}) before the TTL check"
-	fi
+# Release the one above first so this export is observed on its own.
+if ! raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+		"${IDEM_U1}" "${SRC_LVS}")" >/dev/null 2>&1; then
+	fail "rcow_release_export (${IDEM_U1}) before the TTL check"
+fi
+for _ in $(seq 40); do
+	export_status_field "${IDEM_U1}" export_status >/dev/null 2>&1 || break
+	sleep 0.5
 done
+if export_status_field "${IDEM_U1}" export_status >/dev/null 2>&1; then
+	fail "export ${IDEM_U1} was still present after release"
+	exit 1
+fi
 
 TTL_U="$(raw_rpc rcow_export_snapshot \
 		"$(printf '{"snapshot_name":"%s","ttl_sec":3}' "${IDEM_SNAP}")" \
@@ -1977,16 +2157,17 @@ if [ -z "${TTL_U}" ]; then
 fi
 wait_export_done "${TTL_U}" "step 11d.4" || exit 1
 
-check_deletable "${TTL_U}" NO "step 11d.4, within TTL"
+EXP_AT="$(export_list_field "${TTL_U}" expires_at)"
+[ "${EXP_AT}" = "0" ] \
+	&& pass "ttl_sec is ignored and the export has no deadline" \
+	|| fail "the export still has expires_at=${EXP_AT}, expected 0"
 
-# 3 s ttl plus margin; the poll that does the work is once a second.
 sleep 5
-
 ST_TTL="$(export_status_field "${TTL_U}" export_status)"
 [ "${ST_TTL}" = "DONE" ] \
-	&& pass "the expired export still reports DONE" \
-	|| fail "the expired export reports '${ST_TTL}', expected DONE"
-check_deletable "${TTL_U}" YES "step 11d.4, after TTL"
+	&& pass "the export remains DONE after the requested TTL elapsed" \
+	|| fail "the export reports '${ST_TTL}' after ttl_sec elapsed"
+
 check_target "step 11d.4" || exit 1
 
 # --------------------------------------------------------------------------
@@ -2190,11 +2371,17 @@ check_target "step 11d.6" || exit 1
 # --------------------------------------------------------------------------
 # 11d.7 cleanup of the idempotence volume
 # --------------------------------------------------------------------------
-if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-		"${TTL_U}" "${SRC_LVS}")" >/dev/null 2>&1; then
-	pass "the expired export could still be released"
+# 11d.5/11d.6 re-export IDEM_SNAP, which is the same uuid as TTL_U, and already
+# released it. Releasing a missing export is not the property under test.
+if export_status_field "${TTL_U}" export_status >/dev/null 2>&1; then
+	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+			"${TTL_U}" "${SRC_LVS}")" >/dev/null 2>&1; then
+		pass "the no-deadline export could be released explicitly"
+	else
+		fail "rcow_release_export (the no-deadline export)"
+	fi
 else
-	fail "rcow_release_export (the expired export)"
+	pass "the no-deadline export was already released with the contention exports"
 fi
 IDEM_NSID="$(nsid_of "${SRC_LVS}/${IDEM_VOL}")"
 if [ -n "${IDEM_NSID}" ]; then
@@ -3724,6 +3911,7 @@ XR_SNAP_C="${XR_VOL_C}-snap"
 XR_DST_A="${DST_VOL}-xr-a"
 XR_DST_B="${DST_VOL}-xr-b"
 XR_DST_C="${DST_VOL}-xr-c"
+XR_IO_LEN_MB=64
 
 XR_SETUP_OK=1
 i=0
@@ -3738,8 +3926,9 @@ for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}"; do
 done
 [ "${XR_SETUP_OK}" = "1" ] || exit 1
 
-# One region per volume, at distinct offsets. 8 MiB each: enough clusters to
-# make the walk do real work, not so much that the step drags.
+# One region per volume, at distinct offsets. 64 MiB keeps the three destination
+# decouples running/queued long enough to exercise unload's lifetime guard below,
+# while remaining small beside the 1 GiB volumes.
 i=0
 for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}"; do
 	i=$((i + 1))
@@ -3752,7 +3941,7 @@ for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}"; do
 		exit 1
 	fi
 	write_pattern_at "${XR_DEV}" "${WORKDIR}/XR${i}.bin" \
-		"$((MULTI_DATA_OFF_MB + i * IO_LEN_MB))" "${IO_LEN_MB}"
+		"$((MULTI_DATA_OFF_MB + i * XR_IO_LEN_MB))" "${XR_IO_LEN_MB}"
 	eval "XR_DEV_${i}=\"${XR_DEV}\""
 done
 
@@ -3843,6 +4032,7 @@ fi
 DST_CREATED=1
 
 XR_DATA_OK=1
+XR_UNLOAD_GUARD_TESTED=0
 i=0
 for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${XR_U_C}:3"; do
 	dst="$(printf '%s' "${pair}" | cut -d: -f1)"
@@ -3859,6 +4049,27 @@ for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${X
 		continue
 	fi
 
+	# Check immediately after the third import, before reading 64 MiB from each
+	# volume gives the background decouples time to finish. At least the last
+	# one must still be running or queued here.
+	if [ "${i}" -eq 3 ]; then
+		XR_DECOUPLE_N="$(raw_rpc rcow_get_decouple 2>/dev/null | python3 -c \
+			'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
+		if [ "${XR_DECOUPLE_N}" -eq 0 ]; then
+			fail "all three decouples escaped the unload-during-decouple window"
+			exit 1
+		fi
+		if raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+				>/dev/null 2>"${WORKDIR}/xr_unload_busy.err"; then
+			fail "rcow_unload_lvstore succeeded with ${XR_DECOUPLE_N} decouple(s) pending"
+			exit 1
+		else
+			pass "unload was refused while destination decouples were pending"
+			XR_UNLOAD_GUARD_TESTED=1
+		fi
+		check_target "refused unload during step 11j decouple" || exit 1
+	fi
+
 	BEFORE_XR_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
 	${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${dst}" \
 		>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (${dst})"; exit 1; }
@@ -3871,7 +4082,7 @@ for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${X
 
 	want="$(md5sum "${WORKDIR}/XR${idx}.bin" | cut -d' ' -f1)"
 	got="$(read_md5_at "${XR_DST_DEV}" "${WORKDIR}/xr_got_${i}.bin" \
-		"$((MULTI_DATA_OFF_MB + idx * IO_LEN_MB))" "${IO_LEN_MB}")"
+		"$((MULTI_DATA_OFF_MB + idx * XR_IO_LEN_MB))" "${XR_IO_LEN_MB}")"
 	if [ "${got}" = "${want}" ]; then
 		pass "${dst} holds every byte of its own export"
 	else
@@ -3886,13 +4097,41 @@ else
 	exit 1
 fi
 
-# Cleanup: imported volumes, then the source volumes and snapshots.
+[ "${XR_UNLOAD_GUARD_TESTED}" = "1" ] || {
+	fail "unload-during-decouple guard was not exercised"
+	exit 1
+}
+
+# Cleanup: imported volumes, then the source volumes and snapshots. A running
+# volume's delete is deferred; queued entries are safely dequeued.
 for vol in "${XR_DST_A}" "${XR_DST_B}" "${XR_DST_C}"; do
 	XR_NSID="$(nsid_of "${DST_LVS}/${vol}")"
 	[ -n "${XR_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
 		"${XR_NSID}" >/dev/null 2>&1 || true
 	raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${vol}")" \
 		>/dev/null 2>&1 || fail "rcow_delete_lvol (${vol})"
+done
+
+if ! wait_for_decouple; then
+	fail "destination decouples did not finish after unload was refused"
+	exit 1
+fi
+python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --retry-pending \
+	>/dev/null 2>"${WORKDIR}/xr_retry_pending.err" || true
+for vol in "${XR_DST_A}" "${XR_DST_B}" "${XR_DST_C}"; do
+	XR_GONE=0
+	for _ in $(seq 90); do
+		if ! ${RPC} bdev_get_bdevs -b "${DST_LVS}/${vol}" \
+				>/dev/null 2>/dev/null; then
+			XR_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${XR_GONE}" != "1" ]; then
+		fail "${vol} remained after its decouple/delete completed"
+		exit 1
+	fi
 done
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 	>/dev/null 2>&1 || fail "rcow_unload_lvstore (destination, after step 11j)"
@@ -3934,6 +4173,479 @@ for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}" \
 done
 
 check_target "step 11j" || exit 1
+
+# ==========================================================================
+# [11k] import, delete, import the same export again (decouple:true)
+#
+# A destination node that resumes a sandbox and later tears it down does this:
+# import the export, delete the volume, import the same uuid again. Every
+# earlier step either keeps the imported volume or deletes it as cleanup and
+# never comes back. The field report is that repeating that pair on the
+# destination is what breaks -- leftover registry, lease, or name -- so the
+# same export is imported, read, decoupled, deleted and imported again here,
+# three times. The first read deliberately warms the lvstore's exact-key object
+# cache. Round one explicitly warms before decouple; later rounds use the
+# production decouple=true path. Once CopyObject binds a fresh destination uuid,
+# its alias must let the post-decouple first read reuse the same object slot.
+# ==========================================================================
+echo
+echo "[11k] importing, deleting and re-importing the same export"
+
+REIMP_SRC="${SRC_VOL}-reimp"
+REIMP_SNAP="${REIMP_SRC}-snap"
+REIMP_DST="${DST_VOL}-reimp"
+REIMP_ROUNDS=3
+
+if ! raw_rpc rcow_create_lvol "$(printf '{"lvol_name":"%s","size_gib":%d}' \
+		"${REIMP_SRC}" "${LVOL_GIB}")" \
+		>/dev/null 2>"${WORKDIR}/reimp_lvol.err"; then
+	fail "rcow_create_lvol (${REIMP_SRC})"
+	sed 's/^/       /' "${WORKDIR}/reimp_lvol.err"
+	exit 1
+fi
+
+BEFORE_REIMP_SRC_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${SRC_LVS}/${REIMP_SRC}" \
+	>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (${REIMP_SRC})"; exit 1; }
+REIMP_SRC_DEV="$(wait_for_new_ns "${BEFORE_REIMP_SRC_NS}")"
+if [ -z "${REIMP_SRC_DEV}" ]; then
+	fail "no namespace for ${REIMP_SRC}"
+	exit 1
+fi
+write_pattern "${REIMP_SRC_DEV}" "${WORKDIR}/REIMP.bin"
+REIMP_HASH="$(md5_of "${WORKDIR}/REIMP.bin")"
+
+if ! raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
+		"${REIMP_SRC}" "${REIMP_SNAP}")" \
+		>/dev/null 2>"${WORKDIR}/reimp_snap.err"; then
+	fail "rcow_create_snapshot (${REIMP_SNAP})"
+	sed 's/^/       /' "${WORKDIR}/reimp_snap.err"
+	exit 1
+fi
+
+nvme_settle
+REIMP_SRC_NSID="$(nsid_of "${SRC_LVS}/${REIMP_SRC}")"
+[ -n "${REIMP_SRC_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${REIMP_SRC_NSID}" >/dev/null 2>&1 || true
+
+REIMP_UUID="$(raw_rpc rcow_export_snapshot \
+	"$(printf '{"snapshot_name":"%s"}' "${REIMP_SNAP}")" 2>/dev/null \
+	| tr -d '"[:space:]')"
+if [ -z "${REIMP_UUID}" ]; then
+	fail "rcow_export_snapshot (step 11k)"
+	exit 1
+fi
+wait_export_done "${REIMP_UUID}" "step 11k" || exit 1
+pass "export ${REIMP_UUID} ready for repeated import"
+
+if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${DST_LVS}" "${BUCKET}" "${DST_WAL_BDEV}")" \
+		>/dev/null 2>"${WORKDIR}/reimp_attach.err"; then
+	fail "rcow_attach_lvstore (destination, for step 11k)"
+	sed 's/^/       /' "${WORKDIR}/reimp_attach.err"
+	exit 1
+fi
+DST_CREATED=1
+
+for round in $(seq 1 "${REIMP_ROUNDS}"); do
+	if [ "${round}" -eq 1 ]; then
+		REIMP_DECOUPLE=false
+	else
+		REIMP_DECOUPLE=true
+	fi
+	if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":%s}' \
+			"${REIMP_DST}" "${REIMP_UUID}" "${DST_LVS}" "${REIMP_DECOUPLE}")" \
+			>/dev/null 2>"${WORKDIR}/reimp_import_${round}.err"; then
+		fail "rcow_import_lvol (round ${round} of ${REIMP_ROUNDS})"
+		sed 's/^/       /' "${WORKDIR}/reimp_import_${round}.err"
+		check_target "step 11k, import round ${round}" || exit 1
+		exit 1
+	fi
+	pass "round ${round}: imported ${REIMP_DST}"
+
+	BEFORE_REIMP_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+	${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${REIMP_DST}" \
+		>/dev/null 2>&1 || {
+		fail "nvmf_subsystem_add_ns (${REIMP_DST}, round ${round})"
+		exit 1; }
+	REIMP_DEV="$(wait_for_new_ns "${BEFORE_REIMP_NS}")"
+	if [ -z "${REIMP_DEV}" ]; then
+		fail "round ${round}: no namespace for ${REIMP_DST}"
+		exit 1
+	fi
+
+	REIMP_CACHE_HITS_BEFORE="$(raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c "
+import json, sys
+name = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+    row = next(r for r in rows if r.get('lvs_name') == name)
+    print(row.get('write_path', {}).get('cache_object_hits', 0))
+except Exception:
+    print('parse-error')
+" "${DST_LVS}" 2>/dev/null)"
+	REIMP_GOT="$(read_md5 "${REIMP_DEV}" "${WORKDIR}/reimp_got_${round}.bin")"
+	if [ "${REIMP_GOT}" = "${REIMP_HASH}" ]; then
+		pass "round ${round}: the imported volume reads the exported data"
+	else
+		fail "round ${round}: imported data mismatch (${REIMP_GOT} != ${REIMP_HASH})"
+		exit 1
+	fi
+
+	REIMP_CACHE_HITS_AFTER="$(raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c "
+import json, sys
+name = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+    row = next(r for r in rows if r.get('lvs_name') == name)
+    print(row.get('write_path', {}).get('cache_object_hits', 0))
+except Exception:
+    print('parse-error')
+" "${DST_LVS}" 2>/dev/null)"
+	if [ "${round}" -gt 1 ]; then
+		if [ "${REIMP_CACHE_HITS_BEFORE}" != "parse-error" ] &&
+		   [ "${REIMP_CACHE_HITS_AFTER}" != "parse-error" ] &&
+		   [ "${REIMP_CACHE_HITS_AFTER}" -gt "${REIMP_CACHE_HITS_BEFORE}" ]; then
+			pass "round ${round}: immediate read reused exact-key local object cache"
+		else
+			fail "round ${round}: no object-cache hit (${REIMP_CACHE_HITS_BEFORE} -> ${REIMP_CACHE_HITS_AFTER})"
+			exit 1
+		fi
+	fi
+
+	if [ "${round}" -eq 1 ]; then
+		if ! raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' \
+				"${REIMP_DST}")" >/dev/null 2>"${WORKDIR}/reimp_decouple_${round}.err"; then
+			fail "rcow_decouple_lvol (${REIMP_DST}, round ${round})"
+			sed 's/^/       /' "${WORKDIR}/reimp_decouple_${round}.err"
+			exit 1
+		fi
+	fi
+	if wait_for_decouple; then
+		pass "round ${round}: decouple finished"
+	else
+		fail "round ${round}: decouple did not finish in 120s"
+		sed 's/^/       /' "${WORKDIR}/decouple_progress.json" 2>/dev/null | head -3
+		check_target "step 11k, decouple round ${round}" || exit 1
+		exit 1
+	fi
+	REIMP_ALIAS_BEFORE="$(lvstore_write_stat "${DST_LVS}" \
+		cache_object_alias_hits || echo parse-error)"
+	REIMP_DEST_GETS_BEFORE="$(lvstore_write_stat "${DST_LVS}" \
+		dest_whole_gets || echo parse-error)"
+	REIMP_LOCAL_GOT="$(read_md5 "${REIMP_DEV}" \
+		"${WORKDIR}/reimp_local_got_${round}.bin")"
+	if [ "${REIMP_LOCAL_GOT}" = "${REIMP_HASH}" ]; then
+		pass "round ${round}: data remains correct after decouple"
+	else
+		fail "round ${round}: post-decouple data mismatch"
+		exit 1
+	fi
+	REIMP_ALIAS_AFTER="$(lvstore_write_stat "${DST_LVS}" \
+		cache_object_alias_hits || echo parse-error)"
+	REIMP_DEST_GETS_AFTER="$(lvstore_write_stat "${DST_LVS}" \
+		dest_whole_gets || echo parse-error)"
+	if [ "${REIMP_ALIAS_BEFORE}" != "parse-error" ] &&
+	   [ "${REIMP_ALIAS_AFTER}" != "parse-error" ] &&
+	   [ "${REIMP_DEST_GETS_BEFORE}" != "parse-error" ] &&
+	   [ "${REIMP_DEST_GETS_AFTER}" != "parse-error" ] &&
+	   [ "${REIMP_ALIAS_AFTER}" -gt "${REIMP_ALIAS_BEFORE}" ] &&
+	   [ "${REIMP_DEST_GETS_AFTER}" -eq "${REIMP_DEST_GETS_BEFORE}" ]; then
+		pass "round ${round}: post-decouple read used CopyObject cache alias"
+	else
+		fail "round ${round}: alias/get counters alias ${REIMP_ALIAS_BEFORE}->${REIMP_ALIAS_AFTER}, GET ${REIMP_DEST_GETS_BEFORE}->${REIMP_DEST_GETS_AFTER}"
+		exit 1
+	fi
+
+	nvme_settle
+	REIMP_NSID="$(nsid_of "${DST_LVS}/${REIMP_DST}")"
+	[ -n "${REIMP_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+		"${REIMP_NSID}" >/dev/null 2>&1 || true
+	if ! raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${REIMP_DST}")" \
+			>/dev/null 2>"${WORKDIR}/reimp_del_${round}.err"; then
+		fail "rcow_delete_lvol (${REIMP_DST}, round ${round})"
+		sed 's/^/       /' "${WORKDIR}/reimp_del_${round}.err"
+		exit 1
+	fi
+
+	if ${RPC} bdev_get_bdevs -b "${DST_LVS}/${REIMP_DST}" \
+			>/dev/null 2>"${WORKDIR}/reimp_bdev_${round}.err"; then
+		fail "round ${round}: ${REIMP_DST} is still registered after delete"
+		exit 1
+	fi
+	pass "round ${round}: deleted, name is free"
+
+	if raw_rpc rcow_get_imports "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+			>"${WORKDIR}/reimp_imports_${round}.json" 2>/dev/null && \
+	   grep -q "${REIMP_UUID}" "${WORKDIR}/reimp_imports_${round}.json"; then
+		fail "round ${round}: the registry still lists the export after delete"
+	else
+		pass "round ${round}: the registry no longer lists the export"
+	fi
+	check_target "step 11k, round ${round}" || exit 1
+done
+pass "the same export was imported, deleted and imported again ${REIMP_ROUNDS} times"
+
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+	>/dev/null 2>&1 || fail "rcow_unload_lvstore (destination, after step 11k)"
+DST_CREATED=0
+
+REIMP_RELEASED=0
+for _ in $(seq 40); do
+	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+			"${REIMP_UUID}" "${SRC_LVS}")" \
+			>/dev/null 2>"${WORKDIR}/reimp_release.err"; then
+		REIMP_RELEASED=1
+		break
+	fi
+	sleep 0.5
+done
+if [ "${REIMP_RELEASED}" = "1" ]; then
+	pass "the reimport export was released"
+else
+	fail "rcow_release_export (step 11k)"
+	sed 's/^/       /' "${WORKDIR}/reimp_release.err" 2>/dev/null
+fi
+
+for vol in "${REIMP_SRC}" "${REIMP_SNAP}"; do
+	raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${vol}")" \
+		>/dev/null 2>&1 || fail "rcow_delete_lvol (${vol})"
+done
+
+check_target "step 11k" || exit 1
+
+# ==========================================================================
+# [11l] delete the import *while its decouple is still running*
+#
+# 11k waits for the copy to finish, which is not what a caller that treats
+# rcow_import_lvol's reply as "the volume is fully local" does. Import with
+# decouple:true starts the copy in the background and answers at once; a
+# delete that lands in that window is deferred (the volume is still there,
+# action_in_progress is set), so a same-name import of the same uuid fails
+# until the pending delete actually completes. That is the field report;
+# 11k cannot see it.
+# ==========================================================================
+echo
+echo "[11l] deleting an import whose decouple is still running"
+
+BUSY_SRC="${SRC_VOL}-busy"
+BUSY_SNAP="${BUSY_SRC}-snap"
+BUSY_DST="${DST_VOL}-busy"
+# Enough allocated clusters that the copy is still on the list when delete
+# runs. 8 MiB (11k) finishes in tens of milliseconds and misses the window.
+BUSY_LEN_MB=64
+
+if ! raw_rpc rcow_create_lvol "$(printf '{"lvol_name":"%s","size_gib":%d}' \
+		"${BUSY_SRC}" "${LVOL_GIB}")" \
+		>/dev/null 2>"${WORKDIR}/busy_lvol.err"; then
+	fail "rcow_create_lvol (${BUSY_SRC})"
+	sed 's/^/       /' "${WORKDIR}/busy_lvol.err"
+	exit 1
+fi
+
+BEFORE_BUSY_SRC_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${SRC_LVS}/${BUSY_SRC}" \
+	>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (${BUSY_SRC})"; exit 1; }
+BUSY_SRC_DEV="$(wait_for_new_ns "${BEFORE_BUSY_SRC_NS}")"
+if [ -z "${BUSY_SRC_DEV}" ]; then
+	fail "no namespace for ${BUSY_SRC}"
+	exit 1
+fi
+write_pattern_at "${BUSY_SRC_DEV}" "${WORKDIR}/BUSY.bin" "${IO_OFF_MB}" "${BUSY_LEN_MB}"
+BUSY_HASH="$(md5_of "${WORKDIR}/BUSY.bin")"
+
+if ! raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
+		"${BUSY_SRC}" "${BUSY_SNAP}")" \
+		>/dev/null 2>"${WORKDIR}/busy_snap.err"; then
+	fail "rcow_create_snapshot (${BUSY_SNAP})"
+	sed 's/^/       /' "${WORKDIR}/busy_snap.err"
+	exit 1
+fi
+
+nvme_settle
+BUSY_SRC_NSID="$(nsid_of "${SRC_LVS}/${BUSY_SRC}")"
+[ -n "${BUSY_SRC_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${BUSY_SRC_NSID}" >/dev/null 2>&1 || true
+
+BUSY_UUID="$(raw_rpc rcow_export_snapshot \
+	"$(printf '{"snapshot_name":"%s"}' "${BUSY_SNAP}")" 2>/dev/null \
+	| tr -d '"[:space:]')"
+if [ -z "${BUSY_UUID}" ]; then
+	fail "rcow_export_snapshot (step 11l)"
+	exit 1
+fi
+wait_export_done "${BUSY_UUID}" "step 11l" || exit 1
+pass "export ${BUSY_UUID} ready (${BUSY_LEN_MB} MiB to copy)"
+
+if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${DST_LVS}" "${BUCKET}" "${DST_WAL_BDEV}")" \
+		>/dev/null 2>"${WORKDIR}/busy_attach.err"; then
+	fail "rcow_attach_lvstore (destination, for step 11l)"
+	sed 's/^/       /' "${WORKDIR}/busy_attach.err"
+	exit 1
+fi
+DST_CREATED=1
+
+if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
+		"${BUSY_DST}" "${BUSY_UUID}" "${DST_LVS}")" \
+		>/dev/null 2>"${WORKDIR}/busy_import.err"; then
+	fail "rcow_import_lvol (${BUSY_DST})"
+	sed 's/^/       /' "${WORKDIR}/busy_import.err"
+	exit 1
+fi
+pass "imported ${BUSY_DST} with decouple:true (not waiting)"
+
+# The window this step exists to hit. An empty list here means the copy already
+# finished and a delete would go through for the wrong reason.
+raw_rpc rcow_get_decouple "" >"${WORKDIR}/busy_decouple.json" 2>/dev/null || true
+if python3 -c "
+import json, sys
+sys.exit(0 if len(json.load(open(sys.argv[1]))) > 0 else 1)
+" "${WORKDIR}/busy_decouple.json"; then
+	pass "the decouple is still running"
+else
+	fail "the decouple had already finished; ${BUSY_LEN_MB} MiB was not enough to catch the window"
+	sed 's/^/       /' "${WORKDIR}/busy_decouple.json" 2>/dev/null | head -3
+	exit 1
+fi
+
+# --raw, because the unwrapped reply is just the name and hides deferred.
+BUSY_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${BUSY_DST}")" 2>&1)"
+if echo "${BUSY_DEL}" | grep -q '"deferred": *true'; then
+	pass "delete while decouple is running was deferred"
+else
+	fail "delete while decouple is running was not deferred: ${BUSY_DEL}"
+	exit 1
+fi
+
+if ${RPC} bdev_get_bdevs -b "${DST_LVS}/${BUSY_DST}" \
+		>/dev/null 2>"${WORKDIR}/busy_still.err"; then
+	pass "the volume is still registered (the delete has not run yet)"
+else
+	fail "the volume vanished on a deferred delete"
+	exit 1
+fi
+
+if raw_rpc rcow_get_pending_deletes "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+		>"${WORKDIR}/busy_pending.json" 2>/dev/null && \
+   python3 -c "
+import json, sys
+name, reason = sys.argv[1], sys.argv[2]
+try:
+    q = json.load(open(sys.argv[3]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(e.get('lvol_name') == name and e.get('reason') == reason for e in q) else 1)
+" "${BUSY_DST}" "decouple" "${WORKDIR}/busy_pending.json"; then
+	pass "the pending-delete queue names it as reason=decouple"
+else
+	fail "the deferred delete is not queued as decouple: $(cat "${WORKDIR}/busy_pending.json" 2>/dev/null)"
+fi
+
+if raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
+		"${BUSY_DST}" "${BUSY_UUID}" "${DST_LVS}")" \
+		>/dev/null 2>"${WORKDIR}/busy_reimp_early.err"; then
+	fail "a same-name import succeeded while the deferred delete had not run"
+	exit 1
+else
+	pass "same-name import refused while the volume is still there"
+fi
+
+if wait_for_decouple; then
+	pass "the decouple finished (the pending delete can now complete)"
+else
+	fail "the decouple did not finish in 120s"
+	exit 1
+fi
+
+# The poller ticks once a minute; --retry-pending is the same destroy once
+# deletable is YES, without waiting for that tick.
+python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --retry-pending \
+	>/dev/null 2>"${WORKDIR}/busy_retry.err" || true
+BUSY_GONE=0
+for _ in $(seq 90); do
+	if ! ${RPC} bdev_get_bdevs -b "${DST_LVS}/${BUSY_DST}" \
+			>/dev/null 2>/dev/null; then
+		BUSY_GONE=1
+		break
+	fi
+	sleep 1
+done
+if [ "${BUSY_GONE}" = "1" ]; then
+	pass "the pending delete completed; the name is free"
+else
+	fail "the volume was still registered 90s after the decouple finished"
+	exit 1
+fi
+
+if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
+		"${BUSY_DST}" "${BUSY_UUID}" "${DST_LVS}")" \
+		>/dev/null 2>"${WORKDIR}/busy_reimp.err"; then
+	fail "rcow_import_lvol after the pending delete completed"
+	sed 's/^/       /' "${WORKDIR}/busy_reimp.err"
+	exit 1
+fi
+pass "imported ${BUSY_DST} again once the name was free"
+
+if wait_for_decouple; then
+	pass "the second decouple finished"
+else
+	fail "the second decouple did not finish in 120s"
+	exit 1
+fi
+
+BEFORE_BUSY_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${BUSY_DST}" \
+	>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (${BUSY_DST})"; exit 1; }
+BUSY_DEV="$(wait_for_new_ns "${BEFORE_BUSY_NS}")"
+if [ -z "${BUSY_DEV}" ]; then
+	fail "no namespace for the reimported volume"
+	exit 1
+fi
+BUSY_GOT="$(read_md5_at "${BUSY_DEV}" "${WORKDIR}/busy_got.bin" \
+	"${IO_OFF_MB}" "${BUSY_LEN_MB}")"
+if [ "${BUSY_GOT}" = "${BUSY_HASH}" ]; then
+	pass "the reimported volume reads the exported data"
+else
+	fail "reimported data mismatch (${BUSY_GOT} != ${BUSY_HASH})"
+	exit 1
+fi
+
+nvme_settle
+BUSY_NSID="$(nsid_of "${DST_LVS}/${BUSY_DST}")"
+[ -n "${BUSY_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${BUSY_NSID}" >/dev/null 2>&1 || true
+raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${BUSY_DST}")" \
+	>/dev/null 2>&1 || fail "rcow_delete_lvol (${BUSY_DST})"
+
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+	>/dev/null 2>&1 || fail "rcow_unload_lvstore (destination, after step 11l)"
+DST_CREATED=0
+
+BUSY_RELEASED=0
+for _ in $(seq 40); do
+	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+			"${BUSY_UUID}" "${SRC_LVS}")" \
+			>/dev/null 2>"${WORKDIR}/busy_release.err"; then
+		BUSY_RELEASED=1
+		break
+	fi
+	sleep 0.5
+done
+if [ "${BUSY_RELEASED}" = "1" ]; then
+	pass "the in-flight-delete export was released"
+else
+	fail "rcow_release_export (step 11l)"
+	sed 's/^/       /' "${WORKDIR}/busy_release.err" 2>/dev/null
+fi
+
+for vol in "${BUSY_SRC}" "${BUSY_SNAP}"; do
+	raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${vol}")" \
+		>/dev/null 2>&1 || fail "rcow_delete_lvol (${vol})"
+done
+
+check_target "step 11l" || exit 1
 
 # ==========================================================================
 # [12] target log
@@ -4021,7 +4733,7 @@ fi
 # provokes on purpose to prove deletable agrees with the delete path. It is an
 # expected refusal like the ones beside it, not a fault.
 LOG_ERRORS="$(grep -inE 'error|failed' "${TGT_LOG}" 2>/dev/null | \
-	grep -viE 'already|not found|read-only|is not a snapshot|meta/owner|still the parent|imports.json|is the snapshot behind export' | \
+	grep -viE 'already|not found|read-only|is not a snapshot|meta/owner|still the parent|imports.json|is the snapshot behind export|cannot be deleted yet|in progress on lvol' | \
 	grep -viE 'response status=404' || true)"
 # The 404 a reread already dealt with is not an unexpected error either.
 if [ -n "${LOG_ERRORS}" ] && [ -n "${REREAD_UUIDS}" ]; then

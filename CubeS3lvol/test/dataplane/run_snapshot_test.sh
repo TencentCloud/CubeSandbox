@@ -847,15 +847,29 @@ if ! ${RPC} nvmf_subsystem_remove_ns "${NQN}" "${SNAP_NSID}" \
 fi
 pass "snapshot namespace removed, so the bdev is no longer claimed"
 
-# The exit status is the answer: the RPC replies with {bool_value, string_value}
-# whether it worked or not, and s3lvol_rpc.py turns bool_value:false into exit 1
-# with the reason on stderr.
-if raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${SNAP_NAME}")" \
+# Two clones (the writable volume and the clone taken in step 8) is not an error
+# but a deferral: blobstore cannot merge a snapshot into two clones, so the delete
+# does not happen now, yet the extra clone is something that goes away on its own
+# and the delete completes when it does. The RPC therefore answers success with
+# deferred:true (docs/pending-delete-design.md), and what matters here is that the
+# snapshot is still present afterwards.
+if python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+		rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${SNAP_NAME}")" \
 		>"${WORKDIR}/del_snap.json" 2>"${WORKDIR}/del_snap.err"; then
-	fail "deleting a snapshot with a live clone succeeded"
+	if grep -q '"deferred": *true' "${WORKDIR}/del_snap.json"; then
+		pass "deleting the snapshot was deferred while the clone needs it"
+	else
+		fail "deleting a snapshot with a live clone succeeded"
+	fi
 else
 	pass "deleting the snapshot was refused: $(cat "${WORKDIR}/del_snap.err")"
 fi
+
+# The intent has to go, or the poller would delete the snapshot as soon as the
+# clone is removed -- later steps still expect it.
+python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" \
+	rcow_cancel_pending_delete "$(printf '{"lvol_name":"%s"}' "${SNAP_NAME}")" \
+	>/dev/null 2>&1
 check_target "step 9" || exit 1
 
 # ==========================================================================

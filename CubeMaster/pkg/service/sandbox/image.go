@@ -9,7 +9,6 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -19,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 func CreateImage(ctx context.Context, req *types.CreateImageReq) (rsp *types.Res) {

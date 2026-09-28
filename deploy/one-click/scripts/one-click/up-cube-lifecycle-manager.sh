@@ -31,10 +31,10 @@ COMPOSE_FILE="${CUBE_LCM_DIR}/docker-compose.yaml"
 #   3. default    → int.tencentcloudcr.com (overseas/international)
 #
 # The image is published by cube-lifecycle-manager/Makefile's `make push`
-# to both registries under the same :v0.7.0 tag; either default resolves
+# to both registries under the same :v0.7.2 tag; either default resolves
 # to whatever the operator most recently published.
-CUBE_LCM_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.0"
-CUBE_LCM_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.0"
+CUBE_LCM_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.2"
+CUBE_LCM_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.2"
 if [[ -n "${CUBE_SANDBOX_CUBE_LCM_IMAGE:-}" ]]; then
   CUBE_LCM_IMAGE="${CUBE_SANDBOX_CUBE_LCM_IMAGE}"
 elif [[ "${MIRROR:-}" == "cn" ]]; then
@@ -53,7 +53,10 @@ CUBE_LCM_REDIS_HOST="${CUBE_LCM_REDIS_HOST:-${CUBE_PROXY_REDIS_IP:-127.0.0.1}}"
 CUBE_LCM_REDIS_PORT="${CUBE_LCM_REDIS_PORT:-${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}}"
 CUBE_LCM_REDIS_ADDR="${CUBE_LCM_REDIS_ADDR:-${CUBE_LCM_REDIS_HOST}:${CUBE_LCM_REDIS_PORT}}"
 CUBE_LCM_REDIS_PASSWORD="${CUBE_LCM_REDIS_PASSWORD:-${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}}"
-CUBE_LCM_REDIS_DB="${CUBE_LCM_REDIS_DB:-0}"
+# Prefer CUBE_EXTERNAL_REDIS_DB; keep legacy CUBE_LCM_REDIS_DB as fallback.
+CUBE_LCM_REDIS_DB="$(normalize_redis_db \
+  "${CUBE_EXTERNAL_REDIS_DB:-${CUBE_LCM_REDIS_DB:-0}}" \
+  "CUBE_EXTERNAL_REDIS_DB/CUBE_LCM_REDIS_DB")"
 CUBE_LCM_REDIS_MASTER_NAME="${CUBE_LCM_REDIS_MASTER_NAME:-${CUBE_PROXY_REDIS_MASTER_NAME:-${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}}}"
 CUBE_LCM_REDIS_SENTINEL_NODES="${CUBE_LCM_REDIS_SENTINEL_NODES:-${CUBE_PROXY_REDIS_SENTINEL_NODES:-${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}}}"
 CUBE_LCM_REDIS_SENTINEL_PASSWORD="${CUBE_LCM_REDIS_SENTINEL_PASSWORD:-${CUBE_PROXY_REDIS_SENTINEL_PASSWORD:-${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}}}"

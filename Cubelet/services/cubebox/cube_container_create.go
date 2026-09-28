@@ -32,9 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
 	cubelabels "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/labels"
 	cristore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
@@ -71,7 +68,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 const (
@@ -228,7 +228,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		Metadata: cubeboxstore.Metadata{
 			ID:           flowOpts.SandboxID,
 			SandboxID:    flowOpts.SandboxID,
-			Labels:       deepCopyStringMap(realReq.GetLabels()),
+			Labels:       stripUserCubeMasterLabels(deepCopyStringMap(realReq.GetLabels())),
 			Annotations:  realReq.GetAnnotations(),
 			CreatedAt:    time.Now().UnixNano(),
 			InstanceType: flowOpts.GetInstanceType(),
@@ -270,6 +270,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	l.storeNumaQueues(ctx, sandBox, flowOpts)
+	stampLaunchMemoryAncestorOnce(sandBox, resolveLaunchAncestorSnapshotID(sandBox))
 	if snapshotID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.IsRetoreSnapshot() {
 		now := time.Now().UTC()
 		setRuntimeSnapshotBindingLabels(sandBox, snapshotID, now)
@@ -280,9 +281,11 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		// reflinkable base after the most recent commit's snapshot is
 		// deleted.
 		setRuntimeRestoreBaseLabels(sandBox, snapshotID, now)
-		// Resume-from-pause stamps pause snapshot id so Destroy can GC a
-		// leftover pause catalog if Pause-time CleanupTemplate of the
-		// previous live snap missed it.
+		// Resume-from-pause stamps pause snapshot id. Master strips this
+		// key from user Create; only the thin Resume request carries it.
+		// Resume still needs that package (XFS mmap; S3 Snapshot
+		// last-restore catalog). CleanupTemplate no-ops while this
+		// label is live. Next Pause or Destroy GCs it.
 		if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
 			if sandBox.Labels == nil {
 				sandBox.Labels = map[string]string{}

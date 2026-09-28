@@ -34,15 +34,25 @@
 #include "spdk/log.h"
 
 #include "s3lvol/s3_export.h"
+/* For s3_chunk_data_key(), which is how the read path turns a ref into the key it
+ * GETs -- case [13] composes one the same way to check the prefix ends up in it. */
+#include "s3lvol/s3_chunk_map.h"
 
 #define CHUNK_SIZE (1024 * 1024)
 
-/* So that the "a newer version is refused" case follows S3_EXPORT_VERSION
- * instead of having to be edited every time it is bumped -- which is exactly
- * what went wrong the first time it was. */
+/* The version a freshly written manifest carries, which is what the strings these
+ * cases patch actually contain.
+ *
+ * Deliberately not S3_EXPORT_VERSION any more: a manifest is written at the oldest
+ * version that can describe it, so serialize() emits 2 for the single-source
+ * exports every one of these cases builds. Tying this to S3_EXPORT_VERSION made
+ * the substitutions silently match nothing the moment the constant moved to 3, and
+ * check_rejected() then reported "could not build the case" rather than passing
+ * vacuously -- which is the only reason it was noticed. */
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
-#define VERSION_FIELD "\"version\":" STRINGIFY(S3_EXPORT_VERSION)
+#define WRITTEN_VERSION 2
+#define VERSION_FIELD "\"version\":" STRINGIFY(WRITTEN_VERSION)
 
 static int g_pass;
 static int g_fail;
@@ -143,7 +153,12 @@ test_geometry(void)
 		check_u64("num_chunks", m->num_chunks, 64);
 		check_u64("size_bytes", m->size_bytes, 64ULL * CHUNK_SIZE);
 		check_u64("block_size", m->block_size, 4096);
-		check_u64("version", m->version, S3_EXPORT_VERSION);
+		/* 2, not S3_EXPORT_VERSION: a manifest is created at the oldest
+		 * version that can describe it, and is only raised to 3 by
+		 * serialize() if it ends up with more than one source. Writing 3
+		 * unconditionally would make every ordinary export unreadable to
+		 * binaries that have not been upgraded, for no gain. */
+		check_u64("a fresh manifest is written as version 2", m->version, 2);
 		check_u64("a fresh manifest has no chunks", m->present_chunks, 0);
 		check_str("the uuid is kept verbatim", m->uuid_str, TEST_UUID);
 		s3_export_manifest_unref(m);
@@ -398,8 +413,16 @@ test_rejections(void)
 	 * unrelated object, which is worse than failing. */
 	check_rejected("an unknown layout is refused", json,
 		       "\"layout\":\"dense\"", "\"layout\":\"uuid\"");
+	/* Above the accepted range: a future layout read as this one would resolve
+	 * every chunk somewhere unrelated. */
 	check_rejected("a newer version is refused", json,
 		       VERSION_FIELD, "\"version\":999");
+	/* Below it. Version 1's ref entries are 24 bytes against version 2's 16, so
+	 * reading one as the other names a different object for every chunk past the
+	 * first and returns plausible data from the wrong place -- which is why 1 is
+	 * refused rather than merely deprecated. */
+	check_rejected("version 1 is refused", json,
+		       VERSION_FIELD, "\"version\":1");
 
 	check_rejected("a block size other than 4 KiB is refused", json,
 		       "\"block_size\":4096", "\"block_size\":512");
@@ -955,6 +978,679 @@ test_captured_manifest(void)
 	s3_export_manifest_unref(m);
 }
 
+/* ==========================================================================
+ * [12] A version 2 ref manifest, read by a binary that can write version 3
+ *
+ * The compatibility direction that matters. Version 3 appends src_idx to the crc,
+ * so a reader that stages the crc by S3_EXPORT_VERSION rather than by the
+ * manifest's own version recomputes every version 2 ref manifest with a stage it
+ * does not carry, and reports corruption on all of them -- including the ones the
+ * same binary wrote before it was upgraded.
+ *
+ * Dense manifests would not have caught it: the extra stage only exists for ref.
+ * The manifest below is built by the writer, so its crc is genuine rather than
+ * asserted, and parse then has to agree with it.
+ * ========================================================================== */
+
+static void
+test_v2_ref_compat(void)
+{
+	struct s3_export_manifest *m = NULL;
+	struct s3_export_manifest *parsed = NULL;
+	struct spdk_uuid u = {0};
+	char *json = NULL;
+	size_t len = 0;
+	int rc;
+
+	printf("\n[12] a version 2 ref manifest read by a version 3 binary\n");
+
+	rc = s3_export_manifest_create(TEST_UUID, 8 * CHUNK_SIZE, CHUNK_SIZE,
+				       S3_EXPORT_LAYOUT_REF, &m);
+	check_int("a ref manifest is created", rc, 0);
+	if (rc != 0) {
+		return;
+	}
+
+	/* One whole chunk and one partial, so the crc covers both the ref table and
+	 * the partial-length exceptions -- the two stages version 2 has. */
+	fill_uuid(&u, 0x11);
+	s3_export_manifest_set_ref(m, 1, &u, CHUNK_SIZE);
+	fill_uuid(&u, 0x22);
+	s3_export_manifest_set_ref(m, 5, &u, CHUNK_SIZE / 2);
+
+	check_u64("written as version 2", m->version, 2);
+	check_u64("with one source", m->num_srcs, 1);
+	check_true("and no per-chunk source table", m->src_idx == NULL, NULL);
+
+	/* serialize() does not seal, and pack_all_refs() sizes its buffer from
+	 * present_chunks, so an unsealed manifest asserts rather than producing a
+	 * short one. Every other caller seals too. */
+	s3_export_manifest_seal(m);
+
+	rc = s3_export_manifest_serialize(m, &json, &len);
+	check_int("it serializes", rc, 0);
+	if (rc != 0) {
+		s3_export_manifest_unref(m);
+		return;
+	}
+	check_true("the json says version 2", strstr(json, "\"version\":2") != NULL,
+		   json);
+	check_true("and carries no source table",
+		   strstr(json, "\"srcs\"") == NULL, json);
+
+	rc = s3_export_manifest_parse(json, len, &parsed);
+	check_int("a version 2 ref manifest parses", rc, 0);
+	if (rc == 0) {
+		/* The assertion this case exists for: the crc has to verify, which it
+		 * only does if seal() staged it the way version 2 wrote it. */
+		check_u64("its crc verifies", parsed->crc32c, m->crc32c);
+		check_u64("version is kept, not overwritten", parsed->version, 2);
+		check_u64("a source table was synthesised", parsed->num_srcs, 1);
+		check_str("naming its own prefix", parsed->srcs[0].prefix,
+			  m->src.prefix);
+		check_true("with src_idx still absent", parsed->src_idx == NULL, NULL);
+		check_u64("present chunks survive", parsed->present_chunks, 2);
+		s3_export_manifest_unref(parsed);
+	}
+
+	free(json);
+	s3_export_manifest_unref(m);
+}
+
+/* ==========================================================================
+ * [13] A version 3 manifest: chunks from more than one prefix
+ *
+ * The format the whole v3 step exists for. What is asserted is that a round trip
+ * preserves which prefix each chunk resolves against -- because getting that wrong
+ * does not fail, it reads another chunk's object and returns bytes that look
+ * perfectly good.
+ * ========================================================================== */
+
+static void
+test_v3_multi_source(void)
+{
+	struct s3_export_manifest *m = NULL, *parsed = NULL;
+	struct spdk_uuid u;
+	uint8_t own = 0xff, parent = 0xff;
+	char *json = NULL;
+	size_t len = 0;
+	int rc;
+
+	printf("\n[13] a version 3 manifest with two sources\n");
+
+	rc = s3_export_manifest_create(TEST_UUID, 8 * CHUNK_SIZE, CHUNK_SIZE,
+				       S3_EXPORT_LAYOUT_REF, &m);
+	check_int("a ref manifest is created", rc, 0);
+	if (rc != 0) {
+		return;
+	}
+	/* The manifest's own prefix. Set directly, as every other case here does --
+	 * there is no setter, and add_src() below has to agree with it. */
+	snprintf(m->src.prefix, sizeof(m->src.prefix), "lvs-b");
+	snprintf(m->src.lvs_name, sizeof(m->src.lvs_name), "lvs-b");
+
+	/* Entry 0 is this export's own prefix and must already be there. */
+	rc = s3_export_manifest_add_src(m, "lvs-b", NULL, NULL, &own);
+	check_int("adding its own prefix succeeds", rc, 0);
+	check_u64("and resolves to entry 0", own, 0);
+	check_u64("without growing the table", m->num_srcs, 1);
+
+	rc = s3_export_manifest_add_src(m, "lvs-a", "exp-a-uuid", "snap-a-uuid",
+					&parent);
+	check_int("adding a parent prefix succeeds", rc, 0);
+	check_u64("as entry 1", parent, 1);
+	check_u64("the table has two entries", m->num_srcs, 2);
+
+	/* Idempotent: a derived export names the same parent for every chunk it
+	 * inherited, so the writer must be able to ask per chunk. */
+	rc = s3_export_manifest_add_src(m, "lvs-a", NULL, NULL, &parent);
+	check_int("asking again succeeds", rc, 0);
+	check_u64("gives the same index", parent, 1);
+	check_u64("and does not grow the table", m->num_srcs, 2);
+
+	/* Two chunks of its own, two inherited. */
+	fill_uuid(&u, 0x11);
+	s3_export_manifest_set_ref(m, 0, &u, CHUNK_SIZE);
+	fill_uuid(&u, 0x22);
+	s3_export_manifest_set_ref(m, 1, &u, CHUNK_SIZE / 2);
+	fill_uuid(&u, 0x33);
+	s3_export_manifest_set_ref(m, 4, &u, CHUNK_SIZE);
+	check_int("chunk 4 takes the parent source",
+		  s3_export_manifest_set_chunk_src(m, 4, parent), 0);
+	fill_uuid(&u, 0x44);
+	s3_export_manifest_set_ref(m, 7, &u, CHUNK_SIZE);
+	check_int("chunk 7 takes the parent source",
+		  s3_export_manifest_set_chunk_src(m, 7, parent), 0);
+
+	check_int("a source nobody added is refused",
+		  s3_export_manifest_set_chunk_src(m, 2, 9), -EINVAL);
+
+	check_str("chunk 0 resolves to its own prefix",
+		  s3_export_manifest_chunk_prefix(m, 0), "lvs-b");
+	check_str("chunk 4 resolves to the parent",
+		  s3_export_manifest_chunk_prefix(m, 4), "lvs-a");
+
+	s3_export_manifest_seal(m);
+	rc = s3_export_manifest_serialize(m, &json, &len);
+	check_int("it serializes", rc, 0);
+	if (rc != 0) {
+		s3_export_manifest_unref(m);
+		return;
+	}
+	/* Raised by serialize, not by create: the version follows the source count. */
+	check_u64("serializing raised it to version 3", m->version, 3);
+	check_true("the json says version 3", strstr(json, "\"version\":3") != NULL,
+		   json);
+	check_true("it carries a source table", strstr(json, "\"srcs\"") != NULL, json);
+	check_true("and per-chunk indices", strstr(json, "\"src_idx\"") != NULL, json);
+	/* Entry 0 is never written: it mirrors "source", and a second copy would be a
+	 * second place for the same prefix to be wrong. So the table starts at the
+	 * parent, and "lvs-b" appears only inside "source". */
+	check_true("the source table starts at entry 1",
+		   strstr(json, "\"srcs\":[{\"prefix\":\"lvs-a\"") != NULL, json);
+	check_true("entry 0 is not repeated in it",
+		   strstr(json, "{\"prefix\":\"lvs-b\"") == NULL, json);
+
+	rc = s3_export_manifest_parse(json, len, &parsed);
+	check_int("it parses back", rc, 0);
+	if (rc == 0) {
+		check_u64("as version 3", parsed->version, 3);
+		check_u64("with both sources", parsed->num_srcs, 2);
+		check_str("entry 0 synthesised from source", parsed->srcs[0].prefix,
+			  "lvs-b");
+		check_str("entry 1 read from the wire", parsed->srcs[1].prefix, "lvs-a");
+		check_str("with its export uuid", parsed->srcs[1].export_uuid,
+			  "exp-a-uuid");
+		check_str("and its snapshot uuid", parsed->srcs[1].snapshot_uuid,
+			  "snap-a-uuid");
+		check_u64("the crc verifies", parsed->crc32c, m->crc32c);
+
+		check_str("chunk 0 still resolves to its own prefix",
+			  s3_export_manifest_chunk_prefix(parsed, 0), "lvs-b");
+		check_str("chunk 1 too",
+			  s3_export_manifest_chunk_prefix(parsed, 1), "lvs-b");
+		check_str("chunk 4 still resolves to the parent",
+			  s3_export_manifest_chunk_prefix(parsed, 4), "lvs-a");
+		check_str("chunk 7 too",
+			  s3_export_manifest_chunk_prefix(parsed, 7), "lvs-a");
+
+		/* The keys themselves, composed the way export_chunk_key() composes
+		 * them. Worth asserting separately from the prefix: this is the value a
+		 * GET is issued against, and if two chunks from different sources came
+		 * out under one prefix the read would still succeed -- on another
+		 * chunk's object. */
+		{
+			const struct s3_export_ref *r0, *r4;
+			char k0[512], k4[512];
+
+			r0 = s3_export_manifest_get_ref(parsed, 0);
+			r4 = s3_export_manifest_get_ref(parsed, 4);
+			check_true("both chunks have refs", r0 && r4, NULL);
+			if (r0 && r4) {
+				s3_chunk_data_key(s3_export_manifest_chunk_prefix(parsed, 0),
+						  &r0->uuid, k0, sizeof(k0));
+				s3_chunk_data_key(s3_export_manifest_chunk_prefix(parsed, 4),
+						  &r4->uuid, k4, sizeof(k4));
+				check_true("chunk 0's key is under its own prefix",
+					   strncmp(k0, "lvs-b/", 6) == 0, k0);
+				check_true("chunk 4's key is under the parent's prefix",
+					   strncmp(k4, "lvs-a/", 6) == 0, k4);
+			}
+		}
+		s3_export_manifest_unref(parsed);
+	}
+
+	/* A source table without indices, or indices without a table, describes
+	 * chunks nobody can resolve; both halves have to arrive. */
+	check_rejected("a source table without indices is refused", json,
+		       "\"src_idx\"", "\"src_idx_unused\"");
+
+	free(json);
+	s3_export_manifest_unref(m);
+}
+
+/* ==========================================================================
+ * [14] The source limit
+ *
+ * Reaching it must be reported, not wrapped: a 17th source silently becoming
+ * source 1 would resolve those chunks against the wrong prefix.
+ * ========================================================================== */
+
+static void
+test_src_limit(void)
+{
+	struct s3_export_manifest *m = NULL;
+	char prefix[32];
+	uint8_t idx = 0;
+	int rc, i;
+
+	printf("\n[14] the source limit\n");
+
+	rc = s3_export_manifest_create(TEST_UUID, 8 * CHUNK_SIZE, CHUNK_SIZE,
+				       S3_EXPORT_LAYOUT_REF, &m);
+	if (rc != 0) {
+		check_int("a ref manifest is created", rc, 0);
+		return;
+	}
+	snprintf(m->src.prefix, sizeof(m->src.prefix), "lvs0");
+	rc = s3_export_manifest_add_src(m, "lvs0", NULL, NULL, &idx);
+	check_int("entry 0 is its own prefix", rc, 0);
+
+	/* Entry 0 exists already, so MAX_SOURCES-1 more fit. */
+	for (i = 1; i < S3_EXPORT_MAX_SOURCES; i++) {
+		snprintf(prefix, sizeof(prefix), "lvs%d", i);
+		rc = s3_export_manifest_add_src(m, prefix, NULL, NULL, &idx);
+		if (rc != 0) {
+			break;
+		}
+	}
+	check_int("filling the table succeeds", rc, 0);
+	check_u64("it holds exactly the limit", m->num_srcs, S3_EXPORT_MAX_SOURCES);
+
+	rc = s3_export_manifest_add_src(m, "one-too-many", NULL, NULL, &idx);
+	check_int("one more is refused with -E2BIG", rc, -E2BIG);
+	check_u64("and the table is unchanged", m->num_srcs, S3_EXPORT_MAX_SOURCES);
+
+	s3_export_manifest_unref(m);
+}
+
+/* ==========================================================================
+ * [15] Inheriting from the export a volume reads through
+ *
+ * The write side of a handoff that is itself derived from an import. What has to
+ * come out right is not just "the chunks are there": each one has to be recorded
+ * against the prefix that really holds it, and against the export whose lease
+ * protects it -- which for a parent that was itself derived is the grandparent's,
+ * not the parent's. Getting either wrong produces a manifest that reads fine on
+ * the machine that wrote it and fails, or serves another volume's data, elsewhere.
+ * ========================================================================== */
+
+/* A ref manifest standing in for one published by another node. */
+static struct s3_export_manifest *
+make_parent(const char *uuid, const char *prefix, const char *snap_uuid,
+	    uint64_t chunks)
+{
+	struct s3_export_manifest *p = NULL;
+	uint8_t idx;
+	int rc;
+
+	rc = s3_export_manifest_create(uuid, chunks * CHUNK_SIZE, CHUNK_SIZE,
+				       S3_EXPORT_LAYOUT_REF, &p);
+	if (rc != 0) {
+		return NULL;
+	}
+	snprintf(p->src.prefix, sizeof(p->src.prefix), "%s", prefix);
+	snprintf(p->src.lvs_name, sizeof(p->src.lvs_name), "%s", prefix);
+	snprintf(p->src.snapshot_uuid, sizeof(p->src.snapshot_uuid), "%s", snap_uuid);
+	snprintf(p->src.bucket, sizeof(p->src.bucket), "bkt");
+	snprintf(p->src.endpoint, sizeof(p->src.endpoint), "ep");
+	if (s3_export_manifest_add_src(p, prefix, NULL, NULL, &idx) != 0) {
+		s3_export_manifest_unref(p);
+		return NULL;
+	}
+	return p;
+}
+
+static void
+test_inherit(void)
+{
+	struct s3_export_manifest *p = NULL, *g = NULL, *c = NULL;
+	uint64_t named = 0, bytes = 0;
+	struct spdk_uuid u;
+	uint8_t idx;
+	int rc;
+
+	printf("\n[15] inheriting from the export a volume reads through\n");
+
+	/* The parent: 8 chunks, owning 0,1,2 and 5, with the rest holes. */
+	p = make_parent("11111111-1111-1111-1111-111111111111", "lvs-p",
+			"snap-p-uuid", 8);
+	c = make_parent("22222222-2222-2222-2222-222222222222", "lvs-c",
+			"snap-c-uuid", 8);
+	check_true("the manifests are built", p && c, NULL);
+	if (!p || !c) {
+		goto out;
+	}
+
+	fill_uuid(&u, 0xA0);
+	s3_export_manifest_set_ref(p, 0, &u, CHUNK_SIZE);
+	fill_uuid(&u, 0xA1);
+	s3_export_manifest_set_ref(p, 1, &u, CHUNK_SIZE);
+	fill_uuid(&u, 0xA2);
+	s3_export_manifest_set_ref(p, 2, &u, CHUNK_SIZE / 4);
+	fill_uuid(&u, 0xA5);
+	s3_export_manifest_set_ref(p, 5, &u, CHUNK_SIZE);
+
+	/* The child wrote chunk 1 since the import, and chunk 6 which the parent
+	 * never had. */
+	fill_uuid(&u, 0xB1);
+	s3_export_manifest_set_ref(c, 1, &u, CHUNK_SIZE);
+	fill_uuid(&u, 0xB6);
+	s3_export_manifest_set_ref(c, 6, &u, CHUNK_SIZE);
+
+	rc = s3_export_manifest_inherit(c, p, &named, &bytes);
+	check_int("inheriting succeeds", rc, 0);
+	/* 0, 2 and 5. Not 1 -- the child rewrote it -- and not the holes. */
+	check_u64("it names the parent's chunks the child lacks", named, 3);
+	check_u64("and their bytes", bytes, CHUNK_SIZE + CHUNK_SIZE / 4 + CHUNK_SIZE);
+
+	/* Sealed first because present_chunks is derived there, not maintained by
+	 * set_ref -- the same reason the writer seals before serializing. */
+	s3_export_manifest_seal(c);
+	check_u64("the child now has five chunks", c->present_chunks, 5);
+	check_true("a hole in the parent stays a hole",
+		   !s3_export_manifest_is_present(c, 3), NULL);
+
+	/* The ordering rule, which is the one that silently serves stale data when
+	 * broken: the chunk the child rewrote must still be the child's. */
+	check_str("the rewritten chunk stays under the child's prefix",
+		  s3_export_manifest_chunk_prefix(c, 1), "lvs-c");
+	check_true("and keeps the child's object",
+		   s3_export_manifest_get_ref(c, 1)->uuid.u.raw[0] == 0xB1, NULL);
+
+	check_str("an inherited chunk moves to the parent's prefix",
+		  s3_export_manifest_chunk_prefix(c, 0), "lvs-p");
+	check_true("carrying the parent's object",
+		   s3_export_manifest_get_ref(c, 0)->uuid.u.raw[0] == 0xA0, NULL);
+	check_u64("and its partial length",
+		  s3_export_manifest_get_ref(c, 2)->valid_bytes, CHUNK_SIZE / 4);
+
+	/* The lease. An importer of the child must renew against the parent's own
+	 * export, because that is the node holding these objects. */
+	check_u64("one prefix was added", c->num_srcs, 2);
+	check_str("named as the parent's prefix", c->srcs[1].prefix, "lvs-p");
+	check_str("governed by the parent's export",
+		  c->srcs[1].export_uuid, "11111111-1111-1111-1111-111111111111");
+	check_str("and its snapshot", c->srcs[1].snapshot_uuid, "snap-p-uuid");
+
+	/* Transitivity. A grandchild inheriting from the child must end up pointing
+	 * at lvs-p directly for those chunks -- not at lvs-c, which does not have
+	 * them -- and must renew the *parent's* lease, not the child's. This is what
+	 * lets the middle node be shut down. */
+	g = make_parent("33333333-3333-3333-3333-333333333333", "lvs-g",
+			"snap-g-uuid", 8);
+	check_true("a grandchild is built", g != NULL, NULL);
+	if (!g) {
+		goto out;
+	}
+	rc = s3_export_manifest_inherit(g, c, &named, &bytes);
+	check_int("it inherits from the child", rc, 0);
+	check_u64("taking everything the child had", named, 5);
+
+	check_str("a chunk the child owned comes from the child",
+		  s3_export_manifest_chunk_prefix(g, 1), "lvs-c");
+	check_str("a chunk the child inherited comes from the grandparent, not the "
+		  "child", s3_export_manifest_chunk_prefix(g, 0), "lvs-p");
+	check_u64("so the grandchild names three prefixes", g->num_srcs, 3);
+
+	/* Which is the point: no entry anywhere refers to a manifest, so nothing has
+	 * to be fetched to resolve a chunk and no node in the history has to be
+	 * running. */
+	for (idx = 1; idx < g->num_srcs; idx++) {
+		const char *pfx = g->srcs[idx].prefix;
+		const char *want = (strcmp(pfx, "lvs-p") == 0)
+				   ? "11111111-1111-1111-1111-111111111111"
+				   : "22222222-2222-2222-2222-222222222222";
+
+		check_str("each prefix is governed by the export that holds it",
+			  g->srcs[idx].export_uuid, want);
+	}
+
+	/* A local write_zeroes leaves present clear -- that is also how an
+	 * untouched hole is spelled -- so inherit used to restore the parent's
+	 * object. resolved is what the walk sets for that case. */
+	{
+		struct s3_export_manifest *z;
+
+		z = make_parent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "lvs-z",
+				"snap-z-uuid", 8);
+		check_true("a child with a local zero is built", z != NULL, NULL);
+		if (z) {
+			fill_uuid(&u, 0xB1);
+			s3_export_manifest_set_ref(z, 1, &u, CHUNK_SIZE);
+			s3_export_manifest_set_resolved(z, 0);
+
+			rc = s3_export_manifest_inherit(z, p, &named, &bytes);
+			check_int("inherit still succeeds after a local zero", rc, 0);
+			/* 2 and 5. Not 0 -- zeroed -- and not 1 -- rewritten. */
+			check_u64("the zeroed chunk is not inherited", named, 2);
+			check_true("and stays a hole on the child",
+				   !s3_export_manifest_is_present(z, 0), NULL);
+			check_true("while the parent's other objects still are",
+				   s3_export_manifest_is_present(z, 2) &&
+				   s3_export_manifest_is_present(z, 5), NULL);
+			check_true("and the walk's resolved bit is what blocked it",
+				   s3_export_manifest_is_resolved(z, 0), NULL);
+
+			s3_export_manifest_seal(z);
+			{
+				char *json = NULL;
+				size_t len = 0;
+
+				rc = s3_export_manifest_serialize(z, &json, &len);
+				check_int("the hole serializes", rc, 0);
+				if (rc == 0 && json) {
+					struct s3_export_manifest *parsed = NULL;
+
+					rc = s3_export_manifest_parse(json, len, &parsed);
+					check_int("and parses", rc, 0);
+					if (rc == 0) {
+						check_true("the wire form has no object at 0",
+							   !s3_export_manifest_is_present(
+								   parsed, 0), NULL);
+						check_true("resolved does not travel",
+							   !s3_export_manifest_is_resolved(
+								   parsed, 0), NULL);
+						s3_export_manifest_unref(parsed);
+					}
+					free(json);
+				}
+			}
+			s3_export_manifest_unref(z);
+		}
+	}
+
+	/* A parent shorter than the child: the volume grew after the import, so the
+	 * chunks past its end were never the parent's to describe. */
+	{
+		struct s3_export_manifest *small, *big;
+
+		small = make_parent("44444444-4444-4444-4444-444444444444", "lvs-s",
+				    "snap-s-uuid", 2);
+		big   = make_parent("55555555-5555-5555-5555-555555555555", "lvs-t",
+				    "snap-t-uuid", 8);
+		if (small && big) {
+			fill_uuid(&u, 0xC0);
+			s3_export_manifest_set_ref(small, 0, &u, CHUNK_SIZE);
+			fill_uuid(&u, 0xC1);
+			s3_export_manifest_set_ref(small, 1, &u, CHUNK_SIZE);
+
+			rc = s3_export_manifest_inherit(big, small, &named, NULL);
+			check_int("a shorter parent is accepted", rc, 0);
+			check_u64("contributing only what it covers", named, 2);
+			check_true("and nothing past its end",
+				   !s3_export_manifest_is_present(big, 2), NULL);
+		}
+		s3_export_manifest_unref(small);
+		s3_export_manifest_unref(big);
+	}
+
+	/* More distinct prefixes than a manifest can name. This is the degradation
+	 * path, and what it has to do is *stop*: -E2BIG travels back to the writer,
+	 * which exports by copying instead. Copying can express any history in one
+	 * prefix, so nothing is lost but the speed.
+	 *
+	 * Asserted on inherit() rather than only on add_src() -- case [14] already
+	 * covers the table filling up -- because a limit that is enforced but not
+	 * propagated is the dangerous shape: the writer would carry on and publish a
+	 * manifest missing exactly the chunks that did not fit, which reads as
+	 * zeroes on the importer. */
+	{
+		struct s3_export_manifest *wide = NULL, *heir = NULL;
+		char pfx[32];
+		uint8_t widx;
+		uint64_t k;
+
+		/* A parent that has been handed on until its table is full, with a
+		 * chunk under each prefix so every one of them has to be carried. */
+		wide = make_parent("88888888-8888-8888-8888-888888888888", "lvs-w",
+				   "snap-w-uuid", S3_EXPORT_MAX_SOURCES + 4);
+		heir = make_parent("99999999-9999-9999-9999-999999999999", "lvs-h",
+				   "snap-h-uuid", S3_EXPORT_MAX_SOURCES + 4);
+		if (wide && heir) {
+			for (k = 0; k < S3_EXPORT_MAX_SOURCES; k++) {
+				fill_uuid(&u, (uint8_t)(0xD0 + k));
+				s3_export_manifest_set_ref(wide, k, &u, CHUNK_SIZE);
+				if (k == 0) {
+					continue;
+				}
+				snprintf(pfx, sizeof(pfx), "lvs-w%u", (unsigned)k);
+				rc = s3_export_manifest_add_src(wide, pfx, "e", "s",
+								&widx);
+				if (rc != 0) {
+					break;
+				}
+				rc = s3_export_manifest_set_chunk_src(wide, k, widx);
+				if (rc != 0) {
+					break;
+				}
+			}
+			check_int("a parent can be built at the source limit", rc, 0);
+			check_u64("with a full table", wide->num_srcs,
+				  S3_EXPORT_MAX_SOURCES);
+
+			/* The heir already holds its own prefix at entry 0, so the
+			 * parent's own prefix plus its 15 others need one slot more
+			 * than remain. */
+			rc = s3_export_manifest_inherit(heir, wide, NULL, NULL);
+			check_int("inheriting more prefixes than fit gives -E2BIG",
+				  rc, -E2BIG);
+			check_u64("having filled the table and stopped there",
+				  heir->num_srcs, S3_EXPORT_MAX_SOURCES);
+		}
+		s3_export_manifest_unref(wide);
+		s3_export_manifest_unref(heir);
+	}
+
+	/* Different chunk sizes make chunk indices incomparable, so there is nothing
+	 * to carry across without re-cutting the data. */
+	{
+		struct s3_export_manifest *other = NULL;
+
+		rc = s3_export_manifest_create("66666666-6666-6666-6666-666666666666",
+					       8 * CHUNK_SIZE * 2, CHUNK_SIZE * 2,
+					       S3_EXPORT_LAYOUT_REF, &other);
+		if (rc == 0) {
+			check_int("a parent of another chunk size is refused",
+				  s3_export_manifest_inherit(c, other, NULL, NULL),
+				  -EINVAL);
+			s3_export_manifest_unref(other);
+		}
+	}
+
+	/* A copied export keys its objects exports/<uuid>/chunk-N, which a source
+	 * entry -- a bare prefix -- cannot address. */
+	{
+		struct s3_export_manifest *dense = NULL;
+
+		rc = s3_export_manifest_create("77777777-7777-7777-7777-777777777777",
+					       8 * CHUNK_SIZE, CHUNK_SIZE,
+					       S3_EXPORT_LAYOUT_DENSE, &dense);
+		if (rc == 0) {
+			check_int("a copied parent is refused",
+				  s3_export_manifest_inherit(c, dense, NULL, NULL),
+				  -EINVAL);
+			s3_export_manifest_unref(dense);
+		}
+	}
+
+	/* Where a reference cannot be expressed at all, and the writer has to copy.
+	 *
+	 * A source entry is a bare prefix sharing endpoint, bucket and region with
+	 * `source`, so a parent reachable any other way cannot be named. Nothing
+	 * here can be reached by the end-to-end suite -- it would need a second
+	 * bucket -- and the failure it prevents is the quiet kind: a manifest naming
+	 * a prefix in the wrong bucket resolves to whatever happens to be at that
+	 * key there, which on a shared endpoint is another volume's data. */
+	{
+		struct s3_export_source dst;
+		struct s3_export_manifest *dense = NULL;
+
+		memset(&dst, 0, sizeof(dst));
+		snprintf(dst.bucket, sizeof(dst.bucket), "bkt");
+		snprintf(dst.endpoint, sizeof(dst.endpoint), "ep");
+
+		/* p was built by make_parent() with bucket "bkt", endpoint "ep" and
+		 * an empty region, so it matches and is inheritable. */
+		check_int("a parent in the same place is inheritable",
+			  s3_export_manifest_inheritable(p, &dst, "test"), 0);
+
+		snprintf(dst.bucket, sizeof(dst.bucket), "other-bucket");
+		check_int("a parent in another bucket is refused with -ENOTSUP",
+			  s3_export_manifest_inheritable(p, &dst, "test"), -ENOTSUP);
+
+		snprintf(dst.bucket, sizeof(dst.bucket), "bkt");
+		snprintf(dst.endpoint, sizeof(dst.endpoint), "other-endpoint");
+		check_int("a parent behind another endpoint is refused",
+			  s3_export_manifest_inheritable(p, &dst, "test"), -ENOTSUP);
+
+		/* Region carries no address by itself, but the client is built per
+		 * endpoint/bucket/region, so a manifest that changed it silently would
+		 * be resolved by a client the importer never meant to use. */
+		snprintf(dst.endpoint, sizeof(dst.endpoint), "ep");
+		snprintf(dst.region, sizeof(dst.region), "elsewhere");
+		check_int("and so is one in another region",
+			  s3_export_manifest_inheritable(p, &dst, "test"), -ENOTSUP);
+
+		/* A copied export keys its objects exports/<uuid>/chunk-N, which a
+		 * bare prefix cannot address however reachable the bucket is. */
+		dst.region[0] = '\0';
+		rc = s3_export_manifest_create("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+					       8 * CHUNK_SIZE, CHUNK_SIZE,
+					       S3_EXPORT_LAYOUT_DENSE, &dense);
+		if (rc == 0) {
+			snprintf(dense->src.bucket, sizeof(dense->src.bucket), "bkt");
+			snprintf(dense->src.endpoint, sizeof(dense->src.endpoint), "ep");
+			check_int("a copied parent is refused even in the right bucket",
+				  s3_export_manifest_inheritable(dense, &dst, "test"),
+				  -ENOTSUP);
+			s3_export_manifest_unref(dense);
+		}
+	}
+
+	/* And the whole thing has to survive the wire, since that is the only way the
+	 * importing node ever sees it. */
+	{
+		char *json = NULL;
+		size_t len = 0;
+		struct s3_export_manifest *parsed = NULL;
+
+		s3_export_manifest_seal(g);
+		rc = s3_export_manifest_serialize(g, &json, &len);
+		check_int("the grandchild serializes", rc, 0);
+		if (rc == 0) {
+			rc = s3_export_manifest_parse(json, len, &parsed);
+			check_int("and parses back", rc, 0);
+			if (rc == 0) {
+				check_u64("with its three sources", parsed->num_srcs, 3);
+				check_str("chunk 0 still points past the middleman",
+					  s3_export_manifest_chunk_prefix(parsed, 0),
+					  "lvs-p");
+				check_str("and chunk 1 at the middleman",
+					  s3_export_manifest_chunk_prefix(parsed, 1),
+					  "lvs-c");
+				s3_export_manifest_unref(parsed);
+			}
+			free(json);
+		}
+	}
+
+out:
+	s3_export_manifest_unref(g);
+	s3_export_manifest_unref(c);
+	s3_export_manifest_unref(p);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -980,6 +1676,10 @@ main(int argc, char **argv)
 	test_ref_crc();
 	test_ref_all_full();
 	test_captured_manifest();
+	test_v2_ref_compat();
+	test_v3_multi_source();
+	test_src_limit();
+	test_inherit();
 
 	printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);
 	spdk_log_close();

@@ -12,6 +12,10 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # CubeTemplateCenter address for template builds. Can be set here or via
+  # CUBE_TEMPLATE_CENTER_ADDR env (env wins). Uncomment and adjust for your
+  # deployment; one-click defaults to http://127.0.0.1:8090.
+  # template_center_addr: "http://127.0.0.1:8090"
 
 log:
   module: "cubemaster"
@@ -25,10 +29,11 @@ cubelet_conf:
     grpc_port: 9999
   common_timeout_insec: 30
   create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: 300
   # See docs/guide/lifecycle.md — Timeout semantics (canonical).
   default_timeout_insec: -1
-  # Create-path RPC/scheduling deadline (seconds).
-  create_timeout_insec: 300
+  # Create-path RPC/scheduling deadline (seconds). Must cover warehouse download.
+  create_timeout_insec: 600
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
   enable_exposed_port: true
@@ -82,20 +87,9 @@ scheduler:
   # during scheduling. Defaults to false: account for the Redis allocation
   # records when computing schedulable capacity.
   ignore_redis_allocation: false
-  # Global CPU/Mem overcommit ratio applied to the node-reported quota capacity.
-  # Defaults to CPU=3, Mem=2.
-  overcommit_ratio:
-    cpu_ratio: 3.0
-    mem_ratio: 2.0
-  # Per-instance-type overcommit ratio (takes precedence over the global
-  # overcommit_ratio).
-  # overcommit_ratio_conf:
-  #   cubebox:
-  #     cpu_ratio: 6.0
-  #     mem_ratio: 4.0
-  #   cubebox_gpu:
-  #     cpu_ratio: 1.0
-  #     mem_ratio: 1.0
+  # Deprecated: overcommit_ratio / overcommit_ratio_conf are no longer used.
+  # Leftover keys here are ignored; CubeMaster logs a warning at startup
+  # if they are present.
   filter:
     enable_filters:
       - "cpu"

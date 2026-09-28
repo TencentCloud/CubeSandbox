@@ -13,10 +13,10 @@ import (
 	"github.com/containerd/plugin/registry"
 	"google.golang.org/grpc"
 
-	api "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1"
 )
 
 var _ api.SnapshotServer = &service{}

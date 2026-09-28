@@ -9,15 +9,31 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
+	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
+
+func initTestPmemPaths(t *testing.T, baseDir string) {
+	t.Helper()
+	paths, err := pmem.ResolvePaths(baseDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
+}
 
 func writeTestFile(t *testing.T, path string, content []byte) {
 	t.Helper()
@@ -46,7 +62,13 @@ func writeRawKernelFile(t *testing.T, instanceType, imageRef string, content []b
 
 func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	paths, pathErr := pmem.ResolvePaths(baseDir, filepath.Join(t.TempDir(), "artifacts"), filepath.Join(t.TempDir(), "vmlinux"))
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
 
 	kernelV1 := bytes.Repeat([]byte("a"), 2048)
 	writeSharedKernelFile(t, kernelV1)
@@ -83,7 +105,7 @@ func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *te
 
 func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	writeSharedKernelFile(t, bytes.Repeat([]byte("s"), 3072))
 	writeRawImageFile(t, "cubebox", "artifact-2", bytes.Repeat([]byte("e"), 2048))
@@ -115,7 +137,7 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 
 func TestEnsurePmemFileMaterializesFreshArtifactKernel(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	sharedKernel := bytes.Repeat([]byte("s"), 3072)
 	writeSharedKernelFile(t, sharedKernel)
@@ -137,7 +159,7 @@ func TestEnsurePmemFileMaterializesFreshArtifactKernel(t *testing.T) {
 
 func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	writeRawImageFile(t, "cubebox", "artifact-4", bytes.Repeat([]byte("e"), 2048))
 
@@ -148,7 +170,7 @@ func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 
 func TestEnsurePmemFileDoesNotRequireCubeImageVersionFile(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	sharedKernel := bytes.Repeat([]byte("s"), 3072)
 	writeSharedKernelFile(t, sharedKernel)
@@ -170,7 +192,7 @@ func TestEnsurePmemFileDoesNotRequireCubeImageVersionFile(t *testing.T) {
 
 func TestEnsureKernelFilePresentRequiresSharedKernel(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	err := ensureKernelFilePresent(context.Background(), "cubebox", "artifact-2")
 	if err == nil {
@@ -207,7 +229,7 @@ func TestDestroyPmemArtifactResolvesSymlinkedBase(t *testing.T) {
 	if err := os.Symlink(realBase, filepath.Join(dataDir, "cubebox_os_image")); err != nil {
 		t.Fatalf("Symlink base error=%v", err)
 	}
-	pmem.Init(dataDir)
+	initTestPmemPaths(t, dataDir)
 
 	artifactDir := filepath.Join(realBase, "artifact-6")
 	writeTestFile(t, filepath.Join(artifactDir, "artifact-6.ext4"), []byte("rootfs"))
@@ -222,7 +244,7 @@ func TestDestroyPmemArtifactResolvesSymlinkedBase(t *testing.T) {
 
 func TestDestroyPmemArtifactUnlinksLeafSymlinkOnly(t *testing.T) {
 	dataDir := t.TempDir()
-	pmem.Init(dataDir)
+	initTestPmemPaths(t, dataDir)
 	base := pmem.GetPmemBasePath("cubebox")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatalf("MkdirAll base error=%v", err)
@@ -250,9 +272,104 @@ func TestDestroyPmemArtifactUnlinksLeafSymlinkOnly(t *testing.T) {
 
 func TestDestroyPmemArtifactMissingBaseIsIdempotent(t *testing.T) {
 	dataDir := t.TempDir()
-	pmem.Init(dataDir)
+	initTestPmemPaths(t, dataDir)
 
 	if err := DestroyPmemArtifact(context.Background(), "cubebox", "artifact-8", nil); err != nil {
 		t.Fatalf("missing pmem base should be success, got %v", err)
+	}
+}
+
+func TestDownloadArtifactWithIndependentKernelSource(t *testing.T) {
+	paths, err := pmem.ResolvePaths(t.TempDir(), filepath.Join(t.TempDir(), "images"), filepath.Join(t.TempDir(), "vmlinux"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
+	rootfs := bytes.Repeat([]byte("r"), 2048)
+	kernel := bytes.Repeat([]byte("k"), 2048)
+	writeSharedKernelFile(t, kernel)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(rootfs) }))
+	defer server.Close()
+	sum := sha256.Sum256(rootfs)
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:    server.URL,
+		constants.MasterAnnotationRootfsArtifactSHA256: hex.EncodeToString(sum[:]),
+	}})
+	if err := EnsurePmemFile(ctx, "cubebox", "rfs-download"); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string][]byte{paths.ImageFile("cubebox", "rfs-download"): rootfs, paths.KernelFile("cubebox", "rfs-download"): kernel} {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("artifact %s: err=%v, content matches=%v", path, err, bytes.Equal(got, want))
+		}
+	}
+	if err := DestroyPmemArtifact(ctx, "cubebox", "rfs-download", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(paths.ImageFile("cubebox", "rfs-download")); !os.IsNotExist(err) {
+		t.Fatalf("artifact was not deleted: %v", err)
+	}
+	if _, err := os.Stat(paths.SharedKernelPath); err != nil {
+		t.Fatalf("shared kernel must survive artifact deletion: %v", err)
+	}
+}
+
+func TestEnsurePmemRootfsMixedEntrypointsReusePreparedFile(t *testing.T) {
+	baseDir := t.TempDir()
+	initTestPmemPaths(t, baseDir)
+
+	rootfs := bytes.Repeat([]byte("concurrent-rootfs"), 256)
+	kernel := bytes.Repeat([]byte("concurrent-kernel"), 256)
+	writeSharedKernelFile(t, kernel)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		time.Sleep(25 * time.Millisecond)
+		_, _ = w.Write(rootfs)
+	}))
+	defer server.Close()
+
+	sum := sha256.Sum256(rootfs)
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:    server.URL,
+		constants.MasterAnnotationRootfsArtifactSHA256: hex.EncodeToString(sum[:]),
+	}})
+
+	const concurrency = 8
+	start := make(chan struct{})
+	errs := make(chan error, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(useRootfsEntrypoint bool) {
+			defer wg.Done()
+			<-start
+			if useRootfsEntrypoint {
+				errs <- EnsurePmemRootfs(ctx, "cubebox", "rfs-concurrent")
+				return
+			}
+			errs <- EnsurePmemFile(ctx, "cubebox", "rfs-concurrent")
+		}(i%2 == 0)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("ensure pmem file error = %v", err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("download requests = %d, want 1", got)
+	}
+	if got, err := os.ReadFile(pmem.GetRawImageFilePath("cubebox", "rfs-concurrent")); err != nil || !bytes.Equal(got, rootfs) {
+		t.Fatalf("prepared rootfs mismatch: err=%v", err)
+	}
+	if got, err := os.ReadFile(pmem.GetRawKernelFilePath("cubebox", "rfs-concurrent")); err != nil || !bytes.Equal(got, kernel) {
+		t.Fatalf("prepared kernel mismatch: err=%v", err)
 	}
 }

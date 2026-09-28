@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package cubemasterclient is the sidecar's tiny HTTP client for CubeMaster.
+// Package cubemasterclient is CLM's tiny HTTP client for CubeMaster.
 // It calls the same /cube/sandbox/update endpoint that CubeAPI uses; we go
-// directly here to avoid the sidecar → CubeAPI → CubeMaster round-trip.
+// directly here to avoid the CLM → CubeAPI → CubeMaster round-trip.
 package cubemasterclient
 
 import (
@@ -15,18 +15,24 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// CubeMaster ret_code constants the sidecar reasons about. The full set
-// lives in CubeMaster/api/services/errorcode/v1/errorcode.proto; we mirror
-// only the codes we need to react to here, keeping the sidecar free of a
+// CubeMaster ret_code constants CLM reasons about. The full set
+// lives in pkgs/proto/services/errorcode/v1/errorcode.proto; we mirror
+// only the codes we need to react to here, keeping CLM free of a
 // build-time dependency on the master proto.
 const (
 	// RetCodeSuccess is CubeMaster's "operation succeeded" code.
 	RetCodeSuccess = 200
+
+	// RetCodeMasterParamsError is CubeMaster's generic params error.
+	// Pause uses it both for real Begin() failures and for "already has
+	// pause snapshot" (see pausesnap.Begin). Only the latter is a no-op.
+	RetCodeMasterParamsError = 130400
 
 	// RetCodeInvalidParamFormat is reused by CubeMaster's pause/resume path
 	// for "sandbox does not exist" — the meta lookup misses, surfaced as
@@ -44,7 +50,7 @@ const (
 	// human or SDK client. Used by CubeAPI's kill_sandbox path.
 	KillReasonRequest = "request"
 
-	// KillReasonTimeout is the sidecar sweeper reaping an idle sandbox that
+	// KillReasonTimeout is the CLM sweeper reaping an idle sandbox that
 	// did not opt into auto_pause (lifecycle.on_timeout=kill, the default).
 	KillReasonTimeout = "timeout"
 
@@ -67,17 +73,28 @@ func (e *APIError) Error() string {
 }
 
 // IsNotFound reports whether the master replied with the "sandbox does not
-// exist" ret_code. Sidecar uses this to evict stale registry entries instead
+// exist" ret_code. CLM uses this to evict stale registry entries instead
 // of retrying a doomed pause/resume forever.
 func (e *APIError) IsNotFound() bool {
 	return e != nil && e.RetCode == RetCodeInvalidParamFormat
 }
 
+// alreadyHasPauseSnapshotMarker is the pausesnap.Begin message CubeMaster
+// wraps as 130400. Other 130400 Begin failures must not be treated as success.
+const alreadyHasPauseSnapshotMarker = "already has pause snapshot"
+
 // IsAlreadyInState reports whether the master refused the transition because
-// the sandbox is already in the desired state. From the sidecar's POV this
+// the sandbox is already in the desired state. From CLM's POV this
 // is success: the sandbox is already where we wanted it, no retry needed.
 func (e *APIError) IsAlreadyInState() bool {
-	return e != nil && e.RetCode == RetCodeTaskStateInvalid
+	if e == nil {
+		return false
+	}
+	if e.RetCode == RetCodeTaskStateInvalid {
+		return true
+	}
+	return e.RetCode == RetCodeMasterParamsError &&
+		strings.Contains(e.RetMsg, alreadyHasPauseSnapshotMarker)
 }
 
 // Client is a thin wrapper around http.Client + base URL. Concurrency-safe.

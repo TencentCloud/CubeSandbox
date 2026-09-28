@@ -1,4 +1,9 @@
 terraform {
+  # 1.2 is the floor for resource `precondition` blocks, which tke-addons.tf
+  # uses to reject cube-lifecycle-manager replica/leader-election combinations
+  # that would silently degrade active-standby into uncoordinated replicas.
+  required_version = ">= 1.2.0"
+
   required_providers {
     tencentcloud = {
       source = "tencentcloudstack/tencentcloud"

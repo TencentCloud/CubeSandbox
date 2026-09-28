@@ -8,6 +8,10 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
 
+## Service designs
+
+- [CubeTemplateCenter Design](./templatecenter-design) — the standalone template build service: control/data plane split, routing rules, callback authentication, artifact lifecycle, deployment wiring, and known limitations.
+
 ## What belongs here
 
 - Cross-service data contracts and naming conventions (keys, topics, schemas)

@@ -8,6 +8,10 @@
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
 
+## 服务设计
+
+- [CubeTemplateCenter 设计](./templatecenter-design)——独立模板构建服务：管控面/数据面拆分、路由规则、回调认证、artifact 生命周期、部署接线与已知限制。
+
 ## 适合放在这里的内容
 
 - 跨服务的数据契约与命名约定（key、消息主题、schema）

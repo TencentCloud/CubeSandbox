@@ -10,7 +10,7 @@
     "replicas": "Replicas",
     "replicasDesc": "该模板在各节点上的快照副本状态。",
     "compat": "兼容性",
-    "compatDesc": "模板副本绑定的组件版本与当前节点环境的对比。",
+    "compatDesc": "节点升级后，这个模板还能不能直接用来建沙箱。需要重建时，点「重建模板」。",
     "danger": "删除模板",
     "dangerDesc": "删除后无法恢复，该模板下所有 replica 将一并删除。"
   },
@@ -72,15 +72,17 @@
     "blocked": "禁止"
   },
   "compat": {
-    "staleTitle": "该模板在当前节点环境下需要重建",
-    "staleDesc": "{{count}} 个副本绑定的 guest-image 或 cube-agent 版本与当前节点不一致。模板构建状态仍可为就绪，但这些副本不可用于创建新沙箱。",
+    "staleTitle": "需要重建此模板",
+    "staleDesc": "{{count}} 个副本在节点升级后可能无法正常创建沙箱。请点击「重建模板」，按当前节点重新制作。",
+    "driftTitle": "节点环境已更新",
+    "driftDesc": "仍可直接创建沙箱。如果想用节点上的新环境，再点「重建模板」。",
     "loading": "正在读取兼容性信息…",
     "empty": "暂无兼容性信息。",
     "status": {
-      "OK": "正常",
-      "STALE": "需重建",
-      "UNKNOWN": "未知",
-      "MISSING": "缺失"
+      "OK": "可用",
+      "STALE": "可用",
+      "UNKNOWN": "需重建",
+      "MISSING": "此节点没有副本"
     },
     "components": {
       "guestImage": "guest-image",

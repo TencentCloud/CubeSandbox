@@ -21,7 +21,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/transfer/transferi"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 func (ts *localTransferService) prepareCfs(ctx context.Context, erf transferi.ExternalRootfs, is transfer.ImageStorer, tops *transfer.Config) error {

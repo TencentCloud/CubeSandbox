@@ -53,3 +53,8 @@ lang: zh-CN
 | [Hermes Agent：在 Cube Sandbox 中运行常驻 Agent 平台](./hermes-agent.md) | 陈金博 | 2026-08-20 | agent, persistence, skills, host-mount |
 | [Lenovo Cloud Agent：从 Daytona 到 CubeSandbox 的沙箱迁移](./lenovo-cloud-agent.md) | 李健 | 2026-08-20 | agent, migration, daytona, e2b-compat |
 | [Horizon Insights：金融投研 Agent 沙箱化实践](./horizon-insights.md) | 王正凯 | 2026-08-26 | agent, financial, host-mount, cubeegress |
+| [云知声：RL rollout 场景下的密度边界压测](./unisound-rl-rollout.md) | 云知声 Atlas 智算团队 | 2026-09-01 | agent, rl, rollout, density |
+| [广晟数科：多租户沙箱平台构建实践](./guangdong-rising.md) | 冯佳奇 | 2026-09-03 | agent, multi-tenant, sandbox-platform, lifecycle |
+| [WeKnora：基于 CubeSandbox 的 Agent 持久化运行环境](./weknora.md) | 陈洋、赵海龙 | 2026-09-17 | agent, snapshot, session-persistence, e2b-compat |
+| [花椒：沙箱是选项不是标配的 Agent 平台实践](./huajiao.md) | 王成龙、封冰清 | 2026-09-17 | agent, host-mount, go-sdk, execution-environment |
+| [openFuyao：Kubernetes 中运行 CubeSandbox 的落地实践](./openfuyao.md) | 王文涛、李爱华 | 2026-09-17 | kubernetes, deployment, ebpf, production |

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 

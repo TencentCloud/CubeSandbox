@@ -5,7 +5,7 @@
 -- they are truly distributed and don't lead to synchronized stampedes.
 math.randomseed(ngx.now() * 1000 + ngx.worker.id())
 
--- Register this CubeProxy replica in Redis so cube-lifecycle-manager can
+-- Register this CubeProxy replica in Redis so Cube Lifecycle Manager can
 -- discover us. Config comes from environment variables so the operator can
 -- flip the feature on without editing nginx.conf (ngx.var.* is unavailable
 -- in init_worker_by_lua). All settings are optional; if CUBE_PROXY_REGISTRY_ENABLE

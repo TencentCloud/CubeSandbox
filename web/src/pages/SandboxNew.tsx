@@ -51,8 +51,10 @@ function TemplatePicker({
     queryFn: templateApi.compat,
     staleTime: 15_000,
   });
-  const staleTemplates = new Set(
-    (compat?.templates ?? []).filter((row) => row.overall === 'STALE').map((row) => row.templateID),
+  const unpinnedTemplates = new Set(
+    (compat?.templates ?? [])
+      .filter((row) => row.overall === 'UNKNOWN')
+      .map((row) => row.templateID),
   );
 
   if (isLoading) {
@@ -70,7 +72,7 @@ function TemplatePicker({
       {(templates ?? []).map((tpl) => {
         const statusLower = tpl.status.toLowerCase();
         const isReady = statusLower === 'ready';
-        const isStale = staleTemplates.has(tpl.templateID);
+        const isUnpinned = unpinnedTemplates.has(tpl.templateID);
         const isSelected = tpl.templateID === selected;
         return (
           <button
@@ -90,8 +92,8 @@ function TemplatePicker({
               <span className="truncate font-mono text-sm font-medium">{tpl.templateID}</span>
               <Badge
                 tone={
-                  isStale
-                    ? 'warn'
+                  isUnpinned
+                    ? 'err'
                     : statusLower === 'ready'
                       ? 'ok'
                       : statusLower === 'building'
@@ -100,7 +102,7 @@ function TemplatePicker({
                 }
                 className="shrink-0 text-xs"
               >
-                {isStale ? t('compat.stale') : tpl.status}
+                {isUnpinned ? t('compat.unpinned') : tpl.status}
               </Badge>
             </div>
             <span className="truncate text-xs text-muted-foreground">
@@ -225,7 +227,7 @@ export default function SandboxNewPage() {
   });
 
   const selectedCompat = compat?.templates.find((row) => row.templateID === form.templateID);
-  const selectedTemplateStale = selectedCompat?.overall === 'STALE';
+  const selectedTemplateUnpinned = selectedCompat?.overall === 'UNKNOWN';
   const canSubmit = !!form.templateID && !create.isPending;
 
   return (
@@ -249,8 +251,16 @@ export default function SandboxNewPage() {
         {!form.templateID && (
           <p className="text-xs text-muted-foreground">{t('form.templateRequired')}</p>
         )}
-        {selectedTemplateStale && (
-          <p className="text-xs text-muted-foreground">{t('compat.staleHelp')}</p>
+        {selectedTemplateUnpinned && (
+          <p className="text-xs text-cube-err">
+            {t('compat.unpinnedHelp')}{' '}
+            <Link
+              to={`/templates/${form.templateID}`}
+              className="underline underline-offset-2 hover:text-cube-err/80"
+            >
+              {t('compat.openTemplate')}
+            </Link>
+          </p>
         )}
       </Section>
 

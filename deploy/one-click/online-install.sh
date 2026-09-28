@@ -36,6 +36,19 @@ detect_glibc_version() {
   printf '%s\n' "${glibc_ver}"
 }
 
+# Snap Docker cannot read /usr/local/services (#1753).
+reject_snap_docker() {
+  local p resolved
+  p="$(command -v docker 2>/dev/null || true)"
+  [[ -n "${p}" ]] || return 0
+  resolved="$(readlink -f "${p}" 2>/dev/null || true)"
+  [[ "${p}" == /snap/* || "${resolved}" == /snap/* || "${resolved}" == /usr/bin/snap ]] || return 0
+  echo "[online-install] ERROR: snap Docker is not supported; it cannot read /usr/local/services." >&2
+  echo "[online-install]   sudo snap remove docker" >&2
+  echo "[online-install]   then install docker-ce: https://docs.docker.com/engine/install/ubuntu/" >&2
+  exit 3
+}
+
 # ---------------------------------------------------------------------------
 # Pre-download preflight checks (lightweight, self-contained)
 # ---------------------------------------------------------------------------
@@ -276,6 +289,8 @@ EOF
       exit 1
       ;;
   esac
+
+  reject_snap_docker
 
   if [[ "${deploy_role}" != "compute" ]]; then
     # Verify package manager is available to install Docker if it is not present

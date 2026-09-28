@@ -300,6 +300,7 @@ sudo ./down.sh
 |------|------|
 | `ONE_CLICK_CUBEMASTER_BIN` | 预编译 cubemaster 路径 |
 | `ONE_CLICK_CUBEMASTERCLI_BIN` | 预编译 cubemastercli 路径 |
+| `ONE_CLICK_TEMPLATECENTER_BIN` | 预编译 templatecenter 路径 |
 | `ONE_CLICK_CUBELET_BIN` | 预编译 cubelet 路径 |
 | `ONE_CLICK_CUBECLI_BIN` | 预编译 cubecli 路径 |
 | `ONE_CLICK_CUBE_API_BIN` | 预编译 cube-api 路径 |

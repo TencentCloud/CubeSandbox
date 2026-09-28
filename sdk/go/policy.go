@@ -73,6 +73,13 @@ type Inject struct {
 	Format string `json:"format,omitempty"`
 }
 
+func (i Inject) validate() error {
+	if len(i.Secret) > secretMaxBytes {
+		return fmt.Errorf("inject.secret exceeds %d bytes", secretMaxBytes)
+	}
+	return nil
+}
+
 // Render returns the final injected header value (preview helper).
 func (i Inject) Render() string {
 	format := i.Format
@@ -99,6 +106,9 @@ type Rule struct {
 }
 
 const (
+	// secretMaxBytes matches e2b maxNetworkRuleHeaderValueLen and sits under
+	// nginx's default large_client_header_buffers (8k).
+	secretMaxBytes                = 2048
 	denyAllIPv4CIDR               = "0.0.0.0/0"
 	allowOutDomainRequiresDenyAll = "When specifying allowed domains in allow_out, you must disable public " +
 		"outbound traffic or include '0.0.0.0/0' in deny_out to block all other traffic."
@@ -136,6 +146,11 @@ func buildNetworkPayload(opts NetworkOptions, internetAccessDisabled bool) (map[
 		for i, rule := range opts.Rules {
 			if err := rule.Match.validate(); err != nil {
 				return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
+			}
+			for j, inj := range rule.Action.Inject {
+				if err := inj.validate(); err != nil {
+					return nil, fmt.Errorf("network.rules[%d] %q: inject[%d]: %w", i, rule.Name, j, err)
+				}
 			}
 			rule.Match = rule.Match.normalized()
 			rules[i] = rule

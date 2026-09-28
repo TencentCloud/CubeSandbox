@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -24,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"gorm.io/gorm"
 )
 
@@ -141,10 +141,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	} else {
 		originReq.Request.RequestID = requestID
 	}
-	createReq, storedReq, err := buildSnapshotRequests(originReq, "")
-	if err != nil {
-		return nil, err
-	}
+
 	var jobID string
 	reusedExistingJob := false
 	if err := withSnapshotWriteLocks([]string{
@@ -155,6 +152,12 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			if existing.Operation != JobOperationSnapshotCreate {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
 			}
+			_, storedReq, err := buildSnapshotRequests(originReq, existing.TemplateID)
+			if err != nil {
+				return err
+			}
+			storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
+			storedReq.Backend = normalizedBackend
 			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, storedReq) {
 				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
 			}
@@ -176,8 +179,10 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 		}
 
 		snapshotID := generateSnapshotID()
-		createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = snapshotID
-		storedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = snapshotID
+		createReq, storedReq, err := buildSnapshotRequests(originReq, snapshotID)
+		if err != nil {
+			return err
+		}
 		createReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
 		storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
 		createReq.Backend = normalizedBackend
@@ -465,9 +470,12 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		rec, err := getSnapshotRecord(ctx, snapshotID)
 		if err != nil {
 			if errors.Is(err, ErrSnapshotNotFound) {
-				return fmt.Errorf("%w: %s", ErrSnapshotNotFound, snapshotID)
+				return wrapSnapshotNotFound(snapshotID)
 			}
 			return err
+		}
+		if snapshotRejectsNewUse(rec.Status) {
+			return wrapSnapshotNotFound(snapshotID)
 		}
 		if !strings.EqualFold(rec.Status, StatusReady) {
 			return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, snapshotID, rec.Status)
@@ -628,33 +636,27 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 	return nil
 }
 
-// DeleteSnapshot tears down a snapshot synchronously: it returns only when
-// the underlying delete job has settled into a terminal state (READY on
-// success, FAILED on error).  There is no "started, please poll" return
-// path — pending / running states are converted into errors by
-// `finalizeSynchronousSnapshotJob`.  The caller can therefore treat a nil
-// error as "snapshot is gone (replica + metadata + caches all cleaned)"
-// and a non-nil error as "delete either rejected up-front or ran to
-// failure".
+// DeleteSnapshot logically retires a snapshot immediately, then physically
+// removes it when it is safe to do so.
 //
-// Behaviour summary:
+//   - CREATING / DELETING / another active job still conflict (true
+//     "operation in progress").
+//   - Active runtime refs no longer block the caller: the row is tombstoned
+//     (`DELETED`) and a synthetic READY job is returned. New creates and
+//     rollbacks are rejected. Physical cleanup waits for registered refs
+//     and for a late register that wins the snapshot write lock before
+//     cleanup starts. A create RPC that has not returned yet is not waited
+//     on (same window as the pre-tombstone synchronous delete).
+//   - When no runtime refs remain, the existing synchronous delete job runs
+//     (replica cleanup + metadata drop). A nil error then means the bytes
+//     are gone. Physical-delete failure returns the row to `DELETED` so GC
+//     / a later DELETE can retry — it is not marked `FAILED`.
 //
-//   - Up-front guards (kind, status, in-use, active-job, active runtime
-//     refs) all run inside `withTemplateWriteLock`, so a duplicate request
-//     for the same `requestID` is idempotent: a re-arrived call either
-//     resumes the still-pending job or surfaces the prior terminal result.
-//   - The actual delete (`runSnapshotDeleteJob`) runs under a detached
-//     context produced by `synchronousSnapshotJobContext`, capped at
-//     `snapshotOperationTimeout` (15 min) so a stuck cubelet cannot wedge
-//     the master goroutine forever.  The wider request context is allowed
-//     to cancel the *response*, but the job itself is owned by master and
-//     completes (or fails) regardless.
-//   - On crash / restart, `reconcileSnapshotDefinitionTimeouts` will mark
-//     definitions left in `deleting` past the timeout as `failed`, and the
-//     next `DeleteSnapshot` call for the same id will re-attempt cleanly.
-//
-// The snapshot API is synchronous — CubeAPI waits for a terminal state
-// and does not expose a polling interface to callers.
+// Duplicate requestIDs remain idempotent: a still-pending job is resumed,
+// a tombstone-only call is re-returned as READY. Repeat DELETE is
+// idempotent only while the row is still DELETED. DELETING still
+// conflicts as in-progress; after physical cleanup the row is gone and
+// DELETE returns not found.
 func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType string) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -664,6 +666,7 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 	}
 	var jobID string
 	reusedExistingJob := false
+	tombstoned := false
 	var existingRequest snapshotDeleteJobRequest
 	if err := withSnapshotWriteLocks([]string{
 		snapshotResourceLockKey(snapshotID),
@@ -689,7 +692,7 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 		rec, err := getSnapshotRecord(ctx, snapshotID)
 		if err != nil {
 			if errors.Is(err, ErrSnapshotNotFound) {
-				return fmt.Errorf("%w: %s", ErrSnapshotNotFound, snapshotID)
+				return wrapSnapshotNotFound(snapshotID)
 			}
 			return err
 		}
@@ -718,53 +721,30 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 				log.G(ctx).Warnf("snapshot %s still has active sandbox(es) referencing it; proceeding with delete (rootfs is reflink/CoW-derived and memory vol remains accessible to running hypervisors)", snapshotID)
 			}
 		}
-		if activeRefs, err := ListActiveSnapshotRuntimeRefs(ctx, snapshotID); err != nil {
-			return err
-		} else if len(activeRefs) > 0 {
-			return fmt.Errorf("%w: snapshot %s still has %d active runtime ref(s): %s", ErrTemplateAttemptInProgress, snapshotID, len(activeRefs), formatSnapshotRuntimeRefConsumers(activeRefs))
-		}
-		attemptNo, retryOfJobID, err := nextSnapshotAttempt(ctx, snapshotID)
+		n, err := countActiveSnapshotRuntimeRefsFn(ctx, snapshotID)
 		if err != nil {
 			return err
 		}
-		payload, err := json.Marshal(snapshotDeleteJobRequest{
-			RequestID:  requestID,
-			SnapshotID: snapshotID,
-			NodeID:     rec.OriginNodeID,
-		})
-		if err != nil {
-			return err
-		}
-		jobID = uuid.NewString()
-		record := &models.TemplateImageJob{
-			JobID:        jobID,
-			TemplateID:   snapshotID,
-			RequestID:    requestID,
-			ResourceType: JobResourceTypeSnapshot,
-			ResourceID:   snapshotID,
-			AttemptNo:    attemptNo,
-			RetryOfJobID: retryOfJobID,
-			Operation:    JobOperationSnapshotDelete,
-			NodeID:       rec.OriginNodeID,
-			InstanceType: instanceType,
-			Status:       JobStatusPending,
-			Phase:        JobPhaseDeleting,
-			Progress:     0,
-			RequestJSON:  string(payload),
-		}
-		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if err := tx.Table(constants.SnapshotTableName).
-				Where("snapshot_id = ?", snapshotID).
-				Updates(map[string]any{
-					"status":     StatusDeleting,
-					"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
-				}).Error; err != nil {
-				return err
+		if n > 0 {
+			if !snapshotIsTombstoned(rec.Status) {
+				if err := tombstoneSnapshotRecord(ctx, snapshotID); err != nil {
+					return err
+				}
 			}
-			return tx.Table(constants.TemplateImageJobTableName).Create(record).Error
-		})
+			tombstoned = true
+			return nil
+		}
+		id, err := insertSnapshotDeleteJob(ctx, requestID, snapshotID, rec.OriginNodeID, instanceType)
+		if err != nil {
+			return err
+		}
+		jobID = id
+		return nil
 	}); err != nil {
 		return nil, err
+	}
+	if tombstoned {
+		return syntheticTombstoneJobInfo(requestID, snapshotID), nil
 	}
 	info, err := GetTemplateImageJobInfo(ctx, jobID)
 	if err != nil {
@@ -775,6 +755,8 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 	}
 	return executeSnapshotDeleteJob(ctx, info, snapshotID)
 }
+
+var runSnapshotReferenceCleanup = releaseSnapshotArtifactReferences
 
 func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	success := false
@@ -788,17 +770,31 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	})
 	targets, err := discoverTemplateCleanupTargets(ctx, snapshotID, "")
 	if err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	locators, err := snapshotDeleteLocators(targets)
 	if err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
-	if err := runReplicaCleanup(ctx, snapshotID, locators, cleanupBackendFromTargets(targets)); err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+	if err := abortSnapshotDeleteIfRefsReappeared(ctx, jobID, snapshotID); err != nil {
+		return err
+	}
+	// A saved plan means replica cleanup and reference release already
+	// committed. Resume artifact cleanup without depending on those nodes
+	// still being reachable after an earlier failure or process restart.
+	if targets.Snapshot == nil || strings.TrimSpace(targets.Snapshot.CleanupArtifactIDsJSON) == "" {
+		if err := runReplicaCleanup(ctx, snapshotID, locators, cleanupBackendFromTargets(targets)); err != nil {
+			return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+		}
+		if err := runSnapshotReferenceCleanup(ctx, snapshotID, targets); err != nil {
+			return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+		}
+	}
+	if err := runArtifactCleanup(ctx, snapshotID, targets); err != nil {
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	if err := runMetadataCleanup(ctx, snapshotID); err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	invalidateTemplateCaches(snapshotID)
 	// Mirror template delete: drop job rows so ListTemplates does not
@@ -808,6 +804,32 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	}
 	success = true
 	return nil
+}
+
+// abortSnapshotDeleteIfRefsReappeared re-counts runtime refs under the
+// snapshot write lock immediately before physical cleanup. A late
+// in-flight create that registered after the row flipped to DELETING
+// must send the job back to DELETED instead of unlinking bytes.
+func abortSnapshotDeleteIfRefsReappeared(ctx context.Context, jobID, snapshotID string) error {
+	var n int64
+	if err := withSnapshotWriteLocks([]string{snapshotResourceLockKey(snapshotID)}, func() error {
+		count, err := countActiveSnapshotRuntimeRefsFn(ctx, snapshotID)
+		if err != nil {
+			return err
+		}
+		n = count
+		return nil
+	}); err != nil {
+		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+	}
+	if n <= 0 {
+		return nil
+	}
+	cause := fmt.Errorf("snapshot %s grew %d runtime ref(s) before physical cleanup", snapshotID, n)
+	if err := failSnapshotDeleteJob(ctx, jobID, snapshotID, cause); err != nil {
+		return err
+	}
+	return cause
 }
 
 func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snapshotPath string, commitRsp *cubeboxv1.CommitSandboxResponse, cause error, backend string) error {
@@ -840,18 +862,28 @@ func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snaps
 	return errors.Join(defErr, jobErr)
 }
 
+var withStoreTx = func(ctx context.Context, fn func(*gorm.DB) error) error {
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	return store.db.WithContext(ctx).Transaction(fn)
+}
+
 func failSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string, cause error) error {
-	defErr := updateSnapshotFields(ctx, snapshotID, map[string]any{
-		"status":     StatusFailed,
-		"last_error": cause.Error(),
+	return withStoreTx(ctx, func(tx *gorm.DB) error {
+		if err := updateSnapshotFieldsTx(tx, snapshotID, map[string]any{
+			"status":     StatusDeleted,
+			"last_error": cause.Error(),
+		}); err != nil {
+			return err
+		}
+		return updateTemplateImageJobTx(tx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseDeleting,
+			"progress":      100,
+			"error_message": cause.Error(),
+		})
 	})
-	jobErr := updateTemplateImageJob(ctx, jobID, map[string]any{
-		"status":        JobStatusFailed,
-		"phase":         JobPhaseDeleting,
-		"progress":      100,
-		"error_message": cause.Error(),
-	})
-	return errors.Join(defErr, jobErr)
 }
 
 func failSnapshotRollbackJob(ctx context.Context, jobID, phase string, resultPayload []byte, cause error) error {
@@ -917,19 +949,12 @@ func marshalSnapshotRollbackRequest(requestID, sandboxID, snapshotID, nodeID, no
 	return string(payload), nil
 }
 
-func formatSnapshotRuntimeRefConsumers(refs []SnapshotRuntimeRefInfo) string {
-	consumers := make([]string, 0, len(refs))
-	for _, item := range refs {
-		consumer := strings.TrimSpace(item.SandboxID)
-		if node := firstNonEmpty(item.NodeID, item.NodeIP); node != "" {
-			consumer = firstNonEmpty(consumer, "<unknown>") + "@" + node
-		}
-		consumers = append(consumers, firstNonEmpty(consumer, "<unknown>"))
-	}
-	return strings.Join(consumers, ", ")
-}
-
 func getSnapshotReadyReplica(ctx context.Context, snapshotID, preferredNodeID string) (ReplicaStatus, error) {
+	if rec, err := getSnapshotRecord(ctx, snapshotID); err == nil && rec != nil && snapshotRejectsNewUse(rec.Status) {
+		return ReplicaStatus{}, ErrTemplateHasNoReadyReplica
+	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrTemplateStoreNotInitialized) {
+		return ReplicaStatus{}, err
+	}
 	replicas, err := ListReplicas(ctx, snapshotID)
 	if err != nil {
 		return ReplicaStatus{}, err
@@ -1151,7 +1176,6 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		OriginHostFactsJSON:       opts.OriginHostFactsJSON,
 		DisplayName:               opts.DisplayName,
 		StorageBackend:            opts.StorageBackend,
-		Retain:                    opts.Retain,
 		RootfsSizeBytesAtSnapshot: opts.RootfsSizeBytesAtSnapshot,
 		RootfsArtifactID:          rootfsArtifactIDFromCreateRequest(storedReq),
 		RequestJSON:               string(payload),

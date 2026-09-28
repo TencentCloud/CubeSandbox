@@ -18,7 +18,7 @@ import (
 func TestApplyPauseBindingsEnrichesScannedRow(t *testing.T) {
 	pausedAt := time.Now().Add(-time.Minute)
 	items := []*types.SandboxBriefData{
-		{SandboxID: "sb-1", Status: 5, HostID: "node-a", Backend: constants.SnapshotBackendS3, CreateAt: 42},
+		{SandboxID: "sb-1", Status: 5, HostID: "node-a", Backend: constants.SnapshotBackendS3, CreateAt: 42, EndAt: 1234},
 	}
 
 	got := applyPauseBindings(items, []*pausesnap.Record{{
@@ -36,6 +36,7 @@ func TestApplyPauseBindingsEnrichesScannedRow(t *testing.T) {
 	require.Equal(t, constants.RemoteStatusReady, got[0].RemoteStatus)
 	// The node reported this row, so its own timestamps must survive.
 	require.Equal(t, int64(42), got[0].CreateAt)
+	require.Equal(t, int64(1234), got[0].EndAt)
 }
 
 func TestApplyPauseBindingsAppendsRowMissingFromNodeScan(t *testing.T) {
@@ -60,6 +61,42 @@ func TestApplyPauseBindingsAppendsRowMissingFromNodeScan(t *testing.T) {
 	require.Equal(t, constants.RemoteStatusInProgress, got[0].RemoteStatus)
 	require.Equal(t, pausedAt.UnixNano(), got[0].PauseAt)
 	require.Zero(t, got[0].CreateAt)
+}
+
+func TestEnrichSandboxListEndAtsUsesOneBatchLookup(t *testing.T) {
+	provider := &mockTimeoutProvider{returnEndAts: map[string]int64{
+		"sb-node":   1234,
+		"sb-paused": 5678,
+	}}
+	previousProvider := getTimeoutProvider()
+	SetTimeoutProvider(provider)
+	t.Cleanup(func() { SetTimeoutProvider(previousProvider) })
+
+	items := []*types.SandboxBriefData{
+		{SandboxID: "sb-node", EndAt: 1},
+		{SandboxID: "sb-paused"},
+		{SandboxID: "sb-never", EndAt: 2},
+	}
+	enrichSandboxListEndAts(t.Context(), items)
+
+	require.Equal(t, int64(1234), items[0].EndAt)
+	require.Equal(t, int64(5678), items[1].EndAt)
+	require.Equal(t, int64(2), items[2].EndAt)
+	require.Equal(t, 1, provider.batchLookupCalls)
+	require.Zero(t, provider.lookupCalls)
+	require.Equal(t, []string{"sb-node", "sb-paused", "sb-never"}, provider.lastLookupIDs)
+}
+
+func TestEnrichSandboxListEndAtsAppliesAuthoritativeZero(t *testing.T) {
+	provider := &mockTimeoutProvider{returnEndAts: map[string]int64{"sb-never": 0}}
+	previousProvider := getTimeoutProvider()
+	SetTimeoutProvider(provider)
+	t.Cleanup(func() { SetTimeoutProvider(previousProvider) })
+
+	items := []*types.SandboxBriefData{{SandboxID: "sb-never", EndAt: 1234}}
+	enrichSandboxListEndAts(t.Context(), items)
+
+	require.Zero(t, items[0].EndAt)
 }
 
 func TestApplyPauseBindingsSkipsUnfinishedPause(t *testing.T) {

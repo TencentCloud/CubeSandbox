@@ -54,7 +54,29 @@ cubemastercli --address <cubemaster-host> --port 8089 tpl create-from-image \
   --writable-layer-size 1G \
   --expose-port 49983 \
   --probe 49983
+
+# 把一个 READY 模板的 rootfs artifact 迁入 TC 存储。
+# CLI 叫 merge，对应 API 是 /cube/template/migrate。
+# 存量模板如果不迁移，artifact 仍留在 CubeMaster 本地盘上。
+cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id>
+
+# 如果场景是把历史 artifact 从本地盘迁到 S3 托管存储，且还要重新覆盖节点，可在 merge 完成后再 redo。
+# redo 负责节点侧重新分发；原 artifact 不可复用时会回退到重建流程。
+cubemastercli --address <cubemaster-host> --port 8089 tpl redo --template-id <template-id>
+
+# 只提交 migrate job，不等待结束。
+cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id> --detach
 ```
+
+对于**存量镜像 / 历史模板**，文档口径应统一为：**`tpl merge` 解决历史 artifact 的存储收敛问题，`tpl redo` 解决节点侧重新分发 / 必要时重建问题。**
+
+典型场景是：模板最初的 artifact 仍保存在 `CubeMaster` 本地盘，后续集群开启了 `s3Backed=true`，需要将这批历史 artifact 从本地盘迁移到 **S3 托管存储**。如果同一次运维还需要让模板重新覆盖目标节点，则在 `tpl merge` 完成后继续执行 `tpl redo`。
+
+> **高亮提醒**
+> 在默认共盘 / 共享 PVC 部署里，不执行 `tpl merge` 通常**不会立刻影响现有模板下载**；真正的问题是旧 artifact 仍未完成从**本地盘到 S3 托管存储**的收敛。
+>
+> - **存储侧**：开启 `s3Backed=true` 后，旧模板不会自动补做迁移。
+> - **恢复侧**：如果本地 ext4 已经丢失，再补跑 `tpl merge` 也修不回来，因为已经没有可上传的文件；这时只能对可重建的 `from-image` 模板执行 `tpl redo`，回退到重建流程。
 
 破坏性操作需要谨慎执行：
 
@@ -74,9 +96,14 @@ cubeopscli --address <cubeops-host> --port 3010 node list
 cubeopscli --address <cubeops-host> --port 3010 node isolate <node-id>
 cubeopscli --address <cubeops-host> --port 3010 node unisolate <node-id>
 cubeopscli --address <cubeops-host> --port 3010 node delete <node-id>
+cubeopscli --version
+cubeopscli version
+cubeopscli version --versiononly
 ```
 
 删除节点要求节点**已隔离且无沙箱**；批量删除时单个节点失败不会中断后续节点，命令最终返回非零退出码。`delete` 的别名是 `rm`；用 `--force` 可在无法校验沙箱清单时强制删除（仍要求先隔离）。
+
+`cubeopscli --version` 与 `cubeopscli version` 输出发布版本（如 `cubeopscli v0.7.0 (<commit>) built at <timestamp>`）；`cubeopscli version --versiononly` 只输出语义化版本号。
 
 增加、隔离与删除节点的详细用法见[节点相关操作](./node-operations.md)。
 

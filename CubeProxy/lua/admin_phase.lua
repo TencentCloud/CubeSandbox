@@ -1,6 +1,6 @@
 -- admin_phase.lua
 --
--- Admin endpoints called by cube-lifecycle-manager (CLM) to drive the
+-- Admin endpoints called by Cube Lifecycle Manager (CLM) to drive the
 -- auto-pause / auto-resume coordination dicts on this CubeProxy replica.
 -- See nginx.conf admin server block for routing.
 --
@@ -131,7 +131,9 @@ local function handle_backend_cache_delete()
 end
 
 -- POST /admin/state
---   body: {"sandbox_id": "...", "state": "running|pausing|paused"}
+--   body: {"sandbox_id": "...", "state": "running|pausing|paused|killing|killed"}
+--   CLM's sweeper pushes "killing" before the timeout-kill RPC; the Lua gate
+--   maps killing/killed to 410 Gone so in-flight requests fail fast.
 local function handle_state()
     local obj, err = read_json_body()
     if not obj then return reply_error(ngx.HTTP_BAD_REQUEST, err) end
@@ -139,9 +141,10 @@ local function handle_state()
     if not sid then return reply_error(ngx.HTTP_BAD_REQUEST, e2) end
     local st, e3 = require_string(obj, "state")
     if not st then return reply_error(ngx.HTTP_BAD_REQUEST, e3) end
-    if st ~= "running" and st ~= "pausing" and st ~= "paused" then
+    if st ~= "running" and st ~= "pausing" and st ~= "paused"
+        and st ~= "killing" and st ~= "killed" then
         return reply_error(ngx.HTTP_BAD_REQUEST,
-            "state must be one of running|pausing|paused")
+            "state must be one of running|pausing|paused|killing|killed")
     end
 
     local ok, set_err, forcible = STATE:set(sid, st)

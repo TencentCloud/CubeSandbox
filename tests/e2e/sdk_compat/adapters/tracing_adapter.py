@@ -167,16 +167,27 @@ class TracingSandboxAdapter(SandboxAdapter):
             ),
         )
 
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
         return self._trace.capture(
             "run_code",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
                 "code": code,
+                "env_vars": env_vars,
                 "timeout": timeout,
             },
-            lambda: self._wrapped.run_code(code, timeout=timeout),
+            lambda: self._wrapped.run_code(
+                code,
+                env_vars=env_vars,
+                timeout=timeout,
+            ),
         )
 
     def pause(self, *, timeout: int = 60) -> None:
@@ -200,6 +211,19 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "timeout": timeout,
             },
             lambda: self._wrapped.resume_or_connect(timeout=timeout),
+            output=lambda result: {"sandbox_id": result.sandbox_id},
+        )
+        return wrap_adapter(resumed, self._trace)
+
+    def resume_idle_timeout(self, timeout: int | None) -> SandboxAdapter:
+        resumed = self._trace.capture(
+            "resume_idle_timeout",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.resume_idle_timeout(timeout),
             output=lambda result: {"sandbox_id": result.sandbox_id},
         )
         return wrap_adapter(resumed, self._trace)

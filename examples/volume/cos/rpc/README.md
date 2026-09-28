@@ -199,5 +199,5 @@ cosfs / mntns troubleshooting: [binary/README.md](../binary/README.md#create-san
 
 - [Shared COS docs](../README.md)
 - [cosfs](https://cloud.tencent.com/document/product/436/6883) · [COS Go SDK](https://cloud.tencent.com/document/product/436/31215)
-- Proto: `Cubelet/api/services/volumeplugin/v1/volumeplugin.proto`
+- Proto: `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto`
 - [Volume Plugin framework](../../../../docs/guide/volume-plugin.md)

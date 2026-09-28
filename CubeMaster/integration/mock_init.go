@@ -22,9 +22,6 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gomodule/redigo/redis"
 	"github.com/google/uuid"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
@@ -35,6 +32,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"gorm.io/gorm"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -654,10 +655,22 @@ func metricNow() []byte {
 }
 
 func mock_db() {
+	// Establish the shared dao handle before db.Init (a dao.Default()
+	// wrapper) needs it. dao.Open is idempotent for the same config
+	// identity, so the later open in app.Run's initDatabaseSchema is a
+	// no-op; schema migration (including t_cube_host_type) still runs
+	// there. Both call sites build their dao config through
+	// db.ConfigFromDBConfig so the identities cannot drift.
+	daoCfg, err := db.ConfigFromDBConfig(config.GetDbConfig())
+	if err != nil {
+		stdlog.Fatalf("integration: dao config fail: %v", err)
+	}
+	if _, err := dao.Open(mocktest_Ctx, daoCfg); err != nil {
+		stdlog.Fatalf("dao open fail:%v", err)
+	}
 	mocktest_OssDb = db.Init(config.GetDbConfig())
-	// Schema (including t_cube_host_type) is owned by the dao.Migrate
-	// path that the integration test bootstrap runs before tests.
 }
+
 func mock_getstr() string {
 	return fmt.Sprintf("%d.%d.%d.%d", rand.Int31n(254), rand.Int31n(254), rand.Int31n(254), rand.Int31n(254))
 }

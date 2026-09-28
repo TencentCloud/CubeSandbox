@@ -109,18 +109,22 @@ endif
 
 # Builder image build-args. Set MIRROR=cn to source packages from China-reachable
 # mirrors: the ubuntu apt archive (amd64 -> $(APT_MIRROR_BASE)/ubuntu, arm64 ->
-# $(APT_MIRROR_BASE)/ubuntu-ports) plus the llvm.sh installer script and clang-14
-# apt packages (override the LLVM mirror host with LLVM_MIRROR_BASE=...). Unset
-# builds against upstream archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org.
-# The LLVM GPG signing key is vendored at docker/llvm-snapshot.gpg.key so the
-# image build does not wget it from apt.llvm.org. This build-time MIRROR is
-# unrelated to the runtime MIRROR=cn used by deploy/one-click.
+# $(APT_MIRROR_BASE)/ubuntu-ports) plus the clang-14 apt packages (override the
+# LLVM mirror host with LLVM_MIRROR_BASE=...). Unset builds against upstream
+# archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org. The LLVM GPG signing key
+# is vendored at docker/llvm-snapshot.gpg.key so the image build does not wget
+# it from apt.llvm.org. This build-time MIRROR is unrelated to the runtime
+# MIRROR=cn used by deploy/one-click.
 APT_MIRROR_BASE ?= http://mirrors.tencent.com
 LLVM_MIRROR_BASE ?= https://mirrors.zju.edu.cn/llvm-apt
+RUSTUP_DIST_SERVER ?= https://rsproxy.cn
+RUSTUP_UPDATE_ROOT ?= https://rsproxy.cn/rustup
 BUILDER_BUILD_ARGS ?=
 ifeq ($(MIRROR),cn)
 BUILDER_BUILD_ARGS += --build-arg 'APT_MIRROR_BASE=$(APT_MIRROR_BASE)'
 BUILDER_BUILD_ARGS += --build-arg 'LLVM_MIRROR_BASE=$(LLVM_MIRROR_BASE)'
+BUILDER_BUILD_ARGS += --build-arg 'RUSTUP_DIST_SERVER=$(RUSTUP_DIST_SERVER)'
+BUILDER_BUILD_ARGS += --build-arg 'RUSTUP_UPDATE_ROOT=$(RUSTUP_UPDATE_ROOT)'
 else ifneq ($(MIRROR),)
 $(warning MIRROR='$(MIRROR)' is not recognized by builder-image; expected 'cn' or empty -- building against upstream ubuntu and apt.llvm.org sources)
 endif
@@ -135,6 +139,7 @@ help:
 	@printf "  builder-shell  Start interactive shell with persisted HOME (%s)\n" "$(BUILDER_HOME)"
 	@printf "  builder-run    Run command inside builder image (BUILDER_CMD=...)\n"
 	@printf "  cubemaster    Build cubemaster and cubemastercli in Docker\n"
+	@printf "  cubetemplatecenter Build templatecenter in Docker\n"
 	@printf "  cubelet       Build cubelet and cubecli in Docker\n"
 	@printf "  cubevsmapdump Build CubeVS eBPF business map dump tool in Docker\n"
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
@@ -145,6 +150,7 @@ help:
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
+	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
@@ -157,15 +163,18 @@ help:
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
+	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
 	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cubelet-mount-test Run Cubelet mount tests in privileged Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
+	@printf "  blobstore-test Run pkgs/blobstore unit tests on the host\n"
+	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
-	@printf "  cubelet-pkg-test Run Cubelet ./pkg/... unit tests in Docker (no coverage)\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
 	@printf "  hypervisor-test Run hypervisor --lib --bins unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
@@ -182,7 +191,6 @@ help:
 	@printf "  web-fmt       Format WebUI sources\n"
 	@printf "  fmt           Format all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
-	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
 	@printf "  - builder-shell forwards ~/.git-credentials when present\n"
 	@printf "  - builder-run reuses the same mounted workspace and persisted HOME\n"
@@ -366,14 +374,25 @@ cubecow-smoke: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && go build -a -o /workspace/_output/bin/cubecow-smoke ./pkg/cubecow/cmd/cubecow-smoke'
 
+# Both halves of the cubecow test set: the crate's own #[test]s via cargo, and
+# the Go bindings that link it. Nothing else in the tree runs the first half --
+# cubecow-sdk only builds the crate.
 .PHONY: cubecow-test-native
 cubecow-test-native: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && go test -a ./pkg/cubecow -run Test -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/cubecow && cargo test -p cubecow --lib && cd /workspace/Cubelet && go mod download && go test -a ./pkg/cubecow -run Test -count=1'
 
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+
+# CubeTemplateCenter is a separate module whose go.mod replaces CubeMaster,
+# CubeDB, Cubelet and cubelog with local paths, so it builds inside the same
+# builder image as every other Go component.
+.PHONY: cubetemplatecenter
+cubetemplatecenter: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && make build && mkdir -p /workspace/_output/bin && cp build/templatecenter /workspace/_output/bin/'
 
 .PHONY: cubelet
 cubelet: builder-image
@@ -441,7 +460,7 @@ cube-api: cubeapi
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=$(CUBE_VERSION) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=$(CUBE_COMMIT) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops && go build -ldflags '-s -w' -o /workspace/_output/bin/cubeopscli ./cmd/cubeopscli"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && CGO_ENABLED=0 make build && cp bin/cubeops bin/cubeopscli /workspace/_output/bin/'
 
 .PHONY: cubeops-test
 cubeops-test: builder-image
@@ -453,13 +472,40 @@ cubeops-test: builder-image
 cube-volume-s3-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
 
+# COS RPC Volume plugin (examples/volume/cos/rpc): the reference gRPC volume
+# plugin and the only example consuming pkgs/proto. Standalone Go module (its
+# own go.mod), so it is not covered by any component test target above.
+.PHONY: cube-volume-cos-rpc-test
+cube-volume-cos-rpc-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/cos/rpc && go mod download && go vet ./... && go test ./...'
+
 .PHONY: cubemaster-test
 cubemaster-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test'
 
+# CubeTemplateCenter shares CubeMaster's pkg/templatecenter/image, which uses
+# Linux-only syscall constants, so its tests cannot run on a macOS host and go
+# through the builder like every other Go component.
+.PHONY: cubetemplatecenter-test
+cubetemplatecenter-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && go test ./... -count=1'
+
+# cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
+# for several Cubelet packages.
 .PHONY: cubelet-test
 cubelet-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make test'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test'
+
+# Keep the ordinary Cubelet gate unprivileged while still exercising tests that
+# call mount(2) in CI. Run every storage test protected by requireRoot; the full
+# package also contains unrelated timing-sensitive tests. Patchoverlay's other
+# privileged tests need host overlayfs support, so only its affected removal test
+# runs here. Running the builder as root can leave both ignored workspace
+# artifacts and shared builder-home caches root-owned; harmless in CI, but local
+# cleanup or a later unprivileged builder may require ownership repair.
+.PHONY: cubelet-mount-test
+cubelet-mount-test: builder-image
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
@@ -478,23 +524,34 @@ shim-test: builder-image
 # container is faster.
 .PHONY: cubelog-test
 cubelog-test:
-	cd cubelog && go test -short ./...
+	cd pkgs/CubeLog && go test -short ./...
 
 .PHONY: cubedb-test
 cubedb-test:
-	cd CubeDB && go mod download && go test ./...
+	cd pkgs/cubedb && go mod download && go test ./...
+
+# pkgs/blobstore is pure Go (no CGO). Consumers compile it via replace;
+# the module's own tests must run here.
+.PHONY: blobstore-test
+blobstore-test:
+	cd pkgs/blobstore && go mod download && go test ./...
+
+# pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
+# deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
+# compile its non-test code via replace, so the module's own _test.go files
+# must be run here -- `go test ./...` in an importer never runs a
+# dependency's tests.
+.PHONY: proto-test
+proto-test:
+	cd pkgs/proto && go mod download && go vet ./... && go test ./...
+
+.PHONY: cubebench-test
+cubebench-test:
+	bash tests/perf/cubebench_test.sh
 
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'
-
-# cubelet-pkg-test bypasses cubelet-test: that target runs `go test
-# -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
-# any coverage build fails. Run only ./pkg/... with -short (skips the
-# Redis/KVM-dependent cases), which is self-contained in the builder.
-.PHONY: cubelet-pkg-test
-cubelet-pkg-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'
 
 # cubevs-test runs the CubeNet/cubevs module's own unit tests (dataplane policy,
 # DNS learning, migration, dump, classify), which the cubelet targets never
@@ -514,12 +571,12 @@ agent-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
 
 # Only unit tests (--lib --bins) run here; the tests/integration.rs target
-# needs a full VM. This does not pass /dev/kvm into the builder, so the
-# runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
-# hypervisor-kvm for those).
+# needs a full VM. The root package command does not execute workspace member
+# tests, so block_util runs explicitly. This does not pass /dev/kvm into the
+# builder; see tests/unittest/run.sh hypervisor-kvm for runtime-KVM tests.
 .PHONY: hypervisor-test
 hypervisor-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins && cargo test -p block_util --lib'
 
 .PHONY: shim
 shim: builder-image
@@ -586,10 +643,6 @@ web-fmt:
 web-api-sync:
 	cd "$(WEB_DIR)" && npm run api:sync
 
-.PHONY: web-sync-dev-env
-web-sync-dev-env:
-	"$(ROOT_DIR)/dev-env/internal/sync_web_to_vm.sh"
-
 # Run make fmt in each component directory that has a fmt target.
 # Components without formattable code (e.g. CubeProxy) are skipped.
 # Outside the builder, Go/Rust fmt routes through builder-run so
@@ -610,9 +663,15 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@printf '  %-8s %s\n' "FMT" "Cubelet"
 	@$(MAKE) -C Cubelet fmt
 	@printf '  %-8s %s\n' "FMT" "cubelog"
-	@$(MAKE) -C cubelog fmt
+	@$(MAKE) -C pkgs/CubeLog fmt
+	@printf '  %-8s %s\n' "FMT" "proto"
+	@$(MAKE) -C pkgs/proto fmt
+	@printf '  %-8s %s\n' "FMT" "blobstore"
+	@$(MAKE) -C pkgs/blobstore fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
+	@printf '  %-8s %s\n' "FMT" "CubeTemplateCenter"
+	@$(MAKE) -C CubeTemplateCenter fmt
 	@printf '  %-8s %s\n' "FMT" "CubeNet"
 	@$(MAKE) -C CubeNet fmt
 	@printf '  %-8s %s\n' "FMT" "CubeOps"

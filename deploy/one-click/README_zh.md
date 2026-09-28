@@ -64,7 +64,7 @@ export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 - `KERNEL_TAG` / `PVM_KERNEL_TAG` **不作为**库存目录名；`release-manifest` 的 `kernel.version` / `pvm_version` 同样记录内容短哈希
 - Ensure 从 Master identity 中的 digest 映射到上述短 key
 
-运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。
+运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。`CUBE_PVM_ENABLE` 是安装器开关：升级时 `CUBE_PVM_ENABLE=0|1 ./install.sh` 或包内 `.env` 出现该 key 即为显式设置（`0` 默认值同样生效），整份 `cp env.example .env` 会把它重置为 `0`。
 
 guest image 不再依赖本地 zip。默认在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
@@ -107,8 +107,8 @@ ENVD_LOCAL_PATH=/abs/path/to/envd \
 
 这个入口会先：
 
-- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
-- 在 builder 内对 `CubeMaster`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
+- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`templatecenter`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
+- 在 builder 内对 `CubeMaster`、`CubeTemplateCenter`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
 - 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
 - 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
 
@@ -131,7 +131,7 @@ export ONE_CLICK_WEB_DIST_DIR=/abs/path/to/web/dist
 - 首次构建 `CubeMaster`、`Cubelet` 时会执行 `go mod download`
 - 构建机需要能访问对应的模块源；如处于内网环境，请提前配置 `GOPROXY`、`GOPRIVATE` 和私有仓库凭据
 - 推荐入口会把 builder HOME 持久化到宿主机缓存目录，因此同一台机器上的后续构建通常不会重复全量下载
-- `cubelog` 仍然通过仓库内本地模块 `../cubelog` 引用，不走远端下载
+- `cubelog` 仍然通过仓库内本地模块 `../pkgs/CubeLog` 引用，不走远端下载
 
 成功后会生成：
 
@@ -166,7 +166,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 和 `cubeops` 都从 `.one-click.env` 读环境变量。CubeOps 仓库相关项是 `CUBE_OPS_WAREHOUSE_*`（超时、GitHub/CNB 白名单和 token）以及 `CUBE_OPS_S3_*`；默认复用 Volume 的 MinIO/S3 连接、用独立的 `cube-ops` 桶，不需要额外配置。一键安装不写 CubeOps YAML。`cube-api` 默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 
@@ -201,7 +201,7 @@ CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员�
 
 - **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
 - **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
-- **启停开关**：`.env` 里 `ONE_CLICK_ENABLE_S3LVOL` 翻转为 1/0 后重跑 `install.sh`（或直接 `systemctl enable/disable cube-sandbox-s3lvol.service`）即可。
+- **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
 - **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
 
 控制节点安装完成后，可以打开 Dashboard：
@@ -220,10 +220,10 @@ http://<target-host>:12088
 
 ### 数字助手环境变量
 
-数字助手（AgentHub）需要 CubeAPI 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 拼出 `DATABASE_URL`，指向随 one-click 启动的 MySQL：
+数字助手（AgentHub）需要 CubeOps 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 生成 `DATABASE_URL`（经百分号编码写入 `.one-click.env`；启动脚本回退时直接导出拆分字段，由 CubeOps 直接映射），指向随 one-click 启动的 MySQL：
 
 ```bash
-# 可选；未设置时由 one-click 自动拼接。
+# 可选；未设置时由 CUBE_SANDBOX_MYSQL_* 生成。
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 ```
 
@@ -293,18 +293,29 @@ MySQL/Redis 依赖默认会部署到：
 - `redis:7-alpine`
 - `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
 
-### 使用外部 MySQL / Redis
+### 使用外部 MySQL / PostgreSQL / Redis
 
-如果希望使用已有的 MySQL/Redis 服务器，而不是内置的本地容器，可在执行
-`install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）：
+如果希望使用已有的 MySQL、PostgreSQL 或 Redis 服务器，而不是内置的本地容器，
+可在执行 `install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）。
+`CUBE_DATABASE_DRIVER` 对齐 Helm 的 `database.driver`：`mysql`（默认）或
+`postgres`（始终外置，one-click 从不自带本地 PostgreSQL）。
 
 ```bash
-# 外部 MySQL（凭据字段可按需覆盖）
+# 外部 MySQL（默认驱动；凭据字段可按需覆盖）
+# CUBE_DATABASE_DRIVER=mysql
 CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
 CUBE_EXTERNAL_MYSQL_PORT=3306
 CUBE_EXTERNAL_MYSQL_USER=cube
 CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
 CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+
+# 外部 PostgreSQL
+# CUBE_DATABASE_DRIVER=postgres
+# CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
+# CUBE_EXTERNAL_POSTGRES_PORT=5432
+# CUBE_EXTERNAL_POSTGRES_USER=cube
+# CUBE_EXTERNAL_POSTGRES_PASSWORD=cube_pass
+# CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
 
 # 外部 Redis
 CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
@@ -312,14 +323,15 @@ CUBE_EXTERNAL_REDIS_PORT=6379
 CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 ```
 
-当设置了 `CUBE_EXTERNAL_MYSQL_HOST`（和/或 `CUBE_EXTERNAL_REDIS_HOST`）时，`install.sh` 会：
+当设置了 `CUBE_EXTERNAL_MYSQL_HOST`、`CUBE_EXTERNAL_POSTGRES_HOST`（且
+`CUBE_DATABASE_DRIVER=postgres`）和/或 `CUBE_EXTERNAL_REDIS_HOST` 时，`install.sh` 会：
 
-- 用外部 MySQL/Redis 地址改写 `CubeMaster/conf.yaml`；
-- 将 `DATABASE_URL`（CubeAPI）和 `CUBE_PROXY_REDIS_*`（cube proxy）写入 `.one-click.env`，让各服务都连接外部地址；
+- 用外部地址改写 `CubeMaster/conf.yaml` 和 `CubeTemplateCenter/conf.yaml` 的 `instance_db_config`（驱动、地址、用户、密码、库名）；
+- 将 `DATABASE_URL`（`mysql://` 或 `postgresql://`）和 `CUBE_PROXY_REDIS_*` 写入 `.one-click.env`，让各服务都连接外部地址；
 - mask 对应的 `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`，本地容器不会再被启动；
 - 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
 
-外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行内置 schema 迁移。
+外部数据库需要预先授予所配置用户对目标库的访问权限。CubeMaster 和 CubeTemplateCenter 都会打开这个库，并在首次启动时执行内置 schema 迁移。
 
 ### 内置 MinIO 与 S3 Volume 插件
 
@@ -350,6 +362,8 @@ S3 API 默认发布在节点 IP 上，目的是让计算节点的 Cubelet 能直
 `CUBE_SANDBOX_MINIO_IMAGE`（默认按 `MIRROR=cn|int` 选择）。MinIO 运行态由
 `cube-sandbox-minio.service` 托管，启动后校验通过
 `curl http://<节点IP>:9000/minio/health/live`（返回 `200` 即正常）。
+
+模板产物与 CubeOps 组件仓库可用 `CUBE_ARTIFACT_STORE_BACKEND=fs`、`CUBE_OPS_STORE_BACKEND=fs` 替代 MinIO（S3 Volume 仍需要 MinIO 或外部 S3）。
 
 改用已有 S3 时，设 `CUBE_SANDBOX_MINIO_ENABLED=0` 并填写 `CUBE_S3_*`：
 
@@ -436,7 +450,7 @@ export E2B_API_KEY=e2b_000000
 
 必需命令：
 
-- `docker`（cube-egress 以 docker 容器运行，安装器会自动安装；docker 是硬性前置依赖，离线/无法自动安装的环境请提前装好 Docker）
+- `docker`（cube-egress 以 docker 容器运行，安装器会自动安装；docker 是硬性前置依赖，离线/无法自动安装的环境请提前装好 Docker。不支持 snap Docker，读不到 `/usr/local/services`：`sudo snap remove docker`，再安装 docker-ce）
 - `tar`
 - `ss`
 - `bash`
@@ -485,7 +499,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 
 必需命令：
 
-- `docker`
+- `docker`（不支持 snap Docker，请安装 docker-ce / docker.io）
 - `tar`
 - `ss`
 - `bash`
@@ -562,6 +576,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 - 如果 `deploy/guest-image/Dockerfile` 构建失败，或构建机的 `mkfs.ext4` 不支持 `-d`，guest image 生成会立即失败。
 - `cube-snapshot/spec.json` 在当前 one-click 首版中不是强制产物；缺失时相关插件会退化为告警，而不是阻塞基础启动。
 - 默认的 `NetworkManager + dnsmasq` 回退路径依赖 NetworkManager 拉起 `dnsmasq` 子进程。在 NetworkManager 会初始化插件但从不真正拉起它的目标机上（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本自己拉起并管理 `dnsmasq`。standalone 模式不需要可重启的 `NetworkManager`，但在完全没有任何解析器管理器的目标机上，你必须确保之后没有其它组件覆盖 `/etc/resolv.conf`。该模式下 `dnsmasq` 作为一个不受 systemd 托管的裸子进程运行，若之后崩溃不会自动重启；可通过 `systemctl restart cube-sandbox-dns` 恢复。
+- **不支持 snap Docker。** Ubuntu Server 安装器（Subiquity）在装系统时会将 Docker 列为 "Featured Snap" 可勾选项；勾选后或后续执行 `snap install docker` 装的都是带 AppArmor 沙箱限制的 snap 版 Docker daemon，无法访问 `/usr/local/services` 等受限路径。安装脚本会自动检测并中止，同时给出修复步骤。修复：`sudo snap remove docker`，再按 <https://docs.docker.com/engine/install/ubuntu/> 安装 docker-ce。
 
 ## DNS 排障
 
@@ -628,7 +643,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker 节点数（默�
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                 # 默认使用公网预置镜像
 export TENCENTCLOUD_USE_CFS=false                 # 默认无 CFS，cubemaster 单副本
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.0
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.2
 ```
 
 非交互 / CI 运行时建议显式设置以下变量（没有 TTY 时交互菜单会回退到默认值，显式设置可避免意外）。密码变量是例外：非交互运行会拒绝使用仓库中公开可见的内置演示密码并要求显式设置；如需在临时沙箱中使用不安全的默认密码，可设置 `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1`。

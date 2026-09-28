@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -26,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -446,11 +446,15 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// describes a sandbox that is by now running whatever the proxy thinks.
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
-	// After Create the sandbox runs on private disks. Drop the pause package
-	// on the node that still holds it: origin when that IP is known and not
-	// the target (also the PAUSED tombstone), otherwise this node. Do not
-	// key this off CrossNode — a cross-node placement with a blank origin
-	// would otherwise skip both cleanup paths and leak the package.
+	// After Create the sandbox runs on private disks. Ask Cubelet to drop
+	// the pause package on the node that still holds it: origin when that
+	// IP is known and not the target (also the PAUSED tombstone), otherwise
+	// this node. Cubelet no-ops while a live sandbox still restores from
+	// that catalog (XFS mmap; S3 Snapshot last-restore) and GCs on the
+	// next Pause or Destroy. Cross-node origin is not live, so the origin
+	// package still goes away. Do not key this off CrossNode — a
+	// cross-node placement with a blank origin would otherwise skip both
+	// cleanup paths and leak the package.
 	origin := strings.TrimSpace(rec.NodeIP)
 	if origin != "" && origin != targetIP {
 		if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin, rec.SnapshotID, rec.Backend); err != nil {

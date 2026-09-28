@@ -12,6 +12,9 @@
 
 import { ApiError } from "./exceptions.js";
 
+/** Align with e2b maxNetworkRuleHeaderValueLen; under nginx's 8k header buffers. */
+export const SECRET_MAX_BYTES = 2048;
+
 export type Scheme = "http" | "https";
 
 export type Method =
@@ -160,7 +163,18 @@ function serializeMatch(match: Match): Record<string, unknown> {
   return out;
 }
 
+function secretByteLength(secret: string): number {
+  return new TextEncoder().encode(secret).length;
+}
+
+function validateInjectSecret(secret: string, field: string): void {
+  if (secretByteLength(secret) > SECRET_MAX_BYTES) {
+    throw new Error(`${field} exceeds ${SECRET_MAX_BYTES} bytes`);
+  }
+}
+
 function serializeInject(inject: Inject): Record<string, unknown> {
+  validateInjectSecret(inject.secret, "inject.secret");
   const out: Record<string, unknown> = { header: inject.header, secret: inject.secret };
   if (inject.format !== undefined) out.format = inject.format;
   return out;
@@ -214,6 +228,7 @@ function convertE2BTransformToInject(transform: {
     if (typeof value !== "string") {
       throw new Error(`network.rules transform.headers[${name}] must be a string`);
     }
+    validateInjectSecret(value, `network.rules transform.headers[${name}]`);
     injects.push({ header: name, secret: value });
   }
   return injects;

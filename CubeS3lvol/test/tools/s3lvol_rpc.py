@@ -47,7 +47,7 @@
 #
 #  Printing string_value *verbatim* is what makes the unwrapping transparent: the
 #  RPCs with more than a name to report put a serialised JSON document in there
-#  (rcow_get_bdev, rcow_get_decouple, rcow_get_imports, rcow_active_bdev), so
+#  (rcow_get_bdev, rcow_get_decouple, rcow_get_exports, rcow_get_imports, rcow_active_bdev), so
 #  stdout ends up carrying exactly the object or array those RPCs used to return,
 #  and callers that parse it need no change at all.
 #
@@ -74,16 +74,14 @@
 #  again is reported and does not stop the others. Exit status is 0 only if
 #  every marked-and-deletable snapshot went.
 #
-#  What this is not:
+#  A ~60s poller already completes leased exports, extra clones, and finished
+#  decouples. This command is for lease-less exports, failed destroys, and not
+#  waiting out the poller. Marks are persisted to
+#  <prefix>/meta/pending-deletes.json; a crash before that PUT forgets the
+#  intent. Withdraw a mark with rcow_cancel_pending_delete (idempotent;
+#  lvol_name required, lvs_name optional). If the poller has already submitted
+#  destroy, cancel only drops the mark and the snapshot may still go away.
 #
-#    * There is no automatic retry. Nothing on the target polls the marks; this
-#      command is the only thing that acts on them, and it has to be run.
-#    * The marks live in the target's memory only. A restart loses them, and a
-#      delete refused before the restart is then indistinguishable from one that
-#      was never asked for.
-#    * There is no way to cancel a mark other than completing the delete. A
-#      refused delete stays recorded for as long as the target runs and its
-#      lvstore stays attached (an unload drops that lvstore's marks).
 #    * The cluster deployment does not run this: Cubelet's own delete path
 #      (S3Cow.DeleteByKind) still treats a refused snapshot delete as success.
 #      This is an operator tool for the node, not a fix for that.
@@ -190,13 +188,25 @@ def _send(sock_path, timeout, method, params=None, raw=False):
 
     result = resp.get("result")
 
-    # The envelope, recognised by its exact shape: an object with those two keys
-    # and nothing else. Being that strict matters -- an RPC that happened to
-    # report a bool_value among other fields would otherwise have the rest of its
-    # answer thrown away.
+    # The envelope, recognised by its shape. The two mandatory keys, plus at most
+    # the ones listed here.
+    #
+    # Being this specific matters in both directions. rcow_delete_lvol adds
+    # "deferred" to say the delete was accepted as an intent rather than carried
+    # out, and every caller that reads the name off stdout has to keep working --
+    # so an unknown extra field cannot simply disqualify the envelope. But
+    # rcow_import_lvol answers {bool_value, string_value, mode} and its callers
+    # parse "mode" out of the whole object, so unwrapping *anything* with those
+    # two keys would throw the rest of its answer away. Hence a whitelist: new
+    # RPCs that carry real payload alongside the envelope keep arriving whole.
+    #
+    # --raw shows the whole object either way.
+    _ENVELOPE_EXTRA = {"deferred"}
     if (not raw and isinstance(result, dict)
-            and set(result) == {"bool_value", "string_value"}
-            and isinstance(result["bool_value"], bool)):
+            and {"bool_value", "string_value"} <= set(result)
+            and set(result) - {"bool_value", "string_value"} <= _ENVELOPE_EXTRA
+            and isinstance(result["bool_value"], bool)
+            and isinstance(result["string_value"], str)):
         text = result["string_value"]
         if result["bool_value"]:
             return True, text, True

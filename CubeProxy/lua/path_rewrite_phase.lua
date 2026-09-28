@@ -1,5 +1,3 @@
--- file name: path_rewrite_phase.lua
---
 -- Path-based sandbox routing. Accepts URIs shaped as:
 --     /sandbox/<sandbox-id>/<container-port>(/<rest>)?
 -- and rewrites the upstream URI to "/<rest>" (preserving the query string),
@@ -36,9 +34,8 @@ ngx.var.container_port = container_port
 -- continue to run as configured.
 ngx.req.set_uri(rest, false)
 
--- Auto-pause gate: if the sandbox is currently paused, ask the sidecar to
--- resume it before we attempt backend resolution. No-op when the lifecycle
--- feature is disabled or the sandbox isn't tracked.
+-- Auto-pause gate: if the sandbox is currently paused, ask CLM to resume it
+-- before we attempt backend resolution. No-op when the sandbox isn't tracked.
 state.gate(ins_id)
 
 local host_ip, host_port, mask_request_host = sb.resolve_backend(ins_id, container_port)

@@ -126,6 +126,13 @@ read_back_pattern()
 
 jget() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$1" "$2"; }
 
+# For a field that is written only when it is true, where its absence is the
+# answer: jget raises on a missing key rather than saying so.
+has_key() {
+	python3 -c 'import json,sys; print("yes" if sys.argv[2] in json.loads(sys.argv[1]) else "no")' \
+		"$1" "$2"
+}
+
 rpc() { python3 "${RPC}" "$@"; }
 
 registry_names() {
@@ -136,6 +143,38 @@ try:
 except Exception:
     print("")
 PY
+}
+
+# Where the registry says a volume belongs, as "subsys nsid". The layout a
+# replay has to reproduce comes from here, not from wherever the volume happens
+# to be, so that is what the test compares against.
+recorded_placement() {
+	python3 - "${ACTIVE_FILE}" "$1" <<'PY'
+import json, sys
+try:
+    e = json.load(open(sys.argv[1]))[sys.argv[2]]
+    print("%d %d" % (e["subsys"], e["nsid"]))
+except Exception:
+    print("")
+PY
+}
+
+# Whether the subsystem at this index exposes a namespace with this nsid, asked
+# of the target rather than the host. rcow_get_bdev's device_path would answer
+# it too, but only once the kernel has published the gendisk, and a test that
+# waits on udev reports timing as failure -- measured, see read_back_pattern.
+nsid_present() {
+	rcow_srpc nvmf_get_subsystems 2>/dev/null | python3 -c '
+import json, sys
+want_nqn, want_nsid = sys.argv[1], int(sys.argv[2])
+for s in json.load(sys.stdin):
+    if s.get("nqn") == want_nqn:
+        print(sum(1 for n in s.get("namespaces", [])
+                  if n.get("nsid") == want_nsid))
+        break
+else:
+    print(-1)
+' "$(rcow_nqn "$1")" "$2"
 }
 
 # --------------------------------------------------------------------------
@@ -472,7 +511,10 @@ else
 	fail "the target died removing a namespace under host reads"
 fi
 
-# Put it back, so the rest of the test sees the layout it expects.
+# Put it back without an explicit nsid, which is what Cubelet does. Auto-alloc
+# must not reuse the slot that just vanished: the host treats an in-place UUID
+# change as "identifiers changed" and may never republish a /dev node. The
+# hashed subsystem stays the same; recovery that names a nsid is tested in [5].
 rpc rcow_active_bdev '{"device_name":"ctl-a"}' >/dev/null 2>&1 ||
 	fail "could not re-activate ctl-a"
 if rcow_verify_active 30 >/dev/null 2>&1; then
@@ -483,10 +525,19 @@ fi
 
 RE_JSON="$(rpc rcow_get_bdev '{"device_name":"ctl-a"}')"
 RE_DEV="$(jget "${RE_JSON}" device_path)"
-[ "$(jget "${RE_JSON}" subsys)" = "${A_SUB}" ] &&
-[ "$(jget "${RE_JSON}" nsid)" = "${A_NSID}" ] &&
-	pass "at the same placement it had before (subsys ${A_SUB} nsid ${A_NSID})" ||
-	fail "it came back at subsys $(jget "${RE_JSON}" subsys) nsid $(jget "${RE_JSON}" nsid)"
+RE_SUB="$(jget "${RE_JSON}" subsys)"
+RE_NSID="$(jget "${RE_JSON}" nsid)"
+[ "${RE_SUB}" = "${A_SUB}" ] &&
+	pass "re-activate stayed on hashed subsys ${A_SUB}" ||
+	fail "it came back at subsys ${RE_SUB}, wanted ${A_SUB}"
+[ "${RE_NSID}" != "${A_NSID}" ] &&
+	pass "auto-activate skipped the just-freed nsid ${A_NSID} (got ${RE_NSID})" ||
+	fail "auto-activate reused nsid ${A_NSID} on subsys ${A_SUB}"
+if [ -n "${RE_DEV}" ] && [ -b "${RE_DEV}" ]; then
+	pass "get_bdev after nsid skip is an openable block device (${RE_DEV})"
+else
+	fail "get_bdev after nsid skip: '${RE_DEV}' is not a block device"
+fi
 
 read_back_pattern "${RE_DEV}" "after deactivating under load and re-activating"
 
@@ -596,6 +647,102 @@ fi
 grep -q "restart instead" /tmp/rcow_ctl_verify.log &&
 	pass "and said what actually fixes it, rather than re-activating" ||
 	fail "the advice on a mismatch is missing"
+
+# ==========================================================================
+# The state the two sections above have just built is the one the replay gets
+# wrong: the registry is in memory with entries in it, and nothing has attached
+# them. An activation for a volume in that state has to attach it. Reading "the
+# name is in the registry" as "the namespace is up" is how a replay over an
+# already-loaded registry builds nothing at all -- and a hot restart is exactly
+# that replay, run by a target whose registry something else had already read
+# while it was coming up. The host then reconnects to a subsystem with no
+# namespaces in it and the kernel removes its block devices, which turns the
+# pause a hot upgrade promises into I/O errors.
+echo ""
+echo "=== [7b] a recorded-but-unattached volume is attached, not reported active"
+
+read -r REC_SUB REC_NSID <<<"$(recorded_placement ctl-a)"
+info "the registry records ctl-a at subsys ${REC_SUB} nsid ${REC_NSID}"
+
+ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-a"}' 2>&1)"
+
+# The placement alone does not tell the two answers apart -- a wrong answer can
+# carry the right placement too. So assert first that the reply is a reply at all (an
+# error would parse as neither field), and only then that it was the attach
+# answer rather than the already-active one.
+[ "$(jget "${ACT}" subsys)" = "${REC_SUB}" ] &&
+[ "$(jget "${ACT}" nsid)" = "${REC_NSID}" ] &&
+	pass "the activation answered for ctl-a at the recorded placement" ||
+	fail "unexpected reply for ctl-a: ${ACT}"
+
+[ "$(has_key "${ACT}" already_active)" = "yes" ] &&
+	fail "activating an inherited volume answered 'already active' off the \
+registry record alone" ||
+	pass "and it did not answer 'already active', so it attached"
+
+NS="$(nsid_present "${REC_SUB}" "${REC_NSID}")"
+[ "${NS}" = "1" ] &&
+	pass "and the namespace is really there, not just recorded" ||
+	fail "the subsystem has ${NS} namespace(s) at nsid ${REC_NSID}, wanted 1"
+
+# Only now may it be treated as a repeat, which is what a caller retrying after
+# a timeout relies on.
+ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-a"}' 2>&1)"
+[ "$(has_key "${ACT}" already_active)" = "yes" ] &&
+	pass "a second activation is recognised as already active" ||
+	fail "a second activation did not see the namespace it had just created"
+
+# ==========================================================================
+# A volume whose recording fails must stop claiming it is attached. The caller
+# removes the namespace on any non-zero return from the add, so an entry left
+# saying "attached" answers already_active on the retry while the host has no
+# device behind it. A replay is where that bites: the loader has already put an
+# entry in for every volume by the time the attach runs, so every volume takes
+# that path, and the batch counts already_active as restored.
+#
+# ctl-b is the volume to use. The --no-replay start above recorded it without
+# attaching it, and [7b] attached only ctl-a, so it is still in exactly the
+# state this is about.
+echo ""
+echo "=== [7c] a failed recording does not leave the volume claiming to be up"
+
+# Make the write fail the way a full or read-only filesystem would. The writer
+# creates "<path>.tmp" and renames it into place, so a directory at that name is
+# EISDIR for root as well -- permissions alone would not be, since the target
+# runs as root here.
+REG="${RCOW_ACTIVE_FILE}"
+rm -f "${REG}.tmp"
+mkdir "${REG}.tmp" || fail "could not set up the write failure"
+
+# The reply to this one is an error, not a document, so it is read through the
+# exit status rather than parsed: what the caller has to report is the failure.
+if rpc rcow_active_bdev '{"device_name":"ctl-b"}' \
+		>/tmp/rcow_ctl_7c.log 2>&1; then
+	ACT_RC=0
+else
+	ACT_RC=1
+fi
+rmdir "${REG}.tmp"
+
+[ "${ACT_RC}" -ne 0 ] &&
+	pass "the attach reported the failed recording instead of claiming success" ||
+	fail "the attach was reported as succeeding although recording it failed"
+
+# The retry is the assertion with teeth: nothing is up for ctl-b, so it has to
+# attach again. Answering already_active here means the registry would be
+# counted as restored for a volume the host has no device for.
+ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-b"}' 2>&1)"
+[ "$(has_key "${ACT}" already_active)" = "yes" ] &&
+	fail "the retry was answered from a record whose attach had failed, while \
+the host has no device for it" ||
+	pass "the retry attached rather than answering already active"
+
+CB_SUB="$(jget "${ACT}" subsys)"
+CB_NSID="$(jget "${ACT}" nsid)"
+CB_NS="$(nsid_present "${CB_SUB}" "${CB_NSID}")"
+[ "${CB_NS}" = "1" ] &&
+	pass "and the namespace is really there, not just recorded" ||
+	fail "the subsystem has ${CB_NS} namespace(s) at nsid ${CB_NSID}, wanted 1"
 
 # ==========================================================================
 echo ""

@@ -26,14 +26,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 func makeTestConfig(t *testing.T) *Config {
@@ -72,6 +72,7 @@ func probeReflink(dir string) error {
 }
 
 func TestParam(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -92,6 +93,7 @@ func TestParam(t *testing.T) {
 }
 
 func TestCreateDestroy(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -145,6 +147,7 @@ func TestCreateDestroy(t *testing.T) {
 	assert.Error(t, s.Destroy(ctx, nil))
 }
 func TestCreateDestroyInvalidVolume(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -454,6 +457,7 @@ func (m *fakeCowVolumeManager) GetMetrics(ctx context.Context) (map[string]uint6
 }
 
 func TestCleanupTemplateLocalDataIsIdempotent(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -502,6 +506,7 @@ func TestCleanupTemplateLocalDataIsIdempotent(t *testing.T) {
 }
 
 func TestCleanupTemplateLocalDataRemovesSnapIDParentDir(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -530,6 +535,7 @@ func TestCleanupTemplateLocalDataRemovesSnapIDParentDir(t *testing.T) {
 }
 
 func TestCreateWithTimeoutCtx(t *testing.T) {
+	requireRoot(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 	time.Sleep(2 * time.Millisecond)
@@ -561,6 +567,7 @@ func TestCreateWithTimeoutCtx(t *testing.T) {
 }
 
 func TestCreateWithInvalidParam(t *testing.T) {
+	requireRoot(t)
 	ctx := context.Background()
 
 	s := &local{}
@@ -610,14 +617,6 @@ func TestCreateWithInvalidParam(t *testing.T) {
 
 }
 
-func TestMain(m *testing.M) {
-	if os.Getenv("CI") != "" {
-		fmt.Println("Skipping testing in CI environment")
-		return
-	}
-	m.Run()
-}
-
 func TestPollImmediateInfiniteWithContext(t *testing.T) {
 	timeout := 5 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -656,6 +655,8 @@ func TestPollImmediateInfiniteWithContext(t *testing.T) {
 }
 
 func TestSnapCreateCubebox(t *testing.T) {
+	requireRoot(t)
+
 	cfg := makeTestConfig(t)
 	// Template Create→Destroy promotes tmpPool→poolFormat only for reflink pools.
 	cfg.PoolType = cp_reflink_type
@@ -733,6 +734,7 @@ func TestSnapCreateCubebox(t *testing.T) {
 
 func TestCreateCubeboxBySnap(t *testing.T) {
 
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -821,6 +823,7 @@ func TestCreateCubeboxBySnap(t *testing.T) {
 
 func TestInit(t *testing.T) {
 
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -854,6 +857,7 @@ func TestInitSkipsPoolSetupWhenStorageBackendIsCow(t *testing.T) {
 func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"
+	cfg.Cow.S3.Enable = true
 	// cubelet derives reflink root_dir from data_path, so put data_path
 	// somewhere we can also pre-seed stale state in.
 	rootDir := defaultReflinkAutoRootDir(cfg.DataPath)

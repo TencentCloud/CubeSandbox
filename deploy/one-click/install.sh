@@ -43,11 +43,18 @@ esac
 require_root
 
 ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
+# Snapshot this-run toggle intent (ONE_CLICK_TOGGLE_KEYS) before any file is
+# sourced: the upgrade merge later loads the old .one-click.env, which would
+# otherwise clobber both `VAR=x ./install.sh` and toggle keys carried in .env.
+snapshot_one_click_toggles "${ENV_FILE}"
+snapshot_one_click_database_intent "${ENV_FILE}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
   # which would otherwise clobber the CLI-provided values set above.
   apply_cli_overrides
+  # Shell-interpret .env DB values (quotes stripped) into the dotenv snapshot.
+  capture_one_click_database_dotenv_values
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -57,11 +64,15 @@ fi
 DEPLOY_ROLE="$(one_click_deploy_role)"
 
 # ---- External MySQL / Redis support ----
-# Set CUBE_EXTERNAL_MYSQL_HOST / CUBE_EXTERNAL_REDIS_HOST to use external
-# services instead of the bundled local Docker containers. Defaults are filled
-# after the optional upgrade env merge so they are based on the final runtime
-# configuration.
+# Set CUBE_EXTERNAL_MYSQL_HOST / CUBE_EXTERNAL_POSTGRES_HOST /
+# CUBE_EXTERNAL_REDIS_HOST to use external services instead of the bundled
+# local Docker containers. Defaults are filled after the optional upgrade env
+# merge so they are based on the final runtime configuration.
+# CUBE_DATABASE_DRIVER mirrors Helm database.driver (mysql|postgres); postgres
+# is always external (one-click never ships a local PostgreSQL).
 init_external_dep_defaults() {
+  CUBE_DATABASE_DRIVER="${CUBE_DATABASE_DRIVER:-mysql}"
+
   CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
   CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
   CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
@@ -71,6 +82,14 @@ init_external_dep_defaults() {
   # CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
   # the persisted .one-click.env and the seed step disagree on the database name.
   CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+
+  # External PostgreSQL (CUBE_DATABASE_DRIVER=postgres). Separate keys from
+  # MySQL so nothing is shared or inferred across engines (same as Helm).
+  CUBE_EXTERNAL_POSTGRES_HOST="${CUBE_EXTERNAL_POSTGRES_HOST:-}"
+  CUBE_EXTERNAL_POSTGRES_PORT="${CUBE_EXTERNAL_POSTGRES_PORT:-5432}"
+  CUBE_EXTERNAL_POSTGRES_USER="${CUBE_EXTERNAL_POSTGRES_USER:-cube}"
+  CUBE_EXTERNAL_POSTGRES_PASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD:-cube_pass}"
+  CUBE_EXTERNAL_POSTGRES_DB="${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}"
 
   # Mirrors the MySQL behaviour above (patch conf.yaml, persist env, mask local
   # redis unit).
@@ -99,6 +118,12 @@ init_external_dep_defaults() {
   # prefixes never collide with the volume plugin's volumes/<id>/ tree.
   CUBE_S3LVOL_BUCKET="${CUBE_S3LVOL_BUCKET:-cube-s3lvol}"
   CUBE_S3LVOL_PATH_STYLE="${CUBE_S3LVOL_PATH_STYLE:-}"
+  CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
+  CUBE_ARTIFACT_STORE_BACKEND="${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+  CUBE_OPS_STORE_BACKEND="${CUBE_OPS_STORE_BACKEND:-s3}"
+  CUBE_OPS_STORE_FS_ROOT="${CUBE_OPS_STORE_FS_ROOT:-/var/lib/cubeops/blobs}"
+  CUBE_OPS_STORE_FS_PUBLIC_URL="${CUBE_OPS_STORE_FS_PUBLIC_URL:-}"
+  CUBE_OPS_STORE_FS_SIGNING_KEY="${CUBE_OPS_STORE_FS_SIGNING_KEY:-}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -109,6 +134,10 @@ warn_default_external_credentials() {
   if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" && "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "cube_pass" ]]; then
     log "WARNING: external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}) configured with the default password 'cube_pass'."
     log "WARNING: set CUBE_EXTERNAL_MYSQL_PASSWORD to a strong value in your .env before exposing this deployment."
+  fi
+  if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" && "${CUBE_EXTERNAL_POSTGRES_PASSWORD}" == "cube_pass" ]]; then
+    log "WARNING: external PostgreSQL (${CUBE_EXTERNAL_POSTGRES_HOST}) configured with the default password 'cube_pass'."
+    log "WARNING: set CUBE_EXTERNAL_POSTGRES_PASSWORD to a strong value in your .env before exposing this deployment."
   fi
   if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
     log "WARNING: external Redis (${CUBE_EXTERNAL_REDIS_HOST}) configured with the default password 'ceuhvu123'."
@@ -248,8 +277,40 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
 fi
+# Re-apply this-run toggle intent (harmless on fresh install): the merged env
+# above preserves the old runtime values for keys whose .env value equals the
+# env.example default, which would otherwise ignore an explicit flip back.
+apply_one_click_toggles
+# Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
+# opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
+apply_one_click_database_intent
+
+# Old packages had no unified knob. Preserve a previous non-zero Master /
+# per-component DB instead of silently resetting all consumers to DB 0.
+if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
+  derive_one_click_redis_db_from_legacy \
+    "${RUNTIME_ENV_OLD}" \
+    "${INSTALL_PREFIX}/CubeMaster/conf.yaml"
+fi
+# Compute nodes never deploy CubeMaster, so without an explicit .env value
+# they stay on DB 0 while the control node may use a non-zero DB. Warn on
+# any non-zero value (fresh install or upgrade), not only after derivation.
+if [[ "${CUBE_EXTERNAL_REDIS_DB:-0}" != "0" ]]; then
+  log "WARNING: using non-zero Redis DB ${CUBE_EXTERNAL_REDIS_DB}; set the same"
+  log "CUBE_EXTERNAL_REDIS_DB in .env on every node that runs the control-plane"
+  log "stack (Master/Ops/Proxy/LCM), or those nodes stay on DB 0."
+fi
+
+# Validate Redis DB before any destructive install phase (stop/rm). A typo
+# like CUBE_EXTERNAL_REDIS_DB=16 must fail here, not after toolbox is wiped.
+one_click_redis_db >/dev/null
 
 init_external_dep_defaults
+# Compute nodes never open the control-plane DB; skip driver/host validation
+# so a mirrored CUBE_DATABASE_DRIVER=postgres without local reachability works.
+if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+  validate_one_click_database_config
+fi
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
     log "compute role does not deploy MinIO; ignoring CUBE_SANDBOX_MINIO_ENABLED (volume plugin uses CUBE_S3_*)"
@@ -258,6 +319,22 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
 fi
 check_minio_not_combined_with_user_s3
 ensure_minio_init_credentials
+
+# Shared secret authenticating CubeTemplateCenter's build-status callbacks to
+# CubeMaster (POST /internal/template/jobs/:job_id/status, whose BUILT payload
+# is trusted wholesale by the resume pipeline). Generated once and persisted in
+# .one-click.env, which both units load via EnvironmentFile. Control-plane only;
+# an upgrade merge carries the existing value forward, so generation happens
+# only when the key is still empty.
+ensure_template_callback_token() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+  CUBE_TEMPLATE_CALLBACK_TOKEN="${CUBE_TEMPLATE_CALLBACK_TOKEN:-}"
+  if [[ -z "${CUBE_TEMPLATE_CALLBACK_TOKEN}" ]]; then
+    CUBE_TEMPLATE_CALLBACK_TOKEN="$(generate_alnum_secret 32)"
+    log "generated CUBE_TEMPLATE_CALLBACK_TOKEN (32 chars); it will be saved to .one-click.env"
+  fi
+}
+ensure_template_callback_token
 
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
@@ -408,6 +485,51 @@ check_runtime_file_paths_not_directories() {
   done < <(one_click_runtime_file_paths)
 }
 
+# Resolve the placeholders in CubeTemplateCenter's conf.yaml. Runs alongside
+# generate_cubemaster_config_ports and uses the same CUBE_SANDBOX_* inputs, so
+# TC and CubeMaster always point at the same MySQL/Redis -- they share the
+# CubeDB and the progress-snapshot keyspace, so mismatched credentials would be
+# a silent split-brain.
+generate_templatecenter_config() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeTemplateCenter/conf.yaml"
+  [[ -f "${cfg}" ]] || return 0
+
+  local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  local mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  local mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+  local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  # TC is co-located with CubeMaster and only the local master calls it, so
+  # loopback is the safe default. CUBETEMPLATECENTER_HTTP_BIND overrides for a
+  # split deployment; the build endpoint is unauthenticated, so exposing it is
+  # the operator's explicit choice.
+  local http_bind="${CUBETEMPLATECENTER_HTTP_BIND:-127.0.0.1}"
+  # CubeMaster's HTTP base URL for TC to report build results. Defaults to the
+  # local CubeMaster (co-located in one-click); override for split deployments.
+  # Can also be set via CUBE_MASTER_ADDR env (env wins over this yaml value).
+  local master_addr="${CUBETEMPLATECENTER_MASTER_ADDR:-http://127.0.0.1:8089}"
+
+  sed -i \
+    -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_USER__|$(escape_sed "${mysql_user}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_PASSWORD__|$(escape_sed "${mysql_password}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_DB__|$(escape_sed "${mysql_db}")|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
+    -e "s|__CUBETEMPLATECENTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
+    -e "s|__CUBETEMPLATECENTER_MASTER_ADDR__|$(escape_sed "${master_addr}")|g" \
+    "${cfg}"
+
+  # Same knob as Master: TC shares the progress-snapshot Redis keyspace.
+  # A mismatch (Master on N, TC on 0) breaks progress queries — see Helm #1638.
+  local redis_db
+  redis_db="$(one_click_patch_conf_redis_db "${cfg}")"
+  log "CubeTemplateCenter redis db_no=${redis_db} (CUBE_EXTERNAL_REDIS_DB)"
+}
+
 generate_cubemaster_config_ports() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
@@ -437,11 +559,19 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
     -e "s|__CUBEMASTER_CUBE_OPS_ADDR__|$(escape_sed "${cube_ops_addr}")|g" \
     "${cfg}"
+
+  # Single operator knob CUBE_EXTERNAL_REDIS_DB → Master conf db_no (same value
+  # TC/Ops/Proxy/LCM derive). Default 0 matches the conf template. Validated
+  # early via one_click_redis_db before the destructive install phase.
+  local redis_db
+  redis_db="$(one_click_patch_conf_redis_db "${cfg}")"
+  log "CubeMaster redis db_no=${redis_db} (CUBE_EXTERNAL_REDIS_DB)"
 }
 
-# When external MySQL/Redis is configured, patch CubeMaster conf.yaml to replace
-# the default 127.0.0.1 endpoints with the external connection details. Must run
-# after generate_cubemaster_config_ports so the port placeholders are resolved.
+# When external MySQL/PostgreSQL/Redis is configured, patch CubeMaster and
+# CubeTemplateCenter conf.yaml with the external endpoints. Must run after
+# generate_cubemaster_config_ports / generate_templatecenter_config so the port
+# placeholders are resolved.
 patch_cubemaster_external_deps() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
@@ -466,12 +596,18 @@ patch_cubemaster_external_deps() {
     fi
   fi
 
-  # Validate once up front; both branches patch the same file.
-  if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
+  # Bundled MySQL restore from a previously externalized conf.yaml is not needed:
+  # PKG_ROOT is a fresh unpack every run, so the template already has driver=mysql
+  # and addr=127.0.0.1:<port>. (Upgrade does not restore an old conf.yaml into PKG_ROOT.)
+
+  # Nothing to patch: no external endpoint, no stale Sentinel keys.
+  if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_POSTGRES_HOST}" \
+      && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
       && "${scrub_stale_sentinel}" -eq 0 && "${restore_bundled_redis}" -eq 0 ]]; then
     return 0
   fi
+
   ensure_file "${cfg}"
 
   if [[ "${scrub_stale_sentinel}" -eq 1 ]]; then
@@ -479,87 +615,17 @@ patch_cubemaster_external_deps() {
     sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "patching conf.yaml for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}/${CUBE_EXTERNAL_MYSQL_DB}"
-    # SECURITY: escape user-supplied values for the sed '|' delimiter so that a
-    # '|', '\', '&' or '"' in a host/user/password does not corrupt conf.yaml
-    # or break the double-quoted sed replacement strings below.
-    local mysql_addr_esc mysql_user_esc mysql_pwd_esc mysql_db_esc
-    mysql_addr_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}")"
-    mysql_user_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_USER}")"
-    mysql_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
-    mysql_db_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_DB}")"
-    # Match only on the YAML key prefix ('addr:'/'user:'/'pwd:'/'db_name:') and
-    # accept any current value, so these patterns keep working even if the
-    # conf.yaml template is regenerated with different defaults. These keys only
-    # appear in the MySQL section (instance_db_config), so without
-    # a trailing 'g' flag each line is patched exactly once and Redis fields
-    # (nodes:/password:) are never touched.
-    sed -i \
-      -e "s|addr: \".*\"|addr: \"${mysql_addr_esc}\"|" \
-      -e "s|user: \".*\"|user: \"${mysql_user_esc}\"|" \
-      -e "s|pwd: \".*\"|pwd: \"${mysql_pwd_esc}\"|" \
-      -e "s|db_name: \".*\"|db_name: \"${mysql_db_esc}\"|" \
-      "${cfg}"
-  fi
+  # No-op when no external SQL host is set (Redis-only).
+  patch_conf_external_instance_db "${cfg}"
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-    [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}" ]] \
-      || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
-    log "patching conf.yaml for external Redis Sentinel: master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} sentinels=${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
-    local redis_master_esc redis_sentinel_esc redis_pwd_esc redis_sentinel_pwd_esc
-    redis_master_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_MASTER_NAME}")"
-    redis_sentinel_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}")"
-    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
-    redis_sentinel_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}")"
-    # Always use s||| substitutions (not sed a\) so escape_sed's \| / \& /
-    # \\ escapes are interpreted by the replacement engine. sed a-text would
-    # leave those backslashes literal and produce invalid YAML on first insert
-    # when master name / password / nodes contain | or &.
-    sed -i -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" "${cfg}"
-    if grep -q 'master_name:' "${cfg}"; then
-      sed -i \
-        -e "s|nodes: \".*\"|nodes: \"\"|" \
-        -e "s|master_name: \".*\"|master_name: \"${redis_master_esc}\"|" \
-        -e "s|sentinel_nodes: \".*\"|sentinel_nodes: \"${redis_sentinel_esc}\"|" \
-        -e "s|sentinel_password: \".*\"|sentinel_password: \"${redis_sentinel_pwd_esc}\"|" \
-        "${cfg}"
-    else
-      sed -i \
-        -e "s|nodes: \".*\"|nodes: \"\"\\
-  master_name: \"${redis_master_esc}\"\\
-  sentinel_nodes: \"${redis_sentinel_esc}\"\\
-  sentinel_password: \"${redis_sentinel_pwd_esc}\"|" \
-        "${cfg}"
-    fi
-  elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
-    log "patching conf.yaml for external Redis: ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
-    # Sentinel → standalone: drop leftover master_name/sentinel_* so
-    # resolveRedisAddr does not keep preferring MasterName over Nodes.
-    sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
-    local redis_nodes_esc redis_pwd_esc
-    redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
-    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
-    # Match only on the YAML key prefix so these patterns survive template
-    # default changes. 'nodes:'/'password:' only appear in the redis* sections,
-    # so every Redis endpoint is repointed while MySQL fields stay untouched.
-    sed -i \
-      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
-      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
-      "${cfg}"
-  elif [[ "${restore_bundled_redis}" -eq 1 ]]; then
-    # Leaving external Redis (Sentinel or standalone) for bundled local Redis:
-    # restore nodes/password so CubeMaster matches up-support/quickcheck.
-    local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
-    local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
-    local redis_nodes_esc redis_pwd_esc
-    redis_nodes_esc="$(escape_sed "127.0.0.1:${redis_port}")"
-    redis_pwd_esc="$(escape_sed "${redis_password}")"
-    log "restoring bundled Redis nodes/password in conf.yaml: 127.0.0.1:${redis_port}"
-    sed -i \
-      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
-      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
-      "${cfg}"
+  one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster" "${restore_bundled_redis}"
+
+  # TemplateCenter shares the SQL database and the Redis keyspace and has no
+  # env override for either endpoint.
+  local tc_cfg="${PKG_ROOT}/CubeTemplateCenter/conf.yaml"
+  if [[ -f "${tc_cfg}" ]]; then
+    patch_conf_external_instance_db "${tc_cfg}"
+    one_click_patch_conf_redis_endpoint "${tc_cfg}" "CubeTemplateCenter" "${restore_bundled_redis}"
   fi
 }
 
@@ -571,7 +637,40 @@ patch_cubemaster_external_deps() {
 check_external_deps_preflight() {
   local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
 
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+  if [[ "${DEPLOY_ROLE:-}" != "compute" && -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
+    # Prefer psql: it authenticates (user/password/db). pg_isready only checks
+    # that the server accepts TCP and would otherwise mask bad credentials.
+    if command -v psql >/dev/null 2>&1; then
+      log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (psql)"
+      if ! PGPASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD}" \
+          PGCONNECT_TIMEOUT="${connect_timeout}" psql \
+          -h "${CUBE_EXTERNAL_POSTGRES_HOST}" \
+          -p "${CUBE_EXTERNAL_POSTGRES_PORT}" \
+          -U "${CUBE_EXTERNAL_POSTGRES_USER}" \
+          -d "${CUBE_EXTERNAL_POSTGRES_DB}" \
+          -c 'SELECT 1' >/dev/null 2>&1; then
+        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}'.
+  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB and that the server is reachable from this host."
+      fi
+      log "external PostgreSQL connectivity OK"
+    elif command -v pg_isready >/dev/null 2>&1; then
+      log "checking reachability of external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (pg_isready; does not verify credentials)"
+      if ! PGPASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD}" pg_isready \
+          -h "${CUBE_EXTERNAL_POSTGRES_HOST}" \
+          -p "${CUBE_EXTERNAL_POSTGRES_PORT}" \
+          -U "${CUBE_EXTERNAL_POSTGRES_USER}" \
+          -d "${CUBE_EXTERNAL_POSTGRES_DB}" \
+          -t "${connect_timeout}" >/dev/null 2>&1; then
+        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}'.
+  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB and that the server is reachable from this host."
+      fi
+      log "external PostgreSQL server reachable (credentials not verified; install psql for a full check)"
+    else
+      log "WARNING: psql/pg_isready not found; skipping external PostgreSQL connectivity preflight (credentials unchecked until CubeMaster/CubeAPI start)"
+    fi
+  fi
+
+  if [[ "${DEPLOY_ROLE:-}" != "compute" && -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
     if command -v mysqladmin >/dev/null 2>&1; then
       log "checking connectivity to external MySQL ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}"
       local mysql_cnf
@@ -1063,6 +1162,7 @@ check_install_preflight() {
 
   if needs_docker_for_install; then
     require_cmd docker
+    reject_snap_docker
   fi
 
   # tencent mirror path may mutate /etc/docker/daemon.json via python3.
@@ -1331,6 +1431,73 @@ systemd_target_for_role() {
   esac
 }
 
+# CubeS3lvol's own version, as its VERSION file records it. Empty when the file
+# is not there.
+s3lvol_component_version() {
+  sed -n 's/^version:[[:space:]]*//p' "$1/VERSION" 2>/dev/null | head -1
+}
+
+# Install CubeS3lvol under a versioned directory, with the bare name as a
+# symlink to it.
+#
+# The bare name is what every consumer resolves through -- the unit's ExecStart
+# and ExecStop, and the scripts' own RCOW_REPO_ROOT -- so a symlink keeps them
+# all working while giving an upgrade two things a plain directory cannot: the
+# new build goes in place while the old one is still running, and the previous
+# build stays reachable if the replacement has to be rolled back.
+# Stage the component under its own version directory, and leave the bare name
+# alone.
+#
+# The switch belongs to switch_cubes3lvol_bare_to, which runs once the build
+# being replaced is no longer running. Until then the bare name has to keep
+# pointing at that build: the unit's stop script reaches its scripts through it,
+# and so does every identity check that recognises the running target -- which
+# is why switching it here takes the running build's own supervisor down
+# mid-swap, and the stop that follows becomes a no-op.
+#
+# Sets S3LVOL_STAGED_DIR to the directory it created.
+install_cubes3lvol_versioned() {
+  local src="$1" version prev
+
+  version="$(s3lvol_component_version "${src}")"
+  [[ -n "${version}" ]] || version="legacy-$(date +%Y%m%d-%H%M%S)"
+  S3LVOL_STAGED_DIR="CubeS3lvol-${version}"
+
+  # A bare real directory is the layout from before this. Keep it under its own
+  # version, so the first upgrade of an old install can still roll back, and
+  # leave the bare name on it for the reason above.
+  if [[ -d "${INSTALL_PREFIX}/CubeS3lvol" && ! -L "${INSTALL_PREFIX}/CubeS3lvol" ]]; then
+    prev="$(s3lvol_component_version "${INSTALL_PREFIX}/CubeS3lvol")"
+    [[ -n "${prev}" ]] || prev="legacy-$(date +%Y%m%d-%H%M%S)"
+    mv -f "${INSTALL_PREFIX}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol-${prev}"
+    switch_cubes3lvol_bare_to "CubeS3lvol-${prev}"
+    log "CubeS3lvol: kept the pre-versioning install as CubeS3lvol-${prev}"
+  fi
+
+  rm -rf "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"
+  mkdir -p "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"
+  cp -a "${src}/." "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}/"
+
+  log "CubeS3lvol: staged ${S3LVOL_STAGED_DIR}"
+}
+
+# Point the bare name at one of the version directories -- through a rename, so
+# it never points at nothing -- and keep the two newest for a rollback.
+switch_cubes3lvol_bare_to() {
+  local dir="$1"
+
+  ln -sfn "${dir}" "${INSTALL_PREFIX}/.CubeS3lvol.new"
+  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${INSTALL_PREFIX}/CubeS3lvol"
+
+  # Keep the build just replaced, which is the one a rollback needs, and drop
+  # anything older.
+  find "${INSTALL_PREFIX}" -maxdepth 1 -name 'CubeS3lvol-*' -type d \
+    -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR>2 {print $2}' |
+    while read -r old; do rm -rf "${old}"; done
+
+  log "CubeS3lvol: installed as ${dir}; the bare name points at it"
+}
+
 stop_existing_systemd_deployment() {
   # Disable + stop the targets first; PartOf= on each child service is
   # supposed to cascade the stop. In practice, units that are stuck in
@@ -1343,11 +1510,26 @@ stop_existing_systemd_deployment() {
   # service afterwards, which both forces failed units back to inactive
   # and guarantees the next `enable --now <target>` actually re-runs
   # ExecStart instead of returning a "no-op, already active" exit 0.
+  #
+  # s3lvol is deliberately left running here. It is the one service whose stop
+  # takes the block devices away from a live sandbox, and that is not necessary
+  # for an upgrade: the target is killed and rebuilt in place instead. Doing so
+  # needs the new component on disk and the S3 endpoint an online flush writes
+  # to, so it happens earlier -- see cube-s3lvol-hot-upgrade.sh. The unit is
+  # deliberately not PartOf= these targets, so this stop does not reach it.
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
   systemctl reset-failed 'cube-sandbox-*.service' >/dev/null 2>&1 || true
-  systemctl stop 'cube-sandbox-*.service' >/dev/null 2>&1 || true
+  # Enumerated rather than globbed: the glob would match s3lvol too. Filter
+  # s3lvol in the loop body (not `grep -vx`, which exits 1 on empty input and
+  # silently aborts a first-time install under `set -euo pipefail`).
+  systemctl list-units --plain --no-legend --all 'cube-sandbox-*.service' 2>/dev/null |
+    awk '{print $1}' |
+    while read -r unit; do
+      [[ "${unit}" == "cube-sandbox-s3lvol.service" ]] && continue
+      systemctl stop "${unit}" >/dev/null 2>&1 || true
+    done
 }
 
 stop_existing_legacy_deployment() {
@@ -1379,10 +1561,25 @@ remove_obsolete_network_agent_unit() {
   systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
+# The TC unit was renamed to cube-sandbox-cube-templatecenter.service to match
+# the cube-templatecenter naming used by the image, the Helm chart, and
+# terraform. Remove the pre-rename unit so an upgrade does not leave two units
+# managing the same process.
+remove_obsolete_templatecenter_unit() {
+  local unit="cube-sandbox-cubetemplatecenter.service"
+  systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-control.target.wants/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-compute.target.wants/${unit}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+}
+
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
   remove_obsolete_network_agent_unit
+  remove_obsolete_templatecenter_unit
   "${install_units_script}"
 }
 
@@ -1406,6 +1603,16 @@ start_systemd_target() {
       || log "WARN: could not enable cube-sandbox-s3lvol.service"
   else
     systemctl disable cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+    systemctl reset-failed cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+  fi
+
+  # CubeTemplateCenter is part of the default control-plane stack (CubeMaster
+  # has no in-process build fallback). The control target's Wants= already
+  # pulls it up; the explicit enable creates the .wants symlink so the unit
+  # also reports is-enabled for quickcheck and boot audits.
+  if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+    systemctl enable cube-sandbox-cube-templatecenter.service >/dev/null 2>&1 \
+      || log "WARN: could not enable cube-sandbox-cube-templatecenter.service"
   fi
 
   systemctl enable --now "${target}"
@@ -1447,8 +1654,12 @@ mask_local_dep_service() {
 }
 
 mask_external_dep_services() {
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
+  if one_click_skip_local_mysql; then
+    if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
+      log "masking local MySQL service (external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST} in use)"
+    else
+      log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
+    fi
     mask_local_dep_service cube-sandbox-mysql.service
   else
     # Re-enable in case a previous install masked it and the user switched back.
@@ -1494,6 +1705,25 @@ warn_compute_s3_missing
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
 log "using node IP: ${CUBE_SANDBOX_NODE_IP}"
+
+# fs blob backend: fill a node-reachable CubeOps URL and a durable signing key.
+# Default backend remains s3; this only runs when the operator opts in.
+CUBE_ARTIFACT_STORE_BACKEND="${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+CUBE_OPS_STORE_BACKEND="${CUBE_OPS_STORE_BACKEND:-s3}"
+if [[ "${CUBE_OPS_STORE_BACKEND}" == "fs" ]]; then
+  if [[ -z "${CUBE_OPS_STORE_FS_PUBLIC_URL:-}" ]]; then
+    CUBE_OPS_STORE_FS_PUBLIC_URL="http://${CUBE_SANDBOX_NODE_IP}:3010"
+  fi
+  if [[ -z "${CUBE_OPS_STORE_FS_SIGNING_KEY:-}" ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+      CUBE_OPS_STORE_FS_SIGNING_KEY="$(openssl rand -hex 32)"
+    else
+      CUBE_OPS_STORE_FS_SIGNING_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+  fi
+  export CUBE_OPS_STORE_FS_PUBLIC_URL CUBE_OPS_STORE_FS_SIGNING_KEY
+fi
+export CUBE_ARTIFACT_STORE_BACKEND CUBE_OPS_STORE_BACKEND
 fill_s3_from_local_minio
 CUBE_SANDBOX_ETH_NAME="${CUBE_SANDBOX_ETH_NAME:-$(detect_primary_interface || true)}"
 if [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]]; then
@@ -1543,6 +1773,18 @@ validate_declared_release_manifest "${SCRIPT_DIR}"
 log "extracting package ${PACKAGE_TAR}"
 tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
+if [[ ! -d "${PKG_ROOT}" ]]; then
+	# PACKAGE_TAR pointed at the OUTER release bundle
+	# (cube-sandbox-one-click-*.tar.gz), which nests the real package at
+	# <bundle>/assets/package/sandbox-package.tar.gz. Descend into it
+	# transparently instead of dying with a confusing
+	# "required directory not found: .../sandbox-package".
+	inner_tar="$(find "${WORK_DIR}" -maxdepth 4 -path '*/assets/package/sandbox-package.tar.gz' -print -quit 2>/dev/null || true)"
+	if [[ -n "${inner_tar}" ]]; then
+		log "outer release bundle detected; extracting nested package ${inner_tar}"
+		tar -xzf "${inner_tar}" -C "${WORK_DIR}"
+	fi
+fi
 ensure_dir "${PKG_ROOT}"
 validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
 CUBE_EGRESS_ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9091}"
@@ -1569,7 +1811,16 @@ RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
 # total. Tuning RCOW_CACHE_MB only matters before the first start.
 RCOW_CACHE_MB="${RCOW_CACHE_MB:-490496}"
 RCOW_CAPACITY_GB="${RCOW_CAPACITY_GB:-16384}"
-RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"
+RCOW_CACHE_HOT_BUFS="${RCOW_CACHE_HOT_BUFS:-1024}"
+case "${RCOW_CACHE_HOT_BUFS}" in
+  ''|*[!0-9]*) die "RCOW_CACHE_HOT_BUFS must be an integer from 0 to 8192" ;;
+  *) (( RCOW_CACHE_HOT_BUFS <= 8192 )) ||
+       die "RCOW_CACHE_HOT_BUFS must be at most 8192" ;;
+esac
+# Leave RCOW_TGT_CPUMASK unset unless the operator (or a previous
+# .one-click.env) set it. rcow_common.sh derives last-two at service start
+# from the service's own affinity; freezing the installer's mask would be
+# wrong under taskset/cgroup and would abort bundles that omit CubeS3lvol.
 RCOW_TGT_MEM_MB="${RCOW_TGT_MEM_MB:-16384}"
 RCOW_LISTEN_ADDR="${RCOW_LISTEN_ADDR:-127.0.0.1}"
 RCOW_LISTEN_PORT="${RCOW_LISTEN_PORT:-4420}"
@@ -1606,6 +1857,52 @@ if [[ -n "${detected_installed_role}" ]]; then
   installed_role="${detected_installed_role}"
 fi
 
+# Last check before anything is touched, and in particular before the services
+# are stopped: a prefix this refuses has to cost nothing, and a refusal after
+# the swap would leave the node with s3lvol upgraded and everything else
+# stopped.
+assert_safe_install_prefix "${INSTALL_PREFIX}"
+
+# CubeS3lvol is staged and upgraded first, in place, before anything else is
+# stopped. Both halves of that need something the steps below would take away:
+# the new component has to be on disk before its version can be compared with
+# the running one's, and the running target has to still be there to be upgraded
+# -- along with the S3 endpoint an online flush writes to. Everything after this
+# leaves s3lvol alone and only touches the other components, so a live sandbox
+# is paused for the swap and not for the whole install.
+S3LVOL_UPGRADE_RC=0
+if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
+  # Captured before staging: the orchestrator switches the bare name itself, and
+  # once it has, there is nothing left to resolve the outgoing build through.
+  S3LVOL_OLD_DIR="$(readlink -f "${INSTALL_PREFIX}/CubeS3lvol" 2>/dev/null || true)"
+
+  # Staged regardless of the enable switch, so the component is where the next
+  # enabling install expects it; the upgrade only runs when the switch is on.
+  # The bare name stays on the outgoing build until the swap -- see the function.
+  install_cubes3lvol_versioned "${PKG_ROOT}/CubeS3lvol"
+  # Out of the package tree either way, so the whole-tree copy below cannot
+  # write through the bare name into the version directory it points at.
+  rm -rf "${PKG_ROOT}/CubeS3lvol"
+
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]]; then
+    # Out of the package tree, so an upgrade never runs the copy it is replacing
+    # -- an install from before this has the old script, or none. The prefix has
+    # to travel with it for that reason: this copy's own directory is the
+    # package, not the install. Through bash, so a missing exec bit in either
+    # tree cannot decide whether the upgrade happens.
+    #
+    # This also switches the bare name, and only once the target it replaces is
+    # dead. A swap that is refused or fails therefore leaves the outgoing build
+    # installed, which is the build that is still running.
+    TOOLBOX_ROOT="${INSTALL_PREFIX}" \
+      bash "${PKG_ROOT}/scripts/systemd/cube-s3lvol-hot-upgrade.sh" \
+        "${S3LVOL_STAGED_DIR}" "${S3LVOL_OLD_DIR}" || S3LVOL_UPGRADE_RC=$?
+  else
+    # Nothing is going to start it, so the bare name is put in place here.
+    switch_cubes3lvol_bare_to "${S3LVOL_STAGED_DIR}"
+  fi
+fi
+
 log "stopping existing systemd deployment under ${INSTALL_PREFIX}"
 stop_existing_systemd_deployment
 stop_existing_legacy_deployment "${installed_role}"
@@ -1620,8 +1917,6 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   fi
 fi
 
-assert_safe_install_prefix "${INSTALL_PREFIX}"
-
 # Inventory component_versions before replacing toolbox.
 inventory_package_component_versions
 
@@ -1630,8 +1925,8 @@ rm -rf \
   "${INSTALL_PREFIX}/CubeAPI" \
   "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
+  "${INSTALL_PREFIX}/CubeTemplateCenter" \
   "${INSTALL_PREFIX}/Cubelet" \
-  "${INSTALL_PREFIX}/CubeS3lvol" \
   "${INSTALL_PREFIX}/cubeproxy" \
   "${INSTALL_PREFIX}/coredns" \
   "${INSTALL_PREFIX}/webui" \
@@ -1658,16 +1953,14 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
     copy_dir_contents "${PKG_ROOT}/cube-agent" "${INSTALL_PREFIX}/cube-agent"
   fi
   copy_dir_contents "${PKG_ROOT}/cube-egress" "${INSTALL_PREFIX}/cube-egress"
-  # CubeS3lvol ships in the package only when the builder wrapper supplied
-  # ONE_CLICK_S3LVOL_DIR (build-release-bundle.sh warns+skips otherwise), so
-  # guard the directory like cube-agent does.
-  if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
-    copy_dir_contents "${PKG_ROOT}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol"
-  fi
+  # CubeS3lvol is not copied here. It was staged under a versioned directory
+  # with the bare name switched to it, earlier, because that has to happen while
+  # the target it replaces is still running.
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
+  generate_templatecenter_config
   patch_cubemaster_external_deps
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
@@ -1810,37 +2103,15 @@ if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_ADMIN_PORT" "${CUBE_EGRESS_ADMIN_PORT}"
-
-# Persist external MySQL config so every systemd unit / helper picks it up
-# instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck
-# and the up/down helpers skip the local service entirely; DATABASE_URL points
-# CubeAPI at the external server (CubeMaster reads the patched conf.yaml).
-if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_HOST" "${CUBE_EXTERNAL_MYSQL_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PORT" "${CUBE_EXTERNAL_MYSQL_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_USER" "${CUBE_EXTERNAL_MYSQL_USER}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${CUBE_EXTERNAL_MYSQL_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_DB" "${CUBE_EXTERNAL_MYSQL_DB}"
-  # Percent-encode every URI component so values containing URL metacharacters
-  # (@, :, /, #, %, ...) cannot corrupt the connection string. This covers the
-  # userinfo (user/password) as well as the host, port, and database name (e.g.
-  # a '/' in the db name would otherwise be parsed as a path separator).
-  database_url_user="$(urlencode "${CUBE_EXTERNAL_MYSQL_USER}")"
-  database_url_pass="$(urlencode "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
-  database_url_host="$(urlencode "${CUBE_EXTERNAL_MYSQL_HOST}")"
-  database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
-  database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
-else
-  # Local MySQL (bundled container): persist DATABASE_URL so CubeAPI and other
-  # components can reach the database without relying on per-script defaults.
-  local_mysql_host="127.0.0.1"
-  local_mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  local_mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
-  local_mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
-  local_mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://$(urlencode "${local_mysql_user}"):$(urlencode "${local_mysql_password}")@$(urlencode "${local_mysql_host}"):$(urlencode "${local_mysql_port}")/$(urlencode "${local_mysql_db}")"
+if [[ -n "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_EGRESS_IMAGE" "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE}"
 fi
+
+# Persist database driver + engine endpoints. CubeMaster and CubeTemplateCenter
+# read the patched conf.yaml; CubeAPI/CubeOps consume DATABASE_URL from
+# .one-click.env. Opposite-engine CUBE_EXTERNAL_* keys are scrubbed so a driver
+# switch cannot keep the previous endpoint alive via ":-" fallbacks.
+persist_one_click_database_runtime_env "${RUNTIME_ENV_FILE}"
 
 # Persist Redis for the current mode (Sentinel / standalone / local) and
 # drop opposite-mode keys so stale values cannot keep the previous mode
@@ -1849,6 +2120,12 @@ persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"
 
 # Persist MinIO deploy settings (control node) independently from CUBE_S3_*
 # (volume plugin). Local MinIO fills CUBE_S3_* before this block.
+# CubeTemplateCenter callback token (control plane): both cubemaster and
+# cubetemplatecenter units read it from this file via EnvironmentFile.
+if [[ -n "${CUBE_TEMPLATE_CALLBACK_TOKEN:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TEMPLATE_CALLBACK_TOKEN" "${CUBE_TEMPLATE_CALLBACK_TOKEN}"
+fi
+
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ENABLED" "${CUBE_SANDBOX_MINIO_ENABLED}"
 if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_USER" "${CUBE_SANDBOX_MINIO_ROOT_USER}"
@@ -1879,6 +2156,14 @@ fi
 # without re-deriving them, and so `down.sh` / upgrade knows the intent.
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_STORE_BACKEND" "${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_BACKEND" "${CUBE_OPS_STORE_BACKEND:-s3}"
+if [[ "${CUBE_OPS_STORE_BACKEND}" == "fs" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_FS_ROOT" "${CUBE_OPS_STORE_FS_ROOT:-/var/lib/cubeops/blobs}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_FS_PUBLIC_URL" "${CUBE_OPS_STORE_FS_PUBLIC_URL}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_FS_SIGNING_KEY" "${CUBE_OPS_STORE_FS_SIGNING_KEY}"
+fi
 if [[ -n "${CUBE_S3LVOL_PATH_STYLE}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_PATH_STYLE" "${CUBE_S3LVOL_PATH_STYLE}"
 else
@@ -1888,7 +2173,10 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WAL_MB" "${RCOW_WAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
-upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_HOT_BUFS" "${RCOW_CACHE_HOT_BUFS}"
+if [[ -n "${RCOW_TGT_CPUMASK:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
+fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_MEM_MB" "${RCOW_TGT_MEM_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_ADDR" "${RCOW_LISTEN_ADDR}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"
@@ -1912,6 +2200,13 @@ if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
   chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops" "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
+  # CubeTemplateCenter is mandatory: CubeMaster no longer builds templates
+  # in-process, so the unit is enabled and started with the control target
+  # (see start_systemd_target). Guarded with -f so an older package without
+  # the binary still installs.
+  if [[ -f "${INSTALL_PREFIX}/CubeTemplateCenter/bin/templatecenter" ]]; then
+    chmod +x "${INSTALL_PREFIX}/CubeTemplateCenter/bin/templatecenter"
+  fi
 fi
 
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
@@ -1943,3 +2238,14 @@ print_path_hint
 # Re-print the missing-S3 warning last so an unconfigured compute node ends on
 # the remediation path (no-op for control role and for compute nodes with S3).
 warn_compute_s3_missing
+
+# And the s3lvol outcome last of all, because it is the one thing here that can
+# fail while everything else succeeded: the install is complete either way, but
+# if the target was rolled back it is running the previous build, and the caller
+# has to be able to tell. Exiting non-zero is the only channel for that -- the
+# unit, the layout and the sandbox are all healthy, so nothing else would say so.
+if [[ "${S3LVOL_UPGRADE_RC}" -ne 0 ]]; then
+  log "WARNING: the CubeS3lvol upgrade did not complete (rc=${S3LVOL_UPGRADE_RC})"
+  log "         the previous build is still running; everything else is installed"
+  exit "${S3LVOL_UPGRADE_RC}"
+fi

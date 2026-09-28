@@ -23,7 +23,7 @@ syntax = "proto3";
 package cubelet.services.cubebox.hostimage.v1;
 
 import "google/protobuf/any.proto";
-import "api/types/v1/images.proto";
+import "types/v1/images.proto";
 
 option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubehost/v1;cubehost";
 

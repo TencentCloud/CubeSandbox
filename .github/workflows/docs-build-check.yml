@@ -35,3 +35,6 @@ jobs:
       - name: Build with VitePress
         run: npm run docs:build
         working-directory: docs
+
+      - name: Check crawler discovery files
+        run: bash docs/scripts/check-crawler-discovery.sh

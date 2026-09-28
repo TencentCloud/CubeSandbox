@@ -35,12 +35,13 @@ Dashboard 是一个静态前端，由 **控制节点** 上的 nginx 容器托管
 | 3 | 🧩 | **Templates（模板）** | 可复用的沙箱快照目录，支持从 OCI 镜像创建新模板 |
 | 4 | 🖥️ | **Nodes（节点）** | 集群健康：每台宿主机的 CPU、内存、可用槽位 |
 | 5 | 🧬 | **Versions（版本矩阵）** | 跨节点的组件版本分布（内核、agent、guest 镜像） |
-| 6 | 🌐 | **Network（网络）** | API 网关配置与每节点速率限制 |
-| 7 | 📈 | **Observability（可观测性）** | 运行时状态、沙箱健康、模板构建总览 |
-| 8 | 🔑 | **API Keys（API 密钥）** | 存储 Dashboard 请求使用的 `X-API-Key` |
-| 9 | 🏪 | **Template Store（模板商店）** | 安装官方预置镜像，一键生成模板 |
-| 10 | 🤖 | **AgentHub（智能体中心）** | 在 Cube Sandbox 上招募并管理 AI 智能体实例 |
-| 11 | ⚙️ | **Settings（设置）** | 主题、语言、集群信息、键盘快捷键 |
+| 6 | 📦 | **Warehouse（组件仓库）** | 导入一键包；创建/恢复时节点可按需下载缺失的绑定版本 |
+| 7 | 🌐 | **Network（网络）** | API 网关配置与每节点速率限制 |
+| 8 | 📈 | **Observability（可观测性）** | 运行时状态、沙箱健康、模板构建总览 |
+| 9 | 🔑 | **API Keys（API 密钥）** | 存储 Dashboard 请求使用的 `X-API-Key` |
+| 10 | 🏪 | **Template Store（模板商店）** | 安装官方预置镜像，一键生成模板 |
+| 11 | 🤖 | **AgentHub（智能体中心）** | 在 Cube Sandbox 上招募并管理 AI 智能体实例 |
+| 12 | ⚙️ | **Settings（设置）** | 主题、语言、集群信息、键盘快捷键 |
 
 ::: tip 新用户？从 **Overview** 开始。
 它把最重要的信息聚在同一屏上，并且会自动刷新。
@@ -61,7 +62,7 @@ Dashboard 是一个静态前端，由 **控制节点** 上的 nginx 容器托管
 ### 3.2 创建一个沙箱
 
 1. 点左侧栏的 **Sandboxes**，再点右上角 **+ New sandbox**。
-2. 在网格里挑一个模板。优先选 `READY`。出现 `STALE` 徽章只表示节点当前组件版本和模板记录的不一致——仍可创建；请先确认节点本地已有模板所需的组件版本。
+2. 在网格里挑一个模板。优先选 `READY`。如果模板标了「需重建」，先打开详情点「重建模板」，再建沙箱。其它 `READY` 模板在节点升级后仍可直接创建。
 3. （可选）填几对 `meta` 键值对作为标签。
 4. 点 **Create**。几秒内你就会被跳转到该沙箱的详情页，能看到日志在实时滚动。
 
@@ -121,6 +122,7 @@ Dashboard 对键盘很友好。最常用的三个：
 
 - [快速开始](./quickstart.md) — 如果你还没安装，几分钟到能跑的 Dashboard
 - [服务管理与日志](./service-management.md) — 如何启停 / 重启 `cube-sandbox-webui.service` 容器
+- [组件多版本](./component-multiversion.md) — 节点同时存多个组件版本，升级组件不影响老模板和老沙箱
 - [鉴权](./authentication.md) — 还没开启 API Key？这里有完整步骤
 - [HTTPS 证书与域名解析](./https-and-domain.md) — 给 Dashboard 加 TLS
 - [架构概览](../architecture/overview.md) — 了解 Dashboard 背后的 CubeAPI / CubeMaster / Cubelet 怎么协作

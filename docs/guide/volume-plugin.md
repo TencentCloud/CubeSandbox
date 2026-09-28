@@ -40,6 +40,8 @@ Implement Create / Destroy (Controller) and Attach / Detach (Node) per the [Hook
 
 Reference: [COS plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) (one-click packages the binary under `CubeMaster/plugin/` and `Cubelet/plugin/`).
 
+> **Install third-party plugins outside the cubetoolbox tree**, otherwise they are reset on Cube upgrade. See [Registration and Configuration](#registration-and-configuration) and [Plugin Development Guidelines](#plugin-development-guidelines).
+
 ### Configure CubeMaster / Cubelet and restart
 
 Register the same `driver` name on both sides (`volume_plugins`), point `binary_path` / `socket_path` at the deployed plugin, then restart CubeMaster and Cubelet so the config is loaded. See [Registration and Configuration](#registration-and-configuration).
@@ -545,6 +547,19 @@ Volume.destroy(vol.volume_id)
 
 One Volume may be mounted by multiple sandboxes simultaneously; data written from one sandbox is visible to others. Destroy **all** sandboxes using the Volume before calling `Volume.destroy()` (see [RefCount](#refcount) for how the platform tracks shared usage).
 
+### Snapshot, rollback, clone, and cross-node restore
+
+Snapshots store the stable Volume ID, container mount path, and read-only flag. They do not copy Volume data or persist runtime `private_data`. FromSnap asks Master to resolve the current Volume record and sends that driver metadata to the target Cubelet for `Attach`. Pause/Resume validates the recorded Volume IDs and reattaches from the pause package, while in-place rollback keeps the sandbox's existing external attachment.
+
+This produces **external-reference** behavior:
+
+- FromSnap and rollback restore VM/rootfs state, but the mounted Volume exposes its current data.
+- Clones continue to share the same Volume. Writes through a read-write mount are visible to the source and other clones.
+- A plugin Volume does not pin an otherwise cross-node-capable VM snapshot to its origin. For an S3 VM snapshot with `remote_status=ready`, the target Cubelet attempts to attach the Volume before starting the VM.
+- The scheduler currently checks VM compatibility, not Volume portability, topology, multi-attach support, or target driver availability. A missing Volume, unregistered target driver, or `Attach` error fails sandbox creation. Configure every eligible node with the same driver and access to the intended backend.
+
+The Volume backend and VM snapshot backend are independent. The VM snapshot package must use the S3 backend for cross-node restore; the plugin Volume may use any backend that its target-side driver can attach. Raw host mounts are different and remain pinned to their origin node.
+
 ### Common SDK Errors
 
 | Scenario | SDK exception | Typical cause |
@@ -595,26 +610,28 @@ volume_plugins:
 
 **`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/cube-shared/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
 
+> **`binary_path` / `socket_path` location:** install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade.
+
 **`name` must be unique** within each process: no two `volume_plugins` entries with the same `name`. List order sets the default plugin when API/SDK omits `driver`.
 
 ---
 
 ## rpc Plugin Proto Definition
 
-rpc plugins implement gRPC services in [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto). Message fields match the [Hook definitions](#hooks) above (proto uses `snake_case`).
+rpc plugins implement gRPC services in [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto). Message fields match the [Hook definitions](#hooks) above (proto uses `snake_case`).
 
 | File | Description |
 |------|-------------|
-| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto) | Protocol source |
-| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.pb.go) | Generated Go messages |
-| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | Generated gRPC stubs |
+| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto) | Protocol source |
+| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.pb.go) | Generated Go messages |
+| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | Generated gRPC stubs |
 
 | Service | Caller | RPCs |
 |---------|--------|------|
 | `VolumeControllerService` | CubeMaster | `Create`, `Destroy` |
 | `VolumePluginService` | Cubelet | `Attach`, `Detach` |
 
-Regenerate after editing proto: `cd Cubelet && make proto`. Reference implementation: [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md).
+Regenerate after editing proto: `cd pkgs/proto && make proto`. Reference implementation: [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md).
 
 ---
 
@@ -630,6 +647,7 @@ When implementing a custom Volume plugin, follow these platform rules:
 | 4 | Detach scope | Tear down host mount only (e.g. FUSE unmount); do not delete backend data |
 | 5 | Credentials | Keys, bucket, region, etc. managed by the **plugin** (config file, env, …); the framework does not mandate layout |
 | 6 | CubeMaster / Cubelet alignment | Both must register the **same `driver` names** in `volume_plugins`; Controller hooks (Create/Destroy) and Node hooks (Attach/Detach) must refer to the **same plugin** for a given Volume |
+| 7 | Upgrade-safe path | Install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade |
 
 ---
 
@@ -644,6 +662,7 @@ The repo ships a **Tencent Cloud COS** reference plugin (binary Shell + rpc Go) 
 | [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md) | rpc plugin build and deploy |
 | [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK verification script |
 | [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Generic S3-compatible walkthrough (Go binary with a built-in S3 client + s3fs; AWS S3, Tencent Cloud COS, MinIO, R2; runs on `arm64`) |
+| [`examples/volume/juicefs/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.md) | JuiceFS walkthrough (POSIX file system over object storage; one file system, `--subdir` per volume; several sandboxes share a volume and see each other's writes) |
 
 Backend-specific Hook behavior, object layout, trade-offs, and troubleshooting live in those example docs — not duplicated here.
 
@@ -735,7 +754,7 @@ Platform behavior (independent of a specific plugin):
 | Volume DB model | `CubeMaster/pkg/base/db/models/volume.go` | `VolumeRecord` (includes `refcount`) |
 | Plugin volume mount injection | `CubeMaster/pkg/service/sandbox/hostdir_mount.go` | `injectPluginVolumeMounts` from `plugin-volume-mounts` annotation |
 | Node mount logic | `Cubelet/storage/pluginvolume.go` | bind-mount + virtiofs; node-level refcount transitions |
-| Proto | `Cubelet/api/services/volumeplugin/v1/volumeplugin.proto` | rpc protocol |
-| Generated Go | `Cubelet/api/services/volumeplugin/v1/volumeplugin*.pb.go` | Messages / gRPC stubs |
+| Proto | `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto` | rpc protocol |
+| Generated Go | `pkgs/proto/services/volumeplugin/v1/volumeplugin*.pb.go` | Messages / gRPC stubs |
 | COS reference (binary) | `examples/volume/cos/binary/cube-volume-cos.sh` | Example binary plugin |
 | COS reference (rpc) | `examples/volume/cos/rpc/cmd/cube-volume-cos-rpc` | Example rpc plugin |

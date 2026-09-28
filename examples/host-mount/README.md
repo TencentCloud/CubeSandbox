@@ -62,7 +62,7 @@ the configuration at startup. Path-traversal attempts (e.g.
 `/data/shared/../etc`) are resolved before checking and will be rejected.
 
 If a disallowed `hostPath` is specified, sandbox creation will fail. The Python
-SDK raises an `ApiError` exception with HTTP status 500:
+SDK raises an `ApiError` exception with HTTP status 400:
 
 ```python
 from cubesandbox import Sandbox
@@ -76,20 +76,20 @@ try:
         ])}
     )
 except ApiError as e:
-    print(e.status_code)  # 500
+    print(e.status_code)  # 400
     print(str(e))
-    # "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
+    # CubeMaster returned error code 130400: "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
 ```
 
 The raw HTTP response from CubeAPI looks like:
 
 ```http
-HTTP/1.1 500 Internal Server Error
+HTTP/1.1 400 Bad Request
 Content-Type: application/json
 
 {
-  "code": 500,
-  "message": "internal error: \"host-mount\" entry[0]: hostPath \"/etc/passwd\" is not within an allowed mount prefix"
+  "code": 400,
+  "message": "CubeMaster returned error code 130400: \"host-mount\" entry[0]: hostPath \"/etc/passwd\" is not within an allowed mount prefix"
 }
 ```
 

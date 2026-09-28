@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; host network by default (`cubeNode.hostNetwork: true`). Image/template changes recreate the Pod: sandbox tap devices and cubevs hooks live in the Pod netns, so they survive that on the host network and are lost on the Pod network. Switching the mode on an existing release is gated by the `cube-node-hostnet-preflight` Hook.
 - **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
@@ -27,7 +27,7 @@ Official docs (source of truth; do not keep a parallel copy under this chart):
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
 - [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
-- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod and interrupt sandboxes
+- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
@@ -76,9 +76,8 @@ global:
   timezone: Asia/Shanghai
   # Non-default cluster DNS domain (empty falls back to cluster.local).
   clusterDomain: ""
-  # Optional private-registry prefix that rewrites every Cube-owned image
-  # repository so operators mirroring the chart into a private registry
-  # only need to change one value.
+  # Optional private-registry host: rewrites the official Cube TCR host
+  # on Cube-owned images; other repositories are left as declared.
   imageRegistry: ""
 
 # StorageClass — off by default so PVCs use the cluster's default
@@ -154,8 +153,11 @@ can set it to `false`.
 `cube-node` mirrors the one-click runtime layout:
 
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
-- `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
-- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
+- `cubeNode.network.autoDetectEthName=true` auto-detects the primary NIC of the Pod's netns (the host's under `hostNetwork`) and patches Cubelet `eth_name`;
+- `cubeNode.hostNetwork` (default `true`) puts the Big Pod on the host network: the netns is the host's, so sandbox tap devices and cubevs hooks stay across Pod recreation (drain until cubelet-restart survival is live-validated). Trade-offs: NetworkPolicy cannot govern sandbox traffic, and cubelet / egress / s3lvol bind on the host. `cube-node-init` preflights cubelet's ports and, with `cubeS3lvol.enabled`, its listen port (`bootstrap.nodeInit.checkHostPorts`, independent of `cidrSkipConflictCheck`); CubeEgress ports are not in that check. Set `false` for the Pod network: NetworkPolicy then applies, but a Pod recreate breaks networking for every sandbox on the node.
+- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk. Under `hostNetwork` this CIDR becomes a host route, so an overlap also affects the node's own traffic — on a cluster whose Service CIDR is `172.16.0.0/16` (e.g. TKE) layer the provider preset, such as `values-tke.yaml`.
+- `cubeNode.network.mtu` patches Cubelet `mvm_mtu`, the MTU the sandbox tap is created with and, via `VIRTIO_NET_F_MTU`, the MTU the guest configures. It must not exceed the MTU of the interface the traffic leaves through: on the host network that interface is the node uplink, so `auto` is normally a no-op; on the Pod network it is the CNI interface, which encapsulates below 1500 (Flannel VXLAN is 1450; Calico's documented IPIP default is 1480). A guest on a 1500 tap emits frames the uplink drops, and it cannot recover on its own, because inbound ICMP fragmentation-needed is not forwarded into it, so connections stall rather than fail. The default `auto` lowers `mvm_mtu` to the detected NIC's MTU and never raises it, so it is a no-op wherever the uplink is already >= the packaged value; set an integer in `1280`..`65535` to pin it, or `0` to keep the packaged Cubelet `config.toml` value.
+- `cubeNode.hostNetworkChangeAck` (default `false`) is read only by the `cube-node-hostnet-preflight` Hook (`pre-install`/`pre-upgrade`/`pre-rollback`): an existing release may change `cubeNode.hostNetwork` — recreating every Big Pod — only with it set. Remove the key once that upgrade has gone through. See the upgrade guide for the `helm rollback` caveat.
 
 The `cube-node` Pod defaults `kubectl exec` to its `cubelet` container, where `cubecli` uses the node-local Cubelet and containerd sockets. In a multi-node cluster, select the Pod scheduled on the compute node you want to inspect:
 
@@ -180,7 +182,7 @@ To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstr
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.2 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Cube-owned images default to `imagePullPolicy: IfNotPresent`. To pick up a
@@ -279,12 +281,17 @@ requirement).
 The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
 The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (same path as one-click); `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
 
+During the `CREATING_TEMPLATE` phase, the CubeMaster-to-Cubelet `AppSnapshot`
+RPC defaults to a 300-second deadline. Increase
+`controlPlane.master.appSnapshotTimeoutSeconds` for large templates or slow
+networks/disks. Non-positive values fall back to 300 seconds.
+
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
-# Optional: pin all four control-plane PVCs at once
+# Optional: pin master / mysql / redis / minio PVCs at once.
 persistence:
   storageClassName: ""   # empty → cluster default SC
 
@@ -319,7 +326,11 @@ cluster's default StorageClass, which works out of the box for most
 self-hosted / EKS / GKE / AKS clusters. Use `hostPath` only for
 single-node throwaway environments; multi-control-node deployments must
 use PVCs or external MySQL / Redis / S3. `existingClaim` overrides both
-`storageClassName` and `hostPath`.
+`storageClassName` and `hostPath`. Warehouse blobs live in S3 (chart MinIO
+by default); CubeOps unpack scratch is an `emptyDir`. `cubeOps.replicas`
+may be greater than 1; the default strategy is RollingUpdate with
+`maxUnavailable: 0`. If a previous release set `cubeOps.persistence`,
+remove it — Helm fails render rather than silently dropping that key.
 
 Do not confuse `storageClass.*` (whether the chart **creates** a
 StorageClass) with `persistence.storageClassName` (which SC **name** PVCs
@@ -368,17 +379,18 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
   -n cube-system --create-namespace
 ```
 
-Combine with `values-tke.yaml` when installing on TKE in China. The preset sets
-`global.imageRegistry` to the cn host and overrides mysql / redis / minio / kubectl
-repositories that do not go through `cube.cubeImage`.
+`global.imageRegistry` (set by `values-cn.yaml`) only rewrites the official
+Cube TCR hosts, so per-image overrides pointing at other hosts are left as
+declared. On TKE in China, also combine with `values-tke.yaml` (StorageClass /
+PVC / LoadBalancer only — it does not set `global.imageRegistry`).
 
 ## Database migration
 
-The chart does not deliver a separate DB migration Job or image. CubeMaster owns MySQL schema migration and runs its embedded `CubeMaster/pkg/base/dao/migrate/migrations/mysql` migrations during startup.
+The chart does not deliver a separate DB migration Job or image. CubeMaster and CubeOps share the `pkgs/cubedb` migrator and apply the embedded SQL under `pkgs/cubedb/migrate/migrations/{mysql,postgres}` at process startup.
 
-- CubeMaster uses the configured MySQL endpoint, user, password, and database.
+- CubeMaster and CubeOps use the configured database endpoint, user, password, and database.
 - The chart does not package or maintain SQL files under `files/`; do not add migration SQL copies to the chart.
-- CubeMaster records applied versions in `goose_db_version` and serializes concurrent migration attempts through the migration lock implemented by CubeMaster.
+- Applied versions are recorded in `goose_db_version`. Concurrent migration attempts are serialized by the cluster lock in `pkgs/cubedb`.
 - There is no chart-managed SQL data seed, and the one-click single-node seed file `sql/002_seed_single_node.sql` is intentionally not rendered by the chart. Node registration must come from real Cube Node Pods selected by `placement.compute.nodeSelector`.
 - When using a third-party database, set `mysql.host` or `postgres.host` (matching `database.driver`) and ensure the configured user can create/alter tables in that database.
 
@@ -433,6 +445,19 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate for CubeProxy. External clients reach `cubeProxy.domain` / `*.domain` through the chart Ingress (SSL passthrough; TLS still terminates in CubeProxy). The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
 
 `cube-proxy` depends on chart-managed `cube-lifecycle-manager` for sandbox auto-pause / auto-resume. The chart wires nginx `$cube_sidecar_addr` to the lifecycle-manager Service, opens the proxy admin listener for in-cluster discovery, and registers each proxy replica in Redis. Do not deploy a separate cube-proxy-sidecar.
+
+The lifecycle manager runs two warm replicas by default. Both replicas consume
+lifecycle events and serve resume callbacks, while a Redis lease elects the
+single replica allowed to run idle sweep/kill and stale-proxy pruning. The
+lease uses single-key Redis transactions and requires no Kubernetes RBAC.
+Production deployments should pair this with Sentinel or managed HA Redis;
+the chart's built-in single-replica Redis remains a shared failure point.
+Because Redis replication is asynchronous, a Redis failover does not provide
+strict fencing for an already in-flight leader operation. The new leader
+catches up the event stream, waits one CubeProxy HTTP timeout to drain in-flight
+writes, then catches up again before running singleton work. Per-sandbox state
+locks (SET NX with TTL) and local lease deadlines provide the fencing boundary
+for singleton actions.
 
 ### Production TLS Secret
 
@@ -508,7 +533,7 @@ This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt
 
 `cube-proxy` uses `placement.controlPlane`. The chart does not create node labels.
 
-CubeProxy runs on the **Pod network** (no `hostNetwork`). Traffic path:
+CubeProxy runs on the **Pod network** (no `hostNetwork`), whatever mode `cube-node` uses. Traffic path:
 
 1. External clients → Ingress Controller → ClusterIP Service → CubeProxy Pod
 2. In-cluster clients / sandbox guests → CoreDNS rewrite → same ClusterIP Service
@@ -517,9 +542,9 @@ TLS for `cube.app` / wildcards still terminates **inside CubeProxy**. The defaul
 
 Without an Ingress / cloud LB, set `cubeProxy.service.type` / `controlPlane.api.service.type` to `NodePort` (or `LoadBalancer`) and optionally pin host ports via `cubeProxy.service.nodePorts.*` / `controlPlane.api.service.nodePort` (Kubernetes range `30000-32767`; empty keeps auto-allocation). Explicit `nodePort` values are rejected when `type` is still `ClusterIP`.
 
-When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
+When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort` — the node IP under the default `cubeNode.hostNetwork=true`, and the Big Pod IP under the Pod network. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
 
-CubeProxy admin is reachable in-cluster at each Pod IP:`adminPort` (default `8082`) for cube-lifecycle-manager discovery; probes use the admin token header.
+CubeProxy admin is at Pod IP:`adminPort` (default `8082`) for CLM; helm test uses the Service admin port. Probes send the admin token header.
 
 CubeProxy reads sandbox routing metadata from Redis in nginx Lua. Because nginx
 does not automatically inherit Kubernetes DNS resolution for Lua cosocket
@@ -545,8 +570,8 @@ cubeProxy:
 ## Cluster DNS for sandbox domain
 
 When CubeProxy is enabled, the chart patches **cluster CoreDNS** so
-`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy ClusterIP Service
-(Pod IP). Users only set the domain:
+`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy Service FQDN
+(ClusterIP). Users only set the domain:
 
 ```yaml
 cubeProxy:
@@ -567,6 +592,30 @@ cubeNode:
 - a chart-rendered nginx config proxies `/opsapi/` and `/cubeapi/v1/` (SDK) to the CubeOps Service (`0.0.0.0:3010` in-pod, ClusterIP);
 - `/sandbox/` proxies to CubeProxy; static assets are unchanged;
 - the Service listens on port `12088`, matching one-click `WEB_UI_HOST_PORT`.
+
+Warehouse import allow-lists and tokens are the same `CUBE_OPS_WAREHOUSE_*` env vars as one-click. Set them via `cubeOps.warehouse` (empty lists omit the env so CubeOps defaults apply):
+
+```yaml
+cubeOps:
+  warehouse:
+    githubRepos: ["TencentCloud/CubeSandbox"]
+    cnbRepos: ["CubeSandbox/CubeSandbox"]
+    # Prefer a Secret for private-repo tokens:
+    githubTokenSecret:
+      name: my-warehouse-tokens
+      key: github-token
+    cnbTokenSecret:
+      name: my-warehouse-tokens
+      key: cnb-token
+```
+
+These render as `CUBE_OPS_WAREHOUSE_GITHUB_REPOS`, `CUBE_OPS_WAREHOUSE_CNB_REPOS`, `CUBE_OPS_WAREHOUSE_GITHUB_TOKEN`, and `CUBE_OPS_WAREHOUSE_CNB_TOKEN`. Object storage is `cubeOps.s3` (bucket `cube-ops`; endpoint and inline AK/SK fall back to `volumeS3` then chart MinIO). `cubeOps.replicas` may be greater than 1; the default strategy is RollingUpdate with `maxUnavailable: 0`.
+
+Chart MinIO is a single StatefulSet. For warehouse HA, set `cubeOps.s3.endpoint` (and `nodeEndpoint` for compute nodes outside cluster DNS) to external S3/COS. Credentials are always injected via `secretKeyRef` (`s3-access-key-id` / `s3-secret-access-key`). `cubeOps.s3.existingSecret` must use those keys; it cannot reuse `volumeS3.existingSecret` (`volume-s3.conf`). Sharing a store can reuse the endpoint and inline AK/SK only.
+
+When no cubeOps.s3 / volumeS3 / MinIO endpoint is set, Helm still renders; CubeOps starts and returns `501 warehouse_disabled` on warehouse routes. Helm fails when an endpoint is set without CubeOps credentials.
+
+Template artifacts and the CubeOps warehouse default to S3. For disk/PVC instead, set `controlPlane.artifactStore.backend: fs` and `cubeOps.store.backend: fs` (see `values.yaml`). S3 volumes and CubeS3lvol still need a real S3 API.
 
 CubeAPI serves external E2B-compatible SDK clients.
 
@@ -612,6 +661,35 @@ cubeEgress:
 
 Do not rotate the CubeEgress CA casually: templates baked with the old CA and sandboxes trusting the old CA must be considered during rotation.
 
+## CubeS3lvol
+
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+
+When enabled, the sidecar:
+
+- runs in its own `cube-s3lvol` image next to cubelet;
+- shares a Unix socket (`/var/run/s3lvol/s3lvol.sock`) with cubelet over an in-memory emptyDir, and writes cubelet's `[cow.s3] enable = true` + `socket_path` (a socket path alone does not opt in);
+- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths, so a Pod recreate loses nothing;
+- reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
+- reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
+- identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
+- uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
+- reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
+  per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
+
+```yaml
+cubeS3lvol:
+  enabled: true
+  cacheHotBufs: 1024
+  # Optional: explicit S3 (otherwise chart MinIO or volumeS3 is reused).
+  # s3:
+  #   existingSecret: my-s3lvol-cfg   # key must be s3.cfg
+  #   endpoint: https://s3.example.com
+  #   accessKeyId: ...
+  #   secretAccessKey: ...
+  #   bucket: cube-s3lvol
+```
+
 ## Render and lint
 
 ```bash
@@ -638,12 +716,27 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 helm test cube -n cube-system --timeout 20m
 ```
 
+`helm test` pods except `node-runtime-test` use `cube.testPlacement` (both
+plane taints, no nodeSelector): health, cubemastercli, cubeopscli, mysql,
+redis, proxy, dns, and node-image. `node-runtime-test` uses
+`cube.computePlacement` and is skipped when `cubeNode.enabled=false`.
+
+`proxy-control-test` GETs `/admin/healthz` on the proxy Service admin port with
+`X-Cube-Admin-Token` (Secret `cube-admin-token`) and requires HTTP 200.
+Dataplane `/` returns 400.
+
+Health / proxy / node-image use `curl -4`; dns-test uses `getent ahostsv4`.
+Override `helmTest.image` with curl+sh+awk+getent. `helmTest.dnsImage` is
+busybox for node-runtime-test only.
+
 ## Upgrade policy
 
 `cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
 (`images.cubelet`, `images.waitNodePrep`, …) or changing the Pod template
-**recreates** the Big Pod (Pod UID/IP/netns change) and **interrupts sandboxes
-on that node**. Artifact images bump only `cube-node-installer`; node-init
+**recreates** the Big Pod (Pod UID change). Sandbox tap devices and cubevs hooks
+live in the Pod netns, so on the default host network they survive that, while on
+the Pod network every sandbox on that node loses its network.
+Artifact images bump only `cube-node-installer`; node-init
 images bump `cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`.
 See [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
 

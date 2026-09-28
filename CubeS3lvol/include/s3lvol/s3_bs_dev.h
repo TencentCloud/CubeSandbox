@@ -32,6 +32,7 @@
 struct s3_ctx;             /* opaque; the internal context, see s3_bs_dev_internal.h */
 struct s3_export_manifest; /* opaque; see s3_export.h */
 struct s3_chunk_map;       /* opaque, see s3_chunk_map.h */
+struct s3_cache;           /* opaque, see s3_cache.h */
 
 typedef void (*s3_bs_dev_cb)(void *cb_arg, int status);
 
@@ -127,6 +128,10 @@ int s3_bs_dev_attach_wal(struct spdk_bs_dev *bs_dev, struct s3_wal *wal,
  *         "no cache" rather than as a failure. -EEXIST if already attached.
  */
 int s3_bs_dev_attach_cache(struct spdk_bs_dev *bs_dev);
+
+/* Non-owning handle for an esnap parent created by this same lvstore.
+ * Blobstore destroys all of those parents before it tears down bs_dev. */
+struct s3_cache *s3_bs_dev_get_cache(struct spdk_bs_dev *bs_dev);
 
 /**
  * Register a callback for "this bs_dev is completely gone".
@@ -253,6 +258,31 @@ int s3_bs_dev_journal_apply(struct spdk_bs_dev *bs_dev,
 			    const struct s3_journal_record *rec);
 
 /* ==========================================================================
+ * Server-side ingest (CopyObject into the chunk map)
+ *
+ * Installed for the duration of a decouple of a same-bucket export. blobstore's
+ * allocate_and_copy_cluster then calls dest->copy instead of GET+write. copy()
+ * treats src_lba as an LBA on the export parent and dst_lba as the newly
+ * allocated cluster on this device.
+ * ========================================================================== */
+
+typedef int (*s3_ingest_src_fn)(void *cb_arg, uint64_t chunk_index,
+				char *src_key, size_t key_len,
+				uint32_t *valid_bytes);
+
+int s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev,
+			   const char *src_endpoint, const char *src_bucket,
+			   s3_ingest_src_fn src_fn, void *src_arg);
+
+/* Start CopyObject for this parent range if a slot is free. Harmless if the
+ * chunk is already in flight or ready. */
+void s3_bs_dev_ingest_prefetch(struct spdk_bs_dev *bs_dev, uint64_t src_lba,
+			       uint64_t lba_count);
+
+void s3_bs_dev_ingest_end(struct spdk_bs_dev *bs_dev, s3_bs_dev_cb cb_fn,
+			  void *cb_arg);
+
+/* ==========================================================================
  * Diagnostics
  * ========================================================================== */
 
@@ -262,6 +292,15 @@ struct s3_bs_dev_stats {
 	uint64_t allocated_chunks;
 	uint64_t rmw_count;       /* uploads that had to read the old object */
 	uint64_t zero_fill_count; /* reads of an unallocated range */
+	uint64_t dest_whole_gets;       /* cache misses fetched as whole objects */
+	uint64_t dest_coalesced_reads;  /* readers joined to an in-flight GET */
+	uint64_t dest_exact_fallbacks;  /* whole-object fill unused: setup failed, or GET could not serve waiters (once per fill) */
+	uint64_t dest_submit_cache_hits;    /* cache hits completed off owner */
+	uint64_t dest_submit_cache_retries; /* fast reads retried on owner */
+	uint64_t dest_submit_fill_starts;   /* whole GETs started off owner */
+	uint64_t dest_submit_fill_joins;    /* off-owner reads coalesced */
+	uint64_t dest_direct_gets;          /* whole GETs written to user buffer */
+	uint64_t dest_direct_get_bytes;     /* bytes avoiding fill-to-user copy */
 
 	uint64_t wal_writes;      /* writes acknowledged from the log */
 	uint64_t wal_retries;     /* writes parked by backpressure */
@@ -307,16 +346,37 @@ struct s3_bs_dev_stats {
 	 * reads repeat at a coarser granularity than they arrive in. */
 	bool     cache_attached;
 	uint64_t cache_hits;
+	uint64_t cache_ram_hits;
+	uint64_t cache_disk_hits;
 	uint64_t cache_misses;
 	uint64_t cache_hits_declined;
 	uint64_t cache_populates;
 	uint64_t cache_populates_dropped;
 	uint64_t cache_evictions;
 	uint64_t cache_bytes_served;
+	uint64_t cache_ram_bytes_served;
 	uint64_t cache_bytes_populated;
 	uint64_t cache_slots_total;
 	uint64_t cache_slots_resident;
 	uint64_t cache_bytes_resident;
+	uint64_t cache_hot_slots_total;
+	uint64_t cache_hot_slots_resident;
+	uint64_t cache_hot_evictions;
+	uint64_t cache_object_hits;
+	uint64_t cache_object_misses;
+	uint64_t cache_object_hits_declined;
+	uint64_t cache_object_populates;
+	uint64_t cache_object_populates_dropped;
+	uint64_t cache_object_populates_failed;
+	uint64_t cache_object_evictions;
+	uint64_t cache_object_bytes_served;
+	uint64_t cache_object_bytes_populated;
+	uint64_t cache_object_slots_resident;
+	uint64_t cache_object_alias_hits;
+	uint64_t cache_object_alias_misses;
+	uint64_t cache_object_alias_registers;
+	uint64_t cache_object_alias_evictions;
+	uint64_t cache_object_aliases_resident;
 };
 
 /**

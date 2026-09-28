@@ -34,8 +34,6 @@ import (
 	bolt "go.etcd.io/bbolt"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
@@ -46,7 +44,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 type local struct {
@@ -994,10 +994,12 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	backend := createContextStorageBackend(opts)
 	// Cross-node imports a sandbox-private memory volume. XFS template
 	// start / pause resume / FromSnap mmap the original snapshot file
-	// MAP_PRIVATE; CH keeps it open so later unlink of the package is
-	// safe and a clone would only duplicate bytes. Same-node S3 pause
-	// resume still clones onto sb-<id>-memory: deactivate of an NVMe
-	// lvol would yank the live disk, unlike an unlinked XFS file.
+	// MAP_PRIVATE. Master's Resume CleanupTemplate is a no-op while the
+	// live sandbox still holds that pause id; next Pause or Destroy
+	// unlinks the package (CH keeps the fd open). Same-node S3 pause
+	// resume still clones onto sb-<id>-memory so deactivate of the
+	// package NVMe cannot yank the live disk; the package catalog is
+	// still kept for Snapshot last-restore, like XFS.
 	if imp := CrossNodeSandboxImport(annotations); imp != nil {
 		name, devPath, err := imp.Memory(ctx)
 		if err != nil {
@@ -1297,6 +1299,9 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 		if l.s3CowManager != nil {
 			return l.s3CowManager, nil
 		}
+		if l.config == nil || !l.config.s3lvolConfigured() {
+			return nil, ErrS3NotConfigured
+		}
 		return nil, ErrS3NotReady
 	default:
 		if l.cowManager != nil {
@@ -1309,6 +1314,9 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 	switch normalized {
 	case cow.BackendS3:
 		if l.s3CowManager == nil {
+			if l.config == nil || !l.config.s3lvolConfigured() {
+				return nil, ErrS3NotConfigured
+			}
 			return nil, ErrS3NotReady
 		}
 		return l.s3CowManager, nil

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for CubeTemplateCenter/docker/Dockerfile
+# (context = repository root).
+#
+# The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
+# exclude CubeTemplateCenter/ without these overrides. Allow the trees this
+# Dockerfile COPYs.
+**
+!CubeTemplateCenter
+!CubeTemplateCenter/**
+!CubeMaster
+!CubeMaster/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**
+!pkgs/blobstore
+!pkgs/blobstore/**
+!pkgs/cubedb
+!pkgs/cubedb/**
+!Cubelet
+!Cubelet/**
+!pkgs/proto
+!pkgs/proto/**

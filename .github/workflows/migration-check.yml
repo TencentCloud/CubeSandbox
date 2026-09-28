@@ -4,16 +4,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - 'CubeDB/migrate/**'
-      - 'CubeMaster/pkg/base/dao/migrate/**'
-      - 'cubedb/migrate/**'
+      - 'pkgs/cubedb/migrate/**'
       - '.github/workflows/migration-check.yml'
   push:
     branches: [master]
     paths:
-      - 'CubeDB/migrate/**'
-      - 'CubeMaster/pkg/base/dao/migrate/**'
-      - 'cubedb/migrate/**'
+      - 'pkgs/cubedb/migrate/**'
       - '.github/workflows/migration-check.yml'
   workflow_dispatch:
 
@@ -45,12 +41,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: CubeDB/go.mod
-          cache-dependency-path: CubeDB/go.sum
+          go-version-file: pkgs/cubedb/go.mod
+          cache-dependency-path: pkgs/cubedb/go.sum
 
       - name: Validate migration filenames & cross-dialect parity
         shell: bash
-        working-directory: CubeDB
+        working-directory: pkgs/cubedb
         run: |
           set -euo pipefail
           go test ./migrate/ \
@@ -72,7 +68,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          migrations_dir="CubeDB/migrate/migrations"
+          migrations_dir="pkgs/cubedb/migrate/migrations"
+          legacy_migrations_dir="CubeDB/migrate/migrations"
+
+          # A same-content relocation CubeDB/ → pkgs/cubedb/ is allowed; any
+          # other rename/edit/delete is still rejected so goose versions stay
+          # immutable.
+          is_cubedb_dir_relocation() {
+            local old="$1" new="$2"
+            local dialect file
+            if [[ "${old}" =~ ^CubeDB/migrate/migrations/(mysql|postgres)/([^/]+\.sql)$ ]]; then
+              dialect="${BASH_REMATCH[1]}"
+              file="${BASH_REMATCH[2]}"
+            else
+              return 1
+            fi
+            [[ "${new}" == "pkgs/cubedb/migrate/migrations/${dialect}/${file}" ]]
+          }
 
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             base_sha="${PR_BASE_SHA}"
@@ -106,9 +118,11 @@ jobs:
             fi
           fi
 
-          # --find-renames so a rename shows up as R (which we reject), not as
-          # an add+delete pair.
-          changes="$(git diff --name-status --find-renames "${base_sha}" "${head_sha}" -- "${migrations_dir}")"
+          # --find-renames so a rename shows up as R (which we reject, except
+          # a same-content CubeDB → pkgs/cubedb relocation), not as an
+          # add+delete pair. The legacy path is included so a relocation does
+          # not slip through as a plain add.
+          changes="$(git diff --name-status --find-renames "${base_sha}" "${head_sha}" -- "${migrations_dir}" "${legacy_migrations_dir}")"
 
           if [[ -z "${changes}" ]]; then
             echo "No migration file changes."
@@ -125,8 +139,32 @@ jobs:
               A*)
                 # New file: allowed.
                 ;;
-              M*|D*|R*|C*)
-                # For renames/copies the original path is in $path.
+              R*)
+                if [[ "${path}" == *.sql ]] && is_cubedb_dir_relocation "${path}" "${rest}" \
+                  && git diff --quiet "${base_sha}:${path}" "${head_sha}:${rest}"; then
+                  echo "Allowed same-content relocation: ${path} -> ${rest}"
+                  continue
+                fi
+                if [[ "${path}" == *.sql ]]; then
+                  echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
+                  violations=$((violations + 1))
+                fi
+                ;;
+              D*)
+                relocated="pkgs/cubedb/${path#CubeDB/}"
+                if [[ "${path}" == CubeDB/migrate/migrations/*/*.sql ]] \
+                  && git cat-file -e "${head_sha}:${relocated}" 2>/dev/null \
+                  && git diff --quiet "${base_sha}:${path}" "${head_sha}:${relocated}"; then
+                  echo "Allowed same-content relocation: ${path} -> ${relocated}"
+                  continue
+                fi
+                if [[ "${path}" == *.sql ]]; then
+                  echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
+                  violations=$((violations + 1))
+                fi
+                ;;
+              M*|C*)
+                # For copies the original path is in $path.
                 if [[ "${path}" == *.sql ]]; then
                   echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
                   violations=$((violations + 1))
@@ -137,11 +175,11 @@ jobs:
 
           if [[ "${violations}" -gt 0 ]]; then
             echo ""
-            echo "::error::${violations} forbidden migration change(s). See CubeDB/migrate/migrations/mysql/README.md"
+            echo "::error::${violations} forbidden migration change(s). See pkgs/cubedb/migrate/migrations/mysql/README.md"
             exit 1
           fi
 
-          echo "All migration changes are additive (new files only)."
+          echo "All migration changes are additive (new files only) or a same-content CubeDB → pkgs/cubedb relocation."
 
   schema-alignment:
     name: Cross-dialect schema alignment (docker) (${{ matrix.arch }})
@@ -161,12 +199,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: CubeDB/go.mod
-          cache-dependency-path: CubeDB/go.sum
+          go-version-file: pkgs/cubedb/go.mod
+          cache-dependency-path: pkgs/cubedb/go.sum
 
       - name: Run migrate integration tests (MySQL + PostgreSQL + alignment)
         shell: bash
-        working-directory: CubeDB
+        working-directory: pkgs/cubedb
         env:
           # Forbid t.Skip when Docker is unavailable — job must not go green by skip.
           # NOTE: env var name is kept as CUBEMASTER_REQUIRE_DOCKER_TESTS for backward

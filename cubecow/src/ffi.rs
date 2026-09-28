@@ -72,7 +72,6 @@ fn set_last_error(msg: &str) {
 }
 
 fn set_last_init_error(msg: &str) {
-    eprintln!("cubecow init error: {msg}");
     set_last_error(msg);
 }
 

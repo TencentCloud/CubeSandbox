@@ -272,7 +272,7 @@ variable "use_cfs" {
 variable "image_tag" {
   description = "Shared image tag for the Cube components when per-component image overrides are empty"
   type        = string
-  default     = "v0.7.0"
+  default     = "v0.7.2"
 }
 
 variable "image_registry" {
@@ -290,37 +290,65 @@ variable "image_namespace" {
 variable "cubemaster_image" {
   description = "Full cubemaster image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:v0.7.0"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:v0.7.2"
 }
 
 variable "cubeapi_image" {
   description = "Full cube-api image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.7.0"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.7.2"
 }
 
 variable "cubeops_image" {
   description = "Full cube-ops image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:v0.7.0"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:v0.7.2"
 }
 
 variable "cubeproxy_image" {
   description = "Full cube-proxy image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.7.0"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.7.2"
 }
 
 variable "webui_image" {
   description = "Full cube-webui image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:v0.7.0"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:v0.7.2"
 }
 
 variable "cube_lifecycle_manager_image" {
   description = "Full cube-lifecycle-manager image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.0"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.2"
+}
+
+variable "templatecenter_image" {
+  description = "Full cube-templatecenter image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-templatecenter:v0.7.2"
+}
+
+variable "templatecenter_enabled" {
+  description = "DEPRECATED, must stay true: CubeTemplateCenter is mandatory (CubeMaster has no in-process build fallback) and now deploys unconditionally with the addons. The variable remains only so existing tfvars keep parsing."
+  type        = bool
+  default     = true
+
+  validation {
+    condition     = var.templatecenter_enabled
+    error_message = "templatecenter_enabled=false is no longer supported: CubeMaster cannot build templates in-process, so disabling CubeTemplateCenter breaks every template build. Remove the variable; TC deploys unconditionally."
+  }
+}
+
+variable "templatecenter_replicas" {
+  description = "CubeTemplateCenter replica count. Increase for higher build throughput. Values > 1 require use_cfs=true: replicas coordinate duplicate builds of the same spec through DB session locks, but the artifact store must be the shared NFS export for every replica (and every cube-master) to see every ext4. With the default node-local hostPath store a second replica could neither read the first one's files nor take over its builds, and the templatecenter deployment's lifecycle precondition fails the plan in that combination."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.templatecenter_replicas >= 1 && floor(var.templatecenter_replicas) == var.templatecenter_replicas
+    error_message = "templatecenter_replicas must be an integer >= 1."
+  }
 }
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
@@ -373,9 +401,9 @@ variable "cube_proxy_replicas" {
 }
 
 variable "cube_lifecycle_manager_replicas" {
-  description = "cube-lifecycle-manager Deployment replica count. Keep 1 unless CLM HA behavior has been validated for the target deployment."
+  description = "cube-lifecycle-manager Deployment replica count. Two replicas run active-standby when cube_lifecycle_manager_leader_election_enabled is true; set to 1 only after also disabling leader election."
   type        = number
-  default     = 1
+  default     = 2
 
   validation {
     condition     = var.cube_lifecycle_manager_replicas >= 1 && floor(var.cube_lifecycle_manager_replicas) == var.cube_lifecycle_manager_replicas
@@ -424,6 +452,54 @@ variable "cube_lifecycle_manager_discovery_refresh" {
   validation {
     condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_discovery_refresh))
     error_message = "cube_lifecycle_manager_discovery_refresh must be a Go duration such as 3s, 1m, or 1h."
+  }
+}
+
+# Leader election. Both replicas consume lifecycle events and serve resume
+# requests; the Redis lease only gates singleton work (idle sweep/kill and
+# stale cube-proxy pruning). Mirrors lifecycleManager.leaderElection in
+# deploy/kubernetes/chart/values.yaml — keep the two in sync.
+#
+# The inter-value constraints (renew < ttl/2, 0 < retry < ttl) are enforced by
+# cube-lifecycle-manager's own config.Validate() at startup, which fails fast
+# with an explicit message. Terraform cannot compare Go duration strings
+# without parsing them, so they are documented rather than re-checked here.
+variable "cube_lifecycle_manager_leader_election_enabled" {
+  description = "Run cube-lifecycle-manager as active-standby using a Redis lease. Requires cube_lifecycle_manager_replicas >= 2."
+  type        = bool
+  default     = true
+}
+
+variable "cube_lifecycle_manager_leader_lease_ttl" {
+  description = "Redis lease TTL for cube-lifecycle-manager leader election. Bounds how long a crashed leader blocks takeover."
+  type        = string
+  default     = "10s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_leader_lease_ttl))
+    error_message = "cube_lifecycle_manager_leader_lease_ttl must be a Go duration such as 10s, 30s, or 1m."
+  }
+}
+
+variable "cube_lifecycle_manager_leader_renew_interval" {
+  description = "How often the cube-lifecycle-manager leader renews its lease. Must be less than half of cube_lifecycle_manager_leader_lease_ttl."
+  type        = string
+  default     = "3s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_leader_renew_interval))
+    error_message = "cube_lifecycle_manager_leader_renew_interval must be a Go duration such as 3s, 1s, or 500ms."
+  }
+}
+
+variable "cube_lifecycle_manager_leader_retry_interval" {
+  description = "How often a cube-lifecycle-manager standby retries acquiring the lease. Must be greater than 0 and less than cube_lifecycle_manager_leader_lease_ttl."
+  type        = string
+  default     = "1s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_leader_retry_interval))
+    error_message = "cube_lifecycle_manager_leader_retry_interval must be a Go duration such as 1s, 2s, or 500ms."
   }
 }
 

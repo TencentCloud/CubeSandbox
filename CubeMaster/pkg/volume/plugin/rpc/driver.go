@@ -4,7 +4,7 @@
 // Package rpc implements a ControllerPlugin that calls an external gRPC server.
 //
 // The server must implement VolumeControllerService from
-// Cubelet/api/services/volumeplugin/v1/volumeplugin.proto.
+// pkgs/proto/services/volumeplugin/v1/volumeplugin.proto.
 //
 // Connection target (socket_path config):
 //   - Unix socket: "unix:///run/cube/volume-<name>.sock" or "/run/cube/…"
@@ -16,8 +16,8 @@ import (
 	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
-	vpb "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/grpctarget"
+	vpb "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/volumeplugin/grpctarget"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

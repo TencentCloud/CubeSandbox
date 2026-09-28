@@ -30,7 +30,18 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.arch }} base image
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
@@ -41,8 +52,10 @@ jobs:
 
       - name: Resolve envd ref
         id: meta_ref
+        env:
+          ENVD_REF_INPUT: ${{ github.event.inputs.envd_ref }}
         run: |
-          envd_ref="${{ github.event.inputs.envd_ref || env.ENVD_REF_DEFAULT }}"
+          envd_ref="${ENVD_REF_INPUT:-${ENVD_REF_DEFAULT}}"
           echo "envd_ref=${envd_ref}" >> "${GITHUB_OUTPUT}"
           echo "Compiling envd from e2b-dev/infra@${envd_ref}"
 
@@ -62,28 +75,42 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }}-${{ env.BASE_OS_TAG_SUFFIX }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=raw,value=latest,enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=sha,prefix=sha-,format=short
           labels: |
             io.cubesandbox.envd.ref=${{ steps.meta_ref.outputs.envd_ref }}
+
+      - name: Prepare image tags
+        id: image_tags
+        env:
+          ARCH: ${{ matrix.arch }}
+          ENVD_REF: ${{ steps.meta_ref.outputs.envd_ref }}
+          IS_RELEASE_PUSH: ${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:sha-${short_sha}-${ARCH}"
+            if [[ "${IS_RELEASE_PUSH}" == "true" ]]; then
+              echo "${IMAGE_NAME}:latest-${ARCH}"
+              echo "${IMAGE_NAME}:${ENVD_REF}-${ARCH}"
+              echo "${IMAGE_NAME}:${ENVD_REF}-${BASE_OS_TAG_SUFFIX}-${ARCH}"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Build image (load locally for smoke test)
         uses: docker/build-push-action@v6
         with:
           context: docker
           file: docker/Dockerfile.cube-base
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           tags: cubesandbox-base:ci-smoke
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
 
       - name: Smoke test envd /health
         run: |
@@ -92,7 +119,7 @@ jobs:
           trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
 
           ok=""
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          for attempt in {1..10}; do
             code="$(docker exec "${cid}" curl -s -o /dev/null -w "%{http_code}" \
                 http://127.0.0.1:49983/health || true)"
             echo "attempt ${attempt}: envd /health => ${code}"
@@ -113,17 +140,61 @@ jobs:
           docker exec "${cid}" /usr/bin/envd -version
           docker exec "${cid}" /usr/bin/envd -commit
 
-      - name: Push image
+      - name: Push per-arch image
         if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
         uses: docker/build-push-action@v6
         with:
           context: docker
           file: docker/Dockerfile.cube-base
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # Plain per-arch manifests so publish_manifest can combine them.
+          # Attestations add unknown/unknown entries that break imagetools create.
+          provenance: false
+          tags: ${{ steps.image_tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
+
+  publish_manifest:
+    name: Publish multi-arch base manifests
+    if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Resolve envd ref
+        id: meta_ref
+        env:
+          ENVD_REF_INPUT: ${{ github.event.inputs.envd_ref }}
+        run: |
+          envd_ref="${ENVD_REF_INPUT:-${ENVD_REF_DEFAULT}}"
+          echo "envd_ref=${envd_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifests
+        env:
+          ENVD_REF: ${{ steps.meta_ref.outputs.envd_ref }}
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          docker buildx imagetools create \
+            -t "${IMAGE_NAME}:latest" \
+            -t "${IMAGE_NAME}:${ENVD_REF}" \
+            -t "${IMAGE_NAME}:${ENVD_REF}-${BASE_OS_TAG_SUFFIX}" \
+            -t "${IMAGE_NAME}:sha-${short_sha}" \
+            "${IMAGE_NAME}:sha-${short_sha}-amd64" \
+            "${IMAGE_NAME}:sha-${short_sha}-arm64"

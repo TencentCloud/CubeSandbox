@@ -8,7 +8,7 @@ import (
 	"context"
 
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 func LoadImageScore() {

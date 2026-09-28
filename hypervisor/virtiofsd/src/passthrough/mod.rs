@@ -31,7 +31,7 @@ use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
 use mount_fd::{MPRError, MountFds};
 use stat::{statx, StatExt};
 use std::borrow::Cow;
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{btree_map, BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
@@ -40,7 +40,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use xattrmap::{AppliedRule, XattrMap};
 
@@ -379,6 +379,22 @@ pub struct Config {
     ///
     /// The default is `FindPaths`.
     pub migration_mode: MigrationMode,
+
+    /// Whether to use the legacy DFS-based `PathReconstructor` during the preserialization
+    /// phase of migration instead of the optimized "store-only" reconstructor.
+    ///
+    /// When `false` (default), preserialization only iterates the inode store (and reverse-looks
+    /// up parents via a path -> inode hash table built in a single store pass), avoiding any
+    /// directory tree traversal. Any parent inodes that are not yet in the store are
+    /// materialized on demand via `openat(O_PATH | O_NOFOLLOW)` from the nearest known anchor,
+    /// so the result is semantically identical to the legacy DFS reconstructor. This is much
+    /// faster when the shared directory is large but only a small subset has been looked up by
+    /// the guest, and especially when the shared tree is on a slow backend (e.g. NFS).
+    ///
+    /// When `true`, fall back to the original full-tree DFS-based `PathReconstructor` (e.g. as
+    /// an escape hatch if the store-only reconstructor is suspected of misbehaving in a
+    /// specific setup).
+    pub migration_dfs_preserialization: bool,
 }
 
 impl Default for Config {
@@ -397,7 +413,7 @@ impl Default for Config {
             proc_mountinfo_rawfd: None,
             announce_submounts: false,
             inode_file_handles: Default::default(),
-            readdirplus: true,
+            readdirplus: false,
             allow_direct_io: false,
             killpriv_v2: false,
             posix_acl: false,
@@ -410,6 +426,7 @@ impl Default for Config {
             migration_verify_handles: false,
             migration_confirm_paths: false,
             migration_mode: MigrationMode::FindPaths,
+            migration_dfs_preserialization: false,
         }
     }
 }
@@ -471,6 +488,11 @@ pub struct PassthroughFs {
     // serialization each subtree of filter entries.
     filter: RwLock<BTreeMap<Inode, (String, String)>>,
 
+    // basename → destination absolute path, used only while applying a
+    // migration blob so filter inodes open at the restore-time allow_dir.
+    // OnceLock so remap_filter_fullname can return &str borrowed from self.
+    restore_filter_remap: OnceLock<HashMap<String, String>>,
+
     cfg: Config,
 }
 
@@ -525,6 +547,7 @@ impl PassthroughFs {
             os_facts: oslib::OsFacts::new(),
             track_migration_info: AtomicBool::new(false),
             filter: RwLock::new(BTreeMap::new()),
+            restore_filter_remap: OnceLock::new(),
             cfg,
         };
 
@@ -575,6 +598,31 @@ impl PassthroughFs {
             .filter(|hd| hd.inode == inode)
             .cloned()
             .ok_or_else(ebadf)
+    }
+
+    /// If restore remapped this filter basename to a new host path, return that
+    /// path; otherwise keep `fullname` from the migration blob.
+    fn remap_filter_fullname<'a>(&'a self, inode: Inode, fullname: &'a str) -> &'a str {
+        match self
+            .restore_filter_remap
+            .get()
+            .and_then(|remap| {
+                std::path::Path::new(fullname)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| remap.get(name))
+            })
+            .map(String::as_str)
+        {
+            Some(new_path) if new_path != fullname => {
+                info!(
+                    "remap filter inode {}: {:?} -> {:?}",
+                    inode, fullname, new_path
+                );
+                new_path
+            }
+            _ => fullname,
+        }
     }
 
     fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
@@ -1364,6 +1412,10 @@ impl FileSystem for PassthroughFs {
         Ok(st.st.st_ino)
     }
 
+    fn readdirplus_enabled(&self) -> bool {
+        self.cfg.readdirplus
+    }
+
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
         self.open_root_node()?;
 
@@ -1472,11 +1524,41 @@ impl FileSystem for PassthroughFs {
     }
 
     fn forget(&self, _ctx: Context, inode: Inode, count: u64) {
+        // Pin filter inodes: guest FORGETs must never evict a filter (whitelist)
+        // entry from `self.inodes`, otherwise `self.filter` and `inode_store` can
+        // desynchronize. A stale filter id left in `self.filter` will poison the
+        // preserialization `path_to_inode` seed (see `build_filter_resolved_map`)
+        // and cause children of that filter to be marked Invalid during migration.
+        if self.filter.read().unwrap().contains_key(&inode) {
+            debug!(
+                "forget: skipping filter-pinned inode {} (count={})",
+                inode, count
+            );
+            return;
+        }
         self.inodes.forget_one(inode, count)
     }
 
     fn batch_forget(&self, _ctx: Context, requests: Vec<(Inode, u64)>) {
-        self.inodes.forget_many(requests)
+        // Same rationale as `forget`: strip filter-pinned inodes from the batch
+        // so they are never evicted from `self.inodes`.
+        let filter = self.filter.read().unwrap();
+        let filtered: Vec<(Inode, u64)> = requests
+            .into_iter()
+            .filter(|(inode, count)| {
+                if filter.contains_key(inode) {
+                    debug!(
+                        "batch_forget: skipping filter-pinned inode {} (count={})",
+                        inode, count
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        drop(filter);
+        self.inodes.forget_many(filtered)
     }
 
     fn opendir(

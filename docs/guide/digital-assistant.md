@@ -61,13 +61,13 @@ If the template is missing, built from a different image, or does not include th
 
 ### AgentHub Database
 
-CubeAPI uses MySQL to persist Digital Assistant metadata, including assistant instances, snapshots, templates, and operation history:
+CubeOps uses MySQL to persist Digital Assistant metadata, including assistant instances, snapshots, templates, and operation history:
 
 ```bash
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 ```
 
-In one-click deployments, when `DATABASE_URL` is omitted, the startup script builds it from `CUBE_SANDBOX_MYSQL_*`.
+In one-click deployments, when `DATABASE_URL` is omitted, the startup script exports the `CUBE_SANDBOX_MYSQL_*` fields and CubeOps maps them directly onto its database config.
 
 ### LLM API Key
 

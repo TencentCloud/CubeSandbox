@@ -241,6 +241,42 @@ COMMON_CFLAGS += $(s3lvol_bt_cflags)
 COMMON_CFLAGS += -D_GNU_SOURCE -fno-strict-aliasing
 
 # ---------------------------------------------------------------------------
+# Build identification, surfaced through rcow_get_build_info and
+# s3lvol_tgt --print-build-info.
+#
+# Stamped in at compile time rather than probed at run time: the candidate
+# binary is asked what it is *before* it is allowed to start, so the answer
+# cannot come from anything the process would have to come up to learn.
+#
+# Expanded once, not on every use. These land in COMMON_CFLAGS, which is a
+# recursive variable every compile recipe expands, so a `$(shell ...)` left
+# recursive would run once per translation unit -- and could stamp different
+# objects differently if the tree went dirty part way through a build.
+#
+# The origin guard is what `?=` did and what a release build needs: a value
+# pinned on the command line or in the environment wins, and the shell only
+# runs when nothing pinned one. The fallbacks keep a plain `make` going in a
+# tree with no git metadata or no sibling SPDK checkout.
+#
+# Quoting: the single quotes are stripped by the shell, leaving the compiler
+# with -DS3LVOL_VERSION="...", i.e. a C string literal -- which is what the
+# #ifndef fallbacks in s3lvol/s3_build_info.h expect.
+# ---------------------------------------------------------------------------
+ifeq ($(origin S3LVOL_VERSION),undefined)
+S3LVOL_VERSION := $(shell git -C $(S3LVOL_ROOT) describe --tags --always --dirty 2>/dev/null || echo unknown)
+endif
+ifeq ($(origin S3LVOL_GIT_COMMIT),undefined)
+S3LVOL_GIT_COMMIT := $(shell git -C $(S3LVOL_ROOT) rev-parse HEAD 2>/dev/null || echo unknown)
+endif
+ifeq ($(origin S3LVOL_SPDK_VERSION),undefined)
+S3LVOL_SPDK_VERSION := $(shell git -C $(SPDK_ROOT) describe --tags --always 2>/dev/null || echo unknown)
+endif
+
+COMMON_CFLAGS += -DS3LVOL_VERSION='"$(S3LVOL_VERSION)"'
+COMMON_CFLAGS += -DS3LVOL_GIT_COMMIT='"$(S3LVOL_GIT_COMMIT)"'
+COMMON_CFLAGS += -DS3LVOL_SPDK_VERSION='"$(S3LVOL_SPDK_VERSION)"'
+
+# ---------------------------------------------------------------------------
 # ASan build (for debugging use-after-free). Off by default. When enabled every
 # .o and the link carry -fsanitize=address. Note the sanitize flags are not part
 # of the .o dependency tracking, so toggling it requires a make clean first.
@@ -403,6 +439,12 @@ spdk_only_libs   = $(filter-out -lrte_%,$(1))
 # does not register constructors the way SPDK/DPDK do, and wrapping it would
 # pull unused ENGINE objects. -ldl -pthread stay dynamic (OpenSSL 1.1 needs
 # them).
+#
+# The archive may also need -lz, which the .so never does because it carries its
+# own DT_NEEDED. Distros disagree: TencentOS/RHEL build libcrypto with zlib
+# compression, so c_zlib.o refers to inflate/deflate and the link fails without
+# it, while Debian's is built no-comp. Probed rather than always appended, so a
+# builder that does not need zlib does not gain a dependency on it.
 # ---------------------------------------------------------------------------
 
 OPENSSL_LIBDIR := $(strip $(shell pkg-config --variable=libdir openssl 2>/dev/null))
@@ -412,18 +454,28 @@ ifneq ($(filter /%,$(OPENSSL_SSL_A_PROBE)),)
 OPENSSL_LIBDIR := $(patsubst %/,%,$(dir $(OPENSSL_SSL_A_PROBE)))
 endif
 endif
-OPENSSL_STATIC_LIBS := $(OPENSSL_LIBDIR)/libssl.a $(OPENSSL_LIBDIR)/libcrypto.a
 
 filter_ssl = $(filter-out -lssl -lcrypto,$(1))
 SYS_LIBS := $(call filter_ssl,$(SYS_LIBS))
 
-ifeq ($(filter clean help,$(MAKECMDGOALS)),)
+# Archives when present (release / Ubuntu 20.04 builder). Shared -lssl otherwise:
+# openssl-devel on RHEL/TencentOS ships headers and .so only; the .a files are
+# openssl-static. make_release.sh still refuses a binary that DT_NEEDED libssl.
 ifeq ($(and $(wildcard $(OPENSSL_LIBDIR)/libssl.a),$(wildcard $(OPENSSL_LIBDIR)/libcrypto.a)),)
-$(error No static OpenSSL at $(OPENSSL_LIBDIR) (need libssl.a and libcrypto.a). \
-        Install libssl-dev (Debian/Ubuntu) or openssl-devel (RHEL/CentOS). \
-        Release s3lvol_tgt links OpenSSL statically so the package does not \
-        need libssl.so.1.1 on the target)
+ifeq ($(filter clean help,$(MAKECMDGOALS)),)
+ifndef S3LVOL_OPENSSL_SHARED_WARNED
+$(warning No static OpenSSL at $(OPENSSL_LIBDIR); linking shared -lssl -lcrypto. \
+        Install openssl-static (RHEL/TencentOS) or libssl-dev (Debian/Ubuntu) \
+        for a package that does not need libssl.so.1.1 on the target)
+export S3LVOL_OPENSSL_SHARED_WARNED := 1
 endif
+endif
+OPENSSL_STATIC_LIBS := -lssl -lcrypto
+else
+OPENSSL_ZLIB := $(shell nm -u $(OPENSSL_LIBDIR)/libcrypto.a 2>/dev/null \
+        | grep -qw inflate && echo -lz)
+OPENSSL_STATIC_LIBS := $(OPENSSL_LIBDIR)/libssl.a $(OPENSSL_LIBDIR)/libcrypto.a \
+        $(OPENSSL_ZLIB)
 endif
 
 # $(call dpdk_link_args,<pkg-config --libs output>) -- the DPDK half, ready to

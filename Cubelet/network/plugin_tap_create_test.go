@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
 	networktypes "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 type fakeNetworkRuntime struct {
@@ -54,7 +54,7 @@ func (c *fakeNetworkRuntime) EnsureNetwork(_ context.Context, req *networkruntim
 		NetworkHandle: "sandbox-1",
 		Interfaces: []networkruntime.Interface{
 			{
-				Name:    "z192.168.0.40",
+				Name:    "192.168.0.40",
 				MAC:     "20:90:6f:fc:fc:fc",
 				MTU:     1500,
 				IPs:     []string{"169.254.68.6/30"},
@@ -170,7 +170,7 @@ func TestTapCreateWithNetworkRuntimeCallsEnsureNetwork(t *testing.T) {
 		t.Fatal("network runtime ReleaseNetwork was called despite successful Create")
 	}
 	shimInfo, ok := opts.NetworkInfo.(*networktypes.ShimNetReq)
-	if !ok || shimInfo == nil || len(shimInfo.Interfaces) != 1 || shimInfo.Interfaces[0].Name != "z192.168.0.40" {
+	if !ok || shimInfo == nil || len(shimInfo.Interfaces) != 1 || shimInfo.Interfaces[0].Name != "192.168.0.40" {
 		t.Fatalf("NetworkInfo not populated from runtime response: %+v", opts.NetworkInfo)
 	}
 }

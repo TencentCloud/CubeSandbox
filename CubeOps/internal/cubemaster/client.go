@@ -13,7 +13,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // CMError carries a CubeMaster business error (non-zero ret_code) out of

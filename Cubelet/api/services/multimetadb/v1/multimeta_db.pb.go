@@ -11,7 +11,7 @@
 package multimetadb
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -392,7 +392,7 @@ var File_api_services_multimetadb_v1_multimeta_db_proto protoreflect.FileDescrip
 
 const file_api_services_multimetadb_v1_multimeta_db_proto_rawDesc = "" +
 	"\n" +
-	".api/services/multimetadb/v1/multimeta_db.proto\x12\x1fcubelet.services.multimetadb.v1\x1a)api/services/errorcode/v1/errorcode.proto\"z\n" +
+	".api/services/multimetadb/v1/multimeta_db.proto\x12\x1fcubelet.services.multimetadb.v1\x1a%services/errorcode/v1/errorcode.proto\"z\n" +
 	"\fBucketDefine\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
 	"\fis_namespace\x18\x02 \x01(\bR\visNamespace\x12\x17\n" +

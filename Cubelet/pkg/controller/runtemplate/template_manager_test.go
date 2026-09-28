@@ -345,6 +345,43 @@ func TestRecoveredMetadataHomeAcceptsPausePackage(t *testing.T) {
 	}
 }
 
+func TestS3RecoveryIDsListsPackageHomesWhenIDUnknown(t *testing.T) {
+	root := t.TempDir()
+	snapshots := filepath.Join(root, "snapshots")
+	pause := filepath.Join(root, "pause-snapshots")
+	for _, dir := range []string{
+		filepath.Join(snapshots, "tpl-b"),
+		filepath.Join(snapshots, "tpl-a"),
+		filepath.Join(snapshots, "tpl-tmp.tmp"),
+		filepath.Join(snapshots, "deadbeefdeadbeefdeadbeef"),
+		filepath.Join(pause, "tpl-b"),
+		filepath.Join(pause, "snap-pause-1"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(snapshots, "not-a-package"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	got := s3RecoveryIDs(context.Background(), "", []string{snapshots, pause, filepath.Join(root, "missing")})
+	want := []string{"snap-pause-1", "tpl-a", "tpl-b"}
+	if len(got) != len(want) {
+		t.Fatalf("ids=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ids=%v, want %v", got, want)
+		}
+	}
+
+	one := s3RecoveryIDs(context.Background(), " tpl-only ", []string{snapshots})
+	if len(one) != 1 || one[0] != "tpl-only" {
+		t.Fatalf("specific id=%v, want [tpl-only]", one)
+	}
+}
+
 // An unmounted or absent package must not blow up the recovery attempt; the
 // caller treats it as a plain miss.
 func TestMountS3PackageMetadataForRecoveryTolerAtesMissingPackage(t *testing.T) {

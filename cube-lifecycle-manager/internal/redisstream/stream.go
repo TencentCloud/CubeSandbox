@@ -4,7 +4,7 @@
 
 // Package redisstream owns every interaction with the lifecycle Redis schema:
 // the meta HSet bootstrap, the events stream consumer, and the per-sandbox
-// state locks used to serialize pause/resume across sidecar instances.
+// state locks used to serialize pause/resume across CLM replicas.
 package redisstream
 
 import (
@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -23,6 +25,10 @@ import (
 // notifyPublishTimeout bounds the best-effort Redis PUBLISH. It is detached
 // from the caller context so a cancelled request cannot drop the hint.
 const notifyPublishTimeout = 500 * time.Millisecond
+
+// ErrCursorTrimmed means XREAD could no longer prove that all entries after
+// the caller's cursor were retained.
+var ErrCursorTrimmed = errors.New("Redis stream cursor was trimmed")
 
 // Client wraps a go-redis client with lifecycle-shaped methods.
 type Client struct {
@@ -86,19 +92,88 @@ func (c *Client) Bootstrap(ctx context.Context) (map[string]lifecycle.SandboxLif
 	return out, nil
 }
 
-// EnsureGroup creates the consumer group on the events stream, ignoring
-// "BUSYGROUP" (group already exists) errors. MKSTREAM lets the group be
-// created before any events have been published.
-func (c *Client) EnsureGroup(ctx context.Context, group string) error {
-	err := c.rdb.XGroupCreateMkStream(ctx, lifecycle.EventStreamKey, group, "$").Err()
-	if err == nil {
-		return nil
+// LatestID returns the newest lifecycle stream ID. Callers capture it before
+// HGETALL bootstrap, then XREAD from that cursor so events written during the
+// bootstrap window are not missed. An empty stream starts at 0-0.
+func (c *Client) LatestID(ctx context.Context) (string, error) {
+	messages, err := c.rdb.XRevRangeN(ctx, lifecycle.EventStreamKey, "+", "-", 1).Result()
+	if err != nil {
+		return "", fmt.Errorf("xrevrange latest: %w", err)
 	}
-	// go-redis surfaces BUSYGROUP as a generic error with a known message.
-	if isBusyGroup(err) {
-		return nil
+	if len(messages) == 0 {
+		return "0-0", nil
 	}
-	return fmt.Errorf("xgroup create mkstream: %w", err)
+	return messages[0].ID, nil
+}
+
+// CursorValid reports whether cursor is still present in, or newer than, the
+// retained stream window. Redis XREAD silently skips trimmed entries, so CLM
+// must detect this condition and rebuild from the authoritative metadata Hash
+// before the replica is allowed to perform leader work.
+func (c *Client) CursorValid(ctx context.Context, cursor string) (bool, error) {
+	if cursor == "" {
+		return true, nil
+	}
+	if cursor == "0-0" {
+		exists, err := c.rdb.Exists(ctx, lifecycle.EventStreamKey).Result()
+		if err != nil {
+			return false, fmt.Errorf("exists %s: %w", lifecycle.EventStreamKey, err)
+		}
+		if exists == 0 {
+			return true, nil
+		}
+		info, err := c.rdb.XInfoStream(ctx, lifecycle.EventStreamKey).Result()
+		if err != nil {
+			return false, fmt.Errorf("xinfo stream %s: %w", lifecycle.EventStreamKey, err)
+		}
+		return info.EntriesAdded <= info.Length, nil
+	}
+	oldest, err := c.rdb.XRangeN(ctx, lifecycle.EventStreamKey, "-", "+", 1).Result()
+	if err != nil {
+		return false, fmt.Errorf("xrange oldest %s: %w", lifecycle.EventStreamKey, err)
+	}
+	if len(oldest) == 0 {
+		return false, nil
+	}
+	cmp, err := CompareStreamIDs(cursor, oldest[0].ID)
+	if err != nil {
+		return false, err
+	}
+	return cmp >= 0, nil
+}
+
+// CompareStreamIDs compares two Redis stream IDs.
+func CompareStreamIDs(left, right string) (int, error) {
+	parse := func(id string) (uint64, uint64, error) {
+		msText, seqText, ok := strings.Cut(id, "-")
+		if !ok {
+			return 0, 0, fmt.Errorf("invalid Redis stream ID %q", id)
+		}
+		ms, err := strconv.ParseUint(msText, 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid Redis stream ID %q: %w", id, err)
+		}
+		seq, err := strconv.ParseUint(seqText, 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid Redis stream ID %q: %w", id, err)
+		}
+		return ms, seq, nil
+	}
+	leftMS, leftSeq, err := parse(left)
+	if err != nil {
+		return 0, err
+	}
+	rightMS, rightSeq, err := parse(right)
+	if err != nil {
+		return 0, err
+	}
+	if leftMS < rightMS || (leftMS == rightMS && leftSeq < rightSeq) {
+		return -1, nil
+	}
+	if leftMS == rightMS && leftSeq == rightSeq {
+		return 0, nil
+	}
+	return 1, nil
 }
 
 // Event is a decoded entry from the events stream.
@@ -115,56 +190,50 @@ type Event struct {
 	Timestamp int64
 }
 
-// ReadGroup blocks for up to `block` waiting for new events on the stream.
-// Returns when at least one entry arrives, when the context is cancelled, or
-// when the block timeout expires (in which case it returns an empty slice and
-// nil error — the caller loops).
-func (c *Client) ReadGroup(ctx context.Context, group, consumer string, block time.Duration, count int) ([]Event, error) {
-	res, err := c.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    group,
-		Consumer: consumer,
-		Streams:  []string{lifecycle.EventStreamKey, ">"},
-		Count:    int64(count),
-		Block:    block,
+// Read broadcasts lifecycle events to one CLM replica using a caller-owned
+// cursor. Unlike XREADGROUP, every replica receives every event and can keep
+// its in-memory registry warm. The returned cursor advances over malformed
+// entries too, preventing one bad message from wedging the loop.
+func (c *Client) Read(ctx context.Context, cursor string, block time.Duration, count int) ([]Event, string, error) {
+	res, err := c.rdb.XRead(ctx, &redis.XReadArgs{
+		Streams: []string{lifecycle.EventStreamKey, cursor},
+		Count:   int64(count),
+		Block:   block,
 	}).Result()
-
-	if errors.Is(err, redis.Nil) {
-		return nil, nil
+	valid, checkErr := c.CursorValid(ctx, cursor)
+	if checkErr != nil {
+		return nil, cursor, checkErr
+	}
+	if !valid {
+		return nil, cursor, ErrCursorTrimmed
+	}
+	if errors.Is(err, redis.Nil) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, cursor, nil
 	}
 	if err != nil {
-		// Block-timeout shows up as a context-deadline-ish error from
-		// go-redis when no entries arrive and BLOCK > 0; treat as empty.
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("xreadgroup: %w", err)
+		return nil, cursor, fmt.Errorf("xread: %w", err)
 	}
 
+	next := cursor
 	var out []Event
 	for _, stream := range res {
 		for _, msg := range stream.Messages {
+			next = msg.ID
 			ev := decodeEvent(msg)
-			if ev != nil {
-				out = append(out, *ev)
-			} else {
+			if ev == nil {
 				c.log.Warn("redisstream: dropping unparseable event",
 					zap.String("id", msg.ID), zap.Any("values", msg.Values))
-				// Still ack so we don't loop on it.
-				_ = c.Ack(ctx, group, msg.ID)
+				continue
 			}
+			out = append(out, *ev)
 		}
 	}
-	return out, nil
-}
-
-// Ack marks the event as processed so it leaves the consumer's pending list.
-func (c *Client) Ack(ctx context.Context, group, id string) error {
-	return c.rdb.XAck(ctx, lifecycle.EventStreamKey, group, id).Err()
+	return out, next, nil
 }
 
 // AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with
 // the supplied desired state. Returns true on success. Used to coordinate
-// concurrent pause/resume across sidecars: whoever wins the SETNX owns the
+// concurrent pause/resume across CLM replicas: whoever wins the SETNX owns the
 // transition.
 func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error) {
 	key := lifecycle.StateKey(sandboxID)
@@ -173,6 +242,76 @@ func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl 
 		return false, fmt.Errorf("setnx %s: %w", key, err)
 	}
 	return ok, nil
+}
+
+// AcquireResume atomically changes an absent or paused state to resuming using
+// a single-key WATCH transaction. acquired=true means this caller owns the
+// transition. state is always the value observed before the write: paused or
+// empty when acquired, otherwise the blocking marker a waiter should reconcile
+// against. Transactions avoid Lua/EVAL and remain single-slot safe.
+func (c *Client) AcquireResume(ctx context.Context, sandboxID string, ttl time.Duration) (state string, acquired bool, err error) {
+	return c.acquireIf(ctx, sandboxID, "resuming", ttl, allowEmptyOrPaused)
+}
+
+// AcquireKill atomically changes an absent or paused state to killing. It is
+// the timeout-kill counterpart of AcquireResume: the two CAS transitions
+// are mutually exclusive, so a concurrent resume wins or this kill does,
+// but neither overwrites an in-flight resuming / pausing / running lock.
+// state is the pre-CAS observation (paused or empty when acquired) so a
+// failed kill can restore the proxy to the right prior state.
+func (c *Client) AcquireKill(ctx context.Context, sandboxID string, ttl time.Duration) (state string, acquired bool, err error) {
+	return c.acquireIf(ctx, sandboxID, "killing", ttl, allowEmptyOrPaused)
+}
+
+func allowEmptyOrPaused(current string) bool {
+	return current == "" || current == lifecycle.StatePaused
+}
+
+// acquireIf CAS-writes dest when allow(current) still holds under WATCH.
+// The returned state is always the pre-write observation, including when acquired.
+func (c *Client) acquireIf(
+	ctx context.Context,
+	sandboxID, dest string,
+	ttl time.Duration,
+	allow func(current string) bool,
+) (string, bool, error) {
+	const maxAttempts = 3
+	key := lifecycle.StateKey(sandboxID)
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var state string
+		acquired := false
+		err := c.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			current, getErr := tx.Get(ctx, key).Result()
+			if errors.Is(getErr, redis.Nil) {
+				current = ""
+			} else if getErr != nil {
+				return getErr
+			}
+
+			state = current
+			if !allow(current) {
+				return nil
+			}
+
+			_, txErr := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(ctx, key, dest, ttl)
+				return nil
+			})
+			if txErr == nil {
+				acquired = true
+			}
+			return txErr
+		}, key)
+		if errors.Is(err, redis.TxFailedErr) {
+			continue
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("acquire %s %s: %w", dest, key, err)
+		}
+		return state, acquired, nil
+	}
+	return "", false, fmt.Errorf("acquire %s %s: transaction conflicted after %d attempts", dest, key, maxAttempts)
 }
 
 // SetState forces the state value (overwriting any existing). Used to
@@ -203,6 +342,41 @@ func (c *Client) GetState(ctx context.Context, sandboxID string) (string, bool, 
 	return v, true, nil
 }
 
+// getStatesChunk bounds MGET so a large registry does not send one giant
+// command. 128 keys stay well under typical Redis argument limits.
+const getStatesChunk = 128
+
+// GetStates returns the current state string for each sandbox that has a
+// key. Missing keys are omitted from the map (not an error).
+func (c *Client) GetStates(ctx context.Context, sandboxIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(sandboxIDs))
+	if len(sandboxIDs) == 0 {
+		return out, nil
+	}
+	for start := 0; start < len(sandboxIDs); start += getStatesChunk {
+		chunk := sandboxIDs[start:min(start+getStatesChunk, len(sandboxIDs))]
+		keys := make([]string, len(chunk))
+		for i, id := range chunk {
+			keys[i] = lifecycle.StateKey(id)
+		}
+		vals, err := c.rdb.MGet(ctx, keys...).Result()
+		if err != nil {
+			return nil, fmt.Errorf("mget lifecycle states: %w", err)
+		}
+		for i, v := range vals {
+			if v == nil {
+				continue
+			}
+			s, ok := v.(string)
+			if !ok || s == "" {
+				continue
+			}
+			out[chunk[i]] = s
+		}
+	}
+	return out, nil
+}
+
 // WriteState performs SetState and, when notifications are enabled,
 // publishes a best-effort wakeup hint. Redis remains the source of truth.
 //
@@ -215,6 +389,49 @@ func (c *Client) WriteState(ctx context.Context, sandboxID, state string, ttl ti
 	}
 	c.publishNotify(sandboxID)
 	return nil
+}
+
+// WriteStateCAS writes a terminal state only if the current value still
+// matches expected. This prevents a state event from overwriting a transition
+// marker installed after the event handler's initial read.
+func (c *Client) WriteStateCAS(
+	ctx context.Context, sandboxID, expected, state string, ttl time.Duration,
+) (bool, error) {
+	const maxAttempts = 3
+	key := lifecycle.StateKey(sandboxID)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		updated := false
+		err := c.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			current, getErr := tx.Get(ctx, key).Result()
+			if errors.Is(getErr, redis.Nil) {
+				current = ""
+			} else if getErr != nil {
+				return getErr
+			}
+			if current != expected {
+				return nil
+			}
+			_, txErr := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(ctx, key, state, ttl)
+				return nil
+			})
+			if txErr == nil {
+				updated = true
+			}
+			return txErr
+		}, key)
+		if errors.Is(err, redis.TxFailedErr) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("write state cas %s: %w", key, err)
+		}
+		if updated {
+			c.publishNotify(sandboxID)
+		}
+		return updated, nil
+	}
+	return false, fmt.Errorf("write state cas %s: transaction conflicted after %d attempts", key, maxAttempts)
 }
 
 // ClearStateNotify is the ClearState + Pub/Sub companion used on rollback.
@@ -304,11 +521,4 @@ func decodeEvent(msg redis.XMessage) *Event {
 		}
 	}
 	return ev
-}
-
-func isBusyGroup(err error) bool {
-	if err == nil {
-		return false
-	}
-	return err.Error() == "BUSYGROUP Consumer Group name already exists"
 }

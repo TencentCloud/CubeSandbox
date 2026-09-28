@@ -8,5 +8,6 @@
   "observability": "Observability",
   "settings": "Settings",
   "store": "Template Store",
-  "agentHub": "AgentHub"
+  "agentHub": "AgentHub",
+  "warehouse": "Warehouse"
 }

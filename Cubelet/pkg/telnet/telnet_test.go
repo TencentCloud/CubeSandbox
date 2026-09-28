@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 func TestDoTCPDetect(t *testing.T) {

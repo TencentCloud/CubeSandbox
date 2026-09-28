@@ -583,6 +583,100 @@ sed_escape_replacement() {
   printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g' -e 's/[/]/\\\//g'
 }
 
+# Opt cubelet into CubeS3lvol: [cow.s3] enable = true (the image default is
+# false -- a socket path alone does not opt in) and socket_path pointing at
+# the sidecar socket. No undo path is needed: stage_component resets
+# config.toml from the image on every start.
+patch_cow_s3_opt_in() {
+  local cfg="$1"
+  local sock="$2"
+  local header='[plugins."io.cubelet.internal.v1.storage".cow.s3]'
+  local header_re='^[[:space:]]*\[plugins\."io\.cubelet\.internal\.v1\.storage"\.cow\.s3\]'
+  local tmp
+  local header_count
+  local enable_ok=0
+  local socket_ok=0
+
+  [[ -n "${sock}" ]] || fail "CUBE_S3LVOL_SOCKET is empty"
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  if grep -Eq "${header_re}" "${cfg}"; then
+    awk -v sock="${sock}" -v header="${header}" '
+      function is_table(line, name,    t) {
+        t = line
+        sub(/^[[:space:]]+/, "", t)
+        return index(t, name) == 1
+      }
+      function flush_s3() {
+        if (in_s3) {
+          if (!found_enable) {
+            print "    enable = true"
+          }
+          if (!found_socket) {
+            print "    socket_path = \"" sock "\""
+          }
+          in_s3 = 0
+        }
+      }
+      is_table($0, header) {
+        in_s3 = 1
+        print
+        next
+      }
+      in_s3 && /^[[:space:]]*\[/ {
+        flush_s3()
+      }
+      in_s3 && /^[[:space:]]*enable[[:space:]]*=/ {
+        print "    enable = true"
+        found_enable = 1
+        next
+      }
+      in_s3 && /^[[:space:]]*socket_path[[:space:]]*=/ {
+        print "    socket_path = \"" sock "\""
+        found_socket = 1
+        next
+      }
+      { print }
+      END { flush_s3() }
+    ' "${cfg}" > "${tmp}"
+  else
+    cat "${cfg}" > "${tmp}"
+    printf '\n    %s\n    enable = true\n    socket_path = "%s"\n' "${header}" "${sock}" >> "${tmp}"
+  fi
+  header_count="$(grep -Ec "${header_re}" "${tmp}" || true)"
+  if [[ "${header_count}" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "expected exactly one live ${header} (got ${header_count})"
+  fi
+  enable_ok="$(awk -v header="${header}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    is_table($0, header) { in_s3 = 1; next }
+    in_s3 && /^[[:space:]]*\[/ { in_s3 = 0 }
+    in_s3 && /^[[:space:]]*enable[[:space:]]*=[[:space:]]*true[[:space:]]*$/ { found = 1 }
+    END { print found + 0 }
+  ' "${tmp}")"
+  socket_ok="$(awk -v header="${header}" -v sock="${sock}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    is_table($0, header) { in_s3 = 1; next }
+    in_s3 && /^[[:space:]]*\[/ { in_s3 = 0 }
+    in_s3 && $0 ~ ("^[[:space:]]*socket_path[[:space:]]*=[[:space:]]*\"" sock "\"[[:space:]]*$") { found = 1 }
+    END { print found + 0 }
+  ' "${tmp}")"
+  if [[ "${enable_ok}" -ne 1 || "${socket_ok}" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "failed to set ${header} enable = true and socket_path = ${sock}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+  log "cow.s3 enable=true socket_path=${sock}"
+}
+
 detect_primary_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '
     {
@@ -593,6 +687,115 @@ detect_primary_interface() {
         }
       }
     }'
+}
+
+# resolve_mvm_mtu <setting> <link_mtu> <config.toml>
+# Echoes the mvm_mtu to patch in, or 0 to leave the packaged value alone.
+#
+# The sandbox tap is created with mvm_mtu and the hypervisor advertises that
+# tap's MTU to the guest over VIRTIO_NET_F_MTU, so mvm_mtu is effectively the
+# guest's MTU. It must not exceed the MTU of the interface the traffic leaves
+# through: oversized frames are dropped on egress and the guest cannot learn a
+# smaller path MTU, because inbound ICMP fragmentation-needed is not forwarded
+# into it. The connection stalls instead of failing.
+#
+# "auto" lowers mvm_mtu to link_mtu and never raises it, so it is a no-op
+# wherever the uplink is already >= the packaged value. An integer in
+# 1280..65535 pins mvm_mtu; leading zeros are stripped first, because bash
+# would read them as octal and TOML rejects them. 0 keeps the packaged value;
+# so does an empty setting, though run_cubelet defaults an unset variable to
+# "auto" before calling, so only a direct caller can reach that.
+resolve_mvm_mtu() {
+  local setting="$1" link_mtu="$2" cfg="$3"
+  local packaged_mtu="" normalized=""
+
+  if [[ -z "${setting}" || "${setting}" == "0" ]]; then
+    printf '0\n'
+    return 0
+  fi
+
+  if [[ "${setting}" != "auto" ]]; then
+    [[ "${setting}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be \"auto\", 0, or a positive integer (got \"${setting}\")"
+    # Strip leading zeros before any arithmetic or write-back. Bash reads a
+    # leading-zero literal as octal ("010000" is 4096), and TOML rejects a
+    # leading zero outright, so writing one back produces a config.toml that
+    # cubelet cannot parse. Normalizing first also bounds the digit count
+    # before (( )) ever sees the value, so an over-64-bit input cannot wrap.
+    normalized="$(printf '%s' "${setting}" | sed 's/^0*//')"
+    [[ -n "${normalized}" ]] || normalized="0"
+    if [[ "${normalized}" == "0" ]]; then
+      printf '0\n'
+      return 0
+    fi
+    (( ${#normalized} <= 5 )) || fail "CUBE_SANDBOX_NETWORK_MTU ${setting} is above the maximum of 65535"
+    (( normalized >= 1280 )) || fail "CUBE_SANDBOX_NETWORK_MTU ${setting} is below the virtio minimum of 1280"
+    (( normalized <= 65535 )) || fail "CUBE_SANDBOX_NETWORK_MTU ${setting} is above the maximum of 65535"
+    if [[ "${link_mtu}" =~ ^[0-9]+$ ]] && (( normalized > link_mtu )); then
+      log "mvm_mtu ${normalized} exceeds the detected uplink MTU ${link_mtu}; frames larger than the uplink are dropped on egress" >&2
+    fi
+    printf '%s\n' "${normalized}"
+    return 0
+  fi
+
+  # Leading zeros are stripped here too: this value is compared with (( )),
+  # which would read "01500" as octal 768.
+  packaged_mtu="$(sed -n 's/^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*\([0-9]\{1,\}\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "${cfg}" 2>/dev/null | head -1 | sed 's/^0*//')"
+
+  if [[ -z "${link_mtu}" || ! "${link_mtu}" =~ ^[0-9]+$ ]]; then
+    log "mvm_mtu auto: no readable uplink MTU, keeping the packaged value" >&2
+  elif [[ -z "${packaged_mtu}" ]]; then
+    log "mvm_mtu auto: no plain decimal mvm_mtu key in ${cfg}, nothing to patch" >&2
+  elif (( link_mtu < 1280 )); then
+    log "mvm_mtu auto: uplink MTU ${link_mtu} is below the virtio minimum 1280, keeping the packaged value ${packaged_mtu}" >&2
+  elif (( link_mtu < packaged_mtu )); then
+    printf '%s\n' "${link_mtu}"
+    return 0
+  fi
+  printf '0\n'
+}
+
+# mvm_mtu_is_pinned <setting>
+# True when the operator named an explicit MTU, as opposed to the derived
+# "auto" or the "keep the packaged value" sentinels.
+mvm_mtu_is_pinned() {
+  case "$1" in
+    auto | 0 | "") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# patch_mvm_mtu <config.toml> <value> [pinned]
+# Writes the resolved mvm_mtu back. A derived value is fail-open like the
+# eth_name/cidr patches next to it, so an unexpected config cannot crash-loop
+# the node. An explicit pin is not: see below.
+patch_mvm_mtu() {
+  local cfg="$1" value="$2" pinned="${3:-}" reason=""
+
+  # Only a bare decimal literal is rewritten. TOML also accepts 0x5DC and
+  # 1_500, which the digit match below would match on their leading digits
+  # only, splicing the remainder onto the new number ("mvm_mtu = 14500x5DC")
+  # and leaving a config.toml cubelet cannot parse. The anchor keeps a
+  # commented example such as "# mvm_mtu = 1500" out of both patterns.
+  if ! grep -Eq '^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*(#.*)?$' "${cfg}"; then
+    if grep -Eq '^[[:space:]]*mvm_mtu[[:space:]]*=' "${cfg}"; then
+      reason="mvm_mtu in ${cfg} is not a plain decimal literal"
+    else
+      reason="no mvm_mtu key in ${cfg}"
+    fi
+    # An explicit pin that cannot be applied is a misconfiguration, not a
+    # surprise to absorb: the operator asked for a specific MTU and would
+    # otherwise run with the packaged one while believing otherwise, which is
+    # the silent-mismatch failure this change exists to remove. Only the
+    # derived value stays fail-open.
+    if [[ -n "${pinned}" ]]; then
+      fail "CUBE_SANDBOX_NETWORK_MTU=${value} was requested but ${reason}"
+    fi
+    log "${reason}, nothing to patch"
+    return 0
+  fi
+
+  sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9]\{1,\}/\1mvm_mtu = ${value}/" "${cfg}"
+  log "patched mvm_mtu -> ${value}"
 }
 
 # select_guest_kernel [preserved_target]
@@ -777,11 +980,22 @@ run_cubelet() {
   apply_effective_pvm_from_state
   select_guest_kernel "$(preserve_guest_kernel_selection "${TOOLBOX_ROOT}/cube-kernel-scf")"
 
-  local ops_esc master_http_esc
+  local ops_esc master_http_esc cubeops_addr_esc cubeops_addr
   ops_esc="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"
   master_http_esc="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
   sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ops_esc}\"#" "${dyn}"
   sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${master_http_esc}\"#" "${dyn}"
+  # Warehouse downloads use the same CubeOps as node register/heartbeat.
+  cubeops_addr="${CUBE_OPS_ADDR:-${CUBE_OPS_ENDPOINT}}"
+  if [[ "${cubeops_addr}" != http://* && "${cubeops_addr}" != https://* ]]; then
+    cubeops_addr="http://${cubeops_addr}"
+  fi
+  cubeops_addr_esc="$(sed_escape_replacement "${cubeops_addr}")"
+  if grep -Eq '^[[:space:]]*cubeops_addr[[:space:]]*=' "${cfg}"; then
+    sed -i -e "s#^[[:space:]]*cubeops_addr[[:space:]]*=.*#    cubeops_addr = \"${cubeops_addr_esc}\"#" "${cfg}"
+  else
+    sed -i -e "/node_status_update_frequency/a\\    cubeops_addr = \"${cubeops_addr_esc}\"" "${cfg}"
+  fi
   configure_sandbox_dns
 
   if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then
@@ -797,12 +1011,35 @@ run_cubelet() {
     cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
     sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
   fi
+  # Read the MTU with ip, not from /sys/class/net: sysfs is mounted from the
+  # host here, so it reports the host NIC (1500) rather than the Pod netns
+  # interface the sandbox traffic actually leaves through. ip goes through
+  # netlink in the current netns, which is the same namespace, and the same
+  # tool, that detect_primary_interface resolved the name in.
+  local mvm_link_mtu="" mvm_mtu_target
+  if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
+    mvm_link_mtu="$(ip -o link show dev "${CUBE_SANDBOX_ETH_NAME}" 2>/dev/null \
+      | sed -n 's/.* mtu \([0-9]\{1,\}\).*/\1/p' | head -1)"
+  fi
+  # resolve_mvm_mtu reports its own rejection and exits the substitution
+  # subshell, so propagate that status rather than printing a second, vaguer
+  # line over the specific one.
+  local mvm_mtu_pinned=""
+  mvm_mtu_is_pinned "${CUBE_SANDBOX_NETWORK_MTU:-auto}" && mvm_mtu_pinned=1
+  mvm_mtu_target="$(resolve_mvm_mtu "${CUBE_SANDBOX_NETWORK_MTU:-auto}" "${mvm_link_mtu}" "${cfg}")" || exit 1
+  [[ "${mvm_mtu_target}" =~ ^[0-9]+$ ]] || fail "resolve_mvm_mtu returned \"${mvm_mtu_target}\""
+  if [[ "${mvm_mtu_target}" != "0" ]]; then
+    patch_mvm_mtu "${cfg}" "${mvm_mtu_target}" "${mvm_mtu_pinned}"
+  fi
   if [[ -n "${CUBE_EGRESS_ADMIN_PORT:-}" ]]; then
     [[ "${CUBE_EGRESS_ADMIN_PORT}" =~ ^[0-9]+$ ]] || fail "CUBE_EGRESS_ADMIN_PORT must be a positive integer"
     local egress_admin_url="http://127.0.0.1:${CUBE_EGRESS_ADMIN_PORT}"
     local egress_admin_url_esc
     egress_admin_url_esc="$(sed_escape_replacement "${egress_admin_url}")"
     sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${egress_admin_url_esc}\"|" "${cfg}"
+  fi
+  if [[ -n "${CUBE_S3LVOL_SOCKET:-}" ]]; then
+    patch_cow_s3_opt_in "${cfg}" "${CUBE_S3LVOL_SOCKET}"
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"

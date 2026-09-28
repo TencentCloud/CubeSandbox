@@ -148,7 +148,9 @@ test_image_names_match() {
   # component image on one side but not the other is caught as drift. The `^`
   # anchor on build_images.sh skips its `#   CUBE_*_IMAGE=...` comment header.
   built="$(extract_image_names "${BUILD_IMAGES_SH}" '^CUBE_[A-Z0-9]+_IMAGE=')"
-  composed="$(extract_image_names "${TKE_ADDONS_TF}" 'cube_[a-z0-9]+_image[[:space:]]*=')"
+  # tke-addons.tf names its locals cube_*_image EXCEPT templatecenter_image
+  # (the TF variable is var.templatecenter_image), so both spellings match.
+  composed="$(extract_image_names "${TKE_ADDONS_TF}" '(cube_[a-z0-9]+_image|templatecenter_image)[[:space:]]*=')"
 
   if [[ -z "${built}" ]]; then
     fail "could not extract image names from build_images.sh"
@@ -159,8 +161,8 @@ test_image_names_match() {
   # Guard against a regex that silently matches too few/many lines.
   local built_n
   built_n="$(printf '%s\n' "${built}" | grep -c .)"
-  if [[ "${built_n}" -ne 6 ]]; then
-    fail "expected 6 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
+  if [[ "${built_n}" -ne 7 ]]; then
+    fail "expected 7 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
   fi
   if [[ "${built}" != "${composed}" ]]; then
     fail "image name drift between build_images.sh and tke-addons.tf:
@@ -292,6 +294,13 @@ is_reinstall_cleanup_exception() {
     terraform)
       return 0
       ;;
+    # CubeS3lvol is installed into a versioned directory with the bare name as a
+    # symlink to it, and both are staged before this cleanup runs. Removing the
+    # bare name here would leave the service with nothing to start, and the
+    # versioned directories are what a rollback needs.
+    CubeS3lvol)
+      return 0
+      ;;
     *)
       return 1
       ;;
@@ -344,6 +353,8 @@ test_env_templates_are_split() {
     || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BUILD_MODE"
   grep -q 'ONE_CLICK_CUBEMASTER_BIN=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BIN"
+  grep -q 'ONE_CLICK_TEMPLATECENTER_BIN=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_TEMPLATECENTER_BIN"
   grep -q 'ONE_CLICK_MKCERT_BIN=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_MKCERT_BIN"
   grep -q 'ONE_CLICK_VOLUME_S3_BIN=' "${build_example}" \
@@ -377,7 +388,12 @@ test_s3lvol_rpc_launcher_is_packaged() {
   require_file "${ROOT_DIR}/CubeS3lvol/scripts/rpc.py" "s3lvol rpc.py launcher"
   require_file "${ROOT_DIR}/CubeS3lvol/scripts/rpc_compat.py" \
     "s3lvol rpc.py 3.8 compat shim"
+  require_file "${ROOT_DIR}/CubeS3lvol/scripts/rcow_cpumask.sh" \
+    "s3lvol default CPU mask helper"
   require_file "${ROOT_DIR}/CubeS3lvol/make_release.sh" "s3lvol make_release.sh"
+  if ! grep -q -F 'rcow_cpumask.sh' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
+    fail "make_release.sh must install scripts/rcow_cpumask.sh"
+  fi
   if ! grep -q -F 'scripts/spdk_rpc.py' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
     fail "make_release.sh must install SPDK rpc.py as scripts/spdk_rpc.py"
   fi

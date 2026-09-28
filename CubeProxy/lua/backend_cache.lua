@@ -9,9 +9,6 @@ local _M = {}
 -- mappings ({sid}:{container_port}) are also served from the cache but are
 -- gated by HostIP/SandboxIP and overwritten on the next fill, so invalidation
 -- only needs to drop these fixed keys.
--- There is deliberately no "meta_cached" completion flag: the read gate (see
--- sandbox_backend.lua) checks the presence of every served field, so a flag
--- would be redundant.
 local ROUTE_CACHE_SUFFIXES = {
     "HostIP",
     "SandboxIP",

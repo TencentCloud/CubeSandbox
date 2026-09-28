@@ -10,7 +10,7 @@
     "replicas": "Replicas",
     "replicasDesc": "Snapshot replicas of this template across nodes.",
     "compat": "Compatibility",
-    "compatDesc": "Component versions bound to template replicas compared with the current node environment.",
+    "compatDesc": "Whether this template can still create sandboxes after a node upgrade. If it needs a rebuild, click Rebuild Template.",
     "danger": "Delete Template",
     "dangerDesc": "This action cannot be undone. All replicas of this template will also be deleted."
   },
@@ -72,15 +72,17 @@
     "blocked": "Blocked"
   },
   "compat": {
-    "staleTitle": "This template needs rebuilding for the current node environment",
-    "staleDesc": "{{count}} replica has guest-image or cube-agent versions that differ from the current node. The template build status can still be ready, but these replicas cannot create new sandboxes.",
+    "staleTitle": "Rebuild this template",
+    "staleDesc": "{{count}} copies may fail to create sandboxes after the node upgrade. Click Rebuild Template to remake them on the current node.",
+    "driftTitle": "The node environment has been updated",
+    "driftDesc": "You can still create sandboxes. Click Rebuild Template only if you want the node's current environment.",
     "loading": "Loading compatibility information…",
     "empty": "No compatibility information available.",
     "status": {
-      "OK": "OK",
-      "STALE": "Needs rebuild",
-      "UNKNOWN": "Unknown",
-      "MISSING": "Missing"
+      "OK": "Ready",
+      "STALE": "Ready",
+      "UNKNOWN": "Needs rebuild",
+      "MISSING": "Not on this node"
     },
     "components": {
       "guestImage": "guest-image",

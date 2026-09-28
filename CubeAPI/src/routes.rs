@@ -359,6 +359,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_and_connect_reject_invalid_timeout_before_cubemaster() {
+        let server = test_server().await;
+
+        for path in ["/sandboxes/sb-1/resume", "/sandboxes/sb-1/connect"] {
+            let response = server
+                .post(path)
+                .json(&serde_json::json!({ "timeout": -2 }))
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "path={path}"
+            );
+        }
+
+        let response = server
+            .post("/sandboxes/sb-1/connect")
+            .json(&serde_json::json!({ "timeout": 0 }))
+            .await;
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn template_alias_route_is_mounted_before_template_id_route() {
         let server = test_server().await;
 
@@ -487,9 +510,9 @@ mod tests {
 
     /// Verifies that `DELETE /templates/:id` is mounted on the long-budget
     /// router (240 s in production), not on the 30 s standard router, so that
-    /// CubeMaster's *synchronous* snapshot delete contract — which can
-    /// legitimately wait for cubelet LVM/metadata cleanup — is not cut short
-    /// by an HTTP timeout that fires while the master is still working.
+    /// CubeMaster's snapshot delete contract — which still waits for cubelet
+    /// cleanup when no sandbox holds a runtime ref — is not cut short by an
+    /// HTTP timeout that fires while the master is still working.
     ///
     /// Strategy: rebuild the same merge topology as `build_router` but with
     /// scaled-down durations (50 ms vs 5 s) and a slow handler that sleeps

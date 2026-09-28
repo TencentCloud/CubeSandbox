@@ -4,7 +4,10 @@
 // Package version provides CubeOps build version information.
 package version
 
-import "runtime"
+import (
+	"fmt"
+	"runtime"
+)
 
 var (
 	// Version is injected at build time with -ldflags.
@@ -19,4 +22,9 @@ var (
 // ShowVersion returns the semantic version used by cubelog records.
 func ShowVersion() string {
 	return Version
+}
+
+// VersionString returns the unified version string for the given binary name.
+func VersionString(binaryName string) string {
+	return fmt.Sprintf("%s %s (%s) built at %s", binaryName, Version, Commit, BuildTime)
 }

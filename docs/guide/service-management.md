@@ -126,6 +126,22 @@ sudo systemctl restart cube-sandbox-<service>.service
 If you only edited the helper script (`/usr/local/services/cubetoolbox/scripts/systemd/*.sh`), `daemon-reload` is **not** needed — the next `restart` re-invokes the script.
 :::
 
+## Cubelet artifact paths {#cubelet-artifact-paths}
+
+Cubelet stores template rootfs artifacts as read-only ext4 files built from Docker/OCI images. Configure their location and the kernel source used for template runtime files in `Cubelet/config/config.toml`, under `[plugins."io.cubelet.internal.v1.images"]`:
+
+```toml
+[plugins."io.cubelet.internal.v1.images"]
+image_base_path = "/usr/local/services/cubetoolbox/cubebox_os_image"
+shared_kernel_path = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"
+```
+
+`image_base_path` is the final cache directory for cubebox template artifacts. Each artifact is stored below `<image_base_path>/<artifact-id>/<artifact-id>.ext4` (with the corresponding `.vm` file). `shared_kernel_path` is the source `vmlinux` used for template artifacts and sandboxes without a template. Both values must be absolute paths. When omitted, Cubelet keeps the historical toolbox paths; `cubetool_base_dir` remains a legacy fallback for older configurations. Once either new path is set, it takes precedence for that path and the legacy setting does not override it. If the legacy cbri `base_path` is customized, set `shared_kernel_path` explicitly to the matching kernel under that installation; `base_path` still controls the no-template guest and agent images, but no longer selects `vmlinux`. The configured kernel path must resolve to the same active bm/pvm variant and digest selected for the node; changing this path does not select a different kernel identity for node or template reporting.
+
+The image path and kernel path are independent. After changing either value, restart Cubelet. Cubelet does not move existing artifacts automatically; make the affected cache or kernel files available at the new paths before switching. Existing snapshots additionally require their historical artifact paths to remain resolvable (for example through a deployment-level softlink), or the snapshots must be recreated, because snapshot metadata stores absolute kernel and ext4 artifact paths. The legacy cbri plugin's `image_base_path` and `kernel_base_path` fields are ignored as artifact path sources; configure artifact paths under the images plugin instead. If those legacy fields contain custom values, copy the intended values to the images plugin before removing or updating the legacy entries.
+
+`cubelet config dump` and `cubelet config migrate` write the resolved artifact paths as explicit `image_base_path` and `shared_kernel_path` values. After using that output as a configuration file, edit those explicit fields when changing paths; changing only `cubetool_base_dir` will not override them.
+
 ## CubeMaster settings {#cubemaster-settings}
 
 Path: `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (from `configs/single-node/cubemaster.yaml` in one-click bundles).
@@ -135,10 +151,26 @@ Under `cubelet_conf`:
 | Key | Purpose |
 |-----|---------|
 | `default_timeout_insec` | Server default **sandbox idle TTL** (seconds) when the client omits `timeout`. **Unset or `<= 0` means no cluster-wide idle timeout** (sandboxes never time out from idle unless the client sets `timeout`). The repository ships `-1` for this “no default” behavior. Set a positive value (e.g. `300`) in production if you want automatic reclamation of sandboxes created without an explicit TTL. |
-| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `300` when unset. |
+| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `600` when unset. |
 | `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
+| `create_image_timeout_insec` | Timeout for CubeMaster to instruct a single compute node to **download an image**. It covers downloading, validating, and storing the rootfs artifact. Increase it for large images, low-bandwidth connections, or slow disks. The default is `300` seconds. |
+| `app_snapshot_timeout_insec` | Timeout for CubeMaster to instruct a single compute node to **create a template**. It covers starting the temporary VM, waiting for its readiness probe, saving memory and disk state, cleaning up the temporary VM, and returning the result. If unset or set to a non-positive value, it defaults to `300` seconds. Increase it when network conditions are poor or the template is large. |
 
-After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior. For node selection, quota, labels, scheduler scoring, or template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
+The image-download and template-creation timeouts are independent and each starts when its corresponding RPC begins. Example configuration:
+
+```yaml
+cubelet_conf:
+  create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: 600
+```
+
+After changing any of these CubeMaster settings, restart CubeMaster:
+
+```bash
+sudo systemctl restart cube-sandbox-cubemaster.service
+```
+
+For relevant details, see [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 
 ### Scenario B: a service is failing or restart-looping
 

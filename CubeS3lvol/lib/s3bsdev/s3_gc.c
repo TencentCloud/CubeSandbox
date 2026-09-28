@@ -31,18 +31,15 @@
  *   exported read-only snapshot holds the corresponding clusters), so rule 3
  *   alone would be enough -- 4b looks redundant.
  *
- *   It is not redundant in these two cases:
+ *   It is not redundant when repairing an older/incomplete lifecycle:
  *
  *     - The exported snapshot is deleted. The snapshot's clusters merge into its
  *       only clone and end up on the writable origin volume; once the origin
  *       overwrites those clusters, create-once produces a new uuid and the old
  *       uuid leaves the chunk map. The B-side's manifest still points at the old
  *       uuid.
- *     - The snapshot is deleted after the export TTL expires
- *       (`s3lvol_export_pinning()` returns "do not pin" for an expired export,
- *       so this path happens by default; nobody has to enable it).
  *
- *   In both cases a GC judging by rule 3 alone deletes those objects as
+ *   A GC judging by rule 3 alone then deletes those objects as
  *   orphans. B receives no notice: its imports registry caches the manifest
  *   text and loads it on attach without re-GETting (see the imports_serialize
  *   comment in vbdev_s3lvol_xfer.c). B then reads 404s, returns zeroes, and
@@ -83,11 +80,11 @@
  *   anyway (to tell which exports/<uuid>/ prefixes are orphans), so this part
  *   comes for free rather than costing extra.
  *
- *   Until 4b is implemented, do not lift the "-EBUSY on deleting a snapshot
- *   referenced by a ref export" guard in vbdev_s3lvol_lvstore.c. The TTL
- *   expiry path has not caused trouble only because GC does not exist yet and
- *   nobody deletes orphans -- that is accidental safety, not a design
- *   guarantee.
+ *   An explicit snapshot delete now releases that snapshot's REF exports
+ *   internally once no live lease remains (including pre-lease registry
+ *   entries), so a successful delete removes the manifest before those objects
+ *   can become orphans. Rule 4b remains required for crash or incomplete states
+ *   in which a live ref manifest still outlived its source snapshot.
  */
 
 #include "spdk/stdinc.h"

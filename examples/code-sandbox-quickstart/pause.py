@@ -6,7 +6,7 @@ import os
 import time
 
 from e2b_code_interpreter import Sandbox
-from env_utils import load_local_dotenv
+from env_utils import ensure_dev_sidecar, load_local_dotenv
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -15,6 +15,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 load_local_dotenv()
+ensure_dev_sidecar()
 
 parser = argparse.ArgumentParser(description="Cube Sandbox Pause/Resume TUI Demo")
 parser.add_argument(

@@ -9,6 +9,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [Code Sandbox Quickstart](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | Create a sandbox, run Python and shell commands, work with files, and try core E2B-compatible APIs. |
 | [Browser Sandbox (Playwright)](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox) | Run headless Chromium in a MicroVM and control it remotely through Playwright over CDP. |
 | [Custom nginx Image](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx) | Build a minimal nginx image on top of `cubesandbox-base` and test the custom-template-image flow end to end. |
+| [Ubuntu Desktop Sandbox](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ubuntu-desktop) | Run an Ubuntu 22.04 GNOME desktop in the browser via noVNC, with screenshots and scripted GUI automation from the SDK. |
 
 ## Agents and Framework Integrations
 
@@ -40,6 +41,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [ivshmem](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ivshmem) | Enable host/guest shared memory and try a ring-buffer protocol and mmap throughput benchmark. |
 | [Tencent Cloud COS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) | Deploy and exercise the binary or RPC COS volume plugin through its complete lifecycle. |
 | [S3-Compatible Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Connect AWS S3, Tencent Cloud COS, Cloudflare R2, MinIO, or another S3-compatible backend. |
+| [JuiceFS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.md) | A POSIX file system over object storage: one file system, `--subdir` per volume, several sandboxes sharing a volume and seeing each other's writes |
 
 ## Benchmarking
 

@@ -25,8 +25,10 @@ CHECK_CGROUP_CPU="${CHECK_CGROUP_CPU:-true}"
 CHECK_BPF_FS="${CHECK_BPF_FS:-true}"
 CHECK_GLIBC="${CHECK_GLIBC:-true}"
 CHECK_CIDR="${CHECK_CIDR:-true}"
+CHECK_HOST_PORTS="${CHECK_HOST_PORTS:-true}"
 CHECK_CUBECOW_DEPS="${CHECK_CUBECOW_DEPS:-true}"
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
+CUBE_NODE_HOST_NETWORK="${CUBE_NODE_HOST_NETWORK:-false}"
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
 CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK="${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}"
 LOOPBACK_ENABLED="${LOOPBACK_ENABLED:-false}"
@@ -236,6 +238,16 @@ validate_cidr() {
   fi
 }
 
+# List addrs/routes in the netns cube-dev will use: host when cube-node is
+# hostNetwork (bootstrap itself is always on the Pod network), else this netns.
+cidr_ip() {
+  if [ "$CUBE_NODE_HOST_NETWORK" = "true" ]; then
+    nsenter --target 1 --net -- ip "$@"
+  else
+    ip "$@"
+  fi
+}
+
 check_cidr_conflict() {
   [ "$CHECK_CIDR" = "true" ] || return 0
   [ -n "$CUBE_SANDBOX_NETWORK_CIDR" ] || return 0
@@ -247,8 +259,8 @@ check_cidr_conflict() {
 
   conflicts_file="$(mktemp)"
   {
-    ip -o -4 addr show 2>/dev/null | awk '{print $4 " addr " $2}'
-    ip -o -4 route show 2>/dev/null | awk '{print $1 " route " $0}'
+    cidr_ip -o -4 addr show 2>/dev/null | awk '{print $4 " addr " $2}'
+    cidr_ip -o -4 route show 2>/dev/null | awk '{print $1 " route " $0}'
   } | while read -r candidate kind detail; do
     existing="$(normalize_existing_cidr "$candidate" || true)"
     [ -n "$existing" ] || continue
@@ -266,6 +278,23 @@ Set CUBE_SANDBOX_NETWORK_CIDR to a non-overlapping private CIDR or set CUBE_SAND
   fi
   rm -f "$conflicts_file"
   log "CIDR check passed: ${CUBE_SANDBOX_NETWORK_CIDR}"
+}
+
+# Fail when a host port cube-node will bind is already held by another process.
+# HOST_PORT_RESERVED_PORTS comes from the chart env, so it follows the enabled
+# components.
+check_host_ports() {
+  [ "$CHECK_HOST_PORTS" = "true" ] || return 0
+  [ "$CUBE_NODE_HOST_NETWORK" = "true" ] || return 0
+
+  conflicts="$(host_port_conflicts "$(host_path /proc)")"
+  if [ -n "${conflicts}" ]; then
+    fail "host port conflict: cube-node binds these ports on the host (cubeNode.hostNetwork=true) but something else already holds them
+${conflicts}
+Stop the conflicting service. \"unknown\" means no reachable holder.
+cubeNode.hostNetwork=false is gated — see docs/guide/kubernetes/upgrade.md."
+  fi
+  log "host port check passed: ${HOST_PORT_RESERVED_PORTS}"
 }
 
 check_cubecow_deps() {
@@ -323,6 +352,7 @@ check_glibc
 check_cgroup_cpu
 check_bpf_fs
 check_cidr_conflict
+check_host_ports
 check_cubecow_deps
 
 if [ "$LOAD_KVM_MODULE" = "true" ]; then

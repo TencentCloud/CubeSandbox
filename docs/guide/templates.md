@@ -57,7 +57,7 @@ CubeSandbox supports two approaches:
 - **Create from an OCI image**: Prepare an OCI image containing the operating system, tools, and application dependencies, then let CubeSandbox convert it into a template. This is the usual choice for reproducible templates. See [Create Templates from OCI Image](./tutorials/template-from-image.md).
 - **Create from a running sandbox**: Install software or adjust the environment interactively, then commit the sandbox's current filesystem and memory state as a new template. This is useful for iterative development and quickly preserving a working environment. See [Commit a Running Sandbox as a Template](./tutorials/template-from-sandbox.md).
 
-In either case, template creation consists of preparing the root filesystem, booting a MicroVM and waiting for the environment to become ready, taking a snapshot, and registering the resulting template. Once ready, the template can be used to create new sandboxes quickly.
+In either case, template creation consists of preparing the root filesystem, booting a MicroVM and waiting for the environment to become ready, taking a snapshot, and registering the resulting template. Once ready, the template can be used to create new sandboxes quickly. For historical image-based templates whose artifacts still live on CubeMaster local disk, keep the runbook wording consistent: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** The typical case is enabling `s3Backed=true` later and migrating those historical artifacts from local disk into S3-backed storage; run `tpl redo` afterward only if you also need to repopulate nodes.
 
 ## Templates and Images
 

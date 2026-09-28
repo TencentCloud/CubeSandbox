@@ -6,7 +6,7 @@ package store
 import (
 	"strings"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 )
 
 // testDialectForced allows tests to force a specific dialect without opening
@@ -165,4 +165,14 @@ func formatTimestamp(col string) string {
 		return "to_char(" + col + " AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
 	}
 	return "DATE_FORMAT(" + col + ", '%Y-%m-%dT%H:%i:%sZ')"
+}
+
+// olderThanDurationSQL is true when col is older than ? seconds on the
+// database clock. Passing a Go time.Time cutoff is wrong: driver location
+// vs DATETIME/timestamp without time zone makes a live row look stale.
+func olderThanDurationSQL(col string) string {
+	if IsPostgres() {
+		return "EXTRACT(EPOCH FROM (NOW() - " + col + ")) > ?"
+	}
+	return "TIMESTAMPDIFF(SECOND, " + col + ", NOW()) > ?"
 }

@@ -8,8 +8,8 @@ import (
 	"context"
 	"testing"
 
-	api "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1"
 )
 
 func TestStatusXFSHasNoRemoteUpload(t *testing.T) {

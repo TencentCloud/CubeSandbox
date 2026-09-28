@@ -29,16 +29,53 @@ export CUBE_MASTER_ADDR="${CUBE_MASTER_ADDR:-http://127.0.0.1:8089}"
 export JWT_ACCESS_TTL="${JWT_ACCESS_TTL:-15m}"
 export JWT_REFRESH_TTL="${JWT_REFRESH_TTL:-168h}"
 
+# Warehouse unpack scratch. Distro /tmp is often tmpfs — keep it on disk.
+CUBE_OPS_WAREHOUSE_WORK_DIR="${CUBE_OPS_WAREHOUSE_WORK_DIR:-/data/cubeops/tmp}"
+mkdir -p "${CUBE_OPS_WAREHOUSE_WORK_DIR}"
+export CUBE_OPS_WAREHOUSE_WORK_DIR
+export TMPDIR="${TMPDIR:-${CUBE_OPS_WAREHOUSE_WORK_DIR}}"
+
+# Derive CubeOps S3 connection from CUBE_S3_* when unset. Bucket stays
+# cube-ops — never copy CUBE_S3_BUCKET (that is cube-volumes).
+if [[ -z "${CUBE_OPS_S3_ENDPOINT:-}" && -n "${CUBE_S3_ENDPOINT:-}" ]]; then
+  export CUBE_OPS_S3_ENDPOINT="${CUBE_S3_ENDPOINT}"
+fi
+if [[ -z "${CUBE_OPS_S3_NODE_ENDPOINT:-}" && -n "${CUBE_OPS_S3_ENDPOINT:-}" ]]; then
+  export CUBE_OPS_S3_NODE_ENDPOINT="${CUBE_OPS_S3_ENDPOINT}"
+fi
+if [[ -z "${CUBE_OPS_S3_ACCESS_KEY_ID:-}" && -n "${CUBE_S3_ACCESS_KEY_ID:-}" ]]; then
+  export CUBE_OPS_S3_ACCESS_KEY_ID="${CUBE_S3_ACCESS_KEY_ID}"
+fi
+if [[ -z "${CUBE_OPS_S3_SECRET_ACCESS_KEY:-}" && -n "${CUBE_S3_SECRET_ACCESS_KEY:-}" ]]; then
+  export CUBE_OPS_S3_SECRET_ACCESS_KEY="${CUBE_S3_SECRET_ACCESS_KEY}"
+fi
+export CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
+if [[ -z "${CUBE_OPS_S3_REGION:-}" && -n "${CUBE_S3_REGION:-}" ]]; then
+  export CUBE_OPS_S3_REGION="${CUBE_S3_REGION}"
+fi
+if [[ -z "${CUBE_OPS_S3_PATH_STYLE:-}" && -n "${CUBE_S3_S3FS_EXTRA_OPTS:-}" ]]; then
+  if [[ "${CUBE_S3_S3FS_EXTRA_OPTS}" == *use_path_request_style* ]]; then
+    export CUBE_OPS_S3_PATH_STYLE=true
+  fi
+fi
+# Optional warehouse knobs from .one-click.env (defaults live in CubeOps):
+#   CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT
+#   CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT
+#   CUBE_OPS_WAREHOUSE_GITHUB_REPOS / CUBE_OPS_WAREHOUSE_CNB_REPOS
+#   CUBE_OPS_WAREHOUSE_GITHUB_TOKEN / CUBE_OPS_WAREHOUSE_CNB_TOKEN
+
 # Shared MySQL (same instance as CubeMaster, database cube_mvp).
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL
 else
-  mysql_host="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
-  mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
-  mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
-  mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
-  export DATABASE_URL="mysql://${mysql_user}:${mysql_password}@${mysql_host}:${mysql_port}/${mysql_db}"
+  # No URL: hand CubeOps the split fields. It maps them straight onto its
+  # DB config with no URL round-trip, so URL-reserved characters in the
+  # password survive intact. Defaults match the bundled one-click MySQL.
+  export CUBE_SANDBOX_MYSQL_HOST="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
+  export CUBE_SANDBOX_MYSQL_PORT="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  export CUBE_SANDBOX_MYSQL_USER="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  export CUBE_SANDBOX_MYSQL_PASSWORD="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  export CUBE_SANDBOX_MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
 fi
 
 # Skip migration fingerprint check (dev environment compat).
@@ -48,11 +85,21 @@ fi
 
 # Redis (optional). CubeProxy/LCM use the same derivation (CUBE_EXTERNAL → CUBE_SANDBOX).
 # CubeOps splits host/port/password (no REDIS_URL) and assembles the connection internally.
+# A preserved REDIS_URL has higher priority inside CubeOps and would bypass
+# REDIS_DB, so managed one-click starts must remove it.
+if [[ -n "${REDIS_URL:-}" ]]; then
+  log "ignoring REDIS_URL; CubeOps now derives its Redis endpoint from CUBE_EXTERNAL_REDIS_*"
+fi
+unset REDIS_URL
 export REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-${CUBE_SANDBOX_REDIS_HOST:-127.0.0.1}}"
 export REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
 export REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
 export REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
 export REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
 export REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+# Prefer CUBE_EXTERNAL_REDIS_DB; keep legacy REDIS_DB as fallback. Must match
+# CubeMaster conf.yaml db_no (patched from the same env at install).
+export REDIS_DB
+REDIS_DB="$(normalize_redis_db "${CUBE_EXTERNAL_REDIS_DB:-${REDIS_DB:-0}}" "CUBE_EXTERNAL_REDIS_DB/REDIS_DB")"
 
 exec "${CUBE_OPS_BIN}"

@@ -126,19 +126,51 @@ sudo systemctl restart cube-sandbox-<service>.service
 但如果你只是改了 helper 脚本（`/usr/local/services/cubetoolbox/scripts/systemd/*.sh`），不需要 `daemon-reload`，下一次 `restart` 就会重新拉起脚本生效。
 :::
 
+## Cubelet 工件路径 {#cubelet-artifact-paths}
+
+Cubelet 会把由 Docker/OCI 镜像构建的模板根文件系统保存为只读 ext4 工件。可以在 `Cubelet/config/config.toml` 的 `[plugins."io.cubelet.internal.v1.images"]` 段中配置工件目录和模板运行时使用的内核源文件：
+
+```toml
+[plugins."io.cubelet.internal.v1.images"]
+image_base_path = "/usr/local/services/cubetoolbox/cubebox_os_image"
+shared_kernel_path = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"
+```
+
+`image_base_path` 是 cubebox 模板工件的最终缓存目录，每个工件位于 `<image_base_path>/<artifact-id>/<artifact-id>.ext4`，并包含对应的 `.vm` 文件。`shared_kernel_path` 是模板工件以及无模板沙箱使用的 `vmlinux` 源文件。两个路径都必须是绝对路径。省略时，Cubelet 保留历史 toolbox 路径；`cubetool_base_dir` 仍作为旧配置的兼容 fallback。设置任一新路径后，该路径以新配置为准，旧配置不会覆盖它。如果旧 cbri 配置自定义了 `base_path`，应显式将 `shared_kernel_path` 设为该安装目录下匹配的内核路径；`base_path` 仍控制无模板沙箱使用的 guest 和 agent 镜像，但不再选择 `vmlinux`。配置的内核路径必须与节点当前选中的 bm/pvm 内核变体和 digest 一致；修改这个路径不会为节点或模板上报选择另一套 kernel identity。
+
+工件目录和内核路径相互独立。修改任一路径后都需要重启 Cubelet。Cubelet 不会自动搬迁已有工件；切换到新路径前，需要先让受影响的缓存或内核文件在新路径可用。已有 snapshot 还必须继续让历史工件路径可访问（例如通过部署层软链），或者重建相关 snapshot，因为 snapshot 元数据保存了 kernel 和 ext4 工件的绝对路径。旧 cbri 插件中的 `image_base_path` 和 `kernel_base_path` 不再作为工件路径来源，请改在 images 插件段配置工件路径。如果旧字段中有自定义值，应先把需要保留的值复制到 images 插件段，再删除或更新旧字段。
+
+`cubelet config dump` 和 `cubelet config migrate` 会把解析后的工件路径写成显式的 `image_base_path` 和 `shared_kernel_path`。使用导出的配置文件后，如需调整路径，应修改这两个显式字段；只修改 `cubetool_base_dir` 不会覆盖它们。
+
 ## CubeMaster 配置项 {#cubemaster-settings}
 
 路径：`/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`（one-click 包内来自 `configs/single-node/cubemaster.yaml`）。
 
-`cubelet_conf` 段中与沙箱空闲超时相关的字段：
+`cubelet_conf` 段中的主要超时字段：
 
 | 配置项 | 说明 |
 |--------|------|
 | `default_timeout_insec` | 客户端**不传** `timeout` 时，集群默认的**沙箱空闲 TTL**（秒）。**未配置或 `<= 0` 表示不设集群级空闲超时**（沙箱不会因空闲被自动回收，除非客户端显式传 `timeout`）。仓库默认为 `-1`，即“无集群默认”。生产环境若需自动回收未带 TTL 的沙箱，可改为正数（如 `300`）。 |
-| `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `300`。 |
+| `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `600`。 |
 | `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用）。 |
+| `create_image_timeout_insec` | CubeMaster 调用单个计算节点**下载镜像**的超时时间。它包含下载、校验和保存 rootfs artifact 的时间。大镜像、低带宽或磁盘较慢时可适当调大。默认值 `300`（秒）。 |
+| `app_snapshot_timeout_insec` | CubeMaster 调用单个计算节点**创建模版**的超时时间。它包含制作模版时启动临时虚拟机、等待 readiness probe、保存内存和磁盘状态、清理临时虚拟机并返回结果的总时间。未配置或配置为非正数时，使用默认值 `300`（秒）。网络较差或模版较大时可适当调大。|
 
-修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。如果要调整节点选择、quota、label、调度评分或新增计算节点后的 template redo，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
+下载镜像和创建模版的 timeout 相互独立，分别从对应 RPC 发起时开始计时。配置示例：
+
+```yaml
+cubelet_conf:
+  create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: 600
+```
+
+修改上述任一 CubeMaster 配置后，需要重启 CubeMaster：
+
+```bash
+sudo systemctl restart cube-sandbox-cubemaster.service
+```
+
+相关说明见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。
 
 ### 场景 B：服务挂了 / 反复重启
 

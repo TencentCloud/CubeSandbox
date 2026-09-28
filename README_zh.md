@@ -430,23 +430,9 @@ http://<控制节点 IP>:12088
 | **E2B API 对齐补齐** | 补齐与 E2B 规范的剩余差距，实现完整的兼容替代 |
 | **沙箱异常恢复** | 自动检测并恢复 VM Crash、shim 卡死、网络分区等异常，支持可配置恢复策略 |
 | **调度与运维能力增强** | 资源感知调度、亲和规则、在线均衡与带迁移的节点排空 |
-
-## 赞助商
-
-<table>
-  <tr>
-    <td align="center">
-      <a href="https://cloud.tencent.com/">
-        <img src="./docs/assets/tcloud_logo_zh.png" alt="腾讯云" height="40">
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://www.arm.com/">
-        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
-      </a>
-    </td>
-  </tr>
-</table>
+| **基于 S3 的性能与成本优化** | 增量上传、更好的缓存与更低成本存储层级，让 S3 快照/Volume I/O 更快、更便宜 |
+| **只带文件系统的快照** | 只保存可写文件系统、跳过内存 dump，适合磁盘冷启动场景，克隆/恢复更快更省 |
+| **GPU 沙箱** | 把宿主机 GPU 透传到沙箱，Agent / 推理可在隔离 VM 内使用 CUDA，调度感知 GPU 库存 |
 
 ## 贡献者
 

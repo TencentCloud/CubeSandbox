@@ -9,7 +9,7 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/cap"
 	"github.com/containerd/containerd/v2/pkg/oci"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	customopts "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/opts"

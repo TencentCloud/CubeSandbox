@@ -16,9 +16,48 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
-func TestStoreForS3NotReadyUntilInit(t *testing.T) {
+func TestS3lvolConfigured(t *testing.T) {
+	assert.False(t, (*Config)(nil).s3lvolConfigured())
+	assert.False(t, (&Config{}).s3lvolConfigured())
+	assert.False(t, (&Config{Cow: CowInlineConfig{S3: CowS3UserConfig{
+		Enable:     false,
+		SocketPath: stringPtr("/var/run/s3lvol.sock"),
+	}}}).s3lvolConfigured())
+	assert.True(t, s3OptInConfig().s3lvolConfigured())
+}
+
+func s3OptInConfig() *Config {
+	return &Config{
+		StorageBackend: "cubecow",
+		Cow: CowInlineConfig{
+			S3: CowS3UserConfig{
+				Enable:     true,
+				SocketPath: stringPtr("/var/run/s3lvol.sock"),
+			},
+		},
+	}
+}
+
+func TestStoreForS3NotConfiguredWhenDisabled(t *testing.T) {
 	prev := localStorage
 	cfg := &Config{StorageBackend: "cubecow"}
+	localStorage = &local{config: cfg, cowManager: &XfsCow{engine: &cubecow.Engine{}}}
+	t.Cleanup(func() {
+		localStorage.stopS3CowInitLoop()
+		localStorage = prev
+	})
+
+	_, err := StoreFor(cow.BackendS3)
+	require.ErrorIs(t, err, ErrS3NotConfigured)
+
+	xfs, err := StoreFor(cow.BackendXFS)
+	require.NoError(t, err)
+	require.NotNil(t, xfs)
+}
+
+func TestStoreForS3NotReadyUntilInit(t *testing.T) {
+	prev := localStorage
+	cfg := s3OptInConfig()
 	localStorage = &local{config: cfg, cowManager: &XfsCow{engine: &cubecow.Engine{}}}
 	t.Cleanup(func() {
 		localStorage.stopS3CowInitLoop()
@@ -35,7 +74,7 @@ func TestStoreForS3NotReadyUntilInit(t *testing.T) {
 
 func TestTryS3CowInitOncePublishesAfterMetadata(t *testing.T) {
 	prev := localStorage
-	cfg := &Config{StorageBackend: "cubecow"}
+	cfg := s3OptInConfig()
 	s := &local{config: cfg}
 	localStorage = s
 	t.Cleanup(func() {
@@ -63,7 +102,7 @@ func TestTryS3CowInitOncePublishesAfterMetadata(t *testing.T) {
 
 func TestTryS3CowInitOnceDoesNotPublishOnMetadataFail(t *testing.T) {
 	prev := localStorage
-	cfg := &Config{StorageBackend: "cubecow"}
+	cfg := s3OptInConfig()
 	s := &local{config: cfg}
 	localStorage = s
 	t.Cleanup(func() {
@@ -92,7 +131,7 @@ func TestTryS3CowInitOnceDoesNotPublishOnMetadataFail(t *testing.T) {
 func TestS3CowInitLoopRetriesUntilSuccess(t *testing.T) {
 	prev := localStorage
 	prevInterval := s3InitRetryInterval
-	cfg := &Config{StorageBackend: "cubecow"}
+	cfg := s3OptInConfig()
 	s := &local{config: cfg}
 	localStorage = s
 	s3InitRetryInterval = 20 * time.Millisecond
@@ -121,4 +160,38 @@ func TestS3CowInitLoopRetriesUntilSuccess(t *testing.T) {
 		return s.s3CowEngine == eng && s.s3CowManager != nil
 	}, 2*time.Second, 20*time.Millisecond)
 	assert.GreaterOrEqual(t, attempts, 3)
+}
+
+func TestS3CowInitLoopSkippedWhenDisabled(t *testing.T) {
+	prev := localStorage
+	cfg := &Config{
+		StorageBackend: "cubecow",
+		Cow: CowInlineConfig{
+			S3: CowS3UserConfig{
+				Enable:     false,
+				SocketPath: stringPtr("/var/run/s3lvol.sock"),
+			},
+		},
+	}
+	s := &local{config: cfg}
+	localStorage = s
+	t.Cleanup(func() {
+		s.stopS3CowInitLoop()
+		s.clearS3Cow()
+		localStorage = prev
+		initS3CowEngine = initS3CowEngineWithConfig
+	})
+
+	attempts := 0
+	initS3CowEngine = func(*Config) (*cubecow.Engine, string, error) {
+		attempts++
+		return nil, "", errors.New("must not be called")
+	}
+
+	s.startS3CowInitLoop(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, attempts)
+	assert.Nil(t, s.s3InitCancel)
+	_, err := StoreFor(cow.BackendS3)
+	require.ErrorIs(t, err, ErrS3NotConfigured)
 }

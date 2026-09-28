@@ -28,10 +28,6 @@ local INDEX_KEY = "__index__"
 local INDEX_LOCK_KEY = "__index_lock__"
 local INDEX_LOCK_TIMEOUT_MS = 1000
 
--- Inline secret value cap. 64 KiB matches the old standalone secret_store
--- per-entry limit; anything larger is almost certainly a misconfiguration
--- (and would bloat policy_store fast).
-local SECRET_MAX_BYTES = 65536
 local MAX_L7_PORTS_PER_HOST = 8
 
 -- ---------- validation ----------
@@ -214,11 +210,6 @@ local function validate_policy(p)
                 if type(inj.secret) ~= "string" or inj.secret == "" then
                     return false, string.format(
                         "rules[%d].action.inject[%d].secret required (non-empty string)", i, j)
-                end
-                if #inj.secret > SECRET_MAX_BYTES then
-                    return false, string.format(
-                        "rules[%d].action.inject[%d].secret exceeds %d bytes",
-                        i, j, SECRET_MAX_BYTES)
                 end
                 -- format optional; defaults to "${SECRET}" at inject time
             end

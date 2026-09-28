@@ -10,7 +10,8 @@
 当前版本的 K8s 部署是**预览版本**，已知问题：
 
 1. 计算节点资源紧张时，Pod 可能被 K8s 控制面错误驱逐，导致沙箱中断。该问题正在解决中。
-2. 计算节点升级目前存在一些已知问题（升级会重建 `cube-node`，中断该节点上的存量沙箱网络）。请在部署之前先阅读[升级文档](./upgrade.md)。
+2. 计算节点升级目前存在一些已知问题（升级会重建 `cube-node`；Pod 网络下会中断该节点上的存量沙箱网络，默认宿主机网络下 netns 不随重建销毁）。请在部署之前先阅读[升级文档](./upgrade.md)。
+3. 默认hostNetwork可能与您的 CNI / Pod Security Admission（如 Cilium eBPF、`restricted` PSA）冲突。请先在非生产集群测试，详见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。
 
 **上述问题将在后续版本逐步得到解决。欢迎试用 K8s 部署方式，通过 Issue 反馈问题与建议。**
 :::
@@ -21,7 +22,7 @@
 | --- | --- |
 | [Helm 安装](./install.md) | 从集群就绪到验证的完整步骤（推荐主路径） |
 | [架构说明](./architecture.md) | Chart 组件分层、四个 DaemonSet、启动顺序与数据流 |
-| [升级](./upgrade.md) | 控制面可滚动；计算面升级会 recreate Big Pod 并中断沙箱 |
+| [升级](./upgrade.md) | 控制面可滚动；计算面升级会 recreate Big Pod（默认宿主机网络下 netns 保留） |
 | [常见问题](./faq.md) | 安装、调度、PVM、Proxy、Egress、升级排障 |
 
 ## 安装顺序（必读）

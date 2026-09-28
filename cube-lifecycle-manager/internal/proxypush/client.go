@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package proxypush is the HTTP client the sidecar uses to push lifecycle
+// Package proxypush is the HTTP client CLM uses to push lifecycle
 // metadata + state to one or more CubeProxy admin endpoints, and to pull the
 // per-request last_active timestamps back. The protocol is documented in
 // CubeProxy/lua/admin_phase.lua — this file is the canonical Go peer.
@@ -88,6 +88,19 @@ func (c *Client) UpsertMetaTo(ctx context.Context, adminURL string, meta lifecyc
 		return fmt.Errorf("marshal meta: %w", err)
 	}
 	_, err = c.do(ctx, http.MethodPost, adminURL, "/admin/meta/upsert", body)
+	return err
+}
+
+// SetStateTo pushes a state transition to a single admin URL.
+func (c *Client) SetStateTo(ctx context.Context, adminURL, sandboxID, state string) error {
+	body, err := json.Marshal(map[string]string{
+		"sandbox_id": sandboxID,
+		"state":      state,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPost, adminURL, "/admin/state", body)
 	return err
 }
 

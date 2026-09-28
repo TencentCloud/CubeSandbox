@@ -3,6 +3,105 @@
 {{- if and .Values.controlPlane.enabled (not $controlPlaneSelector) }}
 {{- fail "controlPlane.enabled=true requires placement.controlPlane.nodeSelector" }}
 {{- end }}
+{{- $templateCenter := .Values.controlPlane.templateCenter -}}
+{{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
+{{- $artifactBackend := include "cube.artifactStoreBackend" . -}}
+{{- if and $s3Backed (eq $artifactBackend "fs") }}
+{{- fail "controlPlane.artifactStore.backend=fs cannot be combined with controlPlane.artifactStore.s3Backed=true" }}
+{{- end }}
+{{- if $s3Backed }}
+{{- /* s3Backed only works when a COMPLETE CUBE_S3_* set
+(ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY) actually reaches BOTH the
+cube-master and cube-templatecenter pods. The pods get it from exactly two
+places, so validate those -- not "some S3 exists somewhere": operator-rendered
+global.env (cube.globalEnvS3State), or the chart's own injection from
+volumeS3.* / builtin MinIO (cube.artifactS3Env, gated by
+cube.artifactS3Injectable). Without one of them S3Config() silently disables
+S3 and every replica builds to its own node-local disk. */ -}}
+{{- if eq (include "cube.globalEnvS3State" .) "partial" }}
+{{- fail "controlPlane.artifactStore.s3Backed=true: global.env sets CUBE_S3_ENDPOINT but the set is incomplete -- CUBE_S3_BUCKET / CUBE_S3_ACCESS_KEY_ID / CUBE_S3_SECRET_ACCESS_KEY must all be present (the binaries fall back to local disk when any piece is missing)" }}
+{{- end }}
+{{- if and (eq (include "cube.globalEnvS3State" .) "absent") (ne (include "cube.artifactS3Injectable" .) "true") }}
+{{- fail "controlPlane.artifactStore.s3Backed=true requires a complete CUBE_S3_* set to reach BOTH the cube-master and cube-templatecenter pods: set CUBE_S3_ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY in global.env, or make them chart-injectable via volumeS3.endpoint+accessKeyId+secretAccessKey or the builtin minio (volumeS3.existingSecret only ships a volume-s3.conf file and cannot feed env injection -- combine it with global.env)" }}
+{{- end }}
+{{- end }}
+{{- if hasKey $templateCenter "buildMode" }}
+{{- fail "controlPlane.templateCenter.buildMode no longer exists: template builds always go to CubeTemplateCenter, which deploys automatically whenever controlPlane.enabled=true. Remove controlPlane.templateCenter.buildMode from your values" }}
+{{- end }}
+{{- if hasKey $templateCenter "routeMode" }}
+{{- fail "controlPlane.templateCenter.routeMode no longer exists: the route proxy was removed along with the build-mode string. CubeMaster always serves the public template API" }}
+{{- end }}
+{{- if hasKey $templateCenter "enabled" }}
+{{- fail "controlPlane.templateCenter.enabled no longer exists: TC is mandatory and deploys automatically whenever controlPlane.enabled=true (CubeMaster no longer builds templates in-process). Remove controlPlane.templateCenter.enabled from your values" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (not .Values.controlPlane.master.enabled) }}
+{{- fail "controlPlane.enabled=true requires controlPlane.master.enabled=true: TC (which deploys automatically) writes the ext4 but CubeMaster is what serves it to Cubelet and owns every business-state write" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled .Values.externalControlPlane.enabled (not $s3Backed) }}
+{{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do (unless controlPlane.artifactStore.s3Backed=true and the external master also has CUBE_S3_* configured)" }}
+{{- end }}
+{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- if and .Values.controlPlane.enabled (eq $artifactBackend "fs") }}
+{{- $fsRoot := ((.Values.controlPlane.artifactStore).fsRoot) | default "" | toString | trim -}}
+{{- $allowedRoot := "/data/CubeMaster/storage" -}}
+{{- if and $fsRoot (ne $fsRoot $allowedRoot) (not (hasPrefix (printf "%s/" $allowedRoot) $fsRoot)) }}
+{{- fail "controlPlane.artifactStore.fsRoot must be under /data/CubeMaster/storage (the mounted artifact volume)" }}
+{{- end }}
+{{- if not $masterPersistence.enabled }}
+{{- fail "controlPlane.artifactStore.backend=fs requires controlPlane.master.persistence.enabled=true (emptyDir loses artifacts on restart)" }}
+{{- end }}
+{{- end }}
+{{- /* A genuinely shared artifact volume (a ReadWriteMany claim, e.g. CFS/NFS —
+TC mounts the SAME claim by default, see cube.templateCenterStorageClaimName)
+makes the store non-node-local: every master replica and TC see every
+artifact. hostPath stays node-local by definition, and a
+templateCenter.persistence.existingClaim we cannot prove is the same share
+does not count (conservative).
+
+Multi-replica master/TC without S3 and without a shared volume is allowed but
+degraded ONLY when the artifact disk is per-pod scratch (persistence disabled
+→ emptyDir) or node-pinned (hostPath): NOTES.txt prints a loud warning for
+that combination. The one combination that must still fail is a mounted
+ReadWriteOnce claim: it cannot attach on several nodes, so the second master
+replica never even schedules (Pending) — a hard failure, not a degradation
+the foreign-artifact retry can absorb. */ -}}
+{{- $sharedArtifactStore := and $masterPersistence.enabled (not $masterPersistence.hostPath) (has "ReadWriteMany" ($masterPersistence.accessModes | default list)) (not $templateCenter.persistence.existingClaim) -}}
+{{- if and .Values.controlPlane.enabled (gt (int .Values.controlPlane.master.replicas) 1) (not $s3Backed) $masterPersistence.enabled (not $masterPersistence.hostPath) (not $sharedArtifactStore) }}
+{{- fail (printf "controlPlane.master.replicas=%v cannot mount the default ReadWriteOnce artifact PVC on several nodes — the second replica stays Pending forever. Choose one: controlPlane.master.persistence.enabled=false (per-pod emptyDir scratch; degraded, see the install-notes warning), controlPlane.master.persistence.accessModes=[ReadWriteMany] (a genuinely shared CFS/NFS volume), or controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store)" .Values.controlPlane.master.replicas) }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) (not $sharedArtifactStore) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true or a ReadWriteMany shared artifact volume)" }}
+{{- end }}
+{{- /* Multi-replica in S3 mode needs the local volume to be per-Pod scratch,
+not a shared RWO claim (which cannot attach on several nodes). hostPath and
+emptyDir are fine -- each Pod gets its own scratch. */ -}}
+{{- $anyMultiReplica := or (gt (int .Values.controlPlane.master.replicas) 1) (gt (int ($templateCenter.replicas | default 1)) 1) -}}
+{{- if and $s3Backed $anyMultiReplica $masterPersistence.enabled (not $masterPersistence.hostPath) (not (has "ReadWriteMany" ($masterPersistence.accessModes | default list))) }}
+{{- fail "artifactStore.s3Backed=true with master.replicas>1 or templateCenter.replicas>1 requires controlPlane.master.persistence.enabled=false: in S3 mode the local disk is build scratch only and S3 is the durable store, so the ReadWriteOnce artifact PVC (which cannot attach on several nodes) only gets in the way. Set enabled=false, or use a ReadWriteMany claim" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (eq $artifactBackend "fs") $anyMultiReplica (not $sharedArtifactStore) }}
+{{- fail "controlPlane.artifactStore.backend=fs with master.replicas>1 or templateCenter.replicas>1 requires a ReadWriteMany artifact volume (CFS/NFS). An RWO disk is local to one replica" }}
+{{- end }}
+{{- /*
+TC shares CubeMaster's artifact volume, so CubeMaster's access mode decides
+whether co-location is merely required or physically unavoidable. Reject the
+combination that cannot work at all: a ReadWriteOnce claim plus TC scheduled
+away from CubeMaster means one of the two Pods cannot attach the volume.
+*/ -}}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $s3Backed) }}
+{{- if and $masterPersistence.enabled (not $masterPersistence.hostPath) }}
+{{- $modes := $masterPersistence.accessModes | default list -}}
+{{- if and (not (has "ReadWriteMany" $modes)) (not $templateCenter.persistence.existingClaim) }}
+{{- fail (printf "controlPlane.templateCenter.colocateWithMaster=false requires a ReadWriteMany artifact volume, but controlPlane.master.persistence.accessModes is %v. TC writes the ext4 and CubeMaster serves it from the same directory; with ReadWriteOnce (CBS and most block CSI drivers) only one node can attach the volume, so an un-colocated TC either fails to attach or builds into a different disk and every artifact download 404s. Either keep colocateWithMaster=true, provide a genuinely shared volume (e.g. CFS/NFS with ReadWriteMany) via controlPlane.master.persistence.accessModes and controlPlane.templateCenter.persistence.existingClaim, or set controlPlane.artifactStore.s3Backed=true" $modes) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) (not $s3Backed) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false cannot work with controlPlane.master.persistence.hostPath: a hostPath artifact store exists only on one node, so TC must run on that same node as CubeMaster (not required with controlPlane.artifactStore.s3Backed=true, where the local disk is scratch)" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (eq $templateCenter.service.type "ClusterIP") $templateCenter.service.nodePort }}
+{{- fail "controlPlane.templateCenter.service.nodePort must be empty when service.type is ClusterIP" }}
+{{- end }}
 {{- if .Values.cubeNode.enabled }}
 {{- if not $computeSelector }}
 {{- fail "cube-node requires placement.compute.nodeSelector, otherwise host-mutating bootstrap may run on all nodes" }}
@@ -68,11 +167,18 @@
 {{- if hasKey (.Values.images | default dict) "pause" }}
 {{- fail "images.pause was removed; Big Pod placeholder slots (cube-slot-*) are gone. Remove images.pause from your values." }}
 {{- end }}
+{{- /* Only fail on non-zero nested db: old chart defaults shipped db:0, and helm upgrade keeps those keys in release values. */}}
+{{- if and (hasKey ((.Values.cubeProxy).redis | default dict) "db") (ne (((.Values.cubeProxy).redis).db | default 0 | int) 0) }}
+{{- fail "cubeProxy.redis.db was removed; set top-level redis.db instead (Master / Proxy / LCM / Ops share one logical DB)." }}
+{{- end }}
+{{- if and (hasKey ((.Values.lifecycleManager).redis | default dict) "db") (ne (((.Values.lifecycleManager).redis).db | default 0 | int) 0) }}
+{{- fail "lifecycleManager.redis.db was removed; set top-level redis.db instead (Master / Proxy / LCM / Ops share one logical DB)." }}
+{{- end }}
 {{- if hasKey (.Values.cubeNode | default dict) "placeholderSlots" }}
 {{- fail "cubeNode.placeholderSlots was removed; Big Pod no longer reserves cube-slot-1..6. Remove cubeNode.placeholderSlots from your values." }}
 {{- end }}
 {{- if hasKey .Values.security "hostNetwork" }}
-{{- fail "security.hostNetwork was removed; cube-node always runs on the Pod network. Remove security.hostNetwork from your values." }}
+{{- fail "security.hostNetwork was removed; cube-node's network mode is cubeNode.hostNetwork (default true = host network). Remove security.hostNetwork from your values." }}
 {{- end }}
 {{- if hasKey .Values.cubeNode "useAdvancedDaemonSet" }}
 {{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node uses a native apps/v1 DaemonSet. Remove cubeNode.useAdvancedDaemonSet from your values." }}
@@ -125,6 +231,12 @@
 {{- end }}
 {{- if and (or (eq (include "cube.redisBuiltinEnabled" .) "true") .Values.redis.host (eq (include "cube.redisSentinelEnabled" .) "true")) (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
 {{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying." }}
+{{- end }}
+{{- /* redis.db fans out to Master / Proxy / LCM / Ops; reject non-integer and out-of-range values at render time. */ -}}
+{{- $redisDBRaw := .Values.redis.db | default 0 -}}
+{{- $redisDB := $redisDBRaw | int -}}
+{{- if or (not (eq ($redisDBRaw | toString) ($redisDB | toString))) (lt $redisDB 0) (gt $redisDB 15) }}
+{{- fail (printf "redis.db must be an integer in 0-15 (got %v)" $redisDBRaw) }}
 {{- end }}
 {{- /* Fixed Service nodePorts are only valid for NodePort / LoadBalancer. */ -}}
 {{- $apiSvcType := .Values.controlPlane.api.service.type | default "ClusterIP" -}}
@@ -198,6 +310,33 @@
 {{- fail "cubeProxy.enabled=true requires lifecycleManager.enabled=true (cube-lifecycle-manager replaces the obsolete cube-proxy-sidecar)" }}
 {{- end }}
 {{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- $leaderElection := .Values.lifecycleManager.leaderElection | default dict -}}
+{{- if and (hasKey $leaderElection "enabled") (not (kindIs "bool" $leaderElection.enabled)) }}
+{{- fail "lifecycleManager.leaderElection.enabled must be a boolean" }}
+{{- end }}
+{{- if and (ge (int .Values.lifecycleManager.replicas) 2) (ne (printf "%v" $leaderElection.enabled) "true") }}
+{{- fail "lifecycleManager.replicas>=2 requires lifecycleManager.leaderElection.enabled=true" }}
+{{- end }}
+{{- if $leaderElection.enabled }}
+{{- if or (empty $leaderElection.leaseTTL) (empty $leaderElection.renewInterval) (empty $leaderElection.retryInterval) }}
+{{- fail "lifecycleManager.leaderElection.enabled=true requires leaseTTL, renewInterval, and retryInterval" }}
+{{- end }}
+{{- $renew := $leaderElection.renewInterval | toString -}}
+{{- $lease := $leaderElection.leaseTTL | toString -}}
+{{- $retry := $leaderElection.retryInterval | toString -}}
+{{- if or (not (regexMatch `^[0-9]+s$` $renew)) (not (regexMatch `^[0-9]+s$` $lease)) (not (regexMatch `^[0-9]+s$` $retry)) }}
+{{- fail "lifecycleManager.leaderElection.leaseTTL, renewInterval, and retryInterval must be integer seconds (e.g. 10s)" }}
+{{- end }}
+{{- $renewSec := trimSuffix "s" $renew | int -}}
+{{- $leaseSec := trimSuffix "s" $lease | int -}}
+{{- $retrySec := trimSuffix "s" $retry | int -}}
+{{- if ge (mul $renewSec 2) $leaseSec }}
+{{- fail "lifecycleManager.leaderElection.renewInterval must be less than half of leaseTTL" }}
+{{- end }}
+{{- if ge $retrySec $leaseSec }}
+{{- fail "lifecycleManager.leaderElection.retryInterval must be less than leaseTTL" }}
+{{- end }}
+{{- end }}
 {{- if not (include "cube.masterEndpoint" .) }}
 {{- fail "lifecycleManager.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
 {{- end }}
@@ -248,4 +387,75 @@
 {{- end }}
 {{- if and (eq (include "cube.minioBuiltinEnabled" .) "true") .Values.minio.rootPassword (lt (len (printf "%s" .Values.minio.rootPassword)) 8) }}
 {{- fail "minio.rootPassword must be at least 8 characters when set (leave empty to generate one)" }}
+{{- end }}
+{{- if eq (include "cube.s3lvolEnabled" .) "true" }}
+{{- if not ((.Values.images.cubeS3lvol).repository) }}
+{{- fail "cubeS3lvol.enabled=true requires images.cubeS3lvol.repository" }}
+{{- end }}
+{{- $s3lvolBucket := include "cube.s3lvolEffectiveBucket" . }}
+{{- if eq $s3lvolBucket "cube-volumes" }}
+{{- fail "cubeS3lvol must not share the S3 volume plugin bucket (cube-volumes); set cubeS3lvol.s3.bucket" }}
+{{- end }}
+{{- $volBucket := ((.Values.volumeS3).bucket) | default "" }}
+{{- if and (ne $volBucket "") (eq $s3lvolBucket $volBucket) }}
+{{- fail "cubeS3lvol.s3.bucket must not equal volumeS3.bucket; cube-s3lvol must use its own bucket" }}
+{{- end }}
+{{- $s3lvolS3 := default dict ((.Values.cubeS3lvol).s3) }}
+{{- if eq (($s3lvolS3.existingSecret) | default "") "" }}
+{{- if eq (include "cube.s3lvolEffectiveEndpoint" .) "" }}
+{{- fail "cubeS3lvol.enabled=true requires cubeS3lvol.s3.endpoint, volumeS3.endpoint, cubeS3lvol.s3.existingSecret, or chart MinIO" }}
+{{- end }}
+{{- if ne (include "cube.s3lvolHasResolvedCreds" .) "true" }}
+{{- fail "cubeS3lvol.enabled=true requires S3 credentials: cubeS3lvol.s3.existingSecret, cubeS3lvol.s3.accessKeyId+secretAccessKey, volumeS3.accessKeyId+secretAccessKey, or chart MinIO" }}
+{{- end }}
+{{- $s3lvolQuoteCheck := list ($s3lvolS3.accessKeyId | default "") ($s3lvolS3.secretAccessKey | default "") ($s3lvolS3.bucket | default "cube-s3lvol") }}
+{{- range $s3lvolQuoteCheck }}
+{{- if contains "\"" (. | toString) }}
+{{- fail "cubeS3lvol.s3 values must not contain double quotes (s3.cfg is double-quoted TOML)" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- if hasKey (.Values.cubeOps | default dict) "persistence" }}
+{{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3 or cubeOps.store.fs.persistence. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}
+{{- end }}
+{{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+{{- $opsRoot := include "cube.opsFSRoot" . }}
+{{- if or (eq $opsRoot "/data/CubeMaster/storage") (hasPrefix "/data/CubeMaster/storage/" $opsRoot) }}
+{{- fail "cubeOps.store.fs.root must not be under /data/CubeMaster/storage (CubeMaster artifact volume); warehouse _state would collide with template artifacts" }}
+{{- end }}
+{{- $pub := include "cube.opsFSPublicURL" . | lower }}
+{{- if or (contains "127.0.0.1" $pub) (contains "localhost" $pub) (contains "[::1]" $pub) }}
+{{- fail "cubeOps.store.backend=fs requires cubeOps.store.fs.publicURL to be reachable from compute nodes (not 127.0.0.1/localhost). For in-cluster nodes leave it empty to use the CubeOps Service DNS; for nodes outside the cluster set an internal CLB URL" }}
+{{- end }}
+{{- if and (eq (include "cube.opsStoreBackend" .) "fs") (gt (int .Values.cubeOps.replicas) 1) }}
+{{- $shared := false }}
+{{- if eq (include "cube.opsFSPersistEnabled" .) "true" }}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) }}
+{{- $persist := default dict $fs.persistence }}
+{{- $modes := $persist.accessModes | default (list "ReadWriteOnce") }}
+{{- if has "ReadWriteMany" $modes }}
+{{- $shared = true }}
+{{- end }}
+{{- end }}
+{{- if not $shared }}
+{{- fail "cubeOps.store.backend=fs with cubeOps.replicas>1 requires a shared volume: cubeOps.store.fs.persistence.enabled=true and accessModes including ReadWriteMany (emptyDir and RWO are per-replica)" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $opsS3 := default dict .Values.cubeOps.s3 }}
+{{- $opsEndpoint := include "cube.opsS3Endpoint" . }}
+{{- $opsExistingSecret := $opsS3.existingSecret | default "" }}
+{{- $opsAK := $opsS3.accessKeyId | default "" }}
+{{- $opsSK := $opsS3.secretAccessKey | default "" }}
+{{- $volAK := (.Values.volumeS3).accessKeyId | default "" }}
+{{- $volSK := (.Values.volumeS3).secretAccessKey | default "" }}
+{{- $hasOpsCreds := or (ne $opsExistingSecret "") (and (ne $opsAK "") (ne $opsSK "")) (and (ne $volAK "") (ne $volSK "")) (eq (include "cube.minioBuiltinEnabled" .) "true") }}
+{{- if and (ne $opsExistingSecret "") (eq $opsEndpoint "") }}
+{{- fail "cubeOps.s3.existingSecret requires cubeOps.s3.endpoint (or volumeS3.endpoint / chart MinIO); the Secret only supplies s3-access-key-id / s3-secret-access-key" }}
+{{- end }}
+{{- if and (ne $opsEndpoint "") (not $hasOpsCreds) }}
+{{- fail "cubeOps S3 endpoint is set but no credentials: set cubeOps.s3.existingSecret (keys s3-access-key-id / s3-secret-access-key), cubeOps.s3.accessKeyId+secretAccessKey, or volumeS3.accessKeyId+secretAccessKey. volumeS3.existingSecret (volume-s3.conf) is not a CubeOps credential source." }}
+{{- end }}
 {{- end }}

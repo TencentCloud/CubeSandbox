@@ -58,7 +58,6 @@ type snapshotResource struct {
 	StorageBackend            string                      `json:"storage_backend,omitempty"`
 	Backend                   string                      `json:"backend,omitempty"`
 	RemoteStatus              string                      `json:"remote_status,omitempty"`
-	Retain                    bool                        `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                      `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                      `json:"last_error,omitempty"`
 	CreatedAt                 string                      `json:"created_at,omitempty"`

@@ -225,14 +225,6 @@ type ingressSessionValue struct {
 	Reserved [3]uint16
 }
 
-//nolint:unused
-func ingressSession(key *sessionKey, value *ingressSessionValue) string {
-	return fmt.Sprintf("%s:%d->%s:%d(%s:%d)",
-		uint32ToIP(key.SourceIP), ntohs(key.SourcePort),
-		uint32ToIP(key.TargetIP), ntohs(key.TargetPort),
-		uint32ToIP(value.VMIP), ntohs(value.VMPort))
-}
-
 // StartSessionReaper starts a goroutine that will periodically
 // check for sessions and DNS-learned policies that have expired and remove them.
 func StartSessionReaper() <-chan Event {

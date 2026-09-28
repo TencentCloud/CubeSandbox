@@ -5,15 +5,17 @@
 package sandbox
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func ensureSandboxTestConfig(t *testing.T) *config.Config {
@@ -285,5 +287,107 @@ func TestGetReqResourceRejectsCPUOverflowBeforeMemOverflow(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cpu") {
 		t.Fatalf("expected cpu validation error to win, got %v", err)
+	}
+}
+
+func TestCheckAndGetAnnotationStripsPlatformPauseKeys(t *testing.T) {
+	ensureSandboxTestConfig(t)
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			constants.CubeAnnotationPauseSnapshotID:                  "snap-forged-pause",
+			constants.CubeAnnotationLaunchMemorySnapshotID:           "tpl-forged",
+			constants.CubeAnnotationRuntimeRestoreSnapshotID:         "snap-forged-restore",
+			constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt: "2026-09-04T00:00:00Z",
+			constants.CubeAnnotationRuntimeSnapshotID:                "snap-user-runtime",
+		},
+	}
+	out := &cubebox.RunCubeSandboxRequest{}
+	if err := checkAndGetAnnotation(req, out); err != nil {
+		t.Fatalf("checkAndGetAnnotation: %v", err)
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationPauseSnapshotID]; ok {
+		t.Fatal("user pause snapshot id must not be forwarded")
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationLaunchMemorySnapshotID]; ok {
+		t.Fatal("user launch ancestor must not be forwarded")
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationRuntimeRestoreSnapshotID]; ok {
+		t.Fatal("user restore-base must not be forwarded")
+	}
+	if got := out.Annotations[constants.CubeAnnotationRuntimeSnapshotID]; got != "snap-user-runtime" {
+		t.Fatalf("other cube.master keys still forward, got %q", got)
+	}
+}
+
+func TestStripUserCubeMasterLabelsDropsPauseKeys(t *testing.T) {
+	got := stripUserCubeMasterLabels(map[string]string{
+		constants.CubeAnnotationPauseSnapshotID:                  "snap-forged-pause",
+		constants.CubeAnnotationLaunchMemorySnapshotID:           "tpl-forged",
+		constants.CubeAnnotationRuntimeRestoreSnapshotID:         "snap-forged-restore",
+		constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt: "2026-09-04T00:00:00Z",
+		"user.label": "keep-me",
+	})
+	if _, ok := got[constants.CubeAnnotationPauseSnapshotID]; ok {
+		t.Fatal("forged pause snapshot id must not reach Cubelet Labels")
+	}
+	if _, ok := got[constants.CubeAnnotationLaunchMemorySnapshotID]; ok {
+		t.Fatal("forged launch ancestor must not reach Cubelet Labels")
+	}
+	if _, ok := got[constants.CubeAnnotationRuntimeRestoreSnapshotID]; ok {
+		t.Fatal("forged restore-base must not reach Cubelet Labels")
+	}
+	if _, ok := got[constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt]; ok {
+		t.Fatal("forged restore-base timestamp must not reach Cubelet Labels")
+	}
+	if got["user.label"] != "keep-me" {
+		t.Fatalf("ordinary labels must pass through, got %#v", got)
+	}
+	if stripUserCubeMasterLabels(nil) != nil {
+		t.Fatal("nil labels stay nil")
+	}
+}
+
+func TestConstructCubeletReqStripsForgedPauseLabels(t *testing.T) {
+	ensureSandboxTestConfig(t)
+	req := &types.CreateCubeSandboxReq{
+		Request: &types.Request{RequestID: "req-label-strip"},
+		Containers: []*types.Container{{
+			Name: "ctr-1",
+			Resources: &types.Resource{
+				Cpu: "1",
+				Mem: "1Gi",
+			},
+			Image: &types.ImageSpec{
+				Image: "busybox:latest",
+			},
+		}},
+		Annotations: map[string]string{
+			constants.CubeAnnotationPauseSnapshotID:          "snap-anno-forged",
+			constants.CubeAnnotationRuntimeRestoreSnapshotID: "snap-anno-restore",
+		},
+		Labels: map[string]string{
+			constants.CubeAnnotationPauseSnapshotID:          "snap-label-forged",
+			constants.CubeAnnotationRuntimeRestoreSnapshotID: "snap-label-restore",
+			"app": "ok",
+		},
+	}
+	out, err := ConstructCubeletReq(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ConstructCubeletReq: %v", err)
+	}
+	if _, ok := out.Labels[constants.CubeAnnotationPauseSnapshotID]; ok {
+		t.Fatal("user Label pause snapshot id must not be forwarded")
+	}
+	if _, ok := out.Labels[constants.CubeAnnotationRuntimeRestoreSnapshotID]; ok {
+		t.Fatal("user Label restore-base must not be forwarded")
+	}
+	if out.Labels["app"] != "ok" {
+		t.Fatalf("ordinary labels must pass through, got %#v", out.Labels)
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationPauseSnapshotID]; ok {
+		t.Fatal("user annotation pause snapshot id must not be re-added after strip")
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationRuntimeRestoreSnapshotID]; ok {
+		t.Fatal("user annotation restore-base must not be re-added after strip")
 	}
 }

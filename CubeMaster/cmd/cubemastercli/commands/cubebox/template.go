@@ -20,10 +20,10 @@ import (
 
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
-	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/urfave/cli"
 )
 
@@ -124,6 +124,11 @@ type templateDeleteRequest struct {
 	TemplateID   string `json:"template_id,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
 	Sync         bool   `json:"sync,omitempty"`
+}
+
+type templateMigrateRequest struct {
+	RequestID  string `json:"requestID,omitempty"`
+	TemplateID string `json:"template_id,omitempty"`
 }
 
 func mergeCubeNetworkConfigFlags(c *cli.Context, existing *types.CubeNetworkConfig) *types.CubeNetworkConfig {
@@ -324,6 +329,7 @@ var TemplateCommand = cli.Command{
 		TemplateCreateCommand,
 		TemplateCommitCommand,
 		TemplateCreateFromImageCommand,
+		TemplateMergeCommand,
 		TemplateRedoCommand,
 		TemplateDeleteCommand,
 		TemplateSetAliasCommand,
@@ -610,7 +616,7 @@ var TemplateRenderCommand = cli.Command{
 var TemplateDeleteCommand = cli.Command{
 	Name:      "delete",
 	Usage:     "delete template metadata and node replicas",
-	ArgsUsage: "<template-id>",
+	ArgsUsage: "<template-id> [template-id ...]",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "template-id",
@@ -618,8 +624,8 @@ var TemplateDeleteCommand = cli.Command{
 		},
 	},
 	Action: func(c *cli.Context) error {
-		templateID := resolveTemplateID(c)
-		if templateID == "" {
+		templateIDs := resolveTemplateIDs(c)
+		if len(templateIDs) == 0 {
 			return errors.New("template-id is required")
 		}
 
@@ -628,34 +634,52 @@ var TemplateDeleteCommand = cli.Command{
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
-		requestID := uuid.New().String()
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/template", net.JoinHostPort(host, port))
 
-		req := &templateDeleteRequest{
-			RequestID:  requestID,
-			TemplateID: templateID,
+		var deleteErr error
+		for _, templateID := range templateIDs {
+			if err := deleteTemplate(c, url, templateID); err != nil {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("%s: %w", templateID, err))
+				continue
+			}
+			log.Printf("template deleted: %s\n", templateID)
 		}
-		body, err := jsoniter.Marshal(req)
-		if err != nil {
-			return err
-		}
-
-		rsp := &templateResponse{}
-		if err := doHttpReq(c, url, http.MethodDelete, requestID, bytes.NewBuffer(body), rsp); err != nil {
-			log.Printf("template delete request err. %s. RequestId: %s\n", err.Error(), requestID)
-			return err
-		}
-		if rsp.Ret == nil {
-			return errors.New("empty response")
-		}
-		if rsp.Ret.RetCode != 200 {
-			log.Printf("template delete failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
-			return errors.New(rsp.Ret.RetMsg)
-		}
-		log.Printf("template deleted: %s\n", templateID)
-		return nil
+		return deleteErr
 	},
+}
+
+func resolveTemplateIDs(c *cli.Context) []string {
+	if id := c.String("template-id"); id != "" {
+		return []string{id}
+	}
+	return c.Args()
+}
+
+func deleteTemplate(c *cli.Context, url, templateID string) error {
+	requestID := uuid.New().String()
+	req := &templateDeleteRequest{
+		RequestID:  requestID,
+		TemplateID: templateID,
+	}
+	body, err := jsoniter.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	rsp := &templateResponse{}
+	if err := doHttpReq(c, url, http.MethodDelete, requestID, bytes.NewBuffer(body), rsp); err != nil {
+		log.Printf("template delete request err. %s. TemplateId: %s. RequestId: %s\n", err.Error(), templateID, requestID)
+		return err
+	}
+	if rsp.Ret == nil {
+		return errors.New("empty response")
+	}
+	if rsp.Ret.RetCode != 200 {
+		log.Printf("template delete failed. %s. TemplateId: %s. RequestId: %s\n", rsp.Ret.RetMsg, templateID, requestID)
+		return errors.New(rsp.Ret.RetMsg)
+	}
+	return nil
 }
 
 // templateSetAliasRequest is the JSON body for PUT /cube/template/:id/alias.
@@ -968,6 +992,65 @@ var TemplateCreateFromImageCommand = cli.Command{
 	},
 }
 
+var TemplateMergeCommand = cli.Command{
+	Name: "merge",
+	// "merge" is the CLI spelling of the /cube/template/migrate API; the usage
+	// text keeps the word "migrate" so docs/errors that mention `tpl migrate`
+	// still lead here.
+	Usage:     "migrate one template artifact to the template center (the CLI command is `merge`; the API is /cube/template/migrate)",
+	ArgsUsage: "<template-id>",
+	Flags: []cli.Flag{
+		cli.StringFlag{Name: "template-id", Usage: "template id (or alias) to migrate"},
+		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the merge job to completion"},
+		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
+		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
+	},
+	Action: func(c *cli.Context) error {
+		templateID := resolveTemplateID(c)
+		if templateID == "" {
+			return errors.New("template-id is required")
+		}
+		serverList = getServerAddrs(c)
+		if len(serverList) == 0 {
+			return errors.New("no server addr")
+		}
+		port = c.GlobalString("port")
+		host := serverList[rand.Int()%len(serverList)]
+		req := &templateMigrateRequest{
+			RequestID:  uuid.New().String(),
+			TemplateID: templateID,
+		}
+		body, err := jsoniter.Marshal(req)
+		if err != nil {
+			return err
+		}
+		url := fmt.Sprintf("http://%s/cube/template/migrate", net.JoinHostPort(host, port))
+		rsp := &templateImageJobResponse{}
+		if err := doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
+			return err
+		}
+		if rsp.Ret == nil {
+			return errors.New("empty response")
+		}
+		if rsp.Ret.RetCode != 200 {
+			return errors.New(rsp.Ret.RetMsg)
+		}
+		if c.Bool("json") {
+			commands.PrintAsJSON(rsp)
+			return nil
+		}
+		if detachRequested(c) || rsp.Job == nil {
+			printTemplateImageJob(rsp.Job)
+			return nil
+		}
+		log.Printf("submitted merge job: job_id=%s template_id=%s\n", rsp.Job.JobID, rsp.Job.TemplateID)
+		// Watch through the dedicated migrate endpoint, not the from-image one:
+		// the from-image status handler happens to return MIGRATE rows today
+		// only because it does not filter by operation.
+		return runMigrateJobWatch(c, rsp.Job.JobID)
+	},
+}
+
 var TemplateRedoCommand = cli.Command{
 	Name:      "redo",
 	Usage:     "redo a template on all, specific, or failed nodes",
@@ -1029,7 +1112,7 @@ var TemplateRedoCommand = cli.Command{
 
 var TemplateStatusCommand = cli.Command{
 	Name:  "status",
-	Usage: "show create-from-image job status",
+	Usage: "show template image/merge job status",
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "job-id", Usage: "template image job id"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -1054,7 +1137,7 @@ var TemplateStatusCommand = cli.Command{
 
 var TemplateWatchCommand = cli.Command{
 	Name:  "watch",
-	Usage: "watch create-from-image job progress until completion",
+	Usage: "watch template image/merge job progress until completion",
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "job-id", Usage: "template image job id"},
 		cli.DurationFlag{Name: "interval", Value: 2 * time.Second, Usage: "poll interval"},
@@ -1285,6 +1368,28 @@ func fetchTemplateImageJob(c *cli.Context, jobID string) (*templateImageJobRespo
 	return rsp, nil
 }
 
+func fetchTemplateMigrateJob(c *cli.Context, jobID string) (*templateImageJobResponse, error) {
+	serverList = getServerAddrs(c)
+	if len(serverList) == 0 {
+		return nil, errors.New("no server addr")
+	}
+	port = c.GlobalString("port")
+	requestID := uuid.New().String()
+	host := serverList[rand.Int()%len(serverList)]
+	url := fmt.Sprintf("http://%s/cube/template/migrate?job_id=%s", net.JoinHostPort(host, port), jobID)
+	rsp := &templateImageJobResponse{}
+	if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
+		return nil, err
+	}
+	if rsp.Ret == nil {
+		return nil, errors.New("empty response")
+	}
+	if rsp.Ret.RetCode != 200 {
+		return nil, errors.New(rsp.Ret.RetMsg)
+	}
+	return rsp, nil
+}
+
 func printTemplateImageJob(job *types.TemplateImageJobInfo) {
 	if job == nil {
 		fmt.Println("job: <nil>")
@@ -1344,11 +1449,20 @@ func formatTemplateImageJobWatchPhase(job *types.TemplateImageJobInfo) string {
 	phase := "UNKNOWN"
 	if job != nil {
 		if job.Status == "READY" {
+			if job.Operation == "MIGRATE" {
+				return "READY"
+			}
 			return "[7/7] READY"
 		}
 		if job.Phase != "" {
 			phase = job.Phase
 		}
+	}
+
+	// Migrate jobs have a single transfer phase; the 7-step build progress
+	// display is meaningless for them.
+	if job != nil && job.Operation == "MIGRATE" {
+		return phase
 	}
 
 	phaseOrder := map[string]int{

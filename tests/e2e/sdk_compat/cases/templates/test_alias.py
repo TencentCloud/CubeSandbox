@@ -10,12 +10,8 @@ cubesandbox,e2b, the [e2b] variants are skipped with an explanation.
 
 from __future__ import annotations
 
-import sys
 import time
 import uuid
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "sdk" / "python"))
 
 import pytest
 import requests

@@ -40,7 +40,7 @@ func (l *cpuFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	nodes := make(node.NodeList, 0, inList.Len())
 	for i := range inList {
 
-		quotaCpuFree := sconf.EffectiveQuotaCpu(inList[i].InstanceType, inList[i].QuotaCpu) -
+		quotaCpuFree := inList[i].QuotaCpu -
 			sconf.EffectiveAllocated(inList[i].QuotaCpuUsage)
 		if quotaCpuFree <= cpuq.MilliValue() {
 			log.G(selCtx.Ctx).Warnf("%v select:%v, quotaCpuFree:%v, cpuq:%v",

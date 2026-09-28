@@ -119,20 +119,40 @@ func TestSetTimeoutValidationAllowsNeverTimeout(t *testing.T) {
 }
 
 type mockTimeoutProvider struct {
+	called             bool
 	lastSandboxID      string
 	lastTimeoutSeconds int
 	returnEndAt        int64
+	returnEndAts       map[string]int64
 	returnErr          error
+	lookupCalls        int
+	batchLookupCalls   int
+	lastLookupIDs      []string
 }
 
 func (m *mockTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
+	m.called = true
 	m.lastSandboxID = sandboxID
 	m.lastTimeoutSeconds = timeoutSeconds
 	return m.returnEndAt, m.returnErr
 }
 
 func (m *mockTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string) (int64, error) {
+	m.lookupCalls++
 	return m.returnEndAt, m.returnErr
+}
+
+func (m *mockTimeoutProvider) LookupEndAts(ctx context.Context, sandboxIDs []string) (map[string]int64, error) {
+	m.batchLookupCalls++
+	m.lastLookupIDs = append([]string(nil), sandboxIDs...)
+	if m.returnEndAts != nil {
+		return m.returnEndAts, m.returnErr
+	}
+	endAts := make(map[string]int64, len(sandboxIDs))
+	for _, sandboxID := range sandboxIDs {
+		endAts[sandboxID] = m.returnEndAt
+	}
+	return endAts, m.returnErr
 }
 
 func TestSetTimeoutWithInstalledProviderAllowsNeverTimeout(t *testing.T) {

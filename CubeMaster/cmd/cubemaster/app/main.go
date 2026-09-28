@@ -18,12 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
-	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"    // register mysql driver
-	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres" // register postgres driver
-	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/tombstone"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
@@ -40,7 +36,12 @@ import (
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/rpc"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/postgres" // register postgres driver
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/tombstone"
 )
 
 type App struct {
@@ -128,6 +129,10 @@ func (a *App) Run() {
 func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	log.Init(config.GetLogConfig())
+
+	if err := templatecenter.InitArtifactStore(ctx); err != nil {
+		return fmt.Errorf("artifact store: %w", err)
+	}
 
 	errorcode.InitCubeCodeRetryMap(cfg)
 
@@ -231,27 +236,11 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 // process; whoever loses the lock race blocks until the winner is done,
 // then sees the schema is already at HEAD and returns immediately.
 func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
-	// The schema produced by CubeDB/migrate/migrations is a single catalog
-	// covering the host/node inventory tables (t_cube_host_*, t_cube_node_*)
-	// and the instance tables (t_cube_template_*, t_cube_instance_*,
-	// t_cube_sandbox_spec, ...), all in the one configured database.
-	src := cfg.InstanceDBConfig
-	if src == nil {
-		return fmt.Errorf("dao: instance_db_config is not set")
-	}
-	daoCfg := dao.Config{
-		Driver:                      src.Driver,
-		Addr:                        src.Addr,
-		User:                        src.User,
-		Pwd:                         src.Pwd,
-		DBName:                      src.DBName,
-		ConnTimeoutSeconds:          src.ConnTimeout,
-		ReadTimeoutSeconds:          src.ReadTimeout,
-		WriteTimeoutSeconds:         src.WriteTimeout,
-		MaxIdleConns:                src.MaxIdleConns,
-		MaxOpenConns:                src.MaxOpenConns,
-		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
-		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
+	// Migrations put every table in the one configured database; build the
+	// dao config through the shared helper so both dao.Open identities match.
+	daoCfg, err := db.ConfigFromDBConfig(cfg.InstanceDBConfig)
+	if err != nil {
+		return fmt.Errorf("dao: %w", err)
 	}
 	if _, err := dao.Open(ctx, daoCfg); err != nil {
 		return fmt.Errorf("dao open: %w", err)

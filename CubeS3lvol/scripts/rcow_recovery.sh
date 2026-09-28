@@ -31,14 +31,14 @@
 #
 #  === Why case 3 does not attempt a repair ===
 #
-#  If a volume is recorded as active but no device exists, the fix is not another
-#  rcow_active_bdev call: that RPC sees the name in the registry and reports
-#  success without attaching anything, which is right for a retry and useless
-#  here. The mismatch means the registry was loaded by a process that never
-#  attached those namespaces, and the way out is a restart -- which case 1
-#  handles properly, by moving the registry aside first. Pretending to repair it
-#  from here would report a restored layout that is not there, and that is the
-#  one failure this whole mechanism exists to prevent.
+#  The mismatch means the registry was loaded by a process that never attached
+#  those namespaces, so every entry in it is a plan rather than a fact. Attaching
+#  them from here would work -- rcow_active_bdev attaches a recorded volume it
+#  finds unattached -- but a restart replays the whole recorded layout from a
+#  copy, and case 1 already does that properly. Repairing a subset out of a
+#  verify-or-restart path would report a layout restored in part, and reporting a
+#  layout that is not there is the one failure this mechanism exists to prevent.
+#  Draining the WAL is part of it too, and that is a start, not an attach.
 #
 #  Usage: rcow_recovery.sh [--verify-only] [--timeout SEC]
 #
@@ -140,8 +140,6 @@ fi
 # --no-replay, or a target started by hand), so it loaded the registry and now
 # reports those volumes as active while holding no namespaces for them.
 rcow_err "the registry lists volumes this process is not exposing"
-rcow_err "re-activating them from here would not help: rcow_active_bdev sees \
-the name in the registry and reports success without attaching anything"
-rcow_err "restart instead, which replays the layout from a copy: \
+rcow_err "restart instead, which replays the whole recorded layout from a copy: \
 rcow_stop.sh && rcow_start.sh"
 exit 1

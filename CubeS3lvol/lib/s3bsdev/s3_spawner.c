@@ -3,8 +3,6 @@
 /*
  *   Thread spawner implementation. The design rationale lives in
  *   include/s3lvol/s3_spawner.h.
- *
- *   Ported from spdk/module/bdev/erofs/bdev_erofs.c (verified in production).
  */
 
 #include "spdk/stdinc.h"

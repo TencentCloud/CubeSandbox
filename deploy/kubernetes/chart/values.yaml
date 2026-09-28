@@ -11,105 +11,111 @@ global:
   # kubelet --cluster-domain=<non-default>. Empty falls back to
   # cubeNode.dns.clusterDomain, then "cluster.local".
   clusterDomain: ""
-  # Optional registry prefix that replaces the registry portion of every
-  # Cube-owned image below. Leave empty to keep the per-image repository
-  # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
-  # to mirror all images into a private registry without editing each entry
-  # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
-  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
-  # third-party images such as mysql / redis / minio.
+  # Optional private registry host that rewrites the official Cube TCR host
+  # on Cube-owned images. Set to a host only, e.g. my-registry.example.com.
   imageRegistry: ""
 
 images:
   # Bootstrap DaemonSet init: installs/configures PVM host kernel and may reboot the host.
   pvmHostBootstrap:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-pvm-host-bootstrap
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   # Bootstrap DaemonSet init: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
   nodeInit:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-node-init
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   # Big Pod wait-node-prep initContainer + bootstrap write-ready/hold.
   waitNodePrep:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-wait-node-prep
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   # Big Pod per-component runtime images.
   cubelet:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubelet
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubeKernel:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-kernel
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubeGuest:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-guest
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubeAgent:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-agent
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   master:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-master
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   api:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-api
-    tag: v0.7.0
+    tag: v0.7.2
+    pullPolicy: IfNotPresent
+
+  # Standalone template build service. Built from
+  # CubeTemplateCenter/docker/Dockerfile; carries skopeo / umoci / e2fsprogs
+  # because it is the process that pulls images and makes the ext4.
+  templateCenter:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-templatecenter
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   ops:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubemastercli:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   proxy:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   lifecycleManager:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubeEgress:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   cubeEgressNet:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-net
-    tag: v0.7.0
+    tag: v0.7.2
+    pullPolicy: IfNotPresent
+
+  cubeS3lvol:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-s3lvol
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   webui:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui
-    tag: v0.7.0
+    tag: v0.7.2
     pullPolicy: IfNotPresent
 
   # Used by the post-install Job that merges *.cubeProxy.domain into cluster CoreDNS.
@@ -148,11 +154,11 @@ storageClass:
   # parameters:
   #   type: cbs
 
-# Convenience: pin CubeMaster / MySQL / Redis / MinIO PVCs to one StorageClass name
-# when the component-level storageClassName is empty. Empty (default) means
-# omit storageClassName on the PVC → cluster default SC. Component-level
-# non-empty values always win (used by values-tke.yaml). Mix different SCs
-# by setting the four component fields explicitly instead of this key.
+# Convenience: pin CubeMaster / MySQL / Redis / MinIO PVCs
+# to one StorageClass name when the component-level storageClassName is empty.
+# Empty (default) means omit storageClassName on the PVC → cluster default SC.
+# Component-level non-empty values always win (used by values-tke.yaml). Mix
+# different SCs by setting the component fields explicitly instead of this key.
 persistence:
   storageClassName: ""
 
@@ -206,8 +212,8 @@ controlPlane:
   enabled: true
   namespaceScoped: true
   # Native Deployment rolling strategy for stateless control-plane workloads
-  # (api, webui, proxy, ops, lifecycle-manager, cubemastercli). Do not apply
-  # maxSurge > 0 to cube-master when it mounts a ReadWriteOnce PVC.
+  # (api, webui, proxy, lifecycle-manager, cubemastercli, cube-ops). Do not
+  # apply maxSurge > 0 to cube-master when it mounts a ReadWriteOnce PVC.
   deploymentStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -216,23 +222,42 @@ controlPlane:
 
   master:
     enabled: true
+    # Number of Master replicas. Master is stateless (all state in DB), so
+    # multiple replicas can run concurrently without coordination. Increase
+    # for higher API throughput and availability.
     replicas: 1
+    # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
+    # templates or slow networks/disks.
+    appSnapshotTimeoutSeconds: 300
     # Default PVC is ReadWriteOnce: RollingUpdate with maxSurge would start a
     # second Pod before the old one releases the volume and hang on multi-attach.
     # Recreate deletes the old Pod first so the PVC can remount cleanly.
+    #
+    # If using shared storage (ReadWriteMany) or S3-only artifact storage
+    # (persistence.enabled=false), you can switch to RollingUpdate.
     deploymentStrategy:
       type: Recreate
     command: []
     args: []
     env: []
     nodeIPs: []
+    # Bypass the migration content preflight. Rarely needed: an applied version
+    # that is absent from this image's migrations tree is only reported, so a
+    # database migrated by a different build line no longer blocks startup.
+    # Enable this only to bypass a real content drift (a migration edited after
+    # being applied), which stays fatal by design.
+    skipMigrationFingerprintCheck: false
     service:
       type: ClusterIP
       port: 8089
     persistence:
-      # One-click persists CubeMaster artifacts under /data/CubeMaster/storage.
-      # Kubernetes multi-control-node deployments use PVC by default so data
-      # follows the Pod when it is rescheduled across control nodes.
+      # Master persists artifact metadata in DB, but may cache ext4 files
+      # locally for faster distribution to nodes. If using S3-only storage
+      # (TC uploads to S3, Master fetches from S3), set enabled=false.
+      #
+      # For multi-replica Master with shared storage, use ReadWriteMany
+      # access mode (requires a storage class that supports RWX, e.g., CBS
+      # with multi-attach or a shared filesystem like CFS).
       enabled: true
       hostPath: ""
       existingClaim: ""
@@ -258,6 +283,137 @@ controlPlane:
         initialDelaySeconds: 30
         periodSeconds: 20
         failureThreshold: 6
+    resources: {}
+
+  # Template artifact storage semantics. This declares WHERE the durable copy
+  # of a built ext4 lives, which in turn decides whether CubeMaster and
+  # CubeTemplateCenter can scale beyond one replica:
+  #
+  #   s3Backed=false (default): artifacts live on the local/shared disk
+  #     (master.persistence PVC or hostPath). Multi-replica master/TC is
+  #     allowed but DEGRADED (install notes print a warning): artifacts are
+  #     node-local, so a download may hit a master that never built it and TC
+  #     replicas duplicate builds. The default ReadWriteOnce artifact PVC is
+  #     the exception that still fails validation — it cannot attach on
+  #     several nodes, so a second master replica would stay Pending forever.
+  #     Use persistence.enabled=false (per-pod scratch) or a ReadWriteMany
+  #     claim for multi-replica without S3, and a non-colocated TC still
+  #     requires a ReadWriteMany volume.
+  #
+  #   s3Backed=true: the durable copy is the S3/MinIO object. TC uploads the
+  #     ext4 after building; Cubelet downloads straight from S3 via presigned
+  #     URLs that CubeMaster re-signs at each use; the local disk on both
+  #     master and TC is build scratch / cache only. In this mode BOTH
+  #     master and TC may run any replica count on any node -- no shared
+  #     volume and no co-location required.
+  #
+  # Requirements when s3Backed=true:
+  #   - CUBE_S3_* must reach BOTH the master and TC pods (via global.env,
+  #     volumeS3.*, or the chart's builtin minio), and
+  #   - with master.replicas>1 or templateCenter.replicas>1, set
+  #     master.persistence.enabled=false (S3 is durable; the RWO PVC cannot
+  #     attach on several nodes anyway) unless the claim is ReadWriteMany.
+  artifactStore:
+    s3Backed: false
+    # Durable blob backend for template rootfs artifacts. Default s3 keeps
+    # today's behaviour (incomplete CUBE_S3_* falls back to local disk).
+    # Set backend=fs to store objects on the shared artifact PVC via
+    # pkgs/blobstore without MinIO. Do not combine backend=fs with s3Backed=true.
+    # backend=fs requires master.persistence.enabled=true (emptyDir is lost
+    # on restart) and fsRoot, when set, must stay under /data/CubeMaster/storage.
+    backend: s3
+    # Optional override of CUBE_ARTIFACT_STORE_FS_ROOT. Empty uses the
+    # existing CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR mount.
+    fsRoot: ""
+
+  # Standalone template build service (CubeTemplateCenter). REQUIRED.
+  #
+  # CubeTemplateCenter is the ONLY component that builds template ext4 images
+  # (pulls container images, exports rootfs, runs mkfs.ext4, uploads to S3).
+  # CubeMaster does NOT build locally; it only orchestrates (persists job rows,
+  # forwards build requests to TC, receives BUILT callbacks, distributes
+  # artifacts to nodes).
+  #
+  # There is no enabled switch: whenever controlPlane.enabled is true, TC is
+  # deployed unconditionally and CUBE_TEMPLATE_CENTER_ADDR / CUBE_MASTER_ADDR
+  # are wired automatically on both sides -- no manual conf editing, and no
+  # way to end up with a CubeMaster that has nowhere to forward builds.
+  templateCenter:
+    # Replica count. Recommended >1 setup is artifactStore.s3Backed=true,
+    # where replicas coordinate duplicate builds of one spec through DB
+    # session locks and every replica reads/writes the shared S3 bucket.
+    # Without S3, values > 1 are allowed but DEGRADED (the install notes print
+    # a warning): the artifact store is node-local, so replicas cannot read
+    # each other's ext4 or take over each other's builds, and duplicate builds
+    # of one spec run in parallel. See the artifactStore comment above.
+    replicas: 1
+    # Bypass the migration content preflight. Rarely needed: an applied version
+    # that is absent from this image's migrations tree is only reported, so a
+    # database ahead of the binary no longer blocks startup. Enable this only to
+    # bypass a real content drift (a migration edited after being applied), which
+    # stays fatal by design.
+    skipMigrationFingerprintCheck: false
+    command: []
+    args: []
+    env: []
+    # Pin TC to the same node as CubeMaster so both can mount the ReadWriteOnce
+    # artifact PVC (RWO is per-node, not per-Pod). Required because TC writes the
+    # ext4 and CubeMaster is the one that serves it to Cubelet.
+    #
+    # Set to false ONLY when the artifact volume is genuinely shared across nodes
+    # or when master and TC are pinned by other means; then supply `affinity`.
+    colocateWithMaster: true
+    affinity: {}
+    persistence:
+      # Empty means "share CubeMaster's artifact claim", which is the required
+      # default. Point this at another claim only if that claim is mounted by the
+      # CubeMaster replica serving downloads as well.
+      existingClaim: ""
+    # S3/MinIO artifact storage. When the global CUBE_S3_* environment variables
+    # are set (typically via .Values.global.env or the s3lvol section), TC
+    # uploads built ext4 artifacts to S3 and reports a presigned URL; Cubelet
+    # downloads directly from S3 instead of through CubeMaster's local HTTP
+    # endpoint.
+    #
+    # TC shares the same S3 configuration as Cubelet / s3lvol / volume plugins,
+    # so S3 is configured once for the whole deployment. No templateCenter-
+    # specific S3 settings are needed here.
+    service:
+      type: ClusterIP
+      port: 8090
+      # Only for NodePort / LoadBalancer. Must be empty for ClusterIP.
+      nodePort: ""
+    # VPC-internal CLB, for reaching TC from outside the cluster. Control-plane
+    # traffic from CubeMaster uses the ClusterIP Service and does not go through
+    # this. The build endpoint is unauthenticated, so keep the CLB internal.
+    #
+    # TKE example:
+    #   internalLoadBalancer:
+    #     enabled: true
+    #     annotations:
+    #       service.kubernetes.io/qcloud-loadbalancer-internal-subnetid: subnet-xxxxxxxx
+    #       service.cloud.tencent.com/pass-to-target: "true"
+    #       service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
+    internalLoadBalancer:
+      enabled: false
+      annotations: {}
+      port: 8090
+    probes:
+      readiness:
+        enabled: true
+        path: /health
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 12
+      liveness:
+        enabled: true
+        path: /health
+        # Slower than CubeMaster's on purpose: restarting TC mid-build abandons
+        # the ext4 and leaves the job for the reconciler, so the probe must
+        # tolerate a busy process.
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        failureThreshold: 8
     resources: {}
 
   api:
@@ -342,8 +498,14 @@ cubeOps:
   # Stateful ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster.
   # Required when webui.enabled=true.
   enabled: true
-  # Shared MySQL/Redis state; two replicas for availability.
-  replicas: 2
+  # CubeOps is stateless once blobs are in S3, so replicas may be > 1.
+  # Chart MinIO is still a single StatefulSet; warehouse HA needs external S3/COS.
+  replicas: 1
+  deploymentStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   podAnnotations: {}
   bind: "0.0.0.0:3010"
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
@@ -352,6 +514,63 @@ cubeOps:
     type: ClusterIP
     port: 3010
   env: []
+  # Local unpack scratch (emptyDir). Not shared across replicas.
+  workDir: /var/tmp/cubeops-warehouse
+  workDirSizeLimit: 32Gi
+  # Connection fields fall back to volumeS3 then chart MinIO.
+  # bucket does not follow volumeS3.bucket / cube-volumes.
+  s3:
+    # Empty falls back to volumeS3.endpoint, then chart MinIO.
+    # Empty with minio.enabled=false disables the warehouse (501); CubeOps still starts.
+    # Helm fails when an endpoint is set but no CubeOps credentials are available.
+    endpoint: ""
+    nodeEndpoint: ""
+    # Existing Secret must contain keys s3-access-key-id / s3-secret-access-key.
+    # Cannot reuse volumeS3.existingSecret (that Secret holds volume-s3.conf).
+    existingSecret: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+    bucket: cube-ops
+    region: us-east-1
+    pathStyle: true
+    createBucket: true
+  # Blob backend for the component warehouse. Default s3 keeps today's
+  # behaviour (no S3 credentials → warehouse APIs return 501).
+  # Set backend=fs plus store.fs.publicURL (node-reachable CubeOps URL)
+  # to run the warehouse without MinIO/COS.
+  store:
+    backend: s3
+    fs:
+      root: /var/lib/cubeops/blobs
+      # Empty defaults to http://<ops Service FQDN>:<port>. Override with an
+      # internal CLB URL when compute nodes are outside the cluster.
+      publicURL: ""
+      # Hex-encoded signing key (>=32 bytes = 64 hex chars). Leave empty to
+      # generate one (32 random bytes, hex-encoded) and persist it across
+      # helm upgrade via lookup on the chart Secret. Multi-replica fs must
+      # share this key.
+      signingKey: ""
+      persistence:
+        enabled: true
+        size: 20Gi
+        accessModes:
+          - ReadWriteOnce
+        storageClass: ""
+        existingClaim: ""
+  warehouse:
+    presignTTL: 5m
+    # Empty lists omit the env vars so CubeOps built-in allow-lists apply.
+    # A string is also accepted (comma-separated owner/repo).
+    githubRepos: []
+    cnbRepos: []
+    githubToken: ""
+    cnbToken: ""
+    githubTokenSecret:
+      name: ""
+      key: github-token
+    cnbTokenSecret:
+      name: ""
+      key: cnb-token
   probes:
     readiness:
       enabled: true
@@ -373,7 +592,15 @@ lifecycleManager:
   # is enabled; CubeProxy points $cube_sidecar_addr at this Service and
   # registers itself in Redis for CLM discovery.
   enabled: true
-  replicas: 1
+  # Two replicas run active-standby when leader election is enabled. The
+  # preferred anti-affinity in the Deployment spreads them across nodes when
+  # the cluster has enough eligible control-plane nodes.
+  replicas: 2
+  leaderElection:
+    enabled: true
+    leaseTTL: 10s
+    renewInterval: 3s
+    retryInterval: 1s
   podAnnotations: {}
   listenAddr: "0.0.0.0:8083"
   service:
@@ -383,7 +610,6 @@ lifecycleManager:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""
     port: ""
-    db: 0
   defaultIdleTimeout: 5m
   heartbeatTTL: 15s
   discoveryRefresh: 3s
@@ -495,6 +721,9 @@ redis:
   # AUTH against Sentinel instances only. Leave empty when Sentinel has no requirepass
   # (master password still uses redis.password).
   sentinelPassword: ""
+  # Logical Redis DB (0-15 on standalone/Sentinel masters). Master / Proxy / LCM / Ops share this.
+  # Use a distinct db per Cube cluster when sharing one Redis instance.
+  db: 0
   # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
   # refuses to render when this equals the CHANGE_ME_* sentinel.
   password: CHANGE_ME_REDIS_PASSWORD
@@ -543,8 +772,8 @@ cubeNode:
   podAnnotations:
     # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
     kubectl.kubernetes.io/default-container: cubelet
-  # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod
-  # (PodIP / netns change; existing sandboxes on that node are interrupted).
+  # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod; on the
+  # Pod network that interrupts existing sandboxes on that node (see hostNetwork).
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -553,15 +782,23 @@ cubeNode:
   # cubelet pidfile; containerd-shim-cube-rs / microVMs are left alone.
   terminationGracePeriodSeconds: 30
 
-  # Run cube-node on the host network (hostNetwork: true, dnsPolicy becomes
-  # ClusterFirstWithHostNet). The Pod then shares the host netns, so sandbox
-  # network devices survive cube-node Pod recreation. Trade-offs: cube-node
-  # loses its CNI-assigned Pod identity (Kubernetes NetworkPolicy can no longer
-  # govern sandbox traffic) and cubelet ports (9998/9999/9966) bind on the host.
-  hostNetwork: false
+  # Run cube-node on the host network (dnsPolicy becomes ClusterFirstWithHostNet):
+  # the Pod netns is the host's, so sandbox taps stay across Pod recreation —
+  # on the Pod network a recreate destroys the netns and breaks every sandbox's
+  # networking on that node. Trade-offs: NetworkPolicy cannot govern sandbox
+  # traffic, and cubelet / CubeS3lvol / cube-egress bind on the host (cubelet
+  # is unauthenticated — firewall it like kubelet). Set false only when
+  # NetworkPolicy must apply.
+  hostNetwork: true
+  # One-time acknowledgement read by the cube-node-hostnet preflight Hook
+  # (pre-install/pre-upgrade/pre-rollback): changing hostNetwork on an existing
+  # release recreates every Big Pod, so the Hook blocks until this is set.
+  # Remove it after that upgrade.
+  hostNetworkChangeAck: false
 
   # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
-  # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP).
+  # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP) — the node IP on the host
+  # network.
   nodeIDSource: specNodeName
 
   # Default to the PVM profile so a labelled compute node can be initialized by
@@ -571,7 +808,8 @@ cubeNode:
     enabled: true
 
   network:
-    # Auto-detect primary NIC inside the Pod netns and patch Cubelet eth_name.
+    # Auto-detect the primary NIC in the Pod's netns (the host's with
+    # hostNetwork) and patch Cubelet eth_name.
     autoDetectEthName: true
     # Leave empty to keep auto-detection. Set to pin Cubelet eth_name.
     ethName: ""
@@ -582,9 +820,27 @@ cubeNode:
     # Empty falls back to the packaged Cubelet config.toml CIDR (192.168.0.0/18).
     # Helm pre-install/pre-upgrade Hook fails fast when this overlaps Service CIDR.
     cidr: "172.16.0.0/18"
-    # Skip host-network conflict checks (cube-node-init) and the Service CIDR
-    # preflight Hook. Use only when you accept blackhole / routing risk.
+    # Skip the CIDR conflict checks (cube-node-init) and the Service CIDR
+    # preflight Hook. Use only when you accept blackhole / routing risk. The
+    # host-port preflight is not skipped by this — see
+    # bootstrap.nodeInit.checkHostPorts.
     cidrSkipConflictCheck: false
+    # Guest MTU patched into Cubelet config.toml mvm_mtu
+    # (CUBE_SANDBOX_NETWORK_MTU). The sandbox tap is created with this value and
+    # the hypervisor advertises it to the guest over VIRTIO_NET_F_MTU, so it is
+    # effectively the guest's MTU and must not exceed the MTU of the interface
+    # the traffic leaves through. On the host network that interface is the node
+    # uplink, so "auto" is normally a no-op; on the Pod network it is the CNI
+    # interface, which encapsulates below 1500 (Flannel VXLAN is 1450; Calico's
+    # documented IPIP default is 1480). The guest cannot recover on its own:
+    # oversized frames are dropped on egress and inbound ICMP
+    # fragmentation-needed is not forwarded into the guest, so connections
+    # stall instead of failing.
+    # "auto" lowers mvm_mtu to the detected NIC's MTU and never raises it, so it
+    # is a no-op wherever the uplink is already >= the packaged value. Set an
+    # integer in 1280..65535 to pin it, or 0 to keep the packaged Cubelet
+    # config.toml value.
+    mtu: "auto"
 
   dns:
     clusterDomain: cluster.local
@@ -658,8 +914,9 @@ cubeNodeInstaller:
 cubeNodeBootstrap:
   podAnnotations: {}
   # Bump only when intentionally invalidating all nodes' prep fingerprint
-  # (forces wait-node-prep to re-block until bootstrap rewrites sentinel).
-  prepGeneration: "1"
+  # (forces wait-node-prep to re-block until bootstrap rewrites sentinel). Bump it
+  # too whenever a new node-init check must run on nodes that are already ready.
+  prepGeneration: "2"
   # How long wait-pvm-host polls pvm-host-ready on PVM-labeled nodes.
   pvmWaitTimeoutSeconds: "900"
   # Resources for Big Pod wait-node-prep initContainer.
@@ -759,7 +1016,6 @@ cubeProxy:
     # Overrides must be an FQDN or IP literal (nginx resolver has no search domains).
     host: ""
     port: ""
-    db: 0
   timeout:
     min: 500
     max: 700
@@ -926,6 +1182,66 @@ cubeEgress:
     limits:
       memory: "128Mi"
 
+# Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
+# in the cube-node Big Pod. Off by default, same as one-click. Enabling it
+# recreates the Big Pod and adds ~2 CPU
+# + 19 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
+# The 19 GiB request is 16 GiB tgtMemMB plus the default 1 GiB RAM cache and
+# process overhead, still under the 20 GiB limit.
+cubeS3lvol:
+  enabled: false
+  # Optional cluster-wide pin. Empty: the sidecar hashes the full Kubernetes
+  # node name (spec.nodeName) to rcow-<8hex>. Do not set this on a multi-node
+  # cluster — every node would share one S3 prefix.
+  lvsName: ""
+  socketPath: /var/run/s3lvol/s3lvol.sock
+  # Empty: last two CPUs from Cpus_allowed_list (keeps CPU0 free when the
+  # set is 0..N-1). Set a hex mask when the container is pinned to isolated cores.
+  cpuMask: ""
+  tgtMemMB: 16384
+  # Whole-object RAM cache slots per lvstore. With 1 MiB chunks, 1024 is
+  # 1 GiB of resident memory; set 0 to keep only the disk cache.
+  cacheHotBufs: 1024
+  journalMB: 1024
+  walMB: 32768
+  cacheMB: 490496
+  listenAddr: "127.0.0.1"
+  listenPort: 4420
+  # rcow_stop needs disconnect + unload; Big Pod default 30s is too short.
+  terminationGracePeriodSeconds: 180
+  s3:
+    # Existing Secret must contain key s3.cfg (s3lvol format, not volume-s3.conf).
+    existingSecret: ""
+    secretName: ""
+    # Explicit override; otherwise chart MinIO or volumeS3 is reused.
+    endpoint: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+    bucket: cube-s3lvol
+    region: ""
+    # Default: true only when filling from chart MinIO; external path-style
+    # endpoints must set pathStyle: true.
+    # pathStyle: true
+  probes:
+    startup:
+      enabled: true
+      # Probe RPC uses --timeout 5; kubelet default timeoutSeconds is 1.
+      timeoutSeconds: 8
+      periodSeconds: 10
+      failureThreshold: 30
+    readiness:
+      enabled: true
+      timeoutSeconds: 8
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 12
+  resources:
+    requests:
+      cpu: "2"
+      memory: "19Gi"
+    limits:
+      memory: "20Gi"
+
 bootstrap:
   pvmHostKernel:
     enabled: true
@@ -986,6 +1302,10 @@ bootstrap:
     checkBPFFS: true
     checkGlibc: true
     checkCIDR: true
+    # Fail when a reserved host port is already held. Runs under
+    # cubeNode.hostNetwork=true; the reserved-port set is part of the
+    # node-prep fingerprint, so changing it re-runs the check.
+    checkHostPorts: true
     checkCubecowDeps: true
     dataCubelet:
       path: /data/cubelet
@@ -995,8 +1315,8 @@ bootstrap:
         size: 25G
 
 security:
-  # cube-node host network is controlled by cubeNode.hostNetwork (default
-  # false = Pod network).
+  # cube-node network mode is controlled by cubeNode.hostNetwork (default true =
+  # host network; false = Pod network).
   hostPID: true
   privileged: true
 

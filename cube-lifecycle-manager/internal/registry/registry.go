@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package registry holds the in-memory map of every sandbox the sidecar is
+// Package registry holds the in-memory map of every sandbox CLM is
 // tracking. It is the single source of truth that the sweeper reads to make
 // pause decisions and that the resume HTTP handler consults to know whether
 // auto-resume is enabled for a given sandbox.
@@ -21,15 +21,19 @@ import (
 type Entry struct {
 	Meta lifecycle.SandboxLifecycleMeta
 
+	// RuntimeState is the latest terminal state observed on the lifecycle
+	// stream. Warm standbys retain it for promotion reconciliation.
+	RuntimeState string
+
 	// LastActiveMs is the most recent activity timestamp seen across all
-	// CubeProxy instances (sidecar takes max() over instances). Zero means
+	// CubeProxy instances (CLM takes max() over instances). Zero means
 	// "never observed" — the sweeper falls back to Meta.CreatedAt for the
 	// idle calculation.
 	LastActiveMs int64
 
-	// FirstSeenAt is when the sidecar registered the sandbox locally. The
+	// FirstSeenAt is when CLM registered the sandbox locally. The
 	// sweeper compares this against config.GracePeriod so a freshly-restarted
-	// sidecar doesn't pause everything in its first sweep before it has a
+	// CLM doesn't pause everything in its first sweep before it has a
 	// chance to receive any activity reports.
 	FirstSeenAt time.Time
 }
@@ -90,6 +94,19 @@ func (r *Registry) MergeLastActive(sandboxID string, tsMs int64) bool {
 	return false
 }
 
+// SetRuntimeState records the latest terminal lifecycle state for promotion.
+// Unknown sandboxes are ignored until their create event arrives.
+func (r *Registry) SetRuntimeState(sandboxID, state string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[sandboxID]
+	if !ok {
+		return false
+	}
+	e.RuntimeState = state
+	return true
+}
+
 // ResetLastActive clears LastActiveMs back to 0 for a single sandbox.
 func (r *Registry) ResetLastActive(sandboxID string) bool {
 	r.mu.Lock()
@@ -142,7 +159,7 @@ func (r *Registry) Len() int {
 }
 
 // Reset removes every entry. Bootstrap uses it before re-applying a fresh
-// HGETALL to avoid leaking stale entries across sidecar restarts within the
+// HGETALL to avoid leaking stale entries across CLM restarts within the
 // same in-memory state (e.g. tests).
 func (r *Registry) Reset() {
 	r.mu.Lock()

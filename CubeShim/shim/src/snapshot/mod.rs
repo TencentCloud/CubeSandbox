@@ -123,6 +123,7 @@ impl Snapshot {
             self.store_metadata()
         }
         .await;
+
         let resume_result = self.api_resume_vm().await;
 
         match (snapshot_result, resume_result) {

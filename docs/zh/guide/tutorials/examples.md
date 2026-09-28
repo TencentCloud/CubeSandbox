@@ -9,6 +9,7 @@
 | [代码沙箱快速入门](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | 创建沙箱，执行 Python 和 Shell 命令，操作文件，并体验核心 E2B 兼容 API。 |
 | [浏览器沙箱（Playwright）](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox) | 在 MicroVM 中运行无头 Chromium，通过 CDP 使用 Playwright 远程控制浏览器。 |
 | [自定义 nginx 镜像](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx) | 基于 `cubesandbox-base` 构建最小 nginx 镜像，完整验证自定义模板镜像流程。 |
+| [Ubuntu 桌面沙箱](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ubuntu-desktop) | 在浏览器里打开 Ubuntu 22.04 GNOME 桌面，支持截图和 SDK 脚本化 GUI 自动化。 |
 
 ## Agent 与框架集成
 
@@ -40,6 +41,7 @@
 | [ivshmem](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ivshmem) | 启用主机与虚机共享内存，并体验环形缓冲区协议和 mmap 吞吐测试。 |
 | [腾讯云 COS Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md) | 部署 binary 或 RPC 类型的 COS Volume 插件，并验证完整生命周期。 |
 | [S3 兼容 Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md) | 接入 AWS S3、腾讯云 COS、Cloudflare R2、MinIO 等 S3 兼容后端。 |
+| [JuiceFS Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.zh.md) | 对象存储之上的 POSIX 文件系统：一个文件系统，每个卷 `--subdir`，多个沙箱可共享一个卷并立即看到彼此的写入 |
 
 ## 性能测试
 

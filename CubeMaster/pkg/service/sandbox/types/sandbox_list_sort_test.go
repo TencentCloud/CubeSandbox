@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestSortSandboxListPutsPausedLast(t *testing.T) {

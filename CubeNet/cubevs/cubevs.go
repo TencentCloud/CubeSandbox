@@ -269,8 +269,6 @@ const (
 
 // Errors that will be returned to upper layer.
 var (
-	// ErrProgNotExist is returned when there is no specified BPF program in BPF object.
-	ErrProgNotExist = errors.New("BPF program not exists")
 	// ErrTooLong is returned when the provided MVM ID is too long.
 	ErrTooLong = errors.New("MVM ID is too long")
 )

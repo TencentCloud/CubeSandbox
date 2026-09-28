@@ -1,34 +1,15 @@
 ---
 layout: home
+logo3d: true
 
 hero:
   name: "Cube Sandbox"
-  text: "Empowering your AI Agents."
+  text: "Empowering your AI&nbsp;Agents."
   tagline: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents"
   actions:
     - theme: brand
       text: Quick Start
       link: /guide/quickstart
-
-features:
-  - title: "⚡ Ultra-fast Startup"
-    details: Resource pooling and snapshot cloning skip all cold-start overhead. Sandbox creation faster than a blink.
-  - title: "🔒 Hardware Isolation"
-    details: Every sandbox runs a dedicated OS kernel in its own MicroVM.
-  - title: "🔌 E2B SDK Compatible"
-    details: Compatible with E2B SDK interface. Switch from E2B Cloud seamlessly by changing one environment variable — zero client code changes.
-  - title: "📦 High-density Deployment"
-    details: MB-level per-sandbox overhead enables thousands of instances per server via kernel sharing and Copy-on-Write (CoW). Supports automatic sandbox pause and resume, further improving deployment density and cost optimization.
-  - title: "🛡️ Network Security"
-    details: eBPF-based inter-sandbox isolation and egress filtering at kernel level; built-in L7 security proxy enables per-domain/path/method policies with automatic credential injection — secrets never visible to sandbox code.
-  - title: "📸 Flexible State Management"
-    details: High-frequency snapshot and rollback at hundred-millisecond granularity. Create checkpoints on running sandboxes, roll back to any saved state at any time, or fork from a specific state to explore in parallel.
-  - title: "💾 Volume Framework"
-    details: E2B-compatible Volume framework that lets users plug in custom backend storage solutions. Volumes have an independent lifecycle and can be shared across sandboxes.
-  - title: "🚀 Production Deployment"
-    details: Deploy production clusters on Tencent Cloud with one click using Terraform. Also supports deployment on standard Kubernetes clusters (preview).
-  - title: "💪 ARM Architecture Support"
-    details: Full native ARM64 support across compilation, build, and deployment workflows.
 ---
 
 ## Get Started

@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"gorm.io/gorm"
 )
 
@@ -27,6 +28,7 @@ func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
 		Annotations: map[string]string{
 			constants.CubeAnnotationsSystemDiskSize: "20",
+			sandbox.AnnotationPluginVolumeSources:   `[{"name":"data","driver":"s3","private_data":"secret"}]`,
 		},
 	}
 
@@ -41,6 +43,12 @@ func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 		if got := constants.GetAppSnapshotVersion(item.Annotations); got != DefaultTemplateVersion {
 			t.Fatalf("snapshot version = %q, want %q", got, DefaultTemplateVersion)
 		}
+	}
+	if _, ok := storedReq.Annotations[sandbox.AnnotationPluginVolumeSources]; ok {
+		t.Fatal("stored snapshot request must not retain runtime plugin volume source metadata")
+	}
+	if _, ok := createReq.Annotations[sandbox.AnnotationPluginVolumeSources]; !ok {
+		t.Fatal("live create request should remain unchanged")
 	}
 }
 
@@ -76,6 +84,71 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 	})
 	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
+	})
+
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "")
+	if err != nil {
+		t.Fatalf("SubmitSandboxSnapshot returned error: %v", err)
+	}
+	if info == nil || info.JobID != "job-existing" {
+		t.Fatalf("unexpected job info: %#v", info)
+	}
+}
+
+func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	_, storedReq, err := buildSnapshotRequests(&sandboxtypes.CreateCubeSandboxReq{
+		Request:      &sandboxtypes.Request{RequestID: "req-existing"},
+		InstanceType: "cubebox",
+		Annotations:  map[string]string{},
+	}, "snap-existing")
+	if err != nil {
+		t.Fatalf("buildSnapshotRequests returned error: %v", err)
+	}
+	storedReq.Annotations[constants.CubeAnnotationStorageBackend] = constants.SnapshotBackendXFS
+	storedReq.Backend = constants.SnapshotBackendXFS
+	requestJSON, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
+		RequestID:       "req-existing",
+		SandboxID:       "sb-1",
+		SnapshotID:      "snap-existing",
+		NodeID:          "node-1",
+		NodeIP:          "10.0.0.1",
+		DisplayName:     "snap",
+		Backend:         constants.SnapshotBackendXFS,
+		SpecFingerprint: buildCommitTemplateSpecFingerprint(storedReq),
+	})
+	if err != nil {
+		t.Fatalf("marshalSnapshotCreateRequest returned error: %v", err)
+	}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+		return &sandboxtypes.CreateCubeSandboxReq{
+			InstanceType: "cubebox",
+			Annotations:  map[string]string{},
+		}, nil
+	}
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			TemplateID:  "snap-existing",
+			JobID:       "job-existing",
+			Operation:   JobOperationSnapshotCreate,
+			RequestJSON: requestJSON,
+		}, nil
+	})
+	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+		return &sandboxtypes.TemplateImageJobInfo{
+			JobID:      jobID,
+			TemplateID: "snap-existing",
+			Status:     JobStatusReady,
+		}, nil
 	})
 
 	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "")
@@ -638,13 +711,7 @@ func TestValidateSnapshotMetricsRejectsMissingKeys(t *testing.T) {
 	}
 }
 
-// TestDeleteSnapshotBlocksWhenRuntimeRefsExist verifies that the active
-// runtime binding table is the current-state authority: deleting a snapshot
-// that is still attached to a sandbox must fail with a conflict.
-//
-// The legacy template in-use precheck remains warning-only, but active runtime
-// refs are authoritative and must prevent reaching nextSnapshotAttempt.
-func TestDeleteSnapshotBlocksWhenRuntimeRefsExist(t *testing.T) {
+func TestDeleteSnapshotTombstonesWhenRuntimeRefsExist(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -652,13 +719,18 @@ func TestDeleteSnapshotBlocksWhenRuntimeRefsExist(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
+	var tombstoneStatus string
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
 		return nil, gorm.ErrRecordNotFound
 	})
 	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		status := StatusReady
+		if tombstoneStatus != "" {
+			status = tombstoneStatus
+		}
 		return &models.SnapshotRecord{
 			SnapshotID: snapshotID,
-			Status:     StatusReady,
+			Status:     status,
 		}, nil
 	})
 	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
@@ -676,35 +748,76 @@ func TestDeleteSnapshotBlocksWhenRuntimeRefsExist(t *testing.T) {
 			}},
 		}, nil
 	})
-	// The legacy template in-use precheck is still warning-only.
 	patches.ApplyFunc(isTemplateInUse, func(ctx context.Context, templateID, instanceType string) (bool, error) {
 		return true, nil
 	})
-	patches.ApplyFunc(ListActiveSnapshotRuntimeRefs, func(ctx context.Context, snapshotID string) ([]SnapshotRuntimeRefInfo, error) {
-		return []SnapshotRuntimeRefInfo{{
-			SnapshotID: snapshotID,
-			SandboxID:  "sb-active",
-			NodeID:     "node-a",
-		}}, nil
+	origCount := countActiveSnapshotRuntimeRefsFn
+	t.Cleanup(func() { countActiveSnapshotRuntimeRefsFn = origCount })
+	countActiveSnapshotRuntimeRefsFn = func(ctx context.Context, snapshotID string) (int64, error) {
+		return 1, nil
+	}
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+		if status, ok := values["status"].(string); ok {
+			tombstoneStatus = status
+		}
+		return nil
 	})
+	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
-	sentinel := errors.New("sentinel: reached nextSnapshotAttempt past runtime-ref guard")
+	sentinel := errors.New("sentinel: reached nextSnapshotAttempt past tombstone path")
 	patches.ApplyFunc(nextSnapshotAttempt, func(ctx context.Context, snapshotID string) (int32, string, error) {
 		return 0, "", sentinel
 	})
 
-	_, err := DeleteSnapshot(context.Background(), "req-delete", "snap-in-use", "cubebox")
-	if err == nil {
-		t.Fatal("DeleteSnapshot returned nil error; expected active runtime refs to block deletion")
+	info, err := DeleteSnapshot(context.Background(), "req-delete", "snap-in-use", "cubebox")
+	if err != nil {
+		t.Fatalf("DeleteSnapshot returned error: %v", err)
 	}
 	if errors.Is(err, sentinel) {
 		t.Fatalf("DeleteSnapshot reached nextSnapshotAttempt despite active runtime refs: %v", err)
 	}
-	if !errors.Is(err, ErrTemplateAttemptInProgress) {
-		t.Fatalf("DeleteSnapshot error = %v, want ErrTemplateAttemptInProgress", err)
+	if info == nil || info.Status != JobStatusReady {
+		t.Fatalf("job info = %#v, want READY tombstone", info)
 	}
-	if !strings.Contains(err.Error(), "active runtime ref") {
-		t.Fatalf("DeleteSnapshot error = %q, want active runtime ref message", err.Error())
+	if tombstoneStatus != StatusDeleted {
+		t.Fatalf("status = %q, want %q", tombstoneStatus, StatusDeleted)
+	}
+}
+
+func TestDeleteSnapshotWithZeroRefsStartsPhysicalDelete(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Status: StatusReady, OriginNodeID: "node-a"}, nil
+	})
+	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(discoverTemplateCleanupTargets, func(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {
+		return &templateCleanupTargets{InstanceType: "cubebox"}, nil
+	})
+	origCount := countActiveSnapshotRuntimeRefsFn
+	t.Cleanup(func() { countActiveSnapshotRuntimeRefsFn = origCount })
+	countActiveSnapshotRuntimeRefsFn = func(ctx context.Context, snapshotID string) (int64, error) {
+		return 0, nil
+	}
+
+	sentinel := errors.New("sentinel: reached nextSnapshotAttempt for zero-ref delete")
+	patches.ApplyFunc(nextSnapshotAttempt, func(ctx context.Context, snapshotID string) (int32, string, error) {
+		return 0, "", sentinel
+	})
+
+	_, err := DeleteSnapshot(context.Background(), "req-delete", "snap-idle", "cubebox")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("DeleteSnapshot error = %v, want zero-ref physical delete sentinel", err)
 	}
 }
 
@@ -712,30 +825,57 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 	origReplicaCleanup := runReplicaCleanup
 	origMetadataCleanup := runMetadataCleanup
 	origJobCleanup := runTemplateJobCleanup
+	origArtifactCleanup := runArtifactCleanup
+	origReferenceCleanup := runSnapshotReferenceCleanup
 	t.Cleanup(func() {
 		runReplicaCleanup = origReplicaCleanup
 		runMetadataCleanup = origMetadataCleanup
 		runTemplateJobCleanup = origJobCleanup
+		runArtifactCleanup = origArtifactCleanup
+		runSnapshotReferenceCleanup = origReferenceCleanup
 	})
 
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
 	jobsCleaned := false
+	metadataCleaned := false
+	referencesReleased := false
+	artifactCleaned := false
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error {
 		return nil
 	})
 	patches.ApplyFunc(discoverTemplateCleanupTargets, func(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {
-		return &templateCleanupTargets{}, nil
+		return &templateCleanupTargets{ArtifactIDs: map[string]struct{}{"rfs-snapshot": {}}}, nil
 	})
 	patches.ApplyFunc(snapshotDeleteLocators, func(targets *templateCleanupTargets) ([]templateCleanupLocator, error) {
 		return nil, nil
 	})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
+	origCount := countActiveSnapshotRuntimeRefsFn
+	t.Cleanup(func() { countActiveSnapshotRuntimeRefsFn = origCount })
+	countActiveSnapshotRuntimeRefsFn = func(ctx context.Context, snapshotID string) (int64, error) {
+		return 0, nil
+	}
 	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		return nil
 	}
 	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+		metadataCleaned = true
+		return nil
+	}
+	runSnapshotReferenceCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
+		referencesReleased = true
+		return nil
+	}
+	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
+		if !referencesReleased || metadataCleaned {
+			t.Fatal("artifact cleanup must run after reference release and before metadata removal")
+		}
+		if _, ok := targets.ArtifactIDs["rfs-snapshot"]; !ok {
+			t.Fatal("artifact cleanup lost the snapshot rootfs reference")
+		}
+		artifactCleaned = true
 		return nil
 	}
 	runTemplateJobCleanup = func(ctx context.Context, templateID string) error {
@@ -749,8 +889,61 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 	if err := runSnapshotDeleteJob(context.Background(), "job-del", "snap-del"); err != nil {
 		t.Fatalf("runSnapshotDeleteJob returned error: %v", err)
 	}
+	if !artifactCleaned {
+		t.Fatal("expected snapshot artifact cleanup")
+	}
 	if !jobsCleaned {
 		t.Fatal("expected runTemplateJobCleanup to be called")
+	}
+}
+
+func TestRunSnapshotDeleteJobAbortsWhenRefsReappeared(t *testing.T) {
+	origReplicaCleanup := runReplicaCleanup
+	t.Cleanup(func() { runReplicaCleanup = origReplicaCleanup })
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	var status string
+	origTx := withStoreTx
+	t.Cleanup(func() { withStoreTx = origTx })
+	withStoreTx = func(ctx context.Context, fn func(*gorm.DB) error) error {
+		return fn(&gorm.DB{})
+	}
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error {
+		return nil
+	})
+	patches.ApplyFunc(updateTemplateImageJobTx, func(tx *gorm.DB, jobID string, fields map[string]any) error {
+		return nil
+	})
+	patches.ApplyFunc(discoverTemplateCleanupTargets, func(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {
+		return &templateCleanupTargets{}, nil
+	})
+	patches.ApplyFunc(snapshotDeleteLocators, func(targets *templateCleanupTargets) ([]templateCleanupLocator, error) {
+		return nil, nil
+	})
+	patches.ApplyFunc(updateSnapshotFieldsTx, func(tx *gorm.DB, snapshotID string, values map[string]any) error {
+		if s, ok := values["status"].(string); ok {
+			status = s
+		}
+		return nil
+	})
+	origCount := countActiveSnapshotRuntimeRefsFn
+	t.Cleanup(func() { countActiveSnapshotRuntimeRefsFn = origCount })
+	countActiveSnapshotRuntimeRefsFn = func(ctx context.Context, snapshotID string) (int64, error) {
+		return 1, nil
+	}
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
+		t.Fatal("must not physically clean up when a runtime ref reappeared")
+		return nil
+	}
+
+	err := runSnapshotDeleteJob(context.Background(), "job-del", "snap-late-ref")
+	if err == nil {
+		t.Fatal("expected abort when refs reappeared")
+	}
+	if status != StatusDeleted {
+		t.Fatalf("status = %q, want %q", status, StatusDeleted)
 	}
 }
 

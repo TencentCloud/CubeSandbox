@@ -7,12 +7,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/postgres"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
 	"gorm.io/gorm"
 )
 

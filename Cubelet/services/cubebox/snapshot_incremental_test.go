@@ -5,15 +5,17 @@
 package cubebox
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestNormalizeSnapshotTypeAcceptsKnownValues(t *testing.T) {
@@ -84,6 +86,45 @@ func TestBuildCubeRuntimeSnapshotArgsAlwaysIncludesSnapshotType(t *testing.T) {
 func TestBuildCubeRuntimeSnapshotArgsOmitsMemoryVolWhenEmpty(t *testing.T) {
 	args := buildCubeRuntimeSnapshotArgs("sb-1", nil, "/tmp/s.tmp", "", snapshotTypeFull)
 	assert.NotContains(t, args, "--memory-vol")
+}
+
+func TestDetachedSnapshotWorkContextPreservesDeadlineAndIgnoresCancellation(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 2*time.Minute)
+	parentDeadline, ok := parent.Deadline()
+	require.True(t, ok)
+
+	workCtx, cancelWork := detachedSnapshotWorkContext(parent)
+	defer cancelWork()
+	workDeadline, ok := workCtx.Deadline()
+	require.True(t, ok)
+	assert.WithinDuration(t, parentDeadline, workDeadline, time.Millisecond)
+
+	cancelParent()
+	assert.NoError(t, workCtx.Err(), "client cancellation must not interrupt a frozen snapshot")
+}
+
+func TestDetachedSnapshotWorkContextUsesDefaultWithoutDeadline(t *testing.T) {
+	startedAt := time.Now()
+	workCtx, cancelWork := detachedSnapshotWorkContext(context.Background())
+	defer cancelWork()
+	deadline, ok := workCtx.Deadline()
+	require.True(t, ok)
+	remaining := deadline.Sub(startedAt)
+	assert.Greater(t, remaining, snapshotDefaultWorkTimeout-time.Second)
+	assert.LessOrEqual(t, remaining, snapshotDefaultWorkTimeout+time.Second)
+}
+
+func TestDetachedSnapshotWorkContextPreservesLongDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancelParent()
+	workCtx, cancelWork := detachedSnapshotWorkContext(parent)
+	defer cancelWork()
+	parentDeadline, _ := parent.Deadline()
+	workDeadline, ok := workCtx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, parentDeadline, workDeadline)
+	cancelParent()
+	assert.NoError(t, workCtx.Err())
 }
 
 func TestResolveBaseSnapshotIDPriority(t *testing.T) {

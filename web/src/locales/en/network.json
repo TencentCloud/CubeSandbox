@@ -3,13 +3,8 @@
   "description": "API gateway config and node rate limits.",
   "gateway": {
     "title": "API Gateway",
-    "desc": "CubeAPI runtime configuration — rate limiting and auth status.",
-    "rateLimit": "Rate Limit",
-    "auth": "Auth",
-    "authOn": "Enabled",
-    "authOff": "Disabled",
-    "domain": "Sandbox Domain",
-    "instanceType": "Default Instance Type"
+    "desc": "API gateway access configuration.",
+    "domain": "Sandbox Domain"
   },
   "quota": {
     "title": "Node Quota / Rate Limits",

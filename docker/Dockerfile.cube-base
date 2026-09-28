@@ -5,11 +5,12 @@
 # and can be turned into Cube templates without any extra wiring.
 #
 # envd is compiled from e2b-dev/infra@${ENVD_REF} in a builder stage,
-# producing a static linux/amd64 binary that is copied into the final
-# ubuntu:22.04 runtime stage alongside a generic entrypoint.
+# producing a static linux/${TARGETARCH} binary that is copied into the
+# final ubuntu:22.04 runtime stage alongside a generic entrypoint.
 #
-# Build example:
+# Build example (repeat with --platform linux/arm64 for ARM):
 #   docker build \
+#     --platform linux/amd64 \
 #     -f docker/Dockerfile.cube-base \
 #     -t ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
 #     docker/
@@ -17,12 +18,12 @@
 ARG ENVD_REF=2026.16
 ARG GO_VERSION=1.25.4
 ARG UBUNTU_VERSION=22.04
-ARG TARGETARCH
 
 # -------- Stage 1: compile envd from e2b-dev/infra --------
 FROM golang:${GO_VERSION}-bookworm AS envd-builder
 
 ARG ENVD_REF
+ARG TARGETARCH
 ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
 
 RUN apt-get update \

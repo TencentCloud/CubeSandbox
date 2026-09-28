@@ -91,7 +91,7 @@ func projectedEndAt(nowMs int64, timeoutSeconds int) int64 {
 	return nowMs + int64(timeoutSeconds)*1000
 }
 
-// LookupEndAt reads the latest meta.EndAt straight from the lifecycle snapshot in Redis.
+// LookupEndAt reads the latest deadline from the lifecycle snapshot in Redis.
 func (p *storeTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string) (int64, error) {
 	if p == nil || p.store == nil {
 		return 0, nil
@@ -100,16 +100,35 @@ func (p *storeTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string
 	if err != nil {
 		return 0, err
 	}
+	return lifecycleMetaEndAt(meta), nil
+}
+
+func (p *storeTimeoutProvider) LookupEndAts(ctx context.Context, sandboxIDs []string) (map[string]int64, error) {
+	if p == nil || p.store == nil || len(sandboxIDs) == 0 {
+		return nil, nil
+	}
+	metas, err := p.store.LoadMetas(ctx, sandboxIDs)
+	if err != nil {
+		return nil, err
+	}
+	endAts := make(map[string]int64, len(metas))
+	for sandboxID, meta := range metas {
+		endAts[sandboxID] = lifecycleMetaEndAt(meta)
+	}
+	return endAts, nil
+}
+
+func lifecycleMetaEndAt(meta *SandboxLifecycleMeta) int64 {
 	if meta == nil {
-		return 0, nil
+		return 0
 	}
 	if meta.EndAt > 0 {
-		return meta.EndAt, nil
+		return meta.EndAt
 	}
 	if meta.CreatedAt > 0 && meta.TimeoutSeconds != nil && *meta.TimeoutSeconds > 0 {
-		return meta.CreatedAt + int64(*meta.TimeoutSeconds)*1000, nil
+		return meta.CreatedAt + int64(*meta.TimeoutSeconds)*1000
 	}
-	return 0, nil
+	return 0
 }
 
 // isNilPool guards against wrapredis.GetRedis returning a typed-nil

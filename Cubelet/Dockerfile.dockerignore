@@ -7,8 +7,9 @@
 **
 !Cubelet
 !Cubelet/**
-!cubelog
-!cubelog/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**
 !cubecow
 !cubecow/**
 !CubeNet

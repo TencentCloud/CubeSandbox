@@ -127,6 +127,8 @@ cd examples/volume/s3 && make    # -> bin/cube-volume-s3
 One-click release bundles and the container images already ship the compiled
 binary at `<prefix>/{CubeMaster,Cubelet}/plugin/cube-volume-s3`.
 
+> **Third-party plugins:** install outside the cubetoolbox tree, otherwise they are reset on Cube upgrade.
+
 Install it into both `plugin/` directories:
 
 ```bash

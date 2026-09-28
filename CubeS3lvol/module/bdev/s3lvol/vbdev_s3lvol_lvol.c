@@ -8,15 +8,15 @@
  *   The core point is not "a few NULL checks"; the entry points are closed to out-of-tree code:
  *
  *   - Every built-in lvol RPC goes through vbdev_lvol_store_first() walking
- *     g_spdk_lvol_pairs (vbdev_lvol.c:20), which is a **static private list** --
+ *     g_spdk_lvol_pairs (vbdev_lvol.c), which is a **static private list** --
  *     no external API can insert entries into it.
  *   - _create_lvol_disk() starts with vbdev_get_lvs_bdev_by_lvs() and
  *     assert(false)s when the lookup fails (the struct lvol_store_bdev
- *     machinery at vbdev_lvol.c:202 requires a real spdk_bdev); our lvstore
+ *     machinery at vbdev_lvol.c requires a real spdk_bdev); our lvstore
  *     sits on s3_bs_dev, with no bdev underneath.
  *
  *   Conversely, nvmf only recognises a name in the global bdev registry
- *   (spdk_bdev_open_ext_v2, lib/nvmf/subsystem.c:2596). So this file's whole
+ *   (spdk_bdev_open_ext_v2, lib/nvmf/subsystem.c). So this file's whole
  *   reason for being is: **register lvols as bdevs, thereby getting the entire
  *   nvmf ecosystem for free.**
  *
@@ -199,7 +199,7 @@ s3lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 }
 
 /* Read-only-ness is expressed through here, with no extra flag (copying what
- * vbdev_lvol.c:842 does).
+ * vbdev_lvol.c does).
  *
  *   - `nvmf_subsystem_add_ns` has no read-only-like parameter (only nsid /
  *     nguid / eui64 / uuid / anagrpid / ptpl-file);

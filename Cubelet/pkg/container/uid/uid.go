@@ -13,8 +13,8 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	customopts "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/opts"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 const (

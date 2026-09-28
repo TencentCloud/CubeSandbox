@@ -22,15 +22,7 @@
     "endpoint": "API Endpoint",
     "endpointDesc": "The public-facing CubeOps ops API address. Configure via CUBE_OPS_PUBLIC_HOST env var at startup.",
     "test": "Test",
-    "connected": "Connected",
-    "runtime": "Runtime Config",
-    "runtimeDesc": "Read-only runtime information from CubeOps.",
-    "sandboxDomain": "Sandbox Domain",
-    "instanceType": "Default Instance Type",
-    "rateLimit": "Rate Limit",
-    "auth": "Auth",
-    "authOn": "Enabled",
-    "authOff": "Disabled"
+    "connected": "Connected"
   },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
@@ -55,7 +47,6 @@
     "desc": "Version and related links.",
     "version": "Version",
     "cubeApi": "CubeOps Endpoint",
-    "instanceType": "Default Instance Type",
     "docs": "Docs"
   }
 }

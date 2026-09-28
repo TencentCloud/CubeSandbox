@@ -248,7 +248,6 @@ func TestGetCleanupRefDirectories(t *testing.T) {
 }
 
 func TestRemoveDirectory(t *testing.T) {
-	RequiresRoot(t)
 	ctx := context.Background()
 
 	t.Run("non mount path", func(t *testing.T) {
@@ -263,6 +262,7 @@ func TestRemoveDirectory(t *testing.T) {
 	})
 
 	t.Run("mount path", func(t *testing.T) {
+		RequiresRoot(t)
 		source := t.TempDir()
 		target := filepath.Join(t.TempDir(), "mnt")
 		if err := os.MkdirAll(target, 0o700); err != nil {

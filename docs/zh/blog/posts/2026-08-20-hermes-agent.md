@@ -3,8 +3,7 @@ title: "在 Cube Sandbox 中运行 Hermes Agent：从持久化挂载、Skills �
 date: 2026-08-20
 author: 陈金博（上海阳璞新能源科技 AI 团队）
 description: "一个常驻 Agent 应用需要沙箱记住的不只是任务产物，还包括 Agent 自身的配置、历史会话、以及一批被反复调用的 Skills。而沙箱本身天然是易失的——重启、暂停、迁移都可能让这些状态归零。本文分享上海阳璞新能源科技 AI 团队在将 Hermes Studio 迁上 Cube Sandbox 的过程中踩过的坑和落地方案。"
-featured: true
-weight: 2
+featured: false
 ---
 
 # 在 Cube Sandbox 中运行 Hermes Agent：从持久化挂载、Skills 分层到网络与恢复故障的工程实践

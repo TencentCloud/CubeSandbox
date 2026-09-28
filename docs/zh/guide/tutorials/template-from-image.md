@@ -1,6 +1,6 @@
 # 从 OCI 镜像制作模板
 
-本文介绍如何从标准 OCI 容器镜像出发，完成模板的创建、进度监控和删除操作。
+本文介绍如何从标准 OCI 容器镜像出发，完成模板的创建、进度监控、可选的 `tpl merge` 存储迁移，以及删除操作。
 
 建议在开始前先阅读[模板概览](../templates.md)，了解 OCI 镜像、模板快照、端口、探针和 `envd` 等相关概念。
 
@@ -172,12 +172,53 @@ cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 
 如果你更关心“应该看什么、如何一步步预览最终请求”，可继续阅读[模板检查与请求预览](../template-inspection-and-preview.md)。
 
+## 第五步 — （可选）把历史本地 artifact 迁入 TC 存储
 
-## 删除模板
+大多数**新建**的 `from-image` 模板已经沿当前数据面直接走 TC 构建，因此**不一定需要再手动执行 `tpl merge`**。`tpl merge` 主要用于以下场景：
+
+- 历史模板的 rootfs ext4 还只在 CubeMaster 本地磁盘上
+- 集群后来开启了 `s3Backed=true`，希望把旧模板收敛进 S3 / TC artifact store
+- artifact 已经迁移过，但你想再次触发幂等检查并清理遗留的本地 ext4 文件
+
+命令名叫 `merge`，对应的 API 路径是 `/cube/template/migrate`。默认会阻塞到 migrate job 结束：
+
+```bash
+cubemastercli tpl merge tpl-748094d2f2374b0a8a37e6ec
+```
+
+如果只想提交 migrate job 就返回，可使用：
+
+```bash
+cubemastercli tpl merge tpl-748094d2f2374b0a8a37e6ec --detach
+```
+
+这里的 `merge` 指的是**artifact 存储迁移**，不是 `tpl render` 里看到的 `merged_request` 请求合并。
+
+如果你在处理的是**存量镜像对应的历史模板**，文档口径应统一为：**`tpl merge` 解决历史 artifact 的存储收敛问题，`tpl redo` 解决节点侧重新分发 / 必要时重建问题。**
+
+典型场景是：模板最初的 artifact 仍保存在 `CubeMaster` 本地盘，后续集群开启了 `s3Backed=true`，需要将这批历史 artifact 从本地盘迁移到 **S3 托管存储**。如果同一次运维还需要让模板重新覆盖目标节点，可以按下面的顺序执行：
+
+```bash
+cubemastercli tpl merge tpl-748094d2f2374b0a8a37e6ec
+cubemastercli tpl redo --template-id tpl-748094d2f2374b0a8a37e6ec
+```
+
+> **高亮提醒**
+> 在默认共盘 / 共享 PVC 部署里，即使跳过 `tpl merge`，现有 `READY` 模板通常也**仍可继续下载**；真正的问题是这些历史 artifact 仍未完成从**本地盘到 S3 托管存储**的收敛。
+>
+> - **存储侧**：开启 `s3Backed=true` 后，旧模板不会自动补做迁移。
+> - **恢复侧**：如果本地 ext4 已经丢失，再补跑 `tpl merge` 也修不回来，因为已经没有可上传的文件；这时只能对可重建的 `from-image` 模板执行 `tpl redo`，回退到重建流程。
+
+## 第六步 — 删除模板
 
 ```bash
 cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
+
+# 一次删除多个模板
+cubemastercli tpl delete tpl-first tpl-second tpl-third
 ```
+
+传入多个模板 ID 时，即使其中某个模板删除失败，CLI 也会继续尝试删除其余模板，最后汇总返回失败项。
 
 成功后输出：
 

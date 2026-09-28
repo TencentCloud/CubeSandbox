@@ -14,6 +14,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// gatewayARPRetries is the number of times GetGatewayMacAddr will re-probe the
+// neighbor table after triggering ARP resolution. Node initialization may race
+// the kernel's ARP learning, so a single read is not enough.
+const gatewayARPRetries = 5
+
+// gatewayARPBackoff is the delay between ARP trigger retries. It gives the
+// kernel time to complete the ARP request/response cycle. It is a var so
+// tests can set it to zero for fast failure-path execution.
+var gatewayARPBackoff = 200 * time.Millisecond
+
+// errGatewayMacNotFound is returned by lookupGatewayMac when the neighbor
+// table was read successfully but no usable entry for the gateway IP exists.
+// Callers can distinguish this from real netlink errors via errors.Is.
+var errGatewayMacNotFound = errors.New("gateway mac not found in neighbor table")
+
 // maxDumpRetries is higher than containernetworking/plugins netlinksafe (5)
 // because Cubelet density creates can keep the link table mutating for longer
 // than a single LinkList of hundreds of TAPs takes to complete.
@@ -58,7 +73,63 @@ var (
 		})
 	}
 	netlinkRouteDel = netlink.RouteDel
+	netlinkNeighSet = netlink.NeighSet
+
+	// sendUDPProbe sends a small UDP packet to gatewayIP from localIP, forcing
+	// the kernel to create a neighbor entry and issue an ARP request through
+	// the network stack. Binding to localIP ensures the packet egresses via
+	// the correct interface so the ARP entry lands in the neighbor table that
+	// lookupGatewayMac reads. It is a var so tests can replace it to avoid
+	// live network I/O. Returns an error when the probe socket cannot be
+	// created or the datagram fails to send, so callers can distinguish
+	// "probe never fired" from "ARP genuinely unanswered".
+	sendUDPProbe = func(gatewayIP net.IP, localIP net.IP) error {
+		var localAddr *net.UDPAddr
+		if localIP != nil {
+			localAddr = &net.UDPAddr{IP: localIP}
+		}
+		// Port 9 (discard) is used instead of a well-known service port to
+		// avoid triggering IDS alerts or ICMP port-unreachable storms that
+		// port 1 (tcpmux) can cause on some networks.
+		conn, err := net.DialUDP("udp4", localAddr, &net.UDPAddr{IP: gatewayIP, Port: 9})
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		if _, err := conn.Write([]byte{0}); err != nil {
+			return fmt.Errorf("udp probe write to %s: %w", gatewayIP, err)
+		}
+		return nil
+	}
+
+	// triggerARPResolution forces the kernel to resolve the gateway's L2
+	// address. NeighSet(NUD_PROBE) re-probes an existing neighbor entry to
+	// trigger a fresh ARP request; for the missing-entry case the call may
+	// create an empty shell without starting ARP, so the subsequent UDP
+	// probe is the primary mechanism that creates a new entry through the
+	// full network stack. Any empty entry left by NeighSet is harmless —
+	// lookupGatewayMac ignores entries without a hardware address.
+	// localIP is the address of the egress interface; binding the UDP probe
+	// to it ensures the ARP entry is created on the correct interface.
+	triggerARPResolution = func(linkIndex int, gatewayIP net.IP, localIP net.IP) error {
+		probeNeighborEntry(linkIndex, gatewayIP)
+		return sendUDPProbe(gatewayIP, localIP)
+	}
 )
+
+// probeNeighborEntry sets NUD_PROBE on an existing neighbor entry for
+// gatewayIP, causing the kernel to re-send an ARP request. When no entry
+// exists the call may create an empty shell without triggering ARP; the
+// caller relies on sendUDPProbe to handle that case. Errors are silently
+// ignored because sendUDPProbe always follows as a fallback.
+func probeNeighborEntry(linkIndex int, gatewayIP net.IP) {
+	_ = netlinkNeighSet(&netlink.Neigh{
+		IP:        gatewayIP,
+		LinkIndex: linkIndex,
+		State:     unix.NUD_PROBE,
+		Family:    netlink.FAMILY_V4,
+	})
+}
 
 // HostDevice captures the configured host network device selected by Cubelet.
 type HostDevice struct {
@@ -71,7 +142,12 @@ type HostDevice struct {
 }
 
 // GetHostDevice validates the configured host interface and captures the
-// addresses CubeVS needs for SNAT and L2 forwarding.
+// addresses CubeVS needs for SNAT and L2 forwarding. The uplink NIC may carry
+// multiple IPv4 addresses (cloud hosts commonly stack secondary/alias
+// addresses), so rather than failing it selects the primary one. The returned
+// IPMask is the selected address's own mask, which becomes the eBPF NodeIPMask
+// (the on-link / bpf_fib_lookup view), so the selected address entry should
+// carry the intended subnet prefix.
 func GetHostDevice(ifName string) (*HostDevice, error) {
 	link, err := netlinkLinkByName(ifName)
 	if err != nil {
@@ -81,8 +157,9 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(addrs) != 1 {
-		return nil, fmt.Errorf("ipv4 address on %s is not unique", ifName)
+	addr, err := selectPrimaryIPv4Addr(ifName, addrs)
+	if err != nil {
+		return nil, err
 	}
 	gwMac, err := GetGatewayMacAddr(ifName)
 	if err != nil {
@@ -95,15 +172,62 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	return &HostDevice{
 		Index:      link.Attrs().Index,
 		Name:       link.Attrs().Name,
-		IP:         addrs[0].IP,
-		IPMask:     addrs[0].Mask,
+		IP:         addr.IP,
+		IPMask:     addr.Mask,
 		Mac:        link.Attrs().HardwareAddr,
 		GatewayMac: gatewayMac,
 	}, nil
 }
 
+// selectPrimaryIPv4Addr picks the primary IPv4 address from a NIC that may
+// carry several (cloud hosts commonly stack secondary/alias addresses). It
+// prefers the first global-scope, non-secondary, non-deprecated address and
+// falls back to the first address so a NIC with no primary still works.
+func selectPrimaryIPv4Addr(ifName string, addrs []netlink.Addr) (netlink.Addr, error) {
+	if len(addrs) == 0 {
+		return netlink.Addr{}, fmt.Errorf("ipv4 address not found on %s", ifName)
+	}
+	for _, a := range addrs {
+		if isPrimaryGlobalIPv4(a) {
+			return a, nil
+		}
+	}
+	return addrs[0], nil
+}
+
+// isPrimaryGlobalIPv4 reports whether a is a global-scope primary address,
+// excluding secondary/deprecated and loopback addresses. Addr.Flags is populated
+// by vishvananda/netlink v1.3.1 from the kernel's IFA_FLAGS attribute
+// (addr_linux.go parseAddr), so IFA_F_SECONDARY / IFA_F_DEPRECATED are reliably
+// set; if that dependency ever regresses, the secondary/deprecated skip would
+// silently no-op while the unit tests (which set Flags by hand) stay green.
+func isPrimaryGlobalIPv4(a netlink.Addr) bool {
+	if a.IPNet == nil {
+		return false
+	}
+	if a.IP.To4() == nil || a.IP.IsLoopback() {
+		return false
+	}
+	if a.Scope != unix.RT_SCOPE_UNIVERSE {
+		return false
+	}
+	if a.Flags&unix.IFA_F_SECONDARY != 0 || a.Flags&unix.IFA_F_DEPRECATED != 0 {
+		return false
+	}
+	return true
+}
+
 // GetGatewayMacAddr resolves the MAC address of the default gateway on ifName
 // from the neighbor table. CubeVS needs this L2 destination for direct egress.
+//
+// Side effects: when the neighbor entry has not been learned yet (common during
+// node boot), the function triggers active ARP resolution by sending a UDP
+// probe to the gateway (port 9, discard) and retrying with a short backoff.
+// On a cache miss it sends up to gatewayARPRetries (5) UDP datagrams and
+// blocks for up to gatewayARPRetries × gatewayARPBackoff (~1 s) before giving
+// up. There is no side-effect-free path once the initial neighbor-table read
+// returns a miss. Real netlink errors (EPERM, ENODEV, dump exhaustion) are
+// propagated immediately without probing.
 func GetGatewayMacAddr(ifName string) (string, error) {
 	link, err := netlinkLinkByName(ifName)
 	if err != nil {
@@ -113,7 +237,73 @@ func GetGatewayMacAddr(ifName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	neighs, err := netlinkNeighList(link.Attrs().Index, netlink.FAMILY_V4)
+
+	// First attempt: read whatever the neighbor table already has.
+	mac, err := lookupGatewayMac(link.Attrs().Index, gatewayIP)
+	if err == nil {
+		return mac, nil
+	}
+	if !errors.Is(err, errGatewayMacNotFound) {
+		return "", fmt.Errorf("lookup gateway mac on %s: %w", ifName, err)
+	}
+
+	// Cache miss: actively trigger ARP and retry. During node initialization
+	// the gateway's neighbor entry may not exist yet; triggerARPResolution
+	// first tries NeighSet(NUD_PROBE) then falls back to a UDP probe bound
+	// to the interface's local IP so the ARP entry lands on the correct
+	// interface's neighbor table.
+	// Extract the interface's IPv4 address to bind the UDP probe, ensuring
+	// the kernel sends ARP on the same interface lookupGatewayMac reads.
+	// Returning the error here is critical: without a bound source address
+	// the kernel picks the IP from the route, which on a multi-homed node
+	// may egress on a different interface, silently defeating the fix.
+	addrs, err := netlinkAddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return "", fmt.Errorf("list addrs on %s for UDP probe: %w", ifName, err)
+	}
+	var localIP net.IP
+	for _, a := range addrs {
+		if a.IP.To4() != nil {
+			localIP = a.IP
+			break
+		}
+	}
+
+	// Each iteration: trigger → sleep → lookup. Sleeping before the lookup
+	// gives the kernel time to complete ARP, so every trigger (including the
+	// last) contributes to the resolution budget.
+	// NOTE: lastProbeErr only captures the final attempt's probe error.
+	// If early probes fail but later ones succeed while ARP stays unresolved,
+	// earlier failures are not surfaced in the error message. This is
+	// acceptable because all probes use the same interface/IP and failures
+	// are typically consistent across attempts; the primary diagnostic
+	// (errGatewayMacNotFound) is always returned regardless.
+	var lastErr, lastProbeErr error
+	for attempt := 0; attempt < gatewayARPRetries; attempt++ {
+		lastProbeErr = triggerARPResolution(link.Attrs().Index, gatewayIP, localIP)
+		time.Sleep(gatewayARPBackoff)
+		mac, lastErr = lookupGatewayMac(link.Attrs().Index, gatewayIP)
+		if lastErr == nil {
+			return mac, nil
+		}
+		if !errors.Is(lastErr, errGatewayMacNotFound) {
+			return "", fmt.Errorf("lookup gateway mac on %s: %w", ifName, lastErr)
+		}
+	}
+	if lastProbeErr != nil {
+		return "", fmt.Errorf("gateway mac for %s via %s not found after %d retries (last probe error: %v): %w",
+			ifName, gatewayIP.String(), gatewayARPRetries, lastProbeErr, lastErr)
+	}
+	return "", fmt.Errorf("gateway mac for %s via %s not found after %d retries: %w",
+		ifName, gatewayIP.String(), gatewayARPRetries, lastErr)
+}
+
+// lookupGatewayMac scans the neighbor table on linkIndex for a usable entry
+// matching gatewayIP. Returns errGatewayMacNotFound when the table was read
+// successfully but no matching entry exists; real netlink errors are returned
+// as-is so callers can distinguish them via errors.Is.
+func lookupGatewayMac(linkIndex int, gatewayIP net.IP) (string, error) {
+	neighs, err := netlinkNeighList(linkIndex, netlink.FAMILY_V4)
 	if err != nil {
 		return "", err
 	}
@@ -122,7 +312,7 @@ func GetGatewayMacAddr(ifName string) (string, error) {
 			return neigh.HardwareAddr.String(), nil
 		}
 	}
-	return "", fmt.Errorf("gateway mac for %s via %s not found", ifName, gatewayIP.String())
+	return "", errGatewayMacNotFound
 }
 
 // defaultGatewayIP chooses the lowest-metric IPv4 default route on link.

@@ -197,5 +197,5 @@ cosfs 排障、mntns 验证见 [binary/README.zh.md](../binary/README.zh.md#验�
 
 - [cos 共用文档](../README.zh.md)
 - [cosfs](https://cloud.tencent.com/document/product/436/6883) · [COS Go SDK](https://cloud.tencent.com/document/product/436/31215)
-- 协议：`Cubelet/api/services/volumeplugin/v1/volumeplugin.proto`
+- 协议：`pkgs/proto/services/volumeplugin/v1/volumeplugin.proto`
 - [Volume 插件框架](../../../../docs/zh/guide/volume-plugin.md)

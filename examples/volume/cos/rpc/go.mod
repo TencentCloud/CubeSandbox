@@ -1,9 +1,9 @@
 module github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc
 
-go 1.24.8
+go 1.25.7
 
 require (
-	github.com/tencentcloud/CubeSandbox/Cubelet v0.0.0
+	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.71
 	google.golang.org/grpc v1.78.0
 )
@@ -20,4 +20,4 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 )
 
-replace github.com/tencentcloud/CubeSandbox/Cubelet => ../../../../Cubelet
+replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../../../../pkgs/proto

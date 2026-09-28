@@ -69,8 +69,13 @@ pub struct SnapshotArgs {
     #[arg(long = "force", help = "force", action = ArgAction::SetTrue, required = false)]
     pub force: bool,
 
-    /// App snapshot
-    #[arg(long = "app-snapshot", help = "app-snapshot", action = ArgAction::SetTrue, required = false)]
+    /// Snapshot an existing VM's memory and metadata, then resume it.
+    #[arg(
+        long = "app-snapshot",
+        help = "pause an existing VM, snapshot its memory and metadata, then resume",
+        action = ArgAction::SetTrue,
+        required = false
+    )]
     pub app_snapshot: bool,
 
     /// Vm id

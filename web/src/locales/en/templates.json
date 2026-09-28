@@ -7,22 +7,23 @@
     "compat": "Compatibility"
   },
   "compat": {
-    "banner": "{{templates}} templates have {{replicas}} stale replicas after node environment changes and need rebuild.",
-    "view": "View compatibility",
-    "adoptBaseline": "Adopt current baseline",
-    "adoptConfirm": "Use the current node versions as the new baseline for UNKNOWN replicas of this template? Only continue if you have verified the template works in the current environment.",
+    "banner": "{{count}} templates need to be rebuilt. After the node upgrade, creating sandboxes from them may fail. Open a template and click Rebuild Template.",
+    "view": "Rebuild now",
+    "openRebuild": "Open and rebuild",
+    "driftHint": "You can still create sandboxes. Click Rebuild Template only if you want the node's current environment.",
     "status": {
-      "OK": "OK",
-      "STALE": "Needs rebuild",
-      "UNKNOWN": "Unknown",
-      "MISSING": "Missing"
+      "OK": "Ready",
+      "STALE": "Ready",
+      "UNKNOWN": "Needs rebuild",
+      "MISSING": "Not on this node"
     },
     "kpi": {
-      "staleTemplates": "Stale templates",
-      "staleReplicas": "Stale replicas",
-      "affectedNodes": "Affected nodes",
-      "missingReplicas": "Missing replicas",
-      "unknownReplicas": "Unknown replicas"
+      "staleTemplates": "Needs rebuild",
+      "staleReplicas": "Copies to rebuild",
+      "affectedNodes": "Nodes involved",
+      "missingReplicas": "Missing copies",
+      "unknownReplicas": "Copies to rebuild",
+      "driftReplicas": "Newer node environment (rebuild optional)"
     }
   },
   "col": {

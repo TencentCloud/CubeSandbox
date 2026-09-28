@@ -14,7 +14,7 @@ between CubeMaster, CubeProxy and Redis.
 
 ```sh
 make test    # go test ./...
-make build   # local image, tag: cube-lifecycle-manager:v0.7.0-<arch>
+make build   # local image, tag: cube-lifecycle-manager:v0.7.2-<arch>
 ```
 
 ## Publishing images
@@ -35,10 +35,22 @@ make manifest
 
 Overrides:
 
-- `IMAGE_TAG=<tag>` — override the release tag (default `v0.7.0`)
+- `IMAGE_TAG=<tag>` — override the release tag (default `v0.7.2`)
 - `V=1` — verbose docker commands
 
 ## Configuration
 
 All configuration is via environment variables (prefix `CUBE_LCM_`); see
 `internal/config/config.go` for the authoritative list.
+
+Kubernetes deployments run two warm replicas with Redis-backed leader
+election. Both replicas consume lifecycle events and serve resume requests;
+only the leader performs idle sweep/kill and stale CubeProxy pruning.
+Leader election uses `SET NX PX` plus single-key `WATCH` transactions (no
+Lua/EVAL). After acquiring the lease the new leader catches up the event
+stream, waits one CubeProxy HTTP timeout to drain in-flight writes from the
+previous leader, catches up again, then starts singleton work. Per-sandbox
+state locks (`SET NX` with TTL) provide the fencing boundary for singleton
+actions. Hydrating CubeProxy dicts is best-effort and does not gate leadership.
+Host Docker/systemd deployments leave election disabled and retain
+single-instance behavior.

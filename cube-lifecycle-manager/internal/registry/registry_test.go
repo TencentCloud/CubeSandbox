@@ -17,6 +17,9 @@ func TestUpsert_PreservesLastActiveOnReplace(t *testing.T) {
 	if !r.MergeLastActive("sbx", 1000) {
 		t.Fatal("first MergeLastActive should advance the watermark")
 	}
+	if !r.SetRuntimeState("sbx", lifecycle.StatePaused) {
+		t.Fatal("SetRuntimeState should update a known sandbox")
+	}
 	// Replace meta with a fresh value (e.g. stream replay).
 	r.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx", AutoPause: false})
 	got := r.Get("sbx")
@@ -25,6 +28,9 @@ func TestUpsert_PreservesLastActiveOnReplace(t *testing.T) {
 	}
 	if got.LastActiveMs != 1000 {
 		t.Fatalf("LastActiveMs reset to %d; should have been preserved at 1000", got.LastActiveMs)
+	}
+	if got.RuntimeState != lifecycle.StatePaused {
+		t.Fatalf("RuntimeState reset to %q; should have been preserved", got.RuntimeState)
 	}
 	if got.Meta.AutoPause {
 		t.Fatal("Meta.AutoPause should reflect latest upsert")

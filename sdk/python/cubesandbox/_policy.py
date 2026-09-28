@@ -25,6 +25,17 @@ Method = Literal[
 
 AuditLevel = Literal["full", "metadata", "none"]
 
+# Align with e2b maxNetworkRuleHeaderValueLen. Well under nginx's default
+# large_client_header_buffers (8k), so injected headers fit common proxies.
+SECRET_MAX_BYTES = 2048
+
+
+def _validate_inject_secret(secret: Any, field: str) -> None:
+    if not isinstance(secret, str):
+        return
+    if len(secret.encode("utf-8")) > SECRET_MAX_BYTES:
+        raise ValueError(f"{field} exceeds {SECRET_MAX_BYTES} bytes")
+
 
 def _validate_scheme(value: Any, field: str) -> Optional[str]:
     """Normalize *value* (strip + lowercase) and validate against http/https.
@@ -118,6 +129,9 @@ class Inject:
     secret: str
     format: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        _validate_inject_secret(self.secret, "Inject.secret")
+
     def render(self) -> str:
         """Render the final injected header value (preview helper)."""
         fmt = self.format or "${SECRET}"
@@ -204,7 +218,9 @@ def _normalize_match_dict(m: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_inject_dict(i: Dict[str, Any]) -> Dict[str, Any]:
     # No snake_case keys to translate today; pass through verbatim.
-    return dict(i)
+    out = dict(i)
+    _validate_inject_secret(out.get("secret"), "inject.secret")
+    return out
 
 
 def _normalize_action_dict(a: Dict[str, Any]) -> Dict[str, Any]:

@@ -17,12 +17,14 @@ ARG RUST_TOOLCHAIN_HYPERVISOR=1.77.2
 ARG RUST_TOOLCHAIN_E2BAPI=1.85
 ARG RUST_TOOLCHAIN_AGENT=1.89
 ARG GITHUB_ACTIONS=false
-ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
-ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+# Base URLs for Rustup. Defaults to upstream official https://static.rust-lang.org.
+# Set via `make builder-image MIRROR=cn` to use China-reachable mirror https://rsproxy.cn.
+ARG RUSTUP_DIST_SERVER=https://static.rust-lang.org
+ARG RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup
 # Base URL of a China-reachable LLVM apt mirror (e.g. set via `make builder-image
-# MIRROR=cn`). When set, the llvm.sh installer script and the clang-14 apt packages
-# are sourced from this mirror; empty uses upstream apt.llvm.org. The GPG signing
-# key is copied from docker/llvm-snapshot.gpg.key so llvm.sh does not wget it.
+# MIRROR=cn`). When set, the clang-14 apt packages are sourced from this mirror;
+# empty uses upstream apt.llvm.org. The GPG signing key is copied from
+# docker/llvm-snapshot.gpg.key so the build does not fetch it from apt.llvm.org.
 ARG LLVM_MIRROR_BASE=
 ARG TARGETARCH
 
@@ -176,23 +178,26 @@ RUN /usr/bin/python3.9 -m venv /opt/s3lvol-tools \
         tabulate==0.9.0 \
         pyelftools==0.31
 
-# Install clang-14. With LLVM_MIRROR_BASE set, fetch llvm.sh from the mirror and
-# pass `-m` so the apt repo/packages resolve to the mirror too (the upstream
-# script otherwise hardcodes BASE_URL=apt.llvm.org). The GPG key is vendored:
-# llvm.sh skips download_key when /etc/apt/trusted.gpg.d/apt.llvm.org.asc exists.
-# Fingerprint: 6084 F3CF 814B 57C1 CF12 EFD5 15CF 4D18 AF4F 7421
+# Install clang-14. With LLVM_MIRROR_BASE set, configure apt repo using the mirror base URL;
+# otherwise default to https://apt.llvm.org. The GPG key is vendored in
+# docker/llvm-snapshot.gpg.key. Fingerprint: 6084 F3CF 814B 57C1 CF12 EFD5 15CF 4D18 AF4F 7421
 COPY docker/llvm-snapshot.gpg.key /etc/apt/trusted.gpg.d/apt.llvm.org.asc
 RUN set -eux; \
+    . /etc/os-release; \
+    distro="${VERSION_CODENAME}"; \
     if [ -n "${LLVM_MIRROR_BASE}" ]; then \
-        script_url="${LLVM_MIRROR_BASE}/llvm.sh"; set -- 14 -m "${LLVM_MIRROR_BASE}"; \
+        base_url="${LLVM_MIRROR_BASE}"; \
     else \
-        script_url="https://apt.llvm.org/llvm.sh"; set -- 14; \
+        base_url="https://apt.llvm.org"; \
     fi; \
-    wget -O /tmp/llvm.sh "${script_url}"; bash /tmp/llvm.sh "$@"; rm -f /tmp/llvm.sh; \
-    apt-get install -y llvm-14 \
+    base_url="${base_url%/}"; \
+    echo "deb ${base_url}/${distro}/ llvm-toolchain-${distro}-14 main" > /etc/apt/sources.list.d/llvm-14.list; \
+    apt-get update -o Acquire::Retries=3 \
+    && apt-get install -y --no-install-recommends clang-14 llvm-14 lld-14 lldb-14 \
     && rm -rf /var/lib/apt/lists/* && clang-14 --version && llvm-strip-14 --version \
-    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
-    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 200 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 200 \
+    && clang --version \
     && if [ -x /usr/bin/llvm-strip-14 ] && [ ! -e /usr/local/bin/llvm-strip ]; then ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip; fi \
     && if [ ! -e /usr/bin/musl-g++ ]; then ln -s /usr/bin/g++ /usr/bin/musl-g++; fi
 

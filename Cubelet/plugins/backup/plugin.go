@@ -19,7 +19,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 type Config struct {

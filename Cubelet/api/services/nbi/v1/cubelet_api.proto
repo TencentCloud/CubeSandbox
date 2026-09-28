@@ -3,7 +3,7 @@
 //
 
 syntax = "proto3";
-import "api/services/errorcode/v1/errorcode.proto";
+import "services/errorcode/v1/errorcode.proto";
 
 package cubelet.services.cubebox.v1;
 option go_package="github.com/tencentcloud/CubeSandbox/Cubelet/api/services/nbi/v1;nbi";

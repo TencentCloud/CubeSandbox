@@ -5,6 +5,7 @@
 use crate::log::Log;
 use crate::{common::CResult, errf, infof, sandbox::sb::SandBox};
 use cube_hypervisor::config::RestoreConfig;
+use cube_hypervisor::SnapshotType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,8 +14,11 @@ use std::path::{Path, PathBuf};
 
 /// Identifies the update action to perform.
 ///
-/// Supported values: `"RollbackSnapshot"`, `"PauseToSnapshot"`
+/// Supported values: `"RollbackSnapshot"`, `"PauseToSnapshot"`,
+/// `"SnapshotCapture"`, `"SnapshotResume"`.
 const ANNO_UPDATE_EXT_ACTION: &str = "cube.shimapi.update.action";
+const ANNO_SNAPSHOT_CAPTURE_CONFIG: &str = "cube.shimapi.update.snapshot.capture_config";
+const ANNO_SNAPSHOT_ID: &str = "cube.shimapi.update.snapshot.id";
 
 /// (RollbackSnapshot) **Required.** JSON-encoded `RollbackRestoreConfig`,
 /// aligned with hypervisor `RestoreConfig`.
@@ -104,6 +108,67 @@ struct PauseSnapshotConfig {
     /// CommitSandbox layout (`--memory-vol`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_vol_url: Option<String>,
+
+    /// Same values as cube-runtime `--snapshot-type`: `full`, `incremental`,
+    /// `soft-dirty`. Missing / empty / unknown defaults to Full so older
+    /// Cubelets keep the historical full dump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FrozenSnapshotConfig {
+    snapshot_id: String,
+    #[serde(default)]
+    destination_url: String,
+    memory_vol_url: Option<String>,
+    snapshot_type: Option<String>,
+    #[serde(default)]
+    renew_only: bool,
+}
+
+async fn do_snapshot_capture(
+    sb: &mut SandBox,
+    annos: &HashMap<String, String>,
+) -> CResult<UpdateOutcome> {
+    let raw = annos
+        .get(ANNO_SNAPSHOT_CAPTURE_CONFIG)
+        .ok_or_else(|| format!("missing annotation: {ANNO_SNAPSHOT_CAPTURE_CONFIG}"))?;
+    let config: FrozenSnapshotConfig =
+        serde_json::from_str(raw).map_err(|e| format!("invalid snapshot capture config: {e}"))?;
+    if config.renew_only {
+        sb.renew_snapshot_frozen(&config.snapshot_id).await?;
+        return Ok(UpdateOutcome::default());
+    }
+    let destination = strip_file_url(&config.destination_url);
+    let snapshot_type = parse_pause_snapshot_type(config.snapshot_type.as_deref());
+    sb.capture_snapshot_frozen(
+        &config.snapshot_id,
+        &destination,
+        config.memory_vol_url,
+        snapshot_type,
+    )
+    .await?;
+    Ok(UpdateOutcome::default())
+}
+
+async fn do_snapshot_resume(
+    sb: &mut SandBox,
+    annos: &HashMap<String, String>,
+) -> CResult<UpdateOutcome> {
+    let snapshot_id = annos
+        .get(ANNO_SNAPSHOT_ID)
+        .ok_or_else(|| format!("missing annotation: {ANNO_SNAPSHOT_ID}"))?;
+    sb.resume_snapshot_frozen(snapshot_id).await?;
+    Ok(UpdateOutcome::default())
+}
+
+fn parse_pause_snapshot_type(raw: Option<&str>) -> SnapshotType {
+    let s = raw.map(str::trim).unwrap_or("");
+    if s.is_empty() {
+        return SnapshotType::Full;
+    }
+    s.parse().unwrap_or(SnapshotType::Full)
 }
 
 /// Outcome of an extended update action.
@@ -204,14 +269,16 @@ async fn do_pause_to_snapshot(
         .into());
     }
 
+    let snapshot_type = parse_pause_snapshot_type(pause_cfg.snapshot_type.as_deref());
     infof!(
         log,
-        "pause to snapshot: destination={} memory_vol_url={:?}",
+        "pause to snapshot: destination={} memory_vol_url={:?} snapshot_type={}",
         destination_path,
-        pause_cfg.memory_vol_url
+        pause_cfg.memory_vol_url,
+        snapshot_type
     );
 
-    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url)
+    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url, snapshot_type)
         .await
         .map_err(|e| {
             errf!(log, "pause to snapshot failed: {}", e);
@@ -249,6 +316,8 @@ pub async fn update_route(
     match action {
         "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log).await,
         "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log).await,
+        "SnapshotCapture" => do_snapshot_capture(sb, annos).await,
+        "SnapshotResume" => do_snapshot_resume(sb, annos).await,
         unknown => Err(format!("unknown update ext action: {}", unknown).into()),
     }
 }
@@ -273,5 +342,28 @@ mod tests {
             cfg.memory_vol_url.as_deref(),
             Some("file:///dev/cubecow/mem1")
         );
+        assert_eq!(cfg.snapshot_type, None);
+        assert_eq!(
+            parse_pause_snapshot_type(cfg.snapshot_type.as_deref()),
+            SnapshotType::Full
+        );
+    }
+
+    #[test]
+    fn pause_snapshot_config_parses_soft_dirty() {
+        let raw = r#"{"destination_url":"/data/snap/pause-1","memory_vol_url":"file:///dev/cubecow/mem1","snapshot_type":"soft-dirty"}"#;
+        let cfg: PauseSnapshotConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.snapshot_type.as_deref(), Some("soft-dirty"));
+        assert_eq!(
+            parse_pause_snapshot_type(cfg.snapshot_type.as_deref()),
+            SnapshotType::SoftDirty
+        );
+        assert_eq!(
+            parse_pause_snapshot_type(Some("incremental")),
+            SnapshotType::Incremental
+        );
+        assert_eq!(parse_pause_snapshot_type(Some("weird")), SnapshotType::Full);
+        assert_eq!(parse_pause_snapshot_type(Some("")), SnapshotType::Full);
+        assert_eq!(parse_pause_snapshot_type(None), SnapshotType::Full);
     }
 }

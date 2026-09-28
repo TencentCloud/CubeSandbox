@@ -87,6 +87,33 @@ func TestKill_HTTPError(t *testing.T) {
 	}
 }
 
+func TestAPIError_IsAlreadyInState(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *APIError
+		want bool
+	}{
+		{"nil", nil, false},
+		{"task state invalid", &APIError{RetCode: RetCodeTaskStateInvalid, RetMsg: "sandbox is already paused"}, true},
+		{"already has pause snapshot", &APIError{
+			RetCode: RetCodeMasterParamsError,
+			RetMsg:  "begin pause snapshot: sandbox sbx already has pause snapshot snap-1",
+		}, true},
+		{"other master params error", &APIError{
+			RetCode: RetCodeMasterParamsError,
+			RetMsg:  "begin pause snapshot: sandboxID is required",
+		}, false},
+		{"not found", &APIError{RetCode: RetCodeInvalidParamFormat, RetMsg: "key not found"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.IsAlreadyInState(); got != tc.want {
+				t.Fatalf("IsAlreadyInState() = %v, want %v (%+v)", got, tc.want, tc.err)
+			}
+		})
+	}
+}
+
 func TestKill_RequiresArgs(t *testing.T) {
 	c := New("http://unused", time.Second)
 	if err := c.Kill(context.Background(), "", "cubebox", ""); err == nil {

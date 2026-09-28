@@ -37,6 +37,8 @@ cp env.example .env
 Edit `.env` and fill in at least these three values:
 
 ```bash
+# Running Cube inside the dev-env VM? Boot it with:
+#   EXTRA_FORWARDS="13000:3000 11443:443" ./dev-env/run_vm.sh
 # **If you are running Cube on remote machine,** replace this with: http://<node-ip>:3000
 E2B_API_URL="http://127.0.0.1:13000"
 # **If you are running Cube on remote machine,** replace this with: https://<node-ip>:443

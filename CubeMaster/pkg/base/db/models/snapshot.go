@@ -24,9 +24,10 @@ type SnapshotRecord struct {
 	Version                   string `json:"version" gorm:"column:version"`
 	Status                    string `json:"status" gorm:"column:status"`
 	LastError                 string `json:"last_error" gorm:"column:last_error"`
-	Retain                    bool   `json:"retain" gorm:"column:retain"`
 	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
 	OriginHostFactsJSON       string `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
+	RootfsArtifactID          string `json:"rootfs_artifact_id" gorm:"column:rootfs_artifact_id;index:idx_cube_snapshot_rootfs_artifact"`
+	CleanupArtifactIDsJSON    string `json:"-" gorm:"column:cleanup_artifact_ids_json"`
 	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
 	Backend                   string `json:"backend" gorm:"column:backend"`
 	RemoteStatus              string `json:"remote_status" gorm:"column:remote_status"`

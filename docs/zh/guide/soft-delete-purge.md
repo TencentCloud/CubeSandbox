@@ -4,7 +4,7 @@ CubeSandbox 在很多表上使用 GORM 的*软删除*：删除一行时只是把
 
 ## 它做什么
 
-一个共享包 `CubeDB/tombstone` 同时运行在共享数据库的**两个**二进制里：
+一个共享包 `pkgs/cubedb/tombstone` 同时运行在共享数据库的**两个**二进制里：
 
 - **CubeMaster** —— 清理 `t_cube_*` 软删除表。
 - **CubeOps** —— 清理 `t_agenthub_*` 软删除表。

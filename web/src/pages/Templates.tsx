@@ -10,6 +10,7 @@ import {
   templateApi,
   type TemplateCompatMatrix,
   type TemplateCompatRow,
+  type TemplateNodeCompat,
   type TemplateSummary,
 } from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
@@ -590,6 +591,9 @@ export default function TemplatesPage() {
   const [deletingID, setDeletingID] = useState<string | null>(null);
   const [tab, setTab] = useState<'list' | 'compat'>('list');
   const compatByTemplate = new Map((compat?.templates ?? []).map((row) => [row.templateID, row]));
+  const unknownTemplateCount = (compat?.templates ?? []).filter(
+    (row) => row.overall === 'UNKNOWN',
+  ).length;
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -603,15 +607,14 @@ export default function TemplatesPage() {
         </Button>
       </header>
 
-      {(compat?.summary.staleTemplates ?? 0) > 0 && (
-        <Card className="border-destructive/30 bg-destructive/5">
+      {unknownTemplateCount > 0 && (
+        <Card className="border-cube-err/30 bg-cube-err/5">
           <div className="flex items-center justify-between gap-3 p-4 text-sm">
-            <div className="flex items-center gap-2 text-destructive">
+            <div className="flex items-center gap-2 text-cube-err">
               <AlertTriangle size={16} />
               <span>
                 {t('compat.banner', {
-                  templates: compat?.summary.staleTemplates,
-                  replicas: compat?.summary.staleReplicas,
+                  count: unknownTemplateCount,
                 })}
               </span>
             </div>
@@ -636,9 +639,9 @@ export default function TemplatesPage() {
           onClick={() => setTab('compat')}
         >
           {t('tabs.compat')}
-          {(compat?.summary.staleTemplates ?? 0) > 0 && (
+          {unknownTemplateCount > 0 && (
             <Badge tone="err" className="ml-2">
-              {compat?.summary.staleTemplates}
+              {unknownTemplateCount}
             </Badge>
           )}
         </Button>
@@ -678,8 +681,8 @@ export default function TemplatesPage() {
                         </CardDescription>
                       </div>
                     </div>
-                    {compatByTemplate.get(tpl.templateID)?.overall === 'STALE' ? (
-                      <Badge tone="err">{t('compat.status.STALE')}</Badge>
+                    {compatByTemplate.get(tpl.templateID)?.overall === 'UNKNOWN' ? (
+                      <Badge tone="err">{t('compat.status.UNKNOWN')}</Badge>
                     ) : (
                       <Badge
                         tone={
@@ -771,21 +774,11 @@ function TemplateCompatPanel({ matrix }: { matrix?: TemplateCompatMatrix }) {
   }
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <CompatKpi
-          label={t('compat.kpi.staleTemplates')}
-          value={matrix.summary.staleTemplates}
+          label={t('compat.kpi.unknownReplicas')}
+          value={matrix.summary.unknownReplicas}
           tone="err"
-        />
-        <CompatKpi
-          label={t('compat.kpi.staleReplicas')}
-          value={matrix.summary.staleReplicas}
-          tone="err"
-        />
-        <CompatKpi
-          label={t('compat.kpi.affectedNodes')}
-          value={matrix.summary.affectedNodes}
-          tone="warn"
         />
         <CompatKpi
           label={t('compat.kpi.missingReplicas')}
@@ -793,11 +786,30 @@ function TemplateCompatPanel({ matrix }: { matrix?: TemplateCompatMatrix }) {
           tone="warn"
         />
         <CompatKpi
-          label={t('compat.kpi.unknownReplicas')}
-          value={matrix.summary.unknownReplicas}
+          label={t('compat.kpi.driftReplicas')}
+          value={countDriftReplicas(matrix)}
           tone="mute"
         />
       </div>
+      {matrix.summary.staleTemplates > 0 && (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <CompatKpi
+            label={t('compat.kpi.staleTemplates')}
+            value={matrix.summary.staleTemplates}
+            tone="mute"
+          />
+          <CompatKpi
+            label={t('compat.kpi.staleReplicas')}
+            value={matrix.summary.staleReplicas}
+            tone="mute"
+          />
+          <CompatKpi
+            label={t('compat.kpi.affectedNodes')}
+            value={matrix.summary.affectedNodes}
+            tone="mute"
+          />
+        </div>
+      )}
       {matrix.templates.length === 0 ? (
         <Card>
           <div className="p-8 text-center text-sm text-muted-foreground">{t('noTemplates')}</div>
@@ -839,7 +851,7 @@ function compatKpiToneClass(tone: 'err' | 'warn' | 'mute') {
     case 'err':
       return 'text-destructive';
     case 'warn':
-      return 'text-warning';
+      return 'text-cube-warn';
     default:
       return 'text-muted-foreground';
   }
@@ -847,12 +859,8 @@ function compatKpiToneClass(tone: 'err' | 'warn' | 'mute') {
 
 function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
   const { t } = useTranslation('templates');
-  const queryClient = useQueryClient();
-  const adoptMutation = useMutation({
-    mutationFn: () => templateApi.adoptCompatBaseline(row.templateID),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['templates', 'compat'] }),
-  });
   const hasUnknown = row.nodes.some((node) => node.compatStatus === 'UNKNOWN');
+  const hasDrift = row.nodes.some((node) => replicaLiveDiffers(node));
   return (
     <Card>
       <div className="space-y-3 p-4">
@@ -865,17 +873,8 @@ function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
           </Link>
           <div className="flex items-center gap-2">
             {hasUnknown && (
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={adoptMutation.isPending}
-                onClick={() => {
-                  if (window.confirm(t('compat.adoptConfirm'))) {
-                    adoptMutation.mutate();
-                  }
-                }}
-              >
-                {t('compat.adoptBaseline')}
+              <Button size="sm" asChild>
+                <Link to={`/templates/${row.templateID}`}>{t('compat.openRebuild')}</Link>
               </Button>
             )}
             <Badge tone={compatTone(row.overall)}>
@@ -883,6 +882,9 @@ function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
             </Badge>
           </div>
         </div>
+        {hasDrift && !hasUnknown && (
+          <p className="text-xs text-muted-foreground">{t('compat.driftHint')}</p>
+        )}
         <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
           {row.nodes.map((node) => (
             <div
@@ -939,9 +941,31 @@ function CompatVersionLine({
   );
 }
 
+function replicaLiveDiffers(node: TemplateNodeCompat): boolean {
+  return (
+    versionsDiffer(node.boundGuestImageVersion, node.currentGuestImageVersion) ||
+    versionsDiffer(node.boundAgentVersion, node.currentAgentVersion) ||
+    versionsDiffer(node.boundKernelVersion, node.currentKernelVersion)
+  );
+}
+
+function versionsDiffer(bound?: string | null, current?: string | null): boolean {
+  const a = (bound ?? '').trim();
+  const b = (current ?? '').trim();
+  return a !== '' && b !== '' && a !== b;
+}
+
+function countDriftReplicas(matrix: TemplateCompatMatrix): number {
+  return matrix.templates.reduce(
+    (n, row) => n + row.nodes.filter((node) => replicaLiveDiffers(node)).length,
+    0,
+  );
+}
+
 function compatTone(status: string): 'ok' | 'err' | 'warn' | 'mute' {
   if (status === 'OK') return 'ok';
-  if (status === 'STALE') return 'err';
+  if (status === 'UNKNOWN') return 'err';
   if (status === 'MISSING') return 'warn';
+  if (status === 'STALE') return 'mute';
   return 'mute';
 }

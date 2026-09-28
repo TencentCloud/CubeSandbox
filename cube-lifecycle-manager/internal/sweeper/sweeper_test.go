@@ -48,6 +48,20 @@ func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Du
 	return true, nil
 }
 
+func (f *fakeStore) AcquireKill(_ context.Context, sid string, _ time.Duration) (string, bool, error) {
+	if f.failAcquire {
+		return "", false, errors.New("redis down")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur := f.states[sid]
+	if cur != "" && cur != lifecycle.StatePaused {
+		return cur, false, nil
+	}
+	f.states[sid] = "killing"
+	return cur, true, nil
+}
+
 func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -180,10 +194,16 @@ func newTestSweeper(reg *registry.Registry, store *fakeStore, master *fakeMaster
 		BootstrapWarmup:    0,
 		StateLockTTL:       30 * time.Second,
 		Interval:           time.Second,
+		ActionTimeout:      13 * time.Second,
 		Now:                func() time.Time { return at },
 		Log:                zap.NewNop(),
 	})
 }
+
+type stubLeaderStatus bool
+
+func (s stubLeaderStatus) IsLeader() bool { return bool(s) }
+func (s stubLeaderStatus) Enabled() bool  { return true }
 
 // seedEntry inserts a registry entry. Unlike the previous grace-period
 // design, the sweeper now bases its idle decision on max(LastActiveMs,
@@ -195,6 +215,29 @@ func seedEntry(t *testing.T, r *registry.Registry, meta lifecycle.SandboxLifecyc
 		if !r.MergeLastActive(meta.SandboxID, lastActiveMs) {
 			t.Fatalf("seed: MergeLastActive(%s, %d) didn't advance", meta.SandboxID, lastActiveMs)
 		}
+	}
+}
+
+func TestSweeper_StandbySkipsIdleWork(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-standby", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(1),
+	}, now.Add(-time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.o.Leader = stubLeaderStatus(false)
+	s.sweepOnce(context.Background())
+
+	if len(master.calls) != 0 {
+		t.Fatalf("standby must not pause sandboxes: %v", master.calls)
+	}
+	if got := store.state("sbx-standby"); got != "" {
+		t.Fatalf("standby must not mutate state, got %q", got)
 	}
 }
 
@@ -276,7 +319,10 @@ func TestSweeper_SkipsSandboxWithoutAutoPause(t *testing.T) {
 func TestSweeper_KillRollsBackOnFailure(t *testing.T) {
 	reg := registry.New()
 	store := newFakeStore()
-	master := &fakeMaster{failNextKill: true, failKillErr: errors.New("master 500")}
+	master := &fakeMaster{failNextKill: true, failKillErr: &cubemasterclient.APIError{
+		RetCode: 999,
+		RetMsg:  "definitive failure",
+	}}
 	push := newFakePush()
 
 	now := time.Now()
@@ -297,6 +343,112 @@ func TestSweeper_KillRollsBackOnFailure(t *testing.T) {
 	}
 	if reg.Get("sbx-killfail") == nil {
 		t.Fatal("registry entry should NOT be evicted on kill failure")
+	}
+	_, failed := s.KillStats()
+	if failed != 1 {
+		t.Fatalf("expected kill failed=1, got %d", failed)
+	}
+}
+
+func TestSweeper_KillPausedRollsBackToPausedOnFailure(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	const sid = "sbx-paused-killfail"
+	store.states[sid] = lifecycle.StatePaused
+	master := &fakeMaster{failNextKill: true, failKillErr: &cubemasterclient.APIError{
+		RetCode: 130500,
+		RetMsg:  "definitive failure",
+	}}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: sid, InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if got := store.state(sid); got != "" {
+		t.Fatalf("redis state should be cleared after rollback, got %q", got)
+	}
+	pushed := push.states(sid)
+	if len(pushed) == 0 || pushed[len(pushed)-1] != lifecycle.StatePaused {
+		t.Fatalf("rollback should restore proxy to paused, got %v", pushed)
+	}
+	if reg.Get(sid) == nil {
+		t.Fatal("registry entry should NOT be evicted on kill failure")
+	}
+	_, failed := s.KillStats()
+	if failed != 1 {
+		t.Fatalf("expected kill failed=1, got %d", failed)
+	}
+}
+
+func TestSweeper_KillPausedDoesNotEvictOnTaskStateInvalid(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	const sid = "sbx-paused-busy"
+	store.states[sid] = lifecycle.StatePaused
+	master := &fakeMaster{failNextKill: true, failKillErr: &cubemasterclient.APIError{
+		RetCode: cubemasterclient.RetCodeTaskStateInvalid,
+		RetMsg:  "sandbox lifecycle operation is in progress",
+	}}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: sid, InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if reg.Get(sid) == nil {
+		t.Fatal("130490 must not evict a live paused sandbox")
+	}
+	if got := store.state(sid); got != "" {
+		t.Fatalf("must not write killed; redis should be cleared for retry, got %q", got)
+	}
+	if got := push.deletedIDs(); len(got) != 0 {
+		t.Fatalf("DeleteMeta must not fire on 130490, got %v", got)
+	}
+	pushed := push.states(sid)
+	if len(pushed) == 0 || pushed[len(pushed)-1] != lifecycle.StatePaused {
+		t.Fatalf("proxy must roll back to paused, got %v", pushed)
+	}
+	triggered, failed := s.KillStats()
+	if triggered != 0 || failed != 1 {
+		t.Fatalf("130490 is a retryable failure: triggered=%d failed=%d", triggered, failed)
+	}
+}
+
+func TestSweeper_KillPreservesOwnershipOnUnknownError(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{failNextKill: true, failKillErr: errors.New("connection reset")}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-killunknown", InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if got := store.state("sbx-killunknown"); got != "killing" {
+		t.Fatalf("redis state should remain killing on unknown error, got %q", got)
+	}
+	pushed := push.states("sbx-killunknown")
+	if len(pushed) != 1 || pushed[0] != "killing" {
+		t.Fatalf("proxy must not be rolled back to running on unknown kill, got %v", pushed)
+	}
+	if reg.Get("sbx-killunknown") == nil {
+		t.Fatal("registry entry should NOT be evicted on unknown kill error")
 	}
 	_, failed := s.KillStats()
 	if failed != 1 {
@@ -337,30 +489,89 @@ func TestSweeper_KillNotFoundEvictsRegistry(t *testing.T) {
 	}
 }
 
-func TestSweeper_KillSkipsAlreadyKillingSandbox(t *testing.T) {
-	reg := registry.New()
-	store := newFakeStore()
-	store.states["sbx-killmid"] = "killing"
+func TestSweeper_KillsPausedSandboxWhenAutoPauseFalse(t *testing.T) {
+	// on_timeout=kill + a prior manual pause must still timeout-kill,
+	// whether Redis still holds "paused" or only RuntimeState does.
+	const sid = "sbx-paused-kill"
+	cases := []struct {
+		name          string
+		redisPaused   bool
+		runtimePaused bool
+	}{
+		{name: "redis_paused", redisPaused: true},
+		{name: "runtime_paused_redis_empty", runtimePaused: true},
+		{name: "both_paused", redisPaused: true, runtimePaused: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registry.New()
+			store := newFakeStore()
+			master := &fakeMaster{}
+			push := newFakePush()
+			now := time.Now()
+			seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+				SandboxID: sid, InstanceType: "cubebox",
+				AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+			}, now.Add(-1*time.Hour).UnixMilli())
+			if tc.redisPaused {
+				store.states[sid] = lifecycle.StatePaused
+			}
+			if tc.runtimePaused {
+				if !reg.SetRuntimeState(sid, lifecycle.StatePaused) {
+					t.Fatal("SetRuntimeState")
+				}
+			}
 
-	master := &fakeMaster{}
-	push := newFakePush()
+			s := newTestSweeper(reg, store, master, push, now)
+			s.sweepOnce(context.Background())
 
-	now := time.Now()
-	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
-		SandboxID: "sbx-killmid", InstanceType: "cubebox",
-		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
-	}, now.Add(-1*time.Hour).UnixMilli())
+			if len(master.killCalls) != 1 || master.killCalls[0] != sid {
+				t.Fatalf("expected timeout Kill, got %v", master.killCalls)
+			}
+			if len(master.killReasons) != 1 || master.killReasons[0] != cubemasterclient.KillReasonTimeout {
+				t.Fatalf("kill reason = %v, want [timeout]", master.killReasons)
+			}
+			if reg.Get(sid) != nil {
+				t.Fatal("registry entry should have been evicted after kill")
+			}
+			if got := store.state(sid); got != "killed" {
+				t.Fatalf("expected redis state=killed, got %q", got)
+			}
+			triggered, failed := s.KillStats()
+			if triggered != 1 || failed != 0 {
+				t.Fatalf("kill stats: triggered=%d failed=%d", triggered, failed)
+			}
+		})
+	}
+}
 
-	s := newTestSweeper(reg, store, master, push, now)
-	s.sweepOnce(context.Background())
+func TestSweeper_SkipsInFlightSandboxWhenAutoPauseFalse(t *testing.T) {
+	for _, state := range []string{"resuming", "killing"} {
+		t.Run(state, func(t *testing.T) {
+			reg := registry.New()
+			store := newFakeStore()
+			sid := "sbx-" + state
+			store.states[sid] = state
+			master := &fakeMaster{}
+			push := newFakePush()
+			now := time.Now()
+			seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+				SandboxID: sid, InstanceType: "cubebox",
+				AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+			}, now.Add(-1*time.Hour).UnixMilli())
 
-	if len(master.killCalls) != 0 {
-		t.Fatalf("sweeper must NOT call Kill when peer is mid-flight: %v", master.killCalls)
+			s := newTestSweeper(reg, store, master, push, now)
+			s.sweepOnce(context.Background())
+
+			if len(master.killCalls) != 0 {
+				t.Fatalf("sweeper must NOT call Kill while state=%s: %v", state, master.killCalls)
+			}
+		})
 	}
 }
 
 func TestSweeper_BootstrapWarmupSkipsBootstrapEntries(t *testing.T) {
-	// Verifies the bootstrap-warmup gate: while the sidecar is still in
+	// Verifies the bootstrap-warmup gate: while CLM is still in
 	// its warmup window, sandboxes whose FirstSeenAt is at-or-before the
 	// sweeper's StartedAt (i.e. loaded from HGETALL) are skipped, even if
 	// their CreatedAt is hours old. After the warmup elapses, the sweeper
@@ -412,7 +623,10 @@ func TestSweeper_BootstrapWarmupSkipsBootstrapEntries(t *testing.T) {
 func TestSweeper_RollsBackOnPauseFailure(t *testing.T) {
 	reg := registry.New()
 	store := newFakeStore()
-	master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
+	master := &fakeMaster{failNext: true, failError: &cubemasterclient.APIError{
+		RetCode: 999,
+		RetMsg:  "definitive failure",
+	}}
 	push := newFakePush()
 
 	now := time.Now()
@@ -430,6 +644,34 @@ func TestSweeper_RollsBackOnPauseFailure(t *testing.T) {
 	pushed := push.states("sbx-4")
 	if len(pushed) == 0 || pushed[len(pushed)-1] != "running" {
 		t.Fatalf("rollback should leave proxy at running, got %v", pushed)
+	}
+	_, failed := s.Stats()
+	if failed != 1 {
+		t.Fatalf("expected failed=1, got %d", failed)
+	}
+}
+
+func TestSweeper_PausePreservesOwnershipOnUnknownError(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{failNext: true, failError: errors.New("connection reset")}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-pauseunknown", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if got := store.state("sbx-pauseunknown"); got != "pausing" {
+		t.Fatalf("redis state should remain pausing on unknown error, got %q", got)
+	}
+	pushed := push.states("sbx-pauseunknown")
+	if len(pushed) != 1 || pushed[0] != "pausing" {
+		t.Fatalf("proxy must not be rolled back to running on unknown pause, got %v", pushed)
 	}
 	_, failed := s.Stats()
 	if failed != 1 {
@@ -678,9 +920,107 @@ func TestSweeper_NilTimeoutFallsBackToDefaultIdle(t *testing.T) {
 	}
 }
 
+func TestSweeper_SkipsWhenRuntimeStatePausedAndRedisEmpty(t *testing.T) {
+	// After a successful pause the Redis key expires (StateLockTTL) while
+	// the in-memory RuntimeState stays paused. Idle keeps growing. Without
+	// the RuntimeState guard we would Pause CubeMaster every Interval.
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-mem", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-1*time.Hour).UnixMilli())
+	if !reg.SetRuntimeState("sbx-mem", lifecycle.StatePaused) {
+		t.Fatal("SetRuntimeState")
+	}
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if len(master.calls) != 0 {
+		t.Fatalf("sweeper must NOT call Pause when RuntimeState is paused: %v", master.calls)
+	}
+}
+
+func TestSweeper_AlreadyHasPauseSnapshotReconcilesAsSuccess(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{
+		failNext: true,
+		failError: &cubemasterclient.APIError{
+			RetCode: cubemasterclient.RetCodeMasterParamsError,
+			RetMsg:  "begin pause snapshot: sandbox sbx-snap already has pause snapshot snap-1",
+		},
+	}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-snap", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if got := store.state("sbx-snap"); got != "paused" {
+		t.Fatalf("expected redis state=paused (reconciliation), got %q", got)
+	}
+	if got := reg.Get("sbx-snap").RuntimeState; got != lifecycle.StatePaused {
+		t.Fatalf("RuntimeState = %q, want paused", got)
+	}
+	pushed := push.states("sbx-snap")
+	if len(pushed) == 0 || pushed[len(pushed)-1] != "paused" {
+		t.Fatalf("expected last push state=paused, got %v", pushed)
+	}
+	triggered, failed := s.Stats()
+	if triggered != 1 || failed != 0 {
+		t.Fatalf("already-has-snapshot should count as triggered, not failed: triggered=%d failed=%d",
+			triggered, failed)
+	}
+}
+
+func TestSweeper_OtherMasterParamsErrorStillFails(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{
+		failNext: true,
+		failError: &cubemasterclient.APIError{
+			RetCode: cubemasterclient.RetCodeMasterParamsError,
+			RetMsg:  "begin pause snapshot: sandboxID is required",
+		},
+	}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-bad", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if got := store.state("sbx-bad"); got != "" {
+		t.Fatalf("unrelated 130400 must not leave paused, got %q", got)
+	}
+	pushed := push.states("sbx-bad")
+	if len(pushed) == 0 || pushed[len(pushed)-1] != "running" {
+		t.Fatalf("unrelated 130400 should roll back to running, got %v", pushed)
+	}
+	_, failed := s.Stats()
+	if failed != 1 {
+		t.Fatalf("unrelated 130400 should count as failed, got failed=%d", failed)
+	}
+}
+
 func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 	// CubeMaster returns "sandbox is already paused" (RetCodeTaskStateInvalid)
-	// when a peer sidecar already paused this sandbox. The sweeper should NOT
+	// when a peer CLM replica already paused this sandbox. The sweeper should NOT
 	// roll back: it should write `paused` state to Redis + push to CubeProxy
 	// just like a fresh successful pause, so all callers converge on the
 	// same view.

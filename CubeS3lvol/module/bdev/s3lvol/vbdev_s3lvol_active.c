@@ -97,11 +97,21 @@ struct active_entry {
 	TAILQ_ENTRY(active_entry) link;
 };
 
-static TAILQ_HEAD(, active_entry) g_active = TAILQ_HEAD_INITIALIZER(g_active);
+TAILQ_HEAD(active_entry_list, active_entry);
+static struct active_entry_list g_active = TAILQ_HEAD_INITIALIZER(g_active);
 
 /* Set once the file has been read, so a load is not repeated on every lookup
  * and an empty registry is not mistaken for "not loaded yet". */
 static bool g_loaded;
+
+/* Monotonic clock and per-nsid last-touch. 0 means this slot has never been
+ * handed out or freed in this process. Auto-alloc picks the free nsid with the
+ * oldest stamp so a just-vacated slot is the last one reused -- the Linux NVMe
+ * host treats an in-place UUID change as "identifiers changed" and may never
+ * republish a /dev node. In-memory only: a restart rebuilds the live set from
+ * the registry, and the host's view is rebuilt with it. */
+static uint64_t g_nsid_clock;
+static uint64_t g_nsid_gen[RCOW_NUM_SUBSYS][RCOW_NS_PER_SUBSYS + 1];
 
 /* --------------------------------------------------------------------------
  * Placement
@@ -125,12 +135,32 @@ s3lvol_active_hash_subsys(const char *name)
 	return crc % RCOW_NUM_SUBSYS;
 }
 
+static void
+active_touch_nsid(uint32_t subsys, uint32_t nsid)
+{
+	if (subsys >= RCOW_NUM_SUBSYS || nsid < 1 ||
+	    nsid > RCOW_NS_PER_SUBSYS) {
+		return;
+	}
+	g_nsid_gen[subsys][nsid] = ++g_nsid_clock;
+}
+
+void
+s3lvol_active_note_nsid(uint32_t subsys, uint32_t nsid)
+{
+	active_touch_nsid(subsys, nsid);
+}
+
 uint32_t
 s3lvol_active_alloc_nsid(uint32_t subsys)
 {
 	struct active_entry *e;
 	bool taken[RCOW_NS_PER_SUBSYS + 1] = {};
-	uint32_t nsid;
+	uint32_t nsid, best = 0;
+
+	if (subsys >= RCOW_NUM_SUBSYS) {
+		return 0;
+	}
 
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (e->pub.subsys == subsys && e->pub.nsid >= 1 &&
@@ -139,14 +169,26 @@ s3lvol_active_alloc_nsid(uint32_t subsys)
 		}
 	}
 
-	/* nsid is 1-based in NVMe. */
+	/* Never-used slots (gen 0) beat anything that has been handed out or
+	 * freed. Equal gens take the lowest nsid, so a fresh subsystem still
+	 * fills 1, 2, 3, ... Touching the winner means a second alloc before
+	 * the registry add will not pick the same in-flight slot. */
 	for (nsid = 1; nsid <= RCOW_NS_PER_SUBSYS; nsid++) {
-		if (!taken[nsid]) {
-			return nsid;
+		if (taken[nsid]) {
+			continue;
+		}
+		if (best == 0 ||
+		    g_nsid_gen[subsys][nsid] < g_nsid_gen[subsys][best]) {
+			best = nsid;
 		}
 	}
 
-	return 0;	/* subsystem full */
+	if (best == 0) {
+		return 0;	/* subsystem full */
+	}
+
+	active_touch_nsid(subsys, best);
+	return best;
 }
 
 /* --------------------------------------------------------------------------
@@ -250,9 +292,13 @@ static const struct spdk_json_object_decoder entry_decoders[] = {
 };
 
 /* Append without touching the file: used by the loader, which must not rewrite
- * what it is in the middle of reading. */
+ * what it is in the middle of reading, and by s3lvol_active_add, which flushes
+ * the whole registry separately. `attached` is the caller's to state: the
+ * loader records what a restart should reproduce, an attach records what it
+ * has just brought up. */
 static int
-active_insert(const char *name, const char *uuid, uint32_t subsys, uint32_t nsid)
+active_insert(const char *name, const char *uuid, uint32_t subsys, uint32_t nsid,
+	      bool attached)
 {
 	struct active_entry *e;
 
@@ -263,11 +309,27 @@ active_insert(const char *name, const char *uuid, uint32_t subsys, uint32_t nsid
 
 	snprintf(e->pub.name, sizeof(e->pub.name), "%s", name);
 	snprintf(e->pub.uuid, sizeof(e->pub.uuid), "%s", uuid ? uuid : "");
-	e->pub.subsys = subsys;
-	e->pub.nsid   = nsid;
+	e->pub.subsys   = subsys;
+	e->pub.nsid     = nsid;
+	e->pub.attached = attached;
 
 	TAILQ_INSERT_TAIL(&g_active, e, link);
 	return 0;
+}
+
+/* Undo only entries appended by the current load attempt. The registry can be
+ * reached again after an allocation failure because g_loaded remains false; a
+ * half-built list would then be appended a second time and leave ghost NSIDs. */
+static void
+active_rollback_loaded(uint32_t count)
+{
+	while (count-- > 0) {
+		struct active_entry *e = TAILQ_LAST(&g_active, active_entry_list);
+
+		assert(e != NULL);
+		TAILQ_REMOVE(&g_active, e, link);
+		free(e);
+	}
 }
 
 int
@@ -356,9 +418,10 @@ s3lvol_active_load(void)
 			continue;
 		}
 
-		if (active_insert(name, f.uuid, f.subsys, f.nsid) != 0) {
+		if (active_insert(name, f.uuid, f.subsys, f.nsid, false) != 0) {
 			SPDK_ERRLOG("active: out of memory loading '%s'\n", name);
 			free(f.uuid);
+			active_rollback_loaded(loaded);
 			free(values);
 			free(text);
 			return -ENOMEM;
@@ -423,18 +486,34 @@ s3lvol_active_add(const char *name, const char *uuid, uint32_t subsys,
 		return -EINVAL;
 	}
 
+	/* Reached only from the completion of a successful attach, so what this
+	 * records is up in this process. Marking attached here -- and nowhere
+	 * else -- is what keeps "recorded" and "exposed" from drifting apart. */
+
 	/* Update in place when it is already there, so that a re-activation does
 	 * not accumulate duplicates. */
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (strcmp(e->pub.name, name) == 0) {
 			snprintf(e->pub.uuid, sizeof(e->pub.uuid), "%s", uuid);
-			e->pub.subsys = subsys;
-			e->pub.nsid   = nsid;
-			return active_flush();
+			e->pub.subsys   = subsys;
+			e->pub.nsid     = nsid;
+
+			/* The caller removes the namespace when this fails, so the
+			 * in-memory entry must stop claiming it is up. The insert path
+			 * below undoes its entry for the same reason; here there is
+			 * nothing to undo but the flag.
+			 *
+			 * Every replay comes through here: the loader has already put
+			 * an entry in for each volume by the time the attach runs. One
+			 * failed write would otherwise leave the volume answering
+			 * "already active" on the retry, with no namespace to back it. */
+			rc = active_flush();
+			e->pub.attached = (rc == 0);
+			return rc;
 		}
 	}
 
-	rc = active_insert(name, uuid, subsys, nsid);
+	rc = active_insert(name, uuid, subsys, nsid, true);
 	if (rc != 0) {
 		return rc;
 	}
@@ -466,6 +545,7 @@ s3lvol_active_remove(const char *name)
 
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (strcmp(e->pub.name, name) == 0) {
+			active_touch_nsid(e->pub.subsys, e->pub.nsid);
 			TAILQ_REMOVE(&g_active, e, link);
 			free(e);
 			return active_flush();

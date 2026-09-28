@@ -20,9 +20,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	vpb "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/grpctarget"
+	vpb "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/volumeplugin/grpctarget"
 )
 
 // Plugin is a VolumePlugin backed by an external gRPC process.

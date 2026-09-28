@@ -10,7 +10,7 @@ import (
 	"unicode"
 
 	"github.com/containerd/plugin"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 const (
@@ -207,8 +207,13 @@ const (
 	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
 	// the local catalog under this id; Kind=pause_snapshot.
 	MasterAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// MasterAnnotationLaunchMemorySnapshotID is the template or customer
+	// snapshot the sandbox was first started from. Pause may clone it only
+	// when it is still the VM's last restore (first Pause after
+	// Create-from-template). Resume and Commit must not overwrite it.
+	MasterAnnotationLaunchMemorySnapshotID = "cube.master.launch.memory.snapshot.id"
 	// MasterAnnotationStorageBackend is the CoW backend Master passes on
-	// Pause / Commit (xfs｜s3). Empty means xfs.
+	// Pause / Commit (xfs/s3). Empty means xfs.
 	MasterAnnotationStorageBackend = "cube.master.storage.backend"
 	// MasterAnnotationSnapshotRemoteUUIDs is the JSON blob of remote
 	// volume uuids (rootfs/memory/metadata) for cubecow_import_lvol.
@@ -233,21 +238,18 @@ const (
 	// on Master).
 	AnnotationPauseDeleteTombstone = "cube.pause.delete_tombstone"
 
-	MasterAnnotationAppSnapshotVersion               = "cube.master.appsnapshot.version"
-	MasterAnnotationRootfsArtifactID                 = "cube.master.rootfs.artifact.id"
-	MasterAnnotationRootfsArtifactJobID              = "cube.master.rootfs.artifact.job_id"
-	MasterAnnotationRootfsArtifactURL                = "cube.master.rootfs.artifact.url"
-	MasterAnnotationRootfsArtifactToken              = "cube.master.rootfs.artifact.token"
-	MasterAnnotationRootfsArtifactSHA256             = "cube.master.rootfs.artifact.sha256"
-	MasterAnnotationRootfsArtifactSizeBytes          = "cube.master.rootfs.artifact.size_bytes"
-	MasterAnnotationWritableLayerSize                = "cube.master.rootfs.writable_layer_size"
-	MasterAnnotationTemplateSpecFingerprint          = "cube.master.template.spec_fingerprint"
-	MasterAnnotationComponentEnvdVersion             = "cube.master.components.envd.version"
-	MasterAnnotationCreateTimeEnvVars                = "cube.master.internal.create_time_env_vars"
-	MasterAnnotationInstanceType                     = "cube.master.instance.type"
-	MasterAnnotationNetworkPolicyBlockAll            = "cube.master.network.policy.block_all"
-	MasterAnnotationNetworkPolicyAllowPublicServices = "cube.master.network.policy.allow_public_services"
-	MasterAnnotationNetworkPolicyDefault             = "cube.master.network.policy.default"
+	MasterAnnotationAppSnapshotVersion      = "cube.master.appsnapshot.version"
+	MasterAnnotationRootfsArtifactID        = "cube.master.rootfs.artifact.id"
+	MasterAnnotationRootfsArtifactJobID     = "cube.master.rootfs.artifact.job_id"
+	MasterAnnotationRootfsArtifactURL       = "cube.master.rootfs.artifact.url"
+	MasterAnnotationRootfsArtifactToken     = "cube.master.rootfs.artifact.token"
+	MasterAnnotationRootfsArtifactSHA256    = "cube.master.rootfs.artifact.sha256"
+	MasterAnnotationRootfsArtifactSizeBytes = "cube.master.rootfs.artifact.size_bytes"
+	MasterAnnotationWritableLayerSize       = "cube.master.rootfs.writable_layer_size"
+	MasterAnnotationTemplateSpecFingerprint = "cube.master.template.spec_fingerprint"
+	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
+	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
+	MasterAnnotationInstanceType            = "cube.master.instance.type"
 )
 
 // Inventory version annotations used by Ensure

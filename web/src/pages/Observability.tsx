@@ -3,7 +3,6 @@
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -16,12 +15,10 @@ import {
   Wifi,
   WifiOff,
   CheckCircle2,
-  XCircle,
   AlertTriangle,
 } from 'lucide-react';
 import { clusterApi, sandboxApi, templateApi } from '@/api/client';
 import { Skeleton } from '@/components/ui/skeleton';
-import { MetricValue } from '@/components/ui/typography';
 import { cn, formatRelative } from '@/lib/utils';
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
@@ -360,8 +357,6 @@ function ApiSection() {
     null,
   );
 
-  const { data: cfg, isLoading } = useRuntimeConfig();
-
   const handleTest = async () => {
     setTesting(true);
     setResult(null);
@@ -379,37 +374,6 @@ function ApiSection() {
   return (
     <div>
       <SectionHeader icon={Gauge} title={t('api.title')} desc={t('api.desc')} />
-      <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-1 mb-3">
-        {isLoading ? (
-          <div className="space-y-3 py-3">
-            {[1, 2].map((i) => (
-              <Skeleton key={i} className="h-4 w-full" />
-            ))}
-          </div>
-        ) : (
-          <>
-            <div className="flex items-center justify-between py-2.5 border-b border-border/40">
-              <span className="text-sm text-muted-foreground">{t('api.rateLimit')}</span>
-              <MetricValue value={cfg?.rateLimitPerSec ?? '—'} unit="req/s" />
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <span className="text-sm text-muted-foreground">{t('api.auth')}</span>
-              {cfg?.authEnabled ? (
-                <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium">
-                  <CheckCircle2 size={12} />
-                  {t('api.authOn')}
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 text-muted-foreground text-xs">
-                  <XCircle size={12} />
-                  {t('api.authOff')}
-                </span>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-
       {/* Test button + result */}
       <div className="flex items-center gap-3">
         <button

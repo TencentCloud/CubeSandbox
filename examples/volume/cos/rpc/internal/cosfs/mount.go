@@ -148,10 +148,10 @@ func isMountPoint(path string) (bool, error) {
 	case 32:
 		return false, nil
 	case 1:
-		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-			return false, nil
-		}
-		return false, err
+		// util-linux exits 1 when the path exists but is not a mount point
+		// (0 = mounted, 32 = error). Either way this is legitimately "not
+		// mounted", so report it without an error.
+		return false, nil
 	default:
 		return false, err
 	}

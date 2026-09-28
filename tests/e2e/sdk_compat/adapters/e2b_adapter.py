@@ -104,6 +104,7 @@ def _sandbox_info_to_raw(info: Any) -> dict[str, Any]:
             "startedAt",
             "end_at",
             "endAt",
+            "timeout",
             "state",
             "status",
             "cpu_count",
@@ -144,7 +145,16 @@ def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
     else:
         data = {
             name: getattr(entry, name)
-            for name in ("sandbox_id", "sandboxID", "id", "state", "metadata", "template_id")
+            for name in (
+                "sandbox_id",
+                "sandboxID",
+                "id",
+                "state",
+                "metadata",
+                "template_id",
+                "end_at",
+                "endAt",
+            )
             if hasattr(entry, name)
         }
 
@@ -155,6 +165,11 @@ def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
     state = data.get("state")
     if state is not None:
         data["state"] = str(getattr(state, "value", state))
+    end_at = first_present(data, "end_at", "endAt")
+    if end_at is not None:
+        end_at = _normalize_info_value(end_at)
+        data.setdefault("end_at", end_at)
+        data.setdefault("endAt", end_at)
     return data
 
 
@@ -220,7 +235,7 @@ class E2BAdapter(SandboxAdapter):
         connect_method = getattr(Sandbox, "connect", None)
         if callable(connect_method):
             kwargs = dict(_e2b_api_params(config))
-            if _accepts_keyword(connect_method, "timeout"):
+            if timeout is not None and _accepts_keyword(connect_method, "timeout"):
                 kwargs["timeout"] = timeout
             sandbox = connect_method(sandbox_id, **kwargs)
         else:
@@ -389,8 +404,17 @@ class E2BAdapter(SandboxAdapter):
                 stop()
         return events
 
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
-        result = self._sandbox.run_code(code, timeout=timeout)
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
+        kwargs = {"timeout": timeout}
+        if env_vars is not None:
+            kwargs["envs"] = env_vars
+        result = self._sandbox.run_code(code, **kwargs)
         logs = getattr(result, "logs", None)
         stdout = list(getattr(logs, "stdout", []) or [])
         stderr = list(getattr(logs, "stderr", []) or [])
@@ -429,6 +453,13 @@ class E2BAdapter(SandboxAdapter):
         pause(**kwargs)
 
     def resume_or_connect(self, *, timeout: int = 60) -> "E2BAdapter":
+        return type(self).connect(
+            self.sandbox_id,
+            self._e2e_config or SdkE2EConfig.from_env(),
+            timeout=timeout,
+        )
+
+    def resume_idle_timeout(self, timeout: int | None) -> "E2BAdapter":
         return type(self).connect(
             self.sandbox_id,
             self._e2e_config or SdkE2EConfig.from_env(),

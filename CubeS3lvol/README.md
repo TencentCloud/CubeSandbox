@@ -28,7 +28,8 @@ s3lvol-<version>/
 ├── bin/s3lvol_tgt
 ├── scripts/
 │   ├── rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_common.sh
-│   ├── rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
+│   ├── rcow_cpumask.sh               # default SPDK -m (last two allowed CPUs)
+│   ├── rcow_upgrade.sh  rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
 │   ├── rpc.py         # this repo's launcher (3.8 argparse shim)
 │   ├── rpc_compat.py  # BooleanOptionalAction backfill for Python 3.8
 │   ├── spdk_rpc.py    # SPDK's rpc.py, unmodified
@@ -110,12 +111,31 @@ forfeited its previous state.
 ```sh
 scripts/rcow_start.sh          # start target, create/attach lvstore, export nvmf, connect host
 scripts/rcow_stop.sh           # reverse order: disconnect, flush, unload, stop process
+scripts/rcow_upgrade.sh        # stop the target alone, for upgrades: no disconnect, no unload
 scripts/rcow_recovery.sh       # use this after an unclean exit
 scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state (irreversible)
 ```
 
 `rcow_start.sh` is idempotent: if already running it tells you and exits rather
 than starting a second instance.
+
+`rcow_upgrade.sh` is the upgrade path and not a general stop. It flushes and
+checkpoints the lvstore online, pins the initiator timeouts the pause depends on,
+then kills the target so the host keeps its namespaces and only pauses I/O,
+leaving the state for a replacement to pick up.
+
+`--candidate <binary>` is required on a real run: it is the binary the upgrade
+will start, and the version gate refuses if the two builds cannot share the
+on-disk state. There is nowhere to take a default from -- an upgrade switches the
+versioned directory in only after the old process is confirmed dead, so
+`RCOW_TGT_BIN` still names the outgoing binary while the stop is running. The
+systemd path reads it from the hot-restart marker instead. `--dry-run` rehearses
+the online steps and may leave it out, because nothing is risked either way.
+
+With no target running, there is nothing to pause: it clears the target-side
+residue and exits 0. With one that does not answer RPC, it touches nothing at all
+and exits non-zero, so the operator still has a process to talk to. Use
+`rcow_stop.sh` for anything else.
 
 Credentials are read from `s3.cfg` and passed on **only through the target
 process's environment** — never on the command line, never into logs.
@@ -146,11 +166,13 @@ used ones:
 |---|---|---|
 | `RCOW_S3_CFG` | `/data/cubelet/s3.cfg` | |
 | `RCOW_WAL_IMG` | `/data/cubelet/rcow/wal_bdev.img` | |
-| `RCOW_LVS_NAME` | derived `rcow-<hostname-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
+| `RCOW_LVS_NAME` | derived `rcow-<identity-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
+| `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
+| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
-| `RCOW_TGT_CPUMASK` | `0x3` | |
+| `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
 | `RCOW_RPC_SOCK` | `/var/run/s3lvol.sock` | |
 
@@ -164,11 +186,24 @@ hostname: two machines with the same hostname (containers, cloned disks)
 each consider the other's marker stale and force-take a volume the other is
 still serving, which can corrupt data.
 
-The lvstore name is derived from the same hostname (`rcow-<hostname-hash>`),
-so duplicate hostnames also collide on the S3 prefix itself. When nodes have
-a real unique id (an inventory id, a Kubernetes node name, an instance id),
-pin `RCOW_LVS_NAME` to it instead of relying on the hostname-derived
-default, and never let two nodes share a hostname.
+The lvstore name is derived from the same hostname (`rcow-<identity-hash>`),
+so duplicate hostnames also collide on the S3 prefix itself. The identity
+string is `hostname -s` for a DNS name (`worker1.example.com` → `worker1`),
+so an existing prefix survives a domain-suffix change. An address is not an
+FQDN: `hostname -s` of `192.0.2.48` is `192`, which would give every node
+in a /8 the same prefix. IPv4, IPv6, and a purely numeric short name of a
+dotted hostname (`192.0.2.48.internal`) are hashed in full.
+
+Changing the identity string changes the prefix. A node whose hostname is
+already an IP, and that already created a store under the old `hostname -s`
+hash, looks like a new machine on upgrade (create formats the WAL; the old
+S3 prefix is orphaned unless you pin `RCOW_LVS_NAME` to the old name).
+
+When nodes have a real unique id (an inventory id, a Kubernetes node name,
+an instance id), pin `RCOW_LVS_NAME` to `rcow-<hash of that full id>`
+instead of relying on `hostname -s`, and never let two nodes share a
+hostname. The Helm sidecar does this automatically from the full
+`spec.nodeName`.
 
 `RCOW_NO_HUGE=1` is a **choice, not a concession**: nothing on this data path
 needs DMA (the local disk goes through `bdev_aio` read/write syscalls, the
@@ -196,24 +231,48 @@ scripts/s3lvol_rpc.py rcow_delete_lvol     '{"lvol_name":"clone0"}'
 scripts/s3lvol_rpc.py rcow_get_lvstores    # list all lvstores and lvols
 ```
 
+(`rcow_pending_load_hold` exists only so tests can park pending-delete registry
+HEAD/GET around unload; it is not an operations RPC.)
+
 The parameter names are deliberately chosen; the easy mistakes to make when
 copying them:
 
 - `create_lvol` has **no `lvs_name`** — it operates on the single lvstore that
   exists.
 - `create_snapshot` takes `lvol_name` as the source and `snapshot_name` as the
-  target; snapshots are read-only.
+  target; snapshots are read-only. If the source is still decoupling from an
+  import, the snapshot keeps that external parent and the reply includes
+  `decouple_cancelled: true`.
 - `create_clone` takes `snapshot_name` (which **must be a read-only snapshot**)
   as the source and `clone_name` as the target.
 - `resize_lvol` can only grow, never shrink.
 - `delete_lvol` also clears the volume's activation record, so the next restart
-  does not try to restore it.
+  does not try to restore it. A snapshot that is still pinned is recorded as an
+  intent rather than carried out. When the blocker is one the poller can finish
+  on its own, the reply is the usual success envelope plus `deferred: true`. A
+  live or still-unknown lease still returns EBUSY; a stale lease-aware export
+  and a pre-lease (`export_legacy`) export are released internally by the delete.
+  `rcow_cancel_pending_delete` withdraws it.
 
 **Exporting a snapshot** (cross-node transfer):
 
 ```sh
 scripts/s3lvol_rpc.py rcow_export_snapshot '{"snapshot_name":"snap0"}'
 ```
+
+`ttl_sec` is accepted for compatibility but ignored. New reference manifests use
+`expires_at: 0`; their lifetime follows the source snapshot.
+
+Rolling upgrade: bring **importers** to this build before sources that publish
+`expires_at: 0`. An older importer skips writing a lease for that shape, so a
+source-first upgrade would treat a still-reading node as absent after the
+grace window. Same-version importers renew every 20 s. A confirmed miss younger
+than 60 s still pins — that covers a first lease PUT that arrives in the first
+minute after publish (or after a live lease disappears). Once the export has
+been idle longer than that, the miss is already older than the grace: a newly
+admitted importer is unprotected until the source's next lease poll (20 s),
+when the source first sees the PUT. The delete path uses that cached
+poll; it does not HEAD S3 itself.
 
 `rcow_export_snapshot` returns an **export uuid immediately**; the export itself
 keeps running in the background. The uuid is not a completion signal — poll it:
@@ -222,18 +281,23 @@ keeps running in the background. The uuid is not a completion signal — poll it
 scripts/s3lvol_rpc.py rcow_get_snapshot_status '{"export_uuid":"<uuid>"}'
 # -> {"export_status":"INPROGRESS","deletable":"NO","delete_pending":false}
 #    ... then, eventually
-# -> {"export_status":"DONE","deletable":"NO","delete_pending":false}
-#    (still pinned while exported)
+# -> {"export_status":"DONE","deletable":"YES","delete_pending":false}
+#    (when no live/unknown reader or other blocker remains)
 ```
 
 `rcow_get_snapshot_status` returns three fields:
 
 - `export_status`: `INPROGRESS` / `DONE` / `NONE`.
-- `deletable`: `YES` / `NO`, computed on the spot each time (never cached) and
-  mirroring what `rcow_delete_lvol` would actually refuse: a snapshot is **not
-  deletable** while an export is in progress or pins it, while a decouple is
-  running on it, while it is active over NVMf, or when it has more than one
-  clone.
+- `deletable`: `YES` / `NO`, computed on the spot each time from the cached
+  lease poll (the query itself does not HEAD S3) and mirroring what
+  `rcow_delete_lvol` would actually refuse: a snapshot is **not
+  deletable** while an export is in progress, has a live lease, has a miss
+  younger than the source grace (`S3LVOL_LEASE_MIN_GRACE_SEC`), or is read by a
+  local esnap clone; also while a decouple runs, while active over NVMf, or when
+  it has more than one clone. An idle lease-aware ref export, and a pre-lease
+  legacy export, are released internally by the delete — `deletable: YES` in
+  those cases is the signal that an operator delete will revoke the export even
+  if a pre-lease reader cannot be observed.
 - `delete_pending`: whether a delete was asked for and refused — see
   [Retrying a refused snapshot delete](#retrying-a-refused-snapshot-delete---retry-pending).
   Only meaningful when the query names a `snapshot_name`; queried by
@@ -272,6 +336,19 @@ change.
 the **lvol name**, not the `<lvs>/<lvol>` bdev name. `rcow_deactive_bdev` is
 idempotent: deactivating a volume that is not active succeeds, because "not
 active" is the desired end state.
+
+Automatic namespace placement uses the free NSID that has been idle longest,
+rather than immediately reusing the lowest slot. This avoids presenting a new
+UUID at the NSID the Linux NVMe host just removed. Explicit recovery placements
+still win and reserve their NSID while the asynchronous attach is in progress.
+
+The local cache has a disk tier in the WAL image and a native whole-object RAM
+tier. The RAM tier is allocated per lvstore with `MAP_POPULATE`: the default
+`RCOW_CACHE_HOT_BUFS=1024` therefore adds 1 GiB of resident memory at the
+default 1 MiB chunk size, including during attach. Set it to `0` for disk-only
+cache operation. `rcow_get_lvstores` exposes native RAM/disk hit, miss,
+populate, eviction, residency and byte counters, plus separate imported-object
+cache and CopyObject-alias counters under each lvstore's `write_path`.
 
 Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `RCOW_LOG_DIR`). The CRT log level is set with
@@ -344,21 +421,22 @@ For a local MinIO the config must also set `path_style = "true"` and
 
 `s3lvol_tgt` runs SPDK reactor threads in busy-poll mode: they spin at 100% of
 the cores they are pinned to and never sleep. The current deployment starts
-with **2 reactors on 2 dedicated cores** (e.g. `-m 0x3` pins them to CPU 0 and
-CPU 1). Those two cores are fully consumed by the target, so **other
-(application/business) processes must be kept off them** — pin them elsewhere
-with `taskset`/`numactl` (or a cpuset/cgroup) so the target's request latency
-is not disturbed by scheduler contention.
+with **2 reactors on the last two allowed CPUs** (for `Cpus_allowed_list: 0-7`
+that is `-m 0xc0`, CPU 6 and CPU 7). Those two cores are fully consumed by the
+target, so **other (application/business) processes must be kept off them** —
+pin them elsewhere with `taskset`/`numactl` (or a cpuset/cgroup) so the
+target's request latency is not disturbed by scheduler contention. Set
+`RCOW_TGT_CPUMASK` to an explicit hex mask when the cores are isolated.
 
 ## LIMITATIONS and TODOs
 
 ### Deleting snapshots / lvols
 
-- A snapshot that is **behind an export** cannot be deleted while the export is
-  alive: `s3lvol_lvol_destroy` refuses with *"the snapshot behind export
-  \<uuid\>, which another node may be reading through. Release that export, or
-  wait for it to expire, before deleting this."* — call `rcow_release_export`
-  first (or wait for the export TTL to lapse).
+- Deleting a snapshot also releases its zero-copy reference exports. If an
+  importer still has a live lease, or a local esnap clone still reads through
+  one, the delete is recorded as pending and completes after those readers stop.
+  Callers do not need to sequence `rcow_release_export` themselves. Dense exports
+  keep their independent copies and remain valid.
 - An **active** (attached) lvol cannot be deleted; deactivate it first
   (`rcow_deactive_bdev`).
 - The delete-time cluster-count log line needs the blob to still be open: if
@@ -374,6 +452,9 @@ is not disturbed by scheduler contention.
   while the decouple still reads through it"*. Wait for the decouple to finish
   (`rcow_get_decouple` status -- its list emptying is the signal) before taking
   the snapshot or clone.
+- `rcow_unload_lvstore` returns `-EBUSY` while any decouple is in flight. Wait
+  for `rcow_get_decouple` to become empty; unloading cannot safely destroy the
+  export parent or its channels underneath materialisation.
 
 ## Retrying a refused snapshot delete (`--retry-pending`)
 
@@ -389,10 +470,11 @@ only inside one loaded lvstore and is reusable, so a name-keyed mark could end u
 pointing at a snapshot the delete was never refused for.
 
 `rcow_get_lvstores` reports the mark per snapshot (`delete_pending`), together
-with whether the snapshot is deletable *right now* (`deletable`). Once the
-blocker clears — the export is released or expires, the extra clone is deleted —
-the snapshot becomes deletable, but the delete still has to be carried out by
-hand:
+with whether the snapshot is deletable *right now* (`deletable`).
+
+Most recorded intents are finished by a **background poller** (~60 s, 16 deletes
+per tick) once the blocker is gone. `--retry-pending` is for the cases the
+poller will not touch, and for not waiting a minute:
 
 ```sh
 test/tools/s3lvol_rpc.py --retry-pending
@@ -419,38 +501,84 @@ $ test/tools/s3lvol_rpc.py --retry-pending
 no pending snapshot deletes to retry
 ```
 
-### What this is not
+### What the poller completes, and what still needs a human
 
-The mark is a record and a manual retry, nothing more. Specifically:
+The poller finishes deletes whose blockers clear without anyone deciding
+anything:
+
+- a **leased** export (`export`) — the importer stops renewing, the lease goes
+  stale, that is evidence nobody is reading;
+- a **pre-lease** export (`export_legacy`) once a snapshot delete has been
+  recorded — the intent is the revocation (including marks restored from an
+  older build);
+- an export still **publishing** (`export_inflight`);
+- extra **clones** (`clone_count`);
+- a running **decouple** (`decouple`).
+
+It will **not** complete:
+
+- a destroy that already **failed asynchronously** (`failed`). Retrying it every
+  minute would only repeat the same failure.
+
+If the poller itself failed to register, queued deletes also wait for an
+explicit retry (a log line says so).
+
+### Persistence and the crash window
+
+Marks are written to `<prefix>/meta/pending-deletes.json` and restored when the
+lvstore attaches, so a restart does not forget a delete the caller was told not
+to reissue.
+
+The RPC answers **before** that PUT. If the process crashes (or the PUT fails)
+in the window after the mark is in memory and before the object lands, the
+intent is gone after the next attach and the delete has to be asked for again
+— the same class of window the exports registry accepts, and cheaper: the
+snapshot is still there.
+
+Unload or destroy drops the in-memory queue for that lvstore (marks must not
+outlive the lvols they name). The S3 object is reloaded on the next attach of
+the same prefix; a failed or missing registry is logged and attach continues.
+
+### Cancelling a pending delete (`rcow_cancel_pending_delete`)
+
+The mark is an intent, not a lock. Withdraw it with:
+
+```sh
+scripts/s3lvol_rpc.py rcow_cancel_pending_delete '{"lvol_name":"snap0"}'
+# optional lvs_name when the same snapshot name exists on more than one lvstore
+scripts/s3lvol_rpc.py rcow_cancel_pending_delete '{"lvs_name":"vs0","lvol_name":"snap0"}'
+```
+
+`lvol_name` is required; `lvs_name` is optional and only disambiguates. The
+RPC is **idempotent**: cancelling a name that was never queued, or that the
+poller has already finished, still succeeds — the caller asked for "this
+snapshot will not be deleted behind my back", and that is the state they get.
+The snapshot itself was never touched, only the intent.
+
+The same crash window applies as for recording: the RPC answers, then the
+registry PUT runs. A crash before that PUT lands can restore the mark on the
+next attach.
+
+If the poller has **already submitted** `s3lvol_lvol_destroy`, cancel only
+drops the mark. It does not abort the in-flight destroy; the snapshot may
+still go away. Check `rcow_get_lvstores` afterwards if that race matters.
+
+### What this is not
 
 - **Not every refusal records a mark.** Recorded are the blockers
   `s3lvol_lvol_destroy()` itself identifies — an export pin (published or still
   in flight), more than one clone, a running decouple — plus an asynchronous
-  destroy failure. Those are the ones that clear on their own, which is what
-  makes coming back to them worthwhile. Not recorded: the RPC-layer refusals
-  that run before it (an NVMf-active volume, an unreadable active registry), a
-  bdev unregister that fails, and the case where `spdk_blob_get_clones()`
-  answers an unknown error. Those are either the caller's own precondition to
-  fix (deactivate first) or a failure that has to be looked at rather than
-  retried blindly.
+  destroy failure. Not recorded: the RPC-layer refusals that run before it (an
+  NVMf-active volume, an unreadable active registry), and the case where
+  `spdk_blob_get_clones()` answers an unknown error. A bdev unregister that fails
+  **is** recorded as `failed`. Those unrecorded refusals are either the caller's
+  own precondition to fix (deactivate first) or a failure that has to be looked
+  at rather than retried blindly.
 
   The recording does not re-check that the volume is a snapshot: with the blob
   closed that is not reliably answerable, and only the three blockers above get
   that far anyway. In practice a mark therefore means "a delete was asked for
   and refused because something still referenced the volume".
-- **No automatic retry.** Nothing on the target polls the marks; there is no
-  deferred-completion poller. `--retry-pending` is the only thing that acts on
-  them, and it has to be run.
-- **In memory only.** The marks live in the target process and are gone on
-  restart. A delete refused before a restart is afterwards indistinguishable
-  from one that was never asked for.
-- **Dropped with the lvstore.** Unloading or deleting an lvstore drops that
-  lvstore's marks, deliberately: past the teardown they would name lvols that no
-  longer exist, and an lvstore attached again can give the same names to
-  different objects.
-- **No cancel.** Completing the delete is the only way to clear a mark; a
-  refused delete stays recorded for as long as the target runs and its lvstore
-  stays attached.
 - **`delete_pending` is a snapshot notion.** `rcow_get_snapshot_status` reports
   it when queried by `snapshot_name`; queried by `export_uuid` it is always
   `false`, because an export names a snapshot but is not one.
@@ -460,7 +588,9 @@ The mark is a record and a manual retry, nothing more. Specifically:
   object leak on the cluster path is a separate change.
 
 `deletable: YES` means every blocker the delete path checks is clear right now —
-export pins, a running decouple, an NVMf-active volume, and more than one clone.
+export pins (live lease or a miss younger than grace, from the last lease poll),
+a running decouple, an NVMf-active volume, and more than one clone. A local
+esnap reader of an export of the snapshot also keeps it `NO`.
 It is a snapshot of the current state, not a promise: something can pin the
 snapshot again between the query and the delete, and a retry that is refused
 again is reported by `--retry-pending` (exit status 1) rather than hidden.

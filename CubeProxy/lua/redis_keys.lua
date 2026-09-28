@@ -1,11 +1,9 @@
--- file name: redis_keys.lua
---
 -- Centralized Redis key construction for CubeProxy. Keys follow the unified
 -- convention "cube:{ver}:{scope}:{resource}[:{sub}]:{id}" shared with
 -- CubeMaster. Reads always try the new key first and fall back to the legacy
 -- key so a simultaneous upgrade can still route to pre-cutover data.
 --
--- See docs/architecture/redis-key-spec.md for the full convention.
+-- See docs/dev/redis-key-spec.md for the full convention.
 
 local _M = { _VERSION = "0.01" }
 

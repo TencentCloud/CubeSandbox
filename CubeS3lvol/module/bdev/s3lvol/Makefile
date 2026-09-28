@@ -16,11 +16,13 @@ SRCS = vbdev_s3lvol.c \
        vbdev_s3lvol_lvstore.c \
        vbdev_s3lvol_lvol.c \
        vbdev_s3lvol_xfer.c vbdev_s3lvol_exports.c \
+       vbdev_s3lvol_pending.c \
        vbdev_s3lvol_namespace.c \
        vbdev_s3lvol_statefile.c \
        vbdev_s3lvol_active.c \
        vbdev_s3lvol_nvmf.c \
        vbdev_s3lvol_bstore.c \
+       vbdev_s3lvol_buildinfo.c \
        vbdev_s3lvol_rpc.c
 
 OBJS = $(SRCS:.c=.o)

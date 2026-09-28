@@ -1466,7 +1466,8 @@ pub struct SandboxUpdateRequest {
     /// "pause" | "resume"
     #[serde(rename = "action")]
     pub action: String,
-    /// TTL in seconds (for resume; 0 = keep original). Optional for pause.
+    /// Idle timeout in seconds for resume. Omitted or 0 keeps the current
+    /// timeout; -1 disables expiry; positive values start a new window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
 }
@@ -1592,7 +1593,6 @@ pub struct CreateSnapshotRequest {
     pub sandbox_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    pub create_request: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
 }

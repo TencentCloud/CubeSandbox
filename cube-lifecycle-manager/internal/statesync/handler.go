@@ -35,6 +35,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leader"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisstream"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
@@ -53,6 +54,22 @@ type Deps struct {
 	Log *zap.Logger
 	// Now returns the current time. Injectable for tests.
 	Now func() time.Time
+
+	// Leader gates Redis state-key writes and CubeProxy upserts. Standbys
+	// only retain the in-memory registry; promotion reconcile writes the
+	// shared key afterwards. Nil means "always write" (single-replica / tests).
+	Leader leader.Status
+}
+
+func writeEnabled(d Deps) bool {
+	return d.Leader == nil || d.Leader.IsLeader()
+}
+
+func recordWarmState(d Deps, sandboxID, newState string, now func() time.Time) {
+	if newState == lifecycle.StateRunning {
+		d.Registry.MergeLastActive(sandboxID, now().UnixMilli())
+	}
+	d.Registry.SetRuntimeState(sandboxID, newState)
 }
 
 // Handle applies a single OpState event. It is intentionally best-effort:
@@ -99,6 +116,13 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 		return
 	}
 
+	if !writeEnabled(d) {
+		// Standbys consume one ordered XREAD sequence and retain the latest
+		// terminal state for promotion, but never perform external writes.
+		recordWarmState(d, ev.SandboxID, newState, now)
+		return
+	}
+
 	cur, _, err := d.Redis.GetState(ctx, ev.SandboxID)
 	if err != nil {
 		log.Warn("state event: get current state failed",
@@ -119,31 +143,27 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 		return
 	}
 
-	// Idempotence: already at the desired state.
-	if cur == newState {
-		return
-	}
-
-	if err := d.Redis.WriteState(ctx, ev.SandboxID, newState, d.TTL); err != nil {
+	updated, err := d.Redis.WriteStateCAS(ctx, ev.SandboxID, cur, newState, d.TTL)
+	if err != nil {
 		log.Warn("state event: set state failed",
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.String("new", newState), zap.Error(err))
-		// Continue: try to push to proxy anyway so at least one side
-		// converges. Next sweep will retry Redis via its own path.
+		return
 	}
+	if !updated {
+		log.Info("state event skipped: state changed concurrently",
+			zap.String("sandbox_id", ev.SandboxID),
+			zap.String("cur", cur),
+			zap.String("new", newState))
+		return
+	}
+	recordWarmState(d, ev.SandboxID, newState, now)
 	if d.ProxyPush != nil {
 		if err := d.ProxyPush.SetState(ctx, ev.SandboxID, newState); err != nil {
 			log.Warn("state event: push proxy state failed",
 				zap.String("sandbox_id", ev.SandboxID),
 				zap.String("new", newState), zap.Error(err))
 		}
-	}
-	if newState == lifecycle.StateRunning {
-		// Mirror resumer.doResume: bump LastActiveMs so sweeper won't
-		// immediately re-pause a sandbox that was just resumed by the
-		// user. The proxy's log_phase will eventually overwrite this via
-		// last_active polling, but we want an accurate baseline now.
-		d.Registry.MergeLastActive(ev.SandboxID, now().UnixMilli())
 	}
 	log.Info("state event applied",
 		zap.String("sandbox_id", ev.SandboxID),

@@ -8,7 +8,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 
 	cseccomp "github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/pkg/oci"

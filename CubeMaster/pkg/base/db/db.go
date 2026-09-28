@@ -6,8 +6,10 @@
 package db
 
 import (
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"errors"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	"gorm.io/gorm"
 )
 
@@ -19,4 +21,29 @@ import (
 func Init(cfg *config.DBConfig) *gorm.DB {
 	_ = cfg
 	return dao.Default()
+}
+
+// ConfigFromDBConfig maps a config.DBConfig to the dao.Config used to open
+// the shared database handle. dao.Open keys its idempotence on this config
+// identity, so every call site that opens the handle before app startup
+// (schema init, integration/mock-debug bootstrap) must build the dao config
+// through this helper — keeping the two mappings from drifting.
+func ConfigFromDBConfig(src *config.DBConfig) (dao.Config, error) {
+	if src == nil {
+		return dao.Config{}, errors.New("db config is nil")
+	}
+	return dao.Config{
+		Driver:                      src.Driver,
+		Addr:                        src.Addr,
+		User:                        src.User,
+		Pwd:                         src.Pwd,
+		DBName:                      src.DBName,
+		ConnTimeoutSeconds:          src.ConnTimeout,
+		ReadTimeoutSeconds:          src.ReadTimeout,
+		WriteTimeoutSeconds:         src.WriteTimeout,
+		MaxIdleConns:                src.MaxIdleConns,
+		MaxOpenConns:                src.MaxOpenConns,
+		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
+		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
+	}, nil
 }

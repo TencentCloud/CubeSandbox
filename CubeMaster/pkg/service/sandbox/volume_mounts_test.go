@@ -7,7 +7,7 @@ package sandbox
 import (
 	"testing"
 
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestCollectVolumeMountsFromContainersIncludesSandboxOnly(t *testing.T) {

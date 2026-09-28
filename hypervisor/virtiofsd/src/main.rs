@@ -947,6 +947,31 @@ struct Opt {
     /// This parameter is ignored on the destination side.
     #[arg(long = "migration-confirm-paths")]
     migration_confirm_paths: bool,
+
+    /// Use the legacy full-tree DFS-based path reconstruction for the preserialization phase,
+    /// instead of the default store-only reconstructor.
+    ///
+    /// By default (when this flag is NOT given), preserialization only iterates the inode store
+    /// and reverse-looks up parent inodes via a path -> inode hash table built in a single store
+    /// pass. Any parent inodes that are not yet in the store are materialized on demand via
+    /// `openat(O_PATH | O_NOFOLLOW)` from the nearest known anchor, so the result is semantically
+    /// identical to the legacy DFS reconstructor. This is much faster when the shared directory
+    /// is large but only a small subset has been looked up by the guest, and especially when the
+    /// shared tree is on a slow backend (e.g. NFS).
+    ///
+    /// Set this flag to opt into the legacy directory-tree DFS reconstructor (e.g. as an escape
+    /// hatch if the store-only reconstructor is suspected of misbehaving in a specific setup).
+    ///
+    /// The deprecated aliases `--migration-legacy-reconstructor` and `--migration-no-store-only`
+    /// are still accepted for backward compatibility.
+    ///
+    /// This parameter is ignored on the destination side.
+    #[arg(
+        long = "migration-dfs-preserialization",
+        alias = "migration-legacy-reconstructor",
+        alias = "migration-no-store-only"
+    )]
+    migration_dfs_preserialization: bool,
 }
 
 fn parse_compat(opt: Opt) -> Opt {
@@ -1366,6 +1391,7 @@ fn main() {
         migration_verify_handles: opt.migration_verify_handles,
         migration_confirm_paths: opt.migration_confirm_paths,
         migration_mode: opt.migration_mode,
+        migration_dfs_preserialization: opt.migration_dfs_preserialization,
         ..Default::default()
     };
 

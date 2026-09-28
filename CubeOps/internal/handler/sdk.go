@@ -19,7 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/translator"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // DTO / transformation aliases re-exported from package translator so the

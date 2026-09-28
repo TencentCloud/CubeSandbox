@@ -5,14 +5,18 @@
 package cubebox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 // TestErrNoBaseMemoryForIncrementalIsSentinel locks in that
@@ -288,4 +292,220 @@ func TestOpaqueRestoreInvalidatesIncrementalBases(t *testing.T) {
 	setRuntimeSnapshotBindingLabels(cb, "snap-full-after-resume", now.Add(2*time.Second))
 	assert.Equal(t, "snap-full-after-resume", resolveBaseSnapshotID(cb))
 	assert.Equal(t, runtimeSnapshotBindingInvalidID, resolveRestoreBaseSnapshotID(cb))
+}
+
+func TestResolveLaunchAncestorKeepsStartImage(t *testing.T) {
+	fromTpl := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
+			},
+		},
+	}
+	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl))
+
+	fromSnap := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Annotations: map[string]string{
+				constants.MasterAnnotationRuntimeSnapshotID:     "snap-customer",
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
+			},
+		},
+	}
+	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap))
+
+	// Commit/Resume rewrite runtime labels; Pause must still copy the start image.
+	now := time.Now().UTC()
+	setRuntimeSnapshotBindingLabels(fromTpl, "snap-after-commit", now)
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(time.Second))
+	fromTpl.AddAnnotations(map[string]string{
+		constants.MasterAnnotationRuntimeSnapshotID: runtimeSnapshotBindingInvalidID,
+	})
+	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl))
+
+	stampLaunchMemoryAncestorOnce(fromSnap, "snap-customer")
+	stampPauseSnapshotID(fromSnap, "snap-pause-1")
+	fromSnap.AddAnnotations(map[string]string{
+		constants.MasterAnnotationRuntimeSnapshotID: "snap-pause-1",
+	})
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromSnap, now)
+	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap),
+		"Resume must not replace the FromSnap ancestor with the pause package")
+
+	stampLaunchMemoryAncestorOnce(fromSnap, "tpl-T")
+	assert.Equal(t, "snap-customer", fromSnap.Labels[constants.MasterAnnotationLaunchMemorySnapshotID],
+		"launch ancestor is written once and never overwritten")
+}
+
+func TestLaunchAncestorIsLastRestore(t *testing.T) {
+	fromTpl := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
+			},
+		},
+	}
+	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"first Pause after Create-from-template: no restore-base yet is OK")
+
+	now := time.Now().UTC()
+	setRuntimeRestoreBaseLabels(fromTpl, "tpl-T", now)
+	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"Create-from-template stamps restore-base to the same ancestor")
+
+	setRuntimeRestoreBaseLabels(fromTpl, "snap-pause-1", now.Add(time.Second))
+	stampPauseSnapshotID(fromTpl, "snap-pause-1")
+	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"after Resume the restore-base is the pause package, not the template")
+
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(2*time.Second))
+	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"opaque restore must not incremental-overlay onto the ancestor")
+
+	assert.False(t, launchAncestorIsLastRestore(fromTpl, ""),
+		"empty ancestor is never a valid incremental dest")
+}
+
+func TestImportedMemoryIsCurrentRestore(t *testing.T) {
+	pauseID := "snap-pause-keep-2b"
+	cb := newCubeboxWithStatusForTest("sb-2b", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(cb, pauseID)
+	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	assert.True(t, importedMemoryIsCurrentRestore(cb),
+		"Resume stamps restore-base to the pause id; 2b may use the import")
+
+	setRuntimeRestoreBaseLabels(cb, "snap-rollback-target", time.Now().UTC())
+	assert.False(t, importedMemoryIsCurrentRestore(cb),
+		"Rollback restamps restore-base; stale ImportedMemoryVol must not be 2b")
+
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb, time.Now().UTC())
+	assert.False(t, importedMemoryIsCurrentRestore(cb),
+		"opaque resume invalidates restore-base; stale import must not be 2b")
+
+	fromSnap := newCubeboxWithStatusForTest("sb-fromsnap", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	setRuntimeRestoreBaseLabels(fromSnap, "snap-customer", time.Now().UTC())
+	assert.False(t, importedMemoryIsCurrentRestore(fromSnap),
+		"FromSnap without a pause binding stays on catalog / full")
+
+	forged := newCubeboxWithStatusForTest("sb-forged-2b", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	forged.AddAnnotations(map[string]string{
+		constants.MasterAnnotationPauseSnapshotID:          pauseID,
+		constants.MasterAnnotationRuntimeRestoreSnapshotID: pauseID,
+	})
+	assert.False(t, importedMemoryIsCurrentRestore(forged),
+		"user Create annotations must not open Tier 2b")
+}
+
+func TestShouldUseImportedMemoryForCommit(t *testing.T) {
+	pauseID := "snap-pause-keep-2b-vol"
+	cb := newCubeboxWithStatusForTest("sb-2b-vol", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(cb, pauseID)
+	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+
+	assert.True(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{
+		Name: "sb-2b-vol-memory",
+		Kind: storage.CowKindVolume,
+	}), "imported vol + current restore → incremental 2b")
+	assert.False(t, shouldUseImportedMemoryForCommit(cb, nil),
+		"empty import must fall through to full")
+	assert.False(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{}),
+		"nameless import must fall through to full")
+
+	setRuntimeRestoreBaseLabels(cb, "snap-after-rollback", time.Now().UTC())
+	assert.False(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{
+		Name: "sb-2b-vol-memory",
+		Kind: storage.CowKindVolume,
+	}), "stale import after rollback must full-dump")
+}
+
+func installCommitMemoryTestHooks(t *testing.T) {
+	t.Helper()
+	origBase := resolveBaseMemoryObjectFn
+	origRestore := resolveRestoreBaseMemoryObjectFn
+	origCommit := commitMemoryFromBaseFor
+	origCreate := createMemoryVolumeFor
+	origImport := getImportedSandboxMemoryFor
+	t.Cleanup(func() {
+		resolveBaseMemoryObjectFn = origBase
+		resolveRestoreBaseMemoryObjectFn = origRestore
+		commitMemoryFromBaseFor = origCommit
+		createMemoryVolumeFor = origCreate
+		getImportedSandboxMemoryFor = origImport
+	})
+	resolveBaseMemoryObjectFn = func(context.Context, *cubeboxstore.CubeBox, string) (*storage.CowSnapshotObject, error) {
+		return nil, ErrNoBaseMemoryForIncremental
+	}
+	resolveRestoreBaseMemoryObjectFn = func(context.Context, *cubeboxstore.CubeBox, string) (*storage.CowSnapshotObject, error) {
+		return nil, ErrNoBaseMemoryForIncremental
+	}
+}
+
+func resumeBoxForCommit2b(id, pauseID string) *cubeboxstore.CubeBox {
+	cb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(cb, pauseID)
+	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	return cb
+}
+
+func TestPrepareCommitMemoryArtifactTier2bIncremental(t *testing.T) {
+	installCommitMemoryTestHooks(t)
+	pauseID := "snap-commit-2b-000000000000001"
+	cb := resumeBoxForCommit2b("sb-commit-2b", pauseID)
+	getImportedSandboxMemoryFor = func(_ context.Context, _, sandboxID string) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "sb-" + sandboxID + "-memory", Kind: storage.CowKindVolume}, nil
+	}
+	var clonedFrom string
+	commitMemoryFromBaseFor = func(_ context.Context, _ string, src *storage.CowSnapshotObject, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+		clonedFrom = src.Name
+		return &storage.CowSnapshotObject{Name: "clone-" + id, Kind: storage.CowKindVolume}, nil
+	}
+	createMemoryVolumeFor = func(context.Context, string, string, uint64) (*storage.CowSnapshotObject, error) {
+		t.Fatal("catalog miss + imported vol must not full-dump")
+		return nil, errors.New("unexpected full")
+	}
+
+	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
+	require.NoError(t, err)
+	assert.Equal(t, snapshotTypeIncremental, snapType)
+	assert.Equal(t, "sb-sb-commit-2b-memory", clonedFrom)
+	assert.Equal(t, "clone-snap-new", obj.Name)
+}
+
+func TestPrepareCommitMemoryArtifactFullWhenImportedEmpty(t *testing.T) {
+	installCommitMemoryTestHooks(t)
+	cb := resumeBoxForCommit2b("sb-commit-full", "snap-commit-full-00000000001")
+	getImportedSandboxMemoryFor = func(context.Context, string, string) (*storage.CowSnapshotObject, error) {
+		return nil, nil
+	}
+	commitMemoryFromBaseFor = func(context.Context, string, *storage.CowSnapshotObject, string, uint64) (*storage.CowSnapshotObject, error) {
+		t.Fatal("empty import must not clone")
+		return nil, errors.New("unexpected clone")
+	}
+	createMemoryVolumeFor = func(_ context.Context, _, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "empty-" + id, Kind: storage.CowKindVolume}, nil
+	}
+
+	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
+	require.NoError(t, err)
+	assert.Equal(t, snapshotTypeFull, snapType)
+	assert.Equal(t, "empty-snap-new", obj.Name)
+}
+
+func TestPrepareCommitMemoryArtifact2bCloneFailFallsToFull(t *testing.T) {
+	installCommitMemoryTestHooks(t)
+	cb := resumeBoxForCommit2b("sb-commit-2b-fail", "snap-commit-2bfail-00000001")
+	getImportedSandboxMemoryFor = func(context.Context, string, string) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "sb-commit-2b-fail-memory", Kind: storage.CowKindVolume}, nil
+	}
+	commitMemoryFromBaseFor = func(context.Context, string, *storage.CowSnapshotObject, string, uint64) (*storage.CowSnapshotObject, error) {
+		return nil, errors.New("clone busy")
+	}
+	createMemoryVolumeFor = func(_ context.Context, _, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "empty-" + id, Kind: storage.CowKindVolume}, nil
+	}
+
+	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
+	require.NoError(t, err)
+	assert.Equal(t, snapshotTypeFull, snapType, "2b clone failure must fall through like Pause")
+	assert.Equal(t, "empty-snap-new", obj.Name)
 }

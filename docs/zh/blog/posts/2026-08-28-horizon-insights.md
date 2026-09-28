@@ -3,8 +3,7 @@ title: "金融投研 Agent 沙箱化：弘则信息基于 CubeSandbox 的选型�
 date: 2026-08-26
 author: 王正凯（弘则弥道首席技术官）
 description: "金融投研 Agent 的一次 run，往往要持续几十秒到数分钟，期间会读取研究方法和数据定义、调用数据接口、运行脚本、生成中间文件、再由模型整理结果。承载它的沙箱不能只是跑一段代码，而是要把完整的 Agent 循环放进隔离环境。本文介绍 CubeSandbox 在弘则 4as Agent 中的三个核心使用场景。"
-featured: true
-weight: 2
+featured: false
 ---
 
 # 金融投研 Agent 沙箱化：弘则信息基于 CubeSandbox 的选型与架构实践

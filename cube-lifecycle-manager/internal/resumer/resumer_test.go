@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/eventbus"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
@@ -23,6 +24,7 @@ import (
 type fakeStore struct {
 	mu     sync.Mutex
 	states map[string]string
+	ttls   map[string]time.Duration
 	// allowAcquire controls whether AcquireState succeeds. When the second
 	// element is non-empty, AcquireState seeds that state value into the
 	// map (simulating a peer holding the lock) and returns false.
@@ -35,7 +37,11 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{states: make(map[string]string), preLocked: make(map[string]string)}
+	return &fakeStore{
+		states:    make(map[string]string),
+		ttls:      make(map[string]time.Duration),
+		preLocked: make(map[string]string),
+	}
 }
 
 func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
@@ -52,10 +58,26 @@ func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Du
 	return true, nil
 }
 
-func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
+func (f *fakeStore) AcquireResume(_ context.Context, sid string, _ time.Duration) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if v, ok := f.preLocked[sid]; ok {
+		f.states[sid] = v
+		return v, false, nil
+	}
+	current, ok := f.states[sid]
+	if !ok || current == lifecycle.StatePaused {
+		f.states[sid] = "resuming"
+		return "resuming", true, nil
+	}
+	return current, false, nil
+}
+
+func (f *fakeStore) SetState(_ context.Context, sid, state string, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states[sid] = state
+	f.ttls[sid] = ttl
 	return nil
 }
 
@@ -82,9 +104,10 @@ func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error
 // WriteState mirrors redisstream.Client.WriteState: it performs the state
 // mutation and, when a local bus is attached (see attachBus), fans out a
 // StateNotify to it.
-func (f *fakeStore) WriteState(_ context.Context, sid, state string, _ time.Duration) error {
+func (f *fakeStore) WriteState(_ context.Context, sid, state string, ttl time.Duration) error {
 	f.mu.Lock()
 	f.states[sid] = state
+	f.ttls[sid] = ttl
 	bus := f.bus
 	f.mu.Unlock()
 	if bus != nil {
@@ -197,6 +220,7 @@ func newTestResumer(reg *registry.Registry, store *fakeStore, master *fakeMaster
 		CubeMaster:   master,
 		ProxyPush:    push,
 		StateLockTTL: 30 * time.Second,
+		AmbiguityTTL: 5 * time.Second,
 		Log:          zap.NewNop(),
 	})
 }
@@ -346,13 +370,50 @@ func TestResumer_DedupesConcurrentResumes(t *testing.T) {
 	}
 }
 
+func TestResumer_DedupesAcrossReplicas(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = lifecycle.StatePaused
+	master := &fakeMaster{latency: 100 * time.Millisecond}
+	first := newTestResumer(reg, store, master, &fakePush{})
+	second := newTestResumer(reg, store, master, &fakePush{})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, r := range []*Resumer{first, second} {
+		go func(r *Resumer) {
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			errs <- r.Resume(ctx, "sbx")
+		}(r)
+	}
+	close(start)
+
+	if err := <-errs; err != nil {
+		t.Fatalf("first replica failed: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("second replica failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 1 {
+		t.Fatalf("cross-replica resumes must coalesce into 1 RPC, got %d", got)
+	}
+}
+
 func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
 	})
 	store := newFakeStore()
-	master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
+	master := &fakeMaster{failNext: true, failError: &cubemasterclient.APIError{
+		RetCode: 999,
+		RetMsg:  "definitive failure",
+	}}
 	push := &fakePush{}
 	r := newTestResumer(reg, store, master, push)
 
@@ -364,8 +425,31 @@ func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 	}
 }
 
+func TestResumer_PreservesOwnershipOnUnknownRPCResult(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	master := &fakeMaster{failNext: true, failError: errors.New("connection reset")}
+	r := newTestResumer(reg, store, master, &fakePush{})
+
+	if err := r.Resume(context.Background(), "sbx"); err == nil {
+		t.Fatal("expected error from transport failure")
+	}
+	if got := store.state("sbx"); got != "resuming" {
+		t.Fatalf("unknown result must retain ownership until TTL, got %q", got)
+	}
+	store.mu.Lock()
+	ttl := store.ttls["sbx"]
+	store.mu.Unlock()
+	if ttl != 5*time.Second {
+		t.Fatalf("unknown result must use AmbiguityTTL, got %v", ttl)
+	}
+}
+
 func TestResumer_WaitsWhenPeerHoldsLock(t *testing.T) {
-	// Pre-seed the state key with "resuming" — simulates a peer sidecar
+	// Pre-seed the state key with "resuming" — simulates a peer CLM replica
 	// that's already mid-flight on this sandbox. acquireResumeOwnership
 	// should observe it via GetState and route to waitForRunning instead
 	// of issuing a duplicate CubeMaster RPC.
@@ -446,6 +530,36 @@ func TestResumer_NoOpWhenStateIsAlreadyRunning(t *testing.T) {
 	}
 }
 
+func TestResumer_FailsFastWhenStateIsKilling(t *testing.T) {
+	for _, state := range []string{"killing", lifecycle.StateKilled} {
+		t.Run(state, func(t *testing.T) {
+			reg := registry.New()
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+			})
+			store := newFakeStore()
+			store.states["sbx"] = state
+			master := &fakeMaster{}
+			r := newTestResumer(reg, store, master, &fakePush{})
+
+			start := time.Now()
+			err := r.Resume(context.Background(), "sbx")
+			if err == nil {
+				t.Fatal("resume must fail when the sweeper owns killing/killed")
+			}
+			if !errors.Is(err, errSandboxKilled) {
+				t.Fatalf("got %v, want errSandboxKilled", err)
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Fatalf("must fail fast, took %s", elapsed)
+			}
+			if got := atomic.LoadInt32(&master.calls); got != 0 {
+				t.Fatalf("must not call master.Resume, got %d", got)
+			}
+		})
+	}
+}
+
 func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -501,6 +615,7 @@ func newTestResumerWithBus(reg *registry.Registry, store *fakeStore, master *fak
 		CubeMaster:   master,
 		ProxyPush:    push,
 		StateLockTTL: 30 * time.Second,
+		AmbiguityTTL: 5 * time.Second,
 		Log:          zap.NewNop(),
 		EventBus:     bus,
 	})
@@ -689,6 +804,7 @@ func TestClassifyState(t *testing.T) {
 		{name: "running", state: "running", ok: true, done: true},
 		{name: "paused", state: "paused", ok: true, wantErr: true, done: true},
 		{name: "killed", state: lifecycle.StateKilled, ok: true, wantErr: true, done: true},
+		{name: "killing", state: "killing", ok: true, wantErr: true, done: true},
 		{name: "missing", ok: false, wantErr: true, done: true},
 		{name: "resuming", state: "resuming", ok: true},
 		{name: "pausing", state: "pausing", ok: true},

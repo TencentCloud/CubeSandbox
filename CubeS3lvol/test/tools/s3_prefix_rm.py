@@ -31,6 +31,7 @@
 #  bucket dedicated to testing.
 
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import hmac
@@ -134,8 +135,11 @@ class Client:
 
     def delete(self, key):
         # One DELETE per object rather than the batch POST: the batch needs a
-        # signed body and per-key result parsing, and at test-bucket sizes the
-        # round trips are not the slow part.
+        # signed body and per-key result parsing. The round trips *are* the slow
+        # part -- a dataplane run leaves tens of thousands of chunk objects, and
+        # one at a time that is over ten minutes of pure latency -- so they are
+        # issued from a thread pool instead. Each call builds its own connection
+        # and touches nothing shared, so it is safe to call from any thread.
         path = self._base_path() + "/" + urllib.parse.quote(key)
         return self.request("DELETE", path)[0]
 
@@ -167,7 +171,14 @@ def main():
                         "comes back empty")
     p.add_argument("--pass-delay", type=float, default=2.0,
                    help="seconds between rounds (default: %(default)s)")
+    p.add_argument("--workers", type=int, default=32,
+                   help="concurrent DELETE requests (default: %(default)s); 1 "
+                        "restores the old serial behaviour")
     args = p.parse_args()
+
+    if args.workers < 1:
+        print("--workers must be >= 1", file=sys.stderr)
+        return 2
 
     # Credentials from the environment only, never from the command line: argv
     # is visible in ps output to every user on the host.
@@ -209,18 +220,23 @@ def main():
             print("%s: pass %d found %d more object(s)"
                   % (label, attempt, len(keys)), file=sys.stderr)
 
-        for key in keys:
+        def delete_one(key):
             try:
-                status = c.delete(key)
+                return key, c.delete(key), None
             except OSError as e:
-                status = -1
-                print("  %s -> %s" % (key, e), file=sys.stderr)
-            # 404 counts as success: the object is gone, which is the point.
-            if status in (200, 204, 404):
-                deleted += 1
-            else:
-                failed += 1
-                print("  %s -> HTTP %s" % (key, status), file=sys.stderr)
+                return key, -1, e
+
+        with concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
+            for key, status, err in pool.map(delete_one, keys):
+                if err is not None:
+                    print("  %s -> %s" % (key, err), file=sys.stderr)
+                # 404 counts as success: the object is gone, which is the point.
+                if status in (200, 204, 404):
+                    deleted += 1
+                else:
+                    failed += 1
+                    if err is None:
+                        print("  %s -> HTTP %s" % (key, status), file=sys.stderr)
 
         if attempt < args.passes:
             time.sleep(args.pass_delay)

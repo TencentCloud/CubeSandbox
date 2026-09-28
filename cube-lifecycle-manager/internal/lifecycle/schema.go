@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package lifecycle is the sidecar-local mirror of
+// Package lifecycle is the CLM-local mirror of
 // CubeMaster/pkg/lifecycle. The two MUST stay byte-compatible: CubeMaster is
-// the single writer, the sidecar is a pure consumer.
+// the single writer, CLM is a pure consumer.
 //
 // We do not import the CubeMaster module directly because it would drag in
 // MySQL, gRPC, scheduler, and a host of other heavy dependencies that have no
-// place in the sidecar. The schema is small enough that copying it (with a
-// pointer to the canonical definition) is cheaper than the cross-module wire.
+// place in Cube Lifecycle Manager. The schema is small enough that copying it
+// (with a pointer to the canonical definition) is cheaper than the
+// cross-module wire.
 //
 // Source of truth:
 //
@@ -25,13 +26,18 @@ const (
 	// EventStreamKey is the append-only stream of create/delete events.
 	EventStreamKey = "cube:v1:shared:sandbox:lifecycle:events"
 
-	// EventStreamMaxLen caps the stream so an offline sidecar cannot drive
+	// EventStreamMaxLen caps the stream so an offline CLM replica cannot drive
 	// unbounded Redis growth.
 	EventStreamMaxLen = 100000
 
 	// EventChannel carries best-effort state-change wakeup hints. Redis
 	// state keys remain the source of truth.
 	EventChannel = "cube:v1:shared:sandbox:lifecycle:notify"
+
+	// LeaderLeaseKey elects the single CLM replica allowed to run destructive
+	// maintenance work. All lease transactions touch only this key so they
+	// remain compatible with Redis Cluster slot constraints.
+	LeaderLeaseKey = "cube:v1:shared:lock:lifecycle-manager:leader"
 )
 
 // StateKilled is a state-key marker for a sandbox killed by the sweeper. It is

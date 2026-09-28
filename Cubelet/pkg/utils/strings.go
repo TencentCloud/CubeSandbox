@@ -22,7 +22,7 @@ import (
 	"unsafe"
 
 	jsoniter "github.com/json-iterator/go"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 

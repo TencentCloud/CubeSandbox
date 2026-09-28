@@ -16,27 +16,6 @@ ROOT = Path(__file__).resolve().parents[3]
 SDK_COMPAT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SDK_COMPAT_ROOT))
 
-from adapters import create_adapter_with_capacity_retry  # noqa: E402
-from framework.capabilities import (  # noqa: E402
-    CODE_INTERPRETER,
-    capabilities_for_backend,
-)
-from framework.cleanup import safe_kill  # noqa: E402
-from framework.config import SdkE2EConfig, volume_plugin_enabled_from_env  # noqa: E402
-from framework.parallel import (  # noqa: E402
-    apply_worker_count,
-    current_worker_count,
-    wants_parallel,
-)
-from framework.preflight import run_preflight  # noqa: E402
-from framework.reporting import JsonlReporter  # noqa: E402
-from framework.trace import (  # noqa: E402
-    TraceCollector,
-    reset_current_trace,
-    set_current_trace,
-)
-
-
 def _load_dotenv(path: Path) -> None:
     if not path.exists():
         return
@@ -60,6 +39,39 @@ def _strip_env_value(value: str) -> str:
 
 
 _load_dotenv(SDK_COMPAT_ROOT / ".env")
+
+
+def _prepare_sdk_import_path() -> None:
+    configured = os.environ.get("CUBE_PYTHON_SDK_PATH")
+    sdk_path = Path(configured) if configured else ROOT / "sdk" / "python"
+    package_init = sdk_path / "cubesandbox" / "__init__.py"
+    if not package_init.is_file():
+        source = "CUBE_PYTHON_SDK_PATH" if configured else "the repository default"
+        raise pytest.UsageError(f"{source} ({sdk_path}) is invalid: expected {package_init}")
+    sys.path.insert(0, str(sdk_path))
+
+
+_prepare_sdk_import_path()
+
+from adapters import create_adapter_with_capacity_retry  # noqa: E402
+from framework.capabilities import (  # noqa: E402
+    CODE_INTERPRETER,
+    capabilities_for_backend,
+)
+from framework.cleanup import safe_kill  # noqa: E402
+from framework.config import SdkE2EConfig, volume_plugin_enabled_from_env  # noqa: E402
+from framework.parallel import (  # noqa: E402
+    apply_worker_count,
+    current_worker_count,
+    wants_parallel,
+)
+from framework.preflight import run_preflight  # noqa: E402
+from framework.reporting import JsonlReporter  # noqa: E402
+from framework.trace import (  # noqa: E402
+    TraceCollector,
+    reset_current_trace,
+    set_current_trace,
+)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -155,6 +167,7 @@ def pytest_configure(config: pytest.Config):
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
         "sandbox_template_id(template_id): override template ID for this test or module",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
+        "requires_run_code_env_inheritance: test requires an opt-in template whose run_code inherits create-time envs",
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
         "auth: CUBE_API_KEY simple-key authentication control-plane tests",
@@ -281,10 +294,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 
 def _prepare_runtime_env(cfg: SdkE2EConfig) -> None:
-    if cfg.cube_python_sdk_path:
-        sys.path.insert(0, cfg.cube_python_sdk_path)
-    else:
-        sys.path.insert(0, str(ROOT / "sdk" / "python"))
     for key, value in cfg.env().items():
         os.environ.setdefault(key, value)
 
@@ -384,6 +393,15 @@ def sdk_sandbox(
             pytest.skip(
                 f"backend {sdk_backend!r} does not support stateful Code Interpreter"
             )
+
+    if (
+        request.node.get_closest_marker("requires_run_code_env_inheritance")
+        and not sdk_e2e_config.run_code_env_inheritance_enabled
+    ):
+        pytest.skip(
+            "run_code env inheritance requires "
+            "SDK_E2E_RUN_CODE_ENV_INHERITANCE=true and a compatible template"
+        )
 
     if request.node.get_closest_marker("requires_cubeproxy") and not sdk_e2e_config.platform_lifecycle_enabled:
         pytest.skip(
@@ -586,6 +604,9 @@ def _log_effective_environment(cfg: SdkE2EConfig) -> None:
         "CUBE_PROXY_NODE_IP": cfg.cube_proxy_node_ip,
         "CUBE_PROXY_PORT_HTTP": str(cfg.cube_proxy_port_http),
         "CUBE_SANDBOX_DOMAIN": cfg.cube_sandbox_domain,
+        "SDK_E2E_RUN_CODE_ENV_INHERITANCE": str(
+            cfg.run_code_env_inheritance_enabled
+        ).lower(),
         "SDK_E2E_PLATFORM_LIFECYCLE": str(cfg.platform_lifecycle_enabled).lower(),
         "SDK_E2E_VOLUME_PLUGIN": str(cfg.volume_plugin_enabled).lower(),
         "SDK_E2E_VOLUME_DRIVER": cfg.volume_driver,

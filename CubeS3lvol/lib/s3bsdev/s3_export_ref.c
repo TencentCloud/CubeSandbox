@@ -62,8 +62,10 @@
  *   to do, turned an ordinary sparse snapshot into a full copy.
  *
  *   is_zeroes() separates the two, because it consults the overlay as well as
- *   the chunk map. A hole is left out of the bitmap, which is exactly how the
- *   manifest spells "reads as zeroes"; anything else still stops the walk.
+ *   the chunk map. A hole is left out of the present bitmap -- which is how
+ *   the importer spells "reads as zeroes" -- and marked resolved so inherit()
+ *   and older layers cannot put a parent object back. Anything else still
+ *   stops the walk.
  */
 
 #include "spdk/stdinc.h"
@@ -97,16 +99,18 @@ struct ref_walk {
 	uint64_t                   bytes_named;
 
 	/* Clusters blobstore has allocated that hold no data at all. Counted
-	 * rather than recorded: the manifest says "not present" for them, which
-	 * is what the importer needs, and the count is worth a line in the log. */
+	 * rather than recorded as present: the published bitmap still says
+	 * "not present" for them, which is what the importer needs. They are
+	 * marked resolved so inherit cannot restore a parent object. */
 	uint64_t                   holes;
 };
 
 /* One layer. Returns the number of chunks it contributed, or negative on error.
  *
- * Chunks already named are skipped rather than overwritten: the layers arrive
- * nearest first, so whoever got there first is the closest layer that has the
- * cluster, which is the one blobstore would reach by reading through the chain.
+ * Chunks already named, or already settled as local zeroes, are skipped rather
+ * than overwritten: the layers arrive nearest first, so whoever got there first
+ * is the closest layer that has the cluster, which is the one blobstore would
+ * reach by reading through the chain.
  */
 static int64_t
 walk_layer(struct ref_walk *w, struct spdk_blob *blob, const char *uuid_str,
@@ -138,8 +142,10 @@ walk_layer(struct ref_walk *w, struct spdk_blob *blob, const char *uuid_str,
 
 		export_chunk = offset / w->io_units_per_chunk;
 
-		if (s3_export_manifest_is_present(w->m, export_chunk)) {
-			/* A nearer layer already owns this chunk. */
+		if (s3_export_manifest_is_present(w->m, export_chunk) ||
+		    s3_export_manifest_is_resolved(w->m, export_chunk)) {
+			/* A nearer layer already owns this chunk, or settled it as
+			 * zeroes. */
 			offset += w->io_units_per_chunk;
 			continue;
 		}
@@ -177,11 +183,14 @@ walk_layer(struct ref_walk *w, struct spdk_blob *blob, const char *uuid_str,
 			 *
 			 * is_zeroes() is the device's own answer to exactly this question
 			 * -- it checks the overlay as well as the chunk map -- so it is
-			 * asked rather than reimplemented. A hole is left absent from the
-			 * bitmap, which is how the manifest spells "reads as zeroes".
+			 * asked rather than reimplemented. A hole is left absent from
+			 * the present bitmap, which is how the importer spells "reads
+			 * as zeroes", and marked resolved so inherit() cannot restore
+			 * a parent object over the zero.
 			 */
 			if (w->bs_dev->is_zeroes(w->bs_dev, lba,
 						 w->io_units_per_chunk)) {
+				s3_export_manifest_set_resolved(w->m, export_chunk);
 				w->holes++;
 				offset += w->io_units_per_chunk;
 				continue;
@@ -220,6 +229,7 @@ s3_export_run_ref(const struct s3_export_ref_opts *opts, s3_export_cb cb, void *
 	struct s3_export_manifest *m = NULL;
 	struct ref_walk w = {0};
 	uint64_t size_bytes;
+	uint64_t inherited = 0;
 	uint32_t chunk_size;
 	uint32_t i;
 	int64_t contributed;
@@ -232,6 +242,27 @@ s3_export_run_ref(const struct s3_export_ref_opts *opts, s3_export_cb cb, void *
 	for (i = 0; i < opts->chain_len; i++) {
 		if (!opts->chain[i]) {
 			return -EINVAL;
+		}
+	}
+
+	/* An esnap chain with no parent manifest would produce a manifest that is
+	 * short exactly where the export it reads through holds data, and short in a
+	 * manifest means "reads as zeroes". Refused here as well as at the caller,
+	 * because the caller is the one place that knows and this is the one place
+	 * that can prove it. */
+	if (spdk_blob_is_esnap_clone(opts->chain[opts->chain_len - 1]) &&
+	    !opts->parent) {
+		SPDK_ERRLOG("Export %s: the chain ends in an external snapshot but no "
+			    "parent manifest was given, so the chunks it inherits could "
+			    "not be named\n", opts->uuid_str);
+		return -EINVAL;
+	}
+
+	if (opts->parent) {
+		rc = s3_export_manifest_inheritable(opts->parent, &opts->src,
+						    opts->uuid_str);
+		if (rc != 0) {
+			return rc;
 		}
 	}
 
@@ -278,6 +309,19 @@ s3_export_run_ref(const struct s3_export_ref_opts *opts, s3_export_cb cb, void *
 		return -ENOTSUP;
 	}
 
+	/* Chunk indices are only comparable between two manifests of the same chunk
+	 * size: index i means a different byte range under each. Inheriting across a
+	 * change of chunk size would need the ranges re-cut, which is reading and
+	 * rewriting the data -- exactly what the copy engine does. */
+	if (opts->parent && opts->parent->chunk_size != chunk_size) {
+		SPDK_NOTICELOG("Export %s: parent %s has a chunk size of %u against "
+			       "this lvstore's %u, so their chunk indices do not line "
+			       "up. Exporting by copying instead.\n", opts->uuid_str,
+			       opts->parent->uuid_str, opts->parent->chunk_size,
+			       chunk_size);
+		return -ENOTSUP;
+	}
+
 	w.chunk_shift = spdk_u32log2(chunk_size);
 	w.io_units_per_chunk = chunk_size / S3LVOL_BLOCK_SIZE;
 	w.num_io_units = spdk_blob_get_num_io_units(opts->chain[0]);
@@ -294,6 +338,7 @@ s3_export_run_ref(const struct s3_export_ref_opts *opts, s3_export_cb cb, void *
 	m->cluster_size = opts->cluster_size;
 	m->created_at = (uint64_t)time(NULL);
 	m->expires_at = opts->expires_at;
+	m->generation = opts->generation;
 
 	/* The walk. Every step is memory: blobstore is asked which cluster is next,
 	 * not to read it. */
@@ -307,11 +352,44 @@ s3_export_run_ref(const struct s3_export_ref_opts *opts, s3_export_cb cb, void *
 			      " chunk(s)\n", opts->uuid_str, i, contributed);
 	}
 
+	/* Then whatever the chain inherited from an export rather than from a blob.
+	 * Last, so every local layer has already claimed what it owns -- a chunk
+	 * rewritten since the import must resolve to the rewritten cluster, and a
+	 * locally zeroed chunk must stay a hole. */
+	if (opts->parent) {
+		uint64_t bytes = 0;
+
+		rc = s3_export_manifest_inherit(m, opts->parent, &inherited, &bytes);
+		if (rc != 0) {
+			/* Including -E2BIG, which leaves m holding the sources that did
+			 * fit and the chunks recorded against them. Not repaired,
+			 * because err drops the manifest -- publishing happens further
+			 * down and only on the success path, so a half-filled one is
+			 * never written. The caller copies instead. */
+			goto err;
+		}
+		w.named += inherited;
+		w.bytes_named += bytes;
+		SPDK_DEBUGLOG(s3lvol_export, "Export %s: inherited %" PRIu64
+			      " chunk(s) from export %s\n", opts->uuid_str, inherited,
+			      opts->parent->uuid_str);
+	}
+
 	SPDK_NOTICELOG("Export %s references %" PRIu64 " object(s) holding %" PRIu64
 		       " byte(s) of a %" PRIu64 "-byte snapshot across %u layer(s), "
 		       "skipping %" PRIu64 " zeroed cluster(s); nothing was copied\n",
 		       opts->uuid_str, w.named, w.bytes_named, size_bytes,
 		       opts->chain_len, w.holes);
+
+	/* Said separately because it is the part an operator cannot infer: these
+	 * chunks are not under this lvstore's prefix, so this node's own snapshot
+	 * being present is not enough to keep the export readable. */
+	if (inherited) {
+		SPDK_NOTICELOG("Export %s inherits %" PRIu64 " of those chunk(s) from "
+			       "export %s, across %u prefix(es) in total\n",
+			       opts->uuid_str, inherited, opts->parent->uuid_str,
+			       m->num_srcs);
+	}
 
 	/* Hands its reference to the callback. */
 	rc = s3_export_manifest_publish(opts->client, m, cb, cb_arg);

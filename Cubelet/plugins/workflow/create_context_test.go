@@ -9,8 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestCreateContextIsPauseResume(t *testing.T) {

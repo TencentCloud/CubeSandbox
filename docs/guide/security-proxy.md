@@ -18,6 +18,9 @@ rule list attached at sandbox-creation time:
 - **Access auditing** — every decision (allow / deny / inject /
   TLS handshake outcome) is written to a per-host JSONL audit log.
 
+Upstream `proxy_read_timeout` / `proxy_send_timeout` are 2h (same
+order as CubeProxy). `proxy_connect_timeout` stays 10s.
+
 ## How it intercepts
 
 CubeEgress runs as a host-network container and binds two TPROXY
@@ -237,6 +240,30 @@ The point of the inject path is that the secret stays on the
 operator side: it lives in the rule list, gets pushed to
 CubeEgress at sandbox creation, and is never exposed to the
 sandbox's environment, filesystem, or process space.
+
+### Security notes
+
+HTTP credential injection is risky. Use it only on a controlled
+private network. Unless you have no other option, use HTTPS.
+
+Plain HTTP cannot authenticate the peer. After a `Host` match, the
+injected credential is forwarded to whatever destination IP the
+name resolved to.
+
+A typical scenario: the sandbox is created with
+`allow_internet_access=true`, and `example.com` has a
+credential-inject rule. An attacker who controls the DNS used to
+resolve that name can point `example.com` at an IP they own. The
+next matching HTTP request then carries the injected credential to
+the attacker's server. This is not a CubeSandbox defect — plaintext
+HTTP has no way to verify the peer.
+
+::: warning Prefer HTTPS
+Write inject rules with `scheme="https"`. Only use `scheme="http"`
+when the upstream lives on a network you fully control. Omitting
+`scheme` matches both HTTP and HTTPS, so the HTTP side injects the
+credential as well.
+:::
 
 ## Access auditing
 

@@ -300,6 +300,7 @@ You can also point to prebuilt binaries to skip compilation:
 |----------|-------------|
 | `ONE_CLICK_CUBEMASTER_BIN` | Path to prebuilt cubemaster binary |
 | `ONE_CLICK_CUBEMASTERCLI_BIN` | Path to prebuilt cubemastercli binary |
+| `ONE_CLICK_TEMPLATECENTER_BIN` | Path to prebuilt templatecenter binary |
 | `ONE_CLICK_CUBELET_BIN` | Path to prebuilt cubelet binary |
 | `ONE_CLICK_CUBECLI_BIN` | Path to prebuilt cubecli binary |
 | `ONE_CLICK_CUBE_API_BIN` | Path to prebuilt cube-api binary |

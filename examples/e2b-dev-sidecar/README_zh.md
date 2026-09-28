@@ -36,6 +36,8 @@ cp env.example .env
 编辑 `.env`，至少填这三个值：
 
 ```bash
+# 如果 Cube 跑在 dev-env 虚机里，启动虚机时带上：
+#   EXTRA_FORWARDS="13000:3000 11443:443" ./dev-env/run_vm.sh
 # **If you are running Cube on remote machine,** replace this with:  http://<node-ip>:3000
 E2B_API_URL="http://127.0.0.1:13000"
 # **If you are running Cube on remote machine,** replace this with:  https://<node-ip>:443

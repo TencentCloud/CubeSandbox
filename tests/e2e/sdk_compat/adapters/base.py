@@ -79,13 +79,28 @@ class SandboxAdapter(ABC):
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
     @abstractmethod
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
         raise NotImplementedError
 
     def pause(self, *, timeout: int = 60) -> None:
         raise UnsupportedCapability(self.backend, "pause_resume")
 
     def resume_or_connect(self, *, timeout: int = 60) -> "SandboxAdapter":
+        raise UnsupportedCapability(self.backend, "pause_resume")
+
+    def resume_idle_timeout(self, timeout: int | None) -> "SandboxAdapter":
+        """Resume a paused sandbox and apply an explicit idle TTL.
+
+        Unlike ``resume_or_connect``, this forwards ``timeout`` as the sandbox
+        idle TTL (``None`` omits the field). The ``timeout`` argument on
+        ``resume_or_connect`` is only a wait budget.
+        """
         raise UnsupportedCapability(self.backend, "pause_resume")
 
     def set_timeout(self, timeout: int) -> None:

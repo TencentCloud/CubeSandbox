@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -204,8 +204,10 @@ jobs:
           known = {
               "cube-egress",
               "cube-egress-net",
+              "cube-s3lvol",
               "cube-master",
               "cubemastercli",
+              "cube-templatecenter",
               "cubelet",
               "cube-shim",
               "cube-kernel",
@@ -246,6 +248,14 @@ jobs:
                   "cache_scope": "cube-egress-net",
               },
               {
+                  "component": "cube-s3lvol",
+                  "image": "cube-s3lvol",
+                  "context": ".",
+                  "dockerfile": "deploy/kubernetes/images/cube-s3lvol/Dockerfile",
+                  "cache_scope": "cube-s3lvol",
+                  "arches": ["amd64"],
+              },
+              {
                   "component": "cube-master",
                   "image": "cube-master",
                   "context": ".",
@@ -258,6 +268,13 @@ jobs:
                   "context": ".",
                   "dockerfile": "CubeMaster/docker/Dockerfile.cubemastercli",
                   "cache_scope": "cubemastercli",
+              },
+              {
+                  "component": "cube-templatecenter",
+                  "image": "cube-templatecenter",
+                  "context": ".",
+                  "dockerfile": "CubeTemplateCenter/docker/Dockerfile",
+                  "cache_scope": "cube-templatecenter",
               },
               {
                   "component": "cubelet",
@@ -731,6 +748,7 @@ jobs:
             CUBE_VERSION=${{ inputs.image_tag }}
             CUBE_COMMIT=${{ steps.meta.outputs.commit }}
             CUBE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CUBE_BUILDER_IMAGE=ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
             CUBE_PROXY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
             OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
             CUBE_KERNEL_BM_VERSION=${{ steps.stage_kernel.outputs.asset_tag_bm || inputs.image_tag }}
@@ -830,6 +848,20 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
+          # Official archive/security HTTP is currently unreachable; this job
+          # runs on a Tencent Cloud GZ runner, so use Tencent Cloud mirrors.
+          mirror="http://mirrors.tencent.com"
+          shopt -s nullglob
+          for src in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            sed -i \
+              -e "s|http://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              -e "s|https://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              "${src}"
+          done
           apt-get update
           apt-get install -y --no-install-recommends curl ca-certificates
           rm -rf /var/lib/apt/lists/*

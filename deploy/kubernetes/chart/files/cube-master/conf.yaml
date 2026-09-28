@@ -11,6 +11,16 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # Template build wiring: CubeMaster no longer has a templatecenter_enabled
+  # switch. Every template-from-image build is forwarded to CubeTemplateCenter.
+  #
+  # CubeTemplateCenter's address can be set here (persistent, per-deployment)
+  # or overridden by the CUBE_TEMPLATE_CENTER_ADDR environment variable
+  # (ad-hoc debugging). Env wins over yaml. Both empty means "not configured"
+  # and all template builds will fail.
+  {{- if .Values.controlPlane.enabled }}
+  template_center_addr: "{{ include "cube.templateCenterEndpoint" . }}"
+  {{- end }}
 
 log:
   module: "cubemaster"
@@ -24,6 +34,8 @@ cubelet_conf:
     grpc_port: 9999
   common_timeout_insec: 30
   create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: {{ .Values.controlPlane.master.appSnapshotTimeoutSeconds }}
+  create_timeout_insec: 600
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
   enable_exposed_port: true
@@ -71,7 +83,7 @@ redis:
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
-  db_no: 0
+  db_no: {{ include "cube.redisDB" . }}
   max_idle: 8
   max_active: 32
   idle_timeout: 30

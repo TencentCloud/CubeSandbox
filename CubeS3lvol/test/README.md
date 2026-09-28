@@ -12,19 +12,16 @@ them in this order -- the earlier ones are faster and need less environment.
 ## Running everything with one command
 
 ```sh
-make check           # 23 suites, 928 assertions, about 6 minutes (= test/run_all.sh)
-make check-offline   # only the suites needing no credentials and no root: 11, 491 assertions, about 40 seconds
+make check           # all suites in test/run_all.sh; dataplane needs root + S3
+make check-offline   # suites needing no credentials and no root (see `test/run_all.sh --list`)
 test/run_all.sh --list          # show what would run and what the environment has
 test/run_all.sh --no-dataplane  # both integration layers, no dataplane
 ```
 
 The reason `run_all.sh` exists is that the suites' preconditions had drifted
-apart: ten integration tests run anywhere, two need real credentials, ten
-dataplane scripts need root + credentials + a writable `/data` + exclusive use
-of the machine's nvme stack; and the arguments differ too (seven take
-`-e/-b/-r`, six read `s3.cfg` themselves). So "run the tests" had become
-"remember twenty-two invocations", and in practice meant running only the two
-or three related to whatever had just changed.
+apart: which tests need credentials, root, or a writable `/data` lives in
+`run_all.sh --list` (and the skip reasons it prints), not in a count that
+rots every time a suite is added.
 
 A few design decisions, each corresponding to a way a run can "look green while
 testing nothing":
@@ -146,8 +143,11 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./test/dataplane/run_export_test.sh    -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_selfimport_test.sh    # reads /data/cubelet/s3.cfg, no arguments
 ./test/dataplane/run_snapdelete_test.sh    # same
+./test/dataplane/run_cubecow_client_test.sh    # same; cubecow/Cubelet RPC order
 ./test/dataplane/run_activation_test.sh    # same
 ./test/dataplane/run_fs_test.sh            # same; really does mkfs.xfs + mount
+./test/dataplane/run_hot_upgrade_test.sh            # same; I/O continuity across a hot restart
+./test/dataplane/run_hot_upgrade_negative_test.sh   # same; faults injected into the same path
 ./test/dataplane/run_guards_test.sh        # same; the two accidental-deletion guards
 ./test/dataplane/run_control_test.sh       # same; drives the scripts under scripts/
 ```
@@ -229,8 +229,10 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   `rcow_get_snapshot_status` takes `export_uuid` or `snapshot_name` (exactly
   one; giving both is refused) and on success returns `export_status`
   (INPROGRESS / DONE / NONE) and `deletable` (YES / NO, computed on the spot:
-  NO while an export is in progress, when the snapshot is referenced by a
-  zero-copy export, or when it has more than one clone).
+  NO while an export is in progress, when a live/unknown lease or local esnap
+  reader still references a zero-copy export, or when it has more than one
+  clone). An idle REF export does not pin the snapshot: deleting the snapshot
+  releases that export.
 
   The two forms differ only in what "does not exist" means: queried by uuid, an
   export that matches nothing follows the failure path (`bool_value` false,
@@ -240,32 +242,34 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   form exists: a never-exported snapshot still needs its `deletable` asked, and
   there is no uuid to ask with.
 
-- `run_selfimport_test.sh` -- 28 assertions. `export_snapshot` + `import_lvol`
+- `run_selfimport_test.sh` -- `export_snapshot` + `import_lvol`
   inside the same lvstore now degenerates into a **local clone** (the RPC reply's
   `mode` field says whether it is `local_clone` or `esnap`). `export_snapshot`
   was not changed at all: the manifest cannot know at write time whether it will
   be consumed locally or on another machine, so the decision has to sit on the
   import side.
 
-  The degeneration holds only when all three criteria match: `endpoint`+`bucket`
-  +`prefix` all equal, the snapshot still exists and is read-only, and the
-  `snapshot_uuid` is the same. **The point of the test is not the happy path but
-  that the inverse of each criterion falls back to esnap** -- the first version
-  used `blob_id` as identity and step [4] caught it immediately cloning a
-  recreated same-name volume: the blobstore derives blob ids from the lowest
-  free md page, so delete-then-create hands out the same id. Identity is the
-  lvol uuid.
-
-  Step [4] judges by **content** rather than just the mode, but it cannot assert
-  "reads the exported data": creating a "same name, different blob" requires
-  deleting the original snapshot, which frees the objects the REF export
-  references. So it asserts "**not** the replaced data" -- reading empty is the
-  correct result.
+  The local-clone optimisation requires matching endpoint, bucket, prefix,
+  snapshot name and lvol uuid. The suite also verifies the lifecycle invariant:
+  deleting the source snapshot releases its export, and reusing the snapshot
+  name for another blob or writable lvol does not revive that export.
 
   Why the degeneration is worth it: a local clone's parent is pinned by the
   blobstore (a snapshot with a clone cannot be deleted), while an esnap clone's
-  parent is pinned by the export, which can be released and also expires (the
-  REF default TTL is only 3600 s). So it is safer, not just faster.
+  parent is protected by the export lease until the esnap clone decouples or is
+  deleted. So it is safer, not just faster.
+
+- `run_cubecow_client_test.sh` -- the cubecow / Cubelet client contract. Cubelet
+  never calls JSON-RPC itself; cubecow always uses the same 11 `rcow_*` methods
+  in a fixed order, and that order is what this suite drives. Existing suites
+  cover the mechanisms (export, clone isolation, two-process import) but not
+  the composition Cubelet actually issues: seal (ext4, umount, inactive snap,
+  delete the work volume), N clones from one template plus resize of a clone,
+  three snapshots exported at once and polled by `snapshot_name`, a refused
+  template delete whose error must not contain `not found`, a failed import
+  that must not leave a named lvol, and `import(decouple=true)` followed by
+  `rcow_active_bdev` without waiting for decouple. It reads `s3.cfg` and uses
+  its own lvstore / WAL / registries.
 
 - `run_snapdelete_test.sh` -- 23 assertions. **Deleting a snapshot while its
   source volume is still alive**, and the boundaries of that.
@@ -355,6 +359,30 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   log `-n` refuses to replay and reports a free-block count it cannot reconcile,
   which is complaining about the log, not the snapshot.
 
+- `run_hot_upgrade_test.sh` -- I/O continuity across a hot upgrade. One target,
+  N volumes each under a time-based fio, and one or two restarts that SIGKILL
+  the target and rebuild the same NQN/NSID/UUID layout rather than disconnecting
+  and unloading. The claim is that the host's I/O **pauses and never errors**:
+  fio must report `err 0` and `io_errors 0`, the layout captured before the stop
+  must return byte-identical (`rcow_verify_active --expect`), all 32 controllers
+  must end `live`, and dmesg must gain neither a `Buffer I/O error` nor a
+  namespace-removal line. It prints `pause_window_ms=<n>` as a regression
+  baseline. `--cross-spdk <tree>` runs the second upgrade with a target built
+  against a different SPDK -- the only way to exercise a firmware-revision
+  change; without the flag that case is skipped loudly,
+  never silently repeated with the same binary. Owns its lvstore and **must not
+  run concurrently with anything else on the machine**.
+- `run_hot_upgrade_negative_test.sh` -- the same path with faults injected, one
+  scenario per function: a new binary that crashes on start and rolls back; the
+  version gate refusing a bumped `ckpt_version` / `journal_op_max` while the
+  target and its I/O stay untouched; a stale `hot-restart` marker refused after a
+  faked boot_id change; a second target refused with the basename fallback
+  still finding an unlinked one; the three timeout faults (wrong write order
+  and a delay-only write collapse the retry budget and the read-back detects it,
+  and a `reconnect_delay` of 0 or negative is refused before it reaches sysfs);
+  and a window stretched past `ctrl_loss_tmo` so controller deletion is observed
+  and logged. The destructive scenarios run last and restore the machine. Same
+  exclusivity requirement as its sibling.
 - `run_guards_test.sh` -- 24 assertions, two guards against "creating a live
   lvstore out from under", both added after a near-miss.
 
@@ -443,8 +471,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   next round red while **the round that actually produced it shows all green**,
   wrong on both ends.
 
-Common conventions of the dataplane scripts (seven take `-e/-b/-r`
-arguments, the other six read `/data/cubelet/s3.cfg` themselves):
+Common conventions of the dataplane scripts (those that take `-e/-b/-r`
+versus those that read `/data/cubelet/s3.cfg` themselves):
 
 | Environment variable | Effect |
 |----------|------|
@@ -488,10 +516,16 @@ test/tools/s3lvol_rpc.py --retry-pending   # re-issue the snapshot deletes that
 ```
 
 `--retry-pending` acts on the pending-delete marks a refused snapshot delete
-leaves behind (`PEND` in `--ls`). The marks are in the target's memory only,
-nothing retries them automatically, and there is no cancel -- see
+leaves behind (`PEND` in `--ls`). A ~60s poller already completes leased
+exports, extra clones, and finished decouples; `--retry-pending` is for
+lease-less exports, failed destroys, and not waiting out the poller. Marks are
+persisted to `<prefix>/meta/pending-deletes.json` (crash before that PUT
+forgets the intent). Withdraw a mark with `rcow_cancel_pending_delete`; see
 [Retrying a refused snapshot delete](../README.md#retrying-a-refused-snapshot-delete---retry-pending)
-in the main README for the full contract.
+in the main README for the full contract, including the race if the poller
+has already submitted destroy. `run_pending_delete_test.sh` step [11] uses
+`rcow_pending_load_hold` to delay that registry's HEAD and GET around unload
+(test-only; production never parks attach).
 
 Especially useful when debugging a hung target: a process a test script left
 behind can be asked for its state directly.

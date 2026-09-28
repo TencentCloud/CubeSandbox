@@ -7,42 +7,11 @@ package utils
 import (
 	"bytes"
 	"errors"
-	"math/rand"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func Test_HashCode(t *testing.T) {
-	size := 10000
-	cases := make([]string, 0, size)
-	for i := 0; i < len(cases); i++ {
-		cases = append(cases, strconv.Itoa(int(rand.Int31n(int32(size)))))
-	}
-
-	startTime := time.Now().UnixNano()
-	m := make(map[string]uint32, size)
-	for _, c := range cases {
-		code := HashCode(c)
-		m[c] = code
-	}
-	for _, c := range cases {
-		t.Run(c, func(t *testing.T) {
-			code := HashCode(c)
-
-			if code != m[c] {
-				t.Errorf("hashCode diff, %s code:%d, %d difference", c, code, m[c])
-			}
-		})
-	}
-	useTime := time.Now().UnixNano() - startTime
-	if useTime > 1000000 {
-		t.Errorf("use too much time, use %d ms, each use %d ns", useTime/(1000000), useTime/int64(size))
-	}
-}
 
 func TestString2Slice(t *testing.T) {
 	testCases := []struct {

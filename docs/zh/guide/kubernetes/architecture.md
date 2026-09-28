@@ -18,7 +18,7 @@
 | 管理入口 | WebUI | Deployment + Service + ConfigMap | 静态控制台；`/opsapi/`、`/cubeapi/v1/` 反代到 CubeOps（依赖 `cubeOps.enabled`） |
 | 运维入口 | cubemastercli | Deployment | `kubectl exec` 用 CLI；注入本 Release 的 CubeMaster endpoint |
 | 依赖存储 | MySQL / Redis / MinIO | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 / S3 Volume 后端 |
-| 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + 内嵌 network runtime 的 cubelet + 可选 egress |
+| 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + 内嵌 network runtime 的 cubelet + 可选 egress / s3lvol |
 | 计算面 · 产物 | `cube-node-installer` | 原生 `apps/v1` DaemonSet | 将 shim / kernel / guest 安装到宿主机 toolbox |
 | 计算面 · 节点引导 | `cube-node-bootstrap` | 原生 `apps/v1` DaemonSet | `wait-pvm-host`、`cube-node-init`、写 `node-prep-ready` |
 | 计算面 · PVM 宿主机 | `cube-node-pvm` | 原生 `apps/v1` DaemonSet（仅 `placement.pvm`） | PVM host kernel 安装（可 reboot）；管理 L0 污点并写指纹 |
@@ -63,6 +63,7 @@ flowchart TB
       WAIT["init: wait-node-prep（就绪后退出）"]
       RUN["cubelet + embedded network runtime"]
       EG["cube-egress + cube-egress-net"]
+      S3L["optional cube-s3lvol"]
     end
   end
 
@@ -118,6 +119,7 @@ flowchart TB
 | 第三方 Redis | `redis.host` 非空 → 不装内置 Redis |
 | 内置 MinIO | `minio.enabled=true` → 部署 StatefulSet + Headless Service（`minio.*` 只负责部署 MinIO 本身；`rootPassword` 留空则自动生成）。若未设置 `volumeS3.endpoint` / `existingSecret`，Chart 从内置 MinIO 自动生成 S3 配置并写出 `volume-s3.conf` |
 | 外部 S3 | `minio.enabled=false` 且设置 `volumeS3.endpoint` / `volumeS3.existingSecret` → 不部署内置 MinIO；`volume-s3.conf` 从 `volumeS3.*` 生成 |
+| 本地盘 blobstore | `artifactStore.backend=fs` / `cubeOps.store.backend=fs` 用于模板产物与组件仓库（默认 `s3`）；S3 Volume 不受影响 |
 
 ### 2.3 计算面：四个 DaemonSet
 
@@ -127,10 +129,10 @@ flowchart TB
 
 #### Big Pod：`cube-node`
 
-- `hostNetwork: false`（Pod 网络）；原生 `apps/v1` DaemonSet。
+- `hostNetwork: true`（默认宿主机网络；`cubeNode.hostNetwork: false` 可改用 Pod 网络）；原生 `apps/v1` DaemonSet。
 - **initContainer**：`wait-node-prep`（指纹匹配后 **exit 0**，不作为常驻 sidecar）。
-- 镜像 / 资源 / Pod template 变更会 **recreate** Big Pod（PodIP/netns 变化，存量沙箱中断）。详见 [升级](./upgrade.md)。
-- **NodeID** = `spec.nodeName`；**Endpoint** = `status.podIP`。
+- 镜像 / 资源 / Pod template 变更会 **recreate** Big Pod。沙箱 tap 设备与 cubevs 钩子位于 Pod netns 中：宿主机网络下重建后保留，Pod 网络下会中断。详见 [升级](./upgrade.md)。
+- **NodeID** = `spec.nodeName`；**Endpoint** = `status.podIP`（宿主机网络下即节点 IP）。
 - toolbox **整树** hostPath：`/usr/local/services/cubetoolbox`。
 
 | 容器 | 镜像 | 职责 |
@@ -138,6 +140,7 @@ flowchart TB
 | `wait-node-prep`（init） | `images.waitNodePrep` | 只读 hostPath `node-prep-ready` 自描述指纹；匹配后退出，主容器才启动 |
 | `cubelet` | `images.cubelet` | self-stage 后启动；包含内嵌 network runtime 和 CubeVS 工具 |
 | `cube-egress` / `cube-egress-net` | 对应镜像 | 可选；透明出站 / TPROXY |
+| `cube-s3lvol` | `images.cubeS3lvol` | 可选；SPDK NVMe/TCP target，用于 S3 CoW / 跨机快照 |
 
 **容器名 / volumeMount / securityContext / imagePullPolicy 变更同样 recreate**。
 
@@ -191,6 +194,12 @@ Guest 选核：先看 `effective-pvm`；没有则尽量保持节点上一次已�
 
 CubeProxy 经 Redis 中的 owner 元数据转发到目标 compute 节点 sandbox。
 
+### 2.5 cube-lifecycle-manager 高可用
+
+chart 默认 `lifecycleManager.replicas=2` 且 `leaderElection.enabled=true`，以主备方式运行：每个副本都消费生命周期事件、处理恢复回调，由 Redis 租约选出的 leader 执行空闲扫描/销毁和过期注册清理；共享的沙箱状态只有 leader 会写。`replicas` 大于 1 却关闭选主会在 Helm 校验阶段失败。Terraform 一键部署默认同样是双副本主备。
+
+leader 故障切换后，新 leader 按保守策略恢复共享状态：状态记录不一致的沙箱按安全的一侧记为 `paused`，下次请求照常 auto-resume。用户可见的影响见 [FAQ](faq.md)。
+
 ## 3. DNS
 
 Chart **不**部署自有 CoreDNS。Proxy 启用且 `configureClusterDNS=true`（默认）时：
@@ -237,7 +246,7 @@ flowchart TD
 - `configureClusterDNS=true` 须配置 `cubeProxy.domain`。
 - compute-only 须配置 `externalControlPlane.masterEndpoint`。
 - `pvmHostKernel.enabled=true` 时 `placement.pvm` 须含 `allow-pvm-bootstrap`，且 **不得** 写在 `placement.compute`。
-- 已移除 `security.hostNetwork`；cube-node 固定 Pod 网络。
+- 已移除 `security.hostNetwork`；cube-node 的网络模式由 `cubeNode.hostNetwork` 控制（默认 true = 宿主机网络）。
 
 调度：控制面用 `placement.controlPlane`；`cube-node` / installer / bootstrap 用 `placement.compute`；`cube-node-pvm` 用 `placement.pvm`。Chart 管理的容器经 `global.timezone` 注入 `TZ`（默认 `Asia/Shanghai`）。
 
@@ -303,6 +312,7 @@ sequenceDiagram
 - network-agent 合入 Cubelet 后，节点就绪 / `NotReady` 不再探测独立网络进程。运行期网络退化（例如 TAP 池耗尽、CubeEgress 持续推送失败）会体现在 create/release 失败与本地诊断上，而不会把节点打成 NotReady。请改看创建失败率、TAP 池状态（`cubecli container taps` / loopback `GET /v1/network/taps`）以及 CubeEgress 健康，而不是只依赖节点 Ready。
 - `cube-egress`：`127.0.0.1:9091/admin/v1/health`（默认；`cubeEgress.adminPort`）。
 - `cube-egress-net`：`cube-dev`、ip rule、table 100、mangle `TRANSPROXY`。
+- `cube-s3lvol`（启用时）：startup / readiness 探测 Unix socket `/var/run/s3lvol/s3lvol.sock` 与一次轻量 `s3lvol_rpc.py` RPC。没有 liveness：target 退出时 entrypoint 以非 0 退出，由 kubelet 重启容器。
 
 ### 4.4 注册与验收关注点
 
@@ -402,6 +412,8 @@ externalControlPlane:
 | `cubeProxy.configureClusterDNS` | `true` | 是否写入集群 CoreDNS |
 | `cubeNode.dns.sandbox.followNodeDns` | `true` | guest 跟随节点 DNS |
 | `cubeNode.pvmGuestKernel.enabled` | `true` | 首次安装默认是否倾向 PVM guest |
+| `cubeNode.hostNetwork` | `true` | 宿主机网络；Pod 网络下 Pod 重建会中断该节点所有沙箱网络 |
+| `cubeNode.hostNetworkChangeAck` | `false` | 网络模式 preflight Hook 的一次性确认键 |
 | `bootstrap.pvmHostKernel.enabled` | `true` | host kernel bootstrap（可能重启节点） |
 | `bootstrap.pvmHostKernel.startupGate.enabled` | `true` | PVM 未就绪时使用 Node NoSchedule 污点硬门闩 |
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | 当前 `kvm_pvm` 不支持 host KPTI |
@@ -411,6 +423,7 @@ externalControlPlane:
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
+| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 19 GiB / 512 GiB 稀疏 WAL，含默认 1 GiB RAM cache） |
 | `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI 上游） |
 | `webui.enabled` | `true` | WebUI（要求 `cubeOps.enabled=true`） |
 
@@ -418,7 +431,7 @@ externalControlPlane:
 
 | Test Pod | 覆盖 |
 | --- | --- |
-| `<release>-health-test` | Master / Ops / API / 节点注册 / WebUI / Proxy / 工作负载 Ready / Egress 存在性 |
+| `<release>-health-test` | Master / Ops / API / 节点注册 / WebUI / Proxy / 工作负载 Ready / Egress 存在性 / 启用时的 s3lvol 存在性 |
 | `<release>-mysql-test` / `redis-test` | 内置依赖连通性 |
 | `<release>-dns-test` | `cube.app` / wildcard → Proxy Service |
 | `<release>-node-image-test` | 镜像内 runtime 工具与 asset |

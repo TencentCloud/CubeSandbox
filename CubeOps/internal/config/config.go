@@ -10,25 +10,29 @@
 //     manifests keep using env vars without changes.
 //
 //  2. YAML file at the path in CUBE_OPS_CONFIG (or /etc/cube/ops.yaml if
-//     unset). YAML is the recommended way to configure CubeOps going forward
-//     because it groups all knobs in one place and supports comments.
+//     unset). One-click and Helm use environment variables; the YAML file is
+//     optional for manual installs. Nested keys map to CUBE_OPS_<SECTION>_<FIELD>
+//     (for example s3.endpoint → CUBE_OPS_S3_ENDPOINT).
 //
 //  3. Built-in defaults.
 //
-// The YAML schema is intentionally flat — one section per top-level
-// component. See config.example.yaml for a fully commented example.
+// The YAML schema groups related knobs under a section per component
+// (for example warehouse:). See config.example.yaml for a fully
+// commented example.
 package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 )
 
 // Config holds all CubeOps runtime configuration.
@@ -59,11 +63,12 @@ type Config struct {
 	// CubeAPI (for SDK endpoint proxy)
 	CubeAPIURL string `yaml:"cubeapi_url"`
 
-	// Redis (optional): REDIS_URL or the split REDIS_HOST/PORT/PASSWORD triple.
-	// Sentinel: set MasterName (+ SentinelNodes/Password) to use Sentinel mode.
+	// Redis (optional): REDIS_URL is the complete source of truth when set.
+	// Otherwise, MasterName selects Sentinel; split HOST/PORT/DB/PASSWORD is the fallback.
 	RedisURL              string `yaml:"redis_url"`
 	RedisHost             string `yaml:"redis_host"`
 	RedisPort             int    `yaml:"redis_port"`
+	RedisDB               int    `yaml:"redis_db"`
 	RedisPassword         string `yaml:"redis_password"`
 	RedisMasterName       string `yaml:"redis_master_name"`
 	RedisSentinelNodes    string `yaml:"redis_sentinel_nodes"`
@@ -78,7 +83,32 @@ type Config struct {
 	// by CubeDB/tombstone (7-day retention, hourly). DISABLED by default — the
 	// purge is irreversible, so it must be opted into explicitly.
 	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
+
+	S3        S3Config        `yaml:"s3"`
+	Warehouse WarehouseConfig `yaml:"warehouse"`
+	Store     StoreConfig     `yaml:"store"`
 }
+
+// StoreConfig selects the warehouse blob backend. Default is s3.
+// FSBackend is used only when Backend is fs.
+type StoreConfig struct {
+	Backend   string               `yaml:"backend"`
+	FSBackend StoreFSBackendConfig `yaml:"fs_backend"`
+}
+
+// StoreFSBackendConfig is the local-directory warehouse store.
+type StoreFSBackendConfig struct {
+	Root       string `yaml:"root"`
+	PublicURL  string `yaml:"public_url"`
+	SigningKey string `yaml:"signing_key"`
+	Shared     bool   `yaml:"shared"`
+}
+
+const (
+	StoreBackendS3 = "s3"
+	StoreBackendFS = "fs"
+	DefaultFSRoot  = "/var/lib/cubeops/blobs"
+)
 
 // SoftDeletePurgeConf configures the CubeOps tombstone purger.
 type SoftDeletePurgeConf struct {
@@ -87,6 +117,56 @@ type SoftDeletePurgeConf struct {
 	Retention time.Duration `yaml:"retention"` // <=0 -> 7d; (0,1h) clamped up to 1h
 	Interval  time.Duration `yaml:"interval"`  // <=0 -> 1h; (0,1m) clamped up to 1m
 }
+
+// WarehouseConfig is the component warehouse and its import sources.
+type WarehouseConfig struct {
+	WorkDir        string        `yaml:"work_dir"`
+	UploadTimeout  time.Duration `yaml:"upload_timeout"`
+	FetchTimeout   time.Duration `yaml:"fetch_timeout"`
+	UploadMaxBytes int64         `yaml:"upload_max_bytes"`
+	GitHubRepos    []string      `yaml:"github_repos"`
+	CNBRepos       []string      `yaml:"cnb_repos"`
+	GitHubToken    string        `yaml:"github_token"`
+	CNBToken       string        `yaml:"cnb_token"`
+	PresignTTL     time.Duration `yaml:"presign_ttl"`
+}
+
+// S3Config is the CubeOps object-store connection.
+type S3Config struct {
+	Endpoint        string `yaml:"endpoint"`
+	NodeEndpoint    string `yaml:"node_endpoint"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
+	Bucket          string `yaml:"bucket"`
+	Region          string `yaml:"region"`
+	PathStyle       *bool  `yaml:"path_style"`
+	CreateBucket    *bool  `yaml:"create_bucket"`
+}
+
+const DefaultS3Bucket = "cube-ops"
+
+// S3Configured reports whether the CubeOps object store is usable.
+func (c Config) S3Configured() bool {
+	return strings.TrimSpace(c.S3.Endpoint) != "" &&
+		strings.TrimSpace(c.S3.AccessKeyID) != "" &&
+		strings.TrimSpace(c.S3.SecretAccessKey) != ""
+}
+
+// UsePathStyle defaults to true (MinIO / path-style S3).
+func (c S3Config) UsePathStyle() bool {
+	return defaultTrue(c.PathStyle)
+}
+
+// ShouldCreateBucket defaults to true.
+func (c S3Config) ShouldCreateBucket() bool {
+	return defaultTrue(c.CreateBucket)
+}
+
+func defaultTrue(p *bool) bool {
+	return p == nil || *p
+}
+
+func boolPtr(v bool) *bool { return &v }
 
 // Load reads configuration from YAML + environment variables (env wins).
 func Load() (*Config, error) {
@@ -97,11 +177,6 @@ func Load() (*Config, error) {
 
 	// Environment variable overrides take precedence.
 	overrideFromEnv(cfg)
-
-	// Build DATABASE_URL from individual fields if not set directly.
-	if cfg.DatabaseURL == "" {
-		cfg.DatabaseURL = cfg.buildMySQLURL()
-	}
 
 	// Default durations.
 	if cfg.AccessTTL == 0 {
@@ -134,104 +209,205 @@ func Load() (*Config, error) {
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
 	}
+	if cfg.Warehouse.WorkDir == "" {
+		cfg.Warehouse.WorkDir = "/var/tmp/cubeops-warehouse"
+	}
+	if cfg.Warehouse.UploadTimeout == 0 {
+		cfg.Warehouse.UploadTimeout = 30 * time.Minute
+	}
+	if cfg.Warehouse.FetchTimeout == 0 {
+		cfg.Warehouse.FetchTimeout = 30 * time.Minute
+	}
+	if cfg.Warehouse.UploadMaxBytes <= 0 {
+		cfg.Warehouse.UploadMaxBytes = 8 << 30
+	}
+	if cfg.S3.Bucket == "" {
+		cfg.S3.Bucket = DefaultS3Bucket
+	}
+	if cfg.S3.Region == "" {
+		cfg.S3.Region = "us-east-1"
+	}
+	if err := applyStoreDefaults(&cfg.Store); err != nil {
+		return nil, err
+	}
+	cfg.Warehouse.PresignTTL = clampPresignTTL(cfg.Warehouse.PresignTTL)
+	if len(cfg.Warehouse.GitHubRepos) == 0 {
+		cfg.Warehouse.GitHubRepos = []string{"TencentCloud/CubeSandbox"}
+	}
+	if len(cfg.Warehouse.CNBRepos) == 0 {
+		cfg.Warehouse.CNBRepos = []string{"CubeSandbox/CubeSandbox"}
+	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
 	// persisted to the DB on first startup (see store.bootstrapJWTSecret).
-	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("database_url (or mysql_host + mysql_user + mysql_password + mysql_db) is required (set in YAML %s or via DATABASE_URL env)",
-			yamlConfigPath())
-	}
-
 	return cfg, nil
 }
 
-// DaoConfig converts the CubeOps config to a CubeDB dao.Config.
-//
-// If DatabaseURL is set, it is the single source of truth and the individual
-// MySQL* fields are ignored. This fixes R06: previously DatabaseURL was
-// accepted by Load() and passed the required-field check, but DaoConfig()
-// silently used the (possibly empty) MySQL* fields instead, causing CubeOps
-// to connect with empty user/db or fall back to localhost.
-//
-// S6 fix: the driver is selected from the URL scheme (mysql:// or
-// postgres://), so PostgreSQL deployments work instead of silently falling
-// back to MySQL and failing on dialect-specific SQL.
-func (c *Config) DaoConfig() dao.Config {
-	// Fast path: no DatabaseURL — use the individual fields as before.
-	if c.DatabaseURL == "" {
-		return dao.Config{
-			Driver:       "mysql",
-			User:         c.MySQLUser,
-			Pwd:          c.MySQLPassword,
-			Addr:         fmt.Sprintf("%s:%d", c.MySQLHost, c.MySQLPortOrDefault()),
-			DBName:       c.MySQLDB,
-			MaxIdleConns: 10,
-			MaxOpenConns: 100,
-		}
+// DaoConfig maps the config to a CubeDB dao.Config. DatabaseURL wins when
+// set (driver inferred from its scheme); otherwise the MySQL* fields are used
+// directly, so passwords never round-trip through a URL.
+func (c *Config) DaoConfig() (dao.Config, error) {
+	// Both DATABASE_URL and the split MySQL* fields are empty: point the
+	// operator at both knobs instead of a misleading per-field error.
+	if strings.TrimSpace(c.DatabaseURL) == "" &&
+		strings.TrimSpace(c.MySQLHost) == "" &&
+		strings.TrimSpace(c.MySQLUser) == "" &&
+		strings.TrimSpace(c.MySQLDB) == "" {
+		return dao.Config{}, fmt.Errorf("no database configured: set DATABASE_URL, or CUBE_SANDBOX_MYSQL_{HOST,USER,DB} (PASSWORD optional) via env or the YAML at %s", yamlConfigPath())
 	}
-
-	// Parse DatabaseURL and select driver from the scheme.
-	// Supported schemes: mysql://, postgres:// (or postgresql://).
-	driver, user, pass, host, port, dbname := parseDatabaseURL(c.DatabaseURL)
-	return dao.Config{
-		Driver:       driver,
-		User:         user,
-		Pwd:          pass,
-		Addr:         fmt.Sprintf("%s:%d", host, port),
-		DBName:       dbname,
-		MaxIdleConns: 10,
-		MaxOpenConns: 100,
+	if strings.TrimSpace(c.DatabaseURL) == "" {
+		// Whitespace-only URL counts as unset: fall back to the split-field path.
+		return c.daoConfigFromFields()
 	}
+	return c.daoConfigFromURL()
 }
 
-// parseDatabaseURL extracts (driver, user, password, host, port, dbname) from
-// a database URL. The driver is inferred from the scheme:
-//   - mysql://    → "mysql"
-//   - postgres:// or postgresql:// → "postgres"
-//
-// If parsing fails for any component, the caller's individual fields are NOT
-// consulted — the error surfaces as an empty component that the DB driver
-// will reject with a clear "access denied" or "unknown database" message,
-// which is better than silently connecting to the wrong database.
-func parseDatabaseURL(rawURL string) (driver, user, pass, host string, port int, dbname string) {
-	port = 3306 // default (MySQL)
+// daoConfigFromFields builds a dao.Config directly from the MySQL* fields,
+// failing fast on a missing required field (host, user or database).
+func (c *Config) daoConfigFromFields() (dao.Config, error) {
+	raw := strings.TrimSpace(c.MySQLHost)
+	// Probe before Trim("[]"): otherwise "[2001:db8::1]:3306" becomes
+	// "2001:db8::1]:3306" and SplitHostPort no longer sees the port.
+	if hostHasNumericPort(raw) {
+		return dao.Config{}, fmt.Errorf("mysql_host %q must not include a port; set mysql_port instead", raw)
+	}
+	// JoinHostPort re-brackets IPv6, so drop brackets copied from a URL.
+	host := strings.Trim(raw, "[]")
+	if host == "" {
+		return dao.Config{}, fmt.Errorf("mysql_host is required (set CUBE_SANDBOX_MYSQL_HOST or mysql_host)")
+	}
+	user := strings.TrimSpace(c.MySQLUser)
+	if user == "" {
+		return dao.Config{}, fmt.Errorf("mysql_user is required (set CUBE_SANDBOX_MYSQL_USER or mysql_user)")
+	}
+	dbname := strings.TrimSpace(c.MySQLDB)
+	if dbname == "" {
+		return dao.Config{}, fmt.Errorf("mysql_db is required (set CUBE_SANDBOX_MYSQL_DB or mysql_db)")
+	}
+	port := c.MySQLPortOrDefault()
+	if port < 1 || port > 65535 {
+		return dao.Config{}, fmt.Errorf("mysql_port %d is out of range (1-65535)", port)
+	}
+	return newDAOConfig("mysql", user, c.MySQLPassword,
+		net.JoinHostPort(host, strconv.Itoa(port)), dbname, nil), nil
+}
 
-	u, err := url.Parse(rawURL)
+// hostHasNumericPort reports whether s is host:port or [host]:port with a
+// numeric port. Bare hosts, including bracketed IPv6, return false.
+func hostHasNumericPort(s string) bool {
+	_, port, err := net.SplitHostPort(s)
 	if err != nil {
-		return
+		return false
 	}
+	_, err = strconv.Atoi(port)
+	return err == nil
+}
 
-	// Select driver from scheme.
-	scheme := strings.ToLower(u.Scheme)
-	switch scheme {
+// daoConfigFromURL parses DatabaseURL into a dao.Config, inferring the driver
+// from the scheme (mysql:// or postgres://). Malformed URLs fail fast instead
+// of silently falling back to localhost:3306.
+func (c *Config) daoConfigFromURL() (dao.Config, error) {
+	// Trim to match DaoConfig's whitespace-counts-as-unset rule: a stray
+	// leading space or trailing newline should parse, not fail.
+	u, err := url.Parse(strings.TrimSpace(c.DatabaseURL))
+	if err != nil {
+		// url.Parse errors can embed the password; keep the message generic.
+		return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
+	}
+	// Redact credentials for any error message that follows.
+	redacted := u.Redacted()
+
+	driver := "mysql"
+	port := 3306
+	// Keep in sync with dao.driverRegistry (pkgs/cubedb/dao/driver.go):
+	// adding an engine there requires a case here.
+	switch strings.ToLower(u.Scheme) {
 	case "postgres", "postgresql":
-		driver = "postgres"
-		port = 5432 // default PG port if not specified
+		driver, port = "postgres", 5432
 	case "mysql", "":
-		driver = "mysql"
+		// defaults above
 	default:
-		driver = scheme // let resolveDriver reject unknown schemes
+		return dao.Config{}, fmt.Errorf("unsupported database_url scheme %q (want mysql:// or postgres://)", u.Scheme)
 	}
 
-	// url.Parse puts user:pass into User, host:port into Host.
+	host := u.Hostname()
+	if host == "" {
+		// Opaque URLs (missing "//") hide credentials from Redacted().
+		if u.Opaque != "" {
+			return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
+		}
+		return dao.Config{}, fmt.Errorf("database_url %s has no host", redacted)
+	}
+	if h := u.Port(); h != "" {
+		// url.Parse rejects non-numeric ports; this fires on int overflow
+		// and out-of-range values (0, 65536+).
+		p, err := strconv.Atoi(h)
+		if err != nil || p < 1 || p > 65535 {
+			return dao.Config{}, fmt.Errorf("database_url %s has invalid port %q", redacted, h)
+		}
+		port = p
+	}
+
+	var user, pass string
 	if u.User != nil {
 		user = u.User.Username()
-		if p, ok := u.User.Password(); ok {
-			pass = p
-		}
+		pass, _ = u.User.Password()
 	}
-
-	host = u.Hostname()
-	if h := u.Port(); h != "" {
-		if p, err := strconv.Atoi(h); err == nil {
-			port = p
-		}
+	if user == "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has no user", redacted)
 	}
 
 	// Database name is the path without leading "/".
-	dbname = strings.TrimPrefix(u.Path, "/")
+	dbname := strings.TrimPrefix(u.Path, "/")
+	if dbname == "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has no database name", redacted)
+	}
 
-	return
+	// Query parameters must be consumed, not dropped: honor postgres sslmode
+	// (the driver only enables TLS via Extra["sslmode"]) and reject everything
+	// else so an ignored setting never fails silently at connect time.
+	var extra map[string]string
+	if q := u.Query(); len(q) > 0 {
+		if driver == "postgres" {
+			if v := q.Get("sslmode"); v != "" {
+				extra = map[string]string{"sslmode": v}
+			}
+			q.Del("sslmode")
+		}
+		if len(q) > 0 {
+			return dao.Config{}, fmt.Errorf("database_url %s has unsupported query parameter(s) %v (only postgres sslmode is honored)", redacted, sortedKeys(q))
+		}
+	}
+	if u.Fragment != "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has an unsupported fragment", redacted)
+	}
+
+	return newDAOConfig(driver, user, pass,
+		net.JoinHostPort(host, strconv.Itoa(port)), dbname, extra), nil
+}
+
+// sortedKeys lists a query map's keys; values may carry secrets, keys do not.
+func sortedKeys(v url.Values) []string {
+	keys := make([]string, 0, len(v))
+	for k := range v {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// newDAOConfig builds a dao.Config with the shared pool limits applied.
+func newDAOConfig(driver, user, pwd, addr, dbname string, extra map[string]string) dao.Config {
+	return dao.Config{
+		Driver:       driver,
+		User:         user,
+		Pwd:          pwd,
+		Addr:         addr,
+		DBName:       dbname,
+		Extra:        extra,
+		MaxIdleConns: 10,
+		MaxOpenConns: 100,
+	}
 }
 
 // MySQLPortOrDefault returns the configured MySQL port or 3306.
@@ -240,15 +416,6 @@ func (c *Config) MySQLPortOrDefault() int {
 		return 3306
 	}
 	return c.MySQLPort
-}
-
-// buildMySQLURL builds a mysql:// URL from the individual MySQL fields.
-func (c *Config) buildMySQLURL() string {
-	if c.MySQLHost == "" {
-		return ""
-	}
-	return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
-		c.MySQLUser, c.MySQLPassword, c.MySQLHost, c.MySQLPortOrDefault(), c.MySQLDB)
 }
 
 func yamlConfigPath() string {
@@ -340,6 +507,11 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RedisPort = p
 		}
 	}
+	if v := os.Getenv("REDIS_DB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.RedisDB = n
+		}
+	}
 	if v := os.Getenv("REDIS_PASSWORD"); v != "" {
 		cfg.RedisPassword = v
 	}
@@ -365,4 +537,152 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_WORK_DIR"); v != "" {
+		cfg.Warehouse.WorkDir = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.UploadTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.FetchTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_TOKEN"); v != "" {
+		cfg.Warehouse.GitHubToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_TOKEN"); v != "" {
+		cfg.Warehouse.CNBToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_REPOS"); v != "" {
+		cfg.Warehouse.GitHubRepos = splitCSV(v)
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_REPOS"); v != "" {
+		cfg.Warehouse.CNBRepos = splitCSV(v)
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ENDPOINT"); v != "" {
+		cfg.S3.Endpoint = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_NODE_ENDPOINT"); v != "" {
+		cfg.S3.NodeEndpoint = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ACCESS_KEY_ID"); v != "" {
+		cfg.S3.AccessKeyID = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_SECRET_ACCESS_KEY"); v != "" {
+		cfg.S3.SecretAccessKey = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_BUCKET"); v != "" {
+		cfg.S3.Bucket = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_REGION"); v != "" {
+		cfg.S3.Region = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_PATH_STYLE"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.S3.PathStyle = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_S3_CREATE_BUCKET"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.S3.CreateBucket = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_PRESIGN_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.PresignTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_UPLOAD_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.Warehouse.UploadMaxBytes = n
+		}
+	}
+	overrideStoreFromEnv(&cfg.Store)
+}
+
+// CUBE_OPS_STORE_FS_* overlays the nested fs_backend fields.
+func overrideStoreFromEnv(s *StoreConfig) {
+	if v := os.Getenv("CUBE_OPS_STORE_BACKEND"); v != "" {
+		s.Backend = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_ROOT"); v != "" {
+		s.FSBackend.Root = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_PUBLIC_URL"); v != "" {
+		s.FSBackend.PublicURL = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_SIGNING_KEY"); v != "" {
+		s.FSBackend.SigningKey = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_SHARED"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			s.FSBackend.Shared = *p
+		}
+	}
+}
+
+func applyStoreDefaults(s *StoreConfig) error {
+	backend, err := normalizeStoreBackend(s.Backend)
+	if err != nil {
+		return err
+	}
+	s.Backend = backend
+	if s.FSBackend.Root == "" {
+		s.FSBackend.Root = DefaultFSRoot
+	}
+	return nil
+}
+
+func normalizeStoreBackend(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "", StoreBackendS3:
+		return StoreBackendS3, nil
+	case StoreBackendFS:
+		return StoreBackendFS, nil
+	default:
+		return "", fmt.Errorf("store.backend %q is not supported (want s3 or fs)", strings.TrimSpace(raw))
+	}
+}
+
+func parseEnvBool(v string) *bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return boolPtr(true)
+	case "0", "false", "no", "off":
+		return boolPtr(false)
+	default:
+		return nil
+	}
+}
+
+func clampPresignTTL(d time.Duration) time.Duration {
+	const minTTL = time.Minute
+	const maxTTL = 15 * time.Minute
+	const defTTL = 5 * time.Minute
+	if d <= 0 {
+		return defTTL
+	}
+	if d < minTTL {
+		return minTTL
+	}
+	if d > maxTTL {
+		return maxTTL
+	}
+	return d
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

@@ -936,6 +936,10 @@ pub enum KvmError {
     CapabilityMissing(Cap),
 }
 pub type KvmResult<T> = result::Result<T, KvmError>;
+
+#[cfg(target_arch = "x86_64")]
+const MSR_PVM_VCPU_STRUCT: u32 = 0x4b56_4df1;
+
 impl KvmHypervisor {
     /// Create a hypervisor based on Kvm
     #[allow(clippy::new_ret_no_self)]
@@ -951,12 +955,12 @@ impl KvmHypervisor {
         let mut hypervisor_type = HypervisorType::Kvm;
 
         #[cfg(target_arch = "x86_64")]
-        if let Ok(cpuid) = kvm_obj.get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES) {
-            for entry in cpuid.as_slice().iter() {
-                if entry.function == 0x4000_0002 && entry.ebx == 0x4d_5650 {
-                    hypervisor_type = HypervisorType::KvmPvm;
-                }
-            }
+        if kvm_obj
+            .get_msr_index_list()
+            .map(|msrs| msrs.as_slice().contains(&MSR_PVM_VCPU_STRUCT))
+            .unwrap_or(false)
+        {
+            hypervisor_type = HypervisorType::KvmPvm;
         }
 
         Ok(Arc::new(KvmHypervisor {

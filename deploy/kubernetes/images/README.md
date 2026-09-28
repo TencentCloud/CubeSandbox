@@ -5,7 +5,7 @@ This directory contains image build definitions used by the Kubernetes/TKE chart
 ## Build entrypoint
 
 ```bash
-PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.2 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Before a real release, run `scripts/bump-image.sh vX.Y.Z` so hard-coded tags
@@ -18,7 +18,7 @@ Use `NO_CACHE=1` when every Docker image layer must be rebuilt instead of
 using Docker's build cache:
 
 ```bash
-NO_CACHE=1 PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh
+NO_CACHE=1 PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.2 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 The script defaults its temporary `BUILD_ROOT` to
@@ -53,8 +53,9 @@ compile from the current worktree (see below).
 `cube-kernel` does not use the one-click package. It stages guest kernels from:
 
 1. `CUBE_KERNEL_VMLINUX` (required) and optional `CUBE_KERNEL_PVM_VMLINUX`, or
-2. Release assets `vmlinux-${arch}` (required) and `vmlinux-pvm-${arch}`
-   (`arch` from `ONE_CLICK_ARCH`, default `amd64`).
+2. The dedicated `kernel-release-*` pins in `deploy/release-assets.yaml`
+   (same source CI uses; BM and PVM may be different Releases).
+   `IMAGE_TAG` is only the output image tag.
 
 **PVM policy:** required on `amd64`; optional on `arm64` (no PVM guest kernel
 today — arm64 images are BM-only when `vmlinux-pvm-arm64` is absent).
@@ -68,7 +69,7 @@ CUBE_KERNEL_VMLINUX=/path/to/vmlinux \
 ONE_CLICK_ARCH=arm64 CUBE_KERNEL_VMLINUX=/path/to/vmlinux \
   IMAGE_TAG=dev ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 
-IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
+IMAGE_TAG=v0.7.2 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 ```
 
 `cube-guest` does not use the one-click package. It stages guest rootfs from:
@@ -76,14 +77,14 @@ IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 1. `CUBE_GUEST_IMAGE_DIR` (directory containing `cube-guest-image-cpu.img`,
    `version`), or
 2. `CUBE_GUEST_IMAGE_TAR` (`.tar.gz` of those files), or
-3. Release asset `cube-guest-image-${arch}.tar.gz` (same `IMAGE_TAG` when
-   present, otherwise latest GitHub Release).
+3. The `guest-image-*` pin in `deploy/release-assets.yaml`.
 
 `cube-agent` stages the independent Agent plane file from:
 
 1. `CUBE_AGENT_IMAGE_DIR` (`cube-agent.ext4` + `version`), or
 2. `CUBE_AGENT_IMAGE_TAR`, or
-3. Release asset `cube-agent-${arch}.tar.gz`.
+3. Product Release `${VERSION}` asset `cube-agent-${arch}.tar.gz`
+   (not pinned in `release-assets.yaml`).
 
 ```bash
 CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev \
@@ -92,32 +93,42 @@ CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev \
 CUBE_AGENT_IMAGE_DIR=/path/to/cube-agent IMAGE_TAG=dev \
   ./deploy/kubernetes/images/build-cube-images.sh cube-agent
 
-IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh cube-guest cube-agent
+IMAGE_TAG=v0.7.2 ./deploy/kubernetes/images/build-cube-images.sh cube-guest cube-agent
 ```
 
 ## Pinning source to a release tag
 
 `cube-master`, `cubemastercli`, `cubelet`, `cube-shim`, `cube-api`, `cube-ops`,
-`cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and `cube-webui` are
+`cube-proxy`, `cube-egress`, `cube-s3lvol`, `cube-lifecycle-manager`, and `cube-webui` are
 compiled from repository source (rather than binaries in the release tarball).
 By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
-`${VERSION}`, so `v0.7.0` for the default build). It exports `CubeMaster/`,
+`${VERSION}`, so `v0.7.2` for the default build). It exports `CubeMaster/`,
 `CubeAPI/`, `CubeProxy/`, `CubeEgress/`,
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
 there for the duration of the build. When building `cube-master` or
-`cubemastercli`, it also exports `cubelog/`, `CubeDB/`, and `Cubelet/`;
+`cubemastercli`, it also exports the trees those Dockerfiles COPY.
 `cube-master` additionally exports `deploy/scripts/` (volume-deps installer) and
 `examples/volume/cos/` (Controller plugin binary + example conf).
-When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `cubelog/`,
+When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`,
 `cubecow/`, `deploy/scripts/`, `deploy/kubernetes/images/scripts/`, and
 `examples/volume/cos/` so the image can build both `cubelet` and
 `cubevsmapdump`. When building `cube-shim`, it also exports `CubeShim/`,
 `hypervisor/`, `deploy/one-click/config-cube.toml`, and
 `deploy/kubernetes/images/scripts/`.
-When building `cube-ops`, it also exports `CubeOps/` and `CubeDB/` (required by
-`CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
+When building `cube-ops`, it also exports the trees that Dockerfile COPYs
+(not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
+When building `cube-s3lvol`, it also exports `CubeS3lvol/` and
+`deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh`.
+The cubelog module path is probed on `${SOURCE_REF}`: tags at or after this
+move export `pkgs/CubeLog/`; older tags including the default `${VERSION}`
+(`v0.7.0`) still have `cubelog/` and matching `COPY cubelog/` Dockerfiles.
+The CubeDB module path is probed the same way: current trees export
+`pkgs/cubedb/`; older tags still have `CubeDB/` and matching `COPY CubeDB/`
+Dockerfiles.
+The script archives whichever path exists on that ref so a default
+`SOURCE_REF=${VERSION}` build does not fail the export step.
 This guarantees the images match the release tag even when the current worktree
 is ahead of it.
 
@@ -163,7 +174,7 @@ entrypoint into it:
 
 ```bash
 CUBE_NODE_BASE_IMAGE=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627 \
-  PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.0 \
+  PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.2 \
   ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
@@ -215,7 +226,7 @@ behavior.
   `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. No duplicate Dockerfile is
   kept under `deploy/kubernetes/images/`.
 - `cube-ops` is built from `CubeOps/Dockerfile` with context = repository root
-  (needs sibling `CubeDB/` via `CubeOps/Dockerfile.dockerignore`); same as CI
+  (needs local replace modules via `CubeOps/Dockerfile.dockerignore`); same as CI
   `release-docker-images.yml`. No duplicate Dockerfile is kept here.
 - `cubemastercli` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = repository root, file = `CubeMaster/docker/Dockerfile.cubemastercli`,
@@ -235,6 +246,12 @@ behavior.
   `CubeEgress/scripts/cube-proxy-iptables-init.sh` plus a small idempotent
   entrypoint that waits for `cube-dev`, applies rules, and removes them on
   termination.
+- `cube-s3lvol` is the optional cube-node sidecar that runs the CubeS3lvol
+  NVMe/TCP target (`s3lvol_tgt`). Context is the repository root; file is
+  `deploy/kubernetes/images/cube-s3lvol/Dockerfile` (builder stage
+  `CUBE_BUILDER_IMAGE`, Ubuntu 20.04 runtime). Enable it with chart
+  `cubeS3lvol.enabled`. Release binaries need Haswell/AVX2 on x86_64; the
+  publish workflow is amd64-only.
 - `cube-webui` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = repository root, file = `deploy/one-click/webui/Dockerfile`, with
   `OPENRESTY_BASE_IMAGE` / `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`.
@@ -246,4 +263,4 @@ The Helm chart stays under `deploy/kubernetes/chart`; image build logic stays he
 
 `build-cube-images.sh` copies only the scripts required by each image into that image's build context. Do not add generic helper scripts here unless they are referenced by a Dockerfile or explicitly copied by the build script.
 
-CubeMaster runtime layout matches one-click under `/usr/local/services/cubetoolbox/CubeMaster/` (`bin/cubemaster`, `plugin/`, `conf.yaml`). Runtime configuration is delivered by the Helm chart from `deploy/kubernetes/chart/files/cube-master/conf.yaml` as a Secret mounted at `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`. CubeMaster schema migrations are embedded in the `cubemaster` binary at compile time from `CubeMaster/pkg/base/dao/migrate/migrations/mysql`; this image build does not package a second SQL copy.
+CubeMaster runtime layout matches one-click under `/usr/local/services/cubetoolbox/CubeMaster/` (`bin/cubemaster`, `plugin/`, `conf.yaml`). Runtime configuration is delivered by the Helm chart from `deploy/kubernetes/chart/files/cube-master/conf.yaml` as a Secret mounted at `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`. CubeMaster schema migrations are embedded in the `cubemaster` binary at compile time from `pkgs/cubedb/migrate/migrations/{mysql,postgres}`; this image build does not package a second SQL copy.

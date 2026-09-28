@@ -38,14 +38,17 @@ Go：`cubesandbox.NeverTimeout`；Python：`from cubesandbox import NEVER_TIMEOU
    create()       ┌────▼────┐   timeout & on_timeout=pause   ┌─────────┐
   ───────────────►│ running │ ──────────────────────────────►│ paused  │
                   │         │◄──────── connect() 或          │         │
-                  └─┬─────┬─┘     auto_resume 触发的请求      └────┬────┘
-                    │     │                                       │
-        kill()      │     │ timeout & on_timeout=kill             │ kill()
-        ────────────┘     └─────────────────┐                     │
-                                            ▼                     ▼
-                                      ┌────────────┐
-                                      │ terminated │
-                                      └────────────┘
+                  └──┬────┬─┘     auto_resume 触发的请求      └──┬────┬─┘
+                     │    │                                     │    │
+                     │    │ timeout & on_timeout=kill           │    │ timeout & on_timeout=kill
+                     │    └────────────────┐                    │    └──────────────┐
+                     │                     ▼                    │                   ▼
+                     │               ┌────────────┐◄────────────┘
+                     │               │ terminated │
+                     │               └──────▲─────┘
+                     │                      │
+                     │ kill()               │ kill()
+                     └──────────────────────┘
 ```
 
 ## 创建沙箱
@@ -90,7 +93,7 @@ print(info)
 # }
 ```
 
-`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。对于**永不超时**的沙箱没有截止时间，因此响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
+`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。暂停不会取消有限的空闲截止时间，因此沙箱处于暂停状态时，详情和列表 API 仍会返回相同的 `endAt`。对于**永不超时**的沙箱没有截止时间，因此响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
 
 ## 列出运行中的沙箱
 
@@ -134,9 +137,32 @@ sandbox.kill()
 ```python
 sandbox.pause()                       # 主动保存快照，释放 CPU/内存
 # ... 一段时间过去 ...
-sandbox.connect()                     # 从快照恢复
+sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # 从快照恢复，并重置空闲超时
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
+
+`pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
+
+`connect(timeout=...)` 可以更新空闲超时，无论沙箱已经在运行，还是需要先从暂停状态恢复。对于运行中的沙箱，正数 timeout 只会在请求窗口更长时延长 deadline；如果要主动缩短生命周期，请使用 `set_timeout(...)`：
+
+| `connect(timeout=...)` | 效果 |
+|---|---|
+| 不传 / `None` | 保持当前超时 |
+| `NEVER_TIMEOUT`（`-1`） | 连接后永不超时 |
+| `N > 0` | 确保至少剩余 N 秒；运行中或暂停中的沙箱保留更长的现有 deadline，否则在连接后重新开 N 秒窗口 |
+| `0` 或 `N < -1` | 拒绝请求并返回 HTTP 400 |
+
+连接暂停中的沙箱时，底层 Resume 如果与另一个生命周期操作同时切换，可能返回 HTTP 409；请等沙箱进入稳定状态后重试。
+
+已弃用的 `resume(timeout=...)` 保留原有的 `0` 语义：
+
+| `resume(timeout=...)` | 效果 |
+|---|---|
+| 不传 / `None` | 保持当前超时 |
+| `0` | 保持当前超时（立刻到期请用 `set_timeout(0)`） |
+| `NEVER_TIMEOUT`（`-1`） | 恢复后永不超时 |
+| `N > 0` | 从恢复时刻起重新开 N 秒窗口 |
+| `N < -1` | 拒绝请求并返回 HTTP 400 |
 
 可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（S3 后端且 `remote_status=ready`）见 [跨机快照](./cross-node-snapshot.md)。
 
@@ -176,7 +202,7 @@ sandbox = Sandbox.create(
 
 ### 自动恢复后的 timeout 重置
 
-每次自动恢复成功后，沙箱获得一个**全新的 `timeout` 计时窗口**（与 e2b 同样语义），所以"恢复 → 短暂使用 → 再次空闲超时 → 再次暂停"的循环可以无缝持续。
+每次自动恢复成功后，**空闲计时重置**，但超时时长不变。所以"恢复 → 短暂使用 → 再次空闲超时 → 再次暂停"的循环可以无缝持续。
 
 ### 何时算"活跃"
 
@@ -185,7 +211,7 @@ sandbox = Sandbox.create(
 - 通过 SDK 调用：`sandbox.run_code(...)`、`sandbox.commands.run(...)`、`sandbox.files.read(...)` / `write(...)`。
 - 通过 HTTP 直连沙箱内的服务（例如 `getHost()` 返回的 URL）。
 
-未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。若不希望被自动回收，可传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、把 `timeout` 设得足够大，或通过定期活动刷新空闲计时。
+未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。手动 `pause()` **不会取消** auto-kill：之后被暂停的沙箱，空闲仍超过 `timeout` 时一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、把 `timeout` 设得足够大，或通过定期活动刷新空闲计时。
 
 ### 端到端示例
 
@@ -220,7 +246,7 @@ python examples/code-sandbox-quickstart/auto-kill.py
 同一段里的 `create_timeout_insec` 与空闲 TTL 无关，仅限制创建/调度 RPC 的截止时间。更多 CubeMaster 配置项见[服务管理 — CubeMaster 配置项](service-management.md#cubemaster-settings)。
 
 - **暂停的状态保真度**：CPU 寄存器、进程内存、TCP 连接（无外部对端）、文件系统改动都会随快照保留；面向外部的连接（如 sandbox 主动建立的 outbound socket）会在暂停时断开，恢复后由应用层自行重连。
-- **集群一致性**：自动暂停由部署在 control 节点上的 `cube-lifecycle-manager` 服务统一协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，通过 Redis 注册表实时发现所有在线的 CubeProxy 副本并广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。
+- **集群一致性**：自动暂停由 `cube-lifecycle-manager` 协调。Helm chart 与 Terraform 一键部署默认都是两个温备副本。两个副本都消费生命周期事件、发现 CubeProxy 并处理恢复回调，由 Redis 租约选出一个副本执行空闲扫描、销毁和过期注册清理。leader 故障切换后沙箱可能多一次 pause/resume，下次请求会照常 auto-resume（见 [Kubernetes FAQ](kubernetes/faq.md)）。每沙箱 Redis 状态转换与 CubeMaster lifecycle lock 共同串行化跨副本的有效暂停/恢复操作。
 - **失败回退**：自动恢复 RPC 失败时，CubeProxy 直接对客户端返回 503 + `Retry-After`，不会让用户卡在长超时上；当沙箱已经被销毁（`killing` / `killed`），则返回 410 Gone 让客户端立即停止重试。
 - **故障排查**：控制节点上执行 `docker logs cube-lifecycle-manager` 查看运行日志，关键事件包括 `create event applied`、`auto-paused sandbox`、`auto-resumed sandbox`、`timeout-killed sandbox`。每个 CubeProxy 副本额外提供 `GET http://<node-ip>:8082/admin/healthz`，其中 `heartbeat_last_pushed_ms` 表示该副本最近一次向 manager 上报心跳的时间戳。管理端口默认为 `8082`；由于 CubeProxy 使用主机网络，当该端口已被占用时可通过 `CUBE_PROXY_ADMIN_PORT` 覆盖。
 
@@ -263,6 +289,7 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 ## 下一步
 
+- [Agent 平台 freeze / resume](./agent-platform-freeze.md) — 手动 pause 保留、envd 前先 connect、Volume 与 snapshot 区别。
 - [模板概览](./templates.md) —— 沙箱基于模板启动，模板的构建过程也会影响首次冷启动开销。
 - [快速开始](./quickstart.md) —— 完整跑通"创建沙箱 → 执行代码 → 销毁"的最短路径。
 - 上游参考：[e2b · Sandbox lifecycle](https://e2b.dev/docs/sandbox)、[e2b · Auto-resume](https://e2b.dev/docs/sandbox/auto-resume)。

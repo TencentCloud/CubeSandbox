@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 )
 
 func TestJobPullProgressSinkCachesLiveProgressOnly(t *testing.T) {
@@ -24,7 +23,7 @@ func TestJobPullProgressSinkCachesLiveProgressOnly(t *testing.T) {
 	}
 
 	s := newJobPullProgressSink(context.Background(), "job-live")
-	s.onProgress(image.PullProgress{
+	s.onProgress(PullProgress{
 		TotalBytes:      100,
 		DownloadedBytes: 40,
 		TotalLayers:     5,
@@ -51,8 +50,8 @@ func TestJobPullProgressSinkSetsCacheTTLOnlyOnce(t *testing.T) {
 	defer restore()
 
 	s := newJobPullProgressSink(context.Background(), "job-live")
-	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 10})
-	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 20})
+	s.onProgress(PullProgress{TotalBytes: 100, DownloadedBytes: 10})
+	s.onProgress(PullProgress{TotalBytes: 100, DownloadedBytes: 20})
 
 	if cachePullProgressCalls != 1 {
 		t.Fatalf("initial cache write with TTL calls=%d want 1", cachePullProgressCalls)
@@ -77,9 +76,9 @@ func TestJobPullProgressSinkRetriesTTLAfterInitialCacheFailure(t *testing.T) {
 	}
 
 	s := newJobPullProgressSink(context.Background(), "job-live")
-	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 10})
-	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 20})
-	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 30})
+	s.onProgress(PullProgress{TotalBytes: 100, DownloadedBytes: 10})
+	s.onProgress(PullProgress{TotalBytes: 100, DownloadedBytes: 20})
+	s.onProgress(PullProgress{TotalBytes: 100, DownloadedBytes: 30})
 
 	if cachePullProgressCalls != 2 {
 		t.Fatalf("cache writes with TTL=%d want 2", cachePullProgressCalls)
@@ -94,7 +93,7 @@ func TestJobPullProgressSinkFlushCompletedWritesFinalSnapshot(t *testing.T) {
 	defer restore()
 
 	s := newJobPullProgressSink(context.Background(), "job-final")
-	s.lastSnap = image.PullProgress{
+	s.lastSnap = PullProgress{
 		TotalBytes:      100,
 		DownloadedBytes: 40,
 		TotalLayers:     5,
@@ -125,7 +124,7 @@ func TestJobPullProgressSinkFlushPartialKeepsPartialSnapshot(t *testing.T) {
 	defer restore()
 
 	s := newJobPullProgressSink(context.Background(), "job-partial")
-	s.lastSnap = image.PullProgress{
+	s.lastSnap = PullProgress{
 		TotalBytes:      100,
 		DownloadedBytes: 40,
 		TotalLayers:     5,
@@ -149,7 +148,7 @@ func TestJobPullProgressSinkFlushIgnoresCanceledJobContext(t *testing.T) {
 	cancel()
 
 	s := newJobPullProgressSink(ctx, "job-canceled")
-	s.lastSnap = image.PullProgress{
+	s.lastSnap = PullProgress{
 		TotalBytes:      100,
 		DownloadedBytes: 40,
 		TotalLayers:     5,

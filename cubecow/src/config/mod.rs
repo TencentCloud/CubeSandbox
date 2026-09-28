@@ -92,6 +92,18 @@ pub struct S3Config {
     #[serde(default = "default_s3_rpc_timeout_ms")]
     pub rpc_timeout_ms: u64,
 
+    /// Total time budget, in milliseconds, that a single RPC may spend
+    /// retrying connection establishment before giving up. Default:
+    /// 60000.
+    ///
+    /// The socket is unlinked for the whole s3lvol hot-upgrade window, so
+    /// there a connect failure is the expected case rather than an error;
+    /// this budget decides how long control-plane calls block waiting for
+    /// the endpoint to return. Once a connection is up, a JSON-RPC error
+    /// response is an answer and is never retried.
+    #[serde(default = "default_s3_rpc_connect_budget_ms")]
+    pub rpc_connect_budget_ms: u64,
+
     /// How the `size_bytes → size_gib` conversion is handled at the
     /// boundary with s3lvol (which is GiB-granular): `"round_up"`
     /// (default) or `"strict"`.
@@ -105,6 +117,7 @@ impl Default for S3Config {
             socket_path: default_s3_socket_path(),
             state_dir: default_s3_state_dir(),
             rpc_timeout_ms: default_s3_rpc_timeout_ms(),
+            rpc_connect_budget_ms: default_s3_rpc_connect_budget_ms(),
             size_policy: default_s3_size_policy(),
         }
     }
@@ -118,6 +131,9 @@ fn default_s3_state_dir() -> PathBuf {
 }
 fn default_s3_rpc_timeout_ms() -> u64 {
     10_000
+}
+fn default_s3_rpc_connect_budget_ms() -> u64 {
+    60_000
 }
 fn default_s3_size_policy() -> String {
     "round_up".to_string()

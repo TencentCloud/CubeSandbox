@@ -9,7 +9,7 @@ import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Shield, Gauge, Server, ExternalLink, Minus } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { BoolBadge, MetricValue } from '@/components/ui/typography';
+import { MetricValue } from '@/components/ui/typography';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -71,32 +71,10 @@ function GatewaySection() {
       <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-1">
         {isLoading ? (
           <div className="space-y-3 py-3">
-            {[1, 2, 3, 4].map((i) => (
-              <Skeleton key={i} className="h-4 w-full" />
-            ))}
+            <Skeleton className="h-4 w-full" />
           </div>
         ) : (
-          <>
-            <InfoRow
-              label={t('gateway.rateLimit')}
-              value={
-                <MetricValue value={data?.rateLimitPerSec ?? '—'} unit="req/s · per API Key" />
-              }
-            />
-            <InfoRow
-              label={t('gateway.auth')}
-              value={undefined}
-              badge={
-                <BoolBadge
-                  value={data?.authEnabled}
-                  trueLabel={t('gateway.authOn')}
-                  falseLabel={t('gateway.authOff')}
-                />
-              }
-            />
-            <InfoRow label={t('gateway.domain')} value={data?.sandboxDomain ?? '—'} />
-            <InfoRow label={t('gateway.instanceType')} value={data?.instanceType ?? '—'} />
-          </>
+          <InfoRow label={t('gateway.domain')} value={data?.sandboxDomain ?? '—'} />
         )}
       </div>
     </div>

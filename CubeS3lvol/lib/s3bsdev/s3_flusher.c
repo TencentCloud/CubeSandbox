@@ -63,6 +63,11 @@ struct s3_flusher {
 	/* Tick at which a drain gives up on dirty data. */
 	uint64_t drain_deadline;
 
+	/* The drain reached drain_deadline with chunks still dirty: it starts no
+	 * further round and only waits for the ones already in flight. Cleared with
+	 * the drain itself, unlike stopping, which ends the flusher's life. */
+	bool                        drain_expired;
+
 	/* Highest seq already reported to the WAL, so truncation is only
 	 * attempted when it would actually make progress. */
 	uint64_t                    truncated_seq;
@@ -253,7 +258,10 @@ s3_flusher_kick(struct s3_flusher *f)
 	 * log -- so this is the guard for a configuration where it is not. */
 	force = (f->drain_cb != NULL) || s3_wal_is_backpressured(f->wal);
 
-	while (!f->stopping && f->in_flight < f->max_concurrent) {
+	/* An expired drain starts no further round either: refilling would push the
+	 * moment it can report as far away as the writes keep coming. */
+	while (!f->stopping && !f->drain_expired &&
+	       f->in_flight < f->max_concurrent) {
 		uint64_t chunk_index;
 
 		if (s3_overlay_next_dirty(f->overlay, force, &chunk_index) != 0) {
@@ -295,10 +303,29 @@ flusher_check_drain(struct s3_flusher *f)
 {
 	s3_flusher_cb cb_fn;
 	void *cb_arg;
-	int status = 0;
+	bool dirty;
+	int status;
 
 	if (!f->drain_cb) {
 		return;
+	}
+
+	dirty = s3_overlay_has_dirty(f->overlay);
+
+	/* The deadline is read here, before the gates below rather than after them.
+	 * Those gates wait for uploads and for a super-sync, and kick refills the
+	 * uploads out of the overlay every time one lands, so while writes keep
+	 * arriving there is no idle moment in which to notice the deadline -- a
+	 * drain that only looked at the clock once it was idle would never look at
+	 * it at all. */
+	if (!f->drain_expired &&
+	    (f->stopping || spdk_get_ticks() >= f->drain_deadline) && dirty) {
+		/* Start no further round, so the ones in flight can land and the drain
+		 * can report. The data is durable in the log, so the cost is a replay,
+		 * not a loss. */
+		f->drain_expired = true;
+		SPDK_WARNLOG("Flusher drain timed out with dirty chunks left; "
+			     "they stay in the WAL for replay\n");
 	}
 
 	/* Uploads already running are always waited for: their completions touch
@@ -315,22 +342,19 @@ flusher_check_drain(struct s3_flusher *f)
 		return;
 	}
 
-	if (s3_overlay_has_dirty(f->overlay)) {
-		if (spdk_get_ticks() < f->drain_deadline) {
-			return;
-		}
-		/* Out of time. Stop starting rounds and report it -- the data is
-		 * durable in the log, so the cost is a replay, not a loss. */
-		f->stopping = true;
-		status = -ETIMEDOUT;
-		SPDK_WARNLOG("Flusher drain timed out with dirty chunks left; "
-			     "they stay in the WAL for replay\n");
+	/* Still in time with something left to push: the next completion or the
+	 * next tick comes back here. */
+	if (dirty && !f->drain_expired) {
+		return;
 	}
+
+	status = f->drain_expired ? -ETIMEDOUT : 0;
 
 	cb_fn  = f->drain_cb;
 	cb_arg = f->drain_arg;
-	f->drain_cb  = NULL;
-	f->drain_arg = NULL;
+	f->drain_cb      = NULL;
+	f->drain_arg     = NULL;
+	f->drain_expired = false;
 
 	cb_fn(cb_arg, status);
 }
@@ -363,8 +387,9 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	f->drain_deadline = spdk_get_ticks() +
 			    (timeout_us * spdk_get_ticks_hz()) / 1000000;
 
-	f->drain_cb  = cb_fn;
-	f->drain_arg = cb_arg;
+	f->drain_cb      = cb_fn;
+	f->drain_arg     = cb_arg;
+	f->drain_expired = false;
 
 	/* Push everything through rather than waiting for the poller tick. */
 	s3_flusher_kick(f);

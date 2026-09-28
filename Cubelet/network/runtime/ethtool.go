@@ -8,7 +8,7 @@ import (
 	"sync"
 	"unsafe"
 
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"golang.org/x/sys/unix"
 )
 

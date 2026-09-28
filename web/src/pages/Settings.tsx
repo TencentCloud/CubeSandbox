@@ -145,7 +145,7 @@ function ClusterSection() {
     msg?: string;
   } | null>(null);
 
-  const { data: cfg, isLoading } = useRuntimeConfig();
+  const { data: cfg } = useRuntimeConfig();
 
   const handleTest = async () => {
     setTesting(true);
@@ -203,49 +203,6 @@ function ClusterSection() {
             </div>
           )}
         </div>
-      </SettingRow>
-
-      {/* Runtime info */}
-      <SettingRow label={t('cluster.runtime')} desc={t('cluster.runtimeDesc')}>
-        {isLoading ? (
-          <div className="space-y-2">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-4 w-48 animate-pulse rounded bg-muted/60" />
-            ))}
-          </div>
-        ) : (
-          <dl className="space-y-2 text-sm">
-            {(
-              [
-                {
-                  label: t('cluster.sandboxDomain'),
-                  value: cfg?.sandboxDomain ?? '—',
-                  numeric: false,
-                },
-                {
-                  label: t('cluster.instanceType'),
-                  value: cfg?.instanceType ?? '—',
-                  numeric: false,
-                },
-                {
-                  label: t('cluster.rateLimit'),
-                  value: `${cfg?.rateLimitPerSec ?? '—'} req/s`,
-                  numeric: true,
-                },
-                {
-                  label: t('cluster.auth'),
-                  value: cfg?.authEnabled ? t('cluster.authOn') : t('cluster.authOff'),
-                  numeric: false,
-                },
-              ] as Array<{ label: string; value: string; numeric: boolean }>
-            ).map(({ label, value, numeric }) => (
-              <div key={label} className="flex items-center gap-3">
-                <span className="w-36 text-muted-foreground">{label}</span>
-                <span className={cn('text-foreground/90', numeric && 'text-num')}>{value}</span>
-              </div>
-            ))}
-          </dl>
-        )}
       </SettingRow>
     </div>
   );
@@ -440,7 +397,6 @@ function AboutSection() {
               value: cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`,
               mono: true,
             },
-            { label: t('about.instanceType'), value: cfg?.instanceType ?? '—', mono: false },
           ] as Array<{ label: string; value: string; mono: boolean }>
         ).map(({ label, value, mono }) => (
           <div key={label} className="flex items-center justify-between px-5 py-3.5">

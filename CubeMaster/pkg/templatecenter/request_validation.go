@@ -12,11 +12,10 @@ import (
 	"sort"
 	"strings"
 
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, error) {
@@ -79,7 +78,7 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if sourceImageRef == "" {
 		return nil, errors.New("source_image_ref is required")
 	}
-	if err := image.ValidateImageRef(sourceImageRef); err != nil {
+	if err := ValidateImageRef(sourceImageRef); err != nil {
 		return nil, fmt.Errorf("source_image_ref: %w", err)
 	}
 	if strings.TrimSpace(req.WritableLayerSize) == "" {

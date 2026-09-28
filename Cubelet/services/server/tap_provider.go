@@ -13,7 +13,7 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 type Req struct {

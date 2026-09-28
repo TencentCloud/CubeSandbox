@@ -43,7 +43,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/server"
 	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/urfave/cli/v2"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/net/context"

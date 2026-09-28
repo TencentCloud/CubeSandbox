@@ -33,6 +33,9 @@ sed -i \
   -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${MASTER_HTTP_ADDR}\"#" \
   "${CUBELET_DYNAMICCONF}"
 
+# CubeOps warehouse: same CubeOps as node register/heartbeat, unless CUBE_OPS_ADDR is set.
+write_cubelet_cubeops_addr "${CUBELET_CONFIG}" "${CUBE_OPS_ADDR:-${OPS_ADDR}}"
+
 mkdir -p \
   "${TOOLBOX_ROOT}/cube-vs/network" \
   "${TOOLBOX_ROOT}/cube-snapshot" \

@@ -20,8 +20,6 @@ import (
 	"github.com/containerd/typeurl/v2"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -30,7 +28,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 const (
@@ -38,8 +38,20 @@ const (
 
 	DefaultCubeRuntimePath = "/usr/local/services/cubetoolbox/cube-shim/bin/cube-runtime"
 
-	SnapshotStatusPath = "/data/cube-shim/snapshot"
+	snapshotDefaultWorkTimeout = 5 * time.Minute
+	snapshotResumeTimeout      = 30 * time.Second
 )
+
+// detachedSnapshotWorkContext lets an in-flight frozen snapshot finish after
+// client cancellation, while preserving the upstream deadline. When none is
+// supplied, a five-minute default bounds the frozen work.
+func detachedSnapshotWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(snapshotDefaultWorkTimeout)
+	if parentDeadline, ok := ctx.Deadline(); ok {
+		deadline = parentDeadline
+	}
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
+}
 
 type CubeboxSnapshotSpec struct {
 	Resource    json.RawMessage `json:"resource,omitempty"`
@@ -293,39 +305,115 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 
 	// collectEnvdVersion uses containerd Exec, which must run before
-	// cube-runtime marks the guest as app-snapshotting and disables exec.
+	// the shim marks the guest as app-snapshotting and disables exec.
 	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
-	stepLog.Info("Step 4: Executing cube-runtime snapshot...")
+	stepLog.Info("Step 4: Capturing sandbox snapshot through shim...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is
 	// no base memory blob to overlay onto, so we always ask for a full memory
 	// snapshot. Incremental is reserved for CommitSandbox where the running
 	// sandbox is bound to a prior snapshot whose memory file we can clone.
-	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull); err != nil {
-		stepLog.Errorf("Failed to execute cube-runtime snapshot: %v", err)
-
+	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
+	defer frozenCancel()
+	cb, err := s.cubeboxMgr.cubeboxManger.Get(frozenCtx, sandboxID)
+	if err != nil {
 		cleanupSnapshotObjects()
 		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to load sandbox for snapshot: %v", err)
 		return rsp, nil
 	}
-	stepLog.Info("cube-runtime snapshot executed successfully")
-	// Do not write memory.dev: host-local /dev paths must not be baked into
-	// packages. Restore resolves memory via catalog vol name + ResolveDevPath.
+	var snapshotErr, rootfsErr, resumeErr error
+	shimCapability := resolveShimSnapshotCapability(cb)
 
-	rootfsObject, err = storage.CommitRootfsFromBuildFor(ctx, backend, templateID)
-	if err != nil {
-		stepLog.Errorf("Failed to create template rootfs snapshot: %v", err)
+	// The legacy sequence: capture memory with the cube-runtime CLI, then commit
+	// rootfs. Used both as the ordinary path for a shim below the coordinated
+	// boundary and as the one-shot retry described below.
+	runLegacy := func() (snapshotErr, rootfsErr error) {
+		return runLegacySnapshot(
+			func() error {
+				return s.captureLegacyMemory(frozenCtx, cb, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+			},
+			func() (err error) {
+				rootfsObject, err = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
+				return err
+			},
+		)
+	}
+
+	if shimCapability.Coordinated {
+		captureStarted := false
+		var freezeLease *snapshotFreezeLease
+		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
+			captureStarted = true
+			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, templateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+			if shimSnapshotUnsupported(captureErr) {
+				captureStarted = false
+			}
+			if captureErr == nil {
+				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, templateID, frozenCancel)
+			}
+			return snapshotCaptureError(captureErr)
+		}, func() error {
+			var commitErr error
+			rootfsObject, commitErr = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
+			if commitErr != nil {
+				return commitErr
+			}
+			return frozenCtx.Err()
+		}, func() error {
+			var leaseErr error
+			if freezeLease != nil {
+				leaseErr = freezeLease.Stop()
+			}
+			if !captureStarted {
+				return leaseErr
+			}
+			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+			defer cancel()
+			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, templateID))
+		})
+		// A shim whose recorded pin is at or above the boundary but which rejects
+		// the action means the version gate guessed wrong about it. The shim
+		// rejects an unknown action at update_route's match arm, before entering
+		// any handler (CubeShim/shim/src/service/update_ext.rs), so the VM was
+		// never frozen and no artifact was committed -- the whole transaction can
+		// safely be redone on the legacy path. The legacy path never re-enters
+		// the coordinated one, so this retries at most once.
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+			logShimDegradedToLegacy(stepLog, shimCapability.Version)
+			snapshotErr, rootfsErr = runLegacy()
+		}
+	} else {
+		logSnapshotPathSelection(stepLog, shimCapability)
+		snapshotErr, rootfsErr = runLegacy()
+	}
+	if snapshotErr != nil || rootfsErr != nil {
 		cleanupSnapshotObjects()
 		layout.discardTmpDir()
-		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
-			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-			rsp.Ret.RetMsg = fmt.Sprintf("template rootfs already exists: %v", err)
-			return rsp, nil
-		}
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to create template rootfs snapshot: %v", err)
+		if snapshotErr != nil {
+			if errors.Is(snapshotErr, errSnapshotShimIncompatible) {
+				rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			}
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to capture sandbox snapshot: %v", snapshotErr)
+		} else if errors.Is(rootfsErr, storage.ErrCowObjectAlreadyExists) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			rsp.Ret.RetMsg = fmt.Sprintf("template rootfs already exists: %v", rootfsErr)
+		} else {
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to create template rootfs snapshot: %v", rootfsErr)
+		}
+		if resumeErr != nil {
+			rsp.Ret.RetMsg += fmt.Sprintf("; additionally failed to resume sandbox: %v", resumeErr)
+		}
+		return rsp, nil
+	}
+	if resumeErr != nil {
+		stepLog.Errorf("Failed to resume cubebox after snapshot: %v", resumeErr)
+		cleanupSnapshotObjects()
+		layout.discardTmpDir()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to resume sandbox after snapshot: %v", resumeErr)
 		return rsp, nil
 	}
 
@@ -396,21 +484,18 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	stepLog.Info("Step 7: Writing snapshot status flag file...")
-	if err := writeSnapshotFlag(stepLog); err != nil {
-		stepLog.Warnf("Failed to write snapshot flag: %v", err)
-
-	}
-
 	snapshotSuccess = true
 	rsp.RootfsVol = rootfsObject.Name
 	rsp.MemoryVol = memoryObject.Name
 	rsp.RootfsKind = rootfsObject.Kind
 	rsp.MemoryKind = memoryObject.Kind
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
-	// One live inventory scan fills both the RPC response and catalog pins.
-	frozenVersions := inventoryVersionsFromLive()
-	versions := guestEnvironmentVersionsFromComponentMap(frozenVersions, guestEnvironmentVersions{})
+	// Preserve component versions captured when the sandbox was created.
+	// Missing values may be filled from the live toolbox, but existing pins
+	// must not be replaced after a host upgrade.
+	CaptureForCubeBox(cb)
+	frozenVersions := cloneStringMap(cb.ComponentVersions)
+	versions := guestEnvironmentVersionsFromCubeBox(cb)
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
@@ -462,32 +547,6 @@ func inheritIncomingMetadata(dst context.Context, src context.Context) context.C
 		return metadata.NewIncomingContext(dst, md.Copy())
 	}
 	return dst
-}
-
-func writeSnapshotFlag(stepLog *log.CubeWrapperLogEntry) error {
-
-	if _, err := os.Stat(SnapshotStatusPath); err == nil {
-		stepLog.Info("Snapshot status flag file already exists, skipping")
-		return nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(SnapshotStatusPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	file, err := os.Create(SnapshotStatusPath)
-	if err != nil {
-		return fmt.Errorf("failed to create flag file: %w", err)
-	}
-	file.Close()
-
-	cmd := exec.Command("chattr", "+i", SnapshotStatusPath)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to set immutable attribute: %w", err)
-	}
-
-	stepLog.Infof("Snapshot status flag file created: %s", SnapshotStatusPath)
-	return nil
 }
 
 func validateAppSnapshotAnnotations(req *cubebox.RunCubeSandboxRequest) error {
@@ -583,22 +642,22 @@ func (s *service) getCubeboxSnapshotSpec(ctx context.Context, sandboxID string) 
 	return result, nil
 }
 
-// snapshotTypeFull asks cube-runtime to capture every memory page of the VM
+// snapshotTypeFull asks the VM to capture every memory page
 // (the historical default).
 const snapshotTypeFull = "full"
 
-// snapshotTypeIncremental asks cube-runtime to write only CoW anonymous pages
+// snapshotTypeIncremental asks the VM to write only CoW anonymous pages
 // into the destination memory file, leaving non-anonymous regions to whatever
 // the destination file already contains (i.e. the reflink-cloned base).
 const snapshotTypeIncremental = "incremental"
 
-// snapshotTypeSoftDirty asks cube-runtime to write only the pages dirtied
+// snapshotTypeSoftDirty asks the VM to write only the pages dirtied
 // since the previous soft-dirty snapshot (a true per-cycle delta) on top of
 // the destination memory file. The destination MUST already contain a valid
 // base image (the reflink-cloned previous snapshot's memory), otherwise pages
 // untouched-since-last-clear would read back as zero on restore. Cubelet
 // guarantees this precondition by reflink-cloning the binding base before
-// invoking cube-runtime; if the base cannot be resolved, the caller falls
+// invoking the shim; if the base cannot be resolved, the caller falls
 // back to snapshotTypeFull instead.
 //
 // The host kernel needs CONFIG_MEM_SOFT_DIRTY=y for soft-dirty to do
@@ -700,15 +759,10 @@ func (s *service) resolveCubeRuntimePath(ctx context.Context, sandboxID string) 
 		return path, nil
 	}
 
-	var shimVer string
-	if cb.ComponentVersions != nil {
-		shimVer = strings.TrimSpace(cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
-	}
-	if shimVer == "" && cb.LocalRunTemplate != nil && cb.LocalRunTemplate.Componts != nil {
-		if shim, ok := cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim]; ok {
-			shimVer = strings.TrimSpace(shim.Component.Version)
-		}
-	}
+	// Read the pinned version through the same resolver the snapshot path
+	// selection uses, so the gate and the runtime we exec can never disagree
+	// about which shim is in play.
+	shimVer, _ := pinnedShimVersion(cb)
 	if shimVer != "" {
 		candidate := templatetypes.VersionedLocalPath(
 			templatetypes.DefaultVersionedBaseDir,

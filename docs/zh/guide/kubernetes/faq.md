@@ -144,6 +144,10 @@ kubectl uncordon <node>
 
 ## 控制面 / 数据库
 
+### CLM 故障切换后沙箱为什么会多一次 pause/resume
+
+这是预期行为，且只发生一次，不是循环。新 leader 接管时（副本故障，或滚动升级中的 leader 切换）会重新核对每个沙箱的状态，记录不一致时按安全的一侧记为 `paused`。这只是记录层面的修正，不会向 VM 发 pause，下次请求会照常 auto-resume。代价是最多一次额外的 auto-resume；反过来，把实际已停止的沙箱记成 `running`，会让流量打到已停机的 VM。
+
 ### cube-master 报连不上 MySQL
 
 按顺序查（以下命令假定 Release 名为 `cube`，命名空间 `cube-system`；其它 Release 名请把资源名前缀换成 `<release>`）：
@@ -253,14 +257,14 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 ### 某个节点上所有沙箱同时断网
 
-大概率是该节点上的 `cube-node` Pod 被重建过（手工删除、DaemonSet template 变更、节点 drain 等）。沙箱的 TAP 设备位于该 Pod 的 netns 中，Pod 重建会销毁它，**节点上所有沙箱的网络随之全部中断（入站、出站均中断），且不会自愈**。可对比 Pod 的 AGE / UID 与故障时间确认：
+大概率是该节点上的 `cube-node` Pod 被重建过（手工删除、DaemonSet template 变更、节点 drain 等），**且该 Pod 运行在 Pod 网络上**：沙箱的 TAP 设备位于该 netns 中，Pod 重建会销毁它，**节点上所有沙箱的网络随之全部中断（入站、出站均中断），且不会自愈**。默认宿主机网络下 netns 是宿主机的、重建不销毁，此时出现该症状应另查原因。可对比 Pod 的 AGE / UID 与故障时间确认：
 
 ```bash
 kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
 ```
 
 - **恢复**：销毁并重建受影响的沙箱。
-- **预防**：部署时为 `cube-node` 启用 `hostNetwork: true`，使 Pod 重建不再引起 netns 变化；详见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。若还需要用 NetworkPolicy 管控沙箱访问集群内 Service 的流量，也请参考同一节。
+- **预防**：让 `cube-node` 保持默认的宿主机网络（`cubeNode.hostNetwork: true`），Pod 重建不会引起 netns 变化；详见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。若因 NetworkPolicy 需要管控沙箱流量而使用 Pod 网络，同一节也说明了这一取舍。
 
 ### 如何在 Kubernetes 部署中运行 `cubecli`？
 
@@ -277,7 +281,7 @@ kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
 
 默认情况下，`kubectl exec` 会进入该 `cube-node` Pod 的 `cubelet` container，这是 Kubernetes 部署中运行 `cubecli` 的支持入口。
 
-对于 `cubecli container taps` 这类网络设备诊断命令，建议在目标 `cube-node` Pod 内执行。Chart 默认使用 `hostNetwork: false`，TAP 设备创建在 `cube-node` Pod 的 network namespace 中；宿主机 login shell 通常使用不同的 network namespace，无法提供同一视角。只有在用户自定义 `cube-node` 使用 `hostNetwork: true` 时，`cube-node` Pod 才会与宿主机共享 network namespace，此时才可以从两侧排查同一批 TAP 设备。
+对于 `cubecli container taps` 这类网络设备诊断命令，注意 TAP 设备所在的 netns：默认 `hostNetwork: true` 下 TAP 创建在宿主机 network namespace 中，宿主机 login shell 与 `cube-node` Pod 看到的是同一批设备。若使用 Pod 网络（`cubeNode.hostNetwork: false`），TAP 位于 `cube-node` Pod 的 network namespace 中，宿主机 login shell 无法提供同一视角，此时请在 Pod 内执行。
 
 ### 沙箱启动很慢（>10s），节点却很空
 
@@ -407,7 +411,7 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 
 ### `helm upgrade` 会不会中断存量沙箱？Pod IP 会变吗？
 
-**升 Big Pod 运行时镜像 / 改 Pod template：会。** `cube-node` 是原生 DaemonSet，变更会 recreate Pod（UID / IP / netns 变化），该节点存量沙箱会中断。只升 Installer / Bootstrap / PVM 且不动 Big Pod template 时，Big Pod 可保持不变。步骤与红线见 [升级](./upgrade.md)。
+**升 Big Pod 运行时镜像 / 改 Pod template 会 recreate Pod（UID 会变）。** 对沙箱的影响取决于网络模式：Pod 网络下 netns 被销毁，该节点存量沙箱断网；默认宿主机网络下 netns 存活——见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。在原地替换落地前，两种模式都建议安排维护窗口。只升 Installer / Bootstrap / PVM 且不动 Big Pod template 时，Big Pod 可保持不变。步骤与红线见 [升级](./upgrade.md)。
 
 会 recreate Big Pod 的典型操作：bump `images.cubelet` 等运行时镜像、增删容器、改 volumeMount / securityContext / 容器名 / env。
 
@@ -440,7 +444,7 @@ PVC/PV 是否删除取决于实际 StorageClass 的 `reclaimPolicy`（TKE 的 `c
 
 ```bash
 ONE_CLICK_ARCH=arm64 \
-PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.7.0 \
+PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.7.2 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 

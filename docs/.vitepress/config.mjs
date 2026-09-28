@@ -1,10 +1,59 @@
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
+import llmstxt from 'vitepress-plugin-llms'
+import {
+  crawlerHeadTags,
+  regroupLlmsTxtByLanguage,
+  reorderLlmsFullByLanguage,
+  shouldDropFromSitemap,
+  SITE_ORIGIN
+} from './seo.mjs'
 
 export default withMermaid(defineConfig({
   title: "CubeSandbox",
   description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
   srcExclude: ['**/_template.md'],
+  cleanUrls: true,
+
+  sitemap: {
+    hostname: SITE_ORIGIN,
+    transformItems(items) {
+      return items.filter((item) => !shouldDropFromSitemap(item.url))
+    }
+  },
+
+  vite: {
+    plugins: [
+      ...llmstxt({
+        domain: SITE_ORIGIN,
+        title: 'CubeSandbox',
+        generateLLMsTxt: true,
+        generateLLMsFullTxt: true,
+        generateLLMFriendlyDocsForEachPage: true,
+        stripHTML: true,
+        injectLLMHint: false,
+        excludeUnnecessaryFiles: false,
+        excludeIndexPage: false,
+        excludeBlog: false,
+        ignoreFiles: [
+          '**/_template.md'
+        ]
+      })
+    ]
+  },
+
+  transformHead({ pageData }) {
+    return crawlerHeadTags({ relativePath: pageData.relativePath })
+  },
+
+  buildEnd(siteConfig) {
+    const llmsTxt = join(siteConfig.outDir, 'llms.txt')
+    writeFileSync(llmsTxt, regroupLlmsTxtByLanguage(readFileSync(llmsTxt, 'utf8')))
+    const llmsFull = join(siteConfig.outDir, 'llms-full.txt')
+    writeFileSync(llmsFull, reorderLlmsFullByLanguage(readFileSync(llmsFull, 'utf8')))
+  },
 
   markdown: {
     // Shiki has no bundled PromQL grammar; alias so ```promql blocks do not warn.
@@ -115,8 +164,7 @@ export default withMermaid(defineConfig({
           { text: 'Blog', link: '/blog/' },
           { text: 'Changelog', link: '/changelog/' },
           { text: 'Contributors', link: '/contributors' },
-          { text: 'About us', link: '/about-us' },
-          { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
+          { text: 'About us', link: '/about-us' }
         ],
         sidebar: {
           '/blog/': [],
@@ -156,6 +204,7 @@ export default withMermaid(defineConfig({
               text: 'Core Concepts',
               items: [
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
+                { text: 'Agent Platform Freeze / Resume', link: '/guide/agent-platform-freeze' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
@@ -221,7 +270,8 @@ export default withMermaid(defineConfig({
                 { text: 'Node Operations', link: '/guide/node-operations' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
-                { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' }
+                { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
+                { text: 'Component multi-version', link: '/guide/component-multiversion' }
               ]
             },
             {
@@ -229,7 +279,8 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
-                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
+                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
+                { text: 'Quality Status', link: '/guide/quality-status' }
               ]
             },
             {
@@ -255,9 +306,10 @@ export default withMermaid(defineConfig({
                   items: [
                     { text: 'Claude Code', link: '/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
-                    { text: 'LangGraph', link: '/guide/integrations/langgraph' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
-                    { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' }
+                    { text: 'LangGraph', link: '/guide/integrations/langgraph' },
+                    { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
+                    { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' }
                   ]
                 },
                 {
@@ -269,7 +321,12 @@ export default withMermaid(defineConfig({
                     { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/guide/usecases/hermes-agent' },
                     { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' },
-                    { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' }
+                    { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' },
+                    { text: 'Guangdong Rising', link: '/guide/usecases/guangdong-rising' },
+                    { text: 'unisound', link: '/guide/usecases/unisound-rl-rollout' },
+                    { text: 'WeKnora', link: '/guide/usecases/weknora' },
+                    { text: 'Huajiao', link: '/guide/usecases/huajiao' },
+                    { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' }
                   ]
                 }
               ]
@@ -325,8 +382,7 @@ export default withMermaid(defineConfig({
           { text: '博客', link: '/zh/blog/' },
           { text: '更新日志', link: '/zh/changelog/' },
           { text: '贡献者', link: '/zh/contributors' },
-          { text: '关于我们', link: '/zh/about-us' },
-          { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
+          { text: '关于我们', link: '/zh/about-us' }
         ],
         sidebar: {
           '/zh/blog/': [],
@@ -366,6 +422,7 @@ export default withMermaid(defineConfig({
               text: '核心概念',
               items: [
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
+                { text: 'Agent 平台 Freeze / Resume', link: '/zh/guide/agent-platform-freeze' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }
@@ -431,7 +488,8 @@ export default withMermaid(defineConfig({
                 { text: '节点相关操作', link: '/zh/guide/node-operations' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
-                { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' }
+                { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
+                { text: '组件多版本', link: '/zh/guide/component-multiversion' }
               ]
             },
             {
@@ -439,7 +497,8 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
-                { text: '性能基准', link: '/zh/guide/performance-benchmark' }
+                { text: '性能基准', link: '/zh/guide/performance-benchmark' },
+                { text: '质量状态', link: '/zh/guide/quality-status' }
               ]
             },
             {
@@ -465,9 +524,10 @@ export default withMermaid(defineConfig({
                   items: [
                     { text: 'Claude Code', link: '/zh/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
-                    { text: 'LangGraph', link: '/zh/guide/integrations/langgraph' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
-                    { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' }
+                    { text: 'LangGraph', link: '/zh/guide/integrations/langgraph' },
+                    { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
+                    { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' }
                   ]
                 },
                 {
@@ -479,7 +539,12 @@ export default withMermaid(defineConfig({
                     { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/zh/guide/usecases/hermes-agent' },
                     { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' },
-                    { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' }
+                    { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' },
+                    { text: 'Guangdong Rising', link: '/zh/guide/usecases/guangdong-rising' },
+                    { text: 'unisound', link: '/zh/guide/usecases/unisound-rl-rollout' },
+                    { text: 'WeKnora', link: '/zh/guide/usecases/weknora' },
+                    { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
+                    { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' }
                   ]
                 }
               ]

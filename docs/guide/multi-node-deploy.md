@@ -147,11 +147,11 @@ The response should include the compute node's IP and a healthy status.
 
 For multi-node deployments, configure CubeMaster's `scheduler.score` on the control node. If scoring is omitted, CubeMaster filters eligible nodes and then selects from the filtered node order, which can concentrate new sandboxes on the first eligible node until resource filters push traffic elsewhere.
 
-Merge the following scheduler fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, overcommit, and other scheduler settings.
+Merge the following scheduler fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, and other scheduler settings.
 
 ```yaml
 scheduler:
-  # Keep your existing filter, timeout, overcommit, and other scheduler settings.
+  # Keep your existing filter, timeout, and other scheduler settings.
   priority_select_num: 3
   score:
     enable_scorers:

@@ -8,17 +8,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_root
+require_cmd sed
+
+CUBELET_CONFIG="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
+ensure_file "${CUBELET_CONFIG}"
+
+# Warehouse downloads need cubeops_addr on every node that runs Cubelet,
+# including all-in-one control. CUBE_OPS_ADDR overrides the resolved address.
+OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
+write_cubelet_cubeops_addr "${CUBELET_CONFIG}" "${CUBE_OPS_ADDR:-${OPS_ADDR}}"
+
 if ! is_compute_role; then
   exit 0
 fi
-
-require_cmd sed
 
 CUBELET_DYNAMICCONF="${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
 ensure_file "${CUBELET_DYNAMICCONF}"
 [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute role"
 
-OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
 MASTER_HTTP_ADDR="$(resolve_control_plane_cubemaster_addr)"
 grep -Eq "meta_server_endpoint:" "${CUBELET_DYNAMICCONF}" || die "meta_server_endpoint missing in ${CUBELET_DYNAMICCONF}"
 grep -Eq "cubemaster_http_addr:" "${CUBELET_DYNAMICCONF}" || die "cubemaster_http_addr missing in ${CUBELET_DYNAMICCONF}"

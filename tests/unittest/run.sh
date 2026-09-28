@@ -12,7 +12,7 @@
 #
 # By default it runs only the self-contained components (the green gate) and
 # skips "gated" components that need a live database or a full VM. Naming a
-# gated component explicitly (e.g. `run.sh cubelet`) forces it to run.
+# gated component explicitly (e.g. `run.sh hypervisor-kvm`) forces it to run.
 #
 # Usage:
 #   tests/unittest/run.sh                 # run the default (self-contained) gate
@@ -56,7 +56,7 @@ REPO_ROOT="$(find_repo_root)" || {
 		"$(dirname "${BASH_SOURCE[0]}")" >&2
 	exit 2
 }
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit 2
 
 # --- component tables --------------------------------------------------------
 #
@@ -76,10 +76,6 @@ cd "$REPO_ROOT"
 # NO_TESTS: "name|reason" — printed as an explicit skip so the absence of unit
 #   tests is visible rather than silently missing from the sweep.
 
-# cubelet does NOT use `make cubelet-test`: that target runs `go test
-# -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
-# any coverage build fails. Bypass coverage with a direct `go test` over the
-# same package set (`-short` skips the Redis/KVM-dependent cases).
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
 	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
@@ -88,17 +84,15 @@ WITH_TESTS=(
 	# intermittently fails to take effect and the real function runs (e.g. the
 	# flaky "template store is not initialized" failures). The repo already uses
 	# this flag for the integration tests (CubeMaster/Makefile testlocal/testtt).
-	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./api/... ./pkg/...'"
-	# cubelet-network: the standalone network-agent module was removed in #1285 and
-	# folded into Cubelet/network/runtime (NetworkController). Its tests moved there
-	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
-	# then run just the runtime package rather than the whole Cubelet suite.
-	"cubelet-network|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && go test ./network/runtime/...'"
+	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./cmd/... ./pkg/...'"
+	# CubeTemplateCenter shares CubeMaster's pkg/templatecenter image code
+	# (Linux-only syscall constants), so its tests go through the builder like
+	# every other Go component. The Makefile target wraps builder-run.
+	"cubetemplatecenter|Go|0|make cubetemplatecenter-test"
 	# cubevs: the CubeNet/cubevs module's OWN unit tests (dataplane policy, DNS
-	# learning, migration, dump, classify). cubelet-network builds cubevs's
-	# generated code but runs Cubelet's tests, so these never ran. cubevs-test
-	# regenerates the BPF objects (make gen) and runs the full module set in a
-	# privileged root builder (eBPF load + bpffs mount need the privilege).
+	# learning, migration, dump, classify). cubevs-test regenerates the BPF
+	# objects (make gen) and runs the full module set in a privileged root
+	# builder (eBPF load + bpffs mount need the privilege).
 	"cubevs|Go|0|make cubevs-test"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
@@ -109,22 +103,32 @@ WITH_TESTS=(
 	# cubelog/cubedb run on the host, not via builder-run: both are pure Go with
 	# no CGO (no `import "C"`) and no builder-only build deps, so the host
 	# toolchain is sufficient and skipping the container is faster.
-	"cubelog|Go|0|cd cubelog && go test -short ./..."
-	"cubedb|Go|0|cd CubeDB && go mod download && go test ./..."
-	# cubelet runs only ./pkg/... here; the cgroupfs/host-cap-dependent tests
-	# live under ./plugins/... and ./services/... and are not in this set, so
-	# the pkg tests are self-contained in the builder.
-	"cubelet|Go|0|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
+	"cubelog|Go|0|cd pkgs/CubeLog && go test -short ./..."
+	"cubedb|Go|0|cd pkgs/cubedb && go mod download && go test ./..."
+	"blobstore|Go|0|cd pkgs/blobstore && go mod download && go test ./..."
+	"cubebench|Shell|0|make cubebench-test"
+	# Same entry point as CI (unit-test-check).
+	"cubelet|Go|0|make cubelet-test"
 	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
-	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest)
-	# and is excluded so `run.sh hypervisor` exercises the self-contained tests.
-	# This entry does NOT pass /dev/kvm into the builder, so the vmm/hypervisor
-	# crate tests that open /dev/kvm at runtime are never reached here — see
-	# `hypervisor-kvm` below for those.
-	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'"
+	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest).
+	# The root package command does not execute workspace member tests, so run
+	# block_util explicitly. Runtime-KVM tests run in `hypervisor-kvm` below.
+	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins && cargo test -p block_util --lib'"
 )
 
 GATED_TESTS=(
+	# The race profile is intentionally separate from the fast default gate: it
+	# recompiles every CubeMaster unit package with the race detector and runs
+	# substantially longer than the regular -short suite.
+	"cubemaster-race|Go+race|0|race-enabled CubeMaster sweep is an extended check|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test-race'"
+	# Docker-backed CubeMaster tests run on the host so dockertest can reach the
+	# daemon and its published 127.0.0.1 ports without nested-container socket or
+	# network plumbing. The component target fails instead of skipping when the
+	# daemon is unavailable.
+	"cubemaster-docker|Go+Docker|0|database tests need a reachable Docker daemon|make -C CubeMaster test-docker"
+	# The ordinary cubelet entry stays unprivileged. Run this explicitly to cover
+	# tests that format and mount images with CAP_SYS_ADMIN, matching CI's lane.
+	"cubelet-mount|Go|0|mount tests need a privileged root builder|make cubelet-mount-test"
 	# hypervisor-kvm exercises the tests that need a real /dev/kvm at runtime:
 	# the `vmm` and `hypervisor` crate unit tests call hypervisor::new() /
 	# create_vm(), which fail without KVM (verified: 4/4 vmm cpu:: tests fail with

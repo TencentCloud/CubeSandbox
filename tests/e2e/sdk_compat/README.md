@@ -369,7 +369,9 @@ Optional:
   a build slot before a worker gives up and builds unthrottled, so one wedged
   peer cannot stall the whole suite. The effective wait scales by the worker
   count. Defaults to `1800`; `<= 0` waits forever.
-- `CUBE_PYTHON_SDK_PATH`: override local CubeSandbox Python SDK path.
+- `CUBE_PYTHON_SDK_PATH`: override the local CubeSandbox Python SDK path. The
+  directory must directly contain `cubesandbox/__init__.py` and is validated at
+  collection time; unset uses the repository's `sdk/python` directory.
 - `SDK_E2E_PLATFORM_LIFECYCLE`: enable platform-managed lifecycle cases
   (`auto-pause`, `auto-resume`, `auto-kill`). Defaults to `false`.
 - `SDK_E2E_PLATFORM_LIFECYCLE_IDLE_TIMEOUT`: idle timeout in seconds for
@@ -483,7 +485,8 @@ Current capability domains:
   already-established connections (`test_policy_update.py`, CubeSandbox only).
 - `cases/concurrency/`: simultaneous multi-sandbox isolation.
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
-  validation, runtime bind-mount failures, and cross-sandbox sharing boundary cases.
+  validation, runtime bind-mount failures, cross-sandbox sharing boundaries, and
+  multi-generation snapshot restore, rollback, and clone external-reference semantics.
 - `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind and per-sandbox read-only attachment enforcement (CubeSandbox only; default driver `s3`). Runs with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Requires the default-install S3 plugin + MinIO and `cubesandbox` >= 0.6.0.
 - `cases/auth/`: `CUBE_API_KEY` simple-key authentication against the CubeAPI
   control plane — `X-API-Key`/`Bearer` accept, wrong/missing 401, `/health`

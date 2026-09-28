@@ -14,15 +14,15 @@ import (
 
 var Command = cli.Command{
 	Name:  "version",
-	Usage: "print the client and server versions",
+	Usage: "print the client version",
 	Flags: []cli.Flag{
 		&cli.BoolFlag{
 			Name:  "versiononly,v",
-			Usage: "print server version only",
+			Usage: "print semantic version only",
 		},
 		&cli.BoolFlag{
 			Name:  "withclient,c",
-			Usage: "print client version",
+			Usage: "deprecated: client version is printed by default",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -30,10 +30,7 @@ var Command = cli.Command{
 			fmt.Println(version.Version)
 			return nil
 		}
-		if context.Bool("withclient") {
-			fmt.Println(version.VersionString("cubemastercli"))
-			fmt.Println("  Go version: " + version.GoVersion)
-		}
+		fmt.Println(version.VersionString("cubemastercli"))
 		return nil
 	},
 }

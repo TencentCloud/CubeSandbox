@@ -175,6 +175,12 @@ test_unit_dependency_order() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cubemaster.service" "After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-api.service" "After=network-online.target cube-sandbox-cubemaster.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "After=docker.service network-online.target cube-sandbox-cubemaster.service cube-sandbox-cubeops.service"
+  # s3lvol must start after MinIO and therefore stop before it (no Requires=:
+  # compute nodes do not ship MinIO).
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-s3lvol.service" "After=network-online.target cube-sandbox-minio.service"
+  if grep -Fq 'Requires=cube-sandbox-minio.service' "${ONE_CLICK_DIR}/systemd/cube-sandbox-s3lvol.service"; then
+    fail "s3lvol must not Require minio (compute nodes have no MinIO unit)"
+  fi
 }
 
 test_detect_glibc_version_consumes_full_ldd_output() {
@@ -898,6 +904,10 @@ test_postcheck_skips_when_external_host_set() {
   CUBE_EXTERNAL_MYSQL_HOST=db.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
     || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_MYSQL_HOST is set"
+  CUBE_EXTERNAL_POSTGRES_HOST=pg.example.com \
+    CUBE_DATABASE_DRIVER=postgres \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
+    || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_POSTGRES_HOST is set"
   CUBE_EXTERNAL_REDIS_HOST=cache.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"
@@ -1048,10 +1058,12 @@ test_external_redis_sentinel_wiring() {
   assert_contains "${install_sh}" 'persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"'
   # SENTINEL lookup must reuse credentials without putting the password in argv.
   assert_contains "${install_sh}" 'REDISCLI_AUTH="${sentinel_pd}"'
+  # Redis endpoint patching is shared by Master and TemplateCenter in lib/common.sh.
   # Leaving Sentinel for bundled Redis must restore password as well as nodes.
-  assert_contains "${install_sh}" "restoring bundled Redis nodes/password in conf.yaml"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" 'restoring bundled Redis nodes/password in ${component} conf.yaml'
   # Sentinel → external standalone must scrub leftover master_name/sentinel_* keys.
-  assert_contains "${install_sh}" "Sentinel → standalone: drop leftover master_name/sentinel_*"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "patching \${component} conf.yaml for external Redis:"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "-e '/^  master_name:/d'"
   # Empty CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD must not AUTH with the master password.
   if grep -E 'sentinel_pd="\$\{CUBE_EXTERNAL_REDIS_PASSWORD\}"' "${install_sh}" >/dev/null; then
     fail "install.sh must not fall back Sentinel AUTH to CUBE_EXTERNAL_REDIS_PASSWORD"

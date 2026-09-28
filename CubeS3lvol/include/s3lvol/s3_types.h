@@ -24,7 +24,21 @@
 #define S3LVOL_DEFAULT_CHUNK_SIZE    (1024 * 1024)   /* 1 MiB, the LBA range one S3 object carries */
 #define S3LVOL_DEFAULT_CLUSTER_SIZE  (1024 * 1024)   /* 1 MiB, blobstore CoW granularity */
 
-/* Snapshot chain depth limits */
+/* Snapshot chain depth limits.
+ *
+ * MAX is a hard consequence rather than a policy: export_build_chain() walks the
+ * chain into a stack array of this size, and a chain deeper than it makes
+ * export_snapshot fall back to copying the whole volume. That fallback is correct
+ * but expensive and, because a copied (dense) export is never reaped, permanent.
+ *
+ * SOFT is where that becomes worth saying out loud. Nothing enforces it -- a
+ * snapshot is the user's to keep, and refusing to create one because a chain is
+ * long would break an ordinary workflow to avoid a cost the user may be happy to
+ * pay. So it warns, once per lvol per crossing, and the depth is reported by
+ * rcow_get_lvstores so a control plane can act before the cliff rather than
+ * discover it afterwards.
+ *
+ * The gap between the two is the room to act in: eight snapshots' worth. */
 #define S3LVOL_DEFAULT_MAX_CHAIN_DEPTH   32
 #define S3LVOL_DEFAULT_SOFT_CHAIN_DEPTH  24
 
@@ -89,6 +103,9 @@ struct s3_lvs_opts {
 	uint32_t             wal_size_mb;
 	uint32_t             journal_size_mb;
 	uint32_t             cache_size_mb;
+	/* Whole-object DRAM cache entries. Process policy: not persisted, and an
+	 * attach may choose a different value. Zero disables the RAM tier. */
+	uint32_t             cache_hot_bufs;
 	uint32_t             uploader_threads;
 
 	/* Longest a committed mapping may stay only in the journal, in seconds.

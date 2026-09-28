@@ -125,6 +125,15 @@ rcow_need_cmd nvme "nvme-cli provides connect/disconnect (nvme-cli package)"
 if [ "${DO_CONNECT}" -eq 1 ]; then
 	rcow_need_nvme_tcp
 fi
+case "${RCOW_CACHE_HOT_BUFS}" in
+''|*[!0-9]*)
+	rcow_die "RCOW_CACHE_HOT_BUFS must be an integer from 0 to 8192"
+	;;
+*)
+	[ "${RCOW_CACHE_HOT_BUFS}" -le 8192 ] ||
+		rcow_die "RCOW_CACHE_HOT_BUFS must be at most 8192"
+	;;
+esac
 rcow_ensure_run_dir
 
 [ -x "${RCOW_TGT_BIN}" ] || rcow_die "target binary not found: ${RCOW_TGT_BIN}"
@@ -158,8 +167,14 @@ is not a state to recover from automatically"
 fi
 
 # Only now that nothing is running can these be assumed dead rather than in use.
+#
+# The hot-restart marker is removed here unconditionally. RCOW_RUN_DIR is not
+# tmpfs, so a marker can outlive the boot that wrote it, and a process that never
+# intended a hot restart must not honour one; the marker is the stop path's to
+# consume, and any stop that was going to consume it has already finished by the
+# time a start runs.
 rm -f "${RCOW_RPC_SOCK}" "${RCOW_RPC_SOCK}.lock" "/var/tmp/spdk_cpu_lock_"* \
-	"${RCOW_PIDFILE}"
+	"${RCOW_PIDFILE}" "${RCOW_HOT_MARKER}"
 
 rcow_load_credentials ||
 	rcow_die "could not read access_key_id/secret_access_key from ${RCOW_S3_CFG}"
@@ -226,14 +241,17 @@ printf '\n==== %s: starting %s\n' "$(date -Is)" "${RCOW_TGT_BIN}" >>"${RCOW_LOG}
 # options, and the pools are allocated during subsystem init. Passed separately
 # from TGT_ARGS so that overriding those cannot drop it.
 #
+# -r must match RCOW_RPC_SOCK: s3lvol_tgt defaults to /var/run/s3lvol.sock,
+# and rcow_wait_rpc below probes RCOW_RPC_SOCK -- a mismatch just times out.
+#
 # shellcheck disable=SC2086
 TGT_PID="$(rcow_start_target_detached "${RCOW_TGT_BIN}" -m "${RCOW_TGT_CPUMASK}" \
-	--wait-for-rpc ${TGT_ARGS})" ||
+	-r "${RCOW_RPC_SOCK}" --wait-for-rpc ${TGT_ARGS})" ||
 	bail "the target did not come up far enough to record its pid"
 
 rcow_wait_rpc 60 "${TGT_PID}" ||
 	bail "the target did not start answering RPCs within 60s"
-rcow_log "target up as pid ${TGT_PID}, log ${RCOW_LOG}"
+rcow_log "target up as pid ${TGT_PID}, mask ${RCOW_TGT_CPUMASK}, log ${RCOW_LOG}"
 
 rcow_apply_startup_opts || bail "the startup options could not be applied"
 
@@ -305,9 +323,9 @@ somewhere else, stop and check which image it meant"
 	rcow_log "found in ${RCOW_BSTORE_FILE} (namespace ${LVS_NS}): attaching, \
 which replays the journal and the WAL"
 
-	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s' \
+	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_WAL_BDEV}" \
-		"${RCOW_CKPT_INTERVAL_SEC}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
 
 	LOG_MARK="$(rcow_log_size)"
 	if ! ATTACH_OUT="$(rcow_rpc rcow_attach_lvstore \
@@ -357,10 +375,10 @@ ${RCOW_BSTORE_FILE}"
 
 	# RCOW_CAPACITY_GB goes straight through: capacity_gib is in GiB, which is
 	# the unit this script always had. It used to multiply out to bytes here.
-	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s' \
+	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_CAPACITY_GB}" \
 		"${RCOW_WAL_BDEV}" "${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}" \
-		"${RCOW_CKPT_INTERVAL_SEC}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
 
 	# A create can hit the same marker: an earlier create that died after
 	# writing it left no bstore.json entry, so this path is reached again.
@@ -392,8 +410,9 @@ else
 	REPLAY_RC=0
 	if [ -s "${RCOW_ACTIVE_FILE}" ]; then
 		rcow_warn "${RCOW_ACTIVE_FILE} lists volumes that are not attached in \
-this process. Run rcow_recovery.sh, or the next activation of one of them will \
-be reported as already active while no namespace exists"
+this process, so they will be listed with no device path until something \
+attaches them. Run rcow_recovery.sh to have the layout checked, or activate a \
+volume to attach it at its recorded placement"
 	fi
 fi
 
@@ -410,6 +429,10 @@ if [ "${DO_CONNECT}" -eq 1 ]; then
 	# Not fatal: a subsystem that failed to connect costs the volumes hashed
 	# to it, and the ones that did connect are still worth having up. The
 	# warning names which.
+	#
+	# The timeouts ride on these connect flags. rcow_tune_initiator_timeouts is
+	# deliberately not called here: it writes to controllers that already
+	# exist, and at fresh-start time that set is empty.
 	rcow_connect_all ||
 		rcow_warn "some subsystems did not connect; volumes that hash to \
 them will activate on the target but never appear on this host"
