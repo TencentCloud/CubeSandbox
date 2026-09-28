@@ -45,6 +45,14 @@ spec:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
+      {{- if .Values.trustedCACerts.enabled }}
+      annotations:
+        # Roll the Deployment when trustedCACerts.certs changes: the merged
+        # bundle is a one-time copy into an emptyDir at pod start, so a bare
+        # ConfigMap update would never reach running pods. The
+        # existingConfigMap path is operator-owned (restart manually).
+        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toYaml | sha256sum | quote }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -83,13 +91,14 @@ spec:
         # emptyDir so image pulls from registries with private CA certificates
         # succeed (the main container reads it via SSL_CERT_FILE).
         - name: merge-ca
-          image: {{ include "cube.image" .Values.images.cubemastercli | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubemastercli.pullPolicy }}
           command: ["/bin/sh", "-ec"]
           args:
             - |-
-              cat /etc/ssl/certs/ca-certificates.crt /trusted-ca/*.crt > /merged/ca-bundle.crt 2>/dev/null \
-                || cat /trusted-ca/*.crt > /merged/ca-bundle.crt
+              cp /etc/ssl/certs/ca-certificates.crt /merged/ca-bundle.crt \
+                || { echo "system CA bundle missing from init image; refusing to build a partial trust store" >&2; exit 1; }
+              cat /trusted-ca/*.crt >> /merged/ca-bundle.crt
           volumeMounts:
             - name: trusted-ca
               mountPath: /trusted-ca

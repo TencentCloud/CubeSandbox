@@ -19,16 +19,42 @@ if grep -qE 'merge-ca|SSL_CERT_FILE|trusted-ca' "$TMP_DIR/off.yaml"; then
   exit 1
 fi
 
-# 2. Enabled with inline certs: ConfigMap + init container + env rendered.
+# 2. Enabled with inline certs: ConfigMap + init container + env + checksum
+#    annotation rendered.
 helm template guard-on "$CHART_DIR" $COMMON_SETS \
   --set trustedCACerts.enabled=true \
   --set-string trustedCACerts.certs[0]="-----BEGIN CERTIFICATE----- guard" >"$TMP_DIR/on.yaml"
-for needle in 'name: guard-on-cube-trusted-ca' 'ca-0.crt' 'name: merge-ca' 'SSL_CERT_FILE'; do
+for needle in 'name: guard-on-cube-trusted-ca' 'ca-0.crt' 'name: merge-ca' 'SSL_CERT_FILE' 'checksum/trusted-ca'; do
   grep -q "$needle" "$TMP_DIR/on.yaml" || {
     echo "FAIL: enabled render missing /$needle/" >&2
     exit 1
   }
 done
+
+# 2b. Enabled must follow global.imageRegistry for the init image (merge-ca
+#     uses cube.cubeImage, same as every other cube-owned image).
+helm template guard-mirror "$CHART_DIR" $COMMON_SETS \
+  --set global.imageRegistry=mirror.example.com \
+  --set-string images.cubemastercli.repository=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli \
+  --set trustedCACerts.enabled=true \
+  --set-string trustedCACerts.certs[0]="-----BEGIN CERTIFICATE----- guard" >"$TMP_DIR/mirror.yaml"
+grep -q 'image: "mirror.example.com/cube-sandbox/cubemastercli' "$TMP_DIR/mirror.yaml" || {
+  echo "FAIL: merge-ca init image does not follow global.imageRegistry" >&2
+  exit 1
+}
+
+# 2c. Enabled without certs and without existingConfigMap must fail at render
+#     time (otherwise merge-ca would crashloop with stderr swallowed).
+if helm template guard-empty "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true >/dev/null 2>"$TMP_DIR/empty.err"; then
+  echo "FAIL: enabled=true without certs/existingConfigMap must fail validation" >&2
+  exit 1
+fi
+grep -qi 'trustedCACerts' "$TMP_DIR/empty.err" || {
+  echo "FAIL: validation error does not mention trustedCACerts:" >&2
+  cat "$TMP_DIR/empty.err" >&2
+  exit 1
+}
 
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
