@@ -86,5 +86,14 @@
     "registryUsername": "Registry username",
     "registryPassword": "Registry password",
     "withCubeCa": "Bake CubeEgress CA into rootfs"
+  },
+  "delete": {
+    "button": "Delete Template",
+    "title": "Delete Template",
+    "confirmDesc": "Are you sure you want to delete template",
+    "confirmDescSuffix": "? This action cannot be undone.",
+    "cancel": "Cancel",
+    "confirm": "Confirm Delete",
+    "deleting": "Deleting…"
   }
 }
