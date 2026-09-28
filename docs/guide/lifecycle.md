@@ -15,6 +15,9 @@ A sandbox is always in exactly one of these states:
 | `paused`     | Snapshot persisted to disk. **Zero** CPU/memory cost. Full state preserved.                    |
 | `resuming`   | Platform is restoring the snapshot (transient).                                                |
 | `terminated` | Killed (`kill()`) or reaped after `on_timeout="kill"`. Cannot be brought back.                 |
+| `unknown`    | CubeAPI could not map the sandbox to one of the rows above: it is still being created, its container has exited, or its state could not be read from its node. |
+
+`unknown` is not a synonym for "gone": CubeAPI reports it for a sandbox that is still being created, one whose container has exited, and one whose state could not be read from its node. The `terminated` row describes what `kill()` and `on_timeout="kill"` do; a container that exits on its own is reported as `unknown`, not as a separate terminal state. Because those cases share one value, `GET /sandboxes/<id>` alone cannot tell a sandbox that is still coming up from one that is already dead — `POST /sandboxes/<id>/connect` is the signal: it fails with HTTP 409 (`... is not connectable in state 'stopped'`) once the container is gone, and still connects in the other two cases.
 
 Two settings drive transitions:
 
@@ -152,7 +155,7 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 | `N > 0` | ensure at least N seconds remain; a running or paused sandbox keeps a longer existing deadline, otherwise the timeout starts a new N-second window after connecting |
 | `0` or `N < -1` | reject the request with HTTP 400 |
 
-When connecting a paused sandbox, the underlying Resume may return HTTP 409 while another lifecycle operation is still settling; retry after the sandbox reaches a stable state.
+When connecting a paused sandbox, the underlying Resume may return HTTP 409 while another lifecycle operation is still settling; retry after the sandbox reaches a stable state. A connect 409 can also mean the sandbox's container has already exited: that state is permanent, so retrying will not help — see [State Model](#state-model).
 
 The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 

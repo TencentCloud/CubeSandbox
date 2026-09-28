@@ -30,13 +30,21 @@ impl ApiError {
 pub type SandboxMetadata = HashMap<String, String>;
 pub type EnvVars = HashMap<String, String>;
 
-/// State of the sandbox (running | paused)
+/// State of the sandbox (running | paused | pausing | unknown)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxState {
     Running,
     Paused,
     Pausing,
+    /// The backend reported a state CubeAPI cannot map to a live lifecycle
+    /// phase. An exited container (`Stopped`) lands here, but so does a
+    /// sandbox that is still being created and one whose state could not be
+    /// read from its node, so `unknown` is not by itself a terminal signal:
+    /// `POST /sandboxes/{id}/connect` returns 409 only for the states that are
+    /// terminal. Exposed instead of silently reporting `Running` so clients
+    /// stop treating a dead sandbox as usable.
+    Unknown,
 }
 
 /// Network configuration for sandbox egress/ingress control.
@@ -906,6 +914,11 @@ pub struct ListSandboxesQuery {
 #[allow(dead_code)]
 pub struct ListSandboxesV2Query {
     pub metadata: Option<String>,
+    /// Filter by sandbox state. Accepted values are `running`, `paused`,
+    /// `pausing`, and `unknown`; `stopped` and `error` are accepted as aliases
+    /// for `unknown`. The `unknown` bucket also holds sandboxes that are still
+    /// being created and sandboxes whose state could not be read from their
+    /// node, so it is not a synonym for "exited".
     pub state: Option<String>,
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
