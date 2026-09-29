@@ -148,7 +148,16 @@ impl AsyncIo for RawFileAsync {
             sq.sync();
             submitter.submit().map_err(AsyncIoError::Fsync)?;
         } else {
-            unsafe { libc::fsync(self.fd) };
+            loop {
+                // SAFETY: `self.fd` is owned by this backend and remains valid.
+                if unsafe { libc::fsync(self.fd) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(AsyncIoError::Fsync(error));
+                }
+            }
         }
 
         Ok(())
