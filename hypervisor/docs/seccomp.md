@@ -19,11 +19,16 @@ representing the VMM.
 Each of these threads has a limited scope of what it is expected to perform,
 which is why different filters are applied to each of them.
 
-By default, Cloud Hypervisor enables seccomp filtering as the project believes
-that security should not be an option.
+Release builds enable seccomp filtering by default because security should not
+be optional. Debug builds disable filtering by default so that newly introduced
+system calls do not terminate the process while developers investigate them;
+startup logs make this exception visible. The default debug mode does not log
+blocked system calls because it installs no filter. Use `--seccomp log` when the
+host audit setup is available and syscall logging is desired. In either build
+type, `--seccomp process` explicitly enables the production default.
 
-For development and debugging purposes, one might want to disable this feature
-or log the faulty system call.
+For development and debugging purposes, one might want to disable filtering or
+log the faulty system call explicitly.
 
 ### Disabling seccomp filters
 
