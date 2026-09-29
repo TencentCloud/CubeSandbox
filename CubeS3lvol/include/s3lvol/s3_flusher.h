@@ -40,6 +40,17 @@
  * the S3 client's own timeouts. */
 #define S3_FLUSHER_DRAIN_TIMEOUT_US (30ULL * 1000 * 1000)
 
+/* Default deadline for a suspend asked to be bounded. Used by the hot prepare,
+ * which cannot afford to wait on one slow upload for the length of a stop. */
+#define S3_FLUSHER_SUSPEND_TIMEOUT_US (60ULL * 1000 * 1000)
+
+/* Ask s3_flusher_suspend() for no deadline at all.
+ *
+ * Different from passing 0, which selects the default above. The attach hold
+ * wants "wait as long as it takes": its own resume fallback already bounds the
+ * hold, and failing an attach over a slow upload would be worse than waiting. */
+#define S3_FLUSHER_NO_SUSPEND_TIMEOUT UINT64_MAX
+
 struct s3_flusher;
 struct s3_wal;
 
@@ -132,11 +143,23 @@ void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
  * updates finish. Dirty overlay data remains protected by the WAL. The pause is
  * reversible with s3_flusher_resume().
  *
+ * \param timeout_us 0 selects S3_FLUSHER_SUSPEND_TIMEOUT_US;
+ *                   S3_FLUSHER_NO_SUSPEND_TIMEOUT waits without one. Once the
+ *                   deadline passes the hold is abandoned and the callback
+ *                   reports -ETIMEDOUT, but uploads already running are still
+ *                   waited for -- their completions would otherwise touch freed
+ *                   memory. A failed hold never took effect: uploads resume, so
+ *                   the caller must treat -ETIMEDOUT as "not suspended".
+ *
  * If a completion is already in flight the callback may fire after
  * s3_flusher_suspend() returns; a drain started in that window cancels the
  * suspend instead of failing, and the callback then reports -ECANCELED.
+ *
+ * The callback must not re-enter this flusher (a drain or a destroy from inside
+ * it is not refused while the suspend is unwinding).
  */
-void s3_flusher_suspend(struct s3_flusher *f, s3_flusher_cb cb_fn, void *cb_arg);
+void s3_flusher_suspend(struct s3_flusher *f, uint64_t timeout_us,
+			s3_flusher_cb cb_fn, void *cb_arg);
 
 /** Re-enable uploads after a completed suspend. */
 void s3_flusher_resume(struct s3_flusher *f);

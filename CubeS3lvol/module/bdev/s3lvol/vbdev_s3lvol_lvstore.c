@@ -92,6 +92,12 @@ struct s3lvol_lvstore {
 
 static TAILQ_HEAD(, s3lvol_lvstore) g_lvstores = TAILQ_HEAD_INITIALIZER(g_lvstores);
 
+/* Hot-prepare state. Declared here rather than beside the prepare chain below
+ * because s3lvol_lvstore_unload() guards on g_hot_prepare_active, and an unload
+ * can be requested at any point in the attach/prepare lifetime. */
+static bool g_hot_prepare_active;
+static bool g_hot_prepare_done;
+
 /* State carried across the create *or* attach chain. The lvstore is only
  * published in g_lvstores once blobstore is up.
  *
@@ -1743,6 +1749,7 @@ lvs_attach_start_blobstore(struct lvs_setup_ctx *ctx)
 	 * flusher held here, and a timer armed later would never break that cycle. */
 	s3_bs_dev_schedule_flusher_resume(ctx->lvs->bs_dev, 30 * 1000 * 1000);
 	s3_bs_dev_suspend_flusher(ctx->lvs->bs_dev,
+				  S3_FLUSHER_NO_SUSPEND_TIMEOUT,
 				  lvs_attach_blobstore_flusher_held, ctx);
 }
 
@@ -2333,6 +2340,24 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 		return;
 	}
 
+	/* A hot prepare walks g_lvstores with a bare TAILQ_NEXT across asynchronous
+	 * boundaries and holds every flusher. An unload that freed its lvs mid-walk
+	 * would leave that walk on freed memory. Today it happens to survive -- the
+	 * drain cancels the pending suspend, which lands the prepare on its failure
+	 * branch without touching suspend_next again -- but that is an emergent
+	 * property of the cancel path, not something the walk guarantees, so refuse
+	 * the unload explicitly while a prepare is in flight. The prepare is bounded
+	 * now (see S3_FLUSHER_SUSPEND_TIMEOUT_US), so a caller can retry. */
+	if (g_hot_prepare_active) {
+		SPDK_WARNLOG("lvstore '%s' cannot be unloaded while a hot prepare "
+			     "is walking the lvstore list; retry once it settles\n",
+			     lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
 		if (cb_fn) {
@@ -2391,10 +2416,14 @@ struct lvs_hot_prepare_ctx {
 	spdk_lvs_op_complete cb_fn;
 	void *cb_arg;
 	int status;
+
+	/* Budget for holding each flusher, in microseconds; 0 means the flusher's
+	 * own default. The prepare is the one suspend with a caller waiting on a
+	 * stop budget, so it is the one that must be bounded. */
+	uint64_t suspend_timeout_us;
 };
 
-static bool g_hot_prepare_active;
-static bool g_hot_prepare_done;
+static void lvs_hot_prepare_finish(struct lvs_hot_prepare_ctx *ctx, int status);
 
 static void
 lvs_hot_prepare_finish(struct lvs_hot_prepare_ctx *ctx, int status)
@@ -2474,6 +2503,7 @@ lvs_hot_prepare_suspend_next(struct lvs_hot_prepare_ctx *ctx)
 	}
 
 	s3_bs_dev_suspend_flusher(ctx->suspend_next->bs_dev,
+				 ctx->suspend_timeout_us,
 				 lvs_hot_prepare_flusher_suspended, ctx);
 }
 
@@ -2493,7 +2523,8 @@ lvs_hot_prepare_paused(void *cb_arg, int status)
 }
 
 void
-s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg)
+s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg,
+			   uint64_t suspend_timeout_us)
 {
 	struct lvs_hot_prepare_ctx *ctx;
 	struct s3lvol_lvstore *lvs;
@@ -2533,6 +2564,7 @@ s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg)
 	}
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
+	ctx->suspend_timeout_us = suspend_timeout_us;
 	g_hot_prepare_active = true;
 
 	rc = s3lvol_nvmf_pause_all(lvs_hot_prepare_paused, ctx);
@@ -2560,7 +2592,7 @@ lvs_resume_subsystems_done(void *cb_arg, int status)
 	}
 }
 
-void
+int
 s3lvol_resume_subsystems(void)
 {
 	struct s3lvol_lvstore *lvs;
@@ -2576,12 +2608,18 @@ s3lvol_resume_subsystems(void)
 	 * normal no-way-back assumption the retry would otherwise just re-report
 	 * success over a target that is no longer quiesced. Guarded on
 	 * g_hot_prepare_active so a resume cannot open a second prepare's window --
-	 * a prepare in flight is left alone rather than interleaved, and the caller
-	 * is told so it can retry once it settles. */
+	 * a prepare in flight is left alone rather than interleaved.
+	 *
+	 * That refusal is reported rather than swallowed: a caller that reads it as
+	 * success would tell an operator the node had been released while it is
+	 * still frozen, which is the one thing this function exists to prevent.
+	 * With the prepare's own flusher holds now bounded (see
+	 * S3_FLUSHER_SUSPEND_TIMEOUT_US) the refusal is transient -- it lasts only
+	 * as long as a prepare that is already unwinding. */
 	if (g_hot_prepare_active) {
 		SPDK_WARNLOG("a hot prepare is still in flight; not resuming RCOW "
 			     "subsystems under it\n");
-		return;
+		return -EBUSY;
 	}
 	g_hot_prepare_done = false;
 
@@ -2595,7 +2633,10 @@ s3lvol_resume_subsystems(void)
 	if (rc != 0) {
 		SPDK_ERRLOG("could not resume RCOW subsystems: %s\n",
 			    spdk_strerror(-rc));
+		return rc;
 	}
+
+	return 0;
 }
 
 void

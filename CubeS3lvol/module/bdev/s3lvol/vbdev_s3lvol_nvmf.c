@@ -334,6 +334,34 @@ nvmf_pause_all_next(struct nvmf_pause_all_ctx *ctx)
 	}
 
 	subsystem = ctx->subsystems[ctx->index];
+
+	/* Pause every namespace of this subsystem, not "the subsystem".
+	 *
+	 * SPDK_NVME_GLOBAL_NS_TAG (0xFFFFFFFF) is not the same trap as nsid 0 --
+	 * see nvmf_op_start() for that one. Checked against the pinned SPDK,
+	 * d64c4fa89233397460e2e4ff55a1c69b8e498598: lib/nvmf/nvmf.c:2021 has an
+	 * explicit `nsid == SPDK_NVME_GLOBAL_NS_TAG` branch that marks every
+	 * namespace PAUSING, and :2042 a second one that yields the callback until
+	 * every namespace's io_outstanding reaches zero. So unlike 0 (which wraps
+	 * to UINT32_MAX in `nsid - 1 < num_ns` and quiesces nothing), this really
+	 * is a complete quiesce -- which the hot-upgrade path relies on, since it
+	 * SIGKILLs on the strength of it.
+	 *
+	 * The count below makes the dependency self-checking: "0 namespaces" would
+	 * be the silent version of the old bug. */
+	{
+		struct spdk_nvmf_ns *ns;
+		uint32_t ns_count = 0;
+
+		for (ns = spdk_nvmf_subsystem_get_first_ns(subsystem); ns != NULL;
+		     ns = spdk_nvmf_subsystem_get_next_ns(subsystem, ns)) {
+			ns_count++;
+		}
+		SPDK_NOTICELOG("hot prepare: quiescing %" PRIu32 " namespace(s) on "
+			       "subsystem '%s'\n", ns_count,
+			       spdk_nvmf_subsystem_get_nqn(subsystem));
+	}
+
 	rc = spdk_nvmf_subsystem_pause(subsystem, SPDK_NVME_GLOBAL_NS_TAG,
 				       nvmf_pause_all_paused, ctx);
 	if (rc == 0) {

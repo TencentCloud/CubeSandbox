@@ -116,12 +116,15 @@ at the log"
 	exit 1
 }
 
-# A failed attach can leave a flusher still held: the hold is taken before the
-# blobstore load, and the failure is exactly the case in which the milestone that
-# would normally release it never arrives. rcow_resume_flushers is idempotent and
-# releases only uploads, so a plain attach has nothing else to undo. Best effort
-# on purpose -- the caller is already on its way out, and the attach-side fallback
-# would fire on its own anyway.
+# Release a flusher hold left behind by an attach that got as far as publishing
+# the lvstore. An earlier attempt at this lived on the attach-RPC failure
+# branches, where it could do nothing: a failed RPC never reaches
+# lvs_setup_report(), so the lvstore is not in g_lvstores yet and
+# rcow_resume_flushers iterates an empty list -- and the bs_dev teardown that
+# does run there destroys the flusher anyway. The cases that need it are the
+# exits *after* a successful attach but before the resume at the end of this
+# script, where the hold is real and only the fallback timer would otherwise
+# clear it. Best effort: the caller is already on its way out.
 rcow_release_attach_hold()
 {
 	rcow_rpc rcow_resume_flushers '{}' >/dev/null 2>&1 || :
@@ -352,7 +355,9 @@ still in S3: ${OWNER_REASON}. Retrying with force=true"
 				"${ATTACH_PARAMS},\"force\":true}" 2>&1)" || {
 				rcow_err "rcow_attach_lvstore failed even with force: \
 ${ATTACH_OUT}"
-				rcow_release_attach_hold
+				# No release needed: the attach never published the lvstore,
+				# so there is no held flusher to reach and the bs_dev teardown
+				# already destroyed it.
 				bail "the lvstore could not be attached"
 			}
 		else
@@ -360,7 +365,6 @@ ${ATTACH_OUT}"
 			[ -n "${OWNER_REASON:-}" ] &&
 				rcow_err "the owner marker was not confirmed stale: \
 ${OWNER_REASON}"
-			rcow_release_attach_hold
 			bail "the lvstore could not be attached. Do not reach for create: \
 it formats the journal and the WAL, and after a crash they hold the only copy \
 of writes the host has already been told are durable. If the marker is held by \
@@ -434,7 +438,12 @@ fi
 # reachable -- see the step 7 note in the header, and rcow_add_listeners().
 rcow_step "NVMf: listeners on ${RCOW_LISTEN_ADDR}:${RCOW_LISTEN_PORT}"
 
-rcow_add_listeners || bail "the subsystems exist but none of them is reachable"
+rcow_add_listeners || {
+	# The lvstore is published and its flusher is still held; the release at
+	# the end of this script is never reached from here.
+	rcow_release_attach_hold
+	bail "the subsystems exist but none of them is reachable"
+}
 
 # ==========================================================================
 if [ "${DO_CONNECT}" -eq 1 ]; then
@@ -482,6 +491,9 @@ rcow_log "activate a volume:  rcow_rpc rcow_active_bdev '{\"device_name\":\"NAME
 rcow_log "find its device:    rcow_rpc rcow_get_bdev '{\"device_name\":\"NAME\"}'"
 
 if [ "${REPLAY_RC}" -ne 0 ]; then
+	# No release needed: rcow_resume_flushers has already run above, so the
+	# attach hold is gone by now. Only the listener failure is early enough to
+	# need one.
 	rcow_err "the data plane is up but the previous layout was not fully \
 restored; see the warnings above"
 	exit 1

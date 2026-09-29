@@ -169,8 +169,14 @@ void s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
  * The next attach recovers from the dirty super. On success the subsystems
  * stay paused; the caller must terminate the process immediately. On failure
  * they are resumed first.
+ *
+ * \param suspend_timeout_us Budget for holding each flusher; 0 takes the
+ *                           flusher's default. A hold that times out fails the
+ *                           prepare and unwinds it, rather than leaving every
+ *                           namespace paused with nothing able to undo it.
  */
-void s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg);
+void s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg,
+				uint64_t suspend_timeout_us);
 
 /**
  * Resume background upload on every loaded lvstore.
@@ -189,9 +195,11 @@ void s3lvol_resume_flushers(void);
  * This is the only way back for the two windows between a successful prepare
  * and the SIGKILL (an unreadable target binary, or a kill that does not land),
  * where the target would otherwise keep running with a frozen data plane.
- * A no-op while a prepare is still in flight.
+ *
+ * \return 0 on success, -EBUSY while a prepare is still in flight (the call was
+ *         a no-op, so the caller must not report the node as released).
  */
-void s3lvol_resume_subsystems(void);
+int s3lvol_resume_subsystems(void);
 
 /**
  * Snapshot the write-path counters (WAL, overlay, flusher).

@@ -877,7 +877,7 @@ overlay", probe.done, NULL);
 		struct drain_probe probe = { .status = -1, .done = false };
 		uint32_t started;
 
-		s3_flusher_suspend(fl, drain_cb, &probe);
+		s3_flusher_suspend(fl, S3_FLUSHER_NO_SUSPEND_TIMEOUT, drain_cb, &probe);
 		check_true("an idle flusher suspends immediately",
 			   probe.done && probe.status == 0, NULL);
 
@@ -897,7 +897,7 @@ overlay", probe.done, NULL);
 		fill_pattern(blk, 1, 5 * BLOCKS_PER_CHUNK, 0xC2);
 		s3_overlay_write(ov, 5 * BLOCKS_PER_CHUNK, 1, blk, 901);
 		s3_flusher_kick(fl);
-		s3_flusher_suspend(fl, drain_cb, &probe);
+		s3_flusher_suspend(fl, S3_FLUSHER_NO_SUSPEND_TIMEOUT, drain_cb, &probe);
 		check_true("suspend waits for an in-flight upload", !probe.done,
 			   NULL);
 		s3_flusher_resume(fl);
@@ -926,7 +926,7 @@ overlay", probe.done, NULL);
 		s3_flusher_kick(fl);
 		check_u64("one upload is now in flight", fake.n_pending, 1);
 
-		s3_flusher_suspend(fl, drain_cb, &susp);
+		s3_flusher_suspend(fl, S3_FLUSHER_NO_SUSPEND_TIMEOUT, drain_cb, &susp);
 		check_true("the suspend is pending, not complete", !susp.done, NULL);
 
 		started = fake.started;
@@ -945,6 +945,47 @@ overlay", probe.done, NULL);
 		check_true("the drain completed once the upload landed", drain.done,
 			   NULL);
 		check_true("and reported success", drain.status == 0, NULL);
+	}
+
+	/* --- a bounded suspend gives up instead of waiting forever --- */
+	printf("\n[13] a suspend with a deadline abandons the hold\n");
+	{
+		/* The reason the hot prepare is bounded: it holds a namespace pause
+		 * that only a completed hold can release, so one upload that never
+		 * lands would keep the whole data plane frozen. On expiry the hold is
+		 * abandoned and the failure is reported, so the prepare unwinds. */
+		struct drain_probe probe = { .status = -1, .done = false };
+		uint32_t started;
+
+		fill_pattern(blk, 1, 7 * BLOCKS_PER_CHUNK, 0xC4);
+		s3_overlay_write(ov, 7 * BLOCKS_PER_CHUNK, 1, blk, 903);
+		s3_flusher_kick(fl);
+		check_u64("one upload is in flight again", fake.n_pending, 1);
+
+		/* A 1 us deadline is already past by the time the suspend reads the
+		 * clock, as in the drain case above. The suspend still does not report
+		 * yet: the in-flight upload's completion touches the flusher, so it is
+		 * waited for regardless of the deadline. */
+		s3_flusher_suspend(fl, 1, drain_cb, &probe);
+		check_true("the expired suspend still waits for the in-flight upload",
+			   !probe.done, NULL);
+
+		/* Let it land. The completion is what re-checks the suspend. */
+		started = fake.started;
+		fake_complete_all(&fake, 0);
+		check_true("the expired suspend reports -ETIMEDOUT",
+			   probe.done && probe.status == -ETIMEDOUT, NULL);
+
+		/* The hold never took effect, so uploads must not be left gated. */
+		fill_pattern(blk, 1, 8 * BLOCKS_PER_CHUNK, 0xC5);
+		s3_overlay_write(ov, 8 * BLOCKS_PER_CHUNK, 1, blk, 904);
+		s3_flusher_kick(fl);
+		check_true("uploads resume after the abandoned hold",
+			   fake.started > started, NULL);
+
+		while (fake.n_pending > 0) {
+			fake_complete_all(&fake, 0);
+		}
 	}
 
 	s3_flusher_destroy(fl);

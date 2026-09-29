@@ -196,8 +196,15 @@ void s3_bs_dev_log_overlay(struct spdk_bs_dev *bs_dev);
 void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 		     s3_bs_dev_cb cb_fn, void *cb_arg);
 
-/** Stop background uploads after current uploads have completed. */
-void s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev,
+/**
+ * Stop background uploads after current uploads have completed.
+ *
+ * \param timeout_us 0 selects S3_FLUSHER_SUSPEND_TIMEOUT_US;
+ *                   S3_FLUSHER_NO_SUSPEND_TIMEOUT waits without one. A callback
+ *                   status of -ETIMEDOUT means the hold was abandoned (uploads
+ *                   resumed), so the caller must not treat it as suspended.
+ */
+void s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 			       s3_bs_dev_cb cb_fn, void *cb_arg);
 
 /** Re-enable a flusher suspended by s3_bs_dev_suspend_flusher(). */

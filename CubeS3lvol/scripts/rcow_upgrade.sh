@@ -130,9 +130,11 @@ does not confirm that, the target must be restarted."
 	exit 1
 }
 
-# Release a hot prepare that will not be followed by the kill. Idempotent, and
-# best effort: the caller is already on its way out, and a failed resume is
-# reported by the log line that follows it, not by a second failure.
+# Release a hot prepare that will not be followed by the kill. Best effort: the
+# caller is already on its way out, so a failure is reported rather than
+# escalated. A refusal now exits non-zero (the RPC answers with the envelope's
+# two keys), so a node still frozen is warned about instead of being reported as
+# resumed.
 rcow_resume_subsystems()
 {
 	local out
@@ -141,6 +143,7 @@ rcow_resume_subsystems()
 		rcow_log "resumed RCOW subsystems (undoing the prepare)"
 	else
 		rcow_warn "could not resume RCOW subsystems: ${out}"
+		rcow_warn "the target may still be quiesced; restart it to be sure"
 	fi
 }
 
@@ -381,7 +384,8 @@ fi
 # window. Nothing after this point may fail without first undoing the quiesce --
 # see fail_live_prepared.
 rcow_step "prepare: quiesce namespaces; blobstore stays dirty"
-hot_online_op "hot prepare" rcow_prepare_hot_upgrade '{}' ||
+hot_online_op "hot prepare" rcow_prepare_hot_upgrade \
+	"{\"suspend_timeout_ms\":${RCOW_HOT_PREPARE_SUSPEND_MS}}" ||
 	fail_live_prepared "could not prepare the target for hot upgrade"
 
 # ==========================================================================

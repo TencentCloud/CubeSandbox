@@ -1534,6 +1534,10 @@ struct rpc_lvstore_flush {
 	uint64_t timeout_ms;
 };
 
+/* A drain deadline larger than this is refused rather than silently wrapped by
+ * the ms-to-us conversion below. One hour is far past any real drain. */
+#define RCOW_FLUSH_TIMEOUT_MS_MAX (60ULL * 60 * 1000)
+
 static const struct spdk_json_object_decoder rpc_lvstore_flush_decoders[] = {
 	{"lvs_name", offsetof(struct rpc_lvstore_flush, lvs_name), spdk_json_decode_string, false},
 	{"timeout_ms", offsetof(struct rpc_lvstore_flush, timeout_ms), spdk_json_decode_uint64, true},
@@ -1558,6 +1562,18 @@ rpc_rcow_flush_lvstore(struct spdk_jsonrpc_request *request,
 		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV,
 						     "lvstore '%s' not found",
 						     req.lvs_name);
+		goto cleanup;
+	}
+
+	/* Bound the conversion below. timeout_ms is caller-supplied and the
+	 * multiplication would wrap a uint64_t, silently turning "a very long
+	 * drain" into a short one. Well past any real drain, and still under the
+	 * wrap point. */
+	if (req.timeout_ms > RCOW_FLUSH_TIMEOUT_MS_MAX) {
+		spdk_jsonrpc_send_error_response_fmt(request,
+						     SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						     "timeout_ms %" PRIu64 " exceeds the maximum of %" PRIu64,
+						     req.timeout_ms, (uint64_t)RCOW_FLUSH_TIMEOUT_MS_MAX);
 		goto cleanup;
 	}
 
@@ -1625,18 +1641,37 @@ SPDK_RPC_REGISTER("rcow_checkpoint_lvstore",
  * preserving the host namespace layout.
  * ========================================================================== */
 
+struct rpc_rcow_prepare_hot_upgrade {
+	uint64_t suspend_timeout_ms;
+};
+
+static const struct spdk_json_object_decoder rpc_prepare_hot_upgrade_decoders[] = {
+	{"suspend_timeout_ms", offsetof(struct rpc_rcow_prepare_hot_upgrade, suspend_timeout_ms),
+	 spdk_json_decode_uint64, true},
+};
+
 static void
 rpc_rcow_prepare_hot_upgrade(struct spdk_jsonrpc_request *request,
 			     const struct spdk_json_val *params)
 {
-	if (params != NULL && spdk_json_decode_object(params, NULL, 0, NULL)) {
+	struct rpc_rcow_prepare_hot_upgrade req = {0};
+
+	if (params != NULL && spdk_json_decode_object(params,
+						     rpc_prepare_hot_upgrade_decoders,
+						     SPDK_COUNTOF(rpc_prepare_hot_upgrade_decoders),
+						     &req)) {
 		spdk_jsonrpc_send_error_response(request,
 						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-						 "This method takes no parameters");
+						 "Invalid parameters");
 		return;
 	}
 
-	s3lvol_prepare_hot_upgrade(rpc_lvstore_op_cb, request);
+	/* Milliseconds on the wire, microseconds in the hold. 0 means "the
+	 * flusher's own default", which is what a caller that does not care
+	 * sends; the startup script passes its own budget so the prepare cannot
+	 * outlive the stop it is part of. */
+	s3lvol_prepare_hot_upgrade(rpc_lvstore_op_cb, request,
+				   req.suspend_timeout_ms * 1000);
 }
 SPDK_RPC_REGISTER("rcow_prepare_hot_upgrade",
 		  rpc_rcow_prepare_hot_upgrade, SPDK_RPC_RUNTIME)
@@ -1670,6 +1705,8 @@ static void
 rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
 			   const struct spdk_json_val *params)
 {
+	int rc;
+
 	if (params != NULL && spdk_json_decode_object(params, NULL, 0, NULL)) {
 		spdk_jsonrpc_send_error_response(request,
 						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
@@ -1677,8 +1714,15 @@ rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	s3lvol_resume_subsystems();
-	spdk_jsonrpc_send_bool_response(request, true);
+	/* The status travels in the envelope, both keys, so the caller can tell a
+	 * resume from a refusal. Not spdk_jsonrpc_send_bool_response(): it writes
+	 * bool_value alone, and test/tools/s3lvol_rpc.py only unwraps a result that
+	 * carries *both* keys -- a bool-only reply would reach the script as a raw
+	 * result and exit 0, which is exactly the false success this is fixing. */
+	rc = s3lvol_resume_subsystems();
+	rpc_lvol_write_response(request, rc == 0,
+				rc == 0 ? "" : "a hot prepare is still in flight; "
+				"the subsystems were not resumed");
 }
 SPDK_RPC_REGISTER("rcow_resume_subsystems",
 		  rpc_rcow_resume_subsystems, SPDK_RPC_RUNTIME)

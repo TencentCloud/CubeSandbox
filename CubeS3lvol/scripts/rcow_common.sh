@@ -384,6 +384,16 @@ RCOW_RPC_TIMEOUT="${RCOW_RPC_TIMEOUT:-300}"
 # under a write load the overlay never goes clean and the RPC returns -ETIMEDOUT.
 RCOW_HOT_FLUSH_MS="${RCOW_HOT_FLUSH_MS:-0}"
 
+# How long the hot prepare waits for each lvstore's flusher to go idle before it
+# gives up on holding it. The prepare cannot otherwise be bounded: it holds a
+# namespace pause that only a completed hold can release, so one slow or
+# retrying upload would keep the whole data plane frozen past the point where
+# anything could undo it. On expiry the hold is abandoned and the prepare fails
+# and unwinds (the pause is lifted, the flushers are released), so the stop
+# reports a failed upgrade instead of a hung target. Must stay well inside
+# RCOW_STOP_TIMEOUT: the caller's retry loop is what enforces the outer budget.
+RCOW_HOT_PREPARE_SUSPEND_MS="${RCOW_HOT_PREPARE_SUSPEND_MS:-60000}"
+
 # --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------

@@ -66,6 +66,18 @@ struct s3_flusher {
 	s3_flusher_cb suspend_cb;
 	void *suspend_arg;
 
+	/* Tick at which a suspend gives up waiting for uploads, or 0 for "no
+	 * deadline". A hot prepare sets one so a single slow upload cannot hold the
+	 * whole stop open; attach leaves it 0 because its own resume fallback
+	 * already bounds the hold, and failing an attach on a slow upload would be
+	 * worse than waiting. */
+	uint64_t suspend_deadline;
+
+	/* The suspend passed suspend_deadline with uploads still in flight: the
+	 * hold is abandoned and the callback reports -ETIMEDOUT. Cleared with the
+	 * suspend itself. */
+	bool                        suspend_expired;
+
 	/* Tick at which a drain gives up on dirty data. */
 	uint64_t drain_deadline;
 
@@ -295,9 +307,9 @@ flusher_poll(void *arg)
 		return SPDK_POLLER_IDLE;
 	}
 
-	/* A drain blocked on an unreachable S3 only makes progress through its
-	 * deadline, so it has to be re-checked on every tick, not just when an
-	 * upload completes. */
+	/* A drain or a suspend blocked on an unreachable S3 only makes progress
+	 * through its deadline, so both have to be re-checked on every tick, not
+	 * just when an upload completes. */
 	flusher_check_drain(f);
 	flusher_check_suspend(f);
 
@@ -437,28 +449,61 @@ flusher_check_suspend(struct s3_flusher *f)
 	s3_flusher_cb cb_fn;
 	void *cb_arg;
 	bool resume;
+	int status = 0;
 
-	if (!f->suspend_cb || f->in_flight != 0 || f->super_sync_active) {
+	if (!f->suspend_cb) {
 		return;
 	}
+
+	/* The deadline is read before the gates below, for the same reason
+	 * flusher_check_drain() reads its own there: the gates wait on uploads, and
+	 * a workload that keeps writing never lets them idle, so a suspend that only
+	 * looked at the clock once idle would never look at it at all. */
+	if (!f->suspend_expired && f->suspend_deadline != 0 &&
+	    spdk_get_ticks() >= f->suspend_deadline) {
+		f->suspend_expired = true;
+		SPDK_WARNLOG("Flusher suspend timed out with uploads still in "
+			     "flight; the hold is abandoned. The data is durable in "
+			     "the log and is replayed on the next attach\n");
+	}
+
+	/* Uploads already running are always waited for: their completions touch
+	 * the flusher, so cutting them loose would be a use-after-free. An expired
+	 * suspend does not change that -- -ETIMEDOUT is reported once the last one
+	 * lands, exactly as a drain reports. */
+	if (f->in_flight != 0) {
+		return;
+	}
+
+	/* A super-sync is waited for even past the deadline, for the same lifetime
+	 * reason as the uploads above: its completion writes into the flusher and
+	 * would race a later s3_wal_close()'s own super-sync for the shared buffer.
+	 * It is one slot and cannot be extended, so it cannot hold the suspend open
+	 * the way a stream of uploads can. */
+	if (f->super_sync_active) {
+		return;
+	}
+
+	status = f->suspend_expired ? -ETIMEDOUT : 0;
 
 	cb_fn = f->suspend_cb;
 	cb_arg = f->suspend_arg;
 	f->suspend_cb = NULL;
 	f->suspend_arg = NULL;
+	f->suspend_expired = false;
 	resume = f->resume_pending;
 	f->resume_pending = false;
-	if (resume) {
-		f->suspended = false;
-	}
-	cb_fn(cb_arg, 0);
-	if (resume) {
+	/* A failed hold never took effect, so uploads must not be left gated. */
+	f->suspended = resume ? false : (status == 0);
+	cb_fn(cb_arg, status);
+	if (!f->suspended) {
 		s3_flusher_kick(f);
 	}
 }
 
 void
-s3_flusher_suspend(struct s3_flusher *f, s3_flusher_cb cb_fn, void *cb_arg)
+s3_flusher_suspend(struct s3_flusher *f, uint64_t timeout_us,
+		   s3_flusher_cb cb_fn, void *cb_arg)
 {
 	if (!f || !cb_fn) {
 		if (cb_fn) {
@@ -471,11 +516,19 @@ s3_flusher_suspend(struct s3_flusher *f, s3_flusher_cb cb_fn, void *cb_arg)
 		return;
 	}
 
+	if (timeout_us == 0) {
+		timeout_us = S3_FLUSHER_SUSPEND_TIMEOUT_US;
+	}
+
 	/* Stop scheduling before waiting: existing uploads and their final WAL
 	 * super update may complete, but no new upload can enter the gap. */
 	f->suspended = true;
 	f->suspend_cb = cb_fn;
 	f->suspend_arg = cb_arg;
+	f->suspend_expired = false;
+	f->suspend_deadline = timeout_us == S3_FLUSHER_NO_SUSPEND_TIMEOUT ?
+			      0 : spdk_get_ticks() +
+			      (timeout_us * spdk_get_ticks_hz()) / 1000000;
 	flusher_check_suspend(f);
 }
 

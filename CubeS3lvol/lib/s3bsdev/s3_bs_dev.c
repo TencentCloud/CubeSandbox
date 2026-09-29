@@ -4169,7 +4169,7 @@ s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 }
 
 void
-s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev,
+s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 			  s3_bs_dev_cb cb_fn, void *cb_arg)
 {
 	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
@@ -4180,7 +4180,7 @@ s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev,
 		}
 		return;
 	}
-	s3_flusher_suspend(ctx->flusher, cb_fn, cb_arg);
+	s3_flusher_suspend(ctx->flusher, timeout_us, cb_fn, cb_arg);
 }
 
 void
