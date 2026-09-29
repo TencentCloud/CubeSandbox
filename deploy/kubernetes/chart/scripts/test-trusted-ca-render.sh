@@ -73,6 +73,20 @@ grep -qi 'mutually exclusive' "$TMP_DIR/both.err" || {
   exit 1
 }
 
+# 2e. Non-PEM entries must fail at render time (Go would silently ignore
+#     unparseable blocks and the operator would see x509 again).
+if helm template guard-garbled "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     --set-string trustedCACerts.certs[0]="not a pem" >/dev/null 2>"$TMP_DIR/garbled.err"; then
+  echo "FAIL: non-PEM certs entry must fail validation" >&2
+  exit 1
+fi
+grep -qi 'BEGIN CERTIFICATE' "$TMP_DIR/garbled.err" || {
+  echo "FAIL: validation error does not mention PEM:" >&2
+  cat "$TMP_DIR/garbled.err" >&2
+  exit 1
+}
+
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
   --set trustedCACerts.enabled=true \

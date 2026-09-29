@@ -112,6 +112,9 @@ spec:
               [ -n "$BUNDLE" ] \
                 || { echo "no system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
               cp "$BUNDLE" /merged/ca-bundle.crt
+              # Seam: a probed bundle without a trailing newline would glue the
+              # first user cert onto the last END line; normalize before append.
+              printf '\n' >> /merged/ca-bundle.crt
               ls /trusted-ca/*.crt >/dev/null 2>&1 \
                 || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
               # Append user certs one at a time with a newline separator:

@@ -465,3 +465,8 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.existingConfigMap .Values.trustedCACerts.certs }}
 {{- fail "trustedCACerts.existingConfigMap and trustedCACerts.certs are mutually exclusive: existingConfigMap wins and the inline certs would be silently ignored" }}
 {{- end }}
+{{- range $i, $pem := .Values.trustedCACerts.certs }}
+{{- if not (contains "BEGIN CERTIFICATE" $pem) }}
+{{- fail (printf "trustedCACerts.certs[%d] does not look like a PEM certificate (no \"BEGIN CERTIFICATE\" line) -- Go would silently ignore it and the registry pull would still fail with x509" $i) }}
+{{- end }}
+{{- end }}
