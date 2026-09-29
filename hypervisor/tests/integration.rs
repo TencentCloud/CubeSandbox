@@ -6769,7 +6769,7 @@ mod common_parallel {
 
             thread::sleep(std::time::Duration::new(5, 0));
             guest
-                .ssh_command("dd if=/dev/urandom of=/dev/shm/dirty.bin bs=1M count=64")
+                .ssh_command("sudo dd if=/dev/urandom of=/dev/shm/dirty.bin bs=1M count=64")
                 .unwrap();
             let sum = guest.ssh_command("md5sum /dev/shm/dirty.bin").unwrap();
             *dirty_md5.lock().unwrap() = sum.trim().to_string();
