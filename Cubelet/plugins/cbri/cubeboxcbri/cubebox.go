@@ -345,6 +345,11 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 			"annotations": annotations,
 		}).Debugf("create sandbox annotations")
 	}
+	// Passthrough: guest-affecting sandbox annotations must reach the shim's
+	// OCI spec; the assembled map above only carries platform-internal keys.
+	if mode := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationCgroupMode]); mode != "" {
+		annotations[constants.MasterAnnotationCgroupMode] = mode
+	}
 	specOpts = append(specOpts, oci.WithAnnotations(annotations))
 
 	videoOpts, err := e.genVideoAnnotationOpt(ctx, flowOpts)
