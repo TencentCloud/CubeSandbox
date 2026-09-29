@@ -57,6 +57,16 @@ type ServicesConfig struct {
 
 	DeadContainerTTLStr string `toml:"dead_container_ttl"`
 	deadContainerTTL    time.Duration
+
+	// ShimIntentTTLStr bounds how long the "a shim may have been spawned"
+	// record may keep a sandbox's tap, IP and volumes allocated when no
+	// process can be found for it anywhere on the host. Every other piece of
+	// evidence is consulted first, so this only ever decides a record that
+	// names no live holder at all. "0"/"0s" disables the bound, which is the
+	// fail-closed behaviour: such a sandbox then stays undeletable until an
+	// operator clears it by hand.
+	ShimIntentTTLStr string `toml:"shim_intent_ttl"`
+	shimIntentTTL    time.Duration
 }
 
 var (
@@ -64,6 +74,12 @@ var (
 	defaultDestroyDeadline  = 60 * time.Second
 	defaultDeadContainerTTL = 1 * time.Hour
 	cleanerHeartBeat        = 10 * time.Second
+
+	// defaultShimIntentTTL is deliberately far longer than a create can take
+	// (defaultCreateDeadline): it only has to outlast a crash between writing
+	// the spawn intent and recording the shim's pid, and it is the point at
+	// which we stop believing such a record can still describe a live shim.
+	defaultShimIntentTTL = 10 * time.Minute
 
 	// createStuckThreshold bounds how long a sandbox may legitimately remain in
 	// the CONTAINER_CREATED transient before DeadGC is allowed to probe it. The
@@ -80,6 +96,30 @@ var (
 
 func defaultServiceConfig() *ServicesConfig {
 	return &ServicesConfig{}
+}
+
+// parseShimIntentTTL reads the shim-intent TTL. It accepts the bare "0"
+// spelling for "never age out" that time.ParseDuration rejects, and falls back
+// to the default rather than silently disabling the bound on a typo: an
+// unparsable value must not turn into the fail-closed setting by accident.
+func parseShimIntentTTL(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultShimIntentTTL
+	}
+	if raw == "0" {
+		return 0
+	}
+	t, err := time.ParseDuration(raw)
+	switch {
+	case err != nil || t < 0:
+		CubeLog.Warnf("invalid shim_intent_ttl %q, using %s", raw, defaultShimIntentTTL)
+		return defaultShimIntentTTL
+	case t == 0:
+		return 0 // "0s", "0m", ... all mean never age out
+	default:
+		return t
+	}
 }
 
 func init() {
@@ -121,6 +161,8 @@ func init() {
 				config.deadContainerTTL = t
 			}
 
+			config.shimIntentTTL = parseShimIntentTTL(config.ShimIntentTTLStr)
+
 			CubeLog.Infof("%v init config:%+v",
 				fmt.Sprintf("%v.%v", constants.CubeboxServicePlugin, constants.CubeboxServiceID), config)
 
@@ -137,6 +179,18 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("not a cubebox manager")
 			}
+
+			// The destroy path refuses to reclaim a sandbox while its spawn
+			// intent is unresolved, and lives in the cubebox plugin; this
+			// plugin owns the cleanup policy, so hand the bound across rather
+			// than duplicating the configuration surface.
+			cb.SetShimIntentTTL(config.shimIntentTTL)
+			// Records written before Endpoint.ShimSpawnedAt existed have no age,
+			// and an unresolvable age is the one thing the TTL cannot bound.
+			// Stamp them now, before any cleanup can run, so they get a full
+			// TTL instead of blocking forever.
+			cb.BackfillShimIntentTimestamps(ic.Context)
+			CubeLog.Infof("shim-spawn intent TTL is %s (0 means never age out)", config.shimIntentTTL)
 
 			p, err := ic.GetByID(constants.WorkflowPlugin, constants.WorkflowID.ID())
 			if err != nil {

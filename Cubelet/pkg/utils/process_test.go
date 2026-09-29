@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,4 +118,29 @@ func TestWaitIdentityGoneHonorsCancel(t *testing.T) {
 	err = WaitIdentityGone(ctx, id)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// A proc root is threaded through every read about a pid, so that a diagnostic
+// pointed at a fake tree is not silently described by the host's own processes.
+func TestReadProcessIdentityAtReadsTheGivenProcRoot(t *testing.T) {
+	procRoot := t.TempDir()
+	pid := os.Getpid()
+	dir := filepath.Join(procRoot, strconv.Itoa(pid))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stat"),
+		[]byte(strconv.Itoa(pid)+" (fake) S "+strings.Repeat("0 ", 18)+"777\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "comm"), []byte("fake-shim\n"), 0o644))
+
+	id, err := ReadProcessIdentityAt(procRoot, pid)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(777), id.StartTime)
+	assert.Equal(t, LivenessAlive, id.Status(), "liveness must be re-read from the same tree")
+	assert.Equal(t, "fake-shim", ProcessCommAt(procRoot, pid))
+
+	// An empty root means the host's own process table, which reports a real
+	// start time rather than the fake one.
+	host, err := ReadProcessIdentityAt("", pid)
+	require.NoError(t, err)
+	assert.NotEqual(t, uint64(777), host.StartTime)
+	assert.Equal(t, LivenessAlive, host.Status())
 }

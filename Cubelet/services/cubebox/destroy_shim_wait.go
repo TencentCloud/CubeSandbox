@@ -19,6 +19,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
+// resolveShimBundles resolves the on-disk bundle of each shim belonging to a
+// sandbox. It is a variable so tests can stand bundles in without a live shim
+// manager; production reads them from the shim manager, which is the only
+// authoritative mapping from a sandbox to the directory its shim runs in.
+var resolveShimBundles = (*local).shimBundlePaths
+
 const (
 	shimPidFileName = "shim.pid"
 	vmmPidFileName  = "vmm.pid"
@@ -31,6 +37,26 @@ const (
 	replaceGateTimeout = 30 * time.Second
 )
 
+// Sources a recorded pid can come from, reported verbatim so that an operator
+// reading a quarantine alert can tell which record to distrust.
+const (
+	holderSourceBundle   = "the shim bundle"
+	holderSourceEndpoint = "the sandbox endpoint record"
+)
+
+// unresolvedEvidence is one thing we could not decide about.
+//
+// intentAt is set only when the blocker is the spawn-intent bookkeeping with no
+// process anywhere to point at as its holder. That is the one kind of blocker
+// the shim-intent TTL may age out; everything else means we found something we
+// could not interpret, and waiting never fixes that.
+type unresolvedEvidence struct {
+	message  string
+	intentAt time.Time
+}
+
+func (u unresolvedEvidence) ageable() bool { return !u.intentAt.IsZero() }
+
 // sandboxRuntimeEvidence is everything we know about processes that may still
 // hold this sandbox's tap fds, IPs and NVMe paths.
 //
@@ -41,11 +67,31 @@ const (
 // refuse to release resources while it is non-empty.
 type sandboxRuntimeEvidence struct {
 	identities []utils.ProcessIdentity
-	unresolved []string
+	unresolved []unresolvedEvidence
 }
 
 func (e *sandboxRuntimeEvidence) markUnresolved(format string, args ...interface{}) {
-	e.unresolved = append(e.unresolved, fmt.Sprintf(format, args...))
+	e.unresolved = append(e.unresolved, unresolvedEvidence{message: fmt.Sprintf(format, args...)})
+}
+
+// markStaleIntent records that the only reason this sandbox cannot be declared
+// spent is the spawn-intent record itself: a shim may have been started, but no
+// process anywhere on the host can be found for it. startedAt is when that
+// intent was written; a zero value means its age is unknown, and the intent
+// then never ages out.
+func (e *sandboxRuntimeEvidence) markStaleIntent(startedAt time.Time, format string, args ...interface{}) {
+	e.unresolved = append(e.unresolved, unresolvedEvidence{
+		message:  fmt.Sprintf(format, args...),
+		intentAt: startedAt,
+	})
+}
+
+func (e sandboxRuntimeEvidence) unresolvedMessages() []string {
+	msgs := make([]string, 0, len(e.unresolved))
+	for _, u := range e.unresolved {
+		msgs = append(msgs, u.message)
+	}
+	return msgs
 }
 
 func (e sandboxRuntimeEvidence) pids() []int {
@@ -54,6 +100,38 @@ func (e sandboxRuntimeEvidence) pids() []int {
 		pids = append(pids, id.Pid)
 	}
 	return pids
+}
+
+// resolveStaleIntents drops spawn-intent blockers once they are older than ttl.
+// It is the escape hatch for a record that lost the race between writing the
+// intent and recording a pid; the alternative is a sandbox that can never be
+// destroyed, holding its tap, IP and volumes for the life of the host.
+//
+// The TTL is deliberately narrow. It applies only when nothing else in the
+// evidence is live and every remaining blocker is an intent — never a pid we
+// could not read, and never a live pid we could not identify — so it can never
+// release resources that some process is known to be holding.
+func (e *sandboxRuntimeEvidence) resolveStaleIntents(ctx context.Context, sandboxID string, ttl time.Duration) {
+	if ttl <= 0 || len(e.unresolved) == 0 || len(e.identities) > 0 {
+		return
+	}
+	for _, u := range e.unresolved {
+		if !u.ageable() {
+			return
+		}
+	}
+	now := time.Now()
+	for _, u := range e.unresolved {
+		if now.Sub(u.intentAt) < ttl {
+			// Still inside the window that covers a crash between the spawn
+			// and the pid write. Fail closed a little longer.
+			return
+		}
+	}
+	log.G(ctx).Warnf("sandbox %s: shim-spawn intent unresolved for longer than %s with no live process "+
+		"found for it (%s); treating the intent as stale and allowing resource cleanup",
+		sandboxID, ttl, strings.Join(e.unresolvedMessages(), "; "))
+	e.unresolved = nil
 }
 
 // collectSandboxRuntimeEvidence snapshots every host process that may still
@@ -67,92 +145,169 @@ func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxst
 		return ev
 	}
 
-	seen := map[int]struct{}{}
-	add := func(id utils.ProcessIdentity) {
-		if id.Pid <= 1 || id.Pid == os.Getpid() {
-			return
-		}
-		if _, ok := seen[id.Pid]; ok {
-			return
-		}
-		seen[id.Pid] = struct{}{}
-		switch st := id.Status(); st {
-		case utils.LivenessGone:
-			// Recorded and provably finished — including the case where the
-			// pid number now belongs to someone else.
-			return
-		case utils.LivenessUnknown:
-			ev.markUnresolved("pid %d liveness is %s", id.Pid, st)
-			return
-		}
-		ev.identities = append(ev.identities, id)
+	// Candidates, strongest provenance first: the first entry seen for a pid is
+	// the one that decides it.
+	//
+	//   - the shim bundle's pid files are written by the shim about itself.
+	//     They carry no start time, but a live pid there really is this
+	//     sandbox's shim, so they are trusted;
+	//   - the recorded endpoint is precise when it carries a start time;
+	//   - container and sandbox status records are the weakest claim, because
+	//     an older code path stored a bare pid there.
+	//
+	// Bare pids are only trusted for records written before ShimSpawned existed.
+	// Those never had a start time to record, and failing every one of them
+	// closed would make every sandbox created before the upgrade undeletable, so
+	// they keep the previous "wait for whatever holds this number" behaviour.
+	// For everything created since, a bare pid that cannot be tied to the shim
+	// is reported instead of waited on: adopting a recycled number waits on a
+	// stranger until the deadline and then claims a live holder that does not
+	// exist.
+	trustBare := !sb.Endpoint.ShimSpawned
+	var candidates []runtimePIDCandidate
+	for _, bundle := range resolveShimBundles(l, ctx, sb) {
+		candidates = append(candidates,
+			runtimePIDCandidate{
+				pid:     readPidFile(filepath.Join(bundle, shimPidFileName)),
+				source:  holderSourceBundle,
+				trusted: true,
+			},
+			runtimePIDCandidate{
+				pid:     readPidFile(filepath.Join(bundle, vmmPidFileName)),
+				source:  holderSourceBundle,
+				trusted: true,
+			},
+		)
 	}
-	// addBare handles pids recorded without a start time (container statuses,
-	// bundle pid files, pre-upgrade endpoints). Reading the start time now
-	// cannot prove the process is ours, but it is enough to wait for this
-	// specific incarnation, and it errs towards waiting rather than releasing.
-	addBare := func(pid int) {
-		if pid <= 1 || pid == os.Getpid() {
-			return
+	if ep := sb.Endpoint; ep.Pid > 1 {
+		c := runtimePIDCandidate{pid: int(ep.Pid), source: holderSourceEndpoint, trusted: trustBare}
+		if ep.PidStartTime != 0 {
+			identity := utils.ProcessIdentity{Pid: int(ep.Pid), StartTime: ep.PidStartTime}
+			// The record carries a start time, so the verdict is conclusive in
+			// either direction and provenance no longer matters.
+			c.identity = &identity
+			c.trusted = true
 		}
-		if _, ok := seen[pid]; ok {
-			return
-		}
-		id, err := utils.ReadProcessIdentity(pid)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return // already exited, nothing to wait for
-			}
-			ev.markUnresolved("pid %d is unreadable: %v", pid, err)
-			return
-		}
-		add(id)
+		candidates = append(candidates, c)
+	}
+	for _, rec := range recordedSandboxPIDs(sb) {
+		candidates = append(candidates, runtimePIDCandidate{
+			pid:     rec.pid,
+			source:  rec.source,
+			trusted: trustBare,
+		})
 	}
 
-	if ep := sb.Endpoint; ep.Pid > 1 {
-		if ep.PidStartTime != 0 {
-			add(utils.ProcessIdentity{Pid: int(ep.Pid), StartTime: ep.PidStartTime})
-		} else {
-			addBare(int(ep.Pid))
+	seen := map[int]struct{}{}
+	for _, c := range candidates {
+		if c.pid <= 1 || c.pid == os.Getpid() {
+			continue
 		}
-	}
-	for _, pid := range recordedSandboxPIDs(sb) {
-		addBare(pid)
-	}
-	for _, bundle := range l.shimBundlePaths(ctx, sb) {
-		addBare(readPidFile(filepath.Join(bundle, shimPidFileName)))
-		addBare(readPidFile(filepath.Join(bundle, vmmPidFileName)))
+		if _, ok := seen[c.pid]; ok {
+			continue
+		}
+		seen[c.pid] = struct{}{}
+
+		identity := c.identity
+		if identity == nil {
+			id, err := utils.ReadProcessIdentity(c.pid)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue // already exited, nothing to wait for
+				}
+				ev.markUnresolved("pid %d recorded in %s is unreadable: %v", c.pid, c.source, err)
+				continue
+			}
+			if !c.trusted {
+				// A live process we cannot tie to this sandbox. The narrow
+				// TTL does not cover it either: we can see it, so releasing
+				// the sandbox's resources would hand them to a live holder.
+				ev.markUnresolved(
+					"pid %d recorded in %s has no start time, so it cannot be shown to be this sandbox's",
+					c.pid, c.source)
+				continue
+			}
+			identity = &id
+		}
+
+		switch identity.Status() {
+		case utils.LivenessGone:
+			// Provably finished — including the case where the pid number now
+			// belongs to someone else entirely.
+		case utils.LivenessUnknown:
+			ev.markUnresolved("pid %d recorded in %s has no verifiable identity", c.pid, c.source)
+		default:
+			ev.identities = append(ev.identities, *identity)
+		}
 	}
 
 	// A shim was started for this sandbox but its pid never made it into the
 	// store. The process may have exited cleanly or may still be running, and
 	// nothing left on this host can tell the two apart — so we must not treat
 	// the resulting empty evidence as proof that it is safe to reclaim.
+	//
+	// This is the blocker the intent TTL exists for. It is only reached when no
+	// bundle pid file and no recorded pid resolved to a live process either, so
+	// aging it out never releases a process we can still see.
 	if sb.Endpoint.ShimSpawned && sb.Endpoint.Pid <= 1 {
-		ev.markUnresolved("a shim was spawned but no pid was recorded")
+		ev.markStaleIntent(sb.Endpoint.ShimSpawnedAt, "a shim was spawned but no pid was recorded")
 	}
+
+	ev.resolveStaleIntents(ctx, sandboxIdentity(sb), l.shimIntentTTL)
 
 	sort.Slice(ev.identities, func(i, j int) bool { return ev.identities[i].Pid < ev.identities[j].Pid })
 	return ev
 }
 
-func recordedSandboxPIDs(sb *cubeboxstore.CubeBox) []int {
+// runtimePIDCandidate is one record claiming a pid belongs to this sandbox.
+type runtimePIDCandidate struct {
+	pid    int
+	source string
+	// identity is set when the record itself carried a process start time, in
+	// which case the liveness verdict is conclusive without a second read.
+	identity *utils.ProcessIdentity
+	// trusted means the record's provenance is enough to wait on this pid even
+	// when it carries no start time.
+	trusted bool
+}
+
+func sandboxIdentity(sb *cubeboxstore.CubeBox) string {
+	if sb == nil {
+		return ""
+	}
+	if sb.SandboxID != "" {
+		return sb.SandboxID
+	}
+	return sb.ID
+}
+
+// recordedPID is a pid some record claims belongs to this sandbox, plus where
+// that claim came from.
+type recordedPID struct {
+	pid    int
+	source string
+}
+
+func recordedSandboxPIDs(sb *cubeboxstore.CubeBox) []recordedPID {
 	if sb == nil {
 		return nil
 	}
-	var pids []int
+	var pids []recordedPID
 	if status := sb.GetStatus(); status != nil {
-		pids = append(pids, int(status.Get().Pid))
+		pids = append(pids, recordedPID{int(status.Get().Pid), "the sandbox status"})
 	}
-	pids = append(pids, int(sb.Endpoint.Pid))
+	pids = append(pids, recordedPID{int(sb.Endpoint.Pid), holderSourceEndpoint})
 	if main := sb.FirstContainer(); main != nil && main.Status != nil {
-		pids = append(pids, int(main.Status.Get().Pid))
+		pids = append(pids, recordedPID{int(main.Status.Get().Pid), "the primary container status"})
 	}
 	for _, ctr := range sb.AllContainers() {
 		if ctr == nil || ctr.Status == nil {
 			continue
 		}
-		pids = append(pids, int(ctr.Status.Get().Pid))
+		pids = append(pids, recordedPID{
+			int(ctr.Status.Get().Pid),
+			fmt.Sprintf("container %s status", ctr.ID),
+		})
 	}
 	return pids
 }
@@ -234,11 +389,11 @@ func readPidFile(path string) int {
 // Unresolved evidence fails the wait. An empty identity list only means
 // "nothing to wait for" when we are sure there was nothing to find.
 func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRuntimeEvidence) error {
-	if len(ev.unresolved) > 0 {
+	if msgs := ev.unresolvedMessages(); len(msgs) > 0 {
 		log.G(ctx).Errorf("sandbox %s: runtime state unresolved (%s); refuse resource cleanup",
-			sandboxID, strings.Join(ev.unresolved, "; "))
+			sandboxID, strings.Join(msgs, "; "))
 		return fmt.Errorf("sandbox %s runtime state unresolved: %s",
-			sandboxID, strings.Join(ev.unresolved, "; "))
+			sandboxID, strings.Join(msgs, "; "))
 	}
 	if len(ev.identities) == 0 {
 		return nil

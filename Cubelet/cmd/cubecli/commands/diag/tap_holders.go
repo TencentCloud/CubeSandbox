@@ -114,13 +114,18 @@ func scanTunHolders(procRoot string) ([]tunHolder, error) {
 			if err != nil || target != tunDevice {
 				continue
 			}
+			// Every column must come from the same tree. Reading the
+			// identity or the command name from the real /proc while the row
+			// itself came from --proc-root would describe two different
+			// processes, and START_TIME is the value an operator copies into
+			// 'diag reclaim' to stop it acting on a recycled pid.
 			var startTime uint64
-			if id, err := utils.ReadProcessIdentity(pid); err == nil {
+			if id, err := utils.ReadProcessIdentityAt(procRoot, pid); err == nil {
 				startTime = id.StartTime
 			}
 			holders = append(holders, tunHolder{
 				Pid:       pid,
-				Comm:      utils.ProcessComm(pid),
+				Comm:      utils.ProcessCommAt(procRoot, pid),
 				StartTime: startTime,
 				Fd:        fd.Name(),
 				Iface:     readTunIface(filepath.Join(procRoot, entry.Name(), "fdinfo", fd.Name())),

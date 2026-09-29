@@ -7,6 +7,8 @@ package diag
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,4 +77,34 @@ func TestReadTunIface(t *testing.T) {
 	assert.Empty(t, readTunIface(path))
 
 	assert.Empty(t, readTunIface(filepath.Join(dir, "missing")))
+}
+
+// Every column must come from the same tree: the fd row is found under
+// --proc-root, so describing it with the host's process of that pid would
+// produce a START_TIME that belongs to a different process than the row.
+func TestScanTunHoldersReadsIdentityFromProcRoot(t *testing.T) {
+	procRoot := t.TempDir()
+	fakeProcEntry(t, procRoot, "100", "7", tunDevice, "iff:\ttap0\n")
+	require.NoError(t, os.WriteFile(filepath.Join(procRoot, "100", "comm"), []byte("cube-shim\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(procRoot, "100", "stat"),
+		[]byte("100 (cube-shim) S "+strings.Repeat("0 ", 18)+"4242\n"), 0o644))
+
+	holders, err := scanTunHolders(procRoot)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, "cube-shim", holders[0].Comm)
+	assert.Equal(t, uint64(4242), holders[0].StartTime)
+}
+
+// The host's own process with the same pid must not describe the row.
+func TestScanTunHoldersDoesNotDescribeRowsWithTheHostsProcesses(t *testing.T) {
+	procRoot := t.TempDir()
+	pid := strconv.Itoa(os.Getpid())
+	fakeProcEntry(t, procRoot, pid, "7", tunDevice, "iff:\ttap0\n")
+
+	holders, err := scanTunHolders(procRoot)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Empty(t, holders[0].Comm, "the host process with this pid is not the holder found here")
+	assert.Zero(t, holders[0].StartTime, "and its start time is not the one an operator should copy")
 }

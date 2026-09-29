@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,6 +17,19 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 )
+
+// procRootDefault is where the kernel exposes the process table on a normal
+// host. Callers that scan a different tree (tests, a container's view of the
+// host) pass their own root so that every read about a pid — identity, comm
+// and liveness — is answered from the same tree.
+const procRootDefault = "/proc"
+
+func normalizeProcRoot(procRoot string) string {
+	if strings.TrimSpace(procRoot) == "" {
+		return procRootDefault
+	}
+	return procRoot
+}
 
 // Liveness is deliberately three-valued. A bool cannot express "we could not
 // find out", and treating that case as "gone" is what lets a still-running
@@ -53,18 +67,30 @@ func (l Liveness) String() string {
 type ProcessIdentity struct {
 	Pid       int
 	StartTime uint64
+	// procRoot records which /proc tree this identity was read from, so that
+	// Status can re-read the same tree later. Empty means the real /proc. It
+	// is deliberately unexported: identities are built with keyed literals of
+	// Pid and StartTime all over the tree, and the zero value keeps meaning
+	// "the host's own process table".
+	procRoot string
 }
 
 // ReadProcessIdentity captures the identity of a currently running pid.
 func ReadProcessIdentity(pid int) (ProcessIdentity, error) {
+	return ReadProcessIdentityAt(procRootDefault, pid)
+}
+
+// ReadProcessIdentityAt is ReadProcessIdentity against an explicit proc root.
+func ReadProcessIdentityAt(procRoot string, pid int) (ProcessIdentity, error) {
 	if pid <= 1 {
 		return ProcessIdentity{}, fmt.Errorf("invalid pid %d", pid)
 	}
-	st, err := readProcStat(pid)
+	root := normalizeProcRoot(procRoot)
+	st, err := readProcStatAt(root, pid)
 	if err != nil {
 		return ProcessIdentity{}, err
 	}
-	return ProcessIdentity{Pid: pid, StartTime: st.startTime}, nil
+	return ProcessIdentity{Pid: pid, StartTime: st.startTime, procRoot: root}, nil
 }
 
 // Status reports whether the recorded incarnation is still running.
@@ -82,7 +108,7 @@ func (id ProcessIdentity) Status() Liveness {
 	if id.Pid <= 1 {
 		return LivenessGone
 	}
-	st, err := readProcStat(id.Pid)
+	st, err := readProcStatAt(normalizeProcRoot(id.procRoot), id.Pid)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return LivenessGone
@@ -129,7 +155,12 @@ func WaitIdentityGone(ctx context.Context, id ProcessIdentity) error {
 // For operator-facing diagnostics only — never base a decision on it, since
 // a recycled pid answers just as readily as the process you meant.
 func ProcessComm(pid int) string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	return ProcessCommAt(procRootDefault, pid)
+}
+
+// ProcessCommAt is ProcessComm against an explicit proc root.
+func ProcessCommAt(procRoot string, pid int) string {
+	b, err := os.ReadFile(filepath.Join(normalizeProcRoot(procRoot), strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return ""
 	}
@@ -147,8 +178,8 @@ type procStat struct {
 // arbitrary command name wrapped in parentheses and may contain both spaces
 // and parentheses. Everything after the last ')' is regular, and the first
 // token there is field 3, so field 22 sits at index 19.
-func readProcStat(pid int) (procStat, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+func readProcStatAt(procRoot string, pid int) (procStat, error) {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return procStat{}, err
 	}

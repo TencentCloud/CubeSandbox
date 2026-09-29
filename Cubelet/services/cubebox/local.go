@@ -263,6 +263,14 @@ type local struct {
 	envdHTTPClient *http.Client
 	envdInitPort   int
 	destroyFn      func(context.Context, *workflow.DestroyContext) error
+
+	// shimIntentTTL bounds how long the "a shim may have been spawned" record
+	// may keep this sandbox's tap, IP and volumes allocated when no process can
+	// be found for it anywhere on the host. It is pushed in once at startup by
+	// the cubebox-service plugin, which owns the cleanup-policy configuration.
+	// Zero — the value before that call, and the fail-closed one — means the
+	// intent never ages out.
+	shimIntentTTL time.Duration
 }
 
 const (
@@ -274,6 +282,49 @@ const (
 
 func (l *local) ID() string {
 	return constants.CubeboxID.ID()
+}
+
+// SetShimIntentTTL hands the destroy path the age at which an unresolved
+// shim-spawn intent stops blocking resource cleanup. It is called once, from
+// the cubebox-service plugin init, before any workflow step runs.
+func (l *local) SetShimIntentTTL(ttl time.Duration) {
+	if l == nil {
+		return
+	}
+	l.shimIntentTTL = ttl
+}
+
+// ShimIntentTTL exposes the configured bound so the cubebox-service plugin can
+// report it alongside the rest of the cleanup policy.
+func (l *local) ShimIntentTTL() time.Duration {
+	if l == nil {
+		return 0
+	}
+	return l.shimIntentTTL
+}
+
+// BackfillShimIntentTimestamps stamps an age onto every recorded shim intent
+// that predates Endpoint.ShimSpawnedAt.
+//
+// Those records are otherwise "unknown age", which the destroy path treats as
+// never-stale — the very state this field exists to bound. Stamping them at
+// startup gives them a fresh, full TTL instead: they are not released early,
+// and they are not stuck forever either.
+func (l *local) BackfillShimIntentTimestamps(ctx context.Context) {
+	if l == nil || l.cubeboxManger == nil {
+		return
+	}
+	now := time.Now()
+	for _, cb := range l.cubeboxManger.List() {
+		if cb == nil || !cb.Endpoint.ShimSpawned || !cb.Endpoint.ShimSpawnedAt.IsZero() {
+			continue
+		}
+		cb.Endpoint.ShimSpawnedAt = now
+		if err := l.cubeboxManger.SyncByID(ctx, cb.ID, cubes.WithNoEvent); err != nil {
+			log.G(ctx).Errorf("stamp shim intent age on %s: %v; it will stay fail-closed until the "+
+				"intent is rewritten by a new create", cb.ID, err)
+		}
+	}
 }
 
 func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {

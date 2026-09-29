@@ -119,11 +119,9 @@ func init() {
 			s := &gcService{engine: e, config: config, gc: l}
 			// Quarantine survives a restart, and so must the gauge — otherwise
 			// bouncing cubelet makes the lost pool capacity look recovered.
-			quarantinedCount, err := l.countQuarantined()
-			if err != nil {
+			if err := seedQuarantinedGauge(l); err != nil {
 				return nil, fmt.Errorf("restore quarantined cleanup state: %w", err)
 			}
-			quarantinedSandbox.Set(float64(quarantinedCount))
 			go s.run(ic.Context)
 			return s, nil
 		},
@@ -182,7 +180,7 @@ func (l *gcService) run(ctx context.Context) {
 						defer cancel()
 
 						defer recov.HandleCrash(func(panicError interface{}) {
-							log.G(ctx).Fatalf("cleanUpTicker panic :%v %v", panicError, string(debug.Stack()))
+							l.onCleanupPanic(tmpCtx, info.SandboxID, panicError)
 						})
 
 						tmpCtx = namespaces.WithNamespace(tmpCtx, info.Namespace)
@@ -213,6 +211,34 @@ func (l *gcService) run(ctx context.Context) {
 			})
 		}
 	}
+}
+
+// onCleanupPanic accounts for a cleanup round that died with a panic.
+//
+// A cleanup that panics on every round is exactly the "hammering forever"
+// behaviour the retry bound exists for, so a panic has to count as a failure:
+// without this the attempt counter never advances, the sandbox is never
+// quarantined, and the one-shot alert an operator needs never fires.
+func (l *gcService) onCleanupPanic(ctx context.Context, sandboxID string, panicError interface{}) {
+	log.G(ctx).Fatalf("cleanUpTicker panic :%v %v", panicError, string(debug.Stack()))
+	l.recordFailure(ctx, sandboxID, fmt.Errorf("cleanup panicked: %v", panicError))
+}
+
+// seedQuarantinedGauge republishes the number of quarantined sandboxes from the
+// GC store.
+//
+// It is called both at plugin init, so a restart does not make lost pool
+// capacity look recovered, and from local.Init after it has recreated the store
+// — InitHost wipes the GC root, so the gauge seeded before that wipe would
+// otherwise keep reporting quarantined sandboxes that no longer exist and an
+// alert on it would never clear.
+func seedQuarantinedGauge(l *local) error {
+	quarantinedCount, err := l.countQuarantined()
+	if err != nil {
+		return err
+	}
+	quarantinedSandbox.Set(float64(quarantinedCount))
+	return nil
 }
 
 // recordFailure accounts for one failed cleanup round and, once the retry

@@ -149,6 +149,13 @@ func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
 	if err := l.initDb(); err != nil {
 		return err
 	}
+
+	// The store was just recreated empty under the same root the gauge was
+	// seeded from at plugin init, so the seeded count is now stale — the
+	// quarantined sandboxes it counted no longer have records, or resources.
+	if err := seedQuarantinedGauge(l); err != nil {
+		log.G(ctx).Warnf("reset quarantined gauge after InitHost: %v", err)
+	}
 	return nil
 }
 

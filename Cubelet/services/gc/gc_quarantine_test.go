@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 )
 
@@ -365,4 +367,51 @@ func TestApplyGCServiceDefaults(t *testing.T) {
 			assert.Equal(t, test.maxAttempts, config.maxCleanupAttempts)
 		})
 	}
+}
+
+// The gauge must be re-derived from the store, not adjusted: InitHost recreates
+// the GC store from scratch, so a value seeded before that wipe would keep
+// reporting quarantined sandboxes that no longer exist, and an alert on it
+// would never clear.
+func TestSeedQuarantinedGaugeRederivesFromTheStore(t *testing.T) {
+	l := newTestGC(t)
+	now := time.Now()
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-ok"}))
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-q", QuarantinedAt: &now}))
+
+	gauge := installTestGauge(t, 99)
+	require.NoError(t, seedQuarantinedGauge(l))
+	assert.Equal(t, float64(1), gauge.Value(), "a stale seed must be replaced, not added to")
+
+	// Simulate the wipe: the record disappears without any decrement path
+	// running, which is exactly what InitHost does.
+	require.NoError(t, l.db.Delete(bucketName, "sb-q"))
+	require.NoError(t, seedQuarantinedGauge(l))
+	assert.Equal(t, float64(0), gauge.Value())
+}
+
+// stubCubeboxAPI answers only the lookup describeHolder makes. The embedded
+// nil interface panics if any other method is reached, which is what a stub
+// should do.
+type stubCubeboxAPI struct{ cubes.CubeboxAPI }
+
+func (stubCubeboxAPI) Get(context.Context, string) (*cubeboxstore.CubeBox, error) {
+	return nil, utils.ErrorKeyNotFound
+}
+
+// A cleanup that panics every round must reach the retry bound, or it is
+// retried at the full cleanup interval forever and never alerted on.
+func TestCleanupPanicCountsAsAFailure(t *testing.T) {
+	l := newTestGC(t)
+	l.cubeboxManger = stubCubeboxAPI{}
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-panic", Namespace: "default"}))
+	gauge := installTestGauge(t, 0)
+
+	s := &gcService{gc: l, config: &GCServicesConfig{maxCleanupAttempts: 1}}
+	s.onCleanupPanic(context.Background(), "sb-panic", "boom")
+
+	assert.Equal(t, float64(1), gauge.Value(), "a panic must be accounted for like any other failed cleanup")
+	info, err := l.readSandBoxInfo("sb-panic")
+	require.NoError(t, err)
+	assert.True(t, info.quarantined())
 }

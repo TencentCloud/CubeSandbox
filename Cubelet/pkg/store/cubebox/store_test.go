@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -928,4 +929,31 @@ func TestStoreListConcurrency(t *testing.T) {
 
 	<-done
 	<-done
+}
+
+// The destroy path reads Endpoint.ShimSpawnedAt back after a restart, so the
+// field has to survive the JSON round-trip the store performs. It is the only
+// thing bounding how long an unresolved spawn intent may block cleanup.
+func TestStoreRoundTripsShimSpawnIntentAge(t *testing.T) {
+	store, cleanup := createTestStore(t)
+	defer cleanup()
+
+	spawnedAt := time.Now().Add(-3 * time.Minute).Truncate(time.Second)
+	box := createTestCubeBox("box-intent", "template1")
+	box.Endpoint = sandboxstore.Endpoint{
+		Address:       "unix:///run/shim.sock",
+		Version:       2,
+		Pid:           0,
+		ShimSpawned:   true,
+		ShimSpawnedAt: spawnedAt,
+	}
+	store.Add(box)
+	require.NoError(t, store.Sync("box-intent"))
+
+	persisted, err := store.Get("box-intent")
+	require.NoError(t, err)
+	assert.True(t, persisted.Endpoint.ShimSpawned)
+	assert.Zero(t, persisted.Endpoint.Pid)
+	assert.True(t, spawnedAt.Equal(persisted.Endpoint.ShimSpawnedAt),
+		"the intent age must survive the store, or a restart would make it unbounded")
 }
