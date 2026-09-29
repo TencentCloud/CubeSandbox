@@ -215,6 +215,11 @@ struct lvs_destroy_ctx {
 	 * issue and the bstore entry safe to remove. */
 	bool                    unloaded;
 
+	/* The bs_dev the reap callback was registered on, kept so the failure path
+	 * can unregister it: the callback is armed before the unload and would
+	 * otherwise outlive this ctx, which the failure path frees. */
+	struct spdk_bs_dev     *bs_dev;
+
 	/* Set when a key could not be recorded. Kept apart from delete_status
 	 * because the object is not merely undeleted, it is unaccounted for: no
 	 * retry of this destroy will find it, only GC will. */
@@ -300,6 +305,15 @@ lvs_destroy_finish(struct lvs_destroy_ctx *ctx, int status)
 		SPDK_ERRLOG("lvstore '%s' not destroyed: the unload failed (%s); "
 			    "no object was deleted and the lvstore is still "
 			    "loaded\n", ctx->lvs_name, spdk_strerror(-status));
+
+		/* The reap callback was armed before the unload and still points at
+		 * this ctx, which is freed below. A refused unload leaves the lvstore
+		 * loaded, so a later one will run the reap path -- through freed
+		 * memory unless the callback is cleared here. The bs_dev outlives this
+		 * ctx, so clearing it is safe. */
+		if (ctx->bs_dev) {
+			s3_bs_dev_set_reap_cb(ctx->bs_dev, NULL, NULL);
+		}
 	} else if (ctx->delete_status != 0 || ctx->lost_keys) {
 		SPDK_WARNLOG("lvstore '%s' destroyed, but %s; the remaining "
 			     "objects need GC\n", ctx->lvs_name,
@@ -488,8 +502,10 @@ s3lvol_lvstore_destroy(struct s3lvol_lvstore *lvs,
 	}
 
 	/* The data objects come later, from the final chunk map. Registered before
-	 * the unload because that is what triggers it. */
+	 * the unload because that is what triggers it. Remembered on the ctx so the
+	 * failure path can unregister it again -- see lvs_destroy_finish(). */
 	if (lvs->bs_dev) {
+		ctx->bs_dev = lvs->bs_dev;
 		s3_bs_dev_set_reap_cb(lvs->bs_dev, lvs_destroy_reap, ctx);
 	}
 
@@ -1747,7 +1763,8 @@ lvs_attach_start_blobstore(struct lvs_setup_ctx *ctx)
 	 * lvols are exported: if blobstore's own metadata write is parked on WAL
 	 * backpressure or a full overlay, the only thing that can free space is the
 	 * flusher held here, and a timer armed later would never break that cycle. */
-	s3_bs_dev_schedule_flusher_resume(ctx->lvs->bs_dev, 30 * 1000 * 1000);
+	s3_bs_dev_schedule_flusher_resume(ctx->lvs->bs_dev,
+					  S3_FLUSHER_ATTACH_GRACE_US);
 	s3_bs_dev_suspend_flusher(ctx->lvs->bs_dev,
 				  S3_FLUSHER_NO_SUSPEND_TIMEOUT,
 				  lvs_attach_blobstore_flusher_held, ctx);
@@ -2341,13 +2358,18 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 	}
 
 	/* A hot prepare walks g_lvstores with a bare TAILQ_NEXT across asynchronous
-	 * boundaries and holds every flusher. An unload that freed its lvs mid-walk
-	 * would leave that walk on freed memory. Today it happens to survive -- the
-	 * drain cancels the pending suspend, which lands the prepare on its failure
-	 * branch without touching suspend_next again -- but that is an emergent
-	 * property of the cancel path, not something the walk guarantees, so refuse
-	 * the unload explicitly while a prepare is in flight. The prepare is bounded
-	 * now (see S3_FLUSHER_SUSPEND_TIMEOUT_US), so a caller can retry. */
+	 * boundaries, so an unload that freed its lvs mid-walk would leave that walk
+	 * on freed memory. Today it happens to survive -- the drain cancels the
+	 * pending suspend, which lands the prepare on its failure branch without
+	 * touching suspend_next again -- but that is an emergent property of the
+	 * cancel path, not something the walk guarantees, so refuse explicitly.
+	 *
+	 * Only `active`, not the sticky `done`: the hazard is the walk, which is
+	 * over once the prepare returns. A `done` prepare holds the flushers, but
+	 * unload is about to destroy the flusher anyway -- and refusing then would
+	 * leave rcow_stop.sh unable to shut down a node whose upgrade was abandoned.
+	 * The prepare is bounded now (see S3_FLUSHER_SUSPEND_TIMEOUT_US), so a caller
+	 * can retry. */
 	if (g_hot_prepare_active) {
 		SPDK_WARNLOG("lvstore '%s' cannot be unloaded while a hot prepare "
 			     "is walking the lvstore list; retry once it settles\n",
@@ -2390,6 +2412,30 @@ s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
 	if (!lvs || !lvs->bs_dev) {
 		if (cb_fn) {
 			cb_fn(cb_arg, -EINVAL);
+		}
+		return;
+	}
+
+	/* A hot prepare holds every flusher and relies on that hold to declare
+	 * "all data-plane I/O reached the target" before the SIGKILL. A drain here
+	 * would clear the hold -- s3_flusher_drain supersedes an established hold
+	 * with no callback at all -- and the prepare would then finish reporting
+	 * success over a flusher that is running again. Refuse it the way unload
+	 * already does, and let the caller retry once the prepare settles.
+	 *
+	 * Both flags count. `active` covers a prepare still walking the lvstores;
+	 * `done` is the sticky success state, which lasts until the process is
+	 * killed or resume_subsystems clears it -- the whole point of it is that the
+	 * hold must survive a caller that gives up, so a drain must not be what
+	 * ends it.
+	 *
+	 * The teardown drain in s3_bs_dev_destroy() does not come through here, so
+	 * a stop is still able to make its last push. */
+	if (g_hot_prepare_active || g_hot_prepare_done) {
+		SPDK_WARNLOG("not draining lvstore '%s' while a hot prepare holds "
+			     "its flusher; retry once it settles\n", lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
 		}
 		return;
 	}

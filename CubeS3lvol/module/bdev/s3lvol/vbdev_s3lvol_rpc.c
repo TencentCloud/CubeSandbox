@@ -1669,7 +1669,21 @@ rpc_rcow_prepare_hot_upgrade(struct spdk_jsonrpc_request *request,
 	/* Milliseconds on the wire, microseconds in the hold. 0 means "the
 	 * flusher's own default", which is what a caller that does not care
 	 * sends; the startup script passes its own budget so the prepare cannot
-	 * outlive the stop it is part of. */
+	 * outlive the stop it is part of.
+	 *
+	 * Bounded for the same reason rcow_flush_lvstore's timeout_ms is: the
+	 * multiplication would wrap a uint64_t, and a wrapped budget turns "hold
+	 * for a very long time" into "fail immediately" -- the prepare then
+	 * unwinds and reports a timeout with nothing in the log to say why. */
+	if (req.suspend_timeout_ms > RCOW_FLUSH_TIMEOUT_MS_MAX) {
+		spdk_jsonrpc_send_error_response_fmt(request,
+						     SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						     "suspend_timeout_ms %" PRIu64 " exceeds the maximum of %" PRIu64,
+						     req.suspend_timeout_ms,
+						     (uint64_t)RCOW_FLUSH_TIMEOUT_MS_MAX);
+		return;
+	}
+
 	s3lvol_prepare_hot_upgrade(rpc_lvstore_op_cb, request,
 				   req.suspend_timeout_ms * 1000);
 }
@@ -1688,7 +1702,11 @@ rpc_rcow_resume_flushers(struct spdk_jsonrpc_request *request,
 	}
 
 	s3lvol_resume_flushers();
-	spdk_jsonrpc_send_bool_response(request, true);
+	/* The two-key envelope, like rcow_resume_subsystems: spdk_jsonrpc_send_bool_response
+	 * writes bool_value alone, and test/tools/s3lvol_rpc.py only unwraps a result
+	 * carrying both keys -- a bool-only reply reaches the script as a raw result
+	 * and exits 0. */
+	rpc_lvol_write_response(request, true, "");
 }
 SPDK_RPC_REGISTER("rcow_resume_flushers",
 		  rpc_rcow_resume_flushers, SPDK_RPC_RUNTIME)

@@ -2180,6 +2180,11 @@ fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_MEM_MB" "${RCOW_TGT_MEM_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_ADDR" "${RCOW_LISTEN_ADDR}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"
+# The two hot-upgrade knobs. Their defaults live in rcow_common.sh; written out
+# so an operator can tune them through the usual .env mechanism instead of
+# editing the packaged scripts.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_HOT_FLUSH_MS" "${RCOW_HOT_FLUSH_MS:-0}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_HOT_PREPARE_SUSPEND_MS" "${RCOW_HOT_PREPARE_SUSPEND_MS:-60000}"
 
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true

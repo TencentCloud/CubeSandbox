@@ -390,8 +390,12 @@ RCOW_HOT_FLUSH_MS="${RCOW_HOT_FLUSH_MS:-0}"
 # retrying upload would keep the whole data plane frozen past the point where
 # anything could undo it. On expiry the hold is abandoned and the prepare fails
 # and unwinds (the pause is lifted, the flushers are released), so the stop
-# reports a failed upgrade instead of a hung target. Must stay well inside
-# RCOW_STOP_TIMEOUT: the caller's retry loop is what enforces the outer budget.
+# reports a failed upgrade instead of a hung target.
+#
+# Must stay well inside RCOW_STOP_TIMEOUT. That budget is not a retry loop for
+# this call: hot_online_op only retries -EBUSY, and an expiry is not one, so it
+# goes straight to fail_live_prepared. A value above RCOW_STOP_TIMEOUT*1000
+# would therefore have the client give up first, every time.
 RCOW_HOT_PREPARE_SUSPEND_MS="${RCOW_HOT_PREPARE_SUSPEND_MS:-60000}"
 
 # --------------------------------------------------------------------------
@@ -417,6 +421,28 @@ rcow_need_cmd()
 {
 	command -v "$1" >/dev/null 2>&1 || rcow_die "$1 is not installed; $2"
 }
+
+# The two hot-upgrade knobs are spliced into JSON, and one is also compared
+# numerically, so a non-integer would either break the test or send a malformed
+# request. Validated here, after rcow_die exists -- a top-level call before its
+# definition is a "command not found", not the message this wants to print.
+case "${RCOW_HOT_FLUSH_MS}" in
+''|*[!0-9]*)
+	rcow_die "RCOW_HOT_FLUSH_MS must be an integer number of milliseconds (0 skips the flush)"
+	;;
+esac
+
+case "${RCOW_HOT_PREPARE_SUSPEND_MS}" in
+''|*[!0-9]*)
+	rcow_die "RCOW_HOT_PREPARE_SUSPEND_MS must be an integer number of milliseconds"
+	;;
+*)
+	[ "${RCOW_HOT_PREPARE_SUSPEND_MS}" -gt 0 ] ||
+		rcow_die "RCOW_HOT_PREPARE_SUSPEND_MS must be positive"
+	[ "${RCOW_HOT_PREPARE_SUSPEND_MS}" -lt $((RCOW_STOP_TIMEOUT * 1000)) ] ||
+		rcow_die "RCOW_HOT_PREPARE_SUSPEND_MS must be below RCOW_STOP_TIMEOUT (${RCOW_STOP_TIMEOUT}s); the client would time out first"
+	;;
+esac
 
 # nvme connect writes its connect string to /dev/nvme-fabrics, and without the
 # in-kernel nvme-tcp transport loaded that write fails -- silently, because

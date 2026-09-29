@@ -200,7 +200,11 @@ sudo ./down.sh
 CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员被统一管理：
 
 - **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
-- **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
+- **升级（`install.sh` 升级模式）**：组件安装到**版本化目录**（`CubeS3lvol-<version>/`），裸名 `CubeS3lvol` 是指向它的软链；被替换的版本保留在旁边，更旧的会被清理。
+  - **首次升级**（旧装、或 target 过旧无法自述盘上格式、或脚本早于改名 `rcow_upgrade.sh`）：target 走**停止再启动**，仅这一次有中断。具体原因由 `install.sh` 说明。
+  - **此后每次升级都是原地热升级**：在线 checkpoint、直接 kill，替换进程重建同一套 NQN/(subsys, nsid)/UUID 网格，因此 host 重连到同一个 `/dev/nvmeXnY`，sandbox 的 I/O 只是暂停（约 8s）。initiator 全程不断开，lvstore 从不卸载。checkpoint 没能推上去的数据仍在 WAL 中，由替换进程 replay，因此 kill 前的 flush 默认被跳过（`RCOW_HOT_FLUSH_MS=0`）。该步骤在 `install.sh` 停掉其它组件**之前**运行，因为 prepare 与 layout 快照都需要活着的 target 和 S3 端点。
+  - 若替换后布局未能完整恢复，会**回滚**到上一版本；`install.sh` 仍会把其余部分装完，然后以非零退出。节点是完整的，但 s3lvol 仍是旧版本。
+  - `wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。热升级的两个旋钮 `RCOW_HOT_FLUSH_MS`（默认 `0`，跳过 kill 前 flush）与 `RCOW_HOT_PREPARE_SUSPEND_MS`（默认 `60000`，单次 flusher hold 的上限）也会写入 `.one-click.env`，可直接按常规 `.env` 方式调整。
 - **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
 - **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
 

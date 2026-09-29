@@ -166,9 +166,18 @@ flusher_advance_wal(struct s3_flusher *f)
 	if (safe_seq <= f->truncated_seq) {
 		return;
 	}
-	f->truncated_seq = safe_seq;
 
-	s3_wal_truncate_to_seq(f->wal, safe_seq);
+	/* Only memo the request once the truncation has actually released
+	 * something. s3_wal_truncate_to_seq() declines while a replay is in flight,
+	 * and it is called on every flusher tick during one -- memoising the
+	 * argument instead would mark this safe_seq done without releasing a byte,
+	 * and the next tick, computing the same value, would return above and never
+	 * ask again. The segments would stay pinned until some later write moved
+	 * safe_seq past them. */
+	if (!s3_wal_truncate_to_seq(f->wal, safe_seq)) {
+		return;
+	}
+	f->truncated_seq = safe_seq;
 
 	/* Persisting matters: the WAL may now reuse those segments, and replay
 	 * starts from the position recorded in the super. If that position still
@@ -493,8 +502,21 @@ flusher_check_suspend(struct s3_flusher *f)
 	f->suspend_expired = false;
 	resume = f->resume_pending;
 	f->resume_pending = false;
-	/* A failed hold never took effect, so uploads must not be left gated. */
-	f->suspended = resume ? false : (status == 0);
+
+	if (resume && status == 0) {
+		/* The hold completed, but a resume arrived while it was still pending,
+		 * so it is released again here. Report that instead of success: the
+		 * contract is "status 0 means uploads are held", and they are not.
+		 * Same reason and same code as a drain cancelling a pending suspend.
+		 * An expiry keeps -ETIMEDOUT, which says more about why there is no
+		 * hold. */
+		status = -ECANCELED;
+	}
+
+	/* Only a hold that completed with nobody releasing it leaves uploads
+	 * gated. Every other outcome -- expired, cancelled, or released by an
+	 * earlier resume -- means the caller must not treat them as held. */
+	f->suspended = (status == 0);
 	cb_fn(cb_arg, status);
 	if (!f->suspended) {
 		s3_flusher_kick(f);

@@ -901,9 +901,25 @@ overlay", probe.done, NULL);
 		check_true("suspend waits for an in-flight upload", !probe.done,
 			   NULL);
 		s3_flusher_resume(fl);
+		started = fake.started;
 		fake_complete_all(&fake, 0);
-		check_true("an early resume is applied after suspend completes",
-			   probe.done && probe.status == 0, NULL);
+		/* The hold did complete, but the resume that arrived while it was
+		 * pending released it again on the way out. Reporting 0 would tell the
+		 * caller uploads are gated when they are not -- which is exactly the
+		 * state the attach hold cannot tolerate, since it then reads overlay
+		 * metadata while the flusher is free to PUT and delete underneath it. */
+		check_true("an early resume reports the hold as released, not held",
+			   probe.done && probe.status == -ECANCELED, NULL);
+
+		/* And the release is real: scheduling is back on. */
+		fill_pattern(blk, 1, 6 * BLOCKS_PER_CHUNK, 0xC3);
+		s3_overlay_write(ov, 6 * BLOCKS_PER_CHUNK, 1, blk, 902);
+		s3_flusher_kick(fl);
+		check_true("no upload is left gated by the released hold",
+			   fake.started > started, NULL);
+		while (fake.n_pending > 0) {
+			fake_complete_all(&fake, 0);
+		}
 	}
 
 	/* --- a drain supersedes a pending suspend --- */

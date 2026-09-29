@@ -244,14 +244,16 @@ inherit one.
     to describe its own on-disk formats, or one whose scripts predate the rename
     to `rcow_upgrade.sh`: the target is **stopped and started** — an
     interruption, for that one upgrade only. `install.sh` says why.
-  - **Every upgrade after that** is done **in place**: the target is flushed and
+  - **Every upgrade after that** is done **in place**: the target is
     checkpointed online, killed outright, and the replacement rebuilds the same
     NQN/(subsys, nsid)/UUID grid, so the host reconnects to the same
-    `/dev/nvmeXnY` and a sandbox's I/O only pauses (about 40s). The initiator is
-    never disconnected and the lvstore never unloaded. This runs
+    `/dev/nvmeXnY` and a sandbox's I/O only pauses (about 8s). The initiator is
+    never disconnected and the lvstore never unloaded. Anything the checkpoint
+    could not push is still in the WAL and the replacement replays it, so the
+    pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`). This runs
     `cube-s3lvol-hot-upgrade.sh` **before** the rest of the install stops
-    anything, because an online flush needs both the running target and the S3
-    endpoint.
+    anything, because the prepare and the layout snapshot both need the running
+    target and the S3 endpoint.
   - A swap that does not come back with the layout intact is **rolled back** to
     the previous version; `install.sh` still finishes the rest and then exits
     non-zero. The node is complete but on the old s3lvol.

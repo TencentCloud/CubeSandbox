@@ -24,9 +24,10 @@
 #
 #  pause_window_ms is measured from just before rcow_upgrade.sh to after the
 #  layout is verified live again. That deliberately *over*-states the true pause:
-#  the online flush and checkpoint happen inside it but block nothing. It is an
-#  upper bound, and a regression baseline -- a number that only grows is the
-#  signal to look, not a pass/fail gate.
+#  the online checkpoint happens inside it but blocks nothing, and the pre-kill
+#  flush is skipped by default -- it did block, which is why it was skipped. It
+#  is an upper bound, and a regression baseline -- a number that only grows is
+#  the signal to look, not a pass/fail gate.
 #
 #  === The cross-SPDK case is not optional coverage ===
 #

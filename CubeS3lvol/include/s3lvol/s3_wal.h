@@ -310,8 +310,13 @@ void s3_wal_replay(struct s3_wal *wal, s3_wal_replay_cb apply_fn, void *apply_ar
  * *The caller must persist the super before relying on the space being reusable
  * across a crash*, otherwise recovery would still scan from the old position,
  * which by then holds bytes from a later lap.
+ *
+ * \return true if any segment was actually released. It is false while a WAL
+ *         replay is in flight, and false when nothing was eligible -- so a
+ *         caller that memos the truncation it asked for must key off this, not
+ *         off \c safe_seq, or it will skip the retry that would have done it.
  */
-void s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq);
+bool s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq);
 
 /**
  * Persist the current ring positions into the super (alternating A/B slots).
@@ -321,9 +326,6 @@ void s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq);
  */
 void s3_wal_sync_super(struct s3_wal *wal, uint64_t ckpt_seq,
 		       s3_wal_cb cb_fn, void *cb_arg);
-
-/* Backpressure is on: callers should stop submitting and retry later (W5). */
-bool s3_wal_is_backpressured(const struct s3_wal *wal);
 
 /* The log is at least S3_WAL_FLUSH_FORCE_PCT full. The flusher should ignore
  * overlay hold-back so occupancy falls before writes have to be refused. */

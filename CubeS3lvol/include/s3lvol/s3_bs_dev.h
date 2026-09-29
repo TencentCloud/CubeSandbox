@@ -176,7 +176,8 @@ void s3_bs_dev_set_reap_cb(struct spdk_bs_dev *bs_dev, s3_bs_dev_reap_cb cb_fn,
 int s3_bs_dev_wal_apply(struct spdk_bs_dev *bs_dev,
 			const struct s3_wal_entry_hdr *hdr, const void *payload);
 
-/** Overlay occupancy after WAL replay, for attach diagnostics. */
+/** Overlay occupancy at the moment WAL replay completes (not after it has
+ *  drained), for attach diagnostics. */
 void s3_bs_dev_log_overlay(struct spdk_bs_dev *bs_dev);
 
 /**
@@ -200,9 +201,11 @@ void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
  * Stop background uploads after current uploads have completed.
  *
  * \param timeout_us 0 selects S3_FLUSHER_SUSPEND_TIMEOUT_US;
- *                   S3_FLUSHER_NO_SUSPEND_TIMEOUT waits without one. A callback
- *                   status of -ETIMEDOUT means the hold was abandoned (uploads
- *                   resumed), so the caller must not treat it as suspended.
+ *                   S3_FLUSHER_NO_SUSPEND_TIMEOUT waits without one. The
+ *                   callback reports 0 only when uploads are actually held;
+ *                   -ETIMEDOUT (deadline passed) and -ECANCELED (released again
+ *                   by an early resume or a drain) both mean they are not, so
+ *                   the caller must not treat either as a hold.
  */
 void s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 			       s3_bs_dev_cb cb_fn, void *cb_arg);
@@ -211,11 +214,12 @@ void s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 void s3_bs_dev_resume_flusher(struct spdk_bs_dev *bs_dev);
 
 /**
- * Re-enable a suspended flusher after a fallback grace period.
+ * Schedule s3_flusher_resume() to run after \c delay_us, replacing any resume
+ * already scheduled.
  *
- * Attach uses this to keep a large replay backlog from competing with active
- * volume restoration and listener creation. Calling resume directly cancels
- * the pending grace period.
+ * Does not care whether the flusher is suspended: attach calls it just before
+ * taking its hold, so the grace runs from when the hold is taken rather than
+ * from when it completes. Resuming directly cancels the pending grace.
  */
 void s3_bs_dev_schedule_flusher_resume(struct spdk_bs_dev *bs_dev,
 				       uint64_t delay_us);

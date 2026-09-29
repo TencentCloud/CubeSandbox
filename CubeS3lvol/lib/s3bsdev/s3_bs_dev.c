@@ -954,9 +954,10 @@ s3_dest_fill_done(void *cb_arg, uint64_t bytes_read, int status)
 
 	fill->bytes_read = bytes_read;
 	fill->status = status;
-	/* -ENOENT is the flusher-overwrite 404 documented on read_uuid: finish
-	 * treats it as a mapping reread, not a failed GET. ERRLOG here would
-	 * fire on every such race at the level operators filter for faults. */
+	/* -ENOENT is the flusher-overwrite 404 documented above (the "Which object
+	 * this GET is reading" block): finish treats it as a mapping reread, not a
+	 * failed GET. ERRLOG here would fire on every such race at the level
+	 * operators filter for faults. */
 	if (status != 0 && status != -ENOENT) {
 		char uuid_str[SPDK_UUID_STRING_LEN];
 
@@ -1666,7 +1667,12 @@ s3_chunk_io_finish(struct s3_chunk_io *cio, int status)
 		struct s3_ctx *ctx = bs_io->ctx;
 		uint32_t covered = 0;
 
-		if (ctx->overlay) {
+		/* overlay is owner-thread state, and this runs on the abort path too
+		 * (see s3_dest_fill_abort_bounce), which is off-owner by construction.
+		 * s3_overlay_covered_count() walks c->blocks[], which the owner may free
+		 * after storing NULL, so it must not be read from another thread. The
+		 * count is a diagnostic; skip it rather than reach into the overlay. */
+		if (ctx->overlay && ctx->owner_thread == spdk_get_thread()) {
 			covered = s3_overlay_covered_count(ctx->overlay, cio->lba,
 							   cio->nblocks);
 		}

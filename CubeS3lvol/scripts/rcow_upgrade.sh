@@ -147,6 +147,26 @@ rcow_resume_subsystems()
 	fi
 }
 
+# EXIT hook for the window between a successful prepare and the kill.
+#
+# The named failure paths in this script all resume before they exit, but an
+# uncaught death -- OOM killer, `timeout`, systemd -- does not go through any of
+# them, and leaves the target running with its data plane quiesced and nobody to
+# undo it. PREPARED is set only once the prepare has actually succeeded, so this
+# is inert on every path before that.
+#
+# Deliberately not resetting the trap: an exit is an exit, and this runs once.
+rcow_undo_prepare_on_exit()
+{
+	local rc=$?
+
+	[ "${PREPARED:-0}" -eq 1 ] || return "${rc}"
+	rcow_warn "exiting with the target prepared but not killed (rc=${rc}); \
+resuming it so the data plane is not left frozen"
+	rcow_resume_subsystems
+	return "${rc}"
+}
+
 # rcow_flush_lvstore and rcow_checkpoint_lvstore answer -EBUSY while another of
 # their kind is running -- they do not queue. That is "come back later", not a
 # failure, so back off and retry within the stop budget. Anything else is fatal,
@@ -382,11 +402,16 @@ fi
 # resume the subsystems. The host keeps the same namespaces while commands
 # queue, and the SIGKILL below turns that pause into the normal reconnect
 # window. Nothing after this point may fail without first undoing the quiesce --
-# see fail_live_prepared.
+# see fail_live_prepared. That includes this script dying: fail_live_prepared
+# covers the failures it can see, not an OOM kill or a `timeout` around it, so
+# the hold is released from an EXIT trap too.
 rcow_step "prepare: quiesce namespaces; blobstore stays dirty"
+PREPARED=0
+trap 'rcow_undo_prepare_on_exit' EXIT
 hot_online_op "hot prepare" rcow_prepare_hot_upgrade \
 	"{\"suspend_timeout_ms\":${RCOW_HOT_PREPARE_SUSPEND_MS}}" ||
 	fail_live_prepared "could not prepare the target for hot upgrade"
+PREPARED=1
 
 # ==========================================================================
 rcow_step "killing the target"
@@ -420,12 +445,19 @@ if [ "${GONE}" -ne 1 ]; then
 	# left frozen for an operator to restart by hand.
 	rcow_warn "pid ${TGT_PID} survived SIGKILL for ${RCOW_STOP_TIMEOUT}s; \
 something outside this script is holding it, and the target is still alive"
+	# Resumed here rather than left to the EXIT hook: this branch has the
+	# operator-facing message, and the hook would only repeat the call.
 	rcow_resume_subsystems
+	PREPARED=0
 	rcow_die "pid ${TGT_PID} survived SIGKILL; the target is still alive. The \
 RCOW subsystems were resumed, so data-plane I/O can proceed, but this node was \
 not upgraded and the target must be restarted to finish or abandon the upgrade"
 fi
 rcow_log "target pid ${TGT_PID} is gone"
+
+# The quiesce ended with the process, so the exit hook has nothing to undo from
+# here on. Cleared before anything else can fail (the marker, the residue).
+PREPARED=0
 
 # The intent is spent: this is the moment it was recorded for. Clearing it here
 # rather than where the stop script read it is what leaves a refused attempt

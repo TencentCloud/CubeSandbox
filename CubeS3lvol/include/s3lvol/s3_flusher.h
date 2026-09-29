@@ -51,6 +51,16 @@
  * hold, and failing an attach over a slow upload would be worse than waiting. */
 #define S3_FLUSHER_NO_SUSPEND_TIMEOUT UINT64_MAX
 
+/* How long attach leaves its flusher hold armed before releasing it on its own.
+ *
+ * A grace, not a hold deadline: the hold itself is unbounded (the attach waits
+ * for it), and this is the backstop for the case nothing else releases it --
+ * a stalled blobstore metadata write whose only way out is the flusher. Kept
+ * separate from S3_FLUSHER_DRAIN_TIMEOUT_US even though the value matches, and
+ * from S3_FLUSHER_SUSPEND_TIMEOUT_US, because the three mean different things.
+ */
+#define S3_FLUSHER_ATTACH_GRACE_US (30ULL * 1000 * 1000)
+
 struct s3_flusher;
 struct s3_wal;
 
@@ -144,16 +154,16 @@ void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
  * reversible with s3_flusher_resume().
  *
  * \param timeout_us 0 selects S3_FLUSHER_SUSPEND_TIMEOUT_US;
- *                   S3_FLUSHER_NO_SUSPEND_TIMEOUT waits without one. Once the
- *                   deadline passes the hold is abandoned and the callback
- *                   reports -ETIMEDOUT, but uploads already running are still
- *                   waited for -- their completions would otherwise touch freed
- *                   memory. A failed hold never took effect: uploads resume, so
- *                   the caller must treat -ETIMEDOUT as "not suspended".
+ *                   S3_FLUSHER_NO_SUSPEND_TIMEOUT waits without one.
  *
- * If a completion is already in flight the callback may fire after
- * s3_flusher_suspend() returns; a drain started in that window cancels the
- * suspend instead of failing, and the callback then reports -ECANCELED.
+ * \b Status: the callback reports 0 only when the hold is real -- uploads are
+ * gated and stay gated until s3_flusher_resume(). Every other outcome leaves
+ * them ungated, so the caller must not treat it as held:
+ *   - -ETIMEDOUT  the deadline passed; the hold was abandoned.
+ *   - -ECANCELED  a resume arrived while the hold was still pending, or a drain
+ *                 took the flusher over. Either way it is released again.
+ * In every case uploads already running are still waited for before the
+ * callback fires -- their completions would otherwise touch freed memory.
  *
  * The callback must not re-enter this flusher (a drain or a destroy from inside
  * it is not refused while the suspend is unwinding).
