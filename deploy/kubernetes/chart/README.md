@@ -298,6 +298,10 @@ TLS verification stays on — this adds trust, it does not disable it.
   contain PEM documents.
 - `certs` and `existingConfigMap` are mutually exclusive — setting both fails
   the render (the inline certs would be silently ignored).
+- Certificates are concatenated with newline separators, so PEM blocks must
+  not rely on being adjacent; a missing trailing newline in an
+  `existingConfigMap` value is handled. The guard script validates rendering
+  only — the merged bundle itself is produced at pod start.
 - The TemplateCenter image must ship a system CA bundle
   (`ca-certificates`; Debian/Ubuntu and RHEL bundle layouts are probed) plus
   `/bin/sh` with `cp`/`ls`/`cat` for the merge-ca init container.

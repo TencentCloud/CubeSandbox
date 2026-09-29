@@ -45,7 +45,7 @@ spec:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
-      {{- if .Values.trustedCACerts.enabled }}
+      {{- if and .Values.trustedCACerts.enabled (not .Values.trustedCACerts.existingConfigMap) }}
       annotations:
         # Roll the Deployment when trustedCACerts.certs changes: the merged
         # bundle is a one-time copy into an emptyDir at pod start, so a bare
@@ -114,7 +114,11 @@ spec:
               cp "$BUNDLE" /merged/ca-bundle.crt
               ls /trusted-ca/*.crt >/dev/null 2>&1 \
                 || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
-              cat /trusted-ca/*.crt >> /merged/ca-bundle.crt
+              # Append user certs one at a time with a newline separator:
+              # ConfigMap entries are rendered with |- (no trailing newline),
+              # so a bare `cat *.crt` would glue PEM blocks together and
+              # silently drop every cert after the first.
+              for f in /trusted-ca/*.crt; do cat "$f"; printf '\n'; done >> /merged/ca-bundle.crt
           volumeMounts:
             - name: trusted-ca
               mountPath: /trusted-ca
