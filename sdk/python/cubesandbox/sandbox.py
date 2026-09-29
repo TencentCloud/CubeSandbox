@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 import threading
+import uuid
 from typing import Any, Callable, Dict
 
 import httpx
@@ -25,6 +28,13 @@ from ._transport import build_client
 from ._volume import VolumeMountsArg, _serialize_volume_mounts
 
 JUPYTER_PORT = 49999
+
+#: Port the in-sandbox ``mcp-gateway`` listens on (E2B-compatible).
+MCP_PORT = 50005
+MCP_TOKEN_PATH = "/etc/mcp-gateway/.token"
+#: How long ``mcp-gateway --config`` may take, matching the E2B SDK's default
+#: command timeout. Pre-install servers in the template to stay within it.
+MCP_STARTUP_TIMEOUT = 60
 
 #: Never-timeout sentinel. See docs/guide/lifecycle.md.
 NEVER_TIMEOUT = -1
@@ -82,6 +92,12 @@ def _check_response(resp: requests.Response) -> None:
     raise ApiError(msg, code)
 
 
+def _is_template_not_found(resp: requests.Response) -> bool:
+    # Older CubeAPI builds relay CubeMaster's 130404 without mapping it to 404.
+    text = resp.text.lower()
+    return (resp.status_code == 404 and "template" in text) or "130404" in text
+
+
 _VALID_ON_TIMEOUT = ("kill", "pause")
 
 
@@ -127,6 +143,7 @@ class Sandbox:
         self._files = Filesystem(self)
         self._pty = Pty(self)
         self._clone_cleanup: _CloneCleanup | None = None
+        self._mcp_token: str | None = None
 
 
     @property
@@ -167,6 +184,41 @@ class Sandbox:
         """
         return f"{port}-{self.sandbox_id}.{self.domain}"
 
+    def get_mcp_url(self) -> str:
+        """Return the streamable-HTTP URL of the sandbox MCP gateway.
+
+        Send ``Authorization: Bearer <get_mcp_token()>`` with every request.
+        """
+        return f"http://{self.get_host(MCP_PORT)}/mcp"
+
+    def get_mcp_token(self) -> str | None:
+        """Return the MCP gateway bearer token, or ``None`` if MCP is not enabled.
+
+        The token is cached on the instance that started the gateway; other
+        instances (e.g. from :meth:`connect`) read it from the sandbox.
+        """
+        if self._mcp_token is None and self.files.exists(MCP_TOKEN_PATH, user="root"):
+            self._mcp_token = self.files.read(MCP_TOKEN_PATH, user="root").strip()
+        return self._mcp_token
+
+    def _start_mcp_gateway(self, mcp: Dict[str, Any]) -> None:
+        token = str(uuid.uuid4())
+        result = self.commands.run(
+            f"mcp-gateway --config {shlex.quote(json.dumps(mcp))}",
+            user="root",
+            envs={"GATEWAY_ACCESS_TOKEN": token},
+            timeout=MCP_STARTUP_TIMEOUT,
+        )
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout).strip()
+            if result.exit_code == 127:
+                detail = (
+                    f"template {self.template_id!r} does not provide mcp-gateway "
+                    f"(see docs/guide/mcp-gateway.md): {detail}"
+                )
+            raise CubeSandboxError(f"Failed to start MCP gateway: {detail}")
+        self._mcp_token = token
+
     @property
     def commands(self) -> "Commands":
         return self._commands
@@ -194,13 +246,17 @@ class Sandbox:
         network: Dict[str, Any] | None = None,
         lifecycle: Dict[str, Any] | None = None,
         volume_mounts: VolumeMountsArg | None = None,
+        mcp: Dict[str, Any] | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
         """POST /sandboxes - Create a new sandbox.
 
         Args:
-            template: Template ID. Falls back to ``CUBE_TEMPLATE_ID`` env var.
+            template: Template ID or alias. Falls back to ``CUBE_TEMPLATE_ID``.
+                When ``mcp`` is set, ``Config.mcp_template_id`` (``mcp-gateway``
+                by default) is tried first and ``CUBE_TEMPLATE_ID`` is used only
+                if that template does not exist.
             timeout: Sandbox idle timeout in seconds (``None`` omits the field).
                 See ``docs/guide/lifecycle.md``.
             env_vars: Environment variables injected into the sandbox.
@@ -254,6 +310,13 @@ class Sandbox:
                 :meth:`cubesandbox.Volume.create`. ``read_only`` applies to this
                 sandbox attachment; it does not make the volume an immutable
                 snapshot.
+            mcp: E2B-compatible MCP servers keyed by server name, e.g.
+                ``{"duckduckgo": {}, "arxiv": {"storagePath": "/"}}`` or
+                ``{"github/<owner>/<repo>": {"runCmd": ..., "installCmd": ...,
+                "envs": {...}}}``. When set, ``mcp-gateway`` is started inside
+                the sandbox after creation; use :meth:`get_mcp_url` and
+                :meth:`get_mcp_token` to connect. The template must ship the
+                ``mcp-gateway`` binary.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -262,11 +325,24 @@ class Sandbox:
         Raises:
             ValueError: If no template ID is provided, or if ``lifecycle``
                 contains an unsupported ``on_timeout`` value.
-            ApiError: On unexpected backend error (HTTP 500).
+            ApiError: On unexpected backend error (HTTP 500), or HTTP 400 for
+                an invalid ``mcp`` shape.
+            TemplateNotFoundError: If ``mcp`` is set without ``template`` and
+                none of the candidate templates exists.
+            CubeSandboxError: If the MCP gateway fails to start. The sandbox
+                is killed before the error is raised.
         """
         cfg = config or Config()
-        tpl = template or cfg.template_id
-        if not tpl:
+        # A templateID in kwargs is an explicit choice: it is sent verbatim,
+        # without the MCP template fallback.
+        fallback = not template and mcp is not None and "templateID" not in kwargs
+        if template:
+            templates = [template]
+        elif fallback:
+            templates = list(dict.fromkeys(t for t in (cfg.mcp_template_id, cfg.template_id) if t))
+        else:
+            templates = [cfg.template_id] if cfg.template_id else []
+        if not templates:
             raise ValueError("template is required. Set CUBE_TEMPLATE_ID or pass template=")
 
         if env_vars is not None and envs is not None and env_vars != envs:
@@ -274,7 +350,7 @@ class Sandbox:
         sandbox_env_vars = env_vars if env_vars is not None else envs
 
         # Omitted when None; see docs/guide/lifecycle.md.
-        payload: dict = {"templateID": tpl}
+        payload: dict = {"templateID": templates[0]}
         if timeout is not None:
             payload["timeout"] = timeout
         if sandbox_env_vars:
@@ -296,13 +372,33 @@ class Sandbox:
             payload["lifecycle"] = _serialize_lifecycle(lifecycle)
         if volume_mounts:
             payload["volumeMounts"] = _serialize_volume_mounts(volume_mounts)
-        payload.update(kwargs)
-
+        if mcp is not None:
+            payload["mcp"] = mcp
         s = requests.Session()
-        resp = s.post(f"{cfg.api_url}/sandboxes", json=payload,
-                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+        for tpl in templates:
+            resp = s.post(f"{cfg.api_url}/sandboxes", json={**payload, "templateID": tpl, **kwargs},
+                          headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+            if not (fallback and _is_template_not_found(resp)):
+                break
+        else:
+            raise TemplateNotFoundError(
+                f"no template for mcp: tried {', '.join(repr(t) for t in templates)}. "
+                "Build a template that provides mcp-gateway (see docs/guide/mcp-gateway.md), "
+                "then pass template= or set CUBE_MCP_TEMPLATE_ID",
+                resp.status_code,
+            )
         _check_response(resp)
-        return cls(resp.json(), config=cfg)
+        sandbox = cls(resp.json(), config=cfg)
+        if mcp is not None:
+            try:
+                sandbox._start_mcp_gateway(mcp)
+            except BaseException:
+                try:
+                    sandbox.kill()
+                except Exception:  # noqa: BLE001 — surface the gateway error
+                    pass
+                raise
+        return sandbox
 
     @classmethod
     def connect(

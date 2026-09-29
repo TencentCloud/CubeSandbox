@@ -35,6 +35,9 @@ const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
 const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
 const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
+const MCP_MAX_SERVERS: usize = 64;
+const MCP_SERVER_NAME_MAX_LEN: usize = 128;
+const MCP_GITHUB_PREFIX: &str = "github/";
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -164,12 +167,16 @@ impl SandboxService {
             metadata,
             distribution_scope,
             env_vars,
+            mcp,
             volume_mounts,
             backend,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
             validate_env_vars(env_vars)?;
+        }
+        if let Some(mcp) = mcp.as_ref() {
+            validate_mcp_config(mcp)?;
         }
         if let Some(mounts) = volume_mounts.as_ref() {
             validate_unique_volume_mount_names(mounts)?;
@@ -750,6 +757,104 @@ fn validate_env_vars(env_vars: &HashMap<String, String>) -> AppResult<()> {
             return Err(AppError::BadRequest(format!(
                 "env var value contains control character: {name:?}"
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the E2B-compatible `mcp` option: an object keyed by MCP server
+/// name whose values are per-server configuration objects. The gateway inside
+/// the sandbox owns the server catalog, so built-in server names and their
+/// properties are not checked here; only the GitHub / custom-command shape
+/// (`runCmd`, `installCmd`, `envs`) is.
+fn validate_mcp_config(mcp: &serde_json::Value) -> AppResult<()> {
+    let bad = |msg: String| Err(AppError::BadRequest(msg));
+    let servers = match mcp {
+        serde_json::Value::Null => return Ok(()),
+        serde_json::Value::Object(servers) => servers,
+        _ => return bad("mcp must be an object keyed by MCP server name".to_string()),
+    };
+    if servers.len() > MCP_MAX_SERVERS {
+        return bad(format!(
+            "mcp configures {} servers; at most {MCP_MAX_SERVERS} are allowed",
+            servers.len()
+        ));
+    }
+    let no_config = serde_json::Map::new();
+    for (name, config) in servers {
+        if name.is_empty() || name.len() > MCP_SERVER_NAME_MAX_LEN {
+            return bad(format!("invalid mcp server name length: {name:?}"));
+        }
+        if name.chars().any(char::is_control) {
+            return bad(format!(
+                "mcp server name contains control characters: {name:?}"
+            ));
+        }
+        let config = match config {
+            // The gateway treats null as {}, so it gets the same checks.
+            serde_json::Value::Null => &no_config,
+            serde_json::Value::Object(config) => config,
+            _ => {
+                return bad(format!(
+                    "mcp server {name:?} configuration must be an object"
+                ))
+            }
+        };
+        let is_github = name.starts_with(MCP_GITHUB_PREFIX);
+        if is_github {
+            let parts: Vec<&str> = name[MCP_GITHUB_PREFIX.len()..].split('/').collect();
+            let valid_part = |p: &&str| {
+                !p.is_empty()
+                    && *p != "."
+                    && *p != ".."
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            };
+            if parts.len() != 2 || !parts.iter().all(valid_part) {
+                return bad(format!(
+                    "mcp server {name:?} must be named github/<owner>/<repo>"
+                ));
+            }
+        }
+        if !is_github && !config.contains_key("runCmd") {
+            continue;
+        }
+        match config.get("runCmd") {
+            Some(serde_json::Value::String(cmd)) if !cmd.trim().is_empty() => {}
+            _ => {
+                return bad(format!(
+                    "mcp server {name:?} requires a non-empty string runCmd"
+                ))
+            }
+        }
+        if let Some(install) = config.get("installCmd") {
+            if !install.is_string() {
+                return bad(format!("mcp server {name:?} installCmd must be a string"));
+            }
+        }
+        if let Some(envs) = config.get("envs") {
+            let Some(envs) = envs.as_object() else {
+                return bad(format!("mcp server {name:?} envs must be an object"));
+            };
+            for (key, value) in envs {
+                let bytes = key.as_bytes();
+                let valid_name = bytes
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                    && bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+                if !valid_name {
+                    return bad(format!(
+                        "mcp server {name:?} env var name must match [a-zA-Z_][a-zA-Z0-9_]*: {key:?}"
+                    ));
+                }
+                if !value.is_string() {
+                    return bad(format!(
+                        "mcp server {name:?} env var {key:?} must be a string"
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -3480,6 +3585,123 @@ mod tests {
             ("TAB_OK".to_string(), "hello\tworld".to_string()),
         ]))
         .expect("valid env var names should be accepted");
+    }
+
+    #[test]
+    fn mcp_config_accepts_e2b_shapes() {
+        for config in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"duckduckgo": {}, "arxiv": {"storagePath": "/"}, "time": null}),
+            serde_json::json!({"futureServer": {"anyOption": [1, 2, {"nested": true}]}}),
+            serde_json::json!({
+                "github/acme/weather-mcp": {
+                    "installCmd": "npm install",
+                    "runCmd": "npm run start",
+                    "envs": {"API_TOKEN": "secret", "_X": ""}
+                }
+            }),
+            serde_json::json!({"local-tools": {"runCmd": "python3 /opt/server.py"}}),
+        ] {
+            super::validate_mcp_config(&config)
+                .unwrap_or_else(|e| panic!("{config} should be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn mcp_config_rejects_invalid_shapes() {
+        let too_many: serde_json::Map<String, Value> = (0..=super::MCP_MAX_SERVERS)
+            .map(|i| (format!("s{i}"), serde_json::json!({})))
+            .collect();
+        for (config, expected) in [
+            (serde_json::json!(["duckduckgo"]), "must be an object keyed"),
+            (serde_json::json!("duckduckgo"), "must be an object keyed"),
+            (
+                serde_json::json!({"duckduckgo": true}),
+                "configuration must be an object",
+            ),
+            (serde_json::json!({"": {}}), "invalid mcp server name"),
+            (serde_json::json!({"bad\nname": {}}), "control characters"),
+            (Value::Object(too_many), "at most"),
+            (
+                serde_json::json!({"github/acme": {"runCmd": "x"}}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/../repo": {"runCmd": "x"}}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/a/b/c": {"runCmd": "x"}}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/acme": null}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/a/b": {}}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"github/a/b": null}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": " "}}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"custom": {"runCmd": 1}}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "installCmd": ["npm"]}}),
+                "installCmd must be a string",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "envs": ["A=1"]}}),
+                "envs must be an object",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "envs": {"A-B": "1"}}}),
+                "env var name must match",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "envs": {"A": 1}}}),
+                "must be a string",
+            ),
+        ] {
+            let err = super::validate_mcp_config(&config)
+                .expect_err(&format!("{config} should be rejected"));
+            assert!(
+                matches!(err, AppError::BadRequest(ref m) if m.contains(expected)),
+                "{config}: expected BadRequest containing {expected:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_rejects_invalid_mcp_before_calling_cubemaster() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { ret_envelope(0, "ok") }
+            }),
+        ))
+        .await;
+
+        let mut body = probe_sandbox();
+        body.mcp = Some(serde_json::json!([1, 2]));
+        let err = service
+            .create_sandbox(body)
+            .await
+            .expect_err("invalid mcp should be rejected");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]

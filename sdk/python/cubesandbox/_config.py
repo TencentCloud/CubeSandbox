@@ -23,6 +23,11 @@ class Config:
     template_id: str | None = field(
         default_factory=lambda: os.environ.get("CUBE_TEMPLATE_ID")
     )
+    #: Template (ID or alias) used when ``Sandbox.create(mcp=...)`` is called
+    #: without an explicit template. Mirrors E2B's ``mcp-gateway`` default.
+    mcp_template_id: str = field(
+        default_factory=lambda: os.environ.get("CUBE_MCP_TEMPLATE_ID", "mcp-gateway")
+    )
     proxy_node_ip: str | None = field(
         default_factory=lambda: os.environ.get("CUBE_PROXY_NODE_IP")
     )
@@ -69,6 +74,7 @@ class Config:
         return (
             f"Config(api_url={self.api_url!r}, api_key={masked!r}, "
             f"template_id={self.template_id!r}, "
+            f"mcp_template_id={self.mcp_template_id!r}, "
             f"proxy_node_ip={self.proxy_node_ip!r}, proxy_port={self.proxy_port!r}, "
             f"sandbox_domain={self.sandbox_domain!r}, timeout={self.timeout!r}, "
             f"request_timeout={self.request_timeout!r})"

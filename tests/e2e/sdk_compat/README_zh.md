@@ -324,6 +324,9 @@ cp env.example .env
 - `SDK_E2E_PLATFORM_LIFECYCLE_WAIT_MARGIN`：额外等待时间，默认 `20` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_POLL_TIMEOUT`：轮询窗口，默认 `45` 秒；
 - `CUBE_PROXY_ADMIN_PORT`：CubeProxy admin 端口，默认 `8082`；
+- `SDK_E2E_MCP_TEMPLATE_ID`：`cases/mcp` 使用的模板 ID 或别名，基于
+  `examples/mcp-gateway/template/Dockerfile` 构建，默认 `mcp-gateway`。该模板不存在时跳过
+  `cases/mcp`；
 - `SDK_E2E_VOLUME_PLUGIN`：运行 Volume Plugin 用例（CRUD 与 sandbox
   `volumeMounts` 绑定/解绑），默认 `true`；设为 `false` 可跳过；
 - `SDK_E2E_VOLUME_DRIVER`：`POST /volumes` 使用的 driver，默认 `s3`；
