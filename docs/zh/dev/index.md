@@ -7,6 +7,7 @@
 ## 约定
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
+- [Scheduler Profile 配置示例](./scheduler-profile-config-example)——CubeMaster 运行时 `scheduler.profile` / `binpack_score` 可复制 YAML 契约（不是离线模拟器模型；无在线性能断言）。
 
 ## 服务设计
 
