@@ -459,6 +459,6 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "cubeOps S3 endpoint is set but no credentials: set cubeOps.s3.existingSecret (keys s3-access-key-id / s3-secret-access-key), cubeOps.s3.accessKeyId+secretAccessKey, or volumeS3.accessKeyId+secretAccessKey. volumeS3.existingSecret (volume-s3.conf) is not a CubeOps credential source." }}
 {{- end }}
 {{- end }}
-{{- if and .Values.trustedCACerts.enabled (not .Values.trustedCACerts.existingConfigMap) (not .Values.trustedCACerts.certs) }}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled (not .Values.trustedCACerts.existingConfigMap) (not .Values.trustedCACerts.certs) }}
 {{- fail "trustedCACerts.enabled=true requires either trustedCACerts.certs (one or more PEM documents) or trustedCACerts.existingConfigMap -- with neither, the merge-ca init container would find no certs and crashloop with an unexplained error" }}
 {{- end }}

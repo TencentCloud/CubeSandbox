@@ -32,13 +32,14 @@ for needle in 'name: guard-on-cube-trusted-ca' 'ca-0.crt' 'name: merge-ca' 'SSL_
 done
 
 # 2b. Enabled must follow global.imageRegistry for the init image (merge-ca
-#     uses cube.cubeImage, same as every other cube-owned image).
+#     uses cube.cubeImage, same as every other cube-owned image). Assert on
+#     the init container's own image (cube-templatecenter), not a substring
+#     satisfied by unrelated Deployments.
 helm template guard-mirror "$CHART_DIR" $COMMON_SETS \
   --set global.imageRegistry=mirror.example.com \
-  --set-string images.cubemastercli.repository=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli \
   --set trustedCACerts.enabled=true \
   --set-string trustedCACerts.certs[0]="-----BEGIN CERTIFICATE----- guard" >"$TMP_DIR/mirror.yaml"
-grep -q 'image: "mirror.example.com/cube-sandbox/cubemastercli' "$TMP_DIR/mirror.yaml" || {
+grep -q 'image: "mirror.example.com/cube-sandbox/cube-templatecenter' "$TMP_DIR/mirror.yaml" || {
   echo "FAIL: merge-ca init image does not follow global.imageRegistry" >&2
   exit 1
 }

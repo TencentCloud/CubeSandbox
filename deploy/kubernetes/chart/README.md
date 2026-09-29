@@ -284,8 +284,9 @@ one consumer: the CubeTemplateCenter container, which pulls OCI images from
 inside the cluster for `template create-from-image` (node-side kubelet /
 containerd pulls are configured on the host, not here).
 
-With `trustedCACerts.enabled=true` the chart renders a `<release>-trusted-ca`
-ConfigMap from the inline PEM `certs` (or references `existingConfigMap`),
+With `trustedCACerts.enabled=true` the chart renders a `<fullname>-trusted-ca`
+ConfigMap (for release `foo` that is `foo-cube-trusted-ca`) from the inline
+PEM `certs` (or references `existingConfigMap`),
 injects a `merge-ca` init container that concatenates the TemplateCenter
 image's system CA bundle with those certs into an `emptyDir`, and points the
 main container at it via `SSL_CERT_FILE` (honored by Go's `crypto/x509`).
