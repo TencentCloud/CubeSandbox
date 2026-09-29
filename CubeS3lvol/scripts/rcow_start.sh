@@ -116,6 +116,17 @@ at the log"
 	exit 1
 }
 
+# A failed attach can leave a flusher still held: the hold is taken before the
+# blobstore load, and the failure is exactly the case in which the milestone that
+# would normally release it never arrives. rcow_resume_flushers is idempotent and
+# releases only uploads, so a plain attach has nothing else to undo. Best effort
+# on purpose -- the caller is already on its way out, and the attach-side fallback
+# would fire on its own anyway.
+rcow_release_attach_hold()
+{
+	rcow_rpc rcow_resume_flushers '{}' >/dev/null 2>&1 || :
+}
+
 # ==========================================================================
 rcow_step "preflight"
 
@@ -341,6 +352,7 @@ still in S3: ${OWNER_REASON}. Retrying with force=true"
 				"${ATTACH_PARAMS},\"force\":true}" 2>&1)" || {
 				rcow_err "rcow_attach_lvstore failed even with force: \
 ${ATTACH_OUT}"
+				rcow_release_attach_hold
 				bail "the lvstore could not be attached"
 			}
 		else
@@ -348,6 +360,7 @@ ${ATTACH_OUT}"
 			[ -n "${OWNER_REASON:-}" ] &&
 				rcow_err "the owner marker was not confirmed stale: \
 ${OWNER_REASON}"
+			rcow_release_attach_hold
 			bail "the lvstore could not be attached. Do not reach for create: \
 it formats the journal and the WAL, and after a crash they hold the only copy \
 of writes the host has already been told are durable. If the marker is held by \

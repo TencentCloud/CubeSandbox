@@ -906,6 +906,47 @@ overlay", probe.done, NULL);
 			   probe.done && probe.status == 0, NULL);
 	}
 
+	/* --- a drain supersedes a pending suspend --- */
+	printf("\n[12] a drain cancels a suspend that has not completed\n");
+	{
+		/* The teardown hazard: a stop or unload that lands in the window
+		 * between s3_flusher_suspend() and its callback. That window is only
+		 * present while uploads are in flight -- otherwise the callback fires
+		 * synchronously -- and in_flight != 0 is exactly the state
+		 * s3_flusher_destroy() cannot proceed in (it asserts in_flight == 0
+		 * and, with asserts off, leaks the flusher and frees the bs_dev under
+		 * live uploads). Refusing the drain with -EBUSY here would leave the
+		 * caller's destroy to tear that state down. */
+		struct drain_probe susp = { .status = -1, .done = false };
+		struct drain_probe drain = { .status = -1, .done = false };
+		uint32_t started;
+
+		fill_pattern(blk, 1, 6 * BLOCKS_PER_CHUNK, 0xC3);
+		s3_overlay_write(ov, 6 * BLOCKS_PER_CHUNK, 1, blk, 902);
+		s3_flusher_kick(fl);
+		check_u64("one upload is now in flight", fake.n_pending, 1);
+
+		s3_flusher_suspend(fl, drain_cb, &susp);
+		check_true("the suspend is pending, not complete", !susp.done, NULL);
+
+		started = fake.started;
+		s3_flusher_drain(fl, 0, drain_cb, &drain);
+		check_true("the drain is taken, not refused with -EBUSY",
+			   !drain.done && drain.status != -EBUSY,
+			   "(a pending suspend must not block a drain)");
+		check_true("the cancelled suspend is told so",
+			   susp.done && susp.status == -ECANCELED, NULL);
+		check_true("the cancelled suspend starts no upload",
+			   fake.started == started, NULL);
+
+		while (fake.n_pending > 0) {
+			fake_complete_all(&fake, 0);
+		}
+		check_true("the drain completed once the upload landed", drain.done,
+			   NULL);
+		check_true("and reported success", drain.status == 0, NULL);
+	}
+
 	s3_flusher_destroy(fl);
 	s3_overlay_destroy(ov);
 

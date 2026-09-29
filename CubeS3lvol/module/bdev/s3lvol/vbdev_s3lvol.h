@@ -182,6 +182,18 @@ void s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg);
 void s3lvol_resume_flushers(void);
 
 /**
+ * Undo a hot prepare that will not be followed by the kill: resume every RCOW
+ * subsystem and release the flushers. Clears the sticky "prepare succeeded"
+ * flag so a later prepare can run again.
+ *
+ * This is the only way back for the two windows between a successful prepare
+ * and the SIGKILL (an unreadable target binary, or a kill that does not land),
+ * where the target would otherwise keep running with a frozen data plane.
+ * A no-op while a prepare is still in flight.
+ */
+void s3lvol_resume_subsystems(void);
+
+/**
  * Snapshot the write-path counters (WAL, overlay, flusher).
  */
 void s3lvol_lvstore_get_stats(struct s3lvol_lvstore *lvs,

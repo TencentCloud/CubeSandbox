@@ -114,6 +114,36 @@ still this process's"
 	exit 1
 }
 
+# A failure after the prepare succeeded must not reuse fail_live's reassurance:
+# the target was not signalled, but the data plane *is* quiesced, and if the
+# prepare RPC timed out client-side the server may well have completed it
+# (g_hot_prepare_done is deliberately sticky). Try the resume-all escape hatch,
+# then say what state the target is really in.
+fail_live_prepared()
+{
+	rcow_err "$*"
+	rcow_resume_subsystems
+	rcow_err "the target (pid ${TGT_PID}) is still running and was not \
+signalled; no residue was removed. The WAL is intact, but the prepare above may \
+have quiesced the data plane. Tried to resume every RCOW subsystem: if the log \
+does not confirm that, the target must be restarted."
+	exit 1
+}
+
+# Release a hot prepare that will not be followed by the kill. Idempotent, and
+# best effort: the caller is already on its way out, and a failed resume is
+# reported by the log line that follows it, not by a second failure.
+rcow_resume_subsystems()
+{
+	local out
+
+	if out="$(rcow_rpc rcow_resume_subsystems '{}' 2>&1)"; then
+		rcow_log "resumed RCOW subsystems (undoing the prepare)"
+	else
+		rcow_warn "could not resume RCOW subsystems: ${out}"
+	fi
+}
+
 # rcow_flush_lvstore and rcow_checkpoint_lvstore answer -EBUSY while another of
 # their kind is running -- they do not queue. That is "come back later", not a
 # failure, so back off and retry within the stop budget. Anything else is fatal,
@@ -315,6 +345,32 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 fi
 
 # ==========================================================================
+# The identity is captured before the prepare, while the process is known to be
+# the target, and the poll below compares against this copy rather than asking
+# rcow_pid_is_target, which resolves the path RCOW_TGT_BIN names. An upgrade is
+# exactly when that path stops resolving -- the old binary lives in a versioned
+# directory that gets renamed -- and a surviving target read as gone is the one
+# mistake this script must not make: the caller would start a replacement over a
+# WAL the old process still holds.
+#
+# It is resolved *here*, above the prepare rather than below it, because reading
+# it needs no quiesce and is the only step between the prepare and the kill that
+# can fail on its own. Doing it first leaves the prepare as the last thing that
+# can fail before the kill, so no window is left with the target quiesced and
+# this script unwilling to go on.
+TGT_EXE="$(rcow_pid_exe "${TGT_PID}")" || :
+if [ -z "${TGT_EXE}" ]; then
+	# An empty capture is the one answer the poll below cannot tell apart from a
+	# failed read, and reading a live target as gone is the mistake just named.
+	# Refuse rather than clean up after a process that may still hold the WAL --
+	# the same posture as the unreachable-target branch above. The target is
+	# untouched and unquiesced, so this is still fail_live's case, not the
+	# prepared one.
+	fail_live "cannot read the identity of pid ${TGT_PID}; nothing was signalled \
+and no residue was removed"
+fi
+
+# ==========================================================================
 # This is the last RPC the old process may answer. It globally quiesces every
 # RCOW namespace, so all data-plane I/O that reached the target has completed,
 # and holds the flushers. Blobstore is left dirty: the replacement attach
@@ -322,10 +378,11 @@ fi
 # load cannot open, and then a volume is missing. It intentionally does not
 # resume the subsystems. The host keeps the same namespaces while commands
 # queue, and the SIGKILL below turns that pause into the normal reconnect
-# window.
+# window. Nothing after this point may fail without first undoing the quiesce --
+# see fail_live_prepared.
 rcow_step "prepare: quiesce namespaces; blobstore stays dirty"
 hot_online_op "hot prepare" rcow_prepare_hot_upgrade '{}' ||
-	fail_live "could not prepare the target for hot upgrade"
+	fail_live_prepared "could not prepare the target for hot upgrade"
 
 # ==========================================================================
 rcow_step "killing the target"
@@ -334,27 +391,6 @@ rcow_step "killing the target"
 # can only read as a link failure, and a link failure is what makes it keep the
 # namespace and block I/O until the peer returns. A graceful stop's ordering is
 # SPDK's to decide and may announce the removal.
-#
-# The identity is captured here, while the process is known to be the target, and
-# the poll compares against this copy rather than asking rcow_pid_is_target, which
-# resolves the path RCOW_TGT_BIN names. An upgrade is exactly when that path stops
-# resolving -- the old binary lives in a versioned directory that gets renamed --
-# and a surviving target read as gone is the one mistake this script must not
-# make: the caller would start a replacement over a WAL the old process still
-# holds.
-TGT_EXE="$(rcow_pid_exe "${TGT_PID}")" || :
-if [ -z "${TGT_EXE}" ]; then
-	# An empty capture is the one answer the poll below cannot tell apart from a
-	# failed read, and reading a live target as gone is the mistake just named.
-	# Refuse rather than clean up after a process that may still hold the WAL --
-	# the same posture as the unreachable-target branch above. Not fail_live,
-	# whose second line asserts the target is running: that is the very thing
-	# this branch cannot confirm.
-	rcow_err "cannot read the identity of pid ${TGT_PID}; nothing was signalled \
-and no residue was removed"
-	exit 1
-fi
-
 if ! kill -KILL "${TGT_PID}" 2>/dev/null; then
 	rcow_warn "pid ${TGT_PID} could not be signalled; it may already have \
 exited, which is confirmed below"
@@ -374,8 +410,16 @@ while [ "${SECONDS}" -lt "${DEADLINE}" ]; do
 done
 
 if [ "${GONE}" -ne 1 ]; then
-	rcow_die "pid ${TGT_PID} survived SIGKILL for ${RCOW_STOP_TIMEOUT}s; \
+	# A target that survived SIGKILL is still holding its namespaces, and the
+	# prepare left them paused: a host attached to them queues I/O for as long
+	# as the process lives. Undo the quiesce before giving up, so the node is not
+	# left frozen for an operator to restart by hand.
+	rcow_warn "pid ${TGT_PID} survived SIGKILL for ${RCOW_STOP_TIMEOUT}s; \
 something outside this script is holding it, and the target is still alive"
+	rcow_resume_subsystems
+	rcow_die "pid ${TGT_PID} survived SIGKILL; the target is still alive. The \
+RCOW subsystems were resumed, so data-plane I/O can proceed, but this node was \
+not upgraded and the target must be restarted to finish or abandon the upgrade"
 fi
 rcow_log "target pid ${TGT_PID} is gone"
 

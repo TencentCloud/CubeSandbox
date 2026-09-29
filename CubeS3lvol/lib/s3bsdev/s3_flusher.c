@@ -380,7 +380,7 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		}
 		return;
 	}
-	if (f->drain_cb || f->suspend_cb || f->stopping) {
+	if (f->drain_cb || f->stopping) {
 		/* One drain at a time. A second caller is told -EBUSY rather than
 		 * queued: the drain already running is the one it wanted, so waiting
 		 * for it and asking again gets the same answer as a waiter list
@@ -394,6 +394,28 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	/* A drain supersedes an established scheduling hold: it explicitly asks
 	 * for dirty data to be uploaded and has its own completion boundary. */
 	f->suspended = false;
+
+	/* And a *pending* suspend, symmetrically. A suspend whose callback has not
+	 * fired means uploads are in flight -- flusher_check_suspend() clears
+	 * suspend_cb the moment in_flight reaches zero -- which is the one state
+	 * s3_flusher_destroy() cannot proceed in: it asserts in_flight == 0 and,
+	 * with asserts off, leaks the flusher and frees the bs_dev under live
+	 * uploads. Refusing here instead (the old -EBUSY) left the drain to be
+	 * retried while the caller's destroy gave up, so a stop/unload landing in
+	 * the one-round-trip window between s3_flusher_suspend() and its callback
+	 * could tear the bs_dev down underneath it. Cancelling the suspend lets the
+	 * drain provide the in_flight == 0 boundary the caller actually needs. The
+	 * hold never took effect, so the caller is told rather than left to assume
+	 * it did. */
+	if (f->suspend_cb) {
+		s3_flusher_cb suspend_cb = f->suspend_cb;
+		void *suspend_arg = f->suspend_arg;
+
+		f->suspend_cb = NULL;
+		f->suspend_arg = NULL;
+		f->resume_pending = false;
+		suspend_cb(suspend_arg, -ECANCELED);
+	}
 
 	if (timeout_us == 0) {
 		timeout_us = S3_FLUSHER_DRAIN_TIMEOUT_US;

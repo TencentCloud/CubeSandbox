@@ -1659,6 +1659,31 @@ SPDK_RPC_REGISTER("rcow_resume_flushers",
 		  rpc_rcow_resume_flushers, SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
+ * rcow_resume_subsystems
+ *
+ * Release a hot prepare that will not be followed by the kill. rcow_upgrade.sh
+ * calls this on the failure paths that sit between a successful prepare and the
+ * SIGKILL, where the target is quiesced but nothing else would ever resume it.
+ * Unlike rcow_resume_flushers this also lifts the namespace pause.
+ * ========================================================================== */
+static void
+rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	if (params != NULL && spdk_json_decode_object(params, NULL, 0, NULL)) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "This method takes no parameters");
+		return;
+	}
+
+	s3lvol_resume_subsystems();
+	spdk_jsonrpc_send_bool_response(request, true);
+}
+SPDK_RPC_REGISTER("rcow_resume_subsystems",
+		  rpc_rcow_resume_subsystems, SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
  * rcow_add_s3_config
  *
  * Register a namespace that maps to an S3 bucket. Meant to be called by a

@@ -1430,13 +1430,14 @@ lvs_attach_lvols_done(struct lvs_setup_ctx *ctx)
 {
 	struct s3lvol_lvstore *lvs = ctx->lvs;
 
-	/* Blobstore and lvol metadata have been read from the overlay. Keep the
-	 * replay backlog held while rcow_start restores active namespaces and
-	 * listeners; 32 S3 uploads on the owner reactor can otherwise delay that
-	 * I/O recovery path by seconds. rcow_start resumes on that real milestone.
-	 * This long fallback only protects direct RPC users and startup-script
-	 * version skew; it must not normally race restore. */
-	s3_bs_dev_schedule_flusher_resume(lvs->bs_dev, 30 * 1000 * 1000);
+	/* Blobstore and lvol metadata have been read from the overlay, so the hold
+	 * taken for that load in lvs_attach_start_blobstore() has served its
+	 * purpose. It is left in place a little longer, through rcow_start's
+	 * restore of active namespaces and listeners: 32 S3 uploads on the owner
+	 * reactor can otherwise delay that I/O recovery path by seconds, and
+	 * rcow_start resumes on that real milestone. The fallback armed when the
+	 * hold was taken still covers direct RPC users and startup-script version
+	 * skew, so nothing is re-armed here. */
 
 	SPDK_NOTICELOG("lvstore '%s': %u lvol(s) exported as bdevs%s\n",
 		       lvs->name, ctx->lvols_ok,
@@ -1718,10 +1719,46 @@ lvs_attach_exports_loaded(void *cb_arg, int status)
 	spdk_lvs_load_ext(lvs->bs_dev, &lvs_opts, s3lvol_lvs_load_cb, ctx);
 }
 
+static void lvs_attach_blobstore_flusher_held(void *cb_arg, int status);
+
 static void
 lvs_attach_start_blobstore(struct lvs_setup_ctx *ctx)
 {
+	/* Hold uploads only from here on, i.e. for the blobstore load and through
+	 * to the lvol export. This is the phase the hold exists for: blobstore
+	 * reads metadata out of the overlay, and a flusher that PUT+deletes a
+	 * metadata chunk underneath it corrupts the load.
+	 *
+	 * The WAL replay that just finished is deliberately *not* covered. Uploads
+	 * during replay are safe -- replay goes through s3_overlay_write(), which
+	 * only writes overlay blocks and never reads blobstore metadata -- and
+	 * holding them would make peak overlay occupancy the size of the unflushed
+	 * WAL. With the pre-kill flush now skipped by default the WAL arrives at
+	 * this point as full as it can be, so an unbounded replay would mean
+	 * mallocing tens of GiB in a single attach.
+	 *
+	 * Arm the fallback in the same breath as taking the hold, not after the
+	 * lvols are exported: if blobstore's own metadata write is parked on WAL
+	 * backpressure or a full overlay, the only thing that can free space is the
+	 * flusher held here, and a timer armed later would never break that cycle. */
+	s3_bs_dev_schedule_flusher_resume(ctx->lvs->bs_dev, 30 * 1000 * 1000);
+	s3_bs_dev_suspend_flusher(ctx->lvs->bs_dev,
+				  lvs_attach_blobstore_flusher_held, ctx);
+}
+
+static void
+lvs_attach_blobstore_flusher_held(void *cb_arg, int status)
+{
+	struct lvs_setup_ctx *ctx = cb_arg;
 	int rc;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to hold the flusher for '%s' before the "
+			    "blobstore load: %s\n",
+			    ctx->lvs->name, spdk_strerror(-status));
+		lvs_setup_fail(ctx, status);
+		return;
+	}
 
 	/* Fetch the manifests *first*. blobstore asks for the parent of each esnap
 	 * clone synchronously while loading, and that can only be answered out of
@@ -1756,8 +1793,6 @@ lvs_attach_wal_replayed(void *cb_arg, int status)
 	lvs_attach_start_blobstore(ctx);
 }
 
-static void lvs_attach_flusher_held(void *cb_arg, int status);
-
 static void
 lvs_attach_journal_replayed(void *cb_arg, int status)
 {
@@ -1783,24 +1818,10 @@ lvs_attach_journal_replayed(void *cb_arg, int status)
 		return;
 	}
 
-	/* Hold uploads until lvols are exported. Otherwise the flusher can
-	 * PUT+delete a metadata chunk while blobstore is still reading it. */
-	s3_bs_dev_suspend_flusher(lvs->bs_dev, lvs_attach_flusher_held, ctx);
-}
-
-static void
-lvs_attach_flusher_held(void *cb_arg, int status)
-{
-	struct lvs_setup_ctx *ctx = cb_arg;
-	struct s3lvol_lvstore *lvs = ctx->lvs;
-
-	if (status != 0) {
-		SPDK_ERRLOG("Failed to hold the flusher for '%s' during attach: %s\n",
-			    lvs->name, spdk_strerror(-status));
-		lvs_setup_fail(ctx, status);
-		return;
-	}
-
+	/* Replay with the flusher running: replayed entries land in the overlay,
+	 * and the flusher draining them as they arrive is what keeps the peak
+	 * occupancy bounded. The hold is taken afterwards, for the blobstore load
+	 * -- see lvs_attach_start_blobstore(). */
 	s3_wal_replay(lvs->wal, (s3_wal_replay_cb)s3_bs_dev_wal_apply, lvs->bs_dev,
 		      lvs_attach_wal_replayed, ctx);
 }
@@ -2527,6 +2548,53 @@ s3lvol_resume_flushers(void)
 
 	TAILQ_FOREACH(lvs, &g_lvstores, link) {
 		s3_bs_dev_resume_flusher(lvs->bs_dev);
+	}
+}
+
+static void
+lvs_resume_subsystems_done(void *cb_arg, int status)
+{
+	if (status != 0) {
+		SPDK_ERRLOG("could not resume every RCOW subsystem: %s\n",
+			    spdk_strerror(-status));
+	}
+}
+
+void
+s3lvol_resume_subsystems(void)
+{
+	struct s3lvol_lvstore *lvs;
+	int rc;
+
+	/* The escape hatch for a hot prepare that succeeded but was never
+	 * followed by the SIGKILL: every RCOW subsystem is paused and every
+	 * flusher is held, and nothing else in the process would ever undo it.
+	 * rcow_resume_flushers is not enough -- it releases uploads but leaves the
+	 * namespaces paused.
+	 *
+	 * Clear the sticky flag so a *later* prepare can run again; under the
+	 * normal no-way-back assumption the retry would otherwise just re-report
+	 * success over a target that is no longer quiesced. Guarded on
+	 * g_hot_prepare_active so a resume cannot open a second prepare's window --
+	 * a prepare in flight is left alone rather than interleaved, and the caller
+	 * is told so it can retry once it settles. */
+	if (g_hot_prepare_active) {
+		SPDK_WARNLOG("a hot prepare is still in flight; not resuming RCOW "
+			     "subsystems under it\n");
+		return;
+	}
+	g_hot_prepare_done = false;
+
+	TAILQ_FOREACH(lvs, &g_lvstores, link) {
+		s3_bs_dev_resume_flusher(lvs->bs_dev);
+	}
+
+	/* Safe on a subsystem that was never paused: spdk_nvmf_subsystem_resume()
+	 * only undoes a pause, and reports success otherwise. */
+	rc = s3lvol_nvmf_resume_all(lvs_resume_subsystems_done, NULL);
+	if (rc != 0) {
+		SPDK_ERRLOG("could not resume RCOW subsystems: %s\n",
+			    spdk_strerror(-rc));
 	}
 }
 

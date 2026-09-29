@@ -118,6 +118,11 @@ void s3_flusher_kick(struct s3_flusher *f);
  *                   completions would otherwise touch freed memory.
  *
  * One drain at a time; a second concurrent call gets -EBUSY.
+ *
+ * A drain supersedes a scheduling hold, whether established or still pending: a
+ * pending suspend is cancelled and its callback reports -ECANCELED, and the
+ * drain then provides the in_flight == 0 boundary that a caller destroying the
+ * flusher needs.
  */
 void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		      s3_flusher_cb cb_fn, void *cb_arg);
@@ -126,6 +131,10 @@ void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
  * Stop starting uploads and complete after current uploads and WAL super
  * updates finish. Dirty overlay data remains protected by the WAL. The pause is
  * reversible with s3_flusher_resume().
+ *
+ * If a completion is already in flight the callback may fire after
+ * s3_flusher_suspend() returns; a drain started in that window cancels the
+ * suspend instead of failing, and the callback then reports -ECANCELED.
  */
 void s3_flusher_suspend(struct s3_flusher *f, s3_flusher_cb cb_fn, void *cb_arg);
 

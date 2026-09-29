@@ -1728,9 +1728,12 @@ s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq)
 	 * that window would lose acknowledged writes, because recovery would
 	 * restart from the advanced ckpt_head.
 	 *
-	 * The situation is reachable: the flusher is already running while the WAL
-	 * replay is in flight, since s3_bs_dev_attach_wal() has to precede it so
-	 * that the overlay exists. Skipping a round costs nothing -- the flusher
+	 * This is a normal-path race, not a corner: s3_bs_dev_attach_wal() has to
+	 * precede the replay so the overlay exists, so the flusher is live for the
+	 * whole of it and calls here on every tick. The lvstore only takes its
+	 * scheduling hold after the replay, for the blobstore load, so the flusher
+	 * draining the backlog while the replay fills it is exactly what keeps peak
+	 * overlay occupancy bounded. Skipping a round costs nothing -- the flusher
 	 * calls this again on its next tick.
 	 */
 	if (wal->busy) {
