@@ -133,18 +133,26 @@ func (id ProcessIdentity) Status() Liveness {
 // WaitIdentityGone blocks until the recorded incarnation has exited or ctx is
 // done. An unknown state is an error, never a success: the caller asked us to
 // confirm the process is gone, and we cannot.
+//
+// Unknown is retried rather than reported on the first read, because a failed
+// /proc read says nothing about whether the process is still there. Reporting
+// it straight away spends the caller's cleanup budget on one transient error
+// and quarantines a sandbox that is not stuck; the deadline is what turns it
+// into the fail-closed answer, and that answer still never claims the process
+// exited.
 func WaitIdentityGone(ctx context.Context, id ProcessIdentity) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		switch id.Status() {
-		case LivenessGone:
+		if id.Status() == LivenessGone {
 			return nil
-		case LivenessUnknown:
-			return fmt.Errorf("process %d liveness unknown: refusing to assume it exited", id.Pid)
 		}
 		select {
 		case <-ctx.Done():
+			if id.Status() == LivenessUnknown {
+				return fmt.Errorf("process %d liveness unknown: refusing to assume it exited: %w",
+					id.Pid, ctx.Err())
+			}
 			return fmt.Errorf("process %d still running: %w", id.Pid, ctx.Err())
 		case <-ticker.C:
 		}

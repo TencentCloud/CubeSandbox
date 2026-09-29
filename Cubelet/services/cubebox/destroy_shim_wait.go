@@ -66,7 +66,9 @@ func (u unresolvedEvidence) ageable() bool { return !u.intentAt.IsZero() }
 //
 // It is deliberately strict:
 //
-//   - a live identity means we can see a holder, and waiting is not optional;
+//   - a live identity means we can see a holder, and waiting is not optional.
+//     The waiter clears the identities it waited out before it asks, so an
+//     identity still present here is one that was never waited on;
 //   - a blocker that is not an intent (an unreadable pid, a pid we cannot tie
 //     to this sandbox) never resolves with time;
 //   - an intent with no recorded start time never ages out;
@@ -306,14 +308,18 @@ func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxst
 	// nothing left on this host can tell the two apart — so we must not treat
 	// the resulting empty evidence as proof that it is safe to reclaim.
 	//
-	// This is the blocker the intent TTL exists for. It is only reached when no
-	// bundle pid file and no recorded pid resolved to a live process either, so
-	// aging it out never releases a process we can still see.
+	// This is the blocker the intent TTL exists for, and it is recorded
+	// whenever the intent shape is present — including when some other source
+	// did name a live process for this sandbox. The two are decided separately:
+	// the live process is waited out first (see waitSandboxRuntimeGone), and
+	// only an intent that is left with nothing alive to hold the sandbox can
+	// age out. That separation is what keeps aging from ever releasing a
+	// process we can still see.
 	if sb.Endpoint.ShimSpawned && sb.Endpoint.Pid <= 1 {
 		ev.markStaleIntent(sb.Endpoint.ShimSpawnedAt, "a shim was spawned but no pid was recorded")
 	}
 
-	ev.intentTTL = l.shimIntentTTL
+	ev.intentTTL = l.ShimIntentTTL()
 	ev.resolveStaleIntents(ctx, sandboxIdentity(sb), ev.intentTTL)
 
 	sort.Slice(ev.identities, func(i, j int) bool { return ev.identities[i].Pid < ev.identities[j].Pid })
@@ -447,9 +453,35 @@ func readPidFile(path string) int {
 // deletes S3 volumes; doing that while the shim is alive hands a live IP to
 // the next sandbox and produces host I/O after delete_lvol.
 //
+// Waiting comes first, before any verdict is reported. The evidence is a
+// snapshot, and the identities in it are the part time alone can settle, so a
+// snapshot that reads "a process may still hold this, and the spawn intent is
+// still inside its TTL" has to be judged again once that process is gone: the
+// intent is then the only thing left refusing, which is precisely the
+// deferrable case the caller's retry budget must not be spent on. An identity
+// that does not exit in time is reported as the failure it is.
+//
 // Unresolved evidence fails the wait. An empty identity list only means
 // "nothing to wait for" when we are sure there was nothing to find.
 func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRuntimeEvidence) error {
+	if len(ev.identities) > 0 {
+		start := time.Now()
+		for _, id := range ev.identities {
+			if err := utils.WaitIdentityGone(ctx, id); err != nil {
+				log.G(ctx).Errorf("sandbox %s: runtime pid %d still alive after %s; refuse resource cleanup: %v",
+					sandboxID, id.Pid, time.Since(start), err)
+				return err
+			}
+		}
+		if waited := time.Since(start); waited > 20*time.Millisecond {
+			log.G(ctx).Warnf("sandbox %s: waited %s for runtime pids %v to exit before resource cleanup",
+				sandboxID, waited.Round(time.Millisecond), ev.pids())
+		}
+		// Everything waited on above is provably gone, so none of it can be a
+		// reason to refuse any more. What is left is the bookkeeping verdict,
+		// and it is judged on its own.
+		ev.identities = nil
+	}
 	if msgs := ev.unresolvedMessages(); len(msgs) > 0 {
 		// A refusal whose only cause is a spawn-intent record still inside its
 		// TTL is not a stuck sandbox: it is a sandbox that is simply too young
@@ -466,21 +498,6 @@ func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRun
 			sandboxID, strings.Join(msgs, "; "))
 		return fmt.Errorf("sandbox %s runtime state unresolved: %s",
 			sandboxID, strings.Join(msgs, "; "))
-	}
-	if len(ev.identities) == 0 {
-		return nil
-	}
-	start := time.Now()
-	for _, id := range ev.identities {
-		if err := utils.WaitIdentityGone(ctx, id); err != nil {
-			log.G(ctx).Errorf("sandbox %s: runtime pid %d still alive after %s; refuse resource cleanup: %v",
-				sandboxID, id.Pid, time.Since(start), err)
-			return err
-		}
-	}
-	if waited := time.Since(start); waited > 20*time.Millisecond {
-		log.G(ctx).Warnf("sandbox %s: waited %s for runtime pids %v to exit before resource cleanup",
-			sandboxID, waited.Round(time.Millisecond), ev.pids())
 	}
 	return nil
 }

@@ -1336,7 +1336,11 @@ func (l *local) runContainer(
 	ociRuntime cubeconfig.Runtime) (err error) {
 
 	start := time.Now()
-	c, err := l.client.NewContainer(ctx, ci.ID, cOpts...)
+	newContainer := l.newContainerFn
+	if newContainer == nil {
+		newContainer = l.client.NewContainer
+	}
+	c, err := newContainer(ctx, ci.ID, cOpts...)
 	if err != nil {
 		workflow.RecordCreateMetric(ctx, ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, err.Error()),
 			constants.CubeNewContainerId, time.Since(start))

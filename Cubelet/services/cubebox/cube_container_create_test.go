@@ -6,13 +6,16 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	jsoniter "github.com/json-iterator/go"
@@ -1304,4 +1307,78 @@ func TestWithdrawShimIntentKeepsRecordWhileAHolderIsAlive(t *testing.T) {
 	assert.True(t, sb.Endpoint.ShimSpawned, "declaring the sandbox unspawned would leak the tap and IP it holds")
 	assert.False(t, sb.Endpoint.ShimSpawnedAt.IsZero(), "its age must keep accruing towards the TTL")
 	assert.Zero(t, mgr.saveCalls, "nothing to persist while the intent stands")
+}
+
+// fakeContainerdContainer stands in for the container the create flow builds
+// its task on. Embedding the interface keeps the fake down to the one method
+// the flow reaches before it fails.
+type fakeContainerdContainer struct {
+	containerd.Container
+	err       error
+	onNewTask func()
+}
+
+func (f fakeContainerdContainer) NewTask(context.Context, cio.Creator, ...containerd.NewTaskOpts) (containerd.Task, error) {
+	if f.onNewTask != nil {
+		f.onNewTask()
+	}
+	return nil, f.err
+}
+
+// The intent has to be durable before a shim can exist, because a crash in
+// between leaves a process nothing on the host can match back to the sandbox.
+// This drives the real create step rather than the bookkeeping helpers, so the
+// ordering itself is covered, not just the code that writes the record.
+func TestRunContainerPersistsShimIntentBeforeTheSpawn(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-intent-order", cubeboxstore.Status{StartedAt: 1})
+	// A previous incarnation left a full endpoint behind. It has to be dropped
+	// at the same time the intent is written: keeping it would let the destroy
+	// path check a dead pid, find it gone, and clear the sandbox while the shim
+	// started below is alive.
+	staleAt := time.Now().Add(-time.Hour)
+	sb.Endpoint = sandboxstore.Endpoint{
+		Address:       "old-endpoint",
+		Version:       1,
+		Pid:           4242,
+		PidStartTime:  99,
+		ShimSpawned:   true,
+		ShimSpawnedAt: staleAt,
+	}
+	ci := sb.FirstContainer()
+	ci.IsPod = true
+
+	mgr := &fakeCubeboxAPI{cb: sb}
+	spawnErr := errors.New("spawn refused by the test")
+	var savesAtSpawn int
+	var endpointAtSpawn sandboxstore.Endpoint
+	l := &local{
+		cubeboxManger: mgr,
+		newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+			return fakeContainerdContainer{
+				err: spawnErr,
+				onNewTask: func() {
+					savesAtSpawn = mgr.saveCalls
+					endpointAtSpawn = sb.Endpoint
+				},
+			}, nil
+		},
+	}
+
+	err := l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), spawnErr.Error(),
+		"the spawn failure is what the create has to report")
+
+	assert.Equal(t, 1, savesAtSpawn, "the intent must reach the store before the spawn, not after it")
+	assert.True(t, endpointAtSpawn.ShimSpawned)
+	assert.Zero(t, endpointAtSpawn.Pid, "the previous incarnation's pid must not survive into the new attempt")
+	assert.Zero(t, endpointAtSpawn.PidStartTime)
+	assert.True(t, endpointAtSpawn.ShimSpawnedAt.After(staleAt),
+		"the intent must be stamped now: its age is the only thing that bounds the refusal")
+
+	// The spawn failed with no shim to show for it, so the intent is the only
+	// trace left and has to be reconciled away.
+	assert.False(t, sb.Endpoint.ShimSpawned, "a handled failure must not leave a record that blocks cleanup")
+	assert.True(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Equal(t, 2, mgr.saveCalls)
 }

@@ -98,9 +98,21 @@ func TestWaitIdentityGone(t *testing.T) {
 func TestWaitIdentityGoneRefusesUnknown(t *testing.T) {
 	// A pid with no recorded start time is unknown, not gone. WaitProcessGone
 	// would happily return nil here once the number looked free; this must not.
-	err := WaitIdentityGone(context.Background(), ProcessIdentity{Pid: os.Getpid()})
+	//
+	// It is unknown on every read rather than only the first one, so the
+	// refusal has to come from the caller's deadline: one failed /proc read is
+	// not a verdict, and reporting it as one spends a cleanup budget on an
+	// error that usually clears by itself.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := WaitIdentityGone(ctx, ProcessIdentity{Pid: os.Getpid()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond,
+		"a single failed read must not be reported before the context is done")
 }
 
 func TestWaitIdentityGoneHonorsCancel(t *testing.T) {

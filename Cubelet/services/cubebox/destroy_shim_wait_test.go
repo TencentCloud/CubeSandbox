@@ -22,6 +22,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
+// localWithIntentTTL builds the destroy-path receiver with a shim-intent TTL
+// set the way the cubebox-service plugin sets it in production.
+func localWithIntentTTL(ttl time.Duration) *local {
+	l := &local{}
+	l.SetShimIntentTTL(ttl)
+	return l
+}
+
 // pendingIntentOnlyError reports whether err carries the marker the GC retry
 // budget keys on. It mirrors exactly what the budget owner does, so a refactor
 // that drops the marker fails here rather than silently re-spending the budget.
@@ -192,7 +200,7 @@ func TestCollectEvidenceTrustsLiveBundlePidFile(t *testing.T) {
 		ShimSpawnedAt: time.Now(),
 	}
 
-	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.unresolved)
 	assert.Equal(t, []int{live.Pid}, ev.pids())
 }
@@ -226,7 +234,7 @@ func TestCollectEvidenceRefusesUnprovableRecordedPid(t *testing.T) {
 		ShimSpawnedAt: time.Now(),
 	}
 
-	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.identities, "an unprovable pid must not be waited on")
 	require.Len(t, ev.unresolved, 1, "it must be reported instead, exactly once")
 	assert.Contains(t, ev.unresolved[0].message, holderSourceEndpoint)
@@ -244,7 +252,7 @@ func TestCollectEvidenceDedupsContainerStatusAgainstEndpoint(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-dedup", cubeboxstore.Status{Pid: uint32(live.Pid), StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{Pid: uint32(live.Pid), PidStartTime: live.StartTime, ShimSpawned: true}
 
-	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.unresolved)
 	assert.Equal(t, []int{live.Pid}, ev.pids())
 }
@@ -257,7 +265,7 @@ func TestCollectEvidenceKeepsPreUpgradeBarePidBehaviour(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-legacy-bare", cubeboxstore.Status{Pid: uint32(live.Pid), StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{Pid: uint32(live.Pid)}
 
-	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.unresolved)
 	assert.Equal(t, []int{live.Pid}, ev.pids())
 }
@@ -269,7 +277,7 @@ func TestStaleShimIntentIsReleasedAfterTTL(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-stale-intent", cubeboxstore.Status{StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now().Add(-time.Hour)}
 
-	ev := (&local{shimIntentTTL: 10 * time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(10*time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.unresolved, "an intent older than the TTL that names no process must not block cleanup")
 	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-stale-intent", ev))
 }
@@ -280,7 +288,7 @@ func TestFreshShimIntentStillFailsClosed(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-fresh-intent", cubeboxstore.Status{StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now().Add(-time.Minute)}
 
-	ev := (&local{shimIntentTTL: 10 * time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(10*time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	require.NotEmpty(t, ev.unresolved)
 	err := waitSandboxRuntimeGone(context.Background(), "sb-fresh-intent", ev)
 	require.Error(t, err, "the refusal itself must not change: cleanup still fails closed")
@@ -294,7 +302,7 @@ func TestShimIntentWithoutTimestampNeverAgesOut(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-undated-intent", cubeboxstore.Status{StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
 
-	ev := (&local{shimIntentTTL: time.Nanosecond}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Nanosecond).collectSandboxRuntimeEvidence(context.Background(), sb)
 	require.NotEmpty(t, ev.unresolved)
 	err := waitSandboxRuntimeGone(context.Background(), "sb-undated-intent", ev)
 	require.Error(t, err)
@@ -326,7 +334,7 @@ func TestStaleIntentIsNotReleasedWhileALiveHolderExists(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-intent-live", cubeboxstore.Status{StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now().Add(-time.Hour)}
 
-	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	require.Equal(t, []int{live.Pid}, ev.pids(), "the live holder must still be waited on")
 	require.NotEmpty(t, ev.unresolved, "and the intent still blocks cleanup until it is gone")
 
@@ -345,7 +353,7 @@ func TestStaleIntentIsNotReleasedWhileAnotherBlockerRemains(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-intent-blocked", cubeboxstore.Status{Pid: uint32(live.Pid), StartedAt: 1})
 	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now().Add(-time.Hour)}
 
-	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.identities)
 	require.Len(t, ev.unresolved, 2, "the unprovable pid and the intent both block cleanup")
 	err := waitSandboxRuntimeGone(context.Background(), "sb-intent-blocked", ev)
@@ -388,4 +396,106 @@ func TestUnresolvedMessagesPreserveOrderAndText(t *testing.T) {
 	ev.markUnresolved("first %d", 1)
 	ev.markStaleIntent(time.Now(), "second %s", "intent")
 	assert.Equal(t, []string{"first 1", "second intent"}, ev.unresolvedMessages())
+}
+
+// shortLivedSleeper starts a process that exits on its own shortly, and returns
+// the identity of that incarnation. Tests use it for "the holder the wait was
+// about is gone by the time the deadline is up".
+func shortLivedSleeper(t *testing.T) utils.ProcessIdentity {
+	t.Helper()
+	cmd := exec.Command("sleep", "0.3")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	id, err := utils.ReadProcessIdentity(cmd.Process.Pid)
+	require.NoError(t, err)
+	return id
+}
+
+// crashWindowEvidence builds the state this PR targets: an intent that says a
+// shim may have been spawned with no pid recorded, next to a live process the
+// bundle pid file still names.
+func crashWindowEvidence(t *testing.T, sandboxID string, holder utils.ProcessIdentity) sandboxRuntimeEvidence {
+	t.Helper()
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, holder.Pid)
+	withShimBundles(t, bundle)
+
+	sb := newCubeboxWithStatusForTest(sandboxID, cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()}
+
+	ev := localWithIntentTTL(10*time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
+	require.Equal(t, []int{holder.Pid}, ev.pids(), "the bundle pid file is the only trace of the live shim")
+	require.NotEmpty(t, ev.unresolved, "and the pid that never reached the store still blocks cleanup")
+	return ev
+}
+
+// The ordering the deferral depends on: the identity in the snapshot is waited
+// out first, and only then is the refusal classified. Without that, a live
+// identity masks the intent, the round fails hard, and the crash window above
+// spends a cleanup attempt and can be quarantined for a state that clears by
+// itself.
+func TestWaitSandboxRuntimeGoneDefersOnceTheHolderIsGone(t *testing.T) {
+	holder := shortLivedSleeper(t)
+	ev := crashWindowEvidence(t, "sb-crash-window", holder)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := waitSandboxRuntimeGone(ctx, "sb-crash-window", ev)
+
+	require.Error(t, err, "the refusal itself must not change: nothing is released while the intent stands")
+	assert.True(t, pendingIntentOnlyError(t, err),
+		"once the only live process is gone, the fresh intent is all that is left and the round must be deferred")
+}
+
+// The fail-closed half of the same rule: a holder that does not exit is not
+// something time settles, so the round stays a real failure.
+func TestWaitSandboxRuntimeGoneStillFailsWhileTheHolderLives(t *testing.T) {
+	holder := startSleeper(t)
+	ev := crashWindowEvidence(t, "sb-crash-window-live", holder)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := waitSandboxRuntimeGone(ctx, "sb-crash-window-live", ev)
+
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"a holder we can see is not deferred: the sandbox really is still holding its resources")
+}
+
+// The resume gate reaches the same wait with the same evidence, so it has to
+// come out the same way: wait the old runtime out, and defer only the intent
+// that is left behind.
+func TestWaitReplacedSandboxGoneDefersOnceTheOldRuntimeIsGone(t *testing.T) {
+	holder := shortLivedSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, holder.Pid)
+	withShimBundles(t, bundle)
+
+	sb := pausedForReplace("sb-resume-wait", sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := localWithIntentTTL(10*time.Minute).waitReplacedSandboxGone(ctx, sb)
+	require.Error(t, err)
+	assert.True(t, pendingIntentOnlyError(t, err))
+}
+
+// A gate that let a live old runtime through would hand the replacement a tap
+// and IP the previous shim still holds.
+func TestWaitReplacedSandboxGoneRefusesWhileTheOldRuntimeLives(t *testing.T) {
+	holder := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, holder.Pid)
+	withShimBundles(t, bundle)
+
+	sb := pausedForReplace("sb-resume-live", sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := localWithIntentTTL(10*time.Minute).waitReplacedSandboxGone(ctx, sb)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err))
 }

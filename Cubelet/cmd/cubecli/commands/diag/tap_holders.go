@@ -70,6 +70,14 @@ The start time column identifies a process incarnation, and is what
 			holders = filtered
 		}
 		if len(holders) == 0 {
+			if iface := c.String("iface"); iface != "" {
+				// The filter above already emptied the list, so an empty
+				// result means this tap is free — not that the host holds no
+				// tun fd at all. That distinction is the whole question an
+				// operator runs this command to answer.
+				fmt.Fprintf(c.App.Writer, "no holder for tap %s\n", iface)
+				return nil
+			}
 			fmt.Fprintln(c.App.Writer, "no process is holding a tun fd")
 			return nil
 		}

@@ -51,10 +51,9 @@ func resumeReplaceRequest(desired string) *cubeboxpb.RunCubeSandboxRequest {
 }
 
 func gateOnlyService(sb *cubeboxstore.CubeBox, ttl time.Duration) *service {
-	return &service{cubeboxMgr: &local{
-		cubeboxManger: &fakeCubeboxAPI{cb: sb},
-		shimIntentTTL: ttl,
-	}}
+	mgr := &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}
+	mgr.SetShimIntentTTL(ttl)
+	return &service{cubeboxMgr: mgr}
 }
 
 // fakeCreateFlow stands in for the create workflow so a test can tell whether
@@ -86,18 +85,19 @@ func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl ti
 			Actions: []workflow.Flow{flow},
 		}},
 	})
-	return &service{
-		engine: engine,
-		cubeboxMgr: &local{
-			config: &CubeConfig{
-				DefaultRuntimeName: "io.containerd.cube.v2.task",
-				Runtimes: map[string]cubeconfig.Runtime{
-					"io.containerd.cube.v2.task": {Type: "io.containerd.cube.v2.task"},
-				},
+	mgr := &local{
+		config: &CubeConfig{
+			DefaultRuntimeName: "io.containerd.cube.v2.task",
+			Runtimes: map[string]cubeconfig.Runtime{
+				"io.containerd.cube.v2.task": {Type: "io.containerd.cube.v2.task"},
 			},
-			cubeboxManger: &fakeCubeboxAPI{cb: sb},
-			shimIntentTTL: ttl,
 		},
+		cubeboxManger: &fakeCubeboxAPI{cb: sb},
+	}
+	mgr.SetShimIntentTTL(ttl)
+	return &service{
+		engine:                engine,
+		cubeboxMgr:            mgr,
 		sandboxLifecycleLocks: utils.NewResourceLocks(),
 	}
 }
