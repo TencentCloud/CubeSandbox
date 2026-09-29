@@ -106,6 +106,8 @@ WITH_TESTS=(
 	"cubelog|Go|0|cd pkgs/CubeLog && go test -short ./..."
 	"cubedb|Go|0|cd pkgs/cubedb && go mod download && go test ./..."
 	"blobstore|Go|0|cd pkgs/blobstore && go mod download && go test ./..."
+	# sandboxrestart is stdlib-only, so no module download is needed.
+	"sandboxrestart|Go|0|cd pkgs/sandboxrestart && go test ./..."
 	"cubebench|Shell|0|make cubebench-test"
 	# Same entry point as CI (unit-test-check).
 	"cubelet|Go|0|make cubelet-test"

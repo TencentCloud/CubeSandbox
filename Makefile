@@ -173,6 +173,7 @@ help:
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
 	@printf "  blobstore-test Run pkgs/blobstore unit tests on the host\n"
+	@printf "  sandboxrestart-test Run pkgs/sandboxrestart unit tests on the host\n"
 	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -536,6 +537,11 @@ cubedb-test:
 blobstore-test:
 	cd pkgs/blobstore && go mod download && go test ./...
 
+# pkgs/sandboxrestart is stdlib-only, so no module download is needed.
+.PHONY: sandboxrestart-test
+sandboxrestart-test:
+	cd pkgs/sandboxrestart && go test ./...
+
 # pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
 # deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
 # compile its non-test code via replace, so the module's own _test.go files
@@ -668,6 +674,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C pkgs/proto fmt
 	@printf '  %-8s %s\n' "FMT" "blobstore"
 	@$(MAKE) -C pkgs/blobstore fmt
+	@printf '  %-8s %s\n' "FMT" "sandboxrestart"
+	@$(MAKE) -C pkgs/sandboxrestart fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeTemplateCenter"
