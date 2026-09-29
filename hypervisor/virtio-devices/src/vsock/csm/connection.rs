@@ -425,6 +425,10 @@ where
         match self.state {
             ConnState::Killed | ConnState::LocalClosed | ConnState::PeerClosed(true, _) => (),
             _ if self.need_credit_update_from_peer() => (),
+            // An `Rw` indication means host data is already waiting for a guest RX buffer.
+            // Re-arming level-triggered EPOLLIN before that packet can be delivered would make
+            // the muxer event fd remain readable and busy-spin the VMM event thread.
+            _ if self.pending_rx.contains(PendingRx::Rw) => (),
             _ => evset.insert(epoll::Events::EPOLLIN),
         }
         evset
@@ -573,6 +577,8 @@ where
     pub fn kill(&mut self) {
         self.state = ConnState::Killed;
         self.pending_rx.insert(PendingRx::Rst);
+        // The connection is terminating with an RST, so buffered host-bound data is forfeit.
+        self.tx_buf.clear();
     }
 
     /// Return the connections state.
@@ -1078,6 +1084,32 @@ mod tests {
     }
 
     #[test]
+    fn test_polled_evset_drops_in_while_rw_pending() {
+        let mut ctx = CsmTestContext::new_established();
+        assert!(ctx.conn.get_polled_evset().contains(epoll::Events::EPOLLIN));
+
+        ctx.set_stream(TestStream::new_with_read_buf(&[1, 2, 3, 4]));
+        ctx.notify_epollin();
+        assert!(!ctx.conn.get_polled_evset().contains(epoll::Events::EPOLLIN));
+
+        ctx.recv();
+        assert_eq!(ctx.pkt.op(), uapi::VSOCK_OP_RW);
+        assert!(!ctx.conn.has_pending_rx());
+        assert!(ctx.conn.get_polled_evset().contains(epoll::Events::EPOLLIN));
+    }
+
+    #[test]
+    fn test_polled_evset_drops_in_on_host_eof() {
+        let mut ctx = CsmTestContext::new_established();
+        let mut stream = TestStream::new();
+        stream.read_state = StreamState::Closed;
+        ctx.set_stream(stream);
+
+        ctx.notify_epollin();
+        assert!(!ctx.conn.get_polled_evset().contains(epoll::Events::EPOLLIN));
+    }
+
+    #[test]
     fn test_local_read_error() {
         let mut ctx = CsmTestContext::new_established();
         let mut stream = TestStream::new();
@@ -1224,6 +1256,56 @@ mod tests {
                 .contains(epoll::Events::EPOLLOUT));
             ctx.notify_epollout();
             assert_eq!(ctx.conn.state, ConnState::Killed);
+        }
+    }
+
+    #[test]
+    fn test_polled_evset_drops_out_when_killed() {
+        let mut ctx = CsmTestContext::new_established();
+        let mut stream = TestStream::new();
+        stream.write_state = StreamState::WouldBlock;
+        ctx.set_stream(stream);
+        ctx.init_data_pkt(&[1, 2, 3, 4]);
+        ctx.send();
+        assert!(ctx
+            .conn
+            .get_polled_evset()
+            .contains(epoll::Events::EPOLLOUT));
+
+        let mut stream = TestStream::new();
+        stream.write_state = StreamState::Closed;
+        ctx.set_stream(stream);
+        ctx.notify_epollout();
+
+        assert_eq!(ctx.conn.state, ConnState::Killed);
+        assert!(ctx.conn.tx_buf.is_empty());
+        assert!(ctx.conn.get_polled_evset().is_empty());
+        assert!(ctx.conn.has_pending_rx());
+        ctx.recv();
+        assert_eq!(ctx.pkt.op(), uapi::VSOCK_OP_RST);
+    }
+
+    #[test]
+    fn test_polled_evset_keeps_out_while_flushable() {
+        for state in [
+            ConnState::Established,
+            ConnState::LocalClosed,
+            ConnState::PeerClosed(true, true),
+        ] {
+            let mut ctx = CsmTestContext::new_established();
+            let mut stream = TestStream::new();
+            stream.write_state = StreamState::WouldBlock;
+            ctx.set_stream(stream);
+            ctx.init_data_pkt(&[1, 2, 3, 4]);
+            ctx.send();
+
+            ctx.conn.state = state;
+            assert!(
+                ctx.conn
+                    .get_polled_evset()
+                    .contains(epoll::Events::EPOLLOUT),
+                "EPOLLOUT must stay armed in {state:?}"
+            );
         }
     }
 
