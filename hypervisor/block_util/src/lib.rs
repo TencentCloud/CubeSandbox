@@ -194,6 +194,7 @@ pub struct AlignedOperation {
     origin_ptr: u64,
     aligned_ptr: u64,
     size: usize,
+    data_offset: usize,
     layout: Layout,
 }
 
@@ -368,6 +369,7 @@ impl Request {
         let offset = (sector << SECTOR_SHIFT) as libc::off_t;
 
         let mut iovecs = Vec::new();
+        let mut data_offset = 0usize;
         for (data_addr, data_len) in &self.data_descriptors {
             if *data_len == 0 {
                 continue;
@@ -417,6 +419,7 @@ impl Request {
                     origin_ptr: origin_ptr.as_ptr() as u64,
                     aligned_ptr: aligned_ptr as u64,
                     size: *data_len as usize,
+                    data_offset,
                     layout,
                 });
 
@@ -430,6 +433,7 @@ impl Request {
                 iov_len: *data_len as libc::size_t,
             };
             iovecs.push(iovec);
+            data_offset = data_offset.saturating_add(*data_len as usize);
         }
 
         // Queue operations expected to be submitted.
@@ -474,18 +478,21 @@ impl Request {
         Ok(true)
     }
 
-    pub fn complete_async(&mut self) -> result::Result<(), Error> {
+    pub fn complete_async(&mut self, completed_data_bytes: usize) -> result::Result<(), Error> {
         for aligned_operation in self.aligned_operations.drain(..) {
             // We need to perform the copy after the data has been read inside
-            // the aligned buffer in case we're reading data in.
+            // the aligned buffer in case we're reading data in. A short read
+            // only initialized the completed prefix, so do not copy beyond it.
             if self.request_type == RequestType::In {
-                // Safe because origin buffer has been allocated with the
-                // proper size.
+                let completed = completed_data_bytes
+                    .saturating_sub(aligned_operation.data_offset)
+                    .min(aligned_operation.size);
+                // Safe because both buffers are valid for `completed` bytes.
                 unsafe {
                     std::ptr::copy(
                         aligned_operation.aligned_ptr as *const u8,
                         aligned_operation.origin_ptr as *mut u8,
-                        aligned_operation.size,
+                        completed,
                     )
                 };
             }
@@ -971,6 +978,70 @@ mod tests {
             eventfd.read().unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn complete_async_copies_only_completed_short_read_prefix() {
+        use super::{AlignedOperation, Request, RequestType, SECTOR_SIZE};
+        use std::alloc::{alloc_zeroed, Layout};
+        use vm_memory::GuestAddress;
+
+        // Two bounce buffers laid out consecutively in the request's data
+        // stream (data_offset 0 and `size`).
+        let size = SECTOR_SIZE as usize;
+        let layout = Layout::from_size_align(size, SECTOR_SIZE as usize).unwrap();
+
+        // Aligned (host bounce) buffers pre-filled with a stale sentinel to
+        // model uninitialized host memory that must not leak into the guest.
+        // SAFETY: layout has non-zero size; both buffers are freed by
+        // complete_async() via dealloc with the same layout.
+        let aligned0 = unsafe { alloc_zeroed(layout) };
+        let aligned1 = unsafe { alloc_zeroed(layout) };
+        assert!(!aligned0.is_null() && !aligned1.is_null());
+        // SAFETY: both allocations are valid for `size` bytes.
+        unsafe {
+            std::ptr::write_bytes(aligned0, 0xab, size);
+            std::ptr::write_bytes(aligned1, 0xcd, size);
+        }
+
+        // Guest-visible destination buffers, initially zeroed.
+        let mut origin0 = vec![0u8; size];
+        let mut origin1 = vec![0u8; size];
+
+        let mut request = Request {
+            request_type: RequestType::In,
+            sector: 0,
+            data_descriptors: Vec::new(),
+            status_addr: GuestAddress(0),
+            writeback: true,
+            aligned_operations: vec![
+                AlignedOperation {
+                    origin_ptr: origin0.as_mut_ptr() as u64,
+                    aligned_ptr: aligned0 as u64,
+                    size,
+                    data_offset: 0,
+                    layout,
+                },
+                AlignedOperation {
+                    origin_ptr: origin1.as_mut_ptr() as u64,
+                    aligned_ptr: aligned1 as u64,
+                    size,
+                    data_offset: size,
+                    layout,
+                },
+            ],
+        };
+
+        // Short read: the first buffer plus only 8 bytes of the second one
+        // were actually read from the backend.
+        request.complete_async(size + 8).unwrap();
+
+        // First buffer fully copied back.
+        assert!(origin0.iter().all(|&b| b == 0xab));
+        // Second buffer copied only up to the completed prefix; the remainder
+        // stays zero so stale host bytes are never exposed to the guest.
+        assert!(origin1[..8].iter().all(|&b| b == 0xcd));
+        assert!(origin1[8..].iter().all(|&b| b == 0));
     }
 }
 
