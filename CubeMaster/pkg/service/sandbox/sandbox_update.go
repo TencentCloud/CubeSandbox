@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -269,4 +270,20 @@ func resolveSandboxHostIP(ctx context.Context, sandboxID string) (string, bool) 
 		return proxyMap.HostIP, true
 	}
 	return resolvePauseHostIP(ctx, sandboxID)
+}
+
+// ResolveEventHostIP resolves the sandbox's node via cache, proxy map, then
+// pause snapshot. The pause record can go stale after a cross-node resume;
+// fromPause marks that fallback so callers can warn.
+func ResolveEventHostIP(ctx context.Context, sandboxID string) (hostIP string, fromPause bool) {
+	if v := localcache.GetSandboxCache(sandboxID); v != nil && v.HostIP != "" {
+		return v.HostIP, false
+	}
+	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap.HostIP != "" {
+		return proxyMap.HostIP, false
+	}
+	if rec, err := pausesnap.GetBySandbox(ctx, sandboxID); err == nil && rec != nil && rec.NodeIP != "" {
+		return rec.NodeIP, true
+	}
+	return "", false
 }

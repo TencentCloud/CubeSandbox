@@ -18,6 +18,23 @@ CubeSandbox exposes two complementary logging layers:
 
 This page covers the **sandbox-level log** only. For `envd` sub-task logs, refer to the [E2B SDK documentation](https://e2b.dev/docs).
 
+## Fetching sandbox events remotely
+
+Besides the node-local `cubecli logs` command, sandbox **events** (the shim request log — lifecycle and forwarded output) can be fetched remotely through the API on any deployment (single-node, multi-node, or K8s). CubeAPI proxies the request to the Cubelet that owns the sandbox:
+
+```bash
+# Newest 1000 events (polling/tail mode)
+curl "/cubeapi/v1/v2/sandboxes/<sandbox-id>/logs?tail=true&limit=1000"
+
+# Paginate from the beginning
+curl "/cubeapi/v1/v2/sandboxes/<sandbox-id>/logs?limit=200"
+
+# Next page: pass the nextCursor returned by the previous response
+curl "/cubeapi/v1/v2/sandboxes/<sandbox-id>/logs?cursor=<nextCursor>&limit=200"
+```
+
+Parameters: `limit` (default 200, max 2000), `cursor` (Unix-ms timestamp; returns only entries after it), `tail` (returns the newest `limit` entries instead of paginating; mutually exclusive with `cursor`). The response carries `logs`, `nextCursor` and `hasMore`.
+
 ## Prerequisites
 
 `cubecli` is built alongside Cubelet and installed as part of the standard one-click deployment. The `logs` sub-command accesses log files that live inside the **Cubelet mount namespace**, so it must be run **directly on the compute node** — it cannot be executed remotely via the API or from a non-node host.

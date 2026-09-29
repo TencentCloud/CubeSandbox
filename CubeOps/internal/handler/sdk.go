@@ -478,6 +478,11 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 			body["cursor"] = n
 		}
 	}
+	if v := c.Query("tail"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			body["tail"] = b
+		}
+	}
 	raw, err := h.cm.GetSandboxLogs(c.Request.Context(), body)
 	if err != nil {
 		writeCMError(c, err)

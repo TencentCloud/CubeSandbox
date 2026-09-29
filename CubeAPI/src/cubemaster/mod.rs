@@ -22,7 +22,6 @@
 /// New APIs required (❌ not yet on CubeMaster — pending implementation):
 ///   - POST   /cube/sandbox/timeout    set absolute TTL
 ///   - POST   /cube/sandbox/refresh    extend TTL by delta
-///   - POST   /cube/sandbox/logs       fetch sandbox logs
 ///   - POST   /cube/sandbox/commit     commit sandbox → template image
 ///   - GET    /cube/template/build/{id}/status  build status poll
 ///   - DELETE /cube/template           delete template
@@ -191,8 +190,8 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
-    /// POST /cube/sandbox/logs — fetch sandbox stdout/stderr logs.
-    /// ❌ New API required on CubeMaster.
+    /// POST /cube/sandbox/logs — fetch sandbox event logs.
+    /// ✅ Implemented on CubeMaster (proxied to the owning Cubelet).
     pub async fn get_sandbox_logs(
         &self,
         req: &SandboxLogsRequest,
@@ -1566,6 +1565,8 @@ pub struct SandboxLogsRequest {
     pub sandbox_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<bool>,
     pub limit: i32,
 }
 
@@ -1574,6 +1575,10 @@ pub struct SandboxLogsResponse {
     pub ret: RetCode,
     #[serde(default)]
     pub logs: Vec<SandboxLogLine>,
+    #[serde(default, rename = "nextCursor")]
+    pub next_cursor: i64,
+    #[serde(default, rename = "hasMore")]
+    pub has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1582,6 +1587,8 @@ pub struct SandboxLogLine {
     pub message: String,
     #[serde(default)]
     pub level: String,
+    #[serde(default)]
+    pub module: Option<String>,
 }
 
 // ─── Snapshot APIs ─────────────────────────────────────────────────────
