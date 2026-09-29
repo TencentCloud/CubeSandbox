@@ -124,12 +124,43 @@ impl MemorySnapshotFile {
             .open(&self.path)
             .map_err(|e| MigratableError::MigrateSend(e.into()))
     }
+
+    fn complete_write(&self, file: &File) -> result::Result<(), MigratableError> {
+        self.complete_write_with(file, File::sync_all, |parent| {
+            File::open(parent)?.sync_all()
+        })
+    }
+
+    fn complete_write_with<F, G>(
+        &self,
+        file: &File,
+        sync_all: F,
+        sync_parent: G,
+    ) -> result::Result<(), MigratableError>
+    where
+        F: FnOnce(&File) -> io::Result<()>,
+        G: FnOnce(&Path) -> io::Result<()>,
+    {
+        // `memory_vol_url` accepts ordinary files and block devices as well as
+        // CubeCow-managed volumes. Synchronize every target's file descriptor.
+        sync_all(file).map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        if !self.external {
+            // A newly-created local image also needs its directory entry made
+            // durable before snapshot completion is reported.
+            let parent = self.path.parent().ok_or_else(|| {
+                MigratableError::MigrateSend(anyhow!("Snapshot path has no parent directory"))
+            })?;
+            sync_parent(parent).map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod memory_snapshot_file_tests {
     use super::{MemorySnapshotFile, SNAPSHOT_FILENAME};
-    use std::fs;
+    use std::fs::{self, File};
+    use std::io;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -171,6 +202,85 @@ mod memory_snapshot_file_tests {
         target.open_for_fresh_write().unwrap();
 
         assert_eq!(fs::metadata(&file_path).unwrap().len(), original_len);
+        fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn local_snapshot_target_completes_write_with_sync_all() {
+        let dir_path = unique_temp_path("sync-local");
+        fs::create_dir_all(&dir_path).unwrap();
+        let snapshot_url = format!("file://{}", dir_path.display());
+        let target = MemorySnapshotFile::from_snapshot_url(&snapshot_url, None).unwrap();
+        let file = target.open_for_fresh_write().unwrap();
+        let mut file_called = false;
+        let mut parent_called = false;
+
+        target
+            .complete_write_with(
+                &file,
+                |file| {
+                    file_called = true;
+                    file.sync_all()
+                },
+                |parent| {
+                    parent_called = true;
+                    assert_eq!(parent, dir_path.as_path());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(file_called);
+        assert!(parent_called);
+        fs::remove_dir_all(dir_path).unwrap();
+    }
+
+    #[test]
+    fn local_snapshot_target_propagates_sync_error() {
+        let dir_path = unique_temp_path("sync-error");
+        fs::create_dir_all(&dir_path).unwrap();
+        let snapshot_url = format!("file://{}", dir_path.display());
+        let target = MemorySnapshotFile::from_snapshot_url(&snapshot_url, None).unwrap();
+        let file = target.open_for_fresh_write().unwrap();
+
+        let result = target.complete_write_with(
+            &file,
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "injected sync failure",
+                ))
+            },
+            |_| Ok(()),
+        );
+
+        assert!(result.is_err());
+        fs::remove_dir_all(dir_path).unwrap();
+    }
+
+    #[test]
+    fn external_snapshot_target_also_syncs() {
+        let file_path = unique_temp_path("sync-external");
+        let file = File::create(&file_path).unwrap();
+        let target = MemorySnapshotFile::from_snapshot_url(
+            "file:///unused",
+            Some(file_path.to_str().unwrap()),
+        )
+        .unwrap();
+        let mut called = false;
+
+        target
+            .complete_write_with(
+                &file,
+                |_| {
+                    called = true;
+                    Ok(())
+                },
+                |_| panic!("external targets must not synchronize a parent directory"),
+            )
+            .unwrap();
+
+        assert!(called);
         fs::remove_file(file_path).unwrap();
     }
 }
@@ -2448,6 +2558,7 @@ impl MemoryManager {
             self.save_range_to_file(&memory_file, range, file_off)?;
         }
 
+        memory_file_target.complete_write(&memory_file)?;
         info!(
             "PagemapAnon snapshot saved: {} anon bytes written to {:?}",
             stats.saved_bytes,
@@ -2594,6 +2705,7 @@ impl MemoryManager {
                 Self::calculate_file_offset_for_gpa(range.gpa, range.length, &gpa_to_file_offset)?;
             self.save_range_to_file(&memory_file, range, file_off)?;
         }
+        memory_file_target.complete_write(&memory_file)?;
         info!(
             "Soft-dirty snapshot saved: {} dirty bytes written to {:?}",
             stats.saved_bytes,
@@ -3108,6 +3220,7 @@ impl Transportable for MemoryManager {
                 // Move to next range.
                 offset += range.length;
             }
+            memory_file_target.complete_write(&memory_file)?;
             return Ok(());
         }
 
@@ -3127,6 +3240,7 @@ impl Transportable for MemoryManager {
                     self.save_range_to_file(&memory_file, range, file_offset)?;
                     file_offset += range.length;
                 }
+                memory_file_target.complete_write(&memory_file)?;
             }
         }
         Ok(())
