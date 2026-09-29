@@ -35,6 +35,8 @@ class CubeSandboxAdapter(SandboxAdapter):
         if isinstance(extra_metadata, dict):
             merged_metadata.update(extra_metadata)
         timeout = opts.pop("timeout", config.create_timeout)
+        if config.cube_template_id:
+            opts.setdefault("template", config.cube_template_id)
         sandbox = None
         try:
             sandbox = Sandbox.create(
@@ -268,6 +270,12 @@ class CubeSandboxAdapter(SandboxAdapter):
             if key in raw and raw[key]:
                 return str(raw[key])
         return None
+
+    def mcp_url(self) -> str:
+        return str(self._sandbox.get_mcp_url())
+
+    def mcp_token(self) -> str | None:
+        return self._sandbox.get_mcp_token()
 
     def update_network(self, network: dict | None = None) -> None:
         self._sandbox.update_network(network)

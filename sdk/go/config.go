@@ -20,9 +20,13 @@ const (
 
 // Config holds SDK configuration for control-plane and data-plane requests.
 type Config struct {
-	APIURL         string
-	APIKey         string
-	TemplateID     string
+	APIURL     string
+	APIKey     string
+	TemplateID string
+	// MCPTemplateID is the template ID or alias tried first when
+	// CreateOptions.MCP is set without a TemplateID; TemplateID is the fallback
+	// if it does not exist. Defaults to DefaultMCPTemplateID.
+	MCPTemplateID  string
 	ProxyNodeIP    string
 	ProxyPortHTTP  int
 	ProxyScheme    string
@@ -40,6 +44,7 @@ func NewConfigFromEnv() Config {
 		APIURL:         firstEnv("CUBE_API_URL", "E2B_API_URL"),
 		APIKey:         firstEnv("CUBE_API_KEY", "E2B_API_KEY"),
 		TemplateID:     strings.TrimSpace(os.Getenv("CUBE_TEMPLATE_ID")),
+		MCPTemplateID:  strings.TrimSpace(os.Getenv("CUBE_MCP_TEMPLATE_ID")),
 		ProxyNodeIP:    strings.TrimSpace(os.Getenv("CUBE_PROXY_NODE_IP")),
 		ProxyPortHTTP:  parseIntEnv("CUBE_PROXY_PORT_HTTP", defaultProxyPortHTTP),
 		ProxyScheme:    strings.TrimSpace(os.Getenv("CUBE_PROXY_SCHEME")),
@@ -54,6 +59,10 @@ func normalizeConfig(cfg Config) Config {
 	cfg.APIURL = strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
 	if cfg.APIURL == "" {
 		cfg.APIURL = defaultAPIURL
+	}
+	cfg.MCPTemplateID = strings.TrimSpace(cfg.MCPTemplateID)
+	if cfg.MCPTemplateID == "" {
+		cfg.MCPTemplateID = DefaultMCPTemplateID
 	}
 	cfg.SandboxDomain = strings.TrimSpace(cfg.SandboxDomain)
 	if cfg.SandboxDomain == "" {

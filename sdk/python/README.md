@@ -106,6 +106,16 @@ sb.pause(timeout=60, interval=0.5) # custom poll params
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
 
+### MCP gateway (preview)
+
+Pass the E2B-compatible `mcp` option to start an MCP gateway inside the sandbox. It needs a template that ships `mcp-gateway`; when `template` is omitted, the alias `mcp-gateway` is tried first (override with `CUBE_MCP_TEMPLATE_ID`), then `CUBE_TEMPLATE_ID` if that template does not exist. `TemplateNotFoundError` is raised when neither exists. See [MCP Gateway](../../docs/guide/mcp-gateway.md).
+
+```python
+sb = Sandbox.create(mcp={"duckduckgo": {}, "arxiv": {"storagePath": "/tmp/papers"}})
+url = sb.get_mcp_url()      # streamable HTTP endpoint
+token = sb.get_mcp_token()  # send as "Authorization: Bearer <token>"
+```
+
 ### Compute node placement
 
 Restrict scheduling to one or more compute node IDs or host IPs. A single
@@ -310,6 +320,7 @@ print(Sandbox.list_v2())    # v2 API (supports filtering)
 | `CUBE_API_KEY` | | — | API key for auth-enabled deployments |
 | `CUBE_PROXY_PORT_HTTP` | | `80` | CubeProxy HTTP port |
 | `CUBE_SANDBOX_DOMAIN` | | `cube.app` | Sandbox domain suffix |
+| `CUBE_MCP_TEMPLATE_ID` | | `mcp-gateway` | Template tried first when `mcp` is set and no template is given; falls back to `CUBE_TEMPLATE_ID` if it does not exist |
 
 You can also pass a `Config` object directly:
 

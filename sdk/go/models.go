@@ -9,6 +9,7 @@ import "time"
 type Sandbox struct {
 	client       *Client       `json:"-"`
 	cloneCleanup *cloneCleanup `json:"-"`
+	mcpToken     string
 
 	TemplateID         string `json:"templateID"`
 	SandboxID          string `json:"sandboxID"`
@@ -75,7 +76,12 @@ type CreateOptions struct {
 	// mount's Name must be an existing volumeID (see Client.CreateVolume) and
 	// Path a clean absolute path inside the sandbox.
 	VolumeMounts []VolumeMount
-	Extra        map[string]any
+	// MCP starts mcp-gateway with these servers after the sandbox is created.
+	// Without TemplateID, Config.MCPTemplateID is tried first and
+	// Config.TemplateID is used only if that template does not exist. Connect
+	// with Sandbox.GetMCPURL and Sandbox.GetMCPToken.
+	MCP   MCPServers
+	Extra map[string]any
 }
 
 // UpdateNetworkOptions is the desired egress policy for Sandbox.UpdateNetwork.

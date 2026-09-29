@@ -146,6 +146,16 @@ await sb.pause({ timeoutMs: 60000, intervalMs: 500 }); // custom poll params
 const sb2 = await Sandbox.connect(sb.sandboxId);
 ```
 
+### MCP gateway (preview)
+
+Pass the E2B-compatible `mcp` option to start an MCP gateway inside the sandbox. It needs a template that ships `mcp-gateway`; when `template` is omitted, the alias `mcp-gateway` is tried first (override with `CUBE_MCP_TEMPLATE_ID` or `mcpTemplateId`), then `CUBE_TEMPLATE_ID` if that template does not exist. `TemplateNotFoundError` is thrown when neither exists. See [MCP Gateway](../../docs/guide/mcp-gateway.md).
+
+```ts
+const sb = await Sandbox.create({ mcp: { duckduckgo: {}, time: {} } });
+const url = sb.getMcpUrl();            // streamable HTTP endpoint
+const token = await sb.getMcpToken();  // send as "Authorization: Bearer <token>"
+```
+
 ### Network policy
 
 Two layers can be combined inside `network`:
@@ -381,6 +391,7 @@ await Template.delete("tpl-xxx");
 | `CUBE_PROXY_PORT_HTTP` | | `80` | CubeProxy HTTP port |
 | `CUBE_PROXY_SCHEME` | | `http` | Data-plane scheme; normalized to `http` / `https` (unknown values → `https` when port is 443, else `http`) |
 | `CUBE_SANDBOX_DOMAIN` | | `cube.app` | Sandbox domain suffix |
+| `CUBE_MCP_TEMPLATE_ID` | | `mcp-gateway` | Template tried first when `mcp` is set and no template is given; falls back to `CUBE_TEMPLATE_ID` if it does not exist |
 
 You can also pass a `Config` (or plain options object) directly:
 

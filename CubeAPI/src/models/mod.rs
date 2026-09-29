@@ -474,7 +474,13 @@ pub struct NewSandbox {
     )]
     pub env_vars: Option<EnvVars>,
 
+    /// E2B-compatible MCP servers keyed by server name, e.g.
+    /// `{"duckduckgo": {}, "arxiv": {"storagePath": "/"}}`. Keys starting with
+    /// `github/<owner>/<repo>` require `runCmd` and may set `installCmd` and
+    /// `envs`. CubeAPI validates the shape only; the SDK starts `mcp-gateway`
+    /// inside the sandbox, and the value is never forwarded or returned.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<HashMap<String, Object>>)]
     pub mcp: Option<serde_json::Value>,
 
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
