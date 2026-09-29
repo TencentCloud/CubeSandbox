@@ -15,6 +15,63 @@ use crate::arch::x86::{
 use crate::kvm::{Cap, Kvm, KvmError, KvmResult};
 use serde::{Deserialize, Serialize};
 
+/// Replace an ambiguous zero TSC deadline with the captured TSC value.
+///
+/// KVM can clear `MSR_IA32_TSC_DEADLINE` after the timer expires before the
+/// corresponding interrupt reaches a paused guest. Persisting that transient
+/// zero would leave the restored vCPU without a deadline timer. A zero value is
+/// meaningful in other LAPIC timer modes, so only normalize it when the saved
+/// LVT timer is in TSC-deadline mode. If malformed input contains more than one
+/// TSC entry, use the greatest value, matching Firecracker's conservative
+/// handling.
+pub fn normalize_zero_tsc_deadline(msrs: &mut [MsrEntry], lapic_state: &LapicState) -> Option<u64> {
+    use crate::arch::x86::msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
+
+    const APIC_LVTT: usize = 0x320;
+    const APIC_LVT_TIMER_MODE_MASK: u32 = 3 << 17;
+    const APIC_LVT_TIMER_TSC_DEADLINE: u32 = 2 << 17;
+
+    if lapic_state.get_klapic_reg(APIC_LVTT) & APIC_LVT_TIMER_MODE_MASK
+        != APIC_LVT_TIMER_TSC_DEADLINE
+    {
+        return None;
+    }
+
+    let tsc = msrs
+        .iter()
+        .filter(|msr| msr.index == MSR_IA32_TSC)
+        .map(|msr| msr.data)
+        .max()?;
+
+    let mut normalized = false;
+    for msr in msrs {
+        if msr.index == MSR_IA32_TSC_DEADLINE && msr.data == 0 {
+            msr.data = tsc;
+            normalized = true;
+        }
+    }
+
+    normalized.then_some(tsc)
+}
+
+/// Return MSRs in restore order, with TSC deadlines after every other MSR.
+///
+/// KVM evaluates a deadline against the vCPU's current TSC when the deadline
+/// is written. Keeping deadlines in a final group guarantees that the saved
+/// TSC has already been restored, independent of the order KVM advertised its
+/// MSR index list in or the order in an older snapshot. Restore intentionally
+/// fails if the destination rejects any saved MSR: resuming with partial CPU
+/// state is unsupported, including across hosts with mismatched MSR support.
+pub fn order_msrs_for_restore(msrs: &[MsrEntry]) -> Vec<MsrEntry> {
+    use crate::arch::x86::msr_index::MSR_IA32_TSC_DEADLINE;
+
+    msrs.iter()
+        .filter(|msr| msr.index != MSR_IA32_TSC_DEADLINE)
+        .chain(msrs.iter().filter(|msr| msr.index == MSR_IA32_TSC_DEADLINE))
+        .copied()
+        .collect()
+}
+
 ///
 /// Export generically-named wrappers of kvm-bindings for Unix-based platforms
 ///
