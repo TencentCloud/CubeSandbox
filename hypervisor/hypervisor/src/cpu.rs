@@ -81,6 +81,17 @@ pub enum HypervisorCpuError {
     #[error("Failed to set Msr entries: {0}")]
     SetMsrEntries(#[source] anyhow::Error),
     ///
+    /// KVM_SET_MSRS completed only a prefix of the requested entries
+    ///
+    #[error(
+        "Failed to set all Msr entries: wrote {completed} of {expected}; rejected index 0x{rejected:x}"
+    )]
+    SetMsrEntriesIncomplete {
+        expected: usize,
+        completed: usize,
+        rejected: u32,
+    },
+    ///
     /// Getting Msr entries error
     ///
     #[error("Failed to get Msr entries: {0}")]
