@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Result describes the outcome of a bake. Callers persist these onto
@@ -120,6 +121,7 @@ var anchorDirs = []string{
 	"usr/local/share/ca-certificates",  // Debian/Ubuntu
 	"etc/pki/ca-trust/source/anchors",  // RHEL/Fedora/CentOS
 	"etc/ca-certificates/trust-source", // Arch
+	"system/etc/security/cacerts",      // Android system trust store
 }
 
 // seedBundlePath is the bundle file we *create* from scratch when an
@@ -371,6 +373,13 @@ func seedBundle(full string, canonical []byte) (bool, string, error) {
 		return false, "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		// Distros whose /etc is a symlink (e.g. Android: /etc -> /system/etc)
+		// make MkdirAll fail with EEXIST. Anchor dirs cover those distros;
+		// skip seeding instead of failing the whole bake.
+		var pe *os.PathError
+		if errors.As(err, &pe) && errors.Is(pe.Err, syscall.EEXIST) {
+			return false, "seed skipped: parent path occupied (symlink?)", nil
+		}
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"
