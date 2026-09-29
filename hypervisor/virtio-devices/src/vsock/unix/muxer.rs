@@ -198,9 +198,15 @@ pub struct VsockMuxer {
     conn_info: HashMap<RawFd, ConnectionInfo>,
 }
 
+fn initial_local_port_last() -> u32 {
+    (1u32 << 30) - 1
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct VsockMuxerState {
     local_port_set: HashSet<u32>,
+    #[serde(default = "initial_local_port_last")]
+    local_port_last: u32,
 }
 
 impl VsockChannel for VsockMuxer {
@@ -675,11 +681,15 @@ impl VsockMuxer {
         epoll_nested: bool,
         state: Option<VsockMuxerState>,
     ) -> Result<Self> {
-        // Create the local port set.
-        let local_port_set = if let Some(state) = state {
-            state.local_port_set
+        // Restore both the set of active ports and the allocation cursor. Persisting the cursor
+        // prevents a restored muxer from immediately reusing a recently freed pre-snapshot port.
+        let (local_port_set, local_port_last) = if let Some(state) = state {
+            (state.local_port_set, state.local_port_last)
         } else {
-            HashSet::with_capacity(defs::MAX_CONNECTIONS)
+            (
+                HashSet::with_capacity(defs::MAX_CONNECTIONS),
+                initial_local_port_last(),
+            )
         };
 
         // Create the nested epoll FD. This FD will be added to the VMM `EpollContext`, at
@@ -706,7 +716,7 @@ impl VsockMuxer {
             conn_map: HashMap::with_capacity(defs::MAX_CONNECTIONS),
             listener_map: HashMap::with_capacity(defs::MAX_CONNECTIONS + 1),
             killq: MuxerKillQ::new(),
-            local_port_last: (1u32 << 30) - 1,
+            local_port_last,
             local_port_set,
             helper_fd: epoll_fd,
             epoll_nested,
@@ -1112,6 +1122,61 @@ impl VsockMuxer {
         self.local_port_set.remove(&port);
     }
 
+    /// Connect to the Unix socket at `path` without blocking; a full accept backlog
+    /// fails with `EAGAIN`.
+    fn connect_nonblocking(path: &str) -> io::Result<UnixStream> {
+        // SAFETY: constant arguments; the return value is checked.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is valid and not owned by anything else.
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+
+        let mut addr = libc::sockaddr_un {
+            sun_family: libc::sa_family_t::try_from(libc::AF_UNIX).unwrap(),
+            sun_path: [0; 108],
+        };
+        let path = path.as_bytes();
+        if path.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path must not contain null bytes",
+            ));
+        }
+        // Reserve one byte for the trailing NUL.
+        if path.len() >= addr.sun_path.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path must be shorter than sun_path",
+            ));
+        }
+        for (dst, src) in addr.sun_path.iter_mut().zip(path) {
+            *dst = libc::c_char::from_ne_bytes([*src]);
+        }
+        let addr_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+        let addr_len = libc::socklen_t::try_from(addr_len).unwrap();
+
+        // SAFETY: valid fd, initialized `sockaddr_un` and its length; the return value is checked.
+        let ret = unsafe {
+            libc::connect(
+                stream.as_raw_fd(),
+                (&addr as *const libc::sockaddr_un).cast::<libc::sockaddr>(),
+                addr_len,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stream)
+    }
+
     /// Handle a new connection request coming from our peer (the guest vsock driver).
     ///
     /// This will attempt to connect to a host-side Unix socket, expected to be listening at
@@ -1128,8 +1193,7 @@ impl VsockMuxer {
 
         debug!("vsock: port_path {}", port_path);
 
-        UnixStream::connect(port_path)
-            .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))
+        Self::connect_nonblocking(&port_path)
             .map_err(Error::UnixConnect)
             .and_then(|stream| {
                 self.add_connection(
@@ -1330,6 +1394,7 @@ impl VsockMuxer {
     fn state(&self) -> VsockMuxerState {
         VsockMuxerState {
             local_port_set: self.local_port_set.clone(),
+            local_port_last: self.local_port_last,
         }
     }
 }
@@ -1496,6 +1561,35 @@ mod tests {
 
             (stream, local_port)
         }
+    }
+
+    #[test]
+    fn test_state_restores_local_port_cursor() {
+        let mut ctx = MuxerTestContext::new("state_local_port_cursor");
+        let allocated = ctx.muxer.allocate_local_port();
+        ctx.muxer.free_local_port(allocated);
+        let state = ctx.muxer.state();
+        assert_eq!(state.local_port_last, allocated);
+
+        let restored_path = "test_vsock_state_local_port_cursor_restored.sock";
+        let mut restored = VsockMuxer::new(
+            "test_vsock_state_local_port_cursor_restored".to_owned(),
+            PEER_CID,
+            restored_path.to_owned(),
+            true,
+            Some(state),
+        )
+        .unwrap();
+        assert_eq!(restored.local_port_last, allocated);
+        assert_eq!(restored.allocate_local_port(), allocated + 1);
+        drop(restored);
+        std::fs::remove_file(restored_path).unwrap();
+    }
+
+    #[test]
+    fn test_legacy_state_defaults_local_port_cursor() {
+        let state: VsockMuxerState = serde_json::from_str(r#"{"local_port_set":[]}"#).unwrap();
+        assert_eq!(state.local_port_last, initial_local_port_last());
     }
 
     struct LocalListener {
@@ -1686,6 +1780,73 @@ mod tests {
             .set_dst_cid(uapi::VSOCK_HOST_CID + 1);
         ctx.send();
         assert!(!ctx.muxer.has_pending_rx());
+    }
+
+    #[test]
+    fn test_peer_connection_null_path() {
+        let listener = LocalListener::new(
+            std::env::temp_dir().join(format!("peer_connection_null_path_{}", std::process::id())),
+        );
+        let path = format!("{}\0suffix", listener.path.display());
+
+        assert_eq!(
+            VsockMuxer::connect_nonblocking(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn test_peer_connection_long_path() {
+        let path = "x".repeat(108);
+        assert_eq!(
+            VsockMuxer::connect_nonblocking(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn test_peer_connection_backlog_full() {
+        const LOCAL_PORT: u32 = 1026;
+        const PEER_PORT: u32 = 1025;
+
+        let mut ctx = MuxerTestContext::new("peer_connection_backlog_full");
+        let mut listener = ctx.create_local_listener(LOCAL_PORT);
+        // Shrink the backlog so filling it stays within the test fd limit.
+        // SAFETY: valid, listening fd; the return value is checked.
+        assert_eq!(unsafe { libc::listen(listener.sock.as_raw_fd(), 0) }, 0);
+
+        let mut pending = Vec::new();
+        loop {
+            match VsockMuxer::connect_nonblocking(listener.path.to_str().unwrap()) {
+                Ok(stream) => pending.push(stream),
+                Err(err) => {
+                    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+                    break;
+                }
+            }
+        }
+
+        ctx.init_pkt(LOCAL_PORT, PEER_PORT, uapi::VSOCK_OP_REQUEST);
+        ctx.send();
+        assert!(ctx.muxer.conn_map.is_empty());
+        assert!(ctx.muxer.has_pending_rx());
+        ctx.recv();
+        assert_eq!(ctx.pkt.op(), uapi::VSOCK_OP_RST);
+        assert_eq!(ctx.pkt.src_port(), LOCAL_PORT);
+        assert_eq!(ctx.pkt.dst_port(), PEER_PORT);
+
+        for _ in pending {
+            drop(listener.accept());
+        }
+
+        ctx.init_pkt(LOCAL_PORT, PEER_PORT, uapi::VSOCK_OP_REQUEST);
+        ctx.send();
+        assert_eq!(ctx.muxer.conn_map.len(), 1);
+        let _stream = listener.accept();
+        ctx.recv();
+        assert_eq!(ctx.pkt.op(), uapi::VSOCK_OP_RESPONSE);
+        assert_eq!(ctx.pkt.src_port(), LOCAL_PORT);
+        assert_eq!(ctx.pkt.dst_port(), PEER_PORT);
     }
 
     #[test]
