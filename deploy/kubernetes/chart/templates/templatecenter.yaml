@@ -100,8 +100,18 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |-
-              cp /etc/ssl/certs/ca-certificates.crt /merged/ca-bundle.crt \
-                || { echo "system CA bundle missing from init image; refusing to build a partial trust store" >&2; exit 1; }
+              # Probe known system bundle layouts (Debian/Ubuntu first, then
+              # RHEL-family) -- operators may rebuild this image on another
+              # base distro. Fail loudly when none exists.
+              BUNDLE=""
+              for b in /etc/ssl/certs/ca-certificates.crt \
+                       /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+                       /etc/pki/tls/certs/ca-bundle.crt; do
+                [ -f "$b" ] && { BUNDLE="$b"; break; }
+              done
+              [ -n "$BUNDLE" ] \
+                || { echo "no system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
+              cp "$BUNDLE" /merged/ca-bundle.crt
               ls /trusted-ca/*.crt >/dev/null 2>&1 \
                 || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
               cat /trusted-ca/*.crt >> /merged/ca-bundle.crt

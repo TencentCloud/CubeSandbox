@@ -296,6 +296,11 @@ TLS verification stays on — this adds trust, it does not disable it.
   (`checksum/trusted-ca` annotation). With `existingConfigMap` the ConfigMap is
   yours: update it and restart the pods yourself. Keys must end in `.crt` and
   contain PEM documents.
+- `certs` and `existingConfigMap` are mutually exclusive — setting both fails
+  the render (the inline certs would be silently ignored).
+- The TemplateCenter image must ship a system CA bundle
+  (`ca-certificates`; Debian/Ubuntu and RHEL bundle layouts are probed) plus
+  `/bin/sh` with `cp`/`ls`/`cat` for the merge-ca init container.
 - Publicly-trusted registries (Docker Hub, TCR, GCR, ...) need nothing here.
 
 ## CubeMaster configuration
