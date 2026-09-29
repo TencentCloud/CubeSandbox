@@ -101,6 +101,21 @@ fn prepare_default_values() -> (String, String, String) {
     (default_vcpus, default_memory, default_rng)
 }
 
+fn resolve_seccomp_action(seccomp_value: Option<&str>, debug_assertions: bool) -> SeccompAction {
+    match seccomp_value {
+        Some("true") => SeccompAction::Trap,
+        Some("false") => SeccompAction::Allow,
+        Some("log") => SeccompAction::Log,
+        Some("process") => SeccompAction::KillProcess,
+        Some(value) => {
+            // The user providing an invalid value will be rejected by clap.
+            panic!("Invalid parameter {value} for \"--seccomp\" flag");
+        }
+        None if debug_assertions => SeccompAction::Allow,
+        None => SeccompAction::KillProcess,
+    }
+}
+
 fn create_app(default_vcpus: String, default_memory: String, default_rng: String) -> Command {
     let app = Command::new("cube-hypervisor")
         // 'BUILT_VERSION' is set by the build script 'build.rs' at
@@ -360,8 +375,11 @@ fn create_app(default_vcpus: String, default_memory: String, default_rng: String
             Arg::new("seccomp")
                 .long("seccomp")
                 .num_args(1)
-                .value_parser(["true", "false", "log", "process"])
-                .default_value("process"),
+                .help(
+                    "Seccomp action: true=trap, false=allow, log=log, process=kill process. \
+                     Debug builds default to no filter; release builds default to kill process",
+                )
+                .value_parser(["true", "false", "log", "process"]),
         )
         .arg(
             Arg::new("tpm")
@@ -523,6 +541,11 @@ fn start_vmm(
 
     #[cfg(not(feature = "lib_support"))]
     std::panic::set_hook(Box::new(|info| {
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
+            if let Err(e) = std::io::stdin().lock().set_canon_mode() {
+                eprintln!("Failed to restore terminal mode after panic: {e}");
+            }
+        }
         info!("{info:?}");
         log::logger().flush();
     }));
@@ -628,20 +651,13 @@ fn start_vmm(
         )
         .map_err(Error::InitVmmService)?;
 
-    let seccomp_action = if let Some(seccomp_value) = cmd_arguments.get_one::<String>("seccomp") {
-        match seccomp_value as &str {
-            "true" => SeccompAction::Trap,
-            "false" => SeccompAction::Allow,
-            "log" => SeccompAction::Log,
-            "process" => SeccompAction::KillProcess,
-            _ => {
-                // The user providing an invalid value will be rejected by clap
-                panic!("Invalid parameter {} for \"--seccomp\" flag", seccomp_value);
-            }
-        }
-    } else {
-        SeccompAction::KillProcess
-    };
+    let seccomp_value = cmd_arguments
+        .get_one::<String>("seccomp")
+        .map(String::as_str);
+    let seccomp_action = resolve_seccomp_action(seccomp_value, cfg!(debug_assertions));
+    if seccomp_value.is_none() && cfg!(debug_assertions) {
+        info!("Seccomp disabled by default for debug build; use --seccomp to enable it");
+    }
 
     if seccomp_action == SeccompAction::Trap || seccomp_action == SeccompAction::KillProcess {
         // SAFETY: We only using signal_hook for managing signals and only execute signal
@@ -777,7 +793,8 @@ fn main() {
 
 #[cfg(test)]
 mod unit_tests {
-    use crate::{create_app, prepare_default_values};
+    use crate::{create_app, prepare_default_values, resolve_seccomp_action};
+    use seccompiler::SeccompAction;
     use std::path::PathBuf;
     use vmm::config::VmParams;
     use vmm::vm_config::{
@@ -810,6 +827,45 @@ mod unit_tests {
         }
 
         (cli_vm_config, openapi_vm_config)
+    }
+
+    #[test]
+    fn test_resolve_seccomp_action() {
+        assert_eq!(resolve_seccomp_action(None, true), SeccompAction::Allow);
+        assert_eq!(
+            resolve_seccomp_action(None, false),
+            SeccompAction::KillProcess
+        );
+
+        for (value, expected) in [
+            ("true", SeccompAction::Trap),
+            ("false", SeccompAction::Allow),
+            ("log", SeccompAction::Log),
+            ("process", SeccompAction::KillProcess),
+        ] {
+            assert_eq!(resolve_seccomp_action(Some(value), true), expected);
+            assert_eq!(resolve_seccomp_action(Some(value), false), expected);
+        }
+    }
+
+    #[test]
+    fn test_seccomp_cli_value_is_optional() {
+        let (default_vcpus, default_memory, default_rng) = prepare_default_values();
+        let app = create_app(default_vcpus, default_memory, default_rng);
+
+        let implicit = app
+            .clone()
+            .try_get_matches_from(["cube-hypervisor"])
+            .unwrap();
+        assert_eq!(implicit.get_one::<String>("seccomp"), None);
+
+        let explicit = app
+            .try_get_matches_from(["cube-hypervisor", "--seccomp", "process"])
+            .unwrap();
+        assert_eq!(
+            explicit.get_one::<String>("seccomp").map(String::as_str),
+            Some("process")
+        );
     }
 
     #[test]
