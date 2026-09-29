@@ -16,6 +16,8 @@
 !pkgs/cubedb/**
 !pkgs/proto
 !pkgs/proto/**
+!pkgs/sandboxrestart
+!pkgs/sandboxrestart/**
 # Volume plugin host tools installer used by the runtime stage.
 !deploy
 !deploy/scripts
