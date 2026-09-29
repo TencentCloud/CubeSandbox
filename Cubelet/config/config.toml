@@ -202,8 +202,11 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     content_sharing_policy = "shared"
     no_sync = true
 
-  [plugins."io.containerd.monitor.v1.cgroups"]
-    no_prometheus = false
+  # Disable containerd's legacy task cgroup monitor to prevent repetitive
+  # "unmarshal stats" errors when scraping /v1/metrics on cgroup v2 hosts.
+  # Sandbox resource metrics are served independently under /v1/metrics/resource.
+  [plugins."io.containerd.monitor.task.v1.cgroups"]
+    no_prometheus = true
   [plugins."io.containerd.runtime.v2.task"]
     # Declare both platforms so the same config runs on amd64 and arm64 hosts;
     # containerd matches image manifests against the host's native platform.
