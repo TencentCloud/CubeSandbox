@@ -57,6 +57,61 @@ type unresolvedEvidence struct {
 
 func (u unresolvedEvidence) ageable() bool { return !u.intentAt.IsZero() }
 
+// pendingIntentOnly reports that the evidence refuses cleanup for exactly one
+// reason: a spawn-intent record that has not yet reached its TTL. No process
+// was found for the sandbox, every remaining blocker is that intent, and the
+// clock is still running on it — so the verdict is "too early to tell" rather
+// than "something is holding this", and the refusal is expected to clear on
+// its own.
+//
+// It is deliberately strict:
+//
+//   - a live identity means we can see a holder, and waiting is not optional;
+//   - a blocker that is not an intent (an unreadable pid, a pid we cannot tie
+//     to this sandbox) never resolves with time;
+//   - an intent with no recorded start time never ages out;
+//   - a TTL of 0 disables aging entirely, so nothing here is self-healing.
+//
+// Anything else must keep the refusal classified as a real failure and spend
+// the caller's retry budget.
+func (e sandboxRuntimeEvidence) pendingIntentOnly() bool {
+	if len(e.unresolved) == 0 || len(e.identities) > 0 || e.intentTTL <= 0 {
+		return false
+	}
+	now := time.Now()
+	for _, u := range e.unresolved {
+		if !u.ageable() {
+			return false
+		}
+		if now.Sub(u.intentAt) >= e.intentTTL {
+			// Already past the TTL: resolveStaleIntents would have dropped it,
+			// so the evidence was not aged. Refusing to defer is the safe
+			// answer — it spends the budget instead of retrying forever.
+			return false
+		}
+	}
+	return true
+}
+
+// shimIntentPendingError is the "still inside the shim-spawn intent TTL"
+// refusal. Behaviour is unchanged — cleanup still fails closed and releases
+// nothing — but it carries a structural marker that lets a caller that owns a
+// retry budget (the GC service) defer the round instead of counting it as a
+// failed attempt. It is a marker method rather than a shared type so the
+// budget owner does not have to import this package.
+type shimIntentPendingError struct {
+	sandboxID string
+	detail    string
+}
+
+func (e *shimIntentPendingError) Error() string {
+	return fmt.Sprintf("sandbox %s runtime state unresolved: %s", e.sandboxID, e.detail)
+}
+
+// RetryWithoutPenalty marks a failure that is expected to clear on its own and
+// must therefore not consume a caller's retry budget or raise an alert.
+func (e *shimIntentPendingError) RetryWithoutPenalty() bool { return true }
+
 // sandboxRuntimeEvidence is everything we know about processes that may still
 // hold this sandbox's tap fds, IPs and NVMe paths.
 //
@@ -68,6 +123,11 @@ func (u unresolvedEvidence) ageable() bool { return !u.intentAt.IsZero() }
 type sandboxRuntimeEvidence struct {
 	identities []utils.ProcessIdentity
 	unresolved []unresolvedEvidence
+	// intentTTL is the window the spawn-intent record may still be inside,
+	// copied from the collecting local so the pending/really-stuck decision
+	// travels with the evidence instead of being re-derived by a caller that
+	// does not know the setting.
+	intentTTL time.Duration
 }
 
 func (e *sandboxRuntimeEvidence) markUnresolved(format string, args ...interface{}) {
@@ -253,7 +313,8 @@ func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxst
 		ev.markStaleIntent(sb.Endpoint.ShimSpawnedAt, "a shim was spawned but no pid was recorded")
 	}
 
-	ev.resolveStaleIntents(ctx, sandboxIdentity(sb), l.shimIntentTTL)
+	ev.intentTTL = l.shimIntentTTL
+	ev.resolveStaleIntents(ctx, sandboxIdentity(sb), ev.intentTTL)
 
 	sort.Slice(ev.identities, func(i, j int) bool { return ev.identities[i].Pid < ev.identities[j].Pid })
 	return ev
@@ -390,6 +451,17 @@ func readPidFile(path string) int {
 // "nothing to wait for" when we are sure there was nothing to find.
 func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRuntimeEvidence) error {
 	if msgs := ev.unresolvedMessages(); len(msgs) > 0 {
+		// A refusal whose only cause is a spawn-intent record still inside its
+		// TTL is not a stuck sandbox: it is a sandbox that is simply too young
+		// to be judged. Report it with the same fail-closed refusal so no
+		// resource is released, but tag it so the caller does not spend its
+		// retry budget on it — otherwise a cleanup ticker faster than the TTL
+		// quarantines every sandbox that ever loses the intent/pid race.
+		if ev.pendingIntentOnly() {
+			log.G(ctx).Warnf("sandbox %s: still inside the shim-spawn intent TTL (%s); refusing resource cleanup and retrying later",
+				sandboxID, strings.Join(msgs, "; "))
+			return &shimIntentPendingError{sandboxID: sandboxID, detail: strings.Join(msgs, "; ")}
+		}
 		log.G(ctx).Errorf("sandbox %s: runtime state unresolved (%s); refuse resource cleanup",
 			sandboxID, strings.Join(msgs, "; "))
 		return fmt.Errorf("sandbox %s runtime state unresolved: %s",

@@ -34,6 +34,12 @@ const (
 	outcomeSuccess     = "success"
 	outcomeFail        = "fail"
 	outcomeQuarantined = "quarantined"
+	// outcomeDeferred counts cleanup rounds that failed for a reason expected
+	// to clear on its own (a shim-spawn intent still inside its TTL). They are
+	// neither successes nor failed attempts: they must not move the sandbox
+	// toward quarantine, so they are reported separately to keep the budget
+	// visible in metrics without being spent.
+	outcomeDeferred = "deferred"
 
 	schedulerStarted   = "started"
 	schedulerReadError = "read_error"

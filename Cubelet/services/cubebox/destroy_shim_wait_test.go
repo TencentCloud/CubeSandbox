@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,18 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
+
+// pendingIntentOnlyError reports whether err carries the marker the GC retry
+// budget keys on. It mirrors exactly what the budget owner does, so a refactor
+// that drops the marker fails here rather than silently re-spending the budget.
+func pendingIntentOnlyError(t *testing.T, err error) bool {
+	t.Helper()
+	var marker interface{ RetryWithoutPenalty() bool }
+	if !errors.As(err, &marker) {
+		return false
+	}
+	return marker.RetryWithoutPenalty()
+}
 
 // startSleeper starts a process that outlives the test body and returns its
 // identity, so tests can exercise "still running" without racing the reaper.
@@ -269,7 +282,10 @@ func TestFreshShimIntentStillFailsClosed(t *testing.T) {
 
 	ev := (&local{shimIntentTTL: 10 * time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
 	require.NotEmpty(t, ev.unresolved)
-	require.Error(t, waitSandboxRuntimeGone(context.Background(), "sb-fresh-intent", ev))
+	err := waitSandboxRuntimeGone(context.Background(), "sb-fresh-intent", ev)
+	require.Error(t, err, "the refusal itself must not change: cleanup still fails closed")
+	assert.True(t, pendingIntentOnlyError(t, err),
+		"an intent still inside its TTL is the one refusal time alone fixes, so it must not spend the retry budget")
 }
 
 // An intent whose age could not be established must never expire: aging it out
@@ -280,7 +296,10 @@ func TestShimIntentWithoutTimestampNeverAgesOut(t *testing.T) {
 
 	ev := (&local{shimIntentTTL: time.Nanosecond}).collectSandboxRuntimeEvidence(context.Background(), sb)
 	require.NotEmpty(t, ev.unresolved)
-	require.Error(t, waitSandboxRuntimeGone(context.Background(), "sb-undated-intent", ev))
+	err := waitSandboxRuntimeGone(context.Background(), "sb-undated-intent", ev)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"an intent with no timestamp never ages out, so it is a real failure and must spend the budget")
 }
 
 // ttl 0 is the documented fail-closed setting: the intent never ages out.
@@ -290,7 +309,10 @@ func TestShimIntentTTLZeroDisablesAging(t *testing.T) {
 
 	ev := (&local{}).collectSandboxRuntimeEvidence(context.Background(), sb)
 	require.NotEmpty(t, ev.unresolved)
-	require.Error(t, waitSandboxRuntimeGone(context.Background(), "sb-no-ttl", ev))
+	err := waitSandboxRuntimeGone(context.Background(), "sb-no-ttl", ev)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"ttl 0 means the intent never ages out, so the failure is not self-healing")
 }
 
 // The TTL must never release resources a process is known to be holding, even
@@ -310,7 +332,10 @@ func TestStaleIntentIsNotReleasedWhileALiveHolderExists(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
-	require.Error(t, waitSandboxRuntimeGone(ctx, "sb-intent-live", ev))
+	err := waitSandboxRuntimeGone(ctx, "sb-intent-live", ev)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"a live holder is visible and does not clear with time, so the failure must spend the budget")
 }
 
 // A blocker that is not the intent blocks the TTL too, even when the intent
@@ -323,7 +348,39 @@ func TestStaleIntentIsNotReleasedWhileAnotherBlockerRemains(t *testing.T) {
 	ev := (&local{shimIntentTTL: time.Minute}).collectSandboxRuntimeEvidence(context.Background(), sb)
 	assert.Empty(t, ev.identities)
 	require.Len(t, ev.unresolved, 2, "the unprovable pid and the intent both block cleanup")
-	require.Error(t, waitSandboxRuntimeGone(context.Background(), "sb-intent-blocked", ev))
+	err := waitSandboxRuntimeGone(context.Background(), "sb-intent-blocked", ev)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"a blocker that is not the intent keeps the refusal a real failure")
+}
+
+// The classification is about what the evidence contains, not about the error
+// text: a bare "runtime state unresolved" with no intent behind it is a real
+// failure even though it reads the same to an operator.
+func TestPendingIntentMarkerRequiresIntentOnlyEvidence(t *testing.T) {
+	var unreadable sandboxRuntimeEvidence
+	unreadable.markUnresolved("pid %d recorded in %s is unreadable", 4242, "the sandbox endpoint record")
+	err := waitSandboxRuntimeGone(context.Background(), "sb-unreadable", unreadable)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"an unreadable pid never resolves on its own")
+
+	// The same message shape, but produced by the intent record: this one is
+	// the deferral case.
+	freshIntent := sandboxRuntimeEvidence{intentTTL: time.Minute}
+	freshIntent.markStaleIntent(time.Now(), "a shim was spawned but no pid was recorded")
+	err = waitSandboxRuntimeGone(context.Background(), "sb-intent-only", freshIntent)
+	require.Error(t, err)
+	assert.True(t, pendingIntentOnlyError(t, err))
+
+	// The same record once its TTL has run out is no longer self-healing, and
+	// must not be deferred: at that point the intent is exactly the stale
+	// bookkeeping an operator has to look at.
+	var expired sandboxRuntimeEvidence
+	expired.markStaleIntent(time.Now().Add(-time.Hour), "a shim was spawned but no pid was recorded")
+	err = waitSandboxRuntimeGone(context.Background(), "sb-intent-expired", expired)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err))
 }
 
 func TestUnresolvedMessagesPreserveOrderAndText(t *testing.T) {

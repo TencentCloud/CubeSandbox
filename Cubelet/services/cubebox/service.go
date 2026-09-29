@@ -287,6 +287,45 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 
 	return utils.InterfaceToString(tmpReq)
 }
+
+// gatePausedReplace refuses to start a resume that would replace a PAUSED
+// sandbox whose previous runtime may still be running.
+//
+// Everything the replacement does deletes the old sandbox's records, and that
+// row is the only place its shim identity survives: once it is gone nothing on
+// the host can match a still-running shim back to the sandbox, and the new
+// attempt is handed a tap/IP that is still in use.
+//
+// The check runs here, at the entry point, rather than in the create flow's
+// cubebox step where it used to live. By that step the flow has already
+// allocated network and volume for the new attempt, so the only way to fail
+// without stranding those allocations was an error code the workflow engine
+// answers with a failover — and failover destroys the sandbox with this same
+// ID, which on this path is the PAUSED sandbox the user asked to resume. A
+// transient gate failure therefore destroyed the very state it existed to
+// protect. Running before any allocation removes the trade-off: the caller
+// gets a retryable PreConditionFailed, and nothing is allocated or destroyed.
+func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil
+	}
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
+	if err != nil || sb == nil || sb.SandboxID != desired {
+		// No local record to replace: an ordinary create that happens to
+		// carry the annotation.
+		return nil
+	}
+	st := sb.GetStatus()
+	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
+		// lifecycle lock and its cleanup, and a live sandbox must not be
+		// touched; the create step rejects both as already exists.
+		return nil
+	}
+	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
+}
+
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 	rsp := &cubebox.RunCubeSandboxResponse{
 		RequestID: req.RequestID,
@@ -408,6 +447,15 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	rt.Namespace = ns
 	ctx = namespaces.WithNamespace(ctx, ns)
+	// The gate has to run before the create flow allocates anything, and it
+	// needs the same namespace the flow would have used to resolve the old
+	// sandbox's shim.
+	if err := s.gatePausedReplace(ctx, req); err != nil {
+		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		return rsp, nil
+	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	var createErr error
 	if constants.IsCubeRuntime(ctx) {

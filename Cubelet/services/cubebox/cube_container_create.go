@@ -148,40 +148,13 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
 			st := sb.GetStatus()
 			if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
-				// Everything below deletes the old sandbox's records, and this
-				// row is the only place its shim identity survives. If that
-				// shim is still running it still holds the tap fd, and once
-				// the row is gone nothing can match the process back to the
-				// sandbox — the replacement then gets an IP that is in use.
-				//
-				// Wait only, never kill: the target would be identified by
-				// bookkeeping alone. Refusing costs a retry; deleting the
-				// records while the shim lives costs an unreclaimable IP.
-				if waitErr := l.waitReplacedSandboxGone(ctx, sb); waitErr != nil {
-					// Not PreConditionFailed: that code makes the workflow
-					// engine return before the create-flow failover runs, and
-					// network/volume have already allocated for the new
-					// sandbox by this step. Use a code that lets the rollback
-					// happen. See plugins/workflow/engine.go.
-					//
-					// The cost of that choice is deliberate and worth stating:
-					// every create runs with Failover set, and failover
-					// destroys the sandbox with this same ID — which, on this
-					// path, is the PAUSED sandbox the user asked to resume. So
-					// a transient gate failure (the previous shim exiting just
-					// after replaceGateTimeout, say) does not merely fail the
-					// resume, it destroys the paused sandbox and its state, and
-					// a retry can no longer bring it back.
-					//
-					// Accepted, because the alternative is worse: returning
-					// PreConditionFailed would skip failover and strand the
-					// network and volume the new attempt already allocated,
-					// with nothing left to roll them back. Failing the resume
-					// loudly and letting the user re-create the sandbox is
-					// recoverable; a leaked IP is not.
-					return ret.Errorf(errorcode.ErrorCode_Conflict,
-						"cannot replace paused sandbox %s: %v", desired, waitErr)
-				}
+				// The wait that used to gate this replacement now runs in
+				// service.Create, before the create flow allocates anything.
+				// See gatePausedReplace in service.go. It is not repeated
+				// here: everything below deletes the old sandbox's records,
+				// and this row is the only place its shim identity survives,
+				// so the check has to happen before a process can be orphaned
+				// rather than halfway through the create.
 				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
 				if sb.UserMarkDeletedTime == nil {
 					now := time.Now()

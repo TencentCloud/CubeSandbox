@@ -6,10 +6,12 @@ package gc
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/docker/go-metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,6 +33,12 @@ type testGauge struct {
 	mu    sync.Mutex
 	value float64
 }
+
+// testGauge stands in for metrics.Gauge, so it has to keep satisfying that
+// interface. Asserting it here turns a signature drift in go-metrics into a
+// compile error in this package instead of a confusing failure wherever the
+// double is installed.
+var _ metrics.Gauge = (*testGauge)(nil)
 
 func (g *testGauge) Inc(values ...float64) {
 	g.mu.Lock()
@@ -414,4 +422,64 @@ func TestCleanupPanicCountsAsAFailure(t *testing.T) {
 	info, err := l.readSandBoxInfo("sb-panic")
 	require.NoError(t, err)
 	assert.True(t, info.quarantined())
+}
+
+// pendingIntentError stands in for the cleanup flow's "still inside the
+// shim-spawn intent TTL" refusal. Its only interesting property is the marker
+// method: the budget owner must not depend on the concrete type.
+type pendingIntentError struct{ msg string }
+
+func (e pendingIntentError) Error() string             { return e.msg }
+func (e pendingIntentError) RetryWithoutPenalty() bool { return true }
+
+// notSelfHealingError carries the marker but says the failure is permanent, so
+// the budget must still be spent on it.
+type notSelfHealingError struct{}
+
+func (notSelfHealingError) Error() string             { return "permanent" }
+func (notSelfHealingError) RetryWithoutPenalty() bool { return false }
+
+func TestRetryWithoutPenaltyClassification(t *testing.T) {
+	assert.False(t, retryWithoutPenalty(nil))
+	assert.False(t, retryWithoutPenalty(fmt.Errorf("pid 4242 is unreadable")))
+	assert.True(t, retryWithoutPenalty(pendingIntentError{msg: "runtime state unresolved"}))
+	assert.False(t, retryWithoutPenalty(notSelfHealingError{}))
+	// The real path wraps the refusal with %w, so the marker has to survive it.
+	assert.True(t, retryWithoutPenalty(fmt.Errorf("cleanup failed: %w", pendingIntentError{msg: "young"})))
+}
+
+// A sandbox that is merely too young to judge must not spend the retry budget:
+// the cleanup interval is far shorter than the shim-intent TTL, so counting
+// these deferrals quarantines sandboxes that were never stuck.
+func TestPendingIntentFailureIsDeferredNotCounted(t *testing.T) {
+	l := newTestGC(t)
+	l.cubeboxManger = stubCubeboxAPI{}
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-young", Namespace: "default"}))
+	gauge := installTestGauge(t, 0)
+
+	// max_cleanup_attempts=1 makes the difference between "counted" and
+	// "deferred" a single call.
+	s := &gcService{gc: l, config: &GCServicesConfig{maxCleanupAttempts: 1}}
+	cause := fmt.Errorf("shim process still Exists [%s]: %w", "sb-young",
+		pendingIntentError{msg: "runtime state unresolved: a shim was spawned but no pid was recorded"})
+	for i := 0; i < 5; i++ {
+		s.recordFailure(context.Background(), "sb-young", cause)
+	}
+
+	info, err := l.readSandBoxInfo("sb-young")
+	require.NoError(t, err)
+	assert.Equal(t, 0, info.Attempts, "a deferral must not consume the retry budget")
+	assert.False(t, info.quarantined(), "a sandbox that is too young to judge must not be quarantined")
+	assert.True(t, info.FirstFailedAt.IsZero(), "a deferral must not start the stuck-since clock")
+	assert.Equal(t, float64(0), gauge.Value(), "nothing was quarantined, so the alert gauge must not move")
+
+	// The first genuine failure afterwards starts the budget from scratch.
+	s.recordFailure(context.Background(), "sb-young",
+		fmt.Errorf("pid 4242 recorded in the sandbox endpoint record is unreadable"))
+
+	info, err = l.readSandBoxInfo("sb-young")
+	require.NoError(t, err)
+	assert.Equal(t, 1, info.Attempts, "a real failure must spend the budget")
+	assert.True(t, info.quarantined(), "with a budget of 1 the first real failure quarantines")
+	assert.Equal(t, float64(1), gauge.Value())
 }

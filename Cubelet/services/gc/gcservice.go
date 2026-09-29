@@ -6,6 +6,7 @@ package gc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -241,9 +242,40 @@ func seedQuarantinedGauge(l *local) error {
 	return nil
 }
 
+// retryWithoutPenalty reports whether a cleanup failure is expected to clear on
+// its own and must therefore not advance the quarantine budget.
+//
+// The predicate is structural on purpose: the producer (the cleanup flow's
+// "still inside the shim-spawn intent TTL" refusal) lives in another package
+// and marks the error with a RetryWithoutPenalty method. Asserting on that
+// method rather than on a concrete type keeps the dependency pointing the
+// other way — the budget owner does not import the flow it schedules.
+func retryWithoutPenalty(err error) bool {
+	var marker interface{ RetryWithoutPenalty() bool }
+	if !errors.As(err, &marker) {
+		return false
+	}
+	return marker.RetryWithoutPenalty()
+}
+
 // recordFailure accounts for one failed cleanup round and, once the retry
 // budget is spent, moves the sandbox into quarantine and says so loudly.
 func (l *gcService) recordFailure(ctx context.Context, sandboxID string, cause error) {
+	// A cleanup can fail for a reason that time alone fixes — a shim-spawn
+	// intent that has not yet reached its TTL. Counting that against the retry
+	// budget is what makes a ticker faster than the TTL quarantine sandboxes
+	// that are not actually stuck: the budget is spent in minutes while the
+	// intent only ages out after the (much longer) TTL. Defer instead of
+	// penalising, and leave the record untouched so the first genuine failure
+	// still starts the clock.
+	if retryWithoutPenalty(cause) {
+		cleanupAttempts.WithValues(outcomeDeferred).Inc()
+		CubeLog.WithContext(ctx).Warnf(
+			"sandbox %s cleanup deferred and not counted against the retry budget of %d: %v",
+			sandboxID, l.config.maxCleanupAttempts, cause)
+		return
+	}
+
 	info, justQuarantined, err := l.gc.recordCleanupFailure(sandboxID, l.config.maxCleanupAttempts)
 	if err != nil {
 		CubeLog.WithContext(ctx).Warnf("record cleanup failure for %s: %v", sandboxID, err)
