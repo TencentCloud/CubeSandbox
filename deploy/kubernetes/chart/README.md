@@ -295,16 +295,21 @@ TLS verification stays on — this adds trust, it does not disable it.
 - Changing `trustedCACerts.certs` rolls the Deployment automatically
   (`checksum/trusted-ca` annotation). With `existingConfigMap` the ConfigMap is
   yours: update it and restart the pods yourself. Keys must end in `.crt` and
-  contain PEM documents.
+  contain PEM documents; inline `certs` entries must carry line-anchored
+  `BEGIN`/`END CERTIFICATE` markers and are shape-checked at render time.
 - `certs` and `existingConfigMap` are mutually exclusive — setting both fails
   the render (the inline certs would be silently ignored).
 - Certificates are concatenated with newline separators, so PEM blocks must
   not rely on being adjacent; a missing trailing newline in an
   `existingConfigMap` value is handled. The guard script validates rendering
-  only — the merged bundle itself is produced at pod start.
+  only — the merged bundle itself is produced at pod start, and the content
+  quality of an `existingConfigMap` is operator-owned.
 - The TemplateCenter image must ship a system CA bundle
   (`ca-certificates`; Debian/Ubuntu and RHEL bundle layouts are probed) plus
   `/bin/sh` with `cp`/`ls`/`cat` for the merge-ca init container.
+- The feature is inert when `controlPlane.enabled=false` (no TemplateCenter
+  is deployed): the ConfigMap, init container and checksum are not rendered,
+  and the PEM shape check does not fire.
 - Publicly-trusted registries (Docker Hub, TCR, GCR, ...) need nothing here.
 
 ## CubeMaster configuration
