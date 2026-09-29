@@ -6,6 +6,7 @@ package gc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/trace"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -128,6 +130,9 @@ func (l *gcService) run(ctx context.Context) {
 
 							tmpCtx = CubeLog.WithRequestTrace(tmpCtx, gcRt)
 							tmpCtx = log.WithLogger(tmpCtx, log.NewWrapperLogEntry(log.AuditLogger.WithContext(tmpCtx)))
+							if !l.allowCleanup(tmpCtx, info.SandboxID) {
+								return
+							}
 							if err := l.engine.CleanUp(tmpCtx, opts); err != nil {
 								gcRt.RetCode = int64(errorcode.ErrorCode_RemoveContainerFailed)
 								CubeLog.WithContext(tmpCtx).Fatalf("Cubelet CleanUp fail:%v", err)
@@ -148,6 +153,31 @@ func (l *gcService) loadOrStore(sandboxID string) (bool, func()) {
 	return exist, func() {
 		l.concurrentLock.Delete(sandboxID)
 	}
+}
+
+// allowCleanup is the only gate in front of the cleanup flow.
+// A cubebox that is still stored and was not marked deleted keeps its disk
+// and metadata; its dirty-list entry is dropped. A missing row or a
+// user-delete mark proceeds. Any other lookup error waits for the next pass.
+func (l *gcService) allowCleanup(ctx context.Context, sandboxID string) bool {
+	if l == nil || l.gc == nil || l.gc.cubeboxManger == nil {
+		return true
+	}
+	cb, err := l.gc.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) {
+			return true
+		}
+		log.G(ctx).Warnf("cleanup lookup %s: %v", sandboxID, err)
+		return false
+	}
+	if cb == nil || cb.UserMarkDeletedTime != nil {
+		return true
+	}
+	if delErr := l.gc.deleteSandBoxInfo(sandboxID); delErr != nil {
+		log.G(ctx).Warnf("cleanup keep live sandbox %s: %v", sandboxID, delErr)
+	}
+	return false
 }
 
 func reportTrace(ctx context.Context, metrics []*workflow.Metric) {

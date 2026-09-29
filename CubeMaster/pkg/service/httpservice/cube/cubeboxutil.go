@@ -152,6 +152,9 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 	if !isContainerReqWhiteTag("Prestop") {
 		ctr.Prestop = templateCtr.Prestop
 	}
+	if ctr.LivenessProbe == nil {
+		ctr.LivenessProbe = templateCtr.LivenessProbe
+	}
 
 	return nil
 }
@@ -384,6 +387,12 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 
 	if reqInOut.InstanceType != cubebox.InstanceType_cubebox.String() {
 		return nil
+	}
+	// Reject Never + a caller-supplied liveness probe before a template can
+	// merge its own probe in. Validating after the merge would couple the
+	// check to the template; validating here keeps it about the request.
+	if err := sandbox.ValidateRestartLiveness(reqInOut); err != nil {
+		return err
 	}
 	constants.NormalizeAppSnapshotAnnotations(reqInOut.Annotations)
 

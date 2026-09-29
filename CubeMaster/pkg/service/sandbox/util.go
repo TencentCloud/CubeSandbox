@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeboximages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart"
 	"gorm.io/gorm"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -343,8 +344,104 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	if err = getExposedPorts(req, out); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
+	if err = applyRestartPolicy(req, out); err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
 
 	return out, nil
+}
+
+// applyRestartPolicy is the only place CubeMaster decides whether a restart
+// policy reaches Cubelet. The flag stays off until every node can honor it.
+func applyRestartPolicy(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
+	if req == nil || out == nil {
+		return nil
+	}
+	enabled := config.GetConfig() != nil && config.GetConfig().CubeletConf != nil && config.GetConfig().CubeletConf.EnableRestartPolicy
+	asked := strings.TrimSpace(req.RestartPolicy) != "" || req.RestartBackoff != nil || req.LivenessProbe != nil || containerHasLiveness(req)
+	if !enabled {
+		if asked {
+			return fmt.Errorf("restart policy is disabled on this CubeMaster")
+		}
+		return nil
+	}
+	if !asked {
+		return nil
+	}
+	policy, ok := normalizeRestartPolicy(req.RestartPolicy)
+	if !ok {
+		return fmt.Errorf("invalid restart policy %q", req.RestartPolicy)
+	}
+	out.RestartPolicy = policy
+	if req.RestartBackoff != nil {
+		out.RestartBackoff = req.RestartBackoff
+	}
+	for i, cnt := range req.Containers {
+		if cnt == nil || cnt.LivenessProbe == nil || i >= len(out.Containers) {
+			continue
+		}
+		out.Containers[i].LivenessProbe = cnt.LivenessProbe
+	}
+	if req.LivenessProbe != nil && len(out.Containers) > 0 && out.Containers[0].GetLivenessProbe() == nil {
+		out.Containers[0].LivenessProbe = req.LivenessProbe
+	}
+	if policy != "RESTART_POLICY_NEVER" {
+		clampMaxRestarts(out)
+	}
+	return nil
+}
+
+func clampMaxRestarts(out *cubebox.RunCubeSandboxRequest) {
+	if config.GetConfig() == nil || config.GetConfig().CubeletConf == nil {
+		return
+	}
+	capN := config.GetConfig().CubeletConf.MaxRestartsCap
+	if capN <= 0 {
+		return
+	}
+	if out.RestartBackoff == nil {
+		out.RestartBackoff = &cubebox.RestartBackoffConfig{}
+	}
+	if out.RestartBackoff.MaxRestarts <= 0 || out.RestartBackoff.MaxRestarts > capN {
+		out.RestartBackoff.MaxRestarts = capN
+	}
+}
+
+func containerHasLiveness(req *types.CreateCubeSandboxReq) bool {
+	for _, c := range req.Containers {
+		if c != nil && c.LivenessProbe != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateRestartLiveness rejects a Never policy combined with a liveness
+// probe. A probe under Never can never restart the sandbox, so it would only
+// kill it; refusing the request is clearer than silently ignoring the probe.
+// The caller decides the transport status; CubeMaster maps the error to
+// MasterParamsError (130400) and CubeAPI surfaces that as HTTP 400.
+//
+// The check looks only at the request: a probe a template merges in later is
+// not considered here, so a template with a probe does not force every caller
+// away from Never.
+func ValidateRestartLiveness(req *types.CreateCubeSandboxReq) error {
+	if req == nil {
+		return nil
+	}
+	policy, ok := normalizeRestartPolicy(req.RestartPolicy)
+	if !ok || policy != sandboxrestart.WireNever {
+		return nil
+	}
+	if req.LivenessProbe != nil || containerHasLiveness(req) {
+		return fmt.Errorf("liveness_probe requires restart policy OnFailure or Always")
+	}
+	return nil
+}
+
+// normalizeRestartPolicy accepts k8s names and the on-wire RESTART_POLICY_* values.
+func normalizeRestartPolicy(raw string) (string, bool) {
+	return sandboxrestart.Normalize(raw)
 }
 
 func mapCubeNetworkConfig(in *types.CubeNetworkConfig) *cubebox.CubeNetworkConfig {

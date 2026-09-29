@@ -483,6 +483,130 @@ pub struct NewSandbox {
     /// CoW backend (xfs | s3). Omitted = inherit from the template, else xfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+
+    /// Never, OnFailure or Always. Omitted means Never.
+    #[serde(
+        rename = "restartPolicy",
+        alias = "restart_policy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub restart_policy: Option<String>,
+
+    /// Optional override of the node restart backoff.
+    #[serde(
+        rename = "restartBackoff",
+        alias = "restart_backoff",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub restart_backoff: Option<RestartBackoff>,
+
+    /// Runtime health check applied to the sandbox. Times are seconds.
+    #[serde(
+        rename = "livenessProbe",
+        alias = "liveness_probe",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub liveness_probe: Option<LivenessProbe>,
+}
+
+/// Backoff between sandbox restarts. Zero fields use the node default.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct RestartBackoff {
+    #[serde(
+        rename = "initialIntervalSecond",
+        alias = "initial_interval_second",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub initial_interval_second: Option<i32>,
+    #[serde(
+        rename = "maxIntervalSecond",
+        alias = "max_interval_second",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_interval_second: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
+    /// 0 means unlimited.
+    #[serde(
+        rename = "maxRestarts",
+        alias = "max_restarts",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_restarts: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<f64>,
+    #[serde(
+        rename = "stableDurationSecond",
+        alias = "stable_duration_second",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stable_duration_second: Option<i32>,
+}
+
+/// One health check. Exactly one of tcp, http or ping.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct LivenessProbe {
+    #[serde(
+        rename = "initialDelaySecond",
+        alias = "initial_delay_second",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub initial_delay_second: Option<i32>,
+    #[serde(
+        rename = "periodSecond",
+        alias = "period_second",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub period_second: Option<i32>,
+    #[serde(
+        rename = "failureThreshold",
+        alias = "failure_threshold",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub failure_threshold: Option<i32>,
+    #[serde(
+        rename = "probeTimeoutSecond",
+        alias = "probe_timeout_second",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub probe_timeout_second: Option<i32>,
+    #[serde(
+        rename = "httpGet",
+        alias = "http_get",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub http_get: Option<LivenessHTTPGet>,
+    #[serde(
+        rename = "tcpSocket",
+        alias = "tcp_socket",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tcp_socket: Option<LivenessTCP>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct LivenessHTTPGet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub port: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct LivenessTCP {
+    pub port: i32,
 }
 
 // ─── Sandbox — create / connect response ──────────────────────────────────
@@ -518,6 +642,60 @@ pub struct Sandbox {
 
 // ─── Sandbox — list / detail responses ────────────────────────────────────
 
+/// Node-local restart bookkeeping. Separate from `state`, which stays the
+/// lifecycle value (`running`, `paused`, …).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RestartStatus {
+    #[serde(rename = "restartPolicy", alias = "restart_policy", default)]
+    pub restart_policy: String,
+    #[serde(rename = "restartState", alias = "restart_state", default)]
+    pub restart_state: String,
+    #[serde(rename = "restartCount", alias = "restart_count", default)]
+    pub restart_count: i32,
+    #[serde(
+        rename = "lastExitCode",
+        alias = "last_exit_code",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_exit_code: Option<i32>,
+    #[serde(
+        rename = "lastExitReason",
+        alias = "last_exit_reason",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_exit_reason: Option<String>,
+    #[serde(
+        rename = "lastRestartAt",
+        alias = "last_restart_at",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_restart_at: Option<DateTime<Utc>>,
+    #[serde(
+        rename = "lastSuccessfulRestartAt",
+        alias = "last_successful_restart_at",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_successful_restart_at: Option<DateTime<Utc>>,
+    #[serde(
+        rename = "lastFailedRestartAt",
+        alias = "last_failed_restart_at",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_failed_restart_at: Option<DateTime<Utc>>,
+    #[serde(
+        rename = "nextRestartAt",
+        alias = "next_restart_at",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_restart_at: Option<DateTime<Utc>>,
+}
+
 /// One entry in GET /sandboxes (RunningSandbox in OpenAPI spec).
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ListedSandbox {
@@ -552,6 +730,8 @@ pub struct ListedSandbox {
     pub envd_version: String,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    #[serde(rename = "restartStatus", skip_serializing_if = "Option::is_none")]
+    pub restart_status: Option<RestartStatus>,
 }
 
 /// Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
@@ -592,6 +772,8 @@ pub struct SandboxDetail {
     pub state: SandboxState,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    #[serde(rename = "restartStatus", skip_serializing_if = "Option::is_none")]
+    pub restart_status: Option<RestartStatus>,
 }
 
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────

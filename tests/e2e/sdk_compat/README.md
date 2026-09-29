@@ -387,6 +387,8 @@ Optional:
 - `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `s3`.
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`: seconds to wait for delete-while-bound `409`
   and post-unbind `204`. Defaults to `60`.
+- `SDK_E2E_RESTART_POLICY_WAIT`: seconds to wait for one restart-status
+  transition. Defaults to `300`.
 
 For self-hosted HTTPS sandbox endpoints, trust the local CA:
 
@@ -476,7 +478,8 @@ tests/e2e/sdk_compat/
 Current capability domains:
 
 - `cases/lifecycle/`: create/info smoke, connect, create options, pause/resume,
-  kill, and platform-managed auto-pause/auto-resume/auto-kill coverage.
+  kill, platform-managed auto-pause/auto-resume/auto-kill, and node-local
+  restart policy (`test_restart_policy.py`, CubeSandbox only).
 - `cases/commands/`: stdout, stderr, exit code, env, special characters, multiline output, missing command.
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
@@ -514,18 +517,22 @@ Capability markers:
 - `@pytest.mark.sandbox_create_options(...)`: pass SDK create-time options such as `network`, `env_vars`, or `lifecycle`.
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
 - `@pytest.mark.volume`: Volume Plugin cases. Run with `--run-e2e`; skipped when `SDK_E2E_VOLUME_PLUGIN=false`.
+- `@pytest.mark.restart_policy`: node-local restart policy cases. Run with `--run-e2e`; e2b skips via the `restart_policy` capability.
 - `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
 - Common capabilities include `lifecycle`, `commands`, `filesystem`,
   `filesystem_extended`, and `run_code`.
 - Optional capabilities include `code_interpreter`, `pause_resume`, `set_timeout`,
   `rollback_clone`, `network_allow_deny`, `network_public_access`,
   `network_mask_request_host`, `platform_lifecycle`, `host_mount`,
-  `volume_plugin`, and `auth_simple_key`.
+  `volume_plugin`, `auth_simple_key`, and `restart_policy`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 - `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that
   do not support host-directory mounts.
 - `volume_plugin` is available only to CubeSandbox Volume Plugin cases.
+- `restart_policy` is available only to CubeSandbox. The cluster needs
+  CubeMaster `enable_restart_policy`, a template that exposes envd on port
+  49983, and root sysrq in the guest. Run with `pytest --run-e2e -m restart_policy`.
 
 ## Cleanup
 

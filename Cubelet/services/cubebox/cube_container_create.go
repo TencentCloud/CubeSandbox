@@ -58,6 +58,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
@@ -141,32 +142,40 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 			return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 		}
 	}
+	// Restart keeps the previous row on purpose; Save overwrites it.
 	// Resume-from-pause reuses the same sandboxID. Only a fully PAUSED tombstone
 	// may be replaced (not PAUSING — pause may still own the lifecycle lock /
 	// cleanup). Reject PAUSING and other non-paused collisions as already exists.
-	if desired := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]); desired != "" {
-		if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
-			st := sb.GetStatus()
-			if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
-				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
-				if sb.UserMarkDeletedTime == nil {
-					now := time.Now()
-					sb.UserMarkDeletedTime = &now
-					_ = l.cubeboxManger.SyncByID(ctx, desired)
-				}
-				// Pause post-cleanup may leave containerd metadata; wipe before recreate.
-				_ = runc.Clean(ctx, desired)
-				for _, id := range pausedTombstoneContainerIDs(sb) {
-					if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
-						log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
+	if !workflow.ReuseFor(opts).CubeboxMeta {
+		if desired := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]); desired != "" {
+			if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
+				st := sb.GetStatus()
+				if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
+					// Resume replaces the paused row. Keep the restart bookkeeping
+					// so the next report is newer than the one CubeMaster already has.
+					if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
+						opts.RestartPrior = restartPriorFrom(sb)
 					}
+					// CDP user-delete hook requires UserMarkDeletedTime before store delete.
+					if sb.UserMarkDeletedTime == nil {
+						now := time.Now()
+						sb.UserMarkDeletedTime = &now
+						_ = l.cubeboxManger.SyncByID(ctx, desired)
+					}
+					// Pause post-cleanup may leave containerd metadata; wipe before recreate.
+					_ = runc.Clean(ctx, desired)
+					for _, id := range pausedTombstoneContainerIDs(sb) {
+						if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+							log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
+						}
+					}
+					if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
+						return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
+							"failed to replace paused sandbox %s: %v", desired, delErr)
+					}
+				} else {
+					return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 				}
-				if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
-					return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
-						"failed to replace paused sandbox %s: %v", desired, delErr)
-				}
-			} else {
-				return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 			}
 		}
 	}
@@ -245,6 +254,17 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		RuntimeHandler:    realReq.GetRuntimeHandler(),
 		ExposedPorts:      append([]int64(nil), realReq.GetExposedPorts()...),
 		CubeNetworkConfig: cloneCubeNetworkConfig(realReq.GetCubeNetworkConfig()),
+	}
+	if flowOpts.RestartPrior != nil && (flowOpts.IsRestart || flowOpts.RestartPrior.StatusSeq != 0 || flowOpts.RestartPrior.RestartCount != 0 || flowOpts.RestartPrior.LastExitReason != "" || len(flowOpts.RestartPrior.OriginalRequest) > 0) {
+		applyRestartBookkeeping(sandBox, flowOpts.RestartPrior, flowOpts.IsRestart)
+		if flowOpts.IsPauseResume() {
+			clearRestartCountForResume(sandBox)
+		}
+	} else if restartpolicy.KeepsRequest(realReq.GetRestartPolicy()) {
+		if err := sandBox.SetOriginalRequest(realReq); err != nil {
+			return err
+		}
+		sandBox.RestartState = restartpolicy.StateRunning
 	}
 	if sandBox.Metadata.Labels == nil {
 		sandBox.Metadata.Labels = make(map[string]string)
@@ -632,6 +652,14 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 func (l *local) generateContainerID(ctx context.Context, flowOpts *workflow.CreateContext, index int) (context.Context, string) {
 	var cid string
 	ctxTmp := context.WithValue(ctx, constants.KCubeIndexContext, strconv.Itoa(index))
+	if saved := flowOpts.SavedContainerIDs[index]; saved != "" {
+		if index == 0 {
+			ctxTmp = context.WithValue(ctxTmp, CubeLog.KeyFunctionType, constants.ContainerTypeSandBox)
+		} else {
+			ctxTmp = context.WithValue(ctxTmp, CubeLog.KeyFunctionType, constants.ContainerTypeContainer)
+		}
+		return ctxTmp, saved
+	}
 	if index == 0 {
 		ctxTmp = context.WithValue(ctxTmp, CubeLog.KeyFunctionType, constants.ContainerTypeSandBox)
 		cid = flowOpts.GetSandboxID()
@@ -904,6 +932,9 @@ func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox
 		if err != nil {
 
 			return nil, err
+		}
+		if containerdImage == nil {
+			return nil, ret.Err(errorcode.ErrorCode_ResolveLocalSpecFailed, "container image is empty")
 		}
 		cOpts = append(cOpts,
 			containerd.WithSnapshotter(sandBox.OciRuntime.Snapshotter),
@@ -1208,6 +1239,25 @@ func (l *local) prepareVolumePmemsMounts(ctx context.Context, flowOpts *workflow
 	return append([]oci.SpecOpts{}, oci.WithMounts(mounts)), nil
 }
 
+// writableLayerSubdir is the ext4 directory the guest mounts as the overlay upper.
+// A template memory snapshot already has that mount: the template sandbox id is
+// <templateID>_<index>, and restore reconnects the existing process instead of
+// calling setup_bundle, so guest writes land in that directory on the cloned
+// volume. A restart cold-boots and must mount the same directory. A sandbox
+// that did not come from a template keeps using its container id.
+func writableLayerSubdir(flowOpts *workflow.CreateContext, containerID, index string) string {
+	if flowOpts != nil && flowOpts.IsRestart && flowOpts.ReqInfo != nil {
+		templateID := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID])
+		if templateID != "" {
+			if strings.TrimSpace(index) == "" {
+				index = "0"
+			}
+			return "disk/" + templateID + "_" + index
+		}
+	}
+	return "disk/" + containerID
+}
+
 func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.CreateContext, containerReq *cubebox.ContainerConfig,
 ) (oci.SpecOpts, error) {
 	if containerReq.GetSecurityContext().GetReadonlyRootfs() {
@@ -1250,7 +1300,8 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 
 	annotations := make(map[string]string)
 	annotations[constants.AnnotationsRootfsWritableKey] = blkPath
-	annotations[constants.AnnotationsRootfsWlayerSubdir] = "disk/" + containerReq.GetId()
+	index, _ := ctx.Value(constants.KCubeIndexContext).(string)
+	annotations[constants.AnnotationsRootfsWlayerSubdir] = writableLayerSubdir(flowOpts, containerReq.GetId(), index)
 	log.G(ctx).Debugf("writable rootfs:%+v", blkPath)
 
 	return oci.WithAnnotations(annotations), nil

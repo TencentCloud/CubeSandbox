@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,36 @@ import (
 
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
+
+func TestOnlyDeadlineErrors(t *testing.T) {
+	assert.False(t, onlyDeadlineErrors(nil))
+	assert.True(t, onlyDeadlineErrors(context.DeadlineExceeded))
+	assert.True(t, onlyDeadlineErrors(fmt.Errorf("delete task: %w", context.DeadlineExceeded)))
+	assert.True(t, onlyDeadlineErrors(fmt.Errorf("stopTask: %s", context.Canceled.Error())))
+	assert.False(t, onlyDeadlineErrors(fmt.Errorf("delete task: connection refused")))
+}
+
+func TestShimWaitContextLeavesCallerDeadline(t *testing.T) {
+	old := shimWaitBound
+	shimWaitBound = 30 * time.Millisecond
+	t.Cleanup(func() { shimWaitBound = old })
+
+	parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	parentDeadline, ok := parent.Deadline()
+	require.True(t, ok)
+
+	waitCtx, waitCancel := shimWaitContext(parent)
+	defer waitCancel()
+	waitDeadline, ok := waitCtx.Deadline()
+	require.True(t, ok)
+	assert.True(t, waitDeadline.Before(parentDeadline))
+
+	<-waitCtx.Done()
+	assert.NoError(t, parent.Err())
+}
 
 func TestReadPidFile(t *testing.T) {
 	dir := t.TempDir()
@@ -73,12 +103,13 @@ func TestWaitSandboxRuntimeGoneBlocksUntilExit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, waitSandboxRuntimeGone(ctx, "sb-sleep", []int{pid}))
-	_ = cmd.Wait()
+	require.NoError(t, cmd.Wait())
 }
 
-func TestWaitSandboxRuntimeGoneTimesOut(t *testing.T) {
-	cmd := exec.Command("sleep", "5")
+func TestWaitSandboxRuntimeGoneKillsWhenDeadlineExceeded(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
 	require.NoError(t, cmd.Start())
+	pid := cmd.Process.Pid
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -86,8 +117,15 @@ func TestWaitSandboxRuntimeGoneTimesOut(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
-	err := waitSandboxRuntimeGone(ctx, "sb-timeout", []int{cmd.Process.Pid})
-	require.Error(t, err)
+	require.NoError(t, waitSandboxRuntimeGone(ctx, "sb-kill", []int{pid}))
+	require.False(t, utils.ProcessAlive(pid))
+}
+
+func TestReapShimProcessWithoutManager(t *testing.T) {
+	var missing *local
+	missing.reapShimProcess(context.Background(), "sb")
+	(&local{}).reapShimProcess(context.Background(), "")
+	(&local{}).reapShimProcess(context.Background(), "sb")
 }
 
 func TestSandboxShimLookupIDsDedups(t *testing.T) {

@@ -88,6 +88,11 @@ func (p *cubeSandboxStorePlugin) Init(ctx context.Context, opts *workflow.InitIn
 }
 
 func (p *cubeSandboxStorePlugin) Create(ctx context.Context, opts *workflow.CreateContext) error {
+	// Restart keeps the sandbox ID. The bucket is still there when destroy
+	// stopped at the deadline, and it is intentionally not removed below.
+	if opts != nil && workflow.ReuseFor(opts).CubeboxMeta {
+		return nil
+	}
 	_, err := p.client.SandboxStore().Create(ctx,
 		sandbox.Sandbox{
 			ID:        opts.SandboxID,
@@ -108,6 +113,9 @@ func (p *cubeSandboxStorePlugin) Create(ctx context.Context, opts *workflow.Crea
 }
 
 func (p *cubeSandboxStorePlugin) Destroy(ctx context.Context, opts *workflow.DestroyContext) error {
+	if workflow.RetainFor(opts).CubeboxMeta {
+		return nil
+	}
 	err := p.client.SandboxStore().Delete(ctx, opts.SandboxID)
 	if err != nil && !errdefs.IsNotFound(err) {
 		return err

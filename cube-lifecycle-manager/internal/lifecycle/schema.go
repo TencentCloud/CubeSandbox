@@ -98,12 +98,16 @@ func TimeoutSecondsPtr(v int) *int {
 	return &v
 }
 
-// State values carried by StatePayload.State. Only terminal states are
-// broadcast on the stream — transition markers ("pausing", "resuming")
-// stay private to the CLM's state-key coordination logic.
+// State values carried by StatePayload.State. Pause and resume broadcast
+// only their terminal states. Restart states tell the sweeper to leave a
+// sandbox alone while Cubelet is bringing it back. Transition markers
+// ("pausing", "resuming") stay private to the CLM.
 const (
-	StatePaused  = "paused"
-	StateRunning = "running"
+	StatePaused     = "paused"
+	StateRunning    = "running"
+	StateRestarting = "restarting"
+	StateBackOff    = "backoff"
+	StateGaveUp     = "gaveup"
 )
 
 // Actor values distinguishing who initiated the state change.

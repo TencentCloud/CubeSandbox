@@ -274,6 +274,16 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	// Probes would see a frozen guest as dead and restart it mid-pause.
+	// A failed pause resumes them; a successful pause leaves them stopped
+	// until Resume creates the sandbox again.
+	if s.restarts != nil && s.restarts.Suspend(req.SandboxID) {
+		defer func() {
+			if !ret.IsSuccessCode(rsp.Ret.RetCode) {
+				s.restarts.Resume(req.SandboxID)
+			}
+		}()
+	}
 
 	spec, err := s.getCubeboxSnapshotSpec(ctx, req.SandboxID)
 	if err != nil {

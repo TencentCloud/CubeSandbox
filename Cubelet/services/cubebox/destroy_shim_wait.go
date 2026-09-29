@@ -11,12 +11,33 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
+
+// runtimeReapWait bounds the wait after SIGKILL. The caller's context is
+// already canceled, so this cannot reuse it.
+const runtimeReapWait = 2 * time.Second
+
+// shimWaitBound is how long stopTask waits for the shim to exit after SIGKILL.
+// It is not the destroy deadline: a panicked guest must not burn that deadline
+// inside Wait and leave the later destroy steps unrun.
+var shimWaitBound = 5 * time.Second
+
+// shimWaitContext is a short child of parent. The child expiring does not
+// cancel parent, so Delete and the rest of the destroy flow still have time.
+func shimWaitContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, shimWaitBound)
+}
 
 const (
 	shimPidFileName = "shim.pid"
@@ -150,7 +171,9 @@ func readPidFile(path string) int {
 // waitSandboxRuntimeGone blocks until every captured runtime pid has exited.
 // Storage Destroy runs in the next workflow step and deletes S3 volumes;
 // doing that while the shim still holds the NVMe path produces host I/O
-// after delete_lvol.
+// after delete_lvol. When the caller gives up (context canceled) and a pid
+// is still alive, SIGKILL it and wait for it to disappear. A process that
+// already exited is left alone.
 func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, pids []int) error {
 	if len(pids) == 0 {
 		return nil
@@ -158,9 +181,11 @@ func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, pids []int) e
 	start := time.Now()
 	for _, pid := range pids {
 		if err := utils.WaitProcessGone(ctx, pid); err != nil {
-			log.G(ctx).Errorf("sandbox %s: runtime pid %d still alive after %s; refuse volume cleanup: %v",
-				sandboxID, pid, time.Since(start), err)
-			return err
+			if reapErr := reapRuntimePID(pid); reapErr != nil {
+				log.G(ctx).Errorf("sandbox %s: runtime pid %d still alive after %s; refuse volume cleanup: %v",
+					sandboxID, pid, time.Since(start), reapErr)
+				return reapErr
+			}
 		}
 	}
 	if waited := time.Since(start); waited > 20*time.Millisecond {
@@ -168,4 +193,59 @@ func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, pids []int) e
 			sandboxID, waited.Round(time.Millisecond), pids)
 	}
 	return nil
+}
+
+// reapShimProcess SIGKILLs the shim and vmm recorded in the bundle.
+// Call it only after the shim has failed to accept a bounded Kill. Process
+// exit starts containerd's disconnect callback; the following tasks.Delete
+// waits for that callback, including bundle removal.
+func (l *local) reapShimProcess(ctx context.Context, id string) {
+	if l == nil || l.shims == nil || id == "" {
+		return
+	}
+	lookup := ctx
+	if lookup == nil || lookup.Err() != nil {
+		ns := namespaces.Default
+		if lookup != nil {
+			if got, ok := namespaces.Namespace(lookup); ok && got != "" {
+				ns = got
+			}
+		}
+		lookup = namespaces.WithNamespace(context.Background(), ns)
+	}
+	shim, err := l.shims.Get(lookup, id)
+	if err != nil || shim == nil {
+		return
+	}
+	bundle := strings.TrimSpace(shim.Bundle())
+	if bundle == "" {
+		return
+	}
+	self := os.Getpid()
+	for _, name := range []string{shimPidFileName, vmmPidFileName} {
+		pid := readPidFile(filepath.Join(bundle, name))
+		if pid == self {
+			continue
+		}
+		if err := reapRuntimePID(pid); err != nil {
+			log.G(lookup).Warnf("reap runtime pid %d for %s: %v", pid, id, err)
+		}
+	}
+}
+
+// reapRuntimePID SIGKILLs a shim or vmm that outlived the destroy deadline.
+// Success means the pid no longer holds disks, including when it is already gone.
+func reapRuntimePID(pid int) error {
+	if pid <= 1 {
+		return nil
+	}
+	if !utils.ProcessAlive(pid) {
+		return nil
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && utils.ProcessAlive(pid) {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeReapWait)
+	defer cancel()
+	return utils.WaitProcessGone(ctx, pid)
 }

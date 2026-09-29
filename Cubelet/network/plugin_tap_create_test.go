@@ -175,6 +175,87 @@ func TestTapCreateWithNetworkRuntimeCallsEnsureNetwork(t *testing.T) {
 	}
 }
 
+func TestRestartRebuildsNetworkWhenMetadataMissing(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
+	store := networkstore.NewStore(nil)
+	store.Add(networkstore.NetworkAllocation{
+		SandboxID:          "sandbox-1",
+		NetworkType:        cubebox.NetworkType_tap.String(),
+		PersistentMetadata: []byte(`{"sandbox_ip":"192.168.0.40"}`),
+	})
+	manager := &delegateNetworkManager{
+		tapPlugin: &local{
+			Config: &Config{
+				MVMMacAddr:  "20:90:6f:fc:fc:fc",
+				MvmMtu:      1500,
+				MvmGwDestIP: "169.254.68.5",
+				MVMInnerIP:  "169.254.68.6",
+				MvmMask:     30,
+			},
+			networkRuntime: fakeClient,
+		},
+		allocationStore: store,
+	}
+	opts := &workflow.CreateContext{
+		IsRestart:        true,
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-1"},
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			RequestID:    "restart-1",
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			NetworkType:  cubebox.NetworkType_tap.String(),
+		},
+	}
+
+	if err := manager.Create(context.Background(), opts); err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if !fakeClient.ensureCalled {
+		t.Fatal("EnsureNetwork was not called to rebuild shim metadata")
+	}
+	shimInfo, ok := opts.NetworkInfo.(*networktypes.ShimNetReq)
+	if !ok || shimInfo == nil || len(shimInfo.Interfaces) != 1 {
+		t.Fatalf("NetworkInfo not rebuilt: %+v", opts.NetworkInfo)
+	}
+	stored, err := store.Get("sandbox-1")
+	if err != nil || stored.Metadata == nil {
+		t.Fatalf("allocation metadata not restored: %+v %v", stored, err)
+	}
+}
+
+func TestRestartKeepsStoredNetworkMetadata(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
+	store := networkstore.NewStore(nil)
+	storedReq := &networktypes.ShimNetReq{
+		Interfaces: []*networktypes.Interface{{Name: "kept"}},
+	}
+	store.Add(networkstore.NetworkAllocation{
+		SandboxID:   "sandbox-1",
+		NetworkType: cubebox.NetworkType_tap.String(),
+		Metadata:    storedReq,
+	})
+	manager := &delegateNetworkManager{
+		tapPlugin: &local{
+			Config:         &Config{},
+			networkRuntime: fakeClient,
+		},
+		allocationStore: store,
+	}
+	opts := &workflow.CreateContext{
+		IsRestart:        true,
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-1"},
+		ReqInfo:          &cubebox.RunCubeSandboxRequest{NetworkType: cubebox.NetworkType_tap.String()},
+	}
+	if err := manager.Create(context.Background(), opts); err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if fakeClient.ensureCalled {
+		t.Fatal("EnsureNetwork ran even though allocation metadata was present")
+	}
+	if opts.NetworkInfo != storedReq {
+		t.Fatalf("NetworkInfo = %+v, want stored request", opts.NetworkInfo)
+	}
+}
+
 func TestTapCreateReleasesRuntimeAfterCommittedEnsureError(t *testing.T) {
 	fakeClient := &fakeNetworkRuntime{ensureErr: errors.Join(
 		networkruntime.ErrEnsureNetworkCommitted,

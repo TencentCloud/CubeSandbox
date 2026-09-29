@@ -141,12 +141,22 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 
 func (m Metadata) DeepCopy() Metadata {
 	copied := Metadata{
-		ID:           m.ID,
-		Name:         m.Name,
-		SandboxID:    m.SandboxID,
-		Namespace:    m.Namespace,
-		CreatedAt:    m.CreatedAt,
-		InstanceType: m.InstanceType,
+		ID:                      m.ID,
+		Name:                    m.Name,
+		SandboxID:               m.SandboxID,
+		Namespace:               m.Namespace,
+		CreatedAt:               m.CreatedAt,
+		InstanceType:            m.InstanceType,
+		RestartCount:            m.RestartCount,
+		LastRestartAt:           m.LastRestartAt,
+		LastSuccessfulRestartAt: m.LastSuccessfulRestartAt,
+		LastFailedRestartAt:     m.LastFailedRestartAt,
+		LastExitCode:            m.LastExitCode,
+		LastExitReason:          m.LastExitReason,
+		RestartState:            m.RestartState,
+		NextRestartAt:           m.NextRestartAt,
+		StatusSeq:               m.StatusSeq,
+		OriginalRequest:         append([]byte(nil), m.OriginalRequest...),
 	}
 
 	if m.Annotations != nil {

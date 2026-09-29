@@ -1207,6 +1207,33 @@ func TestGenContainerLabels(t *testing.T) {
 	}
 }
 
+func TestWritableLayerSubdirKeepsTemplateUpperOnRestart(t *testing.T) {
+	tpl := "tpl-cec4d42f71324052936a586e"
+	restart := &workflow.CreateContext{
+		IsRestart: true,
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+			},
+		},
+	}
+	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", "0"))
+	assert.Equal(t, "disk/"+tpl+"_1", writableLayerSubdir(restart, "sandbox-id", "1"))
+	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", ""))
+
+	plain := &workflow.CreateContext{IsRestart: true, ReqInfo: &cubebox.RunCubeSandboxRequest{}}
+	assert.Equal(t, "disk/sandbox-id", writableLayerSubdir(plain, "sandbox-id", "0"))
+
+	firstBoot := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+			},
+		},
+	}
+	assert.Equal(t, "disk/sandbox-id", writableLayerSubdir(firstBoot, "sandbox-id", "0"))
+}
+
 func TestTransformError(t *testing.T) {
 	tests := []struct {
 		name        string

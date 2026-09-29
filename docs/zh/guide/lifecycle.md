@@ -287,6 +287,22 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 - 此项为**节点级配置**，不同节点可以设置不同的比值，灵活应对异构硬件或分池部署的需求。
 - 当节点上一大批沙箱同时被唤醒、单节点无法承载时，控制面会返回 409 并给出具体配额数字。对使用 S3 后端的沙箱，调度器可以回退到其它兼容节点恢复——跨机条件与调度规则见[跨机快照](./cross-node-snapshot.md)。
 
+## 进程退出后的重启
+
+创建沙箱时可以带 `restartPolicy`。语义和 Kubernetes 的 `restartPolicy` 一样，作用对象是整台沙箱（一台 microVM），不是里面的某个进程。
+
+| 取值 | 行为 |
+|------|------|
+| `Never`（默认） | 退出后不重启 |
+| `OnFailure` | 非 0 退出、OOM、沙箱崩溃，或存活探针失败时重启 |
+| `Always` | 任何退出都重启，包括正常退出 |
+
+重启会保留磁盘、网络和沙箱 ID，再冷启动一次。内存不保留。连续失败从 10 秒开始退避，每次加倍，最长 300 秒。达到 `maxRestarts` 后不再重试；沙箱仍占着节点上的资源，直到空闲超时或被显式销毁。
+
+存活探针写在创建请求里。没有探针、且镜像带 envd（暴露 `49983`）时，节点会默认请求 `GET /health`。没有 envd 的镜像不会被探测，避免误重启。`Never` 配存活探针会被拒绝，返回 HTTP 400：探测永远不可能触发重启，只会把沙箱杀掉。
+
+查询沙箱时，`restartStatus` 是单独的对象，不改变 `state`（仍然是 `running` / `paused` 这些生命周期状态）。`restartPolicy` 的取值是 `Never`、`OnFailure`、`Always`。`restartState` 可以是 `Running`、`Restarting`、`BackOff` 或 `GaveUp`。处于 `Restarting` 或 `BackOff` 时不会自动暂停。空闲超时仍会销毁这台沙箱，重启也不会把空闲计时清零。
+
 ## 下一步
 
 - [Agent 平台 freeze / resume](./agent-platform-freeze.md) — 手动 pause 保留、envd 前先 connect、Volume 与 snapshot 区别。

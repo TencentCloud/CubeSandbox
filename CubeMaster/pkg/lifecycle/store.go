@@ -95,14 +95,16 @@ func (s *Store) PublishDelete(ctx context.Context, sandboxID string) {
 // keys, and stuffing state into the meta snapshot would blur the "meta is
 // stable" invariant that consumers rely on for restart bootstrap.
 //
-// Only the two terminal states are broadcast — transition markers
-// ("pausing", "resuming") stay private to the CLM. Invalid values are
-// warned and dropped rather than propagated.
+// Pause and resume broadcast only their terminal states. Restart states
+// are included so the CLM sweeper can skip a sandbox that Cubelet is
+// bringing back. Transition markers stay private. Anything else is dropped.
 func (s *Store) PublishState(ctx context.Context, sandboxID, state, source string) {
 	if s == nil || !s.enabled.Load() || s.doer == nil || sandboxID == "" {
 		return
 	}
-	if state != StatePaused && state != StateRunning {
+	switch state {
+	case StatePaused, StateRunning, StateRestarting, StateBackOff, StateGaveUp:
+	default:
 		log.G(ctx).Warnf("lifecycle: PublishState sandbox=%s invalid state %q; dropped",
 			sandboxID, state)
 		return

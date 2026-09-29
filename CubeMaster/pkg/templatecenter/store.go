@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxstatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
@@ -355,6 +356,9 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 			if initErr = sandboxspec.Init(store.db); initErr != nil {
 				return
 			}
+			if initErr = sandboxstatus.Init(store.db); initErr != nil {
+				return
+			}
 			configureSnapshotRuntimeRefHooks()
 			configureSandboxSpecHooks()
 		}
@@ -398,6 +402,10 @@ func configureSnapshotRuntimeRefHooks() {
 		}
 		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
 		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
+		// Status is best-effort. A missing row must not fail destroy.
+		if errDeletingStatus := sandboxstatus.SoftDelete(ctx, sandboxID); errDeletingStatus != nil {
+			log.G(ctx).Warnf("sandbox status soft delete %s: %v", sandboxID, errDeletingStatus)
+		}
 		if ref != nil && strings.TrimSpace(ref.SnapshotID) != "" {
 			maybeFinalizeTombstone(ctx, ref.SnapshotID)
 		}
@@ -2219,13 +2227,27 @@ func applyTemplateRequest(templateReq, reqInOut *sandboxtypes.CreateCubeSandboxR
 	}
 	reqInOut.Volumes = append(reqInOut.Volumes, templateReq.Volumes...)
 	for i, templateCtr := range templateReq.Containers {
+		if templateCtr == nil {
+			continue
+		}
 		if len(reqInOut.Containers) <= i {
 			reqInOut.Containers = append(reqInOut.Containers, templateCtr)
 			continue
 		}
 		if reqInOut.Containers[i] == nil {
 			reqInOut.Containers[i] = templateCtr
+			continue
 		}
+		ctr := reqInOut.Containers[i]
+		if ctr.LivenessProbe == nil {
+			ctr.LivenessProbe = templateCtr.LivenessProbe
+		}
+	}
+	if reqInOut.RestartPolicy == "" {
+		reqInOut.RestartPolicy = templateReq.RestartPolicy
+	}
+	if reqInOut.RestartBackoff == nil {
+		reqInOut.RestartBackoff = templateReq.RestartBackoff
 	}
 	if reqInOut.NetworkType == "" {
 		reqInOut.NetworkType = templateReq.NetworkType
