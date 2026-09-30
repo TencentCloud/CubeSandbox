@@ -893,7 +893,9 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
-		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
+		cli.IntFlag{Name: "probe", Usage: "enable readiness probe on the specified port (e.g. --probe 9000); sets period_ms=500"},
+		cli.StringFlag{Name: "probe-type", Value: "http", Usage: "readiness probe transport for --probe: http (GET probe-path) or tcp (raw connect, e.g. adbd :5555)"},
+		cli.IntFlag{Name: "probe-timeout", Value: 30000, Usage: "total readiness probe window in ms (default 30000); raise for slow-booting guests like full-OS containers"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
@@ -1643,22 +1645,36 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		}
 	}
 	if probePort > 0 {
-		probePath := c.String("probe-path")
-		if probePath == "" {
-			probePath = "/health"
+		probeTimeoutMs := c.Int("probe-timeout")
+		if probeTimeoutMs < 500 {
+			probeTimeoutMs = 30000
 		}
-		host := ""
-		overrides.Probe = &types.Probe{
-			ProbeHandler: &types.ProbeHandler{
+		var handler *types.ProbeHandler
+		if c.String("probe-type") == "tcp" {
+			handler = &types.ProbeHandler{
+				TCPSocket: &types.TCPSocketAction{
+					Port: int32(probePort),
+				},
+			}
+		} else {
+			probePath := c.String("probe-path")
+			if probePath == "" {
+				probePath = "/health"
+			}
+			host := ""
+			handler = &types.ProbeHandler{
 				HttpGet: &types.HTTPGetAction{
 					Path: &probePath,
 					Port: int32(probePort),
 					Host: &host,
 				},
-			},
-			TimeoutMs:        30000,
+			}
+		}
+		overrides.Probe = &types.Probe{
+			ProbeHandler:     handler,
+			TimeoutMs:        int32(probeTimeoutMs),
 			PeriodMs:         500,
-			FailureThreshold: 60,
+			FailureThreshold: int32(probeTimeoutMs / 500),
 			SuccessThreshold: 1,
 		}
 	}
