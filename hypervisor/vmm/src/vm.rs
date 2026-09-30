@@ -2484,6 +2484,12 @@ impl Vm {
         self.memory_manager.lock().unwrap().snapshot_data()
     }
 
+    /// Reference the pause path holds past the Vm drop, deferring the
+    /// guest memory unmap and the KVM fd close past the pause reply.
+    pub(crate) fn memory_manager(&self) -> Arc<Mutex<MemoryManager>> {
+        self.memory_manager.clone()
+    }
+
     #[cfg(feature = "guest_debug")]
     pub fn debug_request(
         &mut self,
