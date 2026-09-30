@@ -4,7 +4,7 @@ date: 2026-08-28
 author: Cube Sandbox Team
 description: "In v0.6.0, we brought CubeSandbox into Kubernetes and delivered the E2B-compatible Volume framework. v0.7.0 addresses the two things production users care about most: letting sandboxes flow across machines, and letting upgrades no longer break existing assets."
 featured: true
-weight: 1
+weight: 2
 ---
 
 # CubeSandbox v0.7.0: Cross-Machine Sandbox Migration and Smooth Cluster Evolution

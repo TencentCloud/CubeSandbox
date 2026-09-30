@@ -4,7 +4,7 @@ date: 2026-08-28
 author: Cube Sandbox 团队
 description: "在 v0.6.0 中，我们把 CubeSandbox 送进了 Kubernetes，也交付了兼容 E2B 的 Volume 框架。v0.7.0 解决了生产用户最在意的两个问题：沙箱跨机器流动，以及升级不再打断已有资产。"
 featured: true
-weight: 1
+weight: 2
 ---
 
 # CubeSandbox v0.7.0 发布：沙箱跨机流动，集群平滑演进
