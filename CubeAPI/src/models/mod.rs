@@ -485,6 +485,42 @@ pub struct NewSandbox {
     pub backend: Option<String>,
 }
 
+// ─── Sandbox — create / connect v2 request ────────────────────────────────
+
+/// Request body for POST /v2/sandboxes (E2B SDK >= 2.51.0).
+///
+/// Reuses the v1 [`NewSandbox`] shape and adds the v2-only
+/// `autoPauseMemory` flag. CubeSandbox always keeps the full memory snapshot
+/// on pause, so `autoPauseMemory=false` (filesystem-only snapshot) is rejected
+/// by the handler rather than silently ignored.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct NewSandboxV2 {
+    #[serde(flatten)]
+    pub base: NewSandbox,
+
+    /// Keep the full memory snapshot when auto-pausing. Defaults to true.
+    /// `false` (filesystem-only, cold-boot on resume) is not supported and is
+    /// rejected by the handler.
+    #[serde(rename = "autoPauseMemory", alias = "auto_pause_memory", default)]
+    pub auto_pause_memory: Option<bool>,
+}
+
+/// Request body for POST /v2/sandboxes/{id}/connect (E2B SDK >= 2.51.0).
+///
+/// Reuses the v1 [`ConnectSandbox`] shape and adds the v2-only `memory` flag.
+/// CubeSandbox always resumes from the memory snapshot, so `memory=false`
+/// (cold-boot from disk) is rejected by the handler.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConnectSandboxV2 {
+    #[serde(flatten)]
+    pub base: ConnectSandbox,
+
+    /// Resume from the memory snapshot. Defaults to true. `false` (cold-boot
+    /// from disk) is not supported and is rejected by the handler.
+    #[serde(default)]
+    pub memory: Option<bool>,
+}
+
 // ─── Sandbox — create / connect response ──────────────────────────────────
 
 /// Response for POST /sandboxes and POST /sandboxes/{id}/connect.
@@ -920,8 +956,9 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectSandbox, CreateTemplateRequest, NewSandbox, ResumedSandbox, SandboxNetworkConfig,
-        SetTimeoutRequest, TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
+        ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, NewSandbox, NewSandboxV2,
+        ResumedSandbox, SandboxNetworkConfig, SetTimeoutRequest, TemplateAliasLookupResponse,
+        UpdateSandboxNetworkRequest,
     };
     use validator::Validate;
 
@@ -1226,6 +1263,95 @@ mod tests {
         let rule = &req.network.expect("network").rules.expect("rules")[0];
         assert_eq!(rule.r#match.host.as_deref(), Some("api.example.com"));
         assert_eq!(rule.action.inject.as_ref().unwrap()[0].header, "X-Header");
+    }
+
+    #[test]
+    fn new_sandbox_v2_flatten_preserves_network_rules_and_aliases() {
+        // flatten must preserve v1's custom network.rules deserialization and envs alias.
+        let req: NewSandboxV2 = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl-1",
+            "autoPauseMemory": true,
+            "envs": {"CUBE_TEST_ENV": "value"},
+            "metadata": {"owner": "alice"},
+            "volumeMounts": [{"name": "dataset", "path": "/data", "readOnly": true}],
+            "network": {
+                "allowOut": ["api.example.com"],
+                "rules": {
+                    "api.example.com": [{
+                        "transform": {"headers": {"X-Header": "Content"}}
+                    }]
+                }
+            }
+        }))
+        .expect("v2 sandbox request should deserialize through flatten");
+
+        assert_eq!(req.auto_pause_memory, Some(true));
+        let base = req.base;
+        assert_eq!(
+            base.env_vars
+                .as_ref()
+                .and_then(|e| e.get("CUBE_TEST_ENV"))
+                .map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            base.metadata
+                .as_ref()
+                .and_then(|m| m.get("owner"))
+                .map(String::as_str),
+            Some("alice")
+        );
+        assert!(base.volume_mounts.as_ref().unwrap()[0].read_only);
+
+        let rule = &base.network.as_ref().unwrap().rules.as_ref().unwrap()[0];
+        assert_eq!(rule.name, "e2b-transform-api.example.com");
+        assert_eq!(rule.r#match.host.as_deref(), Some("api.example.com"));
+        assert_eq!(rule.action.inject.as_ref().unwrap()[0].header, "X-Header");
+    }
+
+    #[test]
+    fn new_sandbox_v2_accepts_snake_case_auto_pause_memory() {
+        // snake_case alias must resolve too, so a hand-rolled client cannot
+        // silently bypass the false rejection.
+        let req: NewSandboxV2 = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl-1",
+            "auto_pause_memory": false
+        }))
+        .expect("snake_case auto_pause_memory should deserialize");
+
+        assert_eq!(req.auto_pause_memory, Some(false));
+    }
+
+    #[test]
+    fn new_sandbox_v2_flatten_preserves_cubesandbox_rule_array() {
+        // CubeSandbox's ordered-array rules shape must also survive flatten.
+        let req: NewSandboxV2 = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl-1",
+            "network": {
+                "rules": [{
+                    "name": "n",
+                    "match": {"host": "h", "port": 443, "scheme": "https"},
+                    "action": {"allow": false}
+                }]
+            }
+        }))
+        .expect("v2 sandbox request with array rules should deserialize");
+
+        let rule = &req.base.network.as_ref().unwrap().rules.as_ref().unwrap()[0];
+        assert_eq!(rule.name, "n");
+        assert!(!rule.action.allow);
+    }
+
+    #[test]
+    fn connect_sandbox_v2_flatten_preserves_timeout_and_memory() {
+        let req: ConnectSandboxV2 = serde_json::from_value(serde_json::json!({
+            "timeout": 300,
+            "memory": true
+        }))
+        .expect("v2 connect request should deserialize through flatten");
+
+        assert_eq!(req.memory, Some(true));
+        assert_eq!(req.base.timeout, Some(300));
     }
 
     #[test]
