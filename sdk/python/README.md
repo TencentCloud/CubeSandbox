@@ -212,6 +212,7 @@ with Sandbox.create() as sb:
     # Read & write
     sb.files.write("/tmp/hello.txt", "Hello, world!")
     print(sb.files.read("/tmp/hello.txt"))  # "Hello, world!"
+    png = sb.files.read("/tmp/chart.png", format="bytes")  # bytearray
 
     # Batch write
     sb.files.write_files([
@@ -354,7 +355,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `sb.files.read(path)` | Download file content via `GET /files` |
+| `sb.files.read(path, *, format=...)` | Download via `GET /files`; `format` is `text` (default) / `bytes` / `stream` (e2b-compatible) |
 | `sb.files.write(path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `sb.files.write_files(files)` | Batch write `[(path, data), ...]`, stops on first error |
 | `sb.files.list(path)` | List directory entries → `list[dict]` |
