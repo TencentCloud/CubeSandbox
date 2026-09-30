@@ -64,13 +64,17 @@ def make_config(**kwargs) -> Config:
     return Config(**defaults)
 
 
-def mock_response(body=None, status: int = 200):
+def mock_response(body=None, status: int = 200, headers: dict | None = None):
     """Build a duck-typed requests.Response for control-plane SDK calls."""
     response = MagicMock()
     response.ok = 200 <= status < 400
     response.status_code = status
     response.text = json.dumps(body) if body is not None else ""
     response.json.return_value = body if body is not None else {}
+    # A real mapping, not a MagicMock: `headers.get("x-next-token", "")` has to
+    # be able to answer "absent", or any caller that follows a pagination
+    # cursor loops forever against a mock.
+    response.headers = headers if headers is not None else {}
     return response
 
 
@@ -2848,3 +2852,59 @@ class TestExports:
     def test_command_result_in_all(self):
         import cubesandbox
         assert "CommandResult" in cubesandbox.__all__
+
+
+# ── list_v2 pagination ────────────────────────────────────────────────────────
+
+class TestListV2Pagination:
+    """`list_v2` promises *all* sandboxes, so it must follow the cursor.
+
+    `GET /v2/sandboxes` answers at most `limit` (100 by default) per page and
+    hands the next position back in `x-next-token`. Dropping that header — which
+    is what the method used to do — silently truncates the list for any caller
+    with more sandboxes than one page, while the docstring still says "all".
+    """
+
+    @staticmethod
+    def _page(items, next_token=None):
+        headers = {} if next_token is None else {"x-next-token": next_token}
+        return mock_response(items, headers=headers)
+
+    def test_follows_the_cursor_until_it_is_exhausted(self):
+        # 250 sandboxes over a 100-per-page endpoint: three pages.
+        first = [{"sandboxID": f"sb-{i:03d}"} for i in range(100)]
+        second = [{"sandboxID": f"sb-{i:03d}"} for i in range(100, 200)]
+        third = [{"sandboxID": f"sb-{i:03d}"} for i in range(200, 250)]
+
+        with patch("requests.Session.get") as get_call:
+            get_call.side_effect = [
+                self._page(first, next_token="c100"),
+                self._page(second, next_token="c200"),
+                # No header on the last page: that is the end of the list.
+                self._page(third),
+            ]
+            result = Sandbox.list_v2(config=make_config())
+
+        assert len(result) == 250, (
+            "list_v2 must follow x-next-token, not return only the first page"
+        )
+        assert [item["sandboxID"] for item in result] == [
+            f"sb-{i:03d}" for i in range(250)
+        ]
+        # The cursor is sent back as the query parameter the endpoint declares.
+        # `requests` receives it as `params=`, so assert on the kwargs.
+        sent = [call.kwargs.get("params") for call in get_call.call_args_list]
+        assert get_call.call_args_list[0].args[0].endswith("/v2/sandboxes")
+        assert not sent[0], "page one must not carry a cursor"
+        assert sent[1] == {"nextToken": "c100"}
+        assert sent[2] == {"nextToken": "c200"}
+
+    def test_single_page_is_returned_unchanged(self):
+        only = [{"sandboxID": "sb-1"}, {"sandboxID": "sb-2"}]
+
+        with patch("requests.Session.get") as get_call:
+            get_call.return_value = self._page(only)
+            result = Sandbox.list_v2(config=make_config())
+
+        assert result == only
+        assert get_call.call_count == 1, "a cursor-less page must not trigger a refetch"

@@ -369,6 +369,12 @@ class Sandbox:
 
         Supports state / metadata filtering on the server side.
 
+        The endpoint answers one page at a time (``limit``, 100 by default) and
+        reports the next page's position in the ``x-next-token`` response
+        header. This method follows that cursor until it is absent, so the
+        returned list is every matching sandbox rather than only the first
+        page.
+
         Args:
             config: SDK config. Uses default (env-based) config if omitted.
 
@@ -377,9 +383,23 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/v2/sandboxes", headers=_auth_headers(cfg))
-        _check_response(resp)
-        return resp.json()
+        collected: list[dict] = []
+        # `nextToken` is the query parameter the endpoint declares; the empty
+        # first request is what fetches page one.
+        params: dict[str, str] = {}
+        while True:
+            resp = s.get(
+                f"{cfg.api_url}/v2/sandboxes",
+                headers=_auth_headers(cfg),
+                params=params,
+            )
+            _check_response(resp)
+            collected.extend(resp.json())
+            # Absent (or blank) header means the last page has been returned.
+            next_token = resp.headers.get("x-next-token", "")
+            if not next_token:
+                return collected
+            params = {"nextToken": next_token}
 
     @classmethod
     def health(cls, config: Config | None = None) -> dict:
