@@ -20,6 +20,7 @@ import (
 type fakeCubeboxAPI struct {
 	cb            *cubeboxstore.CubeBox
 	getCalls      int
+	saveCalls     int
 	getHook       func(call int)
 	syncIDs       []string
 	syncSnapshots []fakeCubeboxSyncSnapshot
@@ -67,6 +68,7 @@ func (f *fakeCubeboxAPI) List() []*cubeboxstore.CubeBox {
 }
 
 func (f *fakeCubeboxAPI) Save(ctx context.Context, info *cubeboxstore.CubeBox, opts ...cubes.UpdateCubeboxOpt) error {
+	f.saveCalls++
 	f.cb = info
 	return nil
 }

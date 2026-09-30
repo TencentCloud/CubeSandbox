@@ -1,0 +1,485 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package gc
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/docker/go-metrics"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+)
+
+func newTestGC(t *testing.T) *local {
+	t.Helper()
+	db, err := utils.NewCubeStoreExt(t.TempDir(), "meta.db", 2, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return &local{db: db}
+}
+
+type testGauge struct {
+	mu    sync.Mutex
+	value float64
+}
+
+// testGauge stands in for metrics.Gauge, so it has to keep satisfying that
+// interface. Asserting it here turns a signature drift in go-metrics into a
+// compile error in this package instead of a confusing failure wherever the
+// double is installed.
+var _ metrics.Gauge = (*testGauge)(nil)
+
+func (g *testGauge) Inc(values ...float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(values) == 0 {
+		g.value++
+		return
+	}
+	for _, value := range values {
+		g.value += value
+	}
+}
+
+func (g *testGauge) Dec(values ...float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(values) == 0 {
+		g.value--
+		return
+	}
+	for _, value := range values {
+		g.value -= value
+	}
+}
+
+// Add has no caller in this test file today, but is required to satisfy
+// metrics.Gauge, which testGauge stands in for.
+func (g *testGauge) Add(value float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value += value
+}
+
+func (g *testGauge) Set(value float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value = value
+}
+
+func (g *testGauge) Value() float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.value
+}
+
+func installTestGauge(t *testing.T, initial float64) *testGauge {
+	t.Helper()
+	previousGauge := quarantinedSandbox
+	gauge := &testGauge{value: initial}
+	quarantinedSandbox = gauge
+	t.Cleanup(func() { quarantinedSandbox = previousGauge })
+	return gauge
+}
+
+func TestRecordCleanupFailureQuarantinesAtTheBound(t *testing.T) {
+	l := newTestGC(t)
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-stuck", Namespace: "default"}))
+
+	const maxAttempts = 3
+	for i := 1; i < maxAttempts; i++ {
+		info, quarantined, err := l.recordCleanupFailure("sb-stuck", maxAttempts)
+		require.NoError(t, err)
+		assert.False(t, quarantined, "attempt %d is still within the budget", i)
+		assert.Equal(t, i, info.Attempts)
+		assert.False(t, info.FirstFailedAt.IsZero(), "the stuck-since timestamp must be set on the first failure")
+	}
+
+	info, quarantined, err := l.recordCleanupFailure("sb-stuck", maxAttempts)
+	require.NoError(t, err)
+	assert.True(t, quarantined, "the bound must be reached exactly once")
+	require.NotNil(t, info.QuarantinedAt)
+
+	// Entering quarantine is a one-time transition: later failures must not
+	// re-trigger the alert.
+	_, quarantined, err = l.recordCleanupFailure("sb-stuck", maxAttempts)
+	require.NoError(t, err)
+	assert.False(t, quarantined)
+
+	persisted, err := l.readSandBoxInfo("sb-stuck")
+	require.NoError(t, err)
+	assert.True(t, persisted.quarantined(), "quarantine must survive a reload, or a restart would resume retrying")
+	assert.Equal(t, maxAttempts, persisted.Attempts, "attempts must stop accruing once quarantined")
+}
+
+// Quarantine slows retries down, it does not stop them: an operator who kills
+// the holder must not also have to un-quarantine the sandbox by hand.
+func TestQuarantinedSandboxIsStillRetriedSlowly(t *testing.T) {
+	const interval = 10 * time.Minute
+	now := time.Now()
+
+	notQuarantined := &sandBoxInfo{SandboxID: "sb-normal", LastFailedAt: now}
+	assert.True(t, notQuarantined.dueForRetryAt(now, interval), "a healthy retry must not be paced")
+
+	justFailed := &sandBoxInfo{SandboxID: "sb-q", QuarantinedAt: &now, LastFailedAt: now}
+	assert.False(t, justFailed.dueForRetryAt(now.Add(interval-time.Nanosecond), interval))
+	assert.True(t, justFailed.dueForRetryAt(now.Add(interval), interval))
+
+	stale := &sandBoxInfo{SandboxID: "sb-q", QuarantinedAt: &now, LastFailedAt: now.Add(-interval - time.Second)}
+	assert.True(t, stale.dueForRetryAt(now, interval), "the slow retry is what lets a reclaimed sandbox recover on its own")
+}
+
+func TestLegacyQuarantinedSandboxUsesQuarantinedAtForPacing(t *testing.T) {
+	const interval = 10 * time.Minute
+	quarantinedAt := time.Date(2026, time.September, 19, 14, 30, 0, 0, time.UTC)
+	info := &sandBoxInfo{SandboxID: "sb-legacy", QuarantinedAt: &quarantinedAt}
+
+	assert.False(t, info.dueForRetryAt(quarantinedAt.Add(interval-time.Nanosecond), interval))
+	assert.True(t, info.dueForRetryAt(quarantinedAt.Add(interval), interval))
+}
+
+// Each failure while quarantined must refresh the pacing timestamp, otherwise
+// the slow retry silently reverts to the full 5s rate.
+func TestFailureWhileQuarantinedRefreshesPacingWithoutRealerting(t *testing.T) {
+	l := newTestGC(t)
+	quarantinedAt := time.Now().Add(-time.Hour)
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{
+		SandboxID:     "sb-q",
+		Attempts:      60,
+		FirstFailedAt: quarantinedAt,
+		LastFailedAt:  quarantinedAt,
+		QuarantinedAt: &quarantinedAt,
+	}))
+
+	info, justQuarantined, err := l.recordCleanupFailure("sb-q", 60)
+	require.NoError(t, err)
+	assert.False(t, justQuarantined, "the alert must fire once, not on every slow retry")
+	assert.WithinDuration(t, time.Now(), info.LastFailedAt, time.Second)
+	assert.False(t, info.dueForRetryAt(time.Now(), 10*time.Minute), "pacing must restart after the retry")
+}
+
+// maxAttempts of 0 is the escape hatch that restores unbounded retrying.
+func TestRecordCleanupFailureUnboundedWhenDisabled(t *testing.T) {
+	l := newTestGC(t)
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-forever"}))
+
+	for i := 0; i < 100; i++ {
+		_, quarantined, err := l.recordCleanupFailure("sb-forever", 0)
+		require.NoError(t, err)
+		require.False(t, quarantined)
+	}
+}
+
+// A destroy that keeps failing re-enters the sandbox through Create. If that
+// reset the counter, the retry bound could never be reached.
+func TestCreatePreservesFailureHistory(t *testing.T) {
+	l := newTestGC(t)
+	stuckSince := time.Now().Add(-time.Hour)
+	lastFailedAt := time.Now().Add(-time.Minute)
+	quarantinedAt := time.Now().Add(-30 * time.Minute)
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{
+		SandboxID:     "sb-requeued",
+		Namespace:     "default",
+		Attempts:      7,
+		FirstFailedAt: stuckSince,
+		LastFailedAt:  lastFailedAt,
+		QuarantinedAt: &quarantinedAt,
+	}))
+
+	fresh := &sandBoxInfo{SandboxID: "sb-requeued", Namespace: "default"}
+	require.NoError(t, l.createSandBoxInfo(fresh))
+
+	info, err := l.readSandBoxInfo("sb-requeued")
+	require.NoError(t, err)
+	assert.Equal(t, 7, info.Attempts, "the count must continue, not restart")
+	assert.WithinDuration(t, stuckSince, info.FirstFailedAt, time.Second)
+	assert.WithinDuration(t, lastFailedAt, info.LastFailedAt, time.Second)
+	require.NotNil(t, info.QuarantinedAt)
+	assert.WithinDuration(t, quarantinedAt, *info.QuarantinedAt, time.Second)
+}
+
+func TestCountQuarantined(t *testing.T) {
+	l := newTestGC(t)
+	now := time.Now()
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-ok"}))
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-q1", QuarantinedAt: &now}))
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-q2", QuarantinedAt: &now}))
+
+	count, err := l.countQuarantined()
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+}
+
+// A single record that fails to decode must not stop every other sandbox
+// from being cleaned up, and must not stop countQuarantined (called at
+// cubelet startup to seed the gauge) from working either.
+func TestReadAllSkipsMalformedRecord(t *testing.T) {
+	l := newTestGC(t)
+	now := time.Now()
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-good", QuarantinedAt: &now}))
+	require.NoError(t, l.db.Set(bucketName, "sb-corrupt", []byte("not json")))
+
+	infos, err := l.readAll()
+	require.NoError(t, err, "one corrupt record must not fail the whole read")
+	require.Len(t, infos, 1)
+	assert.Equal(t, "sb-good", infos[0].SandboxID)
+
+	count, err := l.countQuarantined()
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestDeleteQuarantinedSandboxDecrementsGaugeExactlyOnce(t *testing.T) {
+	l := newTestGC(t)
+	now := time.Now()
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{
+		SandboxID:     "sb-q",
+		QuarantinedAt: &now,
+	}))
+
+	gauge := installTestGauge(t, 1)
+
+	require.NoError(t, l.deleteSandBoxInfo("sb-q"))
+	assert.Equal(t, float64(0), gauge.Value())
+
+	require.NoError(t, l.deleteSandBoxInfo("sb-q"))
+	assert.Equal(t, float64(0), gauge.Value(), "repeated deletion must not decrement the gauge twice")
+}
+
+func TestConcurrentDestroyAndCleanupDecrementGaugeOnce(t *testing.T) {
+	l := newTestGC(t)
+	now := time.Now()
+	const sandboxID = "sb-concurrent"
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{
+		SandboxID:     sandboxID,
+		Namespace:     "default",
+		QuarantinedAt: &now,
+	}))
+	gauge := installTestGauge(t, 1)
+
+	const callers = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(cleanup bool) {
+			defer wg.Done()
+			if cleanup {
+				errs <- l.CleanUp(context.Background(), &workflow.CleanContext{
+					BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: sandboxID},
+				})
+				return
+			}
+			errs <- l.Destroy(context.Background(), &workflow.DestroyContext{
+				BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: sandboxID},
+			})
+		}(i%2 == 0)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, float64(0), gauge.Value())
+	_, err := l.readSandBoxInfo(sandboxID)
+	assert.ErrorIs(t, err, utils.ErrorKeyNotFound)
+}
+
+func TestCountQuarantinedAfterDatabaseReopen(t *testing.T) {
+	dir := t.TempDir()
+	db, err := utils.NewCubeStoreExt(dir, "meta.db", 2, nil)
+	require.NoError(t, err)
+	first := &local{db: db}
+	now := time.Now()
+	require.NoError(t, first.saveSandBoxInfo(&sandBoxInfo{
+		SandboxID:     "sb-restart",
+		QuarantinedAt: &now,
+	}))
+	require.NoError(t, db.Close())
+
+	reopened, err := utils.NewCubeStoreExt(dir, "meta.db", 2, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	second := &local{db: reopened}
+	count, err := second.countQuarantined()
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestApplyGCServiceDefaults(t *testing.T) {
+	maxAttempts := 3
+	tests := []struct {
+		name               string
+		config             GCServicesConfig
+		cleanupInterval    time.Duration
+		quarantineInterval time.Duration
+		maxAttempts        int
+	}{
+		{
+			name:               "defaults",
+			config:             GCServicesConfig{},
+			cleanupInterval:    defaultCleanupInterval,
+			quarantineInterval: defaultQuarantineRetryInterval,
+			maxAttempts:        defaultMaxCleanupAttempts,
+		},
+		{
+			name: "configured",
+			config: GCServicesConfig{
+				CleanupIntervalStr:         "2s",
+				QuarantineRetryIntervalStr: "15s",
+				MaxCleanupAttempts:         &maxAttempts,
+			},
+			cleanupInterval:    2 * time.Second,
+			quarantineInterval: 15 * time.Second,
+			maxAttempts:        3,
+		},
+		{
+			name: "invalid and negative durations use defaults",
+			config: GCServicesConfig{
+				CleanupIntervalStr:         "-1s",
+				QuarantineRetryIntervalStr: "invalid",
+			},
+			cleanupInterval:    defaultCleanupInterval,
+			quarantineInterval: defaultQuarantineRetryInterval,
+			maxAttempts:        defaultMaxCleanupAttempts,
+		},
+		{
+			name: "quarantine retry is never faster than cleanup",
+			config: GCServicesConfig{
+				CleanupIntervalStr:         "10s",
+				QuarantineRetryIntervalStr: "1s",
+			},
+			cleanupInterval:    10 * time.Second,
+			quarantineInterval: 10 * time.Second,
+			maxAttempts:        defaultMaxCleanupAttempts,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := test.config
+			applyGCServiceDefaults(&config)
+			assert.Equal(t, test.cleanupInterval, config.cleanupInterval)
+			assert.Equal(t, test.quarantineInterval, config.quarantineRetryInterval)
+			assert.Equal(t, test.maxAttempts, config.maxCleanupAttempts)
+		})
+	}
+}
+
+// The gauge must be re-derived from the store, not adjusted: InitHost recreates
+// the GC store from scratch, so a value seeded before that wipe would keep
+// reporting quarantined sandboxes that no longer exist, and an alert on it
+// would never clear.
+func TestSeedQuarantinedGaugeRederivesFromTheStore(t *testing.T) {
+	l := newTestGC(t)
+	now := time.Now()
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-ok"}))
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-q", QuarantinedAt: &now}))
+
+	gauge := installTestGauge(t, 99)
+	require.NoError(t, seedQuarantinedGauge(l))
+	assert.Equal(t, float64(1), gauge.Value(), "a stale seed must be replaced, not added to")
+
+	// Simulate the wipe: the record disappears without any decrement path
+	// running, which is exactly what InitHost does.
+	require.NoError(t, l.db.Delete(bucketName, "sb-q"))
+	require.NoError(t, seedQuarantinedGauge(l))
+	assert.Equal(t, float64(0), gauge.Value())
+}
+
+// stubCubeboxAPI answers only the lookup describeHolder makes. The embedded
+// nil interface panics if any other method is reached, which is what a stub
+// should do.
+type stubCubeboxAPI struct{ cubes.CubeboxAPI }
+
+func (stubCubeboxAPI) Get(context.Context, string) (*cubeboxstore.CubeBox, error) {
+	return nil, utils.ErrorKeyNotFound
+}
+
+// A cleanup that panics every round must reach the retry bound, or it is
+// retried at the full cleanup interval forever and never alerted on.
+func TestCleanupPanicCountsAsAFailure(t *testing.T) {
+	l := newTestGC(t)
+	l.cubeboxManger = stubCubeboxAPI{}
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-panic", Namespace: "default"}))
+	gauge := installTestGauge(t, 0)
+
+	s := &gcService{gc: l, config: &GCServicesConfig{maxCleanupAttempts: 1}}
+	s.onCleanupPanic(context.Background(), "sb-panic", "boom")
+
+	assert.Equal(t, float64(1), gauge.Value(), "a panic must be accounted for like any other failed cleanup")
+	info, err := l.readSandBoxInfo("sb-panic")
+	require.NoError(t, err)
+	assert.True(t, info.quarantined())
+}
+
+// pendingIntentError stands in for the cleanup flow's "still inside the
+// shim-spawn intent TTL" refusal. Its only interesting property is the marker
+// method: the budget owner must not depend on the concrete type.
+type pendingIntentError struct{ msg string }
+
+func (e pendingIntentError) Error() string             { return e.msg }
+func (e pendingIntentError) RetryWithoutPenalty() bool { return true }
+
+// notSelfHealingError carries the marker but says the failure is permanent, so
+// the budget must still be spent on it.
+type notSelfHealingError struct{}
+
+func (notSelfHealingError) Error() string             { return "permanent" }
+func (notSelfHealingError) RetryWithoutPenalty() bool { return false }
+
+func TestRetryWithoutPenaltyClassification(t *testing.T) {
+	assert.False(t, retryWithoutPenalty(nil))
+	assert.False(t, retryWithoutPenalty(fmt.Errorf("pid 4242 is unreadable")))
+	assert.True(t, retryWithoutPenalty(pendingIntentError{msg: "runtime state unresolved"}))
+	assert.False(t, retryWithoutPenalty(notSelfHealingError{}))
+	// The real path wraps the refusal with %w, so the marker has to survive it.
+	assert.True(t, retryWithoutPenalty(fmt.Errorf("cleanup failed: %w", pendingIntentError{msg: "young"})))
+}
+
+// A sandbox that is merely too young to judge must not spend the retry budget:
+// the cleanup interval is far shorter than the shim-intent TTL, so counting
+// these deferrals quarantines sandboxes that were never stuck.
+func TestPendingIntentFailureIsDeferredNotCounted(t *testing.T) {
+	l := newTestGC(t)
+	l.cubeboxManger = stubCubeboxAPI{}
+	require.NoError(t, l.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-young", Namespace: "default"}))
+	gauge := installTestGauge(t, 0)
+
+	// max_cleanup_attempts=1 makes the difference between "counted" and
+	// "deferred" a single call.
+	s := &gcService{gc: l, config: &GCServicesConfig{maxCleanupAttempts: 1}}
+	cause := fmt.Errorf("shim process still Exists [%s]: %w", "sb-young",
+		pendingIntentError{msg: "runtime state unresolved: a shim was spawned but no pid was recorded"})
+	for i := 0; i < 5; i++ {
+		s.recordFailure(context.Background(), "sb-young", cause)
+	}
+
+	info, err := l.readSandBoxInfo("sb-young")
+	require.NoError(t, err)
+	assert.Equal(t, 0, info.Attempts, "a deferral must not consume the retry budget")
+	assert.False(t, info.quarantined(), "a sandbox that is too young to judge must not be quarantined")
+	assert.True(t, info.FirstFailedAt.IsZero(), "a deferral must not start the stuck-since clock")
+	assert.Equal(t, float64(0), gauge.Value(), "nothing was quarantined, so the alert gauge must not move")
+
+	// The first genuine failure afterwards starts the budget from scratch.
+	s.recordFailure(context.Background(), "sb-young",
+		fmt.Errorf("pid 4242 recorded in the sandbox endpoint record is unreadable"))
+
+	info, err = l.readSandBoxInfo("sb-young")
+	require.NoError(t, err)
+	assert.Equal(t, 1, info.Attempts, "a real failure must spend the budget")
+	assert.True(t, info.quarantined(), "with a budget of 1 the first real failure quarantines")
+	assert.Equal(t, float64(1), gauge.Value())
+}
