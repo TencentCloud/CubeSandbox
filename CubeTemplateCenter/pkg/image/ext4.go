@@ -18,6 +18,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
+// virtio-pmem requires the backing file size to be a multiple of 2 MiB.
+const pmemAlignmentBytes = int64(2 * 1024 * 1024)
+
 func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
 	sizeBytes, fileCount, err := directorySizeAndFileCount(rootfsDir)
 	if err != nil {
@@ -25,7 +28,6 @@ func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
 	}
 
 	const mib = int64(1024 * 1024)
-	const gib = int64(1024 * 1024 * 1024)
 
 	// Fixed overhead (default 256 MiB, configurable).
 	fixedOverhead := ext4FixedOverheadMiB() * mib
@@ -38,28 +40,89 @@ func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
 
 	raw := sizeBytes + fixedOverhead + percentageOverhead + perFileOverhead
 
-	// Minimum 1 GiB.
-	if raw < gib {
-		raw = gib
+	// Preserve scratch headroom for mkfs.ext4's default inode table. The final
+	// artifact size is determined by resize2fs, not this initial allocation.
+	if raw < 1024*mib {
+		raw = 1024 * mib
 	}
 
-	// Align up to 256 MiB boundary instead of next power-of-2.
+	// Align up to 256 MiB boundary for initial sparse allocation before mkfs.
 	alignment := int64(256) * mib
 	imageSize := ((raw + alignment - 1) / alignment) * alignment
 
 	if err := runCommand(ctx, "", "truncate", "-s", strconv.FormatInt(imageSize, 10), ext4Path); err != nil {
 		return fmt.Errorf("truncate ext4 image failed: %w", err)
 	}
-	if err := runCommand(ctx, "", "mkfs.ext4", "-F", "-d", rootfsDir, ext4Path); err != nil {
+	// The published rootfs is a read-only overlay lower layer; a journal would
+	// consume space that resize2fs -M cannot reclaim.
+	if err := runCommand(ctx, "", "mkfs.ext4", "-F", "-b", "4096", "-O", "^has_journal", "-d", rootfsDir, ext4Path); err != nil {
 		return fmt.Errorf("mkfs.ext4 failed: %w", err)
 	}
+
+	return shrinkAndAlign(ctx, ext4Path)
+}
+
+// shrinkAndAlign finalizes an unmounted ext4 image for virtio-pmem. Both build
+// paths use the same repair, shrink, alignment, and read-only verification steps.
+func shrinkAndAlign(ctx context.Context, ext4Path string) error {
+	if err := runE2fsck(ctx, ext4Path); err != nil {
+		return fmt.Errorf("pre-shrink e2fsck failed: %w", err)
+	}
+	if err := runCommand(ctx, "", "resize2fs", "-M", ext4Path); err != nil {
+		return fmt.Errorf("resize2fs shrink failed: %w", err)
+	}
+	fi, err := os.Stat(ext4Path)
+	if err != nil {
+		return fmt.Errorf("stat shrunk ext4 image failed: %w", err)
+	}
+	fsSize := fi.Size()
+	if fsSize <= 0 {
+		return fmt.Errorf("shrunk ext4 image %s is empty", ext4Path)
+	}
+	// Use apparent length, not allocated blocks, and round up so no filesystem
+	// data is truncated. virtio-pmem requires a multiple of 2 MiB.
+	alignedSize := alignUp(fsSize, pmemAlignmentBytes)
+	if alignedSize != fsSize {
+		if err := runCommand(ctx, "", "truncate", "-s", strconv.FormatInt(alignedSize, 10), ext4Path); err != nil {
+			return fmt.Errorf("truncate ext4 image to pmem-aligned size %d failed: %w", alignedSize, err)
+		}
+	}
+	if err := verifyExt4Image(ctx, ext4Path); err != nil {
+		return fmt.Errorf("post-truncate e2fsck failed: %w", err)
+	}
 	return nil
+}
+
+func verifyExt4Image(ctx context.Context, ext4Path string) error {
+	// Reject any inconsistency after shrink without modifying the artifact.
+	return runCommand(ctx, "", "e2fsck", "-fn", ext4Path)
+}
+
+func runE2fsck(ctx context.Context, ext4Path string) error {
+	cmd := exec.CommandContext(ctx, "e2fsck", "-fy", ext4Path)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		// e2fsck exit codes:
+		// 0: no errors
+		// 1: file system errors corrected
+		// 2: file system errors corrected, system should be rebooted
+		// >= 4: uncorrected or operational errors
+		if exitErr.ExitCode() == 1 || exitErr.ExitCode() == 2 {
+			log.G(ctx).Warnf("e2fsck repaired ext4 image %s (exit %d): %s", ext4Path, exitErr.ExitCode(), strings.TrimSpace(string(output)))
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 }
 
 // EnsureArtifactBuildPreflight asserts that the host has all necessary tools
 // installed to build images before starting a long-running workflow.
 func EnsureArtifactBuildPreflight(ctx context.Context) error {
-	requiredCommands := []string{"mkfs.ext4", "truncate", "cp"}
+	requiredCommands := []string{"mkfs.ext4", "truncate", "cp", "resize2fs", "e2fsck"}
 	if !nativeRootfsExportEnabled() {
 		if hasDockerlessRootfsExportTools() {
 			requiredCommands = append(requiredCommands, "skopeo", "umoci")
@@ -68,7 +131,7 @@ func EnsureArtifactBuildPreflight(ctx context.Context) error {
 		}
 	}
 	if loopMountExt4Enabled() {
-		requiredCommands = append(requiredCommands, "losetup", "mount", "umount", "resize2fs")
+		requiredCommands = append(requiredCommands, "losetup", "mount", "umount")
 	}
 
 	for _, cmd := range requiredCommands {

@@ -133,7 +133,7 @@ func canUseLoopMount() bool {
 		return false
 	}
 	// Check required commands.
-	for _, cmd := range []string{"mount", "umount", "resize2fs"} {
+	for _, cmd := range []string{"mount", "umount", "resize2fs", "e2fsck"} {
 		if _, err := exec.LookPath(cmd); err != nil {
 			return false
 		}

@@ -488,7 +488,7 @@ cubemaster-test: builder-image
 # through the builder like every other Go component.
 .PHONY: cubetemplatecenter-test
 cubetemplatecenter-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && go test ./... -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 go test ./... -count=1'
 
 # cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
 # for several Cubelet packages.
