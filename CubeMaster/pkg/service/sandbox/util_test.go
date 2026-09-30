@@ -391,3 +391,76 @@ func TestConstructCubeletReqStripsForgedPauseLabels(t *testing.T) {
 		t.Fatal("user annotation restore-base must not be re-added after strip")
 	}
 }
+
+func TestValidateRestartLiveness(t *testing.T) {
+	probe := &cubebox.LivenessProbe{
+		ProbeHandler: &cubebox.ProbeHandler{HttpGet: &cubebox.HTTPGetAction{Port: 49983}},
+	}
+	container := func(p *cubebox.LivenessProbe) []*types.Container {
+		return []*types.Container{{Name: "ctr-0", LivenessProbe: p}}
+	}
+
+	rejected := []struct {
+		name string
+		req  *types.CreateCubeSandboxReq
+	}{
+		{
+			name: "Never with a request-level probe",
+			req:  &types.CreateCubeSandboxReq{RestartPolicy: "Never", LivenessProbe: probe},
+		},
+		{
+			name: "Never with a container-level probe",
+			req:  &types.CreateCubeSandboxReq{RestartPolicy: "Never", Containers: container(probe)},
+		},
+		{
+			name: "on-wire Never spelling with a probe",
+			req:  &types.CreateCubeSandboxReq{RestartPolicy: "RESTART_POLICY_NEVER", LivenessProbe: probe},
+		},
+		{
+			// Empty means Never, so a probe without an explicit policy is
+			// rejected too, matching Cubelet's Validate.
+			name: "empty policy with a probe",
+			req:  &types.CreateCubeSandboxReq{LivenessProbe: probe},
+		},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateRestartLiveness(tc.req)
+			if err == nil {
+				t.Fatal("expected Never + liveness probe to be rejected")
+			}
+			if !strings.Contains(err.Error(), "liveness_probe requires restart policy") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+
+	accepted := []struct {
+		name string
+		req  *types.CreateCubeSandboxReq
+	}{
+		{
+			name: "OnFailure with a probe",
+			req:  &types.CreateCubeSandboxReq{RestartPolicy: "OnFailure", LivenessProbe: probe},
+		},
+		{
+			name: "Always with a container probe",
+			req:  &types.CreateCubeSandboxReq{RestartPolicy: "Always", Containers: container(probe)},
+		},
+		{
+			name: "Never without a probe",
+			req:  &types.CreateCubeSandboxReq{RestartPolicy: "Never"},
+		},
+		{
+			name: "empty policy without a probe",
+			req:  &types.CreateCubeSandboxReq{},
+		},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateRestartLiveness(tc.req); err != nil {
+				t.Fatalf("expected acceptance, got %v", err)
+			}
+		})
+	}
+}

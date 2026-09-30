@@ -87,3 +87,28 @@ func TestCreateSandboxKeepsOtherTemplateErrorsAsParamsError(t *testing.T) {
 	assert.Equal(t, assert.AnError.Error(), got.Ret.RetMsg)
 	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
 }
+
+// A Never policy combined with a caller-supplied liveness probe must come back
+// as MasterParamsError (130400), which CubeAPI maps to HTTP 400. The probe
+// could never restart the sandbox, so it would only kill it.
+func TestCreateSandboxRejectsNeverWithLivenessProbe(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
+		"requestID":"req-never-probe",
+		"restart_policy":"Never",
+		"liveness_probe":{"http_get":{"path":"/health","port":49983}},
+		"annotations":{
+			"`+constants.CubeAnnotationAppSnapshotTemplateID+`":"tpl-1",
+			"`+constants.CubeAnnotationAppSnapshotTemplateVersion+`":"v2"
+		}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createSandbox(req, rt)
+
+	got, ok := resp.(*types.Res)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "liveness_probe requires restart policy")
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+}

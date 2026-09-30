@@ -56,6 +56,9 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "opts nil")
 	}
 
+	if workflow.ReuseFor(opts).Storage {
+		return nil
+	}
 	templateID, ok := opts.GetSnapshotTemplateID()
 	if !ok {
 		return nil

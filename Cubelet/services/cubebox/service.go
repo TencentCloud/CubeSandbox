@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -147,11 +148,13 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("not a workflow engine")
 			}
+			restarts := newRestartMgr(cb.cubeboxManger)
 			s := &service{
 				engine:                e,
 				cubeboxMgr:            cb,
 				cleaner:               newDeadContainerCleaner(config.deadContainerTTL),
-				eventMonitor:          newEventMonitor(cb),
+				eventMonitor:          newEventMonitor(cb, restarts),
+				restarts:              restarts,
 				config:                config,
 				events:                ep.(*exchange.Exchange),
 				numaNodeIndex:         0,
@@ -165,6 +168,9 @@ func init() {
 			// allocated-resource metrics so the cubelet heartbeat loop can
 			// pick it up without taking a hard dependency on this package.
 			resourcesource.Set(cb)
+			restarts.bind(s)
+			restarts.Recover()
+			restarts.startStatusReporter()
 
 			go func() {
 				CubeLog.Info("Start subscribing containerd event")
@@ -198,6 +204,7 @@ type service struct {
 	cubebox.UnimplementedCubeboxMgrServer
 	numaNodeIndex         uint32
 	sandboxLifecycleLocks *utils.ResourceLocks
+	restarts              *restartMgr
 
 	otherRuntime *ociRuntime
 }
@@ -279,6 +286,11 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	SetRunCubeSandboxRequestDefaultValue(req)
+	if err := restartpolicy.Apply(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
 
 	start := time.Now()
 	createInfo := &workflow.CreateContext{
@@ -374,6 +386,9 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	if s.restarts != nil && ret.IsSuccessCode(rsp.Ret.RetCode) {
+		s.restarts.Start(createInfo.SandboxID, req)
 	}
 	return rsp, nil
 }
@@ -545,6 +560,9 @@ func getAllocatedPort(createInfo *workflow.CreateContext) []*cubebox.PortMapping
 }
 
 func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+	if s.restarts != nil {
+		s.restarts.Stop(req.GetSandboxID())
+	}
 	rsp := &cubebox.DestroyCubeSandboxResponse{
 		RequestID: req.RequestID,
 		SandboxID: req.SandboxID,
@@ -1006,6 +1024,18 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		if c.IsPod {
 			for key, v := range cb.Labels {
 				cc.Labels[key] = v
+			}
+			if box.RestartState != "" || box.RestartCount > 0 || box.LastExitReason != "" {
+				cc.RestartStats = &cubebox.RestartStats{
+					RestartCount:            box.RestartCount,
+					LastSuccessfulRestartAt: box.LastSuccessfulRestartAt,
+					LastFailedRestartAt:     box.LastFailedRestartAt,
+					LastRestartAt:           box.LastRestartAt,
+					RestartState:            box.RestartState,
+					LastExitCode:            box.LastExitCode,
+					LastExitReason:          box.LastExitReason,
+					NextRestartAt:           box.NextRestartAt,
+				}
 			}
 		}
 		cb.Containers = append(cb.Containers, cc)

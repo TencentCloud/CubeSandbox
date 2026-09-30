@@ -143,6 +143,31 @@ func (m *delegateNetworkManager) Create(ctx context.Context, opts *workflow.Crea
 		}
 	}()
 
+	if opts != nil && workflow.ReuseFor(opts).Network {
+		alloc, getErr := m.allocationStore.Get(opts.SandboxID)
+		if getErr == nil && alloc.Metadata != nil {
+			opts.NetworkInfo = alloc.Metadata
+			return nil
+		}
+		// Metadata is not persisted (json:"-"). After a cubelet process
+		// restart the allocation row remains but Metadata is nil. The network
+		// runtime still owns the tap; EnsureNetwork returns that live config.
+		if err := m.tapPlugin.Create(ctx, opts); err != nil {
+			return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "restart network %s: %v", opts.SandboxID, err)
+		}
+		if opts.NetworkInfo == nil {
+			return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "restart network %s: metadata missing", opts.SandboxID)
+		}
+		alloc.SandboxID = opts.SandboxID
+		alloc.Metadata = opts.NetworkInfo
+		if alloc.NetworkType == "" && opts.ReqInfo != nil {
+			alloc.NetworkType = opts.ReqInfo.NetworkType
+		}
+		alloc.Timestamp = time.Now().Unix()
+		m.allocationStore.Add(alloc)
+		return nil
+	}
+
 	if opts.IsCreateSnapshot() {
 		alloc, err := m.allocationStore.Get(opts.GetSandboxID())
 		if err == nil && alloc.SandboxID == opts.GetSandboxID() {
@@ -179,6 +204,9 @@ func (m *delegateNetworkManager) Create(ctx context.Context, opts *workflow.Crea
 }
 
 func (m *delegateNetworkManager) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err error) {
+	if workflow.RetainFor(opts).Network {
+		return nil
+	}
 	defer func() {
 		if err != nil {
 			log.G(ctx).Errorf("Destroy,fail:%v", err.Error())

@@ -163,6 +163,11 @@ func Telnet(ctx context.Context, p *ProbeConfig) chan error {
 	return retCh
 }
 
+// DoTCPDetect dials address once. address is host:port.
+func DoTCPDetect(address string, dialTimeout time.Duration) error {
+	return doTCPDetect(address, dialTimeout)
+}
+
 func doTCPDetect(address string, dialTimeout time.Duration) error {
 	conn, err := net.DialTimeout("tcp", address, dialTimeout)
 	if err != nil {
@@ -187,6 +192,11 @@ func logError(err error) error {
 	}
 
 	return fmt.Errorf("network connectivity probe failed: %+v, timeout: %+v", opErr, netErr.Timeout())
+}
+
+// DoPing sends one ICMP (or UDP) echo to address.
+func DoPing(ctx context.Context, address string, dialTimeout time.Duration, udp bool) error {
+	return doPing(ctx, address, dialTimeout, udp)
 }
 
 func doPing(ctx context.Context, address string, dialTimeout time.Duration, udp bool) error {

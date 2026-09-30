@@ -31,6 +31,8 @@ PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 VOLUME_PLUGIN = "volume_plugin"
 AUTH_SIMPLE_KEY = "auth_simple_key"
+# Node-local restart policy (Never / OnFailure / Always) and restartStatus.
+RESTART_POLICY = "restart_policy"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -68,6 +70,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         VOLUME_PLUGIN,
         AUTH_SIMPLE_KEY,
         NETWORK_L7_CUSTOM_PORT,
+        RESTART_POLICY,
     }
 )
 

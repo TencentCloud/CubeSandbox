@@ -1611,6 +1611,10 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        restartStatus:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RestartStatus'
         sandboxID:
           type: string
         startedAt:
@@ -1626,6 +1630,58 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+    LivenessHTTPGet:
+      type: object
+      required:
+      - port
+      properties:
+        path:
+          type:
+          - string
+          - 'null'
+        port:
+          type: integer
+          format: int32
+    LivenessProbe:
+      type: object
+      description: One health check. Exactly one of tcp, http or ping.
+      properties:
+        failureThreshold:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        httpGet:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessHTTPGet'
+        initialDelaySecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        periodSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        probeTimeoutSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        tcpSocket:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessTCP'
+    LivenessTCP:
+      type: object
+      required:
+      - port
+      properties:
+        port:
+          type: integer
+          format: int32
     LogLevel:
       type: string
       enum:
@@ -1675,6 +1731,11 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        livenessProbe:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessProbe'
+            description: Runtime health check applied to the sandbox. Times are seconds.
         lifecycle:
           oneOf:
           - type: 'null'
@@ -1692,6 +1753,16 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/SandboxNetworkConfig'
+        restartBackoff:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RestartBackoff'
+            description: Optional override of the node restart backoff.
+        restartPolicy:
+          type:
+          - string
+          - 'null'
+          description: Never, OnFailure or Always. Omitted means Never.
         secure:
           type:
           - boolean
@@ -1745,6 +1816,83 @@ components:
           - integer
           - 'null'
           format: int32
+    RestartBackoff:
+      type: object
+      description: Backoff between sandbox restarts. Zero fields use the node default.
+      properties:
+        initialIntervalSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        jitter:
+          type:
+          - number
+          - 'null'
+          format: double
+        maxIntervalSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        maxRestarts:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: 0 means unlimited.
+        multiplier:
+          type:
+          - number
+          - 'null'
+          format: double
+        stableDurationSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+    RestartStatus:
+      type: object
+      description: |-
+        Node-local restart bookkeeping. Separate from `state`, which stays the
+        lifecycle value (`running`, `paused`, …).
+      properties:
+        lastExitCode:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        lastExitReason:
+          type:
+          - string
+          - 'null'
+        lastFailedRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        lastRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        lastSuccessfulRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        nextRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        restartCount:
+          type: integer
+          format: int32
+        restartPolicy:
+          type: string
+        restartState:
+          type: string
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -1889,6 +2037,10 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        restartStatus:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RestartStatus'
         sandboxID:
           type: string
         startedAt:

@@ -287,6 +287,22 @@ The rejection travels through the following chain to reach the client: `Cubelet 
 - This is a **node-level setting** — different nodes can use different ratios to accommodate heterogeneous hardware or tiered pools.
 - When a large batch of sandboxes on a single node wakes up simultaneously and exceeds node capacity, the control plane returns 409 with precise quota numbers. For sandboxes on the S3 backend, the scheduler can fall back to another compatible node instead — see [Cross-Node Snapshots](./cross-node-snapshot.md) for the conditions and scheduler rules.
 
+## Restart after exit
+
+A create request can set `restartPolicy`. The meaning matches Kubernetes `restartPolicy`, and the unit is the whole sandbox (one microVM), not a process inside it.
+
+| Value | Behavior |
+|-------|----------|
+| `Never` (default) | Do not restart after exit |
+| `OnFailure` | Restart after a non-zero exit, OOM, sandbox crash, or a failed liveness probe |
+| `Always` | Restart after every exit, including a clean one |
+
+A restart keeps the disk, the network, and the sandbox ID, then cold-starts. Memory is not kept. Repeated failures wait 10 seconds, then double, capped at 300 seconds. After `maxRestarts` the node stops trying. The sandbox still holds its node resources until idle timeout or an explicit destroy.
+
+Put a liveness probe on the create request. When the request has none and the image has envd (port `49983` exposed), the node probes `GET /health`. Images without envd are not probed, so they are not restarted by mistake. `Never` combined with a probe is rejected with HTTP 400: a probe that can never restart would only kill the sandbox.
+
+`restartStatus` on get and list is its own object. It does not change `state`, which stays the lifecycle value (`running`, `paused`, and so on). `restartPolicy` is `Never`, `OnFailure`, or `Always`. `restartState` is `Running`, `Restarting`, `BackOff`, or `GaveUp`. A sandbox in `Restarting` or `BackOff` is not auto-paused. Idle timeout still destroys it, and a restart does not reset the idle timer.
+
 ## Next Steps
 
 - [Agent platform freeze / resume](./agent-platform-freeze.md) — manual pause retention, `connect` before envd, Volume vs snapshot.
