@@ -187,7 +187,7 @@ func (r *RedisWrap) Dial() (c redis.Conn, err error) {
 			// outer loop would only repeat the same exhausted probe.
 			return nil, resolveErr
 		}
-		c, err = newConn(addr, r.redisConf.Password, r.redisConf.DbNo)
+		c, err = newConn(addr, r.redisConf.Password, r.redisConf.DbNo, r.redisConf.TLS)
 		if err != nil {
 			continue
 		}
@@ -229,13 +229,22 @@ func (r *RedisWrap) reportMetric() {
 	}
 }
 
-func newConn(serviceName string, passwd string, db int) (redis.Conn, error) {
+func newConn(serviceName string, passwd string, db int, useTLS bool) (redis.Conn, error) {
 	CubeLog.Debugf("redis连接地址:%s", serviceName)
-	c, err := redis.Dial("tcp", serviceName,
+	opts := []redis.DialOption{
 		redis.DialConnectTimeout(dialTimeout),
 		redis.DialReadTimeout(dialTimeout),
 		redis.DialDatabase(db),
-		redis.DialPassword(passwd))
+		redis.DialPassword(passwd),
+	}
+	// Managed Redis with in-transit encryption refuses plaintext, so the TLS
+	// handshake has to be requested explicitly. The server certificate is
+	// verified against the system roots; deployments that terminate with a
+	// private CA install that CA on the host instead of skipping verification.
+	if useTLS {
+		opts = append(opts, redis.DialUseTLS(true))
+	}
+	c, err := redis.Dial("tcp", serviceName, opts...)
 	if err != nil {
 		// Do not Fatalf: Dial()'s retry loop must be able to continue during
 		// Sentinel failover when the newly advertised master is not ready yet.

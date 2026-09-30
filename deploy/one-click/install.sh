@@ -95,10 +95,17 @@ init_external_dep_defaults() {
   # redis unit).
   CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
   CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
-  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+  # `-` (not `:-`): unset still defaults to the bundled password, but an
+  # explicitly empty value means "no AUTH" (e.g. ElastiCache without AuthToken)
+  # and must reach the preflight and every client as empty.
+  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD-ceuhvu123}"
   CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+  # Single Redis TLS switch for every Redis client, normalized to 1/0. The
+  # per-component values (Master/TC redis.tls, Ops REDIS_TLS, Proxy
+  # redis_ssl, LCM CUBE_LCM_REDIS_TLS) are derived from it.
+  CUBE_EXTERNAL_REDIS_TLS="$(normalize_redis_tls "${CUBE_EXTERNAL_REDIS_TLS:-0}" "CUBE_EXTERNAL_REDIS_TLS")"
 
   # CUBE_SANDBOX_MINIO_* only deploys the MinIO container. The S3 volume plugin
   # always reads CUBE_S3_*. When MinIO is enabled, install.sh fills CUBE_S3_*
@@ -638,31 +645,40 @@ check_external_deps_preflight() {
   local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
 
   if [[ "${DEPLOY_ROLE:-}" != "compute" && -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
+    # Connect with the sslmode the components use; verify-ca and verify-full
+    # are checked as require (see one_click_postgres_preflight_sslmode).
+    local pg_sslmode
+    pg_sslmode="$(one_click_postgres_preflight_sslmode)"
+    if [[ "${pg_sslmode}" != "${CUBE_POSTGRES_SSL_MODE:-prefer}" ]]; then
+      log "external PostgreSQL preflight connects with sslmode=${pg_sslmode}; the certificate check of ${CUBE_POSTGRES_SSL_MODE} runs when CubeMaster, CubeTemplateCenter and CubeOps connect"
+    fi
     # Prefer psql: it authenticates (user/password/db). pg_isready only checks
     # that the server accepts TCP and would otherwise mask bad credentials.
     if command -v psql >/dev/null 2>&1; then
-      log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (psql)"
+      log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (psql, sslmode=${pg_sslmode})"
       if ! PGPASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD}" \
+          PGSSLMODE="${pg_sslmode}" \
           PGCONNECT_TIMEOUT="${connect_timeout}" psql \
           -h "${CUBE_EXTERNAL_POSTGRES_HOST}" \
           -p "${CUBE_EXTERNAL_POSTGRES_PORT}" \
           -U "${CUBE_EXTERNAL_POSTGRES_USER}" \
           -d "${CUBE_EXTERNAL_POSTGRES_DB}" \
           -c 'SELECT 1' >/dev/null 2>&1; then
-        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}'.
-  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB and that the server is reachable from this host."
+        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}' with sslmode=${pg_sslmode}.
+  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB, CUBE_POSTGRES_SSL_MODE and that the server is reachable from this host."
       fi
       log "external PostgreSQL connectivity OK"
     elif command -v pg_isready >/dev/null 2>&1; then
-      log "checking reachability of external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (pg_isready; does not verify credentials)"
-      if ! PGPASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD}" pg_isready \
+      log "checking reachability of external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (pg_isready, sslmode=${pg_sslmode}; does not verify credentials)"
+      if ! PGPASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD}" \
+          PGSSLMODE="${pg_sslmode}" pg_isready \
           -h "${CUBE_EXTERNAL_POSTGRES_HOST}" \
           -p "${CUBE_EXTERNAL_POSTGRES_PORT}" \
           -U "${CUBE_EXTERNAL_POSTGRES_USER}" \
           -d "${CUBE_EXTERNAL_POSTGRES_DB}" \
           -t "${connect_timeout}" >/dev/null 2>&1; then
-        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}'.
-  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB and that the server is reachable from this host."
+        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}' with sslmode=${pg_sslmode}.
+  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB, CUBE_POSTGRES_SSL_MODE and that the server is reachable from this host."
       fi
       log "external PostgreSQL server reachable (credentials not verified; install psql for a full check)"
     else
@@ -727,6 +743,18 @@ EOF
       if command -v timeout >/dev/null 2>&1; then
         use_timeout_wrapper=1
       fi
+      # TLS-only Redis (CUBE_EXTERNAL_REDIS_TLS) rejects a plaintext probe, so
+      # the preflight must speak TLS too. A redis-cli built without TLS cannot,
+      # so skip rather than report a healthy TLS endpoint as unreachable. The
+      # Redis check is the last step of this preflight, so returning is safe.
+      local redis_tls_args=()
+      if one_click_external_redis_tls_enabled; then
+        if ! redis_cli_help_supports_flag "${redis_help_output}" "--tls"; then
+          log "redis-cli has no TLS support; skipping external Redis Sentinel connectivity preflight (CUBE_EXTERNAL_REDIS_TLS=${CUBE_EXTERNAL_REDIS_TLS})"
+          return 0
+        fi
+        redis_tls_args+=(--tls)
+      fi
 
       # Do not fall back to the Redis master password: many deployments only
       # set requirepass on the master, while Sentinel has no AUTH.
@@ -757,6 +785,7 @@ EOF
           -h "${sentinel_host}"
           -p "${sentinel_port}"
           "${redis_timeout_args[@]}"
+          "${redis_tls_args[@]}"
         )
         if [[ -n "${sentinel_pd}" ]]; then
           local auth_reply
@@ -805,6 +834,7 @@ EOF
         -h "${master_host}"
         -p "${master_port}"
         "${redis_timeout_args[@]}"
+        "${redis_tls_args[@]}"
       )
       if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
         local redis_reply
@@ -864,11 +894,21 @@ EOF
           log "timeout command not found; Redis preflight may block longer when redis-cli lacks timeout flags"
         fi
       fi
+      # Same TLS handling as the Sentinel branch above.
+      local redis_tls_args=()
+      if one_click_external_redis_tls_enabled; then
+        if ! redis_cli_help_supports_flag "${redis_help_output}" "--tls"; then
+          log "redis-cli has no TLS support; skipping external Redis connectivity preflight (CUBE_EXTERNAL_REDIS_TLS=${CUBE_EXTERNAL_REDIS_TLS})"
+          return 0
+        fi
+        redis_tls_args+=(--tls)
+      fi
       redis_base_cmd=(
         redis-cli
         -h "${CUBE_EXTERNAL_REDIS_HOST}"
         -p "${CUBE_EXTERNAL_REDIS_PORT}"
         "${redis_timeout_args[@]}"
+        "${redis_tls_args[@]}"
       )
       if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
         # SECURITY: PING is NOT an authenticated command. A reachable server that
@@ -1762,6 +1802,7 @@ export CUBE_SANDBOX_CUBE_ROUTER_ENABLE
 install_required_dependencies
 check_install_preflight
 warn_default_external_credentials
+one_click_warn_ignored_redis_tls
 check_external_deps_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror
