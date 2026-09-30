@@ -1,0 +1,75 @@
+{
+  "title": "审计",
+  "subtitle": "e2b 兼容网关看到的每一个沙箱：生命周期、执行的命令、文件操作，按沙箱聚合。",
+  "refresh": "刷新",
+  "filterPlaceholder": "搜索沙箱 ID、模板、来源 IP、metadata、命令…",
+  "range_one": "{{count}} 天",
+  "range_other": "{{count}} 天",
+  "allTemplates": "全部模板",
+  "loadError": "审计日志加载失败",
+  "empty": "该时间范围内没有沙箱。",
+  "stats": {
+    "sandboxes": "沙箱数",
+    "killed": "已结束",
+    "requests": "请求数",
+    "days": "有数据的天数",
+    "running": "运行中"
+  },
+  "col": {
+    "created": "创建时间",
+    "sandbox": "沙箱",
+    "template": "模板",
+    "client": "来源",
+    "state": "状态",
+    "duration": "时长",
+    "commands": "命令",
+    "files": "文件",
+    "firstCommand": "第一条命令",
+    "key": "Key"
+  },
+  "state": {
+    "running": "运行中",
+    "paused": "已暂停",
+    "complete": "已完成",
+    "killed": "被中止",
+    "unknown": "未知"
+  },
+  "pagination": {
+    "total": "共 {{count}} 个沙箱",
+    "prev": "上一页",
+    "next": "下一页",
+    "jump": "跳转到"
+  },
+  "detail": {
+    "subtitle": "由网关请求还原；不记录 stdout/stderr 内容。",
+    "summary": "概要",
+    "timeline": "时间线",
+    "ended": "结束",
+    "lastSeen": "最后活动",
+    "timeout": "TTL",
+    "internet": "公网",
+    "yes": "允许",
+    "no": "禁止",
+    "requests": "请求",
+    "metadata": "Metadata",
+    "network": "网络策略",
+    "copy": "复制沙箱 ID",
+    "copied": "已复制沙箱 ID",
+    "kinds": {
+      "all": "全部",
+      "command": "命令",
+      "file": "文件",
+      "lifecycle": "生命周期"
+    },
+    "events": {
+      "create": "沙箱创建",
+      "kill": "沙箱销毁"
+    }
+  },
+  "allKeys": "全部 key",
+  "allStates": "全部状态",
+  "endedBy": {
+    "kill": "kill()",
+    "ttl": "TTL 到期"
+  }
+}
