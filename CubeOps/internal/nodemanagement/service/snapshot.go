@@ -45,13 +45,7 @@ func buildSnapshotFromStore(reg *store.NodeRegistration, st *store.NodeStatus, v
 		snap.HostFacts = unmarshalHostFacts(reg.HostFactsJSON)
 	}
 
-	if st != nil {
-		_ = json.Unmarshal([]byte(st.ConditionsJSON), &snap.Conditions)
-		_ = json.Unmarshal([]byte(st.ImagesJSON), &snap.Images)
-		_ = json.Unmarshal([]byte(st.LocalTemplatesJSON), &snap.LocalTemplates)
-		snap.HeartbeatTime = time.Unix(st.HeartbeatUnix, 0)
-		snap.ReportedReady = st.Healthy
-	}
+	applyStatusToSnapshot(snap, st)
 
 	for _, v := range versions {
 		snap.Versions = append(snap.Versions, model.ComponentVersion{
@@ -67,6 +61,24 @@ func buildSnapshotFromStore(reg *store.NodeRegistration, st *store.NodeStatus, v
 	applyCurrentHealth(snap, time.Now())
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 	return snap
+}
+
+func applyStatusToSnapshot(snap *model.NodeSnapshot, st *store.NodeStatus) {
+	if snap == nil || st == nil {
+		return
+	}
+	_ = json.Unmarshal([]byte(st.ConditionsJSON), &snap.Conditions)
+	_ = json.Unmarshal([]byte(st.ImagesJSON), &snap.Images)
+	_ = json.Unmarshal([]byte(st.LocalTemplatesJSON), &snap.LocalTemplates)
+	snap.LocalTemplatesReported = st.LocalTemplatesReported
+	snap.HeartbeatTime = time.Unix(st.HeartbeatUnix, 0)
+	snap.HeartbeatOrderUnixMilli = st.HeartbeatOrderUnixMilli
+	if st.HeartbeatOrderUnixMilli > 0 {
+		snap.HeartbeatOrder = time.UnixMilli(st.HeartbeatOrderUnixMilli)
+	} else {
+		snap.HeartbeatOrder = snap.HeartbeatTime
+	}
+	snap.ReportedReady = st.Healthy
 }
 
 // restoreMetricFromRedis overlays real-time metric from the Redis metric hash
@@ -227,65 +239,77 @@ func ToSchedulerNode(snap *model.NodeSnapshot) *model.SchedulerNode {
 	if instanceType == "" {
 		instanceType = model.DefaultInstanceTypeName
 	}
-	localTemplates := make([]string, 0, len(snap.LocalTemplates))
-	for _, t := range snap.LocalTemplates {
-		if t.TemplateID != "" {
-			localTemplates = append(localTemplates, t.TemplateID)
+	var localTemplates []string
+	if snap.LocalTemplatesReported {
+		localTemplates = make([]string, 0, len(snap.LocalTemplates))
+		for _, t := range snap.LocalTemplates {
+			if t.TemplateID != "" {
+				localTemplates = append(localTemplates, t.TemplateID)
+			}
 		}
 	}
+	metadataUpdateAt := snap.HeartbeatOrder
+	if metadataUpdateAt.IsZero() {
+		metadataUpdateAt = snap.HeartbeatTime
+	}
 	return &model.SchedulerNode{
-		InsID:                 snap.NodeID,
-		UUID:                  snap.NodeID,
-		IP:                    hostIP,
-		CpuTotal:              int(snap.Capacity.MilliCPU / 1000),
-		MemMBTotal:            snap.Capacity.MemoryMB,
-		SystemDiskSize:        snap.SystemDiskSize,
-		DataDiskSize:          snap.DataDiskSize,
-		Zone:                  snap.Zone,
-		Region:                snap.Region,
-		CPUType:               snap.CPUType,
-		DeviceClass:           snap.DeviceClass,
-		DeviceID:              snap.DeviceID,
-		MachineHostIP:         snap.MachineHostIP,
-		InstanceFamily:        snap.InstanceFamily,
-		DedicatedClusterId:    snap.DedicatedClusterID,
-		VirtualNodeQuotaArray: append([]int64(nil), snap.VirtualNodeQuotaArray...),
-		ClusterLabel:          snap.ClusterLabel,
-		OssClusterLabel:       snap.ClusterLabel,
-		InstanceType:          instanceType,
-		HostStatus:            model.HostStatusRunning,
-		ReportedReady:         snap.ReportedReady,
-		Healthy:               snap.Healthy,
-		UnhealthyReason:       snap.UnhealthyReason,
-		CreateConcurrentNum:   snap.CreateConcurrentNum,
-		MaxMvmLimit:           snap.MaxMvmNum,
-		MetaDataUpdateAt:      snap.HeartbeatTime,
-		QuotaCpu:              quotaCPU,
-		QuotaMem:              quotaMem,
-		MetricUpdate:          snap.MetricUpdate,
-		MetricLocalUpdateAt:   snap.MetricLocalUpdateAt,
-		QuotaCpuUsage:         snap.QuotaCpuUsage,
-		QuotaMemUsage:         snap.QuotaMemUsage,
-		MvmNum:                snap.MvmNum,
-		DataDiskUsagePer:      snap.DataDiskUsagePer,
-		StorageDiskUsagePer:   snap.StorageDiskUsagePer,
-		SysDiskUsagePer:       snap.SysDiskUsagePer,
-		NicQueues:             snap.NicQueues,
-		NodeLabels:            cloneStringMap(snap.Labels),
-		SchedulingDisabled:    snapSchedulingDisabled(snap),
-		LocalTemplates:        localTemplates,
-		Versions:              snap.Versions,
-		HostFacts:             cloneHostFacts(snap.HostFacts),
+		InsID:                  snap.NodeID,
+		UUID:                   snap.NodeID,
+		IP:                     hostIP,
+		CpuTotal:               int(snap.Capacity.MilliCPU / 1000),
+		MemMBTotal:             snap.Capacity.MemoryMB,
+		SystemDiskSize:         snap.SystemDiskSize,
+		DataDiskSize:           snap.DataDiskSize,
+		Zone:                   snap.Zone,
+		Region:                 snap.Region,
+		CPUType:                snap.CPUType,
+		DeviceClass:            snap.DeviceClass,
+		DeviceID:               snap.DeviceID,
+		MachineHostIP:          snap.MachineHostIP,
+		InstanceFamily:         snap.InstanceFamily,
+		DedicatedClusterId:     snap.DedicatedClusterID,
+		VirtualNodeQuotaArray:  append([]int64(nil), snap.VirtualNodeQuotaArray...),
+		ClusterLabel:           snap.ClusterLabel,
+		OssClusterLabel:        snap.ClusterLabel,
+		InstanceType:           instanceType,
+		HostStatus:             model.HostStatusRunning,
+		ReportedReady:          snap.ReportedReady,
+		Healthy:                snap.Healthy,
+		UnhealthyReason:        snap.UnhealthyReason,
+		CreateConcurrentNum:    snap.CreateConcurrentNum,
+		MaxMvmLimit:            snap.MaxMvmNum,
+		MetaDataUpdateAt:       metadataUpdateAt,
+		QuotaCpu:               quotaCPU,
+		QuotaMem:               quotaMem,
+		MetricUpdate:           snap.MetricUpdate,
+		MetricLocalUpdateAt:    snap.MetricLocalUpdateAt,
+		QuotaCpuUsage:          snap.QuotaCpuUsage,
+		QuotaMemUsage:          snap.QuotaMemUsage,
+		MvmNum:                 snap.MvmNum,
+		DataDiskUsagePer:       snap.DataDiskUsagePer,
+		StorageDiskUsagePer:    snap.StorageDiskUsagePer,
+		SysDiskUsagePer:        snap.SysDiskUsagePer,
+		NicQueues:              snap.NicQueues,
+		NodeLabels:             cloneStringMap(snap.Labels),
+		SchedulingDisabled:     snapSchedulingDisabled(snap),
+		LocalTemplates:         localTemplates,
+		LocalTemplatesReported: snap.LocalTemplatesReported,
+		Versions:               snap.Versions,
+		HostFacts:              cloneHostFacts(snap.HostFacts),
 	}
 }
 
 func SchedulerNodeScoreView(snap *model.NodeSnapshot) *model.SchedulerNode {
+	metadataUpdateAt := snap.HeartbeatOrder
+	if metadataUpdateAt.IsZero() {
+		metadataUpdateAt = snap.HeartbeatTime
+	}
 	return &model.SchedulerNode{
 		InsID:               snap.NodeID,
 		Score:               snap.Score,
 		MetricUpdate:        snap.MetricUpdate,
 		MetricLocalUpdateAt: snap.MetricLocalUpdateAt,
-		MetaDataUpdateAt:    snap.HeartbeatTime,
+		MetaDataUpdateAt:    metadataUpdateAt,
 	}
 }
 

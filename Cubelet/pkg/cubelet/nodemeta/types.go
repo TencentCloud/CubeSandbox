@@ -25,13 +25,14 @@ type NodeSpec struct {
 }
 
 type NodeStatus struct {
-	Capacity      map[corev1.ResourceName]resource.Quantity `json:"capacity,omitempty"`
-	Allocatable   map[corev1.ResourceName]resource.Quantity `json:"allocatable,omitempty"`
-	Conditions    []corev1.NodeCondition                    `json:"conditions,omitempty"`
-	Addresses     []corev1.NodeAddress                      `json:"addresses,omitempty"`
-	NodeInfo      corev1.NodeSystemInfo                     `json:"node_info,omitempty"`
-	CubeImages    []ContainerImage                          `json:"cube_images,omitempty"`
-	CubeTemplates []LocalTemplate                           `json:"cube_templates,omitempty"`
+	Capacity           map[corev1.ResourceName]resource.Quantity `json:"capacity,omitempty"`
+	Allocatable        map[corev1.ResourceName]resource.Quantity `json:"allocatable,omitempty"`
+	Conditions         []corev1.NodeCondition                    `json:"conditions,omitempty"`
+	Addresses          []corev1.NodeAddress                      `json:"addresses,omitempty"`
+	NodeInfo           corev1.NodeSystemInfo                     `json:"node_info,omitempty"`
+	CubeImages         []ContainerImage                          `json:"cube_images,omitempty"`
+	CubeTemplates      []LocalTemplate                           `json:"cube_templates,omitempty"`
+	CubeTemplatesKnown bool                                      `json:"-"`
 }
 
 type ContainerImage struct {

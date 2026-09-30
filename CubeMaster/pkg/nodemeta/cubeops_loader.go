@@ -109,13 +109,6 @@ func (l *CubeOpsLoader) loadOnce(ctx context.Context) ([]*node.Node, error) {
 		return nil, fmt.Errorf("unmarshal cubeops nodes: %w", err)
 	}
 
-	now := time.Now()
-	for _, n := range nodes {
-		if n != nil {
-			n.MetaDataUpdateAt = now
-		}
-	}
-
 	log.G(ctx).Debugf("cubeops_loader nodes=%d", len(nodes))
 	return nodes, nil
 }

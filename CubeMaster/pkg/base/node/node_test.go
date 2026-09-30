@@ -350,6 +350,70 @@ func TestNodeCloneNilHostFacts(t *testing.T) {
 	}
 }
 
+func TestNodeLocalTemplatesReportedJSONSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   string
+		reported  bool
+		templates []string
+	}{
+		{name: "omitted", payload: `{}`, reported: false},
+		{name: "legacy empty", payload: `{"LocalTemplates":[]}`, reported: false, templates: []string{}},
+		{name: "reported empty", payload: `{"LocalTemplates":[],"LocalTemplatesReported":true}`, reported: true, templates: []string{}},
+		{name: "reported non-empty", payload: `{"LocalTemplates":["tpl-a"],"LocalTemplatesReported":true}`, reported: true, templates: []string{"tpl-a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var n Node
+			if err := json.Unmarshal([]byte(tt.payload), &n); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			assert.Equal(t, tt.reported, n.LocalTemplatesReported)
+			assert.Equal(t, tt.templates, n.LocalTemplates)
+		})
+	}
+}
+
+func TestNodeLocalTemplatesMarshalJSONSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		node      *Node
+		wantKey   bool
+		templates []string
+	}{
+		{name: "unreported nil", node: &Node{}},
+		{name: "unreported non-empty", node: &Node{LocalTemplates: []string{"tpl-a"}}},
+		{name: "reported nil", node: &Node{LocalTemplatesReported: true}, wantKey: true, templates: []string{}},
+		{name: "reported empty", node: &Node{LocalTemplates: []string{}, LocalTemplatesReported: true}, wantKey: true, templates: []string{}},
+		{name: "reported non-empty", node: &Node{LocalTemplates: []string{"tpl-a"}, LocalTemplatesReported: true}, wantKey: true, templates: []string{"tpl-a"}},
+		{name: "reported empty clone", node: (&Node{LocalTemplates: []string{}, LocalTemplatesReported: true}).Clone(), wantKey: true, templates: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.node)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatalf("unmarshal fields: %v", err)
+			}
+			value, ok := fields["LocalTemplates"]
+			if ok != tt.wantKey {
+				t.Fatalf("LocalTemplates key present = %t, want %t: %s", ok, tt.wantKey, raw)
+			}
+			if !tt.wantKey {
+				return
+			}
+			var templates []string
+			if err := json.Unmarshal(value, &templates); err != nil {
+				t.Fatalf("unmarshal LocalTemplates: %v", err)
+			}
+			assert.Equal(t, tt.templates, templates)
+		})
+	}
+}
+
 func TestNodeHostFactsJSONRoundTrip(t *testing.T) {
 	n := &Node{
 		InsID: "node-1",

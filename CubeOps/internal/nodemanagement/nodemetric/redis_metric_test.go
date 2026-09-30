@@ -17,7 +17,22 @@ import (
 
 	"github.com/gomodule/redigo/redis"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
 )
+
+func TestWriteNodeSnapshot_NilPoolReturnsError(t *testing.T) {
+	saved := pool
+	pool = nil
+	defer func() { pool = saved }()
+
+	applied, err := WriteNodeSnapshot(&model.NodeSnapshot{NodeID: "node-1"})
+	if err == nil {
+		t.Fatal("expected error for nil pool")
+	}
+	if applied {
+		t.Fatal("nil pool must not report an applied write")
+	}
+}
 
 func TestWriteNodeMetric_NilPool(t *testing.T) {
 	cleanup := SetWriteNodeMetricHook(nil)

@@ -178,6 +178,8 @@ func Images(nodeStatusMaxImages int32,
 
 func LocalTemplate(localTemplateListFunc func(context.Context) (map[string]*templatetypes.LocalRunTemplate, error)) Setter {
 	return func(ctx context.Context, node *cubeletnodemeta.Node) error {
+		node.Status.CubeTemplates = nil
+		node.Status.CubeTemplatesKnown = false
 		var templates []cubeletnodemeta.LocalTemplate
 
 		localTemplates, err := localTemplateListFunc(ctx)
@@ -195,6 +197,7 @@ func LocalTemplate(localTemplateListFunc func(context.Context) (map[string]*temp
 			templates = append(templates, coreTemplate)
 		}
 		node.Status.CubeTemplates = templates
+		node.Status.CubeTemplatesKnown = true
 
 		return nil
 	}

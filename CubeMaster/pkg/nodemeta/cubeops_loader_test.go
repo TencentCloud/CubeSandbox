@@ -111,21 +111,23 @@ func TestCubeOpsLoader_LoadNodes_Isolated(t *testing.T) {
 
 func TestCubeOpsLoader_FullNodeRoundTrip(t *testing.T) {
 	want := &node.Node{
-		InsID:               "node-1",
-		IP:                  "10.0.0.1",
-		CpuTotal:            4,
-		MemMBTotal:          8192,
-		QuotaCpu:            4000,
-		QuotaMem:            8192,
-		MaxMvmLimit:         3000,
-		CreateConcurrentNum: 100,
-		ClusterLabel:        "gz",
-		InstanceType:        "cubebox",
-		HostStatus:          "running",
-		ReportedReady:       true,
-		Healthy:             true,
-		LocalTemplates:      []string{"tpl-1", "tpl-2"},
-		NodeLabels:          map[string]string{"zone": "gz"},
+		InsID:                  "node-1",
+		IP:                     "10.0.0.1",
+		CpuTotal:               4,
+		MemMBTotal:             8192,
+		QuotaCpu:               4000,
+		QuotaMem:               8192,
+		MaxMvmLimit:            3000,
+		CreateConcurrentNum:    100,
+		ClusterLabel:           "gz",
+		InstanceType:           "cubebox",
+		HostStatus:             "running",
+		ReportedReady:          true,
+		Healthy:                true,
+		MetaDataUpdateAt:       time.Unix(1_700_000_000, 123_000_000).UTC(),
+		LocalTemplates:         []string{"tpl-1", "tpl-2"},
+		LocalTemplatesReported: true,
+		NodeLabels:             map[string]string{"zone": "gz"},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -156,6 +158,9 @@ func TestCubeOpsLoader_FullNodeRoundTrip(t *testing.T) {
 	}
 	if n.MaxMvmLimit != want.MaxMvmLimit {
 		t.Errorf("MaxMvmLimit=%d", n.MaxMvmLimit)
+	}
+	if !n.MetaDataUpdateAt.Equal(want.MetaDataUpdateAt) {
+		t.Errorf("MetaDataUpdateAt=%s want %s", n.MetaDataUpdateAt, want.MetaDataUpdateAt)
 	}
 	if len(n.LocalTemplates) != 2 || n.LocalTemplates[0] != "tpl-1" || n.LocalTemplates[1] != "tpl-2" {
 		t.Errorf("LocalTemplates=%v", n.LocalTemplates)

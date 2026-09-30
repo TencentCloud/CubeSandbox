@@ -130,6 +130,7 @@ func stripLocalTemplates(nodes []*model.SchedulerNode) []*model.SchedulerNode {
 		}
 		cp := *n
 		cp.LocalTemplates = nil
+		cp.LocalTemplatesReported = false
 		out[i] = &cp
 	}
 	return out

@@ -72,11 +72,16 @@ type RegisterNodeRequest struct {
 }
 
 type UpdateNodeStatusRequest struct {
-	RequestID      string                           `json:"requestID,omitempty"`
-	Conditions     []corev1.NodeCondition           `json:"conditions,omitempty"`
-	Images         []cubeletnodemeta.ContainerImage `json:"images,omitempty"`
-	LocalTemplates []cubeletnodemeta.LocalTemplate  `json:"local_templates,omitempty"`
-	HeartbeatTime  time.Time                        `json:"heartbeat_time,omitempty"`
+	RequestID  string                           `json:"requestID,omitempty"`
+	Conditions []corev1.NodeCondition           `json:"conditions,omitempty"`
+	Images     []cubeletnodemeta.ContainerImage `json:"images,omitempty"`
+	// LocalTemplates has no omitempty on purpose: cubelet reports its full
+	// local-template inventory on every heartbeat, so it must always emit the
+	// field (an explicit empty array when drained to zero). That lets CubeOps
+	// distinguish a reported-empty inventory from a legacy/partial heartbeat
+	// that omits the field entirely (see UpdateNodeStatusRequest in CubeOps).
+	LocalTemplates []cubeletnodemeta.LocalTemplate `json:"local_templates"`
+	HeartbeatTime  time.Time                       `json:"heartbeat_time,omitempty"`
 
 	Allocated  *AllocatedResources `json:"allocated,omitempty"`
 	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`

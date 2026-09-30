@@ -112,8 +112,9 @@ type Node struct {
 	LocalCreateNum int64 `json:"LocalCreateNum,omitempty"`
 	NicQueues      int64 `json:"nic_queues,omitempty"`
 
-	NodeLabels     map[string]string `json:"NodeLabels,omitempty"`
-	LocalTemplates []string          `json:"LocalTemplates,omitempty"`
+	NodeLabels             map[string]string `json:"NodeLabels,omitempty"`
+	LocalTemplates         []string          `json:"LocalTemplates,omitempty"`
+	LocalTemplatesReported bool              `json:"LocalTemplatesReported"`
 
 	// Versions carries the real version of each component installed on the
 	// node. Populated by CubeOps /internal/v1/nodes; consumed by templatecenter
@@ -163,16 +164,27 @@ func (n *Node) SchedulingAllowed() bool {
 	return n != nil && !n.schedulingDisabled.Load()
 }
 
-// MarshalJSON emits SchedulingDisabled from the atomic cordon flag.
+// MarshalJSON emits SchedulingDisabled from the atomic cordon flag and keeps
+// an authoritative empty template inventory distinct from an unknown one.
 func (n *Node) MarshalJSON() ([]byte, error) {
 	type Alias Node
-	return json.Marshal(&struct {
+	type nodeJSON struct {
 		*Alias
-		SchedulingDisabled bool `json:"SchedulingDisabled"`
-	}{
+		LocalTemplates     *[]string `json:"LocalTemplates,omitempty"`
+		SchedulingDisabled bool      `json:"SchedulingDisabled"`
+	}
+	aux := nodeJSON{
 		Alias:              (*Alias)(n),
 		SchedulingDisabled: n.SchedulingDisabled(),
-	})
+	}
+	if n != nil && n.LocalTemplatesReported {
+		templates := n.LocalTemplates
+		if templates == nil {
+			templates = []string{}
+		}
+		aux.LocalTemplates = &templates
+	}
+	return json.Marshal(&aux)
 }
 
 // UnmarshalJSON loads SchedulingDisabled into the atomic cordon flag.
@@ -218,6 +230,9 @@ func (n *Node) Clone() *Node {
 	cloned.labelsCache = nil
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
+	}
+	if n.LocalTemplates != nil {
+		cloned.LocalTemplates = append([]string(nil), n.LocalTemplates...)
 	}
 	if n.NodeLabels != nil {
 		cloned.NodeLabels = make(map[string]string, len(n.NodeLabels))
