@@ -127,6 +127,27 @@ images:
 
 imagePullSecrets: []
 
+# Extra CA certificates merged into the CubeTemplateCenter container's TLS
+# trust store (via SSL_CERT_FILE). TemplateCenter is the pod that pulls OCI
+# images from registries inside the cluster (template create-from-image);
+# this is needed when the registry serves a certificate signed by a private
+# CA. It has no effect on node-side kubelet/containerd pulls (configure those
+# on the host). Publicly-trusted registries (Docker Hub, TCR, GCR, ...) need
+# no configuration; the default is a no-op.
+#
+# How it works: the chart renders a ConfigMap with the PEM documents below and
+# injects a merge-ca init container that concatenates the TemplateCenter
+# image's system CA bundle with these certs into an emptyDir, exposed to the
+# main container via SSL_CERT_FILE (Go's crypto/x509 honors it).
+#
+# To manage the ConfigMap yourself instead, set existingConfigMap; its keys
+# must end in .crt and contain PEM documents.
+trustedCACerts:
+  enabled: false
+  existingConfigMap: ""
+  # Each entry is one PEM document (-----BEGIN CERTIFICATE----- ...).
+  certs: []
+
 # Optional StorageClass created by the chart. Off by default: on a plain
 # Kubernetes / self-hosted cluster the PVCs below should use the cluster's
 # default StorageClass, so leave `storageClass.create=false` and either leave

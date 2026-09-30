@@ -45,6 +45,14 @@ spec:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
+      {{- if and .Values.trustedCACerts.enabled (not .Values.trustedCACerts.existingConfigMap) }}
+      annotations:
+        # Roll the Deployment when trustedCACerts.certs changes: the merged
+        # bundle is a one-time copy into an emptyDir at pod start, so a bare
+        # ConfigMap update would never reach running pods. The
+        # existingConfigMap path is operator-owned (restart manually).
+        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toYaml | sha256sum | quote }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -77,6 +85,52 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- end }}
+      {{- if .Values.trustedCACerts.enabled }}
+      initContainers:
+        # Merge the pod image's system CA bundle with trustedCACerts into an
+        # emptyDir so image pulls from registries with private CA certificates
+        # succeed (the main container reads it via SSL_CERT_FILE).
+        - name: merge-ca
+          # Use the TemplateCenter image itself: SSL_CERT_FILE replaces the
+          # main container's OS trust store, so the merged bundle must be
+          # built from the same image's CA set (also already cached on the
+          # node -- no extra image dependency).
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.templateCenter.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              # Probe known system bundle layouts (Debian/Ubuntu first, then
+              # RHEL-family) -- operators may rebuild this image on another
+              # base distro. Fail loudly when none exists.
+              # NOTE: run under `sh -ec` — probe with an if-form so a missing
+              # candidate does not trip errexit before the next path is tried.
+              BUNDLE=""
+              for b in /etc/ssl/certs/ca-certificates.crt \
+                       /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+                       /etc/pki/tls/certs/ca-bundle.crt; do
+                if [ -f "$b" ]; then BUNDLE="$b"; break; fi
+              done
+              [ -n "$BUNDLE" ] \
+                || { echo "no system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
+              cp "$BUNDLE" /merged/ca-bundle.crt
+              # Seam: a probed bundle without a trailing newline would glue the
+              # first user cert onto the last END line; normalize before append.
+              printf '\n' >> /merged/ca-bundle.crt
+              ls /trusted-ca/*.crt >/dev/null 2>&1 \
+                || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
+              # Append user certs one at a time with a newline separator:
+              # ConfigMap entries are rendered with |- (no trailing newline),
+              # so a bare `cat *.crt` would glue PEM blocks together and
+              # silently drop every cert after the first.
+              for f in /trusted-ca/*.crt; do cat "$f"; printf '\n'; done >> /merged/ca-bundle.crt
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /trusted-ca
+              readOnly: true
+            - name: merged-ca
+              mountPath: /merged
+      {{- end }}
       containers:
         - name: cube-templatecenter
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
@@ -95,6 +149,10 @@ spec:
           securityContext:
             privileged: true
           env:
+            {{- if .Values.trustedCACerts.enabled }}
+            - name: SSL_CERT_FILE
+              value: /merged/ca-bundle.crt
+            {{- end }}
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             # All CUBE_TEMPLATE_CENTER_*: the pre-rename CUBE_TC_* /
             # CUBEMASTER_* spellings still work as a fallback and log a
@@ -186,6 +244,11 @@ spec:
               mountPath: /etc/cube/ca
               readOnly: true
           {{- end }}
+          {{- if .Values.trustedCACerts.enabled }}
+            - name: merged-ca
+              mountPath: /merged
+              readOnly: true
+          {{- end }}
             - name: cube-templatecenter-log
               mountPath: /data/log/CubeTemplateCenter
             - name: cube-master-storage
@@ -202,6 +265,13 @@ spec:
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
+      {{- end }}
+      {{- if .Values.trustedCACerts.enabled }}
+        - name: trusted-ca
+          configMap:
+            name: {{ include "cube.trustedCAName" . }}
+        - name: merged-ca
+          emptyDir: {}
       {{- end }}
         - name: cube-templatecenter-log
           emptyDir: {}
