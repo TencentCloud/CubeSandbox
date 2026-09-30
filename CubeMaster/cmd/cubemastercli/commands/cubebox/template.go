@@ -189,6 +189,14 @@ func applyCreateFromImageIvshmemFlag(c *cli.Context, req *types.CreateTemplateFr
 	req.EnableIvshmem = &enableIvshmem
 }
 
+func applyCreateFromImageCgroupModeFlag(c *cli.Context, req *types.CreateTemplateFromImageReq) {
+	if !c.IsSet("cgroup-mode") {
+		return
+	}
+	mode := c.String("cgroup-mode")
+	req.CgroupMode = &mode
+}
+
 func parseCreateFromImageExtraNetworkFlags(c *cli.Context) (*createFromImageExtraNetworkFlags, error) {
 	extraArgs := make([]string, 0, c.NArg())
 	for i := 0; i < c.NArg(); i++ {
@@ -888,6 +896,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "registry-username", Usage: "registry username"},
 		cli.StringFlag{Name: "registry-password", Usage: "registry password"},
 		cli.BoolFlag{Name: "enable-ivshmem", Usage: "boot the template build sandbox with ivshmem enabled"},
+		cli.StringFlag{Name: "cgroup-mode", Usage: "cgroup hierarchy for the template build sandbox guest: empty (default) = unified v2; legacy = guest mounts cgroup v1 itself (e.g. Android)"},
 
 		cli.StringSliceFlag{Name: "cmd", Usage: "override container ENTRYPOINT (command); repeat for multiple elements, e.g. --cmd /bin/sh --cmd -c"},
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
@@ -946,6 +955,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		withCubeCA := c.BoolT("with-cube-ca")
 		req.WithCubeCA = &withCubeCA
 		applyCreateFromImageIvshmemFlag(c, req)
+		applyCreateFromImageCgroupModeFlag(c, req)
 		req.CubeNetworkConfig, err = mergeCreateFromImageCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 		if err != nil {
 			return err

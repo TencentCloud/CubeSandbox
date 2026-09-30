@@ -48,6 +48,7 @@ use crate::{debugf, errf, infof, warnf};
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
+const ANNO_CGROUP_MODE: &str = "cube.master.cgroup-mode";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
 #[derive(PartialEq, Eq)]
@@ -798,7 +799,9 @@ impl SandBox {
         }
         vc.add_cmdline("highres=off".to_string());
         vc.add_cmdline("clocksource=kvm-clock".to_string());
-        vc.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
+        if !self.is_legacy_cgroup_mode() {
+            vc.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
+        }
 
         // Add externally passed pmem
         vc.add_pmems(&self.conf.pmem);
@@ -831,6 +834,17 @@ impl SandBox {
             .as_ref()
             .and_then(|anno| anno.get(ANNO_ENABLE_IVSHMEM))
             .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    }
+
+    /// Skip the unified cgroup v2 hierarchy injection for guests that must
+    /// mount cgroup v1 controllers themselves (e.g. Android init task_profiles).
+    fn is_legacy_cgroup_mode(&self) -> bool {
+        self.spec
+            .annotations()
+            .as_ref()
+            .and_then(|anno| anno.get(ANNO_CGROUP_MODE))
+            .map(|v| v == "legacy")
             .unwrap_or(false)
     }
 
@@ -1905,6 +1919,33 @@ mod tests {
             set_expect.is_empty(),
             "missing expected cmdlines: {:?}",
             set_expect
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resource_legacy_cgroup_mode_skips_unified_hierarchy() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), log, false, tx);
+        let mut annos = HashMap::new();
+        annos.insert(
+            "cube.master.cgroup-mode".to_string(),
+            "legacy".to_string(),
+        );
+        sb.spec = SpecBuilder::default().annotations(annos).build().unwrap();
+        sb.conf.kernel = "ut_kernel".to_string();
+        sb.conf.vm_res.cpu = 999;
+        sb.conf.vm_res.memory = 999;
+        sb.conf.product = PRODUCT_CUBEBOX.to_string();
+
+        let vmconfig = sb.prepare_resource().await;
+        assert!(vmconfig.is_ok());
+        let vm_config = vmconfig.unwrap();
+        assert!(
+            !vm_config
+                .cmdlines
+                .contains(&"agent.unified_cgroup_hierarchy=true".to_string()),
+            "legacy cgroup mode must not inject the unified hierarchy cmdline"
         );
     }
 
