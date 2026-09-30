@@ -751,8 +751,10 @@ impl Vmm {
             if let Some(pmems) = &restore_cfg.pmem {
                 vm_config.update_pmem(pmems);
             }
-            if let Some(ivshmem) = &restore_cfg.ivshmem {
-                vm_config.update_ivshmem(ivshmem);
+            if let Some(ivshmems) = &restore_cfg.ivshmem {
+                vm_config
+                    .update_ivshmem(ivshmems)
+                    .map_err(VmError::ConfigValidation)?;
             }
             vm_config.memory.dirty_log = restore_cfg.dirty_log;
 

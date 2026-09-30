@@ -92,7 +92,15 @@ pub struct IvshmemDeviceState {
 }
 
 impl IvshmemDevice {
-    pub fn new(id: String, state: Option<IvshmemDeviceState>, region_size: u64) -> Self {
+    /// `subsystem_id` lands in PCI config space and is how a guest driver
+    /// tells one ivshmem device from another when several are attached.
+    /// `0x0000` is the generic device claimed by `cube-ivshmem`.
+    pub fn new(
+        id: String,
+        state: Option<IvshmemDeviceState>,
+        region_size: u64,
+        subsystem_id: u16,
+    ) -> Self {
         let configuration = PciConfiguration::new(
             IVSHMEM_VENDOR_ID,
             IVSHMEM_DEVICE_ID,
@@ -102,7 +110,7 @@ impl IvshmemDevice {
             None,
             PciHeaderType::Device,
             0,
-            0,
+            subsystem_id,
             None,
         );
 
