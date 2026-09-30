@@ -1,0 +1,15 @@
+# Host-side dependencies. The in-sandbox agent server is pinned separately in
+# the Dockerfile (OPENHANDS_AGENT_SERVER_VERSION) — keep them compatible.
+#
+# Python >= 3.12 — the floor is set by openhands-sdk's requires-python;
+# all examples are tested on 3.12.
+#
+# NOTE: install with uv (or a current pip >= 26). Older pips — e.g. Ubuntu
+# 24.04's stock pip 24.0 — fail to resolve the lmnr / opentelemetry
+# constraints in the OpenHands dependency graph:
+#   uv venv .venv --python 3.12 && source .venv/bin/activate
+#   uv pip install -r requirements.txt
+openhands-sdk==1.38.0
+openhands-tools==1.38.0
+e2b-code-interpreter>=2.4.1
+python-dotenv>=1.0.0
