@@ -161,6 +161,17 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 						log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
 					}
 				}
+				// The tombstone may still have a live shim if a prior VMM
+				// crashed (e.g. resume-timesync failure) — reap it before we
+				// wipe the cubebox record, or the next Create reuses the
+				// same TAP/IP while the shim is still holding fds.
+				reapCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if err := l.reapSandboxRuntime(reapCtx, sb); err != nil {
+					cancel()
+					return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
+						"failed to reap runtime of paused sandbox %s: %v", desired, err)
+				}
+				cancel()
 				if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
 					return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
 						"failed to replace paused sandbox %s: %v", desired, delErr)
