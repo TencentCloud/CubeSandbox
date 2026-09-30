@@ -1,5 +1,9 @@
 # 路线图
 
+各版本的里程碑、计划任务和当前进度统一维护在
+[CubeSandbox 版本迭代计划](https://github.com/orgs/TencentCloud/projects/3/views/1) 中。
+本页用于概述中长期方向，最新迭代状态请以 GitHub Project 为准。
+
 ---
 
 ## 即将上线
