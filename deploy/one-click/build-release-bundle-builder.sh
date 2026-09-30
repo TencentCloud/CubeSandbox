@@ -37,7 +37,7 @@ rm -rf "${PREBUILT_DIR}"
 mkdir -p "${PREBUILT_DIR}" "$(dirname "${HELPER_SCRIPT}")"
 rm -f "${ENVD_WORK_PATH}"
 if [[ -n "${ENVD_LOCAL_PATH:-}" ]]; then
-  ensure_file "${ENVD_LOCAL_PATH}"
+  validate_envd_binary "${ENVD_LOCAL_PATH}" "$(uname -m)"
   install -m 0755 "${ENVD_LOCAL_PATH}" "${ENVD_WORK_PATH}"
   log "embedding envd into cubemastercli from ${ENVD_LOCAL_PATH}"
 fi
@@ -424,6 +424,8 @@ track_s3lvol() {
 # later track_cubemaster path because the latter would overwrite the artifact.
 echo "[one-click] building cubemastercli in builder" >&2
 if [[ -f /workspace/deploy/one-click/.work/envd ]]; then
+  source /workspace/deploy/one-click/lib/common.sh
+  validate_envd_binary /workspace/deploy/one-click/.work/envd "$(go env GOARCH)"
   (cd /workspace/CubeMaster && make cubemastercli ENVD_LOCAL_PATH="/workspace/deploy/one-click/.work/envd")
 else
   (cd /workspace/CubeMaster && make cubemastercli)

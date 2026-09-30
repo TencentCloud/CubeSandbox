@@ -105,6 +105,8 @@ ENVD_LOCAL_PATH=/abs/path/to/envd \
 
 设置该变量后，宿主机 wrapper 会先把文件复制到 `deploy/one-click/.work/envd`，builder 容器再用这个文件构建内嵌 `envd` 的 `cubemastercli`。如果不设置 `ENVD_LOCAL_PATH`，发布包中的 `cubemastercli` 不包含默认 `envd`；运行时若模板构建启用 envd 注入，需要显式传入 `--envd-path`。
 
+如需显式内嵌仓库 Rust 实现，先在仓库根目录运行 `make cube-envd`，再将生成的 `_output/bin/cube-envd/amd64/envd`（arm64 构建机使用 `arm64/envd`）作为 `ENVD_LOCAL_PATH`。输入架构必须与包一致。参见 [Rust 自行构建与镜像选择说明](../../docker/README.md#optional-repository-built-rust-daemon)。默认镜像继续使用 Go；未传入该变量时仍不内嵌 daemon。
+
 这个入口会先：
 
 - 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`templatecenter`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制

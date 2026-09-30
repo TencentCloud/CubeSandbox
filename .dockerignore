@@ -8,3 +8,9 @@
 !CubeS3lvol/patches/**
 CubeS3lvol/deps
 CubeS3lvol/deps/**
+!docker/**
+!rust-toolchain.toml
+!cube-envd/
+!cube-envd/**
+cube-envd/target
+cube-envd/target/**

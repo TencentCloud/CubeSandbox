@@ -512,3 +512,75 @@ export SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true
 
 该开关仅保留通过 `sdk_sandbox` fixture 创建、且**失败**的测试的 sandbox；通过和
 跳过的测试始终会被清理，直接创建 sandbox 的边界用例（使用各自的 helper）也始终清理。
+
+## 选定 envd 验收
+
+Go 保持默认，Rust 必须通过镜像/模板显式选择；`--sdk-e2e-backends=cubesandbox`
+只选择 SDK。复用 [nginx 示例](../../../examples/cubesandbox-base-nginx/README_zh.md)
+构建可比的 Go/Rust 输入，在已有授权本地或远端平台运行。命令不会发布镜像；模板
+构建器必须能读取镜像。支持 Docker 导出的本地构建器可使用既有
+`CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED=false` 配置（无 skopeo/umoci 时），
+不改变 sandbox/代理语义。
+
+从仓库根目录，安装当前 E2E requirements 后运行：
+
+```bash
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy="$NO_PROXY"
+export CUBE_API_URL=http://127.0.0.1:3000
+export CUBE_PROXY_NODE_IP=127.0.0.1  # CubeProxy 节点，不能填 guest IP
+export CUBE_PROXY_PORT_HTTP=80
+export SDK_ENVD_PROVIDER=rust
+export SDK_ENVD_COMMIT=<所选构建实际输出的commit>
+export SDK_ENVD_IMAGE=<构建节点可读的nginx镜像>
+export SDK_E2E_REPORT_DIR=reports/envd/rust-chain
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_new_template_chain --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+```
+
+该用例新建模板并观察 READY，创建 sandbox，确认运行中可执行程序及 commit，经
+CubeProxy 断言 envd health 204、命令和文件行为，失败时也清理本次资源。已有明确
+选择的 READY 模板可独立运行三项：
+
+```bash
+export CUBE_TEMPLATE_ID=<所选READY模板>
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_health_identity --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_sdk_commands --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_sdk_files --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+```
+
+Go 对照设置 `SDK_ENVD_PROVIDER=go` 并提供对应 commit/镜像/模板。每项都先确认身份
+和 health。省略 user 覆盖 SDK 实际 root 默认；显式 user 验证 UID1000。文件覆盖
+UTF-8 文本读取、任意二进制写入并经 SDK 命令比较、空文件、长改短覆盖、命令与文件
+API 双向验证及缺失文件错误，不宣称支持二进制 SDK read。
+
+按需提供 `CUBE_API_KEY`，不记录密钥。私有 CA 分别使用 `SSL_CERT_FILE`（httpx）和
+`REQUESTS_CA_BUNDLE`（requests）。结果和清理写入 `events.jsonl`。未运行、失败、
+跳过、零测试都不是验收通过；组件 CI 和 hermetic 框架测试不能替代平台结果。
+
+### 小规模 SDK 性能对比
+
+先核对同一原生架构、可比节点、CPU/内存、kernel/hypervisor、应用/包版本、日志和
+网络路径，保存这些观察及 SDK/构建身份；测量时停止其他构建负载。配置或位置无法
+控制时，不能把差异归因于 daemon。
+
+```bash
+export SDK_ENVD_GO_TEMPLATE_ID=<Go模板>
+export SDK_ENVD_RUST_TEMPLATE_ID=<Rust模板>
+export SDK_ENVD_GO_COMMIT=<Go构建commit>
+export SDK_ENVD_RUST_COMMIT=<Rust构建commit>
+export SDK_E2E_REPORT_DIR=reports/envd/performance
+unset SDK_E2E_TRACE
+python -m pytest tests/e2e/sdk_compat/cases/performance/test_envd_comparison.py --run-e2e --run-envd-performance --sdk-e2e-backends=cubesandbox -n 0
+```
+
+没有显式开关时不运行性能用例；拒绝 xdist 并行或详细 SDK tracing。三组新 sandbox
+交替 Go/Rust 顺序，串行测短命令及 4096/4194304 字节 ASCII 文件写/完整文本读。
+每组每负载保留首次、5 次预热、10 次测量，即每 provider/负载 30 个测量样本。
+核对和 JSON 序列化在计时外；保留失败，不补测替换。`events.jsonl` 包含全部样本、
+成功/错误数、中位数、nearest-rank p95（ceil(.95*n)）、每组中位数及 4 MiB 有效吞吐。
+延迟降低按 `(Go-Rust)/Go`、吞吐提升按 `(Rust-Go)/Go`，负值也保留。
+
+这些是暖缓存、SDK/客户端/代理/网络/guest 合计时间，不是磁盘持久化吞吐或 daemon
+内部耗时；SDK 重试保持默认，不新增操作重试。相同 1 秒静置后的 idle/post-workload
+RSS 是驻留内存观察，不是峰值或整 VM 内存。30 个组内相关样本只是小比较，不是
+尾延迟认证或 CI 阈值；错误、未完成批次及配置不可比时不下速度优劣结论。
