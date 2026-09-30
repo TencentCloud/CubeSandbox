@@ -13,6 +13,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -53,7 +54,7 @@ func Create(ctx context.Context, calleeEp string,
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
 
-	return c.Create(ctx, req)
+	return c.Create(telemetry.InjectGRPC(ctx), req)
 }
 
 func AppSnapshot(ctx context.Context, calleeEp string,

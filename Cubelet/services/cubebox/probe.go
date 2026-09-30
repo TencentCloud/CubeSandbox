@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
@@ -81,8 +82,10 @@ func newEnvdHTTPClient() *http.Client {
 
 func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) (retErr error) {
 	startTime := time.Now()
+	_, span := telemetry.Start(ctx, telemetry.SpanProbe)
 	defer func() {
 		workflow.RecordCreateMetric(ctx, retErr, constants.CubeProbeId, time.Since(startTime))
+		telemetry.End(span, retErr)
 	}()
 
 	telnetCh := make(chan error, 1)

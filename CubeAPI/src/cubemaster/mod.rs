@@ -62,9 +62,12 @@ impl CubeMasterClient {
         req: &CreateSandboxRequest,
     ) -> Result<CreateSandboxResponse, CubeMasterError> {
         let url = format!("{}/cube/sandbox", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await

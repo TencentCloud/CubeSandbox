@@ -14,6 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -24,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -1776,22 +1780,47 @@ func syncCreateRedoImageJobAliasTx(tx *gorm.DB, templateID, alias string) error 
 	return nil
 }
 
+func dbReadSpan(ctx context.Context, table string) (context.Context, trace.Span) {
+	return telemetry.StartIfTraced(ctx, telemetry.SpanTemplateDB,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrOperation, "select"),
+			attribute.String(telemetry.AttrTable, table),
+		))
+}
+
+// A missing snapshot is the normal fallback to a template definition.
+func endSnapshotReadSpan(span trace.Span, err error) {
+	if errors.Is(err, ErrSnapshotNotFound) {
+		err = nil
+	}
+	telemetry.End(span, err)
+}
+
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
-	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		return nil, err
-	} else if hit {
+	_, cacheSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateCache,
+		trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
+	cached, cacheHit, cacheErr := getCachedTemplateRequest(templateID)
+	cacheSpan.SetAttributes(attribute.Bool(telemetry.AttrCacheHit, cacheHit))
+	cacheSpan.End()
+	if cacheErr != nil {
+		return nil, cacheErr
+	}
+	if cacheHit {
 		reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
-		ensureRuntimeTemplateRequest(req)
-		return req, nil
+		ensureRuntimeTemplateRequest(cached)
+		return cached, nil
 	}
 	reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheMiss, time.Since(cacheStart))
 
-	v, err := templateRequestFetchGroup.Do(templateID, func() (interface{}, error) {
+	v, err := templateRequestFetchGroup.Do(ctx, templateID, func() (interface{}, error) {
 		var req *sandboxtypes.CreateCubeSandboxReq
 		err := withTemplateReadLock(templateID, func() error {
 			dbStart := time.Now()
-			if rec, snapErr := getSnapshotRecord(ctx, templateID); snapErr == nil && rec != nil {
+			snapCtx, snapSpan := dbReadSpan(ctx, constants.SnapshotTableName)
+			rec, snapErr := getSnapshotRecord(snapCtx, templateID)
+			endSnapshotReadSpan(snapSpan, snapErr)
+			if snapErr == nil && rec != nil {
 				if snapshotRejectsNewUse(rec.Status) {
 					return ErrTemplateNotFound
 				}
@@ -1811,7 +1840,9 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 			} else if snapErr != nil && !errors.Is(snapErr, ErrSnapshotNotFound) {
 				return snapErr
 			}
-			def, err := GetDefinition(ctx, templateID)
+			defCtx, defSpan := dbReadSpan(ctx, constants.TemplateDefinitionTableName)
+			def, err := GetDefinition(defCtx, templateID)
+			telemetry.End(defSpan, err)
 			reportTemplateMetric(ctx, constants.MySQL, store.dbAddr, constants.ActionTemplateGetDefinition, time.Since(dbStart), 0)
 			if err != nil {
 				return err

@@ -15,6 +15,9 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
@@ -27,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow/provider"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -395,8 +399,24 @@ func (e *Engine) AddFlow(k string, f *Workflow) {
 	e.workflows[k] = f
 }
 
-func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
+func tracesFlow(do string, ctx context.Context) bool {
+	return do == flow_create || constants.IsFailoverOperation(ctx)
+}
+
+func startFlowSpan(do, name string, ctx context.Context, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if !tracesFlow(do, ctx) {
+		return ctx, noop.Span{}
+	}
+	return telemetry.StartIfTraced(ctx, name, trace.WithAttributes(attrs...))
+}
+
+func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error) {
 	if flow, ok := e.workflows[do]; ok {
+		ctx, span := startFlowSpan(do, telemetry.SpanWorkflow, ctx,
+			attribute.String(telemetry.AttrWorkflow, flow.ID()))
+		defer func() {
+			telemetry.End(span, err)
+		}()
 
 		start := time.Now()
 		if !flow.Limiter.TryAcquire() {
@@ -475,15 +495,25 @@ func (e *Engine) cleanUp(ctx context.Context, opts ReqContext) {
 
 func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContext, step *Step) error {
 
-	eg, ctxWithCancel := errgroup.WithContext(ctx)
 	rt := CubeLog.GetTraceInfo(ctx)
 	if rt == nil {
 		return fmt.Errorf("missing trace info in context")
 	}
+	stepCtx, stepSpan := startFlowSpan(do, telemetry.SpanStep, ctx,
+		attribute.String(telemetry.AttrStep, step.ID()))
+	eg, ctxWithCancel := errgroup.WithContext(stepCtx)
 	for i := range step.Actions {
 		flow := step.Actions[i]
 		startGo := time.Now()
 		eg.Go(func() (err error) {
+			// Registered before HandleCrash so it runs after it on panic
+			// unwinding, and records the error HandleCrash synthesised.
+			actionCtx, actionSpan := startFlowSpan(do, telemetry.SpanAction, ctxWithCancel,
+				attribute.String(telemetry.AttrWorkflow, do),
+				attribute.String(telemetry.AttrAction, flow.ID()))
+			defer func() {
+				telemetry.End(actionSpan, err)
+			}()
 			defer recov.HandleCrash(func(panicError interface{}) {
 				err = ret.Errorf(errorcode.ErrorCode_Unknown, "flow[%v] do %s panic :%v %v", flow.ID(), do, panicError, string(debug.Stack()))
 			})
@@ -493,7 +523,7 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 			if opts != nil {
 				sRt.InstanceID = opts.GetSandboxID()
 			}
-			ctxTmp := CubeLog.WithRequestTrace(ctxWithCancel, sRt)
+			ctxTmp := CubeLog.WithRequestTrace(actionCtx, sRt)
 			ctxTmp = log.ReNewLogger(ctxTmp)
 			switch do {
 			case flow_init:
@@ -530,9 +560,11 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 		})
 	}
 	if err := eg.Wait(); err != nil {
+		telemetry.End(stepSpan, err)
 		return err
 
 	}
+	telemetry.End(stepSpan, nil)
 	return nil
 }
 
@@ -556,7 +588,10 @@ func (e *Engine) failover(ctx context.Context, opts ReqContext) {
 	failoverRt.Callee = e.ID()
 	failoverRt.InstanceID = sandboxID
 
+	// Use a fresh deadline for rollback while retaining the create trace parent.
+	createCtx := ctx
 	ctx = namespaces.WithNamespace(context.Background(), namespace)
+	ctx = telemetry.DetachTrace(ctx, createCtx)
 	ctx, cancel := context.WithTimeout(ctx, config.GetCommon().CommonTimeout)
 	defer cancel()
 

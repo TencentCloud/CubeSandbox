@@ -60,11 +60,14 @@ pub fn build_router(state: AppState) -> Router {
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
 
+    // Assign the request ID before tracing the full request.
     Router::new()
         .merge(standard_router)
         .merge(pause_resume_router)
         .merge(snapshot_long_router)
         .with_state(state)
+        .layer(middleware::from_fn(crate::telemetry::layer))
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
 
 fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
@@ -85,8 +88,8 @@ fn build_e2b_snapshot_long_router(state: &AppState, auth_configured: bool) -> Ro
 
 fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
-        .route("/sandboxes", get(sandboxes::list_sandboxes))
         .route("/sandboxes", post(sandboxes::create_sandbox))
+        .route("/sandboxes", get(sandboxes::list_sandboxes))
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
@@ -236,7 +239,6 @@ fn with_auth_and_rate_limit(
 fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppState> {
     router.layer(
         ServiceBuilder::new()
-            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
             .layer(TraceLayer::new_for_http())
             .layer(TimeoutLayer::new(timeout))
             .layer(CompressionLayer::new())

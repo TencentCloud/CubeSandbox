@@ -42,6 +42,7 @@ use crate::hypervisor::cube_hypervisor as CH;
 use crate::hypervisor::snapshot::SnapshotInfo;
 use crate::log::{stat_defer, Log};
 use crate::sandbox::config;
+use crate::telemetry::{self, Trace};
 use crate::{debugf, errf, infof, warnf};
 
 //use tokio_uring::fs::UnixStream;
@@ -552,8 +553,8 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_sandbox(&mut self) -> CResult<()> {
-        let snapshot = self.start_vm().await?;
+    pub async fn create_sandbox(&mut self, trace: &Trace) -> CResult<()> {
+        let snapshot = self.start_vm(trace).await?;
 
         //todo: app snapshot
         if self.conf.notify_snapshot_ret {
@@ -562,59 +563,69 @@ impl SandBox {
             }
         }
 
-        self.connect_agent_with_retry(snapshot).await?;
+        trace
+            .start(telemetry::SPAN_AGENT_CONNECT)
+            .run(self.connect_agent_with_retry(snapshot))
+            .await?;
 
         infof!(self.log, "agent is ready");
 
-        //add vfio device
-        if !self.app_snapshot_restore() {
-            self.add_device().await?;
-        }
+        let mut stat = trace
+            .start(telemetry::SPAN_GUEST_INIT)
+            .run(async {
+                //add vfio device
+                if !self.app_snapshot_restore() {
+                    self.add_device().await?;
+                }
 
-        let storages = self.get_storages()?;
-        let dns = self.get_dns()?;
-        let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
-        let mut req = agent::CreateSandboxRequest {
-            //hostname: self.id.clone(),
-            hostname: self.id.chars().take(8).collect::<String>(),
-            dns: dns.into(),
-            storages: storages.into(),
-            sandbox_pidns: false,
-            sandbox_id: self.id.clone(),
-            interfaces: self.conf.net.get_pb_interfaces().into(),
-            routes: self.conf.net.get_pb_routes().into(),
-            ARPNeighbors: self.conf.net.get_pb_arps().into(),
-            cube_vip: self.conf.vips.clone(),
-            ..Default::default()
-        };
+                let storages = self.get_storages()?;
+                let dns = self.get_dns()?;
+                let stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
+                let mut req = agent::CreateSandboxRequest {
+                    //hostname: self.id.clone(),
+                    hostname: self.id.chars().take(8).collect::<String>(),
+                    dns: dns.into(),
+                    storages: storages.into(),
+                    sandbox_pidns: false,
+                    sandbox_id: self.id.clone(),
+                    interfaces: self.conf.net.get_pb_interfaces().into(),
+                    routes: self.conf.net.get_pb_routes().into(),
+                    ARPNeighbors: self.conf.net.get_pb_arps().into(),
+                    cube_vip: self.conf.vips.clone(),
+                    ..Default::default()
+                };
 
-        if snapshot {
-            req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
-        }
+                if snapshot {
+                    req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
+                }
 
-        let mut ctx = self.ctx.clone();
+                let mut ctx = self.ctx.clone();
 
-        ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
-        if self.app_snapshot_create() {
-            req.start_mode = protoc::agent::StartMode::SNAPSHOT;
-        }
+                ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
+                if self.app_snapshot_create() {
+                    req.start_mode = protoc::agent::StartMode::SNAPSHOT;
+                }
 
-        if self.app_snapshot_restore() {
-            req.start_mode = protoc::agent::StartMode::RESTORE;
-        }
+                if self.app_snapshot_restore() {
+                    req.start_mode = protoc::agent::StartMode::RESTORE;
+                }
 
-        {
-            if self.client.is_none() {
-                errf!(self.log, "client is None in create_sandbox");
-                return Err(format!("client is None"));
-            }
-            let client = self.client.as_ref().unwrap().lock().await;
+                {
+                    if self.client.is_none() {
+                        errf!(self.log, "client is None in create_sandbox");
+                        return Err(format!("client is None"));
+                    }
+                    let client = self.client.as_ref().unwrap().lock().await;
 
-            client
-                .create_sandbox(ctx, &req)
-                .await
-                .map_err(|e| format!("create sandbox failed:{}", e))?;
-        }
+                    client
+                        .create_sandbox(ctx, &req)
+                        .await
+                        .map_err(|e| format!("create sandbox failed:{}", e))?;
+                }
+
+                Ok::<_, String>(stat)
+            })
+            .await?;
 
         if !self.conf.app_snapshot_create {
             //watch oom
@@ -939,16 +950,19 @@ impl SandBox {
 
         !self.conf.app_snapshot_create
     }
-    async fn start_vm(&mut self) -> CResult<bool> {
+    async fn start_vm(&mut self, trace: &Trace) -> CResult<bool> {
         infof!(self.log, "start vm start");
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
-            ch.launch_vmm().await?;
+            trace
+                .start(telemetry::SPAN_LAUNCH_VMM)
+                .run(ch.launch_vmm())
+                .await?;
         }
         let mut snapshot = false;
 
         if self.by_snapshot() {
-            match self.restore_vm().await {
+            match self.restore_vm(trace).await {
                 Ok(_) => {
                     snapshot = true;
                     if self.conf.app_snapshot_restore {
@@ -971,7 +985,7 @@ impl SandBox {
         }
 
         if !snapshot {
-            self.boot_vm().await?;
+            self.boot_vm(trace).await?;
         }
 
         {
@@ -994,80 +1008,100 @@ impl SandBox {
         Ok(snapshot)
     }
 
-    async fn boot_vm(&mut self) -> CResult<()> {
-        let config = self.prepare_resource().await?;
+    async fn boot_vm(&mut self, trace: &Trace) -> CResult<()> {
+        let config = trace
+            .start(telemetry::SPAN_PREPARE_RESOURCE)
+            .run(self.prepare_resource())
+            .await?;
         let mut ch = self.ch.as_mut().unwrap().lock().await;
-        ch.create_vm(&config).await?;
-        ch.boot_vm().await?;
+        trace
+            .start(telemetry::SPAN_BOOT_VM)
+            .run(async {
+                ch.create_vm(&config).await?;
+                ch.boot_vm().await
+            })
+            .await?;
         Ok(())
     }
 
-    async fn restore_vm(&mut self) -> CResult<()> {
-        // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
-        let enable_ivshmem = self.is_ivshmem_enabled();
+    async fn restore_vm(&mut self, trace: &Trace) -> CResult<()> {
+        let stage = trace.start(telemetry::SPAN_PREPARE_SNAPSHOT);
+        let (align_pmem, config) = stage
+            .run(async {
+                // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
+                let enable_ivshmem = self.is_ivshmem_enabled();
 
-        if enable_ivshmem {
-            Self::ensure_ivshmem_file(&self.id)?;
-        }
+                if enable_ivshmem {
+                    Self::ensure_ivshmem_file(&self.id)?;
+                }
 
-        let ss_file = SnapshotInfo::load(
-            self.conf.snapshot_base.as_str(),
-            self.conf.vm_res.cpu,
-            self.conf.vm_res.snap_memory,
-        )?;
+                let ss_file = SnapshotInfo::load(
+                    self.conf.snapshot_base.as_str(),
+                    self.conf.vm_res.cpu,
+                    self.conf.vm_res.snap_memory,
+                )?;
 
-        let mut ss_req = SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
-        ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
-        ss_req.set_agent_version(self.conf.agent_path.as_str())?;
-        ss_req.set_kernel_version(self.conf.kernel.as_str())?;
-        ss_req.set_disks(&self.conf.disk);
+                let mut ss_req =
+                    SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
+                ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+                ss_req.set_agent_version(self.conf.agent_path.as_str())?;
+                ss_req.set_kernel_version(self.conf.kernel.as_str())?;
+                ss_req.set_disks(&self.conf.disk);
 
-        let align_pmem = ss_file.align_pmems(&self.conf.pmem);
-        ss_req.set_pmems(&align_pmem);
+                let align_pmem = ss_file.align_pmems(&self.conf.pmem);
+                ss_req.set_pmems(&align_pmem);
 
-        //ss_file must be treated as a self object.
-        ss_file
-            .eq(&ss_req)
-            .map_err(|e| format!("snapshot metadata not match:{}", e))?;
+                //ss_file must be treated as a self object.
+                ss_file
+                    .eq(&ss_req)
+                    .map_err(|e| format!("snapshot metadata not match:{}", e))?;
 
-        let snapshot = Utils::get_snapshot_dir(
-            self.conf.snapshot_base.as_str(),
-            self.conf.vm_res.cpu,
-            self.conf.vm_res.snap_memory,
-        );
-        infof!(self.log, "snapshot dir:{}", snapshot.clone());
-        let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
-        let mut fss = vec![];
-        if let Some(fs) = self.conf.fs.as_ref() {
-            let f = Utils::restore_fs_configs(fs);
-            fss.push(f);
-        }
-        fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
-        let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
-        let disks = Utils::restore_disks_config(&self.conf.disk);
-        // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
-        let mut pmems = VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
-        pmems.extend(Utils::restore_pmems_config(&self.conf.pmem));
-        let vsock = Utils::gen_vsock_config(&self.id);
+                let snapshot = Utils::get_snapshot_dir(
+                    self.conf.snapshot_base.as_str(),
+                    self.conf.vm_res.cpu,
+                    self.conf.vm_res.snap_memory,
+                );
+                infof!(self.log, "snapshot dir:{}", snapshot.clone());
+                let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
+                let mut fss = vec![];
+                if let Some(fs) = self.conf.fs.as_ref() {
+                    let f = Utils::restore_fs_configs(fs);
+                    fss.push(f);
+                }
+                fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
+                let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
+                let disks = Utils::restore_disks_config(&self.conf.disk);
+                // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
+                let mut pmems =
+                    VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
+                pmems.extend(Utils::restore_pmems_config(&self.conf.pmem));
+                let vsock = Utils::gen_vsock_config(&self.id);
+
+                let config = RestoreConfig {
+                    source_url: PathBuf::from(snapshot),
+                    fs: Some(fss),
+                    net: Some(nets),
+                    disks: Some(disks),
+                    pmem: Some(pmems),
+                    vsock: Some(vsock),
+                    memory_vol_url: restore_memory_vol_url,
+                    ivshmem: if enable_ivshmem {
+                        Some(Self::default_ivshmem_config(&self.id)?)
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                };
+
+                Ok::<_, String>((align_pmem, config))
+            })
+            .await?;
 
         let ch = self.ch.as_mut().unwrap().lock().await;
-        let config = RestoreConfig {
-            source_url: PathBuf::from(snapshot),
-            fs: Some(fss),
-            net: Some(nets),
-            disks: Some(disks),
-            pmem: Some(pmems),
-            vsock: Some(vsock),
-            memory_vol_url: restore_memory_vol_url,
-            ivshmem: if enable_ivshmem {
-                Some(Self::default_ivshmem_config(&self.id)?)
-            } else {
-                None
-            },
-            ..Default::default()
-        };
-
-        ch.restore_vm(config).await?;
+        trace
+            .start(telemetry::SPAN_RESTORE_VM)
+            .run(ch.restore_vm(config))
+            .await?;
         /*
         let ev = ch
             .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
@@ -1095,6 +1129,7 @@ impl SandBox {
         id: String,
         spec: Spec,
         info: ContainerInfo,
+        trace: &Trace,
     ) -> CResult<()> {
         let mut containers = self.containers.lock().await;
         if containers.contains_key(&id) {
@@ -1112,20 +1147,20 @@ impl SandBox {
             self.tx_containerd.clone(),
             self.app_snapshot_create(),
         )?;
-        c.create_container().await?;
+        c.create_container(trace).await?;
         containers.insert(id, c);
 
         Ok(())
     }
 
-    pub async fn start_container(&mut self, id: &String) -> Result<()> {
+    pub async fn start_container(&mut self, id: &String, trace: &Trace) -> Result<()> {
         let mut containers = self.containers.lock().await;
         let container = match containers.get_mut(id) {
             Some(c) => c,
             None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
         };
         container
-            .start_container()
+            .start_container(trace)
             .await
             .map_err(|e| Error::Other(e.to_string()))?;
         Ok(())
