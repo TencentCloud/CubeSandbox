@@ -14,7 +14,7 @@ use vm_device::BusDevice;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::errno::Result;
 
-const LOOP_SIZE: usize = 0x40;
+const INPUT_BUFFER_SIZE: usize = 0x40;
 
 const DATA: u8 = 0;
 const IER: u8 = 1;
@@ -40,6 +40,7 @@ const IIR_RECV_BIT: u8 = 0x4;
 const LCR_DLAB_BIT: u8 = 0x80;
 
 const LSR_DATA_BIT: u8 = 0x1;
+const LSR_OVERRUN_BIT: u8 = 0x2;
 const LSR_EMPTY_BIT: u8 = 0x20;
 const LSR_IDLE_BIT: u8 = 0x40;
 
@@ -125,11 +126,17 @@ impl Serial {
     }
 
     /// Queues raw bytes for the guest to read and signals the interrupt if the line status would
-    /// change.
+    /// change. Bytes that do not fit in the input buffer are dropped.
     pub fn queue_input_bytes(&mut self, c: &[u8]) -> Result<()> {
         if !self.is_loop() {
-            self.in_buffer.extend(c);
-            self.recv_data()?;
+            let available = INPUT_BUFFER_SIZE.saturating_sub(self.in_buffer.len());
+            self.in_buffer.extend(c.iter().copied().take(available));
+            if c.len() > available {
+                self.line_status |= LSR_OVERRUN_BIT;
+            }
+            if available != 0 && !c.is_empty() {
+                self.recv_data()?;
+            }
         }
         Ok(())
     }
@@ -204,7 +211,7 @@ impl Serial {
             }
             DATA => {
                 if self.is_loop() {
-                    if self.in_buffer.len() < LOOP_SIZE {
+                    if self.in_buffer.len() < INPUT_BUFFER_SIZE {
                         self.in_buffer.push_back(v);
                         self.recv_data()?;
                     }
@@ -216,7 +223,16 @@ impl Serial {
                     self.thr_empty()?;
                 }
             }
-            IER => self.interrupt_enable = v & IER_FIFO_BITS,
+            IER => {
+                let recv_intr_was_enabled = self.is_recv_intr_enabled();
+                self.interrupt_enable = v & IER_FIFO_BITS;
+                if !recv_intr_was_enabled
+                    && self.is_recv_intr_enabled()
+                    && !self.in_buffer.is_empty()
+                {
+                    self.recv_data()?;
+                }
+            }
             LCR => self.line_control = v,
             MCR => self.modem_control = v,
             SCR => self.scratch = v,
@@ -235,7 +251,12 @@ impl Serial {
             modem_status: self.modem_status,
             scratch: self.scratch,
             baud_divisor: self.baud_divisor,
-            in_buffer: self.in_buffer.clone().into(),
+            in_buffer: self
+                .in_buffer
+                .iter()
+                .copied()
+                .take(INPUT_BUFFER_SIZE)
+                .collect(),
         }
     }
 
@@ -248,7 +269,12 @@ impl Serial {
         self.modem_status = state.modem_status;
         self.scratch = state.scratch;
         self.baud_divisor = state.baud_divisor;
-        self.in_buffer = state.in_buffer.clone().into();
+        self.in_buffer = state
+            .in_buffer
+            .iter()
+            .copied()
+            .take(INPUT_BUFFER_SIZE)
+            .collect();
     }
 }
 
@@ -276,7 +302,11 @@ impl BusDevice for Serial {
             }
             LCR => self.line_control,
             MCR => self.modem_control,
-            LSR => self.line_status,
+            LSR => {
+                let status = self.line_status;
+                self.line_status &= !LSR_OVERRUN_BIT;
+                status
+            }
             MSR => self.modem_status,
             SCR => self.scratch,
             _ => 0,
@@ -428,6 +458,54 @@ mod tests {
         // check if reading from the largest u8 offset returns 0
         serial.read(0, 0xff, &mut data[..]);
         assert_eq!(data[0], 0);
+    }
+
+    #[test]
+    fn serial_input_is_bounded() {
+        let intr_evt = EventFd::new(0).unwrap();
+        let mut serial = Serial::new_sink(
+            String::from(SERIAL_NAME),
+            Arc::new(TestInterrupt::new(intr_evt)),
+        );
+        let input: Vec<u8> = (0..INPUT_BUFFER_SIZE as u8 + 1).collect();
+
+        serial.queue_input_bytes(&input).unwrap();
+
+        assert_eq!(serial.in_buffer.len(), INPUT_BUFFER_SIZE);
+        assert_eq!(serial.state().in_buffer.len(), INPUT_BUFFER_SIZE);
+        let mut data = [0u8];
+        serial.read(0, LSR as u64, &mut data);
+        assert_ne!(data[0] & LSR_OVERRUN_BIT, 0);
+        serial.read(0, LSR as u64, &mut data);
+        assert_eq!(data[0] & LSR_OVERRUN_BIT, 0);
+        for expected in input.iter().take(INPUT_BUFFER_SIZE) {
+            serial.read(0, DATA as u64, &mut data);
+            assert_eq!(data[0], *expected);
+        }
+        serial.read(0, DATA as u64, &mut data);
+        assert_eq!(data[0], 0);
+    }
+
+    #[test]
+    fn serial_input_interrupts_when_unmasked() {
+        let intr_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut serial = Serial::new_sink(
+            String::from(SERIAL_NAME),
+            Arc::new(TestInterrupt::new(intr_evt.try_clone().unwrap())),
+        );
+
+        serial.queue_input_bytes(&[b'a']).unwrap();
+        assert_eq!(
+            intr_evt.read().unwrap_err().raw_os_error(),
+            Some(libc::EAGAIN)
+        );
+
+        serial.write(0, IER as u64, &[IER_RECV_BIT]);
+        assert_eq!(intr_evt.read().unwrap(), 1);
+
+        let mut data = [0u8];
+        serial.read(0, DATA as u64, &mut data);
+        assert_eq!(data[0], b'a');
     }
 
     #[test]

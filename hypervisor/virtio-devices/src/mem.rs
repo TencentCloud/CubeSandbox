@@ -449,6 +449,102 @@ impl MemEpollHandler {
         Ok(())
     }
 
+    fn update_dma_mapping(
+        handlers: &BTreeMap<VirtioMemMappingSource, Arc<dyn ExternalDmaMapping>>,
+        addr: u64,
+        size: u64,
+        plug: bool,
+    ) -> Result<(), ()> {
+        let mut updated_handlers: Vec<&Arc<dyn ExternalDmaMapping>> = Vec::new();
+
+        for handler in handlers.values() {
+            let result = if plug {
+                handler.map(addr, addr, size)
+            } else {
+                handler.unmap(addr, size)
+            };
+            if let Err(e) = result {
+                error!(
+                    "failed DMA {}mapping addr 0x{:x} size 0x{:x}: {}",
+                    if plug { "" } else { "un" },
+                    addr,
+                    size,
+                    e
+                );
+
+                // A block is the smallest state tracked by virtio-mem. Roll back
+                // handlers already updated for this block so that it can remain in
+                // its old state. Continuing after a failed rollback would leave no
+                // block state that truthfully describes all DMA mappings.
+                let mut rollback_error = None;
+                for updated_handler in updated_handlers.into_iter().rev() {
+                    let result = if plug {
+                        updated_handler.unmap(addr, size)
+                    } else {
+                        updated_handler.map(addr, addr, size)
+                    };
+                    if let Err(e) = result {
+                        error!(
+                            "failed rolling back DMA {}mapping addr 0x{:x} size 0x{:x}: {}",
+                            if plug { "" } else { "un" },
+                            addr,
+                            size,
+                            e
+                        );
+                        rollback_error = Some(e);
+                    }
+                }
+                if let Some(e) = rollback_error {
+                    // No bitmap value can describe handlers that now disagree.
+                    // Fail stop; the virtio thread wrapper catches this panic and
+                    // signals the VM exit event instead of leaving the VM running.
+                    panic!("failed to restore DMA mappings after a partial update: {e}");
+                }
+
+                return Err(());
+            }
+            updated_handlers.push(handler);
+        }
+
+        Ok(())
+    }
+
+    fn apply_block_state_change(
+        &self,
+        config: &mut VirtioMemConfig,
+        handlers: &BTreeMap<VirtioMemMappingSource, Arc<dyn ExternalDmaMapping>>,
+        block_index: usize,
+        plug: bool,
+    ) -> Result<(), ()> {
+        let offset = block_index as u64 * config.block_size;
+        let addr = config.addr + offset;
+
+        Self::update_dma_mapping(handlers, addr, config.block_size, plug)?;
+
+        // Commit only after every external mapping handler has accepted this
+        // block. On a later block failure, the bitmap and plugged_size describe
+        // exactly the prefix that was successfully applied.
+        self.blocks_state
+            .lock()
+            .unwrap()
+            .set_range(block_index, 1, plug);
+        if plug {
+            config.plugged_size += config.block_size;
+        } else {
+            config.plugged_size = config.plugged_size.saturating_sub(config.block_size);
+
+            // DMA users can no longer access this block and the unplug is
+            // committed. Discard only reclaims host backing; a reclaim failure
+            // must not make the guest believe the unplug failed and retry a
+            // state transition that already happened.
+            if let Err(e) = self.discard_memory_range(offset, config.block_size) {
+                error!("failed discarding unplugged memory range: {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
     fn state_change_request(&mut self, addr: u64, nb_blocks: u16, plug: bool) -> u16 {
         let mut config = self.config.lock().unwrap();
         let size: u64 = nb_blocks as u64 * config.block_size;
@@ -461,7 +557,6 @@ impl MemEpollHandler {
         }
 
         let offset = addr - config.addr;
-
         let first_block_index = (offset / config.block_size) as usize;
         if !self
             .blocks_state
@@ -472,48 +567,14 @@ impl MemEpollHandler {
             return VIRTIO_MEM_RESP_ERROR;
         }
 
-        if !plug {
-            if let Err(e) = self.discard_memory_range(offset, size) {
-                error!("failed discarding memory range: {:?}", e);
+        let handlers = self.dma_mapping_handlers.lock().unwrap();
+        for block_index in first_block_index..first_block_index + nb_blocks as usize {
+            if self
+                .apply_block_state_change(&mut config, &handlers, block_index, plug)
+                .is_err()
+            {
                 return VIRTIO_MEM_RESP_ERROR;
             }
-        }
-
-        self.blocks_state
-            .lock()
-            .unwrap()
-            .set_range(first_block_index, nb_blocks, plug);
-
-        let handlers = self.dma_mapping_handlers.lock().unwrap();
-        if plug {
-            let mut gpa = addr;
-            for _ in 0..nb_blocks {
-                for (_, handler) in handlers.iter() {
-                    if let Err(e) = handler.map(gpa, gpa, config.block_size) {
-                        error!(
-                            "failed DMA mapping addr 0x{:x} size 0x{:x}: {}",
-                            gpa, config.block_size, e
-                        );
-                        return VIRTIO_MEM_RESP_ERROR;
-                    }
-                }
-
-                gpa += config.block_size;
-            }
-
-            config.plugged_size += size;
-        } else {
-            for (_, handler) in handlers.iter() {
-                if let Err(e) = handler.unmap(addr, size) {
-                    error!(
-                        "failed DMA unmapping addr 0x{:x} size 0x{:x}: {}",
-                        addr, size, e
-                    );
-                    return VIRTIO_MEM_RESP_ERROR;
-                }
-            }
-
-            config.plugged_size -= size;
         }
 
         VIRTIO_MEM_RESP_ACK
@@ -521,36 +582,20 @@ impl MemEpollHandler {
 
     fn unplug_all(&mut self) -> u16 {
         let mut config = self.config.lock().unwrap();
-        if let Err(e) = self.discard_memory_range(0, config.region_size) {
-            error!("failed discarding memory range: {:?}", e);
-            return VIRTIO_MEM_RESP_ERROR;
-        }
 
-        // Remaining plugged blocks are unmapped.
-        if config.plugged_size > 0 {
-            let handlers = self.dma_mapping_handlers.lock().unwrap();
-            for (idx, plugged) in self.blocks_state.lock().unwrap().inner().iter().enumerate() {
-                if *plugged {
-                    let gpa = config.addr + (idx as u64 * config.block_size);
-                    for (_, handler) in handlers.iter() {
-                        if let Err(e) = handler.unmap(gpa, config.block_size) {
-                            error!(
-                                "failed DMA unmapping addr 0x{:x} size 0x{:x}: {}",
-                                gpa, config.block_size, e
-                            );
-                            return VIRTIO_MEM_RESP_ERROR;
-                        }
-                    }
-                }
+        let plugged_blocks = self.blocks_state.lock().unwrap().inner().clone();
+        let handlers = self.dma_mapping_handlers.lock().unwrap();
+        for (block_index, plugged) in plugged_blocks.into_iter().enumerate() {
+            if plugged
+                && self
+                    .apply_block_state_change(&mut config, &handlers, block_index, false)
+                    .is_err()
+            {
+                return VIRTIO_MEM_RESP_ERROR;
             }
         }
-
-        self.blocks_state.lock().unwrap().set_range(
-            0,
-            (config.region_size / config.block_size) as u16,
-            false,
-        );
-
+        // The bitmap is authoritative for old snapshots where a failed DMA
+        // transition could persist a mismatched plugged_size in either direction.
         config.plugged_size = 0;
 
         VIRTIO_MEM_RESP_ACK
@@ -1006,3 +1051,320 @@ impl Snapshottable for Mem {
 }
 impl Transportable for Mem {}
 impl Migratable for Mem {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use vm_memory::GuestMemory;
+
+    const TEST_REGION_SIZE: u64 = 4 * VIRTIO_MEM_DEFAULT_BLOCK_SIZE;
+
+    struct NoopVirtioInterrupt;
+
+    impl VirtioInterrupt for NoopVirtioInterrupt {
+        fn trigger(&self, _int_type: VirtioInterruptType) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DmaOperation {
+        Map(u64),
+        Unmap(u64),
+    }
+
+    struct FaultInjectDmaMapping {
+        fail_map_call: usize,
+        fail_unmap_call: usize,
+        map_calls: AtomicUsize,
+        unmap_calls: AtomicUsize,
+        operations: Arc<Mutex<Vec<DmaOperation>>>,
+    }
+
+    impl FaultInjectDmaMapping {
+        fn new(
+            fail_map_call: usize,
+            fail_unmap_call: usize,
+            operations: Arc<Mutex<Vec<DmaOperation>>>,
+        ) -> Self {
+            Self {
+                fail_map_call,
+                fail_unmap_call,
+                map_calls: AtomicUsize::new(0),
+                unmap_calls: AtomicUsize::new(0),
+                operations,
+            }
+        }
+    }
+
+    impl ExternalDmaMapping for FaultInjectDmaMapping {
+        fn map(&self, iova: u64, _gpa: u64, _size: u64) -> io::Result<()> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(DmaOperation::Map(iova));
+            let call = self.map_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_map_call {
+                Err(io::Error::other("injected map failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn unmap(&self, iova: u64, _size: u64) -> io::Result<()> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(DmaOperation::Unmap(iova));
+            let call = self.unmap_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_unmap_call {
+                Err(io::Error::other("injected unmap failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn test_handler(plugged_blocks: &[usize]) -> MemEpollHandler {
+        let memory =
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), TEST_REGION_SIZE as usize)]).unwrap();
+        let host_addr = memory.find_region(GuestAddress(0)).unwrap().as_ptr() as u64;
+        let mut blocks_state = BlocksState::new(TEST_REGION_SIZE);
+        for block_index in plugged_blocks {
+            blocks_state.set_range(*block_index, 1, true);
+        }
+
+        MemEpollHandler {
+            mem: GuestMemoryAtomic::new(memory),
+            host_addr,
+            host_fd: None,
+            blocks_state: Arc::new(Mutex::new(blocks_state)),
+            config: Arc::new(Mutex::new(VirtioMemConfig {
+                block_size: VIRTIO_MEM_DEFAULT_BLOCK_SIZE,
+                addr: 0,
+                region_size: TEST_REGION_SIZE,
+                usable_region_size: TEST_REGION_SIZE,
+                plugged_size: plugged_blocks.len() as u64 * VIRTIO_MEM_DEFAULT_BLOCK_SIZE,
+                requested_size: TEST_REGION_SIZE,
+                ..Default::default()
+            })),
+            queue: Queue::new(QUEUE_SIZE).unwrap(),
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            queue_evt: EventFd::new(0).unwrap(),
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            hugepages: false,
+            dma_mapping_handlers: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    #[test]
+    fn unplug_all_with_nothing_plugged_does_not_discard_region() {
+        let mut handler = test_handler(&[]);
+        // Any attempted madvise through this address would fail. The request is
+        // nevertheless a no-op because no block needs to transition.
+        handler.host_addr = u64::MAX;
+
+        assert_eq!(handler.unplug_all(), VIRTIO_MEM_RESP_ACK);
+        assert_eq!(handler.config.lock().unwrap().plugged_size, 0);
+    }
+
+    #[test]
+    fn unplug_all_clears_stale_legacy_counter() {
+        let mut handler = test_handler(&[]);
+        handler.config.lock().unwrap().plugged_size = VIRTIO_MEM_DEFAULT_BLOCK_SIZE;
+
+        assert_eq!(handler.unplug_all(), VIRTIO_MEM_RESP_ACK);
+        assert_eq!(handler.config.lock().unwrap().plugged_size, 0);
+    }
+
+    #[test]
+    fn unplug_all_reconciles_legacy_inconsistent_state() {
+        let mut handler = test_handler(&[0]);
+        handler.config.lock().unwrap().plugged_size = 0;
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Container,
+            Arc::new(FaultInjectDmaMapping::new(0, 0, operations.clone())),
+        );
+
+        assert_eq!(handler.unplug_all(), VIRTIO_MEM_RESP_ACK);
+        assert!(!handler.blocks_state.lock().unwrap().bitmap[0]);
+        assert_eq!(handler.config.lock().unwrap().plugged_size, 0);
+        assert_eq!(*operations.lock().unwrap(), vec![DmaOperation::Unmap(0)]);
+    }
+
+    #[test]
+    fn plug_failure_commits_only_successful_blocks() {
+        let mut handler = test_handler(&[]);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Container,
+            Arc::new(FaultInjectDmaMapping::new(2, 0, operations.clone())),
+        );
+
+        assert_eq!(
+            handler.state_change_request(0, 2, true),
+            VIRTIO_MEM_RESP_ERROR
+        );
+        let blocks_state = handler.blocks_state.lock().unwrap();
+        assert!(blocks_state.bitmap[0]);
+        assert!(!blocks_state.bitmap[1]);
+        assert_eq!(
+            handler.config.lock().unwrap().plugged_size,
+            VIRTIO_MEM_DEFAULT_BLOCK_SIZE
+        );
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                DmaOperation::Map(0),
+                DmaOperation::Map(VIRTIO_MEM_DEFAULT_BLOCK_SIZE),
+            ]
+        );
+    }
+
+    #[test]
+    fn handler_failure_rolls_back_current_block_before_committing() {
+        let mut handler = test_handler(&[]);
+        let first_operations = Arc::new(Mutex::new(Vec::new()));
+        let second_operations = Arc::new(Mutex::new(Vec::new()));
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Container,
+            Arc::new(FaultInjectDmaMapping::new(0, 0, first_operations.clone())),
+        );
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Device(0),
+            Arc::new(FaultInjectDmaMapping::new(1, 0, second_operations.clone())),
+        );
+
+        assert_eq!(
+            handler.state_change_request(0, 1, true),
+            VIRTIO_MEM_RESP_ERROR
+        );
+        assert!(!handler.blocks_state.lock().unwrap().bitmap[0]);
+        assert_eq!(handler.config.lock().unwrap().plugged_size, 0);
+        assert_eq!(
+            *first_operations.lock().unwrap(),
+            vec![DmaOperation::Map(0), DmaOperation::Unmap(0)]
+        );
+        assert_eq!(
+            *second_operations.lock().unwrap(),
+            vec![DmaOperation::Map(0)]
+        );
+    }
+
+    #[test]
+    fn discard_failure_does_not_revert_committed_unplug() {
+        let mut handler = test_handler(&[0]);
+        handler.host_addr = u64::MAX;
+
+        assert_eq!(
+            handler.state_change_request(0, 1, false),
+            VIRTIO_MEM_RESP_ACK
+        );
+        assert!(!handler.blocks_state.lock().unwrap().bitmap[0]);
+        assert_eq!(handler.config.lock().unwrap().plugged_size, 0);
+    }
+
+    #[test]
+    fn unplug_legacy_inconsistent_state_does_not_underflow() {
+        let mut handler = test_handler(&[0]);
+        handler.config.lock().unwrap().plugged_size = 0;
+
+        assert_eq!(
+            handler.state_change_request(0, 1, false),
+            VIRTIO_MEM_RESP_ACK
+        );
+        assert!(!handler.blocks_state.lock().unwrap().bitmap[0]);
+        assert_eq!(handler.config.lock().unwrap().plugged_size, 0);
+    }
+
+    #[test]
+    fn unplug_failure_commits_only_successful_blocks() {
+        let mut handler = test_handler(&[0, 1]);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Container,
+            Arc::new(FaultInjectDmaMapping::new(0, 2, operations.clone())),
+        );
+
+        assert_eq!(
+            handler.state_change_request(0, 2, false),
+            VIRTIO_MEM_RESP_ERROR
+        );
+        let blocks_state = handler.blocks_state.lock().unwrap();
+        assert!(!blocks_state.bitmap[0]);
+        assert!(blocks_state.bitmap[1]);
+        assert_eq!(
+            handler.config.lock().unwrap().plugged_size,
+            VIRTIO_MEM_DEFAULT_BLOCK_SIZE
+        );
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                DmaOperation::Unmap(0),
+                DmaOperation::Unmap(VIRTIO_MEM_DEFAULT_BLOCK_SIZE),
+            ]
+        );
+    }
+
+    #[test]
+    fn unplug_handler_failure_rolls_back_current_block_before_committing() {
+        let mut handler = test_handler(&[0]);
+        let first_operations = Arc::new(Mutex::new(Vec::new()));
+        let second_operations = Arc::new(Mutex::new(Vec::new()));
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Container,
+            Arc::new(FaultInjectDmaMapping::new(0, 0, first_operations.clone())),
+        );
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Device(0),
+            Arc::new(FaultInjectDmaMapping::new(0, 1, second_operations.clone())),
+        );
+
+        assert_eq!(
+            handler.state_change_request(0, 1, false),
+            VIRTIO_MEM_RESP_ERROR
+        );
+        assert!(handler.blocks_state.lock().unwrap().bitmap[0]);
+        assert_eq!(
+            handler.config.lock().unwrap().plugged_size,
+            VIRTIO_MEM_DEFAULT_BLOCK_SIZE
+        );
+        assert_eq!(
+            *first_operations.lock().unwrap(),
+            vec![DmaOperation::Unmap(0), DmaOperation::Map(0)]
+        );
+        assert_eq!(
+            *second_operations.lock().unwrap(),
+            vec![DmaOperation::Unmap(0)]
+        );
+    }
+
+    #[test]
+    fn unplug_all_failure_commits_only_successful_blocks() {
+        let mut handler = test_handler(&[0, 2]);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        handler.dma_mapping_handlers.lock().unwrap().insert(
+            VirtioMemMappingSource::Container,
+            Arc::new(FaultInjectDmaMapping::new(0, 2, operations.clone())),
+        );
+
+        assert_eq!(handler.unplug_all(), VIRTIO_MEM_RESP_ERROR);
+        let blocks_state = handler.blocks_state.lock().unwrap();
+        assert!(!blocks_state.bitmap[0]);
+        assert!(blocks_state.bitmap[2]);
+        assert_eq!(
+            handler.config.lock().unwrap().plugged_size,
+            VIRTIO_MEM_DEFAULT_BLOCK_SIZE
+        );
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                DmaOperation::Unmap(0),
+                DmaOperation::Unmap(2 * VIRTIO_MEM_DEFAULT_BLOCK_SIZE)
+            ]
+        );
+    }
+}

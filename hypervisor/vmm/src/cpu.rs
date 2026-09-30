@@ -141,6 +141,9 @@ pub enum Error {
     #[error("Cannot apply seccomp filter: {0}")]
     ApplySeccompFilter(#[source] seccompiler::Error),
 
+    #[error("Error restoring vCPU state: {0}")]
+    RestoreVcpu(#[source] MigratableError),
+
     #[error("Error starting vCPU after restore: {0}")]
     StartRestoreVcpu(#[source] anyhow::Error),
 
@@ -330,6 +333,8 @@ pub struct Vcpu {
     saved_state: Option<CpuState>,
     #[cfg(target_arch = "x86_64")]
     tsc_msrs: Vec<MsrEntry>,
+    #[cfg(target_arch = "x86_64")]
+    tsc_deadline_msrs: Vec<MsrEntry>,
 }
 
 impl Vcpu {
@@ -357,6 +362,8 @@ impl Vcpu {
             saved_state: None,
             #[cfg(target_arch = "x86_64")]
             tsc_msrs: Vec::new(),
+            #[cfg(target_arch = "x86_64")]
+            tsc_deadline_msrs: Vec::new(),
         })
     }
 
@@ -464,6 +471,26 @@ impl Vcpu {
 }
 
 const VCPU_SNAPSHOT_ID: &str = "vcpu";
+
+#[cfg(target_arch = "x86_64")]
+fn set_all_msrs(
+    vcpu: &Arc<dyn hypervisor::Vcpu>,
+    msrs: &[MsrEntry],
+) -> std::result::Result<(), HypervisorCpuError> {
+    if msrs.is_empty() {
+        return Ok(());
+    }
+    let completed = vcpu.set_msrs(msrs)?;
+    if completed != msrs.len() {
+        return Err(HypervisorCpuError::SetMsrEntriesIncomplete {
+            expected: msrs.len(),
+            completed,
+            rejected: msrs[completed].index,
+        });
+    }
+    Ok(())
+}
+
 impl Pausable for Vcpu {}
 impl Snapshottable for Vcpu {
     fn id(&self) -> String {
@@ -490,25 +517,34 @@ impl Snapshottable for Vcpu {
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
         let saved_state: CpuState = snapshot.to_state(VCPU_SNAPSHOT_ID)?;
 
-        self.vcpu
-            .set_state(&saved_state)
-            .map_err(|e| MigratableError::Pause(anyhow!("Could not set the vCPU state {:?}", e)))?;
+        self.vcpu.set_state(&saved_state).map_err(|e| {
+            MigratableError::Restore(anyhow!("Could not set the vCPU state {:?}", e))
+        })?;
 
         // Parse msrs from state, save related msrs in tsc_msrs.
         #[cfg(target_arch = "x86_64")]
         {
-            let tsc_msrs: Vec<MsrEntry> = match &saved_state {
+            let (tsc_msrs, tsc_deadline_msrs): (Vec<MsrEntry>, Vec<MsrEntry>) = match &saved_state {
                 #[cfg(feature = "kvm")]
-                hypervisor::CpuState::Kvm(inner) => inner
-                    .msrs
-                    .iter()
-                    .filter(|msr| msr.index == msr_index::MSR_IA32_TSC)
-                    .cloned()
-                    .collect(),
+                hypervisor::CpuState::Kvm(inner) => (
+                    inner
+                        .msrs
+                        .iter()
+                        .filter(|msr| msr.index == msr_index::MSR_IA32_TSC)
+                        .copied()
+                        .collect(),
+                    inner
+                        .msrs
+                        .iter()
+                        .filter(|msr| msr.index == msr_index::MSR_IA32_TSC_DEADLINE)
+                        .copied()
+                        .collect(),
+                ),
                 #[cfg(feature = "mshv")]
-                _ => Vec::new(),
+                _ => (Vec::new(), Vec::new()),
             };
             self.tsc_msrs = tsc_msrs;
+            self.tsc_deadline_msrs = tsc_deadline_msrs;
         }
 
         self.saved_state = Some(saved_state);
@@ -861,7 +897,7 @@ impl CpuManager {
             #[cfg(target_arch = "aarch64")]
             vcpu.init(&self.vm)?;
 
-            vcpu.restore(snapshot).expect("Failed to restore vCPU");
+            vcpu.restore(snapshot).map_err(Error::RestoreVcpu)?;
         } else {
             #[cfg(target_arch = "x86_64")]
             vcpu.configure(
@@ -2174,13 +2210,29 @@ impl Snapshottable for CpuManager {
                 .map_err(|e| MigratableError::Restore(anyhow!("Could not create vCPU {:?}", e)))?;
         }
 
-        // Reset tsc msrs for all vcpu, so that KVM could synchronize TSC
-        // for restored VM, before vcpu run.
+        // Rewrite TSCs consecutively so KVM can synchronize them across the
+        // restored vCPUs. This necessarily happens after set_state(), so every
+        // TSC deadline must be rewritten once more afterwards: KVM interprets
+        // the deadline using the TSC value present at the time of the write.
         #[cfg(target_arch = "x86_64")]
         {
             for vcpu in &self.vcpus {
                 let vcpu = vcpu.lock().unwrap();
-                let _ = vcpu.vcpu.set_msrs(&vcpu.tsc_msrs);
+                set_all_msrs(&vcpu.vcpu, &vcpu.tsc_msrs).map_err(|e| {
+                    MigratableError::Restore(anyhow!(
+                        "Could not synchronize restored vCPU TSC: {:?}",
+                        e
+                    ))
+                })?;
+            }
+            for vcpu in &self.vcpus {
+                let vcpu = vcpu.lock().unwrap();
+                set_all_msrs(&vcpu.vcpu, &vcpu.tsc_deadline_msrs).map_err(|e| {
+                    MigratableError::Restore(anyhow!(
+                        "Could not rearm restored vCPU TSC deadline: {:?}",
+                        e
+                    ))
+                })?;
             }
         }
 
@@ -2625,7 +2677,70 @@ impl CpuElf64Writable for CpuManager {
 mod tests {
     use arch::x86_64::interrupts::*;
     use arch::x86_64::regs::*;
-    use hypervisor::arch::x86::{FpuState, LapicState, StandardRegisters};
+    use hypervisor::arch::x86::{
+        msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE},
+        FpuState, LapicState, MsrEntry, StandardRegisters,
+    };
+    use hypervisor::kvm::x86_64::{normalize_zero_tsc_deadline, order_msrs_for_restore};
+
+    fn msr(index: u32, data: u64) -> MsrEntry {
+        MsrEntry { index, data }
+    }
+
+    #[test]
+    fn test_normalize_zero_tsc_deadline() {
+        const APIC_LVTT: usize = 0x320;
+        const APIC_LVT_TIMER_TSC_DEADLINE: u32 = 2 << 17;
+
+        let other = 0x174;
+        let original = vec![
+            msr(MSR_IA32_TSC_DEADLINE, 0),
+            msr(other, 7),
+            msr(MSR_IA32_TSC, 41),
+            msr(MSR_IA32_TSC, 42),
+            msr(MSR_IA32_TSC_DEADLINE, 1),
+            msr(MSR_IA32_TSC_DEADLINE, 0),
+        ];
+        let mut lapic = LapicState::default();
+
+        let mut msrs = original.clone();
+        assert_eq!(normalize_zero_tsc_deadline(&mut msrs, &lapic), None);
+        assert_eq!(msrs, original);
+
+        lapic.set_klapic_reg(APIC_LVTT, APIC_LVT_TIMER_TSC_DEADLINE);
+        assert_eq!(normalize_zero_tsc_deadline(&mut msrs, &lapic), Some(42));
+        assert_eq!(msrs[0].data, 42);
+        assert_eq!(msrs[4].data, 1);
+        assert_eq!(msrs[5].data, 42);
+
+        let mut no_tsc = vec![msr(MSR_IA32_TSC_DEADLINE, 0)];
+        assert_eq!(normalize_zero_tsc_deadline(&mut no_tsc, &lapic), None);
+        assert_eq!(no_tsc[0].data, 0);
+    }
+
+    #[test]
+    fn test_order_msrs_for_restore_moves_deadlines_last_stably() {
+        let other_a = 0x174;
+        let other_b = 0x175;
+        let input = vec![
+            msr(MSR_IA32_TSC_DEADLINE, 30),
+            msr(other_a, 1),
+            msr(MSR_IA32_TSC, 20),
+            msr(MSR_IA32_TSC_DEADLINE, 40),
+            msr(other_b, 2),
+        ];
+
+        assert_eq!(
+            order_msrs_for_restore(&input),
+            vec![
+                msr(other_a, 1),
+                msr(MSR_IA32_TSC, 20),
+                msr(other_b, 2),
+                msr(MSR_IA32_TSC_DEADLINE, 30),
+                msr(MSR_IA32_TSC_DEADLINE, 40),
+            ]
+        );
+    }
 
     #[test]
     fn test_setlint() {
