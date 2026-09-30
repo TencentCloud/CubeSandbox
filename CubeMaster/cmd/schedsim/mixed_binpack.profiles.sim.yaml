@@ -1,0 +1,100 @@
+# MixedBinPack scenario profile for schedsim.
+#
+# Goal:
+#   Consolidate heterogeneous requests onto fewer nodes while preserving
+#   complete free nodes for later large requests.
+#
+# Strategy:
+#   1. Mandatory guards reject unsafe or infeasible nodes.
+#   2. resource_fit_score prefers tighter CPU/memory placement.
+#   3. real_time_weighted_average limits excessive concentration.
+#   4. Top-2 spread reduces the risk of repeatedly selecting one node.
+#
+# The weights are initial values for evaluation rather than claimed optima.
+
+common:
+  http_port: 18089
+  collect_metric_interval: 1s
+  report_local_create_num: false
+  report_stdev_metric: false
+
+log:
+  module: "schedsim"
+  path: "/tmp/schedsim-log"
+  level: "error"
+  file_size: 100
+  file_num: 2
+
+cubelet_conf:
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 50
+
+scheduler:
+  pre_select_num: -1
+
+  # These legacy picker fields are ignored when scheduler.profiles is present.
+  # They are retained to keep the simulator configuration compatible.
+  priority_select_num: 1
+  least_select_name: "random"
+
+  metric_update_timeout: 86400s
+  local_metric_update_timeout: 86400s
+
+  ignore_redis_allocation: false
+  overcommit_ratio:
+    cpu_ratio: 3.0
+    mem_ratio: 2.0
+  node_max_mem_reserved_in_mb: 256
+
+  # Request-aware placement is handled by resource_fit_score.
+  # The realtime scorer therefore uses only current quota allocation,
+  # avoiding duplicate consideration of req_cpu and req_mem.
+  score:
+    resource_weights:
+      quota_cpu_usage: 1.0
+      quota_mem_usage: 1.0
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - "quota_cpu_usage"
+          - "quota_mem_usage"
+
+  instance_type_conf:
+    sim:
+      oss_cluster_labels:
+        schedsim-sim: {}
+
+  profiles:
+    - name: mixed_binpack
+      default: true
+
+      # Mandatory guards such as node_safety, cpu, mem, disk,
+      # template_locality and realtime_create_num are added automatically.
+      scores:
+        # Main objective: prefer tighter placement while penalizing
+        # unbalanced CPU and memory residual ratios.
+        - name: resource_fit_score
+          type: go
+          weight: 0.7
+          args:
+            imbalance_penalty: 0.5
+
+        # Secondary objective: avoid selecting nodes whose current
+        # allocated load is already substantially higher.
+        - name: real_time_weighted_average
+          type: go
+          weight: 0.3
+
+      # Select among the two highest-ranked candidates to reduce herding
+      # while retaining the consolidation tendency.
+      selection:
+        method: spread
+        top_n: 2
+
+      # Benchmark runs should expose plugin failures instead of silently
+      # falling back to a different scheduling behavior.
+      failure:
+        filter: fail-closed
+        score: fail-closed
+        no_candidate: fail
