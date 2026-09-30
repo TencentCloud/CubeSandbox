@@ -182,7 +182,7 @@ func TestGetDialFailureNoRefLeak(t *testing.T) {
 			MaxActive:            2,
 			MaxConcurrentStreams: 1,
 			Reuse:                false,
-			Dial: func(address string) (*grpc.ClientConn, error) {
+			Dial: func(ua, address string) (*grpc.ClientConn, error) {
 				return nil, dialErr
 			},
 		},
@@ -206,7 +206,7 @@ func TestGetDialFailureNoRefLeak(t *testing.T) {
 			MaxIdle:              1,
 			MaxActive:            4,
 			MaxConcurrentStreams: 1,
-			Dial: func(address string) (*grpc.ClientConn, error) {
+			Dial: func(ua, address string) (*grpc.ClientConn, error) {
 				return nil, dialErr
 			},
 		},
