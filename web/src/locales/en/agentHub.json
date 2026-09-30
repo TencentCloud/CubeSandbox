@@ -70,8 +70,8 @@
         "doneAction": "Configured · Edit"
       },
       "template": {
-        "title": "Prepare a 龙虾助手 template",
-        "desc": "Install the lightweight or all-in-one 龙虾助手 image from the template market as the system template for new assistants.",
+        "title": "Prepare an OpenClaw template",
+        "desc": "Install the lightweight or all-in-one OpenClaw image from the template market as the system template for new assistants.",
         "action": "Open Market",
         "doneAction": "Ready · View"
       }

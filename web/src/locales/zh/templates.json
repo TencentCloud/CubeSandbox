@@ -86,5 +86,14 @@
     "registryUsername": "仓库用户名",
     "registryPassword": "仓库密码",
     "withCubeCa": "将 CubeEgress CA 写入 rootfs"
+  },
+  "delete": {
+    "button": "删除模板",
+    "title": "删除模板",
+    "confirmDesc": "确定要删除模板",
+    "confirmDescSuffix": "吗？此操作不可撤销。",
+    "cancel": "取消",
+    "confirm": "确认删除",
+    "deleting": "删除中…"
   }
 }
