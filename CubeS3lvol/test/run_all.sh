@@ -124,6 +124,34 @@ report_skip()
 	[ "${asked}" -eq 1 ] || SKIPPED_BY_CHOICE=0
 }
 
+# Print what a failed suite actually said, inline.
+#
+# The "see <log>" path in the FAIL line is only useful while the tree is still on
+# this machine. In CI the runner goes away with the container, so a failure that
+# reports a /tmp path and nothing else costs a whole re-run just to learn which
+# assertion broke -- exactly what happened the first time this suite ran on CI.
+# Both failure shapes are covered: assertion failures (grep the [FAIL] lines) and
+# suites that died before printing anything (show the tail, which is where the
+# cause is). Bounded, so a suite that prints a thousand of either does not bury
+# the summary printed after it.
+report_failed_assertions()
+{
+	local log="$1" line
+
+	while IFS= read -r line; do
+		printf '        %s\n' "${line}"
+	done < <(grep -E '^[[:space:]]*\[FAIL\]' "${log}" 2>/dev/null | head -20)
+}
+
+report_log_tail()
+{
+	local log="$1" line
+
+	while IFS= read -r line; do
+		printf '        %s\n' "${line}"
+	done < <(tail -15 "${log}" 2>/dev/null)
+}
+
 # Run one suite, keep its output, report the one line that matters.
 run_suite()
 {
@@ -149,6 +177,7 @@ run_suite()
 		       "${name}" "${rc}" "${elapsed}" "${log}"
 		SUITES_BAD=$((SUITES_BAD + 1))
 		FAILED_NAMES="${FAILED_NAMES}  ${name}: produced no summary (see ${log})"$'\n'
+		report_log_tail "${log}"
 		return 1
 	fi
 
@@ -191,6 +220,8 @@ run_suite()
 	       "${name}" "${f}" "$((p + f))" "${rc}" "${elapsed}" "${log}"
 	SUITES_BAD=$((SUITES_BAD + 1))
 	FAILED_NAMES="${FAILED_NAMES}  ${name}: ${f} assertion(s) failed (see ${log})"$'\n'
+	report_failed_assertions "${log}"
+
 	return 1
 }
 

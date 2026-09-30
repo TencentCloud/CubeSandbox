@@ -680,9 +680,15 @@ test_flusher(void)
 	struct s3_flusher_opts opts = {};
 	struct s3_flusher_stats fstats;
 	uint8_t *blk = malloc(BLOCK_SIZE);
+	uint8_t *chunkbuf = malloc(CHUNK_SIZE);
 	int rc;
 
 	printf("\n[6] flusher scheduling\n");
+
+	if (!blk || !chunkbuf) {
+		check_true("malloc", false, NULL);
+		goto out;
+	}
 
 	memset(&fake, 0, sizeof(fake));
 	for (uint32_t i = 0; i < TEST_CHUNKS; i++) {
@@ -893,11 +899,30 @@ overlay", probe.done, NULL);
 		check_true("resumed upload completed", !s3_overlay_has_dirty(ov),
 			   NULL);
 
+		/* A whole chunk, not a single block. A full chunk is ripe by content,
+		 * so next_dirty hands it out ahead of everything else and without
+		 * consulting the overlay's byte accounting or how long anything has
+		 * been queued. A one-block write is eligible only while the overlay is
+		 * over its high water mark, which ties this section to state left by
+		 * the sections before it -- and this section needs an upload actually
+		 * in flight, because a hold can only stay pending while one is. */
 		probe = (struct drain_probe){ .status = -1, .done = false };
-		fill_pattern(blk, 1, 5 * BLOCKS_PER_CHUNK, 0xC2);
-		s3_overlay_write(ov, 5 * BLOCKS_PER_CHUNK, 1, blk, 901);
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 5 * BLOCKS_PER_CHUNK, 0xC2);
+		s3_overlay_write(ov, 5 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK,
+				 chunkbuf, 901);
 		s3_flusher_kick(fl);
-		s3_flusher_suspend(fl, S3_FLUSHER_NO_SUSPEND_TIMEOUT, drain_cb, &probe);
+
+		/* The premise the three assertions below rest on, stated rather than
+		 * assumed: with the upload parked the suspend cannot complete
+		 * synchronously, so the resume that follows lands while it is still
+		 * pending. If this ever reads otherwise, the failure is here and names
+		 * the count -- rather than showing up later as a suspend that reported
+		 * success when there was nothing to hold. */
+		check_u64("the upload is parked, so the suspend cannot complete in "
+			  "line", fake.n_pending, 1);
+
+		s3_flusher_suspend(fl, S3_FLUSHER_NO_SUSPEND_TIMEOUT, drain_cb,
+				   &probe);
 		check_true("suspend waits for an in-flight upload", !probe.done,
 			   NULL);
 		s3_flusher_resume(fl);
@@ -912,8 +937,9 @@ overlay", probe.done, NULL);
 			   probe.done && probe.status == -ECANCELED, NULL);
 
 		/* And the release is real: scheduling is back on. */
-		fill_pattern(blk, 1, 6 * BLOCKS_PER_CHUNK, 0xC3);
-		s3_overlay_write(ov, 6 * BLOCKS_PER_CHUNK, 1, blk, 902);
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 6 * BLOCKS_PER_CHUNK, 0xC3);
+		s3_overlay_write(ov, 6 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK,
+				 chunkbuf, 902);
 		s3_flusher_kick(fl);
 		check_true("no upload is left gated by the released hold",
 			   fake.started > started, NULL);
@@ -973,15 +999,19 @@ overlay", probe.done, NULL);
 		struct drain_probe probe = { .status = -1, .done = false };
 		uint32_t started;
 
-		fill_pattern(blk, 1, 7 * BLOCKS_PER_CHUNK, 0xC4);
-		s3_overlay_write(ov, 7 * BLOCKS_PER_CHUNK, 1, blk, 903);
+		/* A whole chunk for the same reason as [11]: ripe by content, so the
+		 * kick always finds something to start and the upload is in flight by
+		 * the time the suspend is asked for. */
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 7 * BLOCKS_PER_CHUNK, 0xC4);
+		s3_overlay_write(ov, 7 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK,
+				 chunkbuf, 903);
 		s3_flusher_kick(fl);
 		check_u64("one upload is in flight again", fake.n_pending, 1);
 
-		/* A 1 us deadline is already past by the time the suspend reads the
-		 * clock, as in the drain case above. The suspend still does not report
-		 * yet: the in-flight upload's completion touches the flusher, so it is
-		 * waited for regardless of the deadline. */
+		/* A 1 us deadline. flusher_check_suspend() reads the clock before the
+		 * gates below it, so whether this has expired yet is not what the
+		 * assertion rests on: an upload is in flight, and that is waited for
+		 * regardless, so the callback cannot fire inside the call. */
 		s3_flusher_suspend(fl, 1, drain_cb, &probe);
 		check_true("the expired suspend still waits for the in-flight upload",
 			   !probe.done, NULL);
@@ -992,9 +1022,11 @@ overlay", probe.done, NULL);
 		check_true("the expired suspend reports -ETIMEDOUT",
 			   probe.done && probe.status == -ETIMEDOUT, NULL);
 
-		/* The hold never took effect, so uploads must not be left gated. */
-		fill_pattern(blk, 1, 8 * BLOCKS_PER_CHUNK, 0xC5);
-		s3_overlay_write(ov, 8 * BLOCKS_PER_CHUNK, 1, blk, 904);
+		/* The hold never took effect, so uploads must not be left gated. A
+		 * whole chunk again, for the same reason [11] uses one. */
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 8 * BLOCKS_PER_CHUNK, 0xC5);
+		s3_overlay_write(ov, 8 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK,
+				 chunkbuf, 904);
 		s3_flusher_kick(fl);
 		check_true("uploads resume after the abandoned hold",
 			   fake.started > started, NULL);
@@ -1009,6 +1041,7 @@ overlay", probe.done, NULL);
 
 out:
 	free(blk);
+	free(chunkbuf);
 	for (uint32_t i = 0; i < TEST_CHUNKS; i++) {
 		free(fake.image[i]);
 	}
