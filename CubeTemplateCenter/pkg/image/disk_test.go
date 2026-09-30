@@ -95,7 +95,7 @@ func TestOrphanLoopCandidates(t *testing.T) {
 	}
 }
 
-// setupStreamingFakes puts fake truncate/mkfs.ext4/mount/umount/resize2fs on
+// setupStreamingFakes puts fake truncate/mkfs.ext4/mount/umount/resize2fs/e2fsck on
 // PATH (each appending its argv to a trace file) and lets the streaming build
 // believe loop mounts are usable. The caller installs its own `losetup` fake,
 // which is where every interesting behaviour lives.
@@ -111,9 +111,12 @@ func setupStreamingFakes(t *testing.T) (binDir, tracePath, ext4Path string) {
 	t.Setenv("FAKE_STORE", store)
 	t.Setenv("FAKE_STATE", filepath.Join(binDir, "state"))
 
-	for _, name := range []string{"truncate", "mkfs.ext4", "mount", "umount", "resize2fs"} {
+	for _, name := range []string{"truncate", "mkfs.ext4", "mount", "umount", "resize2fs", "e2fsck"} {
 		installFakeCommand(t, binDir, name, `echo "`+name+` $*" >> "$FAKE_TRACE"`)
 	}
+	// Leave an actual file for the post-shrink stat, without requiring ext4 tools.
+	installFakeCommand(t, binDir, "truncate", `echo "truncate $*" >> "$FAKE_TRACE"
+printf data > "$3"`)
 
 	patches := gomonkey.NewPatches()
 	patches.ApplyFuncReturn(canUseLoopMount, true)
@@ -160,6 +163,101 @@ func traceCount(lines []string, prefix string) int {
 		}
 	}
 	return n
+}
+
+func TestStreamingVerifiesBeforeAndAfterShrink(t *testing.T) {
+	binDir, tracePath, ext4Path := setupStreamingFakes(t)
+	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in --find) echo /dev/loop9 ;; esac`)
+
+	if err := runStreamingBuild(t, ext4Path); err != nil {
+		t.Fatalf("streaming build failed: %v", err)
+	}
+
+	lines := traceLines(t, tracePath)
+	if got := traceCount(lines, "e2fsck -fy"); got != 1 {
+		t.Fatalf("repair calls = %d, want 1: %v", got, lines)
+	}
+	preCheck := traceIndex(lines, "e2fsck -fy")
+	resize := traceIndex(lines, "resize2fs -M")
+	align := traceIndex(lines, "truncate -s 2097152")
+	postCheck := traceIndex(lines, "e2fsck -fn")
+	if preCheck < 0 || resize <= preCheck || align <= resize || postCheck <= align {
+		t.Fatalf("expected repair, shrink, align, then read-only verification: %v", lines)
+	}
+	if traceIndex(lines, "mkfs.ext4 -F -b 4096") < 0 {
+		t.Fatalf("streaming mkfs must use DAX-compatible 4KiB blocks: %v", lines)
+	}
+}
+
+func TestStreamingFailsWhenResize2fsFails(t *testing.T) {
+	binDir, _, ext4Path := setupStreamingFakes(t)
+	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in --find) echo /dev/loop9 ;; esac`)
+	installFakeCommand(t, binDir, "resize2fs", `echo "resize2fs $*" >> "$FAKE_TRACE"
+echo "resize failed" >&2
+exit 1`)
+
+	err := runStreamingBuild(t, ext4Path)
+	if err == nil || !strings.Contains(err.Error(), "resize2fs shrink failed") {
+		t.Fatalf("unexpected resize failure: %v", err)
+	}
+}
+
+func TestStreamingAlignmentUsesActualSize(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		size      int64
+		remove    bool
+		wantTrunc string
+		wantErr   string
+	}{
+		{name: "unaligned size above estimate", size: 3*1024*1024 + 4096, wantTrunc: "truncate -s 4194304"},
+		{name: "already aligned", size: 4 * 1024 * 1024},
+		{name: "missing image", remove: true, wantErr: "stat shrunk ext4 image failed"},
+		{name: "empty image", size: 0, wantErr: "is empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, tracePath, ext4Path := setupStreamingFakes(t)
+			installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in --find) echo /dev/loop9 ;; esac`)
+			// Resize is a no-op fake. Set its resulting file size through the export
+			// hook so alignment reads real FileInfo instead of an estimated size.
+			postExport := func(context.Context, string) error {
+				if tc.remove {
+					return os.Remove(ext4Path)
+				}
+				return os.Truncate(ext4Path, tc.size)
+			}
+			source := &PreparedSource{LocalRef: "local/img:latest", ExportMode: ExportModeNative}
+			err := createExt4ImageStreaming(context.Background(), source, t.TempDir(), ext4Path, 1024, postExport)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected %q, got %v", tc.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("streaming build failed: %v", err)
+			}
+			lines := traceLines(t, tracePath)
+			wantCalls := 1 // Initial scratch allocation only.
+			if tc.wantTrunc != "" {
+				wantCalls++
+				if traceIndex(lines, tc.wantTrunc) <= traceIndex(lines, "resize2fs -M") {
+					t.Fatalf("expected alignment using actual size after shrink: %v", lines)
+				}
+			}
+			if got := traceCount(lines, "truncate "); got != wantCalls {
+				t.Fatalf("truncate calls = %d, want %d: %v", got, wantCalls, lines)
+			}
+			wantChecks := 0
+			if tc.wantErr == "" {
+				wantChecks = 1
+			}
+			if got := traceCount(lines, "e2fsck -fn"); got != wantChecks {
+				t.Fatalf("final verification calls = %d, want %d: %v", got, wantChecks, lines)
+			}
+		})
+	}
 }
 
 // TestStreamingUnmountsBeforeDetach guards the actual leak: detaching a device
