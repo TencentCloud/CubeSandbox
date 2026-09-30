@@ -196,19 +196,56 @@ func (e *sandboxRuntimeEvidence) resolveStaleIntents(ctx context.Context, sandbo
 	e.unresolved = nil
 }
 
+// runtimeEvidenceScope says which recorded sources of evidence a caller will
+// act on. The two callers ask different questions of the same host state.
+type runtimeEvidenceScope int
+
+const (
+	// evidenceEveryRecordedSource is the destroy view: every candidate takes
+	// part, trusted or not. Destroy must not release a tap, IP or volume while
+	// anything might hold it, so a pid it cannot tie to the shim is reported
+	// and the sandbox stays quarantined rather than being reclaimed.
+	evidenceEveryRecordedSource runtimeEvidenceScope = iota
+	// evidenceVerifiableOnly is the resume gate's view: only evidence that can
+	// be tied to one incarnation takes part. A pid that carries no start time
+	// and did not come from the shim's own bundle files cannot answer the
+	// gate's question, and waiting on one waits on whoever holds that number
+	// now — a resume master allowed would stall for the gate timeout and then
+	// keep failing for as long as the number stays occupied, with nothing to
+	// bound it.
+	evidenceVerifiableOnly
+)
+
 // collectSandboxRuntimeEvidence snapshots every host process that may still
 // hold sandbox resources: recorded task/endpoint pids plus the shim bundle's
 // shim.pid / vmm.pid. Call this BEFORE DeleteTask — containerd removes the
 // bundle on Delete, and TaskExit only means the task slot is gone, not that
 // the shim process has released its fds.
 func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox) sandboxRuntimeEvidence {
+	return l.collectRuntimeEvidence(ctx, sb, evidenceEveryRecordedSource)
+}
+
+// collectVerifiableRuntimeEvidence is the resume gate's view of the same state.
+//
+// Records written before ShimSpawned existed carry no start time anywhere, so
+// an endpoint, status or container pid from one of them cannot be shown to be
+// this sandbox's shim: it is a number, and numbers are recycled. The gate drops
+// those instead of waiting on them. The drop is logged rather than silent, so
+// the fail-open is visible to whoever has to reason about an upgrade-era
+// tombstone. The destroy path deliberately keeps trusting them — failing every
+// pre-upgrade sandbox closed would make all of them undeletable.
+func (l *local) collectVerifiableRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox) sandboxRuntimeEvidence {
+	return l.collectRuntimeEvidence(ctx, sb, evidenceVerifiableOnly)
+}
+
+func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox, scope runtimeEvidenceScope) sandboxRuntimeEvidence {
 	var ev sandboxRuntimeEvidence
 	if sb == nil {
 		return ev
 	}
 
-	// Candidates, strongest provenance first: the first entry seen for a pid is
-	// the one that decides it.
+	// Candidates, strongest provenance first: for a pid no candidate can settle
+	// conclusively, the first entry seen for it is the one that decides it.
 	//
 	//   - the shim bundle's pid files are written by the shim about itself.
 	//     They carry no start time, but a live pid there really is this
@@ -260,6 +297,20 @@ func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxst
 		})
 	}
 
+	// A pid number some candidate can settle conclusively is settled for every
+	// candidate that names it. The bundle pid files record the shim's own id and
+	// Endpoint.Pid is that same id, so the two are one process rather than two
+	// sources — and the bundle entry, which carries no start time, would
+	// otherwise win the dedup below. Without this the recorded start time is
+	// never consulted on the destroy path, and a number recycled onto an
+	// unrelated process is waited on as if it were ours.
+	conclusivePids := map[int]struct{}{}
+	for _, c := range candidates {
+		if c.identity != nil {
+			conclusivePids[c.pid] = struct{}{}
+		}
+	}
+
 	seen := map[int]struct{}{}
 	for _, c := range candidates {
 		if c.pid <= 1 || c.pid == os.Getpid() {
@@ -267,6 +318,18 @@ func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxst
 		}
 		if _, ok := seen[c.pid]; ok {
 			continue
+		}
+		if c.identity == nil {
+			if _, conclusive := conclusivePids[c.pid]; conclusive {
+				continue
+			}
+			if scope == evidenceVerifiableOnly && c.source != holderSourceBundle {
+				log.G(ctx).Warnf("sandbox %s: ignoring pid %d from %s while gating a resume: it "+
+					"carries no start time, so waiting on it would wait on whoever holds that "+
+					"number now; the destroy path still refuses to release its resources",
+					sandboxIdentity(sb), c.pid, c.source)
+				continue
+			}
 		}
 		seen[c.pid] = struct{}{}
 
@@ -505,11 +568,16 @@ func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRun
 // waitReplacedSandboxGone blocks until the sandbox being replaced has no
 // runtime process left, so that deleting its records cannot strand a shim
 // that is still holding network and disk resources.
+//
+// It reads the host through the verifiable-evidence view: a replacement may
+// not be gated on a pid number nobody can tie to this sandbox, or a record
+// that predates ShimSpawned would be un-resumable for as long as that number
+// happened to be occupied.
 func (l *local) waitReplacedSandboxGone(ctx context.Context, sb *cubeboxstore.CubeBox) error {
 	if sb == nil {
 		return nil
 	}
-	evidence := l.collectSandboxRuntimeEvidence(ctx, sb)
+	evidence := l.collectVerifiableRuntimeEvidence(ctx, sb)
 	waitCtx, cancel := context.WithTimeout(ctx, replaceGateTimeout)
 	defer cancel()
 	return waitSandboxRuntimeGone(waitCtx, sb.SandboxID, evidence)

@@ -205,6 +205,52 @@ func TestCollectEvidenceTrustsLiveBundlePidFile(t *testing.T) {
 	assert.Equal(t, []int{live.Pid}, ev.pids())
 }
 
+// The normal shape is one pid, not two sources: the shim writes its own id into
+// shim.pid / vmm.pid and Endpoint.Pid is that same id. So a recorded start time
+// that disproves the current holder must settle the number even though the
+// bundle entry is seen first and carries no start time of its own.
+func TestCollectEvidenceLetsConclusiveIdentitySettleTheBundlePid(t *testing.T) {
+	recycled := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, recycled.Pid)
+	withShimBundles(t, bundle)
+
+	sb := newCubeboxWithStatusForTest("sb-shadow", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{
+		Pid:           uint32(recycled.Pid),
+		PidStartTime:  recycled.StartTime + 1, // our shim is gone; a stranger holds the number
+		ShimSpawned:   true,
+		ShimSpawnedAt: time.Now(),
+	}
+
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.pids(),
+		"the start time disproves the holder, so the stale bundle pid file must not keep it alive")
+	assert.Empty(t, ev.unresolved, "and a pid proven gone is not a blocker either")
+}
+
+// The positive control for the rule above. When the start time matches, the
+// bundle entry must still be waited on: dropping bundle trust wholesale would
+// reopen the crash window the intent TTL exists for.
+func TestCollectEvidenceStillWaitsWhenTheIdentityMatchesTheBundlePid(t *testing.T) {
+	live := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, live.Pid)
+	withShimBundles(t, bundle)
+
+	sb := newCubeboxWithStatusForTest("sb-shadow-live", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{
+		Pid:           uint32(live.Pid),
+		PidStartTime:  live.StartTime,
+		ShimSpawned:   true,
+		ShimSpawnedAt: time.Now(),
+	}
+
+	ev := localWithIntentTTL(time.Minute).collectSandboxRuntimeEvidence(context.Background(), sb)
+	assert.Empty(t, ev.unresolved)
+	assert.Equal(t, []int{live.Pid}, ev.pids())
+}
+
 // The bundle is also consulted when deciding whether a failed create may be
 // rolled back: a live pid there must keep the intent in place.
 func TestLiveBundleHolderIsFound(t *testing.T) {
@@ -498,4 +544,45 @@ func TestWaitReplacedSandboxGoneRefusesWhileTheOldRuntimeLives(t *testing.T) {
 	err := localWithIntentTTL(10*time.Minute).waitReplacedSandboxGone(ctx, sb)
 	require.Error(t, err)
 	assert.False(t, pendingIntentOnlyError(t, err))
+}
+
+// A tombstone written before ShimSpawned existed names a pid nobody can tie to
+// this sandbox: no start time anywhere, so all the gate can see is a number
+// that some process happens to hold now. Master's paused-replace path had no
+// wait at all, so gating a resume on that number would turn a resume that used
+// to work into one that fails for as long as the number stays occupied — with
+// nothing to bound it, since an unprovable pid is never ageable.
+func TestWaitReplacedSandboxGoneIgnoresAnUnverifiableLegacyPid(t *testing.T) {
+	recycled := startSleeper(t)
+	sb := pausedForReplace("sb-legacy-resume", sandboxstore.Endpoint{Pid: uint32(recycled.Pid)})
+	withShimBundles(t, t.TempDir()) // the paused tombstone's runtime directory is gone
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	require.NoError(t, localWithIntentTTL(10*time.Minute).waitReplacedSandboxGone(ctx, sb))
+	assert.Less(t, time.Since(start), time.Second,
+		"a pid nobody can tie to the sandbox must not stall the gate")
+}
+
+// The other half of that rule: a record that does carry a start time still
+// gates the replacement, so the relaxation is limited to evidence that cannot
+// be tied to an incarnation.
+func TestWaitReplacedSandboxGoneStillRefusesAVerifiableLiveRuntime(t *testing.T) {
+	live := startSleeper(t)
+	sb := pausedForReplace("sb-verified-resume", sandboxstore.Endpoint{
+		Pid:          uint32(live.Pid),
+		PidStartTime: live.StartTime,
+		ShimSpawned:  true,
+	})
+	withShimBundles(t, t.TempDir())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := localWithIntentTTL(10*time.Minute).waitReplacedSandboxGone(ctx, sb)
+	require.Error(t, err)
+	assert.False(t, pendingIntentOnlyError(t, err),
+		"a runtime we can prove is alive is refused, not deferred")
 }

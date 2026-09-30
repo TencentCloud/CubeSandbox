@@ -148,13 +148,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
 			st := sb.GetStatus()
 			if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
-				// The wait that used to gate this replacement now runs in
-				// service.Create, before the create flow allocates anything.
-				// See gatePausedReplace in service.go. It is not repeated
-				// here: everything below deletes the old sandbox's records,
-				// and this row is the only place its shim identity survives,
-				// so the check has to happen before a process can be orphaned
-				// rather than halfway through the create.
+				// Everything below deletes the old sandbox's records, and this
+				// row is the last place its shim identity survives: once it is
+				// gone nothing on the host can match a still-running shim back
+				// to the sandbox, and this attempt is handed a tap the old one
+				// may still hold. So the eligibility wait runs before any of
+				// this, at the create entry point — see gatePausedReplace in
+				// service.go — and is deliberately not repeated here, where it
+				// would run after the records it protects are already gone.
 				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
 				if sb.UserMarkDeletedTime == nil {
 					now := time.Now()
