@@ -1,9 +1,17 @@
 package templatecenter
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -70,5 +78,82 @@ func TestCloneEgressRuleDeepCopiesPort(t *testing.T) {
 	*cloned.Match.Port = 443
 	if *rule.Match.Port != 8443 {
 		t.Fatalf("source port changed through clone: %d", *rule.Match.Port)
+	}
+}
+
+type spanRecorder struct {
+	mu    sync.Mutex
+	spans []sdktrace.ReadOnlySpan
+}
+
+func (r *spanRecorder) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.spans = append(r.spans, spans...)
+	return nil
+}
+
+func (r *spanRecorder) Shutdown(context.Context) error { return nil }
+
+func (r *spanRecorder) snapshot() []sdktrace.ReadOnlySpan {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]sdktrace.ReadOnlySpan, len(r.spans))
+	copy(out, r.spans)
+	return out
+}
+
+func installSpanRecorder(t *testing.T) (*spanRecorder, func()) {
+	t.Helper()
+	prev := otel.GetTracerProvider()
+	rec := &spanRecorder{}
+	shutdown, err := telemetry.SetupWithExporter(rec, "cubemaster-test")
+	if err != nil {
+		t.Fatalf("SetupWithExporter: %v", err)
+	}
+	var once sync.Once
+	flush := func() {
+		once.Do(func() {
+			if err := shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown: %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() {
+		flush()
+		otel.SetTracerProvider(prev)
+	})
+	return rec, flush
+}
+
+func TestEndSnapshotReadSpanTreatsMissAsSuccess(t *testing.T) {
+	rec, flush := installSpanRecorder(t)
+
+	_, span := telemetry.Start(context.Background(), telemetry.SpanTemplateDB)
+	endSnapshotReadSpan(span, ErrSnapshotNotFound)
+	flush()
+
+	spans := rec.snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("got %d span(s), want 1", len(spans))
+	}
+	if got := spans[0].Status().Code; got == codes.Error {
+		t.Errorf("expected snapshot miss marked the read as %v, want a non-error status", got)
+	}
+}
+
+func TestEndSnapshotReadSpanKeepsRealFailures(t *testing.T) {
+	rec, flush := installSpanRecorder(t)
+
+	_, span := telemetry.Start(context.Background(), telemetry.SpanTemplateDB)
+	endSnapshotReadSpan(span, errors.New("connection refused"))
+	flush()
+
+	spans := rec.snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("got %d span(s), want 1", len(spans))
+	}
+	if got := spans[0].Status().Code; got != codes.Error {
+		t.Errorf("real query failure status = %v, want %v", got, codes.Error)
 	}
 }
