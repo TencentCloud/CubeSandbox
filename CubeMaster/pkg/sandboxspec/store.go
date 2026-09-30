@@ -203,6 +203,43 @@ func Get(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandbox
 	return out, nil
 }
 
+// GetAnnotations returns a copy of the persisted request annotations without
+// decoding the rest of the sandbox create request.
+func GetAnnotations(ctx context.Context, sandboxID string) (map[string]string, error) {
+	client := getDB()
+	if client == nil {
+		return nil, ErrSandboxSpecStoreNotReady
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil, errors.New("sandboxspec.GetAnnotations: sandbox_id is required")
+	}
+	var rec struct {
+		RequestJSON string `gorm:"column:request_json"`
+	}
+	if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+		Select("request_json").Where("sandbox_id = ?", sandboxID).First(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrSandboxSpecNotFound
+		}
+		return nil, err
+	}
+	var stored struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if err := json.Unmarshal([]byte(rec.RequestJSON), &stored); err != nil {
+		return nil, err
+	}
+	if len(stored.Annotations) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(stored.Annotations))
+	for key, value := range stored.Annotations {
+		out[key] = value
+	}
+	return out, nil
+}
+
 // Delete removes the spec record for sandboxID. Missing records are a no-op.
 func Delete(ctx context.Context, sandboxID string) error {
 	client := getDB()

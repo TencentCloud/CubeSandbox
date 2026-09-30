@@ -62,7 +62,7 @@ def run_preflight(
 
     if require_default_template and not config.cube_template_id:
         errors.append("CUBE_TEMPLATE_ID or --cube-template-id is required")
-    if not effective_template_ids:
+    if require_default_template and not effective_template_ids:
         errors.append("at least one template ID is required")
 
     _check_backend_dependencies(config.backends, errors)

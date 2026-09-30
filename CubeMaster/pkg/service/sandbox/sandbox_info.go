@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -206,6 +209,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	if req.SandboxID == "" {
 		return nil
 	}
+	decorateSandboxQosForInfo(ctx, req.SandboxID, rsp.Data, sandboxspec.GetAnnotations)
 	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
 	if !ok || proxyMap == nil {
 		return nil
@@ -234,6 +238,65 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.ExposedPortMode = endpoint.Mode
 	}
 	return nil
+}
+
+func decorateSandboxQosForInfo(ctx context.Context, sandboxID string, items []*types.SandboxData, getAnnotations func(context.Context, string) (map[string]string, error)) {
+	if annotations, err := getAnnotations(ctx, sandboxID); err == nil {
+		decorateSandboxQos(ctx, items, annotations)
+	} else if !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) {
+		log.G(ctx).Warnf("failed to load persisted QoS annotations for sandbox %s: %v", sandboxID, err)
+	}
+	// The persisted create request may predate QoS annotations or contain only
+	// unrelated annotations. The template still tells us what was configured,
+	// but cannot prove that the runtime applied it.
+	decorateSandboxQosFromTemplate(ctx, items)
+}
+
+func decorateSandboxQos(ctx context.Context, items []*types.SandboxData, annotations map[string]string) {
+	networkRaw := annotations[constants.CubeAnnotationsNetWork]
+	blockIORaw := annotations[constants.CubeAnnotationsBlkQos]
+	network, networkErr := qos.ParseAnnotation(networkRaw)
+	blockIO, blockIOErr := qos.ParseBlockIOAnnotation(blockIORaw)
+	if networkErr != nil || blockIOErr != nil {
+		for _, item := range items {
+			if item == nil {
+				continue
+			}
+			if networkErr != nil {
+				log.G(ctx).Warnf("failed to parse %s for sandbox %s: %v", constants.CubeAnnotationsNetWork, item.SandboxID, networkErr)
+			}
+			if blockIOErr != nil {
+				log.G(ctx).Warnf("failed to parse %s for sandbox %s: %v", constants.CubeAnnotationsBlkQos, item.SandboxID, blockIOErr)
+			}
+		}
+	}
+	if network == nil && blockIO == nil {
+		return
+	}
+	configured := &qos.Config{BlockIO: blockIO}
+	if network != nil {
+		configured.Network = network.Network
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		item.ConfiguredQos = configured
+		item.QosApplied = qos.HasAppliedAnnotation(networkRaw, blockIORaw)
+	}
+}
+
+func decorateSandboxQosFromTemplate(ctx context.Context, items []*types.SandboxData) {
+	for _, item := range items {
+		if item == nil || item.ConfiguredQos != nil || item.TemplateID == "" {
+			continue
+		}
+		configured, err := lookupTemplateQos(ctx, item.TemplateID)
+		if err != nil || configured == nil {
+			continue
+		}
+		item.ConfiguredQos = configured
+	}
 }
 
 func getContainerName(label map[string]string) string {
