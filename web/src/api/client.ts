@@ -381,6 +381,39 @@ export const warehouseApi = {
   },
 };
 
+export interface QuotaSpecDto {
+  mcpu_limit: number;
+  mem_limit: string;
+  mvm_limit: number;
+  creation_concurrent_num: number;
+  // Round-tripped from the current spec: the PUT is a full replace, so echoing
+  // this value (or null) keeps a CLI-set node ratio instead of clearing it.
+  paused_resource_release_ratio?: number | null;
+  expected_revision?: number;
+  revision: number;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface QuotaViewDto {
+  node_id: string;
+  spec?: QuotaSpecDto;
+  actual: {
+    milli_cpu: number;
+    mem_mb: number;
+    max_mvm_num: number;
+    create_concurrent_num: number;
+  };
+  drift: 'none' | 'detected' | 'no_spec';
+  message?: string;
+}
+
+export interface QuotaHistoryEntryDto {
+  operator: string;
+  detail: string;
+  created_at: string;
+}
+
 export const clusterApi = {
   overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
@@ -396,6 +429,14 @@ export const clusterApi = {
       body: detail ? JSON.stringify({ detail }) : undefined,
     }),
   nodeOperations: (id: string) => ops<NodeOperationDto[]>(`/nodes/${id}/operations`),
+  nodeQuota: (id: string) => ops<QuotaViewDto>(`/nodes/${id}/config/quota`),
+  setNodeQuota: (id: string, spec: QuotaSpecDto) =>
+    ops<{ view: QuotaViewDto; push: { applied: boolean; skip_reason?: string } }>(
+      `/nodes/${id}/config/quota`,
+      { method: 'PUT', body: JSON.stringify(spec) },
+    ),
+  nodeQuotaHistory: (id: string) =>
+    ops<QuotaHistoryEntryDto[]>(`/nodes/${id}/config/quota/history`),
   config: () =>
     ops<{
       apiEndpoint: string;

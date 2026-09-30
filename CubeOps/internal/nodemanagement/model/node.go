@@ -36,6 +36,9 @@ type HostFacts struct {
 	// KVMModuleScanned is a transient signal (not persisted): mergeIncomingHostFacts
 	// uses it to distinguish "module unloaded" from "read gap".
 	KVMModuleScanned bool `json:"kvm_module_scanned,omitempty"`
+	// Physical machine capacity the overcommit guards validate against.
+	CPUCount   int64 `json:"cpu_count,omitempty"`
+	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
 }
 
 // IsZero reports whether no meaningful host fact was collected.
@@ -45,7 +48,8 @@ func (f *HostFacts) IsZero() bool {
 	}
 	return f.CPUVendor == "" && f.CPUModel == "" && f.CPUIDHash == "" &&
 		f.HostKernelRelease == "" && f.HostKernelFingerprint == "" && f.KVMAPIVersion == 0 &&
-		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == ""
+		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == "" &&
+		f.CPUCount == 0 && f.MemTotalMB == 0
 }
 
 type ContainerImage struct {
@@ -74,19 +78,21 @@ type NodeCondition struct {
 
 // RegisterNodeRequest is sent by cubelet on first registration.
 type RegisterNodeRequest struct {
-	RequestID           string             `json:"requestID,omitempty"`
-	NodeID              string             `json:"node_id,omitempty"`
-	HostIP              string             `json:"host_ip,omitempty"`
-	GRPCPort            int                `json:"grpc_port,omitempty"`
-	Labels              map[string]string  `json:"labels,omitempty"`
-	Capacity            ResourceSnapshot   `json:"capacity,omitempty"`
-	Allocatable         ResourceSnapshot   `json:"allocatable,omitempty"`
-	InstanceType        string             `json:"instance_type,omitempty"`
-	ClusterLabel        string             `json:"cluster_label,omitempty"`
-	QuotaCPU            int64              `json:"quota_cpu,omitempty"`
-	QuotaMemMB          int64              `json:"quota_mem_mb,omitempty"`
-	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
-	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
+	RequestID           string            `json:"requestID,omitempty"`
+	NodeID              string            `json:"node_id,omitempty"`
+	HostIP              string            `json:"host_ip,omitempty"`
+	GRPCPort            int               `json:"grpc_port,omitempty"`
+	Labels              map[string]string `json:"labels,omitempty"`
+	Capacity            ResourceSnapshot  `json:"capacity,omitempty"`
+	Allocatable         ResourceSnapshot  `json:"allocatable,omitempty"`
+	InstanceType        string            `json:"instance_type,omitempty"`
+	ClusterLabel        string            `json:"cluster_label,omitempty"`
+	QuotaCPU            int64             `json:"quota_cpu,omitempty"`
+	QuotaMemMB          int64             `json:"quota_mem_mb,omitempty"`
+	CreateConcurrentNum int64             `json:"create_concurrent_num,omitempty"`
+	MaxMvmNum           int64             `json:"max_mvm_num,omitempty"`
+	// PausedReleaseRatio: nil on cubelets predating ratio reporting.
+	PausedReleaseRatio  *float64           `json:"paused_release_ratio,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
 	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
@@ -102,9 +108,25 @@ type UpdateNodeStatusRequest struct {
 	Allocated           *AllocatedResources `json:"allocated,omitempty"`
 	DiskUsage           *DiskUsage          `json:"disk_usage,omitempty"`
 	MetricTime          time.Time           `json:"metric_time,omitempty"`
+	Quota               *QuotaReport        `json:"quota,omitempty"`
 	Versions            []ComponentVersion  `json:"versions,omitempty"`
 	InventoryIncomplete bool                `json:"inventory_incomplete,omitempty"`
 	HostFacts           *HostFacts          `json:"host_facts,omitempty"`
+}
+
+// QuotaReport is the effective quota reported by cubelet on register/heartbeat.
+type QuotaReport struct {
+	MilliCPU            int64 `json:"milli_cpu"`
+	MemMB               int64 `json:"mem_mb"`
+	MaxMvmNum           int64 `json:"max_mvm_num"`
+	CreateConcurrentNum int64 `json:"create_concurrent_num"`
+	// PausedReleaseRatio: nil on cubelets predating ratio reporting.
+	PausedReleaseRatio *float64 `json:"paused_release_ratio,omitempty"`
+}
+
+// IsZero reports an empty report; receivers must ignore it to protect the registration row.
+func (q *QuotaReport) IsZero() bool {
+	return q == nil || (q.MilliCPU == 0 && q.MemMB == 0 && q.MaxMvmNum == 0 && q.CreateConcurrentNum == 0)
 }
 
 // AllocatedResources carries quota usage reported by cubelet.
@@ -139,6 +161,7 @@ type NodeSnapshot struct {
 	QuotaMemMB          int64              `json:"quota_mem_mb,omitempty"`
 	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
 	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
+	PausedReleaseRatio  *float64           `json:"paused_release_ratio,omitempty"`
 	Conditions          []NodeCondition    `json:"conditions,omitempty"`
 	Images              []ContainerImage   `json:"images,omitempty"`
 	LocalTemplates      []LocalTemplate    `json:"local_templates,omitempty"`

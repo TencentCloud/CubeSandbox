@@ -40,6 +40,12 @@ images:
     tag: v0.7.2
     pullPolicy: IfNotPresent
 
+  # Node-local ops-agent: applies CubeOps-desired config to dynamicconf.
+  opsAgent:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops-agent
+    tag: v0.7.2
+    pullPolicy: IfNotPresent
+
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
     tag: v0.7.2
@@ -766,6 +772,15 @@ minio:
     accessModes:
       - ReadWriteOnce
   resources: {}
+
+# Node-local ops-agent DaemonSet: applies CubeOps-desired quota config to the
+# cubelet dynamicconf on every compute node. Shares the compute placement of
+# the cubelet DaemonSet and runs hostNetwork so CubeOps reaches it on the
+# node IP.
+opsAgent:
+  port: 8890
+  resources: {}
+  extraEnv: []
 
 cubeNode:
   enabled: true

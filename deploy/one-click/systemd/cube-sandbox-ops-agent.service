@@ -1,0 +1,13 @@
+[Unit]
+Description=Cube Sandbox ops-agent
+After=network-online.target cube-sandbox-cubelet.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/services/cubetoolbox/ops-agent/bin/ops-agent --config /usr/local/services/cubetoolbox/ops-agent/conf/config.yaml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

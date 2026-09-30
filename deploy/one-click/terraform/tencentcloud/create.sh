@@ -3993,6 +3993,11 @@ step8_init_compute_nodes() {
 		install_log="$(mktemp "${TMPDIR:-/tmp}/cubesandbox_compute_${i}_install.XXXXXX.log")"
 		local install_rc=0
 
+		# Shared token gating CubeOps pushes to ops-agent; read once for both
+		# install branches (compute hard-fails without it).
+		local ops_agent_token
+		ops_agent_token=$(terraform output -raw ops_agent_token 2>/dev/null || echo "")
+
 		if [ -n "${LOCAL_BUNDLE:-}" ]; then
 			# ---- Local bundle mode (compute node) ----
 			echo -e "  ${CYAN}Using local bundle: ${LOCAL_BUNDLE}${NC}"
@@ -4073,6 +4078,7 @@ CUBE_EXTERNAL_REDIS_HOST=${redis_ip}
 CUBE_PVM_ENABLE=1
 ONE_CLICK_CONTROL_PLANE_IP=\"${control_plane_ip}\"
 ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=\"${ops_clb_ip}:3010\"
+CUBE_OPS_OPSAGENT_TOKEN=${ops_agent_token}
 MIRROR=${egress_mirror}
 EOF
 echo '[local-bundle] .env created:'
@@ -4105,6 +4111,7 @@ echo '[local-bundle] Done'"
          CUBE_SANDBOX_NODE_IP='${compute_private_ip}' \
          ONE_CLICK_CONTROL_PLANE_IP='${cm_clb_ip}' \
          ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR='${ops_clb_ip}:3010' \
+         CUBE_OPS_OPSAGENT_TOKEN='${ops_agent_token}' \
          CUBE_PVM_ENABLE=1 \
          MIRROR='${egress_mirror}' bash 2>&1" 2>&1 | tee "$install_log"
 			install_rc=${PIPESTATUS[0]}

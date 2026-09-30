@@ -1,0 +1,10 @@
+# ops-agent configuration. Deploy to {TOOLBOX_ROOT}/ops-agent/conf/config.yaml.
+node_id: ""            # REQUIRED: node identity, must match the CubeOps registration id (usually the host IP)
+listen_addr: "127.0.0.1:8890"   # bind a management interface on multi-NIC hosts; never expose publicly
+cubeops_url: "http://127.0.0.1:3010"
+dynamicconf_path: "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml"
+reconcile_interval: 300s
+backup_keep: 5
+shared_token: ""        # shared secret matching CubeOps CUBE_OPS_OPSAGENT_TOKEN; empty rejects all pushes
+log_level: "info"
+log_dir: "/data/log/ops-agent"

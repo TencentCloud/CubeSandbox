@@ -185,6 +185,14 @@ func TestMergeIncomingHostFacts(t *testing.T) {
 		assert.Equal(t, "sha256:module", out.KVMModuleFingerprint)
 		assert.False(t, out.KVMModuleScanned)
 	})
+
+	t.Run("zero physical in incoming preserves prev physical", func(t *testing.T) {
+		prevPhys := &model.HostFacts{CPUIDHash: "sha256:cpu", CPUCount: 16, MemTotalMB: 65536}
+		incoming := &model.HostFacts{CPUIDHash: "sha256:cpu", CPUCount: 0, MemTotalMB: 0}
+		out := mergeIncomingHostFacts(prevPhys, incoming)
+		assert.Equal(t, int64(16), out.CPUCount)
+		assert.Equal(t, int64(65536), out.MemTotalMB)
+	})
 }
 
 func TestMarshalHostFactsClearsScanned(t *testing.T) {

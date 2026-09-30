@@ -37,6 +37,7 @@ type NodeService struct {
 	declaredVersionSets map[string]map[string]struct{}
 
 	sandboxCheckerFn SandboxInventoryChecker
+	opsAgentPusher   OpsAgentPusher
 }
 
 func NewNodeService(s store.NodeStore, declared DeclaredVersionInfo) *NodeService {
@@ -88,6 +89,7 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		QuotaMemMB:          req.QuotaMemMB,
 		CreateConcurrentNum: req.CreateConcurrentNum,
 		MaxMvmNum:           req.MaxMvmNum,
+		PausedReleaseRatio:  req.PausedReleaseRatio,
 	}
 	applyHostFactsToRegistration(reg, req.HostFacts)
 
@@ -132,12 +134,14 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		QuotaMemMB:          req.QuotaMemMB,
 		CreateConcurrentNum: req.CreateConcurrentNum,
 		MaxMvmNum:           req.MaxMvmNum,
+		PausedReleaseRatio:  req.PausedReleaseRatio,
 		HostFacts:           cloneHostFacts(req.HostFacts),
 		HeartbeatTime:       time.Now(),
 	}
 	applyCurrentHealth(snap, time.Now())
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 
+	svc.ensureClusterRow(ctx, req.NodeID)
 	svc.persistVersions(ctx, req.NodeID, req.Versions, req.InventoryIncomplete, snap)
 	nodemetric.WriteNodeSnapshot(snap)
 	logging.G(ctx).Infof("nodemgmt: node registered: node=%s host=%s", req.NodeID, req.HostIP)
@@ -211,18 +215,50 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	}
 
 	if req.HostFacts != nil && !req.HostFacts.IsZero() {
-		merged := mergeIncomingHostFacts(snap.HostFacts, req.HostFacts)
+		prev := snap.HostFacts
+		merged := mergeIncomingHostFacts(prev, req.HostFacts)
 		snap.HostFacts = merged
-		reg := &store.NodeRegistration{NodeID: nodeID}
-		applyHostFactsToRegistration(reg, merged)
-		if err := svc.store.UpdateHostFacts(ctx, nodeID, reg.HostFactsJSON, reg.CPUIDHash, reg.HostKernelRelease); err != nil {
-			logging.G(ctx).Warnf("nodemgmt: persist host facts failed: node=%s: %v", nodeID, err)
+		// Diff-then-write on the persisted form.
+		if marshalHostFacts(merged) != marshalHostFacts(prev) {
+			reg := &store.NodeRegistration{NodeID: nodeID}
+			applyHostFactsToRegistration(reg, merged)
+			if err := svc.store.UpdateHostFacts(ctx, nodeID, reg.HostFactsJSON, reg.CPUIDHash, reg.HostKernelRelease, reg.CPUCount, reg.MemTotalMB); err != nil {
+				logging.G(ctx).Warnf("nodemgmt: persist host facts failed: node=%s: %v", nodeID, err)
+			}
 		}
+	}
+
+	if req.Quota != nil && !req.Quota.IsZero() {
+		svc.applyHeartbeatQuota(ctx, nodeID, req.Quota, snap)
 	}
 
 	svc.persistVersions(ctx, nodeID, req.Versions, req.InventoryIncomplete, snap)
 	nodemetric.WriteNodeSnapshot(snap)
 	return cloneSnapshot(snap), nil
+}
+
+// applyHeartbeatQuota persists a heartbeat-reported quota change (diff-then-write).
+func (svc *NodeService) applyHeartbeatQuota(ctx context.Context, nodeID string, q *model.QuotaReport, snap *model.NodeSnapshot) {
+	ratioChanged := q.PausedReleaseRatio != nil &&
+		(snap.PausedReleaseRatio == nil || *snap.PausedReleaseRatio != *q.PausedReleaseRatio)
+	if snap.QuotaCPU == q.MilliCPU && snap.QuotaMemMB == q.MemMB &&
+		snap.MaxMvmNum == q.MaxMvmNum && snap.CreateConcurrentNum == q.CreateConcurrentNum &&
+		!ratioChanged {
+		return
+	}
+	if err := svc.store.UpdateQuota(ctx, nodeID, *q); err != nil {
+		logging.G(ctx).Errorf("nodemgmt: update quota failed: node=%s: %v", nodeID, err)
+		return
+	}
+	logging.G(ctx).Infof("nodemgmt: node quota updated by heartbeat: node=%s cpu=%d memMB=%d mvm=%d createConcurrent=%d ratio=%s",
+		nodeID, q.MilliCPU, q.MemMB, q.MaxMvmNum, q.CreateConcurrentNum, formatRatioPtr(q.PausedReleaseRatio))
+	snap.QuotaCPU = q.MilliCPU
+	snap.QuotaMemMB = q.MemMB
+	snap.MaxMvmNum = q.MaxMvmNum
+	snap.CreateConcurrentNum = q.CreateConcurrentNum
+	if q.PausedReleaseRatio != nil {
+		snap.PausedReleaseRatio = q.PausedReleaseRatio
+	}
 }
 
 func fanOutResourceMetric(ctx context.Context, nodeID string, req *model.UpdateNodeStatusRequest, metricTime time.Time) {
