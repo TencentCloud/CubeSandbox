@@ -7,8 +7,11 @@ package ext4image
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -116,7 +119,8 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 	}
 	defer f.Close()
 	hasher := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, hasher), resp.Body); err != nil {
+	const sparseBufSize = 1024 * 1024 // 1 MiB
+	if _, err := sparseCopy(f, hasher, resp.Body, sparseBufSize); err != nil {
 		return err
 	}
 	if expectedSHA != "" {
@@ -129,6 +133,110 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		return err
 	}
 	return nil
+}
+
+// isAllZeros checks if the byte slice consists entirely of zero bytes.
+func isAllZeros(buf []byte) bool {
+	for len(buf) >= 8 {
+		if binary.LittleEndian.Uint64(buf) != 0 {
+			return false
+		}
+		buf = buf[8:]
+	}
+	for _, b := range buf {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+const sparseHoleThreshold = int64(1024 * 1024)
+
+// sparseCopy copies from src to dst while leaving zero runs of at least 1 MiB
+// sparse. Zero runs may start at any offset and may cross read-buffer boundaries.
+// It simultaneously feeds all read bytes into hasher (if non-nil) to preserve
+// hash integrity. dst.Truncate is called at the end to guarantee the file's
+// apparent size matches total bytes read.
+func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int64, error) {
+	if bufSize <= 0 {
+		bufSize = 1024 * 1024
+	}
+	buf := make([]byte, bufSize)
+	zeroBuf := make([]byte, min(bufSize, int(sparseHoleThreshold)))
+	var totalBytes int64
+	var pendingZeros int64
+
+	flushZeros := func() error {
+		if pendingZeros == 0 {
+			return nil
+		}
+		if pendingZeros >= sparseHoleThreshold {
+			_, err := dst.Seek(pendingZeros, io.SeekCurrent)
+			pendingZeros = 0
+			return err
+		}
+		remaining := pendingZeros
+		for remaining > 0 {
+			n := min(int64(len(zeroBuf)), remaining)
+			if _, err := dst.Write(zeroBuf[:n]); err != nil {
+				return err
+			}
+			remaining -= n
+		}
+		pendingZeros = 0
+		return nil
+	}
+
+	for {
+		n, readErr := io.ReadFull(src, buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if hasher != nil {
+				if _, err := hasher.Write(chunk); err != nil {
+					return totalBytes, err
+				}
+			}
+			if isAllZeros(chunk) {
+				pendingZeros += int64(n)
+			} else {
+				for offset := 0; offset < len(chunk); {
+					if chunk[offset] == 0 {
+						start := offset
+						for offset < len(chunk) && chunk[offset] == 0 {
+							offset++
+						}
+						pendingZeros += int64(offset - start)
+						continue
+					}
+					if err := flushZeros(); err != nil {
+						return totalBytes, err
+					}
+					start := offset
+					for offset < len(chunk) && chunk[offset] != 0 {
+						offset++
+					}
+					if _, err := dst.Write(chunk[start:offset]); err != nil {
+						return totalBytes, err
+					}
+				}
+			}
+			totalBytes += int64(n)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+				break
+			}
+			return totalBytes, readErr
+		}
+	}
+	if err := flushZeros(); err != nil {
+		return totalBytes, err
+	}
+	if err := dst.Truncate(totalBytes); err != nil {
+		return totalBytes, err
+	}
+	return totalBytes, nil
 }
 
 // RefreshArtifactRuntimeFiles rewrites runtime companion files from the current shared sources.
