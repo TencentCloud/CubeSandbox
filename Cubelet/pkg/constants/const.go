@@ -227,6 +227,10 @@ const (
 	// MasterAnnotationDesiredSandboxID asks createid to use this sandbox ID
 	// instead of generating a new one (Resume-from-pause / same-ID recreate).
 	MasterAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"
+	// AnnotationTemplateProfileVerify marks the ephemeral verification
+	// sandboxes the template profiling phase (CUBE_TEMPLATE_PROFILE_ENABLE)
+	// creates from a freshly built template. Value is the literal "true".
+	AnnotationTemplateProfileVerify = "cube.cubelet.template.profile_verify_sandbox"
 	// AnnotationPauseKeepTombstone is set on in-process Destroy after
 	// PauseToSnapshot (Cubelet Pause owns this; Master no longer issues a
 	// separate Destroy RPC): Detach volumes / wipe leftover live runtime, but
