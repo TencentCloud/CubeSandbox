@@ -135,6 +135,14 @@ type CommandResult struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
+	// Signal is the numeric signal that terminated the process, when envd
+	// reported one (for example 9 for SIGKILL). It is nil for normal exits.
+	Signal *int
+	// OOMKilled reports a cgroup memory OOM kill when envd could determine it.
+	OOMKilled bool
+	// KilledBy identifies an envd-side cause such as "timeout", "user", or
+	// "oom". Empty means no cause was recorded.
+	KilledBy string
 }
 
 type Logs struct {
