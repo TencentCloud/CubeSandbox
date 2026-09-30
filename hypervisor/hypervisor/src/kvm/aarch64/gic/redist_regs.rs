@@ -127,6 +127,22 @@ fn redist_attr_set(gic: &DeviceFd, offset: u32, typer: u64, val: u32) -> Result<
         .map_err(|e| Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into())))
 }
 
+/// SGI/PPI-frame redistributor registers whose KVM vGIC reset value is zero;
+/// same rationale as the distributor counterparts in `dist_regs.rs`.
+fn rdist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICR_IGROUPR0
+            | GICR_ISENABLER0
+            | GICR_ICENABLER0
+            | GICR_ISPENDR0
+            | GICR_ICPENDR0
+            | GICR_ISACTIVER0
+            | GICR_ICACTIVER0
+            | GICR_IPRIORITYR0
+    )
+}
+
 fn access_redists_aux(
     gic: &DeviceFd,
     gicr_typer: &[u64],
@@ -142,7 +158,10 @@ fn access_redists_aux(
 
             while base < end {
                 if set {
-                    redist_attr_set(gic, base, *i, state[*idx])?;
+                    let val = state[*idx];
+                    if val != 0 || !rdist_reg_resets_to_zero(rdreg.base) {
+                        redist_attr_set(gic, base, *i, val)?;
+                    }
                     *idx += 1;
                 } else {
                     state.push(redist_attr_get(gic, base, *i)?);

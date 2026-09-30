@@ -159,6 +159,24 @@ fn compute_reg_len(gic: &DeviceFd, reg: &DistReg, base: u32) -> Result<u32> {
     Ok(end)
 }
 
+/// Distributor registers whose KVM vGIC reset value is zero: writing a zero
+/// back is an architectural no-op (enable/pend/active are write-1-to-clear or
+/// write-0-no-op; IGROUPR/IROUTER/IPRIORITYR are RAM that resets to zero).
+fn dist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICD_ISENABLER
+            | GICD_ICENABLER
+            | GICD_IGROUPR
+            | GICD_IROUTER
+            | GICD_ISPENDR
+            | GICD_ICPENDR
+            | GICD_ISACTIVER
+            | GICD_ICACTIVER
+            | GICD_IPRIORITYR
+    )
+}
+
 /// Set distributor registers of the GIC.
 pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
     let mut idx = 0;
@@ -168,7 +186,10 @@ pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
         let end = compute_reg_len(gic, dreg, base)?;
 
         while base < end {
-            dist_attr_set(gic, base, state[idx])?;
+            let val = state[idx];
+            if val != 0 || !dist_reg_resets_to_zero(dreg.base) {
+                dist_attr_set(gic, base, val)?;
+            }
             idx += 1;
             base += REG_SIZE as u32;
         }

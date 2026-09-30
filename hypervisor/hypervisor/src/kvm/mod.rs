@@ -81,9 +81,11 @@ pub use kvm_bindings::{
 #[cfg(target_arch = "aarch64")]
 use kvm_bindings::{
     kvm_regs, user_fpsimd_state, user_pt_regs, KVM_GUESTDBG_USE_HW, KVM_NR_SPSR, KVM_REG_ARM64,
-    KVM_REG_ARM64_SYSREG, KVM_REG_ARM64_SYSREG_CRM_MASK, KVM_REG_ARM64_SYSREG_CRN_MASK,
-    KVM_REG_ARM64_SYSREG_OP0_MASK, KVM_REG_ARM64_SYSREG_OP1_MASK, KVM_REG_ARM64_SYSREG_OP2_MASK,
-    KVM_REG_ARM_CORE, KVM_REG_SIZE_U128, KVM_REG_SIZE_U32, KVM_REG_SIZE_U64,
+    KVM_REG_ARM64_SYSREG, KVM_REG_ARM64_SYSREG_CRM_MASK, KVM_REG_ARM64_SYSREG_CRM_SHIFT,
+    KVM_REG_ARM64_SYSREG_CRN_MASK, KVM_REG_ARM64_SYSREG_CRN_SHIFT, KVM_REG_ARM64_SYSREG_OP0_MASK,
+    KVM_REG_ARM64_SYSREG_OP0_SHIFT, KVM_REG_ARM64_SYSREG_OP1_MASK, KVM_REG_ARM64_SYSREG_OP1_SHIFT,
+    KVM_REG_ARM64_SYSREG_OP2_MASK, KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_ARM_CORE,
+    KVM_REG_SIZE_U128, KVM_REG_SIZE_U32, KVM_REG_SIZE_U64,
 };
 pub use kvm_ioctls;
 pub use kvm_ioctls::{Cap, Kvm};
@@ -103,6 +105,19 @@ pub use {
 
 #[cfg(target_arch = "x86_64")]
 const KVM_CAP_SGX_ATTRIBUTE: u32 = 196;
+
+/// KVM register id of SCTLR_EL1 (op0=3, op1=0, crn=1, crm=0, op2=0). Always
+/// restored: the implementation's reset value may carry RES1 bits, so a saved
+/// zero cannot be assumed to match the post-init state.
+#[cfg(target_arch = "aarch64")]
+const KVM_ARM64_SYSREG_SCTLR_EL1: u64 = KVM_REG_ARM64 as u64
+    | KVM_REG_SIZE_U64 as u64
+    | KVM_REG_ARM64_SYSREG as u64
+    | ((3_u64 << KVM_REG_ARM64_SYSREG_OP0_SHIFT) & KVM_REG_ARM64_SYSREG_OP0_MASK as u64)
+    | ((0_u64 << KVM_REG_ARM64_SYSREG_OP1_SHIFT) & KVM_REG_ARM64_SYSREG_OP1_MASK as u64)
+    | ((1_u64 << KVM_REG_ARM64_SYSREG_CRN_SHIFT) & KVM_REG_ARM64_SYSREG_CRN_MASK as u64)
+    | ((0_u64 << KVM_REG_ARM64_SYSREG_CRM_SHIFT) & KVM_REG_ARM64_SYSREG_CRM_MASK as u64)
+    | ((0_u64 << KVM_REG_ARM64_SYSREG_OP2_SHIFT) & KVM_REG_ARM64_SYSREG_OP2_MASK as u64);
 
 #[cfg(feature = "tdx")]
 const KVM_EXIT_TDX: u32 = 35;
@@ -2181,8 +2196,13 @@ impl cpu::Vcpu for KvmVcpu {
         let state: VcpuKvmState = state.clone().into();
         // Set core registers
         self.set_regs(&state.core_regs)?;
-        // Set system registers
+        // Registers saved as zero are skipped: right after KVM_ARM_VCPU_INIT
+        // every writable system register is at its reset value (zero), so the
+        // write is a no-op. SCTLR_EL1 is always written (RES1 reset bits).
         for reg in &state.sys_regs {
+            if reg.addr == 0 && reg.id != KVM_ARM64_SYSREG_SCTLR_EL1 {
+                continue;
+            }
             self.fd
                 .lock()
                 .unwrap()
