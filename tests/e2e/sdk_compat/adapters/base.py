@@ -127,6 +127,12 @@ class SandboxAdapter(ABC):
     def traffic_access_token(self) -> str | None:
         raise UnsupportedCapability(self.backend, "network_public_access")
 
+    def mcp_url(self) -> str:
+        raise UnsupportedCapability(self.backend, "mcp_gateway")
+
+    def mcp_token(self) -> str | None:
+        raise UnsupportedCapability(self.backend, "mcp_gateway")
+
     def update_network(self, network: dict | None = None) -> None:
         """Replace the egress policy of the running sandbox.
 

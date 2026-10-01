@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,11 +70,39 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, erro
 		return nil, err
 	}
 
+	templates := []string{payload["templateID"].(string)}
+	fallback := opts.TemplateID == "" && opts.MCP != nil
+	if fallback && c.config.TemplateID != "" && c.config.TemplateID != templates[0] {
+		templates = append(templates, c.config.TemplateID)
+	}
 	var sandbox Sandbox
-	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes", payload, &sandbox, http.StatusOK, http.StatusCreated); err != nil {
+	for i, templateID := range templates {
+		payload["templateID"] = templateID
+		err = c.doJSON(ctx, http.MethodPost, "/sandboxes", payload, &sandbox, http.StatusOK, http.StatusCreated)
+		if err == nil || !fallback || !errors.Is(err, ErrTemplateNotFound) {
+			break
+		}
+		if i == len(templates)-1 {
+			err = &APIError{
+				StatusCode: http.StatusNotFound,
+				Kind:       apiErrorKindTemplateNotFound,
+				Message: fmt.Sprintf("no template for mcp: tried %q. Build a template that provides mcp-gateway "+
+					"(see docs/guide/mcp-gateway.md), then set TemplateID or CUBE_MCP_TEMPLATE_ID", templates),
+			}
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 	c.attachSandbox(&sandbox)
+	if opts.MCP != nil {
+		if err := sandbox.startMCPGateway(ctx, opts.MCP); err != nil {
+			killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.config.RequestTimeout)
+			defer cancel()
+			_ = sandbox.Kill(killCtx)
+			return nil, err
+		}
+	}
 	return &sandbox, nil
 }
 
@@ -115,6 +144,9 @@ func (c *Client) Health(ctx context.Context) (map[string]any, error) {
 
 func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 	templateID := opts.TemplateID
+	if templateID == "" && opts.MCP != nil {
+		templateID = c.config.MCPTemplateID
+	}
 	if templateID == "" {
 		templateID = c.config.TemplateID
 	}
@@ -153,6 +185,10 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 			return nil, err
 		}
 		payload["volumeMounts"] = opts.VolumeMounts
+	}
+
+	if opts.MCP != nil {
+		payload["mcp"] = opts.MCP
 	}
 
 	for key, value := range opts.Extra {

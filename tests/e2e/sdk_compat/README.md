@@ -382,6 +382,9 @@ Optional:
   initial wait. Defaults to `45`.
 - `CUBE_PROXY_ADMIN_PORT`: CubeProxy admin port used by the lifecycle probe.
   Defaults to `8082`.
+- `SDK_E2E_MCP_TEMPLATE_ID`: template ID or alias for `cases/mcp`, built from
+  `examples/mcp-gateway/template/Dockerfile`. Defaults to `mcp-gateway`. `cases/mcp`
+  is skipped when the template does not exist.
 - `SDK_E2E_VOLUME_PLUGIN`: run Volume Plugin cases (CRUD and sandbox
   `volumeMounts` bind/unbind). Defaults to `true`; set `false` to skip.
 - `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `s3`.

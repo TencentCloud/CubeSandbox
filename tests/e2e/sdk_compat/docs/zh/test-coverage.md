@@ -148,6 +148,13 @@ pytest --run-e2e -m "lifecycle and slow"
 此外会使用 writable layer 大小、暴露端口、HTTP probe 和环境变量构建模板，
 并从 CubeAPI 返回的模板详情中校验这些高级参数。模板操作仅支持 CubeSandbox。
 
+`cases/mcp/test_mcp_gateway.py` 在两个后端上覆盖与 E2B 兼容的 `mcp` 创建参数：
+经 CubeProxy 列出并调用工具、Token 缺失或错误时返回 `401`、`connect` 后重新获取
+Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 CubeAPI 返回 `400`，
+以及服务名未知时 SDK 报错。用例依赖基于 `examples/mcp-gateway/template/Dockerfile`
+构建的模板，通过 `SDK_E2E_MCP_TEMPLATE_ID` 指定（默认别名 `mcp-gateway`）。该模板不存在时，
+整组用例跳过，不影响其他用例。
+
 ### 2.7 Concurrency
 
 `cases/concurrency/test_isolation.py` 目前覆盖两个 sandbox 同路径不同内容的文件
