@@ -42,11 +42,13 @@ use byteorder::{ByteOrder, LittleEndian};
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
+use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::Queue;
 use virtio_queue::QueueOwnedT;
 use virtio_queue::QueueT;
@@ -137,6 +139,10 @@ where
                     } else {
                         // We are using a consuming iterator over the virtio buffers, so, if we can't
                         // fill in this buffer, we'll need to undo the last iterator step.
+                        // Notifications are intentionally not re-armed here: the reverted buffer
+                        // is already published, so no guest kick could be requested for it. After
+                        // a revert this queue is re-driven by backend events (BACKEND_EVENT /
+                        // muxer wake-ups -> process_rx()), not by guest kicks.
                         self.queues[0].go_to_previous_position();
                         break;
                     }
@@ -151,13 +157,26 @@ where
                 .add_used(desc_chain.memory(), desc_chain.head_index(), used_len)
                 .map_err(DeviceError::QueueAddUsed)?;
             used_descs = true;
+
+            // Re-arm notifications for this queue (publishes avail_event) and stop
+            // draining if the driver did not add more buffers while we were re-arming.
+            if !self.queues[0]
+                .enable_notification(self.mem.memory().deref())
+                .map_err(DeviceError::QueueEnableNotification)?
+            {
+                break;
+            }
         }
 
         if used_descs {
-            self.signal_used_queue(0)
-        } else {
-            Ok(())
+            if self.queues[0]
+                .needs_notification(self.mem.memory().deref())
+                .map_err(DeviceError::QueueNeedsNotification)?
+            {
+                self.signal_used_queue(0)?;
+            }
         }
+        Ok(())
     }
 
     /// Walk the driver-provided TX queue buffers, package them up as vsock packets, and send them to
@@ -169,37 +188,45 @@ where
         let mut used_descs = false;
 
         while let Some(mut desc_chain) = self.queues[1].pop_descriptor_chain(self.mem.memory()) {
-            let pkt = match VsockPacket::from_tx_virtq_head(
-                &mut desc_chain,
-                self.access_platform.as_ref(),
-            ) {
-                Ok(pkt) => pkt,
+            match VsockPacket::from_tx_virtq_head(&mut desc_chain, self.access_platform.as_ref()) {
+                Ok(pkt) => {
+                    if self.backend.write().unwrap().send_pkt(&pkt).is_err() {
+                        // As in process_rx(), notifications are not re-armed on revert: the
+                        // queue is re-driven by backend events (e.g. the connection becoming
+                        // writable) rather than by guest kicks.
+                        self.queues[1].go_to_previous_position();
+                        break;
+                    }
+                }
                 Err(e) => {
                     error!("vsock: error reading TX packet: {:?}", e);
-                    self.queues[1]
-                        .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
-                        .map_err(DeviceError::QueueAddUsed)?;
-                    used_descs = true;
-                    continue;
                 }
-            };
-
-            if self.backend.write().unwrap().send_pkt(&pkt).is_err() {
-                self.queues[1].go_to_previous_position();
-                break;
             }
 
             self.queues[1]
                 .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
                 .map_err(DeviceError::QueueAddUsed)?;
             used_descs = true;
+
+            // Re-arm notifications for this queue (publishes avail_event) and stop
+            // draining if the driver did not add more buffers while we were re-arming.
+            if !self.queues[1]
+                .enable_notification(self.mem.memory().deref())
+                .map_err(DeviceError::QueueEnableNotification)?
+            {
+                break;
+            }
         }
 
         if used_descs {
-            self.signal_used_queue(1)
-        } else {
-            Ok(())
+            if self.queues[1]
+                .needs_notification(self.mem.memory().deref())
+                .map_err(DeviceError::QueueNeedsNotification)?
+            {
+                self.signal_used_queue(1)?;
+            }
         }
+        Ok(())
     }
 
     fn run(
@@ -390,7 +417,9 @@ where
             backend.queue_rst_for_connections(state.connections.clone());
             (state.avail_features, state.acked_features)
         } else {
-            let mut avail_features = 1u64 << VIRTIO_F_VERSION_1 | 1u64 << VIRTIO_F_IN_ORDER;
+            let mut avail_features = 1u64 << VIRTIO_F_VERSION_1
+                | 1u64 << VIRTIO_F_IN_ORDER
+                | 1u64 << VIRTIO_RING_F_EVENT_IDX;
 
             if iommu {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
@@ -481,10 +510,20 @@ where
     ) -> ActivateResult {
         self.common.activate(&queues, &interrupt_cb)?;
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
+        let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
 
         let mut virtqueues = Vec::new();
         let mut queue_evts = Vec::new();
-        for (_, queue, queue_evt) in queues {
+        for (_, mut queue, queue_evt) in queues {
+            // EVENT_IDX is applied uniformly, but only the RX (0) and TX (1) queues are
+            // serviced. The event queue (2) is never popped: EVT_QUEUE_EVENT just drains
+            // its eventfd, so its avail_event is never published and this is a no-op.
+            // Note that avail_event therefore stays 0, so the guest kicks the event queue
+            // at most once for the device's lifetime.
+            // TODO: if the event queue is ever wired up, it needs the same
+            // enable_notification() re-arm and a needs_notification() check before
+            // signalling, or its kicks/interrupts will be silently dropped.
+            queue.set_event_idx(event_idx);
             virtqueues.push(queue);
             queue_evts.push(queue_evt);
         }
@@ -570,13 +609,16 @@ mod tests {
     use super::super::*;
     use super::*;
     use crate::vsock::device::{BACKEND_EVENT, EVT_QUEUE_EVENT, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
+    use crate::vsock::packet::VSOCK_PKT_HDR_SIZE;
     use crate::ActivateError;
     use libc::EFD_NONBLOCK;
 
     #[test]
     fn test_virtio_device() {
         let mut ctx = TestContext::new();
-        let avail_features = 1u64 << VIRTIO_F_VERSION_1 | 1u64 << VIRTIO_F_IN_ORDER;
+        let avail_features = 1u64 << VIRTIO_F_VERSION_1
+            | 1u64 << VIRTIO_F_IN_ORDER
+            | 1u64 << VIRTIO_RING_F_EVENT_IDX;
         let device_features = avail_features;
         let driver_features: u64 = avail_features | 1 | (1 << 32);
         let device_pages = [
@@ -762,6 +804,118 @@ mod tests {
                 ctx.handler.handle_event(&mut epoll_helper, &event).is_err(),
                 "handle_event() should have failed"
             );
+        }
+    }
+
+    #[test]
+    fn test_txq_event_eventidx() {
+        // Test case: same as test_txq_event, but with VIRTIO_RING_F_EVENT_IDX enabled.
+        // - the driver has something to send; and
+        // - the backend has no pending RX data.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(false);
+            ctx.signal_txq_event();
+
+            // The available TX descriptor should have been used.
+            assert_eq!(ctx.guest_txvq.used.idx.get(), 1);
+            // The device should have re-armed notifications by publishing avail_event
+            // (the index of the next buffer the driver is expected to publish).
+            assert_eq!(ctx.guest_txvq.used.event.get(), 1);
+            // used_event defaults to 0, so next_used(1) crosses it: one IRQ expected.
+            assert_eq!(ctx.irq_count(), 1);
+            // The available RX descriptor should be untouched.
+            assert_eq!(ctx.guest_rxvq.used.idx.get(), 0);
+        }
+
+        // Test case: interrupt suppression. The guest sets used_event = 1, i.e. it only
+        // wants an IRQ once next_used goes past 1, so consuming one TX buffer must not
+        // raise an interrupt.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(false);
+            ctx.guest_txvq.avail.event.set(1);
+            ctx.signal_txq_event();
+
+            assert_eq!(ctx.guest_txvq.used.idx.get(), 1);
+            assert_eq!(ctx.irq_count(), 0);
+        }
+
+        // Test case: batch drain. Two TX chains are available, so enable_notification()
+        // returns true after the first one and a single kick must drain the whole batch
+        // with exactly one IRQ.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(false);
+            // Re-shape the queue into two header-only (zero-length) chains.
+            ctx.guest_txvq.dtable[0].set(0x0050_0000, VSOCK_PKT_HDR_SIZE as u32, 0, 0);
+            ctx.guest_txvq.dtable[1].set(0x0050_1000, VSOCK_PKT_HDR_SIZE as u32, 0, 0);
+            ctx.guest_txvq.avail.ring[0].set(0);
+            ctx.guest_txvq.avail.ring[1].set(1);
+            ctx.guest_txvq.avail.idx.set(2);
+            ctx.signal_txq_event();
+
+            assert_eq!(ctx.guest_txvq.used.idx.get(), 2);
+            assert_eq!(ctx.handler.backend.read().unwrap().tx_ok_cnt, 2);
+            assert_eq!(ctx.guest_txvq.used.event.get(), 2);
+            assert_eq!(ctx.irq_count(), 1);
+        }
+
+        // Test case:
+        // - the driver has something to send; and
+        // - the backend also has some pending RX data.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(true);
+            ctx.signal_txq_event();
+
+            // Both available RX and TX descriptors should have been used.
+            assert_eq!(ctx.guest_txvq.used.idx.get(), 1);
+            assert_eq!(ctx.guest_rxvq.used.idx.get(), 1);
+        }
+    }
+
+    #[test]
+    fn test_rxq_event_eventidx() {
+        // Test case: with VIRTIO_RING_F_EVENT_IDX enabled, the backend has pending RX data
+        // that can be forwarded to the driver.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(true);
+            ctx.signal_rxq_event();
+
+            // The available RX descriptor should have been used.
+            assert_eq!(ctx.guest_rxvq.used.idx.get(), 1);
+            // The device should have re-armed notifications by publishing avail_event.
+            assert_eq!(ctx.guest_rxvq.used.event.get(), 1);
+            // used_event defaults to 0, so next_used(1) crosses it: one IRQ expected.
+            assert_eq!(ctx.irq_count(), 1);
+            // The available TX descriptor should be untouched.
+            assert_eq!(ctx.guest_txvq.used.idx.get(), 0);
+        }
+
+        // Test case: interrupt suppression. With used_event = 1 the guest asked not to be
+        // interrupted for the first used buffer, so no IRQ must be raised.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(true);
+            ctx.guest_rxvq.avail.event.set(1);
+            ctx.signal_rxq_event();
+
+            assert_eq!(ctx.guest_rxvq.used.idx.get(), 1);
+            assert_eq!(ctx.irq_count(), 0);
         }
     }
 
