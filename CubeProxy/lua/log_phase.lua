@@ -11,6 +11,8 @@
 --        sandbox simply slip by one sweep cycle.
 --    All paths are non-blocking; this phase MUST NOT delay log emission.
 
+local metrics = require "metrics"
+
 local function get_currtime()
     -- ngx.var.msec = 1663839717.105
     local current_time_seconds_with_ms = ngx.var.msec
@@ -56,3 +58,5 @@ if ins_id and ins_id ~= "" then
         end
     end
 end
+
+metrics.finish_current_request()
