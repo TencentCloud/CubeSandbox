@@ -144,9 +144,33 @@ All chart-managed Cube containers and init containers receive `TZ` from
 ## Cubelet data path
 
 `bootstrap.nodeInit.dataCubelet.loopback.enabled` defaults to `true` so the
-chart can create and mount a loopback XFS image for `/data/cubelet` during
-bootstrap. Production environments that pre-provision `/data/cubelet` as XFS
+chart can create and mount a loopback XFS image at `hostPaths.dataCubelet` during
+bootstrap. Production environments that pre-provision that host directory as XFS
 can set it to `false`.
+
+The storage entries under `hostPaths` select **host-side** directories. Cubelet,
+the artifact installers, and the egress/S3 sidecars retain their standard
+container paths (`/data/cubelet`, `/data/log`, `/data/cube-shim`,
+`/data/snapshot_pack`, `/data/cube-shared`, `/data/shared`, and `/tmp/cube`).
+For example:
+
+```yaml
+hostPaths:
+  dataCubelet: /var/lib/cubesandbox/cubelet
+  dataLog: /var/log/cubesandbox
+bootstrap:
+  nodeInit:
+    dataCubelet:
+      loopback:
+        enabled: false  # hostPaths.dataCubelet is already on XFS
+```
+
+Here the installer writes versioned artifacts to `/data/cubelet/root/component_versions`
+inside its container, backed by `/var/lib/cubesandbox/cubelet/root/component_versions`
+on the host. Cubelet sees the same files at `/data/cubelet/root/component_versions`.
+The bootstrap container uses the configured host paths for directory creation and
+XFS checks. If loopback XFS is enabled, `loopback.imagePath` separately selects the
+image file's location on the host.
 
 ## Cube Node one-click parity
 

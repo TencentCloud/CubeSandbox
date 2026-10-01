@@ -11,6 +11,12 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
+DATA_LOG="${DATA_LOG:-/data/log}"
+DATA_CUBE_SHIM="${DATA_CUBE_SHIM:-/data/cube-shim}"
+DATA_SNAPSHOT_PACK="${DATA_SNAPSHOT_PACK:-/data/snapshot_pack}"
+DATA_CUBE_SHARED="${DATA_CUBE_SHARED:-/data/cube-shared}"
+DATA_SHARED="${DATA_SHARED:-/data/shared}"
+TMP_CUBE="${TMP_CUBE:-/tmp/cube}"
 REQUIRE_KVM="${REQUIRE_KVM:-true}"
 REQUIRE_XFS="${REQUIRE_XFS:-true}"
 CHMOD_KVM="${CHMOD_KVM:-true}"
@@ -379,14 +385,14 @@ fi
 if [ "$CREATE_HOST_DIRS" = "true" ]; then
   log "creating host directories"
   mkdir -p \
-    "$(host_path /data/cubelet)" \
-    "$(host_path /data/log)" \
-    "$(host_path /data/cube-shim)" \
-    "$(host_path /data/snapshot_pack)" \
-    "$(host_path /data/cube-shared)" \
-    "$(host_path /data/cube-shared/volume)" \
-    "$(host_path /data/shared)" \
-    "$(host_path /tmp/cube)"
+    "$(host_path "$DATA_CUBELET")" \
+    "$(host_path "$DATA_LOG")" \
+    "$(host_path "$DATA_CUBE_SHIM")" \
+    "$(host_path "$DATA_SNAPSHOT_PACK")" \
+    "$(host_path "$DATA_CUBE_SHARED")" \
+    "$(host_path "$DATA_CUBE_SHARED/volume")" \
+    "$(host_path "$DATA_SHARED")" \
+    "$(host_path "$TMP_CUBE")"
 fi
 
 if ! xfs_info "$DATA_CUBELET" >/dev/null 2>&1; then

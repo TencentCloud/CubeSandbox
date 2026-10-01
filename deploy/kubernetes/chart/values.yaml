@@ -1325,16 +1325,17 @@ hostPaths:
   dev: /dev
   sys: /sys
   libModules: /lib/modules
+  # Host storage locations. Runtime containers keep the fixed /data/... and
+  # /tmp/cube mount paths even when these host directories are customized.
   dataCubelet: /data/cubelet
   dataLog: /data/log
   dataCubeShim: /data/cube-shim
   dataSnapshotPack: /data/snapshot_pack
-  # Host tree shared across compute-node Cube components (same path in Big Pod).
-  # Current use: volume plugin base dir at <dataCubeShared>/volume; more shared
-  # subdirs may land here later.
+  # Host tree shared across compute-node Cube components, mounted at
+  # /data/cube-shared in the Big Pod (volume plugins use its volume/ subdirectory).
   dataCubeShared: /data/cube-shared
-  # Default CubeMaster allowed_host_mount_prefixes path. Must be visible inside
-  # the Big Pod mount namespace so metadata["host-mount"] can bind host dirs.
+  # Mounted at /data/shared in the Big Pod, matching CubeMaster's default
+  # allowed_host_mount_prefixes for metadata["host-mount"].
   dataShared: /data/shared
   tmpCube: /tmp/cube
   # pvm/node-init state + node-prep-ready / pvm-host-ready / effective-pvm
