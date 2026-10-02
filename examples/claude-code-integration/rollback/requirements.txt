@@ -1,0 +1,3 @@
+cubesandbox>=0.6.0
+bashlex>=0.18
+python-dotenv>=1.0
