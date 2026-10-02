@@ -307,6 +307,7 @@ export default withMermaid(defineConfig({
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
                     { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
+                    { text: 'Pydantic AI', link: '/guide/integrations/pydantic-ai' },
                     { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' }
                   ]
                 },
@@ -523,6 +524,7 @@ export default withMermaid(defineConfig({
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
                     { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
+                    { text: 'Pydantic AI', link: '/zh/guide/integrations/pydantic-ai' },
                     { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' }
                   ]
                 },

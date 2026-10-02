@@ -22,6 +22,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [OpenAI Agents SDK](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example) | Connect `E2BSandboxClient` to CubeSandbox, including Shell Agent, pause/resume, and SWE-bench flows. |
 | [OpenAI Agents + Code Interpreter](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | Run data-analysis agents using either generic E2B execution or a stateful Jupyter kernel. |
 | [SWE-bench with mini-swe-agent](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mini-rl-training) | Automate SWE-bench coding tasks in isolated sandboxes with multi-model support and an RL training workflow. |
+| [Pydantic AI](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pydantic-ai-integration) | Give a Pydantic AI agent a `run_python` function tool that executes inside a CubeSandbox MicroVM. |
 
 ## Networking and Ingress
 
