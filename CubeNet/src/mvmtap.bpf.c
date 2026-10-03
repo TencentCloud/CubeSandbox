@@ -415,8 +415,11 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 				 key.dst_port, key.protocol) == FLOW_REJECT)
 		return 0;
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
-	if (!snat_ip || !snat_ip->ip || !snat_id)
+	if (!snat_ip || !snat_ip->ip || !snat_id) {
+		update_metrics(mvm_meta->ip, 0, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_SNAT_ALLOC_FAIL);
 		return 0;
+	}
 	ok = create_icmp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_id,
 				  policy_version);
 	if (!ok)
@@ -524,8 +527,11 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 				 key.dst_port, key.protocol) == FLOW_REJECT)
 		return 0;
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
-	if (!snat_ip || !snat_ip->ip || !snat_port)
+	if (!snat_ip || !snat_ip->ip || !snat_port) {
+		update_metrics(mvm_meta->ip, 0, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_SNAT_ALLOC_FAIL);
 		return 0;
+	}
 	ok = create_udp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port,
 				 policy_version);
 	if (!ok)
@@ -604,9 +610,14 @@ static __always_inline int finish_udp_nat_inline(struct __sk_buff *skb,
 {
 	__u32 dst_ifindex = do_udp_nat_inline(skb, mvm_meta);
 
-	if (dst_ifindex)
+	if (dst_ifindex) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_FORWARDED);
 		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+	}
 
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+		      SANDBOX_METRIC_DROP);
 	return TC_ACT_SHOT;
 }
 
@@ -615,9 +626,14 @@ static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta
 {
 	__u32 dst_ifindex = do_udp_nat(skb, mvm_meta);
 
-	if (dst_ifindex)
+	if (dst_ifindex) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_FORWARDED);
 		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+	}
 
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+		      SANDBOX_METRIC_DROP);
 	return TC_ACT_SHOT;
 }
 
@@ -772,8 +788,11 @@ prepare_snat:
 
 	if (create_snat) {
 		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
-		if (!snat_ip || !snat_ip->ip || !snat_port)
+		if (!snat_ip || !snat_ip->ip || !snat_port) {
+			update_metrics(mvm_meta->ip, 0, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_SNAT_ALLOC_FAIL);
 			return TCP_NAT_DROP;
+		}
 		goto create_session;
 	}
 
@@ -986,15 +1005,22 @@ int from_cube(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 
 	ret = pull_headers(skb, &l2, &l3);
-	if (ret != TC_ACT_OK)
+	if (ret != TC_ACT_OK) {
+		if (ret == TC_ACT_SHOT)
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 		return ret;
+	}
 
 	daddr = l3->daddr;
 	proto = l3->protocol;
 
 	err = snat(skb, l3, mvm_meta->ip);
-	if (err)
+	if (err) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
+	}
 
 	if (daddr == mvm_gateway_ip) {
 		/* Filter traffic to cubegw0:
@@ -1004,36 +1030,57 @@ int from_cube(struct __sk_buff *skb)
 		case IPPROTO_ICMP:
 			break;
 		case IPPROTO_TCP:
-			if (!__pull_headers(skb, &l2, &l3, &l4))
+			if (!__pull_headers(skb, &l2, &l3, &l4)) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
-			if (l4->syn && !l4->ack)
+			}
+			if (l4->syn && !l4->ack) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
+			}
 			break;
 		default:
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
 		}
 
 		ret = pull_headers(skb, &l2, &l3);
-		if (ret != TC_ACT_OK)
+		if (ret != TC_ACT_OK) {
+			if (ret == TC_ACT_SHOT)
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 			return ret;
+		}
 
 		err = dnat(skb, l3, cubegw0_ip);
-		if (err)
+		if (err) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 
 		return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 	}
 
 	if (proto == IPPROTO_TCP) {
-		if (!__pull_headers(skb, &l2, &l3, &l4))
+		if (!__pull_headers(skb, &l2, &l3, &l4)) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 
 		mvm_port.ifindex = ifindex;
 		mvm_port.listen_port = l4->source;
 		host_port = bpf_map_lookup_elem(&local_port_mapping, &mvm_port);
 		if (host_port) {
-			if (l4->syn && !l4->ack)
+			if (l4->syn && !l4->ack) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
+			}
 
 			/* A port_mapping session whose gen differs from the VM's current
 			 * mvm_meta->version is stale (the sandbox was rolled back); reset
@@ -1048,19 +1095,31 @@ int from_cube(struct __sk_buff *skb)
 			}
 
 			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
-			if (err)
+			if (err) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
+			}
 
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(nodenic_ifindex, 0);
 		}
 	}
 
 	ret = pull_headers(skb, &l2, &l3);
-	if (ret != TC_ACT_OK)
+	if (ret != TC_ACT_OK) {
+		if (ret == TC_ACT_SHOT)
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 		return ret;
+	}
 
-	if (!should_do_nat(l3))
+	if (!should_do_nat(l3)) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
+	}
 
 	if (l3->daddr == nodenic_ip) {
 		/* This branch bypasses do_*_nat() and therefore the policy
@@ -1073,6 +1132,8 @@ int from_cube(struct __sk_buff *skb)
 		case FLOW_REJECT:
 			if (proto == IPPROTO_TCP)
 				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
 		default:
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
@@ -1081,12 +1142,17 @@ int from_cube(struct __sk_buff *skb)
 
 	if (proto == IPPROTO_TCP) {
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
+		}
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
 			return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
 	}
 
@@ -1095,14 +1161,22 @@ int from_cube(struct __sk_buff *skb)
 	prepare_egress_l2(skb, l2, daddr);
 
 	if (proto == IPPROTO_UDP) {
-		if (!__pull_headers_udp(skb, &l2, &l3, &udp))
+		if (!__pull_headers_udp(skb, &l2, &l3, &udp)) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 
 		if (udp->dest == DNS_PORT && dns_policy_enabled(mvm_meta) &&
 		    dns_payload_offset(l3, udp, &dns_off)) {
 			ret = dns_handle_query(skb, dns_off, ifindex);
-			if (ret != CUBE_DNS_PASS)
+			if (ret != CUBE_DNS_PASS) {
+				if (ret == TC_ACT_SHOT)
+					update_metrics(mvm_meta->ip, skb->len,
+						      SANDBOX_METRIC_EGRESS,
+						      SANDBOX_METRIC_DROP);
 				return ret;
+			}
 		}
 
 		return finish_udp_nat_inline(skb, mvm_meta);
@@ -1110,10 +1184,18 @@ int from_cube(struct __sk_buff *skb)
 
 	if (proto == IPPROTO_ICMP) {
 		dst_ifindex = do_icmp_nat(skb, mvm_meta);
-		if (dst_ifindex)
+		if (dst_ifindex) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(dst_ifindex, egress_redirect_flags);
+		}
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
+		return TC_ACT_SHOT;
 	}
 
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+		      SANDBOX_METRIC_DROP);
 	return TC_ACT_SHOT;
 }
 

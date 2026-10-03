@@ -90,8 +90,11 @@ int from_envoy(struct __sk_buff *skb)
 
 	/* NAT and redirect */
 	err = dnat(skb, l3, mvm_inner_ip);
-	if (err)
+	if (err) {
+		update_metrics(daddr, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
+	}
 
 	ret = pull_headers(skb, &l2, &l3);
 	if (ret != TC_ACT_OK)
@@ -103,14 +106,22 @@ int from_envoy(struct __sk_buff *skb)
 	 */
 	if (l3->saddr == cubegw0_ip) {
 		err = snat(skb, l3, mvm_gateway_ip);
-		if (err)
+		if (err) {
+			update_metrics(daddr, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 	}
 
 	ifindex = bpf_map_lookup_elem(&mvmip_to_ifindex, &daddr);
-	if (!ifindex)
+	if (!ifindex) {
+		update_metrics(daddr, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
+	}
 
+	update_metrics(daddr, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(*ifindex, 0);
 }
 

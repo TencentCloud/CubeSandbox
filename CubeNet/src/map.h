@@ -227,6 +227,65 @@ struct {
 	__type(value, struct dns_response_state);
 } dns_response_state SEC(".maps");
 
+/* Per-sandbox traffic counters keyed by sandbox IP. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(max_entries, MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct sandbox_metrics);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} sandbox_metrics SEC(".maps");
+
+static __always_inline struct sandbox_metrics *sandbox_metrics_lookup_or_init(__u32 sandbox_ip)
+{
+	struct sandbox_metrics zero = {};
+	struct sandbox_metrics *value;
+
+	value = bpf_map_lookup_elem(&sandbox_metrics, &sandbox_ip);
+	if (value)
+		return value;
+
+	bpf_map_update_elem(&sandbox_metrics, &sandbox_ip, &zero, BPF_NOEXIST);
+	return bpf_map_lookup_elem(&sandbox_metrics, &sandbox_ip);
+}
+
+static __always_inline void update_metrics(__u32 sandbox_ip, __u64 bytes,
+					   __u32 direction, __u32 reason)
+{
+	struct sandbox_metrics *value;
+	bool ingress = direction == SANDBOX_METRIC_INGRESS;
+
+	value = sandbox_metrics_lookup_or_init(sandbox_ip);
+	if (!value)
+		return;
+
+	switch (reason) {
+	case SANDBOX_METRIC_FORWARDED:
+		if (ingress) {
+			value->ingress_packets += 1;
+			value->ingress_bytes += bytes;
+		} else {
+			value->egress_packets += 1;
+			value->egress_bytes += bytes;
+		}
+		break;
+	case SANDBOX_METRIC_DROP:
+		if (ingress) {
+			value->ingress_drop_packets += 1;
+			value->ingress_drop_bytes += bytes;
+		} else {
+			value->egress_drop_packets += 1;
+			value->egress_drop_bytes += bytes;
+		}
+		break;
+	case SANDBOX_METRIC_SNAT_ALLOC_FAIL:
+		value->snat_alloc_failures += 1;
+		break;
+	default:
+		return;
+	}
+}
+
 /* Tail-call jump table for the DNS parser pipeline. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
