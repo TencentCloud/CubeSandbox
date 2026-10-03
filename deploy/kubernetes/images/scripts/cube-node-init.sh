@@ -11,6 +11,12 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
+DATA_LOG="${DATA_LOG:-/data/log}"
+DATA_CUBE_SHIM="${DATA_CUBE_SHIM:-/data/cube-shim}"
+DATA_SNAPSHOT_PACK="${DATA_SNAPSHOT_PACK:-/data/snapshot_pack}"
+DATA_CUBE_SHARED="${DATA_CUBE_SHARED:-/data/cube-shared}"
+DATA_SHARED="${DATA_SHARED:-/data/shared}"
+TMP_CUBE="${TMP_CUBE:-/tmp/cube}"
 REQUIRE_KVM="${REQUIRE_KVM:-true}"
 REQUIRE_XFS="${REQUIRE_XFS:-true}"
 CHMOD_KVM="${CHMOD_KVM:-true}"
@@ -77,6 +83,9 @@ host_chroot_sh() {
 host_mount_sh() {
   # Enter the host mount namespace when creating or mounting host filesystems.
   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c "$*"
+}
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 version_ge() {
@@ -379,20 +388,33 @@ fi
 if [ "$CREATE_HOST_DIRS" = "true" ]; then
   log "creating host directories"
   mkdir -p \
-    "$(host_path /data/cubelet)" \
-    "$(host_path /data/log)" \
-    "$(host_path /data/cube-shim)" \
-    "$(host_path /data/snapshot_pack)" \
-    "$(host_path /data/cube-shared)" \
-    "$(host_path /data/cube-shared/volume)" \
-    "$(host_path /data/shared)" \
-    "$(host_path /tmp/cube)"
+    "$(host_path "$DATA_CUBELET")" \
+    "$(host_path "$DATA_LOG")" \
+    "$(host_path "$DATA_CUBE_SHIM")" \
+    "$(host_path "$DATA_SNAPSHOT_PACK")" \
+    "$(host_path "$DATA_CUBE_SHARED")" \
+    "$(host_path "$DATA_CUBE_SHARED/volume")" \
+    "$(host_path "$DATA_SHARED")" \
+    "$(host_path "$TMP_CUBE")"
 fi
 
 if ! xfs_info "$DATA_CUBELET" >/dev/null 2>&1; then
   if [ "$LOOPBACK_ENABLED" = "true" ]; then
     log "initializing loopback XFS at ${LOOPBACK_IMAGE_PATH} size=${LOOPBACK_SIZE}"
-    host_mount_sh "mkdir -p ${DATA_CUBELET}; if [ ! -f ${LOOPBACK_IMAGE_PATH} ]; then truncate -s ${LOOPBACK_SIZE} ${LOOPBACK_IMAGE_PATH}; mkfs.xfs -f -m reflink=1 ${LOOPBACK_IMAGE_PATH}; fi; mountpoint -q ${DATA_CUBELET} || mount -o loop,pquota ${LOOPBACK_IMAGE_PATH} ${DATA_CUBELET}; grep -q '${LOOPBACK_IMAGE_PATH} ${DATA_CUBELET}' /etc/fstab || echo '${LOOPBACK_IMAGE_PATH} ${DATA_CUBELET} xfs loop,pquota 0 0' >> /etc/fstab"
+    # The image may live outside DATA_CUBELET, including under a missing /data
+    # when all storage paths are customized. Stop before writing fstab if any
+    # preparation step fails, and quote paths passed through the host shell.
+    image="$(shell_quote "$LOOPBACK_IMAGE_PATH")"
+    target="$(shell_quote "$DATA_CUBELET")"
+    entry="$(shell_quote "$LOOPBACK_IMAGE_PATH $DATA_CUBELET xfs loop,pquota 0 0")"
+    host_mount_sh "set -e
+      mkdir -p $(shell_quote "$(dirname "$LOOPBACK_IMAGE_PATH")") ${target}
+      if [ ! -f ${image} ]; then
+        truncate -s $(shell_quote "$LOOPBACK_SIZE") ${image}
+        mkfs.xfs -f -m reflink=1 ${image}
+      fi
+      mountpoint -q ${target} || mount -o loop,pquota ${image} ${target}
+      grep -Fq -- $(shell_quote "$LOOPBACK_IMAGE_PATH $DATA_CUBELET") /etc/fstab || printf '%s\\n' ${entry} >> /etc/fstab"
   fi
 fi
 
