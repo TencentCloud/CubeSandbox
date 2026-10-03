@@ -566,7 +566,7 @@ func (s *NetworkController) UpdateNetworkPolicy(ctx context.Context, req *Update
 	if len(resolverCIDRs) == 0 {
 		resolverCIDRs = req.DNSAllowOutCIDRs
 	}
-	cfg := withDNSResolverAllowOut(cloneCubeNetworkConfig(req.CubeNetworkConfig), resolverCIDRs)
+	cfg := withDNSResolverAllowOut(cloneCubeNetworkConfig(req.CubeNetworkConfig), resolverCIDRs, state.OperatorDNSAllowOutCIDRs)
 	if err := s.syncEgressPolicy(ctx, state, cfg); err != nil {
 		return fmt.Errorf("sync CubeEgress policy for sandbox %s: %w", req.SandboxID, err)
 	}
@@ -632,18 +632,19 @@ func (s *NetworkController) createState(ctx context.Context, req *EnsureNetworkR
 	stageStart = time.Now()
 	state = &managedState{
 		persistedState: persistedState{
-			SandboxID:         req.SandboxID,
-			NetworkHandle:     req.SandboxID,
-			TapName:           tap.Name,
-			TapIfIndex:        tap.Index,
-			SandboxIP:         tap.IP.String(),
-			Interfaces:        s.actualInterfaces(tap.Name, req.Interfaces),
-			Routes:            slices.Clone(req.Routes),
-			ARPNeighbors:      slices.Clone(req.ARPNeighbors),
-			PortMappings:      actualMappings,
-			CubeNetworkConfig: cloneCubeNetworkConfig(req.CubeNetworkConfig),
-			DNSAllowOutCIDRs:  slices.Clone(req.DNSAllowOutCIDRs),
-			PersistMetadata:   s.persistMetadata(req.PersistMetadata, tap.Name, tap.IP.String()),
+			SandboxID:                req.SandboxID,
+			NetworkHandle:            req.SandboxID,
+			TapName:                  tap.Name,
+			TapIfIndex:               tap.Index,
+			SandboxIP:                tap.IP.String(),
+			Interfaces:               s.actualInterfaces(tap.Name, req.Interfaces),
+			Routes:                   slices.Clone(req.Routes),
+			ARPNeighbors:             slices.Clone(req.ARPNeighbors),
+			PortMappings:             actualMappings,
+			CubeNetworkConfig:        cloneCubeNetworkConfig(req.CubeNetworkConfig),
+			DNSAllowOutCIDRs:         slices.Clone(req.DNSAllowOutCIDRs),
+			OperatorDNSAllowOutCIDRs: slices.Clone(req.OperatorDNSAllowOutCIDRs),
+			PersistMetadata:          s.persistMetadata(req.PersistMetadata, tap.Name, tap.IP.String()),
 		},
 		tap: tap,
 	}

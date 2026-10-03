@@ -283,7 +283,7 @@ func TestGetTapFileForShimGetsFreshRuntimeFDForEveryRequest(t *testing.T) {
 	}
 }
 
-func TestTapCreateWithNetworkRuntimeAddsDNSAllowOutCIDRsForDomainAllow(t *testing.T) {
+func TestTapCreateWithNetworkRuntimePreservesDomainResolverBehavior(t *testing.T) {
 	fakeClient := &fakeNetworkRuntime{}
 	block := false
 	l := &local{
@@ -329,9 +329,14 @@ func TestTapCreateWithNetworkRuntimeAddsDNSAllowOutCIDRsForDomainAllow(t *testin
 	if fakeClient.lastEnsureRequest == nil || fakeClient.lastEnsureRequest.CubeNetworkConfig == nil {
 		t.Fatal("EnsureNetwork request missing CubeNetworkConfig")
 	}
+	// Domain/L7 policies keep their established behavior: Cubelet admits the
+	// guest resolver so DNS learning can resolve the allowed domain.
 	wantAllowOut := []string{"172.67.0.0/16", "api.example.com", "1.1.1.1/32", "8.8.8.8/32"}
 	if strings.Join(fakeClient.lastEnsureRequest.CubeNetworkConfig.AllowOut, ",") != strings.Join(wantAllowOut, ",") {
 		t.Fatalf("AllowOut=%v, want %v", fakeClient.lastEnsureRequest.CubeNetworkConfig.AllowOut, wantAllowOut)
+	}
+	if len(fakeClient.lastEnsureRequest.DNSAllowOutCIDRs) != 2 {
+		t.Fatalf("DNSAllowOutCIDRs=%v, want both domain-policy resolvers", fakeClient.lastEnsureRequest.DNSAllowOutCIDRs)
 	}
 }
 
@@ -711,7 +716,9 @@ func TestMergeDNSAllowOutCIDRsForAllowOutDomain(t *testing.T) {
 		AllowOut:            []string{"172.67.0.0/16", "api.example.com"},
 	}
 
-	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg, []string{"1.1.1.1", "2001:4860:4860::8888", "1.1.1.1"})
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"1.1.1.1", "2001:4860:4860::8888", "1.1.1.1"},
+		[]string{"1.1.1.1", "2001:4860:4860::8888"}, false)
 	if got == nil {
 		t.Fatal("mergeDNSAllowOutCIDRs returned nil config")
 	}
@@ -724,22 +731,68 @@ func TestMergeDNSAllowOutCIDRsForAllowOutDomain(t *testing.T) {
 	}
 }
 
-func TestMergeDNSAllowOutCIDRsSkipsWithoutDomainAllow(t *testing.T) {
+func TestMergeDNSAllowOutCIDRsOperatorOptInDoesNotRestrictDomainResolver(t *testing.T) {
+	block := false
+	cfg := &networkruntime.CubeNetworkConfig{
+		AllowInternetAccess: &block,
+		AllowOut:            []string{"api.example.com"},
+	}
+
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"169.254.169.254"}, []string{"10.204.0.10"}, true)
+	if got == cfg || len(dnsCIDRs) != 1 || dnsCIDRs[0] != "169.254.169.254/32" {
+		t.Fatalf("dnsCIDRs=%v, want domain policy resolver admission", dnsCIDRs)
+	}
+	if strings.Join(got.AllowOut, ",") != "api.example.com,169.254.169.254/32" {
+		t.Fatalf("AllowOut=%v, want domain policy resolver unchanged by opt-in", got.AllowOut)
+	}
+}
+
+func TestMergeDNSAllowOutCIDRsKeepsIPOnlyPolicyUnchangedByDefault(t *testing.T) {
 	block := false
 	cfg := &networkruntime.CubeNetworkConfig{
 		AllowInternetAccess: &block,
 		DenyOut:             []string{"0.0.0.0/0"},
 	}
 
-	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg, []string{"1.1.1.1"})
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"10.204.0.10"}, []string{"10.204.0.10"}, false)
 	if got != cfg {
-		t.Fatal("expected original config to be reused when no domain is allowed")
+		t.Fatal("expected original config without the operator opt-in")
 	}
-	if len(dnsCIDRs) != 0 {
-		t.Fatalf("dnsCIDRs=%v, want empty", dnsCIDRs)
+	if len(dnsCIDRs) != 0 || len(got.AllowOut) != 0 {
+		t.Fatalf("dnsCIDRs=%v allow_out=%v, want no implicit resolver allow", dnsCIDRs, got.AllowOut)
 	}
-	if len(got.AllowOut) != 0 {
-		t.Fatalf("AllowOut=%v, want empty", got.AllowOut)
+}
+
+func TestMergeDNSAllowOutCIDRsAllowsOperatorDefaultResolverForIPOnlyPolicy(t *testing.T) {
+	block := false
+	cfg := &networkruntime.CubeNetworkConfig{AllowInternetAccess: &block}
+
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"10.204.0.10"}, []string{"10.204.0.10"}, true)
+	if got == cfg || len(dnsCIDRs) != 1 || dnsCIDRs[0] != "10.204.0.10/32" {
+		t.Fatalf("dnsCIDRs=%v, want operator-approved resolver", dnsCIDRs)
+	}
+	if len(got.AllowOut) != 1 || got.AllowOut[0] != "10.204.0.10/32" {
+		t.Fatalf("AllowOut=%v, want [10.204.0.10/32]", got.AllowOut)
+	}
+}
+
+func TestMergeDNSAllowOutCIDRsOperatorOptInUsesOnlyDefaultResolver(t *testing.T) {
+	block := false
+	cfg := &networkruntime.CubeNetworkConfig{AllowInternetAccess: &block}
+
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"10.204.0.10", "169.254.169.254"}, []string{"10.204.0.10"}, true)
+	if got == cfg {
+		t.Fatal("expected cloned config when private resolver access is added")
+	}
+	if len(dnsCIDRs) != 1 || dnsCIDRs[0] != "10.204.0.10/32" {
+		t.Fatalf("dnsCIDRs=%v, want only operator default resolver recorded", dnsCIDRs)
+	}
+	if len(got.AllowOut) != 1 || got.AllowOut[0] != "10.204.0.10/32" {
+		t.Fatalf("AllowOut=%v, want only private resolver CIDR", got.AllowOut)
 	}
 }
 
@@ -754,7 +807,8 @@ func TestMergeDNSAllowOutCIDRsForL7DomainRule(t *testing.T) {
 		},
 	}
 
-	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg, []string{"8.8.8.8"})
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"8.8.8.8"}, []string{"8.8.8.8"}, false)
 	if got == nil {
 		t.Fatal("mergeDNSAllowOutCIDRs returned nil config")
 	}
@@ -779,7 +833,8 @@ func TestMergeDNSAllowOutCIDRsForL7WildcardRules(t *testing.T) {
 		},
 	}
 
-	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg, []string{"119.29.29.29"})
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"119.29.29.29"}, []string{"119.29.29.29"}, false)
 	if got == nil {
 		t.Fatal("mergeDNSAllowOutCIDRs returned nil config")
 	}
@@ -792,16 +847,51 @@ func TestMergeDNSAllowOutCIDRsForL7WildcardRules(t *testing.T) {
 	}
 }
 
-func TestMergeDNSAllowOutCIDRsSkipsOpenInternetContext(t *testing.T) {
+func TestMergeDNSAllowOutCIDRsForOpenInternetContext(t *testing.T) {
 	allow := true
 	cfg := &networkruntime.CubeNetworkConfig{AllowInternetAccess: &allow}
 
-	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg, []string{"1.1.1.1"})
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"1.1.1.1"}, []string{"1.1.1.1"}, false)
 	if got != cfg {
-		t.Fatal("expected original config to be reused for open internet access")
+		t.Fatal("expected original config to be reused for public resolver without domain policy")
 	}
 	if len(dnsCIDRs) != 0 {
 		t.Fatalf("dnsCIDRs=%v, want empty", dnsCIDRs)
+	}
+	if len(got.AllowOut) != 0 {
+		t.Fatalf("AllowOut=%v, want empty", got.AllowOut)
+	}
+}
+
+func TestMergeDNSAllowOutCIDRsDoesNotTrustCallerResolver(t *testing.T) {
+	block := false
+	cfg := &networkruntime.CubeNetworkConfig{AllowInternetAccess: &block}
+
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"169.254.169.254"}, []string{"10.204.0.10"}, true)
+	if got != cfg {
+		t.Fatal("expected caller-provided resolver to require explicit allow_out")
+	}
+	if len(dnsCIDRs) != 0 || len(got.AllowOut) != 0 {
+		t.Fatalf("dnsCIDRs=%v allow_out=%v, want no implicit caller resolver allow", dnsCIDRs, got.AllowOut)
+	}
+}
+
+func TestMergeDNSAllowOutCIDRsDomainPolicyKeepsCallerResolver(t *testing.T) {
+	block := false
+	cfg := &networkruntime.CubeNetworkConfig{
+		AllowInternetAccess: &block,
+		AllowOut:            []string{"api.example.com"},
+	}
+
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg,
+		[]string{"169.254.169.254"}, []string{"10.204.0.10"}, false)
+	if got == cfg {
+		t.Fatal("expected domain policy to preserve established resolver admission")
+	}
+	if len(dnsCIDRs) != 1 || strings.Join(got.AllowOut, ",") != "api.example.com,169.254.169.254/32" {
+		t.Fatalf("dnsCIDRs=%v allow_out=%v, want domain resolver admission", dnsCIDRs, got.AllowOut)
 	}
 }
 

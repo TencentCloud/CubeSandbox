@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
 	. "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -181,7 +182,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	}
 	log.G(ctx).Debugf("network request for %s: %s", opts.SandboxID, request.Annotations[constants.MasterAnnotationsNetWork])
 
-	cubeNetworkConfigBeforeDNS, cubeNetworkConfig, resolvedDNSServers, dnsAllowOutCIDRs, err := buildRuntimePolicy(ctx, request)
+	cubeNetworkConfigBeforeDNS, cubeNetworkConfig, resolvedDNSServers, dnsAllowOutCIDRs, operatorDNSAllowOutCIDRs, err := buildRuntimePolicy(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -190,11 +191,11 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 		formatCubeNetworkAllowInternetAccess(cubeNetworkConfig), lenCubeNetworkList(cubeNetworkConfig, true), lenCubeNetworkList(cubeNetworkConfig, false),
 		resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkRuntimeCubeNetworkConfig(cubeNetworkConfigBeforeDNS), formatNetworkRuntimeCubeNetworkConfig(cubeNetworkConfig))
 
-	// Record the sandbox's resolvers even when they were not merged into the
-	// policy: this create had no domain target, but a later update may add one,
-	// and by then the resolver list is not recoverable from anywhere else.
+	// Persist only resolver CIDRs admitted into the policy. Recording every
+	// effective guest resolver here would let a later update promote a
+	// caller-provided private dns_config entry into allow_out.
 	ensureReq := l.buildEnsureNetworkRequestFromIntent(opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req, cubeNetworkConfig,
-		dnsServersToAllowOutCIDRs(ctx, resolvedDNSServers))
+		dnsAllowOutCIDRs, operatorDNSAllowOutCIDRs)
 	log.G(ctx).Infof("tap create ensure request: sandbox_id=%s interfaces=%d routes=%d arps=%d port_mappings=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cube_network_config=%s persist_metadata=%s",
 		ensureReq.SandboxID, len(ensureReq.Interfaces), len(ensureReq.Routes), len(ensureReq.ARPNeighbors),
 		len(ensureReq.PortMappings), resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkRuntimeCubeNetworkConfig(ensureReq.CubeNetworkConfig), utils.InterfaceToString(ensureReq.PersistMetadata))
@@ -238,14 +239,27 @@ func decodeNetRequest(raw string) (*NetRequest, error) {
 	return req, nil
 }
 
-func buildRuntimePolicy(ctx context.Context, request *cubebox.RunCubeSandboxRequest) (*networkruntime.CubeNetworkConfig, *networkruntime.CubeNetworkConfig, []string, []string, error) {
+func buildRuntimePolicy(ctx context.Context, request *cubebox.RunCubeSandboxRequest) (*networkruntime.CubeNetworkConfig, *networkruntime.CubeNetworkConfig, []string, []string, []string, error) {
 	beforeDNS := buildNetworkRuntimeCubeNetworkConfig(request)
 	resolvedDNSServers, err := localnetfile.ResolveEffectiveDNSServers(request)
 	if err != nil {
-		return nil, nil, nil, nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "resolve effective dns servers failed: %v", err)
+		return nil, nil, nil, nil, nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "resolve effective dns servers failed: %v", err)
 	}
-	policy, dnsAllowOutCIDRs := mergeDNSAllowOutCIDRs(ctx, beforeDNS, resolvedDNSServers)
-	return beforeDNS, policy, resolvedDNSServers, dnsAllowOutCIDRs, nil
+	currentConfig := config.GetConfig()
+	autoAllowDefaultResolvers := currentConfig != nil && currentConfig.Common != nil && currentConfig.Common.AutoAllowDefaultDNSServers
+	trustedDNSServers := []string(nil)
+	if autoAllowDefaultResolvers {
+		trustedDNSServers, err = localnetfile.ResolveEffectiveDNSServers(nil)
+		if err != nil {
+			return nil, nil, nil, nil, nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "resolve default dns servers failed: %v", err)
+		}
+	}
+	policy, dnsAllowOutCIDRs := mergeDNSAllowOutCIDRs(ctx, beforeDNS, resolvedDNSServers, trustedDNSServers, autoAllowDefaultResolvers)
+	operatorDNSAllowOutCIDRs := []string(nil)
+	if autoAllowDefaultResolvers && !shouldAppendDNSAllowOut(beforeDNS) {
+		operatorDNSAllowOutCIDRs = append([]string(nil), dnsAllowOutCIDRs...)
+	}
+	return beforeDNS, policy, resolvedDNSServers, dnsAllowOutCIDRs, operatorDNSAllowOutCIDRs, nil
 }
 
 func (l *local) rollbackCreatedNetwork(ctx context.Context, sandboxID string, ensureReq *networkruntime.EnsureNetworkRequest, ensureResp *networkruntime.EnsureNetworkResponse) {
