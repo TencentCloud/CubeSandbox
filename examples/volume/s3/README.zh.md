@@ -146,12 +146,27 @@ sudo install -m 0600 volume-s3.conf.example \
 
 | 字段 | 说明 | 是否必填 |
 |------|------|----------|
-| `ACCESS_KEY_ID` | 访问密钥 ID | 是 |
-| `SECRET_ACCESS_KEY` | 密钥 | 是 |
+| `ACCESS_KEY_ID` | 访问密钥 ID | 是¹ |
+| `SECRET_ACCESS_KEY` | 密钥 | 是¹ |
+| `CREDENTIALS` | `static`（默认）或 `instance_role`¹ | 否 |
 | `BUCKET` | 存放所有 Volume 的存储桶 | 是 |
 | `ENDPOINT` | S3 兼容 Endpoint 地址（见下表） | 是 |
 | `REGION` | SigV4 签名地域，默认 `us-east-1` | 否 |
 | `S3FS_EXTRA_OPTS` | 额外的 s3fs 挂载选项，空格分隔（如 MinIO 需要的 `-ouse_path_request_style`）。多选项值可以加引号以便该文件仍能被 `source`，插件会自行剥离引号。设置了 `-ouse_path_request_style` 时，插件自己的 S3 客户端也会切换为 path-style 寻址。 | 否 |
+
+¹设置 `CREDENTIALS=instance_role` 并删掉两个密钥，即可用主机的 EC2 实例角色代替静态密钥：控制面客户端通过实例元数据服务（IMDS）取凭证，s3fs 以 `-oiam_role=auto` 挂载，不写 passwd 文件，之前静态密钥留下的 passwd 文件也会被删除。没有设置 `CREDENTIALS=instance_role` 时密钥为空会报错，设置了它却又填了密钥也会报错；`ENDPOINT` 必须是 AWS S3 地址（`*.amazonaws.com` 或 `*.amazonaws.com.cn`）。create、destroy、attach 会先取一次凭证，主机没有角色或访问不到 IMDS 时直接报 IMDS 错误。
+
+> **哪些部署方式能用。** 只有本页的手动安装。`deploy/one-click/install.sh` 在设置了 `CUBE_S3_ENDPOINT`
+> 而密钥为空时会直接退出，并且每次安装和升级都会重新生成 `volume-s3.conf`，手动加的 `CREDENTIALS` 行不会保留；Helm chart 同样要求
+> `volumeS3.accessKeyId` / `secretAccessKey`，除非用 `volumeS3.existingSecret` 提供整个文件。
+>
+> **这是哪一种身份。** EC2 实例角色（经 IMDS），不是 AWS 的完整凭证链：`AWS_ACCESS_KEY_ID`、
+> `~/.aws/credentials` 不会被使用。（如果插件进程环境里设置了 `AWS_WEB_IDENTITY_TOKEN_FILE` 或
+> `AWS_CONTAINER_CREDENTIALS_*`，控制面客户端会使用它们；普通主机上不会有这些变量，s3fs 也只走 IMDS。）
+> 所以上面表里的其他后端（COS、R2、MinIO）仍然需要静态密钥对。
+>
+> **角色要配在哪些机器上。** 每一台 CubeMaster 和 Cubelet 上都要有：create/destroy 用 CubeMaster 的身份，
+> attach 用节点的身份。权限范围应当限定到 `BUCKET`——实例角色通常比前置条件要求的那把按桶授权的密钥宽得多。
 
 常见后端：
 

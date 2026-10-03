@@ -11,6 +11,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +30,20 @@ const DefaultLockDir = "/run/cube-volume-s3"
 // ConfigFileName is looked up next to the plugin executable.
 const ConfigFileName = "volume-s3.conf"
 
+// Values of CREDENTIALS, which selects where S3 credentials come from.
+const (
+	// CredentialsStatic uses ACCESS_KEY_ID / SECRET_ACCESS_KEY. The default.
+	CredentialsStatic = "static"
+	// CredentialsInstanceRole uses the EC2 instance role through IMDS; both
+	// keys must be left empty.
+	CredentialsInstanceRole = "instance_role"
+)
+
 // Config holds S3 credentials and mount settings for the plugin.
 type Config struct {
+	// Credentials is CredentialsStatic or CredentialsInstanceRole.
+	Credentials string
+
 	AccessKeyID     string
 	SecretAccessKey string
 	Bucket          string
@@ -71,8 +84,9 @@ func Load(path string) (*Config, error) {
 	defer f.Close()
 
 	cfg := &Config{
-		Region:  DefaultRegion,
-		LockDir: DefaultLockDir,
+		Credentials: CredentialsStatic,
+		Region:      DefaultRegion,
+		LockDir:     DefaultLockDir,
 	}
 
 	// ADDRESSING_STYLE is read for compatibility with the previous shell
@@ -101,6 +115,10 @@ func Load(path string) (*Config, error) {
 		val = unquote(strings.TrimSpace(val))
 
 		switch key {
+		case "CREDENTIALS":
+			if val != "" {
+				cfg.Credentials = val
+			}
 		case "ACCESS_KEY_ID":
 			cfg.AccessKeyID = val
 		case "SECRET_ACCESS_KEY":
@@ -142,23 +160,63 @@ func Load(path string) (*Config, error) {
 	} else {
 		cfg.PasswdFile = "/etc/cube/.passwd-s3fs-volume-" + cfg.Bucket
 	}
-
 	return cfg, nil
 }
 
+// UseInstanceRole reports whether credentials come from the EC2 instance role
+// (IMDS). It needs the explicit opt-in and no static keys at all, so a config
+// that skipped validate() still cannot reach IMDS by accident.
+func (c *Config) UseInstanceRole() bool {
+	return c.Credentials == CredentialsInstanceRole && c.AccessKeyID == "" && c.SecretAccessKey == ""
+}
+
 func (c *Config) validate() error {
+	switch c.Credentials {
+	case CredentialsStatic:
+		// Empty keys are an error here rather than a hint to use IMDS: a
+		// missing, overwritten or misspelled key must fail loudly instead of
+		// switching the plugin to the node's identity.
+		switch {
+		case c.AccessKeyID == "":
+			return fmt.Errorf("config: ACCESS_KEY_ID is empty (set both keys, or CREDENTIALS=%s to use the EC2 instance role)", CredentialsInstanceRole)
+		case c.SecretAccessKey == "":
+			return fmt.Errorf("config: SECRET_ACCESS_KEY is empty (set both keys, or CREDENTIALS=%s to use the EC2 instance role)", CredentialsInstanceRole)
+		}
+	case CredentialsInstanceRole:
+		if c.AccessKeyID != "" || c.SecretAccessKey != "" {
+			return fmt.Errorf("config: CREDENTIALS=%s takes no ACCESS_KEY_ID / SECRET_ACCESS_KEY; remove the keys, or drop CREDENTIALS to use them", CredentialsInstanceRole)
+		}
+	default:
+		return fmt.Errorf("config: CREDENTIALS=%q is not supported (use %s or %s)", c.Credentials, CredentialsStatic, CredentialsInstanceRole)
+	}
+
 	switch {
-	case c.AccessKeyID == "":
-		return fmt.Errorf("config: ACCESS_KEY_ID is empty")
-	case c.SecretAccessKey == "":
-		return fmt.Errorf("config: SECRET_ACCESS_KEY is empty")
 	case c.Bucket == "":
 		return fmt.Errorf("config: BUCKET is empty")
 	case c.Endpoint == "":
 		return fmt.Errorf("config: ENDPOINT is empty (set your S3-compatible endpoint URL)")
+	case c.Credentials == CredentialsInstanceRole && !isAWSEndpoint(c.Endpoint):
+		// COS, R2 and MinIO do not accept AWS role credentials; fail here
+		// rather than on the first create after an IMDS round trip.
+		return fmt.Errorf("config: CREDENTIALS=%s needs an AWS S3 endpoint (*.amazonaws.com), got %q; other backends need ACCESS_KEY_ID / SECRET_ACCESS_KEY", CredentialsInstanceRole, c.Endpoint)
 	default:
 		return nil
 	}
+}
+
+// isAWSEndpoint reports whether endpoint is an AWS S3 host, including China
+// regions and VPC endpoints. A bare host without scheme is accepted, as in
+// s3api.ParseEndpoint.
+func isAWSEndpoint(endpoint string) bool {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "https://" + endpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return strings.HasSuffix(host, ".amazonaws.com") || strings.HasSuffix(host, ".amazonaws.com.cn")
 }
 
 // hasPathRequestStyle reports whether s3fs was told to use path-style
