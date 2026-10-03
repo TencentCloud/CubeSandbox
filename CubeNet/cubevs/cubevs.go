@@ -223,6 +223,7 @@ const (
 	MapNameMVMIPToIfindex       = "mvmip_to_ifindex"
 	MapNameRemotePortMapping    = "remote_port_mapping"
 	MapNameLocalPortMapping     = "local_port_mapping"
+	MapNameSandboxMetrics       = "sandbox_metrics"
 	// MapNameAllowOut is the cube-v0.2.0 legacy migration source.
 	MapNameAllowOut      = "allow_out"
 	MapNameAllowOutV2    = "allow_out_v2" // legacy 16-byte policy value
