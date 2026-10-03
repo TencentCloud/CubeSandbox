@@ -219,6 +219,15 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 
 This removes Chart-managed objects; hostPath / kernel changes need the script and platform runbooks separately.
 
+For custom storage, the cleanup script does not read Helm values. Pass the host
+paths explicitly through `DATA_CUBELET`, `DATA_CUBE_SHIM`, `DATA_CUBE_SHARED`,
+`DATA_LOG`, `DATA_SNAPSHOT_PACK`, `TMP_CUBE`, `TOOLBOX_ROOT`, `BOOTSTRAP_STATE`,
+and `LOOPBACK_IMAGE_PATH`. Review the targets first with
+`sudo env DRY_RUN=1 ... ./deploy/kubernetes/chart/scripts/cleanup-node-host.sh`.
+The script removes only the `Cubelet`, `CubeShim`, and `CubeVmm` subdirectories
+under the log root and preserves the separate `hostPaths.dataShared` user-data
+tree. Do not point a cleanup root at that user-data tree or any of its ancestors.
+
 ---
 
 ## Appendix: image key cheat sheet
