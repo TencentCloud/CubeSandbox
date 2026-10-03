@@ -149,6 +149,36 @@ Also: `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, `global.ti
 
 ---
 
+## Changing host storage paths
+
+The chart's `hostPaths` storage values select host directories; runtime containers
+keep their fixed `/data/...` and `/tmp/cube` paths. Changing a host path recreates
+the affected Pods and **does not migrate existing data**. Drain the affected
+compute nodes and plan data preservation before the upgrade, including logs,
+`dataCubeShared/volume`, and data under `dataShared`.
+
+- `hostPaths.runContainerd` and `hostPaths.runVc` are independent of
+  `hostPaths.dataCubelet`. Update them explicitly if the socket/VM state trees
+  should move with Cubelet storage.
+- With loopback XFS enabled, `bootstrap.nodeInit.dataCubelet.loopback.imagePath`
+  independently selects the backing image. Put it on the intended host filesystem;
+  changing `hostPaths.dataCubelet` does not move the image.
+- Storage paths are not part of the node-prep fingerprint. After changing storage
+  or loopback settings on already-prepared nodes, change
+  `cubeNodeBootstrap.prepGeneration` to a new value so bootstrap reruns directory
+  preparation and XFS checks. Otherwise a matching `node-prep-ready` marker skips
+  node-init. Verify bootstrap completion and the target XFS mount before resuming
+  workloads; a generation change does not copy data to the new paths.
+
+For an existing custom `hostPaths.dataShared`, the host directory is now exposed
+inside the Big Pod at `/data/shared`. For example, host `/mnt/shared/project`
+with `hostPaths.dataShared: /mnt/shared` is requested as `/data/shared/project`
+in `metadata["host-mount"]`. Update callers and CubeMaster's
+`extra_conf.allowed_host_mount_prefixes` to the matching `/data/shared/` prefix
+(or a narrower subdirectory) before resuming sandbox creation. Requests using the
+old custom host prefix no longer resolve inside the Pod. See
+[Persistent Storage](../persistent-storage.md).
+
 ## Special cases
 
 ### A. Changing PVM kernel pattern / boot args (will reboot)

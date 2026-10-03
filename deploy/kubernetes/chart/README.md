@@ -157,6 +157,8 @@ For example:
 ```yaml
 hostPaths:
   dataCubelet: /var/lib/cubesandbox/cubelet
+  runContainerd: /var/lib/cubesandbox/cubelet/run/containerd
+  runVc: /var/lib/cubesandbox/cubelet/run/vc
   dataLog: /var/log/cubesandbox
 bootstrap:
   nodeInit:
@@ -171,6 +173,13 @@ on the host. Cubelet sees the same files at `/data/cubelet/root/component_versio
 The bootstrap container uses the configured host paths for directory creation and
 XFS checks. If loopback XFS is enabled, `loopback.imagePath` separately selects the
 image file's location on the host.
+
+`runContainerd` and `runVc` are independent host paths; set them explicitly when
+relocating the Cubelet tree. On an existing cluster, storage changes require a
+planned maintenance window and a new `cubeNodeBootstrap.prepGeneration` to rerun
+node preparation. Changing paths does not migrate existing data. See the
+[storage upgrade notes](../../../docs/guide/kubernetes/upgrade.md#changing-host-storage-paths),
+including the `/data/shared/` path required by Host Mount requests.
 
 ## Cube Node one-click parity
 
