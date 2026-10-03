@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"time"
 
 	"github.com/cilium/ebpf"
 )
@@ -94,9 +93,7 @@ func ReadSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
 }
 
 func readSandboxTrafficMetrics() ([]SandboxTrafficMetrics, error) {
-	start := time.Now()
 	path := pinPath(MapNameSandboxMetrics)
-	log.Printf("cubevs metrics: sandbox traffic read start: map=%s path=%s", MapNameSandboxMetrics, path)
 	m, err := loadPinnedMap(MapNameSandboxMetrics)
 	if err != nil {
 		log.Printf("cubevs metrics: sandbox traffic load failed: map=%s path=%s err=%v", MapNameSandboxMetrics, path, err)
@@ -139,7 +136,6 @@ func readSandboxTrafficMetrics() ([]SandboxTrafficMetrics, error) {
 		}
 	})
 
-	log.Printf("cubevs metrics: sandbox traffic read finish: map=%s path=%s entries=%d duration=%s", MapNameSandboxMetrics, path, len(entries), time.Since(start))
 	return entries, nil
 }
 
@@ -160,9 +156,7 @@ func sumSandboxMetricsValues(values []sandboxMetricsValue) sandboxMetricsValue {
 }
 
 func readSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
-	start := time.Now()
 	snatPath := pinPath(mapNameSNATIPList)
-	log.Printf("cubevs metrics: SNAT allocation read start: map=%s path=%s", mapNameSNATIPList, snatPath)
 	inUseByNodeIP, err := readSNATSessionsInUse()
 	if err != nil {
 		log.Printf("cubevs metrics: SNAT allocation prerequisite failed: session_map=%s err=%v", MapNameEgressSessions, err)
@@ -193,7 +187,6 @@ func readSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
 	}
 
 	entries := buildSNATAllocationMetrics(values, inUseByNodeIP)
-	log.Printf("cubevs metrics: SNAT allocation read finish: map=%s path=%s slots=%d entries=%d duration=%s", mapNameSNATIPList, snatPath, len(values), len(entries), time.Since(start))
 	return entries, nil
 }
 
@@ -242,9 +235,7 @@ func buildSNATAllocationMetrics(values []snatIP, inUseByNodeIP map[uint32]uint64
 }
 
 func readSNATSessionsInUse() (map[uint32]uint64, error) {
-	start := time.Now()
 	path := pinPath(MapNameEgressSessions)
-	log.Printf("cubevs metrics: SNAT sessions read start: map=%s path=%s", MapNameEgressSessions, path)
 	m, err := loadPinnedMap(MapNameEgressSessions)
 	if err != nil {
 		log.Printf("cubevs metrics: SNAT sessions load failed: map=%s path=%s err=%v", MapNameEgressSessions, path, err)
@@ -266,6 +257,5 @@ func readSNATSessionsInUse() (map[uint32]uint64, error) {
 		log.Printf("cubevs metrics: SNAT sessions iterate failed: map=%s path=%s err=%v", MapNameEgressSessions, path, err)
 		return nil, err
 	}
-	log.Printf("cubevs metrics: SNAT sessions read finish: map=%s path=%s snat_ips=%d duration=%s", MapNameEgressSessions, path, len(inUseByNodeIP), time.Since(start))
 	return inUseByNodeIP, nil
 }

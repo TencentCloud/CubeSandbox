@@ -116,7 +116,6 @@ func newNetworkMetricsHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &statusCapturingResponseWriter{ResponseWriter: w}
-		log.G(r.Context()).Infof("network metrics scrape start: method=%s path=%s remote=%s user_agent=%q", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
 		base.ServeHTTP(rw, r)
 		status := rw.statusCode
 		if status == 0 {
@@ -126,7 +125,6 @@ func newNetworkMetricsHandler() http.Handler {
 			log.G(r.Context()).Errorf("network metrics scrape finish: method=%s path=%s remote=%s status=%d duration=%s", r.Method, r.URL.Path, r.RemoteAddr, status, time.Since(start))
 			return
 		}
-		log.G(r.Context()).Infof("network metrics scrape finish: method=%s path=%s remote=%s status=%d duration=%s", r.Method, r.URL.Path, r.RemoteAddr, status, time.Since(start))
 	})
 }
 
@@ -171,14 +169,12 @@ func (c *cubeVSNetworkCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	log.L.Infof("network metrics collector start: scrape_id=%d", scrapeID)
 	sandboxes, err := c.readSandboxMetrics()
 	if err != nil {
 		log.L.Errorf("network metrics collector sandbox read failed: scrape_id=%d err=%v", scrapeID, err)
 		ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 0)
 		return
 	}
-	log.L.Infof("network metrics collector sandbox read ok: scrape_id=%d sandboxes=%d", scrapeID, len(sandboxes))
 
 	snats, err := c.readSNATMetrics()
 	if err != nil {
@@ -186,7 +182,6 @@ func (c *cubeVSNetworkCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 0)
 		return
 	}
-	log.L.Infof("network metrics collector SNAT read ok: scrape_id=%d snats=%d", scrapeID, len(snats))
 
 	ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 1)
 
@@ -216,5 +211,4 @@ func (c *cubeVSNetworkCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(snatPortsCapacity, prometheus.GaugeValue, float64(snat.PortsCapacity), labels...)
 		ch <- prometheus.MustNewConstMetric(snatPortsEstimatedFree, prometheus.GaugeValue, float64(snat.PortsEstimatedFree), labels...)
 	}
-	log.L.Infof("network metrics collector finish: scrape_id=%d sandboxes=%d snats=%d", scrapeID, len(sandboxes), len(snats))
 }
