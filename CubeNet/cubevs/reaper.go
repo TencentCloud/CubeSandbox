@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -18,6 +19,8 @@ const (
 
 const (
 	reapSessionsInterval = time.Second * 5
+	snatUsageMaxAge      = reapSessionsInterval * 2
+	sessionBatchSize     = 4096
 	maxSessions          = 1048576
 	maxSessionPercentage = 0.8
 )
@@ -109,7 +112,14 @@ func (s icmpConntrackState) String() string {
 var (
 	once     sync.Once
 	vsEvents = make(chan Event, 1024)
+
+	cachedSNATSessionUsage atomic.Pointer[snatSessionUsageSnapshot]
 )
+
+type snatSessionUsageSnapshot struct {
+	inUseByNodeIP map[uint32]uint64
+	collectedAt   time.Time
+}
 
 var tcpTimeouts = map[tcpConntrackState]time.Duration{
 	tcpCTNone:        time.Second * 0, // 2 mins in kernel
@@ -238,6 +248,7 @@ func doReap() {
 	ticker := time.NewTicker(reapSessionsInterval)
 	defer ticker.Stop()
 
+	reapSessions()
 	for range ticker.C {
 		reapSessions()
 		reapDNSState()
@@ -269,6 +280,33 @@ func reportCount(count int) {
 			Message: fmt.Sprintf("too many sessions: %d/%d", count, maxSessions),
 		})
 	}
+}
+
+func publishSNATSessionUsage(inUseByNodeIP map[uint32]uint64, collectedAt time.Time) {
+	snapshot := &snatSessionUsageSnapshot{
+		inUseByNodeIP: make(map[uint32]uint64, len(inUseByNodeIP)),
+		collectedAt:   collectedAt,
+	}
+	for nodeIP, count := range inUseByNodeIP {
+		snapshot.inUseByNodeIP[nodeIP] = count
+	}
+	cachedSNATSessionUsage.Store(snapshot)
+}
+
+func readCachedSNATSessionUsage(now time.Time) (map[uint32]uint64, error) {
+	snapshot := cachedSNATSessionUsage.Load()
+	if snapshot == nil {
+		return nil, errors.New("SNAT session usage cache is not initialized")
+	}
+	if age := now.Sub(snapshot.collectedAt); age > snatUsageMaxAge {
+		return nil, fmt.Errorf("SNAT session usage cache is stale: age=%s max_age=%s", age, snatUsageMaxAge)
+	}
+
+	inUseByNodeIP := make(map[uint32]uint64, len(snapshot.inUseByNodeIP))
+	for nodeIP, count := range snapshot.inUseByNodeIP {
+		inUseByNodeIP[nodeIP] = count
+	}
+	return inUseByNodeIP, nil
 }
 
 func sessionExpired(now uint64, key *sessionKey, sess *natSession) bool {
@@ -322,6 +360,46 @@ func deleteSessions(egressSessions, ingressSessions *ebpf.Map,
 	return nil
 }
 
+func walkSessionMap(m *ebpf.Map, visit func(*sessionKey, *natSession)) error {
+	var cursor ebpf.MapBatchCursor
+	keys := make([]sessionKey, sessionBatchSize)
+	values := make([]natSession, sessionBatchSize)
+	visited := 0
+
+	for {
+		count, err := m.BatchLookup(&cursor, keys, values, nil)
+		for i := 0; i < count; i++ {
+			visit(&keys[i], &values[i])
+		}
+		visited += count
+
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		if err != nil {
+			if visited == 0 && errors.Is(err, ebpf.ErrNotSupported) {
+				// Map batch operations require Linux 5.6. Keep the iterator
+				// path for CubeSandbox's Linux 5.4 minimum.
+				return walkSessionMapIterate(m, visit)
+			}
+			return fmt.Errorf("map.BatchLookup failed: %w", err)
+		}
+		if count == 0 {
+			return errors.New("map.BatchLookup made no progress")
+		}
+	}
+}
+
+func walkSessionMapIterate(m *ebpf.Map, visit func(*sessionKey, *natSession)) error {
+	var key sessionKey
+	var value natSession
+	iter := m.Iterate()
+	for iter.Next(&key, &value) {
+		visit(&key, &value)
+	}
+	return iter.Err()
+}
+
 func reapSessions() {
 	m, err := loadPinnedMap(MapNameEgressSessions)
 	if err != nil {
@@ -353,32 +431,34 @@ func reapSessions() {
 	}
 
 	var (
-		key   sessionKey
-		value natSession
-		count int
+		count         int
+		inUseByNodeIP = make(map[uint32]uint64)
 	)
-	iter := m.Iterate()
-	for iter.Next(&key, &value) {
+	err = walkSessionMap(m, func(key *sessionKey, value *natSession) {
 		count++
-		if sessionExpired(now, &key, &value) {
-			err := deleteSessions(m, m2, &key, &value)
+		sessionPresent := true
+		if sessionExpired(now, key, value) {
+			err := deleteSessions(m, m2, key, value)
 			if err != nil {
 				enqueueEvent(Event{
 					Error:   err,
 					Message: "failed to delete sessions",
 				})
+			} else {
+				sessionPresent = false
 			}
 
-			if !sessionClosedNormally(&key, &value) {
+			if !sessionClosedNormally(key, value) {
 				enqueueEvent(Event{
 					Error:   ErrSessionExpiredNotClosed,
-					Message: egressSession(&key, &value, now),
+					Message: egressSession(key, value, now),
 				})
 			}
 		}
-	}
-
-	err = iter.Err()
+		if sessionPresent && value.PacketClass == snatPacketClass && value.NodeIP != 0 {
+			inUseByNodeIP[value.NodeIP]++
+		}
+	})
 	if err != nil {
 		// Known error:
 		//   - ErrIterationAborted
@@ -388,10 +468,11 @@ func reapSessions() {
 		//   - https://github.com/cilium/ebpf/pull/11
 		enqueueEvent(Event{
 			Error:   err,
-			Message: "failed to iterate session maps",
+			Message: "failed to scan session maps",
 		})
 		return
 	}
 
+	publishSNATSessionUsage(inUseByNodeIP, time.Now())
 	reportCount(count)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
@@ -61,8 +62,8 @@ type sandboxMetricsValue struct {
 	SNATAllocFailures  uint64
 }
 
-// ReadNetworkMetrics reads the current sandbox datapath counters from pinned
-// eBPF maps and derives SNAT allocation usage from the live session table.
+// ReadNetworkMetrics reads current sandbox counters and the latest cached SNAT
+// allocation usage.
 func ReadNetworkMetrics() (*NetworkMetricsSnapshot, error) {
 	sandboxes, err := ReadSandboxTrafficMetrics()
 	if err != nil {
@@ -87,7 +88,7 @@ func ReadSandboxTrafficMetrics() ([]SandboxTrafficMetrics, error) {
 }
 
 // ReadSNATAllocationMetrics reads SNAT allocator state from pinned eBPF maps
-// and derives current usage from the live session table.
+// and combines it with the latest session-reaper usage snapshot.
 func ReadSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
 	return readSNATAllocationMetricsFn()
 }
@@ -157,9 +158,9 @@ func sumSandboxMetricsValues(values []sandboxMetricsValue) sandboxMetricsValue {
 
 func readSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
 	snatPath := pinPath(mapNameSNATIPList)
-	inUseByNodeIP, err := readSNATSessionsInUse()
+	inUseByNodeIP, err := readCachedSNATSessionUsage(time.Now())
 	if err != nil {
-		log.Printf("cubevs metrics: SNAT allocation prerequisite failed: session_map=%s err=%v", MapNameEgressSessions, err)
+		log.Printf("cubevs metrics: SNAT allocation prerequisite failed: session_cache=%s err=%v", MapNameEgressSessions, err)
 		return nil, err
 	}
 
@@ -232,30 +233,4 @@ func buildSNATAllocationMetrics(values []snatIP, inUseByNodeIP map[uint32]uint64
 	})
 
 	return entries
-}
-
-func readSNATSessionsInUse() (map[uint32]uint64, error) {
-	path := pinPath(MapNameEgressSessions)
-	m, err := loadPinnedMap(MapNameEgressSessions)
-	if err != nil {
-		log.Printf("cubevs metrics: SNAT sessions load failed: map=%s path=%s err=%v", MapNameEgressSessions, path, err)
-		return nil, err
-	}
-	defer m.Close()
-
-	inUseByNodeIP := make(map[uint32]uint64)
-	var key sessionKey
-	var value natSession
-	iter := m.Iterate()
-	for iter.Next(&key, &value) {
-		if value.PacketClass != snatPacketClass || value.NodeIP == 0 {
-			continue
-		}
-		inUseByNodeIP[value.NodeIP]++
-	}
-	if err := wrapIterErr(iter.Err(), MapNameEgressSessions); err != nil {
-		log.Printf("cubevs metrics: SNAT sessions iterate failed: map=%s path=%s err=%v", MapNameEgressSessions, path, err)
-		return nil, err
-	}
-	return inUseByNodeIP, nil
 }

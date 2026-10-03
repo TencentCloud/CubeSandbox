@@ -5,6 +5,7 @@ import (
 	"net"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestReadNetworkMetricsCombinesGranularReaders(t *testing.T) {
@@ -158,5 +159,60 @@ func TestBuildSNATAllocationMetricsDeduplicatesReplicatedIPSlots(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("metrics mismatch: got=%#v want=%#v", got[0], want)
+	}
+}
+
+func TestReadCachedSNATSessionUsageRequiresSnapshot(t *testing.T) {
+	original := cachedSNATSessionUsage.Load()
+	cachedSNATSessionUsage.Store(nil)
+	t.Cleanup(func() {
+		cachedSNATSessionUsage.Store(original)
+	})
+
+	if _, err := readCachedSNATSessionUsage(time.Now()); err == nil {
+		t.Fatal("readCachedSNATSessionUsage returned nil error without a snapshot")
+	}
+}
+
+func TestSNATSessionUsageSnapshotIsImmutable(t *testing.T) {
+	original := cachedSNATSessionUsage.Load()
+	t.Cleanup(func() {
+		cachedSNATSessionUsage.Store(original)
+	})
+
+	now := time.Now()
+	source := map[uint32]uint64{1: 7}
+	publishSNATSessionUsage(source, now)
+	source[1] = 99
+
+	first, err := readCachedSNATSessionUsage(now)
+	if err != nil {
+		t.Fatalf("readCachedSNATSessionUsage returned error: %v", err)
+	}
+	if first[1] != 7 {
+		t.Fatalf("cached count=%d, want 7", first[1])
+	}
+
+	first[1] = 42
+	second, err := readCachedSNATSessionUsage(now)
+	if err != nil {
+		t.Fatalf("second readCachedSNATSessionUsage returned error: %v", err)
+	}
+	if second[1] != 7 {
+		t.Fatalf("cached count after caller mutation=%d, want 7", second[1])
+	}
+}
+
+func TestReadCachedSNATSessionUsageRejectsStaleSnapshot(t *testing.T) {
+	original := cachedSNATSessionUsage.Load()
+	t.Cleanup(func() {
+		cachedSNATSessionUsage.Store(original)
+	})
+
+	now := time.Now()
+	publishSNATSessionUsage(map[uint32]uint64{1: 7}, now.Add(-snatUsageMaxAge-time.Nanosecond))
+
+	if _, err := readCachedSNATSessionUsage(now); err == nil {
+		t.Fatal("readCachedSNATSessionUsage returned nil error for a stale snapshot")
 	}
 }
