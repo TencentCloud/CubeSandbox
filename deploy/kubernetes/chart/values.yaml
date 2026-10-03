@@ -1334,8 +1334,10 @@ hostPaths:
   # Host tree shared across compute-node Cube components, mounted at
   # /data/cube-shared in the Big Pod (volume plugins use its volume/ subdirectory).
   dataCubeShared: /data/cube-shared
-  # Mounted at /data/shared in the Big Pod, matching CubeMaster's default
-  # allowed_host_mount_prefixes for metadata["host-mount"].
+  # Mounted at /data/shared in the Big Pod. metadata["host-mount"] source paths
+  # must be visible in that Pod namespace: use /data/shared/... even when this
+  # host directory is customized, and allow that prefix in CubeMaster's
+  # allowed_host_mount_prefixes.
   dataShared: /data/shared
   tmpCube: /tmp/cube
   # pvm/node-init state + node-prep-ready / pvm-host-ready / effective-pvm
@@ -1353,11 +1355,13 @@ hostPaths:
   # at the node's real /run/containerd (owned by kubelet/containerd); use a
   # dedicated directory under dataCubelet so cube-node's mount NS gets a
   # persistent /run/containerd without colliding with the node runtime.
+  # Independent of dataCubelet: update this value too when relocating that tree.
   runContainerd: /data/cubelet/run/containerd
   # Cloud Hypervisor API + vsock sockets (CubeShim VM_PATH=/run/vc/vm/).
   # Surviving shims and post-reconnect cubelet paths such as
   # /run/vc/vm/{id}/chapi and /run/vc/vm/{id}/cube.sock need this tree to
   # remain on a filesystem that is not torn down with the Pod overlay.
+  # Independent of dataCubelet: update this value too when relocating that tree.
   runVc: /data/cubelet/run/vc
 
 # COS volume plugin credentials (volume-cos.conf). Plugin binaries ship in
