@@ -5,11 +5,9 @@
 // Package statesync reconciles the CLM's view of a sandbox's runtime
 // state with pause / resume actions driven externally through CubeMaster.
 //
-// CubeMaster is a stateless proxy: when the SDK calls Sandbox.connect() to
-// resume a paused sandbox, CubeMaster forwards the RPC to Cubelet but does
-// not touch the CLM's state key or CubeProxy's per-worker state dict.
-// Without a nudge from CubeMaster the CLM would keep thinking the
-// sandbox is paused and reject the next request from the dataplane.
+// When the SDK calls Sandbox.connect(), CubeMaster restores through Cubelet
+// and writes a short-lived running marker under its lifecycle lock. The state
+// event then updates CLM's registry, activity timestamp and CubeProxy state.
 //
 // CubeMaster now emits an OpState event on the lifecycle events stream after
 // every successful pause / resume RPC (see CubeMaster/pkg/lifecycle/store.go
@@ -21,12 +19,11 @@
 //     (mirrors resumer.doResume: avoids the sweeper re-pausing a sandbox
 //     that just came back).
 //
-// The event source (CubeMaster) is stateless with respect to the CLM's
-// SETNX-based transition locks ("pausing", "resuming"). To avoid a state
-// event racing an in-flight sweeper.tryPause or resumer.doResume, Handle
-// skips reconciliation whenever the current state key holds a transition
-// marker; the CLM's own flow will write the terminal state moments
-// later, so the event is redundant.
+// Handle skips events while a pausing/resuming marker is present to avoid
+// overwriting an in-flight CLM transition. A completed Master resume replaces
+// that marker with running before publishing its event, allowing reconciliation
+// here. CLM's sweeper uses CAS and retained repairs for superseded pauses; its
+// resumer also completes bookkeeping on a resume_completed partial failure.
 package statesync
 
 import (

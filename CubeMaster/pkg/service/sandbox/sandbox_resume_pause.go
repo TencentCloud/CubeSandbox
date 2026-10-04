@@ -434,11 +434,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// Resume recreates the guest NIC / host ports. Normal Create writes Redis
 	// proxy metadata in dealSuccResult; thin resume Create must rewrite it or
 	// CubeProxy keeps routing to the pre-pause SandboxIP (same-node 504).
-	if err := refreshProxyMapAfterResume(ctx, req.SandboxID, targetIP, cubeRsp); err != nil {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
-		rsp.Ret.RetMsg = fmt.Sprintf("refreshSandboxProxyMap after resume fail:%s", err.Error())
-		return rsp
-	}
+	// The guest is already running. A routing write failure must still reach
+	// the completed-resume bookkeeping below, while remaining an API error.
+	proxyMapErr := refreshProxyMapAfterResume(ctx, req.SandboxID, targetIP, cubeRsp)
 	// Drop CubeProxy local_cache so the new SandboxIP is used immediately
 	// (cache hits renew TTL and would otherwise keep routing to the old NIC).
 	// A purge that fails leaves the sandbox unreachable for good, so it has
@@ -470,16 +468,36 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
 	}
+	completeResumeSynchronization(ctx, req, rsp, targetIP, proxyMapErr, purgeErr)
+	return rsp
+}
+
+func completeResumeSynchronization(ctx context.Context, req *types.UpdateRequest, rsp *types.Res, targetIP string, proxyMapErr, purgeErr error) {
+	// Invalidate queued CLM auto-pauses before releasing the Master lock and
+	// before publishing running (StateSync must not observe an old pausing key).
+	stateErr := markResumedLifecycleState(req.SandboxID)
+	rsp.ResumeCompleted = true
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "resume", req.RequestID)
+	if stateErr != nil {
+		stateErr = fmt.Errorf("sandbox resumed but lifecycle state synchronization failed: %w", stateErr)
+	}
 
 	if purgeErr != nil {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
-		rsp.Ret.RetMsg = fmt.Sprintf(
-			"sandbox %s resumed on %s but CubeProxy kept its pre-pause route and will not reach it: %v",
+		purgeErr = fmt.Errorf(
+			"sandbox %s resumed on %s but CubeProxy kept its pre-pause route and will not reach it: %w",
 			req.SandboxID, targetIP, purgeErr)
+	}
+	if proxyMapErr != nil {
+		proxyMapErr = fmt.Errorf("refreshSandboxProxyMap after resume fail:%w", proxyMapErr)
+	}
+	if err := errors.Join(proxyMapErr, stateErr, purgeErr); err != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+		if proxyMapErr != nil {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
+		}
+		rsp.Ret.RetMsg = err.Error()
 		log.G(ctx).Errorf("resume: %s", rsp.Ret.RetMsg)
 	}
-	return rsp
 }
 
 // loadResumeSandboxSpec is the single sandboxspec.Get on the Resume path.
@@ -521,6 +539,12 @@ func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostIP string, c
 	if sandboxID == "" || hostIP == "" || cubeRsp == nil {
 		return fmt.Errorf("missing sandboxID/hostIP/create response")
 	}
+	// Create already confirmed placement. Keep local lifecycle/Info calls on
+	// the restored node even if persisting its proxy mapping fails.
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    hostIP,
+	})
 
 	proxy := &proxytypes.SandboxProxyMap{
 		HostIP:             hostIP,
@@ -562,10 +586,6 @@ func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostIP string, c
 	if err := setSandboxProxyMapFn(ctx, proxy); err != nil {
 		return err
 	}
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
-		SandboxID: sandboxID,
-		HostIP:    hostIP,
-	})
 	log.G(ctx).Infof("resume: refreshed proxy map sandbox=%s host=%s sandboxIP=%s ports=%v",
 		sandboxID, hostIP, proxy.SandboxIP, proxy.ContainerToHostPorts)
 	return nil

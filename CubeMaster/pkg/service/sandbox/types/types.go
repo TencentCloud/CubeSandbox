@@ -29,6 +29,9 @@ type Request struct {
 type Res struct {
 	RequestID string `json:"requestID,omitempty"`
 	Ret       *Ret   `json:"ret,omitempty"`
+	// ResumeCompleted distinguishes a completed restore with failed follow-up
+	// synchronization from a restore that never completed.
+	ResumeCompleted bool `json:"resume_completed,omitempty"`
 }
 
 type Ret struct {
@@ -826,6 +829,9 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	// CLM auto-pause is conditional on still owning the shared pausing marker.
+	// Explicit API pauses omit this precondition.
+	ExpectedLifecycleState string `json:"expected_lifecycle_state,omitempty"`
 	// Timeout is the optional idle TTL for resume. nil or 0 keeps the stored
 	// timeout; -1 (NeverTimeout) disables expiry; N>0 opens an N-second
 	// window from now. Values below -1 are rejected. Immediate expiry is
