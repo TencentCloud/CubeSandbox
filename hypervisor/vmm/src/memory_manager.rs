@@ -303,6 +303,9 @@ pub struct MemoryManager {
     hugepage_size: Option<u64>,
     prefault: bool,
     thp: bool,
+    /// Cancels the restore hotset prewarm workers when this MemoryManager —
+    /// i.e. the VM whose memory they are warming — goes away.
+    prewarm: Option<crate::hotset::PrewarmGuard>,
     #[cfg(target_arch = "x86_64")]
     sgx_epc_region: Option<SgxEpcRegion>,
     user_provided_zones: bool,
@@ -1306,6 +1309,7 @@ impl MemoryManager {
             #[cfg(target_arch = "aarch64")]
             uefi_flash: None,
             thp: config.thp,
+            prewarm: None,
         };
 
         memory_manager.allocate_address_space()?;
@@ -1338,13 +1342,23 @@ impl MemoryManager {
                     .map_err(Error::Restore)?;
 
             let fast_restore = Self::support_fast_restore_check(config);
+            // Hotset prewarm guard, if a valid profile exists: kick the
+            // workers before the VM is assembled and tie them to its
+            // lifetime. Never fatal.
+            let mut prewarm: Option<crate::hotset::PrewarmGuard> = None;
             let memory_file = if fast_restore {
                 info!("restore non-shared map, speed up restore by share map memory file");
-                Some(
-                    memory_file_target
-                        .open_read()
-                        .map_err(Error::SnapshotOpen)?,
-                )
+                let file = memory_file_target
+                    .open_read()
+                    .map_err(Error::SnapshotOpen)?;
+                prewarm = match url_to_path(source_url) {
+                    Ok(snapshot_dir) => crate::hotset::restore_prewarm(&file, &snapshot_dir),
+                    Err(e) => {
+                        debug!("restore memory hotset: bad snapshot url: {e}");
+                        None
+                    }
+                };
+                Some(file)
             } else {
                 None
             };
@@ -1353,7 +1367,7 @@ impl MemoryManager {
                 .to_state(MEMORY_MANAGER_SNAPSHOT_ID)
                 .map_err(Error::Restore)?;
 
-            let mm = MemoryManager::new(
+            let result = MemoryManager::new(
                 vm,
                 config,
                 Some(prefault),
@@ -1365,7 +1379,23 @@ impl MemoryManager {
                 memory_file,
                 #[cfg(target_arch = "x86_64")]
                 None,
-            )?;
+            );
+
+            let mm = match result {
+                Ok(mm) => {
+                    if let Some(guard) = prewarm.take() {
+                        mm.lock().unwrap().prewarm = Some(guard);
+                    }
+                    mm
+                }
+                // No VM will own the workers; stop them now.
+                Err(e) => {
+                    if let Some(guard) = prewarm.take() {
+                        guard.cancel();
+                    }
+                    return Err(e);
+                }
+            };
 
             if !fast_restore {
                 info!("restore shared map, fall back to slow restore");
@@ -2973,6 +3003,15 @@ impl Aml for MemoryManager {
                 )
                 .append_aml_bytes(bytes);
             }
+        }
+    }
+}
+
+impl Drop for MemoryManager {
+    fn drop(&mut self) {
+        // The restored VM is going away; stop warming its memory volume.
+        if let Some(guard) = self.prewarm.take() {
+            guard.cancel();
         }
     }
 }
