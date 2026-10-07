@@ -52,10 +52,10 @@ func TestNetworkMetricsHandlerExportsPrometheusSnapshot(t *testing.T) {
 	readCubeVSSNATAllocationMetrics = func() ([]cubevs.SNATAllocationMetrics, error) {
 		return []cubevs.SNATAllocationMetrics{
 			{
-				SNATIP:             "203.0.113.2",
-				SessionsInUse:      17,
-				PortsCapacity:      35536,
-				PortsEstimatedFree: 35519,
+				SNATIP:        "203.0.113.2",
+				SessionsInUse: 17,
+				PortsCapacity: 35536,
+				PortsUnused:   35531,
 			},
 		}, nil
 	}
@@ -75,7 +75,8 @@ func TestNetworkMetricsHandlerExportsPrometheusSnapshot(t *testing.T) {
 		`cube_cubebox_network_sandbox_egress_bytes_total{sandbox_ip="192.168.0.10"} 2200`,
 		`cube_cubebox_network_sandbox_snat_alloc_failures_total{sandbox_ip="192.168.0.10"} 4`,
 		`cube_cubebox_network_snat_sessions_in_use{snat_ip="203.0.113.2"} 17`,
-		`cube_cubebox_network_snat_ports_estimated_free{snat_ip="203.0.113.2"} 35519`,
+		`cube_cubebox_network_snat_ports_capacity{snat_ip="203.0.113.2"} 35536`,
+		`cube_cubebox_network_snat_ports_unused{snat_ip="203.0.113.2"} 35531`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output missing %q\nfull body:\n%s", want, body)
@@ -96,9 +97,9 @@ func TestNetworkMetricsHandlerDeduplicatesSNATIP(t *testing.T) {
 	}
 	readCubeVSSNATAllocationMetrics = func() ([]cubevs.SNATAllocationMetrics, error) {
 		snat := cubevs.SNATAllocationMetrics{
-			SNATIP:             "10.12.208.116",
-			PortsCapacity:      35536,
-			PortsEstimatedFree: 35536,
+			SNATIP:        "10.12.208.116",
+			PortsCapacity: 35536,
+			PortsUnused:   35536,
 		}
 		return []cubevs.SNATAllocationMetrics{snat, snat, snat, snat}, nil
 	}

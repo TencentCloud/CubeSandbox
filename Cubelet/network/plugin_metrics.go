@@ -84,12 +84,12 @@ var (
 	)
 	snatPortsCapacity = prometheus.NewDesc(
 		"cube_cubebox_network_snat_ports_capacity",
-		"Total SNAT ports available on this SNAT IP.",
+		"Source-port range size available per destination and protocol on this SNAT IP.",
 		[]string{"snat_ip"}, nil,
 	)
-	snatPortsEstimatedFree = prometheus.NewDesc(
-		"cube_cubebox_network_snat_ports_estimated_free",
-		"Estimated free SNAT ports remaining on this SNAT IP.",
+	snatPortsUnused = prometheus.NewDesc(
+		"cube_cubebox_network_snat_ports_unused",
+		"Current source-port numbers not used by any live session on this SNAT IP.",
 		[]string{"snat_ip"}, nil,
 	)
 )
@@ -154,7 +154,7 @@ func (c *cubeVSNetworkCollector) Describe(ch chan<- *prometheus.Desc) {
 		sandboxSNATAllocFailures,
 		snatSessionsInUse,
 		snatPortsCapacity,
-		snatPortsEstimatedFree,
+		snatPortsUnused,
 	} {
 		ch <- desc
 	}
@@ -209,6 +209,6 @@ func (c *cubeVSNetworkCollector) Collect(ch chan<- prometheus.Metric) {
 		labels := []string{snat.SNATIP}
 		ch <- prometheus.MustNewConstMetric(snatSessionsInUse, prometheus.GaugeValue, float64(snat.SessionsInUse), labels...)
 		ch <- prometheus.MustNewConstMetric(snatPortsCapacity, prometheus.GaugeValue, float64(snat.PortsCapacity), labels...)
-		ch <- prometheus.MustNewConstMetric(snatPortsEstimatedFree, prometheus.GaugeValue, float64(snat.PortsEstimatedFree), labels...)
+		ch <- prometheus.MustNewConstMetric(snatPortsUnused, prometheus.GaugeValue, float64(snat.PortsUnused), labels...)
 	}
 }

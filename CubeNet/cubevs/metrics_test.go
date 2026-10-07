@@ -76,9 +76,9 @@ func TestReadSNATAllocationMetricsUsesConfiguredReader(t *testing.T) {
 	})
 
 	want := []SNATAllocationMetrics{{
-		SNATIP:             "203.0.113.9",
-		PortsCapacity:      35536,
-		PortsEstimatedFree: 35535,
+		SNATIP:        "203.0.113.9",
+		PortsCapacity: 35536,
+		PortsUnused:   35535,
 	}}
 	readSNATAllocationMetricsFn = func() ([]SNATAllocationMetrics, error) {
 		return want, nil
@@ -136,6 +136,30 @@ func TestSumSandboxMetricsValues(t *testing.T) {
 	}
 }
 
+func TestDeleteSandboxTrafficMetricsEntry(t *testing.T) {
+	const sandboxIP = uint32(42)
+	m := &fakeTapMetadataMap{entries: map[uint32]uint32{sandboxIP: 1}}
+
+	if err := deleteSandboxTrafficMetricsEntry(m, sandboxIP); err != nil {
+		t.Fatalf("deleteSandboxTrafficMetricsEntry returned error: %v", err)
+	}
+	if _, exists := m.entries[sandboxIP]; exists {
+		t.Fatal("sandbox metrics entry still exists after delete")
+	}
+	if err := deleteSandboxTrafficMetricsEntry(m, sandboxIP); err != nil {
+		t.Fatalf("repeated delete returned error: %v", err)
+	}
+}
+
+func TestDeleteSandboxTrafficMetricsEntryPropagatesError(t *testing.T) {
+	wantErr := errors.New("delete failed")
+	m := &fakeTapMetadataMap{deleteErr: wantErr}
+
+	if err := deleteSandboxTrafficMetricsEntry(m, 42); !errors.Is(err, wantErr) {
+		t.Fatalf("delete error=%v, want=%v", err, wantErr)
+	}
+}
+
 func TestBuildSNATAllocationMetricsDeduplicatesReplicatedIPSlots(t *testing.T) {
 	ip := ipToUint32(net.ParseIP("203.0.113.9"))
 	values := []snatIP{
@@ -145,20 +169,65 @@ func TestBuildSNATAllocationMetricsDeduplicatesReplicatedIPSlots(t *testing.T) {
 		{Ifindex: 7, IP: ip, MaxPort: 30004},
 	}
 
-	got := buildSNATAllocationMetrics(values, map[uint32]uint64{ip: 17})
+	got := buildSNATAllocationMetrics(values, map[uint32]snatSessionUsage{
+		ip: {
+			sessionsInUse: 17,
+			portsInUse:    5,
+		},
+	})
 	if len(got) != 1 {
 		t.Fatalf("metrics entries=%d, want 1: %#v", len(got), got)
 	}
 
 	want := SNATAllocationMetrics{
-		SNATIP:             "203.0.113.9",
-		Ifindex:            7,
-		SessionsInUse:      17,
-		PortsCapacity:      35536,
-		PortsEstimatedFree: 35519,
+		SNATIP:        "203.0.113.9",
+		Ifindex:       7,
+		SessionsInUse: 17,
+		PortsCapacity: 35536,
+		PortsUnused:   35531,
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("metrics mismatch: got=%#v want=%#v", got[0], want)
+	}
+}
+
+func TestBuildSNATAllocationMetricsDoesNotSubtractTotalSessions(t *testing.T) {
+	ip := ipToUint32(net.ParseIP("203.0.113.9"))
+	values := []snatIP{{Ifindex: 7, IP: ip, MaxPort: 30001}}
+	usage := map[uint32]snatSessionUsage{
+		ip: {
+			sessionsInUse: 40000,
+			portsInUse:    20000,
+		},
+	}
+
+	got := buildSNATAllocationMetrics(values, usage)
+	if len(got) != 1 {
+		t.Fatalf("metrics entries=%d, want 1: %#v", len(got), got)
+	}
+	if got[0].PortsUnused != 15536 {
+		t.Fatalf("unused ports=%d, want 15536", got[0].PortsUnused)
+	}
+}
+
+func TestRecordSNATSessionUsageCountsDistinctPorts(t *testing.T) {
+	const nodeIP = uint32(1)
+	usageByNodeIP := make(map[uint32]snatSessionUsage)
+	portsInUse := make(map[snatPort]struct{})
+	sessions := []natSession{
+		{NodeIP: nodeIP, NodePort: 30000, PacketClass: snatPacketClass},
+		{NodeIP: nodeIP, NodePort: 30001, PacketClass: snatPacketClass},
+		{NodeIP: nodeIP, NodePort: 30000, PacketClass: snatPacketClass},
+		{NodeIP: nodeIP, NodePort: 30002, PacketClass: snatPacketClass},
+		{NodeIP: nodeIP, NodePort: 30001, PacketClass: snatPacketClass},
+	}
+	for i := range sessions {
+		recordSNATSessionUsage(usageByNodeIP, portsInUse, &sessions[i])
+	}
+
+	want := snatSessionUsage{sessionsInUse: 5, portsInUse: 3}
+	if got := usageByNodeIP[nodeIP]; got != want {
+		t.Fatalf("usage=%+v, want=%+v", got, want)
 	}
 }
 
@@ -181,25 +250,27 @@ func TestSNATSessionUsageSnapshotIsImmutable(t *testing.T) {
 	})
 
 	now := time.Now()
-	source := map[uint32]uint64{1: 7}
+	source := map[uint32]snatSessionUsage{
+		1: {sessionsInUse: 7, portsInUse: 3},
+	}
 	publishSNATSessionUsage(source, now)
-	source[1] = 99
+	source[1] = snatSessionUsage{sessionsInUse: 99, portsInUse: 99}
 
 	first, err := readCachedSNATSessionUsage(now)
 	if err != nil {
 		t.Fatalf("readCachedSNATSessionUsage returned error: %v", err)
 	}
-	if first[1] != 7 {
-		t.Fatalf("cached count=%d, want 7", first[1])
+	if first[1] != (snatSessionUsage{sessionsInUse: 7, portsInUse: 3}) {
+		t.Fatalf("cached usage=%+v, want sessions=7 ports=3", first[1])
 	}
 
-	first[1] = 42
+	first[1] = snatSessionUsage{sessionsInUse: 42, portsInUse: 42}
 	second, err := readCachedSNATSessionUsage(now)
 	if err != nil {
 		t.Fatalf("second readCachedSNATSessionUsage returned error: %v", err)
 	}
-	if second[1] != 7 {
-		t.Fatalf("cached count after caller mutation=%d, want 7", second[1])
+	if second[1] != (snatSessionUsage{sessionsInUse: 7, portsInUse: 3}) {
+		t.Fatalf("cached usage after caller mutation=%+v, want sessions=7 ports=3", second[1])
 	}
 }
 
@@ -210,7 +281,9 @@ func TestReadCachedSNATSessionUsageRejectsStaleSnapshot(t *testing.T) {
 	})
 
 	now := time.Now()
-	publishSNATSessionUsage(map[uint32]uint64{1: 7}, now.Add(-snatUsageMaxAge-time.Nanosecond))
+	publishSNATSessionUsage(map[uint32]snatSessionUsage{
+		1: {sessionsInUse: 7, portsInUse: 3},
+	}, now.Add(-snatUsageMaxAge-time.Nanosecond))
 
 	if _, err := readCachedSNATSessionUsage(now); err == nil {
 		t.Fatal("readCachedSNATSessionUsage returned nil error for a stale snapshot")

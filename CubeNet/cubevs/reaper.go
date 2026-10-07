@@ -117,8 +117,18 @@ var (
 )
 
 type snatSessionUsageSnapshot struct {
-	inUseByNodeIP map[uint32]uint64
+	usageByNodeIP map[uint32]snatSessionUsage
 	collectedAt   time.Time
+}
+
+type snatSessionUsage struct {
+	sessionsInUse uint64
+	portsInUse    uint64
+}
+
+type snatPort struct {
+	nodeIP   uint32
+	nodePort uint16
 }
 
 var tcpTimeouts = map[tcpConntrackState]time.Duration{
@@ -282,18 +292,18 @@ func reportCount(count int) {
 	}
 }
 
-func publishSNATSessionUsage(inUseByNodeIP map[uint32]uint64, collectedAt time.Time) {
+func publishSNATSessionUsage(usageByNodeIP map[uint32]snatSessionUsage, collectedAt time.Time) {
 	snapshot := &snatSessionUsageSnapshot{
-		inUseByNodeIP: make(map[uint32]uint64, len(inUseByNodeIP)),
+		usageByNodeIP: make(map[uint32]snatSessionUsage, len(usageByNodeIP)),
 		collectedAt:   collectedAt,
 	}
-	for nodeIP, count := range inUseByNodeIP {
-		snapshot.inUseByNodeIP[nodeIP] = count
+	for nodeIP, usage := range usageByNodeIP {
+		snapshot.usageByNodeIP[nodeIP] = usage
 	}
 	cachedSNATSessionUsage.Store(snapshot)
 }
 
-func readCachedSNATSessionUsage(now time.Time) (map[uint32]uint64, error) {
+func readCachedSNATSessionUsage(now time.Time) (map[uint32]snatSessionUsage, error) {
 	snapshot := cachedSNATSessionUsage.Load()
 	if snapshot == nil {
 		return nil, errors.New("SNAT session usage cache is not initialized")
@@ -302,11 +312,26 @@ func readCachedSNATSessionUsage(now time.Time) (map[uint32]uint64, error) {
 		return nil, fmt.Errorf("SNAT session usage cache is stale: age=%s max_age=%s", age, snatUsageMaxAge)
 	}
 
-	inUseByNodeIP := make(map[uint32]uint64, len(snapshot.inUseByNodeIP))
-	for nodeIP, count := range snapshot.inUseByNodeIP {
-		inUseByNodeIP[nodeIP] = count
+	usageByNodeIP := make(map[uint32]snatSessionUsage, len(snapshot.usageByNodeIP))
+	for nodeIP, usage := range snapshot.usageByNodeIP {
+		usageByNodeIP[nodeIP] = usage
 	}
-	return inUseByNodeIP, nil
+	return usageByNodeIP, nil
+}
+
+func recordSNATSessionUsage(usageByNodeIP map[uint32]snatSessionUsage, portsInUse map[snatPort]struct{}, value *natSession) {
+	if value.PacketClass != snatPacketClass || value.NodeIP == 0 {
+		return
+	}
+
+	usage := usageByNodeIP[value.NodeIP]
+	usage.sessionsInUse++
+	port := snatPort{nodeIP: value.NodeIP, nodePort: value.NodePort}
+	if _, exists := portsInUse[port]; !exists {
+		portsInUse[port] = struct{}{}
+		usage.portsInUse++
+	}
+	usageByNodeIP[value.NodeIP] = usage
 }
 
 func sessionExpired(now uint64, key *sessionKey, sess *natSession) bool {
@@ -432,7 +457,8 @@ func reapSessions() {
 
 	var (
 		count         int
-		inUseByNodeIP = make(map[uint32]uint64)
+		usageByNodeIP = make(map[uint32]snatSessionUsage)
+		portsInUse    = make(map[snatPort]struct{})
 	)
 	err = walkSessionMap(m, func(key *sessionKey, value *natSession) {
 		count++
@@ -455,8 +481,8 @@ func reapSessions() {
 				})
 			}
 		}
-		if sessionPresent && value.PacketClass == snatPacketClass && value.NodeIP != 0 {
-			inUseByNodeIP[value.NodeIP]++
+		if sessionPresent {
+			recordSNATSessionUsage(usageByNodeIP, portsInUse, value)
 		}
 	})
 	if err != nil {
@@ -473,6 +499,6 @@ func reapSessions() {
 		return
 	}
 
-	publishSNATSessionUsage(inUseByNodeIP, time.Now())
+	publishSNATSessionUsage(usageByNodeIP, time.Now())
 	reportCount(count)
 }

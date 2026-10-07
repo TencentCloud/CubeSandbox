@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"slices"
 	"time"
 
@@ -20,6 +21,10 @@ var (
 	readSNATAllocationMetricsFn = readSNATAllocationMetrics
 )
 
+type mapEntryDeleter interface {
+	Delete(key interface{}) error
+}
+
 // SandboxTrafficMetrics is the Prometheus-friendly view of one sandbox's
 // cumulative datapath counters.
 type SandboxTrafficMetrics struct {
@@ -35,13 +40,14 @@ type SandboxTrafficMetrics struct {
 	SNATAllocFailures  uint64
 }
 
-// SNATAllocationMetrics reports one SNAT IP's current allocation state.
+// SNATAllocationMetrics reports one SNAT IP's current session and distinct
+// source-port usage.
 type SNATAllocationMetrics struct {
-	SNATIP             string
-	Ifindex            uint32
-	SessionsInUse      uint64
-	PortsCapacity      uint64
-	PortsEstimatedFree uint64
+	SNATIP        string
+	Ifindex       uint32
+	SessionsInUse uint64
+	PortsCapacity uint64
+	PortsUnused   uint64
 }
 
 // NetworkMetricsSnapshot is the userspace snapshot exported to Prometheus.
@@ -85,6 +91,26 @@ func ReadNetworkMetrics() (*NetworkMetricsSnapshot, error) {
 // eBPF maps and returns a stable userspace snapshot.
 func ReadSandboxTrafficMetrics() ([]SandboxTrafficMetrics, error) {
 	return readSandboxTrafficMetricsFn()
+}
+
+// DeleteSandboxTrafficMetrics removes all per-CPU traffic counters for one
+// sandbox IP. Deleting a missing entry is idempotent.
+func DeleteSandboxTrafficMetrics(ip net.IP) error {
+	m, err := loadPinnedMap(MapNameSandboxMetrics)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	key := ipToUint32(ip)
+	return deleteSandboxTrafficMetricsEntry(m, key)
+}
+
+func deleteSandboxTrafficMetricsEntry(m mapEntryDeleter, sandboxIP uint32) error {
+	if err := m.Delete(&sandboxIP); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("map.Delete failed: %w, name: %s, sandbox_ip: %s", err, MapNameSandboxMetrics, uint32ToIP(sandboxIP))
+	}
+	return nil
 }
 
 // ReadSNATAllocationMetrics reads SNAT allocator state from pinned eBPF maps
@@ -158,7 +184,7 @@ func sumSandboxMetricsValues(values []sandboxMetricsValue) sandboxMetricsValue {
 
 func readSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
 	snatPath := pinPath(mapNameSNATIPList)
-	inUseByNodeIP, err := readCachedSNATSessionUsage(time.Now())
+	usageByNodeIP, err := readCachedSNATSessionUsage(time.Now())
 	if err != nil {
 		log.Printf("cubevs metrics: SNAT allocation prerequisite failed: session_cache=%s err=%v", MapNameEgressSessions, err)
 		return nil, err
@@ -187,11 +213,11 @@ func readSNATAllocationMetrics() ([]SNATAllocationMetrics, error) {
 		values = append(values, value)
 	}
 
-	entries := buildSNATAllocationMetrics(values, inUseByNodeIP)
+	entries := buildSNATAllocationMetrics(values, usageByNodeIP)
 	return entries, nil
 }
 
-func buildSNATAllocationMetrics(values []snatIP, inUseByNodeIP map[uint32]uint64) []SNATAllocationMetrics {
+func buildSNATAllocationMetrics(values []snatIP, usageByNodeIP map[uint32]snatSessionUsage) []SNATAllocationMetrics {
 	capacity := uint64(maxPortEnd - maxPortStart + 1)
 	entries := make([]SNATAllocationMetrics, 0, len(values))
 	seenIPs := make(map[uint32]struct{}, len(values))
@@ -206,18 +232,18 @@ func buildSNATAllocationMetrics(values []snatIP, inUseByNodeIP map[uint32]uint64
 		}
 		seenIPs[value.IP] = struct{}{}
 
-		inUse := inUseByNodeIP[value.IP]
-		free := uint64(0)
-		if inUse < capacity {
-			free = capacity - inUse
+		usage := usageByNodeIP[value.IP]
+		unused := uint64(0)
+		if usage.portsInUse < capacity {
+			unused = capacity - usage.portsInUse
 		}
 
 		entries = append(entries, SNATAllocationMetrics{
-			SNATIP:             uint32ToIP(value.IP).String(),
-			Ifindex:            value.Ifindex,
-			SessionsInUse:      inUse,
-			PortsCapacity:      capacity,
-			PortsEstimatedFree: free,
+			SNATIP:        uint32ToIP(value.IP).String(),
+			Ifindex:       value.Ifindex,
+			SessionsInUse: usage.sessionsInUse,
+			PortsCapacity: capacity,
+			PortsUnused:   unused,
 		})
 	}
 
