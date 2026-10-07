@@ -493,6 +493,30 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		// operators notice drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
 	}
+	// A stale profile from a previous build of this template must never
+	// survive into the published package: remove it whether or not
+	// profiling runs this time. The consumer cannot detect staleness for
+	// external memory volumes, so the producer side owns that guarantee.
+	// snapshotStateDir is the same path helper that builds the source_url
+	// the VMM restores from, and the consumer resolves the profile as
+	// url_to_path(source_url)/hot-pages.json — one spelling on both sides.
+	profilePath := filepath.Join(snapshotStateDir(layout.MetaDir), HotPagesFileName)
+	if err := os.Remove(profilePath); err != nil && !os.IsNotExist(err) {
+		stepLog.Warnf("template profile: remove stale profile failed: %v", err)
+	}
+	// Optional template memory hotset profiling (default off): two
+	// verification restores from the just-built template, /proc pagemap
+	// collection, intersection written next to memory-ranges. Runs after
+	// the catalog write (the verification restores resolve volumes through
+	// it) and before S3 finalization (the profile travels inside the
+	// metadata volume when it is sealed). Fail-open: the template is ready
+	// either way.
+	if templateProfileEnabled() {
+		profileLog := stepLog.WithFields(CubeLog.Fields{"step": "templateProfile"})
+		if err := s.runTemplateProfilePhase(ctx, profileLog, createReq, backend, templateID, profilePath, memoryObject.SizeBytes); err != nil {
+			profileLog.Warnf("template profile phase failed (fail-open, publishing without profile): %v", err)
+		}
+	}
 	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, templateID); err != nil {
 		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
 	}
