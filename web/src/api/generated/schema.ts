@@ -469,6 +469,12 @@ export interface components {
         /** @description v2 log response. */
         SandboxLogsV2Response: {
             logs: components["schemas"]["SandboxLogEntry"][];
+            /** @description True when more matching entries exist beyond the returned page. */
+            hasMore?: boolean;
+            /**
+             * @description Last entry's cursor; pass back as `cursor` to fetch the next page.
+             */
+            nextCursor?: number | null;
         };
         /**
          * @description State of the sandbox (running | paused | pausing | unknown)
@@ -1171,7 +1177,8 @@ export interface operations {
             query?: {
                 cursor?: number;
                 limit?: number;
-                direction?: string;
+                /** @description tail returns the newest entries; mutually exclusive with cursor. */
+                tail?: boolean;
             };
             header?: never;
             path: {
