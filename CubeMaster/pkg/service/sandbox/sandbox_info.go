@@ -64,7 +64,7 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 	}()
 
 	cubeletReq := &cubebox.ListCubeSandboxRequest{}
-	endpoint, rec, ok := checkValidAndGetReq(ctx, req, cubeletReq, rsp)
+	endpoint, locatedHost, rec, ok := checkValidAndGetReq(ctx, req, cubeletReq, rsp)
 	if !ok {
 		return
 	}
@@ -79,7 +79,7 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 	// Pause binding overlays status onto the node view. It does not replace
 	// identity fields. A shimless binding whose node cannot be asked is
 	// rendered from the persisted create spec.
-	if applyPauseBindingToInfo(ctx, req, rsp, rec) {
+	if applyPauseBindingToInfo(ctx, req, rsp, rec, locatedHost) {
 		return
 	}
 	if len(rsp.Data) == 0 {
@@ -107,10 +107,10 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 // rendered from Master. rec is the pause binding read for this sandbox, or
 // nil when there is none; callers must not read it again.
 func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cubeletReq *cubebox.ListCubeSandboxRequest,
-	rsp *types.GetCubeSandboxRes) (endpoint string, rec *pausesnap.Record, ok bool) {
+	rsp *types.GetCubeSandboxRes) (endpoint, locatedHost string, rec *pausesnap.Record, ok bool) {
 	if req.SandboxID == "" && req.HostID == "" {
 		setError(errorcode.ErrorCode_MasterParamsError, rsp)
-		return "", nil, false
+		return "", "", nil, false
 	}
 
 	if req.SandboxID != "" {
@@ -119,27 +119,26 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 	}
 
 	var (
-		n      *node.Node
-		exist  bool
-		hostIP string
+		n     *node.Node
+		exist bool
 	)
 	if req.HostID != "" {
 		n, exist = localcache.GetNode(req.HostID)
 		if !exist {
 			setError(errorcode.ErrorCode_NotFound, rsp)
-			return "", nil, false
+			return "", "", nil, false
 		}
-		hostIP = n.IP
+		locatedHost = n.IP
 	} else {
-		hostIP = cachedSandboxHostIP(ctx, req.SandboxID)
-		if hostIP == "" && rec != nil {
-			hostIP = strings.TrimSpace(rec.NodeIP)
+		locatedHost = cachedSandboxHostIP(ctx, req.SandboxID)
+		if locatedHost == "" && rec != nil {
+			locatedHost = strings.TrimSpace(rec.NodeIP)
 		}
-		if hostIP == "" {
+		if locatedHost == "" {
 			setError(errorcode.ErrorCode_NotFound, rsp)
-			return "", nil, false
+			return "", "", nil, false
 		}
-		n, exist = localcache.GetNodesByIp(hostIP)
+		n, exist = localcache.GetNodesByIp(locatedHost)
 	}
 
 	if !exist || !n.Healthy {
@@ -148,17 +147,17 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 		// the binding's own node. A cache entry that names some other node
 		// (leftover READY after a cross-node resume) stays an error, so a
 		// running sandbox is not reported paused while that node is down.
-		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) && pauseBindingOnHost(rec, hostIP) {
-			return "", rec, true
+		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) && pauseBindingOnHost(rec, locatedHost) {
+			return "", locatedHost, rec, true
 		}
 		if !exist {
 			setError(errorcode.ErrorCode_NotFound, rsp)
 		} else {
 			setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
 		}
-		return "", nil, false
+		return "", "", nil, false
 	}
-	return cubelet.GetCubeletAddr(hostIP), rec, true
+	return cubelet.GetCubeletAddr(locatedHost), locatedHost, rec, true
 }
 
 // cachedSandboxHostIP is where the sandbox was last seen running. It wins
@@ -289,7 +288,7 @@ func getContainerName(label map[string]string) string {
 // of an Info view without replacing its identity. It returns true when it
 // has produced the final response.
 func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
-	rsp *types.GetCubeSandboxRes, rec *pausesnap.Record) bool {
+	rsp *types.GetCubeSandboxRes, rec *pausesnap.Record, locatedHost string) bool {
 	if rec == nil || req == nil || rsp == nil || req.SandboxID == "" {
 		return false
 	}
@@ -315,10 +314,14 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 	if item == nil {
 		// The caller named a host that does not hold this binding. An empty
 		// list from that host means the sandbox is not there; do not invent a
-		// paused sandbox and stamp the caller's host on it. An unpinned Info,
-		// or a pin that matches the binding's node, still synthesizes: that is
-		// how CREATING/FAILED stay visible when the node has not reported a row.
+		// paused sandbox and stamp the caller's host on it. An unpinned Info
+		// synthesizes only when the host we actually asked is the binding's
+		// node. A cache entry that names some other node stays not-found, even
+		// when that node is healthy and returns no row.
 		if req.HostID != "" && !pauseBindingOnHost(rec, req.HostID) {
+			return false
+		}
+		if req.HostID == "" && !pauseBindingOnHost(rec, locatedHost) {
 			return false
 		}
 		spec := loadSandboxSpec(ctx, req.SandboxID)

@@ -272,14 +272,16 @@ func TestApplyPauseBindingsDecidesScannedRowStatus(t *testing.T) {
 		unknown = int32(cubebox.ContainerState_CONTAINER_UNKNOWN)
 	)
 	cases := []struct {
-		name   string
-		status string
-		obs    int32
-		want   int32
-		stale  bool
-		errAnn string
+		name      string
+		status    string
+		obs       int32
+		want      int32
+		stale     bool
+		errAnn    string
+		updatedAt time.Time
 	}{
 		{name: "creating over running", status: pausesnap.StatusCreating, obs: running, want: pausing},
+		{name: "abandoned creating over running", status: pausesnap.StatusCreating, obs: running, want: running, stale: true, updatedAt: time.Now().Add(-pauseCubeletRPCTimeout - time.Second)},
 		{name: "failed over running", status: pausesnap.StatusFailed, obs: running, want: unknown, errAnn: "boom"},
 		{name: "ready over exited", status: pausesnap.StatusReady, obs: exited, want: paused},
 		{name: "ready over running", status: pausesnap.StatusReady, obs: running, want: running, stale: true},
@@ -293,6 +295,7 @@ func TestApplyPauseBindingsDecidesScannedRowStatus(t *testing.T) {
 				SnapshotID: "snap",
 				Status:     tc.status,
 				LastError:  "boom",
+				UpdatedAt:  tc.updatedAt,
 			}}, pauseBindingMerge{})
 			require.Equal(t, tc.want, got[0].Status)
 			require.Equal(t, "demo", got[0].Labels["app"])
@@ -401,7 +404,7 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	})
 
 	infoRsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, infoRsp, rec)
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, infoRsp, rec, rec.NodeIP)
 	require.True(t, filled)
 
 	listed := applyPauseBindings(t.Context(), nil, []*pausesnap.Record{rec}, pauseBindingMerge{

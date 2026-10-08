@@ -39,6 +39,7 @@ func TestApplyPauseBindingToInfoIncludesLifecycleEndAt(t *testing.T) {
 		SandboxID:  sandboxID,
 		SnapshotID: "snap-paused-info",
 		Status:     pausesnap.StatusReady,
+		NodeIP:     "10.0.0.1",
 	}
 
 	for _, tc := range []struct {
@@ -63,7 +64,7 @@ func TestApplyPauseBindingToInfoIncludesLifecycleEndAt(t *testing.T) {
 			}
 			filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{
 				SandboxID: sandboxID,
-			}, rsp, rec)
+			}, rsp, rec, rec.NodeIP)
 
 			require.True(t, filled)
 			require.Len(t, rsp.Data, 1)
@@ -119,7 +120,7 @@ func TestApplyPauseBindingToInfoKeepsTombstoneIdentity(t *testing.T) {
 			Type:        "sandbox",
 		}},
 	}}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID))
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID), "10.0.0.1")
 	require.True(t, filled)
 	got := rsp.Data[0]
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), got.Status)
@@ -147,7 +148,7 @@ func TestApplyPauseBindingToInfoStaleReadyReportsRunning(t *testing.T) {
 		Status:    int32(cubebox.ContainerState_CONTAINER_RUNNING),
 		Labels:    map[string]string{"app": "live"},
 	}}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID))
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID), "10.0.0.1")
 	require.False(t, filled)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_RUNNING), rsp.Data[0].Status)
 	require.Equal(t, "live", rsp.Data[0].Labels["app"])
@@ -162,7 +163,7 @@ func TestApplyPauseBindingToInfoReadyWithoutNodeRecordUsesSpec(t *testing.T) {
 		return specWithIdentity(), nil
 	})
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID))
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID), "10.0.0.1")
 	require.True(t, filled)
 	got := rsp.Data[0]
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), got.Status)
@@ -180,7 +181,7 @@ func TestApplyPauseBindingToInfoReadyWithoutSpecIsMinimal(t *testing.T) {
 	})
 	before := pauseViewWithoutSpecCount("info")
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID))
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID), "10.0.0.1")
 	require.True(t, filled)
 	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	require.Equal(t, sandboxID, rsp.Data[0].SandboxID)
@@ -203,7 +204,7 @@ func TestApplyPauseBindingToInfoCreatingOverRunningKeepsIdentity(t *testing.T) {
 	}}}
 	rec := readyInfoRecord(sandboxID)
 	rec.Status = pausesnap.StatusCreating
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec)
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec, rec.NodeIP)
 	require.True(t, filled)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSING), rsp.Data[0].Status)
 	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
@@ -220,7 +221,7 @@ func TestApplyPauseBindingToInfoCreatingOverPausedKeepsNodeView(t *testing.T) {
 	}}}
 	rec := readyInfoRecord(sandboxID)
 	rec.Status = pausesnap.StatusCreating
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec)
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec, rec.NodeIP)
 	require.False(t, filled)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
 	require.Equal(t, "snap-info", rsp.Data[0].Annotations[constants.CubeAnnotationPauseSnapshotID])
@@ -242,7 +243,7 @@ func TestApplyPauseBindingToInfoFailedOverUnknownKeepsIdentity(t *testing.T) {
 	rec := readyInfoRecord(sandboxID)
 	rec.Status = pausesnap.StatusFailed
 	rec.LastError = "freeze failed"
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec)
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec, rec.NodeIP)
 	require.True(t, filled)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_UNKNOWN), rsp.Data[0].Status)
 	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
@@ -255,7 +256,7 @@ func TestApplyPauseBindingToInfoDeleteFailedWithoutNodeRecordIsPaused(t *testing
 	rec := readyInfoRecord(sandboxID)
 	rec.Status = pausesnap.StatusDeleteFailed
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec)
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, rec, rec.NodeIP)
 	require.True(t, filled)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
 }
@@ -267,7 +268,7 @@ func TestApplyPauseBindingToInfoPinnedWrongHostDoesNotSynthesize(t *testing.T) {
 	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{
 		SandboxID: sandboxID,
 		HostID:    "node-other",
-	}, rsp, rec)
+	}, rsp, rec, "10.9.9.9")
 	require.False(t, filled)
 	require.Empty(t, rsp.Data)
 }
@@ -280,7 +281,7 @@ func TestApplyPauseBindingToInfoPinnedMatchingHostSynthesizes(t *testing.T) {
 	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{
 		SandboxID: sandboxID,
 		HostID:    rec.NodeID,
-	}, rsp, rec)
+	}, rsp, rec, rec.NodeIP)
 	require.True(t, filled)
 	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
 	require.Equal(t, rec.NodeID, rsp.Data[0].HostID)
@@ -294,7 +295,7 @@ func TestApplyPauseBindingToInfoDoesNotRequireProxyMap(t *testing.T) {
 		return nil, false
 	})
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID))
+	filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, rsp, readyInfoRecord(sandboxID), "10.0.0.1")
 	require.True(t, filled)
 	require.Equal(t, "10.0.0.1", rsp.Data[0].HostIP)
 	require.Equal(t, "node-a", rsp.Data[0].HostID)
@@ -316,9 +317,10 @@ func TestCheckValidAndGetReqFallsBackToPauseBinding(t *testing.T) {
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP + ":50051" })
 
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	endpoint, rec, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
+	endpoint, locatedHost, rec, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
 	require.True(t, ok)
 	require.Equal(t, "10.0.0.1:50051", endpoint)
+	require.Equal(t, "10.0.0.1", locatedHost)
 	require.Equal(t, sandboxID, rec.SandboxID)
 }
 
@@ -340,9 +342,10 @@ func TestCheckValidAndGetReqPrefersCacheOverBinding(t *testing.T) {
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP + ":50051" })
 
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	endpoint, _, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
+	endpoint, locatedHost, _, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
 	require.True(t, ok)
 	require.Equal(t, "10.2.0.2:50051", endpoint)
+	require.Equal(t, "10.2.0.2", locatedHost)
 }
 
 func TestCheckValidAndGetReqServesShimlessPauseWhenNodeUnhealthy(t *testing.T) {
@@ -360,9 +363,10 @@ func TestCheckValidAndGetReqServesShimlessPauseWhenNodeUnhealthy(t *testing.T) {
 	})
 
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	endpoint, rec, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
+	endpoint, locatedHost, rec, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
 	require.True(t, ok)
 	require.Empty(t, endpoint)
+	require.Equal(t, "10.0.0.1", locatedHost)
 	require.NotNil(t, rec)
 }
 
@@ -383,7 +387,7 @@ func TestCheckValidAndGetReqKeepsUnhealthyErrorOtherwise(t *testing.T) {
 	})
 
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	_, _, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
+	_, _, _, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
 	require.False(t, ok)
 	require.Equal(t, int(errorcode.ErrorCode_CubeletUnHealthy), rsp.Ret.RetCode)
 
@@ -391,7 +395,7 @@ func TestCheckValidAndGetReqKeepsUnhealthyErrorOtherwise(t *testing.T) {
 	patches.ApplyFunc(localcache.GetNode, func(string) (*node.Node, bool) {
 		return &node.Node{IP: "10.0.0.1", Healthy: false}, true
 	})
-	_, _, ok = checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{
+	_, _, _, ok = checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{
 		SandboxID: sandboxID,
 		HostID:    "node-a",
 	}, &cubebox.ListCubeSandboxRequest{}, rsp)
@@ -482,4 +486,89 @@ func TestSandboxInfoCubeletErrorStillFails(t *testing.T) {
 	ctx := CubeLog.WithRequestTrace(context.Background(), &CubeLog.RequestTrace{RequestID: "req-rpc"})
 	rsp := SandboxInfo(ctx, &types.GetCubeSandboxReq{RequestID: "req-rpc", SandboxID: sandboxID})
 	require.Equal(t, int(errorcode.ErrorCode_ReqCubeAPIFailed), rsp.Ret.RetCode)
+}
+
+func TestApplyPauseBindingToInfoUnpinnedOtherHostDoesNotSynthesize(t *testing.T) {
+	const sandboxID = "sb-other-host"
+	for _, status := range []string{pausesnap.StatusReady, pausesnap.StatusCreating, pausesnap.StatusFailed} {
+		t.Run(status, func(t *testing.T) {
+			rec := readyInfoRecord(sandboxID)
+			rec.Status = status
+			rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
+			filled := applyPauseBindingToInfo(context.Background(), &types.GetCubeSandboxReq{
+				SandboxID: sandboxID,
+			}, rsp, rec, "10.0.0.8")
+			require.False(t, filled)
+			require.Empty(t, rsp.Data)
+		})
+	}
+}
+
+func TestSandboxInfoHealthyEmptyListOnBindingNodeSynthesizes(t *testing.T) {
+	const sandboxID = "sb-info-empty-bind"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"})
+	t.Cleanup(func() { localcache.DeleteSandboxCache(sandboxID) })
+	var listed int
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
+		return nil, false
+	})
+	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
+		return readyInfoRecord(sandboxID), nil
+	})
+	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
+		return &node.Node{IP: ip, InsID: "node-a", Healthy: true}, true
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP + ":50051" })
+	patches.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		return specWithIdentity(), nil
+	})
+	patches.ApplyFunc(cubelet.List, func(context.Context, string, *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
+		listed++
+		return &cubebox.ListCubeSandboxResponse{}, nil
+	})
+
+	ctx := CubeLog.WithRequestTrace(context.Background(), &CubeLog.RequestTrace{RequestID: "req-empty-bind"})
+	rsp := SandboxInfo(ctx, &types.GetCubeSandboxReq{RequestID: "req-empty-bind", SandboxID: sandboxID})
+	require.Equal(t, 1, listed)
+	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	require.Equal(t, int32(cubebox.ContainerState_CONTAINER_PAUSED), rsp.Data[0].Status)
+	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
+	require.Equal(t, "10.0.0.1", rsp.Data[0].HostIP)
+}
+
+func TestSandboxInfoHealthyEmptyListOnOtherNodeDoesNotSynthesize(t *testing.T) {
+	const sandboxID = "sb-info-empty-other"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.8"})
+	t.Cleanup(func() { localcache.DeleteSandboxCache(sandboxID) })
+	var listed int
+	var specs int
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
+		return &basetypes.SandboxProxyMap{HostIP: "10.0.0.8", SandboxIP: "192.168.0.8"}, true
+	})
+	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
+		return readyInfoRecord(sandboxID), nil
+	})
+	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
+		return &node.Node{IP: ip, InsID: "node-b", Healthy: true}, true
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP + ":50051" })
+	patches.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		specs++
+		return specWithIdentity(), nil
+	})
+	patches.ApplyFunc(cubelet.List, func(context.Context, string, *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
+		listed++
+		return &cubebox.ListCubeSandboxResponse{}, nil
+	})
+
+	ctx := CubeLog.WithRequestTrace(context.Background(), &CubeLog.RequestTrace{RequestID: "req-empty-other"})
+	rsp := SandboxInfo(ctx, &types.GetCubeSandboxReq{RequestID: "req-empty-other", SandboxID: sandboxID})
+	require.Equal(t, 1, listed)
+	require.Zero(t, specs)
+	require.Equal(t, int(errorcode.ErrorCode_NotFoundAtCubelet), rsp.Ret.RetCode)
+	require.Empty(t, rsp.Data)
 }

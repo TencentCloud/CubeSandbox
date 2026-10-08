@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"testing"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -78,6 +79,15 @@ func TestDecidePauseViewTable(t *testing.T) {
 		})
 	}
 	require.Equal(t, keep, decidePauseView(nil, running, true))
+
+	fresh := time.Now()
+	abandoned := time.Now().Add(-pauseCubeletRPCTimeout - time.Second)
+	require.Equal(t, asPause, decidePauseView(&pausesnap.Record{
+		Status: pausesnap.StatusCreating, UpdatedAt: fresh,
+	}, running, true))
+	require.Equal(t, stale, decidePauseView(&pausesnap.Record{
+		Status: pausesnap.StatusCreating, UpdatedAt: abandoned, LastError: "boom", SnapshotID: "snap",
+	}, running, true))
 }
 
 func stateName(has bool, observed int32) string {

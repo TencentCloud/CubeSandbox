@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -48,6 +49,12 @@ func decidePauseView(rec *pausesnap.Record, observed int32, hasObserved bool) pa
 		if nodePausing {
 			return pauseView{}
 		}
+		// CREATING plus RUNNING is the in-flight pause. A binding older than
+		// the pause RPC budget was left behind (Master died between Begin and
+		// Complete/MarkFailed). Keep the node view, same as a stale READY.
+		if nodeRunning && creatingBindingAbandoned(rec) {
+			return pauseView{stale: true}
+		}
 		return pauseView{override: true, status: pausing}
 	case pausesnap.StatusReady:
 		if nodeRunning {
@@ -67,6 +74,16 @@ func decidePauseView(rec *pausesnap.Record, observed int32, hasObserved bool) pa
 	default:
 		return pauseView{}
 	}
+}
+
+// creatingBindingAbandoned reports a CREATING binding left behind after the
+// pause RPC budget. A fresh UpdatedAt is an in-flight pause. A zero UpdatedAt
+// is not treated as abandoned.
+func creatingBindingAbandoned(rec *pausesnap.Record) bool {
+	if rec == nil || rec.UpdatedAt.IsZero() {
+		return false
+	}
+	return time.Since(rec.UpdatedAt) > pauseCubeletRPCTimeout
 }
 
 func pauseFailureMessage(rec *pausesnap.Record) string {
@@ -259,8 +276,8 @@ func recordStalePauseBinding(ctx context.Context, path, sandboxID string, rec *p
 		return
 	}
 	pauseBindingStaleTotal.WithLabelValues(path).Inc()
-	log.G(ctx).Debugf("stale pause binding: sandbox=%s snapshot=%s node=%s reported running",
-		sandboxID, rec.SnapshotID, rec.NodeIP)
+	log.G(ctx).Debugf("stale pause binding: sandbox=%s snapshot=%s node=%s status=%s reported running",
+		sandboxID, rec.SnapshotID, rec.NodeIP, rec.Status)
 }
 
 var pauseViewWithoutSpecTotal = promauto.NewCounterVec(prometheus.CounterOpts{
