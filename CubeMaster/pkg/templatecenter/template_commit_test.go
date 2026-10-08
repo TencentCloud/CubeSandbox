@@ -197,12 +197,16 @@ func TestPrepareTemplateCommitRequestLoadsSandboxSpec(t *testing.T) {
 func TestPrepareTemplateCommitRequestUsesExplicitOverride(t *testing.T) {
 	origLoad := loadSandboxCreateRequestFn
 	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadCalls := 0
 	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
-		t.Fatal("sandbox request resolver should not be called for an explicit override")
-		return nil, nil
+		loadCalls++
+		return &types.CreateCubeSandboxReq{Annotations: map[string]string{}}, nil
 	}
 
-	override := &types.CreateCubeSandboxReq{InstanceType: "custom"}
+	override := &types.CreateCubeSandboxReq{
+		InstanceType: "custom",
+		Annotations:  map[string]string{},
+	}
 	got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new", override)
 	if err != nil {
 		t.Fatalf("prepareTemplateCommitRequest: %v", err)
@@ -213,6 +217,49 @@ func TestPrepareTemplateCommitRequestUsesExplicitOverride(t *testing.T) {
 	if got == override {
 		t.Fatal("explicit override should be cloned before normalization")
 	}
+	if loadCalls != 1 {
+		t.Fatalf("sandbox request resolver calls=%d, want 1", loadCalls)
+	}
+}
+
+func TestPrepareTemplateCommitRequestInheritsTemplateManagedQos(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+
+	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*types.CreateCubeSandboxReq, error) {
+		if sandboxID != "sb-1" {
+			t.Fatalf("sandboxID=%q", sandboxID)
+		}
+		return &types.CreateCubeSandboxReq{
+			Annotations: map[string]string{
+				constants.CubeAnnotationsNetWork: "network-qos",
+				constants.CubeAnnotationsBlkQos:  "block-qos",
+				constants.CubeAnnotationsFSQos:   "fs-qos",
+			},
+		}, nil
+	}
+
+	// This models the sanitized create_request returned by the public API:
+	// template-managed network and block I/O annotations are absent, while the
+	// legacy caller-managed filesystem annotation remains visible and mutable.
+	override := &types.CreateCubeSandboxReq{
+		InstanceType: "custom",
+		Annotations: map[string]string{
+			constants.CubeAnnotationsFSQos: "override-fs-qos",
+		},
+	}
+	got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new", override)
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest: %v", err)
+	}
+	if got.Annotations[constants.CubeAnnotationsNetWork] != "network-qos" ||
+		got.Annotations[constants.CubeAnnotationsBlkQos] != "block-qos" ||
+		got.Annotations[constants.CubeAnnotationsFSQos] != "override-fs-qos" {
+		t.Fatalf("commit annotations=%v, want inherited template-managed qos and caller-managed filesystem qos", got.Annotations)
+	}
+	if got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "tpl-new" {
+		t.Fatalf("template annotation=%q, want tpl-new", got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
 }
 
 func TestPrepareTemplateCommitRequestPropagatesResolverError(t *testing.T) {
@@ -222,8 +269,29 @@ func TestPrepareTemplateCommitRequestPropagatesResolverError(t *testing.T) {
 		return nil, fmt.Errorf("base template lookup failed: %w", ErrTemplateNotFound)
 	}
 
-	_, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-legacy", "tpl-new", nil)
-	if !errors.Is(err, ErrTemplateNotFound) {
-		t.Fatalf("expected ErrTemplateNotFound, got %v", err)
+	for _, override := range []*types.CreateCubeSandboxReq{nil, {InstanceType: "custom"}} {
+		_, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-legacy", "tpl-new", override)
+		if !errors.Is(err, ErrTemplateNotFound) {
+			t.Fatalf("override=%v: expected ErrTemplateNotFound, got %v", override != nil, err)
+		}
+	}
+}
+
+func TestPrepareTemplateCommitRequestRejectsMissingSandboxSpec(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		return nil, nil
+	}
+
+	_, err := prepareTemplateCommitRequest(
+		context.Background(),
+		"req-1",
+		"sb-missing",
+		"tpl-new",
+		&types.CreateCubeSandboxReq{InstanceType: "custom"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "sandbox create request is empty") {
+		t.Fatalf("expected missing sandbox spec error, got %v", err)
 	}
 }
