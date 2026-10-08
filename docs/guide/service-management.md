@@ -265,8 +265,8 @@ CubeSandbox has multiple log sources, including component-specific in-container 
 | Cubelet | `/data/log/Cubelet/` | `Cubelet-req.log` (requests)<br>`Cubelet-stat.log` (metrics/stats) |
 | CubeMaster | `/data/log/CubeMaster/` | `cubemaster-req.log` |
 | CubeAPI | `/data/log/CubeAPI/` | `cube-api-YYYY-MM-DD.log` (daily-rotated) |
-| CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`, `cube-shim-stat.log` |
-| Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log` (one entry per sandbox creation) |
+| CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`, `cube-shim-stat.log` (on one-click hosts these rotate hourly; older entries live in `*.log.N` / `*.log.N.gz`) |
+| Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log` (one entry per sandbox creation; same hourly rotation on one-click hosts) |
 | cube-proxy | `/data/log/cube-proxy/` | `error.log`, `access.log` (see below) |
 
 Common commands:
@@ -294,12 +294,17 @@ control thread, not by deferred logger initialization or a vCPU/API thread.
 The host-side policy should run hourly and use `rename` + `create`; do not use
 `copytruncate`.
 
-For example, install the following as `/etc/logrotate.d/cubesandbox` and make
-sure the host invokes `logrotate` hourly:
+One-click install ships this policy as
+`/etc/cube-sandbox/logrotate.d/cubesandbox` (outside `/etc/logrotate.d`, so
+the distro daily logrotate does not also process it) and enables the hourly
+`cube-sandbox-logrotate.timer` (set `ONE_CLICK_ENABLE_LOGROTATE=0` to skip) (it also installs the `logrotate` package when
+a supported package manager is available). Kubernetes / Helm chart
+deployments do not install host logrotate today — configure the same policy
+on each compute node, or install the following manually and invoke it from
+an hourly timer (do not drop it under `/etc/logrotate.d`):
 
 ```text
-/data/log/CubeVmm/vmm.log
-/data/log/CubeShim/*.log {
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
     hourly
     rotate 24
     missingok
@@ -310,19 +315,31 @@ sure the host invokes `logrotate` hourly:
 }
 ```
 
-`rotate 24` retains 24 hourly files; adjust it to the required retention period.
-`delaycompress` keeps the newest rotated file uncompressed for one cycle because
-a writer may still use the old descriptor until its next scheduled reopen.
-CubeShim's internal event runs every 30 minutes, while the VMM control thread
-sends a reopen control event every hour. No `postrotate` signal or service
-restart is required. This policy guarantees bounded retention on the host,
-but does not promise immediate handling of an arbitrary manual rotation; it
-does not support `copytruncate`.
+`rotate 24` retains 24 hourly files. CubeMaster's sandbox-log API
+(`GET /sandboxes/{id}/logs` / cubemaster `/sandbox/logs`) only reads the live
+`/data/log/CubeShim/cube-shim-req.log` path, so once this policy is active that
+API surface covers roughly the current hourly window; older entries remain on
+disk as `cube-shim-req.log.N` / `.gz` but are not walked by that reader
+(tracked in https://github.com/TencentCloud/CubeSandbox/issues/1896).
+One-click reinstalls overwrite
+`/etc/cube-sandbox/logrotate.d/cubesandbox` on every `install.sh` run, so
+hand-edits there do not survive an upgrade. To keep a custom retention period
+or `create` owner/group, point `CUBE_SANDBOX_LOGROTATE_POLICY_SRC` at a
+locally maintained policy file (or install the stanza above by hand outside
+one-click). `delaycompress` keeps the newest rotated file uncompressed for one
+cycle because a writer may still use the old descriptor until its next
+scheduled reopen. CubeShim's internal event runs every 30 minutes, while the
+VMM control thread sends a reopen control event every hour. No `postrotate`
+signal or service restart is required. This policy guarantees bounded
+retention on the host, but does not promise immediate handling of an arbitrary
+manual rotation; it does not support `copytruncate`.
 
-The example uses `root root` because the bundled one-click systemd services run as
-root. If CubeShim or the VMM run under another account, set the `create` owner and
-group to that account; otherwise a newly-created file may not be reopenable.
-The `0640` mode in this example applies to files created by `logrotate`; the
+The shipped example uses `root root` because the bundled one-click systemd
+services run as root. If CubeShim or the VMM run under another account (manual
+or Kubernetes/Helm hosts), set the `create` owner and group to that account;
+otherwise a newly-created file may not be reopenable. On one-click, persist
+that change via `CUBE_SANDBOX_LOGROTATE_POLICY_SRC` rather than editing the
+installed file. The `0640` mode applies to files created by `logrotate`; the
 CubeShim and VMM writers themselves continue to use the process umask.
 
 ### `journalctl` startup logs

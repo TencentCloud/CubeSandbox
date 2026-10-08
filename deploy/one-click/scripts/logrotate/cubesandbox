@@ -1,0 +1,15 @@
+# Installed by deploy/one-click (install-logrotate.sh) at
+# /etc/cube-sandbox/logrotate.d/cubesandbox (outside /etc/logrotate.d so the
+# distro daily logrotate does not also process this stanza).
+# CubeShim and CubeVMM keep log files open; rotation must use rename+create
+# (never copytruncate). Writers reopen on a schedule after the pathname is
+# replaced. See docs/guide/service-management.md.
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
+    hourly
+    rotate 24
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}

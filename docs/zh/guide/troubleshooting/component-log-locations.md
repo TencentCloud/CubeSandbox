@@ -52,6 +52,8 @@ Cubelet 默认日志级别较低（`warn`），常规运行时不会打印详细
 | CubeShim | 业务请求日志（含 guest kernel 输出） | `/data/log/CubeShim/cube-shim-req.log` | `tail -F` |
 | CubeShim | 统计日志 | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM 创建过程日志 | `/data/log/CubeVmm/vmm.log` | `tail -F` |
+
+> 一键部署宿主机上 CubeShim/VMM 日志按小时轮转；更早内容在 `*.log.N` / `*.log.N.gz`（可用 `zcat` / 对 glob 做 `grep`）。
 | cube-proxy | 访问/错误日志 | `/data/log/cube-proxy/{access,error}.log` | `tail -F`（见下文） |
 | 沙箱容器 | init 进程 stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}`（Cubelet 挂载命名空间内） | `cubecli logs <sandbox-id>`（见下文） |
 | 模板构建 | 构建容器 stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}`（宿主机文件系统） | `cubecli logs --tpl <template-id>` |
@@ -102,7 +104,7 @@ cubecli logs --tpl --all --stderr <template-id>
 CubeShim 在启动虚拟机时，通过内核参数 `console=hvc0` 把 guest 内核的控制台输出接管过来，和沙箱容器 init 进程日志一样，统一写进 CubeShim 的请求日志文件：
 
 ```bash
-LC_ALL=C sudo grep -a -E "(<sandbox-id 或 InstanceId>|Linux version)" /data/log/CubeShim/cube-shim-req.log
+LC_ALL=C sudo grep -a -E "(<sandbox-id 或 InstanceId>|Linux version)" /data/log/CubeShim/cube-shim-req.log*
 ```
 
 `cube-shim-req.log` 是逐行 JSON，日志本体在 `LogContent` 字段里。典型的 guest 内核启动记录形如：

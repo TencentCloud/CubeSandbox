@@ -770,6 +770,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
+  "${PACKAGE_ROOT}/scripts/logrotate" \
   "${PACKAGE_ROOT}/cube-egress" \
   "${PACKAGE_ROOT}/terraform/tencentcloud"
 
@@ -916,6 +917,8 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${PACKAGE_ROOT}/scripts/common
 # it must ship in the release bundle so the install layout exposes
 # ${INSTALL_PREFIX}/scripts/cube-diag/collect-logs.sh.
 copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
+# CubeShim/CubeVMM host logrotate policy + hourly timer (see #1290 / service-management.md).
+copy_dir_contents "${SCRIPT_DIR}/scripts/logrotate" "${PACKAGE_ROOT}/scripts/logrotate"
 # CubeEgress's host-side iptables/route init script. Lives in the
 # CubeEgress repo subtree (CubeEgress/scripts/) — copy a single file
 # rather than the whole dir so we don't pull in the legacy
@@ -986,6 +989,7 @@ find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/logrotate" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"

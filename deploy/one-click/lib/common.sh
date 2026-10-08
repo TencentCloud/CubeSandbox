@@ -513,6 +513,7 @@ load_env_file() {
 # default (documented caveat in the one-click README).
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
+  ONE_CLICK_ENABLE_LOGROTATE
   CUBE_PVM_ENABLE
 )
 

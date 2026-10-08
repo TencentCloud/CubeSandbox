@@ -52,6 +52,8 @@ Cubelet defaults to a fairly quiet `warn` log level, so normal operation won't p
 | CubeShim | Business request log (includes guest kernel output) | `/data/log/CubeShim/cube-shim-req.log` | `tail -F` |
 | CubeShim | Stats log | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM creation log | `/data/log/CubeVmm/vmm.log` | `tail -F` |
+
+> On one-click hosts CubeShim/VMM logs rotate hourly; older entries live in `*.log.N` / `*.log.N.gz` (use `zcat` / `grep` on the glob).
 | cube-proxy | Access/error logs | `/data/log/cube-proxy/{access,error}.log` | `tail -F` (see below) |
 | Sandbox container | init process stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}` (inside Cubelet's mount namespace) | `cubecli logs <sandbox-id>` (see below) |
 | Template build | Build container stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}` (host filesystem) | `cubecli logs --tpl <template-id>` |
@@ -102,7 +104,7 @@ Log files are removed together with the sandbox once it's deleted, and log forwa
 When CubeShim boots a VM, it takes over the guest kernel's console output via the `console=hvc0` kernel parameter, and — just like the sandbox's init-process output — forwards it into the same CubeShim request log file:
 
 ```bash
-LC_ALL=C sudo grep -a -E "(<sandbox-id or InstanceId>|Linux version)" /data/log/CubeShim/cube-shim-req.log
+LC_ALL=C sudo grep -a -E "(<sandbox-id or InstanceId>|Linux version)" /data/log/CubeShim/cube-shim-req.log*
 ```
 
 `cube-shim-req.log` is newline-delimited JSON; the actual log text lives in the `LogContent` field. A typical guest kernel boot record looks like:

@@ -1583,6 +1583,50 @@ install_systemd_units() {
   "${install_units_script}"
 }
 
+# Ship the CubeShim/CubeVMM logrotate policy from #1292 plus an hourly timer.
+# Writers reopen on a schedule after rename+create; without host rotation the
+# shared /data/log/CubeShim and CubeVmm files grow without bound.
+install_cubeshim_logrotate() {
+  # Default-on with an explicit off switch (ONE_CLICK_ENABLE_LOGROTATE).
+  if [[ "${ONE_CLICK_ENABLE_LOGROTATE:-1}" != "1" ]]; then
+    log "ONE_CLICK_ENABLE_LOGROTATE=0; skipping CubeShim/VMM log rotation"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now cube-sandbox-logrotate.timer >/dev/null 2>&1 || true
+      systemctl reset-failed cube-sandbox-logrotate.service >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+  local install_script="${INSTALL_PREFIX}/scripts/logrotate/install-logrotate.sh"
+  if [[ ! -f "${install_script}" ]]; then
+    log "WARN: logrotate installer missing (${install_script}); skipping CubeShim/VMM log rotation"
+    return 0
+  fi
+  # Soft: log hygiene must not leave units installed but the role target down.
+  bash "${install_script}" \
+    || log "WARN: cube-shim/vmm log rotation was not installed; continuing without it"
+}
+
+# Re-print at end of install so a soft-failed / air-gapped logrotate setup cannot
+# hide behind earlier WARN lines in a long install log (#1290).
+warn_inactive_cubeshim_logrotate() {
+  if [[ "${ONE_CLICK_ENABLE_LOGROTATE:-1}" != "1" ]]; then
+    return 0
+  fi
+  local policy="${CUBE_SANDBOX_LOGROTATE_POLICY_DST:-/etc/cube-sandbox/logrotate.d/cubesandbox}"
+  if [[ ! -f "${policy}" ]]; then
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-enabled --quiet cube-sandbox-logrotate.timer 2>/dev/null; then
+    return 0
+  fi
+  log "WARN: ${policy} is installed but cube-sandbox-logrotate.timer is not enabled"
+  log "      install the logrotate package, then re-run:"
+  log "      bash ${INSTALL_PREFIX}/scripts/logrotate/install-logrotate.sh"
+}
+
 start_systemd_target() {
   local target
   target="$(systemd_target_for_role "${DEPLOY_ROLE}")"
@@ -1802,6 +1846,13 @@ ONE_CLICK_ENABLE_S3LVOL="${ONE_CLICK_ENABLE_S3LVOL:-0}"
 case "${ONE_CLICK_ENABLE_S3LVOL}" in
   0|1) ;;
   *) die "ONE_CLICK_ENABLE_S3LVOL must be 0 or 1 (got: '${ONE_CLICK_ENABLE_S3LVOL}')" ;;
+esac
+# CubeShim/VMM host logrotate: default on (#1290); set 0 to keep a hand-managed
+# /etc/logrotate.d policy or skip rotation entirely (reinstall will not re-enable).
+ONE_CLICK_ENABLE_LOGROTATE="${ONE_CLICK_ENABLE_LOGROTATE:-1}"
+case "${ONE_CLICK_ENABLE_LOGROTATE}" in
+  0|1) ;;
+  *) die "ONE_CLICK_ENABLE_LOGROTATE must be 0 or 1 (got: '${ONE_CLICK_ENABLE_LOGROTATE}')" ;;
 esac
 RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
 RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
@@ -2155,6 +2206,7 @@ fi
 # rcow_common.sh) so the systemd unit picks them up via EnvironmentFile
 # without re-deriving them, and so `down.sh` / upgrade knows the intent.
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_LOGROTATE" "${ONE_CLICK_ENABLE_LOGROTATE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_STORE_BACKEND" "${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
@@ -2230,6 +2282,7 @@ restore_selinux_contexts
 # Persist the L7 skb->mark config before the units that consume it start.
 write_l7_marks_conf
 install_systemd_units
+install_cubeshim_logrotate
 mask_external_dep_services
 check_runtime_file_paths_not_directories
 start_systemd_target
@@ -2240,8 +2293,10 @@ fi
 
 log "install complete (role=${DEPLOY_ROLE})"
 print_path_hint
-# Re-print the missing-S3 warning last so an unconfigured compute node ends on
-# the remediation path (no-op for control role and for compute nodes with S3).
+# Soft-fail logrotate paths only WARN mid-install; surface again here.
+# Keep this above the S3 warning so an unconfigured compute node still ends on
+# the S3 remediation path (warn_compute_s3_missing must stay last).
+warn_inactive_cubeshim_logrotate
 warn_compute_s3_missing
 
 # And the s3lvol outcome last of all, because it is the one thing here that can

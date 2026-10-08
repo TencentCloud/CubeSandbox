@@ -265,8 +265,8 @@ CubeSandbox 有多种日志来源，其中也包括各组件自己的容器内�
 | Cubelet | `/data/log/Cubelet/` | `Cubelet-req.log`（请求）<br>`Cubelet-stat.log`（指标/统计）|
 | CubeMaster | `/data/log/CubeMaster/` | `cubemaster-req.log` |
 | CubeAPI | `/data/log/CubeAPI/` | `cube-api-YYYY-MM-DD.log`（按天滚动） |
-| CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`、`cube-shim-stat.log` |
-| Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log`（每次创建沙箱都会写 VMM 日志）|
+| CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`、`cube-shim-stat.log`（一键部署按小时轮转；更早内容在 `*.log.N` / `*.log.N.gz`）|
+| Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log`（每次创建沙箱都会写 VMM 日志；一键部署同样按小时轮转）|
 | cube-proxy | `/data/log/cube-proxy/` | `error.log`、`access.log`（见下文）|
 
 常用命令：
@@ -286,11 +286,10 @@ sudo tail -200 /data/log/CubeVmm/vmm.log
 
 CubeShim 和 VMM 运行期间会保持日志文件打开。CubeShim 通过内部每 30 分钟轮转事件 reopen。VMM 控制线程自己持有 monotonic `timerfd`，每小时发出已有的 `LOG_CTRL_REOPEN` 控制记录。reopen 由固定周期驱动：宿主机执行“`rename` + `create`”后，会在下一次计划中的 reopen 时切换到新文件，而不是在任意一次写入时立即检测。该定时器由 VMM 控制线程持有，不依赖延迟 logger 初始化，也不会由 vCPU/API 线程创建。因此宿主机侧仍应按小时执行轮转，并使用“`rename` + `create`”方式，不要使用 `copytruncate`。
 
-例如，将下面内容保存为 `/etc/logrotate.d/cubesandbox`，并确保宿主机每小时执行一次 `logrotate`：
+一键部署会安装 `/etc/cube-sandbox/logrotate.d/cubesandbox`（放在 `/etc/logrotate.d` 之外，避免发行版每日 logrotate 再次处理），并启用每小时执行的 `cube-sandbox-logrotate.timer`（设 `ONE_CLICK_ENABLE_LOGROTATE=0` 可跳过）（若缺少 `logrotate` 包，会在有 apt/dnf/yum 时尝试安装）。Kubernetes / Helm chart 部署目前不会在宿主机安装 logrotate —— 请在每个计算节点配置相同策略，或手动安装如下内容，并用小时级 timer 调用（不要放进 `/etc/logrotate.d`）：
 
 ```text
-/data/log/CubeVmm/vmm.log
-/data/log/CubeShim/*.log {
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
     hourly
     rotate 24
     missingok
@@ -301,10 +300,9 @@ CubeShim 和 VMM 运行期间会保持日志文件打开。CubeShim 通过内部
 }
 ```
 
-`rotate 24` 表示保留 24 个小时文件，可按实际保留周期调整。`delaycompress` 会将最新的轮转文件延迟一个周期压缩，因为 writer 在下一次计划中的 reopen 之前可能仍使用旧 fd。CubeShim 每 30 分钟触发一次内部事件，VMM 控制线程每小时发送一次 reopen 控制事件。不需要 `postrotate` 信号或重启服务；该策略保证宿主机侧 retention 有界，但不承诺对任意手工轮转立即响应，也不支持 `copytruncate`。
+`rotate 24` 表示保留 24 个小时文件。CubeMaster 的沙箱日志接口（`GET /sandboxes/{id}/logs` / cubemaster `/sandbox/logs`）只读当前活跃的 `/data/log/CubeShim/cube-shim-req.log`，因此启用本策略后该接口大约只能看到当前这一小时窗口；更早的内容仍在磁盘上的 `cube-shim-req.log.N` / `.gz`，但该 reader 不会遍历它们（跟踪：https://github.com/TencentCloud/CubeSandbox/issues/1896）。一键部署每次跑 `install.sh` 都会覆盖 `/etc/cube-sandbox/logrotate.d/cubesandbox`，因此直接改该文件无法在升级后保留。若要自定义保留周期或 `create` 的 owner/group，请把 `CUBE_SANDBOX_LOGROTATE_POLICY_SRC` 指向本地维护的策略文件（或不走一键、按上面片段手工安装）。`delaycompress` 会将最新的轮转文件延迟一个周期压缩，因为 writer 在下一次计划中的 reopen 之前可能仍使用旧 fd。CubeShim 每 30 分钟触发一次内部事件，VMM 控制线程每小时发送一次 reopen 控制事件。不需要 `postrotate` 信号或重启服务；该策略保证宿主机侧 retention 有界，但不承诺对任意手工轮转立即响应，也不支持 `copytruncate`。
 
-示例使用 `root root`，因为随附的一键部署 systemd 服务以 root 运行。如果 CubeShim 或 VMM 使用其他账号运行，请把 `create` 的 owner 和 group 改成对应账号；否则新建文件可能无法被 reopen。
-示例中的 `0640` 只适用于 `logrotate` 创建的文件；CubeShim 和 VMM writer 本身仍遵循进程的 umask。
+随附示例使用 `root root`，因为一键部署的 systemd 服务以 root 运行。如果 CubeShim 或 VMM 使用其他账号运行（手工安装或 Kubernetes/Helm 节点），请把 `create` 的 owner 和 group 改成对应账号；否则新建文件可能无法被 reopen。一键部署请通过 `CUBE_SANDBOX_LOGROTATE_POLICY_SRC` 持久化该改动，不要直接改已安装文件。示例中的 `0640` 只适用于 `logrotate` 创建的文件；CubeShim 和 VMM writer 本身仍遵循进程的 umask。
 
 ### `journalctl` 启动期日志
 
