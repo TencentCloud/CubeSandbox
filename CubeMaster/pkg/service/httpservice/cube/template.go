@@ -7,7 +7,9 @@ package cube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -25,6 +27,8 @@ var getTemplateInfoFn = templatecenter.GetTemplateInfo
 var getTemplateRequestFn = templatecenter.GetTemplateRequest
 var resolveTemplateIdentifierFn = templatecenter.ResolveTemplateIdentifier
 var setTemplateAliasFn = templatecenter.SetTemplateAlias
+var listTemplatesFn = templatecenter.ListTemplatesWithOptions
+var listReplicasForTemplatesFn = templatecenter.ListReplicasForTemplates
 
 type templateResponse struct {
 	*types.Res
@@ -49,6 +53,8 @@ type templateResponse struct {
 type templateListResponse struct {
 	*types.Res
 	Data []templateSummary `json:"data,omitempty"`
+	// Total is the pre-pagination entry count; equals len(Data) when unpaged.
+	Total int `json:"total,omitempty"`
 }
 
 type templateSummary struct {
@@ -443,7 +449,17 @@ func getTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 }
 
 func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	infos, err := templatecenter.ListTemplates(r.Context())
+	opts, err := parseTemplateListOptions(r)
+	if err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return &templateListResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  err.Error(),
+			}},
+		}
+	}
+	result, err := listTemplatesFn(r.Context(), opts)
 	if err != nil {
 		code := int(errorcode.ErrorCode_MasterInternalError)
 		if errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
@@ -462,20 +478,22 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  "success",
 		}},
-		Data: make([]templateSummary, 0, len(infos)),
+		Data:  make([]templateSummary, 0, len(result.Templates)),
+		Total: result.Total,
 	}
-	for _, info := range infos {
-		originNodeID := strings.TrimSpace(info.OriginNodeID)
-		originNodeIP := ""
-		if originNodeID != "" {
-			if n, ok := localcache.GetNode(originNodeID); ok && n != nil {
-				originNodeIP = strings.TrimSpace(n.HostIP())
-			}
-		}
+	replicasByTemplate, batchErr := batchReadyReplicaOrigins(r.Context(), result.Templates)
+	if batchErr != nil {
+		// Degraded, not failed: origins stay blank rather than breaking the list.
+		log.G(r.Context()).Warnf("list templates: batch replica lookup failed: %v", batchErr)
+		replicasByTemplate = map[string][]templatecenter.ReplicaStatus{}
+	}
+	for _, info := range result.Templates {
+		originNodeID, originNodeIP := resolveOriginNode(info.OriginNodeID)
 		// create-from-image templates often have empty origin_node_id; fall
 		// back to any READY replica so list can still show an origin node.
 		if originNodeIP == "" {
-			originNodeID, originNodeIP = firstReadyReplicaOrigin(r.Context(), info.TemplateID, originNodeID)
+			originNodeID, originNodeIP = firstReadyReplicaOriginFromList(
+				replicasByTemplate[strings.TrimSpace(info.TemplateID)], originNodeID)
 		}
 		rsp.Data = append(rsp.Data, templateSummary{
 			TemplateID:     info.TemplateID,
@@ -497,15 +515,59 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	return rsp
 }
 
-func firstReadyReplicaOrigin(ctx context.Context, templateID, originNodeID string) (string, string) {
-	templateID = strings.TrimSpace(templateID)
-	if templateID == "" {
+// parseTemplateListOptions reads optional limit/offset query params; limit=0
+// means "no limit" per the CLI's "0 = all" contract, other invalids are 400s.
+func parseTemplateListOptions(r *http.Request) (templatecenter.TemplateListOptions, error) {
+	opts := templatecenter.TemplateListOptions{}
+	query := r.URL.Query()
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			return opts, fmt.Errorf("invalid limit %q: want a non-negative integer", raw)
+		}
+		opts.Limit = limit
+	}
+	if raw := strings.TrimSpace(query.Get("offset")); raw != "" {
+		offset, err := strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			return opts, fmt.Errorf("invalid offset %q: want a non-negative integer", raw)
+		}
+		opts.Offset = offset
+	}
+	return opts, nil
+}
+
+// resolveOriginNode resolves the origin node id and its localcache IP; the IP
+// is empty when the origin is absent or the node lacks a usable IP.
+func resolveOriginNode(originNodeID string) (string, string) {
+	originNodeID = strings.TrimSpace(originNodeID)
+	if originNodeID == "" {
+		return "", ""
+	}
+	n, ok := localcache.GetNode(originNodeID)
+	if !ok || n == nil {
 		return originNodeID, ""
 	}
-	replicas, err := templatecenter.ListReplicas(ctx, templateID)
-	if err != nil {
-		return originNodeID, ""
+	return originNodeID, strings.TrimSpace(n.HostIP())
+}
+
+// batchReadyReplicaOrigins loads replicas for every template whose origin node
+// is absent or resolves to no usable IP in one query, so the list loop below
+// never issues per-template lookups.
+func batchReadyReplicaOrigins(ctx context.Context, infos []templatecenter.TemplateInfo) (map[string][]templatecenter.ReplicaStatus, error) {
+	needFallback := make([]string, 0, len(infos))
+	for _, info := range infos {
+		if _, ip := resolveOriginNode(info.OriginNodeID); ip != "" {
+			continue
+		}
+		needFallback = append(needFallback, strings.TrimSpace(info.TemplateID))
 	}
+	return listReplicasForTemplatesFn(ctx, needFallback)
+}
+
+// firstReadyReplicaOriginFromList picks the first READY replica with a usable
+// node IP, mirroring the per-template query semantics it replaces.
+func firstReadyReplicaOriginFromList(replicas []templatecenter.ReplicaStatus, originNodeID string) (string, string) {
 	for _, replica := range replicas {
 		if !strings.EqualFold(strings.TrimSpace(replica.Status), templatecenter.ReplicaStatusReady) {
 			continue
