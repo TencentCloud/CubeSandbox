@@ -254,6 +254,41 @@ grep -qi 'ConfigMap API limit' "$TMP_DIR/oversize.err" || {
   exit 1
 }
 
+# 2m. BEGIN/END lines with trailing whitespace must render (exact-line match
+#     with a [[:space:]]* tail): such a paste is easy to get from a web page
+#     or a kubectl jsonpath, and the render-time and runtime layers must
+#     agree on it.
+{
+  printf -- 'trustedCACerts:\n  certs:\n    - |\n'
+  printf -- '      -----BEGIN CERTIFICATE----- \n'
+  printf -- '      guard\n'
+  printf -- '      -----END CERTIFICATE----- \n'
+} >"$TMP_DIR/trailing-space-values.yaml"
+helm template guard-trailing-space "$CHART_DIR" $COMMON_SETS \
+  --set trustedCACerts.enabled=true \
+  -f "$TMP_DIR/trailing-space-values.yaml" >"$TMP_DIR/trailing-space.yaml" \
+  || { echo "FAIL: BEGIN/END lines with trailing whitespace must render" >&2; exit 1; }
+grep -q 'ca-0.crt' "$TMP_DIR/trailing-space.yaml" || {
+  echo "FAIL: trailing-whitespace render lost the ConfigMap entry" >&2
+  exit 1
+}
+
+# 2n. Junk after the BEGIN marker must fail the render with the exact-line
+#     check -- a prefix match would admit it here and have the init container
+#     reject the same file at pod start with a misleading private-key hunt.
+if helm template guard-marker-junk "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     --set-string trustedCACerts.certs[0]="-----BEGIN CERTIFICATE----- junk
+-----END CERTIFICATE-----" >/dev/null 2>"$TMP_DIR/junk.err"; then
+  echo "FAIL: content after the BEGIN marker must fail validation" >&2
+  exit 1
+fi
+grep -qi 'does not look like a PEM certificate' "$TMP_DIR/junk.err" || {
+  echo "FAIL: validation error does not mention the PEM shape for marker junk:" >&2
+  cat "$TMP_DIR/junk.err" >&2
+  exit 1
+}
+
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
   --set trustedCACerts.enabled=true \
@@ -461,6 +496,22 @@ fi
 grep -q 'unbalanced BEGIN/END' "$REPLAY/err" || {
   echo "FAIL: fallback rejection message does not mention the unbalanced markers:" >&2
   cat "$REPLAY/err" >&2
+  exit 1
+}
+
+# 6g. A CRLF PEM must pass end to end: the [[:space:]]* tail is POSIX (works
+#     on mawk/busybox, not just gawk), so the \r before the line ending is
+#     tolerated by the block-type check and the X.509 splitter alike.
+printf -- '-----BEGIN CERTIFICATE-----\r\n%s\r\n-----END CERTIFICATE-----\r\n' "$(printf '%s\n' "$REAL_CERT" | sed -n '2,$p' | head -n -1 | tr -d '\n')" >"$REPLAY/trusted-ca/ca-0.crt"
+rm -f "$REPLAY/merged/ca-bundle.crt"
+run_merge_ca || {
+  echo "FAIL: merge-ca must accept a CRLF PEM:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+[ "$(grep -c '^-----BEGIN CERTIFICATE-----' "$REPLAY/merged/ca-bundle.crt")" = "2" ] || {
+  echo "FAIL: CRLF PEM must still be merged into the bundle" >&2
+  cat "$REPLAY/merged/ca-bundle.crt" >&2
   exit 1
 }
 

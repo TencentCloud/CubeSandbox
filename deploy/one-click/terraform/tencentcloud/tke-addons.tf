@@ -811,11 +811,16 @@ resource "kubernetes_deployment" "templatecenter" {
               # merged bundle. The terraform variable validation enforces the
               # same rule on inline certs at plan time; this pass
               # additionally covers the existingConfigMap path, whose content
-              # a plan cannot see. \r? keeps CRLF PEMs working.
+              # a plan cannot see.
+              # Exact-line match with a POSIX [[:space:]]* tail (LF, CR/CRLF
+              # and stray trailing spaces all match -- portable across awk
+              # implementations, unlike \r? which only gawk honors), so a
+              # file that passed the plan-time validation cannot be rejected
+              # here with a different diagnosis.
               # The offending block is reported by awk; errexit turns its
               # non-zero exit into a failed init container (fail closed).
               for f in /trusted-ca/*.crt; do
-                awk '/^-----BEGIN / && $0 !~ /^-----BEGIN CERTIFICATE-----\r?$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE PEM block: " $0; exit 1 }' "$f" 1>&2
+                awk '/^-----BEGIN / && $0 !~ /^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE PEM block: " $0; exit 1 }' "$f" 1>&2
                 # Symmetry + presence: an empty or marker-less entry would
                 # append nothing and that CA would be silently absent from
                 # the merged bundle; an unbalanced paste renders blocks Go
@@ -833,7 +838,7 @@ resource "kubernetes_deployment" "templatecenter" {
                 # and block type; only this ASN.1-level check degrades.
                 if command -v openssl >/dev/null 2>&1; then
                   T=$(mktemp -d)
-                  awk -v dir="$T" '/^-----BEGIN CERTIFICATE-----\r?$/ { n++; fn = sprintf("%s/block-%04d.pem", dir, n) } fn { print > fn } /^-----END CERTIFICATE-----\r?$/ { fn = "" }' "$f"
+                  awk -v dir="$T" '/^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { n++; fn = sprintf("%s/block-%04d.pem", dir, n) } fn { print > fn } /^-----END CERTIFICATE-----[[:space:]]*$/ { fn = "" }' "$f"
                   for blk in "$T"/block-*.pem; do
                     openssl x509 -in "$blk" -noout >/dev/null 2>&1 \
                       || { echo "trusted-ca entry $f contains a CERTIFICATE block that does not parse as X.509 (truncated or corrupted base64/DER) -- Go would silently skip it and the registry pull would keep failing with x509" >&2; rm -rf "$T"; exit 1; }
