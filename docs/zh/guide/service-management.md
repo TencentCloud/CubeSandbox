@@ -286,11 +286,10 @@ sudo tail -200 /data/log/CubeVmm/vmm.log
 
 CubeShim 和 VMM 运行期间会保持日志文件打开。CubeShim 通过内部每 30 分钟轮转事件 reopen。VMM 控制线程自己持有 monotonic `timerfd`，每小时发出已有的 `LOG_CTRL_REOPEN` 控制记录。reopen 由固定周期驱动：宿主机执行“`rename` + `create`”后，会在下一次计划中的 reopen 时切换到新文件，而不是在任意一次写入时立即检测。该定时器由 VMM 控制线程持有，不依赖延迟 logger 初始化，也不会由 vCPU/API 线程创建。因此宿主机侧仍应按小时执行轮转，并使用“`rename` + `create`”方式，不要使用 `copytruncate`。
 
-例如，将下面内容保存为 `/etc/logrotate.d/cubesandbox`，并确保宿主机每小时执行一次 `logrotate`：
+一键部署会安装 `/etc/cube-sandbox/logrotate.d/cubesandbox`（放在 `/etc/logrotate.d` 之外），并启用每小时的 `cube-sandbox-logrotate.timer`。Kubernetes / Helm 仍需手工安装，例如：
 
 ```text
-/data/log/CubeVmm/vmm.log
-/data/log/CubeShim/*.log {
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
     hourly
     rotate 24
     missingok
