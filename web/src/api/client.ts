@@ -23,6 +23,8 @@ export interface SandboxDetail extends SandboxDetailDto {}
 
 export interface TemplateSummary {
   templateID: string;
+  /** Maps from dto.aliases[0] (CubeAPI) or dto.displayName (CubeOps, camelCased CubeMaster `display_name`). */
+  displayName?: string | null;
   instanceType?: string | null;
   version?: string | null;
   status: string;
@@ -39,8 +41,6 @@ export interface TemplateDetail extends TemplateSummary {
   createRequest?: unknown;
   networkType?: string | null;
   allowInternetAccess?: boolean | null;
-  /** Maps from dto.aliases[0] — CubeMaster returns the template alias as `aliases: string[]`. */
-  displayName?: string | null;
 }
 
 export interface TemplateCompatSummary {
@@ -133,6 +133,10 @@ function mapSandboxDetail(dto: SandboxDetailDto): SandboxDetail {
 function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
   return {
     templateID: dto.templateID,
+    displayName:
+      dto.aliases?.[0]?.trim() ||
+      (dto as unknown as { displayName?: string }).displayName?.trim() ||
+      null,
     instanceType: dto.instanceType,
     version: dto.version,
     status: dto.status,
