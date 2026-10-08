@@ -183,7 +183,7 @@ pub trait VsockBackend: VsockChannel + Snapshottable + VsockEpollListener + Send
 
 #[cfg(test)]
 mod tests {
-    use super::device::{VsockEpollHandler, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
+    use super::device::{VsockEpollHandler, BACKEND_EVENT, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
     use super::packet::VSOCK_PKT_HDR_SIZE;
     use super::*;
     use crate::device::{VirtioInterrupt, VirtioInterruptType};
@@ -429,6 +429,15 @@ mod tests {
             self.handler.queue_evts[0].write(1).unwrap();
             let events = epoll::Events::EPOLLIN;
             let event = epoll::Event::new(events, RX_QUEUE_EVENT as u64);
+            let mut epoll_helper =
+                EpollHelper::new(&self.handler.kill_evt, &self.handler.pause_evt).unwrap();
+            self.handler
+                .handle_event(&mut epoll_helper, &event)
+                .expect("handle_event() should have succeeded");
+        }
+        pub fn signal_backend_event(&mut self) {
+            let events = epoll::Events::EPOLLIN;
+            let event = epoll::Event::new(events, BACKEND_EVENT as u64);
             let mut epoll_helper =
                 EpollHelper::new(&self.handler.kill_evt, &self.handler.pause_evt).unwrap();
             self.handler

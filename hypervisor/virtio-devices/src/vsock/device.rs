@@ -612,6 +612,7 @@ mod tests {
     use crate::vsock::packet::VSOCK_PKT_HDR_SIZE;
     use crate::ActivateError;
     use libc::EFD_NONBLOCK;
+    use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_WRITE;
 
     #[test]
     fn test_virtio_device() {
@@ -917,6 +918,106 @@ mod tests {
             assert_eq!(ctx.guest_rxvq.used.idx.get(), 1);
             assert_eq!(ctx.irq_count(), 0);
         }
+
+        // Test case: batch drain. Two RX chains are available, so a single kick must fill
+        // both of them with exactly one IRQ.
+        {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+            ctx.handler.backend.write().unwrap().set_pending_rx(true);
+            // Re-shape the queue into two single-descriptor chains (Linux >= v6.3 layout).
+            let len = (VSOCK_PKT_HDR_SIZE + 4096) as u32;
+            let flags = VRING_DESC_F_WRITE.try_into().unwrap();
+            ctx.guest_rxvq.dtable[0].set(0x0040_0000, len, flags, 0);
+            ctx.guest_rxvq.dtable[1].set(0x0040_2000, len, flags, 0);
+            ctx.guest_rxvq.avail.ring[0].set(0);
+            ctx.guest_rxvq.avail.ring[1].set(1);
+            ctx.guest_rxvq.avail.idx.set(2);
+            ctx.signal_rxq_event();
+
+            assert_eq!(ctx.guest_rxvq.used.idx.get(), 2);
+            assert_eq!(ctx.handler.backend.read().unwrap().rx_ok_cnt, 2);
+            assert_eq!(ctx.guest_rxvq.used.event.get(), 2);
+            assert_eq!(ctx.irq_count(), 1);
+        }
+    }
+
+    #[test]
+    fn test_rxq_revert_eventidx() {
+        // Test case: the backend fails to fill the RX buffer, so the chain is reverted.
+        // Nothing is used, no IRQ is raised and avail_event is not advanced; a later
+        // backend event must then drive the RX queue again.
+        let test_ctx = TestContext::new();
+        let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+        // Keep the TX queue empty so that only RX contributes to the IRQ count.
+        ctx.guest_txvq.avail.idx.set(0);
+        ctx.handler.backend.write().unwrap().set_pending_rx(true);
+        ctx.handler
+            .backend
+            .write()
+            .unwrap()
+            .set_rx_err(Some(VsockError::NoData));
+        ctx.signal_rxq_event();
+
+        assert_eq!(ctx.guest_rxvq.used.idx.get(), 0);
+        assert_eq!(ctx.guest_rxvq.used.event.get(), 0);
+        assert_eq!(ctx.irq_count(), 0);
+
+        ctx.signal_backend_event();
+
+        assert_eq!(ctx.guest_rxvq.used.idx.get(), 1);
+        assert_eq!(ctx.guest_rxvq.used.event.get(), 1);
+        assert_eq!(ctx.handler.backend.read().unwrap().rx_ok_cnt, 1);
+        assert_eq!(ctx.irq_count(), 1);
+    }
+
+    #[test]
+    fn test_txq_revert_eventidx() {
+        // Test case: the backend refuses the TX packet, so the chain is reverted. Nothing
+        // is used, no IRQ is raised and avail_event is not advanced; a later backend event
+        // (e.g. the connection becoming writable) must then drive the TX queue again.
+        let test_ctx = TestContext::new();
+        let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+        ctx.handler.backend.write().unwrap().set_pending_rx(false);
+        ctx.handler
+            .backend
+            .write()
+            .unwrap()
+            .set_tx_err(Some(VsockError::NoData));
+        ctx.signal_txq_event();
+
+        assert_eq!(ctx.guest_txvq.used.idx.get(), 0);
+        assert_eq!(ctx.guest_txvq.used.event.get(), 0);
+        assert_eq!(ctx.irq_count(), 0);
+
+        ctx.signal_backend_event();
+
+        assert_eq!(ctx.guest_txvq.used.idx.get(), 1);
+        assert_eq!(ctx.guest_txvq.used.event.get(), 1);
+        assert_eq!(ctx.handler.backend.read().unwrap().tx_ok_cnt, 1);
+        assert_eq!(ctx.irq_count(), 1);
+        assert_eq!(ctx.guest_rxvq.used.idx.get(), 0);
+    }
+
+    #[test]
+    fn test_txq_malformed_eventidx() {
+        // Test case: a malformed TX chain is still returned to the driver, re-arms
+        // notifications and raises an IRQ, without reaching the backend.
+        let test_ctx = TestContext::new();
+        let mut ctx = test_ctx.create_epoll_handler_context_eventidx();
+
+        ctx.handler.backend.write().unwrap().set_pending_rx(false);
+        // Invalidate the packet header descriptor, by setting its length to 0.
+        ctx.guest_txvq.dtable[0].len.set(0);
+        ctx.signal_txq_event();
+
+        assert_eq!(ctx.guest_txvq.used.idx.get(), 1);
+        assert_eq!(ctx.handler.backend.read().unwrap().tx_ok_cnt, 0);
+        assert_eq!(ctx.guest_txvq.used.event.get(), 1);
+        assert_eq!(ctx.irq_count(), 1);
     }
 
     #[test]

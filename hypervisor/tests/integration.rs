@@ -1682,6 +1682,40 @@ fn _test_virtio_vsock(hotplug: bool) {
     handle_child_output(r, &output);
 }
 
+fn _test_virtio_vsock_bulk_echo() {
+    let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+    let guest = Guest::new(Box::new(focal));
+
+    let socket = temp_vsock_path(&guest.tmp_dir);
+
+    let mut cmd = GuestCommand::new(&guest);
+    cmd.args(["--cpus", "boot=2"]);
+    cmd.args(["--memory", "size=512M"]);
+    cmd.args(["--kernel", direct_kernel_boot_path().to_str().unwrap()]);
+    cmd.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+    cmd.default_disks();
+    cmd.default_net();
+    cmd.args(["--vsock", format!("cid=3,socket={}", socket).as_str()]);
+
+    let mut child = cmd.capture_output().spawn().unwrap();
+
+    let r = std::panic::catch_unwind(|| {
+        guest.wait_vm_boot(None).unwrap();
+
+        // Bulk traffic keeps both rings busy, so a lost kick or a suppressed IRQ that
+        // was actually needed (e.g. with VIRTIO_RING_F_EVENT_IDX) shows up as a stall.
+        guest.start_vsock_echo_listener();
+        guest.vsock_echo(socket.as_str(), 64 << 20);
+        // A second connection checks that the device state is still sane afterwards.
+        guest.vsock_echo(socket.as_str(), 1 << 20);
+    });
+
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+
+    handle_child_output(r, &output);
+}
+
 fn _test_virtio_vsock_passthrough_fd(hotplug: bool) {
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = Guest::new(Box::new(focal));
@@ -4805,6 +4839,11 @@ mod common_parallel {
     #[test]
     fn test_virtio_vsock_hotplug() {
         _test_virtio_vsock(true);
+    }
+
+    #[test]
+    fn test_virtio_vsock_bulk_echo() {
+        _test_virtio_vsock_bulk_echo();
     }
 
     #[test]
