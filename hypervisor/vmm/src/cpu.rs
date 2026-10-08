@@ -61,6 +61,7 @@ use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
 use libc::{c_void, siginfo_t};
 #[cfg(feature = "guest_debug")]
 use linux_loader::elf::Elf64_Nhdr;
+use logging::LOG_CTRL_START;
 use seccompiler::{apply_filter, SeccompAction};
 use std::collections::BTreeMap;
 #[cfg(feature = "guest_debug")]
@@ -1194,6 +1195,11 @@ impl CpuManager {
 
         // Unblock all CPU threads.
         vcpu_thread_barrier.wait();
+
+        // Start the deferred async logger thread from this thread, after the
+        // vCPUs run: vCPU threads are not allowed to call clone3. Calling the
+        // logger directly bypasses the log level filter.
+        log::logger().log(&log::Record::builder().target(LOG_CTRL_START).build());
         Ok(())
     }
 

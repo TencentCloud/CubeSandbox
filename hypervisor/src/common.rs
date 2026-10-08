@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use lazy_static::lazy_static;
-use logging::LOG_CTRL_REOPEN;
+use logging::{LOG_CTRL_REOPEN, LOG_CTRL_START};
 use slog::slog_info;
 
 pub const DEFAULT_LOG_FILE: &str = "/data/log/CubeVmm/vmm.log";
@@ -101,6 +101,19 @@ impl Logger {
         LOG_GUARD.store(Arc::new(guard));
     }
 
+    fn start_logger_thread(&self) {
+        let logger_startd = self.logger_thread_started.lock().unwrap();
+        if logger_startd.load(Ordering::SeqCst) {
+            return;
+        }
+        self.build_logger_thread();
+        for v in self.buffer.lock().unwrap().drain(..) {
+            slog_info!(slog_scope::logger(), "{}", v);
+        }
+        self.buffer.lock().unwrap().shrink_to_fit();
+        logger_startd.store(true, Ordering::SeqCst);
+    }
+
     fn log_async(&self, data: String, target: &str) {
         #[cfg(feature = "logger_debug")]
         let _ = self
@@ -151,33 +164,18 @@ impl Logger {
             return;
         }
 
-        if self.vcpu_started.load(Ordering::SeqCst) {
-            let logger_startd = self.logger_thread_started.lock().unwrap();
-            if !logger_startd.load(Ordering::SeqCst) {
-                self.build_logger_thread();
-                for v in self.buffer.lock().unwrap().drain(..) {
-                    slog_info!(slog_scope::logger(), "{}", v);
+        // Deferred mode: only LOG_CTRL_START starts the logger thread, so it is
+        // never spawned from a vCPU thread. Keep buffering until then.
+        let logger_startd = self.logger_thread_started.lock().unwrap();
+        if logger_startd.load(Ordering::SeqCst) {
+            // logger thread has been started, slog those waiting for
+            // logger_thread_started lock
+            match target {
+                LOG_CTRL_REOPEN => {
+                    slog_info!(slog_scope::logger(), #LOG_CTRL_REOPEN, "{}", data)
                 }
-                self.buffer.lock().unwrap().shrink_to_fit();
-                // log this info/debug/warn, 'cause this
-                // data has not been pushed into buffer
-                match target {
-                    LOG_CTRL_REOPEN => {
-                        slog_info!(slog_scope::logger(), #LOG_CTRL_REOPEN, "{}", data)
-                    }
-                    _ => slog_info!(slog_scope::logger(), "{}", data),
-                };
-                logger_startd.store(true, Ordering::SeqCst);
-            } else {
-                // logger thread has been started, slog those waiting for
-                // logger_thread_started lock
-                match target {
-                    LOG_CTRL_REOPEN => {
-                        slog_info!(slog_scope::logger(), #LOG_CTRL_REOPEN, "{}", data)
-                    }
-                    _ => slog_info!(slog_scope::logger(), "{}", data),
-                };
-            }
+                _ => slog_info!(slog_scope::logger(), "{}", data),
+            };
         } else {
             self.buffer.lock().unwrap().push(data);
         }
@@ -202,6 +200,13 @@ impl log::Log for Logger {
 
     fn log(&self, record: &log::Record) {
         if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        if record.target() == LOG_CTRL_START {
+            if self.log_async && self.vcpu_started.load(Ordering::SeqCst) {
+                self.start_logger_thread();
+            }
             return;
         }
 
