@@ -13,6 +13,9 @@ global:
   clusterDomain: ""
   # Optional private registry host that rewrites the official Cube TCR host
   # on Cube-owned images. Set to a host only, e.g. my-registry.example.com.
+  # If that registry serves a certificate signed by a private CA, see
+  # trustedCACerts below for the TemplateCenter pod's trust; node-side
+  # kubelet/containerd pulls still need the CA configured on the host.
   imageRegistry: ""
 
 images:

@@ -279,10 +279,19 @@ requirement).
 ## Trusted CA certificates for private image registries
 
 `trustedCACerts.*` handles registries whose serving certificate is signed by a
-private CA (self-hosted Harbor, offline test registries). It affects exactly
-one consumer: the CubeTemplateCenter container, which pulls OCI images from
-inside the cluster for `template create-from-image` (node-side kubelet /
-containerd pulls are configured on the host, not here).
+private CA (self-hosted Harbor, offline test registries). The injection site is
+one container — the CubeTemplateCenter Deployment — but the scope of the
+injected trust is **process-wide for that container**: `SSL_CERT_FILE` applies
+to every outbound TLS connection the TemplateCenter process makes, not just
+registry pulls. In particular minio-go reads it too, so S3/MinIO artifact
+traffic (carrying `CUBE_S3_*` credentials) trusts the injected CA as well —
+do not point the feature at a CA whose private key you do not control. Other
+control-plane components (CubeMaster, CubeOps, ...) are not covered: CubeOps
+warehouse import sources are public hosts (github.com / cnb.cool, allow-listed,
+with a manual upload path for offline environments). Node-side
+kubelet/containerd pulls are configured on the host, not here. The TKE
+one-click edition (terraform) takes the same capability via
+`templatecenter_trusted_ca_certs` / `templatecenter_trusted_ca_existing_config_map`.
 
 With `trustedCACerts.enabled=true` the chart renders a `<fullname>-trusted-ca`
 ConfigMap (for release `foo` that is `foo-cube-trusted-ca`) from the inline
@@ -294,22 +303,47 @@ TLS verification stays on — this adds trust, it does not disable it.
 
 - Changing `trustedCACerts.certs` rolls the Deployment automatically
   (`checksum/trusted-ca` annotation). With `existingConfigMap` the ConfigMap is
-  yours: update it and restart the pods yourself. Keys must end in `.crt` and
-  contain PEM documents; inline `certs` entries must carry line-anchored
-  `BEGIN`/`END CERTIFICATE` markers and are shape-checked at render time.
+  yours: update it and restart the pods yourself — in **both** directions.
+  Adding a CA without a restart does nothing, and **removing** one without a
+  restart keeps it trusted (the security-relevant half: revocation does not
+  propagate until the pods roll). `existingConfigMap` must live in the
+  release's namespace (a volume can only reference a same-namespace
+  ConfigMap). Keys must end in `.crt` and contain PEM documents; inline
+  `certs` entries are validated at render time (empty entries, non-
+  `CERTIFICATE` PEM blocks — private keys are rejected outright — unbalanced
+  `BEGIN`/`END` markers, and a combined payload over 900 KiB all fail the
+  render).
 - `certs` and `existingConfigMap` are mutually exclusive — setting both fails
   the render (the inline certs would be silently ignored).
+- The merge-ca init container re-checks every entry at pod start (this also
+  covers `existingConfigMap`, whose content a render cannot see): non-
+  `CERTIFICATE` blocks, empty/unbalanced entries and — when openssl is
+  present in the image — X.509-unparseable blocks all fail the init container
+  (fail closed) with the offending file named in the log. On success it logs
+  the merged certificate count, the operator-facing signal that the merge
+  took effect. The `global.env` / `controlPlane.templateCenter.env` lists
+  must not define `SSL_CERT_FILE` (the render fails if they do); envFrom-
+  backed env cannot be checked statically — do not set `SSL_CERT_FILE`
+  there.
 - Certificates are concatenated with newline separators, so PEM blocks must
   not rely on being adjacent; a missing trailing newline in an
-  `existingConfigMap` value is handled. The guard script validates rendering
-  only — the merged bundle itself is produced at pod start, and the content
-  quality of an `existingConfigMap` is operator-owned.
+  `existingConfigMap` value is handled.
 - The TemplateCenter image must ship a system CA bundle
-  (`ca-certificates`; Debian/Ubuntu and RHEL bundle layouts are probed) plus
-  `/bin/sh` with `cp`/`ls`/`cat` for the merge-ca init container.
+  (`ca-certificates`; Debian/Ubuntu and RHEL bundle layouts are probed —
+  empty bundles are rejected) plus `/bin/sh` with `cp`/`ls`/`cat` for the
+  merge-ca init container.
+- To confirm the merge actually took effect on a running pod:
+
+  ```sh
+  kubectl exec -n <namespace> <templatecenter-pod> -- \
+    sh -c 'openssl crl2pkcs7 -nocrl -certfile /merged/ca-bundle.crt | openssl pkcs7 -print_certs -noout | grep -c subject='
+  ```
+
+  The count should equal the system bundle's certificates plus the entries
+  you configured (the init container logs the same number at pod start).
 - The feature is inert when `controlPlane.enabled=false` (no TemplateCenter
   is deployed): the ConfigMap, init container and checksum are not rendered,
-  and the PEM shape check does not fire.
+  and the PEM validation does not fire.
 - Publicly-trusted registries (Docker Hub, TCR, GCR, ...) need nothing here.
 
 ## CubeMaster configuration
