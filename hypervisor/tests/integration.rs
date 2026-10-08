@@ -1943,15 +1943,30 @@ fn verify_free_page_reporting(guest: &Guest, vmm_pid: u32, phase: &str) {
         |rss| rss >= baseline + FREE_PAGE_REPORTING_PEAK_DELTA_KIB,
     );
 
+    // $! is the stress parent; the memory is held by its --vm worker child,
+    // which ignores the parent's death until its own --timeout expires.
     guest
         .ssh_command(&format!(
-            "kill -TERM {stress_pid}; \
+            "pkill -TERM -P {stress_pid}; kill -TERM {stress_pid}; \
              for i in $(seq 1 100); do \
-               kill -0 {stress_pid} 2>/dev/null || exit 0; \
+               pgrep -x stress >/dev/null || exit 0; \
                sleep 0.1; \
              done; \
-             kill -KILL {stress_pid}"
+             pkill -KILL -x stress; sleep 1; \
+             ! pgrep -x stress >/dev/null"
         ))
+        .unwrap();
+
+    // The guest only reports free blocks of at least pageblock_order (2MB).
+    // Compact memory so that the scattered pages freed by stress merge into
+    // reportable blocks.
+    guest
+        .ssh_command(
+            "sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches; \
+             for i in 1 2 3; do \
+               echo 1 > /proc/sys/vm/compact_memory; sleep 2; \
+             done'",
+        )
         .unwrap();
 
     let released = wait_for_process_rss(
