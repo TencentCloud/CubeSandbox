@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -783,6 +784,30 @@ func TestBackfillShimIntentTimestampsLeavesCurrentAndUnspawnedRecordsAlone(t *te
 
 	assert.True(t, clean.Endpoint.ShimSpawnedAt.IsZero(), "a sandbox with no intent must not gain one")
 	assert.Empty(t, cleanMgr.syncIDs)
+}
+
+func TestBackfillShimIntentTimestampsContinuesWhenSyncFails(t *testing.T) {
+	failed := newCubeboxWithStatusForTest("sb-sync-fail", cubeboxstore.Status{StartedAt: 1})
+	failed.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	kept := newCubeboxWithStatusForTest("sb-dated", cubeboxstore.Status{StartedAt: 1})
+	keptAt := time.Now().Add(-time.Hour)
+	kept.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: keptAt}
+	later := newCubeboxWithStatusForTest("sb-later", cubeboxstore.Status{StartedAt: 1})
+	later.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	mgr := &fakeCubeboxAPI{
+		list:    []*cubeboxstore.CubeBox{failed, kept, later},
+		syncErr: errors.New("store unavailable"),
+	}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.True(t, failed.Endpoint.ShimSpawned)
+	assert.False(t, failed.Endpoint.ShimSpawnedAt.IsZero(),
+		"this process still bounds the intent even when the stamp did not reach disk")
+	assert.Equal(t, keptAt, kept.Endpoint.ShimSpawnedAt, "an existing age must keep accruing")
+	assert.False(t, later.Endpoint.ShimSpawnedAt.IsZero(),
+		"a sync failure must not stop the records that follow")
+	assert.Equal(t, []string{"sb-sync-fail", "sb-later"}, mgr.syncIDs)
 }
 
 func TestSetShimIntentTTLIsReadableFromTheDestroyPath(t *testing.T) {

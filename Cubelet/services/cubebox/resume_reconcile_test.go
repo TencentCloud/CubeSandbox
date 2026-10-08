@@ -19,12 +19,14 @@ import (
 
 type fakeCubeboxAPI struct {
 	cb            *cubeboxstore.CubeBox
+	list          []*cubeboxstore.CubeBox
 	getCalls      int
 	saveCalls     int
 	getHook       func(call int)
 	syncIDs       []string
 	syncSnapshots []fakeCubeboxSyncSnapshot
 	syncErr       error
+	saveErr       error
 }
 
 type fakeCubeboxSyncSnapshot struct {
@@ -61,6 +63,9 @@ func (f *fakeCubeboxAPI) FindContainerOfCubebox(ctx context.Context, id string) 
 }
 
 func (f *fakeCubeboxAPI) List() []*cubeboxstore.CubeBox {
+	if f.list != nil {
+		return f.list
+	}
 	if f.cb == nil {
 		return nil
 	}
@@ -69,6 +74,9 @@ func (f *fakeCubeboxAPI) List() []*cubeboxstore.CubeBox {
 
 func (f *fakeCubeboxAPI) Save(ctx context.Context, info *cubeboxstore.CubeBox, opts ...cubes.UpdateCubeboxOpt) error {
 	f.saveCalls++
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	f.cb = info
 	return nil
 }

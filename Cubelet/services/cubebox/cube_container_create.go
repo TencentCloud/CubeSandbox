@@ -224,6 +224,17 @@ type createContainerParam struct {
 	cntrReq *cubebox.ContainerConfig
 }
 
+// persistCreateResult turns a failed sandbox save into a create failure, and
+// leaves an earlier create error in place. A save failure must not be reported
+// as success, and it must not hide the error that already failed the create.
+func persistCreateResult(sandboxID string, retE, saveErr error) error {
+	if saveErr == nil || retE != nil {
+		return retE
+	}
+	return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed,
+		fmt.Sprintf("persist sandbox %s after create: %v", sandboxID, saveErr))
+}
+
 func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateContext) error {
 	realReq := flowOpts.ReqInfo
 
@@ -390,16 +401,14 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if err := func() (retE error) {
 		sandBox.Lock()
 		defer func() {
-			if saveErr := l.cubeboxManger.Save(ctx, sandBox); saveErr != nil {
+			saveErr := l.cubeboxManger.Save(ctx, sandBox)
+			if saveErr != nil {
 				log.G(ctx).Warnf("saveSandBoxInfo failed.%s", saveErr.Error())
-				// The record this Save writes is what destroy reads to decide
-				// whether a shim may still hold the sandbox's resources, so
-				// losing it must not be reported as a successful create.
-				if retE == nil {
-					retE = ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed,
-						fmt.Sprintf("persist sandbox %s after create: %v", sandBox.ID, saveErr))
-				}
 			}
+			// The record this Save writes is what destroy reads to decide
+			// whether a shim may still hold the sandbox's resources, so
+			// losing it must not be reported as a successful create.
+			retE = persistCreateResult(sandBox.ID, retE, saveErr)
 			sandBox.Unlock()
 		}()
 
@@ -1531,6 +1540,10 @@ func (l *local) withdrawShimIntent(ctx context.Context, sb *cubeboxstore.CubeBox
 	log.G(ctx).Infof("shim intent for %s withdrawn after failed create: no shim process was found", sandboxIdentity(sb))
 }
 
+// readBundleProcessIdentity is the pid read liveBundleHolder uses. It is a
+// variable so a test can report a pid as unreadable without a live /proc entry.
+var readBundleProcessIdentity = utils.ReadProcessIdentity
+
 // liveBundleHolder looks for a live process named by this sandbox's shim bundle
 // pid files. The shim writes those files about itself while it starts, so a
 // live pid there is real evidence that a spawn happened.
@@ -1542,7 +1555,7 @@ func (l *local) liveBundleHolder(ctx context.Context, sb *cubeboxstore.CubeBox) 
 			if pid <= 1 || pid == os.Getpid() {
 				continue
 			}
-			id, err := utils.ReadProcessIdentity(pid)
+			id, err := readBundleProcessIdentity(pid)
 			if err != nil {
 				if os.IsNotExist(err) {
 					continue

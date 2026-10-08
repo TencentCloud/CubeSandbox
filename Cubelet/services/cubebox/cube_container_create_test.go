@@ -31,13 +31,16 @@ import (
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
 	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
@@ -1381,4 +1384,67 @@ func TestRunContainerPersistsShimIntentBeforeTheSpawn(t *testing.T) {
 	assert.False(t, sb.Endpoint.ShimSpawned, "a handled failure must not leave a record that blocks cleanup")
 	assert.True(t, sb.Endpoint.ShimSpawnedAt.IsZero())
 	assert.Equal(t, 2, mgr.saveCalls)
+}
+
+func TestRunContainerFailsBeforeSpawnWhenIntentSaveFails(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-intent-save", cubeboxstore.Status{StartedAt: 1})
+	ci := sb.FirstContainer()
+	ci.IsPod = true
+
+	var newTaskCalls int
+	mgr := &fakeCubeboxAPI{cb: sb, saveErr: errors.New("disk full")}
+	l := &local{
+		cubeboxManger: mgr,
+		newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+			return fakeContainerdContainer{
+				err:       errors.New("should not spawn"),
+				onNewTask: func() { newTaskCalls++ },
+			}, nil
+		},
+	}
+
+	err := l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{})
+	require.Error(t, err)
+	assert.True(t, ret.IsErrorCode(err, errorcode.ErrorCode_UpdateLocalMetaDataFailed))
+	assert.Contains(t, err.Error(), "record shim intent")
+	assert.Zero(t, newTaskCalls, "a shim must not be spawned when the intent never became durable")
+	assert.Equal(t, 1, mgr.saveCalls)
+}
+
+func TestWithdrawShimIntentKeepsRecordWhenBundlePidIsUnreadable(t *testing.T) {
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, 4242)
+	withShimBundles(t, bundle)
+	previous := readBundleProcessIdentity
+	readBundleProcessIdentity = func(int) (utils.ProcessIdentity, error) {
+		return utils.ProcessIdentity{}, errors.New("stat unreadable")
+	}
+	t.Cleanup(func() { readBundleProcessIdentity = previous })
+
+	spawnedAt := time.Now()
+	sb := newCubeboxWithStatusForTest("sb-unreadable", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: spawnedAt}
+	mgr := &fakeCubeboxAPI{cb: sb}
+
+	(&local{cubeboxManger: mgr}).withdrawShimIntent(context.Background(), sb, sb.FirstContainer())
+
+	assert.True(t, sb.Endpoint.ShimSpawned, "an unreadable pid is not proof the shim is gone")
+	assert.True(t, spawnedAt.Equal(sb.Endpoint.ShimSpawnedAt))
+	assert.Zero(t, mgr.saveCalls, "keeping the intent must not rewrite the record")
+}
+
+func TestPersistCreateResult(t *testing.T) {
+	prior := errors.New("run container failed")
+	saveErr := errors.New("disk full")
+
+	assert.NoError(t, persistCreateResult("sb", nil, nil))
+	assert.ErrorIs(t, persistCreateResult("sb", prior, nil), prior)
+	assert.ErrorIs(t, persistCreateResult("sb", prior, saveErr), prior,
+		"a save failure must not hide the error that already failed the create")
+
+	err := persistCreateResult("sb-1", nil, saveErr)
+	require.Error(t, err)
+	assert.True(t, ret.IsErrorCode(err, errorcode.ErrorCode_UpdateLocalMetaDataFailed))
+	assert.Contains(t, err.Error(), "persist sandbox sb-1")
+	assert.Contains(t, err.Error(), "disk full")
 }
