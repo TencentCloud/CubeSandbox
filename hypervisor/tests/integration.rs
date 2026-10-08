@@ -7825,7 +7825,9 @@ mod common_sequential {
 
         let pid = restored.id();
         let r = std::panic::catch_unwind(|| {
-            guest.wait_vm_boot(Some(120)).unwrap();
+            // A restored guest does not boot again, so it never sends the boot
+            // notification; wait for SSH instead.
+            guest.ssh_command("true").unwrap();
             verify_free_page_reporting(&guest, pid, "snapshot restore");
         });
 

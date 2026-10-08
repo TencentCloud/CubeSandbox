@@ -10,6 +10,9 @@ extern crate lazy_static;
 
 /// Slog tag used to request an explicit log-file reopen.
 pub const LOG_CTRL_REOPEN: &str = "LogReopen";
+/// Log target used to start the deferred async logger thread on the calling
+/// thread. The record itself is not written.
+pub const LOG_CTRL_START: &str = "LogStart";
 
 fn open_log_file(name: &str) -> io::Result<std::fs::File> {
     std::fs::File::options()

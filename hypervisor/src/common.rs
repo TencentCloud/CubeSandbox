@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use lazy_static::lazy_static;
-use logging::LOG_CTRL_REOPEN;
+use logging::{LOG_CTRL_REOPEN, LOG_CTRL_START};
 use slog::slog_info;
 
 pub const DEFAULT_LOG_FILE: &str = "/data/log/CubeVmm/vmm.log";
@@ -99,6 +99,19 @@ impl Logger {
         let logger = logging::create_logger(self.log_file_name.clone());
         let guard = Some(slog_scope::set_global_logger(logger));
         LOG_GUARD.store(Arc::new(guard));
+    }
+
+    fn start_logger_thread(&self) {
+        let logger_startd = self.logger_thread_started.lock().unwrap();
+        if logger_startd.load(Ordering::SeqCst) {
+            return;
+        }
+        self.build_logger_thread();
+        for v in self.buffer.lock().unwrap().drain(..) {
+            slog_info!(slog_scope::logger(), "{}", v);
+        }
+        self.buffer.lock().unwrap().shrink_to_fit();
+        logger_startd.store(true, Ordering::SeqCst);
     }
 
     fn log_async(&self, data: String, target: &str) {
@@ -202,6 +215,13 @@ impl log::Log for Logger {
 
     fn log(&self, record: &log::Record) {
         if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        if record.target() == LOG_CTRL_START {
+            if self.log_async {
+                self.start_logger_thread();
+            }
             return;
         }
 
