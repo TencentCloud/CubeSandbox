@@ -393,9 +393,12 @@ impl CubeMasterClient {
         req: &CreateTemplateFromImageReq,
     ) -> Result<TemplateJobResponse, CubeMasterError> {
         let url = format!("{}/cube/template/from-image", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await

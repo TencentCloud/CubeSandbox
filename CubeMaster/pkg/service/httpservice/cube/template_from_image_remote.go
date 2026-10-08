@@ -14,9 +14,12 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // submitBuildJobFn is a seam over tcclient.SubmitBuildJob so tests can
@@ -53,19 +56,32 @@ func isRetryableTCStatus(code int) bool {
 func submitBuildJobWithRetry(ctx context.Context, endpoint, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL, envdSHA string, envdData []byte) error {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		err := submitBuildJobFn(ctx, endpoint, jobID, req, downloadBaseURL, envdSHA, envdData)
+		attemptCtx, attemptSpan := telemetry.Start(ctx, telemetry.SpanTemplateSubmitAttempt,
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrJobID, jobID),
+				attribute.Int(telemetry.AttrAttempt, attempt+1),
+			))
+		err := submitBuildJobFn(attemptCtx, endpoint, jobID, req, downloadBaseURL, envdSHA, envdData)
 		if err == nil {
+			telemetry.End(attemptSpan, nil)
 			return nil
 		}
 		var statusErr *tcclient.StatusError
 		if errors.As(err, &statusErr) {
+			attemptSpan.SetAttributes(attribute.Int("http.response.status_code", statusErr.StatusCode))
 			if statusErr.StatusCode == http.StatusConflict {
+				attemptSpan.SetAttributes(attribute.Bool(telemetry.AttrDuplicate, true))
+				telemetry.End(attemptSpan, nil)
 				log.G(ctx).Infof("forward to templatecenter: job %s already submitted (409), treating as success", jobID)
 				return nil
 			}
+			telemetry.End(attemptSpan, err)
 			if !isRetryableTCStatus(statusErr.StatusCode) {
 				return err
 			}
+		} else {
+			telemetry.End(attemptSpan, err)
 		}
 		lastErr = err
 		if attempt >= len(forwardBuildJobRetryDelays) {
@@ -74,10 +90,18 @@ func submitBuildJobWithRetry(ctx context.Context, endpoint, jobID string, req *t
 		wait := forwardBuildJobRetryDelays[attempt]
 		log.G(ctx).Warnf("forward to templatecenter: transient error (attempt %d/%d), retrying in %s: job_id=%s err=%v",
 			attempt+1, len(forwardBuildJobRetryDelays)+1, wait, jobID, err)
+		waitCtx, waitSpan := telemetry.Start(ctx, telemetry.SpanTemplateDispatchBackoff,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrJobID, jobID),
+				attribute.Int(telemetry.AttrAttempt, attempt+1),
+				attribute.Int64(telemetry.AttrWaitMS, wait.Milliseconds()),
+			))
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			telemetry.End(waitSpan, waitCtx.Err())
+			return waitCtx.Err()
 		case <-time.After(wait):
+			telemetry.End(waitSpan, nil)
 		}
 	}
 }
@@ -120,9 +144,8 @@ var updateTemplateImageJobFn = templatecenter.UpdateTemplateImageJob
 // would stay PENDING -- exactly what this function exists to prevent. Asserted
 // by TestForwardBuildJobFailed*.
 func markForwardBuildJobFailed(ctx context.Context, jobID, msg string) {
-	// A fresh, deadline-free context derived from Background: must NOT inherit
-	// the submit timeout. The incoming ctx is used only for logging context.
-	failCtx, failCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Persist failure even if the dispatch deadline has expired.
+	failCtx, failCancel := context.WithTimeout(telemetry.DetachTrace(context.Background(), ctx), 10*time.Second)
 	defer failCancel()
 	if err := updateTemplateImageJobFn(failCtx, jobID, map[string]any{
 		"status":        templatecenter.JobStatusFailed,
@@ -132,12 +155,21 @@ func markForwardBuildJobFailed(ctx context.Context, jobID, msg string) {
 	}
 }
 
-func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *templatecenter.EnvdInjectionPayload) {
-	// 120s budget: submitBuildJobWithRetry can make up to 4 attempts against a
-	// transient (429/502/503/504) TC with backoff between them; the single
-	// 60s window used to leave no room for even one retry.
-	callCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *templatecenter.EnvdInjectionPayload, parent trace.SpanContext) {
+	// Allow four attempts and backoff within the dispatch deadline.
+	callCtx, cancel := context.WithTimeout(trace.ContextWithSpanContext(context.Background(), parent), 120*time.Second)
 	defer cancel()
+	templateID := ""
+	if req != nil {
+		templateID = req.TemplateID
+	}
+	callCtx, dispatchSpan := telemetry.Start(callCtx, telemetry.SpanTemplateImageDispatch,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+		))
+	var dispatchErr error
+	defer func() { telemetry.End(dispatchSpan, dispatchErr) }()
 
 	cfg := config.GetConfig()
 	endpoint := ""
@@ -156,7 +188,8 @@ func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFrom
 				"the variable must be present in the CubeMaster process environment (e.g. systemd unit / container env / supervisor), "+
 				"not just in an interactive shell",
 			config.EnvTemplateCenterAddr, raw, len(raw), jobID)
-		markForwardBuildJobFailed(callCtx, jobID, config.EnvTemplateCenterAddr+" is not configured; CubeMaster no longer builds templates in-process and requires CubeTemplateCenter for every build")
+		dispatchErr = errors.New(config.EnvTemplateCenterAddr + " is not configured; CubeMaster no longer builds templates in-process and requires CubeTemplateCenter for every build")
+		markForwardBuildJobFailed(callCtx, jobID, dispatchErr.Error())
 		return
 	}
 
@@ -169,6 +202,7 @@ func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFrom
 
 	if err := submitBuildJobWithRetry(callCtx, endpoint, jobID, req, downloadBaseURL, envdSHA, envdData); err != nil {
 		log.G(callCtx).Errorf("forward to templatecenter fail: job_id=%s endpoint=%s err=%v", jobID, endpoint, err)
+		dispatchErr = err
 		markForwardBuildJobFailed(callCtx, jobID, "forward build job to templatecenter: "+err.Error())
 		return
 	}

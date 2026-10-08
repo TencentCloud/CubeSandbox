@@ -24,6 +24,11 @@ const SCOPE: &str = "github.com/tencentcloud/CubeSandbox/CubeAPI";
 const CREATE_METHOD: &str = "POST";
 const CREATE_PATH: &str = "/sandboxes";
 const CREATE_SPAN: &str = "POST /sandboxes";
+const TEMPLATE_PATH: &str = "/templates";
+const TEMPLATE_SPAN: &str = "POST /templates";
+
+const TRACED_ROUTES: [(&str, &str); 2] =
+    [(CREATE_PATH, CREATE_SPAN), (TEMPLATE_PATH, TEMPLATE_SPAN)];
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
@@ -86,7 +91,13 @@ fn build_provider(
 }
 
 pub async fn layer(req: Request, next: Next) -> Response {
-    if req.method().as_str() != CREATE_METHOD || req.uri().path() != CREATE_PATH {
+    let Some((_, span_name)) = TRACED_ROUTES
+        .iter()
+        .find(|(path, _)| *path == req.uri().path())
+    else {
+        return next.run(req).await;
+    };
+    if req.method().as_str() != CREATE_METHOD {
         return next.run(req).await;
     }
 
@@ -108,7 +119,7 @@ pub async fn layer(req: Request, next: Next) -> Response {
         ));
     }
     let span = tracer
-        .span_builder(CREATE_SPAN)
+        .span_builder(*span_name)
         .with_kind(SpanKind::Server)
         .with_attributes(attributes)
         .start_with_context(&tracer, &parent);
@@ -166,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_route_is_spanned_and_carries_the_trace() {
+    async fn entry_routes_are_spanned_and_carry_the_trace() {
         let exporter = InMemorySpanExporter::default();
         global::set_text_map_propagator(TraceContextPropagator::new());
         global::set_tracer_provider(
@@ -177,25 +188,32 @@ mod tests {
 
         let app = Router::new()
             .route("/sandboxes", post(ok).get(ok))
+            .route("/templates", post(ok).get(ok))
             .route("/untraced", post(ok).get(ok))
             .layer(axum::middleware::from_fn(layer));
 
-        let response = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/sandboxes")
-                    .header(TRACEPARENT_HEADER, INBOUND)
-                    .header(REQUEST_ID_HEADER, "req-1")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("infallible");
-        assert_eq!(response.status(), 200);
+        for (uri, request_id) in [("/sandboxes", "req-1"), ("/templates", "req-2")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(TRACEPARENT_HEADER, INBOUND)
+                        .header(REQUEST_ID_HEADER, request_id)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("infallible");
+            assert_eq!(response.status(), 200);
+        }
 
-        for (method, uri) in [("GET", "/sandboxes"), ("POST", "/untraced")] {
+        for (method, uri) in [
+            ("GET", "/sandboxes"),
+            ("GET", "/templates"),
+            ("POST", "/untraced"),
+        ] {
             let response = app
                 .clone()
                 .oneshot(
@@ -234,24 +252,31 @@ mod tests {
         let spans = exporter.get_finished_spans().expect("finished spans");
         let created: Vec<_> = spans.iter().filter(|s| s.name == CREATE_SPAN).collect();
         assert_eq!(created.len(), 1, "the create route must be spanned once");
+        let templates: Vec<_> = spans.iter().filter(|s| s.name == TEMPLATE_SPAN).collect();
+        assert_eq!(
+            templates.len(),
+            1,
+            "the template route must be spanned once"
+        );
 
-        let span = created[0];
-        assert_eq!(span.span_kind, SpanKind::Server);
-        assert_eq!(
-            span.span_context.trace_id().to_string(),
-            INBOUND_TRACE_ID,
-            "the public entry span must continue the caller's trace"
-        );
-        assert_eq!(
-            span.parent_span_id.to_string(),
-            INBOUND_PARENT_ID,
-            "the public entry span must hang under the inbound parent"
-        );
+        for span in [created[0], templates[0]] {
+            assert_eq!(span.span_kind, SpanKind::Server);
+            assert_eq!(
+                span.span_context.trace_id().to_string(),
+                INBOUND_TRACE_ID,
+                "the public entry span must continue the caller's trace"
+            );
+            assert_eq!(
+                span.parent_span_id.to_string(),
+                INBOUND_PARENT_ID,
+                "the public entry span must hang under the inbound parent"
+            );
+        }
         assert!(
-            spans
-                .iter()
-                .all(|s| s.name == CREATE_SPAN || &*s.name == "outbound"),
-            "only the create request may open a span, got {:?}",
+            spans.iter().all(|s| s.name == CREATE_SPAN
+                || s.name == TEMPLATE_SPAN
+                || &*s.name == "outbound"),
+            "only the entry routes may open a span, got {:?}",
             spans.iter().map(|s| &*s.name).collect::<Vec<_>>()
         );
     }
