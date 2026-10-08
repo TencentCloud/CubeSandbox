@@ -70,6 +70,12 @@ const (
 	SpanTemplateImageReconcile     = "cubemaster.template.image.reconcile"
 	SpanTemplateImageCleanupMaster = "cubemaster.template.image.artifact.cleanup"
 
+	SpanTemplateCommitSubmit   = "cubemaster.template.commit.submit"
+	SpanTemplateCommitRun      = "cubemaster.template.commit.run"
+	SpanTemplateCommitSnapshot = "cubemaster.template.commit.snapshot"
+	SpanTemplateCommitRegister = "cubemaster.template.commit.register"
+	SpanTemplateCommitCleanup  = "cubemaster.template.commit.cleanup"
+
 	SpanTemplateImageBuild            = "cubetemplatecenter.template.image.build"
 	SpanTemplateImagePrepareSource    = "cubetemplatecenter.template.image.prepare_source"
 	SpanTemplateImageBuildLockWait    = "cubetemplatecenter.template.image.build_lock.wait"
@@ -88,6 +94,7 @@ const (
 	AttrSandboxID       = "cube.sandbox_id"
 	AttrTemplateID      = "cube.template_id"
 	AttrNodeID          = "cube.node_id"
+	AttrNodeIP          = "cube.node_ip"
 	AttrInstanceType    = "cube.instance_type"
 	AttrRetCode         = "cube.ret_code"
 	AttrAttempt         = "cube.attempt"

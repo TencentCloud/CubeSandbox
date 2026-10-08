@@ -85,7 +85,7 @@ func CommitSandbox(ctx context.Context, calleeEp string,
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	return c.CommitSandbox(ctx, req)
+	return c.CommitSandbox(telemetry.InjectGRPC(ctx), req)
 }
 
 func RollbackSandbox(ctx context.Context, calleeEp string,

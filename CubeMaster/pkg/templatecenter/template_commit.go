@@ -16,11 +16,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -40,11 +43,30 @@ const cleanupTemplateRPCTimeout = 1 * time.Minute
 // the JobPhase* set in template_image.go; they are referenced here without
 // re-declaration to avoid duplicate constants.
 
-func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.TemplateImageJobInfo, error) {
+func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *sandboxtypes.CreateCubeSandboxReq) (info *sandboxtypes.TemplateImageJobInfo, err error) {
+	requestID = strings.TrimSpace(requestID)
+	reusedExistingJob := false
+	jobID := ""
+	ctx, submitSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateCommitSubmit,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, requestID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	defer func() {
+		attrs := []attribute.KeyValue{attribute.Bool(telemetry.AttrReused, reusedExistingJob)}
+		if jobID != "" {
+			attrs = append(attrs, attribute.String(telemetry.AttrJobID, jobID))
+		}
+		submitSpan.SetAttributes(attrs...)
+		telemetry.End(submitSpan, err)
+	}()
+
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
-	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
 		return nil, errors.New("requestID is required for commit; retry should generate a new request id")
 	}
@@ -64,10 +86,9 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 	if err != nil {
 		return nil, err
 	}
-	jobID := uuid.New().String()
+	jobID = uuid.New().String()
 	attemptNo := int32(1)
 	retryOfJobID := ""
-	reusedExistingJob := false
 	if err := withTemplateWriteLock(templateID, func() error {
 		// Idempotency: the same (request_id, COMMIT) tuple uniquely identifies a
 		// commit attempt. Reuse a prior job when payload matches; reject on drift.
@@ -155,7 +176,7 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 	// job invisible to the response. Match the sibling SubmitTemplateImage()
 	// path: detach the context (so HTTP client disconnects do not cancel the
 	// background work) and dispatch onto a fresh goroutine.
-	go runTemplateCommitJob(detachTemplateImageJobContext(ctx, "template_commit", map[string]any{
+	jobCtx := telemetry.DetachTrace(detachTemplateImageJobContext(ctx, "template_commit", map[string]any{
 		"job_id":          jobID,
 		"template_id":     templateID,
 		"attempt_no":      attemptNo,
@@ -163,7 +184,8 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 		"sandbox_id":      sandboxID,
 		"node_id":         nodeID,
 		"node_ip":         nodeIP,
-	}), jobID, sandboxID, nodeID, nodeIP, createReq, storedReq)
+	}), ctx)
+	go runTemplateCommitJob(jobCtx, jobID, sandboxID, nodeID, nodeIP, createReq, storedReq)
 
 	return GetTemplateImageJobInfo(ctx, jobID)
 }
@@ -194,6 +216,7 @@ func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, tem
 }
 
 func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) {
+	var jobErr error
 	templateID := createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
@@ -202,25 +225,47 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"node_id":     nodeID,
 		"node_ip":     nodeIP,
 	})
+	ctx, runSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateCommitRun,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrRequestID, createReq.RequestID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	var snapshotSpan, registerSpan trace.Span
+	// End spans after recover so a panic does not leak them.
 	defer func() {
 		if r := recover(); r != nil {
 			stack := string(debug.Stack())
 			logger.Errorf("template commit job panic: %v\n%s", r, stack)
+			jobErr = fmt.Errorf("template commit job panic: %v", r)
 			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 				"status":        JobStatusFailed,
 				"phase":         JobPhaseSnapshotting,
 				"progress":      100,
-				"error_message": fmt.Sprintf("template commit job panic: %v", r),
+				"error_message": jobErr.Error(),
 			})
 		}
+		telemetry.End(registerSpan, jobErr)
+		telemetry.End(snapshotSpan, jobErr)
+		telemetry.End(runSpan, jobErr)
 	}()
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	snapshotCtx, snapshotSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateCommitSnapshot,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	_ = updateTemplateImageJob(snapshotCtx, jobID, map[string]any{
 		"status":   JobStatusRunning,
 		"phase":    JobPhaseSnapshotting,
 		"progress": 10,
 	})
 
-	commitCtx, commitCancel := context.WithTimeout(ctx, commitSandboxRPCTimeout)
+	commitCtx, commitCancel := context.WithTimeout(snapshotCtx, commitSandboxRPCTimeout)
+	defer commitCancel()
 	commitRsp, err := cubelet.CommitSandbox(commitCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
 		RequestID:   uuid.NewString(),
 		SandboxID:   sandboxID,
@@ -230,8 +275,11 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	})
 	commitCancel()
 	if err != nil {
+		telemetry.End(snapshotSpan, err)
+		snapshotSpan = nil
 		errMsg := fmt.Sprintf("cubelet CommitSandbox transport error: %v", err)
 		logger.Errorf("%s", errMsg)
+		jobErr = errors.New(errMsg)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
 			"phase":         JobPhaseSnapshotting,
@@ -244,9 +292,13 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	// All other call sites in CubeMaster compare against int(ErrorCode_Success);
 	// this site is the only one that historically wrote `!= 0`, which silently
 	// flipped every successful commit into a FAILED job with empty error_message.
-	if ret := commitRsp.GetRet(); ret == nil || int(ret.GetRetCode()) != int(errorcode.ErrorCode_Success) {
+	retCode := int(commitRsp.GetRet().GetRetCode())
+	telemetry.EndWithCode(snapshotSpan, retCode)
+	snapshotSpan = nil
+	if commitRsp.GetRet() == nil || retCode != int(errorcode.ErrorCode_Success) {
 		errMsg := buildCommitFailureMessage(commitRsp)
 		logger.Errorf("cubelet CommitSandbox returned non-success: %s snapshot_path=%q", errMsg, commitRsp.GetSnapshotPath())
+		jobErr = errors.New(errMsg)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
 			"phase":         JobPhaseSnapshotting,
@@ -256,8 +308,13 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return
 	}
 
+	registerCtx, registerSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateCommitRegister,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+		))
 	snapshotPath := commitRsp.GetSnapshotPath()
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	_ = updateTemplateImageJob(registerCtx, jobID, map[string]any{
 		"phase":         JobPhaseRegistering,
 		"progress":      70,
 		"node_id":       nodeID,
@@ -277,33 +334,55 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		// path) because partial-failure rollback may need to remove a half-
 		// written entry. The bounded RPC timeout protects the goroutine from
 		// a hung cubelet.
-		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, cleanupTemplateRPCTimeout)
-		_, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
+		cleanupCtx, cleanupSpan := telemetry.StartIfTraced(registerCtx, telemetry.SpanTemplateCommitCleanup,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrTemplateID, templateID),
+				attribute.String(telemetry.AttrNodeIP, nodeIP),
+			))
+		var spanErr error
+		defer func() {
+			if r := recover(); r != nil {
+				telemetry.End(cleanupSpan, errors.New("cleanup panicked"))
+				panic(r)
+			}
+			telemetry.End(cleanupSpan, spanErr)
+		}()
+		rpcCtx, rpcCancel := context.WithTimeout(cleanupCtx, cleanupTemplateRPCTimeout)
+		cleanupRsp, cleanupErr := cubelet.CleanupTemplate(rpcCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
 			TemplateID: templateID,
 			Backend:    pinnedCleanupBackend(storageBackendFromCreate(createReq)),
 		})
-		cleanupCancel()
+		rpcCancel()
+		// A business Ret failure flags the span but is not folded into cause.
+		spanErr = cleanupErr
+		if spanErr == nil && int(cleanupRsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
+			spanErr = fmt.Errorf("cleanup template returned non-success: ret_code=%d", int(cleanupRsp.GetRet().GetRetCode()))
+		}
 		if cleanupErr != nil {
 			cause = errors.Join(cause, cleanupErr)
 		}
 		if definitionCreated {
-			if cleanupErr := cleanupTemplateMetadata(ctx, templateID); cleanupErr != nil {
-				cause = errors.Join(cause, cleanupErr)
+			if metaErr := cleanupTemplateMetadata(cleanupCtx, templateID); metaErr != nil {
+				cause = errors.Join(cause, metaErr)
+				spanErr = errors.Join(spanErr, metaErr)
 			}
 		}
 		logger.Errorf("template commit job rolling back to FAILED: %v", cause)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		if writeErr := updateTemplateImageJob(cleanupCtx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseRegistering,
 			"progress":        100,
 			"template_status": StatusFailed,
 			"error_message":   cause.Error(),
-		})
+		}); writeErr != nil {
+			spanErr = errors.Join(spanErr, writeErr)
+		}
 		invalidateTemplateCaches(templateID)
+		jobErr = cause
 	}
 
-	if err := createDefinition(ctx, templateID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations)); err != nil {
+	if err := createDefinition(registerCtx, templateID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations)); err != nil {
 		cleanupOnFailure(err)
 		return
 	}
@@ -320,7 +399,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		Status:       ReplicaStatusReady,
 	}
 	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion(), commitRsp.GetShimVersion())
-	if err := UpsertReplica(ctx, templateID, createReq.InstanceType, replica); err != nil {
+	if err := UpsertReplica(registerCtx, templateID, createReq.InstanceType, replica); err != nil {
 		cleanupOnFailure(err)
 		return
 	}
@@ -331,13 +410,13 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	if expectedNodes > 1 {
 		templateStatus = StatusPartiallyReady
 	}
-	if err := UpdateDefinitionStatus(ctx, templateID, templateStatus, ""); err != nil {
+	if err := UpdateDefinitionStatus(registerCtx, templateID, templateStatus, ""); err != nil {
 		cleanupOnFailure(err)
 		return
 	}
 
 	localcache.RegisterTemplateReplica(templateID, nodeID, 1)
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	if writeErr := updateTemplateImageJob(registerCtx, jobID, map[string]any{
 		"status":              JobStatusReady,
 		"phase":               JobPhaseRegistering,
 		"progress":            100,
@@ -346,7 +425,9 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"failed_node_count":   max(expectedNodes-1, 0),
 		"template_status":     templateStatus,
 		"error_message":       "",
-	})
+	}); writeErr != nil {
+		jobErr = writeErr
+	}
 	logger.Infof("template commit job finished successfully")
 }
 
