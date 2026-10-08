@@ -844,12 +844,11 @@ rpc_derive_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	}
 
 	if (ctx->cancelled_decouple) {
-		/* The caller asked for this volume to be decoupled -- by default,
-		 * without naming it -- and that is not going to happen now: the
-		 * snapshot holds the external parent, so the chain keeps reading the
-		 * source export, and this node keeps renewing its lease. In the reply
-		 * so Cubelet does not have to scrape logs, and here so a post-mortem
-		 * can find the same fact. */
+		/* An import asked for this volume to be decoupled, and that is not
+		 * going to happen now: the snapshot holds the external parent, so the
+		 * chain keeps reading the source export, and this node keeps renewing
+		 * its lease. In the reply so Cubelet does not have to scrape logs, and
+		 * here so a post-mortem can find the same fact. */
 		SPDK_NOTICELOG("%s '%s' from '%s' completed; decouple of the source "
 			       "was cancelled\n", op, lvol->name, ctx->from);
 	} else {
@@ -2408,9 +2407,10 @@ struct rpc_import_lvol {
 	 * volume reading through to the export until somebody asks. The import still
 	 * answers as soon as the volume is usable.
 	 *
-	 * On by default. A volume left reading through keeps a lease renewed at the
-	 * source, so a source-side snapshot delete is deferred. Reading through is
-	 * the explicit opt-out from eager materialisation. */
+	 * Off by default. An omitted flag leaves the volume reading through, which
+	 * renews a lease at the source, so a source-side snapshot delete stays
+	 * deferred until that reader is gone. decouple:true is the request to
+	 * materialise this volume alone. */
 	bool  decouple;
 };
 
@@ -2501,9 +2501,11 @@ rpc_import_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	 *
 	 * Additive, so anything reading bool_value/string_value is unaffected.
 	 *
-	 * Read off the blob rather than passed down from the decision: this cannot
-	 * disagree with what was actually built. */
-	mode = spdk_blob_is_esnap_clone(lvol->blob) ? "esnap" : "local_clone";
+	 * Taken from the parent chain, not from the flag the caller passed.
+	 * "esnap" means this volume, or a snapshot it was cloned from, still
+	 * reads the export. A local clone of a snapshot that does not is
+	 * "local_clone". */
+	mode = s3lvol_lvol_reads_import(lvol) ? "esnap" : "local_clone";
 
 	SPDK_NOTICELOG("rcow_import_lvol '%s' from export %s completed (%s)\n",
 		       lvol->name, ctx->export_uuid, mode);
@@ -2522,10 +2524,10 @@ static void
 rpc_rcow_import_lvol(struct spdk_jsonrpc_request *request,
 			    const struct spdk_json_val *params)
 {
-	/* decouple defaults to true; the decoder writes the field only when the
-	 * call says so, so an absent flag keeps the default while an explicit false
-	 * overrides it. */
-	struct rpc_import_lvol req = { .decouple = true };
+	/* decouple defaults to false; the decoder writes the field only when the
+	 * call says so, so an absent flag keeps the volume reading through the
+	 * export while an explicit true starts the background copy. */
+	struct rpc_import_lvol req = { .decouple = false };
 	struct rpc_import_ctx *ctx;
 	struct s3lvol_import_opts opts = {0};
 	struct s3lvol_lvstore *lvs;

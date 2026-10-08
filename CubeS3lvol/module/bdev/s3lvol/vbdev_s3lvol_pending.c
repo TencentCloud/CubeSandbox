@@ -458,6 +458,13 @@ pending_lvol_deletable(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		*why = "an operation is in progress on it";
 		return false;
 	}
+	/* action_in_progress covers only the volume being decoupled. Finalizing
+	 * also refuses every other reader of that export, and this list has to
+	 * name the same refusals as s3lvol_lvol_destroy_impl(). */
+	if (s3lvol_lvol_import_finalizing(lvs, lvol)) {
+		*why = "an export it reads is detaching";
+		return false;
+	}
 	return true;
 }
 

@@ -3091,6 +3091,7 @@ ingest_try_finish_end(struct s3_ctx *ctx)
 	}
 
 	ctx->bs_dev.copy = NULL;
+	ctx->bs_dev.copy_on_materialize_only = false;
 	ctx->ingest = NULL;
 	cb = in->end_cb;
 	arg = in->end_arg;
@@ -3382,6 +3383,7 @@ s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_endpoint,
 	in->src_fn = src_fn;
 	in->src_arg = src_arg;
 	ctx->ingest = in;
+	ctx->bs_dev.copy_on_materialize_only = true;
 	ctx->bs_dev.copy = s3_bs_dev_copy;
 	return 0;
 }

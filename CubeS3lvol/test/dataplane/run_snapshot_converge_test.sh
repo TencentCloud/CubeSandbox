@@ -4,23 +4,18 @@
 #
 #  A reference chain must be able to stop depending on its source export.
 #
-#  Snapshotting an imported volume moves the external snapshot onto the snapshot
-#  (measured, docs/import-reference-snapshot-design.md 9.2). That left nothing to
-#  decouple: the volume no longer reads the export, and a read-only snapshot could
-#  not be materialised -- so the chain referenced its source until it was deleted,
-#  which ties the data's survival to the importer's uptime, since a lease going
-#  stale is what licenses an unattended delete on the source.
-#
-#  Decoupling a snapshot is what closes that. This asserts it end to end, and the
-#  assertion that matters is the last one: the source's objects are deleted from S3
-#  and the lvstore is unloaded and re-attached before the final read, so a pass
-#  cannot come from a cache.
+#  Snapshotting an imported volume cancels that volume's decouple and hands the
+#  external parent to the new snapshot. Decoupling the snapshot is what makes the
+#  chain local. This asserts that end to end, and the assertion that matters is
+#  the last one: the source's objects are deleted from S3 and the lvstore is
+#  unloaded and re-attached before the final read, so a pass cannot come from a
+#  cache.
 #
 #  Scenario:
 #    src: a volume written full -> snapshot -> export
-#    dst: import it, snapshot it (which cancels the import's decouple), clone the
-#         snapshot, write to the clone
-#    dst: decouple the snapshot, while a reader loops on the clone
+#    dst: import it with decouple:true, snapshot it (that cancels the decouple),
+#         clone the snapshot, write to the clone
+#    dst: decouple the snapshot, with a reader looping on the clone
 #    then: erase the source prefix, reload, and read everything back
 #
 #  Usage:
@@ -42,14 +37,15 @@ RPC_SOCK="/var/run/s3lvol_cv.sock"
 
 S3_EXPORTS_DIR="exports"
 
-SRC_LVS="cvsrc"
-DST_LVS="cvdst"
+SRC_LVS="${S3LVOL_TEST_SRC_LVS:-cvsrc}"
+DST_LVS="${S3LVOL_TEST_DST_LVS:-cvdst}"
 
 BIG_VOL="big0"
 BIG_SNAP="big0-snap"
 BIG_IMP="big0-imp"
 BIG_IMP_SNAP="big0-imp-snap"
 BIG_IMP_CLONE="big0-imp-clone"
+BIG_REEXPORT_UUID=""
 
 CAPACITY_GIB=8
 BIG_GIB=1          # written end to end, so its decouple is slow enough to catch
@@ -58,14 +54,14 @@ JOURNAL_MB=64
 WAL_MB=128
 WAL_FILE_MB=$((JOURNAL_MB + WAL_MB + 128))
 
-SRC_WAL_FILE="/data/cv_src.img"
-DST_WAL_FILE="/data/cv_dst.img"
+SRC_WAL_FILE="${S3LVOL_SRC_WAL_FILE:-/data/cv_src.img}"
+DST_WAL_FILE="${S3LVOL_DST_WAL_FILE:-/data/cv_dst.img}"
 SRC_WAL_BDEV="cv_src_wal0"
 DST_WAL_BDEV="cv_dst_wal0"
 
 NQN="nqn.2026-08.io.spdk:cv"
 LISTEN_ADDR="127.0.0.1"
-LISTEN_PORT="4422"
+LISTEN_PORT="${S3LVOL_TEST_PORT:-4422}"
 
 ENDPOINT=""
 BUCKET=""
@@ -493,7 +489,7 @@ echo "[5] snapshot it, clone the snapshot, write to the clone"
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
 	"${BIG_IMP}" "${BIG_IMP_SNAP}")" >/dev/null 2>"${WORKDIR}/snap.err" \
 	|| { fail "snapshot ${BIG_IMP}"; sed 's/^/    /' "${WORKDIR}/snap.err"; exit 1; }
-pass "snapshot ${BIG_IMP_SNAP} taken (its decouple was cancelled)"
+pass "snapshot ${BIG_IMP_SNAP} taken; the volume's decouple was cancelled"
 
 raw_rpc rcow_create_clone "$(printf '{"snapshot_name":"%s","clone_name":"%s"}' \
 	"${BIG_IMP_SNAP}" "${BIG_IMP_CLONE}")" >/dev/null 2>"${WORKDIR}/clone.err" \
@@ -559,12 +555,14 @@ rm -f "${WORKDIR}/reader_stop"
 ) &
 READER_PID=$!
 
+# The snapshot holds the external parent now. Decoupling it is what makes the
+# chain stop reading the export; the volume itself no longer has one.
 if raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${BIG_IMP_SNAP}")" \
 	>/dev/null 2>"${WORKDIR}/dec.err"; then
-	pass "decouple of the read-only snapshot was accepted"
+	pass "decouple of ${BIG_IMP_SNAP} started"
 else
-	fail "decouple of ${BIG_IMP_SNAP} refused"
-	sed 's/^/    /' "${WORKDIR}/dec.err" 2>/dev/null | tail -3
+	fail "could not decouple the snapshot that holds the export"
+	sed 's/^/    /' "${WORKDIR}/dec.err" 2>/dev/null | tail -5
 fi
 
 if wait_for_decouple; then
@@ -590,7 +588,7 @@ else
 fi
 
 if grep -qE "'${BIG_IMP_SNAP}' no longer reads export" "${TGT_LOG}"; then
-	pass "snapshot reports it no longer reads the export"
+	pass "the snapshot reports it no longer reads the export"
 else
 	fail "no 'no longer reads export' line for ${BIG_IMP_SNAP}"
 fi
@@ -607,6 +605,7 @@ else
 fi
 
 raw_rpc rcow_get_lvstores "" >"${WORKDIR}/lvs.json" 2>/dev/null || true
+# The snapshot is the esnap that was materialised, so it owns the clusters.
 SNAP_ALLOC="$(python3 -c "
 import json, sys
 try:
@@ -620,9 +619,20 @@ for lvs in (rows if isinstance(rows, list) else rows.get('lvstores', [])):
 print(-1)
 " "${WORKDIR}/lvs.json" "${BIG_IMP_SNAP}" 2>/dev/null || echo -1)"
 if [ "${SNAP_ALLOC}" -gt 0 ] 2>/dev/null; then
-	pass "snapshot now owns ${SNAP_ALLOC} cluster(s) of its own"
+	pass "snapshot owns the ${SNAP_ALLOC} cluster(s) it materialised"
 else
-	fail "snapshot owns no clusters after being decoupled (reported '${SNAP_ALLOC}')"
+	fail "snapshot did not keep the materialised clusters (got '${SNAP_ALLOC}')"
+fi
+
+BIG_REEXPORT_UUID="$(raw_rpc rcow_export_snapshot \
+	"$(printf '{"snapshot_name":"%s"}' "${BIG_IMP_SNAP}")" \
+	2>"${WORKDIR}/reexport.err" | tr -d ' \t\r\n')"
+if [ -n "${BIG_REEXPORT_UUID}" ] &&
+   wait_export_done "${BIG_REEXPORT_UUID}" "re-export of imported snapshot"; then
+	pass "a snapshot of the imported lvol can be exported again"
+else
+	fail "could not re-export the imported lvol's snapshot"
+	sed 's/^/    /' "${WORKDIR}/reexport.err" 2>/dev/null
 fi
 
 # ==========================================================================

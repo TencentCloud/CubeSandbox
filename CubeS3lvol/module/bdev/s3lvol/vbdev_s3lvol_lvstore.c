@@ -86,6 +86,10 @@ struct s3lvol_lvstore {
 	 * whoever actually wrote it. Releasing one we never acquired would clear
 	 * another process's claim -- the exact thing this is meant to prevent. */
 	bool                    owner_held;
+	size_t                  derive_inflight;
+	/* esnap clones whose bdev is not registered yet. The decouple quiesce
+	 * set waits for these, then refuses any further import of that export. */
+	size_t                  import_clone_inflight;
 
 	TAILQ_ENTRY(s3lvol_lvstore) link;
 };
@@ -2829,6 +2833,8 @@ s3lvol_lvol_create(struct s3lvol_lvstore *lvs, const char *name,
  * So the snapshot is kept and the registration failure is reported honestly.
  * The data is intact; only a bdev is missing, and re-attaching the lvstore
  * registers it. */
+static void derive_inflight_put(struct s3lvol_lvstore *lvs);
+
 static void
 s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
@@ -2839,9 +2845,9 @@ s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	struct s3lvol_lvstore *lvs = ctx->lvs;
 	int rc;
 
-	free(ctx);
-
 	if (lvolerrno != 0) {
+		derive_inflight_put(lvs);
+		free(ctx);
 		SPDK_ERRLOG("Failed to create snapshot/clone: %s\n",
 			    spdk_strerror(-lvolerrno));
 		if (cb_fn) {
@@ -2893,6 +2899,12 @@ s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	}
 
 	rc = vbdev_s3lvol_bdev_register(lvol, lvs_name);
+	/* After registration. The decouple quiesce set treats a zero count as
+	 * "every descendant bdev is visible", so dropping it earlier lets that
+	 * set close while this bdev is still being registered. A failed
+	 * registration leaves no bdev, so there is nothing further to wait for. */
+	derive_inflight_put(lvs);
+	free(ctx);
 	if (rc != 0) {
 		SPDK_ERRLOG("lvol '%s' was created but its bdev could not be "
 			    "registered (%d). The data is intact -- re-attach the "
@@ -2954,6 +2966,15 @@ derive_check(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol, const char *nam
 		SPDK_ERRLOG("lvol '%s' is queued to be decoupled; a snapshot or "
 			    "clone would take its external snapshot while the "
 			    "decouple still reads through it\n", lvol->name);
+		return -EBUSY;
+	}
+	/* Set after the last cluster is copied and before the family is quiesced.
+	 * A descendant registered in that window is not in the quiesce set, and
+	 * clear_external_parent then destroys the esnap channel under it. */
+	if (s3lvol_lvol_import_finalizing(lvs, lvol)) {
+		SPDK_ERRLOG("lvol '%s' still reads an export whose decouple is "
+			    "detaching it; a snapshot or clone would miss the "
+			    "quiesce\n", lvol->name);
 		return -EBUSY;
 	}
 	return 0;
@@ -3075,14 +3096,19 @@ s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		return -ENOMEM;
 	}
 
+	/* Counted before the call. spdk_lvol_create_snapshot() is void and runs
+	 * the callback on every path, including its synchronous failures, so a
+	 * failure cannot leave the count raised. The callback drops it only
+	 * after the new bdev is registered. */
+	lvs->derive_inflight++;
 	spdk_lvol_create_snapshot(lvol, snapshot_name, s3lvol_lvol_derive_cb, ctx);
 	return 0;
 }
 
-int
-s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
-			 const char *clone_name,
-			 s3lvol_lvol_op_cb cb_fn, void *cb_arg)
+static int
+create_clone_common(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
+		    const char *clone_name,
+		    s3lvol_lvol_op_cb cb_fn, void *cb_arg)
 {
 	struct lvol_create_ctx *ctx;
 	int rc;
@@ -3108,8 +3134,62 @@ s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		return -ENOMEM;
 	}
 
+	/* Same pairing as create_snapshot: the callback always runs, and the
+	 * count covers bdev registration rather than just the blob operation. */
+	lvs->derive_inflight++;
 	spdk_lvol_create_clone(lvol, clone_name, s3lvol_lvol_derive_cb, ctx);
 	return 0;
+}
+
+int
+s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
+			 const char *clone_name,
+			 s3lvol_lvol_op_cb cb_fn, void *cb_arg)
+{
+	return create_clone_common(lvs, lvol, clone_name, cb_fn, cb_arg);
+}
+
+static void
+derive_inflight_put(struct s3lvol_lvstore *lvs)
+{
+	assert(lvs->derive_inflight > 0);
+	/* assert() is absent from a release build. A wrapped size_t would look
+	 * permanently busy to the decouple wait. */
+	if (lvs->derive_inflight == 0) {
+		SPDK_ERRLOG("lvstore '%s' derive count is already zero\n", lvs->name);
+		return;
+	}
+	lvs->derive_inflight--;
+}
+
+bool
+s3lvol_lvstore_derive_inflight(const struct s3lvol_lvstore *lvs)
+{
+	return lvs && lvs->derive_inflight != 0;
+}
+
+void
+s3lvol_lvstore_import_clone_begin(struct s3lvol_lvstore *lvs)
+{
+	lvs->import_clone_inflight++;
+}
+
+void
+s3lvol_lvstore_import_clone_end(struct s3lvol_lvstore *lvs)
+{
+	assert(lvs->import_clone_inflight > 0);
+	if (lvs->import_clone_inflight == 0) {
+		SPDK_ERRLOG("lvstore '%s' import-clone count is already zero\n",
+			    lvs->name);
+		return;
+	}
+	lvs->import_clone_inflight--;
+}
+
+bool
+s3lvol_lvstore_import_clone_inflight(const struct s3lvol_lvstore *lvs)
+{
+	return lvs && lvs->import_clone_inflight != 0;
 }
 
 /* ==========================================================================
@@ -3414,6 +3494,21 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 		destroy_mark_pending(lvol, S3LVOL_PENDING_DECOUPLE);
 		return -EBUSY;
 	}
+	/* action_in_progress covers only the volume being decoupled. The quiesce
+	 * set also names every other reader of that export, and it is walked
+	 * across reactor turns. A delete admitted here would unregister one of
+	 * those bdevs while the walk still has to quiesce it. A release-chain
+	 * continuation already passed this check and has revoked an export, so
+	 * it must finish; the quiesce walk re-resolves by name and will not
+	 * touch a bdev that continuation has already freed. */
+	if (!release_chain && owner &&
+	    s3lvol_lvol_import_finalizing(owner, lvol)) {
+		SPDK_ERRLOG("lvol '%s' still reads an export whose decouple is "
+			    "detaching it; it cannot be deleted until that "
+			    "finishes\n", lvol->name);
+		destroy_mark_pending(lvol, S3LVOL_PENDING_DECOUPLE);
+		return -EBUSY;
+	}
 	rc = snapshot_destroy_check_clones(lvol);
 	if (rc != 0) {
 		return rc;
@@ -3564,19 +3659,11 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 	}
 	spdk_uuid_copy(&ctx->lvol_uuid, &lvol->uuid);
 
-	/* Recorded now, for the same reason the owner is: after the destroy the blob
-	 * is gone and the esnap id with it. An id that is not a NUL-terminated uuid
-	 * string is not one of ours, so it is left empty rather than guessed at. */
-	if (lvol->blob && spdk_blob_is_esnap_clone(lvol->blob)) {
-		const void *esnap_id = NULL;
-		size_t id_len = 0;
-
-		if (spdk_blob_get_esnap_id(lvol->blob, &esnap_id, &id_len) == 0 &&
-		    id_len < sizeof(ctx->esnap_uuid)) {
-			memcpy(ctx->esnap_uuid, esnap_id, id_len);
-			ctx->esnap_uuid[id_len] = '\0';
-		}
-	}
+	/* Recorded now, for the same reason the owner is: after the destroy the
+	 * parent chain is gone. A clone reaches the export through its snapshot,
+	 * so the uuid has to come from that chain rather than only this blob. */
+	(void)s3lvol_lvol_import_uuid(lvol, ctx->esnap_uuid,
+				     sizeof(ctx->esnap_uuid));
 
 	/* Capture the cluster counts before the destroy: the blob must still be
 	 * open to read them, and is gone by the time s3lvol_lvol_destroyed()
