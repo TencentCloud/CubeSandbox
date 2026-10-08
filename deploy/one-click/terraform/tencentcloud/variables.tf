@@ -350,6 +350,39 @@ variable "templatecenter_replicas" {
     error_message = "templatecenter_replicas must be an integer >= 1."
   }
 }
+
+variable "templatecenter_trusted_ca_certs" {
+  description = "Optional PEM CA certificates (X.509 only) trusted by the CubeTemplateCenter pod's outbound TLS, for image registries (or other endpoints) behind a private CA. Each entry is one PEM document; rendered into a ConfigMap, merged with the image's system bundle by a merge-ca init container, and exposed via SSL_CERT_FILE — the terraform twin of the helm chart's trustedCACerts. Empty (default) renders nothing. No effect on node-side kubelet/containerd pulls: configure those on the host."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for pem in var.templatecenter_trusted_ca_certs :
+      trimspace(pem) != "" &&
+      length(regexall("-----BEGIN CERTIFICATE-----", pem)) > 0 &&
+      length(regexall("-----BEGIN CERTIFICATE-----", pem)) == length(regexall("-----END CERTIFICATE-----", pem)) &&
+      alltrue([for m in regexall("-----BEGIN [A-Z0-9 ]+-----", pem) : m == "-----BEGIN CERTIFICATE-----"])
+    ])
+    error_message = "Every templatecenter_trusted_ca_certs entry must be a non-empty PEM with only CERTIFICATE blocks and balanced BEGIN/END CERTIFICATE markers. A pasted private key would be written into a world-readable ConfigMap (CWE-200/CWE-540), and Go silently skips unbalanced or non-X.509 blocks, leaving the registry pull failing with x509 while the feature looks enabled. Export the certificate alone (e.g. openssl x509 -in combined.pem -out cert.crt)."
+  }
+
+  validation {
+    condition     = sum([for pem in var.templatecenter_trusted_ca_certs : length(pem)]) <= 921600
+    error_message = "templatecenter_trusted_ca_certs combined size must stay under 900 KiB: the Kubernetes ConfigMap API limit is 1 MiB for the whole object and the apply would fail late with a less obvious error. List only the CAs you actually need (a full OS trust bundle is ~200 KiB and unnecessary here)."
+  }
+}
+
+variable "templatecenter_trusted_ca_existing_config_map" {
+  description = "Name of an operator-managed ConfigMap (same namespace, keys must end in .crt and hold PEM certificates) to mount instead of the inline templatecenter_trusted_ca_certs. Mutually exclusive with the inline certs; its content cannot be validated at plan time, so the merge-ca init container rejects non-CERTIFICATE blocks, unbalanced markers and unparseable X.509 at pod start."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !(var.templatecenter_trusted_ca_existing_config_map != "" && length(var.templatecenter_trusted_ca_certs) > 0)
+    error_message = "templatecenter_trusted_ca_existing_config_map and templatecenter_trusted_ca_certs are mutually exclusive: the existing ConfigMap wins and the inline certs would be silently ignored."
+  }
+}
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
 # env knobs wired by create.sh.
