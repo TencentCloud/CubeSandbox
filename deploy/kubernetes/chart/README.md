@@ -330,8 +330,13 @@ TLS verification stays on — this adds trust, it does not disable it.
   `existingConfigMap` value is handled.
 - The TemplateCenter image must ship a system CA bundle
   (`ca-certificates`; Debian/Ubuntu and RHEL bundle layouts are probed —
-  empty bundles are rejected) plus `/bin/sh` with `cp`/`ls`/`cat` for the
-  merge-ca init container.
+  empty bundles are rejected) plus `/bin/sh` and — **unconditionally** —
+  `awk` (block-type whitelist, BEGIN/END symmetry and the X.509 split all
+  gate on it) and `grep` (the merged-count log line); `openssl` and
+  `mktemp` are only needed when the X.509 validation runs (its absence
+  degrades to the textual checks by design). A slimmed image without awk
+  fails at pod start with `awk: not found` rather than anything the probe
+  comment warns about.
 - To confirm the merge actually took effect on a running pod:
 
   ```sh
@@ -343,7 +348,9 @@ TLS verification stays on — this adds trust, it does not disable it.
   you configured (the init container logs the same number at pod start).
 - The feature is inert when `controlPlane.enabled=false` (no TemplateCenter
   is deployed): the ConfigMap, init container and checksum are not rendered,
-  and the PEM validation does not fire.
+  and the PEM validation does not fire — the one exception is the
+  `certs`/`existingConfigMap` conflict, which still fails the render (it is
+  a values mistake regardless of whether a consumer exists).
 - Publicly-trusted registries (Docker Hub, TCR, GCR, ...) need nothing here.
 
 ## CubeMaster configuration
