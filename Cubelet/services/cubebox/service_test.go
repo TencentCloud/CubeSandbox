@@ -6,12 +6,14 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -727,4 +729,89 @@ func TestAppSnapshotRequiresCowBeforeCreate(t *testing.T) {
 	require.NotNil(t, rsp)
 	assert.Equal(t, errorcode.ErrorCode_PreConditionFailed, rsp.GetRet().GetRetCode())
 	assert.Contains(t, rsp.GetRet().GetRetMsg(), "storage_backend=cubecow")
+}
+
+func TestParseShimIntentTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"unset uses the default", "", defaultShimIntentTTL},
+		{"bare zero disables the bound", "0", 0},
+		{"zero with a unit disables the bound", "0s", 0},
+		{"a duration is parsed", "90s", 90 * time.Second},
+		{"surrounding whitespace is tolerated", "  2m  ", 2 * time.Minute},
+		{"an unparsable value keeps the default rather than disabling the bound", "10 minutes", defaultShimIntentTTL},
+		{"a negative value keeps the default", "-1m", defaultShimIntentTTL},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseShimIntentTTL(tc.raw))
+		})
+	}
+}
+
+// A record written before Endpoint.ShimSpawnedAt existed has no age, and an
+// unknown age is the one thing the TTL cannot bound. Stamping it at startup
+// gives it a full TTL instead of leaving it fail-closed forever.
+func TestBackfillShimIntentTimestampsStampsUndatedRecords(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-undated", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	mgr := &fakeCubeboxAPI{cb: sb}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.False(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Equal(t, []string{"sb-undated"}, mgr.syncIDs, "the stamp has to reach the store")
+}
+
+func TestBackfillShimIntentTimestampsLeavesCurrentAndUnspawnedRecordsAlone(t *testing.T) {
+	stampedAt := time.Now().Add(-time.Hour)
+	dated := newCubeboxWithStatusForTest("sb-dated", cubeboxstore.Status{StartedAt: 1})
+	dated.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: stampedAt}
+	mgr := &fakeCubeboxAPI{cb: dated}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.Equal(t, stampedAt, dated.Endpoint.ShimSpawnedAt, "an existing age must keep accruing")
+	assert.Empty(t, mgr.syncIDs)
+
+	clean := newCubeboxWithStatusForTest("sb-clean", cubeboxstore.Status{StartedAt: 1})
+	cleanMgr := &fakeCubeboxAPI{cb: clean}
+
+	(&local{cubeboxManger: cleanMgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.True(t, clean.Endpoint.ShimSpawnedAt.IsZero(), "a sandbox with no intent must not gain one")
+	assert.Empty(t, cleanMgr.syncIDs)
+}
+
+func TestBackfillShimIntentTimestampsContinuesWhenSyncFails(t *testing.T) {
+	failed := newCubeboxWithStatusForTest("sb-sync-fail", cubeboxstore.Status{StartedAt: 1})
+	failed.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	kept := newCubeboxWithStatusForTest("sb-dated", cubeboxstore.Status{StartedAt: 1})
+	keptAt := time.Now().Add(-time.Hour)
+	kept.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: keptAt}
+	later := newCubeboxWithStatusForTest("sb-later", cubeboxstore.Status{StartedAt: 1})
+	later.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	mgr := &fakeCubeboxAPI{
+		list:    []*cubeboxstore.CubeBox{failed, kept, later},
+		syncErr: errors.New("store unavailable"),
+	}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.True(t, failed.Endpoint.ShimSpawned)
+	assert.False(t, failed.Endpoint.ShimSpawnedAt.IsZero(),
+		"this process still bounds the intent even when the stamp did not reach disk")
+	assert.Equal(t, keptAt, kept.Endpoint.ShimSpawnedAt, "an existing age must keep accruing")
+	assert.False(t, later.Endpoint.ShimSpawnedAt.IsZero(),
+		"a sync failure must not stop the records that follow")
+	assert.Equal(t, []string{"sb-sync-fail", "sb-later"}, mgr.syncIDs)
+}
+
+func TestSetShimIntentTTLIsReadableFromTheDestroyPath(t *testing.T) {
+	l := &local{}
+	l.SetShimIntentTTL(3 * time.Minute)
+	assert.Equal(t, 3*time.Minute, l.ShimIntentTTL())
 }

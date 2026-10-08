@@ -57,6 +57,16 @@ type ServicesConfig struct {
 
 	DeadContainerTTLStr string `toml:"dead_container_ttl"`
 	deadContainerTTL    time.Duration
+
+	// ShimIntentTTLStr bounds how long the "a shim may have been spawned"
+	// record may keep a sandbox's tap, IP and volumes allocated when no
+	// process can be found for it anywhere on the host. Every other piece of
+	// evidence is consulted first, so this only ever decides a record that
+	// names no live holder at all. "0"/"0s" disables the bound, which is the
+	// fail-closed behaviour: such a sandbox then stays undeletable until an
+	// operator clears it by hand.
+	ShimIntentTTLStr string `toml:"shim_intent_ttl"`
+	shimIntentTTL    time.Duration
 }
 
 var (
@@ -64,6 +74,12 @@ var (
 	defaultDestroyDeadline  = 60 * time.Second
 	defaultDeadContainerTTL = 1 * time.Hour
 	cleanerHeartBeat        = 10 * time.Second
+
+	// defaultShimIntentTTL is deliberately far longer than a create can take
+	// (defaultCreateDeadline): it only has to outlast a crash between writing
+	// the spawn intent and recording the shim's pid, and it is the point at
+	// which we stop believing such a record can still describe a live shim.
+	defaultShimIntentTTL = 10 * time.Minute
 
 	// createStuckThreshold bounds how long a sandbox may legitimately remain in
 	// the CONTAINER_CREATED transient before DeadGC is allowed to probe it. The
@@ -80,6 +96,30 @@ var (
 
 func defaultServiceConfig() *ServicesConfig {
 	return &ServicesConfig{}
+}
+
+// parseShimIntentTTL reads the shim-intent TTL. It accepts the bare "0"
+// spelling for "never age out" that time.ParseDuration rejects, and falls back
+// to the default rather than silently disabling the bound on a typo: an
+// unparsable value must not turn into the fail-closed setting by accident.
+func parseShimIntentTTL(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultShimIntentTTL
+	}
+	if raw == "0" {
+		return 0
+	}
+	t, err := time.ParseDuration(raw)
+	switch {
+	case err != nil || t < 0:
+		CubeLog.Warnf("invalid shim_intent_ttl %q, using %s", raw, defaultShimIntentTTL)
+		return defaultShimIntentTTL
+	case t == 0:
+		return 0 // "0s", "0m", ... all mean never age out
+	default:
+		return t
+	}
 }
 
 func init() {
@@ -121,6 +161,8 @@ func init() {
 				config.deadContainerTTL = t
 			}
 
+			config.shimIntentTTL = parseShimIntentTTL(config.ShimIntentTTLStr)
+
 			CubeLog.Infof("%v init config:%+v",
 				fmt.Sprintf("%v.%v", constants.CubeboxServicePlugin, constants.CubeboxServiceID), config)
 
@@ -137,6 +179,18 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("not a cubebox manager")
 			}
+
+			// The destroy path refuses to reclaim a sandbox while its spawn
+			// intent is unresolved, and lives in the cubebox plugin; this
+			// plugin owns the cleanup policy, so hand the bound across rather
+			// than duplicating the configuration surface.
+			cb.SetShimIntentTTL(config.shimIntentTTL)
+			// Records written before Endpoint.ShimSpawnedAt existed have no age,
+			// and an unresolvable age is the one thing the TTL cannot bound.
+			// Stamp them now, before any cleanup can run, so they get a full
+			// TTL instead of blocking forever.
+			cb.BackfillShimIntentTimestamps(ic.Context)
+			CubeLog.Infof("shim-spawn intent TTL is %s (0 means never age out)", config.shimIntentTTL)
 
 			p, err := ic.GetByID(constants.WorkflowPlugin, constants.WorkflowID.ID())
 			if err != nil {
@@ -233,6 +287,45 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 
 	return utils.InterfaceToString(tmpReq)
 }
+
+// gatePausedReplace refuses to start a resume that would replace a PAUSED
+// sandbox whose previous runtime may still be running.
+//
+// Everything the replacement does deletes the old sandbox's records, and that
+// row is the only place its shim identity survives: once it is gone nothing on
+// the host can match a still-running shim back to the sandbox, and the new
+// attempt is handed a tap/IP that is still in use.
+//
+// The check runs here, at the entry point, rather than in the create flow's
+// cubebox step where it used to live. By that step the flow has already
+// allocated network and volume for the new attempt, so the only way to fail
+// without stranding those allocations was an error code the workflow engine
+// answers with a failover — and failover destroys the sandbox with this same
+// ID, which on this path is the PAUSED sandbox the user asked to resume. A
+// transient gate failure therefore destroyed the very state it existed to
+// protect. Running before any allocation removes the trade-off: the caller
+// gets a retryable PreConditionFailed, and nothing is allocated or destroyed.
+func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil
+	}
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
+	if err != nil || sb == nil || sb.SandboxID != desired {
+		// No local record to replace: an ordinary create that happens to
+		// carry the annotation.
+		return nil
+	}
+	st := sb.GetStatus()
+	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
+		// lifecycle lock and its cleanup, and a live sandbox must not be
+		// touched; the create step rejects both as already exists.
+		return nil
+	}
+	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
+}
+
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 	rsp := &cubebox.RunCubeSandboxResponse{
 		RequestID: req.RequestID,
@@ -354,6 +447,15 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	rt.Namespace = ns
 	ctx = namespaces.WithNamespace(ctx, ns)
+	// The gate has to run before the create flow allocates anything, and it
+	// needs the same namespace the flow would have used to resolve the old
+	// sandbox's shim.
+	if err := s.gatePausedReplace(ctx, req); err != nil {
+		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		return rsp, nil
+	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	var createErr error
 	if constants.IsCubeRuntime(ctx) {
