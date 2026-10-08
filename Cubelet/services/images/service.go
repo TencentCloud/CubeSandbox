@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/chi"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
@@ -33,6 +34,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 )
 
@@ -209,6 +212,17 @@ func (s *service) CreateImage(ctx context.Context, req *images.CreateImageReques
 		Callee:       constants.ImagesServiceID.ID(),
 		CalleeAction: "CreateImage",
 	}
+
+	ctx = telemetry.ExtractGRPC(ctx)
+	ctx, span := telemetry.Start(ctx, telemetry.SpanImageCreate,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, req.GetRequestID()),
+			attribute.String(telemetry.AttrArtifactID,
+				req.GetSpec().GetAnnotations()[constants.MasterAnnotationRootfsArtifactID]),
+		))
+	// Defer before recovery so it records the recovered response code.
+	defer func() { telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode())) }()
 
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 	log.G(ctx).Errorf("CreateImageRequest:%s", utils.InterfaceToString(req))
