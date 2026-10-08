@@ -256,9 +256,11 @@ docker run --rm --entrypoint /usr/bin/envd cubesandbox-base:rust-local -commit
 依赖构建，并将程序安装到 `/usr/bin/envd`。镜像提供 UID 1000 的 `user` 账户，
 SDK 默认命令用户仍为 root。
 
-镜像通过 tini 和共享 entrypoint supervisor 运行 envd 及可选的应用 CMD。
-不要在 CMD 中再次启动 envd。envd 退出后，supervisor 会终止应用并停止容器，
-不会静默重启 daemon 或切换为 Go。若要重新使用 Go，请选择 Go 镜像创建新模板，
+镜像通过 tini 和共享入口脚本运行 envd 及可选的应用 CMD。
+不要在 CMD 中再次启动 envd。有 CMD 时，envd 退出不会终止应用，容器使用应用的退出码。
+TERM/INT/HUP 只转发给应用，入口脚本继续等待，不设置强杀超时。
+无 CMD 时原样返回 envd 的退出码，包括零。入口脚本不会静默重启 daemon 或切换为 Go。
+若要重新使用 Go，请选择 Go 镜像创建新模板，
 再从该模板创建 sandbox；此操作不迁移已有 Rust sandbox 的状态。
 
 ## 创建模板并使用 SDK

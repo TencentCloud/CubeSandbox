@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Also support callers that explicitly invoke the former sh entrypoint.
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
-# CubeSandbox image supervisor. Runtime/container teardown owns descendants;
-# this entrypoint only signals the two leaders it starts.
+# CubeSandbox image entrypoint. Runtime/container teardown owns descendants;
+# with a user CMD, this entrypoint only forwards signals to that application.
 set -u
 # Asynchronous commands must inherit default SIGINT handling, not SIG_IGN.
 set -m
@@ -59,92 +59,45 @@ else
     exec 3>&1
 fi
 
-# A single FIFO orders child completion and external signals, including exits
-# before the supervisor begins waiting. Each record is one atomic pipe write.
-events=$(mktemp -d) || exit 1
-mkfifo "$events/events" || { rmdir "$events"; exit 1; }
-exec 4<>"$events/events"
-rm -rf "$events"
-trap 'printf "Signal TERM 143\n" >&4' TERM
-trap 'printf "Signal INT 130\n" >&4' INT
-trap 'printf "Signal HUP 129\n" >&4' HUP
-
-monitor() {
-    local role=$1 pid status
-    shift
-    "$@" 3>&- 4>&- &
-    pid=$!
-    printf 'Start %s %s\n' "$role" "$pid" >&4
-    wait "$pid"
-    status=$?
-    printf 'Exit %s %s\n' "$role" "$status" >&4
-}
-monitor Envd "$ENVD_BIN" -port "$ENVD_PORT" "${envd_args[@]}" >&3 2>&1 &
-envd_monitor=$!
-user_monitor=
-if (( $# )); then
-    monitor User "$@" &
-    user_monitor=$!
-fi
+"$ENVD_BIN" -port "$ENVD_PORT" "${envd_args[@]}" >&3 2>&1 3>&- &
+envd_pid=$!
 exec 3>&-
-envd_pid='' user_pid='' cause='' status=0 terminal_signal=TERM
-envd_done=0 user_done=0
-[[ -n $user_monitor ]] || user_done=1
+if (( $# == 0 )); then
+    # Job control is needed only at launch for SIGINT inheritance. Disable it
+    # while waiting so stopped jobs cannot supply stale termination statuses.
+    set +m
+    wait -f "$envd_pid"
+    exit $?
+fi
 
-# Once selected, a cause and its status never change during teardown.
+# Queue signals during launch so they cannot accidentally target envd's PID.
+user_pid=''
+pending_signals=()
+forward_signal() {
+    interrupted=1
+    if [[ -n $user_pid ]]; then
+        kill -s "$1" "$user_pid" 2>/dev/null || true
+    else
+        pending_signals+=("$1")
+    fi
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+"$@" &
+user_pid=$!
+set +m
+for pending_signal in "${pending_signals[@]}"; do
+    forward_signal "$pending_signal"
+done
+
+# A trap interrupts wait even if the application is still running. Re-wait on
+# that same child to collect its real status, including legitimate 128+signal
+# statuses. Bash retains the child's status for repeated waits by PID.
 while true; do
-    # A trapped signal can interrupt read after its handler queues the event.
-    IFS=' ' read -r event role value <&4 || continue
-    case $event in
-        Start)
-            if [[ $role == Envd ]]; then envd_pid=$value; else user_pid=$value; fi
-            ;;
-        Exit)
-            if [[ $role == Envd ]]; then envd_done=1; else user_done=1; fi
-            if [[ -z $cause ]]; then
-                status=$value
-                if [[ $role == User ]]; then
-                    cause=UserExit
-                else
-                    cause=EnvdFailure
-                    (( status != 0 )) || status=1
-                fi
-            fi
-            ;;
-        Signal)
-            if [[ -z $cause ]]; then
-                cause=ExternalSignal
-                status=$value
-                terminal_signal=$role
-            fi
-            ;;
-    esac
-    # Start records precede each child's Exit record; collect both leader PIDs
-    # before teardown even if a signal or immediate exit arrived during startup.
-    if [[ -n $cause && -n $envd_pid ]] && { [[ -z $user_monitor || -n $user_pid ]]; }; then
-        break
-    fi
+    interrupted=0
+    wait -f "$user_pid"
+    status=$?
+    (( interrupted )) || break
 done
-trap '' TERM INT HUP
-echo "cube-entrypoint: terminal cause=$cause status=$status" >&2
-if (( ! envd_done )); then kill -TERM "$envd_pid" 2>/dev/null || true; fi
-if (( ! user_done )); then kill -s "$terminal_signal" "$user_pid" 2>/dev/null || true; fi
-
-# A single fixed grace bounds both leaders. Later errors/signals cannot replace
-# the selected cause; no signal is sent to either leader's process group.
-deadline=$((SECONDS + 5))
-while (( ! envd_done || ! user_done )); do
-    remaining=$((deadline - SECONDS))
-    (( remaining > 0 )) || break
-    IFS=' ' read -r -t "$remaining" event role value <&4 || break
-    if [[ $event == Exit ]]; then
-        if [[ $role == Envd ]]; then envd_done=1; else user_done=1; fi
-    fi
-done
-(( envd_done )) || kill -KILL "$envd_pid" 2>/dev/null || true
-(( user_done )) || kill -KILL "$user_pid" 2>/dev/null || true
-# Do not wait after forced termination: a leader blocked in a kernel syscall
-# may not reap yet. Container/runtime teardown completes that cleanup.
-if (( envd_done )); then wait "$envd_monitor" 2>/dev/null || true; fi
-if [[ -n $user_monitor ]] && (( user_done )); then wait "$user_monitor" 2>/dev/null || true; fi
 exit "$status"

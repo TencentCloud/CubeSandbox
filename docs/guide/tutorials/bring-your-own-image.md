@@ -163,7 +163,7 @@ For the `cubebox` instance type, CubeMaster also preserves the injection annotat
 
 ## 4. The entrypoint contract
 
-Source-built images from this checkout use a self-contained Bash entrypoint: keep `/bin/bash` and standard coreutils in custom images. They supervise both children, make daemon exit visible even with a user CMD, and bound shutdown to five seconds. Published tags may retain the older behavior described below; the single-file COPY examples remain valid.
+Source-built images from this checkout use a self-contained Bash entrypoint: keep `/bin/bash` and standard coreutils in custom images. With a user CMD, envd exiting does not stop the application. TERM/INT/HUP are forwarded only to the application, and the entrypoint keeps waiting for its exit code without a forced-kill timeout. Without a CMD, envd's exit code is returned unchanged, including zero. Container runtime teardown owns final cleanup; the single-file COPY examples remain valid.
 
 `cube-entrypoint.sh` implements a simple "envd-in-the-background, your
 app in the foreground" pattern:
@@ -172,8 +172,8 @@ app in the foreground" pattern:
    so that `/health` is reachable within about a second of container
    startup.
 2. If the container was started **with** a user `CMD`, the script
-   `exec`s that command. `envd` keeps running in the background; the
-   user process owns `stdout`/`stderr` and receives `SIGTERM` on stop.
+   starts and waits for that command. `envd` runs independently in the
+   background; TERM/INT/HUP are forwarded to the user process only.
 3. If the container was started **without** a `CMD`, the script simply
    waits on `envd`, keeping it as the foreground process.
 

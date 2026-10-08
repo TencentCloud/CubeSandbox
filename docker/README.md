@@ -84,11 +84,11 @@ starts its daemon. No automatic provider switching or restart is performed.
 
 The self-contained Bash entrypoint can still be copied as a single file into
 custom images; those images must provide `/bin/bash` and standard coreutils.
-The supervisor stops the container when the daemon exits, including an
-unexpected zero exit with a user CMD still running. It preserves the first
-termination cause, forwards external TERM/INT/HUP to the user leader, asks the
-daemon to stop, and allows five seconds before forcing shutdown. The container
-runtime removes residual descendants. Health requires HTTP 204 and reports a
+With a user CMD, the entrypoint waits for the application and returns its exit
+code even if envd exits first. TERM/INT/HUP are forwarded only to the application;
+the entrypoint keeps waiting without shutting down envd or imposing a kill
+timeout. Without a CMD, it returns envd's exit code unchanged, including zero.
+The container runtime owns final cleanup. Health requires HTTP 204 and reports a
 nonresponding daemon as unhealthy. These lifecycle checks also cover Go;
 Go's existing upstream build arguments and `docker/` build context remain valid.
 
@@ -105,6 +105,16 @@ or reconfigure the host cgroups to make a test pass. The test bootstrap removes
 SYS_TIME before starting the daemon; do not grant it against the host clock.
 Port forwarding additionally requires the guest's `169.254.0.21` address.
 
+The entrypoint process tests can also run without Docker:
+
+```sh
+python3 -B -m unittest discover -s docker/tests -p test_supervisor.py -v
+```
+
+They cover daemon-only exit codes, daemon failure with a live application,
+TERM/INT/HUP forwarding and continued waiting, repeated signals, immediate
+application exit, stopped children, and the absence of a five-second kill timer.
+
 ```sh
 # On a Linux Docker host supporting private cgroup v2, test the selected image.
 # These tests require permission to create privileged, isolated containers.
@@ -113,6 +123,13 @@ CUBE_ENVD_COMMIT="$(git rev-parse HEAD)" \
 NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 \
 python3 -B -m unittest discover -s docker/tests -v
 ```
+
+For a Go image, set `CUBE_ENVD_PROVIDER=go`, `ENVD_REF` to its upstream build
+reference, and `CUBE_ENVD_COMMIT` to that daemon's `-commit` output. Both providers
+run the same lifecycle tests. When testing a derived image that only replaces
+the entrypoint, keep the original daemon's revision rather than the checkout's
+HEAD; this validates the new script with that existing binary, not a fresh
+build of the complete PR.
 
 This exercises the image's declared entrypoint and real daemon. It does not
 validate Firecracker, platform-created VMs, or SDK/template integration.
