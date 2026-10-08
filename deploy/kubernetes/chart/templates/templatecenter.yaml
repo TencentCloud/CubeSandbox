@@ -91,10 +91,14 @@ spec:
         # emptyDir so image pulls from registries with private CA certificates
         # succeed (the main container reads it via SSL_CERT_FILE).
         - name: merge-ca
-          # Use the TemplateCenter image itself: SSL_CERT_FILE replaces the
-          # main container's OS trust store, so the merged bundle must be
-          # built from the same image's CA set (also already cached on the
-          # node -- no extra image dependency).
+          # Use the TemplateCenter image itself. Precisely (measured): Go's
+          # SSL_CERT_FILE replaces the trust *file* candidate -- it does NOT
+          # disable the system cert directories (/etc/ssl/certs,
+          # /etc/pki/tls/certs are still read; only same-directory symlinks
+          # are skipped). Building the merged bundle from the same image
+          # keeps the file candidate identical to the image's native bundle
+          # instead of depending on distro-specific directory layouts, and
+          # the image is already cached on the node (no extra pull).
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.templateCenter.pullPolicy }}
           command: ["/bin/sh", "-ec"]

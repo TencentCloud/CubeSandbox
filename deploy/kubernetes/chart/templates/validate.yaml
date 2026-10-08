@@ -465,12 +465,15 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.existingConfigMap .Values.trustedCACerts.certs }}
 {{- fail "trustedCACerts.existingConfigMap and trustedCACerts.certs are mutually exclusive: existingConfigMap wins and the inline certs would be silently ignored" }}
 {{- end }}
-{{- /* Gating notes: the missing-certs, block-type, PEM-shape and
-env-override checks are gated on enabled + controlPlane.enabled (a
-disabled feature must stay a no-op even when a shared values file
-carries a certs entry), while the mutual-exclusion check is deliberately
-ungated -- the conflict is a values mistake regardless of whether a
-consumer is rendered. */ -}}
+{{- /* Gating notes, per check:
+- missing-certs, block-type, PEM-shape, BEGIN/END symmetry, env-override:
+  gated on trustedCACerts.enabled + controlPlane.enabled. They protect the
+  rendered pod; with the control plane disabled there is no consumer, and a
+  disabled feature must stay a no-op even when a shared values file carries
+  a certs entry.
+- mutual-exclusion (existingConfigMap + certs together): the one outlier,
+  gated on trustedCACerts.enabled only -- both sources set is a values
+  mistake regardless of whether any consumer is rendered. */ -}}
 {{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
 {{- range $i, $pem := .Values.trustedCACerts.certs }}
 {{- if not (trim $pem) }}
