@@ -713,6 +713,14 @@ resource "kubernetes_deployment" "templatecenter" {
       condition     = var.use_cfs || var.templatecenter_replicas == 1
       error_message = "use_cfs=false requires templatecenter_replicas=1: the artifact store is a node-local hostPath with no cross-node sharing, so a second replica could neither read the first one's ext4 files nor take over its builds. Set use_cfs=true for multiple cube-templatecenter replicas."
     }
+    # A lifecycle precondition, not variable validation: cross-variable
+    # references inside validation rules require terraform >= 1.9, and this
+    # module's floor is 1.2 -- on 1.2-1.8 the validation would hard-fail
+    # every command for every user of the deployer, feature enabled or not.
+    precondition {
+      condition     = !(var.templatecenter_trusted_ca_existing_config_map != "" && length(var.templatecenter_trusted_ca_certs) > 0)
+      error_message = "templatecenter_trusted_ca_existing_config_map and templatecenter_trusted_ca_certs are mutually exclusive: the existing ConfigMap wins and the inline certs would be silently ignored."
+    }
   }
 
   metadata {

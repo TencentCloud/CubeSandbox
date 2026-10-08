@@ -5642,6 +5642,7 @@ main() {
 		kubernetes_secret.cube_egress_ca[0]
 		kubernetes_secret.cubemaster_conf[0]
 		kubernetes_secret.templatecenter_conf[0]
+		kubernetes_config_map_v1.templatecenter_trusted_ca[0]
 		kubernetes_deployment.cubemaster[0]
 		kubernetes_service.cubemaster[0]
 		kubernetes_deployment.templatecenter[0]

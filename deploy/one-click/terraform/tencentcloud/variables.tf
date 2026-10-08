@@ -374,14 +374,9 @@ variable "templatecenter_trusted_ca_certs" {
 }
 
 variable "templatecenter_trusted_ca_existing_config_map" {
-  description = "Name of an operator-managed ConfigMap (same namespace, keys must end in .crt and hold PEM certificates) to mount instead of the inline templatecenter_trusted_ca_certs. Mutually exclusive with the inline certs; its content cannot be validated at plan time, so the merge-ca init container rejects non-CERTIFICATE blocks, unbalanced markers and unparseable X.509 at pod start."
+  description = "Name of an operator-managed ConfigMap (same namespace, keys must end in .crt and hold PEM certificates) to mount instead of the inline templatecenter_trusted_ca_certs. Mutually exclusive with the inline certs (enforced by a lifecycle precondition on the templatecenter Deployment: cross-variable references are not allowed inside variable validation before terraform 1.9, and the module's floor is 1.2); its content cannot be validated at plan time, so the merge-ca init container rejects non-CERTIFICATE blocks, unbalanced markers and unparseable X.509 at pod start."
   type        = string
   default     = ""
-
-  validation {
-    condition     = !(var.templatecenter_trusted_ca_existing_config_map != "" && length(var.templatecenter_trusted_ca_certs) > 0)
-    error_message = "templatecenter_trusted_ca_existing_config_map and templatecenter_trusted_ca_certs are mutually exclusive: the existing ConfigMap wins and the inline certs would be silently ignored."
-  }
 }
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
