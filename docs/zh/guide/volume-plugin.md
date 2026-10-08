@@ -383,6 +383,7 @@ sequenceDiagram
 | `cubesandbox` Go SDK（`sdk/go`） | ✅ 是 | `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume`；挂载用显式结构体 `CreateOptions.VolumeMounts`（非 e2b dict） |
 | 创建时省略 `driver` | ✅ 是 | CubeMaster 取 `volume_plugins` **列表第一项** |
 | 按沙箱只读挂载 | ❌ 否 | 官方 e2b SDK 自身没有只读 Volume 挂载选项；Cube SDK 增加 `VolumeMount(volume, read_only=True)` 扩展 |
+| 从快照创建时重新传入 `volumeMounts` | ✅ 是 | 与快照挂载一致时接受，省略也可以；挂载有变化时拒绝（见下文「快照、回滚、克隆与跨机恢复」） |
 
 完整 COS 插件体验见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。
 
@@ -549,6 +550,8 @@ Volume.destroy(vol.volume_id)
 
 Snapshot 会保存稳定的 Volume ID、容器挂载路径和只读属性，但不会复制 Volume 数据，也不会持久化运行时 `private_data`。FromSnap 由 Master 查询当前 Volume 记录，并把 driver 元数据发送给目标 Cubelet 执行 `Attach`；Pause/Resume 会校验已记录的 Volume ID，并根据 pause package 重新 Attach；原地 Rollback 则保留沙箱现有的外部挂载。
 
+从快照创建沙箱时可以省略 `volumeMounts`，快照记录的挂载会自动重新挂载。官方 e2b 客户端会在每次创建时重新传入 `volumeMounts`，这同样可以接受，但必须与快照完全一致（相同的卷、路径和只读属性）。只要有任何不同，请求就会返回 HTTP 400（`volumeMounts must match the snapshot's volume mounts`），因为快照的 VM 内存中挂载已经固定，无法改挂到其他位置。
+
 因此它采用 **external-reference（外部引用）**语义：
 
 - FromSnap 和回滚会恢复 VM/rootfs 状态，但挂载后的 Volume 展示当前数据。
@@ -567,6 +570,7 @@ Volume backend 与 VM Snapshot backend 相互独立。VM Snapshot 包必须使�
 | 卷仍被引用 | `ApiError`（409，CubeMaster 130409） | Volume 仍被沙箱挂载时尝试删除 |
 | 非法卷名 | `ValueError` | 客户端校验；名称不符合 `^[a-zA-Z0-9_-]+$` |
 | 挂载不存在的卷 | `ApiError` | 沙箱 `volumeMounts[].name` 未创建 |
+| 快照恢复时挂载有变化 | `ApiError`（400，CubeMaster 130400） | 从快照创建时传入的 `volumeMounts` 与快照记录的挂载不一致 |
 
 > **注意**：Volume 仍被任意沙箱挂载时，`Volume.destroy()` 返回 **409**。须先销毁所有使用该 Volume 的沙箱，再删除。删除**不会**自动卸载正在使用的沙箱。
 
