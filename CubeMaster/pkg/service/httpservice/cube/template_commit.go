@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -17,6 +18,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // submitTemplateCommitFn indirects templatecenter.SubmitTemplateCommit so tests
@@ -56,6 +60,15 @@ type templateBuildStatusResponse struct {
 
 func handleSandboxCommitAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	// Business failures return HTTP 200, so flag them on the GinMiddleware route span.
+	span := trace.SpanFromContext(c.Request.Context())
+	retCode := int(errorcode.ErrorCode_MasterParamsError)
+	defer func() {
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, retCode))
+		if retCode != telemetry.SuccessCode {
+			span.SetStatus(codes.Error, "")
+		}
+	}()
 	req := &commitTemplateRequest{}
 	if err := common.GetBodyReq(c.Request, req); err != nil {
 		common.WriteAPI(c, &commitTemplateResponse{
@@ -73,6 +86,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		return
 	}
 	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
+		retCode = ret.RetCode
 		common.WriteAPI(c, &commitTemplateResponse{Res: &types.Res{Ret: ret}})
 		return
 	} else {
@@ -107,6 +121,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetMsg != "" {
 				msg = infoRsp.Ret.RetMsg
 			}
+			retCode = int(errorcode.ErrorCode_NotFound)
 			common.WriteAPI(c, &commitTemplateResponse{
 				Res:        &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_NotFound), RetMsg: msg}},
 				TemplateID: req.TemplateID,
@@ -122,6 +137,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		}
 	}
 	if hostIP == "" || hostID == "" {
+		retCode = int(errorcode.ErrorCode_NotFound)
 		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
@@ -142,6 +158,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 	job, err := submitTemplateCommitFn(ctx, req.RequestID, req.SandboxID, hostID, hostIP, req.TemplateID, req.CreateRequest)
 	if err != nil {
 		code := commitTemplateErrorCode(err)
+		retCode = code
 		log.G(ctx).Errorf("submit template commit failed: %v", err)
 		rt.RetCode = int64(code)
 		common.WriteAPI(c, &commitTemplateResponse{
@@ -155,6 +172,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 	}
 	rt.RequestID = req.RequestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	retCode = int(errorcode.ErrorCode_Success)
 	common.WriteAPI(c, &commitTemplateResponse{
 		Res: &types.Res{
 			RequestID: req.RequestID,
