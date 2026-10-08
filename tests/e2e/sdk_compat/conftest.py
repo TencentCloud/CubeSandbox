@@ -610,6 +610,7 @@ def _log_effective_environment(cfg: SdkE2EConfig) -> None:
         "SDK_E2E_PLATFORM_LIFECYCLE": str(cfg.platform_lifecycle_enabled).lower(),
         "SDK_E2E_VOLUME_PLUGIN": str(cfg.volume_plugin_enabled).lower(),
         "SDK_E2E_VOLUME_DRIVER": cfg.volume_driver,
+        "SDK_E2E_RESTART_POLICY_WAIT": str(cfg.restart_policy_wait),
     }
     if "e2b" in cfg.backends:
         fields.update(

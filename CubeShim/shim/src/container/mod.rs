@@ -597,8 +597,13 @@ impl Container {
         )
     }
 
+    /// True when the guest has no process for this container yet, so the agent
+    /// must create and start it. A memory restore (pause resume / FromSnap)
+    /// reconnects to the running process instead. The guest container id is not
+    /// a safe signal: after a cold restart it equals the sandbox id, which made
+    /// resume call StartContainer on a process that was already running.
     fn is_cold_start(&self) -> bool {
-        self.id == self.real_id
+        !self.sb_conf.app_snapshot_restore
     }
 
     /// Passfd stays compiled in but is opt-in. Cubelet must set

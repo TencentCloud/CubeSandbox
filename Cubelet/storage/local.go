@@ -838,6 +838,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.CreateContext nil")
 	}
+	if workflow.ReuseFor(opts).Storage {
+		info, err := l.readBackendFileInfo(ctx, opts.SandboxID)
+		if err != nil {
+			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "restart storage %s: %v", opts.SandboxID, err)
+		}
+		opts.StorageInfo = info
+		return nil
+	}
 	realReq := opts.ReqInfo
 
 	if opts.IsCreateSnapshot() && !opts.IsCubeboxV2() {
@@ -1516,6 +1524,12 @@ func (l *local) getDevInfo(ctx context.Context, q resource.Quantity) (*devInfo, 
 func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err error) {
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
+	}
+	if workflow.RetainFor(opts).Storage {
+		// The guest crashed without unmounting. The retained ext4 still has
+		// the torn directory entries, and the next cold boot hits them
+		// (deleted inode) before the code interpreter can listen.
+		return l.repairRetainedRootfs(ctx, opts.SandboxID)
 	}
 	log.G(ctx).Debugf("Destroy doing")
 	start := time.Now()

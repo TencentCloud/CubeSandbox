@@ -23,3 +23,5 @@
 !Cubelet/**
 !pkgs/proto
 !pkgs/proto/**
+!pkgs/sandboxrestart
+!pkgs/sandboxrestart/**

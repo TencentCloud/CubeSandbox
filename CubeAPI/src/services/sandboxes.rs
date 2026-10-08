@@ -10,17 +10,19 @@ use crate::{
     constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
-        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxNetworkRequest, SandboxRefreshRequest, SandboxStatus,
-        SandboxTimeoutRequest, SandboxUpdateRequest, VolumeSpec,
+        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeHTTPGet,
+        CubeLivenessProbe, CubeMasterClient, CubeMasterError, CubeNetworkConfig, CubeProbeHandler,
+        CubeRestartStatus, CubeTCPSocket, DeleteSandboxRequest, ListSandboxRequest,
+        RestartBackoffConfig, SandboxInfo, SandboxLogsRequest, SandboxNetworkRequest,
+        SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
+        VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
-        SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
-        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
-        SandboxVolumeMount,
+        EgressRule, EgressRuleMatch, LivenessProbe, LogLevel as ModelLogLevel, NewSandbox,
+        RestartBackoff, RestartStatus, Sandbox, SandboxAutoResume, SandboxDetail,
+        SandboxLifecycleConfig, SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response,
+        SandboxNetworkConfig, SandboxOnTimeout, SandboxState, SandboxVolumeMount,
     },
 };
 
@@ -149,6 +151,7 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: map_volume_mounts(&d.volume_mounts),
+            restart_status: map_restart_status(d.restart_status),
         })
     }
 
@@ -166,6 +169,9 @@ impl SandboxService {
             env_vars,
             volume_mounts,
             backend,
+            restart_policy,
+            restart_backoff,
+            liveness_probe,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
@@ -271,6 +277,9 @@ impl SandboxService {
             auto_pause,
             auto_resume,
             backend,
+            restart_policy,
+            restart_backoff: restart_backoff.map(to_restart_backoff),
+            liveness_probe: liveness_probe.as_ref().map(to_liveness_probe),
         };
 
         let resp = self
@@ -999,7 +1008,30 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         state: sandbox_state_from_str(&s.status),
         envd_version,
         volume_mounts: map_volume_mounts(&s.volume_mounts),
+        restart_status: map_restart_status(s.restart_status),
     }
+}
+
+fn map_restart_status(status: Option<CubeRestartStatus>) -> Option<RestartStatus> {
+    let status = status?;
+    if status.restart_policy.is_empty()
+        && status.restart_state.is_empty()
+        && status.restart_count == 0
+        && status.last_exit_code.is_none()
+    {
+        return None;
+    }
+    Some(RestartStatus {
+        restart_policy: status.restart_policy,
+        restart_state: status.restart_state,
+        restart_count: status.restart_count,
+        last_exit_code: status.last_exit_code,
+        last_exit_reason: (!status.last_exit_reason.is_empty()).then_some(status.last_exit_reason),
+        last_restart_at: status.last_restart_at,
+        last_successful_restart_at: status.last_successful_restart_at,
+        last_failed_restart_at: status.last_failed_restart_at,
+        next_restart_at: status.next_restart_at,
+    })
 }
 
 pub(crate) fn map_volume_mounts(
@@ -1309,6 +1341,43 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
     }
 }
 
+fn to_restart_backoff(b: RestartBackoff) -> RestartBackoffConfig {
+    RestartBackoffConfig {
+        initial_interval_second: b.initial_interval_second,
+        max_interval_second: b.max_interval_second,
+        multiplier: b.multiplier,
+        max_restarts: b.max_restarts,
+        jitter: b.jitter,
+        stable_duration_second: b.stable_duration_second,
+    }
+}
+
+fn to_liveness_probe(p: &LivenessProbe) -> CubeLivenessProbe {
+    let http_get = p.http_get.as_ref().map(|h| CubeHTTPGet {
+        path: h.path.clone(),
+        port: h.port,
+    });
+    let tcp_socket = p
+        .tcp_socket
+        .as_ref()
+        .map(|t| CubeTCPSocket { port: t.port });
+    let probe_handler = if http_get.is_some() || tcp_socket.is_some() {
+        Some(CubeProbeHandler {
+            http_get,
+            tcp_socket,
+        })
+    } else {
+        None
+    };
+    CubeLivenessProbe {
+        probe_handler,
+        initial_delay_second: p.initial_delay_second,
+        period_second: p.period_second,
+        failure_threshold: p.failure_threshold,
+        probe_timeout_second: p.probe_timeout_second,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1382,6 +1451,9 @@ mod tests {
             mcp: None,
             volume_mounts: None,
             backend: None,
+            restart_policy: None,
+            restart_backoff: None,
+            liveness_probe: None,
         }
     }
 
@@ -2535,6 +2607,7 @@ mod tests {
             annotations: HashMap::new(),
             labels: HashMap::new(),
             volume_mounts: vec![],
+            restart_status: None,
         });
 
         assert_eq!(listed.cpu_count, 2);
@@ -2560,6 +2633,7 @@ mod tests {
             annotations: HashMap::new(),
             labels: HashMap::new(),
             volume_mounts: vec![],
+            restart_status: None,
         });
 
         assert_eq!(listed.cpu_count, 0);
@@ -2621,6 +2695,9 @@ mod tests {
             auto_pause: false,
             auto_resume: false,
             backend: None,
+            restart_policy: None,
+            restart_backoff: None,
+            liveness_probe: None,
         };
 
         // Both false → both fields are omitted (skip_serializing_if = Not::not).
@@ -2743,6 +2820,9 @@ mod tests {
             auto_pause: false,
             auto_resume: false,
             backend: None,
+            restart_policy: None,
+            restart_backoff: None,
+            liveness_probe: None,
         }
     }
 
@@ -2953,6 +3033,9 @@ mod tests {
                 mcp: None,
                 volume_mounts: None,
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -3040,6 +3123,9 @@ mod tests {
                 mcp: None,
                 volume_mounts: None,
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -3118,6 +3204,9 @@ mod tests {
                 mcp: None,
                 volume_mounts: None,
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -3199,6 +3288,9 @@ mod tests {
                     },
                 ]),
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");

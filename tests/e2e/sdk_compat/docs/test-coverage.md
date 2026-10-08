@@ -38,6 +38,7 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_negative_and_timeout.py` | Missing create/connect targets, pause-after-delete and online timeout update | `lifecycle`, `pause_resume`, `set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | unusable after kill, list removal, idempotent terminal semantics | `lifecycle` | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause, manual/auto resume, reentrant resume, auto-kill, manual pause before timeout | `platform_lifecycle`, CubeProxy, lifecycle-manager, partially Code Interpreter | P1 + `slow`, daily run |
+| `cases/lifecycle/test_restart_policy.py` | policy on info, default Never, rejected values, healthy sandbox stays up, guest crash keeps id and durable file, kill does not restart, maxRestarts gives up, exit 0 only restarts Always, non-zero main-process exit, backoff schedule, stable-period reset, pause during backoff, pause and resume after a cold restart, delete during backoff, liveness failure | `restart_policy` (CubeSandbox only). Runs with `--run-e2e`. Cluster needs `enable_restart_policy` and envd on port 49983. Pause cases also need `pause_resume` | P1 control plane; P2/P3 + `slow` for crash, exit, backoff and give-up |
 
 The current `platform_lifecycle` prerequisite reflects this branch's execution
 configuration: it depends on CubeProxy and lifecycle-manager coordination, but

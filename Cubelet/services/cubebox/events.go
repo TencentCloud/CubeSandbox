@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
@@ -36,12 +37,13 @@ const (
 )
 
 type eventMonitor struct {
-	c       *local
-	ch      <-chan *events.Envelope
-	errCh   <-chan error
-	ctx     context.Context
-	cancel  context.CancelFunc
-	backOff *backOff
+	c        *local
+	restarts *restartMgr
+	ch       <-chan *events.Envelope
+	errCh    <-chan error
+	ctx      context.Context
+	cancel   context.CancelFunc
+	backOff  *backOff
 }
 
 type backOff struct {
@@ -62,13 +64,14 @@ type backOffQueue struct {
 	duration   time.Duration
 }
 
-func newEventMonitor(c *local) *eventMonitor {
+func newEventMonitor(c *local, restarts *restartMgr) *eventMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &eventMonitor{
-		c:       c,
-		ctx:     ctx,
-		cancel:  cancel,
-		backOff: newBackOff(),
+		c:        c,
+		restarts: restarts,
+		ctx:      ctx,
+		cancel:   cancel,
+		backOff:  newBackOff(),
 	}
 }
 
@@ -221,10 +224,24 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 		}
 
 		cb.Lock()
-		defer cb.Unlock()
+		locked := true
+		defer func() {
+			if locked {
+				cb.Unlock()
+			}
+		}()
 
 		if cb.UserMarkDeletedTime != nil {
 			return nil
+		}
+		// A late event from a process we already replaced must not look like
+		// a new exit. Production filters on pid for the same reason.
+		if cntr.Status != nil && e.Pid > 0 {
+			cur := cntr.Status.Get().Pid
+			if cur > 0 && uint32(e.Pid) != cur {
+				log.G(ctx).Infof("ignoring TaskExit for container %s: stale pid %d (current %d)", e.ID, e.Pid, cur)
+				return nil
+			}
 		}
 
 		rt := &CubeLog.RequestTrace{
@@ -239,13 +256,24 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 		if err := em.handleContainerExit(ctx, e, cntr); err != nil {
 			return fmt.Errorf("failed to handle container TaskExit event: %w", err)
 		}
+		// OnExit records the exit and may lock the cubebox again. Releasing
+		// first avoids a deadlock with that bookkeeping.
+		podExit := cntr.IsPod && em.restarts != nil
+		exitCode := int32(e.ExitStatus)
+		exitReason := restartpolicy.ReasonForTaskExit(e.Pid, e.ExitStatus)
+		sandboxID := cb.ID
+		if podExit {
+			cb.Unlock()
+			locked = false
+			em.restarts.OnExit(sandboxID, exitCode, exitReason)
+		}
 	case *eventtypes.TaskOOM:
 
-		cntr, _, err := em.c.cubeboxManger.FindContainerOfCubebox(ctx, e.ContainerID)
+		cntr, cb, err := em.c.cubeboxManger.FindContainerOfCubebox(ctx, e.ContainerID)
 		if err != nil && !errdefs.IsNotFound(err) {
 			return fmt.Errorf("failed to find container of cubebox: %w", err)
 		}
-		if cntr == nil {
+		if cntr == nil || cb == nil {
 			return nil
 		}
 
@@ -256,7 +284,13 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 			status.FinishedAt = time.Now().UnixNano()
 			return status, nil
 		})
-		return em.c.cubeboxManger.SyncByID(ctx, cntr.ID)
+		if err := em.c.cubeboxManger.SyncByID(ctx, cb.ID); err != nil {
+			return err
+		}
+		if cntr.IsPod && em.restarts != nil {
+			em.restarts.OnExit(cb.ID, 137, restartpolicy.ReasonOOMKilled)
+		}
+		return nil
 	case *eventtypes.TaskPaused:
 		if strings.HasPrefix(e.ContainerID, "exec-") {
 			return nil

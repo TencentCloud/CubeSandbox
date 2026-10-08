@@ -198,6 +198,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	if len(rsp.Data) == 0 {
 		return nil
 	}
+	enrichSandboxInfoRestart(ctx, rsp.Data)
 	if req.HostID != "" {
 		for _, item := range rsp.Data {
 			item.HostID = req.HostID

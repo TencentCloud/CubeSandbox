@@ -146,6 +146,12 @@ type CreateContext struct {
 	// (0→1) observed during this create, to be reported to CubeMaster in the
 	// create response ext_info on success.
 	VolumeRefEvents []VolumeRefEvent
+
+	// IsRestart rebuilds a sandbox that already has an ID, disk and network.
+	// Plugins consult Retain and WantsSnapshotRestore instead of guessing.
+	IsRestart         bool
+	SavedContainerIDs map[int]string
+	RestartPrior      *RestartPrior
 }
 
 func (b *CreateContext) GetInstanceType() string {
@@ -168,6 +174,9 @@ func (b *CreateContext) IsCreateSnapshot() bool {
 }
 
 func (b *CreateContext) IsRetoreSnapshot() bool {
+	if b == nil || b.IsRestart {
+		return false
+	}
 	_, ok := b.GetSnapshotTemplateID()
 	if !ok {
 		return false
@@ -193,7 +202,7 @@ func (b *CreateContext) IsPauseResume() bool {
 // Create-from-template only has appsnapshot.template.id — that memory is a
 // clean template and still needs virtio_rw mounted for newly attached volumes.
 func (b *CreateContext) IsGuestMountRestore() bool {
-	if b == nil || b.ReqInfo == nil {
+	if b == nil || b.IsRestart || b.ReqInfo == nil {
 		return false
 	}
 	if b.IsPauseResume() {
@@ -228,6 +237,16 @@ func (b *CreateContext) GetSnapshotTemplateID() (string, bool) {
 		return v, true
 	}
 	return "", false
+}
+
+// WantsSnapshotRestore reports whether this create should restore guest
+// memory from a snapshot. A restart keeps the disk and cold-boots.
+func (b *CreateContext) WantsSnapshotRestore() bool {
+	if b == nil || b.IsRestart {
+		return false
+	}
+	_, ok := b.GetSnapshotTemplateID()
+	return ok
 }
 
 func (b *CreateContext) IsCubeboxV2() bool {
@@ -287,6 +306,11 @@ type DestroyContext struct {
 	BaseWorkflowInfo
 
 	DestroyInfo *cubebox.DestroyCubeSandboxRequest
+
+	// IsRestartDestroy keeps the sandbox ID's disk, network, volume metadata
+	// and cubebox row. The VM, shim and cgroup are still torn down.
+	// What is kept is decided only by Retain.
+	IsRestartDestroy bool
 
 	// VolumeRefEvents collects node-level plugin_volume ref-count transitions
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
@@ -412,6 +436,13 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 
 		defer flow.Limiter.Release()
 
+		var continueCancel context.CancelFunc
+		defer func() {
+			if continueCancel != nil {
+				continueCancel()
+			}
+		}()
+
 		for _, step := range flow.Steps {
 			if err := e.parallelRunSteps(do, ctx, opts, step); err != nil {
 
@@ -426,7 +457,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 					}
 				}
 
-				if flow_destroy == do {
+				if flow_destroy == do && !restartDestroyKeepsResources(opts) {
 					e.cleanUp(ctx, opts)
 				}
 
@@ -442,6 +473,16 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 							go e.failover(ctx, opts)
 						}
 					}
+					// A restart destroy that spent its deadline inside an earlier
+					// step still has to release cgroup and netfile before create.
+					// User cancel stops here so delete does not race the restart.
+					if flow_destroy == do && ctx.Err() == context.DeadlineExceeded && restartDestroyKeepsResources(opts) {
+						if continueCancel != nil {
+							continueCancel()
+						}
+						ctx, continueCancel = restartDestroyContinuation(ctx)
+						continue
+					}
 					return ctx.Err()
 				}
 				return nil
@@ -453,6 +494,38 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 	} else {
 		return fmt.Errorf("flow %v not implemented", do)
 	}
+}
+
+// restartDestroyKeepsResources is true when this destroy is the first half of
+// a restart. A failed step must not run cleanup: cleanup deletes the disk,
+// network and cubebox row the next cold start still needs.
+func restartDestroyKeepsResources(opts ReqContext) bool {
+	d, ok := opts.(*DestroyContext)
+	return ok && RetainFor(d).Storage
+}
+
+// restartDestroyContinueTimeout is a fresh window for destroy steps that did
+// not run because an earlier step used up the caller's deadline.
+const restartDestroyContinueTimeout = 60 * time.Second
+
+// restartDestroyContinuation carries namespace, trace and the destroy value
+// onto a live context. The parent is already expired, so this cannot derive
+// from it.
+func restartDestroyContinuation(parent context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ns, ok := namespaces.Namespace(parent); ok && ns != "" {
+		base = namespaces.WithNamespace(base, ns)
+	}
+	if constants.IsCubeRuntime(parent) {
+		base = constants.WithRuntimeType(base, "io.containerd.cube")
+	}
+	if rt := CubeLog.GetTraceInfo(parent); rt != nil {
+		base = CubeLog.WithRequestTrace(base, rt)
+	}
+	if dc, ok := parent.Value(KDestroyContext).(*DestroyContext); ok && dc != nil {
+		base = context.WithValue(base, KDestroyContext, dc)
+	}
+	return context.WithTimeout(base, restartDestroyContinueTimeout)
 }
 
 func (e *Engine) cleanUp(ctx context.Context, opts ReqContext) {
@@ -582,9 +655,18 @@ func (e *Engine) failover(ctx context.Context, opts ReqContext) {
 	if rOpts.CubeBoxCreated {
 		ctx = constants.WithCubeboxCreated(ctx)
 	}
+	// A failed restart must not delete the disk and network the next attempt
+	// (or the still-kept cubebox row) depends on.
+	if rOpts.IsRestart {
+		destroyOpt.IsRestartDestroy = true
+	}
 	log.G(ctx).Warnf("fail over doing SandboxID:%v", sandboxID)
 	defer func() {
 		if err != nil {
+			if rOpts != nil && rOpts.IsRestart {
+				log.G(ctx).Warnf("restart failover keeps sandbox %s: %v", sandboxID, err)
+				return
+			}
 			e.cleanUp(ctx, opts)
 		}
 	}()

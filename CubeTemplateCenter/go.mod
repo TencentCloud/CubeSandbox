@@ -95,6 +95,7 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a // indirect
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0 // indirect
+	github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart v0.0.0-00010101000000-000000000000 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.0 // indirect
@@ -142,5 +143,7 @@ replace github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
 replace github.com/tencentcloud/CubeSandbox/pkgs/blobstore => ../pkgs/blobstore
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart => ../pkgs/sandboxrestart
 
 replace cloud.google.com/go/compute/metadata => cloud.google.com/go/compute/metadata v0.9.0
