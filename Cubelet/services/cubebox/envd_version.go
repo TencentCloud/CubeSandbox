@@ -98,7 +98,9 @@ func probeCallTimedOut(err error) bool {
 
 // killProbeProcess sends SIGKILL and, when statusCh is available, waits for the
 // exec to reap so the deferred Delete does not race a still-running process.
-func killProbeProcess(process containerd.Process, statusCh <-chan containerd.ExitStatus, logger *log.CubeWrapperLogEntry) {
+// purpose labels the log lines so callers (envd-version probe, lifecycle hooks)
+// don't all read "collect envd version".
+func killProbeProcess(process containerd.Process, statusCh <-chan containerd.ExitStatus, logger *log.CubeWrapperLogEntry, purpose string) {
 	_ = process.Kill(context.Background(), syscall.SIGKILL)
 	if statusCh == nil {
 		return
@@ -106,18 +108,18 @@ func killProbeProcess(process containerd.Process, statusCh <-chan containerd.Exi
 	select {
 	case <-statusCh:
 	case <-time.After(envdVersionExecTimeout):
-		logger.Warnf("collect envd version: exec did not reap after kill")
+		logger.Warnf("%s: exec did not reap after kill", purpose)
 	}
 }
 
 // abortProbe logs a wait/start failure and best-effort kills the probe process.
-func abortProbe(process containerd.Process, statusCh <-chan containerd.ExitStatus, logger *log.CubeWrapperLogEntry, phase string, err error) {
+func abortProbe(process containerd.Process, statusCh <-chan containerd.ExitStatus, logger *log.CubeWrapperLogEntry, purpose, phase string, err error) {
 	if probeCallTimedOut(err) {
-		logger.Warnf("collect envd version: %s timed out: %v", phase, err)
+		logger.Warnf("%s: %s timed out: %v", purpose, phase, err)
 	} else {
-		logger.Warnf("collect envd version: %s failed: %v", phase, err)
+		logger.Warnf("%s: %s failed: %v", purpose, phase, err)
 	}
-	killProbeProcess(process, statusCh, logger)
+	killProbeProcess(process, statusCh, logger, purpose)
 }
 
 // collectEnvdVersion runs `envd --version` inside the running guest of sandboxID
@@ -207,20 +209,20 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 		return process.Wait(execCtx)
 	})
 	if err != nil {
-		abortProbe(process, nil, logger, "wait", err)
+		abortProbe(process, nil, logger, "collect envd version", "wait", err)
 		return ""
 	}
 	_, err = runProbeCall(execCtx, func() (struct{}, error) {
 		return struct{}{}, process.Start(execCtx)
 	})
 	if err != nil {
-		abortProbe(process, statusCh, logger, "start", err)
+		abortProbe(process, statusCh, logger, "collect envd version", "start", err)
 		return ""
 	}
 
 	select {
 	case <-execCtx.Done():
-		killProbeProcess(process, statusCh, logger)
+		killProbeProcess(process, statusCh, logger, "collect envd version")
 		logger.Warnf("collect envd version: timed out after %s", envdVersionExecTimeout)
 		return ""
 	case status := <-statusCh:
