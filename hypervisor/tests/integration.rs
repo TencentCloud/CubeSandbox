@@ -79,6 +79,13 @@ use aarch64::*;
 const DIRECT_KERNEL_BOOT_CMDLINE: &str =
     "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1";
 
+// The guest reports only free blocks of at least pageblock_order (2MB) by
+// default; blocks freed by stress that stay smaller are never reported.
+const FREE_PAGE_REPORTING_KERNEL_CMDLINE: &str = concat!(
+    "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1 ",
+    "page_reporting.page_reporting_order=0"
+);
+
 const CONSOLE_TEST_STRING: &str = "Started OpenBSD Secure Shell server";
 
 fn prepare_virtiofsd(tmp_dir: &TempDir, shared_dir: &str) -> (std::process::Child, String) {
@@ -1943,14 +1950,17 @@ fn verify_free_page_reporting(guest: &Guest, vmm_pid: u32, phase: &str) {
         |rss| rss >= baseline + FREE_PAGE_REPORTING_PEAK_DELTA_KIB,
     );
 
+    // $! is the stress parent; the memory is held by its --vm worker child,
+    // which ignores the parent's death until its own --timeout expires.
     guest
         .ssh_command(&format!(
-            "kill -TERM {stress_pid}; \
+            "pkill -TERM -P {stress_pid}; kill -TERM {stress_pid}; \
              for i in $(seq 1 100); do \
-               kill -0 {stress_pid} 2>/dev/null || exit 0; \
+               pgrep -x stress >/dev/null || exit 0; \
                sleep 0.1; \
              done; \
-             kill -KILL {stress_pid}"
+             pkill -KILL -x stress; sleep 1; \
+             ! pgrep -x stress >/dev/null"
         ))
         .unwrap();
 
@@ -7753,7 +7763,7 @@ mod common_sequential {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=2G"])
             .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(["--cmdline", FREE_PAGE_REPORTING_KERNEL_CMDLINE])
             .args(["--balloon", "size=0,free_page_reporting=on"])
             .default_disks()
             .default_net()
@@ -7786,7 +7796,7 @@ mod common_sequential {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=2G"])
             .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(["--cmdline", FREE_PAGE_REPORTING_KERNEL_CMDLINE])
             .args(["--balloon", "size=0,free_page_reporting=on"])
             .args(["--seccomp", "true"])
             .default_disks()
