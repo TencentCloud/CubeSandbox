@@ -5074,6 +5074,7 @@ kubernetes_secret.cubeproxy_global|-n cubesandbox delete secret cubeproxy-global
 kubernetes_secret.cubeproxy_certs|-n cubesandbox delete secret cubeproxy-certs
 kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubeproxy-nginx-conf
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
+kubernetes_config_map_v1.templatecenter_trusted_ca|-n cubesandbox delete configmap cube-templatecenter-trusted-ca
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
 kubernetes_service.templatecenter|-n cubesandbox delete svc cube-templatecenter
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api

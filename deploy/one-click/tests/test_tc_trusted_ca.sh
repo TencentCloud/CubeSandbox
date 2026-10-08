@@ -62,6 +62,20 @@ if ! diff -u "${TMP_DIR}/chart-script.sh" "${TMP_DIR}/tf-script.sh" >"${TMP_DIR}
   sed 's/^/    /' "${TMP_DIR}/sync.diff" >&2
 fi
 
+# 1b. The plan-time validation in variables.tf must use the same anchored
+#     regexes as the chart's validate.yaml and the runtime awk -- unanchored
+#     regexall calls admit marker junk and indented markers that the pod-start
+#     check then rejects with a different (misleading) diagnosis.
+TF_VARS="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/variables.tf"
+grep -q 'regexall("(?m)\^-----BEGIN CERTIFICATE-----\[\[:space:\]\]\*\$"' "${TF_VARS}" \
+  || fail "variables.tf validation must anchor the BEGIN marker regex like validate.yaml"
+grep -q 'regexall("(?m)\^-----END CERTIFICATE-----\[\[:space:\]\]\*\$"' "${TF_VARS}" \
+  || fail "variables.tf validation must anchor the END marker regex like validate.yaml"
+grep -q 'regexall("-----BEGIN CERTIFICATE-----"' "${TF_VARS}" \
+  && fail "variables.tf still contains an unanchored BEGIN CERTIFICATE regexall (parity gap with the runtime check)"
+grep -q 'regexall("-----END CERTIFICATE-----"' "${TF_VARS}" \
+  && fail "variables.tf still contains an unanchored END CERTIFICATE regexall (parity gap with the runtime check)"
+
 # --- 2. Runtime replay of the terraform copy --------------------------------
 
 REPLAY="${TMP_DIR}/replay"

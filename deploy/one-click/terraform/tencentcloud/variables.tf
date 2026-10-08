@@ -360,11 +360,11 @@ variable "templatecenter_trusted_ca_certs" {
     condition = alltrue([
       for pem in var.templatecenter_trusted_ca_certs :
       trimspace(pem) != "" &&
-      length(regexall("-----BEGIN CERTIFICATE-----", pem)) > 0 &&
-      length(regexall("-----BEGIN CERTIFICATE-----", pem)) == length(regexall("-----END CERTIFICATE-----", pem)) &&
-      alltrue([for m in regexall("-----BEGIN [A-Z0-9 ]+-----", pem) : m == "-----BEGIN CERTIFICATE-----"])
+      length(regexall("(?m)^-----BEGIN CERTIFICATE-----[[:space:]]*$", pem)) > 0 &&
+      length(regexall("(?m)^-----BEGIN CERTIFICATE-----[[:space:]]*$", pem)) == length(regexall("(?m)^-----END CERTIFICATE-----[[:space:]]*$", pem)) &&
+      alltrue([for m in regexall("(?m)^-----BEGIN [A-Z0-9 ]+-----", pem) : m == "-----BEGIN CERTIFICATE-----"])
     ])
-    error_message = "Every templatecenter_trusted_ca_certs entry must be a non-empty PEM with only CERTIFICATE blocks and balanced BEGIN/END CERTIFICATE markers. A pasted private key would be written into a world-readable ConfigMap (CWE-200/CWE-540), and Go silently skips unbalanced or non-X.509 blocks, leaving the registry pull failing with x509 while the feature looks enabled. Export the certificate alone (e.g. openssl x509 -in combined.pem -out cert.crt)."
+    error_message = "Every templatecenter_trusted_ca_certs entry must be a non-empty PEM with only CERTIFICATE blocks and balanced, line-anchored BEGIN/END CERTIFICATE markers (same exact-line rules as the helm chart's validate.yaml and the merge-ca init container, so an entry accepted here cannot be rejected at pod start with a different diagnosis). A pasted private key would be written into a world-readable ConfigMap (CWE-200/CWE-540), and Go silently skips unbalanced or non-X.509 blocks, leaving the registry pull failing with x509 while the feature looks enabled. Export the certificate alone (e.g. openssl x509 -in combined.pem -out cert.crt)."
   }
 
   validation {
