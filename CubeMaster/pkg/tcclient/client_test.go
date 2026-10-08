@@ -11,7 +11,17 @@ import (
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
+
+type nopExporter struct{}
+
+func (nopExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error { return nil }
+func (nopExporter) Shutdown(context.Context) error                             { return nil }
 
 // DeleteArtifact must POST the artifact_id to /tc/api/v1/artifact/delete and
 // treat a 200 response as success.
@@ -118,6 +128,38 @@ func TestSharedTokenHeader(t *testing.T) {
 	}
 	if gotDelete != "" || gotSubmit != "" || gotUpload != "" {
 		t.Fatalf("token header must be absent when env unset, got %q/%q/%q", gotDelete, gotSubmit, gotUpload)
+	}
+}
+
+func TestSubmitBuildJobPropagatesTraceparent(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("traceparent")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+	}))
+	defer srv.Close()
+
+	shutdown, err := telemetry.SetupWithExporter(nopExporter{}, "tcclient-test")
+	if err != nil {
+		t.Fatalf("SetupWithExporter: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	ctx, dispatch := telemetry.Start(context.Background(), "dispatch")
+	if err := NewClient(srv.URL).SubmitBuildJob(ctx, "job-1", nil, "", "", nil); err != nil {
+		t.Fatalf("SubmitBuildJob() error = %v", err)
+	}
+	dispatch.End()
+
+	if got == "" {
+		t.Fatal("SubmitBuildJob sent no traceparent: TC would start a new trace")
+	}
+	extracted := otel.GetTextMapPropagator().Extract(context.Background(),
+		propagation.HeaderCarrier(http.Header{"Traceparent": []string{got}}))
+	sc := trace.SpanContextFromContext(extracted)
+	if sc.TraceID() != dispatch.SpanContext().TraceID() || sc.SpanID() != dispatch.SpanContext().SpanID() {
+		t.Errorf("traceparent = %q, want the dispatch span's context", got)
 	}
 }
 

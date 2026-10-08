@@ -27,12 +27,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -74,6 +77,19 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 
 	createReq := req.GetCreateRequest()
+	ctx = telemetry.ExtractGRPC(ctx)
+	ctx, span := telemetry.Start(ctx, telemetry.SpanImageAppSnapshot,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, createReq.GetRequestID()),
+			attribute.String(telemetry.AttrTemplateID, createReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]),
+		))
+	// Defer before recovery so it records the recovered response code.
+	defer func() {
+		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, rsp.GetSandboxID()))
+		telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode()))
+	}()
+
 	if createReq == nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = "create_request is required"
@@ -122,6 +138,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		AppID:        getAppID(createReq.Annotations),
 		Qualifier:    getUserAgent(ctx),
 	}
+
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
