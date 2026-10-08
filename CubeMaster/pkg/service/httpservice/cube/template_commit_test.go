@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -24,18 +25,24 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // invokeCommitHandler drives the gin handler handleSandboxCommitAction with a
 // test gin.Context carrying rt, returning the decoded JSON response.
 func invokeCommitHandler(t *testing.T, req *http.Request, rt *CubeLog.RequestTrace) commitTemplateResponse {
 	t.Helper()
+	return invokeCommitHandlerWithCtx(t, context.Background(), req, rt)
+}
+
+func invokeCommitHandlerWithCtx(t *testing.T, base context.Context, req *http.Request, rt *CubeLog.RequestTrace) commitTemplateResponse {
+	t.Helper()
 	patches := gomonkey.NewPatches()
 	patches.ApplyFunc(sandbox.ResolveSandboxID, func(_ context.Context, sandboxID string) (string, error) {
 		return sandboxID, nil
 	})
 	defer patches.Reset()
-	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
+	ctx := CubeLog.WithRequestTrace(base, rt)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = req.WithContext(ctx)
@@ -201,6 +208,61 @@ func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
 	assert.Equal(t, submittedTemplateID, got.TemplateID)
 	assert.NotEqual(t, "custom-template", submittedTemplateID)
 	assert.NotEqual(t, "sb-bad", submittedTemplateID)
+}
+
+func TestHandleSandboxCommitActionReportsRouteSpanBusinessStatus(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		stub     func(*gomonkey.Patches)
+		wantCode int
+	}{
+		{
+			name:     "missing requestID",
+			body:     `{"sandbox_id":"` + knownSandboxTestID + `"}`,
+			stub:     func(*gomonkey.Patches) {},
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name: "sandbox not found",
+			body: `{"requestID":"req-1","sandbox_id":"sb-missing"}`,
+			stub: func(p *gomonkey.Patches) {
+				p.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache { return nil })
+				p.ApplyFunc(sandbox.SandboxInfo, func(context.Context, *types.GetCubeSandboxReq) *types.GetCubeSandboxRes {
+					return &types.GetCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_NotFound), RetMsg: "no such sandbox"}}
+				})
+			},
+			wantCode: int(errorcode.ErrorCode_NotFound),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, flush := setupSpanRecorder(t)
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			tc.stub(patches)
+
+			rootCtx, rootSpan := telemetry.Start(context.Background(), "test.root")
+			req := httptest.NewRequest("POST", "/cube/sandbox/commit", strings.NewReader(tc.body))
+			got := invokeCommitHandlerWithCtx(t, rootCtx, req, &CubeLog.RequestTrace{})
+			rootSpan.End()
+			flush()
+
+			require.NotNil(t, got.Res)
+			require.NotNil(t, got.Res.Ret)
+			assert.Equal(t, tc.wantCode, got.Res.Ret.RetCode)
+
+			routes := rec.named("test.root")
+			require.Len(t, routes, 1)
+			if routes[0].Status().Code != codes.Error {
+				t.Errorf("route span status = %v, want Error on a business failure", routes[0].Status().Code)
+			}
+			if got := attrInt(t, routes[0].Attributes(), telemetry.AttrRetCode); got != int64(tc.wantCode) {
+				t.Errorf("route span %s = %d, want %d", telemetry.AttrRetCode, got, tc.wantCode)
+			}
+		})
+	}
 }
 
 func TestCommitTemplateErrorCode(t *testing.T) {

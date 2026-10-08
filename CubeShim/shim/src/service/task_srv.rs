@@ -694,10 +694,11 @@ impl Task for TaskService {
 
     async fn update(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::UpdateTaskRequest,
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "update req start, id:{}", &req.id);
+        let trace = telemetry::Trace::extract(&ctx.metadata, self.id.as_str());
         let outcome = {
             let mut sb = self.sandbox.lock().await;
             if sb.paused().await {
@@ -729,7 +730,7 @@ impl Task for TaskService {
                 Error::Other(format!("update sandbox failed:{}", e))
             })?;
 
-            update_ext::update_route(&mut sb, &req.annotations, &self.log)
+            update_ext::update_route(&mut sb, &req.annotations, &self.log, &trace)
                 .await
                 .map_err(|e| {
                     errf!(self.log, "update sandbox failed:{}", e.clone());

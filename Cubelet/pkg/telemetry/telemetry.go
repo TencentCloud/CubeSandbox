@@ -46,6 +46,14 @@ const (
 	SpanRuntimeStart     = "cubelet.runtime.start"
 	SpanImageCreate      = "cubelet.image.create"
 	SpanImageAppSnapshot = "cubelet.image.app_snapshot"
+
+	SpanTemplateCommit        = "cubelet.template.commit"
+	SpanTemplateCommitLock    = "cubelet.template.commit.lifecycle_lock"
+	SpanTemplateCommitPrepare = "cubelet.template.commit.prepare"
+	SpanTemplateCommitCapture = "cubelet.template.commit.capture"
+	SpanTemplateCommitRootfs  = "cubelet.template.commit.rootfs"
+	SpanTemplateCommitResume  = "cubelet.template.commit.resume"
+	SpanTemplateCommitPublish = "cubelet.template.commit.publish"
 )
 
 const (
@@ -58,6 +66,8 @@ const (
 	AttrWorkflow     = "cube.workflow"
 	AttrStep         = "cube.step"
 	AttrAction       = "cube.action"
+	AttrSnapshotType = "cube.snapshot.type"
+	AttrBackend      = "cube.backend"
 )
 
 type Shutdown func(context.Context) error

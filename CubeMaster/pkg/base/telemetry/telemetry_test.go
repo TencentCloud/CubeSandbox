@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel"
@@ -235,4 +236,42 @@ func TestStartIfTracedKeepsSpanUnderParent(t *testing.T) {
 		return
 	}
 	t.Fatal("child span was not exported")
+}
+
+func TestDetachTraceKeepsParentButNotCancellation(t *testing.T) {
+	exp, flush := setupTest(t)
+
+	parentCtx, parent := Start(context.Background(), SpanCreate)
+	parent.End()
+	requestCtx, cancel := context.WithCancel(parentCtx)
+	cancel()
+
+	base, baseCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer baseCancel()
+
+	ctx := DetachTrace(base, requestCtx)
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("detached ctx inherited the request cancellation: %v", err)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Error("detached ctx dropped the base deadline")
+	}
+	_, child := StartIfTraced(ctx, SpanTemplateDB)
+	child.End()
+	flush()
+
+	for _, span := range exp.snapshot() {
+		if span.Name() != SpanTemplateDB {
+			continue
+		}
+		if span.Parent().SpanID() != parent.SpanContext().SpanID() {
+			t.Errorf("detached child parent span id = %s, want the request span %s",
+				span.Parent().SpanID(), parent.SpanContext().SpanID())
+		}
+		if span.SpanContext().TraceID() != parent.SpanContext().TraceID() {
+			t.Error("detached child did not continue the request trace")
+		}
+		return
+	}
+	t.Fatal("detached child span was not exported")
 }
