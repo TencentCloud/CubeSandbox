@@ -119,6 +119,18 @@ spec:
               printf '\n' >> /merged/ca-bundle.crt
               ls /trusted-ca/*.crt >/dev/null 2>&1 \
                 || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
+              # Block-type whitelist: EVERY PEM block must be a CERTIFICATE.
+              # A combined "cert + key" paste is the most common input shape
+              # for a private CA, and a private key must never reach the
+              # merged bundle. validate.yaml enforces the same rule on inline
+              # certs at render time; this pass additionally covers the
+              # existingConfigMap path, whose content a render cannot see.
+              # \r? keeps CRLF PEMs working.
+              # The offending block is reported by awk; errexit turns its
+              # non-zero exit into a failed init container (fail closed).
+              for f in /trusted-ca/*.crt; do
+                awk '/^-----BEGIN / && $0 !~ /^-----BEGIN CERTIFICATE-----\r?$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE PEM block: " $0; exit 1 }' "$f" 1>&2
+              done
               # Append user certs one at a time with a newline separator:
               # ConfigMap entries are rendered with |- (no trailing newline),
               # so a bare `cat *.crt` would glue PEM blocks together and

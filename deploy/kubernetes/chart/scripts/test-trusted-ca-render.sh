@@ -128,6 +128,22 @@ if helm template guard-truncated "$CHART_DIR" $COMMON_SETS \
   exit 1
 fi
 
+# 2g. A non-CERTIFICATE PEM block (e.g. a private key pasted alongside the
+#     cert -- the most common private-CA input shape) must fail validation:
+#     the key would otherwise land in a world-readable ConfigMap and the
+#     Helm release Secret.
+if helm template guard-key "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     --set-string trustedCACerts.certs[0]="-----BEGIN PRIVATE KEY----- guard" >/dev/null 2>"$TMP_DIR/key.err"; then
+  echo "FAIL: a non-CERTIFICATE PEM block must fail validation" >&2
+  exit 1
+fi
+grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/key.err" || {
+  echo "FAIL: validation error does not mention the block-type rule:" >&2
+  cat "$TMP_DIR/key.err" >&2
+  exit 1
+}
+
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
   --set trustedCACerts.enabled=true \
@@ -160,6 +176,70 @@ helm template guard-on-2 "$CHART_DIR" $COMMON_SETS \
 CK2=$(grep -o 'checksum/trusted-ca: "[a-f0-9]*"' "$TMP_DIR/on2.yaml")
 [ -n "$CK1" ] && [ -n "$CK2" ] && [ "$CK1" != "$CK2" ] || {
   echo "FAIL: checksum/trusted-ca does not change when certs change" >&2
+  exit 1
+}
+
+# 6. Runtime replay of the merge-ca init-container script: extract the args
+#    block from the enabled render (case 2's on.yaml), rewrite the absolute
+#    container paths (probe list, mount points) to a temp dir, and run it
+#    with the host sh. helm-template assertions cannot see the script's
+#    runtime behavior, and existingConfigMap content cannot be validated at
+#    render time at all -- this replay is the regression surface for both.
+awk '
+  /^        - name: merge-ca$/ { inmc = 1 }
+  /^      containers:/         { inmc = 0; inargs = 0 }
+  inmc && /^          args:$/           { inargs = 1; next }
+  inmc && inargs && /^          volumeMounts:$/ { inargs = 0 }
+  inmc && inargs { print }
+' "$TMP_DIR/on.yaml" \
+  | sed -e 's/^            - |-$//' -e 's/^              //' >"$TMP_DIR/merge-ca-script.sh"
+grep -q 'BUNDLE=""' "$TMP_DIR/merge-ca-script.sh" || {
+  echo "FAIL: could not extract the merge-ca script from the render" >&2
+  exit 1
+}
+REPLAY="$TMP_DIR/replay"
+mkdir -p "$REPLAY/trusted-ca" "$REPLAY/sys" "$REPLAY/merged"
+sed -e "s|/trusted-ca|$REPLAY/trusted-ca|g" \
+    -e "s|/merged|$REPLAY/merged|g" \
+    -e "s|/etc/ssl/certs/ca-certificates.crt|$REPLAY/sys/debian.crt|g" \
+    -e "s|/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem|$REPLAY/sys/rhel.pem|g" \
+    -e "s|/etc/pki/tls/certs/ca-bundle.crt|$REPLAY/sys/rhel2.crt|g" \
+    "$TMP_DIR/merge-ca-script.sh" >"$TMP_DIR/merge-ca-replay.sh"
+# Invoke with -e exactly like the init container (["/bin/sh","-ec"] would be
+# `sh -ec <script>`; -c takes the script as a string, so here -e + the file
+# is the equivalent): without -e a failing awk would not abort the replay.
+run_merge_ca() { sh -e "$TMP_DIR/merge-ca-replay.sh" >/dev/null 2>"$REPLAY/err"; }
+
+# 6a. Happy path: a system bundle + one CERTIFICATE entry merge into two
+#     blocks, separated (the f3b50154 newline contract, asserted for real).
+printf -- '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n' >"$REPLAY/sys/debian.crt"
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+run_merge_ca || {
+  echo "FAIL: merge-ca must succeed on well-shaped input:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+[ "$(grep -c '^-----BEGIN CERTIFICATE-----' "$REPLAY/merged/ca-bundle.crt")" = "2" ] || {
+  echo "FAIL: merged bundle must contain the system bundle + the user cert:" >&2
+  cat "$REPLAY/merged/ca-bundle.crt" >&2
+  exit 1
+}
+if grep -q 'CERTIFICATE------BEGIN' "$REPLAY/merged/ca-bundle.crt"; then
+  echo "FAIL: merged bundle glued blocks together (missing newline separator)" >&2
+  exit 1
+fi
+
+# 6b. A non-CERTIFICATE PEM block in a .crt entry must fail (the
+#     existingConfigMap path: validate.yaml cannot see this content).
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nCCCC\n-----END PRIVATE KEY-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+rm -f "$REPLAY/merged/ca-bundle.crt"
+if run_merge_ca; then
+  echo "FAIL: merge-ca must reject a non-CERTIFICATE PEM block" >&2
+  exit 1
+fi
+grep -q 'non-CERTIFICATE' "$REPLAY/err" || {
+  echo "FAIL: rejection message does not mention the block type:" >&2
+  cat "$REPLAY/err" >&2
   exit 1
 }
 
