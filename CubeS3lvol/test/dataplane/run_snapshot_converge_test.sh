@@ -16,7 +16,8 @@
 #    dst: import it with decouple:true, snapshot it (that cancels the decouple),
 #         clone the snapshot, write to the clone
 #    dst: decouple the snapshot, with a reader looping on the clone
-#    then: erase the source prefix, reload, and read everything back
+#    src: attach it again and delete the snapshot without rcow_release_export
+#    then: sweep whatever that delete left, reload, and read everything back
 #
 #  Usage:
 #    sudo -E ./test/dataplane/run_snapshot_converge_test.sh -e <endpoint> -b <bucket> [-r <region>]
@@ -174,7 +175,13 @@ nvme_settle()
 remove_prefix()
 {
 	python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
-		-r "${REGION}" -p "$1"
+		-r "${REGION}" -p "$1" ${S3LVOL_TEST_S3FLAGS:-}
+}
+
+count_objects()
+{
+	python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
+		-r "${REGION}" -p "$1" --list ${S3LVOL_TEST_S3FLAGS:-} 2>/dev/null | wc -l
 }
 
 # Decouple is considered done when the decouple list is empty.
@@ -636,12 +643,119 @@ else
 fi
 
 # ==========================================================================
+echo "[7b] delete the source snapshot without release_export"
+# The destination stopped reading the export when its snapshot was decoupled.
+# The source was unloaded only so this lvstore could be created; attach it
+# again and let the snapshot delete release the export itself. A lease written
+# while the import was still reading stays for the grace period, so the delete
+# may be deferred until the poller notices it has gone stale.
+if ! raw_rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${SRC_LVS}" "${BUCKET}" "${SRC_WAL_BDEV}")" \
+	>/dev/null 2>"${WORKDIR}/attach_src_del.err"; then
+	fail "re-attach ${SRC_LVS} to delete its snapshot"
+	sed 's/^/    /' "${WORKDIR}/attach_src_del.err"
+	exit 1
+fi
+SRC_CREATED=1
+pass "source re-attached for the snapshot delete"
+
+SRC_DATA_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+if [ "${SRC_DATA_BEFORE}" -eq 0 ]; then
+	fail "the source had no data objects left to reclaim"
+	exit 1
+fi
+
+SRC_VOL_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${BIG_VOL}" "${SRC_LVS}")" 2>&1)"
+if echo "${SRC_VOL_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting ${BIG_VOL} was deferred: ${SRC_VOL_DEL}"
+	exit 1
+elif echo "${SRC_VOL_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source volume was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${BIG_VOL}): ${SRC_VOL_DEL}"
+	exit 1
+fi
+SRC_DATA_AFTER_VOL="$(count_objects "${SRC_LVS}/data/")"
+if [ "${SRC_DATA_AFTER_VOL}" = "${SRC_DATA_BEFORE}" ]; then
+	pass "source data objects survived deleting the writable volume"
+else
+	fail "source data object count changed when the writable volume was deleted (${SRC_DATA_BEFORE} -> ${SRC_DATA_AFTER_VOL})"
+fi
+
+SRC_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${BIG_SNAP}" "${SRC_LVS}")" 2>&1)"
+if echo "${SRC_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	info "source snapshot delete deferred; waiting for the lease to go stale"
+elif echo "${SRC_SNAP_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source snapshot was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${BIG_SNAP}): ${SRC_SNAP_DEL}"
+	exit 1
+fi
+if echo "${SRC_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	SRC_SNAP_GONE=0
+	for _ in $(seq 180); do
+		if ! raw_rpc rcow_get_snapshot_status \
+			"$(printf '{"snapshot_name":"%s"}' "${BIG_SNAP}")" \
+			>/dev/null 2>&1; then
+			SRC_SNAP_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${SRC_SNAP_GONE}" = "1" ]; then
+		pass "the poller deleted the source snapshot once its lease was stale"
+	else
+		fail "the source snapshot was still there 180s after its delete"
+		exit 1
+	fi
+fi
+
+SRC_MANIFEST_GONE=0
+for _ in $(seq 30); do
+	if [ "$(count_objects "${S3_EXPORTS_DIR}/${BIG_EXP_UUID}.json")" -eq 0 ]; then
+		SRC_MANIFEST_GONE=1
+		break
+	fi
+	sleep 1
+done
+if [ "${SRC_MANIFEST_GONE}" = "1" ]; then
+	pass "the snapshot delete removed the export manifest"
+else
+	fail "the export manifest was still in the bucket after the snapshot delete"
+fi
+
+SRC_DATA_RECLAIMED=0
+SRC_DATA_AFTER="${SRC_DATA_BEFORE}"
+for _ in $(seq 60); do
+	SRC_DATA_AFTER="$(count_objects "${SRC_LVS}/data/")"
+	if [ "${SRC_DATA_AFTER}" -lt "${SRC_DATA_BEFORE}" ]; then
+		SRC_DATA_RECLAIMED=1
+		break
+	fi
+	sleep 1
+done
+if [ "${SRC_DATA_RECLAIMED}" = "1" ]; then
+	pass "source data objects were reclaimed after the snapshot delete (${SRC_DATA_BEFORE} -> ${SRC_DATA_AFTER})"
+else
+	fail "source data objects were not reclaimed after the snapshot delete (still ${SRC_DATA_AFTER})"
+fi
+
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${SRC_LVS}")" \
+	>/dev/null 2>&1 || { fail "unload ${SRC_LVS} after the snapshot delete"; exit 1; }
+SRC_CREATED=0
+check_target "step 7b" || exit 1
+
+# ==========================================================================
 echo "[8] erase the source and reload: the bytes must be local now"
-# The whole point. release_export cannot be used -- it runs on the source
-# lvstore, which was unloaded so this one could exist -- and deleting the prefix
-# is the stronger statement anyway: if the objects are gone from S3 and the reads
-# still work, the data is really here. Unload and re-attach so that nothing can
-# be answered out of memory.
+# The snapshot delete above released the export and reclaimed its data objects.
+# What remains of the source prefix is lvstore metadata. Sweeping it, then
+# unloading and re-attaching, is what says the final read is local: nothing of
+# the source is left to answer it, in S3 or in memory.
 nvme_settle
 remove_ns "${CLONE_NSID}"
 CLONE_NSID=""

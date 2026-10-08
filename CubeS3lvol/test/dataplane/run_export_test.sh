@@ -1761,7 +1761,13 @@ check_target "step 11" || exit 1
 # A release that consulted the imports registry would answer "nobody imports this"
 # here and delete the objects out from under the snapshot. Which is why it asks the
 # blobs instead: the assertion below is that release is still refused after the
-# clone is gone, and only opens up when the snapshot is too.
+# clone is gone, and only opens up when the last reader is too.
+#
+# Two deletes sit in that window. The source snapshot's own delete is deferred for
+# as long as this snapshot renews the lease, and neither the manifest nor the data
+# objects move. Then a clone of the snapshot is what the esnap parent has to land
+# on: deleting the snapshot merges into that one clone, and the export stays put
+# until the clone itself is deleted.
 #
 # SRC and DST are both loaded on purpose. With DST unloaded there would be no blob
 # to find and the check would pass for the wrong reason.
@@ -1825,13 +1831,137 @@ else
 	pass "release was still refused, on account of the snapshot"
 fi
 
-if raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${CHAIN_SNAP}")" \
-		>"${WORKDIR}/delete_snap.json" 2>"${WORKDIR}/delete_snap.err"; then
-	pass "the snapshot was deleted"
+# The source snapshot is what the export names. Its delete must not run while the
+# downstream snapshot still renews the lease, and it must not free the clusters
+# that snapshot reads. The intent is withdrawn afterwards: the poller would
+# otherwise finish it once this step deletes the last reader.
+CHAIN_SRC_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+CHAIN_SRC_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${SNAP2_NAME}" "${SRC_LVS}")" 2>&1)"
+if echo "${CHAIN_SRC_DEL}" | grep -q '"deferred": *true'; then
+	pass "the source snapshot delete was deferred while the downstream snapshot reads it"
 else
-	fail "rcow_delete_lvol (the snapshot)"
-	sed 's/^/       /' "${WORKDIR}/delete_snap.err" 2>/dev/null
-	check_target "step 11b" || exit 1
+	fail "deleting ${SNAP2_NAME} was not deferred: ${CHAIN_SRC_DEL}"
+	exit 1
+fi
+if export_status_field "${EXPORT2_UUID}" export_status >/dev/null 2>&1; then
+	pass "the chained export is still published"
+else
+	fail "the chained export disappeared while a snapshot still reads it"
+	exit 1
+fi
+CHAIN_SRC_AFTER="$(count_objects "${SRC_LVS}/data/")"
+if [ "${CHAIN_SRC_AFTER}" = "${CHAIN_SRC_BEFORE}" ]; then
+	pass "source data objects survived the deferred snapshot delete"
+else
+	fail "source data object count changed on the deferred snapshot delete (${CHAIN_SRC_BEFORE} -> ${CHAIN_SRC_AFTER})"
+fi
+
+BEFORE_CHAIN_SNAP_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${CHAIN_SNAP}" \
+	>/dev/null 2>"${WORKDIR}/add_ns_chain_snap.err" || {
+	fail "nvmf_subsystem_add_ns (${CHAIN_SNAP})"
+	sed 's/^/       /' "${WORKDIR}/add_ns_chain_snap.err"
+	exit 1; }
+CHAIN_SNAP_DEV="$(wait_for_new_ns "${BEFORE_CHAIN_SNAP_NS}")"
+if [ -z "${CHAIN_SNAP_DEV}" ]; then
+	fail "the downstream snapshot did not get a namespace"
+	exit 1
+fi
+if [ "$(read_md5_at "${CHAIN_SNAP_DEV}" "${WORKDIR}/chain_snap_a.bin" \
+		"${IO_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_A}" ] && \
+   [ "$(read_md5_at "${CHAIN_SNAP_DEV}" "${WORKDIR}/chain_snap_c.bin" \
+		"${CHAIN_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_C}" ]; then
+	pass "the downstream snapshot still reads both layers after the deferred source delete"
+else
+	fail "the downstream snapshot lost a layer after the deferred source delete"
+	exit 1
+fi
+CHAIN_SNAP_NSID="$(nsid_of "${DST_LVS}/${CHAIN_SNAP}")"
+[ -n "${CHAIN_SNAP_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${CHAIN_SNAP_NSID}" >/dev/null 2>&1 || true
+
+raw_rpc rcow_cancel_pending_delete \
+	"$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${SNAP2_NAME}" "${SRC_LVS}")" >/dev/null 2>&1 || {
+	fail "withdraw the pending delete of ${SNAP2_NAME}"
+	exit 1; }
+pass "the pending delete of the source snapshot was withdrawn"
+
+# One clone, so deleting the snapshot merges into it and the esnap parent moves
+# with the merge. Two clones would only defer, which would leave the parent on
+# the snapshot and make the read below pass for the wrong reason.
+CHAIN_CLONE="${DST_VOL2}-clone"
+if ! raw_rpc rcow_create_clone "$(printf '{"snapshot_name":"%s","clone_name":"%s"}' \
+		"${CHAIN_SNAP}" "${CHAIN_CLONE}")" \
+		>/dev/null 2>"${WORKDIR}/chain_clone.err"; then
+	fail "rcow_create_clone (of the snapshot that holds the esnap parent)"
+	sed 's/^/       /' "${WORKDIR}/chain_clone.err"
+	exit 1
+fi
+pass "cloned the snapshot that holds the esnap parent"
+
+CHAIN_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${CHAIN_SNAP}")" 2>&1)"
+if echo "${CHAIN_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting ${CHAIN_SNAP} was deferred; one clone should have been merged: ${CHAIN_SNAP_DEL}"
+	exit 1
+elif echo "${CHAIN_SNAP_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the snapshot was deleted and its esnap parent merged into the remaining clone"
+else
+	fail "rcow_delete_lvol (${CHAIN_SNAP}): ${CHAIN_SNAP_DEL}"
+	exit 1
+fi
+
+if raw_rpc rcow_get_imports "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+		>"${WORKDIR}/imports_clone.json" 2>/dev/null && \
+   grep -q "${EXPORT2_UUID}" "${WORKDIR}/imports_clone.json"; then
+	pass "the registry still lists the export, because the clone reads it"
+else
+	fail "the registry dropped an export the merged clone still reads through to"
+	exit 1
+fi
+
+if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+		"${EXPORT2_UUID}" "${SRC_LVS}")" \
+		>"${WORKDIR}/release_clone.json" 2>"${WORKDIR}/release_clone.err"; then
+	fail "releasing an export a merged clone still reads succeeded"
+	exit 1
+else
+	pass "release was still refused, on account of the clone"
+fi
+
+BEFORE_CHAIN_CLONE_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${CHAIN_CLONE}" \
+	>/dev/null 2>"${WORKDIR}/add_ns_chain_clone.err" || {
+	fail "nvmf_subsystem_add_ns (${CHAIN_CLONE})"
+	sed 's/^/       /' "${WORKDIR}/add_ns_chain_clone.err"
+	exit 1; }
+CHAIN_CLONE_DEV="$(wait_for_new_ns "${BEFORE_CHAIN_CLONE_NS}")"
+if [ -z "${CHAIN_CLONE_DEV}" ]; then
+	fail "the merged clone did not get a namespace"
+	exit 1
+fi
+if [ "$(read_md5_at "${CHAIN_CLONE_DEV}" "${WORKDIR}/chain_clone_a.bin" \
+		"${IO_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_A}" ] && \
+   [ "$(read_md5_at "${CHAIN_CLONE_DEV}" "${WORKDIR}/chain_clone_c.bin" \
+		"${CHAIN_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_C}" ]; then
+	pass "the clone still reads both layers after the snapshot was merged into it"
+else
+	fail "the clone lost a layer when the snapshot was deleted"
+	exit 1
+fi
+CHAIN_CLONE_NSID="$(nsid_of "${DST_LVS}/${CHAIN_CLONE}")"
+[ -n "${CHAIN_CLONE_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${CHAIN_CLONE_NSID}" >/dev/null 2>&1 || true
+
+if raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${CHAIN_CLONE}")" \
+		>"${WORKDIR}/delete_clone.json" 2>"${WORKDIR}/delete_clone.err"; then
+	pass "the last reader was deleted"
+else
+	fail "rcow_delete_lvol (${CHAIN_CLONE})"
+	sed 's/^/       /' "${WORKDIR}/delete_clone.err" 2>/dev/null
 	exit 1
 fi
 
@@ -4397,7 +4527,9 @@ check_target "step 11j" || exit 1
 # never comes back. The field report is that repeating that pair on the
 # destination is what breaks -- leftover registry, lease, or name -- so the
 # same export is imported, read, decoupled, deleted and imported again here,
-# three times. The first read deliberately warms the lvstore's exact-key object
+# three times. After the last round nothing calls rcow_release_export: deleting
+# the source snapshot is what releases the export and reclaims its objects.
+# The first read deliberately warms the lvstore's exact-key object
 # cache. Round one explicitly warms before decouple; later rounds use the
 # production decouple=true path. Once CopyObject binds a fresh destination uuid,
 # its alias must let the post-decouple first read reuse the same object slot.
@@ -4604,27 +4736,93 @@ raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 	>/dev/null 2>&1 || fail "rcow_unload_lvstore (destination, after step 11k)"
 DST_CREATED=0
 
-REIMP_RELEASED=0
-for _ in $(seq 40); do
-	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-			"${REIMP_UUID}" "${SRC_LVS}")" \
-			>/dev/null 2>"${WORKDIR}/reimp_release.err"; then
-		REIMP_RELEASED=1
-		break
-	fi
-	sleep 0.5
-done
-if [ "${REIMP_RELEASED}" = "1" ]; then
-	pass "the reimport export was released"
-else
-	fail "rcow_release_export (step 11k)"
-	sed 's/^/       /' "${WORKDIR}/reimp_release.err" 2>/dev/null
+# The rounds above decoupled every import and then deleted it, so nothing is
+# renewing the lease. Cleanup does not call rcow_release_export: the snapshot
+# delete releases the export itself once that lease is stale, and the data
+# objects go with the snapshot rather than with the writable volume.
+REIMP_DATA_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+if [ "${REIMP_DATA_BEFORE}" -eq 0 ]; then
+	fail "the source had no data objects left to reclaim"
+	exit 1
 fi
 
-for vol in "${REIMP_SRC}" "${REIMP_SNAP}"; do
-	raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${vol}")" \
-		>/dev/null 2>&1 || fail "rcow_delete_lvol (${vol})"
+REIMP_VOL_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${REIMP_SRC}" "${SRC_LVS}")" 2>&1)"
+if echo "${REIMP_VOL_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting ${REIMP_SRC} was deferred: ${REIMP_VOL_DEL}"
+	exit 1
+elif echo "${REIMP_VOL_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source volume was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${REIMP_SRC}): ${REIMP_VOL_DEL}"
+	exit 1
+fi
+REIMP_DATA_AFTER_VOL="$(count_objects "${SRC_LVS}/data/")"
+if [ "${REIMP_DATA_AFTER_VOL}" = "${REIMP_DATA_BEFORE}" ]; then
+	pass "source data objects survived deleting the writable volume"
+else
+	fail "source data object count changed when the writable volume was deleted (${REIMP_DATA_BEFORE} -> ${REIMP_DATA_AFTER_VOL})"
+fi
+
+REIMP_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${REIMP_SNAP}" "${SRC_LVS}")" 2>&1)"
+if echo "${REIMP_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	info "source snapshot delete deferred; waiting for the lease to go stale"
+elif echo "${REIMP_SNAP_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source snapshot was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${REIMP_SNAP}): ${REIMP_SNAP_DEL}"
+	exit 1
+fi
+if echo "${REIMP_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	REIMP_SNAP_GONE=0
+	for _ in $(seq 180); do
+		if ! snapshot_status_field "${REIMP_SNAP}" export_status \
+				>/dev/null 2>&1; then
+			REIMP_SNAP_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${REIMP_SNAP_GONE}" = "1" ]; then
+		pass "the poller deleted the source snapshot once its lease was stale"
+	else
+		fail "the source snapshot was still there 180s after its delete"
+		exit 1
+	fi
+fi
+
+REIMP_MANIFEST_GONE=0
+for _ in $(seq 30); do
+	if [ "$(count_objects "${S3_EXPORTS_DIR}/${REIMP_UUID}.json")" -eq 0 ]; then
+		REIMP_MANIFEST_GONE=1
+		break
+	fi
+	sleep 1
 done
+if [ "${REIMP_MANIFEST_GONE}" = "1" ]; then
+	pass "the snapshot delete removed the export manifest"
+else
+	fail "the export manifest was still in the bucket after the snapshot delete"
+fi
+
+REIMP_DATA_RECLAIMED=0
+REIMP_DATA_AFTER="${REIMP_DATA_BEFORE}"
+for _ in $(seq 60); do
+	REIMP_DATA_AFTER="$(count_objects "${SRC_LVS}/data/")"
+	if [ "${REIMP_DATA_AFTER}" -lt "${REIMP_DATA_BEFORE}" ]; then
+		REIMP_DATA_RECLAIMED=1
+		break
+	fi
+	sleep 1
+done
+if [ "${REIMP_DATA_RECLAIMED}" = "1" ]; then
+	pass "source data objects were reclaimed after the snapshot delete (${REIMP_DATA_BEFORE} -> ${REIMP_DATA_AFTER})"
+else
+	fail "source data objects were not reclaimed after the snapshot delete (still ${REIMP_DATA_AFTER})"
+fi
 
 check_target "step 11k" || exit 1
 

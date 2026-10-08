@@ -61,7 +61,12 @@
 #  handoff durable: A decides independently whether its snapshot is still needed,
 #  and it consults the lease. Renewing only B's would leave A free to delete the
 #  objects C's head resolves to. It is also why the lease is renewed against A
-#  directly rather than through B -- B may be gone.
+#  directly rather than through B -- B may be gone. While C is still that reader,
+#  deleting sa or sb is deferred and neither prefix loses objects; deleting the
+#  writable volumes under those snapshots is not. The intents are withdrawn so the
+#  convergence steps still have the snapshots. After C has decoupled its own
+#  snapshot, the same deletes are issued again and must finish without
+#  rcow_release_export.
 #
 #  Usage:
 #    sudo -E ./test/dataplane/run_derived_test.sh -e <endpoint> -b <bucket> [-r <region>]
@@ -413,6 +418,68 @@ remove_prefix()
 {
 	python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
 		-r "${REGION}" -p "$1"
+}
+
+count_objects()
+{
+	python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
+		-r "${REGION}" -p "$1" --list 2>/dev/null | wc -l
+}
+
+# --raw keeps the "deferred" envelope field. The plain client turns a successful
+# reply into a boolean and that is exactly the distinction this has to see.
+delete_lvol_raw()
+{
+	python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+		rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "$1")" 2>&1
+}
+
+# A live lease defers the delete. The pending poller finishes it once the lease
+# is stale, with no rcow_release_export in between.
+delete_lvol_until_gone()
+{
+	local name="$1" where="$2"
+	local out deadline
+
+	out="$(delete_lvol_raw "${name}")"
+	# A deferred reply still carries bool_value true: the intent was accepted.
+	# That has to be told apart from a delete that already finished.
+	if echo "${out}" | grep -q '"deferred": *true'; then
+		info "${name} delete deferred (${where}); waiting for the poller"
+	elif echo "${out}" | grep -q '"bool_value": *true'; then
+		pass "${name} deleted without release_export (${where})"
+		return 0
+	else
+		fail "deleting ${name} failed (${where}): ${out}"
+		return 1
+	fi
+	deadline=$(( $(date +%s) + 180 ))
+	while [ "$(date +%s)" -lt "${deadline}" ]; do
+		if ! raw_rpc rcow_get_lvol \
+			"$(printf '{"lvol_name":"%s"}' "${name}")" >/dev/null 2>&1; then
+			pass "the poller deleted ${name} once nothing still reads it (${where})"
+			return 0
+		fi
+		sleep 1
+	done
+	fail "${name} was still there 180s after its delete (${where})"
+	return 1
+}
+
+wait_manifest_gone()
+{
+	local uuid="$1" where="$2"
+	local deadline=$(( $(date +%s) + 30 ))
+
+	while [ "$(date +%s)" -lt "${deadline}" ]; do
+		if [ "$(count_objects "${S3_EXPORTS_DIR}/${uuid}.json")" -eq 0 ]; then
+			pass "the snapshot delete removed export ${where}"
+			return 0
+		fi
+		sleep 1
+	done
+	fail "export ${where} was still in the bucket after the snapshot delete"
+	return 1
 }
 
 cleanup()
@@ -828,6 +895,125 @@ check_target "leases" || exit 1
 
 # ==========================================================================
 echo
+echo "=== [5b] deletes while C still reads both exports"
+
+# C is attached and renewing. A and B come back only for the delete RPCs; their
+# volumes stay unexposed, and C's namespace is left alone so the reads below
+# still hit the same device.
+raw_rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${A_LVS}" "${BUCKET}" "${A_WAL_BDEV}")" \
+	>/dev/null 2>"${WORKDIR}/attach_a_del.err" || {
+	fail "re-attach ${A_LVS} for the deferred delete"
+	sed 's/^/       /' "${WORKDIR}/attach_a_del.err"; exit 1; }
+A_CREATED=1
+
+A_DATA_BEFORE="$(count_objects "${A_LVS}/data/")"
+VA_DEL="$(delete_lvol_raw va)"
+if echo "${VA_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the writable volume under A's export was deleted"
+elif echo "${VA_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting va was deferred: ${VA_DEL}"
+	exit 1
+else
+	fail "deleting va failed: ${VA_DEL}"
+	exit 1
+fi
+A_DATA_AFTER_VA="$(count_objects "${A_LVS}/data/")"
+want "A's data objects survived deleting the writable volume" \
+	"${A_DATA_AFTER_VA}" "${A_DATA_BEFORE}"
+
+SA_DEL="$(delete_lvol_raw sa)"
+if echo "${SA_DEL}" | grep -q '"deferred": *true'; then
+	pass "A's exported snapshot delete was deferred while C reads it"
+else
+	fail "deleting sa was not deferred: ${SA_DEL}"
+	exit 1
+fi
+if export_status_field "${EXP_A}" export_status >/dev/null 2>&1; then
+	pass "A's export is still published"
+else
+	fail "A's export disappeared while C still reads it"
+	exit 1
+fi
+A_DATA_AFTER_SA="$(count_objects "${A_LVS}/data/")"
+want "A's data objects survived the deferred snapshot delete" \
+	"${A_DATA_AFTER_SA}" "${A_DATA_BEFORE}"
+drop_caches
+if [ "${DID_ZERO}" -eq 1 ]; then
+	want "C still reads the zeroed prefix after A's deferred delete" \
+		"$(read_md5_range "${DEV}" "${ZERO_OFF_MB}" "${ZERO_LEN_MB}")" \
+		"${ZERO_MD5}"
+	want "C still reads the rest of A's head after the deferred delete" \
+		"$(read_md5_range "${DEV}" "${HEAD_REST_OFF_MB}" "${HEAD_REST_MB}")" \
+		"${HEAD_REST_MD5}"
+else
+	want "C still reads A's head after the deferred delete" \
+		"$(read_md5_at "${DEV}" "${HEAD_OFF_MB}")" "${HEAD_MD5}"
+fi
+
+# The convergence steps still need sa. A pending intent would finish once C is
+# unloaded below, which is the opposite of what those steps set up.
+raw_rpc rcow_cancel_pending_delete '{"lvol_name":"sa"}' >/dev/null 2>&1 || {
+	fail "withdraw the pending delete of sa"; exit 1; }
+pass "the pending delete of sa was withdrawn"
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${A_LVS}")" \
+	>/dev/null 2>&1 || { fail "unload ${A_LVS} after the deferred delete"; exit 1; }
+A_CREATED=0
+
+raw_rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${B_LVS}" "${BUCKET}" "${B_WAL_BDEV}")" \
+	>/dev/null 2>"${WORKDIR}/attach_b_del.err" || {
+	fail "re-attach ${B_LVS} for the deferred delete"
+	sed 's/^/       /' "${WORKDIR}/attach_b_del.err"; exit 1; }
+B_CREATED=1
+
+B_DATA_BEFORE="$(count_objects "${B_LVS}/data/")"
+VB_DEL="$(delete_lvol_raw vb)"
+if echo "${VB_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the imported volume was deleted while its snapshot still reads the export"
+elif echo "${VB_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting vb was deferred: ${VB_DEL}"
+	exit 1
+else
+	fail "deleting vb failed: ${VB_DEL}"
+	exit 1
+fi
+B_DATA_AFTER_VB="$(count_objects "${B_LVS}/data/")"
+want "B's data objects survived deleting the imported volume" \
+	"${B_DATA_AFTER_VB}" "${B_DATA_BEFORE}"
+
+SB_DEL="$(delete_lvol_raw sb)"
+if echo "${SB_DEL}" | grep -q '"deferred": *true'; then
+	pass "B's exported snapshot delete was deferred while C reads it"
+else
+	fail "deleting sb was not deferred: ${SB_DEL}"
+	exit 1
+fi
+if export_status_field "${EXP_B}" export_status >/dev/null 2>&1; then
+	pass "B's export is still published"
+else
+	fail "B's export disappeared while C still reads it"
+	exit 1
+fi
+B_DATA_AFTER_SB="$(count_objects "${B_LVS}/data/")"
+want "B's data objects survived the deferred snapshot delete" \
+	"${B_DATA_AFTER_SB}" "${B_DATA_BEFORE}"
+drop_caches
+want "C still reads B's tail after the deferred delete" \
+	"$(read_md5_at "${DEV}" "${TAIL_OFF_MB}")" "${TAILB_MD5}"
+
+raw_rpc rcow_cancel_pending_delete '{"lvol_name":"sb"}' >/dev/null 2>&1 || {
+	fail "withdraw the pending delete of sb"; exit 1; }
+pass "the pending delete of sb was withdrawn"
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${B_LVS}")" \
+	>/dev/null 2>&1 || { fail "unload ${B_LVS} after the deferred delete"; exit 1; }
+B_CREATED=0
+check_target "deferred deletes" || exit 1
+
+# ==========================================================================
+echo
 echo "=== [6] converge B's snapshot and redirect its published export"
 
 # Keep C's old generation in its imports registry. After B rewrites the manifest
@@ -998,6 +1184,63 @@ want "C still reads B's tail after decouple" \
 	"$(read_md5_at "${DEV}" "${TAIL_OFF_MB}")" "${TAILB_MD5}"
 
 check_target "derive/decouple after refetch" || exit 1
+
+# ==========================================================================
+echo
+echo "=== [8] delete the chain once C no longer reads it"
+
+# sc was the esnap, and decoupling it dropped C's import. Nothing renews A's or
+# B's lease any more. vc is still the host's namespace, so it has to be removed
+# before the blob delete; sc was never exposed.
+unexpose "${CUR_NSID}"
+CUR_NSID=""
+
+VC_DEL="$(delete_lvol_raw vc)"
+if echo "${VC_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the imported volume was deleted after its snapshot was decoupled"
+elif echo "${VC_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting vc was deferred: ${VC_DEL}"
+	exit 1
+else
+	fail "deleting vc failed: ${VC_DEL}"
+	exit 1
+fi
+
+delete_lvol_until_gone sc "C's re-exported snapshot" || exit 1
+wait_manifest_gone "${EXP_C}" "C" || exit 1
+
+raw_rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${B_LVS}" "${BUCKET}" "${B_WAL_BDEV}")" \
+	>/dev/null 2>"${WORKDIR}/attach_b_reclaim.err" || {
+	fail "re-attach ${B_LVS} to finish the snapshot delete"
+	sed 's/^/       /' "${WORKDIR}/attach_b_reclaim.err"; exit 1; }
+B_CREATED=1
+
+B_DATA_LIVE="$(count_objects "${B_LVS}/data/")"
+if [ "${B_DATA_LIVE}" -eq 0 ]; then
+	fail "B had no data objects left to reclaim"
+	exit 1
+fi
+delete_lvol_until_gone sb "B's snapshot after its last reader was gone" || exit 1
+wait_manifest_gone "${EXP_B}" "B" || exit 1
+
+B_DATA_RECLAIMED=0
+B_DATA_AFTER="${B_DATA_LIVE}"
+for _ in $(seq 60); do
+	B_DATA_AFTER="$(count_objects "${B_LVS}/data/")"
+	if [ "${B_DATA_AFTER}" -lt "${B_DATA_LIVE}" ]; then
+		B_DATA_RECLAIMED=1
+		break
+	fi
+	sleep 1
+done
+if [ "${B_DATA_RECLAIMED}" = "1" ]; then
+	pass "B's data objects were reclaimed after the snapshot delete (${B_DATA_LIVE} -> ${B_DATA_AFTER})"
+else
+	fail "B's data objects were not reclaimed after the snapshot delete (still ${B_DATA_AFTER})"
+fi
+check_target "deletes after the last reader" || exit 1
 
 echo
 echo "=== all steps done"
