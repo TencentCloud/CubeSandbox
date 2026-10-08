@@ -1062,6 +1062,8 @@ int from_cube(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_FORWARDED);
 		return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 	}
 
@@ -1136,6 +1138,8 @@ int from_cube(struct __sk_buff *skb)
 				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
 		default:
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 		}
 	}
@@ -1147,8 +1151,11 @@ int from_cube(struct __sk_buff *skb)
 				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
 		}
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
+		}
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
 			return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
