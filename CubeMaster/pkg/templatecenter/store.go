@@ -666,12 +666,20 @@ func healthyTemplateNodes(instanceType string) []*node.Node {
 }
 
 func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
+	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateReplicate, trace.WithAttributes(
+		attribute.String(telemetry.AttrTemplateID, templateID),
+		attribute.String(telemetry.AttrJobID, opts.JobID),
+		attribute.String(telemetry.AttrArtifactID, opts.ArtifactID),
+	))
 	replicas := make([]ReplicaStatus, 0, len(targets))
 	envdVersions := make([]nodeEnvdVersion, 0, len(targets))
 	var lock sync.Mutex
 	var persistErr error
+	// Node failures affect span status; only persistence failures abort finalization.
+	var spanErr error
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
+	defer func() { telemetry.End(span, spanErr) }()
 
 	for _, target := range targets {
 		target := target
@@ -681,10 +689,17 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			_, slotSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateNodeSlot,
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrNodeID, target.ID()),
+					attribute.String(telemetry.AttrJobID, opts.JobID),
+					attribute.String(telemetry.AttrTemplateID, templateID),
+				))
 			sem <- struct{}{}
+			telemetry.End(slotSpan, nil)
 			defer func() { <-sem }()
 
-			replica, envdVersion := createReplicaOnNode(ctx, target, req, opts)
+			replica, envdVersion := createReplicaOnNode(ctx, target, templateID, req, opts)
 			lock.Lock()
 			replicas = append(replicas, replica)
 			envdVersions = append(envdVersions, nodeEnvdVersion{
@@ -702,6 +717,15 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 		}()
 	}
 	wg.Wait()
+	spanErr = persistErr
+	if spanErr == nil {
+		for _, replica := range replicas {
+			if replica.Status != ReplicaStatusReady {
+				spanErr = fmt.Errorf("appsnapshot replica on node %s failed: %s", replica.NodeID, replica.ErrorMessage)
+				break
+			}
+		}
+	}
 	// Converge per-node envd versions into a single template value and persist it
 	// once to the definition annotation (idempotent; covers create and redo).
 	if envdVersion := convergeEnvdVersion(ctx, envdVersions); envdVersion != "" {
@@ -803,7 +827,7 @@ func persistTemplateEnvdVersion(ctx context.Context, templateID, version string)
 	})
 }
 
-func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
+func createReplicaOnNode(ctx context.Context, target *node.Node, templateID string, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
 	replica := ReplicaStatus{
 		NodeID:          target.ID(),
 		NodeIP:          target.HostIP(),
@@ -816,29 +840,40 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		LastErrorPhase:  ReplicaPhaseSnapshotting,
 		CleanupRequired: true,
 	}
+	rpcCtx, rpcSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateNodeSnapshot,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrNodeID, target.ID()),
+			attribute.String(telemetry.AttrArtifactID, opts.ArtifactID),
+			attribute.String(telemetry.AttrJobID, opts.JobID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+		))
 	nodeReq, err := cloneCreateRequest(req)
 	if err != nil {
+		telemetry.End(rpcSpan, err)
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
 		return replica, ""
 	}
 	ensureRuntimeTemplateRequest(nodeReq)
-	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
+	cubeletReq, err := sandbox.ConstructCubeletReq(rpcCtx, nodeReq)
 	if err != nil {
+		telemetry.End(rpcSpan, err)
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
 		return replica, ""
 	}
-	rsp, err := cubelet.AppSnapshot(ctx, cubelet.GetCubeletAddr(target.HostIP()), &cubeboxv1.AppSnapshotRequest{
+	rsp, err := cubelet.AppSnapshot(rpcCtx, cubelet.GetCubeletAddr(target.HostIP()), &cubeboxv1.AppSnapshotRequest{
 		CreateRequest: cubeletReq,
 		SnapshotDir:   req.SnapshotDir,
 		Backend:       storageBackendFromCreate(nodeReq),
 	})
 	if err != nil {
+		telemetry.End(rpcSpan, err)
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
 		return replica, ""
 	}
+	telemetry.EndWithCode(rpcSpan, int(rsp.GetRet().GetRetCode()))
 	if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
 		replica.Phase = ReplicaPhaseFailed
 		if rsp.GetRet() != nil {

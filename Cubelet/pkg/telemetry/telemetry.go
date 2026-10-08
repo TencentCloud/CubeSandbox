@@ -44,12 +44,15 @@ const (
 	SpanRuntimeContainer = "cubelet.runtime.container"
 	SpanRuntimeTask      = "cubelet.runtime.task"
 	SpanRuntimeStart     = "cubelet.runtime.start"
+	SpanImageCreate      = "cubelet.image.create"
+	SpanImageAppSnapshot = "cubelet.image.app_snapshot"
 )
 
 const (
 	AttrRequestID    = "cube.request_id"
 	AttrSandboxID    = "cube.sandbox_id"
 	AttrTemplateID   = "cube.template_id"
+	AttrArtifactID   = "cube.artifact_id"
 	AttrInstanceType = "cube.instance_type"
 	AttrRetCode      = "cube.ret_code"
 	AttrWorkflow     = "cube.workflow"
@@ -161,6 +164,9 @@ func (c mdCarrier) Keys() []string {
 }
 
 func ExtractGRPC(ctx context.Context) context.Context {
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		return ctx
+	}
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok || md == nil {
 		return ctx

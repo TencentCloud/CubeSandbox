@@ -95,6 +95,31 @@ func TestExtractGRPCContinuesTraceFromMetadata(t *testing.T) {
 	}
 }
 
+func TestExtractGRPCKeepsActiveSpanAsParent(t *testing.T) {
+	exp, flush := setupTest(t)
+
+	remote := metadata.Pairs("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	outerCtx := ExtractGRPC(metadata.NewIncomingContext(context.Background(), remote))
+	callerCtx, caller := Start(outerCtx, SpanImageAppSnapshot)
+	innerCtx := ExtractGRPC(metadata.NewIncomingContext(callerCtx, remote))
+	_, inner := Start(innerCtx, SpanImageCreate)
+	inner.End()
+	caller.End()
+	flush()
+
+	for _, span := range exp.snapshot() {
+		if span.Name() != SpanImageCreate {
+			continue
+		}
+		if span.Parent().SpanID() != caller.SpanContext().SpanID() {
+			t.Fatalf("in-process child parent = %s, want the active AppSnapshot span %s",
+				span.Parent().SpanID(), caller.SpanContext().SpanID())
+		}
+		return
+	}
+	t.Fatal("inner span was not exported")
+}
+
 func TestEndWithCodeMarksBusinessFailure(t *testing.T) {
 	exp, flush := setupTest(t)
 

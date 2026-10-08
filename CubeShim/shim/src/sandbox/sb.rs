@@ -984,26 +984,11 @@ impl SandBox {
             );
         }
 
-        if !snapshot {
-            self.boot_vm(trace).await?;
-        }
-
-        {
+        if snapshot {
             let ch = self.ch.as_mut().unwrap().lock().await;
-            let start = Instant::now();
-            let ev = ch
-                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
-                .await?;
-
-            if CH::NotifyEvent::VsockServerReady != ev {
-                return Err(format!(
-                    "Not an expected event, expected:{:?}, actual:{:?}",
-                    CH::NotifyEvent::VsockServerReady,
-                    ev
-                ));
-            }
-            let duration = start.elapsed().as_millis();
-            infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
+            Self::wait_vsock_ready(&ch, &self.log).await?;
+        } else {
+            self.boot_vm(trace).await?;
         }
         Ok(snapshot)
     }
@@ -1018,9 +1003,28 @@ impl SandBox {
             .start(telemetry::SPAN_BOOT_VM)
             .run(async {
                 ch.create_vm(&config).await?;
-                ch.boot_vm().await
+                ch.boot_vm().await?;
+                Self::wait_vsock_ready(&ch, &self.log).await
             })
             .await?;
+        Ok(())
+    }
+
+    async fn wait_vsock_ready(ch: &CH::CubeHypervisor, log: &Log) -> CResult<()> {
+        let start = Instant::now();
+        let ev = ch
+            .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
+            .await?;
+
+        if CH::NotifyEvent::VsockServerReady != ev {
+            return Err(format!(
+                "Not an expected event, expected:{:?}, actual:{:?}",
+                CH::NotifyEvent::VsockServerReady,
+                ev
+            ));
+        }
+        let duration = start.elapsed().as_millis();
+        infof!(log, "vm ready, vsock is listening, cost:{}", duration);
         Ok(())
     }
 
@@ -1928,6 +1932,8 @@ mod tests {
     use super::Log;
     use super::SandBox;
     use super::SnapshotFreezeState;
+    use crate::hypervisor::config::HypConfig;
+    use crate::hypervisor::cube_hypervisor::CubeHypervisor;
 
     #[tokio::test]
     async fn expired_snapshot_freeze_rejects_resume_and_renew() {
@@ -1951,6 +1957,24 @@ mod tests {
             .to_string()
             .contains("lease expired"));
         assert!(sb.resume_snapshot_frozen("snap-2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn readiness_wait_failure_propagates_instead_of_reporting_ready() {
+        let ch = CubeHypervisor::new(
+            HypConfig {
+                debug: false,
+                log_level: log::LevelFilter::Info,
+                sandbox_id: "ut".to_string(),
+                ch_http_api: None,
+            },
+            Log::default(),
+        );
+
+        let err = SandBox::wait_vsock_ready(&ch, &Log::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("uninitialized"), "{err}");
     }
 
     #[tokio::test]

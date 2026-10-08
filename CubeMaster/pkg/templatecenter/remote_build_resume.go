@@ -18,7 +18,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -239,20 +242,14 @@ func mergeRemoteBuildReport(prior string, finalResult []byte) []byte {
 	return combined
 }
 
-// DetachRemoteBuildResumeContext derives the context the resume goroutine runs
-// on. It must be detached from the HTTP request (returning the callback
-// response must not cancel a cross-node distribution) but it must still carry a
-// CubeLog.RequestTrace, exactly like every other detached template job.
-//
-// This is not cosmetic: log.G(ctx) on a context without a trace loses the
-// request labels and the trace-scoped log sink, which is what made a failing
-// resume look completely silent in templatecenter-req.log.
+// DetachRemoteBuildResumeContext preserves logging and trace context without request cancellation.
 func DetachRemoteBuildResumeContext(ctx context.Context, jobID, artifactID string) context.Context {
-	return detachTemplateImageJobContext(ctx, "template_image_resume_remote", map[string]any{
-		"job_id":      jobID,
-		"artifact_id": artifactID,
-		"build_mode":  "remote",
-	})
+	return telemetry.DetachTrace(
+		detachTemplateImageJobContext(ctx, "template_image_resume_remote", map[string]any{
+			"job_id":      jobID,
+			"artifact_id": artifactID,
+			"build_mode":  "remote",
+		}), ctx)
 }
 
 // RemoteBuildContinuation is the post-registration portion of a remote build.
@@ -340,7 +337,14 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		"build_mode":  "remote",
 	})
 	logger.Infof("resume step 1/3: register remote-built artifact")
-	artifact, generatedReq, adopted, err := register(ctx, req, result)
+	registerCtx, registerSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageRegister,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrArtifactID, result.ArtifactID),
+			attribute.String(telemetry.AttrTemplateID, req.TemplateID),
+		))
+	artifact, generatedReq, adopted, err := register(registerCtx, req, result)
+	telemetry.End(registerSpan, err)
 	if err != nil {
 		if leaveBuiltOnRegisterError || errors.Is(err, errArtifactRegisterRetryable) {
 			// The live callback returns 500 so TC retries while retaining the

@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"gorm.io/gorm"
@@ -195,7 +196,13 @@ func verifyRequestMatchesSnapshot(requestJSON string, req *types.CreateTemplateF
 // Background, which nothing can cancel). Shutdown cancels every in-flight
 // build and waits for them.
 func (e *Executor) Submit(jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL, envdSHA string, envdData []byte) error {
-	if err := e.lookupJob(e.rootCtx, jobID, req); err != nil {
+	return e.SubmitContext(e.rootCtx, jobID, req, downloadBaseURL, envdSHA, envdData)
+}
+
+// SubmitContext preserves the caller trace; Shutdown controls build cancellation.
+func (e *Executor) SubmitContext(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL, envdSHA string, envdData []byte) error {
+	jobCtx := telemetry.DetachTrace(e.rootCtx, ctx)
+	if err := e.lookupJob(jobCtx, jobID, req); err != nil {
 		return err
 	}
 
@@ -234,8 +241,8 @@ func (e *Executor) Submit(jobID string, req *types.CreateTemplateFromImageReq, d
 			delete(e.inFlight, jobID)
 			e.mu.Unlock()
 		}()
-		if err := e.build(e.rootCtx, jobID, req, downloadBaseURL, envdSHA, envdData); err != nil {
-			log.G(e.rootCtx).Errorf("build template fail: job_id=%s err=%v", jobID, err)
+		if err := e.build(jobCtx, jobID, req, downloadBaseURL, envdSHA, envdData); err != nil {
+			log.G(jobCtx).Errorf("build template fail: job_id=%s err=%v", jobID, err)
 		}
 	}()
 	return nil

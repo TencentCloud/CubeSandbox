@@ -14,15 +14,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// createRoute is the one route that is traced. It is spelled out here instead
-// of imported from pkg/service/httpservice/cube because that package imports
-// this one; keep it in step with cube.CubeURI()+cube.SandboxAction.
-const createRoute = "/cube/sandbox"
+var tracedRoutes = map[string]bool{
+	"POST /cube/sandbox":             true,
+	"POST /cube/template/from-image": true,
+}
 
-// GinMiddleware traces sandbox create requests.
 func GinMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Method != http.MethodPost || c.FullPath() != createRoute {
+		if c.Request.Method != http.MethodPost || !tracedRoutes[c.Request.Method+" "+c.FullPath()] {
 			c.Next()
 			return
 		}

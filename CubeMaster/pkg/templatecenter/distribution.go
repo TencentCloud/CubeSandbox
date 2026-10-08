@@ -17,11 +17,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandboxReq, artifactID, jobID string) ReplicaStatus {
@@ -139,15 +142,28 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 	return cleanupTemplateReplicasWithLocators(ctx, templateID, locators, backend)
 }
 
-func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
-	if err := ensureArtifactDistributable(ctx, artifact); err != nil {
+func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) (readyTargets []*node.Node, expected, ready, failed int32, err error) {
+	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateDistribute, trace.WithAttributes(distributeSpanAttrs(artifact, templateID, jobID)...))
+	defer func() { telemetry.End(span, err) }()
+	if err = ensureArtifactDistributable(ctx, artifact); err != nil {
 		return nil, 0, 0, 0, err
 	}
 	targets, err := resolveTemplateNodes(req.InstanceType, req.DistributionScope)
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
-	return distributeRootfsArtifactToNodes(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+	return distributeRootfsArtifactToTargets(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+}
+
+func distributeSpanAttrs(artifact *models.RootfsArtifact, templateID, jobID string) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		attribute.String(telemetry.AttrJobID, jobID),
+		attribute.String(telemetry.AttrTemplateID, templateID),
+	}
+	if artifact != nil {
+		attrs = append(attrs, attribute.String(telemetry.AttrArtifactID, artifact.ArtifactID))
+	}
+	return attrs
 }
 
 // ensureArtifactDistributable refuses to push a CreateImage to cubelets when
@@ -190,6 +206,13 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
 func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
+	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateDistribute, trace.WithAttributes(distributeSpanAttrs(artifact, templateID, jobID)...))
+	readyTargets, expected, ready, failed, err := distributeRootfsArtifactToTargets(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+	telemetry.End(span, err)
+	return readyTargets, expected, ready, failed, err
+}
+
+func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
 	// Always give Cubelets the CubeMaster download endpoint. That keeps the
 	// node-facing address uniform across local-disk and S3-backed artifacts and
 	// avoids per-node dependence on the object-store endpoint's reachability.
@@ -221,14 +244,33 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			_, slotSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateNodeSlot,
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrNodeID, target.ID()),
+					attribute.String(telemetry.AttrJobID, jobID),
+					attribute.String(telemetry.AttrTemplateID, templateID),
+				))
 			sem <- struct{}{}
+			telemetry.End(slotSpan, nil)
 			defer func() { <-sem }()
 
 			replica := buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
-			rsp, err := cubelet.CreateImage(ctx, cubelet.GetCubeletAddr(target.HostIP()), &imagev1.CreateImageRequest{
+			rpcCtx, rpcSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateNodeImage,
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrNodeID, target.ID()),
+					attribute.String(telemetry.AttrArtifactID, artifact.ArtifactID),
+					attribute.String(telemetry.AttrJobID, jobID),
+					attribute.String(telemetry.AttrTemplateID, templateID),
+				))
+			rsp, err := cubelet.CreateImage(rpcCtx, cubelet.GetCubeletAddr(target.HostIP()), &imagev1.CreateImageRequest{
 				RequestID: uuid.New().String(),
 				Spec:      spec,
 			})
+			if err != nil {
+				telemetry.End(rpcSpan, err)
+			} else {
+				telemetry.EndWithCode(rpcSpan, int(rsp.GetRet().GetRetCode()))
+			}
 			lock.Lock()
 			defer lock.Unlock()
 			if err != nil {

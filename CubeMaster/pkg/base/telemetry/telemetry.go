@@ -53,6 +53,37 @@ const (
 )
 
 const (
+	SpanTemplateImageSubmit        = "cubemaster.template.image.submit"
+	SpanTemplateImageDispatch      = "cubemaster.template.image.dispatch"
+	SpanTemplateSubmitAttempt      = "cubemaster.template.image.dispatch.attempt"
+	SpanTemplateDispatchBackoff    = "cubemaster.template.image.dispatch.backoff"
+	SpanTemplateImageCallback      = "cubemaster.template.image.callback"
+	SpanTemplateImageRegister      = "cubemaster.template.image.register"
+	SpanTemplateImageComplete      = "cubemaster.template.image.complete"
+	SpanTemplateDistribute         = "cubemaster.template.image.distribute"
+	SpanTemplateReplicate          = "cubemaster.template.image.replicate"
+	SpanTemplateNodeSlot           = "cubemaster.template.image.node.slot"
+	SpanTemplateNodeImage          = "cubemaster.template.image.node.create_image"
+	SpanTemplateNodeSnapshot       = "cubemaster.template.image.node.appsnapshot"
+	SpanTemplateRegistry           = "cubemaster.template.image.registry"
+	SpanTemplateFinalize           = "cubemaster.template.image.finalize"
+	SpanTemplateImageReconcile     = "cubemaster.template.image.reconcile"
+	SpanTemplateImageCleanupMaster = "cubemaster.template.image.artifact.cleanup"
+
+	SpanTemplateImageBuild            = "cubetemplatecenter.template.image.build"
+	SpanTemplateImagePrepareSource    = "cubetemplatecenter.template.image.prepare_source"
+	SpanTemplateImageBuildLockWait    = "cubetemplatecenter.template.image.build_lock.wait"
+	SpanTemplateImageRootfs           = "cubetemplatecenter.template.image.rootfs"
+	SpanTemplateImageExt4             = "cubetemplatecenter.template.image.ext4"
+	SpanTemplateImageStreamExt4       = "cubetemplatecenter.template.image.stream_ext4"
+	SpanTemplateArtifactPublish       = "cubetemplatecenter.template.image.artifact.publish"
+	SpanTemplateArtifactCallback      = "cubetemplatecenter.template.image.artifact.callback"
+	SpanTemplateArtifactCleanup       = "cubetemplatecenter.template.image.artifact.cleanup"
+	SpanTemplateArtifactReportAttempt = "cubetemplatecenter.template.image.artifact.report.attempt"
+	SpanTemplateArtifactReportBackoff = "cubetemplatecenter.template.image.artifact.report.backoff"
+)
+
+const (
 	AttrRequestID       = "cube.request_id"
 	AttrSandboxID       = "cube.sandbox_id"
 	AttrTemplateID      = "cube.template_id"
@@ -65,6 +96,14 @@ const (
 	AttrLocalitySkipped = "cube.template.locality_skipped"
 	AttrTable           = "db.table"
 	AttrOperation       = "db.operation"
+	AttrJobID           = "cube.job_id"
+	AttrArtifactID      = "cube.artifact_id"
+	AttrReused          = "cube.reused"
+	AttrExportMode      = "cube.template.export_mode"
+	AttrPullDeferred    = "cube.template.pull_deferred"
+	AttrDuplicate       = "cube.dispatch.duplicate"
+	AttrStorageBackend  = "cube.artifact.storage_backend"
+	AttrFallback        = "cube.artifact.fallback"
 )
 
 type Shutdown func(context.Context) error
@@ -178,4 +217,13 @@ func InjectGRPC(ctx context.Context) context.Context {
 
 func ExtractHTTP(ctx context.Context, header http.Header) context.Context {
 	return otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(header))
+}
+
+func InjectHTTP(ctx context.Context, header http.Header) {
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(header))
+}
+
+// DetachTrace copies the trace parent while retaining base cancellation.
+func DetachTrace(base, traceFrom context.Context) context.Context {
+	return trace.ContextWithSpanContext(base, trace.SpanContextFromContext(traceFrom))
 }
