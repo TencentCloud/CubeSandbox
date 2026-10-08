@@ -33,6 +33,8 @@ pub const SPAN_AGENT_CONNECT: &str = "cube-shim.agent_connect";
 pub const SPAN_GUEST_INIT: &str = "cube-shim.guest_init";
 pub const SPAN_CONTAINER_CREATE: &str = "cube-shim.container_create";
 pub const SPAN_CONTAINER_START: &str = "cube-shim.container_start";
+pub const SPAN_SNAPSHOT_CAPTURE: &str = "cube-shim.snapshot.capture";
+pub const SPAN_SNAPSHOT_RESUME: &str = "cube-shim.snapshot.resume";
 
 // Error text can include credentials, so spans record only a generic status.
 const STATUS_ERROR: &str = "error";
@@ -173,37 +175,29 @@ impl Drop for Stage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testutil {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::task::Context as TaskContext;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-    use opentelemetry::propagation::TextMapPropagator;
-    use opentelemetry::trace::noop::NoopTextMapPropagator;
     use opentelemetry_sdk::error::OTelSdkResult;
     use opentelemetry_sdk::trace::{SpanData, SpanExporter};
 
-    const INBOUND: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-    const INBOUND_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
-    const INBOUND_PARENT_ID: &str = "00f067aa0ba902b7";
-    const SANDBOX_ID: &str = "sb-1";
-    const ENDPOINT: &str = "http://127.0.0.1:4317";
+    pub(crate) const INBOUND: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    pub(crate) const INBOUND_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    pub(crate) const INBOUND_PARENT_ID: &str = "00f067aa0ba902b7";
+    pub(crate) const SANDBOX_ID: &str = "sb-1";
 
-    fn traced_call(traceparent: &str) -> HashMap<String, Vec<String>> {
+    pub(crate) fn traced_call(traceparent: &str) -> HashMap<String, Vec<String>> {
         let mut metadata = HashMap::new();
         metadata.insert("traceparent".to_string(), vec![traceparent.to_string()]);
         metadata
     }
 
-    fn task_context() -> TaskContext<'static> {
-        TaskContext::from_waker(futures::task::noop_waker_ref())
-    }
-
     #[derive(Debug, Clone, Default)]
-    struct RecordingExporter(Arc<Mutex<Vec<SpanData>>>);
+    pub(crate) struct RecordingExporter(Arc<Mutex<Vec<SpanData>>>);
 
     impl RecordingExporter {
-        fn finished(&self) -> Vec<SpanData> {
+        pub(crate) fn finished(&self) -> Vec<SpanData> {
             self.0.lock().unwrap().clone()
         }
     }
@@ -216,6 +210,39 @@ mod tests {
             self.0.lock().unwrap().extend(batch);
             Box::pin(std::future::ready(Ok(())))
         }
+    }
+
+    /// The provider and propagator are process-global, so the guard serializes tests that touch them.
+    pub(crate) fn install() -> (RecordingExporter, MutexGuard<'static, ()>) {
+        static GLOBALS: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = GLOBALS
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let exporter = RecordingExporter::default();
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        global::set_tracer_provider(
+            SdkTracerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build(),
+        );
+        (exporter, guard)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::*;
+    use super::*;
+    use std::task::Context as TaskContext;
+
+    use opentelemetry::propagation::TextMapPropagator;
+    use opentelemetry::trace::noop::NoopTextMapPropagator;
+
+    const ENDPOINT: &str = "http://127.0.0.1:4317";
+
+    fn task_context() -> TaskContext<'static> {
+        TaskContext::from_waker(futures::task::noop_waker_ref())
     }
 
     #[test]
@@ -269,13 +296,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn stages_report_their_outcome_under_the_caller_span() {
-        let exporter = RecordingExporter::default();
-        global::set_text_map_propagator(TraceContextPropagator::new());
-        global::set_tracer_provider(
-            SdkTracerProvider::builder()
-                .with_simple_exporter(exporter.clone())
-                .build(),
-        );
+        let (exporter, _guard) = install();
 
         let trace = Trace::extract(&traced_call(INBOUND), SANDBOX_ID);
 

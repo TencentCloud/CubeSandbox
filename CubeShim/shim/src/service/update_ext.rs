@@ -3,6 +3,7 @@
 //
 
 use crate::log::Log;
+use crate::telemetry::{self, Trace};
 use crate::{common::CResult, errf, infof, sandbox::sb::SandBox};
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::SnapshotType;
@@ -130,6 +131,7 @@ struct FrozenSnapshotConfig {
 async fn do_snapshot_capture(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
+    trace: &Trace,
 ) -> CResult<UpdateOutcome> {
     let raw = annos
         .get(ANNO_SNAPSHOT_CAPTURE_CONFIG)
@@ -142,24 +144,30 @@ async fn do_snapshot_capture(
     }
     let destination = strip_file_url(&config.destination_url);
     let snapshot_type = parse_pause_snapshot_type(config.snapshot_type.as_deref());
-    sb.capture_snapshot_frozen(
-        &config.snapshot_id,
-        &destination,
-        config.memory_vol_url,
-        snapshot_type,
-    )
-    .await?;
+    trace
+        .start(telemetry::SPAN_SNAPSHOT_CAPTURE)
+        .run(sb.capture_snapshot_frozen(
+            &config.snapshot_id,
+            &destination,
+            config.memory_vol_url,
+            snapshot_type,
+        ))
+        .await?;
     Ok(UpdateOutcome::default())
 }
 
 async fn do_snapshot_resume(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
+    trace: &Trace,
 ) -> CResult<UpdateOutcome> {
     let snapshot_id = annos
         .get(ANNO_SNAPSHOT_ID)
         .ok_or_else(|| format!("missing annotation: {ANNO_SNAPSHOT_ID}"))?;
-    sb.resume_snapshot_frozen(snapshot_id).await?;
+    trace
+        .start(telemetry::SPAN_SNAPSHOT_RESUME)
+        .run(sb.resume_snapshot_frozen(snapshot_id))
+        .await?;
     Ok(UpdateOutcome::default())
 }
 
@@ -307,6 +315,7 @@ pub async fn update_route(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
     log: &Log,
+    trace: &Trace,
 ) -> CResult<UpdateOutcome> {
     let action = match annos.get(ANNO_UPDATE_EXT_ACTION) {
         Some(a) => a.as_str(),
@@ -316,8 +325,8 @@ pub async fn update_route(
     match action {
         "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log).await,
         "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log).await,
-        "SnapshotCapture" => do_snapshot_capture(sb, annos).await,
-        "SnapshotResume" => do_snapshot_resume(sb, annos).await,
+        "SnapshotCapture" => do_snapshot_capture(sb, annos, trace).await,
+        "SnapshotResume" => do_snapshot_resume(sb, annos, trace).await,
         unknown => Err(format!("unknown update ext action: {}", unknown).into()),
     }
 }
@@ -325,6 +334,65 @@ pub async fn update_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::testutil::{
+        install, traced_call, INBOUND, INBOUND_PARENT_ID, INBOUND_TRACE_ID, SANDBOX_ID,
+    };
+
+    use opentelemetry::trace::Status;
+    use protobuf::MessageDyn;
+    use tokio::sync::mpsc::channel;
+
+    fn capture_annotations(config: &str) -> HashMap<String, String> {
+        let mut annos = HashMap::new();
+        annos.insert(ANNO_SNAPSHOT_CAPTURE_CONFIG.to_string(), config.to_string());
+        annos
+    }
+
+    fn sandbox() -> SandBox {
+        let (tx, _rx) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        SandBox::new("ut".to_string(), Log::default(), false, tx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn renew_only_renews_without_opening_a_capture_span() {
+        let (exporter, _guard) = install();
+        let mut sb = sandbox();
+        let trace = Trace::extract(&traced_call(INBOUND), SANDBOX_ID);
+        let annos = capture_annotations(
+            r#"{"snapshot_id":"snap-1","destination_url":"/data/snap/1","renew_only":true}"#,
+        );
+
+        assert!(
+            do_snapshot_capture(&mut sb, &annos, &trace).await.is_err(),
+            "renewal without a held freeze must fail"
+        );
+        assert!(
+            exporter.finished().is_empty(),
+            "renew_only must not open a capture span"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_failure_reports_error_under_the_caller_span() {
+        let (exporter, _guard) = install();
+        let mut sb = sandbox();
+        let trace = Trace::extract(&traced_call(INBOUND), SANDBOX_ID);
+        let annos =
+            capture_annotations(r#"{"snapshot_id":"snap-1","destination_url":"relative/dir"}"#);
+
+        let err = do_snapshot_capture(&mut sb, &annos, &trace)
+            .await
+            .expect_err("a relative destination must be rejected");
+        assert!(err.to_string().contains("absolute destination"), "{err}");
+
+        let spans = exporter.finished();
+        assert_eq!(spans.len(), 1, "one capture span: {spans:?}");
+        let span = &spans[0];
+        assert_eq!(span.name.as_ref(), telemetry::SPAN_SNAPSHOT_CAPTURE);
+        assert_eq!(span.status, Status::error("error"));
+        assert_eq!(span.span_context.trace_id().to_string(), INBOUND_TRACE_ID);
+        assert_eq!(span.parent_span_id.to_string(), INBOUND_PARENT_ID);
+    }
 
     #[test]
     fn strip_file_url_accepts_plain_and_file_scheme() {
