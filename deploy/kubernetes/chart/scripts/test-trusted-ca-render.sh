@@ -144,6 +144,50 @@ grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/key.err" || {
   exit 1
 }
 
+# 2h. An empty (or whitespace-only) entry must fail: it would render an
+#     empty ca-N.crt, merge-ca would append nothing and that CA would be
+#     silently absent from the merged bundle.
+cat >"$TMP_DIR/empty-entry-values.yaml" <<'EOF'
+trustedCACerts:
+  certs:
+    - ""
+EOF
+if helm template guard-empty-entry "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     -f "$TMP_DIR/empty-entry-values.yaml" >/dev/null 2>"$TMP_DIR/empty-entry.err"; then
+  echo "FAIL: an empty certs entry must fail validation" >&2
+  exit 1
+fi
+grep -qi 'is empty' "$TMP_DIR/empty-entry.err" || {
+  echo "FAIL: validation error does not mention the empty entry:" >&2
+  cat "$TMP_DIR/empty-entry.err" >&2
+  exit 1
+}
+
+# 2i. Mismatched BEGIN/END counts must fail: an unbalanced paste (e.g. a
+#     truncated chain) renders blocks Go silently skips, so the feature
+#     looks enabled but that CA is never trusted.
+cat >"$TMP_DIR/unbalanced-values.yaml" <<'PEMEOF'
+trustedCACerts:
+  certs:
+    - |
+      -----BEGIN CERTIFICATE-----
+      AAAA
+      -----END CERTIFICATE-----
+      -----END CERTIFICATE-----
+PEMEOF
+if helm template guard-unbalanced "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     -f "$TMP_DIR/unbalanced-values.yaml" >/dev/null 2>"$TMP_DIR/unbalanced.err"; then
+  echo "FAIL: mismatched BEGIN/END counts must fail validation" >&2
+  exit 1
+fi
+grep -qi 'mismatched BEGIN/END' "$TMP_DIR/unbalanced.err" || {
+  echo "FAIL: validation error does not mention the marker counts:" >&2
+  cat "$TMP_DIR/unbalanced.err" >&2
+  exit 1
+}
+
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
   --set trustedCACerts.enabled=true \
@@ -210,10 +254,30 @@ sed -e "s|/trusted-ca|$REPLAY/trusted-ca|g" \
 # is the equivalent): without -e a failing awk would not abort the replay.
 run_merge_ca() { sh -e "$TMP_DIR/merge-ca-replay.sh" >/dev/null 2>"$REPLAY/err"; }
 
+# A REAL self-signed certificate: when openssl is available the merge-ca
+# script validates every user block as X.509, so marker-soup fixtures
+# ("guard" bodies) would fail the happy path. Marker-soup fixtures remain
+# in use for the render-only assertions above and the no-openssl replay
+# below, where they prove more than a real cert would.
+REAL_CERT="$(cat <<'REALEOF'
+-----BEGIN CERTIFICATE-----
+MIIBlzCCAT2gAwIBAgIUdth/oWQ0sZk+7Epg3C8VbQQ9B9UwCgYIKoZIzj0EAwIw
+IDEeMBwGA1UEAwwVdHJ1c3RlZC1jYS1ndWFyZC10ZXN0MCAXDTI2MTAwODA2NTQx
+NloYDzIxMjYwOTE0MDY1NDE2WjAgMR4wHAYDVQQDDBV0cnVzdGVkLWNhLWd1YXJk
+LXRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATO8S7IBj3Mx7Vjhuni7hcF
+RlAN819UkutgbvitP5A5BbZv790teGHlQNgHUDsEjCFZ1sE1FAZlcNxE/5c2PoWr
+o1MwUTAdBgNVHQ4EFgQUC5THJvp7KLuSM1CAjJ85UxpDJQwwHwYDVR0jBBgwFoAU
+C5THJvp7KLuSM1CAjJ85UxpDJQwwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD
+AgNIADBFAiB8btp6hv+MX0lvynlT6jCLRMBDq67jEjE/eZxuWxYvUAIhAJ4tLWA9
+rYx/K513++8bo/fIhMKbpB2PUffIbzgC0ubr
+-----END CERTIFICATE-----
+REALEOF
+)"
+
 # 6a. Happy path: a system bundle + one CERTIFICATE entry merge into two
 #     blocks, separated (the f3b50154 newline contract, asserted for real).
 printf -- '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n' >"$REPLAY/sys/debian.crt"
-printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+printf '%s\n' "$REAL_CERT" >"$REPLAY/trusted-ca/ca-0.crt"
 run_merge_ca || {
   echo "FAIL: merge-ca must succeed on well-shaped input:" >&2
   cat "$REPLAY/err" >&2
@@ -228,6 +292,11 @@ if grep -q 'CERTIFICATE------BEGIN' "$REPLAY/merged/ca-bundle.crt"; then
   echo "FAIL: merged bundle glued blocks together (missing newline separator)" >&2
   exit 1
 fi
+grep -q 'merged bundle contains 2 certificates' "$REPLAY/err" || {
+  echo "FAIL: merge-ca must log the merged certificate count (the operator's signal):" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
 
 # 6b. A non-CERTIFICATE PEM block in a .crt entry must fail (the
 #     existingConfigMap path: validate.yaml cannot see this content).
@@ -263,6 +332,7 @@ grep -q 'no non-empty system CA bundle' "$REPLAY/err" || {
 # 6d. An empty FIRST candidate must fall through to a non-empty later one
 #     (the probe picks the first non-empty bundle, not the first that
 #     merely exists).
+printf '%s\n' "$REAL_CERT" >"$REPLAY/trusted-ca/ca-0.crt"
 printf -- '-----BEGIN CERTIFICATE-----\nRHELBASE\n-----END CERTIFICATE-----\n' >"$REPLAY/sys/rhel.pem"
 run_merge_ca || {
   echo "FAIL: merge-ca must fall through an empty first probe candidate:" >&2
@@ -272,6 +342,59 @@ run_merge_ca || {
 grep -q 'RHELBASE' "$REPLAY/merged/ca-bundle.crt" || {
   echo "FAIL: merged bundle must be built from the second (non-empty) probe candidate:" >&2
   cat "$REPLAY/merged/ca-bundle.crt" >&2
+  exit 1
+}
+
+# 6e. A CERTIFICATE block with a corrupted body (markers intact, base64
+#     garbage) must fail when openssl is available -- Go would silently
+#     skip the block and the operator would see the same x509 error as
+#     before enabling the feature. (Without openssl only the textual
+#     checks above run; that degradation is asserted in 6f.)
+if command -v openssl >/dev/null 2>&1; then
+  printf -- '-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+  rm -f "$REPLAY/merged/ca-bundle.crt"
+  if run_merge_ca; then
+    echo "FAIL: merge-ca must reject a CERTIFICATE block that does not parse as X.509" >&2
+    exit 1
+  fi
+  grep -q 'does not parse as X.509' "$REPLAY/err" || {
+    echo "FAIL: rejection message does not mention X.509 parsing:" >&2
+    cat "$REPLAY/err" >&2
+    exit 1
+  }
+fi
+
+# 6f. The no-openssl fallback: with openssl hidden from PATH, the textual
+#     checks must still reject empty and unbalanced entries (block-type
+#     rejection and the happy path are covered above without / with
+#     openssl respectively). Only the ASN.1-level check may degrade.
+BINDIR="$REPLAY/bin"
+mkdir -p "$BINDIR"
+for t in sh awk grep cat cp ls; do
+  ln -sf "$(command -v "$t")" "$BINDIR/$t"
+done
+run_merge_ca_fallback() { PATH="$BINDIR" sh -e "$TMP_DIR/merge-ca-replay.sh" >/dev/null 2>"$REPLAY/err"; }
+
+printf -- '' >"$REPLAY/trusted-ca/ca-0.crt"
+rm -f "$REPLAY/merged/ca-bundle.crt"
+if run_merge_ca_fallback; then
+  echo "FAIL: fallback must reject an empty .crt entry" >&2
+  exit 1
+fi
+grep -q 'contains no PEM block' "$REPLAY/err" || {
+  echo "FAIL: fallback rejection message does not mention the missing PEM block:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n-----END CERTIFICATE-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+if run_merge_ca_fallback; then
+  echo "FAIL: fallback must reject unbalanced BEGIN/END markers" >&2
+  exit 1
+fi
+grep -q 'unbalanced BEGIN/END' "$REPLAY/err" || {
+  echo "FAIL: fallback rejection message does not mention the unbalanced markers:" >&2
+  cat "$REPLAY/err" >&2
   exit 1
 }
 

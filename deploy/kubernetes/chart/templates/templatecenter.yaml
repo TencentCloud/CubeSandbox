@@ -136,12 +136,40 @@ spec:
               # non-zero exit into a failed init container (fail closed).
               for f in /trusted-ca/*.crt; do
                 awk '/^-----BEGIN / && $0 !~ /^-----BEGIN CERTIFICATE-----\r?$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE PEM block: " $0; exit 1 }' "$f" 1>&2
+                # Symmetry + presence: an empty or marker-less entry would
+                # append nothing and that CA would be silently absent from
+                # the merged bundle; an unbalanced paste renders blocks Go
+                # silently skips. Same rule as validate.yaml, here for the
+                # existingConfigMap path.
+                awk '/^-----BEGIN / { b++ } /^-----END / { e++ } END { if (b == 0) { print "trusted-ca entry " FILENAME " contains no PEM block (empty or not PEM)"; exit 1 } if (b != e) { print "trusted-ca entry " FILENAME " has unbalanced BEGIN/END CERTIFICATE markers (" b " BEGIN vs " e " END)"; exit 1 } }' "$f" 1>&2
+                # When openssl is available, check that every block actually
+                # parses as X.509: markers intact but the body truncated or
+                # corrupted means Go silently skips the block and the
+                # operator is back to the same x509 error as before enabling
+                # the feature. openssl x509 only reads the FIRST block of a
+                # file, so split on the markers first -- chain entries
+                # (several certs in one .crt) are validated block by block.
+                # Without openssl the textual checks above still gate shape
+                # and block type; only this ASN.1-level check degrades.
+                if command -v openssl >/dev/null 2>&1; then
+                  T=$(mktemp -d)
+                  awk -v dir="$T" '/^-----BEGIN CERTIFICATE-----\r?$/ { n++; fn = sprintf("%s/block-%04d.pem", dir, n) } fn { print > fn } /^-----END CERTIFICATE-----\r?$/ { fn = "" }' "$f"
+                  for blk in "$T"/block-*.pem; do
+                    openssl x509 -in "$blk" -noout >/dev/null 2>&1 \
+                      || { echo "trusted-ca entry $f contains a CERTIFICATE block that does not parse as X.509 (truncated or corrupted base64/DER) -- Go would silently skip it and the registry pull would keep failing with x509" >&2; rm -rf "$T"; exit 1; }
+                  done
+                  rm -rf "$T"
+                fi
               done
               # Append user certs one at a time with a newline separator:
               # ConfigMap entries are rendered with |- (no trailing newline),
               # so a bare `cat *.crt` would glue PEM blocks together and
               # silently drop every cert after the first.
               for f in /trusted-ca/*.crt; do cat "$f"; printf '\n'; done >> /merged/ca-bundle.crt
+              # Operator signal: the init-container log line that says the
+              # merge actually took effect (grep also tolerates a trailing
+              # \r on CRLF PEMs).
+              echo "trusted-ca: merged bundle contains $(grep -c '^-----BEGIN CERTIFICATE-----' /merged/ca-bundle.crt) certificates (system bundle + user entries)" 1>&2
           volumeMounts:
             - name: trusted-ca
               mountPath: /trusted-ca

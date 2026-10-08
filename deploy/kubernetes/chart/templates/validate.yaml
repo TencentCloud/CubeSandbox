@@ -472,6 +472,9 @@ mutual-exclusion check is deliberately ungated -- the conflict is a
 values mistake regardless of whether a consumer is rendered. */ -}}
 {{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
 {{- range $i, $pem := .Values.trustedCACerts.certs }}
+{{- if not (trim $pem) }}
+{{- fail (printf "trustedCACerts.certs[%d] is empty -- it would render an empty ca-%d.crt, merge-ca would append nothing and that CA would be silently absent from the merged bundle" $i $i) }}
+{{- end }}
 {{- /* Block-type whitelist: EVERY PEM block must be a CERTIFICATE. A
 combined "cert + key" paste is the most common input shape for a private
 CA and would pass the marker checks below -- writing the private key
@@ -486,6 +489,12 @@ anyway. */}}
 {{- end }}
 {{- if not (and (regexMatch "(?m)^-----BEGIN CERTIFICATE-----" $pem) (regexMatch "(?m)^-----END CERTIFICATE-----" $pem)) }}
 {{- fail (printf "trustedCACerts.certs[%d] does not look like a PEM certificate (must contain line-anchored BEGIN and END CERTIFICATE markers) -- Go would silently ignore an unparseable block and the registry pull would still fail with x509" $i) }}
+{{- end }}
+{{- /* BEGIN/END counts must be equal: an unbalanced paste (e.g. a
+truncated chain) renders blocks Go silently skips -- the feature looks
+enabled but that CA is never trusted. */}}
+{{- if ne (len (regexFindAll "(?m)^-----BEGIN CERTIFICATE-----" $pem -1)) (len (regexFindAll "(?m)^-----END CERTIFICATE-----" $pem -1)) }}
+{{- fail (printf "trustedCACerts.certs[%d] has mismatched BEGIN/END CERTIFICATE marker counts (%d BEGIN vs %d END) -- Go silently skips unbalanced blocks and the registry pull would keep failing with x509" $i (len (regexFindAll "(?m)^-----BEGIN CERTIFICATE-----" $pem -1)) (len (regexFindAll "(?m)^-----END CERTIFICATE-----" $pem -1))) }}
 {{- end }}
 {{- end }}
 {{- end }}
