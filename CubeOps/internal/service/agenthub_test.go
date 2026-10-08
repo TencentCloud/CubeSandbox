@@ -754,6 +754,67 @@ func TestCreateInstance_FastPathDefaultedNotFoundIsAConflict(t *testing.T) {
 	assertDefaultedConflict(t, err, published, rootfsSnap)
 }
 
+// TestCreateInstance_PublishedTemplateRecordsRegisteredID pins that the
+// instance records the registered template id whether the caller named it or
+// it was picked by default. The fast-path swaps the CubeMaster source to the
+// template's rootfs snapshot; before this, only an explicit templateId was
+// restored afterwards, so a defaulted create stored the snapshot id instead.
+func TestCreateInstance_PublishedTemplateRecordsRegisteredID(t *testing.T) {
+	const (
+		published  = "tpl-published"
+		sourceSnap = "snap-source"
+		rootfsSnap = "snap-rootfs"
+	)
+	for _, tt := range []struct {
+		name       string
+		templateID string
+	}{
+		{"defaulted", ""},
+		{"explicit", published},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := &fakeServiceCM{}
+			st := llmKeyStore()
+			st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+				return []store.AgentTemplate{{TemplateID: published}}, nil
+			}
+			st.getAgentTemplate = func(_ context.Context, id string) (*store.AgentTemplate, error) {
+				if id != published {
+					return nil, nil
+				}
+				return &store.AgentTemplate{TemplateID: published, SourceAgentID: "agent-source", SourceSnapshotID: sourceSnap}, nil
+			}
+			st.getAgentSnapshot = func(_ context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error) {
+				if agentID != "agent-source" || snapshotID != sourceSnap {
+					return nil, nil
+				}
+				id := rootfsSnap
+				return &store.AgentSnapshot{SnapshotID: sourceSnap, RootfsSnapshotID: &id}, nil
+			}
+			var recorded string
+			st.upsertInstance = func(_ context.Context, inst *store.AgentInstance) error {
+				recorded = inst.TemplateID
+				return nil
+			}
+			svc := newTestService(st, cm)
+
+			if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+				Name:       "my-agent",
+				Engine:     "openclaw",
+				TemplateID: tt.templateID,
+			}); err != nil {
+				t.Fatalf("CreateInstance returned error: %v", err)
+			}
+			if got := rootfsSourceID(t, cm); got != rootfsSnap {
+				t.Fatalf("rootfs_source_id = %q, want %q (the fast-path did not run)", got, rootfsSnap)
+			}
+			if recorded != published {
+				t.Errorf("instance TemplateID = %q, want the registered %q", recorded, published)
+			}
+		})
+	}
+}
+
 // TestCreateInstance_NotFoundInWordsOnlyIsPassedThrough pins that the rewrite
 // keys on how CubeMaster classifies a failure rather than on how it words it.
 // Asking for a pause snapshot as a create source reads "snapshot not found",

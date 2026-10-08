@@ -553,7 +553,15 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		}
 	}
 	templateID := rootfsSourceID
-	explicitTemplateID := req.TemplateID
+	// The template the instance records: the one the caller named, or the one
+	// picked for them. The published-template fast-path below swaps templateID
+	// to that template's rootfs snapshot for the CubeMaster request, which must
+	// not leak into the instance record — a defaulted create and the same
+	// template named explicitly have to store the same id.
+	recordedTemplateID := req.TemplateID
+	if templateDefaulted {
+		recordedTemplateID = rootfsSourceID
+	}
 
 	// --- LLM config + domain + network ---
 	llmCfg, err := ResolveLLMConfig(ctx, s.Store)
@@ -784,8 +792,8 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	botsAvailable := AvailableBots(bots)
 
 	finalTemplateID := templateID
-	if explicitTemplateID != "" {
-		finalTemplateID = explicitTemplateID
+	if recordedTemplateID != "" {
+		finalTemplateID = recordedTemplateID
 	}
 
 	envPort := s.ResolveEnvPort(ctx, templateID)

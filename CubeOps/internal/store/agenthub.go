@@ -480,6 +480,11 @@ func (s *Store) ListAgentTemplates(ctx context.Context, limit, offset int) ([]Ag
 		tmpl.CreatedAt = nullStringPtr(created)
 		templates = append(templates, tmpl)
 	}
+	// An aborted iteration must not read as an empty registry: the default
+	// template selection treats an empty listing as "nothing is registered".
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
 	return templates, nil
 }
 
