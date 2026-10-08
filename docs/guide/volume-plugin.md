@@ -385,6 +385,7 @@ Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**; for Go see [Go SDK Us
 | `cubesandbox` Go SDK (`sdk/go`) | ✅ Yes | `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume`; mounts use the explicit `CreateOptions.VolumeMounts` structs (not the e2b dict) |
 | Omit `driver` on create | ✅ Yes | CubeMaster uses the **first** `volume_plugins` entry |
 | Per-sandbox read-only attachment | ❌ No | The official e2b SDK itself has no read-only Volume mount option; Cube SDK adds `VolumeMount(volume, read_only=True)` |
+| Re-send `volumeMounts` when creating from a snapshot | ✅ Yes | Accepted when identical to the snapshot's mounts; omitting them also works. Changed mounts are rejected (see [Snapshot, rollback, clone, and cross-node restore](#snapshot-rollback-clone-and-cross-node-restore)) |
 
 For a full COS plugin walkthrough, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
 
@@ -551,6 +552,8 @@ One Volume may be mounted by multiple sandboxes simultaneously; data written fro
 
 Snapshots store the stable Volume ID, container mount path, and read-only flag. They do not copy Volume data or persist runtime `private_data`. FromSnap asks Master to resolve the current Volume record and sends that driver metadata to the target Cubelet for `Attach`. Pause/Resume validates the recorded Volume IDs and reattaches from the pause package, while in-place rollback keeps the sandbox's existing external attachment.
 
+When creating a sandbox from a snapshot, `volumeMounts` may be omitted: the snapshot's recorded mounts are reattached automatically. Re-sending them, as official e2b clients do on every create, is also accepted as long as they match the snapshot exactly (same volumes, paths, and read-only flags). Any difference is rejected with HTTP 400 (`volumeMounts must match the snapshot's volume mounts`), because the snapshot's VM memory already has its mounts in place and cannot be remounted elsewhere.
+
 This produces **external-reference** behavior:
 
 - FromSnap and rollback restore VM/rootfs state, but the mounted Volume exposes its current data.
@@ -569,6 +572,7 @@ The Volume backend and VM snapshot backend are independent. The VM snapshot pack
 | Volume still referenced | `ApiError` (409, CubeMaster 130409) | Delete while the volume is still mounted by a sandbox |
 | Invalid volume name | `ValueError` | Client-side validation; name fails `^[a-zA-Z0-9_-]+$` |
 | Mount non-existent volume | `ApiError` | Sandbox `volumeMounts[].name` was never created |
+| Changed mounts on snapshot restore | `ApiError` (400, CubeMaster 130400) | `volumeMounts` sent when creating from a snapshot differ from the snapshot's mounts |
 
 > **Note:** When a volume is still mounted by any sandbox, `Volume.destroy()` returns **409**. Destroy all sandboxes using the volume first, then delete. Delete does **not** automatically unmount running sandboxes.
 
