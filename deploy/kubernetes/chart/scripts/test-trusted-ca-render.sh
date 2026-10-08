@@ -57,6 +57,21 @@ if grep -qE 'merge-ca|SSL_CERT_FILE|trusted-ca|checksum/trusted-ca' "$TMP_DIR/no
   exit 1
 fi
 
+# 1d. The env-override check (2j) is gated the same way: enabled=false with
+#     an operator-owned SSL_CERT_FILE entry must render untouched.
+cat >"$TMP_DIR/env-override-values.yaml" <<'EOF'
+global:
+  env:
+    - name: SSL_CERT_FILE
+      value: /etc/ssl/certs/custom-bundle.crt
+EOF
+helm template guard-off-env "$CHART_DIR" $COMMON_SETS \
+  --set trustedCACerts.enabled=false \
+  -f "$TMP_DIR/env-override-values.yaml" >"$TMP_DIR/off-env.yaml" \
+  || { echo "FAIL: enabled=false must not reject an operator SSL_CERT_FILE entry" >&2; exit 1; }
+grep -q 'custom-bundle.crt' "$TMP_DIR/off-env.yaml" \
+  || { echo "FAIL: operator SSL_CERT_FILE entry lost in the disabled render" >&2; exit 1; }
+
 # 2. Enabled with inline certs: ConfigMap + init container + env + checksum
 #    annotation rendered.
 helm template guard-on "$CHART_DIR" $COMMON_SETS $ENABLED_SETS >"$TMP_DIR/on.yaml"
@@ -187,6 +202,25 @@ grep -qi 'mismatched BEGIN/END' "$TMP_DIR/unbalanced.err" || {
   cat "$TMP_DIR/unbalanced.err" >&2
   exit 1
 }
+
+# 2j. An SSL_CERT_FILE entry in global.env / controlPlane.templateCenter.env
+#     must fail the render: those lists render AFTER the feature's env
+#     block and Kubernetes keeps the LAST duplicate env entry, so the
+#     operator's value would silently override the merged bundle while
+#     merge-ca still runs and the Pod still starts.
+for scope in "global.env[0]" "controlPlane.templateCenter.env[0]"; do
+  if helm template guard-env-override "$CHART_DIR" $COMMON_SETS $ENABLED_SETS \
+       --set "${scope}.name=SSL_CERT_FILE" \
+       --set "${scope}.value=/etc/ssl/certs/custom-bundle.crt" >/dev/null 2>"$TMP_DIR/env-override.err"; then
+    echo "FAIL: an SSL_CERT_FILE entry in $scope must fail validation" >&2
+    exit 1
+  fi
+  grep -qi 'silently override the merged bundle' "$TMP_DIR/env-override.err" || {
+    echo "FAIL: validation error does not mention the override for $scope:" >&2
+    cat "$TMP_DIR/env-override.err" >&2
+    exit 1
+  }
+done
 
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
