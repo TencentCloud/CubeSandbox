@@ -475,7 +475,9 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
   gated on trustedCACerts.enabled only -- both sources set is a values
   mistake regardless of whether any consumer is rendered. */ -}}
 {{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
+{{- $certsBytes := 0 -}}
 {{- range $i, $pem := .Values.trustedCACerts.certs }}
+{{- $certsBytes = add $certsBytes (len $pem) }}
 {{- if not (trim $pem) }}
 {{- fail (printf "trustedCACerts.certs[%d] is empty -- it would render an empty ca-%d.crt, merge-ca would append nothing and that CA would be silently absent from the merged bundle" $i $i) }}
 {{- end }}
@@ -500,6 +502,15 @@ enabled but that CA is never trusted. */}}
 {{- if ne (len (regexFindAll "(?m)^-----BEGIN CERTIFICATE-----" $pem -1)) (len (regexFindAll "(?m)^-----END CERTIFICATE-----" $pem -1)) }}
 {{- fail (printf "trustedCACerts.certs[%d] has mismatched BEGIN/END CERTIFICATE marker counts (%d BEGIN vs %d END) -- Go silently skips unbalanced blocks and the registry pull would keep failing with x509" $i (len (regexFindAll "(?m)^-----BEGIN CERTIFICATE-----" $pem -1)) (len (regexFindAll "(?m)^-----END CERTIFICATE-----" $pem -1))) }}
 {{- end }}
+{{- end }}
+{{- /* ConfigMap size pre-check: the Kubernetes API limit is 1 MiB for the
+WHOLE ConfigMap object (data + keys + labels + annotations). Pasting a
+full OS trust bundle (~200 KiB) or several large chains would only fail
+at apply time with a generic "too large" error; fail here instead. The
+same limit applies to an operator-provided existingConfigMap, so the
+remedy is not that knob -- it is listing only the CAs actually needed. */}}
+{{- if gt $certsBytes 921600 }}
+{{- fail (printf "trustedCACerts.certs total %d bytes: the Kubernetes ConfigMap API limit is 1 MiB for the whole object and the apply would fail late with a less obvious error -- list only the CAs you actually need (a full OS trust bundle is ~200 KiB and unnecessary here; this check fires at 900 KiB to leave headroom for keys, labels and annotations)" $certsBytes) }}
 {{- end }}
 {{- /* SSL_CERT_FILE is the feature's output: Kubernetes keeps the LAST
 duplicate env entry, and global.env / controlPlane.templateCenter.env

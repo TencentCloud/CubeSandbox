@@ -180,6 +180,10 @@ spec:
               readOnly: true
             - name: merged-ca
               mountPath: /merged
+          {{- with .Values.trustedCACerts.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- end }}
       containers:
         - name: cube-templatecenter

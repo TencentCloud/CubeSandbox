@@ -222,6 +222,38 @@ for scope in "global.env[0]" "controlPlane.templateCenter.env[0]"; do
   }
 done
 
+# 2k. The merge-ca init container carries resources (N2: same convention as
+#     cubeNodeBootstrap.waitResources) and honors an override.
+awk '/^        - name: merge-ca$/,/^      containers:$/' "$TMP_DIR/on.yaml" >"$TMP_DIR/merge-ca-block.yaml"
+grep -q 'memory: 32Mi' "$TMP_DIR/merge-ca-block.yaml" || {
+  echo "FAIL: merge-ca init container must render its default resources" >&2
+  exit 1
+}
+helm template guard-res-override "$CHART_DIR" $COMMON_SETS $ENABLED_SETS \
+  --set trustedCACerts.resources.limits.memory=99Mi >"$TMP_DIR/res-override.yaml"
+awk '/^        - name: merge-ca$/,/^      containers:$/' "$TMP_DIR/res-override.yaml" \
+  | grep -q 'memory: 99Mi' || {
+  echo "FAIL: trustedCACerts.resources override must reach the merge-ca container" >&2
+  exit 1
+}
+
+# 2l. A combined certs size over 900 KiB must fail at render time (the
+#     Kubernetes ConfigMap API limit is 1 MiB for the whole object; failing
+#     at apply time surfaces only a generic "too large").
+{ printf -- '-----BEGIN CERTIFICATE-----\n'; head -c 950000 /dev/zero | tr '\0' 'A'; printf -- '\n-----END CERTIFICATE-----\n'; } >"$TMP_DIR/big.pem"
+{ echo 'trustedCACerts:'; echo '  certs:'; echo '    - |'; sed 's/^/      /' "$TMP_DIR/big.pem"; } >"$TMP_DIR/big-values.yaml"
+if helm template guard-oversize "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     -f "$TMP_DIR/big-values.yaml" >/dev/null 2>"$TMP_DIR/oversize.err"; then
+  echo "FAIL: an over-900KiB certs payload must fail validation" >&2
+  exit 1
+fi
+grep -qi 'ConfigMap API limit' "$TMP_DIR/oversize.err" || {
+  echo "FAIL: validation error does not mention the ConfigMap size limit:" >&2
+  cat "$TMP_DIR/oversize.err" >&2
+  exit 1
+}
+
 # 3. existingConfigMap: reference it, and do not render a chart-managed one.
 helm template guard-existing "$CHART_DIR" $COMMON_SETS \
   --set trustedCACerts.enabled=true \

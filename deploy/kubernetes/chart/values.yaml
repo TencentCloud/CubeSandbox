@@ -147,6 +147,14 @@ trustedCACerts:
   existingConfigMap: ""
   # Each entry is one PEM document (-----BEGIN CERTIFICATE----- ...).
   certs: []
+  # Resources for the merge-ca init container (runs for well under a
+  # second; sized like cubeNodeBootstrap.waitResources).
+  resources:
+    requests:
+      cpu: "20m"
+      memory: "32Mi"
+    limits:
+      memory: "64Mi"
 
 # Optional StorageClass created by the chart. Off by default: on a plain
 # Kubernetes / self-hosted cluster the PVCs below should use the cluster's
