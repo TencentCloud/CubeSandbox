@@ -243,4 +243,36 @@ grep -q 'non-CERTIFICATE' "$REPLAY/err" || {
   exit 1
 }
 
+# 6c. An empty system bundle must fail closed: copied as the base, the
+#     container would run with only the private CA trusted and every
+#     publicly-trusted target would start failing with nothing to attribute
+#     it to. (-s probe, not -f.)
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+: >"$REPLAY/sys/debian.crt"
+rm -f "$REPLAY/sys/rhel.pem" "$REPLAY/sys/rhel2.crt" "$REPLAY/merged/ca-bundle.crt"
+if run_merge_ca; then
+  echo "FAIL: merge-ca must reject an empty system bundle" >&2
+  exit 1
+fi
+grep -q 'no non-empty system CA bundle' "$REPLAY/err" || {
+  echo "FAIL: rejection message does not mention the empty bundle:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+
+# 6d. An empty FIRST candidate must fall through to a non-empty later one
+#     (the probe picks the first non-empty bundle, not the first that
+#     merely exists).
+printf -- '-----BEGIN CERTIFICATE-----\nRHELBASE\n-----END CERTIFICATE-----\n' >"$REPLAY/sys/rhel.pem"
+run_merge_ca || {
+  echo "FAIL: merge-ca must fall through an empty first probe candidate:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+grep -q 'RHELBASE' "$REPLAY/merged/ca-bundle.crt" || {
+  echo "FAIL: merged bundle must be built from the second (non-empty) probe candidate:" >&2
+  cat "$REPLAY/merged/ca-bundle.crt" >&2
+  exit 1
+}
+
 echo "trusted-ca guard OK"

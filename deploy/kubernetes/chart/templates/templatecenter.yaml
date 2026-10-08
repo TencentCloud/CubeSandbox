@@ -102,17 +102,23 @@ spec:
             - |-
               # Probe known system bundle layouts (Debian/Ubuntu first, then
               # RHEL-family) -- operators may rebuild this image on another
-              # base distro. Fail loudly when none exists.
+              # base distro. Fail loudly when none exists. -s, not -f: a
+              # zero-length or truncated bundle (e.g. a failed
+              # update-ca-certificates in a derived image) would be copied
+              # as the base and the container would run with ONLY the
+              # private CA trusted -- every publicly-trusted target starts
+              # failing, silently. Skipping an empty candidate falls
+              # through to the next probe path; all-empty fails here.
               # NOTE: run under `sh -ec` — probe with an if-form so a missing
               # candidate does not trip errexit before the next path is tried.
               BUNDLE=""
               for b in /etc/ssl/certs/ca-certificates.crt \
                        /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
                        /etc/pki/tls/certs/ca-bundle.crt; do
-                if [ -f "$b" ]; then BUNDLE="$b"; break; fi
+                if [ -s "$b" ]; then BUNDLE="$b"; break; fi
               done
               [ -n "$BUNDLE" ] \
-                || { echo "no system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
+                || { echo "no non-empty system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
               cp "$BUNDLE" /merged/ca-bundle.crt
               # Seam: a probed bundle without a trailing newline would glue the
               # first user cert onto the last END line; normalize before append.
