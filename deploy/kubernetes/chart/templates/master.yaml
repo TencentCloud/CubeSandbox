@@ -19,6 +19,9 @@ spec:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master
     spec:
+      {{- with include "cube.masterServiceAccountName" . }}
+      serviceAccountName: {{ . }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

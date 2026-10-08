@@ -172,9 +172,27 @@ tolerations:
 
 {{- define "cube.nodeServiceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- printf "%s-node" (include "cube.fullname" .) -}}
+{{- default (printf "%s-node" (include "cube.fullname" .)) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.proxyServiceAccountName" -}}
+{{- $sa := default dict .Values.cubeProxy.serviceAccount -}}
+{{- if dig "create" false $sa -}}
+{{- default (printf "%s-proxy" (include "cube.fullname" .)) ($sa.name) -}}
+{{- else -}}
+{{- $sa.name | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.masterServiceAccountName" -}}
+{{- $sa := default dict ((.Values.controlPlane).master).serviceAccount -}}
+{{- if dig "create" false $sa -}}
+{{- default (printf "%s-master" (include "cube.fullname" .)) ($sa.name) -}}
+{{- else -}}
+{{- $sa.name | default "" -}}
 {{- end -}}
 {{- end -}}
 
