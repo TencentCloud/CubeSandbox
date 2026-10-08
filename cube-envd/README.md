@@ -274,8 +274,11 @@ root toolchain and locked dependencies, and installs the executable as
 command user is still root.
 
 The image runs envd and the optional application CMD under tini and the shared
-entrypoint supervisor. Do not start a second envd in CMD. If envd exits, the
-supervisor terminates the application and stops the container. It does not
+entrypoint. Do not start a second envd in CMD. With a CMD, envd exiting does not
+stop the application; its exit code determines the container's exit code.
+TERM/INT/HUP are forwarded only to the application, which the entrypoint keeps
+waiting for without a forced-kill timeout. Without a CMD, envd's exit code is
+returned unchanged, including zero. The entrypoint does not
 silently restart the daemon or switch to Go. To use Go again, select a Go image
 when creating a new template and create sandboxes from that template; this does
 not migrate the state of existing Rust sandboxes.

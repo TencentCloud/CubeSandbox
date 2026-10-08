@@ -55,10 +55,10 @@ class ImageTests(unittest.TestCase):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             state = json.loads(docker('inspect', cid))[0]['State']
-            if predicate(state):
-                return state
             if not state['Running']:
                 self.fail(f'{description}: container exited: {docker("logs", cid)}')
+            if predicate(state):
+                return state
             time.sleep(.2)
         self.fail(f'{description}: timed out: {docker("logs", cid)}')
 
@@ -74,12 +74,18 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(len(pids), 1, pids)
         return pids[0].split('/')[-1]
 
-    def stopped(self, cid, expected, cause):
+    def stopped(self, cid, expected):
         self.assertEqual(int(docker('wait', cid)), expected, docker('logs', cid))
         state = json.loads(docker('inspect', cid))[0]['State']
         self.assertFalse(state['Running'])
         self.assertEqual(state['Pid'], 0)
-        self.assertIn(f'terminal cause={cause}', docker('logs', cid))
+
+    def kill_daemon(self, cid, pid):
+        # Without CMD, daemon death tears down the container and can kill this
+        # docker-exec process too. Independently check the container status.
+        result = subprocess.run(['docker', 'exec', cid, 'kill', '-KILL', pid],
+                                capture_output=True, timeout=90)
+        self.assertIn(result.returncode, (0, 137), result.stderr.decode())
 
     def test_installation_and_identity(self):
         self.assertEqual(self.metadata['Architecture'], self.arch)
@@ -127,8 +133,8 @@ class ImageTests(unittest.TestCase):
         size, count = struct.unpack_from('<HH', data, 54)
         program_types = [struct.unpack_from('<I', data, offset + size * i)[0] for i in range(count)]
         self.assertNotIn(3, program_types, 'static executable must not need a PT_INTERP loader')
-        docker('stop', '-t', '15', cid)
-        self.stopped(cid, 143, 'ExternalSignal')
+        self.kill_daemon(cid, pid)
+        self.stopped(cid, 137)
 
     def test_arguments_environment_log_and_user_exit(self):
         extra = '--log-format json' if self.provider == 'cube' else '-isnotfc'
@@ -148,44 +154,71 @@ class ImageTests(unittest.TestCase):
         if self.provider == 'cube':
             self.assertIn('starting cube-envd', docker('exec', cid, 'cat', '/var/log/custom/envd.log'))
         docker('exec', cid, 'touch', '/tmp/exit-user')
-        self.stopped(cid, 23, 'UserExit')
+        self.stopped(cid, 23)
 
-    def test_failed_daemon_stops_user_and_descendants(self):
-        cid = self.container('sh', '-c', 'sleep 300 & wait', env=('ENVD_LOG_FILE=-',))
+    def test_failed_daemon_keeps_user_running(self):
+        cid = self.container('sh', '-c',
+                             'echo $$ > /tmp/user-pid; '
+                             'while [ ! -e /tmp/exit-user ]; do sleep .1; done; exit 23',
+                             env=('ENVD_LOG_FILE=-',))
         self.ready(cid)
         pid = self.daemon_pid(cid)
-        # Record actual host PIDs before container teardown, including descendants.
-        processes = docker('top', cid, '-eo', 'pid').splitlines()[1:]
-        result = subprocess.run(['docker', 'exec', cid, 'kill', '-KILL', pid], capture_output=True)
-        self.assertIn(result.returncode, (0, 137))
-        self.stopped(cid, 137, 'EnvdFailure')
-        for process in processes:
-            self.assertFalse(Path(f'/proc/{process.strip()}').exists(), process)
+        self.kill_daemon(cid, pid)
+        self.wait_for(cid, lambda state: state['Health']['Status'] == 'unhealthy',
+                      'failed daemon must be unhealthy without stopping the application')
+        docker('exec', cid, 'sh', '-c', 'kill -0 "$(cat /tmp/user-pid)"')
+        docker('exec', cid, 'touch', '/tmp/exit-user')
+        self.stopped(cid, 23)
+
+    def test_external_signals_keep_waiting_for_application(self):
+        cid = self.container('bash', '-c',
+                             'trap "echo TERM >> /tmp/signals" TERM; '
+                             'trap "echo INT >> /tmp/signals" INT; '
+                             'trap "echo HUP >> /tmp/signals" HUP; '
+                             'while [ ! -e /tmp/exit-user ]; do sleep .1; done; exit 23')
+        self.ready(cid)
+        pid = self.daemon_pid(cid)
+        for sig in ('TERM', 'INT', 'HUP'):
+            docker('kill', '--signal=' + sig, cid)
+            deadline = time.monotonic() + 5
+            while sig not in docker('exec', cid, 'sh', '-c', 'cat /tmp/signals 2>/dev/null || true').splitlines():
+                if time.monotonic() > deadline:
+                    self.fail(f'{sig} did not reach application')
+                time.sleep(.05)
+            self.assertEqual(self.daemon_pid(cid), pid)
+        docker('exec', cid, 'touch', '/tmp/exit-user')
+        self.stopped(cid, 23)
 
     def test_alive_but_unhealthy_daemon_is_visible(self):
         cid = self.container(env=('ENVD_LOG_FILE=-',))
         self.ready(cid)
-        docker('exec', cid, 'kill', '-STOP', self.daemon_pid(cid))
+        pid = self.daemon_pid(cid)
+        docker('exec', cid, 'kill', '-STOP', pid)
         self.wait_for(cid, lambda state: state['Health']['Status'] == 'unhealthy',
                       'stopped daemon must be reported unhealthy')
-        # TERM cannot be handled while stopped; the supervisor must force cleanup.
-        docker('stop', '-t', '15', cid)
-        self.stopped(cid, 143, 'ExternalSignal')
+        # Runtime/test cleanup owns forced termination, not the entrypoint.
+        self.kill_daemon(cid, pid)
+        self.stopped(cid, 137)
 
-    def test_startup_failure_is_not_hidden_by_user_command(self):
-        cid = self.container('sleep', '300',
+    def test_daemon_startup_failure_does_not_stop_user_command(self):
+        cid = self.container('sh', '-c',
+                             'while [ ! -e /tmp/exit-user ]; do sleep .1; done; exit 23',
                              env=('ENVD_EXTRA_ARGS=--port=70000', 'ENVD_LOG_FILE=-'))
-        status = int(docker('wait', cid))
-        self.assertNotEqual(status, 0)
-        self.assertIn('terminal cause=EnvdFailure', docker('logs', cid))
+        self.wait_for(cid, lambda state: state['Health']['Status'] == 'unhealthy',
+                      'daemon startup failure must not stop the application')
+        self.assertTrue(docker('logs', cid))
+        docker('exec', cid, 'touch', '/tmp/exit-user')
+        self.stopped(cid, 23)
 
     def test_readonly_cgroup_falls_back_and_preserves_supervision(self):
-        cid = self.container('sleep', '300', env=('ENVD_LOG_FILE=-',), prepare=False)
+        cid = self.container('sh', '-c',
+                             'trap "exit 23" TERM; while :; do sleep .1; done',
+                             env=('ENVD_LOG_FILE=-',), prepare=False)
         self.ready(cid)
         self.daemon_pid(cid)
         self.assertIn('falling back to no-op cgroup manager', docker('logs', cid))
         docker('stop', '-t', '15', cid)
-        self.stopped(cid, 143, 'ExternalSignal')
+        self.stopped(cid, 23)
 
     def test_duplicate_command_and_missing_binary_fail(self):
         for command, env, message in ((('/usr/bin/envd',), (), 'already starts envd'),
