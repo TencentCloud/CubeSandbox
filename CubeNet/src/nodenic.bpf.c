@@ -21,8 +21,11 @@
 /* create_port_mapping_session installs an egress_sessions entry for a
  * port_mapping connection. Called on the inbound path (SYN for a new
  * connection, or a non-SYN packet whose session was reaped and is being
- * rebuilt). */
-static __always_inline void create_port_mapping_session(__be32 peer_ip, __be16 peer_port,
+ * rebuilt). vm_ip and gen are the sandbox identity read from mvm_meta by the
+ * caller; both belong in this entry so the key and the value name the same
+ * sandbox. */
+static __always_inline void create_port_mapping_session(__be32 vm_ip, __u32 gen,
+							__be32 peer_ip, __be16 peer_port,
 							struct mvm_port *mvm_port,
 							__be32 node_ip, __be16 host_port,
 							__u32 node_ifindex, __u64 now_ns,
@@ -31,23 +34,18 @@ static __always_inline void create_port_mapping_session(__be32 peer_ip, __be16 p
 	struct nat_session sess = {};
 	struct session_key pkey = {};
 
-	port_mapping_key(&pkey, peer_ip, peer_port, mvm_port->listen_port);
+	port_mapping_key(&pkey, vm_ip, peer_ip, peer_port, mvm_port->listen_port);
 
 	sess.access_time = now_ns;
 	sess.node_ifindex = node_ifindex;
 	sess.node_ip = node_ip;
 	sess.node_port = host_port;
 	sess.vm_ifindex = mvm_port->ifindex;
-	sess.vm_ip = mvm_inner_ip;
+	sess.vm_ip = vm_ip;
 	sess.vm_port = mvm_port->listen_port;
 	sess.state = initial_state;
 	sess.packet_class = PORT_MAPPING_PACKET;
-	{
-		struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
-
-		if (meta)
-			sess.gen = meta->version;
-	}
+	sess.gen = gen;
 	bpf_map_update_elem(&egress_sessions, &pkey, &sess, BPF_ANY);
 }
 
@@ -55,18 +53,30 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 			 struct mvm_port *mvm_port)
 {
 	__u32 old_daddr, new_daddr, tcp_csum_off;
+	struct mvm_meta *meta;
 	struct nat_session *sess;
 	struct session_key pkey = {};
+	__be32 vm_ip;
+	__u32 gen;
 	__u16 old_dport, new_dport;
 	__u16 ip_hlen;
 	__u64 now;
 	__u64 flags;
 	long err;
 
+	/* The inbound packet is addressed to the node, so the sandbox identity
+	 * has to come from metadata. Do not fall back to the shared mvm_inner_ip:
+	 * that key aliases every sandbox. */
+	meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
+	if (!meta)
+		return TC_ACT_SHOT;
+	vm_ip = meta->ip;
+	gen = meta->version;
+
 	/* Track the port_mapping connection's generation so a rollback can reset
 	 * it while an aged (reaped) one is rebuilt. */
 	now = bpf_ktime_get_ns();
-	port_mapping_key(&pkey, l3->saddr, l4->source, mvm_port->listen_port);
+	port_mapping_key(&pkey, vm_ip, l3->saddr, l4->source, mvm_port->listen_port);
 	sess = bpf_map_lookup_elem(&egress_sessions, &pkey);
 	if (sess && sess->gen != current_gen(sess->vm_ifindex)) {
 		/* Stale: the sandbox was rolled back. Reset the peer and drop the
@@ -78,11 +88,11 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	if (!sess) {
 		/* New connection (SYN) or a rebuilt aged one (non-SYN). */
 		if (l4->syn && !l4->ack)
-			create_port_mapping_session(l3->saddr, l4->source, mvm_port,
+			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
 						    now, TCP_CONNTRACK_SYN_RECV);
 		else
-			create_port_mapping_session(l3->saddr, l4->source, mvm_port,
+			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
 						    now, TCP_CONNTRACK_ESTABLISHED);
 	} else {
