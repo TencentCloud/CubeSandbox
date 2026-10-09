@@ -64,7 +64,7 @@ func writeServiceError(c *gin.Context, err error, instanceID string) {
 			ctx = updateTraceAndLogger(ctx, cubelog.GetTraceInfo(ctx), instanceID, "", 0)
 		}
 		logging.G(ctx).Errorf("agenthub: handler failed: %v", err)
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	status := svcErr.Status

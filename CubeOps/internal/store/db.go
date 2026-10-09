@@ -87,9 +87,12 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 
 	if b64 == "" {
 		// 2. Fallback: read from the old agenthub settings table.
-		//    This covers the upgrade window where the migration has run
-		//    (key copied to t_system_setting) but also the case where
-		//    CubeOps starts against a DB that hasn't been migrated yet.
+		//    This covers the upgrade window where the migration has run but
+		//    the key has not been copied into t_system_setting yet, plus the
+		//    rollback case where only the old table holds it. An unmigrated DB
+		//    no longer reaches here: the read above returns a real
+		//    table-not-found error and startup fails, as it would anyway at
+		//    seedDefaultAdmin.
 		b64, err = s.GetSetting(ctx, "secret_master_key")
 		if err != nil {
 			return fmt.Errorf("read master key from t_agenthub_setting: %w", err)
