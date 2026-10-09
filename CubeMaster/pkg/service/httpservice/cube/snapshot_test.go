@@ -12,20 +12,26 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestCreateSnapshotSuccessResponse(t *testing.T) {
@@ -93,6 +99,117 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		assert.Equal(t, "READY", got.Operation.Status)
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+// Business failures return HTTP 200, so the route span must carry the real ret_code.
+func TestCreateSnapshotHandlerReportsRouteSpanBusinessStatus(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		stub     func(*gomonkey.Patches)
+		wantCode int
+	}{
+		{
+			name:     "missing sandbox id",
+			body:     `{"request_id":"req-1"}`,
+			stub:     func(*gomonkey.Patches) {},
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name: "sandbox not found",
+			body: `{"request_id":"req-1","sandbox_id":"sb-missing"}`,
+			stub: func(p *gomonkey.Patches) {
+				p.ApplyFunc(sandbox.ResolveSandboxID, func(context.Context, string) (string, error) {
+					return "", sandboxid.ErrNotFound
+				})
+			},
+			wantCode: int(errorcode.ErrorCode_NotFound),
+		},
+	}
+
+	const unknownSandboxRequestID = "req-1"
+	const unknownSandboxID = "sb-missing"
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, flush := setupSpanRecorder(t)
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			tc.stub(patches)
+
+			rootCtx, rootSpan := telemetry.Start(context.Background(), "test.root")
+			req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(tc.body))
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = req.WithContext(rootCtx)
+			createSnapshotGinHandler(c)
+			rootSpan.End()
+			flush()
+
+			var got snapshotResponse
+			require.NoError(t, common.FastestJsoniter.Unmarshal(w.Body.Bytes(), &got))
+			require.NotNil(t, got.Res)
+			require.NotNil(t, got.Res.Ret)
+			assert.Equal(t, tc.wantCode, got.Res.Ret.RetCode)
+
+			routes := rec.named("test.root")
+			require.Len(t, routes, 1)
+			if routes[0].Status().Code != codes.Error {
+				t.Errorf("route span status = %v, want Error on a business failure", routes[0].Status().Code)
+			}
+			if got := attrInt(t, routes[0].Attributes(), telemetry.AttrRetCode); got != int64(tc.wantCode) {
+				t.Errorf("route span %s = %d, want %d", telemetry.AttrRetCode, got, tc.wantCode)
+			}
+			if tc.name == "sandbox not found" {
+				attrs := routes[0].Attributes()
+				assert.Equal(t, unknownSandboxRequestID, attrString(attrs, telemetry.AttrRequestID))
+				assert.Equal(t, unknownSandboxID, attrString(attrs, telemetry.AttrSandboxID))
+				assert.Empty(t, rec.named(telemetry.SpanSnapshotCreateCapture))
+			}
+		})
+	}
+}
+
+func TestCreateSnapshotHandlerPopulatesRouteSpanIdentifiers(t *testing.T) {
+	registerKnownSandboxTestID(t)
+	rec, flush := setupSpanRecorder(t)
+
+	origCreateSnapshotFn := createSnapshotFn
+	origGetSnapshotInfoFn := getSnapshotInfoFn
+	origResolveSnapshotHostFn := resolveSnapshotHostFn
+	t.Cleanup(func() {
+		createSnapshotFn = origCreateSnapshotFn
+		getSnapshotInfoFn = origGetSnapshotInfoFn
+		resolveSnapshotHostFn = origResolveSnapshotHostFn
+	})
+
+	resolveSnapshotHostFn = func(ctx context.Context, requestID, sandboxID string) (string, string, error) {
+		return "node-a", "10.0.0.1", nil
+	}
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+		return &types.TemplateImageJobInfo{JobID: "op-1", TemplateID: "snap-1", RequestID: requestID, Status: "READY"}, nil
+	}
+	getSnapshotInfoFn = func(ctx context.Context, snapshotID string, includeRequest bool) (*templatecenter.SnapshotInfo, error) {
+		return &templatecenter.SnapshotInfo{SnapshotID: snapshotID, Status: "READY"}, nil
+	}
+
+	rootCtx, rootSpan := telemetry.Start(context.Background(), "test.root")
+	body := `{"request_id":"req-span","sandbox_id":"` + knownSandboxTestID + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req.WithContext(CubeLog.WithRequestTrace(rootCtx, &CubeLog.RequestTrace{}))
+	createSnapshotGinHandler(c)
+	rootSpan.End()
+	flush()
+
+	routes := rec.named("test.root")
+	require.Len(t, routes, 1)
+	attrs := routes[0].Attributes()
+	assert.Equal(t, "req-span", attrString(attrs, telemetry.AttrRequestID))
+	assert.Equal(t, knownSandboxTestID, attrString(attrs, telemetry.AttrSandboxID))
+	assert.Equal(t, "snap-1", attrString(attrs, telemetry.AttrSnapshotID))
+	assert.Equal(t, "op-1", attrString(attrs, telemetry.AttrJobID))
 }
 
 func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {
@@ -196,16 +313,38 @@ func TestCreateSnapshotDetachesExecutionFromCanceledRequest(t *testing.T) {
 }
 
 func TestSnapshotExecutionContextDetachesFromParentCancellation(t *testing.T) {
-	parent, cancelParent := context.WithCancel(context.Background())
+	setupSpanRecorder(t)
+
+	parentBase, cancelParent := context.WithCancel(context.Background())
+	parentCtx, parentSpan := telemetry.Start(parentBase, "test.parent")
+	defer parentSpan.End()
 	cancelParent()
 
-	ctx, cancel := snapshotExecutionContext(parent, map[string]any{"RequestId": "req-ctx"})
+	before := time.Now()
+	ctx, cancel := snapshotExecutionContext(parentCtx, map[string]any{"RequestId": "req-ctx"})
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		t.Fatalf("snapshot HTTP execution context should not inherit parent cancellation: %v", ctx.Err())
 	default:
+	}
+
+	sc := trace.SpanContextFromContext(ctx)
+	if sc.TraceID() != parentSpan.SpanContext().TraceID() {
+		t.Errorf("detached trace id = %s, want the request trace %s", sc.TraceID(), parentSpan.SpanContext().TraceID())
+	}
+	if sc.SpanID() != parentSpan.SpanContext().SpanID() {
+		t.Errorf("detached parent span id = %s, want the request span %s", sc.SpanID(), parentSpan.SpanContext().SpanID())
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("detached context must carry the independent snapshot operation deadline")
+	}
+	want := before.Add(templatecenter.SnapshotOperationTimeout())
+	if deadline.Before(want.Add(-time.Second)) || deadline.After(want.Add(time.Second)) {
+		t.Errorf("detached deadline = %s, want ~%s (independent operation budget)", deadline, want)
 	}
 }
 

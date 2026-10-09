@@ -76,6 +76,11 @@ const (
 	SpanTemplateCommitRegister = "cubemaster.template.commit.register"
 	SpanTemplateCommitCleanup  = "cubemaster.template.commit.cleanup"
 
+	SpanSnapshotCreatePrepare  = "cubemaster.snapshot.create.prepare"
+	SpanSnapshotCreateCapture  = "cubemaster.snapshot.create.capture"
+	SpanSnapshotCreateRegister = "cubemaster.snapshot.create.register"
+	SpanSnapshotCreateCleanup  = "cubemaster.snapshot.create.cleanup"
+
 	SpanTemplateImageBuild            = "cubetemplatecenter.template.image.build"
 	SpanTemplateImagePrepareSource    = "cubetemplatecenter.template.image.prepare_source"
 	SpanTemplateImageBuildLockWait    = "cubetemplatecenter.template.image.build_lock.wait"
@@ -92,6 +97,7 @@ const (
 const (
 	AttrRequestID       = "cube.request_id"
 	AttrSandboxID       = "cube.sandbox_id"
+	AttrSnapshotID      = "cube.snapshot_id"
 	AttrTemplateID      = "cube.template_id"
 	AttrNodeID          = "cube.node_id"
 	AttrNodeIP          = "cube.node_ip"
@@ -110,6 +116,7 @@ const (
 	AttrPullDeferred    = "cube.template.pull_deferred"
 	AttrDuplicate       = "cube.dispatch.duplicate"
 	AttrStorageBackend  = "cube.artifact.storage_backend"
+	AttrBackend         = "cube.backend"
 	AttrFallback        = "cube.artifact.fallback"
 )
 
