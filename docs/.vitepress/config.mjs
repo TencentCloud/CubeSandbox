@@ -292,7 +292,8 @@ export default withMermaid(defineConfig({
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
-                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' }
+                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' },
+                { text: 'Go SDK Connect Stream Routing', link: '/guide/troubleshooting/sdk-connect-stream-routing' }
               ]
             },
             {
@@ -509,7 +510,8 @@ export default withMermaid(defineConfig({
                 { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
-                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' }
+                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' },
+                { text: 'Go SDK Connect 流路由', link: '/zh/guide/troubleshooting/sdk-connect-stream-routing' }
               ]
             },
             {
