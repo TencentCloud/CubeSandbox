@@ -162,6 +162,38 @@ func TestGinMiddlewareContinuesTraceAndNamesRoute(t *testing.T) {
 	}
 }
 
+func TestGinMiddlewareTracesSnapshotCreateRoute(t *testing.T) {
+	exp, flush := setupTest(t)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(GinMiddleware())
+	r.POST("/cube/snapshot", func(c *gin.Context) { c.Status(http.StatusOK) })
+	// A sibling POST route under the same prefix must stay untraced.
+	r.POST("/cube/snapshot/:snapshot_id/restore", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", nil)
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/cube/snapshot/snap-1/restore", nil))
+	flush()
+
+	spans := exp.snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("want only the snapshot create route spanned, got %d spans", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "POST /cube/snapshot" {
+		t.Errorf("span name = %q, want POST /cube/snapshot", span.Name())
+	}
+	if span.SpanKind() != trace.SpanKindServer {
+		t.Errorf("span kind = %v, want server", span.SpanKind())
+	}
+	if got := span.Parent().TraceID().String(); got != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("parent trace id = %s, want the incoming traceparent trace id", got)
+	}
+}
+
 func TestInjectGRPCWritesTraceparentForDownstream(t *testing.T) {
 	exp, flush := setupTest(t)
 

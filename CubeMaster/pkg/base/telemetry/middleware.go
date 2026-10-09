@@ -17,6 +17,7 @@ import (
 var tracedRoutes = map[string]bool{
 	"POST /cube/sandbox":             true,
 	"POST /cube/sandbox/commit":      true,
+	"POST /cube/snapshot":            true,
 	"POST /cube/template/from-image": true,
 }
 
