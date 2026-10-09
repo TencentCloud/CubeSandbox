@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -17,6 +18,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func handleUpdateAction(c *gin.Context) {
@@ -28,10 +32,19 @@ func handleUpdateAction(c *gin.Context) {
 			RetMsg:  http.StatusText(http.StatusNotFound),
 		},
 	}
+	span := trace.SpanFromContext(c.Request.Context())
+	retCode := int(errorcode.ErrorCode_MasterParamsError)
+	defer func() {
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, retCode))
+		if retCode != telemetry.SuccessCode {
+			span.SetStatus(codes.Error, "")
+		}
+	}()
 	req := &types.UpdateRequest{}
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "请求体解析失败"
+		retCode = rsp.Ret.RetCode
 		common.WriteAPI(c, rsp)
 		return
 	}
@@ -39,6 +52,7 @@ func handleUpdateAction(c *gin.Context) {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "requestID is empty"
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		retCode = rsp.Ret.RetCode
 		common.WriteAPI(c, rsp)
 		return
 	}
@@ -52,6 +66,9 @@ func handleUpdateAction(c *gin.Context) {
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.Update(CubeLog.WithRequestTrace(ctx, rt), req)
+	if rsp != nil && rsp.Ret != nil {
+		retCode = rsp.Ret.RetCode
+	}
 	common.WriteAPI(c, rsp)
 }
 

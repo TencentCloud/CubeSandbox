@@ -60,6 +60,13 @@ const (
 	SpanRollbackPrepare  = "cubelet.snapshot.rollback.prepare"
 	SpanRollbackRestore  = "cubelet.snapshot.rollback.restore"
 	SpanRollbackFinalize = "cubelet.snapshot.rollback.finalize"
+
+	SpanPause         = "cubelet.sandbox.pause"
+	SpanPauseLock     = "cubelet.sandbox.pause.lifecycle_lock"
+	SpanPausePrepare  = "cubelet.sandbox.pause.prepare"
+	SpanPauseCapture  = "cubelet.sandbox.pause.capture"
+	SpanPausePublish  = "cubelet.sandbox.pause.publish"
+	SpanPauseTeardown = "cubelet.sandbox.pause.teardown"
 )
 
 const (

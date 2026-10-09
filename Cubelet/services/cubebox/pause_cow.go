@@ -20,12 +20,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type pauseSnapshotConfig struct {
@@ -247,6 +250,37 @@ func (s *service) updateWithPauseCow(
 		"sandboxID": req.SandboxID,
 	})
 
+	rootCtx := ctx
+	var stageSpan trace.Span
+	var stageCtx context.Context
+	endStage := func(code int) {
+		if stageSpan == nil {
+			return
+		}
+		telemetry.EndWithCode(stageSpan, code)
+		stageSpan = nil
+	}
+	startStage := func(name string, attrs ...attribute.KeyValue) context.Context {
+		endStage(int(rsp.GetRet().GetRetCode()))
+		c, active := telemetry.StartIfTraced(rootCtx, name, trace.WithAttributes(attrs...))
+		stageSpan = active
+		stageCtx = c
+		return c
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			if stageSpan != nil {
+				telemetry.End(stageSpan, errors.New("pause panicked"))
+				stageSpan = nil
+			}
+			panic(r)
+		}
+		endStage(int(rsp.GetRet().GetRetCode()))
+	}()
+
+	ctx = startStage(telemetry.SpanPausePrepare,
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID))
+
 	snapID, err := resolvePauseSnapshotID(req)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
@@ -335,19 +369,20 @@ func (s *service) updateWithPauseCow(
 	}
 
 	var rootfsObject *storage.CowSnapshotObject
-	cleanupArtifacts := func() {
-		layout.releaseMetadata(ctx)
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+	cleanupArtifacts := func(base context.Context) {
+		c := telemetry.DetachTrace(base, stageCtx)
+		layout.releaseMetadata(c)
+		cleanupCowSnapshotObjectsOn(c, stepLog, backend, memoryObject, rootfsObject)
 		layout.discardTmpDir()
 		if !layout.usesTmpRename() {
 			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
 		}
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
+		s.bestEffortCleanupPauseSnapshot(c, req.RequestID, snapID, backend)
 	}
 
 	layout.resetTmpDir()
 	if err := layout.prepareWork(ctx); err != nil {
-		cleanupArtifacts()
+		cleanupArtifacts(ctx)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create pause snapshot dir: %v", err)
 		return rsp, nil
@@ -374,7 +409,7 @@ func (s *service) updateWithPauseCow(
 	defer workCancel()
 
 	failPause := func(code errorcode.ErrorCode, msg string) (*cubebox.UpdateCubeSandboxResponse, error) {
-		cleanupArtifacts()
+		cleanupArtifacts(ctx)
 		markLocalPauseFailed(sb, errors.New(msg))
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 		rsp.Ret.RetCode = code
@@ -415,14 +450,16 @@ func (s *service) updateWithPauseCow(
 
 	stepLog.Infof("PauseToSnapshot destination=%s memory_vol=%s snapID=%s snapshot_type=%s",
 		layout.MetaWork, memURL, snapID, pauseCfg.SnapshotType)
+	captureCtx := telemetry.DetachTrace(workCtx, startStage(telemetry.SpanPauseCapture,
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID)))
 	// Shim returns Update OK and stays alive (Paused). Any error is Pause
 	// failure — do not treat ttrpc closed as success (shim no longer self-exits
 	// on PauseToSnapshot). Cubelet reaps the shim via keep_tombstone Delete below.
-	if err := task.Update(workCtx, containerd.WithAnnotations(map[string]string{
+	if err := task.Update(captureCtx, containerd.WithAnnotations(map[string]string{
 		shimUpdateActionAnnotation:        shimUpdatePauseToSnapshotAction,
 		shimUpdatePauseSnapshotAnnotation: string(cfgJSON),
 	})); err != nil {
-		cleanupArtifacts()
+		cleanupArtifacts(ctx)
 		markLocalPauseFailed(sb, err)
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
@@ -433,6 +470,8 @@ func (s *service) updateWithPauseCow(
 	// Disk after memory freeze: live rootfs volume is still present until
 	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
 	// Pause fails and the sandbox is not Resume-able (delete only).
+	workCtx = telemetry.DetachTrace(workCtx, startStage(telemetry.SpanPausePublish,
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID)))
 	rootfsObject, err = storage.CommitRootfsFor(workCtx, backend, sourceRootfs, snapID)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
@@ -510,6 +549,8 @@ func (s *service) updateWithPauseCow(
 	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
 
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
+	workCtx = telemetry.DetachTrace(workCtx, startStage(telemetry.SpanPauseTeardown,
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID)))
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
 	// Always attach whatever volume ref events were observed — Detach may have
 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
