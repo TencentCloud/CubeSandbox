@@ -194,6 +194,46 @@ func TestGinMiddlewareTracesSnapshotCreateRoute(t *testing.T) {
 	}
 }
 
+func TestGinMiddlewareTracesRollbackRoutes(t *testing.T) {
+	exp, flush := setupTest(t)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(GinMiddleware())
+	r.POST("/cube/sandbox/:sandbox_id/rollback", func(c *gin.Context) { c.Status(http.StatusOK) })
+	r.POST("/cube/sandbox/rollback", func(c *gin.Context) { c.Status(http.StatusOK) })
+	// A sibling POST route under the same prefix must stay untraced.
+	r.POST("/cube/sandbox/:sandbox_id/logs", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, path := range []string{"/cube/sandbox/sb-1/rollback", "/cube/sandbox/rollback"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+		r.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/cube/sandbox/sb-1/logs", nil))
+	flush()
+
+	spans := exp.snapshot()
+	if len(spans) != 2 {
+		t.Fatalf("want both rollback routes spanned, got %d spans", len(spans))
+	}
+	names := map[string]bool{}
+	for _, span := range spans {
+		names[span.Name()] = true
+		if span.SpanKind() != trace.SpanKindServer {
+			t.Errorf("span %q kind = %v, want server", span.Name(), span.SpanKind())
+		}
+		if got := span.Parent().TraceID().String(); got != "4bf92f3577b34da6a3ce929d0e0e4736" {
+			t.Errorf("span %q parent trace id = %s, want the incoming traceparent trace id", span.Name(), got)
+		}
+	}
+	for _, want := range []string{"POST /cube/sandbox/:sandbox_id/rollback", "POST /cube/sandbox/rollback"} {
+		if !names[want] {
+			t.Errorf("missing rollback span %q, got %v", want, names)
+		}
+	}
+}
+
 func TestInjectGRPCWritesTraceparentForDownstream(t *testing.T) {
 	exp, flush := setupTest(t)
 

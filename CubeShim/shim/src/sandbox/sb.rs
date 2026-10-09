@@ -1765,54 +1765,66 @@ impl SandBox {
     /// * `target_config` – `RestoreConfig` pointing to the desired snapshot.
     ///   `source_url` is mandatory; `disks`, `memory_vol_url`, etc. carry the
     ///   new backend-file descriptors.
-    pub async fn rollback_vm(&mut self, target_config: RestoreConfig) -> CResult<()> {
-        if target_config.source_url.as_os_str().is_empty() {
-            return Err(format!("rollback restore_config.source_url is empty").into());
-        }
+    pub async fn rollback_vm(
+        &mut self,
+        target_config: RestoreConfig,
+        trace: &Trace,
+    ) -> CResult<()> {
+        trace
+            .start(telemetry::SPAN_ROLLBACK_TEARDOWN)
+            .run(async {
+                if target_config.source_url.as_os_str().is_empty() {
+                    return Err(format!("rollback restore_config.source_url is empty").into());
+                }
+                {
+                    let mut state = self.state.lock().await;
+                    if *state != SandBoxState::Normal {
+                        return Err(format!("sandbox not running, cannot rollback").into());
+                    }
+                    if self.pause_vm_forbidding().await {
+                        return Err(format!(
+                            "sandbox pause forbidding, terminate exec tasks first"
+                        )
+                        .into());
+                    }
+                    *state = SandBoxState::Paused;
+                }
 
-        {
-            let mut state = self.state.lock().await;
-            if *state != SandBoxState::Normal {
-                return Err(format!("sandbox not running, cannot rollback").into());
-            }
-            if self.pause_vm_forbidding().await {
-                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
-            }
-            *state = SandBoxState::Paused;
-        }
+                // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
+                // before we delete the VM out from under them.
+                self.disconnect_agent().await?;
 
-        // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
-        // before we delete the VM out from under them.
-        self.disconnect_agent().await?;
+                // Delete the current VM in place of a checkpoint snapshot.
+                // VmDelete shuts the VM down and destroys its object; the VMM process
+                // stays alive and can immediately host the restored VM.
+                if let Err(e) = self.delete_vm().await {
+                    let mut state = self.state.lock().await;
+                    *state = SandBoxState::Normal;
+                    return Err(e);
+                }
 
-        // Delete the current VM in place of a checkpoint snapshot.
-        // VmDelete shuts the VM down and destroys its object; the VMM process
-        // stays alive and can immediately host the restored VM.
-        if let Err(e) = self.delete_vm().await {
-            let mut state = self.state.lock().await;
-            *state = SandBoxState::Normal;
-            return Err(e);
-        }
+                // VmDelete pushes a VmShutdown event into the hypervisor's event
+                // queue. The fresh monitor_vm spawned by resume_vm_with_config
+                // would otherwise consume that stale event on its first iteration
+                // and treat the freshly-restored VM as crashed: aborted=true →
+                // SandBoxState::Exited → notify_vm_shutdown to all containers,
+                // poisoning the next pause/resume request with "sandbox not in
+                // normal state". Drain everything left in the queue here.
+                if let Some(ch_arc) = self.ch.as_ref() {
+                    let ch = ch_arc.lock().await;
+                    while let Ok(ev) = ch.try_wait_notify() {
+                        infof!(
+                            self.log,
+                            "rollback: drained stale hypervisor event {:?}",
+                            ev
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .await?;
 
-        // VmDelete pushes a VmShutdown event into the hypervisor's event
-        // queue. The fresh monitor_vm spawned by resume_vm_with_config
-        // would otherwise consume that stale event on its first iteration
-        // and treat the freshly-restored VM as crashed: aborted=true →
-        // SandBoxState::Exited → notify_vm_shutdown to all containers,
-        // poisoning the next pause/resume request with "sandbox not in
-        // normal state". Drain everything left in the queue here.
-        if let Some(ch_arc) = self.ch.as_ref() {
-            let ch = ch_arc.lock().await;
-            while let Ok(ev) = ch.try_wait_notify() {
-                infof!(
-                    self.log,
-                    "rollback: drained stale hypervisor event {:?}",
-                    ev
-                );
-            }
-        }
-
-        self.resume_vm_with_config(Some(target_config)).await
+        self.resume_vm_with_config(Some(target_config), trace).await
     }
 
     async fn delete_vm(&mut self) -> CResult<()> {
@@ -1820,50 +1832,59 @@ impl SandBox {
         ch.delete_vm().await
     }
 
-    async fn resume_vm_with_config(&mut self, config: Option<RestoreConfig>) -> CResult<()> {
-        {
-            let state = self.state.lock().await;
-            if *state != SandBoxState::Paused {
-                return Err(format!("sandbox not paused").into());
-            };
-        }
-        //resume vm
-        {
-            let ch = self.ch.as_mut().unwrap().lock().await;
-            match config {
-                Some(restore_config) => {
-                    ch.resume_vm_cube_with_config(restore_config).await?;
+    async fn resume_vm_with_config(
+        &mut self,
+        config: Option<RestoreConfig>,
+        trace: &Trace,
+    ) -> CResult<()> {
+        trace
+            .start(telemetry::SPAN_RESTORE_VM)
+            .run(async {
+                {
+                    let state = self.state.lock().await;
+                    if *state != SandBoxState::Paused {
+                        return Err("sandbox not paused".to_string());
+                    };
                 }
-                None => {
-                    return Err("legacy pausevm resume is removed; restore_config required".into());
+                let ch = self.ch.as_mut().unwrap().lock().await;
+                match config {
+                    Some(restore_config) => ch.resume_vm_cube_with_config(restore_config).await,
+                    None => {
+                        Err("legacy pausevm resume is removed; restore_config required".to_string())
+                    }
                 }
-            }
-        }
+            })
+            .await?;
 
-        self.connect_agent_with_retry(true).await?;
+        trace
+            .start(telemetry::SPAN_ROLLBACK_RECONNECT)
+            .run(async {
+                self.connect_agent_with_retry(true).await?;
 
-        let client = self.client.as_ref().unwrap();
+                let client = self.client.as_ref().unwrap();
 
-        let mut containers = self.containers.lock().await;
-        for (_, c) in containers.iter_mut() {
-            c.set_client(client.clone()).await?;
-        }
+                let mut containers = self.containers.lock().await;
+                for (_, c) in containers.iter_mut() {
+                    c.set_client(client.clone()).await?;
+                }
 
-        let (sender, handle) = self.watch_oom().await?;
-        self.tx_oom_exited = Some(sender);
-        self.oom_handle = Some(Arc::new(handle));
+                let (sender, handle) = self.watch_oom().await?;
+                self.tx_oom_exited = Some(sender);
+                self.oom_handle = Some(Arc::new(handle));
 
-        //monitor guest
-        let (sender, handle) = self.monitor_vm(false).await?;
-        self.tx_monitor_exited = Some(sender);
-        self.monitor_handle = Some(Arc::new(handle));
+                //monitor guest
+                let (sender, handle) = self.monitor_vm(false).await?;
+                self.tx_monitor_exited = Some(sender);
+                self.monitor_handle = Some(Arc::new(handle));
 
-        {
-            let mut state = self.state.lock().await;
-            *state = SandBoxState::Normal;
-        }
+                {
+                    let mut state = self.state.lock().await;
+                    *state = SandBoxState::Normal;
+                }
 
-        Ok(())
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -1914,6 +1935,7 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 mod tests {
     use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
     use oci_spec::runtime::SpecBuilder;
+    use opentelemetry::trace::Status;
     use protobuf::MessageDyn;
     use std::collections::{HashMap, HashSet};
     use std::os::fd::IntoRawFd;
@@ -1930,10 +1952,94 @@ mod tests {
     use super::config;
     use super::normalize_dns_for_agent;
     use super::Log;
+    use super::RestoreConfig;
     use super::SandBox;
+    use super::SandBoxState;
     use super::SnapshotFreezeState;
+    use super::Trace;
     use crate::hypervisor::config::HypConfig;
     use crate::hypervisor::cube_hypervisor::CubeHypervisor;
+
+    #[tokio::test]
+    async fn rollback_teardown_stage_reports_under_the_caller_span() {
+        let (exporter, _guard) = crate::telemetry::testutil::install();
+
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        // A sandbox that is not Normal fails teardown's first check, before any
+        // VMM call, so the stage outcome is observable without a live hypervisor.
+        *sb.state.lock().await = SandBoxState::Paused;
+
+        let trace = Trace::extract(
+            &crate::telemetry::testutil::traced_call(crate::telemetry::testutil::INBOUND),
+            crate::telemetry::testutil::SANDBOX_ID,
+        );
+        let cfg = RestoreConfig {
+            source_url: std::path::PathBuf::from("/data/snap/1"),
+            ..Default::default()
+        };
+        assert!(sb.rollback_vm(cfg, &trace).await.is_err());
+
+        let spans = exporter.finished();
+        assert_eq!(spans.len(), 1, "one teardown span: {spans:?}");
+        let span = &spans[0];
+        assert_eq!(span.name.as_ref(), crate::telemetry::SPAN_ROLLBACK_TEARDOWN);
+        assert_eq!(span.status, Status::error("error"));
+        assert_eq!(
+            span.span_context.trace_id().to_string(),
+            crate::telemetry::testutil::INBOUND_TRACE_ID
+        );
+        assert_eq!(
+            span.parent_span_id.to_string(),
+            crate::telemetry::testutil::INBOUND_PARENT_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_teardown_stage_records_nothing_without_a_traceparent() {
+        let (exporter, _guard) = crate::telemetry::testutil::install();
+
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        *sb.state.lock().await = SandBoxState::Paused;
+
+        let trace = Trace::extract(&HashMap::new(), crate::telemetry::testutil::SANDBOX_ID);
+        let cfg = RestoreConfig {
+            source_url: std::path::PathBuf::from("/data/snap/1"),
+            ..Default::default()
+        };
+        assert!(sb.rollback_vm(cfg, &trace).await.is_err());
+        assert!(
+            exporter.finished().is_empty(),
+            "an untraced rollback must record nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_teardown_stage_rejects_empty_source_url() {
+        let (exporter, _guard) = crate::telemetry::testutil::install();
+
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        // Normal state so the empty source_url is the check that fails, and it
+        // must still be attributed to the teardown stage.
+        *sb.state.lock().await = SandBoxState::Normal;
+
+        let trace = Trace::extract(
+            &crate::telemetry::testutil::traced_call(crate::telemetry::testutil::INBOUND),
+            crate::telemetry::testutil::SANDBOX_ID,
+        );
+        let cfg = RestoreConfig::default();
+        assert!(sb.rollback_vm(cfg, &trace).await.is_err());
+
+        let spans = exporter.finished();
+        assert_eq!(spans.len(), 1, "one teardown span: {spans:?}");
+        assert_eq!(
+            spans[0].name.as_ref(),
+            crate::telemetry::SPAN_ROLLBACK_TEARDOWN
+        );
+        assert_eq!(spans[0].status, Status::error("error"));
+    }
 
     #[tokio::test]
     async fn expired_snapshot_freeze_rejects_resume_and_renew() {

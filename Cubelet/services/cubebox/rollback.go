@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -18,10 +19,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 )
@@ -36,6 +40,19 @@ const (
 
 // Indirection so tests can observe which package objects rollback detaches.
 var deactivateRollbackObject = storage.DeactivateObjectFor
+
+// endRollbackTrace must be deferred directly so recover() observes the in-flight panic.
+func endRollbackTrace(stage *trace.Span, root trace.Span, rsp *cubebox.RollbackSandboxResponse) {
+	code := int(rsp.GetRet().GetRetCode())
+	if r := recover(); r != nil {
+		panicked := errors.New("rollback panicked")
+		telemetry.End(*stage, panicked)
+		telemetry.End(root, panicked)
+		panic(r)
+	}
+	telemetry.EndWithCode(*stage, code)
+	telemetry.EndWithCode(root, code)
+}
 
 type rollbackRestoreConfig struct {
 	SourceURL    string               `json:"source_url"`
@@ -64,6 +81,33 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		Ret:        &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
 
+	ctx = telemetry.ExtractGRPC(ctx)
+	ctx, span := telemetry.Start(ctx, telemetry.SpanRollback,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, req.GetRequestID()),
+			attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()),
+			attribute.String(telemetry.AttrSnapshotID, req.GetSnapshotID()),
+		))
+
+	var stageSpan trace.Span
+	endStage := func() {
+		if stageSpan == nil {
+			return
+		}
+		telemetry.EndWithCode(stageSpan, int(rsp.GetRet().GetRetCode()))
+		stageSpan = nil
+	}
+	startStage := func(name string, attrs ...attribute.KeyValue) context.Context {
+		endStage()
+		stageCtx, active := telemetry.StartIfTraced(ctx, name, trace.WithAttributes(attrs...))
+		stageSpan = active
+		return stageCtx
+	}
+	// Registered first so it runs last: closes the active stage and the root,
+	// marking both failed on a panic and re-raising the original value.
+	defer endRollbackTrace(&stageSpan, span, rsp)
+
 	if err := validateRollbackSandboxRequest(req); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = err.Error()
@@ -75,8 +119,13 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 
+	startStage(telemetry.SpanRollbackLock, attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()))
 	unlock := s.sandboxLifecycleLocks.Lock(req.GetSandboxID())
 	defer unlock()
+	prepareCtx := startStage(telemetry.SpanRollbackPrepare,
+		attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()),
+		attribute.String(telemetry.AttrSnapshotID, req.GetSnapshotID()),
+	)
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
 		"step":       "rollbackSandbox",
@@ -85,7 +134,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		"newGen":     req.GetNewGen(),
 	})
 
-	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.GetSandboxID())
+	cb, err := s.cubeboxMgr.cubeboxManger.Get(prepareCtx, req.GetSandboxID())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("sandbox is not found: %v", err)
@@ -111,8 +160,11 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
+	if stageSpan != nil {
+		stageSpan.SetAttributes(attribute.String(telemetry.AttrBackend, backend))
+	}
 
-	rootfsVol, memoryVol, memoryKind, metaDir, err := resolveRollbackTargets(ctx, backend, req)
+	rootfsVol, memoryVol, memoryKind, metaDir, err := resolveRollbackTargets(prepareCtx, backend, req)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = err.Error()
@@ -124,7 +176,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	// snap into a disk this sandbox owns and read the config from there. XFS
 	// is a no-op and keeps the catalog MetaDir.
 	// Same-node only: catalog miss (no local package) already failed above.
-	rollbackMetaDir, err := storage.MountRollbackSnapshotMetadata(ctx, backend, req.GetSnapshotID(), req.GetSandboxID())
+	rollbackMetaDir, err := storage.MountRollbackSnapshotMetadata(prepareCtx, backend, req.GetSnapshotID(), req.GetSandboxID())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
@@ -142,7 +194,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		}()
 	}
 
-	currentRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, req.GetSandboxID(), rootVolumeName)
+	currentRootfs, err := storage.GetSandboxRootfsFor(prepareCtx, backend, req.GetSandboxID(), rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve current rootfs: %v", err)
@@ -155,7 +207,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 	rsp.OldRootfsVol = currentRootfs.Name
 
-	refs, err := storage.ResolveRollbackRefsFor(ctx, backend, rootfsVol, memoryVol, memoryKind)
+	refs, err := storage.ResolveRollbackRefsFor(prepareCtx, backend, rootfsVol, memoryVol, memoryKind)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
@@ -164,7 +216,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	restored := false
 	defer func() { deactivateRollbackPackageObjects(ctx, backend, refs, restored) }()
 
-	newRootfs, err := storage.DeriveRollbackRootfsFor(ctx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
+	newRootfs, err := storage.DeriveRollbackRootfsFor(prepareCtx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to derive rollback rootfs: %v", err)
@@ -179,12 +231,18 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		}
 	}()
 
-	restoreConfig, err := s.buildRollbackRestoreConfig(ctx, req.GetSandboxID(), metaDir, currentRootfs, newRootfs, refs.Memory)
+	restoreConfig, err := s.buildRollbackRestoreConfig(prepareCtx, req.GetSandboxID(), metaDir, currentRootfs, newRootfs, refs.Memory)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to build restore config: %v", err)
 		return rsp, nil
 	}
+
+	restoreCtx := startStage(telemetry.SpanRollbackRestore,
+		attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()),
+		attribute.String(telemetry.AttrSnapshotID, req.GetSnapshotID()),
+		attribute.String(telemetry.AttrBackend, backend),
+	)
 
 	rollbackTime := time.Now().UTC()
 	var rollbackTask containerd.Task
@@ -192,12 +250,12 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	if err := runRollbackWithPreparedGuestMetrics(
 		cb,
 		func() error {
-			rollbackTaskContext, rollbackTask, err = s.taskForRollback(ctx, cb)
+			rollbackTaskContext, rollbackTask, err = s.taskForRollback(restoreCtx, cb)
 			return err
 		},
 		func() error {
 			return prepareAndPersistRollbackGuestMetricsEpoch(
-				ctx,
+				restoreCtx,
 				s.cubeboxMgr.cubeboxManger,
 				cb,
 				rollbackTime,
@@ -223,6 +281,11 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	cleanupNewRootfs = false
 	restored = true
 
+	finalizeCtx := startStage(telemetry.SpanRollbackFinalize,
+		attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()),
+		attribute.String(telemetry.AttrSnapshotID, req.GetSnapshotID()),
+	)
+
 	// Scrub any "terminated" markers a concurrent path may have stamped
 	// onto the in-memory Status while shim's delete_vm + resume_vm_with_config
 	// was running. We do NOT consult containerd here: the shim has already
@@ -241,7 +304,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 
 	newRootfs.MountName = currentRootfs.MountName
-	if err := storage.PersistSandboxRootfs(ctx, req.GetSandboxID(), newRootfs); err != nil {
+	if err := storage.PersistSandboxRootfs(finalizeCtx, req.GetSandboxID(), newRootfs); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("rollback restored VM but failed to persist storage info: %v", err)
 		return rsp, nil
@@ -253,7 +316,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	rsp.NewGen = newRootfs.Gen
 	rsp.MemoryVol = refs.Memory.Name
 	if err := activateAndPersistRollbackGuestMetricsEpoch(
-		ctx,
+		finalizeCtx,
 		s.cubeboxMgr.cubeboxManger,
 		cb,
 		req.GetSnapshotID(),
@@ -261,7 +324,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	); err != nil {
 		stepLog.Warnf("rollback succeeded but guest metrics epoch remains pending or prepared: %v", err)
 	}
-	if err := storage.ReleaseRollbackReplacedVolumes(ctx, backend, req.GetSandboxID(), currentRootfs); err != nil {
+	if err := storage.ReleaseRollbackReplacedVolumes(finalizeCtx, backend, req.GetSandboxID(), currentRootfs); err != nil {
 		rsp.OldRootfsDeleted = false
 		rsp.Ret.RetMsg = fmt.Sprintf("rollback succeeded; old volume cleanup deferred: %v", err)
 		stepLog.Warnf("rollback succeeded but failed to delete replaced sandbox volumes: %v", err)

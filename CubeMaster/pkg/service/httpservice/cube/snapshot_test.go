@@ -438,6 +438,191 @@ func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {
 	assert.Equal(t, "READY", got.Operation.Status)
 }
 
+func TestHandleSandboxRollbackActionPopulatesRouteSpanIdentifiers(t *testing.T) {
+	registerKnownSandboxTestID(t)
+	rec, flush := setupSpanRecorder(t)
+
+	origRollbackSnapshotFn := rollbackSnapshotFn
+	t.Cleanup(func() {
+		rollbackSnapshotFn = origRollbackSnapshotFn
+	})
+	rollbackSnapshotFn = func(ctx context.Context, requestID, sandboxID, snapshotID, instanceType, backend string) (*types.TemplateImageJobInfo, error) {
+		return &types.TemplateImageJobInfo{
+			JobID:      "op-rb",
+			RequestID:  requestID,
+			SandboxID:  sandboxID,
+			ResourceID: snapshotID,
+			Status:     "READY",
+		}, nil
+	}
+
+	rootCtx, rootSpan := telemetry.Start(context.Background(), "test.root")
+	req := httptest.NewRequest(http.MethodPost, "/cube/sandbox/"+knownSandboxTestID+"/rollback", strings.NewReader(`{
+		"request_id":"req-rb",
+		"snapshot_id":"snap-1"
+	}`))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req.WithContext(CubeLog.WithRequestTrace(rootCtx, &CubeLog.RequestTrace{}))
+	c.Params = gin.Params{{Key: "sandbox_id", Value: knownSandboxTestID}}
+	handleSandboxRollbackAction(c)
+	rootSpan.End()
+	flush()
+
+	routes := rec.named("test.root")
+	require.Len(t, routes, 1)
+	attrs := routes[0].Attributes()
+	assert.Equal(t, "req-rb", attrString(attrs, telemetry.AttrRequestID))
+	assert.Equal(t, knownSandboxTestID, attrString(attrs, telemetry.AttrSandboxID))
+	assert.Equal(t, "snap-1", attrString(attrs, telemetry.AttrSnapshotID))
+	assert.Equal(t, "op-rb", attrString(attrs, telemetry.AttrJobID))
+}
+
+func TestHandleSandboxRollbackActionReportsBusinessStatus(t *testing.T) {
+	registerKnownSandboxTestID(t)
+	rec, flush := setupSpanRecorder(t)
+
+	origRollbackSnapshotFn := rollbackSnapshotFn
+	t.Cleanup(func() {
+		rollbackSnapshotFn = origRollbackSnapshotFn
+	})
+	rollbackSnapshotFn = func(context.Context, string, string, string, string, string) (*types.TemplateImageJobInfo, error) {
+		return nil, errors.New("rollback boom")
+	}
+
+	rootCtx, rootSpan := telemetry.Start(context.Background(), "test.root")
+	req := httptest.NewRequest(http.MethodPost, "/cube/sandbox/"+knownSandboxTestID+"/rollback", strings.NewReader(`{
+		"request_id":"req-rb",
+		"snapshot_id":"snap-1"
+	}`))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req.WithContext(CubeLog.WithRequestTrace(rootCtx, &CubeLog.RequestTrace{}))
+	c.Params = gin.Params{{Key: "sandbox_id", Value: knownSandboxTestID}}
+	handleSandboxRollbackAction(c)
+	rootSpan.End()
+	flush()
+
+	var got operationResponse
+	require.NoError(t, common.FastestJsoniter.Unmarshal(w.Body.Bytes(), &got))
+	require.NotNil(t, got.Res)
+	require.NotNil(t, got.Res.Ret)
+	require.NotEqual(t, int(errorcode.ErrorCode_Success), got.Res.Ret.RetCode)
+
+	routes := rec.named("test.root")
+	require.Len(t, routes, 1)
+	if routes[0].Status().Code != codes.Error {
+		t.Errorf("route span status = %v, want Error on a business failure", routes[0].Status().Code)
+	}
+	if got := attrInt(t, routes[0].Attributes(), telemetry.AttrRetCode); got == 0 {
+		t.Error("rollback route span must carry the business ret_code")
+	}
+}
+
+func TestHandleSandboxRollbackActionReportsRouteSpanRejections(t *testing.T) {
+	const rollbackPath = "/cube/sandbox/:sandbox_id/rollback"
+	const legacyPath = "/cube/sandbox/rollback"
+	const otherSandboxID = "ffffffffffffffffffffffffffffffff"
+
+	cases := []struct {
+		name     string
+		route    string
+		reqPath  string
+		body     string
+		stub     func(*gomonkey.Patches)
+		wantCode int
+	}{
+		{
+			name:     "malformed body",
+			route:    rollbackPath,
+			reqPath:  "/cube/sandbox/" + knownSandboxTestID + "/rollback",
+			body:     `{"request_id":`,
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name:     "missing request id",
+			route:    rollbackPath,
+			reqPath:  "/cube/sandbox/" + knownSandboxTestID + "/rollback",
+			body:     `{"sandbox_id":"` + knownSandboxTestID + `","snapshot_id":"snap-1"}`,
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name:     "missing snapshot id",
+			route:    rollbackPath,
+			reqPath:  "/cube/sandbox/" + knownSandboxTestID + "/rollback",
+			body:     `{"request_id":"req-1","sandbox_id":"` + knownSandboxTestID + `"}`,
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name:     "missing sandbox id",
+			route:    legacyPath,
+			reqPath:  legacyPath,
+			body:     `{"request_id":"req-1","snapshot_id":"snap-1"}`,
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name:    "unresolvable sandbox id",
+			route:   rollbackPath,
+			reqPath: "/cube/sandbox/sb-missing/rollback",
+			body:    `{"request_id":"req-1","sandbox_id":"sb-missing","snapshot_id":"snap-1"}`,
+			stub: func(p *gomonkey.Patches) {
+				p.ApplyFunc(sandbox.ResolveSandboxID, func(context.Context, string) (string, error) {
+					return "", sandboxid.ErrNotFound
+				})
+			},
+			wantCode: int(errorcode.ErrorCode_NotFound),
+		},
+		{
+			name:    "path body mismatch",
+			route:   rollbackPath,
+			reqPath: "/cube/sandbox/" + knownSandboxTestID + "/rollback",
+			body:    `{"request_id":"req-1","sandbox_id":"` + otherSandboxID + `","snapshot_id":"snap-1"}`,
+			stub: func(p *gomonkey.Patches) {
+				p.ApplyFunc(sandbox.ResolveSandboxID, func(_ context.Context, id string) (string, error) {
+					return id, nil
+				})
+			},
+			wantCode: int(errorcode.ErrorCode_MasterParamsError),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, flush := setupSpanRecorder(t)
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			if tc.stub != nil {
+				tc.stub(patches)
+			}
+
+			router := gin.New()
+			router.Use(telemetry.GinMiddleware())
+			router.POST(legacyPath, handleSandboxRollbackAction)
+			router.POST(rollbackPath, handleSandboxRollbackAction)
+
+			req := httptest.NewRequest(http.MethodPost, tc.reqPath, strings.NewReader(tc.body))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			flush()
+
+			var got operationResponse
+			require.NoError(t, common.FastestJsoniter.Unmarshal(w.Body.Bytes(), &got))
+			require.NotNil(t, got.Res)
+			require.NotNil(t, got.Res.Ret)
+			assert.Equal(t, tc.wantCode, got.Res.Ret.RetCode)
+
+			spans := rec.named("POST " + tc.route)
+			require.Len(t, spans, 1)
+			if spans[0].Status().Code != codes.Error {
+				t.Errorf("route span status = %v, want Error on a rejected rollback", spans[0].Status().Code)
+			}
+			if got := attrInt(t, spans[0].Attributes(), telemetry.AttrRetCode); got != int64(tc.wantCode) {
+				t.Errorf("route span %s = %d, want %d", telemetry.AttrRetCode, got, tc.wantCode)
+			}
+		})
+	}
+}
+
 func TestConstrainSnapshotCreateScopeIntersectsRequestedScope(t *testing.T) {
 	origResolveSnapshotReadyNodeScopeFn := resolveSnapshotReadyNodeScopeFn
 	t.Cleanup(func() {

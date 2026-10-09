@@ -33,11 +33,14 @@ const TEMPLATE_PATH: &str = "/templates";
 const TEMPLATE_SPAN: &str = "POST /templates";
 const SNAPSHOT_PATH: &str = "/sandboxes/:sandboxID/snapshots";
 const SNAPSHOT_SPAN: &str = "POST /sandboxes/:sandboxID/snapshots";
+const ROLLBACK_PATH: &str = "/sandboxes/:sandboxID/rollback";
+const ROLLBACK_SPAN: &str = "POST /sandboxes/:sandboxID/rollback";
 
-const TRACED_ROUTES: [(&str, &str); 3] = [
+const TRACED_ROUTES: [(&str, &str); 4] = [
     (CREATE_PATH, CREATE_SPAN),
     (TEMPLATE_PATH, TEMPLATE_SPAN),
     (SNAPSHOT_PATH, SNAPSHOT_SPAN),
+    (ROLLBACK_PATH, ROLLBACK_SPAN),
 ];
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -134,12 +137,17 @@ pub async fn layer(req: Request, next: Next) -> Response {
             request_id.to_string(),
         ));
     }
-    if span_name == SNAPSHOT_SPAN {
+    let sandbox_suffix = match span_name {
+        SNAPSHOT_SPAN => Some("/snapshots"),
+        ROLLBACK_SPAN => Some("/rollback"),
+        _ => None,
+    };
+    if let Some(suffix) = sandbox_suffix {
         if let Some(sandbox_id) = req
             .uri()
             .path()
             .strip_prefix("/sandboxes/")
-            .and_then(|rest| rest.strip_suffix("/snapshots"))
+            .and_then(|rest| rest.strip_suffix(suffix))
         {
             attributes.push(KeyValue::new("cube.sandbox_id", sandbox_id.to_string()));
         }
@@ -216,6 +224,7 @@ mod tests {
             .route("/sandboxes", post(ok).get(ok))
             .route("/templates", post(ok).get(ok))
             .route("/sandboxes/:sandboxID/snapshots", post(ok).get(ok))
+            .route("/sandboxes/:sandboxID/rollback", post(ok).get(ok))
             .route("/untraced", post(ok).get(ok))
             .layer(axum::middleware::from_fn(layer));
 
@@ -223,6 +232,7 @@ mod tests {
             ("/sandboxes", "req-1"),
             ("/templates", "req-2"),
             ("/sandboxes/sb-1/snapshots", "req-3"),
+            ("/sandboxes/sb-1/rollback", "req-4"),
         ] {
             let response = app
                 .clone()
@@ -244,6 +254,7 @@ mod tests {
             ("GET", "/sandboxes"),
             ("GET", "/templates"),
             ("GET", "/sandboxes/sb-1/snapshots"),
+            ("GET", "/sandboxes/sb-1/rollback"),
             ("POST", "/untraced"),
         ] {
             let response = app
@@ -296,8 +307,14 @@ mod tests {
             1,
             "the snapshot create route must be spanned once"
         );
+        let rollbacks: Vec<_> = spans.iter().filter(|s| s.name == ROLLBACK_SPAN).collect();
+        assert_eq!(
+            rollbacks.len(),
+            1,
+            "the rollback route must be spanned once"
+        );
 
-        for span in [created[0], templates[0], snapshots[0]] {
+        for span in [created[0], templates[0], snapshots[0], rollbacks[0]] {
             assert_eq!(span.span_kind, SpanKind::Server);
             assert_eq!(
                 span.span_context.trace_id().to_string(),
@@ -310,17 +327,20 @@ mod tests {
                 "the public entry span must hang under the inbound parent"
             );
         }
-        assert!(
-            snapshots[0]
-                .attributes
-                .iter()
-                .any(|kv| kv.key.as_str() == "cube.sandbox_id" && kv.value.as_str() == "sb-1"),
-            "the snapshot span must carry the sandbox id from the path"
-        );
+        for span in [snapshots[0], rollbacks[0]] {
+            assert!(
+                span.attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == "cube.sandbox_id" && kv.value.as_str() == "sb-1"),
+                "the {} span must carry the sandbox id from the path",
+                span.name
+            );
+        }
         assert!(
             spans.iter().all(|s| s.name == CREATE_SPAN
                 || s.name == TEMPLATE_SPAN
                 || s.name == SNAPSHOT_SPAN
+                || s.name == ROLLBACK_SPAN
                 || &*s.name == "outbound"),
             "only the entry routes may open a span, got {:?}",
             spans.iter().map(|s| &*s.name).collect::<Vec<_>>()

@@ -96,7 +96,7 @@ func RollbackSandbox(ctx context.Context, calleeEp string,
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	return c.RollbackSandbox(ctx, req)
+	return c.RollbackSandbox(telemetry.InjectGRPC(ctx), req)
 }
 
 func CleanupTemplate(ctx context.Context, calleeEp string,
