@@ -191,14 +191,70 @@ type definitionCreateOptions struct {
 	RootfsSizeBytesAtSnapshot uint64
 }
 
+// TemplateListOptions controls pagination of ListTemplatesWithOptions.
+// A zero value returns the full list (backwards compatible).
+type TemplateListOptions struct {
+	Limit  int
+	Offset int
+}
+
+// TemplateListResult carries the requested page plus the total entry count
+// measured before slicing, so paged clients can compute page counts.
+type TemplateListResult struct {
+	Templates []TemplateInfo
+	Total     int
+}
+
+// ListTemplates returns all templates (backwards compatible).
 func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
+	result, err := ListTemplatesWithOptions(ctx, TemplateListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return result.Templates, nil
+}
+
+// ListTemplatesWithOptions returns templates with optional limit/offset paging
+// over a totally ordered list, so pages concatenate to the unpaged result.
+func ListTemplatesWithOptions(ctx context.Context, opts TemplateListOptions) (*TemplateListResult, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
+	infos, err := listTemplatesCached(ctx)
+	if err != nil {
+		return nil, err
+	}
+	total := len(infos)
+	if opts.Limit <= 0 && opts.Offset <= 0 {
+		return &TemplateListResult{Templates: infos, Total: total}, nil
+	}
+	return &TemplateListResult{Templates: sliceTemplateInfos(infos, opts), Total: total}, nil
+}
+
+// listTemplatesCached serves the aggregate list from the query cache on a hit
+// and falls back to the DB query, which re-populates the cache.
+func listTemplatesCached(ctx context.Context) ([]TemplateInfo, error) {
 	if cached, ok := getCachedTemplateList(); ok {
 		return cached, nil
 	}
 	return listTemplatesFromDB(ctx)
+}
+
+// sliceTemplateInfos clamps offset/limit so out-of-range paging returns an
+// empty page instead of erroring; a non-positive limit keeps the tail intact.
+func sliceTemplateInfos(infos []TemplateInfo, opts TemplateListOptions) []TemplateInfo {
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(infos) {
+		return []TemplateInfo{}
+	}
+	infos = infos[offset:]
+	if opts.Limit > 0 && opts.Limit < len(infos) {
+		infos = infos[:opts.Limit]
+	}
+	return infos
 }
 
 // listTemplatesFromDB is the uncached ListTemplates implementation. Called by
@@ -208,7 +264,7 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 func listTemplatesFromDB(ctx context.Context) ([]TemplateInfo, error) {
 	var defs []models.TemplateDefinition
 	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Order("updated_at desc").Find(&defs).Error; err != nil {
+		Order("updated_at desc, template_id asc").Find(&defs).Error; err != nil {
 		return nil, err
 	}
 	// Only CREATE/REDO jobs carry the source image identity used for display.
@@ -1805,6 +1861,55 @@ func ListReplicas(ctx context.Context, templateID string) ([]models.TemplateRepl
 		Where("template_id = ?", templateID).
 		Order("node_id asc").Find(&replicas).Error
 	return replicas, err
+}
+
+// maxListReplicasBatchSize bounds the IN predicate below: MySQL prepared
+// statements cap placeholders at 65535, so ids are queried in chunks.
+const maxListReplicasBatchSize = 1000
+
+// ListReplicasForTemplates returns replicas grouped by templateID via
+// chunked IN queries; any batch failure aborts with that error.
+func ListReplicasForTemplates(ctx context.Context, templateIDs []string) (map[string][]ReplicaStatus, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	ids := dedupeTemplateIDs(templateIDs)
+	out := make(map[string][]ReplicaStatus, len(ids))
+	for start := 0; start < len(ids); start += maxListReplicasBatchSize {
+		end := start + maxListReplicasBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		var replicas []models.TemplateReplica
+		err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+			Where("template_id IN ?", batch).
+			Order("template_id asc, node_id asc").Find(&replicas).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, replica := range replicas {
+			out[replica.TemplateID] = append(out[replica.TemplateID], replicaModelToStatus(replica))
+		}
+	}
+	return out, nil
+}
+
+// dedupeTemplateIDs removes duplicate ids while preserving first-seen order.
+func dedupeTemplateIDs(templateIDs []string) []string {
+	seen := make(map[string]struct{}, len(templateIDs))
+	out := make([]string, 0, len(templateIDs))
+	for _, id := range templateIDs {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func normalizeComponentVersion(value string) string {

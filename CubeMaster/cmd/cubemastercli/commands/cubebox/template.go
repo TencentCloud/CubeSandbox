@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -60,8 +61,9 @@ type templateResponse struct {
 }
 
 type templateListResponse struct {
-	Ret  *types.Ret        `json:"ret,omitempty"`
-	Data []templateSummary `json:"data,omitempty"`
+	Ret   *types.Ret        `json:"ret,omitempty"`
+	Data  []templateSummary `json:"data,omitempty"`
+	Total int               `json:"total,omitempty"`
 }
 
 type templateSummary struct {
@@ -1203,6 +1205,14 @@ var TemplateListCommand = cli.Command{
 			Name:  "json",
 			Usage: "print raw json response",
 		},
+		cli.IntFlag{
+			Name:  "limit",
+			Usage: "max templates to return (0 = all)",
+		},
+		cli.IntFlag{
+			Name:  "offset",
+			Usage: "number of templates to skip",
+		},
 		cli.StringFlag{
 			Name:  "output,o",
 			Usage: "output format, set to wide for more columns",
@@ -1218,6 +1228,11 @@ var TemplateListCommand = cli.Command{
 		requestID := uuid.New().String()
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/template", net.JoinHostPort(host, port))
+		paged := false
+		if query := templateListQuery(c); query != "" {
+			url += "?" + query
+			paged = true
+		}
 
 		rsp := &templateListResponse{}
 		if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
@@ -1234,6 +1249,9 @@ var TemplateListCommand = cli.Command{
 		if c.Bool("json") {
 			commands.PrintAsJSON(rsp)
 			return nil
+		}
+		if paged {
+			log.Printf("total: %d\n", rsp.Total)
 		}
 		wideOutput := strings.EqualFold(strings.TrimSpace(c.String("output")), "wide")
 		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
@@ -1264,6 +1282,26 @@ var TemplateListCommand = cli.Command{
 		}
 		return w.Flush()
 	},
+}
+
+// templateListQuery builds the paging query string for tpl ls; empty when no
+// paging flag is set, keeping the request identical to the historical one.
+func templateListQuery(c *cli.Context) string {
+	query := url.Values{}
+	if c.IsSet("limit") {
+		if limit := c.Int("limit"); limit > 0 {
+			query.Set("limit", strconv.Itoa(limit))
+		}
+	}
+	if c.IsSet("offset") {
+		if offset := c.Int("offset"); offset > 0 {
+			query.Set("offset", strconv.Itoa(offset))
+		}
+	}
+	if len(query) == 0 {
+		return ""
+	}
+	return query.Encode()
 }
 
 func printTemplateSummary(rsp *templateResponse) {
