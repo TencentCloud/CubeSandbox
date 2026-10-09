@@ -6,7 +6,7 @@ Cubelet 为运行中的 Cube 沙箱提供 CPU 和内存指标。一键安装默�
 http://<cubelet-node>:9998/v1/metrics/resource
 ```
 
-该端点与 Cubelet 通用指标端点 `/v1/metrics` 相互独立。旧版 containerd task cgroup monitor 默认已禁用（`no_prometheus = true`），不再通过 `/v1/metrics` 导出通用 `container_*` 指标族；本文介绍的 Cube 原生沙箱指标由独立链路采集，并通过 `/v1/metrics/resource` 导出。
+该端点与 Cubelet 通用指标端点 `/v1/metrics` 相互独立。`/v1/metrics` 不导出通用 `container_*` 指标。本文的沙箱指标单独采集，由 `/v1/metrics/resource` 提供。
 
 Cubelet 在后台定期采集所选统计视角的资源数据，并将最新结果缓存在内存中。Prometheus 抓取时只读取缓存，不会在 HTTP 请求过程中同步访问所有沙箱。因此，抓取请求不会额外触发与沙箱数量成比例的运行时 RPC；但响应体大小和序列化开销仍会随时间序列数量增长。
 

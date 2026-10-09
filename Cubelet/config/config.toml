@@ -219,9 +219,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     content_sharing_policy = "shared"
     no_sync = true
 
-  # Disable containerd's legacy task cgroup monitor to prevent repetitive
-  # "unmarshal stats" errors when scraping /v1/metrics on cgroup v2 hosts.
-  # Sandbox resource metrics are served independently under /v1/metrics/resource.
+  # Keep containerd's generic container_* task metrics off /v1/metrics.
+  # Sandbox CPU and memory metrics are at /v1/metrics/resource.
   [plugins."io.containerd.monitor.task.v1.cgroups"]
     no_prometheus = true
   [plugins."io.containerd.runtime.v2.task"]

@@ -6,7 +6,7 @@ Cubelet exposes CPU and memory metrics for running Cube sandboxes. One-click ins
 http://<cubelet-node>:9998/v1/metrics/resource
 ```
 
-This endpoint is separate from Cubelet's generic `/v1/metrics` endpoint. The legacy containerd task cgroup monitor is disabled by default (`no_prometheus = true`), so generic `container_*` metric families are no longer exported under `/v1/metrics`; the Cube-native sandbox metrics below are collected and exported independently under `/v1/metrics/resource`.
+This endpoint is separate from Cubelet's generic `/v1/metrics` endpoint. `/v1/metrics` does not export generic `container_*` metrics. The sandbox metrics below are collected and exported separately at `/v1/metrics/resource`.
 
 Cubelet periodically collects resource data for the selected scopes in the background and caches the latest results in memory. A Prometheus scrape reads only this cache and does not synchronously contact every sandbox. The scrape therefore does not trigger runtime RPCs proportional to the number of sandboxes, although response size and serialization cost still grow with the exported series count.
 
