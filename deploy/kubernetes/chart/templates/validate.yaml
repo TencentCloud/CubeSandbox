@@ -459,3 +459,80 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "cubeOps S3 endpoint is set but no credentials: set cubeOps.s3.existingSecret (keys s3-access-key-id / s3-secret-access-key), cubeOps.s3.accessKeyId+secretAccessKey, or volumeS3.accessKeyId+secretAccessKey. volumeS3.existingSecret (volume-s3.conf) is not a CubeOps credential source." }}
 {{- end }}
 {{- end }}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled (not .Values.trustedCACerts.existingConfigMap) (not .Values.trustedCACerts.certs) }}
+{{- fail "trustedCACerts.enabled=true requires either trustedCACerts.certs (one or more PEM documents) or trustedCACerts.existingConfigMap -- with neither, the merge-ca init container would find no certs and crashloop with an unexplained error" }}
+{{- end }}
+{{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.existingConfigMap .Values.trustedCACerts.certs }}
+{{- fail "trustedCACerts.existingConfigMap and trustedCACerts.certs are mutually exclusive: existingConfigMap wins and the inline certs would be silently ignored" }}
+{{- end }}
+{{- /* Gating notes, per check:
+- missing-certs, block-type, PEM-shape, BEGIN/END symmetry, env-override:
+  gated on trustedCACerts.enabled + controlPlane.enabled. They protect the
+  rendered pod; with the control plane disabled there is no consumer, and a
+  disabled feature must stay a no-op even when a shared values file carries
+  a certs entry.
+- mutual-exclusion (existingConfigMap + certs together): the one outlier,
+  gated on trustedCACerts.enabled only -- both sources set is a values
+  mistake regardless of whether any consumer is rendered. */ -}}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
+{{- $certsBytes := 0 -}}
+{{- range $i, $pem := .Values.trustedCACerts.certs }}
+{{- $certsBytes = add $certsBytes (len $pem) }}
+{{- if not (trim $pem) }}
+{{- fail (printf "trustedCACerts.certs[%d] is empty -- it would render an empty ca-%d.crt, merge-ca would append nothing and that CA would be silently absent from the merged bundle" $i $i) }}
+{{- end }}
+{{- /* Block-type whitelist: EVERY PEM block must be a CERTIFICATE. A
+combined "cert + key" paste is the most common input shape for a private
+CA and would pass the marker checks below -- writing the private key
+into a world-readable ConfigMap and the Helm release Secret. Enumerate
+BEGIN markers with a positive regex (RE2 has no negative lookahead) and
+reject every type but CERTIFICATE; Go only trusts CERTIFICATE blocks
+anyway. */}}
+{{- range $marker := regexFindAll "(?m)^-----BEGIN [A-Z0-9 ]+-----" $pem -1 }}
+{{- if not (regexMatch "^-----BEGIN CERTIFICATE-----" $marker) }}
+{{- fail (printf "trustedCACerts.certs[%d] contains a PEM block of type %q: only CERTIFICATE blocks are accepted, because a private key pasted alongside the certificate would be written into a world-readable ConfigMap and the Helm release Secret -- export the certificate alone (e.g. openssl x509 -in combined.pem -out cert.crt) and list only that" $i $marker) }}
+{{- end }}
+{{- end }}
+{{- /* Marker checks use EXACT-line matches (trailing whitespace tolerated):
+the merge-ca init container validates the same way, so a file that passes
+the render cannot fail at pod start with a different diagnosis. A prefix
+match would admit e.g. "-----BEGIN CERTIFICATE----- <junk>" here and have
+the init container reject it as a non-CERTIFICATE block. */}}
+{{- if not (and (regexMatch "(?m)^-----BEGIN CERTIFICATE-----[[:space:]]*$" $pem) (regexMatch "(?m)^-----END CERTIFICATE-----[[:space:]]*$" $pem)) }}
+{{- fail (printf "trustedCACerts.certs[%d] does not look like a PEM certificate (must contain line-anchored BEGIN and END CERTIFICATE markers) -- Go would silently ignore an unparseable block and the registry pull would still fail with x509" $i) }}
+{{- end }}
+{{- /* BEGIN/END counts must be equal: an unbalanced paste (e.g. a
+truncated chain) renders blocks Go silently skips -- the feature looks
+enabled but that CA is never trusted. Same exact-line matching as the
+shape check and the merge-ca runtime, [[:space:]] covers \r so CRLF PEMs
+count correctly. */}}
+{{- if ne (len (regexFindAll "(?m)^-----BEGIN CERTIFICATE-----[[:space:]]*$" $pem -1)) (len (regexFindAll "(?m)^-----END CERTIFICATE-----[[:space:]]*$" $pem -1)) }}
+{{- fail (printf "trustedCACerts.certs[%d] has mismatched BEGIN/END CERTIFICATE marker counts (%d BEGIN vs %d END) -- Go silently skips unbalanced blocks and the registry pull would keep failing with x509" $i (len (regexFindAll "(?m)^-----BEGIN CERTIFICATE-----[[:space:]]*$" $pem -1)) (len (regexFindAll "(?m)^-----END CERTIFICATE-----[[:space:]]*$" $pem -1))) }}
+{{- end }}
+{{- end }}
+{{- /* ConfigMap size pre-check: the Kubernetes API limit is 1 MiB for the
+WHOLE ConfigMap object (data + keys + labels + annotations). Pasting a
+full OS trust bundle (~200 KiB) or several large chains would only fail
+at apply time with a generic "too large" error; fail here instead. The
+same limit applies to an operator-provided existingConfigMap, so the
+remedy is not that knob -- it is listing only the CAs actually needed. */}}
+{{- if gt $certsBytes 921600 }}
+{{- fail (printf "trustedCACerts.certs total %d bytes: the Kubernetes ConfigMap API limit is 1 MiB for the whole object and the apply would fail late with a less obvious error -- list only the CAs you actually need (a full OS trust bundle is ~200 KiB and unnecessary here; this check fires at 900 KiB to leave headroom for keys, labels and annotations)" $certsBytes) }}
+{{- end }}
+{{- /* SSL_CERT_FILE is the feature's output: Kubernetes keeps the LAST
+duplicate env entry, and global.env / controlPlane.templateCenter.env
+render AFTER the feature's env block -- so an operator entry with the
+same name silently wins, merge-ca still runs, the Pod still starts and
+the registry pull keeps failing with the very x509 error the feature
+was meant to fix. Fail the render instead of picking a winner. The one
+override path a render cannot see is envFrom (ConfigMap/Secret-backed
+env); it cannot carry a static check, so operators using envFrom must
+not define SSL_CERT_FILE there. */}}
+{{- range $scope, $envList := dict "global.env" (.Values.global.env | default list) "controlPlane.templateCenter.env" (.Values.controlPlane.templateCenter.env | default list) }}
+{{- range $e := $envList }}
+{{- if and (kindIs "map" $e) (eq (toString (index $e "name")) "SSL_CERT_FILE") }}
+{{- fail (printf "%s sets SSL_CERT_FILE, but trustedCACerts.enabled also renders SSL_CERT_FILE=/merged/ca-bundle.crt into the TemplateCenter container and Kubernetes keeps the LAST duplicate env entry -- your value would silently override the merged bundle while merge-ca still runs and the Pod still starts. Remove the entry from %s and put any extra CAs into trustedCACerts.certs, or set trustedCACerts.enabled=false to manage SSL_CERT_FILE yourself" $scope $scope) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

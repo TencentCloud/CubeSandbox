@@ -189,5 +189,14 @@ Useful commands:
   sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
 {{- end }}
 
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
+Trusted CA (trustedCACerts): the merge-ca init container logs the merged
+certificate count at pod start. To re-check on a running pod:
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.templateCenterName" . }} -- \
+    sh -c 'openssl crl2pkcs7 -nocrl -certfile /merged/ca-bundle.crt | openssl pkcs7 -print_certs -noout | grep -c subject='
+Remember: an existingConfigMap change (adding OR removing a CA) only takes
+effect after the pods restart.
+{{- end }}
+
 Docs: https://cubesandbox.com/guide/kubernetes/ (Install · Architecture · Upgrade · FAQ)
       https://cubesandbox.com/zh/guide/kubernetes/ (中文)

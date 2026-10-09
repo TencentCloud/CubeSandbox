@@ -45,6 +45,14 @@ spec:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
+      {{- if and .Values.trustedCACerts.enabled (not .Values.trustedCACerts.existingConfigMap) }}
+      annotations:
+        # Roll the Deployment when trustedCACerts.certs changes: the merged
+        # bundle is a one-time copy into an emptyDir at pod start, so a bare
+        # ConfigMap update would never reach running pods. The
+        # existingConfigMap path is operator-owned (restart manually).
+        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toYaml | sha256sum | quote }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -77,6 +85,110 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- end }}
+      {{- if .Values.trustedCACerts.enabled }}
+      initContainers:
+        # Merge the pod image's system CA bundle with trustedCACerts into an
+        # emptyDir so image pulls from registries with private CA certificates
+        # succeed (the main container reads it via SSL_CERT_FILE).
+        - name: merge-ca
+          # Use the TemplateCenter image itself. Precisely (measured): Go's
+          # SSL_CERT_FILE replaces the trust *file* candidate -- it does NOT
+          # disable the system cert directories (/etc/ssl/certs,
+          # /etc/pki/tls/certs are still read; only same-directory symlinks
+          # are skipped). Building the merged bundle from the same image
+          # keeps the file candidate identical to the image's native bundle
+          # instead of depending on distro-specific directory layouts, and
+          # the image is already cached on the node (no extra pull).
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.templateCenter.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              # Probe known system bundle layouts (Debian/Ubuntu first, then
+              # RHEL-family) -- operators may rebuild this image on another
+              # base distro. Fail loudly when none exists. -s, not -f: a
+              # zero-length or truncated bundle (e.g. a failed
+              # update-ca-certificates in a derived image) would be copied
+              # as the base and the container would run with ONLY the
+              # private CA trusted -- every publicly-trusted target starts
+              # failing, silently. Skipping an empty candidate falls
+              # through to the next probe path; all-empty fails here.
+              # NOTE: run under `sh -ec` — probe with an if-form so a missing
+              # candidate does not trip errexit before the next path is tried.
+              BUNDLE=""
+              for b in /etc/ssl/certs/ca-certificates.crt \
+                       /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+                       /etc/pki/tls/certs/ca-bundle.crt; do
+                if [ -s "$b" ]; then BUNDLE="$b"; break; fi
+              done
+              [ -n "$BUNDLE" ] \
+                || { echo "no non-empty system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
+              cp "$BUNDLE" /merged/ca-bundle.crt
+              # Seam: a probed bundle without a trailing newline would glue the
+              # first user cert onto the last END line; normalize before append.
+              printf '\n' >> /merged/ca-bundle.crt
+              ls /trusted-ca/*.crt >/dev/null 2>&1 \
+                || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
+              # Block-type whitelist: EVERY PEM block must be a CERTIFICATE.
+              # A combined "cert + key" paste is the most common input shape
+              # for a private CA, and a private key must never reach the
+              # merged bundle. validate.yaml enforces the same rule on inline
+              # certs at render time; this pass additionally covers the
+              # existingConfigMap path, whose content a render cannot see.
+              # Exact-line match with a POSIX [[:space:]]* tail (LF, CR/CRLF
+              # and stray trailing spaces all match -- portable across awk
+              # implementations, unlike \r? which only gawk honors), so a
+              # file that passed the render cannot be rejected here with a
+              # different diagnosis.
+              # The offending block is reported by awk; errexit turns its
+              # non-zero exit into a failed init container (fail closed).
+              for f in /trusted-ca/*.crt; do
+                awk '/^-----BEGIN / && $0 !~ /^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE PEM block: " $0; exit 1 }' "$f" 1>&2
+                # Symmetry + presence: an empty or marker-less entry would
+                # append nothing and that CA would be silently absent from
+                # the merged bundle; an unbalanced paste renders blocks Go
+                # silently skips. Same rule as validate.yaml, here for the
+                # existingConfigMap path.
+                awk '/^-----BEGIN / { b++ } /^-----END / { e++ } END { if (b == 0) { print "trusted-ca entry " FILENAME " contains no PEM block (empty or not PEM)"; exit 1 } if (b != e) { print "trusted-ca entry " FILENAME " has unbalanced BEGIN/END CERTIFICATE markers (" b " BEGIN vs " e " END)"; exit 1 } }' "$f" 1>&2
+                # When openssl is available, check that every block actually
+                # parses as X.509: markers intact but the body truncated or
+                # corrupted means Go silently skips the block and the
+                # operator is back to the same x509 error as before enabling
+                # the feature. openssl x509 only reads the FIRST block of a
+                # file, so split on the markers first -- chain entries
+                # (several certs in one .crt) are validated block by block.
+                # Without openssl the textual checks above still gate shape
+                # and block type; only this ASN.1-level check degrades.
+                if command -v openssl >/dev/null 2>&1; then
+                  T=$(mktemp -d)
+                  awk -v dir="$T" '/^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { n++; fn = sprintf("%s/block-%04d.pem", dir, n) } fn { print > fn } /^-----END CERTIFICATE-----[[:space:]]*$/ { fn = "" }' "$f"
+                  for blk in "$T"/block-*.pem; do
+                    openssl x509 -in "$blk" -noout >/dev/null 2>&1 \
+                      || { echo "trusted-ca entry $f contains a CERTIFICATE block that does not parse as X.509 (truncated or corrupted base64/DER) -- Go would silently skip it and the registry pull would keep failing with x509" >&2; rm -rf "$T"; exit 1; }
+                  done
+                  rm -rf "$T"
+                fi
+              done
+              # Append user certs one at a time with a newline separator:
+              # ConfigMap entries are rendered with |- (no trailing newline),
+              # so a bare `cat *.crt` would glue PEM blocks together and
+              # silently drop every cert after the first.
+              for f in /trusted-ca/*.crt; do cat "$f"; printf '\n'; done >> /merged/ca-bundle.crt
+              # Operator signal: the init-container log line that says the
+              # merge actually took effect (grep also tolerates a trailing
+              # \r on CRLF PEMs).
+              echo "trusted-ca: merged bundle contains $(grep -c '^-----BEGIN CERTIFICATE-----' /merged/ca-bundle.crt) certificates (system bundle + user entries)" 1>&2
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /trusted-ca
+              readOnly: true
+            - name: merged-ca
+              mountPath: /merged
+          {{- with .Values.trustedCACerts.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
       containers:
         - name: cube-templatecenter
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
@@ -95,6 +207,10 @@ spec:
           securityContext:
             privileged: true
           env:
+            {{- if .Values.trustedCACerts.enabled }}
+            - name: SSL_CERT_FILE
+              value: /merged/ca-bundle.crt
+            {{- end }}
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             # All CUBE_TEMPLATE_CENTER_*: the pre-rename CUBE_TC_* /
             # CUBEMASTER_* spellings still work as a fallback and log a
@@ -186,6 +302,11 @@ spec:
               mountPath: /etc/cube/ca
               readOnly: true
           {{- end }}
+          {{- if .Values.trustedCACerts.enabled }}
+            - name: merged-ca
+              mountPath: /merged
+              readOnly: true
+          {{- end }}
             - name: cube-templatecenter-log
               mountPath: /data/log/CubeTemplateCenter
             - name: cube-master-storage
@@ -202,6 +323,13 @@ spec:
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
+      {{- end }}
+      {{- if .Values.trustedCACerts.enabled }}
+        - name: trusted-ca
+          configMap:
+            name: {{ include "cube.trustedCAName" . }}
+        - name: merged-ca
+          emptyDir: {}
       {{- end }}
         - name: cube-templatecenter-log
           emptyDir: {}

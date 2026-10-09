@@ -1565,3 +1565,8 @@ true
 {{- printf "%s-ops-blobs" (include "cube.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{- /* ConfigMap holding extra trusted CA certs (trustedCACerts). */ -}}
+{{- define "cube.trustedCAName" -}}
+{{- if .Values.trustedCACerts.existingConfigMap -}}{{ .Values.trustedCACerts.existingConfigMap }}{{- else -}}{{ printf "%s-trusted-ca" (include "cube.fullname" .) }}{{- end -}}
+{{- end -}}
