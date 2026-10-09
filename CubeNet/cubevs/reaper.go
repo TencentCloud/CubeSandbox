@@ -352,33 +352,7 @@ func reapSessions() {
 		return
 	}
 
-	var (
-		key   sessionKey
-		value natSession
-		count int
-	)
-	iter := m.Iterate()
-	for iter.Next(&key, &value) {
-		count++
-		if sessionExpired(now, &key, &value) {
-			err := deleteSessions(m, m2, &key, &value)
-			if err != nil {
-				enqueueEvent(Event{
-					Error:   err,
-					Message: "failed to delete sessions",
-				})
-			}
-
-			if !sessionClosedNormally(&key, &value) {
-				enqueueEvent(Event{
-					Error:   ErrSessionExpiredNotClosed,
-					Message: egressSession(&key, &value, now),
-				})
-			}
-		}
-	}
-
-	err = iter.Err()
+	count, err := reapSessionMaps(m, m2, now)
 	if err != nil {
 		// Known error:
 		//   - ErrIterationAborted
@@ -394,4 +368,56 @@ func reapSessions() {
 	}
 
 	reportCount(count)
+}
+
+// reapSessionMaps removes expired egress sessions and their ingress
+// counterparts. count is the number of entries visited.
+//
+// An expired key is deleted on the following step, after Iterate has moved
+// the cursor past it. Deleting the key Iterate will use next restarts a hash
+// map from the first bucket. The last key is deleted after the walk finishes.
+func reapSessionMaps(egressSessions, ingressSessions *ebpf.Map, now uint64) (int, error) {
+	var (
+		key     sessionKey
+		value   natSession
+		prevKey sessionKey
+		prevVal natSession
+		hasPrev bool
+		count   int
+	)
+	iter := egressSessions.Iterate()
+	for iter.Next(&key, &value) {
+		if hasPrev {
+			deleteExpiredSession(egressSessions, ingressSessions, now, &prevKey, &prevVal)
+		}
+		prevKey = key
+		prevVal = value
+		hasPrev = true
+		count++
+	}
+	if hasPrev {
+		deleteExpiredSession(egressSessions, ingressSessions, now, &prevKey, &prevVal)
+	}
+	if err := iter.Err(); err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
+func deleteExpiredSession(egressSessions, ingressSessions *ebpf.Map, now uint64, key *sessionKey, sess *natSession) {
+	if !sessionExpired(now, key, sess) {
+		return
+	}
+	if err := deleteSessions(egressSessions, ingressSessions, key, sess); err != nil {
+		enqueueEvent(Event{
+			Error:   err,
+			Message: "failed to delete sessions",
+		})
+	}
+	if !sessionClosedNormally(key, sess) {
+		enqueueEvent(Event{
+			Error:   ErrSessionExpiredNotClosed,
+			Message: egressSession(key, sess, now),
+		})
+	}
 }
