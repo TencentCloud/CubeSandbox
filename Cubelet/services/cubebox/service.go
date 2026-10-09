@@ -350,6 +350,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode()))
 	}()
 
+	// Stamped before any early failure so a failed restore is still attributed to the resume path.
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		span.SetAttributes(
+			attribute.String(telemetry.AttrAction, "resume"),
+			attribute.String(telemetry.AttrSnapshotID,
+				strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID])),
+		)
+	}
 	if b := strings.TrimSpace(req.GetBackend()); b != "" {
 		if req.Annotations == nil {
 			req.Annotations = map[string]string{}

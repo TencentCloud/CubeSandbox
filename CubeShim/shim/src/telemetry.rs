@@ -35,6 +35,7 @@ pub const SPAN_CONTAINER_CREATE: &str = "cube-shim.container_create";
 pub const SPAN_CONTAINER_START: &str = "cube-shim.container_start";
 pub const SPAN_SNAPSHOT_CAPTURE: &str = "cube-shim.snapshot.capture";
 pub const SPAN_SNAPSHOT_RESUME: &str = "cube-shim.snapshot.resume";
+pub const SPAN_PAUSE_CAPTURE: &str = "cube-shim.pause.capture";
 pub const SPAN_ROLLBACK_TEARDOWN: &str = "cube-shim.rollback.teardown";
 pub const SPAN_ROLLBACK_RECONNECT: &str = "cube-shim.rollback.reconnect";
 
@@ -261,6 +262,7 @@ mod tests {
             INBOUND_PARENT_ID
         );
 
+        // An untraced caller records nothing, whether it sends no traceparent or a malformed one.
         for metadata in [HashMap::new(), traced_call("garbage")] {
             let cx = propagator.extract(&MetadataExtractor(&metadata));
             assert!(

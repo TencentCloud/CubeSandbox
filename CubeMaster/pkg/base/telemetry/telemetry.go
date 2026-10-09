@@ -85,6 +85,13 @@ const (
 	SpanSnapshotRollbackRestore  = "cubemaster.snapshot.rollback.restore"
 	SpanSnapshotRollbackRegister = "cubemaster.snapshot.rollback.register"
 
+	SpanSandboxPausePrepare   = "cubemaster.sandbox.pause.prepare"
+	SpanSandboxPauseRuntime   = "cubemaster.sandbox.pause.runtime"
+	SpanSandboxPauseFinalize  = "cubemaster.sandbox.pause.finalize"
+	SpanSandboxResumePrepare  = "cubemaster.sandbox.resume.prepare"
+	SpanSandboxResumeRuntime  = "cubemaster.sandbox.resume.runtime"
+	SpanSandboxResumeFinalize = "cubemaster.sandbox.resume.finalize"
+
 	SpanTemplateImageBuild            = "cubetemplatecenter.template.image.build"
 	SpanTemplateImagePrepareSource    = "cubetemplatecenter.template.image.prepare_source"
 	SpanTemplateImageBuildLockWait    = "cubetemplatecenter.template.image.build_lock.wait"
@@ -122,6 +129,8 @@ const (
 	AttrStorageBackend  = "cube.artifact.storage_backend"
 	AttrBackend         = "cube.backend"
 	AttrFallback        = "cube.artifact.fallback"
+	AttrAction          = "cube.action"
+	AttrCrossNode       = "cube.cross_node"
 )
 
 type Shutdown func(context.Context) error
