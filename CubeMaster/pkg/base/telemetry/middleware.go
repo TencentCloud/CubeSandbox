@@ -21,6 +21,7 @@ var tracedRoutes = map[string]bool{
 	"POST /cube/sandbox/:sandbox_id/rollback": true,
 	"POST /cube/snapshot":                     true,
 	"POST /cube/template/from-image":          true,
+	"POST /cube/sandbox/update":               true,
 }
 
 func GinMiddleware() gin.HandlerFunc {
