@@ -219,8 +219,10 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     content_sharing_policy = "shared"
     no_sync = true
 
-  [plugins."io.containerd.monitor.v1.cgroups"]
-    no_prometheus = false
+  # Keep containerd's generic container_* task metrics off /v1/metrics.
+  # Sandbox CPU and memory metrics are at /v1/metrics/resource.
+  [plugins."io.containerd.monitor.task.v1.cgroups"]
+    no_prometheus = true
   [plugins."io.containerd.runtime.v2.task"]
     # Declare both platforms so the same config runs on amd64 and arm64 hosts;
     # containerd matches image manifests against the host's native platform.
