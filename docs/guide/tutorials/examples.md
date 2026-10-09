@@ -18,6 +18,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [Claude Code](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/claude-code-integration) | Redirect Claude Code Bash tool calls into isolated CubeSandbox MicroVMs. |
 | [LangChain](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/langchain-integration) | Use CubeSandbox as a command-execution tool with both LangChain 0.x and 1.x agents. |
 | [Pi Agent](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pi-agent-integration) | Connect Pi Agent tool execution to a CubeSandbox environment. |
+| [Agno](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/agno-integration) | Run an Agno custom Python tool in an isolated CubeSandbox MicroVM. |
 | [OpenClaw](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration) | Configure the OpenClaw skill so agents can execute code in isolated MicroVMs. |
 | [OpenAI Agents SDK](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example) | Connect `E2BSandboxClient` to CubeSandbox, including Shell Agent, pause/resume, and SWE-bench flows. |
 | [OpenAI Agents + Code Interpreter](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | Run data-analysis agents using either generic E2B execution or a stateful Jupyter kernel. |
