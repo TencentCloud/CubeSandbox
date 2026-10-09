@@ -4,6 +4,10 @@ set $redis_pd "__CUBE_PROXY_REDIS_PASSWORD__";
 set $redis_master_name "__CUBE_PROXY_REDIS_MASTER_NAME__";
 set $redis_sentinel_nodes "__CUBE_PROXY_REDIS_SENTINEL_NODES__";
 set $redis_sentinel_pd "__CUBE_PROXY_REDIS_SENTINEL_PASSWORD__";
+# "1" turns on TLS for every Redis connection the Lua side opens (managed Redis
+# with in-transit encryption). Certificates are verified against the trust roots
+# in nginx's lua_ssl_trusted_certificate.
+set $redis_ssl "__CUBE_PROXY_REDIS_SSL__";
 set $redis_index "__CUBE_PROXY_REDIS_DB__";
 set $timeout_min 500;
 set $timeout_max 700;

@@ -62,7 +62,7 @@ persist_clean() {
       CUBE_EXTERNAL_REDIS_PASSWORD CUBE_EXTERNAL_REDIS_MASTER_NAME \
       CUBE_EXTERNAL_REDIS_SENTINEL_NODES CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
       CUBE_EXTERNAL_REDIS_DB REDIS_DB CUBE_PROXY_REGISTRY_REDIS_DB CUBE_LCM_REDIS_DB \
-      CUBE_SANDBOX_REDIS_PASSWORD REDIS_URL
+      CUBE_SANDBOX_REDIS_PASSWORD REDIS_URL CUBE_EXTERNAL_REDIS_TLS
     # shellcheck disable=SC1091
     source "${ONE_CLICK_DIR}/lib/common.sh"
     if [[ "$#" -gt 0 ]]; then
@@ -136,8 +136,15 @@ EOF
 
 test_cubeops_start_redis_password_fallback() {
   local start_sh="${ONE_CLICK_DIR}/scripts/systemd/cubeops-start.sh"
-  grep -Fq 'CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123' "${start_sh}" \
-    || fail "cubeops-start.sh must fall back REDIS_PASSWORD to ceuhvu123"
+  # `-` (not `:-`): an unset password still falls back to the bundled ceuhvu123,
+  # but an explicitly empty external password is preserved so managed Redis
+  # without AuthToken ("no AUTH") is not sent a bogus AUTH. Mirrors the
+  # up-cube-proxy / up-cube-lifecycle-manager fix.
+  grep -Fq 'CUBE_SANDBOX_REDIS_PASSWORD-ceuhvu123' "${start_sh}" \
+    || fail "cubeops-start.sh must fall back REDIS_PASSWORD to ceuhvu123 via - so unset still defaults"
+  if grep -Fq 'CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123' "${start_sh}"; then
+    fail "cubeops-start.sh must not use :- (an explicitly empty external password must stay empty)"
+  fi
 }
 
 test_cubeops_start_derives_redis_db() {
@@ -330,6 +337,322 @@ EOF
     || fail "TemplateCenter must use external Sentinel nodes"
   grep -qF 'sentinel_password: "sentinel-secret"' "${cfg}" \
     || fail "TemplateCenter must use external Sentinel password"
+}
+
+test_external_redis_tls_rendering() {
+  local cfg="${TMP_DIR}/redis-tls.yaml"
+  _fresh() { cat > "${cfg}" <<'EOF'
+redis:
+  nodes: "127.0.0.1:6379"
+  password: "local"
+  db_no: 0
+EOF
+  }
+
+  # external host + TLS on -> `tls: true` inserted (2-space indent) under redis:.
+  _fresh
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    CUBE_EXTERNAL_REDIS_TLS=1
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  )
+  grep -qE '^  tls: true$' "${cfg}" \
+    || fail "TLS on must render 'tls: true' under redis:; got: $(cat "${cfg}")"
+
+  # external host, TLS unset -> `tls: false` (CubeMaster must not dial plaintext
+  # implicitly while other clients speak TLS).
+  _fresh
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  )
+  grep -qE '^  tls: false$' "${cfg}" || fail "TLS unset must render 'tls: false'"
+
+  # re-run updates in place (idempotent: exactly one tls line, value refreshed).
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    CUBE_EXTERNAL_REDIS_TLS=1
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  )
+  [[ "$(grep -cE '^  tls:' "${cfg}")" -eq 1 ]] || fail "re-run must keep exactly one tls: line"
+  grep -qE '^  tls: true$' "${cfg}" || fail "re-run with TLS on must update to 'tls: true'"
+
+  # restore-bundled -> `tls: false` (no stale TLS pointing at the plaintext local).
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=
+    CUBE_EXTERNAL_REDIS_MASTER_NAME=
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster" 1
+  )
+  grep -qE '^  tls: false$' "${cfg}" || fail "restore_bundled must render 'tls: false'"
+  unset -f _fresh
+
+  # A two-space `tls:` key in another block must not be taken for redis.tls:
+  # both the update and the insert stay inside the redis: block.
+  cat > "${cfg}" <<'EOF'
+auth:
+  tls: true
+redis:
+  nodes: "127.0.0.1:6379"
+  password: "local"
+EOF
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  )
+  awk '/^auth:/{a=1; next} /^[^[:space:]#]/{a=0} a && /^  tls: true$/{found=1} END{exit found?0:1}' "${cfg}" \
+    || fail "another block's tls: must stay untouched; got: $(cat "${cfg}")"
+  awk '/^redis:/{r=1; next} /^[^[:space:]#]/{r=0} r && /^  tls: false$/{found=1} END{exit found?0:1}' "${cfg}" \
+    || fail "redis.tls must be rendered inside the redis: block; got: $(cat "${cfg}")"
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    CUBE_EXTERNAL_REDIS_TLS=1
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  )
+  [[ "$(grep -cE '^  tls:' "${cfg}")" -eq 2 ]] || fail "re-run must keep one tls: line per block"
+  awk '/^auth:/{a=1; next} /^[^[:space:]#]/{a=0} a && /^  tls: true$/{found=1} END{exit found?0:1}' "${cfg}" \
+    || fail "re-run must not rewrite another block's tls:"
+  awk '/^redis:/{r=1; next} /^[^[:space:]#]/{r=0} r && /^  tls: true$/{found=1} END{exit found?0:1}' "${cfg}" \
+    || fail "re-run with TLS on must update redis.tls to true"
+
+  # An indented redis: block with four-space children gets tls: at the
+  # children's indentation, and a nested tls: deeper in the block is not taken
+  # for redis.tls.
+  cat > "${cfg}" <<'EOF'
+cube:
+  redis:
+    nodes: "127.0.0.1:6379"
+    password: "local"
+    pool:
+      tls: false
+EOF
+  (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    CUBE_EXTERNAL_REDIS_TLS=1
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  )
+  grep -qxF '    tls: true' "${cfg}" \
+    || fail "indented redis block must get tls: true at the children's indentation; got: $(cat "${cfg}")"
+  grep -qxF '      tls: false' "${cfg}" \
+    || fail "a nested tls: under redis.pool must stay untouched; got: $(cat "${cfg}")"
+  [[ "$(one_click_conf_redis_tls "${cfg}")" == "true" ]] \
+    || fail "one_click_conf_redis_tls must read back the rendered value"
+
+  # A conf.yaml without a redis: block fails instead of silently leaving the
+  # control plane on plaintext.
+  printf 'scheduler:\n  tls: false\n' > "${cfg}"
+  if (
+    # shellcheck disable=SC1091
+    source "${ONE_CLICK_DIR}/lib/common.sh"
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+    CUBE_EXTERNAL_REDIS_PORT=6379
+    CUBE_EXTERNAL_REDIS_TLS=1
+    one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster"
+  ) >/dev/null 2>&1; then
+    fail "rendering redis.tls into a conf.yaml without a redis: block must fail"
+  fi
+
+  # Real shipped templates: exactly one tls line, inside the redis: block.
+  local tpl real
+  for tpl in cubemaster templatecenter; do
+    real="${TMP_DIR}/real-${tpl}.yaml"
+    cp "${ONE_CLICK_DIR}/../../configs/single-node/${tpl}.yaml" "${real}"
+    (
+      # shellcheck disable=SC1091
+      source "${ONE_CLICK_DIR}/lib/common.sh"
+      CUBE_EXTERNAL_REDIS_HOST=10.0.0.30
+      CUBE_EXTERNAL_REDIS_PORT=6379
+      CUBE_EXTERNAL_REDIS_PASSWORD=
+      CUBE_EXTERNAL_REDIS_TLS=1
+      one_click_patch_conf_redis_endpoint "${real}" "${tpl}"
+    )
+    [[ "$(grep -cE '^  tls:' "${real}")" -eq 1 ]] \
+      || fail "${tpl}.yaml must end up with exactly one tls: line"
+    awk '/^redis:/{r=1; next} /^[^[:space:]#]/{r=0} r && /^  tls: true$/{found=1} END{exit found?0:1}' "${real}" \
+      || fail "${tpl}.yaml tls: true must sit inside the redis: block"
+    grep -qF 'password: ""' "${real}" \
+      || fail "${tpl}.yaml must keep an explicitly empty external Redis password"
+  done
+}
+
+test_external_redis_tls_persist_and_scrub() {
+  local env_file="${TMP_DIR}/external-tls.env"
+  : > "${env_file}"
+
+  # External TLS-only Redis without AuthToken: the switch is persisted and the
+  # explicitly empty password stays empty for every client ("no AUTH").
+  # Per-component TLS keys are derived at start and never persisted: they are
+  # stripped like the legacy per-component DB keys.
+  printf '%s\n' CUBE_PROXY_REDIS_SSL=1 CUBE_PROXY_REGISTRY_REDIS_SSL=1 \
+    CUBE_LCM_REDIS_TLS=1 REDIS_TLS=1 >> "${env_file}"
+  persist_clean "${env_file}" \
+    CUBE_EXTERNAL_REDIS_HOST=10.0.0.8 \
+    CUBE_EXTERNAL_REDIS_PASSWORD= \
+    CUBE_EXTERNAL_REDIS_TLS=1
+  assert_value "${env_file}" CUBE_EXTERNAL_REDIS_TLS 1
+  assert_value "${env_file}" CUBE_EXTERNAL_REDIS_PASSWORD ""
+  assert_value "${env_file}" CUBE_PROXY_REDIS_PASSWORD ""
+  local key
+  for key in CUBE_PROXY_REDIS_SSL CUBE_PROXY_REGISTRY_REDIS_SSL CUBE_LCM_REDIS_TLS REDIS_TLS; do
+    assert_key_absent "${env_file}" "${key}"
+  done
+
+  # Back to bundled Redis: the switch itself is dropped too, otherwise the
+  # clients would use TLS against the plaintext local Redis.
+  printf '%s\n' CUBE_PROXY_REDIS_SSL=1 CUBE_PROXY_REGISTRY_REDIS_SSL=1 \
+    CUBE_LCM_REDIS_TLS=1 REDIS_TLS=1 >> "${env_file}"
+  persist_clean "${env_file}"
+  for key in CUBE_EXTERNAL_REDIS_TLS CUBE_PROXY_REDIS_SSL CUBE_PROXY_REGISTRY_REDIS_SSL \
+    CUBE_LCM_REDIS_TLS REDIS_TLS; do
+    assert_key_absent "${env_file}" "${key}"
+  done
+}
+
+test_normalize_redis_tls() {
+  local value got
+  for value in 1 true; do
+    got="$(normalize_redis_tls "${value}")"
+    [[ "${got}" == "1" ]] || fail "normalize_redis_tls ${value} must be 1, got '${got}'"
+  done
+  for value in 0 false ""; do
+    got="$(normalize_redis_tls "${value}")"
+    [[ "${got}" == "0" ]] || fail "normalize_redis_tls '${value}' must be 0, got '${got}'"
+  done
+  for value in yes on TRUE 2; do
+    if ( normalize_redis_tls "${value}" ) >/dev/null 2>&1; then
+      fail "normalize_redis_tls must reject '${value}'"
+    fi
+  done
+}
+
+expect_no_ignored_tls_warning() {
+  local out
+  out="$(
+    unset CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_MASTER_NAME CUBE_EXTERNAL_REDIS_TLS
+    export "$@"
+    one_click_warn_ignored_redis_tls 2>&1
+  )"
+  [[ -z "${out}" ]] || fail "no warning expected for '$*', got: ${out}"
+}
+
+# The bundled Redis is plaintext, so a TLS switch without an external endpoint
+# is dropped; install.sh must say so instead of discarding it silently.
+test_ignored_redis_tls_warns() {
+  local out
+  out="$(
+    unset CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_MASTER_NAME
+    CUBE_EXTERNAL_REDIS_TLS=1
+    one_click_warn_ignored_redis_tls 2>&1
+  )"
+  grep -Fq 'WARNING: CUBE_EXTERNAL_REDIS_TLS is on' <<<"${out}" \
+    || fail "TLS without an external Redis endpoint must warn, got: ${out}"
+
+  expect_no_ignored_tls_warning CUBE_EXTERNAL_REDIS_TLS=1 CUBE_EXTERNAL_REDIS_HOST=redis.example.com
+  expect_no_ignored_tls_warning CUBE_EXTERNAL_REDIS_TLS=1 CUBE_EXTERNAL_REDIS_MASTER_NAME=mymaster
+  expect_no_ignored_tls_warning CUBE_EXTERNAL_REDIS_TLS=0
+
+  grep -Eq '^one_click_warn_ignored_redis_tls$' "${ONE_CLICK_DIR}/install.sh" \
+    || fail "install.sh must call one_click_warn_ignored_redis_tls"
+}
+
+test_redis_tls_switch_derivation() {
+  local lcm="${ONE_CLICK_DIR}/scripts/one-click/up-cube-lifecycle-manager.sh"
+  local proxy="${ONE_CLICK_DIR}/scripts/one-click/up-cube-proxy.sh"
+  local ops="${ONE_CLICK_DIR}/scripts/systemd/cubeops-start.sh"
+  local lcm_line proxy_line registry_line ops_line line var got
+  lcm_line="$(grep -E '^CUBE_LCM_REDIS_TLS=' "${lcm}" || true)"
+  proxy_line="$(grep -E '^CUBE_PROXY_REDIS_SSL=' "${proxy}" || true)"
+  registry_line="$(grep -E '^CUBE_PROXY_REGISTRY_REDIS_SSL=' "${proxy}" || true)"
+  ops_line="$(grep -E '^REDIS_TLS=' "${ops}" || true)"
+  [[ -n "${lcm_line}" && -n "${proxy_line}" && -n "${registry_line}" && -n "${ops_line}" ]] \
+    || fail "LCM / CubeProxy / CubeOps must each derive their Redis TLS switch"
+
+  for line in "${lcm_line}" "${proxy_line}" "${ops_line}"; do
+    var="${line%%=*}"
+    # The single switch turns the client on, normalized to 1.
+    got="$(CUBE_EXTERNAL_REDIS_TLS=true; eval "${line}"; printf '%s' "${!var}")"
+    [[ "${got}" == "1" ]] || fail "${var} must follow CUBE_EXTERNAL_REDIS_TLS=true, got '${got}'"
+    # Unset stays off.
+    got="$(unset CUBE_EXTERNAL_REDIS_TLS; eval "${line}"; printf '%s' "${!var}")"
+    [[ "${got}" == "0" ]] || fail "${var} must default off, got '${got}'"
+    # A per-component value cannot switch one client on by itself.
+    got="$(unset CUBE_EXTERNAL_REDIS_TLS; export "${var}=1"; eval "${line}"; printf '%s' "${!var}")"
+    [[ "${got}" == "0" ]] || fail "${var}=1 without CUBE_EXTERNAL_REDIS_TLS must stay off, got '${got}'"
+    # An invalid switch fails instead of leaving some clients on plaintext.
+    if ( CUBE_EXTERNAL_REDIS_TLS=yes; eval "${line}" ) >/dev/null 2>&1; then
+      fail "${var}: an invalid CUBE_EXTERNAL_REDIS_TLS must fail"
+    fi
+  done
+
+  # The registry timer follows the data-plane switch, not a key of its own.
+  # shellcheck disable=SC2034  # CUBE_PROXY_REDIS_SSL is read by the eval'd line
+  got="$(CUBE_PROXY_REDIS_SSL=1; CUBE_PROXY_REGISTRY_REDIS_SSL=0; eval "${registry_line}"; printf '%s' "${CUBE_PROXY_REGISTRY_REDIS_SSL}")"
+  [[ "${got}" == "1" ]] || fail "registry Redis TLS must follow CUBE_PROXY_REDIS_SSL, got '${got}'"
+}
+
+test_tls_intent_survives_upgrade_merge() {
+  if (( BASH_VERSINFO[0] < 4 )); then
+    echo "SKIP: test_tls_intent_survives_upgrade_merge needs bash 4+ (got ${BASH_VERSION})"
+    return 0
+  fi
+  local key found k
+  for key in CUBE_EXTERNAL_REDIS_TLS CUBE_POSTGRES_SSL_MODE; do
+    found=0
+    for k in "${ONE_CLICK_DB_INTENT_KEYS[@]}"; do
+      if [[ "${k}" == "${key}" ]]; then found=1; fi
+    done
+    [[ "${found}" -eq 1 ]] || fail "${key} must be in ONE_CLICK_DB_INTENT_KEYS"
+    for k in "${ONE_CLICK_DB_ENGINE_INTENT_KEYS[@]}"; do
+      [[ "${k}" != "${key}" ]] || fail "${key} must NOT be an engine intent key"
+    done
+  done
+
+  local dotenv="${TMP_DIR}/tls-intent.env"
+  cat > "${dotenv}" <<'EOF'
+CUBE_EXTERNAL_REDIS_TLS=1
+CUBE_POSTGRES_SSL_MODE=verify-full
+EOF
+  (
+    unset CUBE_EXTERNAL_REDIS_TLS CUBE_POSTGRES_SSL_MODE CUBE_EXTERNAL_POSTGRES_HOST \
+      CUBE_DATABASE_DRIVER CUBE_EXTERNAL_REDIS_DB
+    snapshot_one_click_database_intent "${dotenv}"
+    set -a
+    # shellcheck disable=SC1090
+    source "${dotenv}"
+    set +a
+    capture_one_click_database_dotenv_values
+    # Simulate load_env_file of the merged .one-click.env pinning the old values.
+    CUBE_EXTERNAL_REDIS_TLS=0
+    CUBE_POSTGRES_SSL_MODE=require
+    CUBE_DATABASE_DRIVER=postgres
+    CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.9
+    apply_one_click_database_intent
+    [[ "${CUBE_EXTERNAL_REDIS_TLS}" == "1" ]] \
+      || fail "expected .env CUBE_EXTERNAL_REDIS_TLS=1 to win over preserved 0, got '${CUBE_EXTERNAL_REDIS_TLS}'"
+    [[ "${CUBE_POSTGRES_SSL_MODE}" == "verify-full" ]] \
+      || fail "expected .env CUBE_POSTGRES_SSL_MODE=verify-full to win over preserved require, got '${CUBE_POSTGRES_SSL_MODE}'"
+    [[ "${CUBE_EXTERNAL_POSTGRES_HOST}" == "10.0.0.9" ]] \
+      || fail "TLS-only intent must not scrub the preserved postgres host"
+  ) || exit 1
 }
 
 test_one_click_redis_db_normalizes_leading_zeros() {
@@ -597,6 +920,12 @@ test_one_click_patch_conf_redis_db_handles_indented_block
 test_one_click_patch_conf_redis_db_fails_without_redis
 test_templatecenter_external_redis_endpoint_patch
 test_templatecenter_external_redis_sentinel_patch
+test_external_redis_tls_rendering
+test_external_redis_tls_persist_and_scrub
+test_normalize_redis_tls
+test_ignored_redis_tls_warns
+test_redis_tls_switch_derivation
+test_tls_intent_survives_upgrade_merge
 test_one_click_redis_db_normalizes_leading_zeros
 test_legacy_redis_db_is_derived_on_upgrade
 test_legacy_redis_db_conflict_prefers_master

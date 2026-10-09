@@ -1333,7 +1333,9 @@ resource "kubernetes_service" "cube_lifecycle_manager" {
 # ---------------------------------------------------------------
 
 # global.conf — embeds the Redis password, so store it as a Secret (not a
-# ConfigMap) and mount it as a file into the cube-proxy pod.
+# ConfigMap) and mount it as a file into the cube-proxy pod. redis_ssl is read
+# by the Lua Redis client; this deployer has no Redis TLS setting yet, so it is
+# declared off, as in the Helm chart's entrypoint.
 resource "kubernetes_secret" "cubeproxy_global" {
   count = local.deploy_addons ? 1 : 0
   type  = "Opaque"
@@ -1347,6 +1349,7 @@ resource "kubernetes_secret" "cubeproxy_global" {
       set $redis_port "6379";
       set $redis_pd "${var.redis_password}";
       set $redis_index 0;
+      set $redis_ssl "0";
       set $timeout_min 500;
       set $timeout_max 700;
       set $cube_proxy_host_ip "127.0.0.1";

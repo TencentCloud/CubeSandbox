@@ -81,3 +81,33 @@ func TestConfigFromDBConfig(t *testing.T) {
 		t.Fatalf("ConfigFromDBConfig mismatch:\n got: %+v\nwant: %+v", got, want)
 	}
 }
+
+// TestConfigFromDBConfigSSLMode covers the ssl_mode -> Extra["sslmode"] mapping:
+// a set value is carried into dao.Config.Extra, and an empty value leaves Extra
+// nil so the postgres driver keeps its own default ("disable").
+func TestConfigFromDBConfigSSLMode(t *testing.T) {
+	src := &config.DBConfig{
+		Driver:  "postgres",
+		Addr:    "127.0.0.1:5432",
+		User:    "cube",
+		Pwd:     "cube_pass",
+		DBName:  "cube_test",
+		SSLMode: "require",
+	}
+	got, err := db.ConfigFromDBConfig(src)
+	if err != nil {
+		t.Fatalf("ConfigFromDBConfig: %v", err)
+	}
+	if want := map[string]string{"sslmode": "require"}; !reflect.DeepEqual(got.Extra, want) {
+		t.Fatalf("Extra mismatch: got %+v want %+v", got.Extra, want)
+	}
+
+	src.SSLMode = ""
+	got, err = db.ConfigFromDBConfig(src)
+	if err != nil {
+		t.Fatalf("ConfigFromDBConfig: %v", err)
+	}
+	if got.Extra != nil {
+		t.Fatalf("empty SSLMode must leave Extra nil, got %+v", got.Extra)
+	}
+}

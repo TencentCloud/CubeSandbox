@@ -66,6 +66,25 @@ func TestEventBusEnabledRejectsInvalidValue(t *testing.T) {
 	assert.Contains(t, err.Error(), "CUBE_LCM_EVENTBUS_ENABLED")
 }
 
+// The one-click start script renders CUBE_LCM_REDIS_TLS as 0 or 1.
+func TestRedisTLSFromEnv(t *testing.T) {
+	assert.False(t, Default().RedisTLS)
+
+	for value, want := range map[string]bool{"1": true, "true": true, "0": false, "false": false} {
+		t.Setenv("CUBE_LCM_REDIS_TLS", value)
+		cfg, err := Load()
+		require.NoError(t, err, value)
+		assert.Equal(t, want, cfg.RedisTLS, value)
+	}
+}
+
+func TestRedisTLSRejectsInvalidValue(t *testing.T) {
+	t.Setenv("CUBE_LCM_REDIS_TLS", "yes")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CUBE_LCM_REDIS_TLS")
+}
+
 func TestLeaderElectionConfig(t *testing.T) {
 	t.Setenv("CUBE_LCM_LEADER_ELECTION_ENABLED", "true")
 	t.Setenv("CUBE_LCM_LEADER_LEASE_TTL", "12s")
