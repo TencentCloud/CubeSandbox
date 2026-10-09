@@ -366,7 +366,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 | 快照创建（1 并发，有 cache） | N/A | N/A | 250.2 | 272.8 | 722.5 | 767.6 |
 | 快照创建（5 并发，有 cache） | N/A | N/A | 709.6 | 910.1 | 2829.3 | 3814.5 |
 
-跨机 **恢复** / **从快照创建** 是 **warm dest**：计时前目标节点已有该模版 guest 基础镜像（约 1 Gi）和内核旁路文件（约 50 MiB）。不能和上一版约 6–12 s 的格子直接比，那次含 dest 第一次拉制品。从未跑过该模版的节点仍要付这一次拉取。共享行是源端 export 到 `remote=ready`（声明约 210 MiB）；下面的 dest GET 只是发起到 `running` 之间打 MinIO 的字节，不是把整包下完。
+跨机 **恢复** / **从快照创建** 是 **warm dest**：计时前目标节点已有该模版 guest 基础镜像（约 1 Gi）和内核旁路文件（约 50 MiB）。共享行是源端 export 到 `remote=ready`（声明约 210 MiB）；下面的 dest GET 只是发起到 `running` 之间打 MinIO 的字节，不是把整包下完。
 
 跨机 FromSnap / Resume 的数据量（同一规格、Create 后立刻 Snapshot 或 Pause，guest **没有**额外写脏）：
 
