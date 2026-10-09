@@ -200,6 +200,10 @@ const (
 	maxL7PortsPerHost = 8
 	// Network policy value marker. Must match src/cubevs.h.
 	netPolicyValueStatic = 1
+	// Session packet classes. Must match enum packet_class in src/session.h.
+	packetClassSNAT        = uint8(0)
+	packetClassL7Proxy     = uint8(1)
+	packetClassPortMapping = uint8(2)
 	// programs that power CubeVS.
 	programNameFromEnvoy = "from_envoy"
 	programNameFromCube  = "from_cube"

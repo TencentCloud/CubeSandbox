@@ -174,8 +174,14 @@ type natSession struct {
 
 // timeout returns the timeout for the session in nanoseconds.
 func (s *natSession) tcpTimeout() uint64 {
-	if s.State == uint8(tcpCTTimeWait) && s.ActiveClose == 1 {
-		// The guest kernel active close the connection
+	guestActiveClose := s.ActiveClose == 1
+	if s.PacketClass == packetClassPortMapping {
+		// Port mapping reverses the usual conntrack orientation: ORIGINAL is
+		// the external client and REPLY is the guest server.
+		guestActiveClose = s.ActiveClose == 0
+	}
+	if s.State == uint8(tcpCTTimeWait) && guestActiveClose {
+		// The guest kernel actively closed the connection.
 		return uint64(tcpTimeouts[tcpCTClose].Nanoseconds())
 	}
 

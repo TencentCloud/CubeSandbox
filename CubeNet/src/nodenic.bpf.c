@@ -96,13 +96,20 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 		if (l4->syn && !l4->ack)
 			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
-						    now, TCP_CONNTRACK_SYN_RECV);
+						    now, TCP_CONNTRACK_SYN_SENT);
 		else
 			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
 						    now, TCP_CONNTRACK_ESTABLISHED);
 	} else {
-		sess->access_time = now;
+		/* Port mapping conntrack orientation: the outside client is
+		 * IP_CT_DIR_ORIGINAL, while the guest VM server is IP_CT_DIR_REPLY. */
+		bool syn = l4->syn;
+		bool ack = l4->ack;
+		bool fin = l4->fin;
+		bool rst = l4->rst;
+
+		update_session(IP_CT_DIR_ORIGINAL, sess, now, syn, ack, fin, rst);
 	}
 
 	old_daddr = l3->daddr;

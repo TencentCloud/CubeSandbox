@@ -416,8 +416,8 @@ func TestSessionPolicyRevoked(t *testing.T) {
 		ifindex     = uint32(700)
 		snatPort    = uint16(0x5000) // 80, network byte order on little-endian
 		otherPort   = uint16(0xBB01) // 443
-		packetSNAT  = uint8(0)
-		packetL7    = uint8(1)
+		packetSNAT  = packetClassSNAT
+		packetL7    = packetClassL7Proxy
 		schemeNone  = uint8(0)
 		schemeHTTP  = uint8(1)
 		schemeHTTPS = uint8(2)
