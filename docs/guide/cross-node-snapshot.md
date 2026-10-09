@@ -329,7 +329,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 | Create from snapshot (concurrency 1, cached) | N/A | N/A | 250.2 | 272.8 | 722.5 | 767.6 |
 | Create from snapshot (concurrency 5, cached) | N/A | N/A | 709.6 | 910.1 | 2829.3 | 3814.5 |
 
-Cross-node **Resume** and **FromSnap** cells are **warm dest**: the target already had the template guest OS image (~1 Gi) and kernel sidecar (~50 MiB) before timing. They are not comparable to the previous revision’s ~6–12 s cells, which included a dest that still had to fetch that artifact. A first FromSnap onto a node that has never served the template still pays that one-time fetch. Share rows are origin export to `remote=ready` (advertised package ~210 MiB); dest GET below is only bytes read from MinIO between start and `running`, not a download of that whole package.
+Cross-node **Resume** and **FromSnap** cells are **warm dest**: the target already had the template guest OS image (~1 Gi) and kernel sidecar (~50 MiB) before timing. Share rows are origin export to `remote=ready` (advertised package ~210 MiB); dest GET below is only bytes read from MinIO between start and `running`, not a download of that whole package.
 
 Cross-node FromSnap / Resume payload (same spec; Snapshot or Pause immediately after Create; **no** extra guest dirty-page load):
 
