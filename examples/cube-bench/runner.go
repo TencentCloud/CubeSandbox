@@ -16,6 +16,13 @@ type IterResult struct {
 	CreateMs float64
 	DeleteMs float64
 	Err      string
+
+	// Scheduled-workload diagnostics. All zero in legacy mode.
+	TemplateID         string
+	ScheduledArrivalMs float64 // planned arrival offset from bench start
+	ActualStartMs      float64 // actual goroutine start offset from bench start
+	SchedDelayMs       float64 // ActualStartMs - ScheduledArrivalMs (queueing delay)
+	LifetimeMs         float64
 }
 
 type createResp struct {
@@ -23,12 +30,19 @@ type createResp struct {
 }
 
 func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
+	return doBenchCycle(client, cfg, cfg.requestBody, seq, 0)
+}
+
+// doBenchCycle runs one create(+delete) cycle with an explicit request body.
+// deleteDelay > 0 makes the client wait that long after a successful create
+// before issuing the DELETE (scheduled lifetime); 0 deletes immediately.
+func doBenchCycle(client *http.Client, cfg *Config, body []byte, seq int, deleteDelay time.Duration) IterResult {
 	r := IterResult{Seq: seq}
 	apiURL := cfg.APIURL
 
 	// CREATE
 	t0 := time.Now()
-	req, err := http.NewRequest("POST", apiURL+"/sandboxes", bytes.NewReader(cfg.requestBody))
+	req, err := http.NewRequest("POST", apiURL+"/sandboxes", bytes.NewReader(body))
 	if err != nil {
 		r.Err = fmt.Sprintf("create request build: %v", err)
 		return r
@@ -64,6 +78,9 @@ func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 
 	// DELETE
 	if cfg.Mode == "create-delete" && cr.SandboxID != "" {
+		if deleteDelay > 0 {
+			time.Sleep(deleteDelay)
+		}
 		t0 = time.Now()
 		dreq, err := http.NewRequest("DELETE", apiURL+"/sandboxes/"+cr.SandboxID, nil)
 		if err != nil {
@@ -89,6 +106,22 @@ func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 	return r
 }
 
+// benchOneScheduled runs one pre-generated request: per-request template,
+// server-side TTL hint (timeout = lifetime + 60s), and a client-side DELETE
+// once the lifetime elapses.
+func benchOneScheduled(client *http.Client, cfg *Config, sr ScheduledRequest) IterResult {
+	var timeoutS *int64
+	if sr.Lifetime > 0 {
+		t := int64(sr.Lifetime.Seconds()) + 60
+		timeoutS = &t
+	}
+	body, err := buildCreateRequestBodyWithTimeout(sr.TemplateID, cfg.hostMountValue, cfg.NetworkPolicy, timeoutS)
+	if err != nil {
+		return IterResult{Seq: sr.Seq, Err: fmt.Sprintf("create request body build: %v", err)}
+	}
+	return doBenchCycle(client, cfg, body, sr.Seq, sr.Lifetime)
+}
+
 func benchOneDry(cfg *Config, seq int) IterResult {
 	r := IterResult{Seq: seq}
 
@@ -106,6 +139,40 @@ func benchOneDry(cfg *Config, seq int) IterResult {
 
 	if cfg.Mode == "create-delete" {
 		deleteLat := cfg.DryLatencyMean*0.4 + cfg.DryLatencyStd*0.5*rand.NormFloat64()
+		if deleteLat < 1 {
+			deleteLat = 1
+		}
+		time.Sleep(time.Duration(deleteLat * float64(time.Millisecond)))
+		r.DeleteMs = deleteLat
+	}
+
+	return r
+}
+
+// benchOneDryScheduled simulates one scheduled request. Randomness comes from
+// a per-request rng derived from (seed, seq), so a fixed --seed reproduces the
+// exact same latencies/errors regardless of goroutine scheduling.
+func benchOneDryScheduled(cfg *Config, sr ScheduledRequest) IterResult {
+	rng := rand.New(rand.NewSource(cfg.Seed*1000003 + int64(sr.Seq) + 1))
+	r := IterResult{Seq: sr.Seq}
+
+	createLat := cfg.DryLatencyMean + cfg.DryLatencyStd*rng.NormFloat64()
+	if createLat < 1 {
+		createLat = 1
+	}
+	time.Sleep(time.Duration(createLat * float64(time.Millisecond)))
+	r.CreateMs = createLat
+
+	if rng.Float64() < cfg.DryErrorRate {
+		r.Err = fmt.Sprintf("simulated error (seq=%d)", sr.Seq)
+		return r
+	}
+
+	if cfg.Mode == "create-delete" {
+		if sr.Lifetime > 0 {
+			time.Sleep(sr.Lifetime)
+		}
+		deleteLat := cfg.DryLatencyMean*0.4 + cfg.DryLatencyStd*0.5*rng.NormFloat64()
 		if deleteLat < 1 {
 			deleteLat = 1
 		}
@@ -171,6 +238,48 @@ func RunBenchmark(cfg *Config, resultCh chan<- IterResult, client *http.Client) 
 			}
 			resultCh <- r
 		}(i + 1)
+	}
+
+	wg.Wait()
+	close(resultCh)
+}
+
+// RunScheduled dispatches a pre-generated request sequence: the dispatcher
+// sleeps until each request's scheduled arrival offset, then blocks on the
+// concurrency semaphore before releasing the goroutine. The gap between
+// scheduled arrival and actual goroutine start is reported as SchedDelayMs.
+func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterResult, client *http.Client) {
+	sem := make(chan struct{}, cfg.Concurrency)
+	var wg sync.WaitGroup
+
+	if !cfg.DryRun && client == nil {
+		client = newHTTPClient(cfg.Concurrency)
+	}
+
+	benchStart := time.Now()
+	for i := range sched {
+		sr := sched[i]
+		if d := time.Until(benchStart.Add(sr.ArrivalOffset)); d > 0 {
+			time.Sleep(d)
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(sr ScheduledRequest, actualStart time.Duration) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			var r IterResult
+			if cfg.DryRun {
+				r = benchOneDryScheduled(cfg, sr)
+			} else {
+				r = benchOneScheduled(client, cfg, sr)
+			}
+			r.TemplateID = sr.TemplateID
+			r.ScheduledArrivalMs = float64(sr.ArrivalOffset.Microseconds()) / 1000.0
+			r.ActualStartMs = float64(actualStart.Microseconds()) / 1000.0
+			r.SchedDelayMs = r.ActualStartMs - r.ScheduledArrivalMs
+			r.LifetimeMs = float64(sr.Lifetime.Microseconds()) / 1000.0
+			resultCh <- r
+		}(sr, time.Since(benchStart))
 	}
 
 	wg.Wait()

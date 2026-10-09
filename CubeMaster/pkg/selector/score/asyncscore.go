@@ -20,6 +20,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
+// loopAsyncScore 后台协程：周期性为本地缓存中所有节点计算多因子加权平均分，
+// 将结果直接写回节点的 Score 字段（异步评分，供 multi_factor 插件直接读取）。
+// 评分间隔由 MultiFactorWeightedAverage.ScoreInterval 控制
 func loopAsyncScore(ctx context.Context) {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if cfg == nil {
@@ -83,6 +86,7 @@ func loopAsyncScore(ctx context.Context) {
 	}
 }
 
+// printAsyncScores 调试用：将健康节点的多因子评分写入 tabwriter 输出（MockDebug 模式）
 func printAsyncScores(w *tabwriter.Writer) {
 	if w == nil {
 		return
@@ -104,6 +108,7 @@ func printAsyncScores(w *tabwriter.Writer) {
 	w.Flush()
 }
 
+// getAsyncMultiFactorTotalWeight 计算多因子异步评分启用因子的权重总和
 func getAsyncMultiFactorTotalWeight() (float64, error) {
 	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if sconf == nil {
@@ -116,6 +121,7 @@ func getAsyncMultiFactorTotalWeight() (float64, error) {
 	return w, nil
 }
 
+// getMultiFactorWeightedAverageScore 计算节点多因子加权平均分（未归一化）
 func getMultiFactorWeightedAverageScore(n *node.Node) float64 {
 	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if sconf == nil {

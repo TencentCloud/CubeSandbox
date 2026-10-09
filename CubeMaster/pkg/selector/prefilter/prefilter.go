@@ -21,6 +21,7 @@ import (
 type prefilter struct {
 }
 
+// getSchedulableNodesByInstanceType 可调度的节点获取函数（可替换，便于测试）
 var getSchedulableNodesByInstanceType = localcache.GetSchedulableNodesByInstanceType
 
 func NewPreFilter() *prefilter {
@@ -32,6 +33,12 @@ func (l *prefilter) ID() string {
 	return constants.SelectorPreFilterID
 }
 
+// Select 预过滤：从本地缓存中取出可调度节点，剔除以下节点：
+// 1. 不健康的节点；
+// 2. 在最近过滤名单中（未禁用熔断过滤时）；
+// 3. 不满足硬性节点亲和性约束的节点；
+// 4. MVM 数量达到上限的节点；
+// 5. 指标更新时间超时的节点（全局指标或本地指标）
 func (l *prefilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil {

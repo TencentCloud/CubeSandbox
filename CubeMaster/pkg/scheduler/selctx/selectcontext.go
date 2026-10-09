@@ -7,6 +7,8 @@ package selctx
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/smallnest/weighted"
@@ -17,17 +19,61 @@ import (
 )
 
 type SelectorCtx struct {
-	Ctx            context.Context
-	ReqRes         *RequestResource
-	lastBadFilters []*node.Node
-	result         node.NodeList
+	Ctx             context.Context
+	ReqRes          *RequestResource
+	RequestLabels   map[string]string
+	SnapshotVersion string
+	lastBadFilters  []*node.Node
+	result          node.NodeList
+	snapshot        node.NodeList
+	snapshotFacts   map[string]SnapshotNodeFacts
 
+	// profileName is stamped by Select and may be read concurrently by the
+	// create path after a timeout, so it goes through atomic accessors.
+	profileName atomic.Value // string
+	// rejectReason is stamped by filters whose all-reject explains a later
+	// no_node failure (e.g. the realtime create concurrency guard); filters
+	// run concurrently, so it goes through atomic accessors.
+	rejectReason    atomic.Value // string
 	selName         string
 	rSelect         weighted.W
 	resultWithScore node.NodeScoreList
 
 	Affinity     Affinity
 	InstanceType string
+}
+
+// SetProfileName records the profile that routed this request.
+func (s *SelectorCtx) SetProfileName(name string) { s.profileName.Store(name) }
+
+// GetProfileName returns the stamped profile name, or "" if Select has not
+// stamped one yet.
+func (s *SelectorCtx) GetProfileName() string {
+	if value := s.profileName.Load(); value != nil {
+		return value.(string)
+	}
+	return ""
+}
+
+// RejectReasonConcurrencyLimit marks a no-candidate outcome caused by the
+// realtime_create_num guard rejecting every candidate (cluster-wide create
+// concurrency saturated). The value is used verbatim as the reason label of
+// scheduler_attempts_total.
+const RejectReasonConcurrencyLimit = "concurrency_limit"
+
+// SetRejectReason stamps the reason that explains a subsequent no-candidate
+// failure; "" clears it. Select clears the stamp at entry so retries of a
+// reused SelectorCtx never leak a stale reason into a new attempt.
+func (s *SelectorCtx) SetRejectReason(reason string) { s.rejectReason.Store(reason) }
+
+// GetRejectReason returns the stamped reject reason, or "" if none.
+func (s *SelectorCtx) GetRejectReason() string {
+	if value := s.rejectReason.Load(); value != nil {
+		if reason, ok := value.(string); ok {
+			return reason
+		}
+	}
+	return ""
 }
 
 type Affinity struct {
@@ -57,6 +103,85 @@ type ImageSpec struct {
 	ImageID string
 }
 
+type SnapshotNodeFacts struct {
+	TemplateLocal          bool
+	TemplateLocalKnown     bool
+	SnapshotStorageAllowed bool
+	SnapshotStorageKnown   bool
+}
+
+var snapshotSequence atomic.Uint64
+
+// FreezeSnapshot defensively clones all mutable request and node data used by
+// plugins and assigns a version shared by the whole scheduling pipeline. The
+// local cache already returns clones; this second boundary makes the snapshot
+// ownership explicit and protects callers that inject nodes in tests or
+// benchmark simulations.
+func (s *SelectorCtx) FreezeSnapshot() {
+	s.freeze(true)
+}
+
+// FreezeMetadata is FreezeSnapshot without the per-node deep clone: it freezes
+// the request data, snapshot facts and version, and pins the candidate list
+// (shallow slice copy, still stable while result is narrowed by filters), but
+// the snapshot shares the node objects with result. Use it when no consumer
+// reads SnapshotNodes — today only gRPC external plugins serialize the frozen
+// node set, and the local cache already hands out clones, so without them the
+// O(len(candidates)) deep clone has no consumer.
+func (s *SelectorCtx) FreezeMetadata() {
+	s.freeze(false)
+}
+
+func (s *SelectorCtx) freeze(cloneNodes bool) {
+	if s == nil {
+		return
+	}
+	if s.Ctx == nil {
+		s.Ctx = context.Background()
+	}
+	if s.result != nil {
+		if cloneNodes {
+			frozen := make(node.NodeList, 0, len(s.result))
+			for _, candidate := range s.result {
+				frozen = append(frozen, candidate.Clone())
+			}
+			s.result = frozen
+		}
+		s.snapshot = append(node.NodeList(nil), s.result...)
+	}
+	if s.ReqRes != nil {
+		request := *s.ReqRes
+		request.TemplateNodeScope = append([]string(nil), s.ReqRes.TemplateNodeScope...)
+		if s.ReqRes.ErofsImages != nil {
+			request.ErofsImages = make([]*ImageSpec, 0, len(s.ReqRes.ErofsImages))
+			for _, image := range s.ReqRes.ErofsImages {
+				if image == nil {
+					request.ErofsImages = append(request.ErofsImages, nil)
+					continue
+				}
+				cloned := *image
+				request.ErofsImages = append(request.ErofsImages, &cloned)
+			}
+		}
+		s.ReqRes = &request
+	}
+	if s.RequestLabels != nil {
+		labels := make(map[string]string, len(s.RequestLabels))
+		for key, value := range s.RequestLabels {
+			labels[key] = value
+		}
+		s.RequestLabels = labels
+	}
+	if s.snapshotFacts != nil {
+		facts := make(map[string]SnapshotNodeFacts, len(s.snapshotFacts))
+		for nodeID, value := range s.snapshotFacts {
+			facts[nodeID] = value
+		}
+		s.snapshotFacts = facts
+	}
+	s.SnapshotVersion = fmt.Sprintf("%d-%d", time.Now().UnixNano(), snapshotSequence.Add(1))
+}
+
 func New(name string) *SelectorCtx {
 	s := &SelectorCtx{
 		selName: name,
@@ -84,6 +209,24 @@ func (s *SelectorCtx) Nodes() node.NodeList {
 	return s.result
 }
 
+// SnapshotNodes returns the complete frozen node set for SnapshotVersion. It
+// remains stable while result is narrowed by Filter plugins.
+func (s *SelectorCtx) SnapshotNodes() node.NodeList {
+	return s.snapshot
+}
+
+func (s *SelectorCtx) SetSnapshotFacts(facts map[string]SnapshotNodeFacts) {
+	s.snapshotFacts = facts
+}
+
+func (s *SelectorCtx) SnapshotFacts(nodeID string) (SnapshotNodeFacts, bool) {
+	if s == nil || s.snapshotFacts == nil {
+		return SnapshotNodeFacts{}, false
+	}
+	facts, ok := s.snapshotFacts[nodeID]
+	return facts, ok
+}
+
 func (s *SelectorCtx) LeastNodes(n int) node.NodeList {
 	size := s.result.Len()
 	if n >= 0 && n <= size {
@@ -94,6 +237,7 @@ func (s *SelectorCtx) LeastNodes(n int) node.NodeList {
 
 func (s *SelectorCtx) SetNodes(list node.NodeList) {
 	s.result = list
+	s.resultWithScore = nil
 }
 
 func (s *SelectorCtx) LeastScoreNodes(n int) node.NodeScoreList {
@@ -136,18 +280,28 @@ func (s *SelectorCtx) GetReqRes() *RequestResource {
 }
 
 func (s *SelectorCtx) LeastRandomSelect(n int) *node.Node {
+	// Clear items accumulated by a previous selection attempt before reusing
+	// this selector context.
+	s.rSelect.RemoveAll()
+	added := 0
 	if s.resultWithScore.Len() == 0 {
 
 		leastNodes := s.LeastNodes(n)
 		for i := range leastNodes {
 			s.rSelect.Add(leastNodes[i], 1)
 		}
+		added = leastNodes.Len()
 	} else if s.resultWithScore.Len() > 0 {
 		leastNodes := s.LeastScoreNodes(n)
 		for i := range leastNodes {
 			s.rSelect.Add(leastNodes[i].OrigNode, int(leastNodes[i].Score*1e6))
 		}
+		added = leastNodes.Len()
 	} else {
+		return nil
+	}
+	if added == 0 {
+		// No candidates to draw from; Next would panic on an empty selector.
 		return nil
 	}
 

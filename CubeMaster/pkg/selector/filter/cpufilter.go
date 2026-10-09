@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// cpuFilter CPU 资源过滤插件：剔除 CPU 配额不足或 CPU 使用率过高的节点
 type cpuFilter struct {
 }
 
@@ -29,6 +30,9 @@ func (l *cpuFilter) String() string {
 	return l.ID()
 }
 
+// Select 过滤规则：
+// 1. 节点空闲 CPU 配额（有效配额 - 已分配）必须大于请求 CPU；
+// 2. 节点实时 CPU 利用率必须低于 NodeMaxCpuUtil 阈值
 func (l *cpuFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	cpuq := selCtx.GetResCpuFromCtx()
 	sconf := config.GetConfig().Scheduler

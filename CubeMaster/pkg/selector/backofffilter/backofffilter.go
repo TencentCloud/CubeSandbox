@@ -28,6 +28,9 @@ func (l *backofffilter) ID() string {
 	return constants.SelectorBackoffFilterID
 }
 
+// Select 兜底过滤（主过滤失败后的降级路径）：
+// 未配置兜底亲和性选择器或该实例类型被禁用兜底过滤时返回空列表；
+// 否则放宽条件重新选取节点：仅校验兜底亲和性、MVM 上限与三类磁盘使用率
 func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil {
