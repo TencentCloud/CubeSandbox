@@ -234,7 +234,8 @@ export default withMermaid(defineConfig({
                 { text: 'Pre-warm a Template Service', link: '/guide/tutorials/prewarm-template-service' },
                 { text: 'Local & Remote Image Practice', link: '/guide/tutorials/template-build-practice' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
-                { text: 'Template Aliases', link: '/guide/template-aliases' }
+                { text: 'Template Aliases', link: '/guide/template-aliases' },
+                { text: 'MCP in Sandboxes', link: '/guide/mcp-gateway' }
               ]
             },
             {
@@ -451,7 +452,8 @@ export default withMermaid(defineConfig({
                 { text: '预热模板服务', link: '/zh/guide/tutorials/prewarm-template-service' },
                 { text: '本地与远程镜像实战', link: '/zh/guide/tutorials/template-build-practice' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
-                { text: '模板别名', link: '/zh/guide/template-aliases' }
+                { text: '模板别名', link: '/zh/guide/template-aliases' },
+                { text: '在沙箱中使用 MCP', link: '/zh/guide/mcp-gateway' }
               ]
             },
             {

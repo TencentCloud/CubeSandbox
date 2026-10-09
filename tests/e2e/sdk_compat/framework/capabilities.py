@@ -31,6 +31,8 @@ PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 VOLUME_PLUGIN = "volume_plugin"
 AUTH_SIMPLE_KEY = "auth_simple_key"
+# E2B-compatible `mcp` create option served by the in-sandbox mcp-gateway.
+MCP_GATEWAY = "mcp_gateway"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -45,6 +47,7 @@ E2B_CAPABILITIES = frozenset(
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,
+        MCP_GATEWAY,
     }
 )
 
@@ -68,6 +71,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         VOLUME_PLUGIN,
         AUTH_SIMPLE_KEY,
         NETWORK_L7_CUSTOM_PORT,
+        MCP_GATEWAY,
     }
 )
 

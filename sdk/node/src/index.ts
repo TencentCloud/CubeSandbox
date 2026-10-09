@@ -6,6 +6,9 @@ export const VERSION = "0.3.0";
 export {
   Sandbox,
   JUPYTER_PORT,
+  MCP_PORT,
+  type McpServer,
+  type GitHubMcpServerConfig,
   type CreateOptions,
   type RunCodeOptions,
   type PauseOptions,

@@ -19,6 +19,10 @@ export CUBE_PROXY_NODE_IP=<cubeproxy-node-ip>
 export CUBE_PROXY_PORT_HTTP=80
 export CUBE_PROXY_SCHEME=http
 export CUBE_SANDBOX_DOMAIN=cube.app
+
+# Template tried first when CreateOptions.MCP is set and TemplateID is empty;
+# CUBE_TEMPLATE_ID is used if it does not exist.
+export CUBE_MCP_TEMPLATE_ID=mcp-gateway
 ```
 
 `NewConfigFromEnv` also accepts `E2B_API_URL` and `E2B_API_KEY`; `CUBE_API_URL` and `CUBE_API_KEY` take precedence.
@@ -272,6 +276,21 @@ _ = resumed
 ```
 
 `Sandbox.Resume` is available for compatibility but deprecated; prefer `Client.Connect`.
+
+## MCP Gateway (Preview)
+
+Set `MCP` to start an E2B-compatible MCP gateway inside the sandbox. It needs a template that ships `mcp-gateway`; when `TemplateID` is empty, the alias `mcp-gateway` is tried first (override with `CUBE_MCP_TEMPLATE_ID` or `Config.MCPTemplateID`), then `CUBE_TEMPLATE_ID` if that template does not exist. An error matching `ErrTemplateNotFound` is returned when neither exists. A failed start returns an error wrapping `ErrMCPGateway` and kills the sandbox. See [MCP Gateway](../../docs/guide/mcp-gateway.md).
+
+```go
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	MCP: cubesandbox.MCPServers{"duckduckgo": map[string]any{}},
+})
+if err != nil {
+	return err
+}
+url := sb.GetMCPURL()               // streamable HTTP endpoint
+token, err := sb.GetMCPToken(ctx)   // send as "Authorization: Bearer <token>"
+```
 
 ## Network Policy
 

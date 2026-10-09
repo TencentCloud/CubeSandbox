@@ -168,6 +168,14 @@ It also builds a template with writable-layer size, exposed ports, HTTP probe
 and environment variables, then verifies those advanced parameters in the
 template detail returned by CubeAPI. Template operations are CubeSandbox-only.
 
+`cases/mcp/test_mcp_gateway.py` covers the E2B-compatible `mcp` create option on
+both backends: tool listing and calls through CubeProxy, `401` without a valid
+token, token recovery after `connect`, pause/resume, clone (CubeSandbox only),
+CubeAPI `400` for malformed `mcp`, and SDK failure on an unknown server. It needs
+a template built from `examples/mcp-gateway/template/Dockerfile`, selected with
+`SDK_E2E_MCP_TEMPLATE_ID` (default alias `mcp-gateway`). When that template does
+not exist, the module is skipped and the rest of the suite still runs.
+
 ### 2.7 Concurrency
 
 `cases/concurrency/test_isolation.py` currently validates file isolation between
