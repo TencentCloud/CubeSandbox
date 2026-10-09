@@ -1,0 +1,52 @@
+{
+  "schema_version": "plan_frozen_v1",
+  "frozen_at": "2026-09-14T10:56:00+08:00",
+  "baseline_sha": "2668a520878a1ecae1cef1aabd273796d95dca25",
+  "candidate_binary_sha": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "stock_binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "experiments": [
+    {
+      "id": "E1_operator_journey",
+      "title": "运维可用性：启用/观察/故障/回滚",
+      "arms": ["journey"],
+      "warmup": 0,
+      "measure": 1
+    },
+    {
+      "id": "E2_http_hot_path",
+      "title": "真实VM热路径：control/healthy/delayed/timeout",
+      "arms": ["control", "healthy", "delayed", "timeout"],
+      "warmup_per_arm": 2,
+      "measure_per_arm": 20,
+      "template": "small",
+      "engineering_targets": {
+        "healthy_success_ge_control": true,
+        "healthy_api_p95_delta_ms_max": 50,
+        "timeout_bounded_by_config": true,
+        "filter_before_score_isolation": "100%"
+      },
+      "delayed_fault_ms": 80,
+      "timeout_fault_ms": 1500,
+      "scorer_timeout": "200ms"
+    },
+    {
+      "id": "E3_business_signal",
+      "title": "业务信号改变合法候选排序（mock_metrics）",
+      "arms": ["prefer_a", "prefer_b"],
+      "measure_per_arm": 6
+    },
+    {
+      "id": "E4_filter_before_score",
+      "title": "Filter排除节点不被外部分数复活",
+      "arms": ["isolation"],
+      "measure": 3
+    },
+    {
+      "id": "E5_binpack_probe_optional",
+      "title": "CPU/内存错配probe（可选）",
+      "optional": true,
+      "note": "must not override VALID_NO_IMPROVEMENT"
+    }
+  ],
+  "thresholds_immutable": true
+}

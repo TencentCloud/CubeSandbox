@@ -45,3 +45,13 @@ var filters = map[string]interface{}{
 	"disk":                NewDiskFilter,
 	"thirtparty":          NewThirtpartyFilter,
 }
+
+// RegisteredFilterNames returns the live filter registry keys for cross-package
+// drift checks against config.AllowedSchedulerFilterNames().
+func RegisteredFilterNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(filters))
+	for name := range filters {
+		out[name] = struct{}{}
+	}
+	return out
+}
