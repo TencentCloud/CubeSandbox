@@ -305,7 +305,16 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 	}}); err != nil {
 		return nil, fmt.Errorf("set egress snat ip failed: %w", err)
 	}
+	// DNS-learned egress rules are written from user space, so the poller is
+	// not optional: without it a sandbox whose policy names a domain would
+	// resolve the name and then be denied the address it resolved. Fail
+	// startup rather than come up with DNS-based policy silently broken.
+	poller, err := cubevs.StartDNSPoller()
+	if err != nil {
+		return nil, fmt.Errorf("start dns poller failed: %w", err)
+	}
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_local_port_range", []byte("10000\t19999"), 0644); err != nil {
+		poller.Stop()
 		return nil, fmt.Errorf("set ip_local_port_range failed: %w", err)
 	}
 	// Direct mode (no cube-router): the datapath resolves on-link neighbors via
@@ -314,9 +323,11 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 	// the direct on-link path, so there is nothing to scan.
 	if params.EgressRedirectFlags == 0 {
 		if err := cubevs.StartDirectNeighScanner(params.NodeIP); err != nil {
+			poller.Stop()
 			return nil, fmt.Errorf("start direct neighbor scanner failed: %w", err)
 		}
 	}
+	startDNSPollerStatsDrain(poller)
 	return cubeRouter, nil
 }
 
@@ -376,6 +387,38 @@ func loadL7MarksConfig(params *cubevs.Params) error {
 		}
 	}
 	return nil
+}
+
+// dnsPollerStatsInterval is how often the DNS poller's counters are logged. The
+// counters are the only way a dropped DNS reply becomes visible — a lost perf
+// sample or a failed re-injection means one resolution silently did not get
+// learned — so they need a reader, but they move slowly enough that a minute is
+// plenty.
+const dnsPollerStatsInterval = time.Minute
+
+// startDNSPollerStatsDrain logs the poller's counters whenever they change.
+// The poller owns its own lifecycle, exactly like StartSessionReaper; the
+// controller only surfaces its health in Cubelet logs.
+func startDNSPollerStatsDrain(poller *cubevs.DNSPoller) {
+	go func() {
+		logger := CubeLog.WithContext(context.Background())
+		ticker := time.NewTicker(dnsPollerStatsInterval)
+		defer ticker.Stop()
+		var last cubevs.DNSPollerStats
+		for range ticker.C {
+			cur := poller.Stats()
+			if cur == last {
+				continue
+			}
+			last = cur
+			if cur.EventsLost > 0 || cur.ParseErrors > 0 || cur.LearnErrors > 0 || cur.InjectErrors > 0 {
+				logger.Warnf("cubevs dns poller: seen=%d lost=%d parse_err=%d learn_err=%d inject_err=%d",
+					cur.EventsSeen, cur.EventsLost, cur.ParseErrors, cur.LearnErrors, cur.InjectErrors)
+				continue
+			}
+			logger.Infof("cubevs dns poller: seen=%d", cur.EventsSeen)
+		}
+	}()
 }
 
 func startCubeVSSessionLogDrain() {

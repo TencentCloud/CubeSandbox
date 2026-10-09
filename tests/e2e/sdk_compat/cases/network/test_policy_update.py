@@ -12,11 +12,14 @@ than grandfathered.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from framework.assertions import assert_command_ok
 from framework.capabilities import (
     NETWORK_ALLOW_DENY,
+    NETWORK_DNS_ALLOW,
     NETWORK_DYNAMIC_UPDATE,
     PAUSE_RESUME,
     ROLLBACK_CLONE,
@@ -47,11 +50,59 @@ pytestmark = [
 ]
 
 
-def probe(sdk_sandbox, sdk_e2e_config, target: str):
+DNS_LEARN_DOMAIN = os.environ.get("SDK_E2E_DNS_ALLOW_DOMAIN", "example.com")
+DNS_LEARN_PORT = int(os.environ.get("SDK_E2E_DNS_ALLOW_TCP_PORT", "443"))
+
+
+def probe(sdk_sandbox, sdk_e2e_config, target: str, port: int | None = None):
+    kwargs = {"timeout": sdk_e2e_config.network_probe_timeout}
+    if port is not None:
+        kwargs["port"] = port
     return sdk_sandbox.run_command(
-        tcp_probe_command(target, timeout=sdk_e2e_config.network_probe_timeout),
+        tcp_probe_command(target, **kwargs),
         timeout=sdk_e2e_config.command_timeout,
     )
+
+
+def resolve_first_ipv4(sdk_sandbox, sdk_e2e_config, host: str) -> str:
+    """Resolve *host* inside the guest and return its first IPv4 address.
+
+    Skips rather than fails when resolution does not settle: an unreachable
+    resolver is an environment problem, and the case that follows can say
+    nothing about policy without a concrete address to aim at.
+    """
+    result = sdk_sandbox.run_command(
+        "python3 - <<'PY'\n"
+        "import socket, time\n"
+        f"host = {host!r}\n"
+        "for attempt in range(3):\n"
+        "    try:\n"
+        "        infos = socket.getaddrinfo(host, None, family=socket.AF_INET)\n"
+        "        print('RESOLVED:' + infos[0][4][0])\n"
+        "        break\n"
+        "    except Exception as exc:\n"
+        "        if attempt == 2:\n"
+        "            print(f'RESOLVE:ERROR:{type(exc).__name__}:{exc}')\n"
+        "        else:\n"
+        "            time.sleep(min(2 ** attempt, 5))\n"
+        "PY",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    line = next(
+        (
+            ln.strip()
+            for ln in result.stdout.splitlines()
+            if ln.strip().startswith("RESOLVED:")
+        ),
+        "",
+    )
+    if not line:
+        pytest.skip(
+            f"could not resolve {host} inside the sandbox, so there is no learned "
+            f"address to revoke; stdout={result.stdout!r}"
+        )
+    return line.split(":", 1)[1]
 
 
 @pytest.mark.requires_capability(NETWORK_ALLOW_DENY)
@@ -198,6 +249,88 @@ def test_update_keeps_dns_working_for_domain_policy(sdk_sandbox, sdk_e2e_config)
     assert "RESOLVED" in result.stdout, (
         "DNS resolution broke after updating a domain-based policy; the resolver "
         f"allowance was likely dropped. stdout={result.stdout!r}"
+    )
+
+
+@pytest.mark.requires_capability(NETWORK_ALLOW_DENY)
+@pytest.mark.requires_capability(NETWORK_DNS_ALLOW)
+@pytest.mark.sandbox_create_options(
+    allow_internet_access=False,
+    network={
+        "allow_out": [DNS_LEARN_DOMAIN],
+        "deny_out": ["0.0.0.0/0"],
+    },
+)
+def test_update_revokes_addresses_a_domain_rule_taught(sdk_sandbox, sdk_e2e_config):
+    """Dropping a domain rule must retire the addresses DNS learned under it.
+
+    The probe deliberately aims at the resolved IP rather than the domain. A
+    domain rule installs allow entries for whatever its A records resolve to,
+    and those entries carry the record's TTL — floored at 300s. So re-resolving
+    would prove nothing: the domain is gone from the allow list either way. Only
+    a direct connect to the address it taught can tell "revoked now" from
+    "revoked in five minutes", which is what this behaviour is about.
+    """
+    learned_ip = resolve_first_ipv4(sdk_sandbox, sdk_e2e_config, DNS_LEARN_DOMAIN)
+
+    assert_tcp_reachable(
+        probe(sdk_sandbox, sdk_e2e_config, learned_ip, DNS_LEARN_PORT),
+        learned_ip,
+        DNS_LEARN_PORT,
+    )
+
+    # Replace the policy with one that no longer names the domain.
+    sdk_sandbox.update_network(
+        network={"deny_out": ["0.0.0.0/0"], "allow_internet_access": False}
+    )
+
+    assert_tcp_blocked(
+        probe(sdk_sandbox, sdk_e2e_config, learned_ip, DNS_LEARN_PORT),
+        learned_ip,
+        DNS_LEARN_PORT,
+    )
+
+
+@pytest.mark.requires_capability(NETWORK_ALLOW_DENY)
+@pytest.mark.requires_capability(NETWORK_DNS_ALLOW)
+@pytest.mark.sandbox_create_options(
+    allow_internet_access=False,
+    network={
+        "allow_out": [DNS_LEARN_DOMAIN],
+        "deny_out": ["0.0.0.0/0"],
+    },
+)
+def test_update_keeps_addresses_a_surviving_domain_rule_taught(
+    sdk_sandbox,
+    sdk_e2e_config,
+):
+    """The other half: an update that keeps the domain must keep its addresses.
+
+    Without this, a revocation that simply dropped every learned address on any
+    update would pass the case above — and every domain-based sandbox would lose
+    connectivity for a full TTL after an unrelated policy change.
+    """
+    learned_ip = resolve_first_ipv4(sdk_sandbox, sdk_e2e_config, DNS_LEARN_DOMAIN)
+
+    assert_tcp_reachable(
+        probe(sdk_sandbox, sdk_e2e_config, learned_ip, DNS_LEARN_PORT),
+        learned_ip,
+        DNS_LEARN_PORT,
+    )
+
+    # Still names the domain; only widens the policy with an unrelated target.
+    sdk_sandbox.update_network(
+        network={
+            "allow_out": [DNS_LEARN_DOMAIN, ALTERNATE_TCP_TARGET_IP],
+            "deny_out": ["0.0.0.0/0"],
+            "allow_internet_access": False,
+        }
+    )
+
+    assert_tcp_reachable(
+        probe(sdk_sandbox, sdk_e2e_config, learned_ip, DNS_LEARN_PORT),
+        learned_ip,
+        DNS_LEARN_PORT,
     )
 
 

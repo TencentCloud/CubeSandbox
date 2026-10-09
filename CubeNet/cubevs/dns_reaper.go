@@ -7,7 +7,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// reapDNSState scans DNS-related maps and removes expired entries.
+// reapDNSState expires DNS-related state. Called from the session reaper tick.
 func reapDNSState() {
 	// eBPF stores expiration timestamps against CLOCK_MONOTONIC nanoseconds.
 	now, err := currentNS()
@@ -19,11 +19,31 @@ func reapDNSState() {
 		return
 	}
 
+	// Age the sandboxes already under management first (cheap: hasExpired
+	// short-circuits), then sweep the maps for ifindices this process has not
+	// touched yet — after a restart those hold orphaned learned rows nobody
+	// owns until GetNetPolicyManager reloads their snapshot.
+	ageAllManagers(now)
 	reapDNSLearnedPolicies(now)
 	reapDNSQueryTrack(now)
 }
 
-// reapDNSLearnedPolicies removes expired DNS-learned allow_out_v3 entries.
+// reapDNSLearnedPolicies retires DNS-learned allow_out_v3 rows whose TTL has
+// elapsed.
+//
+// This is index-driven: each sandbox's NetPolicyManager knows which QName
+// taught which IP, so expiry is decided per (QName, IP) and the resulting map
+// deletes fall out of the normal desired/diff pass. A row shared by several
+// QNames therefore survives until the last of them expires — scanning the map
+// for lapsed expires_at_ns instead, as this used to, would delete the row as
+// soon as *one* holder lapsed and silently de-authorise the others.
+//
+// Enumeration still comes from the BPF maps rather than the in-memory
+// registry: after a Cubelet restart a sandbox has no manager until something
+// touches it, and its orphaned learned rows would otherwise never be
+// reclaimed. GetNetPolicyManager loads the persisted snapshot and reconciles
+// against the live maps on first use, so visiting an ifindex here is what
+// brings it back under management.
 //
 // The fast path iterates ifindex_to_mvmmeta so Ready-pool TAPs (metadata
 // deleted, allow_out flushed) are skipped without walking every HashOfMaps
@@ -31,101 +51,63 @@ func reapDNSState() {
 // outers so a transient pin/ENOENT failure cannot stall DNS TTL expiry for
 // every subsequent tick.
 func reapDNSLearnedPolicies(now uint64) {
-	allowOut, err := loadPinnedMap(MapNameAllowOutV3)
+	ifindices, err := dnsReapCandidates()
 	if err != nil {
 		enqueueEvent(Event{
 			Error:   err,
-			Message: "failed to load allow_out_v3 map",
+			Message: "failed to enumerate sandboxes for DNS TTL expiry",
 		})
 		return
 	}
-	defer allowOut.Close()
-
-	meta, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
-	if err != nil {
-		enqueueEvent(Event{
-			Error:   err,
-			Message: "failed to load ifindex_to_mvmmeta map; falling back to allow_out_v3 outer scan",
-		})
-		reapDNSLearnedPoliciesFromAllowOutOuter(allowOut, now)
-		return
-	}
-	defer meta.Close()
-
-	var (
-		ifindex uint32
-		mvmMeta mvmMetadata
-	)
-	iter := meta.Iterate()
-	for iter.Next(&ifindex, &mvmMeta) {
-		if err := reapDNSLearnedPoliciesForIfindex(allowOut, ifindex, now); err != nil {
+	for _, ifindex := range ifindices {
+		mgr, err := GetNetPolicyManager(ifindex)
+		if err != nil {
 			enqueueEvent(Event{
 				Error:   err,
-				Message: fmt.Sprintf("failed to reap DNS-learned policies, ifindex: %d", ifindex),
+				Message: fmt.Sprintf("failed to open policy manager, ifindex: %d", ifindex),
 			})
-		}
-	}
-	if err := iter.Err(); err != nil {
-		enqueueEvent(Event{
-			Error:   err,
-			Message: "failed to iterate ifindex_to_mvmmeta map",
-		})
-	}
-}
-
-func reapDNSLearnedPoliciesFromAllowOutOuter(allowOut *ebpf.Map, now uint64) {
-	var (
-		ifindex uint32
-		value   uint32
-	)
-	iter := allowOut.Iterate()
-	for iter.Next(&ifindex, &value) {
-		if err := reapDNSLearnedPoliciesForIfindex(allowOut, ifindex, now); err != nil {
-			enqueueEvent(Event{
-				Error:   err,
-				Message: fmt.Sprintf("failed to reap DNS-learned policies, ifindex: %d", ifindex),
-			})
-		}
-	}
-	if err := iter.Err(); err != nil {
-		enqueueEvent(Event{
-			Error:   err,
-			Message: "failed to iterate allow_out_v3 outer map",
-		})
-	}
-}
-
-func reapDNSLearnedPoliciesForIfindex(allowOut *ebpf.Map, ifindex uint32, now uint64) error {
-	inner, err := acquireInnerMap(allowOut, ifindex, MapNameAllowOutV3, nil)
-	if err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil
-		}
-		return fmt.Errorf("failed to open allow_out_v3 inner map: %w", err)
-	}
-	return reapDNSLearnedPoliciesForInner(inner, now)
-}
-
-// reapDNSLearnedPoliciesForInner deletes expired DNS-learned entries from one
-// allow_out_v3 inner map.
-func reapDNSLearnedPoliciesForInner(inner *ebpf.Map, now uint64) error {
-	var (
-		key   lpmKeyV3
-		value netPolicyValueV3
-	)
-	iter := inner.Iterate()
-	for iter.Next(&key, &value) {
-		if !netPolicyValueV3Expired(value, now) {
 			continue
 		}
-		if err := inner.Delete(&key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("failed to delete expired DNS-learned policy: %w", err)
+		if err := mgr.pruneExpired(now); err != nil {
+			enqueueEvent(Event{
+				Error:   err,
+				Message: fmt.Sprintf("failed to reap DNS-learned policies, ifindex: %d", ifindex),
+			})
 		}
 	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to iterate allow_out_v3 inner map: %w", err)
+}
+
+// dnsReapCandidates lists the ifindices to visit this tick, preferring the
+// metadata map and falling back to the allow_out_v3 outer keys.
+func dnsReapCandidates() ([]uint32, error) {
+	if ifindices, err := outerMapKeys(MapNameIfindexToMVMMetadata, func() any { return new(mvmMetadata) }); err == nil {
+		return ifindices, nil
 	}
-	return nil
+	return outerMapKeys(MapNameAllowOutV3, func() any { return new(uint32) })
+}
+
+// outerMapKeys collects the uint32 keys of a pinned map. newValue supplies a
+// scratch value of the map's value type for the iterator.
+func outerMapKeys(name string, newValue func() any) ([]uint32, error) {
+	m, err := loadPinnedMap(name)
+	if err != nil {
+		return nil, err
+	}
+	defer m.Close()
+
+	var (
+		key  uint32
+		keys []uint32
+	)
+	value := newValue()
+	iter := m.Iterate()
+	for iter.Next(&key, value) {
+		keys = append(keys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate %s: %w", name, err)
+	}
+	return keys, nil
 }
 
 // reapDNSQueryTrack deletes expired pending DNS queries that never got a response.
