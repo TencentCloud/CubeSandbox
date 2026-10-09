@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -48,8 +49,11 @@ def test_explicit_template_still_checked_without_default(monkeypatch):
     api.get_template.assert_called_once_with("tpl-selected")
 
 
-def test_collection_routes_new_template_and_performance(monkeypatch):
-    import conftest
+def test_collection_routes_new_template_and_performance(monkeypatch, request):
+    # A bare import can resolve to a sibling suite's conftest during collection.
+    conftest_path = Path(__file__).resolve().parents[2] / "conftest.py"
+    conftest = request.config.pluginmanager.get_plugin(str(conftest_path))
+    assert conftest is not None, f"root conftest plugin not loaded: {conftest_path}"
     def item(*markers):
         return SimpleNamespace(get_closest_marker=lambda name: object() if name in markers else None)
     config = Mock()
