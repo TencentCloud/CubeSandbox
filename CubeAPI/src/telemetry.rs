@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-//! Tracing for sandbox creation.
+//! Request tracing.
 
-use axum::{extract::Request, http::HeaderMap, middleware::Next, response::Response};
+use axum::{
+    extract::{MatchedPath, Request},
+    http::HeaderMap,
+    middleware::Next,
+    response::Response,
+};
 use opentelemetry::{
     global,
     trace::{FutureExt, SpanKind, Status, TraceContextExt, Tracer},
@@ -26,9 +31,14 @@ const CREATE_PATH: &str = "/sandboxes";
 const CREATE_SPAN: &str = "POST /sandboxes";
 const TEMPLATE_PATH: &str = "/templates";
 const TEMPLATE_SPAN: &str = "POST /templates";
+const SNAPSHOT_PATH: &str = "/sandboxes/:sandboxID/snapshots";
+const SNAPSHOT_SPAN: &str = "POST /sandboxes/:sandboxID/snapshots";
 
-const TRACED_ROUTES: [(&str, &str); 2] =
-    [(CREATE_PATH, CREATE_SPAN), (TEMPLATE_PATH, TEMPLATE_SPAN)];
+const TRACED_ROUTES: [(&str, &str); 3] = [
+    (CREATE_PATH, CREATE_SPAN),
+    (TEMPLATE_PATH, TEMPLATE_SPAN),
+    (SNAPSHOT_PATH, SNAPSHOT_SPAN),
+];
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
@@ -91,15 +101,21 @@ fn build_provider(
 }
 
 pub async fn layer(req: Request, next: Next) -> Response {
-    let Some((_, span_name)) = TRACED_ROUTES
-        .iter()
-        .find(|(path, _)| *path == req.uri().path())
-    else {
-        return next.run(req).await;
-    };
     if req.method().as_str() != CREATE_METHOD {
         return next.run(req).await;
     }
+    let matched = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or_else(|| req.uri().path());
+    let Some(span_name) = TRACED_ROUTES
+        .iter()
+        .find(|(path, _)| *path == matched)
+        .map(|(_, span)| *span)
+    else {
+        return next.run(req).await;
+    };
 
     let parent = global::get_text_map_propagator(|p| p.extract(&HeaderExtractor(req.headers())));
     let tracer = global::tracer(SCOPE);
@@ -118,8 +134,18 @@ pub async fn layer(req: Request, next: Next) -> Response {
             request_id.to_string(),
         ));
     }
+    if span_name == SNAPSHOT_SPAN {
+        if let Some(sandbox_id) = req
+            .uri()
+            .path()
+            .strip_prefix("/sandboxes/")
+            .and_then(|rest| rest.strip_suffix("/snapshots"))
+        {
+            attributes.push(KeyValue::new("cube.sandbox_id", sandbox_id.to_string()));
+        }
+    }
     let span = tracer
-        .span_builder(*span_name)
+        .span_builder(span_name)
         .with_kind(SpanKind::Server)
         .with_attributes(attributes)
         .start_with_context(&tracer, &parent);
@@ -189,10 +215,15 @@ mod tests {
         let app = Router::new()
             .route("/sandboxes", post(ok).get(ok))
             .route("/templates", post(ok).get(ok))
+            .route("/sandboxes/:sandboxID/snapshots", post(ok).get(ok))
             .route("/untraced", post(ok).get(ok))
             .layer(axum::middleware::from_fn(layer));
 
-        for (uri, request_id) in [("/sandboxes", "req-1"), ("/templates", "req-2")] {
+        for (uri, request_id) in [
+            ("/sandboxes", "req-1"),
+            ("/templates", "req-2"),
+            ("/sandboxes/sb-1/snapshots", "req-3"),
+        ] {
             let response = app
                 .clone()
                 .oneshot(
@@ -212,6 +243,7 @@ mod tests {
         for (method, uri) in [
             ("GET", "/sandboxes"),
             ("GET", "/templates"),
+            ("GET", "/sandboxes/sb-1/snapshots"),
             ("POST", "/untraced"),
         ] {
             let response = app
@@ -258,8 +290,14 @@ mod tests {
             1,
             "the template route must be spanned once"
         );
+        let snapshots: Vec<_> = spans.iter().filter(|s| s.name == SNAPSHOT_SPAN).collect();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "the snapshot create route must be spanned once"
+        );
 
-        for span in [created[0], templates[0]] {
+        for span in [created[0], templates[0], snapshots[0]] {
             assert_eq!(span.span_kind, SpanKind::Server);
             assert_eq!(
                 span.span_context.trace_id().to_string(),
@@ -273,8 +311,16 @@ mod tests {
             );
         }
         assert!(
+            snapshots[0]
+                .attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "cube.sandbox_id" && kv.value.as_str() == "sb-1"),
+            "the snapshot span must carry the sandbox id from the path"
+        );
+        assert!(
             spans.iter().all(|s| s.name == CREATE_SPAN
                 || s.name == TEMPLATE_SPAN
+                || s.name == SNAPSHOT_SPAN
                 || &*s.name == "outbound"),
             "only the entry routes may open a span, got {:?}",
             spans.iter().map(|s| &*s.name).collect::<Vec<_>>()
