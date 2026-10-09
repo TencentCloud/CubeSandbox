@@ -23,6 +23,8 @@ import enStore from '@/locales/en/store.json';
 import enAgentHub from '@/locales/en/agentHub.json';
 import enAuth from '@/locales/en/auth.json';
 import enWarehouse from '@/locales/en/warehouse.json';
+import enAudit from '@/locales/en/audit.json';
+import enApiKeys from '@/locales/en/apiKeys.json';
 
 import zhCommon from '@/locales/zh/common.json';
 import zhNav from '@/locales/zh/nav.json';
@@ -46,6 +48,8 @@ import zhStore from '@/locales/zh/store.json';
 import zhAgentHub from '@/locales/zh/agentHub.json';
 import zhAuth from '@/locales/zh/auth.json';
 import zhWarehouse from '@/locales/zh/warehouse.json';
+import zhAudit from '@/locales/zh/audit.json';
+import zhApiKeys from '@/locales/zh/apiKeys.json';
 
 export const resources = {
   en: {
@@ -71,6 +75,8 @@ export const resources = {
     agentHub: enAgentHub,
     auth: enAuth,
     warehouse: enWarehouse,
+    audit: enAudit,
+    apiKeys: enApiKeys,
   },
   zh: {
     common: zhCommon,
@@ -95,6 +101,8 @@ export const resources = {
     agentHub: zhAgentHub,
     auth: zhAuth,
     warehouse: zhWarehouse,
+    audit: zhAudit,
+    apiKeys: zhApiKeys,
   },
 } as const;
 
