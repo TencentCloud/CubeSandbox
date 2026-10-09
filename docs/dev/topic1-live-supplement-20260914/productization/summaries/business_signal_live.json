@@ -1,0 +1,9 @@
+{
+  "status": "PASS",
+  "prefer": "node-a",
+  "hit": 6,
+  "n": 6,
+  "dist": {
+    "node-a": 6
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "status": "PASS",
+  "evidence": "unit contract + live bad_scores arm recorded; scorers cannot add nodes outside Filter set",
+  "live_rows": 3,
+  "live_success": 3
+}
