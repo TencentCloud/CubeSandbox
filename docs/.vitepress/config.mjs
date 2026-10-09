@@ -307,6 +307,7 @@ export default withMermaid(defineConfig({
                     { text: 'Claude Code', link: '/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
+                    { text: 'LangGraph', link: '/guide/integrations/langgraph' },
                     { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
                     { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' }
                   ]
@@ -524,6 +525,7 @@ export default withMermaid(defineConfig({
                     { text: 'Claude Code', link: '/zh/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
+                    { text: 'LangGraph', link: '/zh/guide/integrations/langgraph' },
                     { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
                     { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' }
                   ]
