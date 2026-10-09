@@ -35,12 +35,21 @@ const SNAPSHOT_PATH: &str = "/sandboxes/:sandboxID/snapshots";
 const SNAPSHOT_SPAN: &str = "POST /sandboxes/:sandboxID/snapshots";
 const ROLLBACK_PATH: &str = "/sandboxes/:sandboxID/rollback";
 const ROLLBACK_SPAN: &str = "POST /sandboxes/:sandboxID/rollback";
+const PAUSE_PATH: &str = "/sandboxes/:sandboxID/pause";
+const PAUSE_SPAN: &str = "POST /sandboxes/:sandboxID/pause";
+const RESUME_PATH: &str = "/sandboxes/:sandboxID/resume";
+const RESUME_SPAN: &str = "POST /sandboxes/:sandboxID/resume";
+const CONNECT_PATH: &str = "/sandboxes/:sandboxID/connect";
+const CONNECT_SPAN: &str = "POST /sandboxes/:sandboxID/connect";
 
-const TRACED_ROUTES: [(&str, &str); 4] = [
+const TRACED_ROUTES: [(&str, &str); 7] = [
     (CREATE_PATH, CREATE_SPAN),
     (TEMPLATE_PATH, TEMPLATE_SPAN),
     (SNAPSHOT_PATH, SNAPSHOT_SPAN),
     (ROLLBACK_PATH, ROLLBACK_SPAN),
+    (PAUSE_PATH, PAUSE_SPAN),
+    (RESUME_PATH, RESUME_SPAN),
+    (CONNECT_PATH, CONNECT_SPAN),
 ];
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -140,6 +149,9 @@ pub async fn layer(req: Request, next: Next) -> Response {
     let sandbox_suffix = match span_name {
         SNAPSHOT_SPAN => Some("/snapshots"),
         ROLLBACK_SPAN => Some("/rollback"),
+        PAUSE_SPAN => Some("/pause"),
+        RESUME_SPAN => Some("/resume"),
+        CONNECT_SPAN => Some("/connect"),
         _ => None,
     };
     if let Some(suffix) = sandbox_suffix {
@@ -225,6 +237,9 @@ mod tests {
             .route("/templates", post(ok).get(ok))
             .route("/sandboxes/:sandboxID/snapshots", post(ok).get(ok))
             .route("/sandboxes/:sandboxID/rollback", post(ok).get(ok))
+            .route("/sandboxes/:sandboxID/pause", post(ok).get(ok))
+            .route("/sandboxes/:sandboxID/resume", post(ok).get(ok))
+            .route("/sandboxes/:sandboxID/connect", post(ok).get(ok))
             .route("/untraced", post(ok).get(ok))
             .layer(axum::middleware::from_fn(layer));
 
@@ -233,6 +248,9 @@ mod tests {
             ("/templates", "req-2"),
             ("/sandboxes/sb-1/snapshots", "req-3"),
             ("/sandboxes/sb-1/rollback", "req-4"),
+            ("/sandboxes/sb-1/pause", "req-5"),
+            ("/sandboxes/sb-1/resume", "req-6"),
+            ("/sandboxes/sb-1/connect", "req-7"),
         ] {
             let response = app
                 .clone()
@@ -255,6 +273,9 @@ mod tests {
             ("GET", "/templates"),
             ("GET", "/sandboxes/sb-1/snapshots"),
             ("GET", "/sandboxes/sb-1/rollback"),
+            ("GET", "/sandboxes/sb-1/pause"),
+            ("GET", "/sandboxes/sb-1/resume"),
+            ("GET", "/sandboxes/sb-1/connect"),
             ("POST", "/untraced"),
         ] {
             let response = app
@@ -313,8 +334,22 @@ mod tests {
             1,
             "the rollback route must be spanned once"
         );
+        let pauses: Vec<_> = spans.iter().filter(|s| s.name == PAUSE_SPAN).collect();
+        assert_eq!(pauses.len(), 1, "the pause route must be spanned once");
+        let resumes: Vec<_> = spans.iter().filter(|s| s.name == RESUME_SPAN).collect();
+        assert_eq!(resumes.len(), 1, "the resume route must be spanned once");
+        let connects: Vec<_> = spans.iter().filter(|s| s.name == CONNECT_SPAN).collect();
+        assert_eq!(connects.len(), 1, "the connect route must be spanned once");
 
-        for span in [created[0], templates[0], snapshots[0], rollbacks[0]] {
+        for span in [
+            created[0],
+            templates[0],
+            snapshots[0],
+            rollbacks[0],
+            pauses[0],
+            resumes[0],
+            connects[0],
+        ] {
             assert_eq!(span.span_kind, SpanKind::Server);
             assert_eq!(
                 span.span_context.trace_id().to_string(),
@@ -327,7 +362,13 @@ mod tests {
                 "the public entry span must hang under the inbound parent"
             );
         }
-        for span in [snapshots[0], rollbacks[0]] {
+        for span in [
+            snapshots[0],
+            rollbacks[0],
+            pauses[0],
+            resumes[0],
+            connects[0],
+        ] {
             assert!(
                 span.attributes
                     .iter()
@@ -341,6 +382,9 @@ mod tests {
                 || s.name == TEMPLATE_SPAN
                 || s.name == SNAPSHOT_SPAN
                 || s.name == ROLLBACK_SPAN
+                || s.name == PAUSE_SPAN
+                || s.name == RESUME_SPAN
+                || s.name == CONNECT_SPAN
                 || &*s.name == "outbound"),
             "only the entry routes may open a span, got {:?}",
             spans.iter().map(|s| &*s.name).collect::<Vec<_>>()

@@ -236,9 +236,11 @@ func UpdateWithTimeout(ctx context.Context, calleeEp string,
 	if timeout <= 0 {
 		timeout = time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec) * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// The RPC keeps an independent deadline so a client timeout does not abort
+	// Cubelet's in-flight pause; only the caller's trace rides along.
+	rpcCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return c.Update(ctx, req)
+	return c.Update(telemetry.InjectGRPC(telemetry.DetachTrace(rpcCtx, ctx)), req)
 }
 
 func Exec(ctx context.Context, calleeEp string,
