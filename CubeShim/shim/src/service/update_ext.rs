@@ -203,6 +203,7 @@ async fn do_rollback_snapshot(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
     log: &Log,
+    trace: &Trace,
 ) -> CResult<UpdateOutcome> {
     // --- parse restore_config (required) ---
     let raw = annos
@@ -221,7 +222,7 @@ async fn do_rollback_snapshot(
     let restore_config: RestoreConfig = rollback_cfg.into();
 
     // --- delegate to sb ---
-    sb.rollback_vm(restore_config).await.map_err(|e| {
+    sb.rollback_vm(restore_config, trace).await.map_err(|e| {
         errf!(log, "rollback snapshot failed: {}", e);
         e
     })?;
@@ -323,7 +324,7 @@ pub async fn update_route(
     };
 
     match action {
-        "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log).await,
+        "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log, trace).await,
         "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log).await,
         "SnapshotCapture" => do_snapshot_capture(sb, annos, trace).await,
         "SnapshotResume" => do_snapshot_resume(sb, annos, trace).await,

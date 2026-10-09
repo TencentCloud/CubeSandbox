@@ -54,11 +54,18 @@ const (
 	SpanTemplateCommitRootfs  = "cubelet.template.commit.rootfs"
 	SpanTemplateCommitResume  = "cubelet.template.commit.resume"
 	SpanTemplateCommitPublish = "cubelet.template.commit.publish"
+
+	SpanRollback         = "cubelet.snapshot.rollback"
+	SpanRollbackLock     = "cubelet.snapshot.rollback.lifecycle_lock"
+	SpanRollbackPrepare  = "cubelet.snapshot.rollback.prepare"
+	SpanRollbackRestore  = "cubelet.snapshot.rollback.restore"
+	SpanRollbackFinalize = "cubelet.snapshot.rollback.finalize"
 )
 
 const (
 	AttrRequestID    = "cube.request_id"
 	AttrSandboxID    = "cube.sandbox_id"
+	AttrSnapshotID   = "cube.snapshot_id"
 	AttrTemplateID   = "cube.template_id"
 	AttrArtifactID   = "cube.artifact_id"
 	AttrInstanceType = "cube.instance_type"

@@ -314,9 +314,12 @@ impl CubeMasterClient {
     ) -> Result<RollbackResponse, CubeMasterError> {
         validate_path_segment("sandbox_id", sandbox_id)?;
         let url = format!("{}/cube/sandbox/{}/rollback", self.base_url, sandbox_id);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await
