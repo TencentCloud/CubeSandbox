@@ -73,20 +73,26 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	vm_ip = meta->ip;
 	gen = meta->version;
 
-	/* Track the port_mapping connection's generation so a rollback can reset
-	 * it while an aged (reaped) one is rebuilt. */
+	/* Track the port_mapping connection's generation. A rollback leaves a
+	 * stale entry: a new-connection SYN replaces it, any other packet is
+	 * reset, and an aged (reaped) session is rebuilt below. */
 	now = bpf_ktime_get_ns();
 	port_mapping_key(&pkey, vm_ip, l3->saddr, l4->source, mvm_port->listen_port);
 	sess = bpf_map_lookup_elem(&egress_sessions, &pkey);
-	if (sess && sess->gen != current_gen(sess->vm_ifindex)) {
-		/* Stale: the sandbox was rolled back. Reset the peer and drop the
-		 * entry so a reconnect starts clean. port_mapping sessions have no
-		 * ingress entry. */
-		bpf_map_delete_elem(&egress_sessions, &pkey);
-		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
+	if (sess && session_is_stale(sess)) {
+		/* Stale: the sandbox was rolled back. A new-connection SYN
+		 * replaces the entry with the current generation and is
+		 * forwarded. Any other packet resets the peer and drops the
+		 * entry. port_mapping sessions have no ingress entry. */
+		if (!(l4->syn && !l4->ack)) {
+			bpf_map_delete_elem(&egress_sessions, &pkey);
+			return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
+		}
+		sess = NULL;
 	}
 	if (!sess) {
-		/* New connection (SYN) or a rebuilt aged one (non-SYN). */
+		/* New connection (SYN), a SYN replacing a rolled-back session,
+		 * or a rebuilt aged one (non-SYN). */
 		if (l4->syn && !l4->ack)
 			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
