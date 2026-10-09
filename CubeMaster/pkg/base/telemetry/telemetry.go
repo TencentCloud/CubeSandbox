@@ -81,6 +81,10 @@ const (
 	SpanSnapshotCreateRegister = "cubemaster.snapshot.create.register"
 	SpanSnapshotCreateCleanup  = "cubemaster.snapshot.create.cleanup"
 
+	SpanSnapshotRollbackPrepare  = "cubemaster.snapshot.rollback.prepare"
+	SpanSnapshotRollbackRestore  = "cubemaster.snapshot.rollback.restore"
+	SpanSnapshotRollbackRegister = "cubemaster.snapshot.rollback.register"
+
 	SpanTemplateImageBuild            = "cubetemplatecenter.template.image.build"
 	SpanTemplateImagePrepareSource    = "cubetemplatecenter.template.image.prepare_source"
 	SpanTemplateImageBuildLockWait    = "cubetemplatecenter.template.image.build_lock.wait"
