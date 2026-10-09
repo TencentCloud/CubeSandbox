@@ -52,8 +52,7 @@ func Init(ctx context.Context) error {
 	start := time.Now()
 	l.event = make(chan *Event, 1000)
 	l.cache = cache.New(0, 0)
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
+	l.locality = newTemplateLocality()
 	l.db = db.Init(config.GetDbConfig())
 	l.dbAddr = config.GetDbConfig().Addr
 	l.totalSelfNodes = config.GetConfig().Common.DefaultHeadlessServiceNodesNum
@@ -454,71 +453,30 @@ func HealthyMasterNodes() (num int64) {
 }
 
 func GetImageStateByNode(imageName string, nodeName string) *fwk.ImageStateSummary {
-	state := l.getImageCache(imageName)
-	if state == nil {
-		return nil
-	}
-	if state.HasNode(nodeName) {
+	state := l.locality.image(imageName)
+	if state != nil && state.HasNode(nodeName) {
 		return state
 	}
 	return nil
 }
 
 func RegisterTemplateReplica(templateID, nodeID string, sizeBytes int64) {
-	registerTemplateReplica(templateID, nodeID, sizeBytes, true)
+	if templateID == "" || nodeID == "" {
+		return
+	}
+	l.locality.register(templateID, nodeID, sizeBytes)
 }
 
 func DeregisterTemplateReplica(templateID, nodeID string) {
-	deregisterTemplateReplica(templateID, nodeID, true)
-}
-
-func registerTemplateReplica(templateID, nodeID string, sizeBytes int64, syncNodeTemplates bool) {
 	if templateID == "" || nodeID == "" {
 		return
 	}
-	state := l.getImageCache(templateID)
-	if state == nil {
-		ossClusterLabel := ""
-		if n, ok := GetNode(nodeID); ok && n != nil {
-			ossClusterLabel = n.OssClusterLabel
-		}
-		state = fwk.NewImageStateSummary(sizeBytes, ossClusterLabel, nodeID)
-		l.addImageCache(templateID, state)
-	} else {
-		if sizeBytes > 0 {
-			state.Size = sizeBytes
-		}
-		state.AddNode(nodeID)
-		state.UpdateAt = time.Now()
-	}
-	if state.OssClusterLabel != "" {
-		state.ScaledImageScore = scaledImageScore(state, GetHealthyNodesByInstanceType(-1, state.OssClusterLabel).Len())
-	}
-	if syncNodeTemplates {
-		recordNodeTemplateMembership(nodeID, templateID)
-	}
-}
-
-func deregisterTemplateReplica(templateID, nodeID string, syncNodeTemplates bool) {
-	if templateID == "" || nodeID == "" {
-		return
-	}
-	state := l.getImageCache(templateID)
-	if state != nil {
-		state.RemoveNode(nodeID)
-		if state.GetNumNodes() == 0 && l.imageCache != nil {
-			l.imageCache.Delete(templateID)
-		}
-	}
-	if syncNodeTemplates {
-		removeNodeTemplateMembership(nodeID, templateID)
-	}
+	l.locality.deregister(templateID, nodeID)
 }
 
 func InvalidateImageState(imageName string) {
-	if imageName == "" || l.imageCache == nil {
+	if imageName == "" {
 		return
 	}
-	l.imageCache.Delete(imageName)
-	removeTemplateMembershipFromAllNodes(imageName)
+	l.locality.invalidateTemplate(imageName)
 }
