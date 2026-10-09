@@ -90,3 +90,24 @@ do
 done
 
 log "toolbox staged successfully at ${HOST_TOOLBOX_ROOT}"
+
+# Honor the same chart/one-click env as cubelet / node-init, but only when
+# data_dir is already a host mount — otherwise migrate would land in the
+# container image layer and be lost when the pod exits.
+data_dir="${CUBEBOX_OS_IMAGE_DATA_DIR:-/data/cubebox_os_image}"
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/cubebox_os_image.sh" ]]; then
+  # shellcheck disable=SC1091
+  . "$(dirname "${BASH_SOURCE[0]}")/cubebox_os_image.sh"
+elif [[ -f /usr/local/bin/cubebox_os_image.sh ]]; then
+  # shellcheck disable=SC1091
+  . /usr/local/bin/cubebox_os_image.sh
+fi
+if type ensure_cubebox_os_image_on_data >/dev/null 2>&1; then
+  if type _cubebox_os_image_is_mountpoint >/dev/null 2>&1 \
+    && _cubebox_os_image_is_mountpoint "${data_dir}"; then
+    ensure_cubebox_os_image_on_data "${HOST_TOOLBOX_ROOT}" "${data_dir}" \
+      || log "WARN: cubebox_os_image ensure failed during stage; continuing"
+  else
+    log "skipping cubebox_os_image ensure: ${data_dir} is not a host mount (avoid image-layer migrate)"
+  fi
+fi
