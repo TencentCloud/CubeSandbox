@@ -86,6 +86,9 @@ type TapDeviceAdapter interface {
 	List() (map[string]*tapDevice, error)
 	GetByName(name string) (*tapDevice, error)
 	Destroy(ifIdx int) error
+	// ForeignHolders reports the pids of processes other than this one that
+	// currently hold a tun queue fd attached to name. See tapTunHolders.
+	ForeignHolders(name string) ([]int, error)
 }
 
 // realTapDeviceAdapter forwards calls to the Linux TAP implementation below.
@@ -131,6 +134,10 @@ func (a realTapDeviceAdapter) GetByName(name string) (*tapDevice, error) {
 
 func (realTapDeviceAdapter) Destroy(ifIdx int) error {
 	return destroyTap(ifIdx)
+}
+
+func (realTapDeviceAdapter) ForeignHolders(name string) ([]int, error) {
+	return tapTunHolders(procRootDefault, name, os.Getpid())
 }
 
 // newTap creates a persistent one-queue TAP, configures virtio-net header size,

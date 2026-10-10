@@ -35,13 +35,15 @@ func eventsFrom(events []string, start string) []string {
 // createTestTapDeviceAdapter creates temporary files as stand-ins for TAP fds so
 // controller tests can exercise fd ownership without privileged devices.
 type createTestTapDeviceAdapter struct {
-	nextIndex    int
-	restoreCount int
-	openCount    int
-	openErr      error
-	closeCount   int
-	destroyCount int
-	destroyErr   error
+	nextIndex         int
+	restoreCount      int
+	openCount         int
+	openErr           error
+	closeCount        int
+	destroyCount      int
+	destroyErr        error
+	foreignHolders    []int
+	foreignHoldersErr error
 }
 
 func (f *createTestTapDeviceAdapter) Create(ip net.IP, _ string, _ int, _ int) (*tapDevice, error) {
@@ -92,6 +94,13 @@ func (f *createTestTapDeviceAdapter) GetByName(_ string) (*tapDevice, error) {
 func (f *createTestTapDeviceAdapter) Destroy(_ int) error {
 	f.destroyCount++
 	return f.destroyErr
+}
+
+func (f *createTestTapDeviceAdapter) ForeignHolders(_ string) ([]int, error) {
+	if f.foreignHoldersErr != nil {
+		return nil, f.foreignHoldersErr
+	}
+	return f.foreignHolders, nil
 }
 
 func TestEnsureNetworkCommitsInDocumentedOrder(t *testing.T) {

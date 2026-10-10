@@ -261,6 +261,9 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 	s.recordCleanStep("runtime_cleaned")
 
 	s.resetTapRuntimeFieldsForPool(state.tap)
+	if err := s.verifyTapNotHeldByForeignRuntime(state.tap); err != nil {
+		return err
+	}
 	if err := s.verifyTapReusableFD(state.tap); err != nil {
 		return err
 	}

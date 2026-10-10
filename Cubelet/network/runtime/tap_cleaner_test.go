@@ -105,6 +105,34 @@ func TestCleanupTapForReuseKeepsCleaningWhenTapFDStillBusy(t *testing.T) {
 	}
 }
 
+func TestCleanupTapForReuseKeepsCleaningWhenTapHeldByForeignProcess(t *testing.T) {
+	controller, state := newCleanerTestState(t, nil)
+	cubevsAdapter := controller.cubevsAdapter.(*fakeCubeVSAdapter)
+	defaultDenyCallsBefore := len(cubevsAdapter.defaultDenyPolicyCalls)
+	tapAdapter := controller.tapAdapter.(*createTestTapDeviceAdapter)
+	tapAdapter.foreignHolders = []int{99999}
+	// Drop the retained fd too: if the foreign-holder check ran after the
+	// reusable fd probe instead of before it, this would otherwise still pass.
+	controller.dropPooledTapFD(state.TapName)
+
+	if err := controller.cleanupTapForReuse(context.Background(), state, StateFileDeleting); err == nil {
+		t.Fatal("expected foreign-holder error")
+	}
+	if !controller.store.Exists(state.SandboxID, StateFileDeleting) {
+		t.Fatal("deleting state removed despite foreign-held tap")
+	}
+	poolState, owner, ok := controller.tapPool.StateByName(state.TapName)
+	if !ok || poolState != TapPoolCleaning || owner != state.SandboxID {
+		t.Fatalf("tap state=%s owner=%s ok=%v, want Cleaning owned by sandbox", poolState, owner, ok)
+	}
+	if got := len(cubevsAdapter.defaultDenyPolicyCalls); got != defaultDenyCallsBefore {
+		t.Fatalf("default-deny installed despite foreign-held tap: calls=%d want %d", got, defaultDenyCallsBefore)
+	}
+	if got := tapAdapter.openCount; got != 0 {
+		t.Fatalf("Open calls = %d, want 0: foreign-holder check must run before the reusable fd probe", got)
+	}
+}
+
 func TestCleanupTapForReuseSkipsDuplicateFinishedTask(t *testing.T) {
 	recorder := &createOrderRecorder{}
 	controller, state := newCleanerTestState(t, recorder)

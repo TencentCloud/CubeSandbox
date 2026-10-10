@@ -155,11 +155,35 @@ func (s *NetworkController) resetTapRuntimeFieldsForPool(tap *tapDevice) {
 	s.poolTapFD(tap.Name, file)
 }
 
+// verifyTapNotHeldByForeignRuntime fails when a process other than this one
+// still holds a tun queue on tap.Name. This is the gap verifyTapReusableFD
+// leaves open: a create that fails with a ttrpc timeout can leave its shim
+// running, still holding a queue fd on the TAP cleanup is about to mark
+// Ready. The next sandbox handed that TAP would then share a live queue with
+// a dead lifecycle's runtime, which answers — and resets — its traffic.
+func (s *NetworkController) verifyTapNotHeldByForeignRuntime(tap *tapDevice) error {
+	if tap == nil || tap.Name == "" {
+		return nil
+	}
+	holders, err := s.tapAdapter.ForeignHolders(tap.Name)
+	if err != nil {
+		return fmt.Errorf("verify tap %s not foreign-held: %w", tap.Name, err)
+	}
+	if len(holders) > 0 {
+		return fmt.Errorf("tap %s still held by foreign pid(s) %v; refusing to mark ready", tap.Name, holders)
+	}
+	return nil
+}
+
 // verifyTapReusableFD checks that an idle TAP can be reopened before it is
 // returned to Ready. With fd retention the common case needs no probe: a
 // retained fd is by definition attached and duplicable. Only a TAP without a
 // retained fd (e.g. recovered after restart) is probed, and the successfully
 // opened fd is then retained for future handoffs.
+//
+// This never checks exclusivity: a TUN device accepts multiple queues, so a
+// successful reopen here says nothing about whether another process also
+// holds the TAP. See verifyTapNotHeldByForeignRuntime for that check.
 func (s *NetworkController) verifyTapReusableFD(tap *tapDevice) error {
 	if tap == nil || tap.Name == "" {
 		return nil

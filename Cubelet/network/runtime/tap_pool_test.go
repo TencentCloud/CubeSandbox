@@ -295,6 +295,10 @@ func (f *fakeTapDeviceAdapter) Destroy(_ int) error {
 	return nil
 }
 
+func (f *fakeTapDeviceAdapter) ForeignHolders(_ string) ([]int, error) {
+	return nil, nil
+}
+
 func TestEnsureTapInventoryUsesTapDeviceAdapter(t *testing.T) {
 	controller, adapter := newTapInventoryTestController(t, 2)
 
