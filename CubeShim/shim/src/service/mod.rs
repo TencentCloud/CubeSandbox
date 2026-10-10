@@ -4,6 +4,7 @@
 
 mod srv;
 mod task_srv;
+mod termination;
 mod tools;
 mod update_ext;
 pub use srv::Service;

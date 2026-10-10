@@ -316,8 +316,37 @@ impl SandBox {
         }
         false
     }
+    async fn stop_background_tasks(&mut self) {
+        for handle in self.stop_watchers().await {
+            self.stop_background_task(handle).await;
+        }
+    }
+
+    async fn stop_background_task(&self, handle: Arc<tokio::task::JoinHandle<()>>) {
+        handle.abort();
+        let stopped = tokio::time::timeout(Duration::from_millis(200), async move {
+            match Arc::try_unwrap(handle) {
+                Ok(handle) => {
+                    let _ = handle.await;
+                }
+                Err(handle) => {
+                    while !handle.is_finished() {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            warnf!(
+                self.log,
+                "background task cancellation timed out; continuing cleanup"
+            );
+        }
+    }
+
     async fn disconnect_agent(&mut self) -> CResult<()> {
-        self.stop_watchers().await;
+        self.stop_background_tasks().await;
 
         let mut containers = self.containers.lock().await;
         for (_, c) in containers.iter_mut() {
@@ -341,16 +370,20 @@ impl SandBox {
         }
     }
 
-    /// Stop the monitor / oom watcher tasks; shared by quiesce (pause) and
-    /// disconnect (rollback): whatever holds a clone of the agent client must
-    /// be stopped before the connection is dealt with.
-    async fn stop_watchers(&mut self) {
+    /// Signal the monitor / oom watcher tasks and abort them, returning the
+    /// aborted handles. Whatever holds a clone of the agent client must be
+    /// stopped before the connection is dealt with. Pause's quiesce path
+    /// stops here (wait-free); terminal teardown bounds the cancellation of
+    /// the returned handles via stop_background_tasks.
+    async fn stop_watchers(&mut self) -> Vec<Arc<tokio::task::JoinHandle<()>>> {
+        let mut stopped = Vec::new();
         //stop monitor
         if let Some(tx) = self.tx_monitor_exited.as_ref() {
             let _ = tx.try_send(());
         }
         if let Some(handle) = self.monitor_handle.take() {
             handle.abort();
+            stopped.push(handle);
         }
         //stop watch oom event
         if let Some(tx) = self.tx_oom_exited.as_ref() {
@@ -358,7 +391,9 @@ impl SandBox {
         }
         if let Some(handle) = self.oom_handle.take() {
             handle.abort();
+            stopped.push(handle);
         }
+        stopped
     }
 
     /// Signal every container's init log forwarders to stop without waiting:
@@ -756,6 +791,8 @@ impl SandBox {
         containers.is_empty()
     }
 
+    /// Terminal teardown. Callers must arm a process-exit deadline before
+    /// entering: VMM API requests, joins and mutex acquisition can block.
     pub async fn destroy_sandbox(&mut self) -> CResult<()> {
         infof!(self.log, "destroy sandbox start");
         let req = agent::DestroySandboxRequest {
@@ -764,66 +801,53 @@ impl SandBox {
 
         if self.ch.is_none() {
             infof!(self.log, "ch instance is None");
+            *self.state.lock().await = SandBoxState::Exited;
             return Ok(());
         }
-        let mut ch = self.ch.as_mut().unwrap().lock().await;
-        //In the context of this 'ch' lock, check whether the VmShutdown event has been received
-        {
-            let state = self.state.lock().await;
-            if *state == SandBoxState::Exited {
-                infof!(self.log, "vm has exited");
-                return Ok(());
-            }
-        }
-        if self.client.is_none() {
-            infof!(self.log, "client is None");
-            return Ok(());
-        }
-        let client = self.client.as_ref().unwrap().lock().await;
-
-        if let Err(e) = client
-            .destroy_sandbox(context::with_timeout(1000 * 1000 * 200), &req)
-            .await
-        {
-            //perhaps the VM has already shutdown.(eg:panic/cube-agent exited/...)
-            warnf!(self.log, "destroy sandbox failed:{}, but nothing to do", e)
-        }
-
-        infof!(self.log, "wait vm shutdown");
-
-        //wait for the vm shutdown gracefully
-        loop {
-            match ch.wait_notify(Duration::from_millis(1000)).await {
-                Ok(ev) => {
-                    if CH::NotifyEvent::VmShutdown != ev {
-                        warnf!(
-                            self.log,
-                            "Not an expected event, expected:{:?}, actual:{:?}",
-                            CH::NotifyEvent::VmShutdown,
-                            ev
-                        );
-                        continue;
-                    }
-                    break;
+        // Signal before cancellation, then give aborted tasks a chance to
+        // release their in-flight agent streams before DestroySandbox.
+        self.stop_background_tasks().await;
+        let mut ch = self.ch.as_ref().unwrap().lock().await;
+        let exited = *self.state.lock().await == SandBoxState::Exited;
+        if !exited {
+            // A failed connect_agent leaves no client but can still leave a
+            // running VM. Agent cleanup is best effort, never a prerequisite
+            // for stopping the embedded VMM below.
+            if let Some(client) = self.client.as_ref() {
+                let client = client.lock().await;
+                if let Err(e) = client
+                    .destroy_sandbox(context::with_timeout(1000 * 1000 * 200), &req)
+                    .await
+                {
+                    warnf!(self.log, "destroy guest sandbox failed:{}", e);
                 }
-
-                //we are in the process of destruction, so the results here are not important.
-                Err(e) => {
-                    warnf!(
-                        self.log,
-                        "wait vm shutdown event failed:{}, but nothing to do",
-                        e
-                    );
-                    break;
+                if let Err(e) = ch.wait_vm_shutdown(Duration::from_secs(1)).await {
+                    warnf!(self.log, "wait vm shutdown failed:{}, stopping VMM", e);
                 }
             }
         }
-        infof!(self.log, "wait ch exit");
-        if let Err(e) = ch.join().await {
-            warnf!(self.log, "join ch failed:{}, but nothing to do", e);
+        infof!(self.log, "shutdown VMM and wait ch exit");
+        let result = ch.shutdown().await;
+        drop(ch);
+        self.finish_destroy(result).await
+    }
+
+    async fn finish_destroy(&mut self, result: CResult<()>) -> CResult<()> {
+        // A worker panic does not prove VMM death. Retain the runtime handle:
+        // dropping it can block in VmmInstance::drop. Production callers signal
+        // shim exit instead of retrying; the watchdog bounds any stalled exit.
+        // Notify waiters deliberately because the sandbox is terminal and
+        // unavailable, even when VMM death remains unconfirmed. Callers must not
+        // mark cleanup complete until a successful result confirms the join.
+        if result.is_ok() {
+            self.ch = None;
+        }
+        *self.state.lock().await = SandBoxState::Exited;
+        for container in self.containers.lock().await.values() {
+            container.notify_vm_shutdown().await;
         }
         infof!(self.log, "destroy sandbox finish");
-        Ok(())
+        result
     }
 
     pub async fn prepare_resource(&mut self) -> CResult<VmConfig> {
@@ -1893,6 +1917,107 @@ mod tests {
     use super::Log;
     use super::SandBox;
     use super::SnapshotFreezeState;
+
+    #[tokio::test]
+    async fn destroy_without_agent_or_launched_vmm_is_idempotent() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let mut sb = SandBox::new("failed-create".into(), Log::default(), false, tx);
+        assert!(sb.client.is_none());
+        sb.destroy_sandbox().await.unwrap();
+        assert!(sb.ch.is_none());
+        sb.destroy_sandbox().await.unwrap();
+        assert!(*sb.state.lock().await == super::SandBoxState::Exited);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_noncancellable_background_task_has_a_bound() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let sb = SandBox::new("blocked-background".into(), Log::default(), false, tx);
+        for cloned in [false, true] {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let handle = Arc::new(tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                std::thread::sleep(std::time::Duration::from_millis(600));
+            }));
+            ready.await.unwrap();
+            let keep = if cloned { Some(handle.clone()) } else { None };
+            let start = std::time::Instant::now();
+            sb.stop_background_task(handle).await;
+            assert!(start.elapsed() < std::time::Duration::from_millis(500));
+            drop(keep);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_failure_finalizes_state_and_retains_unconfirmed_runtime() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let mut sb = SandBox::new("failed-worker".into(), Log::default(), false, tx);
+        assert!(sb
+            .finish_destroy(Err("injected worker panic".into()))
+            .await
+            .is_err());
+        assert!(*sb.state.lock().await == super::SandBoxState::Exited);
+        assert!(
+            sb.ch.is_some(),
+            "unconfirmed runtime must remain available for teardown"
+        );
+        sb.destroy_sandbox().await.unwrap();
+        assert!(sb.ch.is_none());
+        sb.destroy_sandbox().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_background_tasks_waits_for_agent_clones_to_drop() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let mut sb = SandBox::new("stop-consumers".into(), Log::default(), false, tx);
+        let owner = Arc::new(());
+        for oom in [false, true] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let client_clone = owner.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let handle = Arc::new(tokio::spawn(async move {
+                let _client = client_clone;
+                ready_tx.send(()).unwrap();
+                rx.recv().await;
+            }));
+            ready_rx.await.unwrap();
+            if oom {
+                sb.tx_oom_exited = Some(tx);
+                sb.oom_handle = Some(handle);
+            } else {
+                sb.tx_monitor_exited = Some(tx);
+                sb.monitor_handle = Some(handle);
+            }
+        }
+        assert_eq!(Arc::strong_count(&owner), 3);
+        sb.stop_background_tasks().await;
+        assert_eq!(Arc::strong_count(&owner), 1);
+        assert!(sb.monitor_handle.is_none() && sb.oom_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn destroy_with_unresponsive_agent_and_missing_shutdown_event() {
+        let (client_fd, _peer_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .unwrap();
+        // Keep the peer open but never answer DestroySandbox. No VMM event
+        // receiver is installed either, as in a partially initialized sandbox.
+        let client = ttrpc::r#async::Client::new(client_fd.into_raw_fd());
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let mut sb = SandBox::new("unreachable-agent".into(), Log::default(), false, tx);
+        sb.client = Some(Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(
+            client,
+        ))));
+        tokio::time::timeout(std::time::Duration::from_secs(2), sb.destroy_sandbox())
+            .await
+            .expect("cleanup waited indefinitely for the agent/event")
+            .unwrap();
+        sb.destroy_sandbox().await.unwrap();
+    }
 
     #[tokio::test]
     async fn expired_snapshot_freeze_rejects_resume_and_renew() {

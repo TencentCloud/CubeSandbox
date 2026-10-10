@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,10 +24,12 @@ use containerd_shim::{
     },
     Context, Error, TtrpcResult,
 };
+use futures::FutureExt;
 use protobuf::{Enum, Message};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 
+use super::termination;
 use crate::common::utils::Utils;
 use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
@@ -277,6 +280,7 @@ pub struct TaskService {
     log: Log,
     //debug: bool,
     exit: Arc<ExitSignal>,
+    terminating: Arc<termination::Deadline>,
     tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
 }
 
@@ -307,6 +311,7 @@ impl TaskService {
             log,
             //debug: debug,
             exit,
+            terminating: Arc::new(termination::Deadline::default()),
             tx_containerd: tx,
         }
     }
@@ -315,6 +320,213 @@ impl TaskService {
         self.tx_containerd
             .try_send((topic.clone(), event))
             .unwrap_or_else(|e| warnf!(self.log, "tx event:{} to publisher failed:{}", topic, e));
+    }
+
+    fn arm_deadline(&self, timeout: Duration) {
+        if let Err(e) = self.terminating.arm(timeout) {
+            warnf!(
+                self.log,
+                "cannot start shim exit watchdog:{}; continuing cleanup without enforced deadline",
+                e
+            );
+        }
+    }
+
+    async fn shutdown_sandbox(&self, timeout: Duration) -> TtrpcResult<api::Empty> {
+        infof!(self.log, "shutdown req start");
+        // The lock wait is bounded but must never force-exit the process: the
+        // sandbox lock can be held for a whole create RPC (25s agent timeout)
+        // or a full pause-snapshot write on a live sandbox. Report lock-busy
+        // to the caller instead; Cubelet reissues Shutdown or reaps a shim
+        // whose lock holder is genuinely stuck.
+        let mut sb = match tokio::time::timeout(timeout, self.sandbox.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                errf!(
+                    self.log,
+                    "sandbox lock busy for {:?}; a create or pause may still be holding it",
+                    timeout
+                );
+                return Err(Others(format!("sandbox lock busy for {:?}", timeout)));
+            }
+        };
+        // After PauseToSnapshot the sandbox is Paused (MicroVM already gone).
+        // Allow shutdown so Cubelet can reap the shim; skip destroy_sandbox
+        // when already paused because there is no live VM to tear down.
+        let already_paused = sb.paused().await;
+        if !already_paused && !sb.is_empty().await {
+            infof!(
+                self.log,
+                "sandbox not empty, do nothing, shutdown req finish"
+            );
+            return Ok(api::Empty::default());
+        }
+        // Terminal from here on: the exit deadline covers both the teardown
+        // below and the shim's own exit sequence with a full budget.
+        self.arm_deadline(timeout);
+        if !already_paused {
+            if let Err(e) = sb.destroy_sandbox().await {
+                errf!(self.log, "shutdown failed:{}", e)
+            } else {
+                self.terminating.cleanup_complete();
+                infof!(self.log, "shutdown req finish");
+            }
+        } else {
+            self.terminating.cleanup_complete();
+            infof!(
+                self.log,
+                "shutdown after pause-to-snapshot; signaling shim exit"
+            );
+        }
+        self.exit.signal();
+        Ok(api::Empty::default())
+    }
+
+    fn rollback_failed_create(&self) {
+        warnf!(
+            self.log,
+            "rolling back failed create; shim exit deadline is {}s",
+            termination::CLEANUP_TIMEOUT.as_secs()
+        );
+        self.arm_deadline(termination::CLEANUP_TIMEOUT);
+        let service = self.clone();
+        tokio::spawn(async move {
+            // Let the failed Create RPC return its original error before
+            // stopping the server. Cleanup does not depend on a later Shutdown.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut sb = service.sandbox.lock().await;
+            if let Err(e) = sb.destroy_sandbox().await {
+                errf!(service.log, "failed create rollback failed:{}", e);
+            } else {
+                service.terminating.cleanup_complete();
+            }
+            service.exit.signal();
+        });
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    #[tokio::test]
+    async fn rollback_child() {
+        let Ok(mode) = std::env::var("CUBE_SHIM_ROLLBACK_TEST") else {
+            return;
+        };
+        std::io::stdout()
+            .write_all(b"rollback-child-started\n")
+            .unwrap();
+        let (tx, _) = channel(8);
+        let service = TaskService {
+            sandbox: Arc::new(Mutex::new(sb::SandBox::new(
+                "failed-create".into(),
+                Log::default(),
+                false,
+                tx.clone(),
+            ))),
+            log: Log::default(),
+            exit: Arc::new(ExitSignal::default()),
+            terminating: Arc::new(termination::Deadline::default()),
+            tx_containerd: tx,
+        };
+        if mode == "shutdown-blocked" {
+            let _guard = service.sandbox.lock().await;
+            // A Shutdown that cannot acquire the sandbox lock reports
+            // lock-busy to the caller instead of killing the process: the
+            // lock may be held by a live sandbox's own create or pause.
+            let res = service.shutdown_sandbox(Duration::from_millis(300)).await;
+            assert!(
+                res.is_err(),
+                "shutdown must report lock-busy, not kill the shim"
+            );
+            assert!(!service.terminating.is_armed());
+            // Outlive the would-be deadline: nothing may force-exit the
+            // shim while a legitimate lock holder may still be running.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            std::process::exit(0);
+        }
+        if mode == "shutdown-clean" {
+            service
+                .shutdown_sandbox(Duration::from_millis(300))
+                .await
+                .unwrap();
+            // Simulate a stalled shim exit sequence after successful cleanup.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+        if mode == "shutdown-refresh" {
+            let guard = service.sandbox.lock().await;
+            let cloned = service.clone();
+            let shutdown = tokio::spawn(async move {
+                cloned
+                    .shutdown_sandbox(Duration::from_millis(500))
+                    .await
+                    .unwrap();
+            });
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            drop(guard);
+            shutdown.await.unwrap();
+            // Past the lock-wait deadline but within the fresh cleanup budget.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            std::process::exit(0);
+        }
+        // Shorten only the child test's deadline. The production rollback must
+        // keep this first deadline even if Shutdown races with it.
+        service.terminating.arm(Duration::from_secs(2)).unwrap();
+        let guard = service.sandbox.lock().await;
+        service.rollback_failed_create();
+        if mode == "released" {
+            drop(guard);
+        }
+        service.exit.wait().await;
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn terminal_cleanup_paths_exit_or_report_busy_when_sandbox_lock_is_stuck() {
+        for (mode, code) in [
+            ("released", 0),
+            ("blocked", 1),
+            ("shutdown-blocked", 0),
+            ("shutdown-clean", 0),
+            ("shutdown-refresh", 0),
+        ] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "service::task_srv::cleanup_tests::rollback_child",
+                ])
+                .env("CUBE_SHIM_ROLLBACK_TEST", mode)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let mut output = String::new();
+                    child
+                        .stdout
+                        .take()
+                        .unwrap()
+                        .read_to_string(&mut output)
+                        .unwrap();
+                    assert!(
+                        output.contains("rollback-child-started"),
+                        "child harness did not execute the selected test"
+                    );
+                    assert_eq!(status.code(), Some(code), "{mode}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("failed-create rollback left a live shim: {mode}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 }
 
@@ -349,6 +561,9 @@ impl Task for TaskService {
         );
 
         let mut sb = self.sandbox.lock().await;
+        if self.terminating.is_armed() {
+            return Err(Others("sandbox is terminating".to_string()));
+        }
         if sb.paused().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
@@ -365,10 +580,31 @@ impl Task for TaskService {
                 Error::Other(format!("Init sandbox config failed:{}", e))
             })?;
 
-            sb.create_sandbox().await.map_err(|e| {
-                errf!(self.log, "Create sandbox failed:{}", e.clone());
-                Error::Other(format!("Create sandbox failed:{}", e))
-            })?;
+            // create_sandbox has reachable panics in its call chain and a
+            // panic would otherwise skip the rollback below: tokio mutexes
+            // are not poisoned, so the shim would keep serving with a
+            // partially created, possibly running VMM.
+            let created = AssertUnwindSafe(sb.create_sandbox()).catch_unwind().await;
+            match created {
+                Ok(Ok(())) => {}
+                Err(panic) => {
+                    let panic = if let Some(s) = panic.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    errf!(self.log, "Create sandbox panicked:{}", panic);
+                    self.rollback_failed_create();
+                    return Err(Error::Other(format!("Create sandbox panicked:{}", panic)).into());
+                }
+                Ok(Err(e)) => {
+                    errf!(self.log, "Create sandbox failed:{}", e.clone());
+                    self.rollback_failed_create();
+                    return Err(Error::Other(format!("Create sandbox failed:{}", e)).into());
+                }
+            }
         }
 
         infof!(
@@ -385,12 +621,12 @@ impl Task for TaskService {
             terminal: req.terminal,
             ..Default::default()
         };
-        sb.create_container(req.id.clone(), spec, info)
-            .await
-            .map_err(|e| {
-                errf!(self.log, "Create container failed:{}", e.clone());
-                Error::Other(format!("Create container failed:{}", e))
-            })?;
+        if let Err(e) = sb.create_container(req.id.clone(), spec, info).await {
+            errf!(self.log, "Create container failed:{}", e.clone());
+            // A successful CreateSandbox is reusable after a container-level
+            // error. Leave its lifetime to Cubelet's retry/Shutdown policy.
+            return Err(Error::Other(format!("Create container failed:{}", e)).into());
+        }
         infof!(
             self.log,
             "start container finish at:{}",
@@ -588,6 +824,13 @@ impl Task for TaskService {
             };
             let pid = sb.pid();
             drop(sb);
+            // The embedded VMM thread is still alive (VmDelete stopped the
+            // guest, not the VMM event loop), so shim exit still runs
+            // VmmInstance::drop, which can block on VmmShutdown + join. Arm
+            // the same exit deadline as Shutdown so this reap path cannot
+            // leak a shim either.
+            self.arm_deadline(termination::CLEANUP_TIMEOUT);
+            self.terminating.cleanup_complete();
             let exit = self.exit.clone();
             let log = self.log.clone();
             tokio::spawn(async move {
@@ -769,36 +1012,8 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         _req: api::ShutdownRequest,
     ) -> TtrpcResult<api::Empty> {
-        infof!(self.log, "shutdown req start");
-
-        let mut sb = self.sandbox.lock().await;
-        // After PauseToSnapshot the sandbox is Paused (MicroVM already gone).
-        // Allow shutdown so Cubelet can reap the shim; skip destroy_sandbox
-        // when already paused because there is no live VM to tear down.
-        let already_paused = sb.paused().await;
-        if !already_paused && !sb.is_empty().await {
-            infof!(
-                self.log,
-                "sandbox not empty, do nothing, shutdown req finish"
-            );
-            return Ok(api::Empty::default());
-        }
-        if !already_paused {
-            if let Err(e) = sb.destroy_sandbox().await {
-                errf!(self.log, "shutdown failed:{}", e)
-            } else {
-                infof!(self.log, "shutdown req finish");
-            }
-        } else {
-            infof!(
-                self.log,
-                "shutdown after pause-to-snapshot; signaling shim exit"
-            );
-        }
-        self.exit.signal();
-        Ok(api::Empty::default())
+        self.shutdown_sandbox(termination::CLEANUP_TIMEOUT).await
     }
-
     async fn state(
         &self,
         _ctx: &TtrpcContext,

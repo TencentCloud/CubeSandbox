@@ -292,9 +292,31 @@ impl CubeHypervisor {
         Err("Receiver is uninitialized".to_string())
     }
 
-    pub async fn join(&mut self) -> CResult<()> {
-        let mut ch = self.ch.as_mut().unwrap().lock().await;
-        ch.join().map_err(|e| format!("join ch failed:{}", e))
+    pub async fn wait_vm_shutdown(&self, timeout: Duration) -> CResult<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+            if remaining.is_zero() {
+                break;
+            }
+            match self.wait_notify(remaining).await {
+                Ok(NotifyEvent::VmShutdown) => return Ok(()),
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() >= deadline => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Err("VM shutdown event deadline expired".into())
+    }
+
+    /// Terminal teardown, including a VM whose agent was never connected.
+    /// VmmShutdown stops the VMM event loop; VmShutdown only stops the guest.
+    pub async fn shutdown(&mut self) -> CResult<()> {
+        let Some(instance) = self.ch.clone() else {
+            return Ok(());
+        };
+        shutdown_and_join(instance, self.log.clone()).await?;
+        self.ch = None;
+        Ok(())
     }
 
     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
@@ -351,5 +373,160 @@ impl CubeHypervisor {
             .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?;
 
         Ok(())
+    }
+}
+
+// Keep the blocking teardown testable without starting KVM or mutating the
+// process-global VMM service/logger. Only a completed join proves VMM death.
+trait ShutdownVmm: Send + 'static {
+    fn request_shutdown(&self) -> CResult<()>;
+    fn join_thread(&mut self) -> CResult<()>;
+}
+
+impl ShutdownVmm for cube_hypervisor::VmmInstance {
+    fn request_shutdown(&self) -> CResult<()> {
+        self.send_request(ApiRequest::VmmShutdown)
+            .map_err(|e| format!("shutdown transport failed:{}", e))?
+            .map_err(|e| format!("VMM rejected shutdown:{}", e))?;
+        Ok(())
+    }
+
+    fn join_thread(&mut self) -> CResult<()> {
+        self.join().map_err(|e| format!("join ch failed:{}", e))
+    }
+}
+
+async fn shutdown_and_join<T: ShutdownVmm>(instance: Arc<Mutex<T>>, log: Log) -> CResult<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut instance = instance.blocking_lock();
+        if let Err(e) = instance.request_shutdown() {
+            crate::warnf!(log, "VmmShutdown request failed:{}", e);
+        }
+        // VmmInstance::join consumes the handle and waits for thread death,
+        // including when the thread panicked or returned an error. Those
+        // errors are diagnostics, not evidence that the VMM is still alive.
+        if let Err(e) = instance.join_thread() {
+            crate::warnf!(log, "VMM exited abnormally:{}", e);
+        }
+    })
+    .await
+    .map_err(|e| format!("shutdown worker failed:{}", e))
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    struct FakeVmm {
+        requested: Arc<AtomicBool>,
+        joined: Arc<AtomicBool>,
+        fail: bool,
+        panic_worker: bool,
+        release: Option<Receiver<()>>,
+    }
+
+    impl ShutdownVmm for FakeVmm {
+        fn request_shutdown(&self) -> CResult<()> {
+            self.requested.store(true, Ordering::SeqCst);
+            if self.fail {
+                Err("VMM rejected shutdown".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn join_thread(&mut self) -> CResult<()> {
+            if self.panic_worker {
+                panic!("injected teardown worker panic");
+            }
+            if let Some(release) = self.release.take() {
+                release
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("Tokio worker was blocked by join");
+            }
+            self.joined.store(true, Ordering::SeqCst);
+            if self.fail {
+                Err("VMM thread panicked after exiting".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_worker_requests_shutdown_and_joins_even_after_rejection() {
+        for fail in [false, true] {
+            let requested = Arc::new(AtomicBool::new(false));
+            let joined = Arc::new(AtomicBool::new(false));
+            let (release, wait_release) = channel();
+            let instance = Arc::new(Mutex::new(FakeVmm {
+                requested: requested.clone(),
+                joined: joined.clone(),
+                fail,
+                panic_worker: false,
+                release: Some(wait_release),
+            }));
+            let teardown = shutdown_and_join(instance, Log::default());
+            // A synchronous join must not starve this single Tokio worker.
+            let timer = async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                release.send(()).unwrap();
+            };
+            let (result, _) = tokio::join!(teardown, timer);
+            result.unwrap();
+            assert!(requested.load(Ordering::SeqCst));
+            assert!(joined.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn teardown_worker_panic_is_not_reported_as_completed_cleanup() {
+        let instance = Arc::new(Mutex::new(FakeVmm {
+            requested: Arc::new(AtomicBool::new(false)),
+            joined: Arc::new(AtomicBool::new(false)),
+            fail: false,
+            panic_worker: true,
+            release: None,
+        }));
+        assert!(shutdown_and_join(instance, Log::default()).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_event_deadline_bounds_missing_and_unrelated_events() {
+        for noisy in [false, true] {
+            let (tx, rx) = channel();
+            let ch = CubeHypervisor {
+                status: HypStatus::Init,
+                config: HypConfig {
+                    debug: false,
+                    log_level: log::LevelFilter::Info,
+                    sandbox_id: "event-deadline".into(),
+                    ch_http_api: None,
+                },
+                ch: None,
+                ev_receiver: Some(Arc::new(Mutex::new(rx))),
+                log: Log::default(),
+            };
+            let producer = std::thread::spawn(move || {
+                let start = Instant::now();
+                while start.elapsed() < Duration::from_millis(300) {
+                    if noisy && tx.send(NotifyEvent::RestoreReady).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            let start = Instant::now();
+            assert!(ch
+                .wait_vm_shutdown(Duration::from_millis(100))
+                .await
+                .is_err());
+            assert!(start.elapsed() >= Duration::from_millis(90));
+            assert!(start.elapsed() < Duration::from_millis(250));
+            drop(ch);
+            producer.join().unwrap();
+        }
     }
 }
