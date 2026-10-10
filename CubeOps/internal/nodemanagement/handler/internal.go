@@ -32,6 +32,15 @@ func (h *InternalHandler) Register(r *gin.RouterGroup) {
 	r.PUT("/nodes/:nodeID/labels", h.SetLabels)
 	r.DELETE("/nodes/:nodeID/labels/:key", h.DeleteLabel)
 	r.DELETE("/nodes/:nodeID", h.DeleteNode)
+
+	// Quota spec management for cubeopscli.
+	r.GET("/nodes/:nodeID/config/quota", h.GetNodeQuota)
+	r.PUT("/nodes/:nodeID/config/quota", h.SetNodeQuota)
+	r.GET("/nodes/:nodeID/config/quota/history", h.GetNodeQuotaHistory)
+
+	// Cluster-wide quota policy for cubeopscli.
+	r.GET("/cluster/quota-defaults", h.GetClusterQuotaDefaults)
+	r.PUT("/cluster/quota-defaults", h.SetClusterQuotaDefaults)
 }
 
 func (h *InternalHandler) ListNodes(c *gin.Context) {
@@ -171,4 +180,78 @@ func (h *InternalHandler) DeleteNode(c *gin.Context) {
 		return
 	}
 	httputil.WriteJSON(c, http.StatusOK, snap)
+}
+
+// GetNodeQuota serves the CLI quota view: spec vs actual vs drift.
+func (h *InternalHandler) GetNodeQuota(c *gin.Context) {
+	view, err := h.svc.GetNodeQuotaView(c.Request.Context(), c.Param("nodeID"))
+	if err != nil {
+		MapNodeError(c, err)
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, view)
+}
+
+// SetNodeQuota is the CLI write path. The internal routes carry no JWT, so
+// the audit operator arrives as ?operator= (default "cli").
+func (h *InternalHandler) SetNodeQuota(c *gin.Context) {
+	var spec model.QuotaSpec
+	if err := c.ShouldBindJSON(&spec); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	operator := c.Query("operator")
+	if operator == "" {
+		operator = "cli"
+	}
+	view, push, err := h.svc.SetNodeQuota(c.Request.Context(), c.Param("nodeID"), &spec, operator)
+	if err != nil {
+		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: set quota failed: node=%s operator=%s: %v", c.Param("nodeID"), operator, err)
+		MapNodeError(c, err)
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, gin.H{"view": view, "push": push})
+}
+
+// GetNodeQuotaHistory serves the CLI audit listing.
+func (h *InternalHandler) GetNodeQuotaHistory(c *gin.Context) {
+	ops, err := h.svc.ListOperations(c.Request.Context(), c.Param("nodeID"), quotaHistoryLimit(c))
+	if err != nil {
+		MapNodeError(c, err)
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, quotaHistoryFromOps(ops))
+}
+
+// GetClusterQuotaDefaults serves the cluster-wide ratio default.
+func (h *InternalHandler) GetClusterQuotaDefaults(c *gin.Context) {
+	defaults, err := h.svc.GetClusterQuotaDefaults(c.Request.Context())
+	if err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, defaults)
+}
+
+// SetClusterQuotaDefaults stores the cluster-wide ratio default and fans it
+// out to every inheriting node. Body: {"paused_release_ratio": 0.5 | null}.
+func (h *InternalHandler) SetClusterQuotaDefaults(c *gin.Context) {
+	var body struct {
+		PausedReleaseRatio *float64 `json:"paused_release_ratio"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	operator := c.Query("operator")
+	if operator == "" {
+		operator = "cli"
+	}
+	defaults, prop, err := h.svc.SetClusterQuotaDefaults(c.Request.Context(), body.PausedReleaseRatio, operator)
+	if err != nil {
+		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: set cluster quota defaults failed: operator=%s: %v", operator, err)
+		MapNodeError(c, err)
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, gin.H{"defaults": defaults, "propagation": prop})
 }

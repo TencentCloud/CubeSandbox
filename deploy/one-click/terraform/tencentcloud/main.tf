@@ -989,6 +989,13 @@ output "tcr_token_user" {
   sensitive = true
 }
 
+# Shared secret gating CubeOps -> ops-agent quota pushes; consumed by create.sh
+# to pass the same value to the compute-VM one-click install.
+output "ops_agent_token" {
+  value     = local.deploy_addons ? random_password.ops_agent_token[0].result : ""
+  sensitive = true
+}
+
 # MySQL outputs
 output "mysql_instance_id" {
   value = tencentcloud_mysql_instance.mysql.id

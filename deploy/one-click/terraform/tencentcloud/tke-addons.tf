@@ -157,6 +157,14 @@ resource "random_password" "template_callback_token" {
   special = false
 }
 
+# Shared secret gating CubeOps -> ops-agent quota pushes; both sides read it as
+# CUBE_OPS_OPSAGENT_TOKEN / OPS_AGENT_SHARED_TOKEN.
+resource "random_password" "ops_agent_token" {
+  count   = local.deploy_addons ? 1 : 0
+  length  = 32
+  special = false
+}
+
 # Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
 # The apiserver is intranet-only, so use the intranet kubeconfig. create.sh then
 # rewrites this local file to reach the endpoint through the jumpserver tunnel.
@@ -974,7 +982,8 @@ resource "kubernetes_secret" "cube_ops_conf" {
   }
 
   data = {
-    "redis-password" = var.redis_password
+    "redis-password"       = var.redis_password
+    "cube-ops-agent-token" = random_password.ops_agent_token[0].result
   }
 }
 
@@ -1003,6 +1012,20 @@ resource "kubernetes_deployment" "cube_ops" {
           env {
             name  = "CUBE_OPS_BIND"
             value = "0.0.0.0:3010"
+          }
+          env {
+            # Push channel to the node-local ops-agent on compute VMs.
+            name  = "CUBE_OPS_OPSAGENT_PORT"
+            value = "8890"
+          }
+          env {
+            name = "CUBE_OPS_OPSAGENT_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cube_ops_conf[0].metadata[0].name
+                key  = "cube-ops-agent-token"
+              }
+            }
           }
           env {
             name  = "CUBE_MASTER_ADDR"

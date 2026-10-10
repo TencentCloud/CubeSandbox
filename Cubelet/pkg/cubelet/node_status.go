@@ -84,7 +84,7 @@ func (kl *Cubelet) tryRegisterWithAPIServer(node *cubeletnodemeta.Node) bool {
 	if kl.masterClient == nil {
 		return false
 	}
-	if err := kl.masterClient.RegisterNode(context.TODO(), kl.buildRegisterRequest(node)); err != nil {
+	if err := kl.masterClient.RegisterNode(context.TODO(), kl.buildRegisterRequest(node, hostConfig())); err != nil {
 		klog.ErrorS(err, "Unable to register node with CubeMaster", "node", node.Name)
 		return false
 	}
@@ -496,7 +496,7 @@ func ReadyCondition(
 	}
 }
 
-func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclient.RegisterNodeRequest {
+func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node, hostCfg *config.HostConf) *masterclient.RegisterNodeRequest {
 	req := &masterclient.RegisterNodeRequest{
 		NodeID:       node.Name,
 		HostIP:       firstNodeIP(node.Status.Addresses),
@@ -505,14 +505,13 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclien
 		Allocatable:  toResourceSnapshot(node.Status.Allocatable),
 		InstanceType: kl.instanceType,
 	}
-	var hostCfg *config.HostConf
-	if cfg := config.GetConfig(); cfg != nil {
-		hostCfg = cfg.HostConf
-	}
 	if hostCfg != nil {
 		req.ClusterLabel = hostCfg.SchedulerLabel
 		req.CreateConcurrentNum = int64(hostCfg.Quota.CreationConcurrentNum)
+		ratio := hostCfg.Quota.PausedResourceReleaseRatio
+		req.PausedReleaseRatio = &ratio
 	}
+	// Fallbacks mirror the quota already resolved into Allocatable/Capacity.
 	req.QuotaCPU = resolveHostQuotaCPUMilli(hostCfg, req.Allocatable.MilliCPU, req.Capacity.MilliCPU)
 	req.QuotaMemMB = resolveHostQuotaMemMB(hostCfg, req.Allocatable.MemoryMB, req.Capacity.MemoryMB)
 	req.MaxMvmNum = resolveHostMaxMvmNum(hostCfg, req.QuotaMemMB)
@@ -531,6 +530,7 @@ func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.
 		HeartbeatTime:  kl.clock.Now(),
 	}
 	attachResourceReport(req, kl.clock.Now())
+	req.Quota = buildQuotaReport(hostConfig())
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
@@ -538,17 +538,40 @@ func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.
 	return req
 }
 
+// hostConfig returns the dynamic host config, or nil when unset.
+func hostConfig() *config.HostConf {
+	if cfg := config.GetConfig(); cfg != nil {
+		return cfg.HostConf
+	}
+	return nil
+}
+
+// buildQuotaReport resolves the effective quota with the same chain as
+// registration; nil means nothing resolved (treated as "no report").
+func buildQuotaReport(hostCfg *config.HostConf) *masterclient.QuotaReport {
+	quotaMemMB := resolveHostQuotaMemMB(hostCfg)
+	report := &masterclient.QuotaReport{
+		MilliCPU:  resolveHostQuotaCPUMilli(hostCfg),
+		MemMB:     quotaMemMB,
+		MaxMvmNum: resolveHostMaxMvmNum(hostCfg, quotaMemMB),
+	}
+	if hostCfg != nil {
+		report.CreateConcurrentNum = int64(hostCfg.Quota.CreationConcurrentNum)
+		ratio := hostCfg.Quota.PausedResourceReleaseRatio
+		report.PausedReleaseRatio = &ratio
+	}
+	if report.MilliCPU == 0 && report.MemMB == 0 && report.MaxMvmNum == 0 && report.CreateConcurrentNum == 0 {
+		return nil
+	}
+	return report
+}
+
 // collectHostFactsReport maps the cached host facts into the master transport
 // type. Returns nil when nothing meaningful was collected so the master treats
 // this heartbeat as carrying no host-facts update.
 func collectHostFactsReport() *masterclient.HostFacts {
 	f := versioninfo.CollectHostFacts()
-	if f.CPUVendor == "" && f.CPUModel == "" && f.CPUIDHash == "" &&
-		f.HostKernelRelease == "" && f.HostKernelFingerprint == "" && f.KVMAPIVersion == 0 &&
-		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == "" {
-		return nil
-	}
-	return &masterclient.HostFacts{
+	out := &masterclient.HostFacts{
 		CPUVendor:             f.CPUVendor,
 		CPUModel:              f.CPUModel,
 		CPUIDHash:             f.CPUIDHash,
@@ -559,6 +582,19 @@ func collectHostFactsReport() *masterclient.HostFacts {
 		KVMModuleTaint:        f.KVMModuleTaint,
 		KVMModuleScanned:      f.KVMModuleScanned,
 	}
+	// Physical capacity for the overcommit guards, measured here (not from the
+	// quota-carrying Capacity).
+	out.CPUCount = int64(hostCPUCount())
+	if memMB, err := readHostMemoryTotalMB(); err == nil {
+		out.MemTotalMB = memMB
+	}
+	if out.CPUVendor == "" && out.CPUModel == "" && out.CPUIDHash == "" &&
+		out.HostKernelRelease == "" && out.HostKernelFingerprint == "" && out.KVMAPIVersion == 0 &&
+		out.KVMModuleFingerprint == "" && out.KVMModuleTaint == "" &&
+		out.CPUCount == 0 && out.MemTotalMB == 0 {
+		return nil
+	}
+	return out
 }
 
 func (kl *Cubelet) collectVersionReport() ([]masterclient.ComponentVersion, bool) {
@@ -619,11 +655,7 @@ func attachResourceReport(req *masterclient.UpdateNodeStatusRequest, now time.Ti
 }
 
 func applyHostQuota(node *cubeletnodemeta.Node) {
-	var hostCfg *config.HostConf
-	if cfg := config.GetConfig(); cfg != nil {
-		hostCfg = cfg.HostConf
-	}
-	applyHostQuotaWithConfig(node, hostCfg)
+	applyHostQuotaWithConfig(node, hostConfig())
 }
 
 func applyHostQuotaWithConfig(node *cubeletnodemeta.Node, hostCfg *config.HostConf) {

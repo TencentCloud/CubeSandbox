@@ -33,6 +33,11 @@ type fakeNodeService struct {
 	getVersionMatrix          func(ctx context.Context) (*model.VersionMatrix, error)
 	listOperations            func(ctx context.Context, nodeID string, limit int) ([]model.NodeOperation, error)
 	deleteNode                func(ctx context.Context, nodeID string, force bool) (*model.NodeSnapshot, error)
+	getNodeQuotaView          func(ctx context.Context, nodeID string) (*model.QuotaView, error)
+	setNodeQuota              func(ctx context.Context, nodeID string, spec *model.QuotaSpec, operator string) (*model.QuotaView, *model.PushResult, error)
+	getOpsAgentSpec           func(ctx context.Context, nodeID string) (*model.OpsAgentSpecResponse, error)
+	getClusterQuotaDefaults   func(ctx context.Context) (*model.ClusterQuotaDefaults, error)
+	setClusterQuotaDefaults   func(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error)
 }
 
 func (f *fakeNodeService) RegisterNode(ctx context.Context, req *model.RegisterNodeRequest) (*model.NodeSnapshot, error) {
@@ -67,6 +72,27 @@ func (f *fakeNodeService) DeleteNode(ctx context.Context, nodeID string, force b
 		return nil, errors.New("not implemented")
 	}
 	return f.deleteNode(ctx, nodeID, force)
+}
+func (f *fakeNodeService) GetNodeQuotaView(ctx context.Context, nodeID string) (*model.QuotaView, error) {
+	return f.getNodeQuotaView(ctx, nodeID)
+}
+func (f *fakeNodeService) SetNodeQuota(ctx context.Context, nodeID string, spec *model.QuotaSpec, operator string) (*model.QuotaView, *model.PushResult, error) {
+	return f.setNodeQuota(ctx, nodeID, spec, operator)
+}
+func (f *fakeNodeService) GetOpsAgentSpec(ctx context.Context, nodeID string) (*model.OpsAgentSpecResponse, error) {
+	return f.getOpsAgentSpec(ctx, nodeID)
+}
+func (f *fakeNodeService) GetClusterQuotaDefaults(ctx context.Context) (*model.ClusterQuotaDefaults, error) {
+	if f.getClusterQuotaDefaults == nil {
+		return &model.ClusterQuotaDefaults{}, nil
+	}
+	return f.getClusterQuotaDefaults(ctx)
+}
+func (f *fakeNodeService) SetClusterQuotaDefaults(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error) {
+	if f.setClusterQuotaDefaults == nil {
+		return &model.ClusterQuotaDefaults{PausedReleaseRatio: ratio}, &model.QuotaPropagation{}, nil
+	}
+	return f.setClusterQuotaDefaults(ctx, ratio, operator)
 }
 
 func TestAgent_RegisterNode(t *testing.T) {
@@ -174,6 +200,40 @@ func TestAgent_UpdateStatus_WithAllocated(t *testing.T) {
 	}
 	if capturedReq.Allocated.MilliCPU != 1000 || capturedReq.Allocated.MvmNum != 3 {
 		t.Errorf("allocated = %+v", capturedReq.Allocated)
+	}
+}
+
+// The heartbeat quota JSON keys must match cubelet's masterclient wire format.
+func TestAgent_UpdateStatus_WithQuota(t *testing.T) {
+	var capturedReq *model.UpdateNodeStatusRequest
+	svc := &fakeNodeService{
+		updateNodeStatus: func(_ context.Context, nodeID string, req *model.UpdateNodeStatusRequest) (*model.NodeSnapshot, error) {
+			capturedReq = req
+			return &model.NodeSnapshot{NodeID: nodeID, Healthy: true, HeartbeatTime: time.Now()}, nil
+		},
+	}
+	r := gin.New()
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
+
+	// Raw payload mirrors cubelet's masterclient JSON keys, not the Go struct.
+	body := []byte(`{
+		"conditions": [{"type": "Ready", "status": "True"}],
+		"quota": {"milli_cpu": 128000, "mem_mb": 262144, "max_mvm_num": 500, "create_concurrent_num": 32}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/n-1/status", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if capturedReq == nil || capturedReq.Quota == nil {
+		t.Fatal("expected quota in captured request")
+	}
+	q := capturedReq.Quota
+	if q.MilliCPU != 128000 || q.MemMB != 262144 || q.MaxMvmNum != 500 || q.CreateConcurrentNum != 32 {
+		t.Errorf("quota = %+v", q)
 	}
 }
 
