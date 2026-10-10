@@ -326,6 +326,17 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	var snapshotErr, rootfsErr, resumeErr error
 	shimCapability := resolveShimSnapshotCapability(cb)
 
+	// Run the template's declared readiness probe immediately before the
+	// snapshot transaction. Templates without a probe preserve the existing
+	// AppSnapshot behavior.
+	if err := s.verifyAppSnapshotReadiness(frozenCtx, sandboxID); err != nil {
+		stepLog.Errorf("Snapshot readiness probe failed before capture: %v", err)
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("snapshot readiness precondition failed: %v", err)
+		return rsp, nil
+	}
+
 	// The legacy sequence: capture memory with the cube-runtime CLI, then commit
 	// rootfs. Used both as the ordinary path for a shim below the coordinated
 	// boundary and as the one-shot retry described below.
