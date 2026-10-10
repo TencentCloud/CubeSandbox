@@ -1101,7 +1101,7 @@ pub struct SandboxInfo {
     pub status: String,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub started_at: Option<DateTime<Utc>>,
-    /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
+    /// Unix nanoseconds from Cubelet sandbox.created_at — used as fallback for started_at.
     #[serde(default)]
     pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
