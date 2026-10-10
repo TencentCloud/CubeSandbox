@@ -58,6 +58,14 @@
 
 SPDK_LOG_REGISTER_COMPONENT(s3lvol_rpc)
 
+/* The hidden import template is an internal snapshot. Callers address the user
+ * lvol that was cloned from it. */
+static bool
+rpc_hides_lvol(const struct spdk_lvol *lvol)
+{
+	return s3lvol_lvol_is_import_template(lvol);
+}
+
 /* Sizes that name a volume or store capacity are taken in GiB, and the parameter
  * always says so: capacity_gib, size_gib. Both convert with << 30.
  *
@@ -565,6 +573,9 @@ rpc_attach_lvstore_cb(void *cb_arg, struct s3lvol_lvstore *lvs, int lvserrno)
 				     spdk_bs_free_cluster_count(store->blobstore));
 	spdk_json_write_named_array_begin(w, "lvols");
 	TAILQ_FOREACH(lvol, &store->lvols, link) {
+		if (rpc_hides_lvol(lvol)) {
+			continue;
+		}
 		spdk_json_write_object_begin(w);
 		spdk_json_write_named_string(w, "name", lvol->name);
 		if (lvol->bdev) {
@@ -892,7 +903,7 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 	}
 
 	lvol = s3lvol_lvol_find_any(req.lvol_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		SPDK_WARNLOG("%s: lvol '%s' not found in any lvstore\n",
 			     snapshot ? "rcow_create_snapshot" : "rcow_create_clone",
 			     req.lvol_name);
@@ -1087,7 +1098,7 @@ rpc_lookup_lvol(struct spdk_jsonrpc_request *request,
 		}
 
 		lvol = s3lvol_lvol_find(lvs, req->lvol_name);
-		if (!lvol) {
+		if (!lvol || rpc_hides_lvol(lvol)) {
 			rpc_lvol_respond_errf(request, "lvstore '%s' has no lvol '%s'",
 					      req->lvs_name, req->lvol_name);
 			return NULL;
@@ -1097,7 +1108,7 @@ rpc_lookup_lvol(struct spdk_jsonrpc_request *request,
 
 	/* No lvs_name -- find the lvol by scanning all lvstores. */
 	lvol = s3lvol_lvol_find_any(req->lvol_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		rpc_lvol_respond_errf(request, "lvol '%s' not found in any lvstore",
 				      req->lvol_name);
 		return NULL;
@@ -2015,6 +2026,9 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 
 		spdk_json_write_named_array_begin(w, "lvols");
 		TAILQ_FOREACH(lvol, &store->lvols, link) {
+			if (rpc_hides_lvol(lvol)) {
+				continue;
+			}
 			spdk_json_write_object_begin(w);
 			spdk_json_write_named_string(w, "name", lvol->name);
 			if (lvol->bdev) {
@@ -2219,7 +2233,7 @@ rpc_rcow_export_snapshot(struct spdk_jsonrpc_request *request,
 	}
 
 	lvol = s3lvol_lvol_find_any(req.snapshot_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		SPDK_WARNLOG("rcow_export_snapshot '%s' refused: snapshot not found\n",
 			     req.snapshot_name);
 		rpc_lvol_respond_errf(request,
@@ -2481,30 +2495,35 @@ rpc_import_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	const char *mode;
 
 	if (lvolerrno != 0) {
-		SPDK_ERRLOG("rcow_import_lvol '%s' from export %s failed: %s\n",
-			    ctx->lvol_name, ctx->export_uuid,
-			    spdk_strerror(-lvolerrno));
-		rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		if (lvolerrno == -ETIMEDOUT) {
+			rpc_lvol_respond_err(ctx->request, lvolerrno,
+					     "timed out waiting for the shared template "
+					     "to finish decoupling");
+		} else {
+			SPDK_ERRLOG("rcow_import_lvol '%s' from export %s failed: %s\n",
+				    ctx->lvol_name, ctx->export_uuid,
+				    spdk_strerror(-lvolerrno));
+			rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		}
 		free(ctx);
 		return;
 	}
 
 	/* The one reply in this file with a third field, and the reason is that an
-	 * import no longer has one implementation. When the export turns out to
-	 * name a snapshot this lvstore still holds, it degenerates into a local
-	 * clone: no import registry entry, nothing for rcow_release_export to be
-	 * held up by, and no dependency on the export surviving. That is a
-	 * different object with different obligations, so a caller keeping track of
-	 * what depends on what has to be able to tell -- and the alternative,
-	 * inferring it from whether the volume later shows up in rcow_get_imports,
-	 * is a question nobody should have to ask.
+	 * import no longer has one implementation. A local clone of a snapshot this
+	 * lvstore still holds writes no registry entry for the export just
+	 * imported, so that export is not what rcow_release_export waits on. The
+	 * chain may still read an older export through that snapshot. Callers
+	 * tracking dependencies should not have to infer this from
+	 * rcow_get_imports.
 	 *
 	 * Additive, so anything reading bool_value/string_value is unaffected.
 	 *
-	 * Taken from the parent chain, not from the flag the caller passed.
-	 * "esnap" means this volume, or a snapshot it was cloned from, still
-	 * reads the export. A local clone of a snapshot that does not is
-	 * "local_clone". */
+	 * Taken from the parent chain, not from this blob and not from the flag
+	 * the caller passed. "esnap" means this volume, or a snapshot it was
+	 * cloned from, still reads an export. rcow_decouple_lvol applies to the
+	 * lvol whose own blob is that esnap clone, which may be the snapshot
+	 * rather than this volume. "local_clone" means the chain does not. */
 	mode = s3lvol_lvol_reads_import(lvol) ? "esnap" : "local_clone";
 
 	SPDK_NOTICELOG("rcow_import_lvol '%s' from export %s completed (%s)\n",
@@ -2600,7 +2619,7 @@ rpc_rcow_decouple_lvol(struct spdk_jsonrpc_request *request,
 	}
 
 	lvol = s3lvol_lvol_find_any(req.lvol_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		rpc_lvol_respond_errf(request, "lvol '%s' not found in any lvstore",
 				      req.lvol_name);
 		goto cleanup;
@@ -3425,7 +3444,7 @@ active_bdev_attach(const char *device_name, uint32_t want_subsys,
 	snprintf(out.name, sizeof(out.name), "%s", device_name);
 
 	lvol = s3lvol_lvol_find_any(device_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		SPDK_WARNLOG("could not activate '%s': no such lvol or snapshot\n",
 			     device_name);
 		out.failed = true;

@@ -310,6 +310,21 @@ void s3_wal_replay(struct s3_wal *wal, s3_wal_replay_cb apply_fn, void *apply_ar
 bool s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq);
 
 /**
+ * True when \c safe_seq is ahead of the seq stored in the super and no replay
+ * is in flight.
+ *
+ * Truncation only releases a whole closed segment, so a drain can upload every
+ * entry and still leave them in the segment head sits in. Replay would apply
+ * those entries again. The flusher would then publish a new object and delete
+ * the one an export manifest already named. The caller persists \c safe_seq
+ * with s3_wal_sync_super() so the next replay skips it.
+ *
+ * False during replay. Recording "everything issued so far is durable" then
+ * would drop writes the replay has not applied yet.
+ */
+bool s3_wal_ckpt_behind(const struct s3_wal *wal, uint64_t safe_seq);
+
+/**
  * Persist the current ring positions into the super (alternating A/B slots).
  *
  * Worth calling after a checkpoint so recovery does not have to rescan from an

@@ -167,15 +167,24 @@ flusher_advance_wal(struct s3_flusher *f)
 		return;
 	}
 
-	/* Only memo the request once the truncation has actually released
-	 * something. s3_wal_truncate_to_seq() declines while a replay is in flight,
-	 * and it is called on every flusher tick during one -- memoising the
-	 * argument instead would mark this safe_seq done without releasing a byte,
-	 * and the next tick, computing the same value, would return above and never
-	 * ask again. The segments would stay pinned until some later write moved
-	 * safe_seq past them. */
+	/* Do not memo a seq the WAL refused.
+	 *
+	 * s3_wal_truncate_to_seq() declines while a replay is in flight, and this
+	 * runs on every flusher tick during one. Memoising that argument would mark
+	 * safe_seq done without releasing a byte, and the next tick, computing the
+	 * same value, would return above and never ask again.
+	 *
+	 * An empty overlay is the other case that must still be recorded. The live
+	 * segment cannot be released until head leaves it, so a drain that uploaded
+	 * every entry releases nothing. The next open would apply those entries
+	 * again and the republish would delete the object an export already named.
+	 * Persisting on every partial advance, while the overlay still holds data,
+	 * is not required for that and would write the super once per chunk. */
 	if (!s3_wal_truncate_to_seq(f->wal, safe_seq)) {
-		return;
+		if (min_seq != UINT64_MAX ||
+		    !s3_wal_ckpt_behind(f->wal, safe_seq)) {
+			return;
+		}
 	}
 	f->truncated_seq = safe_seq;
 
