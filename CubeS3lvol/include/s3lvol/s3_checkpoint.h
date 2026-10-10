@@ -178,12 +178,6 @@ void s3_checkpoint_load(struct s3_client *client, const char *lvs_name,
 			struct s3_chunk_map *map,
 			s3_checkpoint_load_cb cb_fn, void *cb_arg);
 
-/**
- * Delete the snapshot. For destroying an lvstore; not part of normal operation.
- */
-void s3_checkpoint_delete(struct s3_client *client, const char *lvs_name,
-			  s3_checkpoint_cb cb_fn, void *cb_arg);
-
 #ifdef __cplusplus
 }
 #endif

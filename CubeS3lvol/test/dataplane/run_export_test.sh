@@ -45,8 +45,8 @@ RPC_PY="${SPDK_ROOT:-${REPO_ROOT}/deps/spdk}/scripts/rpc.py"
 RPC="${RPC_PY} -s /var/run/s3lvol.sock"
 RPC_SOCK="/var/run/s3lvol.sock"
 
-SRC_LVS="expsrc"
-DST_LVS="expdst"
+SRC_LVS="${S3LVOL_TEST_SRC_LVS:-expsrc}"
+DST_LVS="${S3LVOL_TEST_DST_LVS:-expdst}"
 
 # Must match S3_EXPORTS_DIR in include/s3lvol/s3_export.h: manifests are addressed
 # without an lvstore prefix so that an export uuid is a complete address.
@@ -56,7 +56,7 @@ DST_VOL="resumed0"
 
 NQN="nqn.2026-08.io.spdk:s3xfer"
 LISTEN_ADDR="127.0.0.1"
-LISTEN_PORT="4420"
+LISTEN_PORT="${S3LVOL_TEST_PORT:-4420}"
 
 CAPACITY_GIB=8
 # GiB for the RPC (size_gib), bytes for the sparseness assertions, which compare
@@ -611,6 +611,26 @@ print((row.get("write_path") or {}).get(sys.argv[2], 0))
 ' "${lvs_name}" "${field}" 2>/dev/null
 }
 
+# Sorted lvol names on one lvstore, one per line. Empty if the store has none.
+dst_lvol_names()
+{
+	local lvs_name="$1"
+
+	raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+lvs = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+row = next((r for r in rows if r.get("lvs_name") == lvs), None)
+if row is None:
+    sys.exit(3)
+for name in sorted(v.get("name", "") for v in row.get("lvols") or []):
+    print(name)
+' "${lvs_name}"
+}
+
 # Did the operation actually happen? The exit status answers that on its own
 # again: every RPC used here replies with the {bool_value, string_value} envelope,
 # and s3lvol_rpc.py maps bool_value:false onto exit 1 with string_value on stderr.
@@ -1154,9 +1174,9 @@ echo "[5] importing the export into the destination"
 
 IMPORT_T0="$(now_ns)"
 # Two parameters, and the second one came verbatim out of the export's answer.
-# decouple is explicit false: the RPC now defaults to decoupling in the
-# background, and steps 6-9 below drive the decouple by hand to prove the
-# read-through path first and then the manual decouple.
+# decouple is explicit false, which is also what an omitted flag now means.
+# Steps 6-9 drive the decouple by hand to prove the read-through path first
+# and then the manual decouple.
 if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","decouple":false}' \
 		"${DST_VOL}" "${EXPORT_UUID}")" \
 		>"${WORKDIR}/import.json" 2>"${WORKDIR}/import.err"; then
@@ -1741,7 +1761,13 @@ check_target "step 11" || exit 1
 # A release that consulted the imports registry would answer "nobody imports this"
 # here and delete the objects out from under the snapshot. Which is why it asks the
 # blobs instead: the assertion below is that release is still refused after the
-# clone is gone, and only opens up when the snapshot is too.
+# clone is gone, and only opens up when the last reader is too.
+#
+# Two deletes sit in that window. The source snapshot's own delete is deferred for
+# as long as this snapshot renews the lease, and neither the manifest nor the data
+# objects move. Then a clone of the snapshot is what the esnap parent has to land
+# on: deleting the snapshot merges into that one clone, and the export stays put
+# until the clone itself is deleted.
 #
 # SRC and DST are both loaded on purpose. With DST unloaded there would be no blob
 # to find and the check would pass for the wrong reason.
@@ -1805,13 +1831,137 @@ else
 	pass "release was still refused, on account of the snapshot"
 fi
 
-if raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${CHAIN_SNAP}")" \
-		>"${WORKDIR}/delete_snap.json" 2>"${WORKDIR}/delete_snap.err"; then
-	pass "the snapshot was deleted"
+# The source snapshot is what the export names. Its delete must not run while the
+# downstream snapshot still renews the lease, and it must not free the clusters
+# that snapshot reads. The intent is withdrawn afterwards: the poller would
+# otherwise finish it once this step deletes the last reader.
+CHAIN_SRC_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+CHAIN_SRC_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${SNAP2_NAME}" "${SRC_LVS}")" 2>&1)"
+if echo "${CHAIN_SRC_DEL}" | grep -q '"deferred": *true'; then
+	pass "the source snapshot delete was deferred while the downstream snapshot reads it"
 else
-	fail "rcow_delete_lvol (the snapshot)"
-	sed 's/^/       /' "${WORKDIR}/delete_snap.err" 2>/dev/null
-	check_target "step 11b" || exit 1
+	fail "deleting ${SNAP2_NAME} was not deferred: ${CHAIN_SRC_DEL}"
+	exit 1
+fi
+if export_status_field "${EXPORT2_UUID}" export_status >/dev/null 2>&1; then
+	pass "the chained export is still published"
+else
+	fail "the chained export disappeared while a snapshot still reads it"
+	exit 1
+fi
+CHAIN_SRC_AFTER="$(count_objects "${SRC_LVS}/data/")"
+if [ "${CHAIN_SRC_AFTER}" = "${CHAIN_SRC_BEFORE}" ]; then
+	pass "source data objects survived the deferred snapshot delete"
+else
+	fail "source data object count changed on the deferred snapshot delete (${CHAIN_SRC_BEFORE} -> ${CHAIN_SRC_AFTER})"
+fi
+
+BEFORE_CHAIN_SNAP_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${CHAIN_SNAP}" \
+	>/dev/null 2>"${WORKDIR}/add_ns_chain_snap.err" || {
+	fail "nvmf_subsystem_add_ns (${CHAIN_SNAP})"
+	sed 's/^/       /' "${WORKDIR}/add_ns_chain_snap.err"
+	exit 1; }
+CHAIN_SNAP_DEV="$(wait_for_new_ns "${BEFORE_CHAIN_SNAP_NS}")"
+if [ -z "${CHAIN_SNAP_DEV}" ]; then
+	fail "the downstream snapshot did not get a namespace"
+	exit 1
+fi
+if [ "$(read_md5_at "${CHAIN_SNAP_DEV}" "${WORKDIR}/chain_snap_a.bin" \
+		"${IO_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_A}" ] && \
+   [ "$(read_md5_at "${CHAIN_SNAP_DEV}" "${WORKDIR}/chain_snap_c.bin" \
+		"${CHAIN_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_C}" ]; then
+	pass "the downstream snapshot still reads both layers after the deferred source delete"
+else
+	fail "the downstream snapshot lost a layer after the deferred source delete"
+	exit 1
+fi
+CHAIN_SNAP_NSID="$(nsid_of "${DST_LVS}/${CHAIN_SNAP}")"
+[ -n "${CHAIN_SNAP_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${CHAIN_SNAP_NSID}" >/dev/null 2>&1 || true
+
+raw_rpc rcow_cancel_pending_delete \
+	"$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${SNAP2_NAME}" "${SRC_LVS}")" >/dev/null 2>&1 || {
+	fail "withdraw the pending delete of ${SNAP2_NAME}"
+	exit 1; }
+pass "the pending delete of the source snapshot was withdrawn"
+
+# One clone, so deleting the snapshot merges into it and the esnap parent moves
+# with the merge. Two clones would only defer, which would leave the parent on
+# the snapshot and make the read below pass for the wrong reason.
+CHAIN_CLONE="${DST_VOL2}-clone"
+if ! raw_rpc rcow_create_clone "$(printf '{"snapshot_name":"%s","clone_name":"%s"}' \
+		"${CHAIN_SNAP}" "${CHAIN_CLONE}")" \
+		>/dev/null 2>"${WORKDIR}/chain_clone.err"; then
+	fail "rcow_create_clone (of the snapshot that holds the esnap parent)"
+	sed 's/^/       /' "${WORKDIR}/chain_clone.err"
+	exit 1
+fi
+pass "cloned the snapshot that holds the esnap parent"
+
+CHAIN_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${CHAIN_SNAP}")" 2>&1)"
+if echo "${CHAIN_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting ${CHAIN_SNAP} was deferred; one clone should have been merged: ${CHAIN_SNAP_DEL}"
+	exit 1
+elif echo "${CHAIN_SNAP_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the snapshot was deleted and its esnap parent merged into the remaining clone"
+else
+	fail "rcow_delete_lvol (${CHAIN_SNAP}): ${CHAIN_SNAP_DEL}"
+	exit 1
+fi
+
+if raw_rpc rcow_get_imports "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+		>"${WORKDIR}/imports_clone.json" 2>/dev/null && \
+   grep -q "${EXPORT2_UUID}" "${WORKDIR}/imports_clone.json"; then
+	pass "the registry still lists the export, because the clone reads it"
+else
+	fail "the registry dropped an export the merged clone still reads through to"
+	exit 1
+fi
+
+if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+		"${EXPORT2_UUID}" "${SRC_LVS}")" \
+		>"${WORKDIR}/release_clone.json" 2>"${WORKDIR}/release_clone.err"; then
+	fail "releasing an export a merged clone still reads succeeded"
+	exit 1
+else
+	pass "release was still refused, on account of the clone"
+fi
+
+BEFORE_CHAIN_CLONE_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${CHAIN_CLONE}" \
+	>/dev/null 2>"${WORKDIR}/add_ns_chain_clone.err" || {
+	fail "nvmf_subsystem_add_ns (${CHAIN_CLONE})"
+	sed 's/^/       /' "${WORKDIR}/add_ns_chain_clone.err"
+	exit 1; }
+CHAIN_CLONE_DEV="$(wait_for_new_ns "${BEFORE_CHAIN_CLONE_NS}")"
+if [ -z "${CHAIN_CLONE_DEV}" ]; then
+	fail "the merged clone did not get a namespace"
+	exit 1
+fi
+if [ "$(read_md5_at "${CHAIN_CLONE_DEV}" "${WORKDIR}/chain_clone_a.bin" \
+		"${IO_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_A}" ] && \
+   [ "$(read_md5_at "${CHAIN_CLONE_DEV}" "${WORKDIR}/chain_clone_c.bin" \
+		"${CHAIN_OFF_MB}" "${IO_LEN_MB}")" = "${HASH_C}" ]; then
+	pass "the clone still reads both layers after the snapshot was merged into it"
+else
+	fail "the clone lost a layer when the snapshot was deleted"
+	exit 1
+fi
+CHAIN_CLONE_NSID="$(nsid_of "${DST_LVS}/${CHAIN_CLONE}")"
+[ -n "${CHAIN_CLONE_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+	"${CHAIN_CLONE_NSID}" >/dev/null 2>&1 || true
+
+if raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${CHAIN_CLONE}")" \
+		>"${WORKDIR}/delete_clone.json" 2>"${WORKDIR}/delete_clone.err"; then
+	pass "the last reader was deleted"
+else
+	fail "rcow_delete_lvol (${CHAIN_CLONE})"
+	sed 's/^/       /' "${WORKDIR}/delete_clone.err" 2>/dev/null
 	exit 1
 fi
 
@@ -1932,11 +2082,10 @@ check_target "step 11c" || exit 1
 #
 # Three behaviours the suite did not cover:
 #
-#   1. an import that does not pass decouple at all. The RPC has defaulted it to
-#      true since the "xfer: decouple imported volumes by default" change, so
-#      the volume must end up decoupled without anybody asking -- the flag-less
-#      call is now the common case, and only the explicit decouple:true and
-#      decouple:false forms were being exercised.
+#   1. an import that does not pass decouple at all. The RPC defaults that to
+#      false, so the volume keeps reading the export and nothing is copied
+#      unless the caller says so. The flag-less call is what an omitted field
+#      means; the explicit true and false forms are covered elsewhere.
 #
 #   2. exporting the same snapshot twice always answers the same uuid: in flight
 #      and after DONE. Releasing it is what allows a later export to mint a new
@@ -1946,7 +2095,7 @@ check_target "step 11c" || exit 1
 #      while its snapshot exists.
 # ==========================================================================
 echo
-echo "[11d] default decouple, idempotent export, snapshot-bound lifetime"
+echo "[11d] omitted decouple flag, idempotent export, snapshot-bound lifetime"
 
 IDEM_VOL="${SRC_VOL}-idem"
 IDEM_SNAP="${IDEM_VOL}-snap"
@@ -1960,7 +2109,7 @@ IDEM_OFF_MB=48
 IDEM_LEN_MB="${S3LVOL_TEST_IDEM_MB:-96}"
 
 # --------------------------------------------------------------------------
-# 11d.1 default decouple: no flag at all
+# 11d.1 omitted decouple flag: nothing is materialised
 # --------------------------------------------------------------------------
 AUTO2_VOL="${DST_VOL}-auto2"
 EXPORT4_UUID="$(raw_rpc rcow_export_snapshot \
@@ -1985,34 +2134,46 @@ if ! raw_rpc rcow_import_lvol \
 fi
 pass "an import without a decouple flag was accepted"
 
-if wait_for_decouple; then
-	pass "the default decouple (no flag) finished"
+# An empty list is the assertion, not a timeout. wait_for_decouple treats
+# "nothing running" as success, which is exactly what a decouple that was
+# never started looks like, so it cannot tell the two apart.
+FLAGLESS_DEC_N="$(raw_rpc rcow_get_decouple 2>/dev/null | python3 -c \
+	'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo -1)"
+if [ "${FLAGLESS_DEC_N}" = "0" ]; then
+	pass "an import without a decouple flag started none"
 else
-	fail "the flag-less import's decouple did not finish in 120s"
+	fail "the flag-less import started a decouple (${FLAGLESS_DEC_N} running)"
 	check_target "step 11d.1" || exit 1
 	exit 1
 fi
 
 if raw_rpc rcow_get_imports "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 		>"${WORKDIR}/imports_auto2.json" 2>/dev/null && \
-   ! grep -q "${EXPORT4_UUID}" "${WORKDIR}/imports_auto2.json"; then
-	pass "the flag-less import dropped the registry entry like decouple:true does"
+   grep -q "${EXPORT4_UUID}" "${WORKDIR}/imports_auto2.json"; then
+	pass "the flag-less import is still reading through to the export"
 else
-	fail "the flag-less import is still reading through to the export"
+	fail "the flag-less import dropped the registry entry"
 fi
 
 if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
 		"${EXPORT4_UUID}" "${SRC_LVS}")" \
 		>"${WORKDIR}/release_auto2.json" 2>"${WORKDIR}/release_auto2.err"; then
-	pass "the flag-less import's export could be released"
+	fail "rcow_release_export succeeded while the import still reads the export"
 else
-	fail "rcow_release_export (flag-less import)"
-	sed 's/^/       /' "${WORKDIR}/release_auto2.err" 2>/dev/null
+	pass "release was refused while the flag-less import still reads the export"
 fi
 if ! raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${AUTO2_VOL}")" \
 		>/dev/null 2>"${WORKDIR}/delete_auto2.err"; then
 	fail "rcow_delete_lvol (the flag-less import)"
 	sed 's/^/       /' "${WORKDIR}/delete_auto2.err" 2>/dev/null
+fi
+# The import was the pin. Once it is gone the export can be released, which is
+# what lets 11d.2 mint its own rather than reuse this snapshot's.
+if ! raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+		"${EXPORT4_UUID}" "${SRC_LVS}")" \
+		>/dev/null 2>"${WORKDIR}/release_auto2_after.err"; then
+	fail "rcow_release_export after the flag-less import was deleted"
+	sed 's/^/       /' "${WORKDIR}/release_auto2_after.err" 2>/dev/null
 fi
 check_target "step 11d.1" || exit 1
 
@@ -2743,10 +2904,21 @@ echo "[11f] importing one export into several writable volumes"
 #      copy-on-write volumes that happen to start from the same bytes;
 #   3. deleting one leaves the other working -- the registry entry is shared, so a
 #      delete that dropped it would break the survivor at the next attach;
-#   4. release stays refused until *both* are gone, and says how many are left;
+#   4. each volume is its own esnap reader, so release stays refused until
+#      both are gone;
 #   5. the survivor still opens after the destination lvstore is re-attached,
 #      which is the only proof that the shared entry was persisted rather than
 #      merely held in memory.
+#   6. with that decouple:false reader still live, deleting the source snapshot
+#      without rcow_release_export is deferred. The snapshot and the source data
+#      objects stay, and the survivor still reads the export.
+#   7. deleting the source writable volume, again without rcow_release_export,
+#      merges it into the snapshot. The data objects stay, and the survivor
+#      still reads the export.
+#   8. once that reader is deleted, still without rcow_release_export, the
+#      pending poller finishes the snapshot delete on its own. The export
+#      manifest goes away, and the source data objects the snapshot held are
+#      reclaimed.
 
 MULTI_VOL="${SRC_VOL}-multi"
 MULTI_SNAP="${MULTI_VOL}-snap"
@@ -2808,6 +2980,10 @@ if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","w
 	exit 1
 fi
 DST_CREATED=1
+BEFORE_DST_LVOLS="$(dst_lvol_names "${DST_LVS}")" || {
+	fail "could not list destination lvols before the multi import"
+	exit 1
+}
 
 # decouple:false for both. The point is two volumes reading one export at the
 # same time, which is exactly what decoupling would undo.
@@ -2821,6 +2997,26 @@ for vol in "${MULTI_A}" "${MULTI_B}"; do
 	fi
 done
 pass "two volumes imported from one export"
+
+# The two imports are the only new lvols. An extra hidden volume would show up
+# here whatever it was named.
+AFTER_DST_LVOLS="$(dst_lvol_names "${DST_LVS}")" || {
+	fail "could not list destination lvols after the multi import"
+	exit 1
+}
+if python3 -c '
+import sys
+before = set(filter(None, sys.argv[1].split("\n")))
+after = set(filter(None, sys.argv[2].split("\n")))
+want = {sys.argv[3], sys.argv[4]}
+sys.exit(0 if after - before == want and want <= after else 1)
+' "${BEFORE_DST_LVOLS}" "${AFTER_DST_LVOLS}" "${MULTI_A}" "${MULTI_B}"; then
+	pass "the import added exactly the two named volumes"
+else
+	fail "the import did not add exactly ${MULTI_A} and ${MULTI_B}"
+	printf '       before:\n%s\n       after:\n%s\n' \
+		"${BEFORE_DST_LVOLS}" "${AFTER_DST_LVOLS}" | sed 's/^/       /'
+fi
 
 # One registry entry for both, not two. Reported by rcow_get_imports, which is
 # what an operator would look at.
@@ -2897,10 +3093,7 @@ else
 	info "a write to one imported volume reached the other, or reached the export"
 fi
 
-# Property 4, while both exist: release must refuse and account for both.
-# The count goes to the target log, not to the RPC reply -- rcow_release_export
-# answers with an errno and leaves the detail to the log, as the other failure
-# paths in this file do.
+# Property 4, while both exist: release must refuse, and name both esnap readers.
 MULTI_REL_MARK="$(wc -l < "${TGT_LOG}")"
 if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
 		"${MULTI_UUID}" "${SRC_LVS}")" \
@@ -2910,9 +3103,9 @@ else
 	pass "release was refused while two volumes read the export"
 	if tail -n +"${MULTI_REL_MARK}" "${TGT_LOG}" \
 			| grep -q "parent of 2 volume(s)"; then
-		pass "the refusal counted both readers"
+		pass "the refusal reports both export readers"
 	else
-		fail "the refusal did not report both readers"
+		fail "the refusal did not report both export readers"
 		tail -n +"${MULTI_REL_MARK}" "${TGT_LOG}" \
 			| grep -E "still the parent of" | head -2 | sed 's/^/       /'
 	fi
@@ -2974,6 +3167,27 @@ if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","w
 fi
 DST_CREATED=1
 
+# Re-attach reloads every lvol. The deleted import must stay gone, and nothing
+# besides the surviving import may have appeared.
+AFTER_REATTACH_LVOLS="$(dst_lvol_names "${DST_LVS}")" || {
+	fail "could not list destination lvols after re-attach"
+	exit 1
+}
+if python3 -c '
+import sys
+before = set(filter(None, sys.argv[1].split("\n")))
+after = set(filter(None, sys.argv[2].split("\n")))
+survivor = sys.argv[3]
+deleted = sys.argv[4]
+sys.exit(0 if deleted not in after and after - before == {survivor} else 1)
+' "${BEFORE_DST_LVOLS}" "${AFTER_REATTACH_LVOLS}" "${MULTI_B}" "${MULTI_A}"; then
+	pass "re-attach brought back only the surviving import"
+else
+	fail "re-attach did not bring back exactly ${MULTI_B}"
+	printf '       before:\n%s\n       after:\n%s\n' \
+		"${BEFORE_DST_LVOLS}" "${AFTER_REATTACH_LVOLS}" | sed 's/^/       /'
+fi
+
 BEFORE_MULTI_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
 ${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${MULTI_B}" \
 	>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (${MULTI_B}, after attach)"; exit 1; }
@@ -2993,7 +3207,85 @@ else
 	fi
 fi
 
-# Property 4, the other half: once nothing reads it, release is allowed.
+# Properties 6 and 7. MULTI_B is still a decouple:false esnap reader, and its
+# lease is the pin. Neither delete calls rcow_release_export. A snapshot delete
+# that freed clusters anyway would change the survivor's checksum, and so would
+# a volume delete that failed to merge the source into its snapshot.
+if [ -n "${MULTI_B_DEV2}" ]; then
+	wait_export_pin "${MULTI_UUID}" "lease" "step 11f live reader" || exit 1
+	pass "the decouple:false import's lease is pinning the export"
+	wait_deletable "${MULTI_UUID}" "NO" "decouple:false reader" || exit 1
+
+	MULTI_DATA_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+
+	MULTI_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+		rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+			"${MULTI_SNAP}" "${SRC_LVS}")" 2>&1)"
+	MULTI_PENDING=0
+	if echo "${MULTI_SNAP_DEL}" | grep -q '"deferred": *true'; then
+		MULTI_PENDING=1
+		pass "source snapshot delete was deferred without release_export"
+	else
+		fail "source snapshot delete was not deferred: ${MULTI_SNAP_DEL}"
+		exit 1
+	fi
+	if export_status_field "${MULTI_UUID}" export_status >/dev/null 2>&1; then
+		pass "the exported snapshot is still there"
+	else
+		fail "the exported snapshot was deleted while a volume still reads it"
+		exit 1
+	fi
+
+	MULTI_DATA_AFTER_SNAP="$(count_objects "${SRC_LVS}/data/")"
+	if [ "${MULTI_DATA_AFTER_SNAP}" = "${MULTI_DATA_BEFORE}" ]; then
+		pass "source data objects were not deleted with the deferred snapshot delete"
+	else
+		fail "source data object count changed on the deferred snapshot delete (${MULTI_DATA_BEFORE} -> ${MULTI_DATA_AFTER_SNAP})"
+	fi
+
+	B_AFTER_SNAP="$(read_md5_at "${MULTI_B_DEV2}" "${WORKDIR}/mb_after_snapdel.bin" \
+		"${MULTI_DATA_OFF_MB}" "${MULTI_LEN_MB}")"
+	if [ "${B_AFTER_SNAP}" = "${MULTI_EXPECTED}" ]; then
+		pass "the survivor still reads the export after the deferred snapshot delete"
+	else
+		fail "the survivor lost the exported data after the snapshot delete (${B_AFTER_SNAP})"
+	fi
+
+	# Leave the pending intent in place. After the reader below is gone, the
+	# poller has to finish this delete itself, with no rcow_release_export.
+	MULTI_SRC_NSID="$(nsid_of "${SRC_LVS}/${MULTI_VOL}")"
+	[ -n "${MULTI_SRC_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
+		"${MULTI_SRC_NSID}" >/dev/null 2>&1 || true
+
+	MULTI_VOL_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+		rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+			"${MULTI_VOL}" "${SRC_LVS}")" 2>&1)"
+	if echo "${MULTI_VOL_DEL}" | grep -q '"deferred": *true'; then
+		fail "deleting the source volume was deferred: ${MULTI_VOL_DEL}"
+	elif echo "${MULTI_VOL_DEL}" | grep -q '"bool_value": *true'; then
+		pass "the source volume was deleted without release_export"
+	else
+		fail "deleting the source volume failed: ${MULTI_VOL_DEL}"
+	fi
+
+	MULTI_DATA_AFTER_VOL="$(count_objects "${SRC_LVS}/data/")"
+	if [ "${MULTI_DATA_AFTER_VOL}" = "${MULTI_DATA_BEFORE}" ]; then
+		pass "source data objects survived deleting the writable volume"
+	else
+		fail "source data object count changed when the writable volume was deleted (${MULTI_DATA_BEFORE} -> ${MULTI_DATA_AFTER_VOL})"
+	fi
+
+	B_AFTER_VOL="$(read_md5_at "${MULTI_B_DEV2}" "${WORKDIR}/mb_after_voldel.bin" \
+		"${MULTI_DATA_OFF_MB}" "${MULTI_LEN_MB}")"
+	if [ "${B_AFTER_VOL}" = "${MULTI_EXPECTED}" ]; then
+		pass "the survivor still reads the export after the source volume was deleted"
+	else
+		fail "the survivor lost the exported data after the source volume was deleted (${B_AFTER_VOL})"
+	fi
+fi
+
+# The last decouple:false reader. Deleting it drops the lease. The pending
+# snapshot delete then completes on its own.
 MULTI_B_NSID="$(nsid_of "${DST_LVS}/${MULTI_B}")"
 [ -n "${MULTI_B_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
 	"${MULTI_B_NSID}" >/dev/null 2>&1 || true
@@ -3003,21 +3295,72 @@ if ! raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${MULTI_B}")" \
 	sed 's/^/       /' "${WORKDIR}/multi_del_b.err"
 fi
 
-MULTI_RELEASED=0
-for _ in $(seq 20); do
-	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-			"${MULTI_UUID}" "${SRC_LVS}")" \
-			>/dev/null 2>"${WORKDIR}/multi_release.err"; then
-		MULTI_RELEASED=1
-		break
+if [ "${MULTI_PENDING:-0}" = "1" ]; then
+	# Grace is the 60s floor, then the pending poller has to notice. The
+	# chunk unmaps that reclaim the source objects are not waited on by the
+	# delete RPC, so the object count is polled after the snapshot is gone.
+	info "waiting for the pending snapshot delete to finish without release_export"
+	MULTI_SNAP_GONE=0
+	for _ in $(seq 180); do
+		if ! snapshot_status_field "${MULTI_SNAP}" export_status \
+				>/dev/null 2>&1; then
+			MULTI_SNAP_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${MULTI_SNAP_GONE}" = "1" ]; then
+		pass "the poller deleted the snapshot once the decouple:false reader was gone"
+	else
+		fail "the snapshot was still there 180s after its last reader was deleted"
 	fi
-	sleep 0.5
-done
-if [ "${MULTI_RELEASED}" = "1" ]; then
-	pass "release was allowed once both volumes were gone"
+
+	MULTI_MANIFEST_GONE=0
+	for _ in $(seq 30); do
+		if [ "$(count_objects "${S3_EXPORTS_DIR}/${MULTI_UUID}.json")" -eq 0 ]; then
+			MULTI_MANIFEST_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${MULTI_MANIFEST_GONE}" = "1" ]; then
+		pass "the snapshot delete removed the export manifest"
+	else
+		fail "the export manifest was still in the bucket after the snapshot delete"
+	fi
+
+	MULTI_DATA_RECLAIMED=0
+	MULTI_DATA_AFTER_RECLAIM="${MULTI_DATA_BEFORE}"
+	for _ in $(seq 60); do
+		MULTI_DATA_AFTER_RECLAIM="$(count_objects "${SRC_LVS}/data/")"
+		if [ "${MULTI_DATA_AFTER_RECLAIM}" -lt "${MULTI_DATA_BEFORE}" ]; then
+			MULTI_DATA_RECLAIMED=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${MULTI_DATA_RECLAIMED}" = "1" ]; then
+		pass "source data objects were reclaimed after the snapshot delete (${MULTI_DATA_BEFORE} -> ${MULTI_DATA_AFTER_RECLAIM})"
+	else
+		fail "source data objects were not reclaimed after the snapshot delete (still ${MULTI_DATA_AFTER_RECLAIM})"
+	fi
 else
-	fail "release still refused after both volumes were deleted"
-	sed 's/^/       /' "${WORKDIR}/multi_release.err" 2>/dev/null
+	MULTI_RELEASED=0
+	for _ in $(seq 20); do
+		if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+				"${MULTI_UUID}" "${SRC_LVS}")" \
+				>/dev/null 2>"${WORKDIR}/multi_release.err"; then
+			MULTI_RELEASED=1
+			break
+		fi
+		sleep 0.5
+	done
+	if [ "${MULTI_RELEASED}" = "1" ]; then
+		pass "release was allowed once both volumes were gone"
+	else
+		fail "release still refused after both volumes were deleted"
+		sed 's/^/       /' "${WORKDIR}/multi_release.err" 2>/dev/null
+	fi
 fi
 
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
@@ -3027,25 +3370,23 @@ DST_CREATED=0
 check_target "step 11f" || exit 1
 
 # ==========================================================================
-# [11g] two volumes asked to decouple from one export at once
+# [11g] two decouple:true imports of one export are queued, not overlapped
 # ==========================================================================
 echo
 echo "[11g] queueing decouples of one export"
 
-# Only one volume materialises a given export at a time. N concurrent decouples
-# would fetch the same objects N times over, competing for the same client and
-# bandwidth, and every one of them would finish later than if they had taken
-# turns.
+# Each import is its own esnap clone, and decouple:true materialises that clone.
+# Two of them on one lvstore still do not run together: blobstore serialises
+# cluster allocation on the channel, so the second waits in the decouple queue.
 #
 # The wait is kept inside rather than handed back as -EBUSY. "Import N volumes
 # from this export and decouple them" is one operation to the caller; refusing all
 # but the first would leave the rest esnap clones unless the caller noticed and
 # retried, which means polling for a wait it never asked to manage.
 #
-# So both imports use decouple:true and both are expected to succeed. What this
-# checks is that the second one really did happen -- a queue that dropped its
-# entry would look identical at the RPC level and only differ in that one volume
-# never became independent.
+# Both imports use decouple:true and both are expected to succeed. What this
+# checks is that the two materialisations do not overlap, and that both volumes
+# become independent of the export once their own decouple finishes.
 #
 # The proof that it became independent is release: the export cannot be released
 # while any volume still reads through it, so a release that succeeds once both
@@ -3177,9 +3518,9 @@ for _ in $(seq 40); do
 	sleep 0.5
 done
 if [ "${Q_RELEASED}" = "1" ]; then
-	pass "both queued decouples completed, so the export could be released"
+	pass "both volumes decoupled, so the export could be released"
 else
-	fail "the export could not be released; a queued decouple never ran"
+	fail "the export could not be released; a volume still reads it"
 	sed 's/^/       /' "${WORKDIR}/multi2_release.err" 2>/dev/null
 fi
 
@@ -3544,19 +3885,18 @@ check_target "step 11h" || exit 1
 # [11i] three volumes imported concurrently from one export stay consistent
 #
 # 11f imported two volumes with decouple:false, one RPC after another. 11g
-# queued two decouples of one export. This step is the third shape: three
-# imports submitted at the same time, all decoupling from the same export, and
-# the question is the data.
+# queued a second decouple of the same export behind the first. This step is the
+# third shape: three imports submitted at the same time, each its own esnap
+# clone, and the question is the data.
 #
 # Three kinds of stability are meant by "stable".
 #
 #   1. Before and after materialisation. A decoupled volume is an esnap clone
 #      while its decouple runs: reads go through to the export. Once the
 #      clusters are materialised, reads come from the local blob. The bytes
-#      must not change across that transition. The queue from 11g guarantees
-#      the transition is observable here: the first import starts decoupling
-#      while the second and third are still queued, so reading them early
-#      really does read an un-materialised volume, not merely a finished one.
+#      must not change across that transition. The first import starts its
+#      decouple while the other two wait, so reading them early covers the
+#      still-external path.
 #
 #   2. Repeated reads. Reading the same volume twice must give the same bytes.
 #
@@ -3658,8 +3998,8 @@ con3_dev_of()
 }
 
 # Three imports submitted in one breath, none of them waited for before the
-# next is sent. All decouple:true, so all three end up queued behind the same
-# export and materialise one after another (the 11g queue).
+# next is sent. All decouple:true. Each clone materialises itself; the queue
+# runs those copies one at a time.
 CON3_IMPORT_OK=1
 CON3_PIDS=""
 i=0
@@ -3698,8 +4038,10 @@ print(sum(1 for r in rows if r.get('export_uuid') == uuid))
 " "${CON3_UUID}" 2>/dev/null)"
 if [ "${CON3_ENTRIES}" = "1" ]; then
 	pass "three volumes share one registry entry"
+elif [ "${CON3_ENTRIES}" = "0" ]; then
+	pass "the one shared registry entry was already dropped after decouple"
 else
-	fail "expected one registry entry for the export, got '${CON3_ENTRIES}'"
+	fail "expected at most one registry entry for the export, got '${CON3_ENTRIES}'"
 fi
 
 # Expose all three, one RPC after another as an orchestration layer would.
@@ -4040,7 +4382,9 @@ for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${X
 	idx="$(printf '%s' "${pair}" | cut -d: -f3)"
 	i=$((i + 1))
 
-	if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s"}' \
+	# decouple is explicit. The RPC defaults to false, and this step needs the
+	# copies running so unload can be seen to refuse them.
+	if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
 			"${dst}" "${u}" "${DST_LVS}")" \
 			>/dev/null 2>"${WORKDIR}/xr_imp_${i}.err"; then
 		fail "rcow_import_lvol (${dst})"
@@ -4183,7 +4527,9 @@ check_target "step 11j" || exit 1
 # never comes back. The field report is that repeating that pair on the
 # destination is what breaks -- leftover registry, lease, or name -- so the
 # same export is imported, read, decoupled, deleted and imported again here,
-# three times. The first read deliberately warms the lvstore's exact-key object
+# three times. After the last round nothing calls rcow_release_export: deleting
+# the source snapshot is what releases the export and reclaims its objects.
+# The first read deliberately warms the lvstore's exact-key object
 # cache. Round one explicitly warms before decouple; later rounds use the
 # production decouple=true path. Once CopyObject binds a fresh destination uuid,
 # its alias must let the post-decouple first read reuse the same object slot.
@@ -4390,27 +4736,93 @@ raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 	>/dev/null 2>&1 || fail "rcow_unload_lvstore (destination, after step 11k)"
 DST_CREATED=0
 
-REIMP_RELEASED=0
-for _ in $(seq 40); do
-	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-			"${REIMP_UUID}" "${SRC_LVS}")" \
-			>/dev/null 2>"${WORKDIR}/reimp_release.err"; then
-		REIMP_RELEASED=1
-		break
-	fi
-	sleep 0.5
-done
-if [ "${REIMP_RELEASED}" = "1" ]; then
-	pass "the reimport export was released"
-else
-	fail "rcow_release_export (step 11k)"
-	sed 's/^/       /' "${WORKDIR}/reimp_release.err" 2>/dev/null
+# The rounds above decoupled every import and then deleted it, so nothing is
+# renewing the lease. Cleanup does not call rcow_release_export: the snapshot
+# delete releases the export itself once that lease is stale, and the data
+# objects go with the snapshot rather than with the writable volume.
+REIMP_DATA_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+if [ "${REIMP_DATA_BEFORE}" -eq 0 ]; then
+	fail "the source had no data objects left to reclaim"
+	exit 1
 fi
 
-for vol in "${REIMP_SRC}" "${REIMP_SNAP}"; do
-	raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${vol}")" \
-		>/dev/null 2>&1 || fail "rcow_delete_lvol (${vol})"
+REIMP_VOL_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${REIMP_SRC}" "${SRC_LVS}")" 2>&1)"
+if echo "${REIMP_VOL_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting ${REIMP_SRC} was deferred: ${REIMP_VOL_DEL}"
+	exit 1
+elif echo "${REIMP_VOL_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source volume was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${REIMP_SRC}): ${REIMP_VOL_DEL}"
+	exit 1
+fi
+REIMP_DATA_AFTER_VOL="$(count_objects "${SRC_LVS}/data/")"
+if [ "${REIMP_DATA_AFTER_VOL}" = "${REIMP_DATA_BEFORE}" ]; then
+	pass "source data objects survived deleting the writable volume"
+else
+	fail "source data object count changed when the writable volume was deleted (${REIMP_DATA_BEFORE} -> ${REIMP_DATA_AFTER_VOL})"
+fi
+
+REIMP_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${REIMP_SNAP}" "${SRC_LVS}")" 2>&1)"
+if echo "${REIMP_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	info "source snapshot delete deferred; waiting for the lease to go stale"
+elif echo "${REIMP_SNAP_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source snapshot was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${REIMP_SNAP}): ${REIMP_SNAP_DEL}"
+	exit 1
+fi
+if echo "${REIMP_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	REIMP_SNAP_GONE=0
+	for _ in $(seq 180); do
+		if ! snapshot_status_field "${REIMP_SNAP}" export_status \
+				>/dev/null 2>&1; then
+			REIMP_SNAP_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${REIMP_SNAP_GONE}" = "1" ]; then
+		pass "the poller deleted the source snapshot once its lease was stale"
+	else
+		fail "the source snapshot was still there 180s after its delete"
+		exit 1
+	fi
+fi
+
+REIMP_MANIFEST_GONE=0
+for _ in $(seq 30); do
+	if [ "$(count_objects "${S3_EXPORTS_DIR}/${REIMP_UUID}.json")" -eq 0 ]; then
+		REIMP_MANIFEST_GONE=1
+		break
+	fi
+	sleep 1
 done
+if [ "${REIMP_MANIFEST_GONE}" = "1" ]; then
+	pass "the snapshot delete removed the export manifest"
+else
+	fail "the export manifest was still in the bucket after the snapshot delete"
+fi
+
+REIMP_DATA_RECLAIMED=0
+REIMP_DATA_AFTER="${REIMP_DATA_BEFORE}"
+for _ in $(seq 60); do
+	REIMP_DATA_AFTER="$(count_objects "${SRC_LVS}/data/")"
+	if [ "${REIMP_DATA_AFTER}" -lt "${REIMP_DATA_BEFORE}" ]; then
+		REIMP_DATA_RECLAIMED=1
+		break
+	fi
+	sleep 1
+done
+if [ "${REIMP_DATA_RECLAIMED}" = "1" ]; then
+	pass "source data objects were reclaimed after the snapshot delete (${REIMP_DATA_BEFORE} -> ${REIMP_DATA_AFTER})"
+else
+	fail "source data objects were not reclaimed after the snapshot delete (still ${REIMP_DATA_AFTER})"
+fi
 
 check_target "step 11k" || exit 1
 

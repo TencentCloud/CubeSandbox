@@ -112,13 +112,3 @@ rcow_namespace_to_target(const char *name)
 
 	return ns ? &ns->target : NULL;
 }
-
-void
-rcow_namespace_for_each(rcow_ns_iter_fn fn, void *ctx)
-{
-	struct rcow_namespace *ns;
-
-	TAILQ_FOREACH(ns, &g_ns_list, link) {
-		fn(ns->name, &ns->target, ctx);
-	}
-}

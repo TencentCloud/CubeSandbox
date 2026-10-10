@@ -550,13 +550,6 @@ void s3_export_manifest_key(const char *uuid_str, char *out, size_t out_len);
 void s3_export_chunk_key(const char *prefix, const char *uuid_str,
 			 uint64_t chunk_index, char *out, size_t out_len);
 
-/**
- * Prefix shared by all of one export's chunk objects, i.e. what has to be
- * deleted to release it.
- */
-void s3_export_chunk_prefix(const char *prefix, const char *uuid_str,
-			    char *out, size_t out_len);
-
 /* ==========================================================================
  * A side: run an export
  * ========================================================================== */

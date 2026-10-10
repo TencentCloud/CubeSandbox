@@ -674,13 +674,13 @@ main(void)
 	printf("\n[13] process-wide whole-GET budget is exactly 256\n");
 	bool all_immediate = true;
 	for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
-		rc = s3_whole_get_token_acquire(false, token_granted,
-						&g_token_callbacks);
+		rc = s3_whole_get_token_acquire_ex(false, token_granted,
+						NULL, &g_token_callbacks);
 		all_immediate &= rc == 1;
 	}
 	check_true("all 256 tokens are admitted immediately", all_immediate);
-	rc = s3_whole_get_token_acquire(false, token_granted,
-					&g_token_callbacks);
+	rc = s3_whole_get_token_acquire_ex(false, token_granted,
+					NULL, &g_token_callbacks);
 	check_true("the 257th token waits", rc == 0 && g_token_callbacks == 0);
 	s3_whole_get_token_release();
 	check_u64("a release transfers ownership to the queued request",
@@ -693,16 +693,16 @@ main(void)
 	all_immediate = true;
 	for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT - 1; i++) {
 		all_immediate &=
-			s3_whole_get_token_acquire(false, token_granted,
-						   &g_token_callbacks) == 1;
+			s3_whole_get_token_acquire_ex(false, token_granted,
+						   NULL, &g_token_callbacks) == 1;
 	}
 	check_true("255 priority-test tokens are immediate", all_immediate);
 	check_true("low-priority acquire does not take or queue for the last token",
-		   s3_whole_get_token_acquire(true, token_granted,
-					      &g_token_callbacks) == -EAGAIN);
+		   s3_whole_get_token_acquire_ex(true, token_granted,
+					      NULL, &g_token_callbacks) == -EAGAIN);
 	check_true("demand can take the reserved last token",
-		   s3_whole_get_token_acquire(false, token_granted,
-					      &g_token_callbacks) == 1);
+		   s3_whole_get_token_acquire_ex(false, token_granted,
+					      NULL, &g_token_callbacks) == 1);
 	for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
 		s3_whole_get_token_release();
 	}
@@ -711,14 +711,14 @@ main(void)
 	all_immediate = true;
 	for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
 		all_immediate &=
-			s3_whole_get_token_acquire(false, token_granted,
-						   &g_token_callbacks) == 1;
+			s3_whole_get_token_acquire_ex(false, token_granted,
+						   NULL, &g_token_callbacks) == 1;
 	}
 	check_true("256 bounce-test tokens are immediate", all_immediate);
 	spdk_set_thread(thread2);
 	check_true("cross-thread token request queues",
-		   s3_whole_get_token_acquire(false, token_granted,
-					      &g_token_callbacks) == 0);
+		   s3_whole_get_token_acquire_ex(false, token_granted,
+					      NULL, &g_token_callbacks) == 0);
 	spdk_set_thread(thread);
 	s3_whole_get_token_release();
 	check_u64("grant waits for the requesting thread to poll",

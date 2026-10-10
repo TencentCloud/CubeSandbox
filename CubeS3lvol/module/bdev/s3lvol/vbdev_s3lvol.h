@@ -285,11 +285,6 @@ int rcow_namespace_add(const char *name, const struct s3_target *target);
  */
 const struct s3_target *rcow_namespace_to_target(const char *name);
 
-typedef void (*rcow_ns_iter_fn)(const char *name, const struct s3_target *target,
-				void *ctx);
-
-void rcow_namespace_for_each(rcow_ns_iter_fn fn, void *ctx);
-
 /* ==========================================================================
  * State files
  *
@@ -1092,17 +1087,19 @@ struct s3lvol_import_opts {
  *    directly by blobstore.
  *
  * 2. Anything else -- another node's export, another bucket, or a snapshot that
- *    is gone or has been replaced -- is an esnap clone that reads through to the
- *    export. Metadata only: nothing is transferred, the clone reads through for
- *    what it has not written and copies on first write, which is what makes
- *    resuming a volume on another node a matter of one manifest fetch.
+ *    is gone or has been replaced -- is an esnap clone of that export. Each
+ *    import is its own clone. Metadata only: nothing is transferred before the
+ *    import answers. `opts->decouple` copies that clone's clusters out of the
+ *    export; a later import of the same export does the same for itself.
  *
  * In case 2 the manifest is recorded in this lvstore's own registry in S3
  * *before* the clone exists, because the reverse order can leave a clone that no
- * later attach can open. Case 1 writes no registry entry at all.
+ * later attach can open. One entry per (lvstore, export uuid) covers every
+ * clone of that export. Case 1 writes no registry entry at all.
  *
- * `opts->decouple` applies to case 2 only. In case 1 there is no export to
- * decouple from, and it is logged and ignored rather than failed.
+ * `opts->decouple` applies to case 2 only and targets the clone just created.
+ * In case 1 there is no export to decouple from, and it is logged and ignored
+ * rather than failed.
  *
  * The rcow_import_lvol RPC reports which happened in a `mode` field
  * ("local_clone" or "esnap"), read back off the resulting blob. A caller tracking
@@ -1173,6 +1170,22 @@ int s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
  * states retain raw lvol/lvstore pointers, so the lvstore must not be unloaded
  * until they have left their respective lists. */
 bool s3lvol_lvstore_decouple_pending(const struct s3lvol_lvstore *lvs);
+bool s3lvol_lvstore_derive_inflight(const struct s3lvol_lvstore *lvs);
+
+/* An esnap clone of an import has been submitted and its bdev is not registered
+ * yet. Paired around spdk_lvol_create_esnap_clone(), whose non-zero return does
+ * not run the callback. The decouple quiesce set waits on the same condition
+ * as a snapshot or clone. */
+void s3lvol_lvstore_import_clone_begin(struct s3lvol_lvstore *lvs);
+void s3lvol_lvstore_import_clone_end(struct s3lvol_lvstore *lvs);
+bool s3lvol_lvstore_import_clone_inflight(const struct s3lvol_lvstore *lvs);
+
+/* True while a decouple of the export `lvol` reads has finished copying and is
+ * detaching the external parent. derive_check() refuses a snapshot or clone
+ * for that interval, a new import of that export is refused, and delete of a
+ * volume that still reads it is refused too, so the family quiesce set cannot
+ * grow or lose a member after it is closed. */
+bool s3lvol_lvol_import_finalizing(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol);
 
 /* Drop a volume from the decouple queue because it is being deleted.
  *
@@ -1435,6 +1448,9 @@ struct s3lvol_import *s3lvol_import_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_import *s3lvol_import_next(struct s3lvol_import *prev);
 const struct s3_export_manifest *s3lvol_import_get_manifest(
 	const struct s3lvol_import *imp);
+bool s3lvol_lvol_reads_import(struct spdk_lvol *lvol);
+int s3lvol_lvol_import_uuid(struct spdk_lvol *lvol, char *uuid_out,
+			    size_t uuid_out_len);
 
 /**
  * Select host readahead for an lvol which may ultimately read from an import.

@@ -767,24 +767,6 @@ s3_wal_append_unmap(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
 		   out_seq, cb_fn, cb_arg);
 }
 
-void
-s3_wal_append_barrier(struct s3_wal *wal, uint64_t *out_seq,
-		      s3_wal_cb cb_fn, void *cb_arg)
-{
-	if (!wal) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -EINVAL);
-		}
-		return;
-	}
-
-	wal_submit(wal, S3_WAL_BARRIER, 0, 0, NULL, 0, 0, out_seq, cb_fn, cb_arg);
-
-	/* A barrier is latency sensitive and tiny, so do not make it wait for
-	 * the size trigger. */
-	wal_kick(wal);
-}
-
 /* ==========================================================================
  * Super block
  * ========================================================================== */
@@ -1783,21 +1765,9 @@ s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq)
  * ========================================================================== */
 
 uint64_t
-s3_wal_get_used_bytes(const struct s3_wal *wal)
-{
-	return wal ? wal_used(wal) : 0;
-}
-
-uint64_t
 s3_wal_get_next_seq(const struct s3_wal *wal)
 {
 	return wal ? wal_make_seq(wal, wal->seq_next) : 0;
-}
-
-uint64_t
-s3_wal_get_epoch(const struct s3_wal *wal)
-{
-	return wal ? wal->epoch : 0;
 }
 
 void

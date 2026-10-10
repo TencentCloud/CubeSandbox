@@ -272,15 +272,6 @@ void s3_wal_append_unmap(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
 			 s3_wal_cb cb_fn, void *cb_arg);
 
 /**
- * Append a checkpoint barrier and report the seq it was given.
- *
- * Recovery uses the barrier to pin down "everything before this was already
- * checkpointed", which makes the replay window precise instead of conservative.
- */
-void s3_wal_append_barrier(struct s3_wal *wal, uint64_t *out_seq,
-			   s3_wal_cb cb_fn, void *cb_arg);
-
-/**
  * Replay from the last checkpoint position.
  *
  * \c apply_fn is called once per accepted entry, in seq order, synchronously.
@@ -331,9 +322,7 @@ void s3_wal_sync_super(struct s3_wal *wal, uint64_t ckpt_seq,
  * overlay hold-back so occupancy falls before writes have to be refused. */
 bool s3_wal_should_force_flush(const struct s3_wal *wal);
 
-uint64_t s3_wal_get_used_bytes(const struct s3_wal *wal);
 uint64_t s3_wal_get_next_seq(const struct s3_wal *wal);
-uint64_t s3_wal_get_epoch(const struct s3_wal *wal);
 
 struct s3_wal_stats {
 	uint64_t appends;

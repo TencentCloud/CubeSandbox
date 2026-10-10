@@ -1104,7 +1104,7 @@ impl Engine for S3Engine {
             &serde_json::json!({
                 "lvol_name": lvol_name,
                 "export_uuid": export_uuid,
-                "decouple": true,
+                "decouple": false,
             }),
         ) {
             Ok(_) => {}

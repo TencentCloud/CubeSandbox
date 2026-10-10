@@ -234,19 +234,6 @@ int s3_cache_create(const struct s3_cache_opts *opts, struct s3_cache **out);
 void s3_cache_destroy(struct s3_cache *cache);
 
 /**
- * Whether this exact object version is cached and readable right now.
- *
- * "Readable" means the whole object: with partial residency a slot can hold this
- * uuid and still miss a given read, so this answers a coarser question than
- * s3_cache_read(). Demand reads must call s3_cache_read() and act on its return
- * code -- a true here does not promise a later hit. Read-ahead admission may
- * use this coarse snapshot to avoid fetching an object that is already wholly
- * resident; racing eviction only loses that optimisation.
- */
-bool s3_cache_lookup(struct s3_cache *cache, uint64_t chunk_index,
-		     const struct spdk_uuid *uuid);
-
-/**
  * Serve a read from the local device.
  *
  * \param offset_in_chunk must be block aligned, as must \p length: this reads

@@ -15,9 +15,9 @@ After applying, SPDK must be rebuilt (`make -C ../spdk -j$(nproc)`), otherwise
 the headers are new but the libraries are old, which shows up as undefined
 symbols at link time.
 
-The patches are `git format-patch` shaped, with full commit messages and
-Signed-off-by, so `git am` can consume them too -- use it if you want the
-commits kept in the SPDK tree:
+The patches are `git format-patch` shaped with full commit messages, so
+`git am` can consume them too -- use it if you want the commits kept in the
+SPDK tree. DCO sign-offs, when present, are supplied by the human author:
 
 ```sh
 git -C ../spdk am /path/to/s3lvol/patches/0001-*.patch
@@ -265,12 +265,14 @@ Changes the internal allocation path so an esnap clone may use `dest->copy`
 only for the operation started by `spdk_blob_materialize_cluster()`.
 
 **This is a second patch that modifies an existing function.** The gate is
-`dest->copy != NULL` plus an operation-local boolean passed into
-`bs_allocate_and_copy_cluster()`. The second half is essential because `dest`
-is the blobstore-wide device: CopyObject ingest for volume X installs its
-manifest-bound callback there, while another esnap volume Y in the same lvstore
-remains writable. Gating only on the pointer would route Y's ordinary CoW
-through X's manifest and silently bind the wrong object.
+`dest->copy != NULL`, an operation-local boolean passed into
+`bs_allocate_and_copy_cluster()`, and a `copy_on_materialize_only` property on
+the destination device. The last two are essential because `dest` is the
+blobstore-wide device: CopyObject ingest for volume X installs its
+manifest-bound callback there, while another esnap volume in the same
+lvstore remains writable. Gating
+only on the pointer or on the immediate blob being an esnap would route Y's
+ordinary CoW through X's manifest and silently bind the wrong object.
 
 **Why.** `blob_can_copy()` assumed a copy is an offload on one disk (`src_lba`
 and `dst_lba` on the same device) and therefore excluded esnap clones, whose
@@ -280,8 +282,10 @@ same-bucket decouple treats `src_lba` as an LBA on the export parent and
 CopyObject plus a chunk-map insert. Without this, `allocate_and_copy_cluster()`
 always GET+writes an esnap cluster, which is the slow decouple path.
 
-Ordinary blobs retain the original device-copy behaviour. Ordinary CoW on an
-esnap clone remains GET+write, including a write concurrent with materializing
-the same blob. A blob-local temporal gate is not sufficient: it also redirects
-that foreground CoW into the ingest callback, where collision with the
-materializer's single waiter returns `-EBUSY` and becomes host-visible EIO.
+Generic device-copy implementations retain the original behaviour. A
+manifest-bound implementation marks itself materialize-only, so ordinary CoW
+remains GET+write even when another esnap clone in the same lvstore is
+writable. A blob-local temporal gate is not sufficient: it also redirects that
+foreground CoW into the ingest callback, where it can either bind an object
+from the wrong manifest or collide with the materializer's single waiter and
+return host-visible EIO.

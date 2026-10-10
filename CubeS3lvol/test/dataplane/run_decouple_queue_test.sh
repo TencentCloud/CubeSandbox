@@ -14,8 +14,8 @@
 #
 #  This test reproduces the queue window and asserts the fix. The fix was first a
 #  refusal, and is now a cancellation: refusing was correct about the hazard but
-#  made "import a volume, then snapshot it" impossible, since decouple defaults to
-#  true and is started before the import replies. So create_snapshot cancels the
+#  made "import a volume, then snapshot it" impossible, since an import that
+#  asks for a decouple starts it before the import replies. So create_snapshot cancels the
 #  decouple and proceeds, which removes the hazard by removing the decouple. What
 #  is asserted either way is that no decouple ever materialises everything and then
 #  fails to detach.
@@ -561,14 +561,7 @@ else
 fi
 
 # ==========================================================================
-echo "[8] while small is queued: snapshot it (must cancel the decouple and succeed)"
-# This used to assert a refusal, and the refusal was correct as far as it went --
-# letting the snapshot through while the decouple stood is what produced the
-# detach failure this test is named for. But refusing makes "import a volume,
-# then snapshot it" impossible, because decouple defaults to true and starts
-# before the import replies. So the decouple is cancelled instead, and the
-# snapshot proceeds; the hazard is gone because there is no longer a decouple to
-# fail. See docs/import-reference-snapshot-design.md §3.1 and §9.2.
+echo "[8] while small is queued: snapshot it, which cancels that decouple"
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
 	"${SMALL_IMP}" "${SMALL_IMP_SNAP}")" \
 	>"${WORKDIR}/snap_small.json" 2>"${WORKDIR}/snap_small.err"
@@ -576,28 +569,22 @@ SNAP_RC=$?
 if [ "${SNAP_RC}" -eq 0 ]; then
 	pass "snapshot of queued small succeeded (rc=0)"
 else
-	fail "snapshot of queued small refused (rc=${SNAP_RC}) -- it must cancel the queued decouple instead"
+	fail "snapshot of queued small refused (rc=${SNAP_RC})"
 	sed 's/^/    /' "${WORKDIR}/snap_small.err" 2>/dev/null | tail -5
 fi
 
-# The reply has to say the decouple was dropped: the caller asked for one, by
-# default, and is not getting it.
+# The reply has to say the decouple was dropped: the caller asked for one and
+# is not getting it. The snapshot now holds the external parent.
 if grep -q 'decouple_cancelled' "${WORKDIR}/snap_small.json" 2>/dev/null; then
-	pass "reply reports decouple_cancelled"
+	pass "reply confirms the queued decouple was cancelled"
 else
-	fail "reply does not report decouple_cancelled: $(tr -d '\n' < "${WORKDIR}/snap_small.json" 2>/dev/null | head -c 200)"
+	fail "reply did not report decouple_cancelled"
 fi
 
-# Cancelled from the queue, so it must say so -- and must not have started.
 if grep -qE "'${SMALL_IMP}' was waiting to be decoupled .* is being snapshotted" "${TGT_LOG}"; then
-	pass "queued decouple of ${SMALL_IMP} was dequeued for the snapshot"
+	pass "queued decouple of ${SMALL_IMP} was dropped for the snapshot"
 else
-	fail "no dequeue-for-snapshot line for ${SMALL_IMP} in the log"
-fi
-if grep -qE "Decoupling lvol '${SMALL_IMP}'" "${TGT_LOG}"; then
-	fail "${SMALL_IMP} started materialising -- a queued cancel must stop it before that"
-else
-	pass "${SMALL_IMP} never started materialising"
+	fail "queued decouple of ${SMALL_IMP} was not dropped"
 fi
 
 # ==========================================================================
@@ -631,14 +618,18 @@ else
 	fail "${BIG_IMP} did not finish its decouple"
 fi
 
-# small's decouple was cancelled, so it must still read the export -- and asking
-# again must be refused, because the snapshot now owns the external parent.
+# Small was snapshotted, so its decouple was cancelled and must not have finished.
+if grep -qE "'${SMALL_IMP}' no longer reads export" "${TGT_LOG}"; then
+	fail "${SMALL_IMP} finished a decouple the snapshot was supposed to cancel"
+else
+	pass "${SMALL_IMP}'s queued decouple was cancelled and did not finish"
+fi
 raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${SMALL_IMP}")" \
 	>/dev/null 2>"${WORKDIR}/redecouple.err"
 if [ $? -ne 0 ]; then
-	pass "${SMALL_IMP} can no longer be decoupled (its snapshot holds the parent)"
+	pass "${SMALL_IMP} can no longer be decoupled (its snapshot holds the export)"
 else
-	fail "${SMALL_IMP} accepted a decouple after being snapshotted -- it has no external parent to clear"
+	fail "${SMALL_IMP} accepted a decouple after its snapshot took the export"
 fi
 
 check_target "step 9" || exit 1

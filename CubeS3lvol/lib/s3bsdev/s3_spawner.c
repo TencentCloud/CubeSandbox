@@ -304,30 +304,6 @@ s3_spawner_run_task(void *(*task_fn)(void *), void *arg)
 }
 
 int
-s3_spawner_pthread_create(pthread_t *thread, void *(*start_routine)(void *),
-			  void *arg)
-{
-	struct spawner_request req = {
-		.type          = SPAWNER_REQ_CREATE_THREAD,
-		.thread_out    = thread,
-		.start_routine = start_routine,
-		.arg           = arg,
-		.result        = -1,
-	};
-
-	if (!thread || !start_routine) {
-		return -EINVAL;
-	}
-	if (!s3_spawner_is_started()) {
-		SPDK_ERRLOG("spawner not started\n");
-		return -EPERM;
-	}
-
-	spawner_submit_and_wait(&req);
-	return req.result;
-}
-
-int
 s3_spawner_pthread_create_async(void *(*start_routine)(void *), void *arg,
 				void (*err_cb)(void *ctx, int err), void *err_ctx)
 {

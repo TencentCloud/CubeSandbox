@@ -16,7 +16,7 @@
  *
  *     A. plain pthread_create          -> child inherits the single-core pin
  *                                         (reproduces the problem)
- *     B. via s3_spawner_pthread_create -> child gets the wide affinity
+ *     B. via s3_spawner_pthread_create_async -> child gets the wide affinity
  *                                         (verifies the fix)
  *
  *   If A and B come out the same, the spawner is not doing anything.
@@ -222,26 +222,6 @@ main(void)
 		}
 	}
 
-	/* ---------- B. through the spawner: should get the wide affinity
-	 * ---------- */
-	printf("\n[4] experiment: s3_spawner_pthread_create\n");
-	{
-		pthread_t t;
-		int cpus = -1;
-		rc = s3_spawner_pthread_create(&t, report_affinity, &cpus);
-		check_true("s3_spawner_pthread_create succeeds", rc == 0, NULL);
-		if (rc == 0) {
-			pthread_join(t, NULL);
-		}
-		char detail[80];
-		snprintf(detail, sizeof(detail),
-			 "child allowed = %d cores (want %d)",
-			 cpus, CPU_COUNT(&allowed));
-		check_true("a thread created via the spawner escapes the "
-			   "single-core pin",
-			   cpus == CPU_COUNT(&allowed), detail);
-	}
-
 	/* ---------- C. the async variant ---------- */
 	printf("\n[5] s3_spawner_pthread_create_async\n");
 	{
@@ -325,9 +305,8 @@ main(void)
 	check_true("is_started is false after stop",
 		   !s3_spawner_is_started(), NULL);
 	{
-		pthread_t t;
-		rc = s3_spawner_pthread_create(&t, report_affinity, NULL);
-		check_true("pthread_create fails rather than hangs after stop",
+		rc = s3_spawner_pthread_create_async(report_affinity, NULL, NULL, NULL);
+		check_true("async create fails rather than hangs after stop",
 			   rc != 0, NULL);
 
 		void *ret = s3_spawner_run_task(nested_init, NULL);

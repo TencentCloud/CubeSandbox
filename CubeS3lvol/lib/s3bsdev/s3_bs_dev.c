@@ -3091,6 +3091,7 @@ ingest_try_finish_end(struct s3_ctx *ctx)
 	}
 
 	ctx->bs_dev.copy = NULL;
+	ctx->bs_dev.copy_on_materialize_only = false;
 	ctx->ingest = NULL;
 	cb = in->end_cb;
 	arg = in->end_arg;
@@ -3382,6 +3383,7 @@ s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_endpoint,
 	in->src_fn = src_fn;
 	in->src_arg = src_arg;
 	ctx->ingest = in;
+	ctx->bs_dev.copy_on_materialize_only = true;
 	ctx->bs_dev.copy = s3_bs_dev_copy;
 	return 0;
 }
@@ -3860,8 +3862,6 @@ s3_flush_upload(void *vctx, const struct s3_overlay_flush_view *view,
 
 int
 s3_bs_dev_create(const struct s3_lvs_opts *opts,
-		 struct spdk_bdev_desc *wal_desc,
-		 struct spdk_bdev_desc *cache_desc,
 		 struct s3_client *client,
 		 uint64_t capacity_bytes,
 		 struct spdk_bs_dev **out)
@@ -3870,11 +3870,6 @@ s3_bs_dev_create(const struct s3_lvs_opts *opts,
 	uint32_t chunk_size;
 	uint64_t blockcnt;
 	int rc;
-
-	/* The direct-to-S3 path has no WAL / cache yet. The parameters are
-	 * accepted but unused to keep the interface stable. */
-	(void)wal_desc;
-	(void)cache_desc;
 
 	if (!opts || !client || !out) {
 		return -EINVAL;
@@ -3982,12 +3977,6 @@ s3_bs_dev_create(const struct s3_lvs_opts *opts,
 
 	*out = &ctx->bs_dev;
 	return 0;
-}
-
-struct s3_ctx *
-s3_bs_dev_get_ctx(struct spdk_bs_dev *bs_dev)
-{
-	return (struct s3_ctx *)bs_dev;
 }
 
 /* ==========================================================================
@@ -4756,12 +4745,3 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 	}
 }
 
-void
-s3_bs_dev_kick_flusher(struct spdk_bs_dev *bs_dev)
-{
-	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
-
-	if (ctx && ctx->flusher) {
-		s3_flusher_kick(ctx->flusher);
-	}
-}
