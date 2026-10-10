@@ -1,5 +1,7 @@
 # Custom Template Images
 
+For the explicitly selected repository Rust alternative, see [local builds and runtime prerequisites](https://github.com/TencentCloud/CubeSandbox/blob/master/docker/README.md#optional-repository-built-rust-daemon). The Go image examples below remain the default.
+
 This tutorial shows how to add `envd` to **your own application or container image** for use with the CubeSandbox SDK and E2B SDK.
 
 For the general workflow to create templates from OCI images and configure application ports and readiness probes, see [Create Templates from OCI Image](./template-from-image.md).
@@ -169,6 +171,8 @@ For the `cubebox` instance type, CubeMaster also preserves the injection annotat
 
 ## 4. The entrypoint contract
 
+Source-built images from this checkout use a self-contained Bash entrypoint: keep `/bin/bash` and standard coreutils in custom images. With a user CMD, envd exiting does not stop the application. TERM/INT/HUP are forwarded only to the application, and the entrypoint keeps waiting for its exit code without a forced-kill timeout. Without a CMD, envd's exit code is returned unchanged, including zero. Container runtime teardown owns final cleanup; the single-file COPY examples remain valid.
+
 `cube-entrypoint.sh` implements a simple "envd-in-the-background, your
 app in the foreground" pattern:
 
@@ -176,8 +180,8 @@ app in the foreground" pattern:
    so that `/health` is reachable within about a second of container
    startup.
 2. If the container was started **with** a user `CMD`, the script
-   `exec`s that command. `envd` keeps running in the background; the
-   user process owns `stdout`/`stderr` and receives `SIGTERM` on stop.
+   starts and waits for that command. `envd` runs independently in the
+   background; TERM/INT/HUP are forwarded to the user process only.
 3. If the container was started **without** a `CMD`, the script simply
    waits on `envd`, keeping it as the foreground process.
 

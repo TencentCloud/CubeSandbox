@@ -1,0 +1,97 @@
+name: Build Optional Rust envd Image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docker/Dockerfile.cube-base-rust'
+      - 'docker/cube-entrypoint.sh'
+      - 'docker/tests/**'
+      - 'cube-envd/**'
+      - 'rust-toolchain.toml'
+      - 'Makefile'
+      - '.dockerignore'
+      - '.github/workflows/build-cube-envd-image.yml'
+  pull_request:
+    paths:
+      - 'docker/Dockerfile.cube-base-rust'
+      - 'docker/cube-entrypoint.sh'
+      - 'docker/tests/**'
+      - 'cube-envd/**'
+      - 'rust-toolchain.toml'
+      - 'Makefile'
+      - '.dockerignore'
+      - '.github/workflows/build-cube-envd-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: build-cube-envd-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  component:
+    name: Rust component CI (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned validation environment
+        run: |
+          version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          docker build --build-arg RUST_VERSION="$version" -f docker/tests/Dockerfile.envd-ci -t envd-ci .
+      - name: Run complete component CI in isolated cgroups
+        run: |
+          docker run --rm --init --privileged --cgroupns private \
+            -v "$PWD:/workspace:ro" \
+            -v envd-ci-cargo:/usr/local/cargo \
+            -v envd-ci-target:/target \
+            -e NO_PROXY=localhost,127.0.0.1,::1 -e no_proxy=localhost,127.0.0.1,::1 \
+            -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=2 envd-ci \
+            bash docker/tests/prepare-cgroup.sh bash -ec '
+              cargo --version; rustc --version; rustfmt --version; cargo clippy --version
+              make -C cube-envd ci'
+  build_rust:
+    name: Build optional Rust image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build optional Rust image locally
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.cube-base-rust
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: cubesandbox-base:rust-ci-smoke
+          build-args: CUBE_ENVD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=cube-base-rust-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cube-base-rust-${{ matrix.arch }}
+      - name: Test optional Rust image lifecycle
+        env:
+          CUBE_ENVD_IMAGE: cubesandbox-base:rust-ci-smoke
+          CUBE_ENVD_ARCH: ${{ matrix.arch }}
+          CUBE_ENVD_COMMIT: ${{ github.sha }}
+        run: python3 -B -m unittest discover -s docker/tests -v
