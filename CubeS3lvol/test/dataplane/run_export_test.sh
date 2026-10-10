@@ -1965,9 +1965,19 @@ else
 	exit 1
 fi
 
-if raw_rpc rcow_get_imports "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
-		>"${WORKDIR}/imports_nosnap.json" 2>/dev/null && \
-   ! grep -q "${EXPORT2_UUID}" "${WORKDIR}/imports_nosnap.json"; then
+# The hidden template is reaped after the clone delete returns. The registry
+# entry goes with that reap, not with the clone delete itself.
+CHAIN_REG_DROPPED=0
+for _ in $(seq 50); do
+	if raw_rpc rcow_get_imports "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+			>"${WORKDIR}/imports_nosnap.json" 2>/dev/null && \
+	   ! grep -q "${EXPORT2_UUID}" "${WORKDIR}/imports_nosnap.json"; then
+		CHAIN_REG_DROPPED=1
+		break
+	fi
+	sleep 0.1
+done
+if [ "${CHAIN_REG_DROPPED}" = "1" ]; then
 	pass "deleting the last reader dropped the registry entry"
 else
 	fail "the registry still lists an export nothing reads"
@@ -3093,7 +3103,8 @@ else
 	info "a write to one imported volume reached the other, or reached the export"
 fi
 
-# Property 4, while both exist: release must refuse, and name both esnap readers.
+# Property 4, while both exist: release must refuse. Both user volumes read
+# through one hidden template, and that template is the only esnap reader.
 MULTI_REL_MARK="$(wc -l < "${TGT_LOG}")"
 if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
 		"${MULTI_UUID}" "${SRC_LVS}")" \
@@ -3102,10 +3113,10 @@ if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' 
 else
 	pass "release was refused while two volumes read the export"
 	if tail -n +"${MULTI_REL_MARK}" "${TGT_LOG}" \
-			| grep -q "parent of 2 volume(s)"; then
-		pass "the refusal reports both export readers"
+			| grep -q "parent of 1 volume(s), including '__rcow_tpl_${MULTI_UUID}'"; then
+		pass "the refusal names the hidden template as the only esnap reader"
 	else
-		fail "the refusal did not report both export readers"
+		fail "the refusal did not name the hidden template"
 		tail -n +"${MULTI_REL_MARK}" "${TGT_LOG}" \
 			| grep -E "still the parent of" | head -2 | sed 's/^/       /'
 	fi
@@ -3370,27 +3381,17 @@ DST_CREATED=0
 check_target "step 11f" || exit 1
 
 # ==========================================================================
-# [11g] two decouple:true imports of one export are queued, not overlapped
+# [11g] two decouple:true imports of one export share one template copy
 # ==========================================================================
 echo
-echo "[11g] queueing decouples of one export"
+echo "[11g] one template decouple for two imports of one export"
 
-# Each import is its own esnap clone, and decouple:true materialises that clone.
-# Two of them on one lvstore still do not run together: blobstore serialises
-# cluster allocation on the channel, so the second waits in the decouple queue.
+# Both imports clone __rcow_tpl_<uuid>. decouple:true materialises that template
+# once. The second import waits for the copy, then clones the local template; it
+# does not enqueue a second decouple.
 #
-# The wait is kept inside rather than handed back as -EBUSY. "Import N volumes
-# from this export and decouple them" is one operation to the caller; refusing all
-# but the first would leave the rest esnap clones unless the caller noticed and
-# retried, which means polling for a wait it never asked to manage.
-#
-# Both imports use decouple:true and both are expected to succeed. What this
-# checks is that the two materialisations do not overlap, and that both volumes
-# become independent of the export once their own decouple finishes.
-#
-# The proof that it became independent is release: the export cannot be released
-# while any volume still reads through it, so a release that succeeds once both
-# decouples are done is the same statement as "neither reads the export any more".
+# Release is the check that the export is no longer read: it refuses while the
+# template is still an esnap.
 
 MULTI2_VOL="${SRC_VOL}-multi2"
 MULTI2_SNAP="${MULTI2_VOL}-snap"
@@ -3446,13 +3447,16 @@ if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","w
 fi
 DST_CREATED=1
 
-# Back to back, deliberately without waiting: the second import's decouple is
-# meant to land while the first is still copying.
+# The second call blocks until the template copy finishes, then returns a
+# local clone. The first returns while that copy is still the esnap.
 Q_IMPORTS_OK=1
+Q_I=0
 for vol in "${MULTI2_A}" "${MULTI2_B}"; do
+	Q_I=$((Q_I + 1))
 	if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
 			"${vol}" "${MULTI2_UUID}" "${DST_LVS}")" \
-			>/dev/null 2>"${WORKDIR}/multi2_import_${vol}.err"; then
+			>"${WORKDIR}/multi2_import_${vol}.json" \
+			2>"${WORKDIR}/multi2_import_${vol}.err"; then
 		fail "rcow_import_lvol (${vol}, decouple:true)"
 		sed 's/^/       /' "${WORKDIR}/multi2_import_${vol}.err"
 		Q_IMPORTS_OK=0
@@ -3462,47 +3466,27 @@ if [ "${Q_IMPORTS_OK}" = "1" ]; then
 	pass "both volumes imported with decouple:true"
 fi
 
-# One running, the rest queued -- never two of the same export running. Sampled
-# while the work is in flight; a single sample is enough to catch the case this
-# replaces, where both would have been running.
-Q_MAX_RUNNING=0
-Q_SAW_QUEUED=0
-for _ in $(seq 60); do
-	Q_STATE="$(raw_rpc rcow_get_decouple 2>/dev/null | python3 -c "
-import json, sys
-uuid = sys.argv[1]
-try:
-    rows = json.load(sys.stdin)
-except Exception:
-    print('0 0 0'); sys.exit(0)
-mine = [r for r in rows if r.get('export_uuid') == uuid]
-running = [r for r in mine if not r.get('queued')]
-queued  = [r for r in mine if r.get('queued')]
-print('%d %d %d' % (len(mine), len(running), len(queued)))
-" "${MULTI2_UUID}" 2>/dev/null)"
-	Q_TOTAL="$(printf '%s' "${Q_STATE}" | cut -d' ' -f1)"
-	Q_RUNNING="$(printf '%s' "${Q_STATE}" | cut -d' ' -f2)"
-	Q_QUEUED="$(printf '%s' "${Q_STATE}" | cut -d' ' -f3)"
-	[ -z "${Q_RUNNING}" ] && Q_RUNNING=0
-	[ -z "${Q_QUEUED}" ] && Q_QUEUED=0
-	[ "${Q_RUNNING}" -gt "${Q_MAX_RUNNING}" ] 2>/dev/null && \
-		Q_MAX_RUNNING="${Q_RUNNING}"
-	[ "${Q_QUEUED}" -gt 0 ] 2>/dev/null && Q_SAW_QUEUED=1
-	[ "${Q_TOTAL}" = "0" ] && break
-	sleep 0.2
-done
-
-if [ "${Q_MAX_RUNNING}" -le 1 ] 2>/dev/null; then
-	pass "never more than one decouple of the export ran at a time"
+Q_MODE_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode",""))' \
+	"${WORKDIR}/multi2_import_${MULTI2_A}.json" 2>/dev/null || true)"
+Q_MODE_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode",""))' \
+	"${WORKDIR}/multi2_import_${MULTI2_B}.json" 2>/dev/null || true)"
+if [ "${Q_MODE_A}" = "esnap" ]; then
+	pass "the first import still reads the export (${Q_MODE_A})"
 else
-	fail "${Q_MAX_RUNNING} decouples of one export ran concurrently"
+	fail "first import mode='${Q_MODE_A}', expected esnap"
 fi
-# Not asserted: on a volume this small the first decouple can finish inside one
-# poll interval, so the queued state is real but may never be observed.
-if [ "${Q_SAW_QUEUED}" = "1" ]; then
-	pass "the second volume was observed waiting in the queue"
+if [ "${Q_MODE_B}" = "local_clone" ]; then
+	pass "the second import cloned the template after its copy (${Q_MODE_B})"
 else
-	info "the first decouple finished before a queued state could be sampled"
+	fail "second import mode='${Q_MODE_B}', expected local_clone"
+fi
+
+MULTI2_TPL="__rcow_tpl_${MULTI2_UUID}"
+Q_DEC_N="$(grep -cF "Decoupling lvol '${MULTI2_TPL}'" "${TGT_LOG}" || true)"
+if [ "${Q_DEC_N}" = "1" ]; then
+	pass "the shared template was decoupled once"
+else
+	fail "expected one decouple of ${MULTI2_TPL}, saw ${Q_DEC_N}"
 fi
 
 # Both must actually have been decoupled. Release is the check: it refuses while
@@ -3572,8 +3556,8 @@ check_target "step 11g" || exit 1
 # ==========================================================================
 # [11h] a second decouple of the same lvstore, from a different export
 #
-# Step 11g covers several volumes taking turns at one *export*, which is rationed
-# because they would fetch the same objects twice. Two different exports do not
+# Step 11g covers several volumes of one export sharing one template copy.
+# Two different exports do not
 # collide that way, so this is the case where the reason to wait is blobstore
 # rather than S3: cluster allocation is serialised per io channel, a channel is per
 # thread per blobstore, and both decouples run on the RPC thread.
@@ -3885,18 +3869,15 @@ check_target "step 11h" || exit 1
 # [11i] three volumes imported concurrently from one export stay consistent
 #
 # 11f imported two volumes with decouple:false, one RPC after another. 11g
-# queued a second decouple of the same export behind the first. This step is the
-# third shape: three imports submitted at the same time, each its own esnap
-# clone, and the question is the data.
+# materialised one hidden template for two decouple:true imports. This step is
+# the third shape: three imports submitted at the same time, all clones of that
+# one template, and the question is the data.
 #
 # Three kinds of stability are meant by "stable".
 #
-#   1. Before and after materialisation. A decoupled volume is an esnap clone
-#      while its decouple runs: reads go through to the export. Once the
-#      clusters are materialised, reads come from the local blob. The bytes
-#      must not change across that transition. The first import starts its
-#      decouple while the other two wait, so reading them early covers the
-#      still-external path.
+#   1. Before and after materialisation. While the template's decouple runs,
+#      reads go through to the export. Once it finishes, reads come from that
+#      template. The bytes must not change across that transition.
 #
 #   2. Repeated reads. Reading the same volume twice must give the same bytes.
 #
@@ -3997,9 +3978,8 @@ con3_dev_of()
 	esac
 }
 
-# Three imports submitted in one breath, none of them waited for before the
-# next is sent. All decouple:true. Each clone materialises itself; the queue
-# runs those copies one at a time.
+# Three imports submitted in one breath. All decouple:true, and all three clone
+# the one hidden template. Only that template is materialised.
 CON3_IMPORT_OK=1
 CON3_PIDS=""
 i=0
@@ -4063,12 +4043,8 @@ if [ -z "${CON3_DEV_A}" ] || [ -z "${CON3_DEV_B}" ] || [ -z "${CON3_DEV_C}" ]; t
 fi
 pass "all three volumes exposed: ${CON3_DEV_A}, ${CON3_DEV_B}, ${CON3_DEV_C}"
 
-# T1: read everything now, deliberately before waiting for the decouples.
-# Because import answers before its decouple finishes, and the second and third
-# volumes are still queued at this point, at least those two are read while
-# un-materialised -- reads going through the export. This is the "before" side
-# of the stability comparison; nothing depends on the timing being perfect, but
-# the queue state sampled right after is the evidence that it was right.
+# T1: read everything now, while the shared template may still be copying.
+# Reads go through the export until that one decouple finishes.
 CON3_PRE_OK=1
 for vol in "${CON3_A}" "${CON3_B}" "${CON3_C}"; do
 	dev="$(con3_dev_of "${vol}")"
@@ -4122,7 +4098,7 @@ except Exception:
 	sleep 0.5
 done
 if [ "${CON3_DRAINED}" = "1" ]; then
-	pass "all three decouples completed"
+	pass "the shared template decouple completed"
 else
 	fail "decouples did not drain within the wait"
 	exit 1
@@ -4192,7 +4168,7 @@ raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 DST_CREATED=0
 
 # Once nothing reads the export, release must succeed -- the same proof as
-# 11g that all three decouples really completed.
+# 11g that the shared template decouple really completed.
 CON3_RELEASED=0
 for _ in $(seq 40); do
 	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
@@ -4827,15 +4803,14 @@ fi
 check_target "step 11k" || exit 1
 
 # ==========================================================================
-# [11l] delete the import *while its decouple is still running*
+# [11l] delete the import *while its template is still being copied*
 #
 # 11k waits for the copy to finish, which is not what a caller that treats
 # rcow_import_lvol's reply as "the volume is fully local" does. Import with
-# decouple:true starts the copy in the background and answers at once; a
-# delete that lands in that window is deferred (the volume is still there,
-# action_in_progress is set), so a same-name import of the same uuid fails
-# until the pending delete actually completes. That is the field report;
-# 11k cannot see it.
+# decouple:true copies the hidden template in the background and answers at
+# once. That copy's action_in_progress sits on the template, so deleting the
+# user volume completes immediately. The template keeps copying, and unload
+# must refuse until that copy finishes.
 # ==========================================================================
 echo
 echo "[11l] deleting an import whose decouple is still running"
@@ -4924,77 +4899,70 @@ fi
 # --raw, because the unwrapped reply is just the name and hides deferred.
 BUSY_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
 	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${BUSY_DST}")" 2>&1)"
-if echo "${BUSY_DEL}" | grep -q '"deferred": *true'; then
-	pass "delete while decouple is running was deferred"
+if echo "${BUSY_DEL}" | grep -q '"bool_value": *true' && \
+		! echo "${BUSY_DEL}" | grep -q '"deferred": *true'; then
+	pass "delete of the user volume completed while the template was still copying"
 else
-	fail "delete while decouple is running was not deferred: ${BUSY_DEL}"
+	fail "delete of the user volume did not complete immediately: ${BUSY_DEL}"
 	exit 1
 fi
 
 if ${RPC} bdev_get_bdevs -b "${DST_LVS}/${BUSY_DST}" \
 		>/dev/null 2>"${WORKDIR}/busy_still.err"; then
-	pass "the volume is still registered (the delete has not run yet)"
-else
-	fail "the volume vanished on a deferred delete"
+	fail "the user volume was still registered after delete"
 	exit 1
+else
+	pass "the user volume is gone; the template copy does not pin it"
 fi
 
 if raw_rpc rcow_get_pending_deletes "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 		>"${WORKDIR}/busy_pending.json" 2>/dev/null && \
    python3 -c "
 import json, sys
-name, reason = sys.argv[1], sys.argv[2]
+name = sys.argv[1]
 try:
-    q = json.load(open(sys.argv[3]))
+    q = json.load(open(sys.argv[2]))
 except Exception:
     sys.exit(1)
-sys.exit(0 if any(e.get('lvol_name') == name and e.get('reason') == reason for e in q) else 1)
-" "${BUSY_DST}" "decouple" "${WORKDIR}/busy_pending.json"; then
-	pass "the pending-delete queue names it as reason=decouple"
-else
-	fail "the deferred delete is not queued as decouple: $(cat "${WORKDIR}/busy_pending.json" 2>/dev/null)"
-fi
-
-if raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
-		"${BUSY_DST}" "${BUSY_UUID}" "${DST_LVS}")" \
-		>/dev/null 2>"${WORKDIR}/busy_reimp_early.err"; then
-	fail "a same-name import succeeded while the deferred delete had not run"
+sys.exit(0 if any(e.get('lvol_name') == name for e in q) else 1)
+" "${BUSY_DST}" "${WORKDIR}/busy_pending.json"; then
+	fail "the user volume was queued as a pending delete: $(cat "${WORKDIR}/busy_pending.json" 2>/dev/null)"
 	exit 1
 else
-	pass "same-name import refused while the volume is still there"
+	pass "the user volume was not queued behind the template copy"
+fi
+
+raw_rpc rcow_get_decouple "" >"${WORKDIR}/busy_decouple_after.json" 2>/dev/null || true
+if python3 -c "
+import json, sys
+sys.exit(0 if len(json.load(open(sys.argv[1]))) > 0 else 1)
+" "${WORKDIR}/busy_decouple_after.json"; then
+	pass "the template copy is still running after the user volume was deleted"
+else
+	fail "the template copy finished before the delete returned; the window was missed"
+	exit 1
+fi
+
+if raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+		>/dev/null 2>"${WORKDIR}/busy_unload.err"; then
+	fail "rcow_unload_lvstore succeeded while the template copy was running"
+	DST_CREATED=0
+	exit 1
+else
+	pass "unload was refused while the template copy was running"
 fi
 
 if wait_for_decouple; then
-	pass "the decouple finished (the pending delete can now complete)"
+	pass "the template copy finished after the user volume was deleted"
 else
-	fail "the decouple did not finish in 120s"
-	exit 1
-fi
-
-# The poller ticks once a minute; --retry-pending is the same destroy once
-# deletable is YES, without waiting for that tick.
-python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --retry-pending \
-	>/dev/null 2>"${WORKDIR}/busy_retry.err" || true
-BUSY_GONE=0
-for _ in $(seq 90); do
-	if ! ${RPC} bdev_get_bdevs -b "${DST_LVS}/${BUSY_DST}" \
-			>/dev/null 2>/dev/null; then
-		BUSY_GONE=1
-		break
-	fi
-	sleep 1
-done
-if [ "${BUSY_GONE}" = "1" ]; then
-	pass "the pending delete completed; the name is free"
-else
-	fail "the volume was still registered 90s after the decouple finished"
+	fail "the template copy did not finish in 120s"
 	exit 1
 fi
 
 if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
 		"${BUSY_DST}" "${BUSY_UUID}" "${DST_LVS}")" \
 		>/dev/null 2>"${WORKDIR}/busy_reimp.err"; then
-	fail "rcow_import_lvol after the pending delete completed"
+	fail "rcow_import_lvol after the user volume was deleted"
 	sed 's/^/       /' "${WORKDIR}/busy_reimp.err"
 	exit 1
 fi

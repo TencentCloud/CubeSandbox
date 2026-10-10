@@ -294,7 +294,7 @@ if [ "${MODE}" = list ]; then
 	echo "                     statefile local_dev checkpoint export_swap export_read"
 	echo "                     copy_xml pending_persist active_nsid"
 	echo "with S3:             s3_client_test s3_bs_dev_test"
-	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
+	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport shared_chain import_fanout"
 	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
 	echo "                     agent_template cubecow_client snapdelete pending_delete"
 	echo "                     fs hot_upgrade hot_upgrade_negative guards activation"
@@ -475,8 +475,8 @@ else:
 if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
 	for t in dataplane recovery snapshot export srcdel selfimport derived \
-		 decouple_queue snapshot_cancel snapshot_converge agent_template \
-		 cubecow_client snapdelete pending_delete fs hot_upgrade \
+		 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
+		 import_fanout cubecow_client snapdelete pending_delete fs hot_upgrade \
 		 hot_upgrade_negative guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
@@ -485,8 +485,8 @@ else
 	if [ -n "${BLOCKER}" ]; then
 		echo "--- dataplane"
 		for t in dataplane recovery snapshot export srcdel selfimport derived \
-			 decouple_queue snapshot_cancel snapshot_converge agent_template \
-			 cubecow_client snapdelete pending_delete fs hot_upgrade \
+			 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
+			 import_fanout cubecow_client snapdelete pending_delete fs hot_upgrade \
 			 hot_upgrade_negative guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
@@ -511,6 +511,14 @@ else
 		# Next to export, whose manifests it consumes.
 		run_suite run_selfimport_test.sh \
 			./test/dataplane/run_selfimport_test.sh
+		# One hidden snapshot per (lvstore, export). decouple:false still joins
+		# it; decoupling one user lvol covers every clone on that lvstore.
+		run_suite run_shared_chain_test.sh \
+			./test/dataplane/run_shared_chain_test.sh
+		# 10 and 50 concurrent imports of one export. decouple:false must all
+		# join the hidden template; decouple:true must copy that template once.
+		run_suite run_import_fanout_test.sh \
+			./test/dataplane/run_import_fanout_test.sh
 		# Handing on an imported volume without copying it: three lvstores in
 		# turn, so that what the last one reads has to resolve against two
 		# prefixes at once. Next to selfimport because it is the other half of

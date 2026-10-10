@@ -259,6 +259,26 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   parent is protected by the export lease until the esnap clone decouples or is
   deleted. So it is safer, not just faster.
 
+- `run_shared_chain_test.sh` -- repeated imports of one export on one lvstore
+  share a hidden read-only template named `__rcow_tpl_<uuid>`. The template is
+  created first and every user lvol is a clone of it. `decouple:false`
+  still joins that chain. The template is omitted from listing and refused by
+  get, delete, clone, export, activate and decouple-by-name. Deleting the last
+  clone reaps it. Decoupling one user lvol copies the template, so a later
+  import on that lvstore is a local clone and does not renew the source lease.
+  Deleting those clones reaps the local template, and the next import is an
+  esnap again. The same export on another lvstore stays an esnap. After the source objects are deleted, that other lvstore
+  cannot read the pattern. The decoupled clones are checked in the same
+  process; their bytes are not yet durable across an unload.
+
+- `run_import_fanout_test.sh` -- 10 and 50 concurrent imports of one export
+  (`FANOUT_WIDTHS` overrides the widths). Each width is one `decouple:false`
+  burst and one `decouple:true` burst. Every import must succeed. The false
+  burst stays on one esnap template and does not copy; the true burst starts
+  that template's copy once. After the copy, another import is a local clone.
+  A sample of each burst reads back the source pattern. The payload is 128 MiB
+  so the template copy is still running when the burst's clones return.
+
 - `run_cubecow_client_test.sh` -- the cubecow / Cubelet client contract. Cubelet
   never calls JSON-RPC itself; cubecow always uses the same 11 `rcow_*` methods
   in a fixed order, and that order is what this suite drives. Existing suites

@@ -1439,6 +1439,12 @@ wal_replay_flush_batch(struct wal_replay_ctx *rctx)
 	int rc = 0;
 
 	for (uint32_t i = 0; i < rctx->batch_count; i++) {
+		/* Already uploaded on a previous run. Applying it again puts the
+		 * same bytes back in the overlay, and the flusher publishes a new
+		 * object and deletes the one an export manifest still names. */
+		if (rctx->batch_hdrs[i].seq <= rctx->wal->ckpt_seq) {
+			continue;
+		}
 		rc = rctx->apply_fn(rctx->apply_arg, &rctx->batch_hdrs[i],
 				    rctx->batch_payloads[i]);
 		if (rc != 0) {
@@ -1758,6 +1764,15 @@ s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq)
 
 	wal_update_state(wal);
 	return true;
+}
+
+bool
+s3_wal_ckpt_behind(const struct s3_wal *wal, uint64_t safe_seq)
+{
+	if (!wal || wal->busy || safe_seq == 0) {
+		return false;
+	}
+	return safe_seq > wal->ckpt_seq;
 }
 
 /* ==========================================================================
