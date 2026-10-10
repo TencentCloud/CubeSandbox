@@ -213,7 +213,7 @@ spec:
               mountPath: /etc/cube/ca
               readOnly: true
             - name: data-log
-              mountPath: {{ .Values.hostPaths.dataLog }}
+              mountPath: /data/log
             - name: cube-egress-run
               mountPath: /var/run/openresty
             - name: toolbox
@@ -348,9 +348,9 @@ spec:
           {{- end }}
           volumeMounts:
             - name: data-cubelet
-              mountPath: {{ .Values.hostPaths.dataCubelet }}
+              mountPath: /data/cubelet
             - name: data-log
-              mountPath: {{ .Values.hostPaths.dataLog }}
+              mountPath: /data/log
             - name: dev
               mountPath: /dev
             - name: sys

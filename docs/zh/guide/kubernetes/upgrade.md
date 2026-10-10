@@ -145,6 +145,31 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 ---
 
+## 修改宿主机存储路径
+
+Chart 的 `hostPaths` 存储配置选择宿主机目录；运行时容器仍使用固定的 `/data/...`
+和 `/tmp/cube` 路径。修改宿主机路径会重建受影响的 Pod，且**不会迁移现有数据**。
+升级前应排空受影响的计算节点并安排数据保留，包括日志、`dataCubeShared/volume`
+和 `dataShared` 下的数据。
+
+- `hostPaths.runContainerd` 和 `hostPaths.runVc` 独立于 `hostPaths.dataCubelet`。
+  如果 socket/VM 状态目录也要随 Cubelet 存储搬迁，需显式更新这两个配置。
+- 启用 loopback XFS 时，`bootstrap.nodeInit.dataCubelet.loopback.imagePath`
+  独立决定镜像文件的位置。应将其放在预期的宿主机文件系统上；修改
+  `hostPaths.dataCubelet` 不会移动该镜像。
+- 存储路径不包含在 node-prep 指纹中。在已准备好的节点上修改存储或 loopback
+  配置后，应将 `cubeNodeBootstrap.prepGeneration` 改为一个新值，让 bootstrap
+  重新创建目录并检查 XFS。否则，匹配的 `node-prep-ready` 标记会让 node-init
+  跳过执行。恢复工作负载前，应确认 bootstrap 完成且目标 XFS 已挂载；修改
+  generation 不会将数据复制到新路径。
+
+已有的自定义 `hostPaths.dataShared` 现在会在 Big Pod 内暴露为 `/data/shared`。
+例如，配置 `hostPaths.dataShared: /mnt/shared` 时，宿主机上的 `/mnt/shared/project`
+应在 `metadata["host-mount"]` 中请求为 `/data/shared/project`。
+恢复沙箱创建前，应将调用方路径和 CubeMaster 的 `extra_conf.allowed_host_mount_prefixes`
+更新为对应的 `/data/shared/` 前缀（或更小范围的子目录）。旧的自定义宿主机前缀
+不再能在 Pod 内解析。参阅[持久化存储](../persistent-storage.md)。
+
 ## 特殊场景
 
 ### A. 改 PVM kernel pattern / boot args（会 reboot）
@@ -184,6 +209,14 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 ```
 
 这会清掉 Chart 管理的对象；宿主机 hostPath / 内核改动需脚本与平台 runbook 另行处理。
+
+使用自定义存储路径时，清理脚本不会读取 Helm values。请通过 `DATA_CUBELET`、
+`DATA_CUBE_SHIM`、`DATA_CUBE_SHARED`、`DATA_LOG`、`DATA_SNAPSHOT_PACK`、`TMP_CUBE`、
+`TOOLBOX_ROOT`、`BOOTSTRAP_STATE` 和 `LOOPBACK_IMAGE_PATH` 显式传入对应宿主机路径。
+先用 `sudo env DRY_RUN=1 ... ./deploy/kubernetes/chart/scripts/cleanup-node-host.sh`
+检查目标，再决定是否实际清理。脚本只清理日志目录中的 `Cubelet`、`CubeShim` 和
+`CubeVmm` 子目录，并保留独立的 `hostPaths.dataShared` 用户数据目录；不要把清理根目录
+指向该用户数据目录或其父目录。
 
 ---
 
