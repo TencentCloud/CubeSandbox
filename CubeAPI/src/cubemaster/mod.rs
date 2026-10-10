@@ -62,9 +62,12 @@ impl CubeMasterClient {
         req: &CreateSandboxRequest,
     ) -> Result<CreateSandboxResponse, CubeMasterError> {
         let url = format!("{}/cube/sandbox", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await
@@ -131,9 +134,12 @@ impl CubeMasterClient {
         req: &SandboxUpdateRequest,
     ) -> Result<SandboxUpdateResponse, CubeMasterError> {
         let url = format!("{}/cube/sandbox/update", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await
@@ -216,9 +222,12 @@ impl CubeMasterClient {
         req: &CreateSnapshotRequest,
     ) -> Result<CreateSnapshotResponse, CubeMasterError> {
         let url = format!("{}/cube/snapshot", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await
@@ -307,9 +316,12 @@ impl CubeMasterClient {
     ) -> Result<RollbackResponse, CubeMasterError> {
         validate_path_segment("sandbox_id", sandbox_id)?;
         let url = format!("{}/cube/sandbox/{}/rollback", self.base_url, sandbox_id);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await
@@ -390,9 +402,12 @@ impl CubeMasterClient {
         req: &CreateTemplateFromImageReq,
     ) -> Result<TemplateJobResponse, CubeMasterError> {
         let url = format!("{}/cube/template/from-image", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .post(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await
@@ -2495,6 +2510,219 @@ mod tests {
 
         assert_eq!(detail.cpu_milli, 500);
         assert_eq!(detail.memory_mb, 2048);
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_forwards_traceparent_to_cubemaster() {
+        use super::{CreateSnapshotRequest, CubeMasterClient};
+        use opentelemetry::trace::{
+            FutureExt, Span as _, TraceContextExt, Tracer, TracerProvider as _,
+        };
+        use opentelemetry::{global, Context};
+        use opentelemetry_http::HeaderExtractor;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        const INBOUND: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept loopback");
+            let mut head: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&chunk[..n]),
+                }
+            }
+            String::from_utf8_lossy(&head).to_string()
+        });
+
+        // A local provider keeps the client span off the concurrently-replaced global one.
+        let mut inbound = reqwest::header::HeaderMap::new();
+        inbound.insert(
+            "traceparent",
+            reqwest::header::HeaderValue::from_static(INBOUND),
+        );
+        let parent = global::get_text_map_propagator(|p| p.extract(&HeaderExtractor(&inbound)));
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("cube-api-test");
+        let span = tracer
+            .span_builder("client")
+            .start_with_context(&tracer, &parent);
+        let expected = format!(
+            "00-{}-{}-01",
+            span.span_context().trace_id(),
+            span.span_context().span_id()
+        );
+
+        let client = CubeMasterClient::new(format!("http://{addr}"), reqwest::Client::new());
+        let snapshot_request = CreateSnapshotRequest {
+            request_id: "req-1".to_string(),
+            sandbox_id: "sb-1".to_string(),
+            display_name: None,
+            backend: None,
+        };
+        let call = client.create_snapshot(&snapshot_request);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            call.with_context(Context::current_with_span(span)),
+        )
+        .await
+        .expect("create_snapshot call timed out");
+
+        let head = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("loopback server timed out")
+            .expect("loopback server task failed");
+        assert!(
+            head.starts_with("POST /cube/snapshot"),
+            "unexpected request line: {head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains(&format!("traceparent: {expected}")),
+            "create_snapshot must forward the client span as traceparent {expected}; captured request: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_sandbox_forwards_traceparent_to_cubemaster() {
+        use super::{CubeMasterClient, SandboxUpdateRequest};
+        use opentelemetry::trace::{
+            FutureExt, Span as _, TraceContextExt, Tracer, TracerProvider as _,
+        };
+        use opentelemetry::{global, Context};
+        use opentelemetry_http::HeaderExtractor;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        const INBOUND: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept loopback");
+            let mut head: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&chunk[..n]),
+                }
+            }
+            String::from_utf8_lossy(&head).to_string()
+        });
+
+        let mut inbound = reqwest::header::HeaderMap::new();
+        inbound.insert(
+            "traceparent",
+            reqwest::header::HeaderValue::from_static(INBOUND),
+        );
+        let parent = global::get_text_map_propagator(|p| p.extract(&HeaderExtractor(&inbound)));
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("cube-api-test");
+        let span = tracer
+            .span_builder("client")
+            .start_with_context(&tracer, &parent);
+        let expected = format!(
+            "00-{}-{}-01",
+            span.span_context().trace_id(),
+            span.span_context().span_id()
+        );
+
+        let client = CubeMasterClient::new(format!("http://{addr}"), reqwest::Client::new());
+        let update_request = SandboxUpdateRequest {
+            request_id: "req-1".to_string(),
+            sandbox_id: "sb-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            action: "pause".to_string(),
+            timeout: None,
+        };
+        let call = client.update_sandbox(&update_request);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            call.with_context(Context::current_with_span(span)),
+        )
+        .await
+        .expect("update_sandbox call timed out");
+
+        let head = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("loopback server timed out")
+            .expect("loopback server task failed");
+        assert!(
+            head.starts_with("POST /cube/sandbox/update"),
+            "unexpected request line: {head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains(&format!("traceparent: {expected}")),
+            "update_sandbox must forward the client span as traceparent {expected}; captured request: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_sandbox_sends_no_traceparent_without_an_active_span() {
+        use super::{CubeMasterClient, SandboxUpdateRequest};
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept loopback");
+            let mut head: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&chunk[..n]),
+                }
+            }
+            String::from_utf8_lossy(&head).to_string()
+        });
+
+        let client = CubeMasterClient::new(format!("http://{addr}"), reqwest::Client::new());
+        let update_request = SandboxUpdateRequest {
+            request_id: "req-1".to_string(),
+            sandbox_id: "sb-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            action: "resume".to_string(),
+            timeout: None,
+        };
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.update_sandbox(&update_request),
+        )
+        .await
+        .expect("update_sandbox call timed out");
+
+        let head = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("loopback server timed out")
+            .expect("loopback server task failed");
+        assert!(
+            !head.to_ascii_lowercase().contains("traceparent"),
+            "no active span means no traceparent header; captured request: {head}"
+        );
     }
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
@@ -54,6 +55,12 @@ func (a *App) Run() {
 	if err := coreInit(ctx, cfg); err != nil {
 		stdlog.Fatalf("core init fail:%v", recov.DumpStacktrace(3, err))
 		return
+	}
+
+	shutdownTracing, traceErr := telemetry.Setup(ctx, "cubetemplatecenter")
+	if traceErr != nil {
+		shutdownTracing = nil
+		CubeLog.WithContext(ctx).Warnf("templatecenter telemetry setup failed, tracing disabled: %v", traceErr)
 	}
 
 	// Logged here rather than where they are detected: the earliest notices are
@@ -136,6 +143,14 @@ func (a *App) Run() {
 	CubeLog.WithContext(ctx).Errorf("templatecenter shutting down: cancelling in-flight builds")
 	executor.Shutdown()
 	srv.Stop()
+	if shutdownTracing != nil {
+		// Shutdown has canceled ctx; flushing needs a fresh deadline.
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		if err := shutdownTracing(flushCtx); err != nil {
+			CubeLog.WithContext(ctx).Warnf("templatecenter telemetry shutdown: %v", err)
+		}
+	}
 }
 
 // applyNodeIdentity records this instance's node address and narrows the HTTP

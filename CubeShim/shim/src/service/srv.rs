@@ -4,6 +4,7 @@
 
 use crate::common::utils::{ADDRESS_FILE, SHIM_PID_FILE};
 use crate::service::tools;
+use crate::telemetry::Guard;
 use crate::{common::utils, service::task_srv::TaskService};
 use async_trait::async_trait;
 use containerd_shim::{
@@ -21,6 +22,7 @@ pub struct Service {
     ns: String,
     exit: Arc<ExitSignal>,
     debug: bool,
+    telemetry: Guard,
 }
 
 #[async_trait]
@@ -33,6 +35,7 @@ impl Shim for Service {
             ns: flags.namespace.clone(),
             exit: Arc::new(ExitSignal::default()),
             debug: flags.debug,
+            telemetry: Guard::for_action(&flags.action),
         }
     }
 
@@ -75,6 +78,7 @@ impl Shim for Service {
 
     async fn wait(&mut self) {
         self.exit.wait().await;
+        self.telemetry.shutdown();
     }
 
     async fn create_task_service(&self, publisher: RemotePublisher) -> Self::T {

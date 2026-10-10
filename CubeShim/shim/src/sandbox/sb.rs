@@ -42,6 +42,7 @@ use crate::hypervisor::cube_hypervisor as CH;
 use crate::hypervisor::snapshot::SnapshotInfo;
 use crate::log::{stat_defer, Log};
 use crate::sandbox::config;
+use crate::telemetry::{self, Trace};
 use crate::{debugf, errf, infof, warnf};
 
 //use tokio_uring::fs::UnixStream;
@@ -552,8 +553,8 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_sandbox(&mut self) -> CResult<()> {
-        let snapshot = self.start_vm().await?;
+    pub async fn create_sandbox(&mut self, trace: &Trace) -> CResult<()> {
+        let snapshot = self.start_vm(trace).await?;
 
         //todo: app snapshot
         if self.conf.notify_snapshot_ret {
@@ -562,59 +563,69 @@ impl SandBox {
             }
         }
 
-        self.connect_agent_with_retry(snapshot).await?;
+        trace
+            .start(telemetry::SPAN_AGENT_CONNECT)
+            .run(self.connect_agent_with_retry(snapshot))
+            .await?;
 
         infof!(self.log, "agent is ready");
 
-        //add vfio device
-        if !self.app_snapshot_restore() {
-            self.add_device().await?;
-        }
+        let mut stat = trace
+            .start(telemetry::SPAN_GUEST_INIT)
+            .run(async {
+                //add vfio device
+                if !self.app_snapshot_restore() {
+                    self.add_device().await?;
+                }
 
-        let storages = self.get_storages()?;
-        let dns = self.get_dns()?;
-        let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
-        let mut req = agent::CreateSandboxRequest {
-            //hostname: self.id.clone(),
-            hostname: self.id.chars().take(8).collect::<String>(),
-            dns: dns.into(),
-            storages: storages.into(),
-            sandbox_pidns: false,
-            sandbox_id: self.id.clone(),
-            interfaces: self.conf.net.get_pb_interfaces().into(),
-            routes: self.conf.net.get_pb_routes().into(),
-            ARPNeighbors: self.conf.net.get_pb_arps().into(),
-            cube_vip: self.conf.vips.clone(),
-            ..Default::default()
-        };
+                let storages = self.get_storages()?;
+                let dns = self.get_dns()?;
+                let stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
+                let mut req = agent::CreateSandboxRequest {
+                    //hostname: self.id.clone(),
+                    hostname: self.id.chars().take(8).collect::<String>(),
+                    dns: dns.into(),
+                    storages: storages.into(),
+                    sandbox_pidns: false,
+                    sandbox_id: self.id.clone(),
+                    interfaces: self.conf.net.get_pb_interfaces().into(),
+                    routes: self.conf.net.get_pb_routes().into(),
+                    ARPNeighbors: self.conf.net.get_pb_arps().into(),
+                    cube_vip: self.conf.vips.clone(),
+                    ..Default::default()
+                };
 
-        if snapshot {
-            req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
-        }
+                if snapshot {
+                    req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
+                }
 
-        let mut ctx = self.ctx.clone();
+                let mut ctx = self.ctx.clone();
 
-        ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
-        if self.app_snapshot_create() {
-            req.start_mode = protoc::agent::StartMode::SNAPSHOT;
-        }
+                ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
+                if self.app_snapshot_create() {
+                    req.start_mode = protoc::agent::StartMode::SNAPSHOT;
+                }
 
-        if self.app_snapshot_restore() {
-            req.start_mode = protoc::agent::StartMode::RESTORE;
-        }
+                if self.app_snapshot_restore() {
+                    req.start_mode = protoc::agent::StartMode::RESTORE;
+                }
 
-        {
-            if self.client.is_none() {
-                errf!(self.log, "client is None in create_sandbox");
-                return Err(format!("client is None"));
-            }
-            let client = self.client.as_ref().unwrap().lock().await;
+                {
+                    if self.client.is_none() {
+                        errf!(self.log, "client is None in create_sandbox");
+                        return Err(format!("client is None"));
+                    }
+                    let client = self.client.as_ref().unwrap().lock().await;
 
-            client
-                .create_sandbox(ctx, &req)
-                .await
-                .map_err(|e| format!("create sandbox failed:{}", e))?;
-        }
+                    client
+                        .create_sandbox(ctx, &req)
+                        .await
+                        .map_err(|e| format!("create sandbox failed:{}", e))?;
+                }
+
+                Ok::<_, String>(stat)
+            })
+            .await?;
 
         if !self.conf.app_snapshot_create {
             //watch oom
@@ -939,16 +950,19 @@ impl SandBox {
 
         !self.conf.app_snapshot_create
     }
-    async fn start_vm(&mut self) -> CResult<bool> {
+    async fn start_vm(&mut self, trace: &Trace) -> CResult<bool> {
         infof!(self.log, "start vm start");
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
-            ch.launch_vmm().await?;
+            trace
+                .start(telemetry::SPAN_LAUNCH_VMM)
+                .run(ch.launch_vmm())
+                .await?;
         }
         let mut snapshot = false;
 
         if self.by_snapshot() {
-            match self.restore_vm().await {
+            match self.restore_vm(trace).await {
                 Ok(_) => {
                     snapshot = true;
                     if self.conf.app_snapshot_restore {
@@ -970,104 +984,128 @@ impl SandBox {
             );
         }
 
-        if !snapshot {
-            self.boot_vm().await?;
-        }
-
-        {
+        if snapshot {
             let ch = self.ch.as_mut().unwrap().lock().await;
-            let start = Instant::now();
-            let ev = ch
-                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
-                .await?;
-
-            if CH::NotifyEvent::VsockServerReady != ev {
-                return Err(format!(
-                    "Not an expected event, expected:{:?}, actual:{:?}",
-                    CH::NotifyEvent::VsockServerReady,
-                    ev
-                ));
-            }
-            let duration = start.elapsed().as_millis();
-            infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
+            Self::wait_vsock_ready(&ch, &self.log).await?;
+        } else {
+            self.boot_vm(trace).await?;
         }
         Ok(snapshot)
     }
 
-    async fn boot_vm(&mut self) -> CResult<()> {
-        let config = self.prepare_resource().await?;
+    async fn boot_vm(&mut self, trace: &Trace) -> CResult<()> {
+        let config = trace
+            .start(telemetry::SPAN_PREPARE_RESOURCE)
+            .run(self.prepare_resource())
+            .await?;
         let mut ch = self.ch.as_mut().unwrap().lock().await;
-        ch.create_vm(&config).await?;
-        ch.boot_vm().await?;
+        trace
+            .start(telemetry::SPAN_BOOT_VM)
+            .run(async {
+                ch.create_vm(&config).await?;
+                ch.boot_vm().await?;
+                Self::wait_vsock_ready(&ch, &self.log).await
+            })
+            .await?;
         Ok(())
     }
 
-    async fn restore_vm(&mut self) -> CResult<()> {
-        // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
-        let enable_ivshmem = self.is_ivshmem_enabled();
+    async fn wait_vsock_ready(ch: &CH::CubeHypervisor, log: &Log) -> CResult<()> {
+        let start = Instant::now();
+        let ev = ch
+            .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
+            .await?;
 
-        if enable_ivshmem {
-            Self::ensure_ivshmem_file(&self.id)?;
+        if CH::NotifyEvent::VsockServerReady != ev {
+            return Err(format!(
+                "Not an expected event, expected:{:?}, actual:{:?}",
+                CH::NotifyEvent::VsockServerReady,
+                ev
+            ));
         }
+        let duration = start.elapsed().as_millis();
+        infof!(log, "vm ready, vsock is listening, cost:{}", duration);
+        Ok(())
+    }
 
-        let ss_file = SnapshotInfo::load(
-            self.conf.snapshot_base.as_str(),
-            self.conf.vm_res.cpu,
-            self.conf.vm_res.snap_memory,
-        )?;
+    async fn restore_vm(&mut self, trace: &Trace) -> CResult<()> {
+        let stage = trace.start(telemetry::SPAN_PREPARE_SNAPSHOT);
+        let (align_pmem, config) = stage
+            .run(async {
+                // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
+                let enable_ivshmem = self.is_ivshmem_enabled();
 
-        let mut ss_req = SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
-        ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
-        ss_req.set_agent_version(self.conf.agent_path.as_str())?;
-        ss_req.set_kernel_version(self.conf.kernel.as_str())?;
-        ss_req.set_disks(&self.conf.disk);
+                if enable_ivshmem {
+                    Self::ensure_ivshmem_file(&self.id)?;
+                }
 
-        let align_pmem = ss_file.align_pmems(&self.conf.pmem);
-        ss_req.set_pmems(&align_pmem);
+                let ss_file = SnapshotInfo::load(
+                    self.conf.snapshot_base.as_str(),
+                    self.conf.vm_res.cpu,
+                    self.conf.vm_res.snap_memory,
+                )?;
 
-        //ss_file must be treated as a self object.
-        ss_file
-            .eq(&ss_req)
-            .map_err(|e| format!("snapshot metadata not match:{}", e))?;
+                let mut ss_req =
+                    SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
+                ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+                ss_req.set_agent_version(self.conf.agent_path.as_str())?;
+                ss_req.set_kernel_version(self.conf.kernel.as_str())?;
+                ss_req.set_disks(&self.conf.disk);
 
-        let snapshot = Utils::get_snapshot_dir(
-            self.conf.snapshot_base.as_str(),
-            self.conf.vm_res.cpu,
-            self.conf.vm_res.snap_memory,
-        );
-        infof!(self.log, "snapshot dir:{}", snapshot.clone());
-        let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
-        let mut fss = vec![];
-        if let Some(fs) = self.conf.fs.as_ref() {
-            let f = Utils::restore_fs_configs(fs);
-            fss.push(f);
-        }
-        fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
-        let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
-        let disks = Utils::restore_disks_config(&self.conf.disk);
-        // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
-        let mut pmems = VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
-        pmems.extend(Utils::restore_pmems_config(&self.conf.pmem));
-        let vsock = Utils::gen_vsock_config(&self.id);
+                let align_pmem = ss_file.align_pmems(&self.conf.pmem);
+                ss_req.set_pmems(&align_pmem);
+
+                //ss_file must be treated as a self object.
+                ss_file
+                    .eq(&ss_req)
+                    .map_err(|e| format!("snapshot metadata not match:{}", e))?;
+
+                let snapshot = Utils::get_snapshot_dir(
+                    self.conf.snapshot_base.as_str(),
+                    self.conf.vm_res.cpu,
+                    self.conf.vm_res.snap_memory,
+                );
+                infof!(self.log, "snapshot dir:{}", snapshot.clone());
+                let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
+                let mut fss = vec![];
+                if let Some(fs) = self.conf.fs.as_ref() {
+                    let f = Utils::restore_fs_configs(fs);
+                    fss.push(f);
+                }
+                fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
+                let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
+                let disks = Utils::restore_disks_config(&self.conf.disk);
+                // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
+                let mut pmems =
+                    VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
+                pmems.extend(Utils::restore_pmems_config(&self.conf.pmem));
+                let vsock = Utils::gen_vsock_config(&self.id);
+
+                let config = RestoreConfig {
+                    source_url: PathBuf::from(snapshot),
+                    fs: Some(fss),
+                    net: Some(nets),
+                    disks: Some(disks),
+                    pmem: Some(pmems),
+                    vsock: Some(vsock),
+                    memory_vol_url: restore_memory_vol_url,
+                    ivshmem: if enable_ivshmem {
+                        Some(Self::default_ivshmem_config(&self.id)?)
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                };
+
+                Ok::<_, String>((align_pmem, config))
+            })
+            .await?;
 
         let ch = self.ch.as_mut().unwrap().lock().await;
-        let config = RestoreConfig {
-            source_url: PathBuf::from(snapshot),
-            fs: Some(fss),
-            net: Some(nets),
-            disks: Some(disks),
-            pmem: Some(pmems),
-            vsock: Some(vsock),
-            memory_vol_url: restore_memory_vol_url,
-            ivshmem: if enable_ivshmem {
-                Some(Self::default_ivshmem_config(&self.id)?)
-            } else {
-                None
-            },
-            ..Default::default()
-        };
-
-        ch.restore_vm(config).await?;
+        trace
+            .start(telemetry::SPAN_RESTORE_VM)
+            .run(ch.restore_vm(config))
+            .await?;
         /*
         let ev = ch
             .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
@@ -1095,6 +1133,7 @@ impl SandBox {
         id: String,
         spec: Spec,
         info: ContainerInfo,
+        trace: &Trace,
     ) -> CResult<()> {
         let mut containers = self.containers.lock().await;
         if containers.contains_key(&id) {
@@ -1112,20 +1151,20 @@ impl SandBox {
             self.tx_containerd.clone(),
             self.app_snapshot_create(),
         )?;
-        c.create_container().await?;
+        c.create_container(trace).await?;
         containers.insert(id, c);
 
         Ok(())
     }
 
-    pub async fn start_container(&mut self, id: &String) -> Result<()> {
+    pub async fn start_container(&mut self, id: &String, trace: &Trace) -> Result<()> {
         let mut containers = self.containers.lock().await;
         let container = match containers.get_mut(id) {
             Some(c) => c,
             None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
         };
         container
-            .start_container()
+            .start_container(trace)
             .await
             .map_err(|e| Error::Other(e.to_string()))?;
         Ok(())
@@ -1726,54 +1765,66 @@ impl SandBox {
     /// * `target_config` – `RestoreConfig` pointing to the desired snapshot.
     ///   `source_url` is mandatory; `disks`, `memory_vol_url`, etc. carry the
     ///   new backend-file descriptors.
-    pub async fn rollback_vm(&mut self, target_config: RestoreConfig) -> CResult<()> {
-        if target_config.source_url.as_os_str().is_empty() {
-            return Err(format!("rollback restore_config.source_url is empty").into());
-        }
+    pub async fn rollback_vm(
+        &mut self,
+        target_config: RestoreConfig,
+        trace: &Trace,
+    ) -> CResult<()> {
+        trace
+            .start(telemetry::SPAN_ROLLBACK_TEARDOWN)
+            .run(async {
+                if target_config.source_url.as_os_str().is_empty() {
+                    return Err(format!("rollback restore_config.source_url is empty").into());
+                }
+                {
+                    let mut state = self.state.lock().await;
+                    if *state != SandBoxState::Normal {
+                        return Err(format!("sandbox not running, cannot rollback").into());
+                    }
+                    if self.pause_vm_forbidding().await {
+                        return Err(format!(
+                            "sandbox pause forbidding, terminate exec tasks first"
+                        )
+                        .into());
+                    }
+                    *state = SandBoxState::Paused;
+                }
 
-        {
-            let mut state = self.state.lock().await;
-            if *state != SandBoxState::Normal {
-                return Err(format!("sandbox not running, cannot rollback").into());
-            }
-            if self.pause_vm_forbidding().await {
-                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
-            }
-            *state = SandBoxState::Paused;
-        }
+                // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
+                // before we delete the VM out from under them.
+                self.disconnect_agent().await?;
 
-        // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
-        // before we delete the VM out from under them.
-        self.disconnect_agent().await?;
+                // Delete the current VM in place of a checkpoint snapshot.
+                // VmDelete shuts the VM down and destroys its object; the VMM process
+                // stays alive and can immediately host the restored VM.
+                if let Err(e) = self.delete_vm().await {
+                    let mut state = self.state.lock().await;
+                    *state = SandBoxState::Normal;
+                    return Err(e);
+                }
 
-        // Delete the current VM in place of a checkpoint snapshot.
-        // VmDelete shuts the VM down and destroys its object; the VMM process
-        // stays alive and can immediately host the restored VM.
-        if let Err(e) = self.delete_vm().await {
-            let mut state = self.state.lock().await;
-            *state = SandBoxState::Normal;
-            return Err(e);
-        }
+                // VmDelete pushes a VmShutdown event into the hypervisor's event
+                // queue. The fresh monitor_vm spawned by resume_vm_with_config
+                // would otherwise consume that stale event on its first iteration
+                // and treat the freshly-restored VM as crashed: aborted=true →
+                // SandBoxState::Exited → notify_vm_shutdown to all containers,
+                // poisoning the next pause/resume request with "sandbox not in
+                // normal state". Drain everything left in the queue here.
+                if let Some(ch_arc) = self.ch.as_ref() {
+                    let ch = ch_arc.lock().await;
+                    while let Ok(ev) = ch.try_wait_notify() {
+                        infof!(
+                            self.log,
+                            "rollback: drained stale hypervisor event {:?}",
+                            ev
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .await?;
 
-        // VmDelete pushes a VmShutdown event into the hypervisor's event
-        // queue. The fresh monitor_vm spawned by resume_vm_with_config
-        // would otherwise consume that stale event on its first iteration
-        // and treat the freshly-restored VM as crashed: aborted=true →
-        // SandBoxState::Exited → notify_vm_shutdown to all containers,
-        // poisoning the next pause/resume request with "sandbox not in
-        // normal state". Drain everything left in the queue here.
-        if let Some(ch_arc) = self.ch.as_ref() {
-            let ch = ch_arc.lock().await;
-            while let Ok(ev) = ch.try_wait_notify() {
-                infof!(
-                    self.log,
-                    "rollback: drained stale hypervisor event {:?}",
-                    ev
-                );
-            }
-        }
-
-        self.resume_vm_with_config(Some(target_config)).await
+        self.resume_vm_with_config(Some(target_config), trace).await
     }
 
     async fn delete_vm(&mut self) -> CResult<()> {
@@ -1781,50 +1832,59 @@ impl SandBox {
         ch.delete_vm().await
     }
 
-    async fn resume_vm_with_config(&mut self, config: Option<RestoreConfig>) -> CResult<()> {
-        {
-            let state = self.state.lock().await;
-            if *state != SandBoxState::Paused {
-                return Err(format!("sandbox not paused").into());
-            };
-        }
-        //resume vm
-        {
-            let ch = self.ch.as_mut().unwrap().lock().await;
-            match config {
-                Some(restore_config) => {
-                    ch.resume_vm_cube_with_config(restore_config).await?;
+    async fn resume_vm_with_config(
+        &mut self,
+        config: Option<RestoreConfig>,
+        trace: &Trace,
+    ) -> CResult<()> {
+        trace
+            .start(telemetry::SPAN_RESTORE_VM)
+            .run(async {
+                {
+                    let state = self.state.lock().await;
+                    if *state != SandBoxState::Paused {
+                        return Err("sandbox not paused".to_string());
+                    };
                 }
-                None => {
-                    return Err("legacy pausevm resume is removed; restore_config required".into());
+                let ch = self.ch.as_mut().unwrap().lock().await;
+                match config {
+                    Some(restore_config) => ch.resume_vm_cube_with_config(restore_config).await,
+                    None => {
+                        Err("legacy pausevm resume is removed; restore_config required".to_string())
+                    }
                 }
-            }
-        }
+            })
+            .await?;
 
-        self.connect_agent_with_retry(true).await?;
+        trace
+            .start(telemetry::SPAN_ROLLBACK_RECONNECT)
+            .run(async {
+                self.connect_agent_with_retry(true).await?;
 
-        let client = self.client.as_ref().unwrap();
+                let client = self.client.as_ref().unwrap();
 
-        let mut containers = self.containers.lock().await;
-        for (_, c) in containers.iter_mut() {
-            c.set_client(client.clone()).await?;
-        }
+                let mut containers = self.containers.lock().await;
+                for (_, c) in containers.iter_mut() {
+                    c.set_client(client.clone()).await?;
+                }
 
-        let (sender, handle) = self.watch_oom().await?;
-        self.tx_oom_exited = Some(sender);
-        self.oom_handle = Some(Arc::new(handle));
+                let (sender, handle) = self.watch_oom().await?;
+                self.tx_oom_exited = Some(sender);
+                self.oom_handle = Some(Arc::new(handle));
 
-        //monitor guest
-        let (sender, handle) = self.monitor_vm(false).await?;
-        self.tx_monitor_exited = Some(sender);
-        self.monitor_handle = Some(Arc::new(handle));
+                //monitor guest
+                let (sender, handle) = self.monitor_vm(false).await?;
+                self.tx_monitor_exited = Some(sender);
+                self.monitor_handle = Some(Arc::new(handle));
 
-        {
-            let mut state = self.state.lock().await;
-            *state = SandBoxState::Normal;
-        }
+                {
+                    let mut state = self.state.lock().await;
+                    *state = SandBoxState::Normal;
+                }
 
-        Ok(())
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -1875,6 +1935,7 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 mod tests {
     use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
     use oci_spec::runtime::SpecBuilder;
+    use opentelemetry::trace::Status;
     use protobuf::MessageDyn;
     use std::collections::{HashMap, HashSet};
     use std::os::fd::IntoRawFd;
@@ -1891,8 +1952,94 @@ mod tests {
     use super::config;
     use super::normalize_dns_for_agent;
     use super::Log;
+    use super::RestoreConfig;
     use super::SandBox;
+    use super::SandBoxState;
     use super::SnapshotFreezeState;
+    use super::Trace;
+    use crate::hypervisor::config::HypConfig;
+    use crate::hypervisor::cube_hypervisor::CubeHypervisor;
+
+    #[tokio::test]
+    async fn rollback_teardown_stage_reports_under_the_caller_span() {
+        let (exporter, _guard) = crate::telemetry::testutil::install();
+
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        // A sandbox that is not Normal fails teardown's first check, before any
+        // VMM call, so the stage outcome is observable without a live hypervisor.
+        *sb.state.lock().await = SandBoxState::Paused;
+
+        let trace = Trace::extract(
+            &crate::telemetry::testutil::traced_call(crate::telemetry::testutil::INBOUND),
+            crate::telemetry::testutil::SANDBOX_ID,
+        );
+        let cfg = RestoreConfig {
+            source_url: std::path::PathBuf::from("/data/snap/1"),
+            ..Default::default()
+        };
+        assert!(sb.rollback_vm(cfg, &trace).await.is_err());
+
+        let spans = exporter.finished();
+        assert_eq!(spans.len(), 1, "one teardown span: {spans:?}");
+        let span = &spans[0];
+        assert_eq!(span.name.as_ref(), crate::telemetry::SPAN_ROLLBACK_TEARDOWN);
+        assert_eq!(span.status, Status::error("error"));
+        assert_eq!(
+            span.span_context.trace_id().to_string(),
+            crate::telemetry::testutil::INBOUND_TRACE_ID
+        );
+        assert_eq!(
+            span.parent_span_id.to_string(),
+            crate::telemetry::testutil::INBOUND_PARENT_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_teardown_stage_records_nothing_without_a_traceparent() {
+        let (exporter, _guard) = crate::telemetry::testutil::install();
+
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        *sb.state.lock().await = SandBoxState::Paused;
+
+        let trace = Trace::extract(&HashMap::new(), crate::telemetry::testutil::SANDBOX_ID);
+        let cfg = RestoreConfig {
+            source_url: std::path::PathBuf::from("/data/snap/1"),
+            ..Default::default()
+        };
+        assert!(sb.rollback_vm(cfg, &trace).await.is_err());
+        assert!(
+            exporter.finished().is_empty(),
+            "an untraced rollback must record nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_teardown_stage_rejects_empty_source_url() {
+        let (exporter, _guard) = crate::telemetry::testutil::install();
+
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        // Normal state so the empty source_url is the check that fails, and it
+        // must still be attributed to the teardown stage.
+        *sb.state.lock().await = SandBoxState::Normal;
+
+        let trace = Trace::extract(
+            &crate::telemetry::testutil::traced_call(crate::telemetry::testutil::INBOUND),
+            crate::telemetry::testutil::SANDBOX_ID,
+        );
+        let cfg = RestoreConfig::default();
+        assert!(sb.rollback_vm(cfg, &trace).await.is_err());
+
+        let spans = exporter.finished();
+        assert_eq!(spans.len(), 1, "one teardown span: {spans:?}");
+        assert_eq!(
+            spans[0].name.as_ref(),
+            crate::telemetry::SPAN_ROLLBACK_TEARDOWN
+        );
+        assert_eq!(spans[0].status, Status::error("error"));
+    }
 
     #[tokio::test]
     async fn expired_snapshot_freeze_rejects_resume_and_renew() {
@@ -1916,6 +2063,24 @@ mod tests {
             .to_string()
             .contains("lease expired"));
         assert!(sb.resume_snapshot_frozen("snap-2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn readiness_wait_failure_propagates_instead_of_reporting_ready() {
+        let ch = CubeHypervisor::new(
+            HypConfig {
+                debug: false,
+                log_level: log::LevelFilter::Info,
+                sandbox_id: "ut".to_string(),
+                ch_http_api: None,
+            },
+            Log::default(),
+        );
+
+        let err = SandBox::wait_vsock_ready(&ch, &Log::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("uninitialized"), "{err}");
     }
 
     #[tokio::test]

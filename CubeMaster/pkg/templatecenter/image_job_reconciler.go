@@ -17,6 +17,9 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -233,6 +236,11 @@ func resumeStuckBuiltJobs(ctx context.Context) error {
 	logger.Warnf("found %d job(s) stuck at BUILT for over %s; replaying the post-build pipeline", len(jobs), threshold)
 
 	for _, job := range jobs {
+		jobCtx, span := telemetry.Start(ctx, telemetry.SpanTemplateImageReconcile,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrJobID, job.JobID),
+				attribute.String(telemetry.AttrTemplateID, job.TemplateID),
+			))
 		result, err := remoteBuildResultFromResultJSON(job.ResultJSON)
 		if err != nil {
 			// Nothing to replay from. Fail with an actionable message instead
@@ -248,16 +256,19 @@ func resumeStuckBuiltJobs(ctx context.Context) error {
 			}); updErr != nil {
 				logger.Errorf("job %s: mark FAILED: %v", job.JobID, updErr)
 			}
+			telemetry.End(span, err)
 			continue
 		}
 
 		logger.Warnf("job %s: replaying post-build pipeline (artifact %s)", job.JobID, result.ArtifactID)
-		if err := ResumeTemplateImageJobAfterRemoteBuild(ctx, job.JobID, result); err != nil {
+		if err := ResumeTemplateImageJobAfterRemoteBuild(jobCtx, job.JobID, result); err != nil {
 			// ResumeTemplateImageJobAfterRemoteBuild already wrote the failure
 			// into the job row, so the client always has a concrete reason.
 			logger.Errorf("job %s: replay failed: %v", job.JobID, err)
+			telemetry.End(span, err)
 			continue
 		}
+		telemetry.End(span, nil)
 		logger.Infof("job %s: replay succeeded", job.JobID)
 	}
 	return nil

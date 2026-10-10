@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubeproxy"
@@ -26,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -91,6 +93,23 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
 	log.G(ctx).Infof("pause: sandbox=%s snap=%s host=%s", req.SandboxID, snapID, hostIP)
+	pauseAttrs := []attribute.KeyValue{
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID),
+		attribute.String(telemetry.AttrSnapshotID, snapID),
+	}
+	if nodeID != "" {
+		pauseAttrs = append(pauseAttrs, attribute.String(telemetry.AttrNodeID, nodeID))
+	}
+	if hostIP != "" {
+		pauseAttrs = append(pauseAttrs, attribute.String(telemetry.AttrNodeIP, hostIP))
+	}
+	if b := strings.TrimSpace(req.Backend); b != "" {
+		pauseAttrs = append(pauseAttrs, attribute.String(telemetry.AttrBackend, b))
+	}
+	if s := updateStagesFrom(ctx); s != nil {
+		s.annotate(pauseAttrs...)
+		ctx = s.enter(ctx, s.runtime, pauseAttrs...)
+	}
 	cubeRsp, err := cubelet.UpdateWithTimeout(ctx, calleeEndpoint, cubeletReq, pauseCubeletRPCTimeout)
 	if err != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
 		msg := "cubelet pause response is nil"
@@ -129,6 +148,9 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		// Empty uuids means export failed or still pending on Cubelet.
 		// Pause itself succeeded — same-node Resume does not need uuids;
 		// Complete records remote_status=failed when uuids are empty.
+	}
+	if s := updateStagesFrom(ctx); s != nil {
+		ctx = s.enter(ctx, s.finalize, pauseAttrs...)
 	}
 	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released, exportUUIDs); err != nil {
 		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, err.Error())
@@ -388,7 +410,8 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 			cubeletReq.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
 	}
-	if placement != nil && placement.CrossNode {
+	crossNode := placement != nil && placement.CrossNode
+	if crossNode {
 		// Only Master knows the target holds no replica. Saying so lets
 		// Cubelet import the package up front instead of inferring it from a
 		// catalog miss, and lets it reject a restore it cannot serve.
@@ -397,11 +420,26 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
 
 	calleeEndpoint := cubelet.GetCubeletAddr(targetIP)
-	if placement != nil && placement.CrossNode {
+	if crossNode {
 		log.G(ctx).Infof("resume-from-pause: cross-node sandbox=%s snap=%s origin=%s target=%s",
 			req.SandboxID, snapID, rec.NodeIP, targetIP)
 	} else {
 		log.G(ctx).Infof("resume-from-pause: sandbox=%s snap=%s host=%s", req.SandboxID, snapID, targetIP)
+	}
+	resumeAttrs := []attribute.KeyValue{
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID),
+		attribute.String(telemetry.AttrSnapshotID, snapID),
+		attribute.Bool(telemetry.AttrCrossNode, crossNode),
+	}
+	if targetIP != "" {
+		resumeAttrs = append(resumeAttrs, attribute.String(telemetry.AttrNodeIP, targetIP))
+	}
+	if b := strings.TrimSpace(rec.Backend); b != "" {
+		resumeAttrs = append(resumeAttrs, attribute.String(telemetry.AttrBackend, b))
+	}
+	if s := updateStagesFrom(ctx); s != nil {
+		s.annotate(resumeAttrs...)
+		ctx = s.enter(ctx, s.runtime, resumeAttrs...)
 	}
 	cubeRsp, err := cubelet.Create(ctx, calleeEndpoint, cubeletReq)
 	if err != nil || cubeRsp == nil {
@@ -427,6 +465,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_Unknown)
 		rsp.Ret.RetMsg = fmt.Sprintf("pause resume returned different sandboxID %q (want %q)", got, req.SandboxID)
 		return rsp
+	}
+	if s := updateStagesFrom(ctx); s != nil {
+		ctx = s.enter(ctx, s.finalize, resumeAttrs...)
 	}
 	// Same as normal Create: apply node 0→1 (and only those) to Master.
 	volrefcount.ApplyFromExtInfo(ctx, cubeRsp.GetExtInfo())

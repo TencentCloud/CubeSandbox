@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/instancecache"
@@ -66,6 +67,17 @@ func (a *App) Run() {
 		stdlog.Fatalf("core init fail:%v", recov.DumpStacktrace(3, err))
 		return
 	}
+
+	telemetryShutdown, telErr := telemetry.Setup(ctx, "")
+	if telErr != nil {
+		stdlog.Printf("telemetry setup failed, continuing without tracing: %v", telErr)
+		telemetryShutdown = func(context.Context) error { return nil }
+	}
+	defer func() {
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		_ = telemetryShutdown(flushCtx)
+	}()
 
 	type srvResp struct {
 		s   *server.Server

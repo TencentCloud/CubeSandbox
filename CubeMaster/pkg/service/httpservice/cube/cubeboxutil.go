@@ -16,9 +16,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
@@ -383,7 +387,11 @@ func isContainerReqWhiteTag(tag string) bool {
 }
 
 //go:noinline
-func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.CreateCubeSandboxReq) error {
+func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.CreateCubeSandboxReq) (err error) {
+	ctx, span := telemetry.Start(ctx, telemetry.SpanCreateTemplate)
+	defer func() {
+		telemetry.End(span, err)
+	}()
 
 	if reqInOut.InstanceType != cubebox.InstanceType_cubebox.String() {
 		return nil
@@ -438,7 +446,7 @@ func handleColdStartCompatibility(reqInOut *types.CreateCubeSandboxReq) error {
 }
 
 //go:noinline
-func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) error {
+func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) (err error) {
 	start := time.Now()
 	defer func() {
 		templatecenter.ReportResolveMetric(ctx, time.Since(start))
@@ -447,25 +455,36 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		return errors.New("templateID is empty")
 	}
 	stageStart := time.Now()
-	templateReq, err := templatecenter.GetTemplateRequest(ctx, templateID)
+	requestCtx, requestSpan := telemetry.Start(ctx, telemetry.SpanTemplateRequest,
+		trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
+	templateReq, err := templatecenter.GetTemplateRequest(requestCtx, templateID)
 	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveRequest, time.Since(stageStart))
+	telemetry.End(requestSpan, err)
 	if err != nil {
 		return fmt.Errorf("failed to get template param from store: %w", err)
 	}
 	constants.NormalizeAppSnapshotAnnotations(templateReq.Annotations)
 	stageStart = time.Now()
-	if !skipTemplateLocalityReady(ctx, templateID) {
-		err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType)
+	if skipTemplateLocalityReady(ctx, templateID) {
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
+		trace.SpanFromContext(ctx).SetAttributes(
+			attribute.Bool(telemetry.AttrLocalitySkipped, true))
+	} else {
+		localityCtx, localitySpan := telemetry.Start(ctx, telemetry.SpanTemplateLocality,
+			trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
+		err = templatecenter.EnsureTemplateLocalityReady(localityCtx, templateID, reqInOut.InstanceType)
+		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
+		telemetry.End(localitySpan, err)
 		if err != nil {
 			return fmt.Errorf("template %s is not ready on any healthy node: %w", templateID, err)
 		}
-	} else {
-		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
 	}
 	stageStart = time.Now()
-	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
+	kindCtx, kindSpan := telemetry.Start(ctx, telemetry.SpanTemplateKind,
+		trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
+	templateKind, err := templatecenter.GetTemplateKind(kindCtx, templateID)
 	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
+	telemetry.End(kindSpan, err)
 	if err != nil {
 		return fmt.Errorf("failed to resolve template kind: %w", err)
 	}
@@ -479,8 +498,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		resolved.Kind = templateKind
 	}
 	bindStart := time.Now()
+	_, bindSpan := telemetry.Start(ctx, telemetry.SpanTemplateBind,
+		trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
 	defer func() {
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
+		telemetry.End(bindSpan, err)
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
 		if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {

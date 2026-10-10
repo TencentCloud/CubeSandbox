@@ -31,6 +31,7 @@ use crate::common::{
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
 use crate::sandbox::config::{Config, ANNO_APP_SNAPSHOT_CREATE};
+use crate::telemetry::{self, Trace};
 use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
@@ -611,7 +612,7 @@ impl Container {
             && !self.info.stderr.is_empty()
     }
 
-    pub async fn create_container(&mut self) -> CResult<()> {
+    pub async fn create_container(&mut self, trace: &Trace) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
 
         let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
@@ -649,8 +650,9 @@ impl Container {
 
         let client = self.client.as_ref().unwrap().lock().await;
 
-        client
-            .create_container(self.ctx.clone(), &req)
+        trace
+            .start(telemetry::SPAN_CONTAINER_CREATE)
+            .run(client.create_container(self.ctx.clone(), &req))
             .await
             .map_err(|e: ttrpc::Error| format!("create container failed:{}", e))?;
 
@@ -698,7 +700,7 @@ impl Container {
         Ok(())
     }
 
-    pub async fn start_container(&mut self) -> CResult<()> {
+    pub async fn start_container(&mut self, trace: &Trace) -> CResult<()> {
         if !self.passfd_io_enabled() {
             self.start_log_forward().await?;
         }
@@ -709,8 +711,9 @@ impl Container {
                 container_id: self.id.clone(),
                 ..Default::default()
             };
-            client
-                .start_container(self.ctx.clone(), &req)
+            trace
+                .start(telemetry::SPAN_CONTAINER_START)
+                .run(client.start_container(self.ctx.clone(), &req))
                 .await
                 .map_err(|e| format!("start container failed:{}", e))?;
         }

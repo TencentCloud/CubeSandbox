@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/cube"
 	inner "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/inner"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/middleware"
@@ -111,7 +112,7 @@ func (s *internalHttp) registerRoutes() {
 	cube.RegisterInternalTemplateRoutes(internal)
 
 	root := s.engine.Group("")
-	root.Use(middleware.GinRequestMiddleware())
+	root.Use(telemetry.GinMiddleware(), middleware.GinRequestMiddleware())
 	root.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	notify.RegisterNotifyRoutes(root.Group(notify.NotifyURI()))

@@ -32,6 +32,7 @@ use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
 use crate::sandbox::sb;
 use crate::service::update_ext;
+use crate::telemetry;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
 const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
@@ -271,7 +272,7 @@ mod stats_tests {
 
 #[derive(Clone)]
 pub struct TaskService {
-    //id: String,
+    id: String,
     //ns: String,
     sandbox: Arc<Mutex<sb::SandBox>>,
     log: Log,
@@ -301,7 +302,7 @@ impl TaskService {
 
         let sb = sb::SandBox::new(id.clone(), log.clone(), debug, tx.clone());
         TaskService {
-            //id,
+            id,
             //ns,
             sandbox: Arc::new(Mutex::new(sb)),
             log,
@@ -322,11 +323,12 @@ impl TaskService {
 impl Task for TaskService {
     async fn create(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::CreateTaskRequest,
     ) -> TtrpcResult<api::CreateTaskResponse> {
         infof!(self.log, "create req start");
         let start = Instant::now();
+        let trace = telemetry::Trace::extract(&ctx.metadata, self.id.as_str());
         let mut stat = stat_defer::StatDefer::new(
             req.id.clone(),
             stat_defer::CALLEE_SHIM.to_string(),
@@ -365,7 +367,7 @@ impl Task for TaskService {
                 Error::Other(format!("Init sandbox config failed:{}", e))
             })?;
 
-            sb.create_sandbox().await.map_err(|e| {
+            sb.create_sandbox(&trace).await.map_err(|e| {
                 errf!(self.log, "Create sandbox failed:{}", e.clone());
                 Error::Other(format!("Create sandbox failed:{}", e))
             })?;
@@ -385,7 +387,7 @@ impl Task for TaskService {
             terminal: req.terminal,
             ..Default::default()
         };
-        sb.create_container(req.id.clone(), spec, info)
+        sb.create_container(req.id.clone(), spec, info, &trace)
             .await
             .map_err(|e| {
                 errf!(self.log, "Create container failed:{}", e.clone());
@@ -424,7 +426,7 @@ impl Task for TaskService {
     }
     async fn start(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::StartRequest,
     ) -> TtrpcResult<api::StartResponse> {
         let start_at = Instant::now();
@@ -440,7 +442,8 @@ impl Task for TaskService {
             return Err(Others(format!("sandbox not in normal state")));
         }
         if req.exec_id().is_empty() {
-            sb.start_container(&req.id).await.map_err(|e| {
+            let trace = telemetry::Trace::extract(&ctx.metadata, self.id.as_str());
+            sb.start_container(&req.id, &trace).await.map_err(|e| {
                 errf!(self.log, "Start container failed:{}", e);
                 e
             })?;
@@ -691,10 +694,11 @@ impl Task for TaskService {
 
     async fn update(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::UpdateTaskRequest,
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "update req start, id:{}", &req.id);
+        let trace = telemetry::Trace::extract(&ctx.metadata, self.id.as_str());
         let outcome = {
             let mut sb = self.sandbox.lock().await;
             if sb.paused().await {
@@ -726,7 +730,7 @@ impl Task for TaskService {
                 Error::Other(format!("update sandbox failed:{}", e))
             })?;
 
-            update_ext::update_route(&mut sb, &req.annotations, &self.log)
+            update_ext::update_route(&mut sb, &req.annotations, &self.log, &trace)
                 .await
                 .map_err(|e| {
                     errf!(self.log, "update sandbox failed:{}", e.clone());

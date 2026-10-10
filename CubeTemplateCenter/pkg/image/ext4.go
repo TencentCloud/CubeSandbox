@@ -16,6 +16,9 @@ import (
 	"syscall"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
@@ -157,19 +160,29 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
 				return BuildResult{}, err
 			}
-			if err := createExt4ImageStreaming(ctx, source, workDir, tmpExt4Path, estimatedPhase2, opts.PostRootfsExport); err != nil {
-				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
+			streamCtx, streamSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageStreamExt4,
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrArtifactID, opts.ArtifactID),
+					attribute.String(telemetry.AttrExportMode, source.ExportMode.Name()),
+				))
+			streamErr := createExt4ImageStreaming(streamCtx, source, workDir, tmpExt4Path, estimatedPhase2, opts.PostRootfsExport)
+			if streamErr != nil {
+				telemetry.End(streamSpan, streamErr)
+				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", streamErr)
 				_ = os.RemoveAll(workDir)
 				_ = os.Remove(tmpExt4Path)
 			} else {
 				if err := os.Rename(tmpExt4Path, ext4Path); err != nil { // NOCC:Path Traversal()
+					telemetry.End(streamSpan, err)
 					_ = os.Remove(tmpExt4Path)
 					return BuildResult{}, fmt.Errorf("publish ext4 artifact failed: %w", err)
 				}
 				shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
 				if err != nil {
+					telemetry.End(streamSpan, err)
 					return BuildResult{}, err
 				}
+				telemetry.End(streamSpan, nil)
 				_ = os.RemoveAll(workDir)
 				keepStoreDir = true
 				return BuildResult{Ext4Path: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
@@ -207,19 +220,28 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 		}
 	}()
 
+	rootfsCtx, rootfsSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageRootfs,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrExportMode, source.ExportMode.Name()),
+			attribute.Bool(telemetry.AttrPullDeferred, source.ExportMode != ExportModeDocker),
+		))
 	if isLocalFastFS(storeDir) {
-		if err := exportImageRootfs(ctx, source, storeRootfsDir); err != nil {
+		if err := exportImageRootfs(rootfsCtx, source, storeRootfsDir); err != nil {
+			telemetry.End(rootfsSpan, err)
 			return BuildResult{}, err
 		}
 	} else {
 		rootfsDir := filepath.Join(workDir, "rootfs")
 		if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
+			telemetry.End(rootfsSpan, err)
 			return BuildResult{}, err
 		}
-		if err := exportImageRootfs(ctx, source, rootfsDir); err != nil {
+		if err := exportImageRootfs(rootfsCtx, source, rootfsDir); err != nil {
+			telemetry.End(rootfsSpan, err)
 			return BuildResult{}, err
 		}
-		if err := relocateRootfsToArtifactStore(ctx, rootfsDir, storeRootfsDir); err != nil {
+		if err := relocateRootfsToArtifactStore(rootfsCtx, rootfsDir, storeRootfsDir); err != nil {
+			telemetry.End(rootfsSpan, err)
 			return BuildResult{}, err
 		}
 	}
@@ -231,23 +253,34 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	}
 
 	if opts.PostRootfsExport != nil {
-		if err := opts.PostRootfsExport(ctx, storeRootfsDir); err != nil {
+		if err := opts.PostRootfsExport(rootfsCtx, storeRootfsDir); err != nil {
+			telemetry.End(rootfsSpan, err)
 			return BuildResult{}, err
 		}
 	}
+	telemetry.End(rootfsSpan, nil)
 
-	if err := createExt4Image(ctx, storeRootfsDir, tmpExt4Path); err != nil {
+	ext4Ctx, ext4Span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageExt4,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrArtifactID, opts.ArtifactID),
+			attribute.String(telemetry.AttrExportMode, source.ExportMode.Name()),
+		))
+	if err := createExt4Image(ext4Ctx, storeRootfsDir, tmpExt4Path); err != nil {
+		telemetry.End(ext4Span, err)
 		_ = os.Remove(tmpExt4Path)
 		return BuildResult{}, err
 	}
 	if err := os.Rename(tmpExt4Path, ext4Path); err != nil { // NOCC:Path Traversal()
+		telemetry.End(ext4Span, err)
 		_ = os.Remove(tmpExt4Path)
 		return BuildResult{}, fmt.Errorf("publish ext4 artifact failed: %w", err)
 	}
 	shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
 	if err != nil {
+		telemetry.End(ext4Span, err)
 		return BuildResult{}, err
 	}
+	telemetry.End(ext4Span, nil)
 	keepStoreDir = true
 	return BuildResult{Ext4Path: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
 }

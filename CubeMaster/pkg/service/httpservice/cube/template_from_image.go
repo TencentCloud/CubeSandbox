@@ -18,12 +18,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -94,6 +97,10 @@ func handleRedoTemplateAction(c *gin.Context) {
 }
 
 func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+	retCode := int(errorcode.ErrorCode_MasterParamsError)
+	ctx, span := telemetry.Start(r.Context(), telemetry.SpanTemplateImageSubmit)
+	defer func() { telemetry.EndWithCode(span, retCode) }()
+
 	req, envdPayload, err := parseCreateTemplateFromImageRequest(r)
 	if err != nil {
 		return &types.CreateTemplateFromImageRes{
@@ -104,7 +111,7 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 		}
 	}
 	rt.RequestID = req.RequestID
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+	ctx = log.WithLogger(ctx, log.G(ctx).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 		"Action":       "CreateTemplateFromImage",
@@ -128,6 +135,15 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 			},
 		}
 	}
+	if job != nil && normalizedReq != nil {
+		span.SetAttributes(
+			attribute.String(telemetry.AttrJobID, job.JobID),
+			attribute.String(telemetry.AttrTemplateID, normalizedReq.TemplateID),
+			attribute.String(telemetry.AttrRequestID, normalizedReq.RequestID),
+			attribute.String(telemetry.AttrInstanceType, normalizedReq.InstanceType),
+		)
+	}
+	retCode = int(errorcode.ErrorCode_Success)
 	// Only a job still awaiting a build (PENDING) needs forwarding to TC.
 	// SubmitTemplateFromImageWithoutBuild can also return an existing job
 	// that is already RUNNING (an identical in-flight request was reused) --
@@ -135,7 +151,7 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 	// only ever accepts PENDING/RUNNING build jobs it created, so a
 	// non-PENDING job forwarded here would 404 and get wrongly marked FAILED.
 	if job != nil && job.Status == templatecenter.JobStatusPending {
-		go forwardBuildJobToTemplateCenter(job.JobID, normalizedReq, requestBaseURL(r), envdPayload)
+		go forwardBuildJobToTemplateCenter(job.JobID, normalizedReq, requestBaseURL(r), envdPayload, trace.SpanContextFromContext(ctx))
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	return &types.CreateTemplateFromImageRes{

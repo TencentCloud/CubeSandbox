@@ -114,3 +114,10 @@ const (
 	ExportModeDockerless ExportMode = "dockerless"
 	ExportModeNative     ExportMode = "native"
 )
+
+func (m ExportMode) Name() string {
+	if m == ExportModeDocker {
+		return "docker"
+	}
+	return string(m)
+}
