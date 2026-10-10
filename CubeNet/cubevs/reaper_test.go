@@ -129,12 +129,19 @@ func TestReapSessionMapsDeletesExpiredWithoutRevisiting(t *testing.T) {
 		}
 	}
 
-	count, err := reapSessionMaps(egress, ingress, now)
+	count, usageByNodeIP, err := reapSessionMapsWithUsage(egress, ingress, now)
 	if err != nil {
-		t.Fatalf("reapSessionMaps: %v", err)
+		t.Fatalf("reapSessionMapsWithUsage: %v", err)
 	}
 	if count != n {
 		t.Fatalf("visited %d sessions, want %d", count, n)
+	}
+	wantUsage := snatSessionUsage{
+		sessionsInUse: n - uint64(len(expired)),
+		portsInUse:    n - uint64(len(expired)),
+	}
+	if got := usageByNodeIP[0x0a000003]; got != wantUsage {
+		t.Fatalf("SNAT usage = %+v, want %+v", got, wantUsage)
 	}
 
 	for _, key := range order {

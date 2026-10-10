@@ -25,6 +25,7 @@ type CubeVSAdapter interface {
 	GetTAPDevice(ifindex uint32) (*cubevs.TAPDevice, error)
 	CleanupTAPPolicy(ifindex uint32) error
 	DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error
+	DeleteSandboxTrafficMetrics(ip net.IP) error
 	AttachFilter(ifindex uint32) error
 	InstallTAPDefaultDenyPolicy(ifindex uint32) error
 	GCStaleNetPolicyMaps(keep map[uint32]struct{}, stillPresent func(uint32) bool, onConflict func(uint32)) (int, error)
@@ -67,6 +68,10 @@ func (realCubeVSAdapter) CleanupTAPPolicy(ifindex uint32) error {
 
 func (realCubeVSAdapter) DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error {
 	return cubevs.DeleteTAPDeviceMetadata(ifindex, ip)
+}
+
+func (realCubeVSAdapter) DeleteSandboxTrafficMetrics(ip net.IP) error {
+	return cubevs.DeleteSandboxTrafficMetrics(ip)
 }
 
 func (realCubeVSAdapter) AttachFilter(ifindex uint32) error {

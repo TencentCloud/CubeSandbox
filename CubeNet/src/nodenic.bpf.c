@@ -52,6 +52,7 @@ static __always_inline void create_port_mapping_session(__be32 vm_ip, __u32 gen,
 static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
 			 struct mvm_port *mvm_port)
 {
+	struct mvm_meta *mvm_meta;
 	__u32 old_daddr, new_daddr, tcp_csum_off;
 	struct mvm_meta *meta;
 	struct nat_session *sess;
@@ -62,6 +63,7 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	__u16 ip_hlen;
 	__u64 now;
 	__u64 flags;
+	__u32 sandbox_ip = 0;
 	long err;
 
 	/* The inbound packet is addressed to the node, so the sandbox identity
@@ -109,6 +111,9 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	new_daddr = mvm_inner_ip;
 	old_dport = l4->dest;
 	new_dport = mvm_port->listen_port;
+	mvm_meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
+	if (mvm_meta)
+		sandbox_ip = mvm_meta->ip;
 
 	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
 	ip_hlen <<= 2;
@@ -121,29 +126,54 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	/* update TCP csum: IP daddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
-	if (err)
+	if (err) {
+		if (sandbox_ip)
+			update_metrics(sandbox_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update TCP csum for port change (not part of pseudo-header) */
 	flags = sizeof(old_dport);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport, flags);
-	if (err)
+	if (err) {
+		if (sandbox_ip)
+			update_metrics(sandbox_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* write new TCP destination port */
 	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
-	if (err)
+	if (err) {
+		if (sandbox_ip)
+			update_metrics(sandbox_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		if (sandbox_ip)
+			update_metrics(sandbox_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		if (sandbox_ip)
+			update_metrics(sandbox_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	if (!mvm_meta)
+		return bpf_redirect(mvm_port->ifindex, 0);
+
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(mvm_port->ifindex, 0);
 }
 
@@ -221,29 +251,46 @@ static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	/* update TCP csum: IP daddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update TCP csum for port change (not part of pseudo-header) */
 	flags = sizeof(old_dport);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport, flags);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* write new TCP destination port */
 	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
@@ -287,30 +334,47 @@ static __always_inline int udp_nat_rewrite(struct __sk_buff *skb,
 	if (old_csum) {
 		flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(old_daddr);
 		err = bpf_l4_csum_replace(skb, udp_csum_off, old_daddr, new_daddr, flags);
-		if (err)
+		if (err) {
+			update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_OK;
+		}
 
 		/* port is not part of pseudo-header */
 		flags = BPF_F_MARK_MANGLED_0 | sizeof(old_dport);
 		err = bpf_l4_csum_replace(skb, udp_csum_off, old_dport, new_dport, flags);
-		if (err)
+		if (err) {
+			update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_OK;
+		}
 	}
 
 	/* write new UDP destination port */
 	err = bpf_skb_store_bytes(skb, UDP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
@@ -359,6 +423,8 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 			 * verifier after bpf_tail_call, so we cannot continue
 			 * the reverse-NAT path here.
 			 */
+			update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_OK;
 		}
 	}
@@ -419,23 +485,37 @@ static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iph
 	 */
 	flags = sizeof(old_id);
 	err = bpf_l4_csum_replace(skb, icmp_csum_off, old_id, new_id, flags);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* write the restored ICMP echo identifier */
 	err = bpf_skb_store_bytes(skb, ICMP_ECHO_ID_OFF(ip_hlen), &new_id, sizeof(new_id), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 

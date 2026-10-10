@@ -390,6 +390,29 @@ struct snat_ip {
 	__u16 reserved;
 };
 
+struct sandbox_metrics {
+	__u64 ingress_packets;
+	__u64 ingress_bytes;
+	__u64 ingress_drop_packets;
+	__u64 ingress_drop_bytes;
+	__u64 egress_packets;
+	__u64 egress_bytes;
+	__u64 egress_drop_packets;
+	__u64 egress_drop_bytes;
+	__u64 snat_alloc_failures;
+};
+
+enum sandbox_metric_direction {
+	SANDBOX_METRIC_INGRESS = 0,
+	SANDBOX_METRIC_EGRESS = 1,
+};
+
+enum sandbox_metric_reason {
+	SANDBOX_METRIC_FORWARDED = 0,
+	SANDBOX_METRIC_DROP = 1,
+	SANDBOX_METRIC_SNAT_ALLOC_FAIL = 2,
+};
+
 /* Tail-call state for DNS response handling on the ingress UDP NAT path.
  *
  * The response handler is split into its own tail-called program to keep the
@@ -446,8 +469,9 @@ static __always_inline int _()
 	int p[sizeof(struct ingress_session) % 16 == 0 ? 1 : -1] = {};
 	int q[sizeof(struct snat_ip) % 16 == 0 ? 1 : -1] = {};
 	int s[sizeof(struct l7_port_entry) == 4 ? 1 : -1] = {};
+	int t[sizeof(struct sandbox_metrics) == 72 ? 1 : -1] = {};
 
-	return b[0] + d[0] + dv3[0] + r[0] + rv3[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0] + s[0];
+	return b[0] + d[0] + dv3[0] + r[0] + rv3[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0] + s[0] + t[0];
 }
 
 static __always_inline __attribute__((used)) __u32 __btf_pin(void)
