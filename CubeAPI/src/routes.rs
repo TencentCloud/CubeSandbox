@@ -88,6 +88,7 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/sandboxes", get(sandboxes::list_sandboxes))
         .route("/sandboxes", post(sandboxes::create_sandbox))
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
+        .route("/v2/sandboxes", post(sandboxes::create_sandbox_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
@@ -130,6 +131,10 @@ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Rou
         .route(
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
+        )
+        .route(
+            "/v2/sandboxes/:sandboxID/connect",
+            post(sandboxes::connect_sandbox_v2),
         );
 
     with_auth_and_rate_limit(routes, state, auth_configured)
@@ -344,6 +349,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_create_forwards_flattened_body_without_v2_flags() {
+        use axum::{extract::State, routing::post};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().unwrap() = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-123",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let capture = Capture::default();
+        let server_capture = capture.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/cube/sandbox", post(create_handler))
+                    .with_state(server_capture),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{address}");
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        let resp = server
+            .post("/v2/sandboxes")
+            .json(&serde_json::json!({
+                "templateID": "tpl-1",
+                "timeout": 120,
+                "autoPauseMemory": true
+            }))
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::CREATED);
+
+        let body = capture.body.lock().unwrap().clone().expect("create body");
+        // The v1 body reaches CubeMaster with the template id intact.
+        assert_eq!(
+            body["annotations"]["cube.master.appsnapshot.template.id"],
+            "tpl-1"
+        );
+        // v2-only autoPauseMemory must not leak through to CubeMaster.
+        assert!(body.get("autoPauseMemory").is_none());
+    }
+
+    #[tokio::test]
     async fn preserves_root_e2b_routes() {
         let server = test_server().await;
 
@@ -359,10 +428,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_sandbox_create_and_connect_routes_are_mounted() {
+        let server = test_server().await;
+
+        // POST /v2/sandboxes is mounted: with an unreachable CubeMaster it must
+        // fail with a 5xx, never 404/405 (which would mean the route is missing).
+        let resp = server
+            .post("/v2/sandboxes")
+            .json(&serde_json::json!({ "templateID": "tpl-1" }))
+            .await;
+        assert_ne!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_ne!(resp.status_code(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // POST /v2/sandboxes/{id}/connect is mounted (empty body is valid).
+        let resp = server
+            .post("/v2/sandboxes/sb-1/connect")
+            .json(&serde_json::json!({}))
+            .await;
+        assert_ne!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_ne!(resp.status_code(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn v2_create_rejects_unsupported_auto_pause_memory_false() {
+        let server = test_server().await;
+
+        let resp = server
+            .post("/v2/sandboxes")
+            .json(&serde_json::json!({
+                "templateID": "tpl-1",
+                "autoPauseMemory": false
+            }))
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn v2_connect_rejects_unsupported_memory_false() {
+        let server = test_server().await;
+
+        let resp = server
+            .post("/v2/sandboxes/sb-1/connect")
+            .json(&serde_json::json!({ "memory": false }))
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn resume_and_connect_reject_invalid_timeout_before_cubemaster() {
         let server = test_server().await;
 
-        for path in ["/sandboxes/sb-1/resume", "/sandboxes/sb-1/connect"] {
+        for path in [
+            "/sandboxes/sb-1/resume",
+            "/sandboxes/sb-1/connect",
+            "/v2/sandboxes/sb-1/connect",
+        ] {
             let response = server
                 .post(path)
                 .json(&serde_json::json!({ "timeout": -2 }))
@@ -374,11 +494,17 @@ mod tests {
             );
         }
 
-        let response = server
-            .post("/sandboxes/sb-1/connect")
-            .json(&serde_json::json!({ "timeout": 0 }))
-            .await;
-        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+        for path in ["/sandboxes/sb-1/connect", "/v2/sandboxes/sb-1/connect"] {
+            let response = server
+                .post(path)
+                .json(&serde_json::json!({ "timeout": 0 }))
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "path={path}"
+            );
+        }
     }
 
     #[tokio::test]
