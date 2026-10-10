@@ -127,6 +127,21 @@ fn redist_attr_set(gic: &DeviceFd, offset: u32, typer: u64, val: u32) -> Result<
         .map_err(|e| Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into())))
 }
 
+/// SGI/PPI-frame counterpart of `dist_reg_resets_to_zero`; GICR_IGROUPR0 is
+/// excluded for the same reason as GICD_IGROUPR (KVM inits irq->group to 1).
+fn rdist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICR_ISENABLER0
+            | GICR_ICENABLER0
+            | GICR_ISPENDR0
+            | GICR_ICPENDR0
+            | GICR_ISACTIVER0
+            | GICR_ICACTIVER0
+            | GICR_IPRIORITYR0
+    )
+}
+
 fn access_redists_aux(
     gic: &DeviceFd,
     gicr_typer: &[u64],
@@ -139,10 +154,14 @@ fn access_redists_aux(
         for rdreg in reg_list {
             let mut base = rdreg.base;
             let end = base + rdreg.length as u32;
+            let skip_zero = rdist_reg_resets_to_zero(rdreg.base);
 
             while base < end {
                 if set {
-                    redist_attr_set(gic, base, *i, state[*idx])?;
+                    let val = state[*idx];
+                    if val != 0 || !skip_zero {
+                        redist_attr_set(gic, base, *i, val)?;
+                    }
                     *idx += 1;
                 } else {
                     state.push(redist_attr_get(gic, base, *i)?);
@@ -171,7 +190,9 @@ pub fn get_redist_regs(gic: &DeviceFd, gicr_typer: &[u64]) -> Result<Vec<u32>> {
     Ok(state)
 }
 
-/// Set redistributor registers.
+/// Set redistributor registers. Only valid on a freshly created vGIC: the
+/// zero-skip in `rdist_reg_resets_to_zero` assumes the vGIC still holds its
+/// reset values.
 pub fn set_redist_regs(gic: &DeviceFd, gicr_typer: &[u64], state: &[u32]) -> Result<()> {
     let mut idx: usize = 0;
     let mut mut_state = state.to_owned();
@@ -223,4 +244,57 @@ pub fn construct_gicr_typers(vcpu_states: &[CpuState]) -> Vec<u64> {
     }
 
     gicr_typers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::aarch64::gic::VgicConfig;
+    use crate::kvm::KvmGicV3Its;
+
+    fn test_vgic_config() -> VgicConfig {
+        VgicConfig {
+            vcpu_count: 1,
+            dist_addr: 0x0900_0000 - 0x01_0000,
+            dist_size: 0x01_0000,
+            redists_addr: 0x0900_0000 - 0x01_0000 - 0x02_0000,
+            redists_size: 0x02_0000,
+            msi_addr: 0x0900_0000 - 0x01_0000 - 0x02_0000 - 0x02_0000,
+            msi_size: 0x02_0000,
+            nr_irqs: 256,
+        }
+    }
+
+    // Reset-value pin for the SGI/PPI frame: only GICR_IPRIORITYR0 is a RAM
+    // class in rdist_reg_resets_to_zero (the I{S,C}*0 bitmaps ignore a zero
+    // write whatever the current state, and their SGI enable bits read as
+    // 1s on a fresh vGIC).
+    #[test]
+    fn test_fresh_vgic_sgi_ram_skip_list_reads_zero() {
+        let hv = crate::new().unwrap();
+        let vm = hv.create_vm().unwrap();
+        vm.create_vcpu(0, None).unwrap();
+        let gic = KvmGicV3Its::new(&*vm, test_vgic_config()).expect("Cannot create gic");
+
+        let gicr_typer = vec![123];
+        let state = get_redist_regs(&gic.device, &gicr_typer).unwrap();
+        let mut idx = 0;
+        for rdreg in VGIC_RDIST_REGS {
+            idx += rdreg.length as usize / REG_SIZE as usize;
+        }
+        for rdreg in VGIC_SGI_REGS {
+            let words = rdreg.length as usize / REG_SIZE as usize;
+            if rdreg.base == GICR_IPRIORITYR0 {
+                for w in &state[idx..idx + words] {
+                    assert_eq!(
+                        *w, 0,
+                        "RAM skip-list register {:#06x} is non-zero on a fresh vGIC",
+                        rdreg.base
+                    );
+                }
+            }
+            idx += words;
+        }
+        assert_eq!(idx, state.len());
+    }
 }
