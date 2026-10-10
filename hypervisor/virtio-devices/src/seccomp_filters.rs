@@ -78,7 +78,12 @@ fn create_virtio_mem_ioctl_seccomp_rule() -> Vec<SeccompRule> {
 }
 
 fn virtio_balloon_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
-    vec![(libc::SYS_fallocate, vec![])]
+    vec![
+        (libc::SYS_fallocate, vec![]),
+        // pread64 is required for reading /proc/self/pagemap (via FileExt::read_exact_at)
+        // to detect non-resident memory ranges in the worker thread.
+        (libc::SYS_pread64, vec![]),
+    ]
 }
 
 fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
@@ -521,6 +526,10 @@ mod tests {
         assert!(rules
             .iter()
             .any(|(syscall, _)| *syscall == libc::SYS_fallocate));
+        assert!(rules
+            .iter()
+            .any(|(syscall, _)| *syscall == libc::SYS_pread64));
+        assert!(!rules.iter().any(|(syscall, _)| *syscall == libc::SYS_lseek));
     }
 
     #[test]
@@ -535,6 +544,55 @@ mod tests {
     fn strict_balloon_filter_compiles() {
         let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioBalloon).unwrap();
         assert!(!filter.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_balloon_filter_allows_pread64() {
+        let (file_path, file) = {
+            let mut path = std::env::temp_dir();
+            path.push(format!("balloon-seccomp-test-{}", std::process::id()));
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            use std::io::Write;
+            let mut f_write = &f;
+            f_write.write_all(&[0u8; 64]).unwrap();
+            (path, f)
+        };
+        drop(file);
+        let c_path = std::ffi::CString::new(file_path.to_str().unwrap()).unwrap();
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
+        assert!(fd >= 0, "open failed");
+        let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioBalloon).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            let mut buf = [0u8; 8];
+            let res = unsafe { libc::pread64(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
+            let exit_code = if res == 8 { 0 } else { 2 };
+            unsafe {
+                libc::syscall(libc::SYS_exit, exit_code);
+            }
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "strict balloon filter rejected pread64: wait status {status:#x}"
+        );
+        unsafe { libc::close(fd) };
+        let _ = std::fs::remove_file(file_path);
     }
 
     #[cfg(target_os = "linux")]
