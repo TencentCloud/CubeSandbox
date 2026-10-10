@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+[Unit]
+Description=Rotate CubeSandbox CubeShim and CubeVMM logs
+Documentation=https://cubesandbox.com/guide/service-management.html
+ConditionPathExists=@POLICY@
+
+[Service]
+Type=oneshot
+# Private state file: avoid locking against the distro daily logrotate.
+StateDirectory=cube-sandbox-logrotate
+# @LOGROTATE@ and @POLICY@ are replaced at install time.
+ExecStart=@LOGROTATE@ --state /var/lib/cube-sandbox-logrotate/status @POLICY@
+Nice=19
+IOSchedulingClass=idle
