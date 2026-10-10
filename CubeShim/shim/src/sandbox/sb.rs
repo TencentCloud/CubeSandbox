@@ -260,11 +260,13 @@ impl SandBox {
     /// Connect + reset with bounded retries. Restores are retried because
     /// the guest is thawed from a snapshot with its connections just RST and
     /// transiently refuses or resets the first connections while its runtime
-    /// settles; a cold boot gets a single attempt -- it connects after
-    /// VsockServerReady and failures there are permanent. Every error class
-    /// is retried: the observed transient is itself a connect-level failure.
-    /// What follows the first RPC is not retried: it is not idempotent, and
-    /// reset_guest passing is the signal that the guest can serve again.
+    /// settles -- every restored guest, including an ordinary create from a
+    /// template snapshot. A VM booted from scratch (snapshot == false) gets
+    /// a single attempt: a booted guest has no carried connection state, so
+    /// a failure there is permanent. Every error class is retried: the
+    /// observed transient is itself a connect-level failure. What follows
+    /// the first RPC is not retried: it is not idempotent, and reset_guest
+    /// passing is the signal that the guest can serve again.
     async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
         let retry = async {
             let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
@@ -338,6 +340,7 @@ impl SandBox {
     /// alive across the freeze (the guest learns of them via the restore-side
     /// RST). The monitor's health connection is carried too: monitor_conn
     /// holds it open through the abort, so it gets the same restore-side RST.
+    /// Carried ports stay reserved in the restored muxer for the VM's life.
     /// disconnect_agent remains for rollback.
     async fn quiesce_agent_for_pause(&mut self) {
         self.stop_watchers().await;
@@ -1811,7 +1814,7 @@ impl SandBox {
 
         self.connect_agent_with_retry(true).await?;
 
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or("client is None")?;
 
         {
             let mut containers = self.containers.lock().await;
