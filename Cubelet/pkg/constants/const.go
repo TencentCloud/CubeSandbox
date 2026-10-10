@@ -250,6 +250,10 @@ const (
 	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
 	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
 	MasterAnnotationInstanceType            = "cube.master.instance.type"
+	// MasterAnnotationCgroupMode is the guest cgroup hierarchy selector for
+	// the sandbox: empty = default unified v2 hierarchy; "legacy" lets the
+	// guest mount cgroup v1 controllers itself (required by Android init).
+	MasterAnnotationCgroupMode = "cube.master.cgroup-mode"
 )
 
 // Inventory version annotations used by Ensure

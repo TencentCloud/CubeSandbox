@@ -46,6 +46,9 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if req.EnableIvshmem != nil && *req.EnableIvshmem {
 		annotations[constants.CubeAnnotationEnableIvshmem] = "true"
 	}
+	if req.CgroupMode != nil && *req.CgroupMode != "" {
+		annotations[constants.CubeAnnotationCgroupMode] = *req.CgroupMode
+	}
 	rootVolume := &types.Volume{
 		Name: rootfsWritableVolumeName,
 		VolumeSource: &types.VolumeSource{
