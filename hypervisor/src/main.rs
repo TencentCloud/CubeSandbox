@@ -385,14 +385,15 @@ fn create_app(default_vcpus: String, default_memory: String, default_rng: String
                 .num_args(0)
                 .action(ArgAction::SetTrue)
                 .group("vm-config"),
-        )
-        .arg(
-            Arg::new("ivshmem")
-                .long("ivshmem")
-                .help(IvshmemConfig::SYNTAX)
-                .num_args(1..)
-                .group("vm-config"),
         );
+
+    let app = app.arg(
+        Arg::new("ivshmem")
+            .long("ivshmem")
+            .help(IvshmemConfig::SYNTAX)
+            .num_args(1..)
+            .group("vm-config"),
+    );
 
     #[cfg(target_arch = "x86_64")]
     let app = app.arg(
