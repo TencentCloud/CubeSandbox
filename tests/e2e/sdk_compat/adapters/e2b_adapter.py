@@ -445,6 +445,19 @@ class E2BAdapter(SandboxAdapter):
         token = first_present(raw, "traffic_access_token", "trafficAccessToken")
         return str(token) if token else None
 
+    def mcp_url(self) -> str:
+        get_mcp_url = getattr(self._sandbox, "get_mcp_url", None)
+        if not callable(get_mcp_url):
+            raise RuntimeError("E2B sandbox object does not expose get_mcp_url()")
+        return str(get_mcp_url())
+
+    def mcp_token(self) -> str | None:
+        get_mcp_token = getattr(self._sandbox, "get_mcp_token", None)
+        if not callable(get_mcp_token):
+            raise RuntimeError("E2B sandbox object does not expose get_mcp_token()")
+        token = get_mcp_token()
+        return str(token) if token else None
+
     def pause(self, *, timeout: int = 60) -> None:
         pause = getattr(self._sandbox, "pause", None)
         if not callable(pause):

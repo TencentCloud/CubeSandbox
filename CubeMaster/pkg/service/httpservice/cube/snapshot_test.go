@@ -480,6 +480,108 @@ func TestSnapshotRestorePinsOnlyRawHostMountFromStoredTemplate(t *testing.T) {
 	assert.False(t, snapshotRestoreHasRawHostMount(req, templateReq))
 }
 
+func TestReconcileSnapshotPluginVolumes(t *testing.T) {
+	const snapshotMounts = `[{"name":"data","container_path":"/mnt/data"}]`
+	tests := []struct {
+		name           string
+		snapshotMounts string
+		requestMounts  string
+		requestVolumes []*types.Volume
+		wantErr        bool
+		wantVolumes    []string
+		wantAnnotation bool
+	}{
+		{
+			name:           "identical mounts are dropped from request",
+			snapshotMounts: snapshotMounts,
+			requestMounts:  `[{"name":"data","container_path":"/mnt/data"}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}, {Name: "scratch"}},
+			wantVolumes:    []string{"scratch"},
+		},
+		{
+			name:           "equivalent paths after clean are identical",
+			snapshotMounts: snapshotMounts,
+			requestMounts:  `[{"name":" data ","container_path":"/mnt/data/"}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}},
+			wantVolumes:    []string{},
+		},
+		{
+			name:           "request without mounts is unchanged",
+			snapshotMounts: snapshotMounts,
+			requestVolumes: []*types.Volume{{Name: "scratch"}},
+			wantVolumes:    []string{"scratch"},
+		},
+		{
+			name:           "snapshot without plugin mounts keeps request mounts",
+			requestMounts:  `[{"name":"data","container_path":"/mnt/data"}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}},
+			wantVolumes:    []string{"data"},
+			wantAnnotation: true,
+		},
+		{
+			name:           "different path is rejected",
+			snapshotMounts: snapshotMounts,
+			requestMounts:  `[{"name":"data","container_path":"/mnt/other"}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}},
+			wantErr:        true,
+		},
+		{
+			name:           "different readonly is rejected",
+			snapshotMounts: snapshotMounts,
+			requestMounts:  `[{"name":"data","container_path":"/mnt/data","readonly":true}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}},
+			wantErr:        true,
+		},
+		{
+			name:           "extra volume is rejected",
+			snapshotMounts: snapshotMounts,
+			requestMounts:  `[{"name":"data","container_path":"/mnt/data"},{"name":"more","container_path":"/mnt/more"}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}, {Name: "more"}},
+			wantErr:        true,
+		},
+		{
+			name:           "missing volume is rejected",
+			snapshotMounts: `[{"name":"data","container_path":"/mnt/data"},{"name":"more","container_path":"/mnt/more"}]`,
+			requestMounts:  `[{"name":"data","container_path":"/mnt/data"}]`,
+			requestVolumes: []*types.Volume{{Name: "data"}},
+			wantErr:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateReq := &types.CreateCubeSandboxReq{
+				Annotations: map[string]string{},
+				Volumes:     []*types.Volume{{Name: "data"}},
+			}
+			if tt.snapshotMounts != "" {
+				templateReq.Annotations[sandbox.AnnotationPluginVolumeMounts] = tt.snapshotMounts
+			}
+			req := &types.CreateCubeSandboxReq{
+				Annotations: map[string]string{},
+				Volumes:     tt.requestVolumes,
+			}
+			if tt.requestMounts != "" {
+				req.Annotations[sandbox.AnnotationPluginVolumeMounts] = tt.requestMounts
+			}
+
+			err := reconcileSnapshotPluginVolumes("snap-1", req, templateReq)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "must match the snapshot's volume mounts")
+				return
+			}
+			require.NoError(t, err)
+			names := make([]string, 0, len(req.Volumes))
+			for _, volume := range req.Volumes {
+				names = append(names, volume.Name)
+			}
+			assert.Equal(t, tt.wantVolumes, names)
+			_, hasAnnotation := req.Annotations[sandbox.AnnotationPluginVolumeMounts]
+			assert.Equal(t, tt.wantAnnotation, hasAnnotation)
+		})
+	}
+}
+
 func TestBindSnapshotCreateReplicaHostMountFailsWithoutOriginMetadata(t *testing.T) {
 	stubSnapshotReadyForNewUse(t)
 	origSource := getSnapshotRestoreSourceFn

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -263,6 +264,22 @@ type local struct {
 	envdHTTPClient *http.Client
 	envdInitPort   int
 	destroyFn      func(context.Context, *workflow.DestroyContext) error
+
+	// newContainerFn is the container-creation step the create flow starts
+	// with. It is a field so a test can drive the record bookkeeping that has
+	// to happen before the shim is spawned without standing up a containerd
+	// client; nil means the real client.
+	newContainerFn func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error)
+
+	// shimIntentTTL bounds how long the "a shim may have been spawned" record
+	// may keep this sandbox's tap, IP and volumes allocated when no process can
+	// be found for it anywhere on the host. It is pushed in once at startup by
+	// the cubebox-service plugin, which owns the cleanup-policy configuration,
+	// and read by the destroy path, whose cleanup runs from a sibling plugin.
+	// The two can be initialized concurrently, so the handover is atomic rather
+	// than a plain field. Zero — the value before that call, and the
+	// fail-closed one — means the intent never ages out. Nanoseconds.
+	shimIntentTTL atomic.Int64
 }
 
 const (
@@ -274,6 +291,61 @@ const (
 
 func (l *local) ID() string {
 	return constants.CubeboxID.ID()
+}
+
+// SetShimIntentTTL hands the destroy path the age at which an unresolved
+// shim-spawn intent stops blocking resource cleanup. It is called once, from
+// the cubebox-service plugin init, before any workflow step runs.
+func (l *local) SetShimIntentTTL(ttl time.Duration) {
+	if l == nil {
+		return
+	}
+	l.shimIntentTTL.Store(int64(ttl))
+}
+
+// ShimIntentTTL exposes the configured bound so the cubebox-service plugin can
+// report it alongside the rest of the cleanup policy.
+func (l *local) ShimIntentTTL() time.Duration {
+	if l == nil {
+		return 0
+	}
+	return time.Duration(l.shimIntentTTL.Load())
+}
+
+// BackfillShimIntentTimestamps stamps an age onto every recorded shim intent
+// that predates Endpoint.ShimSpawnedAt.
+//
+// Those records are otherwise "unknown age", which the destroy path treats as
+// never-stale — the very state this field exists to bound. Stamping them at
+// startup gives them a fresh, full TTL instead: they are not released early,
+// and they are not stuck forever either.
+func (l *local) BackfillShimIntentTimestamps(ctx context.Context) {
+	if l == nil || l.cubeboxManger == nil {
+		return
+	}
+	now := time.Now()
+	for _, cb := range l.cubeboxManger.List() {
+		if cb == nil {
+			continue
+		}
+		if err := l.stampShimIntentAge(ctx, cb, now); err != nil {
+			log.G(ctx).Errorf("stamp shim intent age on %s: %v; it will stay fail-closed until the "+
+				"intent is rewritten by a new create", cb.ID, err)
+		}
+	}
+}
+
+// stampShimIntentAge gives one recorded intent an age under that record's own
+// lock. The check, the stamp and the persist have to see the same record state,
+// and every other in-place writer of Endpoint takes this lock too.
+func (l *local) stampShimIntentAge(ctx context.Context, cb *cubeboxstore.CubeBox, now time.Time) error {
+	cb.Lock()
+	defer cb.Unlock()
+	if !cb.Endpoint.ShimSpawned || !cb.Endpoint.ShimSpawnedAt.IsZero() {
+		return nil
+	}
+	cb.Endpoint.ShimSpawnedAt = now
+	return l.cubeboxManger.SyncByID(ctx, cb.ID, cubes.WithNoEvent)
 }
 
 func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
@@ -460,14 +532,14 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 		ctrLists = append(ctrLists, ctr)
 	}
 	ctrLists = append(ctrLists, info.FirstContainer())
-	runtimePIDs := l.collectSandboxRuntimePIDs(ctx, info)
+	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, info)
 	for _, ctr := range ctrLists {
 		err = l.stopTask(ctx, ctr.Container)
 		if err != nil {
 			stepLog.Warnf("CleanUp stopTask %s fail: %v", sandBoxID, err)
 		}
 	}
-	if err := waitSandboxRuntimeGone(ctx, sandBoxID, runtimePIDs); err != nil {
+	if err := waitSandboxRuntimeGone(ctx, sandBoxID, runtimeEvidence); err != nil {
 		return fmt.Errorf("shim process still Exists [%s]: %w", sandBoxID, err)
 	}
 

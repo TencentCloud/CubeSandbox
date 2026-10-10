@@ -6,9 +6,12 @@ package cube
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -480,6 +483,9 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
+		if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
+			return err
+		}
 		pinToOrigin := snapshotRestoreHasRawHostMount(reqInOut, templateReq)
 		if err := bindSnapshotCreateReplicaWithHostMount(ctx, templateID, reqInOut, pinToOrigin); err != nil {
 			return err
@@ -535,6 +541,88 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		log.G(ctx).Infof("dealCubeboxCreateReqWithTemplateCenter success:template=%s %s", templateID, summarizeTemplateRequest(reqInOut))
 	}
 	return nil
+}
+
+type snapshotPluginVolumeMount struct {
+	Name          string `json:"name"`
+	ContainerPath string `json:"container_path"`
+	Readonly      bool   `json:"readonly,omitempty"`
+}
+
+// reconcileSnapshotPluginVolumes lets E2B clients re-send the volumeMounts a
+// snapshot already carries. The snapshot's memory image has the mounts baked
+// in, so the request must match them exactly; identical declarations are
+// dropped from the request so each volume is declared once after the
+// template merge, and any difference is rejected instead of silently ignored.
+func reconcileSnapshotPluginVolumes(snapshotID string, req, templateReq *types.CreateCubeSandboxReq) error {
+	if req == nil || templateReq == nil {
+		return nil
+	}
+	snapshotMounts, err := parseSnapshotPluginVolumeMounts(templateReq.Annotations[sandbox.AnnotationPluginVolumeMounts])
+	if err != nil {
+		return fmt.Errorf("snapshot %s: parse stored plugin-volume-mounts: %w", snapshotID, err)
+	}
+	if len(snapshotMounts) == 0 {
+		return nil
+	}
+	requestMounts, err := parseSnapshotPluginVolumeMounts(req.Annotations[sandbox.AnnotationPluginVolumeMounts])
+	if err != nil {
+		return fmt.Errorf("parse plugin-volume-mounts: %w", err)
+	}
+	if len(requestMounts) == 0 {
+		return nil
+	}
+	if !maps.Equal(snapshotMounts, requestMounts) {
+		return fmt.Errorf("snapshot %s: volumeMounts must match the snapshot's volume mounts when restoring (snapshot=%s, request=%s)",
+			snapshotID, describeSnapshotPluginVolumeMounts(snapshotMounts), describeSnapshotPluginVolumeMounts(requestMounts))
+	}
+	kept := req.Volumes[:0]
+	for _, volume := range req.Volumes {
+		if volume != nil {
+			if _, ok := snapshotMounts[strings.TrimSpace(volume.Name)]; ok {
+				continue
+			}
+		}
+		kept = append(kept, volume)
+	}
+	req.Volumes = kept
+	delete(req.Annotations, sandbox.AnnotationPluginVolumeMounts)
+	return nil
+}
+
+func parseSnapshotPluginVolumeMounts(raw string) (map[string]snapshotPluginVolumeMount, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var entries []snapshotPluginVolumeMount
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, err
+	}
+	out := make(map[string]snapshotPluginVolumeMount, len(entries))
+	for _, entry := range entries {
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.ContainerPath = filepath.Clean(entry.ContainerPath)
+		if _, ok := out[entry.Name]; ok {
+			return nil, fmt.Errorf("volume %q is duplicated", entry.Name)
+		}
+		out[entry.Name] = entry
+	}
+	return out, nil
+}
+
+func describeSnapshotPluginVolumeMounts(mounts map[string]snapshotPluginVolumeMount) string {
+	names := slices.Sorted(maps.Keys(mounts))
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		m := mounts[name]
+		part := name + ":" + m.ContainerPath
+		if m.Readonly {
+			part += ":ro"
+		}
+		parts = append(parts, part)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 func snapshotRestoreHasRawHostMount(req, templateReq *types.CreateCubeSandboxReq) bool {

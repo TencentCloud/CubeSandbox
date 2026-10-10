@@ -7,6 +7,11 @@
 ACCESS_KEY_ID=<your-access-key-id>
 SECRET_ACCESS_KEY=<your-secret-access-key>
 
+# Optional. Where credentials come from: static (default) uses the keys above;
+# instance_role uses the EC2 instance role through IMDS instead. With
+# instance_role, remove both keys and use an AWS ENDPOINT (*.amazonaws.com).
+# CREDENTIALS=instance_role
+
 # Bucket that holds every volume, one prefix per volume: volumes/<volume_id>/
 BUCKET=my-cube-volumes
 

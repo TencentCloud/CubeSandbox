@@ -4,7 +4,9 @@
 package s3fsmnt
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +63,37 @@ func TestMountArgs(t *testing.T) {
 	// override the defaults above.
 	if args[len(args)-1] != "-ouse_path_request_style" {
 		t.Errorf("extra opts must be appended last, got %v", args)
+	}
+}
+
+func TestMountArgsInstanceRole(t *testing.T) {
+	m := testManager(t)
+	m.cfg.Credentials = config.CredentialsInstanceRole
+	m.cfg.AccessKeyID, m.cfg.SecretAccessKey = "", ""
+	args := m.MountArgs("/data/cube-shared/volume/s3-v1", "v1")
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-oiam_role=auto") {
+		t.Errorf("args missing -oiam_role=auto: %v", args)
+	}
+	if strings.Contains(joined, "passwd_file") {
+		t.Errorf("args must not reference a passwd file without static keys: %v", args)
+	}
+	if args[len(args)-1] != "-ouse_path_request_style" {
+		t.Errorf("extra opts must be appended last, got %v", args)
+	}
+}
+
+func TestEnsurePasswdFileSkippedForInstanceRole(t *testing.T) {
+	m := testManager(t)
+	m.cfg.Credentials = config.CredentialsInstanceRole
+	m.cfg.AccessKeyID, m.cfg.SecretAccessKey = "", ""
+
+	if err := m.EnsurePasswdFile(); err != nil {
+		t.Fatalf("EnsurePasswdFile: %v", err)
+	}
+	if _, err := os.Stat(m.cfg.PasswdFile); !os.IsNotExist(err) {
+		t.Errorf("passwd file written without static keys: %v", err)
 	}
 }
 
@@ -228,4 +261,91 @@ func TestMountPoint(t *testing.T) {
 	if got, want := m.MountPoint("/base", "v1"), "/base/s3-v1"; got != want {
 		t.Errorf("MountPoint = %q, want %q", got, want)
 	}
+}
+
+// A node that used to run with static keys keeps the s3fs credential file
+// until something removes it; in instance-role mode nothing reads it again,
+// so leaving it would be leaving a plaintext secret on every such host.
+func TestEnsurePasswdFileRemovesStaleFileForInstanceRole(t *testing.T) {
+	passwd := filepath.Join(t.TempDir(), ".passwd-s3fs-volume-bucket")
+	if err := os.WriteFile(passwd, []byte("bucket:AK:SK\n"), 0o600); err != nil {
+		t.Fatalf("seed passwd file: %v", err)
+	}
+
+	m := &Manager{cfg: &config.Config{
+		Credentials: config.CredentialsInstanceRole,
+		Bucket:      "bucket",
+		PasswdFile:  passwd,
+	}}
+	m.RemoveStalePasswdFile()
+	if _, err := os.Stat(passwd); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale passwd file still there: %v", err)
+	}
+
+	// Already absent is fine too.
+	m.RemoveStalePasswdFile()
+}
+
+// With static keys the file is the live credential and must be left alone.
+func TestRemoveStalePasswdFileKeepsStaticKeys(t *testing.T) {
+	m := testManager(t)
+	if err := m.EnsurePasswdFile(); err != nil {
+		t.Fatalf("EnsurePasswdFile: %v", err)
+	}
+	m.RemoveStalePasswdFile()
+	if _, err := os.Stat(m.cfg.PasswdFile); err != nil {
+		t.Fatalf("static-key passwd file removed: %v", err)
+	}
+}
+
+// The instance-role check must only gate a real mount: a repeat attach of a
+// volume that is already mounted must not depend on IMDS. Stale-secret cleanup,
+// on the other hand, runs either way.
+func TestMountRunsBeforeMountOnlyWhenMounting(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"mountpoint": "#!/bin/sh\nexit ${MOUNTPOINT_EXIT:-1}\n",
+		"s3fs":       "#!/bin/sh\necho s3fs must not run >&2\nexit 1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write stub %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	passwd := filepath.Join(t.TempDir(), "passwd")
+	m := New(&config.Config{
+		Credentials: config.CredentialsInstanceRole,
+		Bucket:      "b",
+		PasswdFile:  passwd,
+	})
+	calls := 0
+	probeErr := errors.New("no role")
+	m.BeforeMount = func() error { calls++; return probeErr }
+
+	t.Run("already mounted", func(t *testing.T) {
+		if err := os.WriteFile(passwd, []byte("b:AK:SK\n"), 0o600); err != nil {
+			t.Fatalf("seed passwd: %v", err)
+		}
+		t.Setenv("MOUNTPOINT_EXIT", "0")
+		if _, err := m.Mount(t.TempDir(), "v1"); err != nil {
+			t.Fatalf("Mount: %v", err)
+		}
+		if calls != 0 {
+			t.Errorf("BeforeMount called %d times for a mounted volume, want 0", calls)
+		}
+		if _, err := os.Stat(passwd); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("stale passwd file kept on a mounted node: %v", err)
+		}
+	})
+
+	t.Run("not mounted", func(t *testing.T) {
+		t.Setenv("MOUNTPOINT_EXIT", "1")
+		if _, err := m.Mount(t.TempDir(), "v1"); !errors.Is(err, probeErr) {
+			t.Fatalf("Mount error = %v, want the BeforeMount error", err)
+		}
+		if calls != 1 {
+			t.Errorf("BeforeMount called %d times, want 1", calls)
+		}
+	})
 }

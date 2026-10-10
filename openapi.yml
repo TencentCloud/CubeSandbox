@@ -1683,7 +1683,20 @@ components:
               Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
               callers that already speak e2b can pass through unchanged. Absent
               (None) means today's behaviour: idle sandboxes are killed.
-        mcp: {}
+        mcp:
+          type:
+          - object
+          - 'null'
+          description: |-
+            E2B-compatible MCP servers keyed by server name, e.g.
+            `{"duckduckgo": {}, "arxiv": {"storagePath": "/"}}`. Keys starting with
+            `github/<owner>/<repo>` require `runCmd` and may set `installCmd` and
+            `envs`. CubeAPI validates the shape only; the SDK starts `mcp-gateway`
+            inside the sandbox, and the value is never forwarded or returned.
+          additionalProperties:
+            type: object
+          propertyNames:
+            type: string
         metadata:
           oneOf:
           - type: 'null'

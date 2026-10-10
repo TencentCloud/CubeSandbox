@@ -314,6 +314,21 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=lambda token: {"token_present": bool(token)},
         )
 
+    def mcp_url(self) -> str:
+        return self._trace.capture(
+            "mcp_url",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id},
+            self._wrapped.mcp_url,
+        )
+
+    def mcp_token(self) -> str | None:
+        return self._trace.capture(
+            "mcp_token",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id},
+            self._wrapped.mcp_token,
+            output=lambda token: {"token_present": bool(token)},
+        )
+
     def update_network(self, network: dict | None = None) -> None:
         return self._trace.capture(
             "update_network",

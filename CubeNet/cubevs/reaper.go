@@ -416,11 +416,24 @@ func walkSessionMap(m *ebpf.Map, visit func(*sessionKey, *natSession)) error {
 }
 
 func walkSessionMapIterate(m *ebpf.Map, visit func(*sessionKey, *natSession)) error {
-	var key sessionKey
-	var value natSession
+	var (
+		key       sessionKey
+		value     natSession
+		prevKey   sessionKey
+		prevValue natSession
+		hasPrev   bool
+	)
 	iter := m.Iterate()
 	for iter.Next(&key, &value) {
-		visit(&key, &value)
+		if hasPrev {
+			visit(&prevKey, &prevValue)
+		}
+		prevKey = key
+		prevValue = value
+		hasPrev = true
+	}
+	if hasPrev {
+		visit(&prevKey, &prevValue)
 	}
 	return iter.Err()
 }
@@ -455,36 +468,7 @@ func reapSessions() {
 		return
 	}
 
-	var (
-		count         int
-		usageByNodeIP = make(map[uint32]snatSessionUsage)
-		portsInUse    = make(map[snatPort]struct{})
-	)
-	err = walkSessionMap(m, func(key *sessionKey, value *natSession) {
-		count++
-		sessionPresent := true
-		if sessionExpired(now, key, value) {
-			err := deleteSessions(m, m2, key, value)
-			if err != nil {
-				enqueueEvent(Event{
-					Error:   err,
-					Message: "failed to delete sessions",
-				})
-			} else {
-				sessionPresent = false
-			}
-
-			if !sessionClosedNormally(key, value) {
-				enqueueEvent(Event{
-					Error:   ErrSessionExpiredNotClosed,
-					Message: egressSession(key, value, now),
-				})
-			}
-		}
-		if sessionPresent {
-			recordSNATSessionUsage(usageByNodeIP, portsInUse, value)
-		}
-	})
+	count, usageByNodeIP, err := reapSessionMapsWithUsage(m, m2, now)
 	if err != nil {
 		// Known error:
 		//   - ErrIterationAborted
@@ -501,4 +485,52 @@ func reapSessions() {
 
 	publishSNATSessionUsage(usageByNodeIP, time.Now())
 	reportCount(count)
+}
+
+// reapSessionMaps removes expired egress sessions and their ingress
+// counterparts. count is the number of entries visited.
+//
+// An expired key is deleted on the following step, after Iterate has moved
+// the cursor past it. Deleting the key Iterate will use next restarts a hash
+// map from the first bucket. The last key is deleted after the walk finishes.
+func reapSessionMaps(egressSessions, ingressSessions *ebpf.Map, now uint64) (int, error) {
+	count, _, err := reapSessionMapsWithUsage(egressSessions, ingressSessions, now)
+	return count, err
+}
+
+func reapSessionMapsWithUsage(egressSessions, ingressSessions *ebpf.Map, now uint64) (int, map[uint32]snatSessionUsage, error) {
+	var (
+		count         int
+		usageByNodeIP = make(map[uint32]snatSessionUsage)
+		portsInUse    = make(map[snatPort]struct{})
+	)
+	err := walkSessionMap(egressSessions, func(key *sessionKey, value *natSession) {
+		count++
+		if deleteExpiredSession(egressSessions, ingressSessions, now, key, value) {
+			recordSNATSessionUsage(usageByNodeIP, portsInUse, value)
+		}
+	})
+	return count, usageByNodeIP, err
+}
+
+func deleteExpiredSession(egressSessions, ingressSessions *ebpf.Map, now uint64, key *sessionKey, sess *natSession) bool {
+	if !sessionExpired(now, key, sess) {
+		return true
+	}
+	sessionPresent := true
+	if err := deleteSessions(egressSessions, ingressSessions, key, sess); err != nil {
+		enqueueEvent(Event{
+			Error:   err,
+			Message: "failed to delete sessions",
+		})
+	} else {
+		sessionPresent = false
+	}
+	if !sessionClosedNormally(key, sess) {
+		enqueueEvent(Event{
+			Error:   ErrSessionExpiredNotClosed,
+			Message: egressSession(key, sess, now),
+		})
+	}
+	return sessionPresent
 }

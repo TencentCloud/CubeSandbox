@@ -165,7 +165,8 @@ def pytest_configure(config: pytest.Config):
         "sdk_compat: SDK compatibility E2E tests",
         "requires_capability(name): current SDK backend must support this capability",
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
-        "sandbox_template_id(template_id): override template ID for this test or module",
+        "sandbox_template_id(template_id, optional=False): override template ID for this test or module; "
+        "optional templates are left out of preflight and their tests are skipped when the template does not exist",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_run_code_env_inheritance: test requires an opt-in template whose run_code inherits create-time envs",
         "requires_internet: test requires public internet access from the sandbox",
@@ -212,7 +213,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     config._sdk_e2e_template_ids = {
         template_id
         for item in items
-        if (template_id := _template_id_for_node(item)) is not None
+        if (template_id := _template_id_for_node(item)) is not None and not _template_is_optional(item)
     }
     config._sdk_e2e_default_template_needed = any(
         _template_id_for_node(item) is None for item in items
@@ -375,6 +376,33 @@ def gate_internet_tests(request: pytest.FixtureRequest) -> None:
         )
 
 
+@pytest.fixture(scope="session")
+def _optional_template_exists(sdk_e2e_config: SdkE2EConfig):
+    from adapters.api_adapter import ApiClient
+
+    cache: dict[str, bool] = {}
+
+    def exists(template_id: str) -> bool:
+        if template_id not in cache:
+            api = ApiClient(sdk_e2e_config)
+            try:
+                cache[template_id] = bool(api.get_template(template_id))
+            finally:
+                api.close()
+        return cache[template_id]
+
+    return exists
+
+
+@pytest.fixture(autouse=True)
+def skip_missing_optional_template(request: pytest.FixtureRequest) -> None:
+    if not request.config.getoption("--run-e2e") or not _template_is_optional(request.node):
+        return
+    template_id = _template_id_for_node(request.node)
+    if not request.getfixturevalue("_optional_template_exists")(template_id):
+        pytest.skip(f"optional template {template_id!r} does not exist")
+
+
 @pytest.fixture()
 def sdk_sandbox(
     request: pytest.FixtureRequest,
@@ -530,12 +558,13 @@ def _template_id_for_node(node: pytest.Item) -> str | None:
     marker = node.get_closest_marker("sandbox_template_id")
     if marker is None:
         return None
-    if marker.args and marker.kwargs:
+    kwargs = {k: v for k, v in marker.kwargs.items() if k != "optional"}
+    if marker.args and kwargs:
         raise ValueError("sandbox_template_id accepts either one positional or one keyword template_id value")
-    if marker.kwargs:
-        if set(marker.kwargs) != {"template_id"}:
+    if kwargs:
+        if set(kwargs) != {"template_id"}:
             raise ValueError("sandbox_template_id accepts one template_id value")
-        template_id = marker.kwargs["template_id"]
+        template_id = kwargs["template_id"]
     else:
         if len(marker.args) != 1:
             raise ValueError("sandbox_template_id accepts one template_id value")
@@ -543,6 +572,11 @@ def _template_id_for_node(node: pytest.Item) -> str | None:
     if not isinstance(template_id, str) or not template_id.strip():
         raise ValueError("sandbox_template_id requires a non-empty string")
     return template_id.strip()
+
+
+def _template_is_optional(node: pytest.Item) -> bool:
+    marker = node.get_closest_marker("sandbox_template_id")
+    return marker is not None and bool(marker.kwargs.get("optional", False))
 
 
 def _cleanup_sdk_sandbox(

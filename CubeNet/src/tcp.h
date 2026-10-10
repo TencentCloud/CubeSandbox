@@ -294,6 +294,12 @@ static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat
 
 	old_state = sess->state;
 	if (old_state > TCP_CONNTRACK_SYN_SENT2) {
+		/* prevent out of bounds access below */
+		return;
+	}
+
+	new_state = tcp_conntracks[dir][index][old_state];
+	if (new_state > TCP_CONNTRACK_SYN_SENT2) {
 		/* TCP_CONNTRACK_SYN_SENT2 = TCP_CONNTRACK_LISTEN = 9
 		 * If we reach here, the state should be either
 		 *   - sIG (IGNORED)
@@ -302,8 +308,6 @@ static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat
 		 */
 		return;
 	}
-
-	new_state = tcp_conntracks[dir][index][old_state];
 
 	if (index == TCP_FIN_SET) {
 		/* A retransmitted FIN from the side that initiated close must not be

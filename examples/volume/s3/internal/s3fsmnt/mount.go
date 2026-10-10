@@ -7,6 +7,8 @@ package s3fsmnt
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,10 @@ import (
 // Manager mounts and unmounts one s3fs process per volume.
 type Manager struct {
 	cfg *config.Config
+
+	// BeforeMount, when set, runs only when a mount is really about to happen
+	// (not for a volume that is already mounted); an error aborts the attach.
+	BeforeMount func() error
 }
 
 // New creates a Manager.
@@ -34,7 +40,12 @@ func (m *Manager) MountPoint(baseDir, volumeID string) string {
 // The path is per-bucket so several plugin instances (different driver names,
 // different buckets) on one node never race on a shared credential file. It is
 // rewritten only when the credentials changed.
+//
+// In instance-role mode no file is written; see RemoveStalePasswdFile.
 func (m *Manager) EnsurePasswdFile() error {
+	if m.cfg.UseInstanceRole() {
+		return nil
+	}
 	content := fmt.Sprintf("%s:%s:%s\n", m.cfg.Bucket, m.cfg.AccessKeyID, m.cfg.SecretAccessKey)
 	if b, err := os.ReadFile(m.cfg.PasswdFile); err == nil && string(b) == content {
 		return nil
@@ -48,11 +59,25 @@ func (m *Manager) EnsurePasswdFile() error {
 	return nil
 }
 
+// RemoveStalePasswdFile deletes, in instance-role mode, a credential file left
+// from when the node ran with static keys: a long-lived plaintext secret that
+// nothing reads any more, which is what this mode is for. Nothing depends on
+// it being gone, so a failure is logged rather than failing the attach.
+func (m *Manager) RemoveStalePasswdFile() {
+	if !m.cfg.UseInstanceRole() {
+		return
+	}
+	if err := os.Remove(m.cfg.PasswdFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("warning: remove stale passwd file %q: %v", m.cfg.PasswdFile, err)
+	}
+}
+
 // MountArgs builds the s3fs argument list for one volume.
 //
 //	-o url          the S3-compatible endpoint from volume-s3.conf
 //	-o endpoint     region used for SigV4 signing
-//	-o passwd_file  per-bucket credential file
+//	-o passwd_file  per-bucket credential file, or -o iam_role=auto with
+//	                CREDENTIALS=instance_role (EC2 instance role via IMDS)
 //	-o allow_other  Cubelet (a different user) must traverse the mount to bind
 //	                it into the microVM via virtiofs
 //
@@ -64,8 +89,12 @@ func (m *Manager) MountArgs(mnt, volumeID string) []string {
 		mnt,
 		"-ourl=" + m.cfg.Endpoint,
 		"-oendpoint=" + m.cfg.Region,
-		"-opasswd_file=" + m.cfg.PasswdFile,
 		"-oallow_other",
+	}
+	if m.cfg.UseInstanceRole() {
+		args = append(args, "-oiam_role=auto")
+	} else {
+		args = append(args, "-opasswd_file="+m.cfg.PasswdFile)
 	}
 	return append(args, m.cfg.S3FSExtraOpts...)
 }
@@ -75,12 +104,22 @@ func (m *Manager) MountArgs(mnt, volumeID string) []string {
 func (m *Manager) Mount(baseDir, volumeID string) (string, error) {
 	mnt := m.MountPoint(baseDir, volumeID)
 
+	// Before the early return, so nodes whose volumes are all mounted already
+	// are cleaned up too.
+	m.RemoveStalePasswdFile()
+
 	mounted, err := IsMountPoint(mnt)
 	if err != nil {
 		return "", err
 	}
 	if mounted {
 		return mnt, nil
+	}
+
+	if m.BeforeMount != nil {
+		if err := m.BeforeMount(); err != nil {
+			return "", err
+		}
 	}
 
 	if err := m.EnsurePasswdFile(); err != nil {

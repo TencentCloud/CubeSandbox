@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from "node:crypto";
+
 import { fetch, type Dispatcher } from "undici";
 
 import { Commands } from "./commands.js";
@@ -26,6 +28,35 @@ import { buildDataDispatcher, controlFetch, dataScheme } from "./transport.js";
 import { serializeVolumeMounts, type VolumeMountsArg } from "./volume.js";
 
 export const JUPYTER_PORT = 49999;
+/** Port the in-sandbox ``mcp-gateway`` listens on (E2B-compatible). */
+export const MCP_PORT = 50005;
+export const MCP_TOKEN_PATH = "/etc/mcp-gateway/.token";
+/**
+ * How long `mcp-gateway --config` may take, in seconds, matching the E2B
+ * SDK's default command timeout. Pre-install servers in the template.
+ */
+export const MCP_STARTUP_TIMEOUT_S = 60;
+
+/**
+ * E2B-compatible MCP server configuration keyed by server name, e.g.
+ * ``{ duckduckgo: {}, arxiv: { storagePath: "/" } }``. Keys of the form
+ * ``github/<owner>/<repo>`` take a {@link GitHubMcpServerConfig}.
+ */
+export type McpServer = Record<string, Record<string, unknown> | GitHubMcpServerConfig>;
+
+/** Configuration for a server cloned from GitHub (``github/<owner>/<repo>``). */
+export interface GitHubMcpServerConfig {
+  /** Command that starts a stdio MCP server, run in the repository root. */
+  runCmd: string;
+  /** Command that installs dependencies, run once in the repository root. */
+  installCmd?: string;
+  /** Environment variables for the MCP server process. */
+  envs?: Record<string, string>;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 /** Egress network policy passed to {@link Sandbox.create}. */
 export interface NetworkOptions {
@@ -81,6 +112,13 @@ export interface CreateOptions {
    * ```
    */
   volumeMounts?: VolumeMountsArg;
+  /**
+   * MCP servers to start inside the sandbox through ``mcp-gateway``. When set
+   * without ``template``, ``config.mcpTemplateId`` (``mcp-gateway``) is tried
+   * first and ``config.templateId`` is used only if that template does not exist.
+   * Connect with {@link Sandbox.getMcpUrl} and {@link Sandbox.getMcpToken}.
+   */
+  mcp?: McpServer;
   config?: Config | ConfigOptions;
   /** Extra fields forwarded verbatim into the create request body. */
   extra?: Record<string, unknown>;
@@ -207,6 +245,12 @@ async function checkControlResponse(resp: {
   throw new ApiError(msg, code);
 }
 
+function isTemplateNotFound(status: number, body: string): boolean {
+  // Older CubeAPI builds relay CubeMaster's 130404 without mapping it to 404.
+  const text = body.toLowerCase();
+  return (status === 404 && text.includes("template")) || text.includes("130404");
+}
+
 /**
  * Translate NetworkOptions into the API's camelCase network object, running the
  * same client-side validation the server applies. Shared by sandbox creation
@@ -279,6 +323,7 @@ function resolveCreateConfig(options: CreateOptions): Config {
       ? {
           apiUrl: options.config.apiUrl,
           templateId: options.config.templateId,
+          mcpTemplateId: options.config.mcpTemplateId,
           proxyNodeIp: options.config.proxyNodeIp,
           proxyPort: options.config.proxyPort,
           proxyScheme: options.config.proxyScheme,
@@ -321,6 +366,7 @@ export class Sandbox {
   private readonly _files: Filesystem;
   private readonly _pty: Pty;
   private _cloneCleanup: CloneCleanup | undefined;
+  private _mcpToken: string | undefined;
 
   constructor(data: Record<string, any>, config: Config) {
     this._data = data;
@@ -401,14 +447,21 @@ export class Sandbox {
   /** POST /sandboxes — create a new sandbox. */
   static async create(options: CreateOptions = {}): Promise<Sandbox> {
     const cfg = resolveCreateConfig(options);
-    const tpl = options.template || options.templateId || cfg.templateId;
-    if (!tpl) {
+    const explicit = options.template || options.templateId;
+    // A templateID in `extra` is an explicit choice: it is sent verbatim,
+    // without the MCP template fallback.
+    const extraTemplate = options.extra !== undefined && "templateID" in options.extra;
+    const fallback = !explicit && !extraTemplate && options.mcp !== undefined;
+    const templates = explicit
+      ? [explicit]
+      : [...new Set((fallback ? [cfg.mcpTemplateId, cfg.templateId] : [cfg.templateId]).filter(Boolean))];
+    if (templates.length === 0) {
       throw new Error(
         "template is required. Set CUBE_TEMPLATE_ID or pass template/templateId",
       );
     }
 
-    const payload: Record<string, unknown> = { templateID: tpl };
+    const payload: Record<string, unknown> = { templateID: templates[0] };
     if (options.timeout !== undefined) {
       payload.timeout = options.timeout;
     }
@@ -433,17 +486,84 @@ export class Sandbox {
     if (options.volumeMounts && Object.keys(options.volumeMounts).length > 0) {
       payload.volumeMounts = serializeVolumeMounts(options.volumeMounts);
     }
-    if (options.extra) {
-      Object.assign(payload, options.extra);
+    if (options.mcp !== undefined) {
+      payload.mcp = options.mcp;
     }
-
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/sandboxes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let resp: Response | undefined;
+    for (const tpl of templates) {
+      const attempt = await controlFetch(cfg, `${cfg.apiUrl}/sandboxes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, templateID: tpl, ...options.extra }),
+      });
+      if (attempt.ok || !fallback) {
+        resp = attempt;
+        break;
+      }
+      const body = await attempt.text();
+      if (!isTemplateNotFound(attempt.status, body)) {
+        await checkControlResponse({ ok: false, status: attempt.status, text: async () => body });
+      }
+    }
+    if (!resp) {
+      throw new TemplateNotFoundError(
+        `no template for mcp: tried ${templates.map((t) => `"${t}"`).join(", ")}. ` +
+          "Build a template that provides mcp-gateway (see docs/guide/mcp-gateway.md), " +
+          "then pass template or set CUBE_MCP_TEMPLATE_ID",
+        404,
+      );
+    }
     await checkControlResponse(resp);
-    return new Sandbox((await resp.json()) as Record<string, any>, cfg);
+    const sandbox = new Sandbox((await resp.json()) as Record<string, any>, cfg);
+    if (options.mcp !== undefined) {
+      try {
+        await sandbox.startMcpGateway(options.mcp);
+      } catch (err) {
+        await sandbox.kill().catch(() => undefined);
+        throw err;
+      }
+    }
+    return sandbox;
+  }
+
+  private async startMcpGateway(mcp: McpServer): Promise<void> {
+    const token = randomUUID();
+    const result = await this.commands.run(
+      `mcp-gateway --config ${shellQuote(JSON.stringify(mcp))}`,
+      {
+        user: "root",
+        envs: { GATEWAY_ACCESS_TOKEN: token },
+        timeoutMs: MCP_STARTUP_TIMEOUT_S * 1000,
+      },
+    );
+    if (result.exitCode !== 0) {
+      let detail = (result.stderr || result.stdout).trim();
+      if (result.exitCode === 127) {
+        detail = `template "${this.templateId}" does not provide mcp-gateway (see docs/guide/mcp-gateway.md): ${detail}`;
+      }
+      throw new CubeSandboxError(`Failed to start MCP gateway: ${detail}`);
+    }
+    this._mcpToken = token;
+  }
+
+  /**
+   * Streamable-HTTP URL of the sandbox MCP gateway. Send
+   * ``Authorization: Bearer <getMcpToken()>`` with every request.
+   */
+  getMcpUrl(): string {
+    return this.dataUrl(MCP_PORT, "/mcp");
+  }
+
+  /**
+   * MCP gateway bearer token, or ``undefined`` if MCP is not enabled. Cached on
+   * the instance that started the gateway; other instances read it from the
+   * sandbox.
+   */
+  async getMcpToken(): Promise<string | undefined> {
+    if (this._mcpToken === undefined && (await this.files.exists(MCP_TOKEN_PATH))) {
+      this._mcpToken = (await this.files.read(MCP_TOKEN_PATH, { user: "root" })).trim();
+    }
+    return this._mcpToken;
   }
 
   /** POST /sandboxes/:id/connect — connect (auto-resumes if paused). */

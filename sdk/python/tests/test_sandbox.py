@@ -317,6 +317,158 @@ class TestCreate:
         assert body["lifecycle"] == {"autoResume": True}
 
 
+# ── MCP gateway (E2B-compatible ``mcp`` option) ───────────────────────────────
+
+class TestMcp:
+    MCP = {"duckduckgo": {}, "github/acme/tools": {"runCmd": "echo 'hi'", "envs": {"K": "v"}}}
+
+    def _create(self, run_result=None, **kwargs):
+        run_result = run_result or CommandResult(stdout="ready", stderr="", exit_code=0)
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as post, \
+                patch.object(Commands, "run", return_value=run_result) as run, \
+                patch.object(Sandbox, "kill") as kill:
+            sb = Sandbox.create(config=make_config(), **kwargs)
+        return sb, post.call_args.kwargs["json"], run, kill
+
+    def test_defaults_to_mcp_gateway_template(self):
+        _, body, _, _ = self._create(mcp=self.MCP)
+        assert body["templateID"] == "mcp-gateway"
+        assert body["mcp"] == self.MCP
+
+    def test_mcp_template_can_be_configured(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as post, \
+                patch.object(Commands, "run", return_value=CommandResult("", "", 0)):
+            Sandbox.create(mcp={}, config=make_config(mcp_template_id="tpl-mcp"))
+        assert post.call_args.kwargs["json"]["templateID"] == "tpl-mcp"
+
+    def test_explicit_template_wins(self):
+        _, body, _, _ = self._create(template="tpl-custom", mcp=self.MCP)
+        assert body["templateID"] == "tpl-custom"
+
+    def _create_with_responses(self, responses, **kwargs):
+        sent = []
+
+        def post(*_args, **kw):
+            sent.append(kw["json"]["templateID"])
+            return responses[len(sent) - 1]
+
+        with patch("requests.Session.post", side_effect=post), \
+                patch.object(Commands, "run", return_value=CommandResult("", "", 0)) as run, \
+                patch.object(Sandbox, "kill"):
+            try:
+                Sandbox.create(config=make_config(), **kwargs)
+            finally:
+                self.sent, self.run = sent, run
+
+    MISSING = {"code": 404, "message": "template mcp-gateway not found: template not found"}
+    LEGACY_MISSING = {"code": 500, "message": 'CubeMaster returned error code 130404: failed to resolve template identifier "mcp-gateway": template not found'}
+
+    @pytest.mark.parametrize("missing", [
+        mock_response(MISSING, status=404),
+        mock_response(LEGACY_MISSING, status=500),
+    ])
+    def test_falls_back_to_default_template_when_mcp_template_missing(self, missing):
+        self._create_with_responses([missing, mock_response(SANDBOX_DATA, status=201)], mcp=self.MCP)
+        assert self.sent == ["mcp-gateway", "tpl-test"]
+        self.run.assert_called_once()
+
+    def test_errors_when_no_candidate_template_exists(self):
+        missing = mock_response(self.MISSING, status=404)
+        with pytest.raises(TemplateNotFoundError, match="'mcp-gateway', 'tpl-test'.*mcp-gateway.md"):
+            self._create_with_responses([missing, missing], mcp=self.MCP)
+        assert self.sent == ["mcp-gateway", "tpl-test"]
+        self.run.assert_not_called()
+
+    def test_missing_explicit_template_does_not_fall_back(self):
+        with pytest.raises(TemplateNotFoundError):
+            self._create_with_responses([mock_response(self.MISSING, status=404)], template="tpl-x", mcp=self.MCP)
+        assert self.sent == ["tpl-x"]
+
+    def test_kwargs_template_id_is_sent_verbatim(self):
+        self._create_with_responses([mock_response(SANDBOX_DATA, status=201)], templateID="tpl-x")
+        assert self.sent == ["tpl-x"]
+        with pytest.raises(TemplateNotFoundError):
+            self._create_with_responses([mock_response(self.MISSING, status=404)], templateID="tpl-x", mcp=self.MCP)
+        assert self.sent == ["tpl-x"]
+        self.run.assert_not_called()
+
+    def test_other_errors_do_not_fall_back(self):
+        with pytest.raises(ApiError):
+            self._create_with_responses([mock_response({"message": "boom"}, status=500)], mcp=self.MCP)
+        assert self.sent == ["mcp-gateway"]
+
+    def test_missing_gateway_binary_names_template(self):
+        missing = CommandResult(stdout="", stderr="/bin/bash: mcp-gateway: command not found", exit_code=127)
+        with pytest.raises(CubeSandboxError, match="template 'tpl-test' does not provide mcp-gateway"):
+            self._create(run_result=missing, mcp=self.MCP)
+
+    def test_without_mcp_does_not_start_gateway(self):
+        _, body, run, _ = self._create()
+        assert body["templateID"] == "tpl-test"
+        assert "mcp" not in body
+        run.assert_not_called()
+
+    def test_starts_gateway_with_token(self):
+        sb, _, run, kill = self._create(mcp=self.MCP)
+        cmd = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
+        assert cmd.startswith("mcp-gateway --config ")
+        import shlex
+        assert shlex.split(cmd)[:2] == ["mcp-gateway", "--config"]
+        assert len(shlex.split(cmd)) == 3
+        assert json.loads(shlex.split(cmd)[2]) == self.MCP
+        assert kwargs["user"] == "root"
+        token = kwargs["envs"]["GATEWAY_ACCESS_TOKEN"]
+        assert token and sb.get_mcp_token() == token
+        assert kwargs["timeout"] == 60
+        kill.assert_not_called()
+
+    def test_empty_mcp_still_starts_gateway(self):
+        _, body, run, _ = self._create(mcp={})
+        assert body["mcp"] == {}
+        run.assert_called_once()
+
+    def test_gateway_failure_kills_sandbox(self):
+        failed = CommandResult(stdout="", stderr='mcp server "duckduckgo": boom', exit_code=1)
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)), \
+                patch.object(Commands, "run", return_value=failed), \
+                patch.object(Sandbox, "kill") as kill:
+            with pytest.raises(CubeSandboxError, match="Failed to start MCP gateway: .*boom"):
+                Sandbox.create(mcp=self.MCP, config=make_config())
+        kill.assert_called_once()
+
+    def test_gateway_exception_kills_sandbox(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)), \
+                patch.object(Commands, "run", side_effect=TimeoutError("slow")), \
+                patch.object(Sandbox, "kill", side_effect=ApiError("gone", 500)) as kill:
+            with pytest.raises(TimeoutError):
+                Sandbox.create(mcp=self.MCP, config=make_config())
+        kill.assert_called_once()
+
+    def test_invalid_mcp_rejected_by_api(self):
+        err = mock_response({"code": 400, "message": "mcp must be an object keyed by MCP server name"}, status=400)
+        with patch("requests.Session.post", return_value=err), patch.object(Commands, "run") as run:
+            with pytest.raises(ApiError, match="keyed by MCP server name"):
+                Sandbox.create(mcp=["duckduckgo"], config=make_config())
+        run.assert_not_called()
+
+    def test_get_mcp_url(self):
+        assert make_sandbox().get_mcp_url() == f"http://50005-{SANDBOX_ID}.{DOMAIN}/mcp"
+
+    def test_get_mcp_token_reads_token_file(self):
+        sb = make_sandbox()
+        with patch.object(Filesystem, "exists", return_value=True) as exists, \
+                patch.object(Filesystem, "read", return_value="tok\n") as read:
+            assert sb.get_mcp_token() == "tok"
+            assert sb.get_mcp_token() == "tok"
+        exists.assert_called_once_with("/etc/mcp-gateway/.token", user="root")
+        read.assert_called_once_with("/etc/mcp-gateway/.token", user="root")
+
+    def test_get_mcp_token_none_without_gateway(self):
+        with patch.object(Filesystem, "exists", return_value=False):
+            assert make_sandbox().get_mcp_token() is None
+
+
 # ── domain filtering (DNS allow-list) ────────────────────────────────────────
 
 class TestDomainFiltering:

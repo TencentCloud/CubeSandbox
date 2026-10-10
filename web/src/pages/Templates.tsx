@@ -674,9 +674,17 @@ export default function TemplatesPage() {
                       <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
                         <Package size={18} />
                       </span>
-                      <div>
-                        <CardTitle className="text-base">{tpl.templateID}</CardTitle>
-                        <CardDescription className="font-mono text-xs">
+                      <div className="min-w-0">
+                        <CardTitle
+                          className="text-base truncate"
+                          title={tpl.displayName || tpl.templateID}
+                        >
+                          {tpl.displayName || tpl.templateID}
+                        </CardTitle>
+                        <CardDescription
+                          className="font-mono text-xs truncate"
+                          title={tpl.templateID}
+                        >
                           {tpl.templateID}
                         </CardDescription>
                       </div>

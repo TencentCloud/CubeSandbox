@@ -204,7 +204,6 @@ export default withMermaid(defineConfig({
               text: 'Core Concepts',
               items: [
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
-                { text: 'Agent Platform Freeze / Resume', link: '/guide/agent-platform-freeze' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
@@ -234,7 +233,8 @@ export default withMermaid(defineConfig({
                 { text: 'Pre-warm a Template Service', link: '/guide/tutorials/prewarm-template-service' },
                 { text: 'Local & Remote Image Practice', link: '/guide/tutorials/template-build-practice' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
-                { text: 'Template Aliases', link: '/guide/template-aliases' }
+                { text: 'Template Aliases', link: '/guide/template-aliases' },
+                { text: 'MCP in Sandboxes', link: '/guide/mcp-gateway' }
               ]
             },
             {
@@ -421,7 +421,6 @@ export default withMermaid(defineConfig({
               text: '核心概念',
               items: [
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
-                { text: 'Agent 平台 Freeze / Resume', link: '/zh/guide/agent-platform-freeze' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }
@@ -451,7 +450,8 @@ export default withMermaid(defineConfig({
                 { text: '预热模板服务', link: '/zh/guide/tutorials/prewarm-template-service' },
                 { text: '本地与远程镜像实战', link: '/zh/guide/tutorials/template-build-practice' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
-                { text: '模板别名', link: '/zh/guide/template-aliases' }
+                { text: '模板别名', link: '/zh/guide/template-aliases' },
+                { text: '在沙箱中使用 MCP', link: '/zh/guide/mcp-gateway' }
               ]
             },
             {

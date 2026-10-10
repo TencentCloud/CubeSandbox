@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -28,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
@@ -1724,5 +1726,119 @@ func TestRunRedoTemplateImageJobFailsOnArtifactReloadError(t *testing.T) {
 	// forwards a full rebuild to CubeTemplateCenter.
 	if got, _ := lastUpdate["error_message"].(string); !strings.Contains(got, "full rebuild") || !strings.Contains(got, "CubeTemplateCenter") {
 		t.Fatalf("unexpected reload failure message: %q", got)
+	}
+}
+
+func TestTemplateImageSubmit_FailFastNodes(t *testing.T) {
+	tests := []struct {
+		name          string
+		healthyNodes  []*node.Node
+		scope         []string
+		wantErr       error
+		errSubstring  string
+		expectJobInDB bool
+	}{
+		{
+			name:          "no healthy nodes returns ErrNoTemplateNodes without orphan job",
+			healthyNodes:  nil,
+			scope:         nil,
+			wantErr:       ErrNoTemplateNodes,
+			expectJobInDB: false,
+		},
+		{
+			name: "specified offline node returns target nodes not healthy error",
+			healthyNodes: []*node.Node{
+				{InsID: "node-online-1", IP: "10.0.0.1", Healthy: true},
+			},
+			scope:         []string{"offline-node"},
+			errSubstring:  "target nodes are not healthy or not found: offline-node",
+			expectJobInDB: false,
+		},
+		{
+			name: "multiple non-existent nodes return all missing nodes sorted",
+			healthyNodes: []*node.Node{
+				{InsID: "node-online-1", IP: "10.0.0.1", Healthy: true},
+			},
+			scope:         []string{"node-missing-2", "node-missing-1"},
+			errSubstring:  "target nodes are not healthy or not found: node-missing-1,node-missing-2",
+			expectJobInDB: false,
+		},
+		{
+			name: "partial scope missing (1 healthy, 2 missing) fails fast with missing nodes",
+			healthyNodes: []*node.Node{
+				{InsID: "node-online-1", IP: "10.0.0.1", Healthy: true},
+			},
+			scope:         []string{"node-online-1", "node-missing-b", "node-missing-a"},
+			errSubstring:  "target nodes are not healthy or not found: node-missing-a,node-missing-b",
+			expectJobInDB: false,
+		},
+		{
+			name: "healthy node available passes submission and creates job",
+			healthyNodes: []*node.Node{
+				{InsID: "node-online-1", IP: "10.0.0.1", Healthy: true},
+			},
+			scope:         []string{"node-online-1"},
+			wantErr:       nil,
+			expectJobInDB: true,
+		},
+		{
+			name: "default scope passes submission when healthy nodes exist",
+			healthyNodes: []*node.Node{
+				{InsID: "node-online-1", IP: "10.0.0.1", Healthy: true},
+			},
+			scope:         nil,
+			wantErr:       nil,
+			expectJobInDB: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbName := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
+			db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+			require.NoError(t, err)
+			require.NoError(t, db.AutoMigrate(&models.TemplateDefinition{}, &models.TemplateImageJob{}))
+			oldDB := store.db
+			store.db = db
+			t.Cleanup(func() { store.db = oldDB })
+
+			patches := gomonkey.NewPatches()
+			defer patches.Reset()
+			patches.ApplyFunc(healthyTemplateNodes, func(instanceType string) []*node.Node {
+				return tt.healthyNodes
+			})
+
+			req := &types.CreateTemplateFromImageReq{
+				Request:           &types.Request{RequestID: "req-" + strings.ReplaceAll(t.Name(), "/", "-")},
+				SourceImageRef:    "docker.io/library/nginx:latest",
+				WritableLayerSize: "20Gi",
+				DistributionScope: tt.scope,
+			}
+
+			job, normalizedReq, submitErr := SubmitTemplateFromImageWithoutBuild(context.Background(), req, "http://127.0.0.1:8089")
+			if tt.wantErr != nil {
+				require.Error(t, submitErr)
+				require.True(t, errors.Is(submitErr, tt.wantErr), "expected error %v, got %v", tt.wantErr, submitErr)
+				assert.Nil(t, job)
+				assert.Nil(t, normalizedReq)
+			} else if tt.errSubstring != "" {
+				require.Error(t, submitErr)
+				assert.Contains(t, submitErr.Error(), tt.errSubstring)
+				assert.Nil(t, job)
+				assert.Nil(t, normalizedReq)
+			} else {
+				require.NoError(t, submitErr)
+				require.NotNil(t, job)
+				require.NotNil(t, normalizedReq)
+			}
+
+			var jobCount int64
+			require.NoError(t, db.Model(&models.TemplateImageJob{}).Count(&jobCount).Error)
+			if tt.expectJobInDB {
+				assert.Equal(t, int64(1), jobCount, "expected job record in DB")
+			} else {
+				assert.Equal(t, int64(0), jobCount, "expected no orphan job in DB")
+			}
+		})
 	}
 }
