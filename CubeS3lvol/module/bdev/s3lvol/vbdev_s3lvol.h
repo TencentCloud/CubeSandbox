@@ -688,6 +688,12 @@ int s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 int s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 			spdk_lvol_op_complete cb_fn, void *cb_arg);
 
+/* Destroy a volume whose action_in_progress the caller already holds.
+ * The public destroy refuses that flag; the import-template reap is the caller
+ * that holds it across the clone-count check. */
+int s3lvol_lvol_destroy_locked(struct spdk_lvol *lvol,
+			       spdk_lvol_op_complete cb_fn, void *cb_arg);
+
 /**
  * Find an lvol by name within an lvstore.
  *
@@ -1062,10 +1068,10 @@ struct s3lvol_import_opts {
 	 * It is a copy of everything the export holds, and it runs whenever it runs;
 	 * the volume is usable either way.
 	 *
-	 * No effect when the import degenerates into a local clone: there is no
-	 * export to decouple from. Logged and ignored, not an error -- a caller that
-	 * always sets it is asking for independence from the export, and a local
-	 * clone already has that. */
+	 * No effect when the import degenerates into a clone of a snapshot this
+	 * lvstore already holds: that snapshot is not a hidden import template.
+	 * Logged and ignored. On the shared-template path it targets the template,
+	 * not the user volume just created. */
 	bool        decouple;
 };
 
@@ -1077,34 +1083,44 @@ struct s3lvol_import_opts {
  *
  * 1. The export names a snapshot *this* lvstore still holds, unchanged --
  *    matching endpoint, bucket, prefix, name, and blob id. Then this is a plain
- *    local clone of that snapshot. No import registry entry, no dependency on the
- *    export, nothing read from S3 beyond the manifest that established the fact.
- *    Exporting and re-importing inside one lvstore is a normal way to get a
- *    writable copy of a snapshot, and it should not cost more than a clone.
+ *    local clone of that snapshot. No import registry entry is written for this
+ *    export, and nothing is read from S3 beyond the manifest that established
+ *    the fact. Exporting and re-importing inside one lvstore is a normal way to
+ *    get a writable copy of a snapshot, and it should not cost more than a clone.
+ *    If that snapshot is itself an esnap clone, the new volume still reads the
+ *    older export through it. Decouple names the snapshot, not this clone.
  *
  *    Worth knowing: it is *safer*, not just cheaper. An esnap clone's parent is
  *    protected by a distributed lease, while a local clone's parent is pinned
  *    directly by blobstore.
  *
  * 2. Anything else -- another node's export, another bucket, or a snapshot that
- *    is gone or has been replaced -- is an esnap clone of that export. Each
- *    import is its own clone. Metadata only: nothing is transferred before the
- *    import answers. `opts->decouple` copies that clone's clusters out of the
- *    export; a later import of the same export does the same for itself.
+ *    is gone or has been replaced -- is one hidden read-only template per
+ *    (lvstore, export uuid). The template blob is created as the esnap clone and
+ *    then frozen in place; the esnap identity is not moved onto a later
+ *    snapshot. Every user lvol of that export on this lvstore, including the
+ *    first, is a local clone of that template, so they share one chain and one
+ *    later decouple. Metadata only: nothing is transferred before the import
+ *    answers. The template is named `__rcow_tpl_<uuid>` and is omitted from
+ *    listing, lookup, derive, export and activate. It is removed when its last
+ *    clone goes away.
  *
  * In case 2 the manifest is recorded in this lvstore's own registry in S3
  * *before* the clone exists, because the reverse order can leave a clone that no
  * later attach can open. One entry per (lvstore, export uuid) covers every
  * clone of that export. Case 1 writes no registry entry at all.
  *
- * `opts->decouple` applies to case 2 only and targets the clone just created.
- * In case 1 there is no export to decouple from, and it is logged and ignored
- * rather than failed.
+ * `opts->decouple` applies to case 2 only and targets the hidden template. A
+ * later import while that decouple is still copying waits, then clones the
+ * template. In case 1 it is logged and ignored.
  *
- * The rcow_import_lvol RPC reports which happened in a `mode` field
- * ("local_clone" or "esnap"), read back off the resulting blob. A caller tracking
- * what depends on what needs it: only case 2 appears in rcow_get_imports and only
- * case 2 holds up rcow_release_export.
+ * The rcow_import_lvol RPC reports `mode` from the parent chain, not from this
+ * blob alone. "esnap" means this volume, or a snapshot it was cloned from, still
+ * reads an export. "local_clone" means the chain does not. rcow_decouple_lvol
+ * on a user lvol whose chain reaches a hidden import template decouples that
+ * template. A local clone of a user-visible esnap snapshot is still decoupled
+ * by naming that snapshot. Only case 2 writes an import registry entry; case 1
+ * does not hold up rcow_release_export for the export it just imported.
  *
  * Nothing about export_snapshot changes. Whether a manifest will be consumed here
  * or on another node cannot be known when it is written, so the choice belongs to
@@ -1245,6 +1261,16 @@ void s3lvol_decouple_queued_get(const struct decouple_queued *q,
  * A no-op when something still reads the export, so it is always safe to call.
  */
 void s3lvol_imports_recheck(struct s3lvol_lvstore *lvs, const char *export_uuid);
+
+/* True for the hidden snapshot that anchors every import of one export on one
+ * lvstore. Identified by its reserved name and by being read-only. */
+bool s3lvol_lvol_is_import_template(const struct spdk_lvol *lvol);
+
+/* Drop the hidden template of \c export_uuid when it has no clones left, then
+ * recheck the imports registry. A template that still has clones, or one whose
+ * decouple is still running, is left in place and only the registry is rechecked. */
+void s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
+					   const char *export_uuid);
 
 /**
  * Delete an export's objects.
@@ -1451,6 +1477,12 @@ const struct s3_export_manifest *s3lvol_import_get_manifest(
 bool s3lvol_lvol_reads_import(struct spdk_lvol *lvol);
 int s3lvol_lvol_import_uuid(struct spdk_lvol *lvol, char *uuid_out,
 			    size_t uuid_out_len);
+
+/* Export uuid encoded in a hidden template on this chain, including one that
+ * decouple has already made local. Empty when the chain has no such template.
+ * This does not mean the volume still reads the export. */
+int s3lvol_lvol_template_export_uuid(struct spdk_lvol *lvol, char *uuid_out,
+				     size_t uuid_out_len);
 
 /**
  * Select host readahead for an lvol which may ultimately read from an import.
