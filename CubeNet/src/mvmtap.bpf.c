@@ -1052,6 +1052,18 @@ int from_cube(struct __sk_buff *skb)
 				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 			}
 
+			if (sess) {
+				/* Port mapping conntrack orientation: the guest VM server is
+				 * IP_CT_DIR_REPLY, while the outside client is IP_CT_DIR_ORIGINAL. */
+				bool syn = l4->syn;
+				bool ack = l4->ack;
+				bool fin = l4->fin;
+				bool rst = l4->rst;
+				__u64 now = bpf_ktime_get_ns();
+
+				update_session(IP_CT_DIR_REPLY, sess, now, syn, ack, fin, rst);
+			}
+
 			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
 			if (err)
 				return TC_ACT_SHOT;

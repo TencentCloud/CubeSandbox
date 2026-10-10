@@ -334,8 +334,11 @@ static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat
 	}
 
 	/* no store if state remain unchanged */
-	if (new_state != old_state)
+	if (new_state != old_state) {
 		sess->state = new_state;
+		if (new_state == TCP_CONNTRACK_SYN_SENT || new_state == TCP_CONNTRACK_SYN_RECV)
+			sess->active_close = 0;
+	}
 }
 
 static __always_inline bool create_new_sessions(struct __sk_buff *skb,
