@@ -4,6 +4,7 @@
 
 use crate::cubemaster::CubeMasterClient;
 use crate::logging::ArcLogger;
+use crate::metrics::BusinessMetrics;
 use crate::services::AppServices;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
@@ -26,6 +27,9 @@ pub struct AppState {
     /// Structured event logger (fan-out to all configured backends).
     pub logger: ArcLogger,
 
+    /// Shared CubeAPI business metrics registry.
+    pub business_metrics: Arc<BusinessMetrics>,
+
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
 }
@@ -46,13 +50,16 @@ impl AppState {
             .expect("failed to build HTTP client");
 
         let cubemaster = CubeMasterClient::new(config.cubemaster_url.clone(), http_client.clone());
-        let services = AppServices::new(&config, cubemaster);
+        let business_metrics =
+            Arc::new(BusinessMetrics::new().expect("business metrics should build"));
+        let services = AppServices::new(&config, cubemaster, business_metrics.clone());
 
         Self {
             rate_limiter,
             http_client,
             services,
             logger,
+            business_metrics,
             config: Arc::new(config),
         }
     }
