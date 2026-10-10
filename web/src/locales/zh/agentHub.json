@@ -304,8 +304,12 @@
         "comingSoon": "建设中"
       }
     },
-    "templateHint": "可选择已发布的数字助手模板；不选择时使用系统默认模板",
+    "templateHint": "必须从已安装的数字助手中选择一个模板",
     "templateLoading": "模板加载中...",
+    "templateSelectPlaceholder": "请选择助手模板",
+    "templateEmpty": "暂无可用模板，请先到模板市场安装轻量版或 all-in-one 龙虾助手镜像。",
+    "templateEmptyAction": "前往模板市场",
+    "templateUnavailable": "当前选中的模板已不可用（可能已被卸载），请重新选择。",
     "templateSelected": "将使用助手模板：{{templateId}}",
     "templateFields": {
       "model": "模型",
@@ -313,9 +317,6 @@
       "persistence": "状态管理模式",
       "sourceAgent": "来源助手",
       "createdAt": "发布时间"
-    },
-    "templateOptions": {
-      "default": "系统默认模板"
     },
     "persistenceHint": "完整快照型支持整个 Sandbox 制作快照；文件共享型会把 OpenClaw 文件持久化到 host，快照/分身只复制共享文件状态。",
     "persistenceInheritedHint": "已选择数字助手模板，状态管理模式将直接继承模板发布时的设置。",
@@ -349,7 +350,8 @@
     },
     "errors": {
       "nameRequired": "请填写助手名称",
-      "apiKeyRequired": "请先配置 LLM API Key 再创建助手"
+      "apiKeyRequired": "请先配置 LLM API Key 再创建助手",
+      "templateRequired": "请选择一个助手模板"
     }
   },
   "wecomDialog": {

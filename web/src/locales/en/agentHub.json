@@ -304,8 +304,12 @@
         "comingSoon": "Coming soon"
       }
     },
-    "templateHint": "Choose a published digital assistant template, or keep the system default.",
+    "templateHint": "A template must be selected from the installed digital assistants.",
     "templateLoading": "Loading templates...",
+    "templateSelectPlaceholder": "Select an assistant template",
+    "templateEmpty": "No templates available yet. Install a Lite or all-in-one lobster assistant image from the template store first.",
+    "templateEmptyAction": "Go to template store",
+    "templateUnavailable": "The selected template is no longer available (it may have been uninstalled). Please select again.",
     "templateSelected": "Assistant template selected: {{templateId}}",
     "templateFields": {
       "model": "Model",
@@ -313,9 +317,6 @@
       "persistence": "State mode",
       "sourceAgent": "Source assistant",
       "createdAt": "Published at"
-    },
-    "templateOptions": {
-      "default": "System default template"
     },
     "persistenceHint": "Full Snapshot captures the whole Sandbox. File Sharing persists OpenClaw files on the host and snapshots/clones copy only that shared file state.",
     "persistenceInheritedHint": "A digital assistant template is selected, so the state mode is inherited from the template.",
@@ -349,7 +350,8 @@
     },
     "errors": {
       "nameRequired": "Please name your assistant",
-      "apiKeyRequired": "Configure an LLM API key before creating an assistant"
+      "apiKeyRequired": "Configure an LLM API key before creating an assistant",
+      "templateRequired": "Please select an assistant template"
     }
   },
   "wecomDialog": {
