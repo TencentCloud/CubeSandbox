@@ -1989,7 +1989,7 @@ impl cpu::Vcpu for KvmVcpu {
 
         let expected_num_msrs = msr_entries.len();
         let num_msrs = self.get_msrs(&mut msr_entries)?;
-        let msrs = if num_msrs != expected_num_msrs {
+        let mut msrs = if num_msrs != expected_num_msrs {
             let mut faulty_msr_index = num_msrs;
             let mut msr_entries_tmp = msr_entries[..faulty_msr_index].to_vec();
 
@@ -2018,6 +2018,13 @@ impl cpu::Vcpu for KvmVcpu {
         } else {
             msr_entries
         };
+
+        if let Some(tsc) = x86_64::normalize_zero_tsc_deadline(&mut msrs, &lapic_state) {
+            warn!(
+                "MSR_IA32_TSC_DEADLINE was zero while saving vCPU state; replacing it with TSC {:#x}",
+                tsc
+            );
+        }
 
         let vcpu_events = self.get_vcpu_events()?;
 
@@ -2138,34 +2145,21 @@ impl cpu::Vcpu for KvmVcpu {
         self.set_lapic(&state.lapic_state)?;
         self.set_fpu(&state.fpu)?;
 
-        // Try to set all MSRs previously stored.
-        // If the number of MSRs set from SET_MSRS is different from the
-        // expected amount, we fallback onto a slower method by setting MSRs
-        // by chunks. This is the only way to make sure we try to set as many
-        // MSRs as possible, even if some MSRs are not supported.
-        let expected_num_msrs = state.msrs.len();
-        let num_msrs = self.set_msrs(&state.msrs)?;
-        if num_msrs != expected_num_msrs {
-            let mut faulty_msr_index = num_msrs;
-
-            loop {
-                warn!(
-                    "Detected faulty MSR 0x{:x} while setting MSRs",
-                    state.msrs[faulty_msr_index].index
-                );
-
-                // Skip the first bad MSR
-                let start_pos = faulty_msr_index + 1;
-
-                let sub_msr_entries = state.msrs[start_pos..].to_vec();
-
-                let num_msrs = self.set_msrs(&sub_msr_entries)?;
-
-                if num_msrs == sub_msr_entries.len() {
-                    break;
-                }
-
-                faulty_msr_index = start_pos + num_msrs;
+        // KVM interprets MSR_IA32_TSC_DEADLINE using the current guest TSC at
+        // write time. Restore every deadline after all other MSRs (including
+        // MSR_IA32_TSC), even for snapshots created before this ordering was
+        // enforced. A short KVM_SET_MSRS is a successful ioctl that restored
+        // only a prefix; fail closed rather than resuming with partial CPU
+        // state.
+        let ordered_msrs = x86_64::order_msrs_for_restore(&state.msrs);
+        if !ordered_msrs.is_empty() {
+            let completed = self.set_msrs(&ordered_msrs)?;
+            if completed != ordered_msrs.len() {
+                return Err(cpu::HypervisorCpuError::SetMsrEntriesIncomplete {
+                    expected: ordered_msrs.len(),
+                    completed,
+                    rejected: ordered_msrs[completed].index,
+                });
             }
         }
 

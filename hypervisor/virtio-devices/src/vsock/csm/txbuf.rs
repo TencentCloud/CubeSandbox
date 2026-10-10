@@ -140,6 +140,13 @@ impl TxBuf {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Discard buffered data and free its backing allocation.
+    pub fn clear(&mut self) {
+        self.data = None;
+        self.head = Wrapping(0);
+        self.tail = Wrapping(0);
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +229,20 @@ mod tests {
         txbuf.push(&[1, 2, 3, 4]).unwrap();
         assert_eq!(txbuf.flush_to(&mut sink).unwrap(), 4);
         assert_eq!(sink.data, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut txbuf = TxBuf::new();
+        txbuf.push(&[1, 2, 3, 4]).unwrap();
+        assert!(!txbuf.is_empty());
+
+        txbuf.clear();
+        assert!(txbuf.is_empty());
+        assert!(txbuf.data.is_none());
+
+        txbuf.push(&[5, 6, 7, 8]).unwrap();
+        assert_eq!(txbuf.len(), 4);
     }
 
     #[test]
