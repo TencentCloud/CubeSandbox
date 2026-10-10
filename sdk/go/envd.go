@@ -36,10 +36,13 @@ type processConfig struct {
 }
 
 type processStartResult struct {
-	PID      int
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	PID       int
+	Stdout    string
+	Stderr    string
+	ExitCode  int
+	Signal    *int
+	OOMKilled bool
+	KilledBy  string
 }
 
 type processStartResponse struct {
@@ -69,6 +72,9 @@ type processEndEvent struct {
 	Exited        bool   `json:"exited,omitempty"`
 	Status        string `json:"status,omitempty"`
 	Error         string `json:"error,omitempty"`
+	Signal        *int   `json:"signal,omitempty"`
+	OOMKilled     bool   `json:"oomKilled,omitempty"`
+	KilledBy      string `json:"killedBy,omitempty"`
 }
 
 func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest, opts CommandOptions) (*processStartResult, error) {
@@ -332,6 +338,9 @@ func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
 				return nil, fmt.Errorf("process EndEvent missing exit code")
 			}
 			result.ExitCode = exitCode
+			result.Signal = response.Event.End.Signal
+			result.OOMKilled = response.Event.End.OOMKilled
+			result.KilledBy = response.Event.End.KilledBy
 			sawEnd = true
 		}
 	}

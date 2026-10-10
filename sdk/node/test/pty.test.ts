@@ -187,6 +187,24 @@ describe("Pty.create", () => {
     sb.close();
   });
 
+  it("records signal and termination metadata on the handle", async () => {
+    const sb = await createSandbox();
+    handler = () => ({
+      status: 200,
+      buffer: Buffer.concat([
+        connectFrame(0, '{"event":{"start":{"pid":8}}}'),
+        connectFrame(0, '{"event":{"end":{"exitCode":-1,"signal":15,"killedBy":"user"}}}'),
+        connectFrame(0x02, "{}"),
+      ]),
+    });
+    const handle = await sb.pty.create({ rows: 24, cols: 80 });
+    await handle.wait();
+    expect(handle.signal).toBe(15);
+    expect(handle.oomKilled).toBe(false);
+    expect(handle.killedBy).toBe("user");
+    sb.close();
+  });
+
   it("propagates an error delivered on the end-of-stream frame", async () => {
     const sb = await createSandbox();
     handler = () => ({

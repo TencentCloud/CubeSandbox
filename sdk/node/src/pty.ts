@@ -54,7 +54,7 @@ export interface PtyCreateOptions {
   envs?: Record<string, string>;
   /**
    * Timeout in milliseconds, applied two ways to match the Python SDK:
-   *  - sent to envd as ``Connect-Timeout-Ms`` (a hard wall-clock deadline), and
+   *  - sent to envd Start as ``Connect-Timeout-Ms`` (a hard wall-clock deadline), and
    *  - a client-side idle abort that resets on every chunk received.
    *
    * Default: 60000. Pass ``0`` to disable both.
@@ -64,7 +64,7 @@ export interface PtyCreateOptions {
 
 /** Options for {@link Pty.connect}. */
 export interface PtyConnectOptions {
-  /** See {@link PtyCreateOptions.timeoutMs}. Default: 60000. */
+  /** Client-side idle/request timeout; Connect omits the server deadline. Default: 60000. */
   timeoutMs?: number;
 }
 
@@ -163,6 +163,9 @@ export class PtyHandle {
   private _exitCode: number | null = null;
   private _error: string | null = null;
   private _exited = false;
+  private _signal: number | null = null;
+  private _oomKilled = false;
+  private _killedBy: string | null = null;
 
   constructor(params: {
     pid: number;
@@ -195,6 +198,21 @@ export class PtyHandle {
     return this._error;
   }
 
+  /** Numeric signal that terminated the PTY, when reported by envd. */
+  get signal(): number | null {
+    return this._signal;
+  }
+
+  /** True when envd observed a cgroup memory OOM kill. */
+  get oomKilled(): boolean {
+    return this._oomKilled;
+  }
+
+  /** envd-side termination cause, such as ``timeout``, ``user``, or ``oom``. */
+  get killedBy(): string | null {
+    return this._killedBy;
+  }
+
   async *[Symbol.asyncIterator](): AsyncGenerator<PtyOutput> {
     try {
       for await (const event of this._events) {
@@ -206,6 +224,9 @@ export class PtyHandle {
         if (end !== undefined && end !== null) {
           this._exitCode = extractExitCode(end);
           this._error = end.error || null;
+          this._signal = end.signal === undefined || end.signal === null ? null : Number(end.signal);
+          this._oomKilled = end.oomKilled === true;
+          this._killedBy = typeof end.killedBy === "string" && end.killedBy.length > 0 ? end.killedBy : null;
           this._exited = true;
         }
       }
