@@ -107,6 +107,10 @@ pub struct SandBox {
     snapshot_frozen: Arc<Mutex<SnapshotFreezeState>>,
     tx_monitor_exited: Option<Sender<()>>,
     monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    /// Keeps the monitor's health connection open across stop_watchers'
+    /// abort (the task's clone would close it), so it rides in the snapshot
+    /// and is reset on restore like the main channel.
+    monitor_conn: Option<Client>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
@@ -148,6 +152,7 @@ impl SandBox {
             snapshot_frozen: Arc::new(Mutex::new(SnapshotFreezeState::Idle)),
             tx_monitor_exited: None,
             monitor_handle: None,
+            monitor_conn: None,
             tx_oom_exited: None,
             oom_handle: None,
         }
@@ -325,14 +330,15 @@ impl SandBox {
         }
         self.client = None;
         self.conn = None;
+        self.monitor_conn = None;
         Ok(())
     }
 
     /// Pause-time teardown that leaves the agent channel and the fwd log conns
     /// alive across the freeze (the guest learns of them via the restore-side
-    /// RST). The monitor's own health connection is closed by its abort; an
-    /// unfinished close rides in the snapshot and gets the same RST. Nothing
-    /// speaks on it after resume. disconnect_agent remains for rollback.
+    /// RST). The monitor's health connection is carried too: monitor_conn
+    /// holds it open through the abort, so it gets the same restore-side RST.
+    /// disconnect_agent remains for rollback.
     async fn quiesce_agent_for_pause(&mut self) {
         self.stop_watchers().await;
         let mut containers = self.containers.lock().await;
@@ -633,7 +639,7 @@ impl SandBox {
 
     //this function must be called after CreateSandbox
     async fn monitor_vm(
-        &self,
+        &mut self,
         check_agent: bool,
     ) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>)> {
         let mut arc_ch: Option<Arc<Mutex<CH::CubeHypervisor>>> = self.ch.clone();
@@ -644,6 +650,7 @@ impl SandBox {
         let arc_conainers = self.containers.clone();
         let arc_state = self.state.clone();
         let conn = AsyncUtils::connect_agent(&self.id).await?;
+        self.monitor_conn = Some(conn.clone());
         let client = health_ttrpc::HealthClient::new(conn);
         let log = self.log.clone();
         let handle = tokio::spawn(async move {
@@ -1638,6 +1645,7 @@ impl SandBox {
         // so disarming the dead client restores the fast "not connected" guards.
         self.client = None;
         self.conn = None;
+        self.monitor_conn = None;
         let mut containers = self.containers.lock().await;
         for (_, c) in containers.iter_mut() {
             c.clear_client();
@@ -1805,9 +1813,11 @@ impl SandBox {
 
         let client = self.client.as_ref().unwrap();
 
-        let mut containers = self.containers.lock().await;
-        for (_, c) in containers.iter_mut() {
-            c.set_client(client.clone()).await?;
+        {
+            let mut containers = self.containers.lock().await;
+            for (_, c) in containers.iter_mut() {
+                c.set_client(client.clone()).await?;
+            }
         }
 
         let (sender, handle) = self.watch_oom().await?;
