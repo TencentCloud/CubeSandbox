@@ -120,10 +120,13 @@ impl SandboxService {
 
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;
+        let summary = self
+            .fetch_sandbox_summary(sandbox_id, &d.host_id)
+            .await?
+            .map(from_cubemaster_info);
         let started_at = summary
             .as_ref()
-            .and_then(|s| s.started_at.as_ref().cloned())
+            .map(|s| s.started_at.clone())
             .or(d.started_at)
             .unwrap_or_else(chrono::Utc::now);
         // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
@@ -1727,6 +1730,59 @@ mod tests {
             .await
             .expect_err("rejected detail request should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn paused_sandbox_detail_uses_list_start_time_fallback() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "status": 5,
+                    "containers": [{
+                        "container_id": "sb-paused",
+                        "type": "sandbox",
+                        "create_at": 1_700_000_060_000_000_000i64
+                    }]
+                }]
+            }))
+        }
+
+        async fn list_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "status": 5,
+                    "create_at": 1_700_000_000_000_000_000i64
+                }]
+            }))
+        }
+
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/list", post(list_handler)),
+        )
+        .await;
+
+        let listed = service
+            .list(None, None, 10)
+            .await
+            .expect("list should succeed");
+        let detail = service
+            .get_sandbox("sb-paused")
+            .await
+            .expect("detail should succeed");
+        let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+            .expect("valid sandbox creation time");
+        assert_eq!(listed[0].started_at, expected);
+        assert_eq!(detail.started_at, listed[0].started_at);
     }
 
     #[tokio::test]
