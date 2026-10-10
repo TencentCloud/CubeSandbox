@@ -61,6 +61,7 @@ use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
 use libc::{c_void, siginfo_t};
 #[cfg(feature = "guest_debug")]
 use linux_loader::elf::Elf64_Nhdr;
+use logging::LOG_CTRL_START;
 use seccompiler::{apply_filter, SeccompAction};
 use std::collections::BTreeMap;
 #[cfg(feature = "guest_debug")]
@@ -1175,6 +1176,12 @@ impl CpuManager {
         if let Some(paused) = paused {
             self.vcpus_pause_signalled.store(paused, Ordering::SeqCst);
         }
+
+        // The deferred async logger thread would otherwise be spawned by the
+        // first log after vcpu_started, possibly from a vCPU thread whose
+        // seccomp filter forbids clone3. Spawn it here instead; warn! keeps
+        // the record visible at the default Warn verbosity.
+        warn!(target: LOG_CTRL_START, "start logger thread");
 
         info!(
             "Starting vCPUs: desired = {}, allocated = {}, present = {}, paused = {}",
