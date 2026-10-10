@@ -25,8 +25,9 @@ use ttrpc::context::{self, Context};
 use crate::common::types::PropagationContainerMount;
 use crate::common::utils::{AsyncUtils, CPath, Utils};
 use crate::common::{
-    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR,
-    CUBE_BIND_SHARE_TYPE, MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
+    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, ANNO_PROPAGATION_CONTAINER_UMNTS,
+    ANNO_PROPAGATION_EXEC_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR, CUBE_BIND_SHARE_TYPE,
+    MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
 };
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
@@ -35,6 +36,20 @@ use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+
+fn should_skip_app_snapshot_create_rpc(
+    is_cold_start: bool,
+    annotations: Option<&HashMap<String, String>>,
+) -> bool {
+    if is_cold_start {
+        return false;
+    }
+
+    !annotations.is_some_and(|annos| {
+        annos.contains_key(ANNO_PROPAGATION_EXEC_MNTS)
+            || annos.contains_key(ANNO_PROPAGATION_CONTAINER_UMNTS)
+    })
+}
 
 /// Upper bound on the dedicated vsock connect in start_log_forward.  It runs
 /// while holding log_forward_lifecycle, so an unbounded connect would serialize
@@ -573,7 +588,8 @@ impl Container {
     pub async fn create_container(&mut self) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
 
-        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+        let passfd_io = self.passfd_io_enabled();
+        let (stdin_port, stdout_port, stderr_port) = if passfd_io {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
                 &self.sandbox_id,
                 &self.info.stdin,
@@ -593,6 +609,23 @@ impl Container {
         } else {
             (0, 0, 0)
         };
+
+        // passfd starts must keep the RPC: it is the only place a restored
+        // container's stdio is reconnected, and start_container skips log
+        // forwarding when passfd is on.
+        if !passfd_io
+            && should_skip_app_snapshot_create_rpc(
+                self.is_cold_start(),
+                self.spec.annotations().as_ref(),
+            )
+        {
+            // App-snapshot restore without mount annotations: the container is
+            // already running in the restored guest, and the annotations
+            // excluded above are exactly the agent-side mount work.
+            self.state = Some(ContainerState::new(self.log.clone()));
+            stat.set_ok();
+            return Ok(());
+        }
 
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
@@ -1373,5 +1406,42 @@ mod sandbox_log_path_tests {
         assert!(super::remove_sandbox_log_dir_sync("../etc").is_err());
         assert!(super::remove_sandbox_log_dir_sync("a/b").is_err());
         assert!(super::remove_sandbox_log_dir_sync("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod app_snapshot_skip_tests {
+    use super::{
+        should_skip_app_snapshot_create_rpc, ANNO_PROPAGATION_CONTAINER_UMNTS,
+        ANNO_PROPAGATION_EXEC_MNTS,
+    };
+    use std::collections::HashMap;
+
+    fn annos(keys: &[&str]) -> HashMap<String, String> {
+        keys.iter()
+            .map(|k| (k.to_string(), "[]".to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn cold_start_never_skips() {
+        assert!(!should_skip_app_snapshot_create_rpc(true, None));
+    }
+
+    #[test]
+    fn restore_without_annotations_skips() {
+        assert!(should_skip_app_snapshot_create_rpc(false, None));
+    }
+
+    #[test]
+    fn restore_with_exec_mounts_keeps_the_create() {
+        let a = annos(&[ANNO_PROPAGATION_EXEC_MNTS]);
+        assert!(!should_skip_app_snapshot_create_rpc(false, Some(&a)));
+    }
+
+    #[test]
+    fn restore_with_container_umounts_keeps_the_create() {
+        let a = annos(&[ANNO_PROPAGATION_CONTAINER_UMNTS]);
+        assert!(!should_skip_app_snapshot_create_rpc(false, Some(&a)));
     }
 }
