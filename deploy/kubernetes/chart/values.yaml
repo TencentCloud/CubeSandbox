@@ -237,6 +237,13 @@ controlPlane:
     # (persistence.enabled=false), you can switch to RollingUpdate.
     deploymentStrategy:
       type: Recreate
+    # Per-component ServiceAccount for CubeMaster. When create=true a dedicated
+    # ServiceAccount is created for the master Deployment; set name to use an
+    # existing one and set create=false. Annotations are forwarded to the SA.
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
     command: []
     args: []
     env: []
@@ -967,6 +974,19 @@ cubeProxy:
   # Traffic reaches CubeProxy via ClusterIP Service + Ingress (TLS still
   # terminates in CubeProxy; Ingress uses SSL passthrough / HTTPS backend).
   enabled: true
+  # Per-component ServiceAccount for CubeProxy. When create=true a dedicated
+  # ServiceAccount is created for the proxy Deployment; set name to use an
+  # existing one and set create=false. Annotations are forwarded to the SA
+  # (useful for IAM role-based access on EKS/GKE).
+  serviceAccount:
+    create: false
+    name: ""
+    annotations: {}
+  # hostUsers controls whether CubeProxy uses the host user namespace.
+  # Set to false to run the pod in a separate user namespace where supported
+  # by the cluster/runtime. Leave null to omit the field and use the cluster
+  # default.
+  hostUsers: null
   # Public sandbox domain (also used for TLS CN / wildcard DNS / Ingress hosts).
   # For production, point external DNS at the Ingress entrypoint.
   domain: cube.app
@@ -1400,8 +1420,15 @@ volumeS3:
   region: us-east-1
   extraOpts: ""
 
+# ServiceAccount for the CubeNode DaemonSet (cube-node, cube-node-installer,
+# cube-node-bootstrap, cube-node-pvm). Per-component overrides for other
+# workloads live under controlPlane.master.serviceAccount and
+# cubeProxy.serviceAccount.
 serviceAccount:
   create: true
+  # When empty and create=true, the name defaults to <release>-node.
+  # When create=false, set name to the existing ServiceAccount to use.
+  name: ""
   annotations: {}
 
 rbac:
