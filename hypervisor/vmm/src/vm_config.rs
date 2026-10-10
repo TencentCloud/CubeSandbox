@@ -4,10 +4,72 @@
 //
 pub use net_util::MacAddr;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 use std::{net::Ipv4Addr, path::PathBuf};
 use virtio_devices::fs::BackendFsConfig;
 use virtio_devices::RateLimiterConfig;
+
+/// Deserialize `ivshmem` accepting either:
+///   - the legacy single-object form: `"ivshmem": {"path":..., "size":...}`
+///   - the list form: `"ivshmem": [{...}, {...}]`
+///   - missing / null: `None`
+///
+/// Snapshots and `config.json` files written by binaries that only knew a
+/// single ivshmem device stay loadable here.
+pub(crate) fn deserialize_ivshmem_compat<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<IvshmemConfig>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct IvshmemCompat;
+
+    impl<'de> Visitor<'de> for IvshmemCompat {
+        type Value = Option<Vec<IvshmemConfig>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an IvshmemConfig object, a list of IvshmemConfig, or null")
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(
+            self,
+            d: D,
+        ) -> std::result::Result<Self::Value, D::Error> {
+            d.deserialize_any(IvshmemCompat)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+            while let Some(item) = seq.next_element::<IvshmemConfig>()? {
+                out.push(item);
+            }
+            Ok(Some(out))
+        }
+
+        fn visit_map<A>(self, map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let cfg = IvshmemConfig::deserialize(de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(vec![cfg]))
+        }
+    }
+
+    deserializer.deserialize_option(IvshmemCompat)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum CompatibleMode {
@@ -529,10 +591,20 @@ pub struct VsockConfig {
 
 pub const DEFAULT_IVSHMEM_SIZE: usize = 128;
 
+/// PCI `subsystem_device` of the generic ivshmem device. Claimed by the
+/// guest `cube-ivshmem` driver. Devices carrying any other value are left
+/// for purpose-specific guest drivers (e.g. shared-memory metric
+/// collection), which is what makes several ivshmem devices per VM usable.
+pub const IVSHMEM_SUBSYSTEM_ID_GENERIC: u16 = 0x0000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct IvshmemConfig {
     pub path: PathBuf,
     pub size: usize,
+    /// Defaulted so configs written before multi-device support (which had
+    /// no such field) deserialize as the generic device they used to be.
+    #[serde(default)]
+    pub subsystem_id: u16,
 }
 
 impl Default for IvshmemConfig {
@@ -540,6 +612,7 @@ impl Default for IvshmemConfig {
         Self {
             path: PathBuf::new(),
             size: DEFAULT_IVSHMEM_SIZE << 20,
+            subsystem_id: IVSHMEM_SUBSYSTEM_ID_GENERIC,
         }
     }
 }
@@ -650,5 +723,49 @@ pub struct VmConfig {
     pub tpm: Option<TpmConfig>,
     #[serde(default)]
     pub sys_ctrl: bool,
-    pub ivshmem: Option<IvshmemConfig>,
+    #[serde(default, deserialize_with = "deserialize_ivshmem_compat")]
+    pub ivshmem: Option<Vec<IvshmemConfig>>,
+}
+
+#[cfg(test)]
+mod ivshmem_compat_tests {
+    use super::*;
+
+    /// Minimal wrapper so the tests exercise the field attribute itself
+    /// without having to build a full `VmConfig`.
+    #[derive(Deserialize)]
+    struct Wrap {
+        #[serde(default, deserialize_with = "deserialize_ivshmem_compat")]
+        ivshmem: Option<Vec<IvshmemConfig>>,
+    }
+
+    #[test]
+    fn single_object_form_is_accepted() {
+        let json = r#"{"ivshmem": {"path": "/dev/shm/a", "size": 4096}}"#;
+        let w: Wrap = serde_json::from_str(json).unwrap();
+        let v = w.ivshmem.expect("must be Some");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].path, PathBuf::from("/dev/shm/a"));
+        assert_eq!(v[0].subsystem_id, IVSHMEM_SUBSYSTEM_ID_GENERIC);
+    }
+
+    #[test]
+    fn list_form_is_accepted() {
+        let json = r#"{"ivshmem": [
+            {"path": "/dev/shm/a", "size": 4096},
+            {"path": "/dev/shm/b", "size": 8192, "subsystem_id": 257}
+        ]}"#;
+        let w: Wrap = serde_json::from_str(json).unwrap();
+        let v = w.ivshmem.expect("must be Some");
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[1].subsystem_id, 0x0101);
+    }
+
+    #[test]
+    fn missing_and_null_are_none() {
+        let w: Wrap = serde_json::from_str("{}").unwrap();
+        assert!(w.ivshmem.is_none());
+        let w: Wrap = serde_json::from_str(r#"{"ivshmem": null}"#).unwrap();
+        assert!(w.ivshmem.is_none());
+    }
 }
