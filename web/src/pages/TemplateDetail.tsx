@@ -741,9 +741,7 @@ export default function TemplateDetailPage() {
           <div className="space-y-3">
             <p className="text-sm text-destructive">{t('buildFailed')}</p>
             <p className="text-xs text-muted-foreground">
-              {t('buildFailedDeleteHint', {
-                defaultValue: '该模板构建失败，无法查看详情，但你可以将其删除。',
-              })}
+              {t('buildFailedDeleteHint')}
             </p>
             {showDeleteConfirm ? (
               <div className="space-y-3">

@@ -67,6 +67,7 @@
   },
   "building": "Template is being built. Please refresh in a moment.",
   "buildFailed": "Template build failed.",
+  "buildFailedDeleteHint": "This template failed to build and cannot be viewed, but you can delete it.",
   "network": {
     "allowed": "Allowed",
     "blocked": "Blocked"

@@ -67,6 +67,7 @@
   },
   "building": "模板正在构建中，请稍后刷新。",
   "buildFailed": "模板构建失败。",
+  "buildFailedDeleteHint": "该模板构建失败，无法查看详情，但你可以将其删除。",
   "network": {
     "allowed": "允许",
     "blocked": "禁止"

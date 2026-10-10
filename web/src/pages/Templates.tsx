@@ -536,7 +536,7 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
       <Card className="w-full max-w-sm shadow-xl">
         <CardHeader className="flex flex-row items-center justify-between pb-3">
           <CardTitle className="text-base text-destructive">
-            {t('delete.title', { defaultValue: '删除模板' })}
+            {t('delete.title')}
           </CardTitle>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X className="h-4 w-4" />
@@ -544,16 +544,16 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            {t('delete.confirmDesc', { defaultValue: '确定要删除模板' })}{' '}
+            {t('delete.confirmDesc')}{' '}
             <span className="font-mono font-medium text-foreground">{templateID}</span>{' '}
-            {t('delete.confirmDescSuffix', { defaultValue: '吗？此操作不可撤销。' })}
+            {t('delete.confirmDescSuffix')}
           </p>
           {mutation.isError && (
             <p className="text-xs text-destructive">{formatDeleteError(mutation.error)}</p>
           )}
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={onClose}>
-              {t('delete.cancel', { defaultValue: '取消' })}
+              {t('delete.cancel')}
             </Button>
             <Button
               variant="destructive"
@@ -562,8 +562,8 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
               onClick={() => mutation.mutate()}
             >
               {mutation.isPending
-                ? t('delete.deleting', { defaultValue: '删除中…' })
-                : t('delete.confirm', { defaultValue: '确认删除' })}
+                ? t('delete.deleting')
+                : t('delete.confirm')}
             </Button>
           </div>
         </CardContent>
@@ -747,7 +747,7 @@ export default function TemplatesPage() {
                     ? 'opacity-100'
                     : 'opacity-0 group-hover:opacity-100',
                 ].join(' ')}
-                title={t('delete.button', { defaultValue: '删除模板' })}
+                title={t('delete.button')}
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
