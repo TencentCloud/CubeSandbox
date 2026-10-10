@@ -37,27 +37,29 @@ type persistedState struct {
 	// are kept separately because a policy update replaces AllowOut wholesale
 	// and has to fold the same resolvers back in — the caller only knows the
 	// user-authored targets.
-	DNSAllowOutCIDRs []string          `json:"dnsAllowOutCIDRs,omitempty"`
-	PersistMetadata  map[string]string `json:"persistMetadata"`
+	DNSAllowOutCIDRs         []string          `json:"dnsAllowOutCIDRs,omitempty"`
+	OperatorDNSAllowOutCIDRs []string          `json:"operatorDnsAllowOutCIDRs,omitempty"`
+	PersistMetadata          map[string]string `json:"persistMetadata"`
 }
 
 // persistedStateOnDisk is the JSON compatibility layer. CubeNetworkConfig is
 // persisted under the new name and also mirrored to cubevsContext so older tools
 // that still read the legacy field continue to understand the file.
 type persistedStateOnDisk struct {
-	SandboxID           string             `json:"sandboxID"`
-	NetworkHandle       string             `json:"networkHandle"`
-	TapName             string             `json:"tapName"`
-	TapIfIndex          int                `json:"tapIfIndex"`
-	SandboxIP           string             `json:"sandboxIP"`
-	Interfaces          []Interface        `json:"interfaces"`
-	Routes              []Route            `json:"routes"`
-	ARPNeighbors        []ARPNeighbor      `json:"arpNeighbors"`
-	PortMappings        []PortMapping      `json:"portMappings"`
-	CubeNetworkConfig   *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
-	LegacyCubeVSContext *CubeNetworkConfig `json:"cubevsContext,omitempty"`
-	DNSAllowOutCIDRs    []string           `json:"dnsAllowOutCIDRs,omitempty"`
-	PersistMetadata     map[string]string  `json:"persistMetadata"`
+	SandboxID                string             `json:"sandboxID"`
+	NetworkHandle            string             `json:"networkHandle"`
+	TapName                  string             `json:"tapName"`
+	TapIfIndex               int                `json:"tapIfIndex"`
+	SandboxIP                string             `json:"sandboxIP"`
+	Interfaces               []Interface        `json:"interfaces"`
+	Routes                   []Route            `json:"routes"`
+	ARPNeighbors             []ARPNeighbor      `json:"arpNeighbors"`
+	PortMappings             []PortMapping      `json:"portMappings"`
+	CubeNetworkConfig        *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
+	LegacyCubeVSContext      *CubeNetworkConfig `json:"cubevsContext,omitempty"`
+	DNSAllowOutCIDRs         []string           `json:"dnsAllowOutCIDRs,omitempty"`
+	OperatorDNSAllowOutCIDRs []string           `json:"operatorDnsAllowOutCIDRs,omitempty"`
+	PersistMetadata          map[string]string  `json:"persistMetadata"`
 }
 
 // MarshalJSON writes both the new and legacy policy field names. This keeps the
@@ -65,19 +67,20 @@ type persistedStateOnDisk struct {
 // compatibility during the transition from network-agent state files.
 func (s *persistedState) MarshalJSON() ([]byte, error) {
 	disk := persistedStateOnDisk{
-		SandboxID:           s.SandboxID,
-		NetworkHandle:       s.NetworkHandle,
-		TapName:             s.TapName,
-		TapIfIndex:          s.TapIfIndex,
-		SandboxIP:           s.SandboxIP,
-		Interfaces:          s.Interfaces,
-		Routes:              s.Routes,
-		ARPNeighbors:        s.ARPNeighbors,
-		PortMappings:        s.PortMappings,
-		CubeNetworkConfig:   s.CubeNetworkConfig,
-		LegacyCubeVSContext: s.CubeNetworkConfig,
-		DNSAllowOutCIDRs:    s.DNSAllowOutCIDRs,
-		PersistMetadata:     s.PersistMetadata,
+		SandboxID:                s.SandboxID,
+		NetworkHandle:            s.NetworkHandle,
+		TapName:                  s.TapName,
+		TapIfIndex:               s.TapIfIndex,
+		SandboxIP:                s.SandboxIP,
+		Interfaces:               s.Interfaces,
+		Routes:                   s.Routes,
+		ARPNeighbors:             s.ARPNeighbors,
+		PortMappings:             s.PortMappings,
+		CubeNetworkConfig:        s.CubeNetworkConfig,
+		LegacyCubeVSContext:      s.CubeNetworkConfig,
+		DNSAllowOutCIDRs:         s.DNSAllowOutCIDRs,
+		OperatorDNSAllowOutCIDRs: s.OperatorDNSAllowOutCIDRs,
+		PersistMetadata:          s.PersistMetadata,
 	}
 	return json.Marshal(&disk)
 }
@@ -104,6 +107,7 @@ func (s *persistedState) UnmarshalJSON(data []byte) error {
 		s.CubeNetworkConfig = disk.LegacyCubeVSContext
 	}
 	s.DNSAllowOutCIDRs = disk.DNSAllowOutCIDRs
+	s.OperatorDNSAllowOutCIDRs = disk.OperatorDNSAllowOutCIDRs
 	s.PersistMetadata = disk.PersistMetadata
 	return nil
 }
