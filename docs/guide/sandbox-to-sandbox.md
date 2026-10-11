@@ -42,6 +42,38 @@ Typical scenarios:
   custom binary protocols); latency-sensitive paths that should bypass the
   proxy; ports can be declared in the template upfront.
 
+## Template build: declare the service port
+
+Both options treat the template's `--expose-port` declarations as the
+service-port contract — the caller only needs to know B's container port and
+**never has to know whether it is co-located with B**. Append the service
+port to the standard template (8080 as an example; see the
+[Quickstart](./quickstart.md) for registry addresses, and use the
+`cube-sandbox-cn` registry in mainland China):
+
+```bash
+cubemastercli tpl create-from-image \
+  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --writable-layer-size 1G \
+  --expose-port 49999 \   # code interpreter (sandbox-code default)
+  --expose-port 49983 \   # envd (sandbox-code default)
+  --expose-port 8080  \   # your service port
+  --probe 49999
+```
+
+Notes:
+
+- `--expose-port` may be repeated; only declared ports get a hostPort mapping
+  (option 2 and option 1's cross-node path both rely on it).
+- `--probe` is the template readiness probe port — 49999 for `sandbox-code`.
+- The command prints a `template_id` and waits for the build to reach
+  `READY`; `cubemastercli tpl list` shows the status too.
+- Adding ports to an existing template means rebuilding it — expose-port is a
+  template property and cannot be changed at runtime.
+
+Create sandboxes with the new template ID; Cubelet programs the port mapping
+automatically at sandbox start, with no extra create-request parameters.
+
 ## Option 1: CubeProxy Host Routing
 
 CubeProxy routes by the `<port>-<sandboxID>.<domain>` Host header. Inside
@@ -53,27 +85,11 @@ curl -sS --resolve 8080-<sandboxID-B>.cube.app:80:<proxy-node-ip> \
      http://8080-<sandboxID-B>.cube.app/
 ```
 
-### Template build: declare the service port
-
-Option 1's service port should be declared via the template's
-`--expose-port` (same as option 2) — then the caller only needs to name B's
-container port in the Host header and **never has to know whether it is
-co-located with B**: same-node, CubeProxy dials `sandboxIP:containerPort`
-directly; cross-node, it enters B through that port's `hostIP:hostPort`
-mapping (mappings only cover declared ports; an undeclared port gets a 404
+Create B from a template that declares the service port as shown above. The
+caller names B's container port in the Host header: same-node, CubeProxy
+dials `sandboxIP:containerPort` directly; cross-node, it enters B through
+that port's `hostIP:hostPort` mapping (an undeclared port gets a 404
 cross-node).
-
-Just append the service port to the standard template (8080 as an example):
-
-```bash
-cubemastercli tpl create-from-image \
-  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 1G \
-  --expose-port 49999 \   # code interpreter (sandbox-code default)
-  --expose-port 49983 \   # envd (sandbox-code default)
-  --expose-port 8080  \   # your service port
-  --probe 49999
-```
 
 > Implementation detail: same-node, CubeProxy's direct dial does not consult
 > the port mapping, so undeclared ports happen to work — but that is lenient
@@ -94,7 +110,7 @@ Limitations:
   Host routing handles). Arbitrary TCP/UDP services (databases, Redis, custom
   protocols) cannot use this path — use option 2 instead.
 - The service port should be declared via the template's `--expose-port`
-  (see "Template build" above).
+  (see "Template build: declare the service port" above).
 
 ## Option 2: Node Host-Port Mapping (hostIP:hostPort)
 
@@ -106,35 +122,8 @@ sandbox — **no CubeProxy involved**.
 ### Prerequisites
 
 - cubemaster `cubelet_conf.enable_exposed_port: true` (default);
-- the template was built with the service port in `--expose-port`.
-
-### Building a template with exposed ports
-
-Using the official `sandbox-code` image as an example (see the
-[Quickstart](./quickstart.md) for registry addresses; use the
-`cube-sandbox-cn` registry in mainland China):
-
-```bash
-cubemastercli tpl create-from-image \
-  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 1G \
-  --expose-port 49999 \   # code interpreter (sandbox-code default)
-  --expose-port 49983 \   # envd (sandbox-code default)
-  --expose-port 8080  \   # your service port
-  --probe 49999
-```
-
-Notes:
-
-- `--expose-port` may be repeated; only declared ports get a hostPort mapping.
-- `--probe` is the template readiness probe port — 49999 for `sandbox-code`.
-- The command prints a `template_id` and waits for the build to reach
-  `READY`; `cubemastercli tpl list` shows the status too.
-- Adding ports to an existing template means rebuilding it — expose-port is a
-  template property and cannot be changed at runtime.
-
-Create sandboxes with the new template ID; Cubelet programs the port mapping
-automatically at sandbox start, with no extra create-request parameters.
+- the template declares the service port (see "Template build: declare the
+  service port" above).
 
 ### Discovering the allocated host port
 
@@ -203,9 +192,12 @@ Both options ship runnable end-to-end demo scripts (in
 Each script: creates sandboxes A and B → starts an HTTP service in B → curls
 it from A → asserts the response body:
 
-- `sandbox-curl-sandbox.py` — option 1, works with the standard template;
-- `sandbox-port-mapping.py` — option 2, requires a template with the service
-  port in `--expose-port` (see "Building a template with exposed ports").
+- `sandbox-curl-sandbox.py` — option 1 (service port fixed at 8080);
+- `sandbox-port-mapping.py` — option 2 (override the port with
+  `CUBE_SERVICE_PORT`, default 8080).
+
+Both should use a template that declares the corresponding port (see
+"Template build" above), passed as `CUBE_TEMPLATE_ID`.
 
 Setup, run commands, and expected outputs are documented in that directory's
 README. If the curl from A gets ECONNREFUSED (exit code 2),

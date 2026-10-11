@@ -300,8 +300,9 @@ sandbox-curl-sandbox.py（数据面 / HTTP）
   镜像源（沙箱无公网时）。注意 pip 在沙箱内执行，guest DNS 需能解析 pip 源
   域名 —— guest DNS 来自模板 `--dns` 或 cubelet `default_dns_servers`，
   实验室无法访问公共 DNS 时请重建模板并加 `--dns`。
-- `CUBE_SERVICE_PORT`：`sandbox-port-mapping.py` 的服务端口（默认 8080），
-  必须在模板的 `--expose-port` 中声明。
+- `CUBE_SERVICE_PORT`：`sandbox-port-mapping.py` 的服务端口（默认 8080）。
+  两个 curl 类脚本的服务端口都需在模板的 `--expose-port` 中声明
+  （`sandbox-curl-sandbox.py` 固定用 8080）。
 - B 以 `allow_public_traffic=False` 创建也可以 —— curl 示例会自动携带 B 的
   `traffic_access_token`。
 

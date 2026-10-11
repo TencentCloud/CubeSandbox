@@ -314,7 +314,9 @@ Script-specific environment variables:
   `--dns` or the cubelet `default_dns_servers`; rebuild the template with
   `--dns` if the default public resolver is unreachable in your lab.
 - `CUBE_SERVICE_PORT` — service port for `sandbox-port-mapping.py`
-  (default 8080); must be declared in the template's `--expose-port`.
+  (default 8080). The service port of both curl-based scripts must be
+  declared in the template's `--expose-port` (`sandbox-curl-sandbox.py`
+  always uses 8080).
 - `allow_public_traffic=False` on B works too — the curl example forwards
   B's `traffic_access_token` automatically.
 
