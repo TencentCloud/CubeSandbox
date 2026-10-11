@@ -140,6 +140,9 @@ hello cube
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
+| `sandbox-in-sandbox.py` | 控制面 — 在沙箱 A 内使用 `cubesandbox` SDK `Sandbox.connect()` 连接沙箱 B 并执行命令 |
+| `sandbox-curl-sandbox.py` | 数据面 — 在沙箱 B 内启动 HTTP 服务，从沙箱 A 通过 CubeProxy Host 路由 `curl` 访问 |
+| `sandbox-port-mapping.py` | 母机端口映射 — 沙箱 A 直接 `curl` B 所在节点的 `hostIP:hostPort`（模板 `--expose-port` 触发的 CubeVS DNAT） |
 
 ### exec_code.py — 运行 Python 代码
 
@@ -262,6 +265,83 @@ requests.get(url)
 requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
 ```
 
+### 沙箱间互访
+
+下面三个脚本演示沙箱如何访问另一个沙箱：创建沙箱 A 和 B，然后分别通过
+**控制面**（SDK）、**CubeProxy**（Host 头路由）和**母机端口映射**（eBPF DNAT）
+三种方式在 A 内访问 B。三种方式的原理、如何选择、前提与限制（含出口策略、
+`allow_public_traffic` token、端点生命周期）见
+[沙箱间互访指南](../../docs/zh/guide/sandbox-to-sandbox.md)。
+
+```text
+sandbox-in-sandbox.py（控制面 / SDK）
+
+  本地脚本                    沙箱 A                       沙箱 B
+      │                     ┌────────────────┐          ┌──────────────┐
+      ├─ Sandbox.create ───►│ pip install    │          │              │
+      ├─ Sandbox.create ────┼───────────────►│          │              │
+      │                     │ cubesandbox    │ connect  │              │
+      │                     │ Sandbox.connect├─────────►│ commands.run │
+      │                     └────────────────┘          └──────────────┘
+      │                          │ CubeAPI :3000（create/connect）
+      │                          │ CubeProxy :80（commands.run → envd）
+
+sandbox-curl-sandbox.py（数据面 / HTTP）
+
+  沙箱 A ── curl ──► CubeProxy :80 ── Host: <port>-<sandboxID-B>.cube.app ──► B 内服务
+```
+
+脚本相关的环境变量：
+
+- `CUBE_INNER_API_URL` / `CUBE_PROXY_NODE_IP`：沙箱内访问 CubeAPI / CubeProxy
+  的地址。默认自动把 `.env` 里的 loopback 地址改写为节点出网 IP
+  （`127.0.0.1` 在沙箱内指向沙箱自身）。
+- `CUBE_PIP_INDEX_URL`：`sandbox-in-sandbox.py` 在 A 内安装 SDK 时使用的 pip
+  镜像源（沙箱无公网时）。注意 pip 在沙箱内执行，guest DNS 需能解析 pip 源
+  域名 —— guest DNS 来自模板 `--dns` 或 cubelet `default_dns_servers`，
+  实验室无法访问公共 DNS 时请重建模板并加 `--dns`。
+- `CUBE_SERVICE_PORT`：`sandbox-port-mapping.py` 的服务端口（默认 8080），
+  必须在模板的 `--expose-port` 中声明。
+- B 以 `allow_public_traffic=False` 创建也可以 —— curl 示例会自动携带 B 的
+  `traffic_access_token`。
+
+```bash
+# A 内安装 cubesandbox SDK，connect 到 B 并执行命令
+python sandbox-in-sandbox.py
+
+# B 在 :8080 提供 HTTP 服务，A 经 CubeProxy curl 访问
+python sandbox-curl-sandbox.py
+
+# B 在 expose-port 上提供服务，A 直接 curl 节点 hostIP:hostPort 映射
+python sandbox-port-mapping.py
+```
+
+`sandbox-in-sandbox.py` 预期输出：
+
+```text
+[outer] sandbox A: 6d8a025c...  sandbox B: 1b26d1bb...
+[inner] connecting to sandbox B: 1b26d1bb...
+hello-from-B
+```
+
+`sandbox-curl-sandbox.py` 预期输出：
+
+```text
+[outer] service host: 8080-23af3202....cube.app
+[inner:A] curl -sS --fail --resolve 8080-23af3202....cube.app:80:<node-ip> http://...
+hello-from-B-service
+[outer] OK: sandbox A reached the service in sandbox B
+```
+
+`sandbox-port-mapping.py` 预期输出：
+
+```text
+[outer] B exposed endpoint (host port mapping): 9.135.152.214:20006
+[inner:A] curl -sS --fail --max-time 10 http://9.135.152.214:20006/
+hello-from-B-portmapping
+[outer] OK: sandbox A reached B via the node host-port mapping
+```
+
 ## 5. 常见问题
 
 | 现象 | 可能原因 | 解决方法 |
@@ -292,6 +372,9 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单
 ├── restrict_public_access.py  # 公网 URL 鉴权 token
+├── sandbox-in-sandbox.py      # 沙箱 A 内通过 SDK 在沙箱 B 中执行命令
+├── sandbox-curl-sandbox.py    # 沙箱 A 内 curl 访问沙箱 B 中的 HTTP 服务
+├── sandbox-port-mapping.py    # 沙箱 A 经母机 hostIP:hostPort DNAT 访问 B 的服务
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```
