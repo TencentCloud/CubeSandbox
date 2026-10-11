@@ -165,10 +165,11 @@ data-plane access (`network_sandbox_to_sandbox`, CubeSandbox only), mirroring
   curling `nodeIP:hostPort`.
 
 The host-port mapping cases need a reachable CubeMaster (`CUBEMASTER_URL`,
-defaulting to the `CUBE_API_URL` host on port 8089). All cases are
-scheduler-placement independent: same-node pairs exercise the in-software
-hairpin loopback, cross-node pairs traverse the wire, and both satisfy the
-same assertions.
+defaulting to the `CUBE_API_URL` host on port 8089). The host-port mapping cases are scheduler-placement independent: same-node
+pairs exercise the in-software hairpin loopback, cross-node pairs traverse
+the wire, and both satisfy the same assertions. The CubeProxy cases assume
+same-node placement (cross-node, CubeProxy only reaches `--expose-port`
+declared ports) and neither group needs public internet.
 
 `cases/lifecycle/test_pause_resume_network.py` covers the same create-time
 policies after an SDK pause + connect resume:
