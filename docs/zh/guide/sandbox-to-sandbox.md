@@ -37,25 +37,12 @@
 - **方式二**：沙箱间跑任意 TCP 协议（数据库、消息队列、自定义二进制
   协议）；对时延敏感、想绕过代理；端口可在模板中预先声明。
 
-## 方式一：CubeProxy Host 路由
+## 模板构建：声明服务端口
 
-CubeProxy 按 `<port>-<sandboxID>.<domain>` 形式的 Host 头路由到对应沙箱。
-沙箱 A 内用 curl `--resolve` 把域名钉到 CubeProxy 节点 IP，无需 DNS：
-
-```bash
-curl -sS --resolve 8080-<sandboxID-B>.cube.app:80:<proxy节点IP> \
-     http://8080-<sandboxID-B>.cube.app/
-```
-
-### 模板构建：声明服务端口
-
-方式一的服务端口也应通过模板 `--expose-port` 声明（与方式二相同）——
-这样调用方只需在 Host 头里指定 B 的容器端口，**无需感知是否与 B 同
-节点**：同节点时 CubeProxy 直接拨 `sandboxIP:容器端口`；跨节点时经该端口
-对应的 `hostIP:hostPort` 映射进入 B（映射只覆盖已声明端口，未声明的端口
-跨节点返回 404）。
-
-在标准模板基础上追加服务端口即可（以 8080 为例）：
+两种方式都以模板 `--expose-port` 声明的端口为服务端口契约 —— 调用方
+只需知道 B 的容器端口，**无需感知是否与 B 同节点**。在标准模板基础上
+追加服务端口即可（以 8080 为例；镜像仓库地址见
+[快速入门](./quickstart.md)，中国大陆环境用 `cube-sandbox-cn` 仓库）：
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -66,6 +53,32 @@ cubemastercli tpl create-from-image \
   --expose-port 8080  \   # 你的服务端口
   --probe 49999
 ```
+
+说明：
+
+- `--expose-port` 可重复多次；只有声明过的端口才会分配 hostPort 映射
+  （方式二与方式一的跨节点路径都依赖它）。
+- `--probe` 是模板就绪探针端口，`sandbox-code` 用 49999。
+- 命令会打印 `template_id`，并等待构建完成（`READY`）；也可用
+  `cubemastercli tpl list` 查看状态。
+- 已有模板追加端口只能重新构建 —— expose-port 是模板属性，运行时不可改。
+
+创建沙箱时使用新模板 ID 即可，端口映射由 Cubelet 在沙箱启动时自动完成，
+无需在创建请求里额外传参。
+
+## 方式一：CubeProxy Host 路由
+
+CubeProxy 按 `<port>-<sandboxID>.<domain>` 形式的 Host 头路由到对应沙箱。
+沙箱 A 内用 curl `--resolve` 把域名钉到 CubeProxy 节点 IP，无需 DNS：
+
+```bash
+curl -sS --resolve 8080-<sandboxID-B>.cube.app:80:<proxy节点IP> \
+     http://8080-<sandboxID-B>.cube.app/
+```
+
+B 用按上文声明了服务端口的模板创建。调用方在 Host 头里指定 B 的容器
+端口：同节点时 CubeProxy 直接拨 `sandboxIP:容器端口`；跨节点时经该端口
+对应的 `hostIP:hostPort` 映射进入 B（未声明的端口跨节点返回 404）。
 
 > 实现细节：同节点时 CubeProxy 的同机直连不检查端口映射，未声明的端口
 > 也能访问——但这是宽松行为，A、B 一旦被调度到不同节点就会 404，
@@ -83,7 +96,7 @@ cubemastercli tpl create-from-image \
 - **仅支持 L7 协议**：HTTP / HTTPS / gRPC（gRPC 基于 HTTP/2，可经 Host
   路由）。任意 TCP/UDP 服务（如数据库、Redis、自定义协议）无法用此方式，
   请改用方式二。
-- 服务端口需经模板 `--expose-port` 声明（见上文"模板构建"）。
+- 服务端口需经模板 `--expose-port` 声明（见上文"模板构建：声明服务端口"）。
 
 ## 方式二：母机端口映射（hostIP:hostPort）
 
@@ -94,33 +107,7 @@ cubemastercli tpl create-from-image \
 ### 前提
 
 - cubemaster 配置 `cubelet_conf.enable_exposed_port: true`（默认开启）；
-- 模板构建时通过 `--expose-port` 声明了服务端口。
-
-### 构建带 expose-port 的模板
-
-以官方 `sandbox-code` 镜像为例（镜像仓库地址见
-[快速入门](./quickstart.md)，中国大陆环境用 `cube-sandbox-cn` 仓库）：
-
-```bash
-cubemastercli tpl create-from-image \
-  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 1G \
-  --expose-port 49999 \   # code interpreter（sandbox-code 默认）
-  --expose-port 49983 \   # envd（sandbox-code 默认）
-  --expose-port 8080  \   # 你的服务端口
-  --probe 49999
-```
-
-说明：
-
-- `--expose-port` 可重复多次；只有声明过的端口才会分配 hostPort 映射。
-- `--probe` 是模板就绪探针端口，`sandbox-code` 用 49999。
-- 命令会打印 `template_id`，并等待构建完成（`READY`）；也可用
-  `cubemastercli tpl list` 查看状态。
-- 已有模板追加端口只能重新构建 —— expose-port 是模板属性，运行时不可改。
-
-创建沙箱时使用新模板 ID 即可，沙箱启动后 Cubelet 自动完成端口映射，
-无需在创建请求里额外传参。
+- 模板已按上文"模板构建：声明服务端口"声明了服务端口。
 
 ### 查询分配的 hostPort
 
@@ -183,9 +170,11 @@ A 内需设置 `CUBE_API_URL`（指向 CubeAPI 节点可达地址，注意 `.env
 [examples/code-sandbox-quickstart](https://github.com/TencentCloud/CubeSandbox/tree/main/examples/code-sandbox-quickstart)），
 脚本自动完成：创建沙箱 A/B → B 内起 HTTP 服务 → A 内 curl 访问 → 校验响应：
 
-- `sandbox-curl-sandbox.py` —— 方式一，使用标准模板；
-- `sandbox-port-mapping.py` —— 方式二，需要带 `--expose-port` 的模板
-  （见上文"构建带 expose-port 的模板"）。
+- `sandbox-curl-sandbox.py` —— 方式一（服务端口固定 8080）；
+- `sandbox-port-mapping.py` —— 方式二（端口可用 `CUBE_SERVICE_PORT`
+  覆盖，默认 8080）。
+
+两者都应使用按上文"模板构建"声明了对应端口的模板（`CUBE_TEMPLATE_ID`）。
 
 环境准备、运行命令与预期输出见该目录的 README。若 A 内 curl 返回
 ECONNREFUSED（退出码 2），`sandbox-port-mapping.py` 会打印排查清单
