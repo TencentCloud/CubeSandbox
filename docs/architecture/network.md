@@ -270,6 +270,23 @@ To prevent collisions between subsystems, the host's usable port space is partit
 
 Cubelet's embedded network runtime allocates host ports for sandbox port mappings only from `20000`--`29999`. The product create path exposes container ports via `exposedPorts` and always requests automatic host-port allocation (`HostPort=0`); users cannot choose a specific host port. The runtime then assigns a free port from this managed range and returns the mapping in the create response.
 
+### 7.5 Same-Host Access (Hairpin)
+
+The port-mapping DNAT lives only on the host's primary NIC ingress (`from_world` consults `remote_port_mapping` only for packets arriving from the primary NIC), so it naturally covers clients outside the host. Sandboxes on the same host have two paths to reach each other:
+
+- **Recommended: direct connection.** A same-host caller uses `peerSandboxIP:containerPort`, delivered straight through `from_envoy` on cube-dev egress. Both CubeProxy and CubeMaster's port-mapping endpoint APIs special-case same-host callers this way.
+- **Hairpin: same-host access to `nodeIP:hostPort`.** For clients that cannot (or do not want to) distinguish same-host from cross-host peers, the data plane in `from_cube` recognizes TCP packets destined to `nodenic_ip` whose `remote_port_mapping[dport]` lookup hits, SNATs them through the normal egress flow (source rewritten to `snat_ip:ephemeralPort`, still subject to the `classify_egress_flow` policy check), then loops them back into the primary NIC ingress (`BPF_F_INGRESS`) where `from_world` applies the DNAT. Replies are disambiguated in `from_cube`'s `local_port_mapping` fast path by whether the peer address is one of this node's own SNAT addresses (`nodenic_ip` or an address in `snat_iplist`): same-host replies loop back into the primary NIC ingress for `tcp_nat_session` reverse NAT, while external replies egress the wire as before. The whole path does not rely on switch hairpinning.
+
+Caveats when using hairpin:
+
+- **Egress policy still applies.** Hairpin traffic is not exempt from the sandbox's egress policy. The always-denied private ranges preinstalled by default (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, etc.) will reject access to a private node IP -- configure `allowOut` for the node IP/subnet explicitly in the sandbox's network settings, or same-host hairpin access is rejected (fail-fast RST).
+- **L7 domain rules on the node IP are not supported**: a hairpin packet classified as L7-proxied traffic is reset directly (the L7 proxy resolves external services; the host stack cannot reach hostPort).
+- The SNAT ephemeral port range (starting at `30000`) does not overlap the hostPort range (`20000`--`29999`), so replies on the primary NIC ingress never false-match `remote_port_mapping`.
+- Each hairpin connection creates a regular SNAT session pair (egress + ingress), reclaimed by the existing session reaper on timeout; the generation semantics on sandbox rollback match ordinary egress connections.
+
+For the user-facing access options and operational steps, see the
+[sandbox-to-sandbox guide](../guide/sandbox-to-sandbox.md).
+
 ---
 
 ## 8. TAP Device Lifecycle

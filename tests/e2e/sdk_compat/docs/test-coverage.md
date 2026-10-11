@@ -145,6 +145,31 @@ The established-connection cases use the guest-side holder in
 flow is re-evaluated when the guest next sends, so nothing would be observed on
 an idle socket.
 
+`cases/network/test_sandbox_to_sandbox.py` covers sandbox-to-sandbox
+data-plane access (`network_sandbox_to_sandbox`, CubeSandbox only), mirroring
+`examples/code-sandbox-quickstart/sandbox-curl-sandbox.py` and
+`sandbox-port-mapping.py`:
+
+- an HTTP service in sandbox B reached from sandbox A through CubeProxy Host
+  routing (`curl --resolve` pins `<port>-<sandboxID>.<domain>` to the proxy
+  node IP, so no wildcard DNS is needed inside the sandbox);
+- the same path with B created `allow_public_traffic=False`: no token gets
+  HTTP 403, B's traffic access token gets 200;
+- node host-port mapping: B is created from a module-provisioned template
+  exposing the service port (same pattern as `test_mask_request_host.py`),
+  the `hostIP:hostPort` endpoint is discovered via CubeMaster's info API
+  (`X-Cube-Caller-Host-IP` forces `host_port` mode), and A is created with
+  `allow_out` for the node IP so the case also holds when the node IP falls
+  inside the built-in always-denied private ranges;
+- egress policy applied to hairpin traffic: a deny-all A is rejected when
+  curling `nodeIP:hostPort`.
+
+The host-port mapping cases need a reachable CubeMaster (`CUBEMASTER_URL`,
+defaulting to the `CUBE_API_URL` host on port 8089). All cases are
+scheduler-placement independent: same-node pairs exercise the in-software
+hairpin loopback, cross-node pairs traverse the wire, and both satisfy the
+same assertions.
+
 `cases/lifecycle/test_pause_resume_network.py` covers the same create-time
 policies after an SDK pause + connect resume:
 
