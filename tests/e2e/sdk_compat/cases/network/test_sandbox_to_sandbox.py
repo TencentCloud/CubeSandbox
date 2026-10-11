@@ -20,7 +20,12 @@ Pytest counterparts of the quickstart demos
 - Egress policy is not bypassed by hairpin: a deny-all sandbox A is rejected
   when curling ``nodeIP:hostPort``.
 
-All cases are scheduler-placement independent and need no public internet.
+The host-port mapping cases are scheduler-placement independent (same-node
+hairpin and cross-node wire paths satisfy the same assertions). The CubeProxy
+cases additionally rely on same-node placement: cross-node, CubeProxy can
+only reach ports declared via the template's `--expose-port`
+(CubeProxy/lua/sandbox_backend.lua), while SERVICE_PORT is deliberately not
+declared on the default template.
 """
 
 from __future__ import annotations

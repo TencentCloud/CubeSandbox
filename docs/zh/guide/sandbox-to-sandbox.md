@@ -2,7 +2,10 @@
 
 一个沙箱访问另一个沙箱中的服务有两条数据面路径：**CubeProxy Host 路由**
 （与公网 URL 相同的入口）和**母机端口映射**（CubeVS eBPF DNAT）。
-两条路径都不需要 `*.cube.app` 的 DNS，沙箱内只要有节点 IP 即可。
+两条路径都通过直接指定节点 IP 来避免域名解析：方式一用 `curl --resolve`
+把 `<port>-<sandboxID>.cube.app` 钉到 CubeProxy 节点 IP（Host 头照常携带，
+路由不受影响），方式二的端点本身就是 `节点IP:hostPort`。因此沙箱内无需
+为 `*.cube.app` 配置 DNS，能访问节点 IP 即可。
 
 ```text
 方式一：CubeProxy Host 路由
@@ -23,14 +26,14 @@
 | 协议 | 仅 HTTP / HTTPS / gRPC（L7，按 Host 头路由） | 任意 TCP 协议（L4 DNAT） |
 | 数据面路径 | 经 CubeProxy 转发，多一跳代理 | eBPF DNAT 直连沙箱，无代理开销 |
 | 入口鉴权 | 支持 `allow_public_traffic=False` 的 per-sandbox token | 不支持 token，由网络策略与 expose-port 控制暴露面 |
-| 服务端口的来源 | 任意端口，URL 里的 `<port>` 前缀指定 | 仅限模板 `--expose-port` 声明的端口 |
+| 服务端口的来源 | URL 的 `<port>` 前缀指定 B 的容器端口 | info API 查询 B 的容器端口对应的 `hostIP:hostPort` |
 | 端点稳定性 | 域名格式固定，暂停/恢复后不变 | hostIP:hostPort 可能在暂停/恢复后改变（见下文） |
 | 沙箱内 DNS | 不需要（`--resolve` 钉到 proxy IP） | 不需要（直接用节点 IP） |
 
 典型场景：
 
 - **方式一**：沙箱内 Agent 调用另一个沙箱托管的 HTTP API / gRPC 服务；
-  需要复用 CubeProxy 的 token 鉴权；服务端口不固定或由镜像决定。
+  需要复用 CubeProxy 的 token 鉴权；希望端点 URL 稳定、免去查询 hostPort。
 - **方式二**：沙箱间跑任意 TCP 协议（数据库、消息队列、自定义二进制
   协议）；对时延敏感、想绕过代理；端口可在模板中预先声明。
 
@@ -44,24 +47,29 @@ curl -sS --resolve 8080-<sandboxID-B>.cube.app:80:<proxy节点IP> \
      http://8080-<sandboxID-B>.cube.app/
 ```
 
-### 模板构建
+### 模板构建：声明服务端口
 
-方式一对模板**没有特殊要求**：CubeProxy 按 URL 中的 `<port>` 前缀转发到
-沙箱内任意端口，不需要 `--expose-port` 声明。使用
-[快速入门](./quickstart.md)中的标准模板即可：
+方式一的服务端口也应通过模板 `--expose-port` 声明（与方式二相同）——
+这样调用方只需在 Host 头里指定 B 的容器端口，**无需感知是否与 B 同
+节点**：同节点时 CubeProxy 直接拨 `sandboxIP:容器端口`；跨节点时经该端口
+对应的 `hostIP:hostPort` 映射进入 B（映射只覆盖已声明端口，未声明的端口
+跨节点返回 404）。
+
+在标准模板基础上追加服务端口即可（以 8080 为例）：
 
 ```bash
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
-  --expose-port 49999 \
-  --expose-port 49983 \
+  --expose-port 49999 \   # code interpreter（sandbox-code 默认）
+  --expose-port 49983 \   # envd（sandbox-code 默认）
+  --expose-port 8080  \   # 你的服务端口
   --probe 49999
 ```
 
-（这里的两个 `--expose-port` 是 `sandbox-code` 镜像自身 code
-interpreter / envd 的端口，与方式一的路由无关；方式一下 B 的服务可以
-监听任意端口。）
+> 实现细节：同节点时 CubeProxy 的同机直连不检查端口映射，未声明的端口
+> 也能访问——但这是宽松行为，A、B 一旦被调度到不同节点就会 404，
+> 不应依赖。
 
 特点：
 
@@ -75,6 +83,7 @@ interpreter / envd 的端口，与方式一的路由无关；方式一下 B 的�
 - **仅支持 L7 协议**：HTTP / HTTPS / gRPC（gRPC 基于 HTTP/2，可经 Host
   路由）。任意 TCP/UDP 服务（如数据库、Redis、自定义协议）无法用此方式，
   请改用方式二。
+- 服务端口需经模板 `--expose-port` 声明（见上文"模板构建"）。
 
 ## 方式二：母机端口映射（hostIP:hostPort）
 
@@ -135,10 +144,7 @@ curl -sS http://<节点IP>:<hostPort>/
 
 A、B 同节点时，沙箱 A 的报文在 `from_cube` 中先做 SNAT，再由软件环回进
 节点网卡 ingress 触发 DNAT —— 不依赖网卡/交换机 hairpin；跨节点（A、B 在
-不同节点）流量经物理链路到达同一 ingress 路径。注意：
-
-- 从**母机本机** curl（127.0.0.1 或节点 IP）必然失败 —— 本机流量不经过
-  网卡 ingress。母机上请改用 `tap_ip` 端点或 CubeProxy。
+不同节点）流量经物理链路到达同一 ingress 路径。
 
 特点：
 
