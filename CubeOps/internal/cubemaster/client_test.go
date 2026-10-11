@@ -6,6 +6,7 @@ package cubemaster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -123,6 +124,60 @@ func TestClient_GetSandbox_HTTPError(t *testing.T) {
 	}
 	if !cmErr.IsNotFound() {
 		t.Errorf("expected IsNotFound, got RetCode=%d", cmErr.RetCode)
+	}
+}
+
+// TestClient_CreateSandbox_HTTPStatusReturnsHTTPError pins the one place an
+// *HTTPError is constructed: a >= 400 response must come back typed, with Status
+// and Body intact, because callers classify it from the body. If this path went
+// back to an opaque error, or dropped the body, every consumer-side test would
+// still pass — they build HTTPError by hand — while a real HTTP-status not-found
+// quietly stopped being recognised. The message must also stay byte-identical to
+// the fmt.Errorf it replaced, so logs and operator greps keep matching.
+func TestClient_CreateSandbox_HTTPStatusReturnsHTTPError(t *testing.T) {
+	const envelope = `{"ret":{"ret_code":130404,"ret_msg":"failed to get template param from store: template not found"}}`
+	tests := []struct {
+		name         string
+		status       int
+		body         string
+		wantNotFound bool
+	}{
+		{"404 carrying a not-found envelope", http.StatusNotFound, envelope, true},
+		{"400 carrying a not-found envelope", http.StatusBadRequest, envelope, true},
+		{"opaque route 404", http.StatusNotFound, "404 page not found", false},
+		{"5xx carrying a not-found envelope", http.StatusServiceUnavailable, envelope, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer srv.Close()
+
+			_, err := New(srv.URL).CreateSandbox(context.Background(), map[string]string{"name": "x"})
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) {
+				t.Fatalf("expected *HTTPError, got %T: %v", err, err)
+			}
+			if httpErr.Status != tt.status || httpErr.Body != tt.body {
+				t.Errorf("Status/Body = %d/%q, want %d/%q", httpErr.Status, httpErr.Body, tt.status, tt.body)
+			}
+			if want := fmt.Sprintf("cubemaster returned %d: %s", tt.status, tt.body); err.Error() != want {
+				t.Errorf("Error() = %q, want %q", err.Error(), want)
+			}
+			if got := httpErr.IsNotFound(); got != tt.wantNotFound {
+				t.Errorf("IsNotFound() = %v, want %v", got, tt.wantNotFound)
+			}
+			// Under a non-5xx status the envelope must be read the same way the
+			// 200-body shape is, so the two error types cannot drift apart.
+			if tt.status < http.StatusInternalServerError && tt.body == envelope {
+				if cm := (&CMError{RetCode: 130404}); httpErr.IsNotFound() != cm.IsNotFound() {
+					t.Errorf("HTTPError.IsNotFound() = %v disagrees with CMError.IsNotFound() = %v on the same envelope",
+						httpErr.IsNotFound(), cm.IsNotFound())
+				}
+			}
+		})
 	}
 }
 

@@ -489,6 +489,11 @@ func (s *Store) ListAgentTemplates(ctx context.Context, limit, offset int) ([]Ag
 		tmpl.CreatedAt = nullStringPtr(created)
 		templates = append(templates, tmpl)
 	}
+	// An aborted iteration must not read as an empty registry: the default
+	// template selection treats an empty listing as "nothing is registered".
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
 	return templates, nil
 }
 
@@ -510,6 +515,49 @@ func (s *Store) GetAgentTemplate(ctx context.Context, templateID string) (*Agent
 		&tmpl.Recommended, &created,
 	); err != nil {
 		return nil, nil // not found
+	}
+	tmpl.PersistenceMode = nullStringPtr(persistenceMode)
+	tmpl.CreatedAt = nullStringPtr(created)
+	return &tmpl, nil
+}
+
+// GetRecommendedAgentTemplate returns the most recently registered template
+// flagged recommended, or nil when none is flagged.
+//
+// The flag is set only through PATCH /agenthub/templates/{templateID}
+// (AgentHubHandler.UpdateTemplate, which the Dashboard's per-template toggle
+// calls). Neither registration path writes it — RegisterMarketTemplate omits
+// the column and UpsertTemplateSQL hardcodes it false — so an install has no
+// recommended template until an operator marks one.
+//
+// created_at is selected raw, like ListAgentTemplates and GetAgentTemplate, so
+// the three return it in the same shape. That is safe on PostgreSQL too:
+// database/sql formats a time.Time into a *string destination as RFC 3339.
+// formatTimestamp is not a neutral substitute there — for this timestamp
+// without time zone column its "AT TIME ZONE 'UTC'" renders in the session time
+// zone, so a server not set to UTC gets a shifted value still labelled Z.
+func (s *Store) GetRecommendedAgentTemplate(ctx context.Context) (*AgentTemplate, error) {
+	row := s.db.WithContext(ctx).Raw(
+		`SELECT template_id, name, source_agent_id, source_snapshot_id,
+		        source_sandbox_id, model, version, persistence_mode,
+		        recommended, created_at
+		 FROM t_agenthub_template
+		 WHERE recommended = ? AND deleted_at IS NULL
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		true,
+	).Row()
+	var tmpl AgentTemplate
+	var persistenceMode, created sql.NullString
+	if err := row.Scan(
+		&tmpl.TemplateID, &tmpl.Name, &tmpl.SourceAgentID, &tmpl.SourceSnapshotID,
+		&tmpl.SourceSandboxID, &tmpl.Model, &tmpl.Version, &persistenceMode,
+		&tmpl.Recommended, &created,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get recommended template: %w", err)
 	}
 	tmpl.PersistenceMode = nullStringPtr(persistenceMode)
 	tmpl.CreatedAt = nullStringPtr(created)

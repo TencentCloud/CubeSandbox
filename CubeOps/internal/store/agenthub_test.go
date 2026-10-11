@@ -255,3 +255,91 @@ func TestStore_AgentTemplate(t *testing.T) {
 		t.Error("GetAgentTemplate after delete should return nil")
 	}
 }
+
+// TestStore_GetRecommendedAgentTemplate covers the query AgentHub uses to pick
+// a default template: nothing recommended by default (registration never sets
+// the flag), the marked row once PATCH sets it — even when a newer unmarked
+// one exists — the newest one when several are marked, and no resurrection
+// after a soft delete.
+func TestStore_GetRecommendedAgentTemplate(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+	s := env.store
+	ctx := context.Background()
+
+	// Seed through UpsertTemplateSQL, the write PublishTemplate actually uses,
+	// so the first assertion pins that path rather than the column default: if
+	// publishing ever started marking templates recommended, it fails here. The
+	// market path's INSERT lives in the handler and is not covered by this test.
+	insert := func(id string) {
+		t.Helper()
+		if err := s.DB().WithContext(ctx).Exec(store.UpsertTemplateSQL(),
+			id, id, "agent-src", "snap-src", "sb-src", "deepseek-v4", "1.0", nil,
+		).Error; err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("tpl-rec-old")
+	insert("tpl-rec-new")
+
+	// Publishing does not set the flag, so nothing is recommended yet.
+	got, err := s.GetRecommendedAgentTemplate(ctx)
+	if err != nil {
+		t.Fatalf("GetRecommendedAgentTemplate: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got %q, want nil — publishing must not mark a template recommended", got.TemplateID)
+	}
+
+	// Mark the older row, the way PATCH /agenthub/templates/{id} does. It must
+	// win over the newer, unmarked one.
+	if err := s.DB().WithContext(ctx).Exec(
+		`UPDATE t_agenthub_template SET recommended = ? WHERE template_id = ?`, true, "tpl-rec-old",
+	).Error; err != nil {
+		t.Fatalf("mark recommended: %v", err)
+	}
+	got, err = s.GetRecommendedAgentTemplate(ctx)
+	if err != nil {
+		t.Fatalf("GetRecommendedAgentTemplate: %v", err)
+	}
+	if got == nil || got.TemplateID != "tpl-rec-old" {
+		t.Fatalf("got %v, want tpl-rec-old", got)
+	}
+	if !got.Recommended {
+		t.Error("Recommended = false on the row returned by the recommended query")
+	}
+
+	// Nothing stops an operator marking several, since the toggle is per
+	// template and clears nothing else. With more than one marked, the ORDER BY
+	// decides — the newest wins, and with both rows written in the same second
+	// it is the id tiebreaker that settles it.
+	if err := s.DB().WithContext(ctx).Exec(
+		`UPDATE t_agenthub_template SET recommended = ? WHERE template_id = ?`, true, "tpl-rec-new",
+	).Error; err != nil {
+		t.Fatalf("mark second recommended: %v", err)
+	}
+	got, err = s.GetRecommendedAgentTemplate(ctx)
+	if err != nil {
+		t.Fatalf("GetRecommendedAgentTemplate: %v", err)
+	}
+	if got == nil || got.TemplateID != "tpl-rec-new" {
+		t.Fatalf("got %v, want tpl-rec-new — the newest of several marked rows must win", got)
+	}
+	if err := s.DB().WithContext(ctx).Exec(
+		`UPDATE t_agenthub_template SET recommended = ? WHERE template_id = ?`, false, "tpl-rec-new",
+	).Error; err != nil {
+		t.Fatalf("unmark second recommended: %v", err)
+	}
+
+	// A soft-deleted recommendation must not come back.
+	if err := s.DeleteAgentTemplate(ctx, "tpl-rec-old"); err != nil {
+		t.Fatalf("DeleteAgentTemplate: %v", err)
+	}
+	got, err = s.GetRecommendedAgentTemplate(ctx)
+	if err != nil {
+		t.Fatalf("GetRecommendedAgentTemplate: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %q after soft delete, want nil", got.TemplateID)
+	}
+}
