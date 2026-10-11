@@ -2,20 +2,54 @@
 
 One sandbox can reach a service inside another sandbox over two data-plane
 paths: **CubeProxy Host routing** (the same ingress as the public URL) and
-the **node host-port mapping** (CubeVS eBPF DNAT). Both address node IPs
-directly and never resolve the `*.cube.app` wildcard domain: option 1 pins
-`<port>-<sandboxID>.cube.app` to the CubeProxy node IP with
-`curl --resolve` (the Host header still carries the name, so routing is
-unaffected), and option 2's endpoint is a plain `nodeIP:hostPort`. No DNS
-for `*.cube.app` is needed inside the sandbox — reaching the node IP is
-enough.
+the **node host-port mapping** (CubeVS eBPF DNAT). Option 1 names the target
+sandbox ID and port in the HTTP Host header (`<port>-<sandboxID>.cube.app`)
+and CubeProxy routes and proxies the request to the target sandbox; option 2
+accesses the target sandbox's node IP and mapped port directly —
+`nodeIP:hostPort`.
+
+Option 1 data flow (CubeProxy on a different machine from the sandboxes):
 
 ```text
-Option 1: CubeProxy Host routing
-  sandbox A ──► CubeProxy :80 ── Host: <port>-<sandboxID-B>.cube.app ──► service in B
+  source sandbox A       CubeProxy node              target node
+  (source node)          CubeProxy :80               primary NIC ingress
+     │                       │                            │
+     │  ① Host: 8080-B.cube.app                          │
+     │    (--resolve pins the CubeProxy node IP)          │
+     │──────────────────────►│                            │
+     │                       │  ② hostIP:hostPort         │
+     │                       │───────────────────────────►│ from_world DNAT
+     │                       │                            │ to sandboxIP:8080
+     │                       │                            │──► target sandbox B :8080
+```
 
-Option 2: Node host-port mapping (hostIP:hostPort)
-  sandbox A ──► nodeIP:hostPort ── from_world eBPF DNAT (NIC ingress) ──► service in B
+Option 2 data flow — same node (source node = target node):
+
+```text
+  source sandbox A      from_cube                  primary NIC ingress
+     │                     │                            │
+     │ ① nodeIP:hostPort   │                            │
+     │────────────────────►│ ② SNAT, then software      │
+     │                     │    loopback: bpf_redirect  │
+     │                     │    (BPF_F_INGRESS)         │
+     │                     │───────────────────────────►│ from_world DNAT
+     │                     │                            │ to sandboxIP:8080
+     │                     │                            │──► target sandbox B :8080
+
+  Entire path stays on one node; no NIC/switch hairpinning required.
+```
+
+Option 2 data flow — cross-node:
+
+```text
+  source sandbox A      from_cube                  target node
+  (source node)         (source node)              primary NIC ingress
+     │                     │                            │
+     │ ① nodeIP:hostPort   │                            │
+     │────────────────────►│ ② SNAT, out the physical   │
+     │                     │    NIC ════════════════════►│ from_world DNAT
+     │                     │       (physical link)      │ to sandboxIP:8080
+     │                     │                            │──► target sandbox B :8080
 ```
 
 Runnable end-to-end examples live in
