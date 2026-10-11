@@ -9,6 +9,9 @@
 /* https://elixir.bootlin.com/linux/v5.4.222/source/include/uapi/linux/pkt_cls.h#L35 */
 #define TC_ACT_SHOT			2
 
+/* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/pkt_cls.h#L40 */
+#define TC_ACT_REDIRECT			7
+
 /* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/if_ether.h#L52 */
 #define ETH_P_IP			0x0800	/* Internet Protocol packet */
 /* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/if_ether.h#L54 */
