@@ -23,11 +23,13 @@ How it works:
     of running until it closes on its own. That is what makes revocation take
     effect rather than merely apply to future connections.
 
-This script walks four scenarios:
+This script walks five scenarios:
     1. IP allow list — grant one, confirm another stays blocked, revoke.
     2. A live connection carried across a revoking update, which gets reset.
     3. Domain allow list — grant one, then switch the policy to another.
-    4. L7 rules — start intercepting a host mid-run, with no restart.
+    4. Revoking a domain, seen from the address it taught: the learned entry
+       goes with the rule instead of lingering until its DNS TTL expires.
+    5. L7 rules — start intercepting a host mid-run, with no restart.
 
 Run:
     cp .env.example .env   # fill in values
@@ -102,14 +104,28 @@ except OSError as exc:
 """
 
 
-def tcp_reachable(sandbox: Sandbox, ip: str) -> bool:
-    """Whether a fresh TCP connection to ip:PROBE_PORT succeeds."""
+def tcp_reachable(sandbox: Sandbox, ip: str, port: int | None = None) -> bool:
+    """Whether a fresh TCP connection to ip:port succeeds; port defaults to PROBE_PORT."""
     result = sandbox.commands.run(
-        f"timeout 5 bash -c '</dev/tcp/{ip}/{PROBE_PORT}' "
+        f"timeout 5 bash -c '</dev/tcp/{ip}/{port or PROBE_PORT}' "
         f"&& echo REACHABLE || echo BLOCKED",
         timeout=20,
     )
     return "REACHABLE" in result.stdout
+
+
+def resolve_ipv4(sandbox: Sandbox, domain: str) -> str:
+    """First IPv4 address the guest resolves for domain, or "" when it cannot.
+
+    Used to aim a probe at the address a domain rule taught, which is the only
+    way to observe that revoking the rule retires that address rather than
+    leaving it usable until its DNS TTL runs out.
+    """
+    result = sandbox.commands.run(
+        f"getent ahostsv4 {domain} | awk '{{print $1; exit}}'",
+        timeout=20,
+    )
+    return result.stdout.strip()
 
 
 def https_status(sandbox: Sandbox, domain: str) -> str:
@@ -225,7 +241,31 @@ def main() -> None:
         print(f"\nswitched the allow list to {OTHER_DOMAIN}")
         print(f"  https://{OTHER_DOMAIN} -> {https_status(sandbox, OTHER_DOMAIN)}   (expect 200)")
 
-        # --- 4. L7 rules ------------------------------------------------------
+        # --- 4. Revoking a domain retires the addresses it taught -------------
+        # A domain rule does not filter by name at connect time: DNS replies are
+        # learned, and the addresses they carry become allow entries stamped with
+        # the record's TTL. So "the domain is no longer allowed" and "the address
+        # it resolved to is no longer reachable" are two different claims, and
+        # only the second one matters to a caller who wants access gone now.
+        #
+        # Probing the resolved address rather than the domain is what tells them
+        # apart. The TTL floor is 300s, so a learned entry left behind would keep
+        # working for five minutes after the rule went away.
+        sandbox.update_network(
+            network={"allow_out": [GRANTED_DOMAIN], "allow_internet_access": False}
+        )
+        learned_ip = resolve_ipv4(sandbox, GRANTED_DOMAIN)
+        if not learned_ip:
+            print(f"\ncould not resolve {GRANTED_DOMAIN}; skipping the revocation check")
+        else:
+            print(f"\ngranted {GRANTED_DOMAIN}, which resolved to {learned_ip}")
+            print(f"  {learned_ip} reachable: {tcp_reachable(sandbox, learned_ip, 443)}   (expect True)")
+
+            sandbox.update_network(network={"allow_internet_access": False})
+            print(f"\nrevoked {GRANTED_DOMAIN}")
+            print(f"  {learned_ip} reachable: {tcp_reachable(sandbox, learned_ip, 443)}   (expect False, immediately)")
+
+        # --- 5. L7 rules ------------------------------------------------------
         # Start intercepting a host mid-run. A rule's host is allowed implicitly,
         # and once any rule exists for it the host is L7 default-deny: only what
         # a rule matches gets through, everything else is refused by the proxy.

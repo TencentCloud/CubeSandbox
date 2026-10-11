@@ -27,10 +27,10 @@ var alwaysDeniedSandboxEntries = mustBuildDenyOutPolicyEntries(alwaysDeniedSandb
 type allowOutPolicyEntry struct {
 	key   lpmKey
 	flags uint8
-	// ports is inherited by dns_learn_response_ip into net_policy_value_v3.ports
-	// when a domain rule with an explicit (port, scheme) set is learned into
-	// allow_out_v3. Empty for legacy port-agnostic rules (the datapath falls
-	// back to the default 80/443 set in that case).
+	// ports holds the (port, scheme) tuples this entry expands into, one exact
+	// (ip, port)/48 row each — see expandAllowOutEntry. Empty means the default
+	// {80/http, 443/https} set. The port lives in the LPM key, not in the
+	// value: net_policy_value_v3 carries only flags, scheme and expiry.
 	ports  []l7PortEntry
 	source string
 }
@@ -206,7 +206,15 @@ func cleanupNetPolicy(ifindex uint32) error {
 // Ready-pool reuse must keep the HashOfMaps outer keys (and reinstall default
 // deny afterwards). Outer keys are deleted only when the TAP netdev itself is
 // destroyed — see DeleteTAPDevicePolicyMaps and GCStaleNetPolicyMaps.
+//
+// The manager is tombstoned first and the barrier is held across the flushes.
+// A late DNS event then becomes a no-op instead of re-learning rows into a TAP
+// that is going away, and no replacement manager can be created (and adopt the
+// half-flushed maps as its mirror) until cleanup finishes.
 func CleanupTAPDevicePolicy(ifindex uint32) error {
+	finish := beginRemoveNetPolicyManager(ifindex)
+	defer finish()
+
 	if err := cleanupNetPolicy(ifindex); err != nil {
 		return err
 	}
@@ -224,7 +232,16 @@ var netPolicyOuterMaps = []string{
 
 // DeleteTAPDevicePolicyMaps removes HashOfMaps outer entries for a destroyed TAP.
 // Call this only after the host netdev is gone; Ready-pool cleanup must not use it.
+//
+// The removal barrier is held across the outer deletes. policyInnerCache has no
+// per-key lock, so without the barrier a concurrent learn could re-cache an
+// inner FD in the window between deleteCachedInnerAndOuter's cache eviction and
+// its outer delete. That stale FD would survive the teardown and a later
+// ifindex reuse would write policy into a map the datapath no longer consults.
 func DeleteTAPDevicePolicyMaps(ifindex uint32) error {
+	finish := beginRemoveNetPolicyManager(ifindex)
+	defer finish()
+
 	var errs []error
 	for _, name := range netPolicyOuterMaps {
 		outer, err := loadPinnedMap(name)
@@ -303,7 +320,7 @@ func gcStaleOuterKeys(mapName string, keep map[uint32]struct{}, stillPresent fun
 		if stillPresent != nil && stillPresent(ifindex) {
 			continue
 		}
-		if err := deleteCachedInnerAndOuter(outer, mapName, ifindex); err != nil {
+		if err := deleteStaleOuterKey(outer, mapName, ifindex); err != nil {
 			errs = append(errs, fmt.Errorf("delete stale %s[%d]: %w", mapName, ifindex, err))
 			continue
 		}
@@ -314,6 +331,20 @@ func gcStaleOuterKeys(mapName string, keep map[uint32]struct{}, stillPresent fun
 		}
 	}
 	return deleted, errors.Join(errs...)
+}
+
+// deleteStaleOuterKey drops one GC'd ifindex's outer key, its cached inner FD
+// and its policy snapshot, under the removal barrier.
+//
+// GC is designed to race with sandbox creation (see the onConflict callback),
+// so the barrier matters twice here: it keeps the snapshot removal from
+// erasing an index a racing create just installed, and it keeps a concurrent
+// learn out of the cache-eviction window described on
+// DeleteTAPDevicePolicyMaps.
+func deleteStaleOuterKey(outer *ebpf.Map, mapName string, ifindex uint32) error {
+	finish := beginRemoveNetPolicyManager(ifindex)
+	defer finish()
+	return deleteCachedInnerAndOuter(outer, mapName, ifindex)
 }
 
 func cleanupDNSPolicyFlags(ifindex uint32) error {
@@ -420,8 +451,8 @@ func htonsPort(p uint16) uint16 {
 
 // expandDefaultPortSet returns the (port, scheme) tuples applied when a user
 // rule omits both port and scheme: the classic {80/http, 443/https}. Kept as a
-// helper so the datapath fallback in mvmtap.bpf.c (port_count==0 branch) and
-// the userspace expansion stay in lockstep.
+// helper so the static and the DNS-learned expansions agree on it — both reach
+// it through expandAllowOutEntry.
 func expandDefaultPortSet() []l7PortEntry {
 	return []l7PortEntry{
 		{Port: htonsPort(80), Scheme: L7SchemeHTTP},
@@ -587,8 +618,8 @@ func buildL7Plan(targets []L7Target) (l7CIDRs []allowOutPolicyEntry,
 					maxL7PortsPerHost, host)
 			}
 		}
-		// ports == nil for pure-default hosts: signal "use default set" to the
-		// datapath (port_count = 0).
+		// ports == nil for pure-default hosts: signal "use default set", which
+		// expandAllowOutEntry resolves to {80/http, 443/https}.
 
 		kind, cerr := classifyL7Target(host)
 		if cerr != nil {
@@ -736,10 +767,10 @@ func l7DNSDomainNames(rules []dnsAllowRule) []string {
 // mergeAllowOutWithL7 combines the non-L7 base entries with the L7 entries.
 // When the same LPM key appears in both, the L7 version's flags and port set
 // win, and the merged entry is also marked netPolicyFlagL3Allowed so
-// populateAllowOutInnerMap writes the plain /32 any-port entry alongside the
-// L7 /48 entries — otherwise an L7 rule would silently narrow a same-host
-// plain allow_out to only the rule's ports. (Domain hosts get the same
-// treatment in mergeDNSAllowRules.)
+// expandAllowOutEntry emits the plain /32 any-port row alongside the L7 /48
+// rows — otherwise an L7 rule would silently narrow a same-host plain
+// allow_out to only the rule's ports. (Domain hosts get the same treatment in
+// mergeDNSAllowRules.)
 func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
 	if len(l7) == 0 {
 		return base
@@ -790,30 +821,6 @@ func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
 	return out
 }
 
-// l7DomainHasPlainCover reports whether an L7 rule host is covered by a plain
-// (non-L7) allow_out domain — either an exact same-host entry or a
-// leading-"*." wildcard whose base the host is a subdomain of. Matching follows
-// the same semantics as makeDNSAllowRule / domain_match: case-insensitive, a
-// trailing dot is ignored, and "*.base" covers any-depth subdomains of base but
-// not the apex itself.
-func l7DomainHasPlainCover(host string, plainDomains []string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, raw := range plainDomains {
-		d := strings.ToLower(strings.TrimSuffix(raw, "."))
-		if strings.HasPrefix(d, "*.") {
-			base := d[2:]
-			if h != base && strings.HasSuffix(h, "."+base) {
-				return true
-			}
-			continue
-		}
-		if h == d {
-			return true
-		}
-	}
-	return false
-}
-
 // markL3AllowedByPlainCover sets netPolicyFlagL3Allowed on each L7 dns_allow
 // rule whose host is also covered by a plain (non-L7) allow_out domain. This
 // is what lets a host keep its plain /32 L3 access (SNAT on non-rule ports)
@@ -821,7 +828,12 @@ func l7DomainHasPlainCover(host string, plainDomains []string) bool {
 // appears verbatim in allow_out and when a leading-"*." wildcard covers it
 // (the exact rule otherwise shadows the wildcard in the DNS LPM match, which
 // would silently deny the host's non-rule ports under deny-all).
+//
+// Cover detection runs through the same domainRuleSet the DNS learner uses, so
+// "exact vs *.base, case-insensitive, trailing dot ignored, apex excluded" has
+// exactly one implementation in the package.
 func markL3AllowedByPlainCover(rules []dnsAllowRule, plainDomains []string) {
+	var cover *domainRuleSet
 	for i := range rules {
 		if rules[i].value.Flags&uint8(netPolicyFlagL7Required) == 0 {
 			continue
@@ -829,7 +841,10 @@ func markL3AllowedByPlainCover(rules []dnsAllowRule, plainDomains []string) {
 		if rules[i].value.Flags&uint8(netPolicyFlagL3Allowed) != 0 {
 			continue
 		}
-		if l7DomainHasPlainCover(rules[i].domain, plainDomains) {
+		if cover == nil {
+			cover = buildPlainDomainRuleSet(plainDomains)
+		}
+		if cover.lookup(rules[i].domain) != nil {
 			rules[i].value.Flags |= uint8(netPolicyFlagL3Allowed)
 		}
 	}
@@ -1105,45 +1120,28 @@ func populateDenyOutInner(inner *ebpf.Map, entries []denyOutPolicyEntry) error {
 	return nil
 }
 
-// populateAllowOutInnerMap inserts pre-parsed static allow_out_v3 entries.
-//
-// v3 carries the port in the LPM key, so an L7 entry (flags &
-// netPolicyFlagL7Required) is materialised as one exact (ip, port)/48 entry
-// per (port, scheme) tuple — a default port set expands to {80/http,
-// 443/https}. A plain allow is a single ip-only (or subnet) /32 entry
-// with scheme = NONE. When a static (ip, port) key already holds a
-// DNS-learned entry, the learned flags are merged in but the static (zero)
-// expiry wins — the entry becomes permanent. Keeping the learned TTL
-// instead would let the reaper delete the entry at the old TTL and
-// silently drop the static verdict; a later DNS refresh preserves the
-// static zero expiry (dns_response.h same-key rule).
-func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []allowOutPolicyEntry) error {
-	inner, err := acquireInnerMap(outerMap, ifindex, MapNameAllowOutV3, nil)
-	if err != nil {
-		return err
-	}
-	return populateAllowOutInner(inner, entries)
-}
-
 // allowOutRow is one inner-map row a plan entry occupies.
+//
+// There is deliberately no "merge with whatever is installed" marker here any
+// more. That existed because the BPF learner was a second, invisible writer of
+// the same keys, so the static path had to look the live map up before writing.
+// NetPolicyManager now computes the desired value from both sources
+// (computeEffective) and writes it outright.
 type allowOutRow struct {
 	key lpmKeyV3
 	val netPolicyValueV3
-	// mergeLearnedFlags marks the exact (ip, port)/48 rows an L7 rule owns,
-	// which are the only keys a DNS-learned entry can also land on. Plain
-	// any-port rows overwrite outright: nothing else writes that key, so
-	// merging there would just resurrect stale flags.
-	mergeLearnedFlags bool
 }
 
-// expandAllowOutEntry materialises the rows one plan entry occupies: an L7
-// entry becomes one exact (ip, port)/48 row per (port, scheme) tuple — an empty
-// port set means the default {80/http, 443/https} — plus, when the host is also
-// in plain allow_out (netPolicyFlagL3Allowed), the any-port row that keeps L3
+// expandAllowOutEntry materialises the rows one entry occupies: an L7 entry
+// becomes one exact (ip, port)/48 row per (port, scheme) tuple — an empty port
+// set means the default {80/http, 443/https} — plus, when the host is also in
+// plain allow_out (netPolicyFlagL3Allowed), the any-port row that keeps L3
 // access on every other port. A plain entry is a single any-port row.
 //
-// Shared by the populate and diff paths so the set of keys written can never
-// drift from the set of keys considered current.
+// Shared by the static and the DNS-learned paths (see learnedAllowOutRows), so
+// a learned row and a static row for the same host can never expand to
+// different key sets. This is the same shape the retired BPF helper
+// dns_learn_response_ip produced.
 func expandAllowOutEntry(entry allowOutPolicyEntry) []allowOutRow {
 	plainRow := func(flags uint8) allowOutRow {
 		return allowOutRow{
@@ -1162,9 +1160,8 @@ func expandAllowOutEntry(entry allowOutPolicyEntry) []allowOutRow {
 	rows := make([]allowOutRow, 0, len(ports)+1)
 	for _, p := range ports {
 		rows = append(rows, allowOutRow{
-			key:               lpmKeyV3{Prefixlen: 48, IP: entry.key.IP, Port: p.Port},
-			val:               netPolicyValueV3{Flags: entry.flags, Scheme: p.Scheme, KeyPrefixlen: 48},
-			mergeLearnedFlags: true,
+			key: lpmKeyV3{Prefixlen: 48, IP: entry.key.IP, Port: p.Port},
+			val: netPolicyValueV3{Flags: entry.flags, Scheme: p.Scheme, KeyPrefixlen: 48},
 		})
 	}
 	if entry.flags&netPolicyFlagL3Allowed != 0 {
@@ -1174,35 +1171,6 @@ func expandAllowOutEntry(entry allowOutPolicyEntry) []allowOutRow {
 		rows = append(rows, plainRow(entry.flags&^(netPolicyFlagL7Required|netPolicyFlagL3Allowed)))
 	}
 	return rows
-}
-
-func populateAllowOutInner(inner *ebpf.Map, entries []allowOutPolicyEntry) error {
-	for _, entry := range entries {
-		for _, row := range expandAllowOutEntry(entry) {
-			val := row.val
-			if row.mergeLearnedFlags {
-				var oldVal netPolicyValueV3
-				switch err := inner.Lookup(&row.key, &oldVal); {
-				case err == nil:
-					// LPM lookup is longest-prefix: only merge with an entry
-					// written under the EXACT same key, never with a shorter
-					// covering entry (whose flags would otherwise leak in).
-					// Flags only: the static (zero) expiry wins over a learned
-					// same-key entry, so the entry becomes permanent rather
-					// than ageing out at the old TTL.
-					if oldVal.KeyPrefixlen == uint8(row.key.Prefixlen) {
-						val.Flags |= oldVal.Flags
-					}
-				case !errors.Is(err, ebpf.ErrKeyNotExist):
-					return fmt.Errorf("inner map lookup failed: %w, cidr: %s", err, entry.source)
-				}
-			}
-			if err := inner.Update(&row.key, &val, ebpf.UpdateAny); err != nil {
-				return fmt.Errorf("inner map update failed: %w, cidr: %s", err, entry.source)
-			}
-		}
-	}
-	return nil
 }
 
 // netPolicyValueV3Expired reports whether a v3 allow entry is a dynamic
@@ -1216,151 +1184,48 @@ func netPolicyValueV3Expired(value netPolicyValueV3, now uint64) bool {
 // opts, then bumps the sandbox's policy generation so the datapath re-evaluates
 // established flows.
 //
-// It is the third apply mode alongside applyNetPolicy (additive, create path)
-// and replaceNetPolicy (flush + refill, recovery path). Neither fits a live
-// sandbox: flushing would blank the policy for as long as the refill takes, and
-// swapping the inner map would defeat the HashOfMaps inner cache and pay a
-// synchronize_rcu() on every update. So this diffs against what is installed
-// and issues only the required per-entry writes.
+// Create, recovery and update are the same operation — "install this plan" —
+// and all three route through NetPolicyManager.applyUpdate, which diffs the
+// desired state against its mirrors and issues only the required per-row
+// writes. Neither a flush-and-refill nor an inner-map swap is needed: the
+// former would blank the policy for as long as the refill takes, and the
+// latter would defeat the HashOfMaps inner cache and pay a synchronize_rcu().
 //
-// Two ordering rules:
+// The generation bump is last, and it belongs here rather than inside the
+// manager. A failure before it leaves established flows on their cached
+// verdict instead of judging them against a half-applied map, and because a
+// revoked flow is deleted outright, a premature bump could retire flows the
+// finished policy would have allowed. Keeping it out of the manager also means
+// the DNS-learning path structurally cannot reach it: a bump at DNS rates
+// would force every flow on the node to re-evaluate continuously.
 //
-//   - The generation bump is last. A failure before it leaves established flows
-//     on their cached verdict instead of judging them against a half-applied
-//     map — and because a revoked flow is deleted outright, a premature bump
-//     could retire flows the finished policy would have allowed.
-//   - Within each map, revocations land before additions. No intermediate state
-//     is then more permissive than both the old and the new policy.
-//
-// Nothing is rolled back on failure. The diff is computed from the live maps,
-// so replaying the same request converges; and the caller's durable state is
-// only written after this returns, so a restart re-applies the previous policy
-// in full.
+// Nothing is rolled back on failure. The diff is idempotent, so replaying the
+// same request converges; and the caller's durable state is only written after
+// this returns, so a restart re-applies the previous policy in full.
 func UpdateTAPDevicePolicy(ifindex uint32, opts MVMOptions) error {
-	// Validate the whole desired state before touching anything: a rejected
-	// plan must leave both the L3 maps and the caller's L7 push untouched.
-	plan, err := buildNetPolicyPlan(opts)
-	if err != nil {
-		return err
-	}
-
-	if err := syncAllowOutInner(ifindex, plan.allowOutEntries); err != nil {
-		return fmt.Errorf("sync %s failed: %w", MapNameAllowOutV3, err)
-	}
-	if err := syncDenyOutInner(ifindex, effectiveDenyOutEntriesForReplace(plan)); err != nil {
-		return fmt.Errorf("sync %s failed: %w", MapNameDenyOut, err)
-	}
-	if err := syncDNSAllowInner(ifindex, plan.dnsAllowRules); err != nil {
-		return fmt.Errorf("sync %s failed: %w", MapNameDNSAllowV2, err)
-	}
-	if err := setDNSPolicyFlags(ifindex, plan.dnsPolicyFlags); err != nil {
+	if err := applyPolicyPlan(ifindex, opts); err != nil {
 		return err
 	}
 	return bumpPolicyVersion(ifindex)
 }
 
-// syncAllowOutInner converges allow_out_v3 for one TAP on the desired entries.
-//
-// Only static rows are managed. DNS-learned rows (non-zero expiry) are left
-// exactly as they are: their lifetime belongs to the TTL and the reaper, and a
-// revoked domain rule stops producing new ones as soon as dns_allow_v2 is
-// synced. Removing a domain therefore takes effect for already-resolved IPs
-// only once they age out.
-func syncAllowOutInner(ifindex uint32, entries []allowOutPolicyEntry) error {
-	outer, err := loadPinnedMap(MapNameAllowOutV3)
+// applyPolicyPlan validates opts and installs the resulting plan through the
+// per-sandbox manager. Shared by every control-plane path; a rejected plan
+// must leave both the L3 maps and the caller's L7 push untouched, so the plan
+// is built before anything is written.
+func applyPolicyPlan(ifindex uint32, opts MVMOptions) error {
+	plan, err := buildNetPolicyPlan(opts)
 	if err != nil {
 		return err
 	}
-	defer outer.Close()
-
-	inner, err := acquireInnerMap(outer, ifindex, MapNameAllowOutV3, newInnerAllowOutMap)
+	mgr, err := GetNetPolicyManager(ifindex)
 	if err != nil {
 		return err
 	}
-
-	desired := make(map[lpmKeyV3]struct{}, len(entries))
-	for _, entry := range entries {
-		for _, row := range expandAllowOutEntry(entry) {
-			desired[row.key] = struct{}{}
-		}
+	if err := mgr.applyUpdate(plan); err != nil {
+		return fmt.Errorf("apply net policy failed: %w", err)
 	}
-
-	stale, err := staleKeys(inner, desired, func(v *netPolicyValueV3) bool {
-		return v.ExpiresAtNS == 0
-	})
-	if err != nil {
-		return err
-	}
-	if err := deleteKeys(inner, stale); err != nil {
-		return err
-	}
-	return populateAllowOutInner(inner, entries)
-}
-
-// syncDenyOutInner converges deny_out for one TAP. Every row is managed, so the
-// caller must pass the effective set including the always-denied private and
-// link-local ranges — otherwise an update would drop the invariant deny rules.
-func syncDenyOutInner(ifindex uint32, entries []denyOutPolicyEntry) error {
-	outer, err := loadPinnedMap(MapNameDenyOut)
-	if err != nil {
-		return err
-	}
-	defer outer.Close()
-
-	inner, err := acquireInnerMap(outer, ifindex, MapNameDenyOut, newInnerLPMMap)
-	if err != nil {
-		return err
-	}
-
-	desired := make(map[lpmKey]struct{}, len(entries))
-	for _, entry := range entries {
-		desired[entry.key] = struct{}{}
-	}
-
-	stale, err := staleKeys(inner, desired, func(*uint32) bool { return true })
-	if err != nil {
-		return err
-	}
-	if err := deleteKeys(inner, stale); err != nil {
-		return err
-	}
-	return populateDenyOutInner(inner, entries)
-}
-
-// staleKeys returns the managed keys currently in inner that desired no longer
-// covers. managed decides which rows this policy owns; rows it rejects are left
-// alone.
-//
-// Keys are collected first and deleted afterwards: deleting while iterating a
-// BPF hash map can make the cursor skip live entries.
-func staleKeys[K comparable, V any](inner *ebpf.Map, desired map[K]struct{}, managed func(*V) bool) ([]K, error) {
-	var (
-		key   K
-		value V
-		stale []K
-	)
-	iter := inner.Iterate()
-	for iter.Next(&key, &value) {
-		if !managed(&value) {
-			continue
-		}
-		if _, keep := desired[key]; !keep {
-			stale = append(stale, key)
-		}
-	}
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("inner map iterate failed: %w", err)
-	}
-	return stale, nil
-}
-
-func deleteKeys[K any](inner *ebpf.Map, keys []K) error {
-	for i := range keys {
-		if err := inner.Delete(&keys[i]); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("inner map delete failed: %w", err)
-		}
-	}
-	return nil
+	return setDNSPolicyFlags(ifindex, plan.dnsPolicyFlags)
 }
 
 // bumpPolicyVersion advances the sandbox's policy generation. Every established
@@ -1392,77 +1257,24 @@ func bumpPolicyVersion(ifindex uint32) error {
 //   - L7AllowOut IP/CIDR targets are inserted into allow_out_v3 with the L7 flag.
 //   - AllowOut domain targets are inserted into dns_allow_v2 inner map.
 //   - L7AllowOut domain targets are inserted into dns_allow_v2 with the L7 flag.
-//   - Default private/link-local DenyOut ranges are preloaded when a TAP enters
-//     the free pool. Replace paths replay them after flushing policy maps.
+//   - Default private/link-local DenyOut ranges are always part of the
+//     effective deny set, so a plan that names none still keeps them.
 //   - AllowInternetAccess=false: DenyOut is set to "0.0.0.0/0" (deny all).
+//
+// This is the sandbox-create path. It differs from UpdateTAPDevicePolicy only
+// in that it does not bump the policy generation: there are no established
+// flows to re-judge yet.
 func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
-	return applyNetPolicyWithMode(ifindex, opts, false)
+	return applyPolicyPlan(ifindex, opts)
 }
 
-// replaceNetPolicy replaces all configured egress policy for an ifindex.
-// It is used by TAP upsert/recovery paths so removed policy entries do not
-// survive a network-agent restart.
+// replaceNetPolicy replaces all configured egress policy for an ifindex. Used
+// by TAP upsert/recovery paths so policy entries the control plane dropped do
+// not survive a Cubelet restart.
+//
+// Identical to applyNetPolicy now that the manager owns the desired state: the
+// diff removes whatever the new plan no longer names, which is what the old
+// flush-then-refill was for — without its window of blanked policy.
 func replaceNetPolicy(ifindex uint32, opts MVMOptions) error {
-	return applyNetPolicyWithMode(ifindex, opts, true)
-}
-
-func applyNetPolicyWithMode(ifindex uint32, opts MVMOptions, replace bool) error {
-	plan, err := buildNetPolicyPlan(opts)
-	if err != nil {
-		return err
-	}
-
-	if replace || len(plan.allowOutEntries) > 0 {
-		allowOutMap, err := loadPinnedMap(MapNameAllowOutV3)
-		if err != nil {
-			return err
-		}
-		defer allowOutMap.Close()
-
-		inner, err := acquireInnerMap(allowOutMap, ifindex, MapNameAllowOutV3, newInnerAllowOutMap)
-		if err != nil {
-			return err
-		}
-		if replace {
-			if err := flushInnerEntries[lpmKeyV3, netPolicyValueV3](inner); err != nil {
-				return fmt.Errorf("flush %s failed: %w", MapNameAllowOutV3, err)
-			}
-		}
-		if err := populateAllowOutInner(inner, plan.allowOutEntries); err != nil {
-			return fmt.Errorf("populate %s failed: %w", MapNameAllowOutV3, err)
-		}
-	}
-	if err := applyDNSAllow(ifindex, plan.dnsAllowRules, replace); err != nil {
-		return fmt.Errorf("populate %s failed: %w", MapNameDNSAllowV2, err)
-	}
-
-	denyOutEntries := plan.denyOutEntries
-	if replace {
-		denyOutEntries = effectiveDenyOutEntriesForReplace(plan)
-	}
-	if replace || len(denyOutEntries) > 0 {
-		denyOutMap, err := loadPinnedMap(MapNameDenyOut)
-		if err != nil {
-			return err
-		}
-		defer denyOutMap.Close()
-
-		inner, err := acquireInnerMap(denyOutMap, ifindex, MapNameDenyOut, newInnerLPMMap)
-		if err != nil {
-			return err
-		}
-		if replace {
-			if err := flushInnerEntries[lpmKey, uint32](inner); err != nil {
-				return fmt.Errorf("flush %s failed: %w", MapNameDenyOut, err)
-			}
-		}
-		if err := populateDenyOutInner(inner, denyOutEntries); err != nil {
-			return fmt.Errorf("populate %s failed: %w", MapNameDenyOut, err)
-		}
-	}
-
-	if !replace && plan.dnsPolicyFlags == 0 {
-		return nil
-	}
-	return setDNSPolicyFlags(ifindex, plan.dnsPolicyFlags)
+	return applyPolicyPlan(ifindex, opts)
 }

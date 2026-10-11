@@ -169,14 +169,13 @@ type DNSQueryTrackDump struct {
 	ExpiresInNS int64  `json:"expires_in_ns"`
 	ExpiresIn   string `json:"expires_in"`
 	Expired     bool   `json:"expired"`
-	L7Required  bool   `json:"l7_required"`
-	L3Allowed   bool   `json:"l3_allowed"`
-	Flags       uint8  `json:"flags"`
-	// L7 port tuples copied verbatim from the matched dns_allow_value so the
-	// response handler can rebuild net_policy_value_v3 without a second
-	// dns_allow lookup.
-	PortCount uint8             `json:"port_count"`
-	Ports     []L7PortEntryDump `json:"ports,omitempty"`
+	// Flags records what the query matched in dns_allow_v2. It is diagnostic
+	// only: the response path just needs to know the query was tracked, and
+	// the user-space learner reads the matched rule's ports from its own
+	// domain index rather than from the pending query.
+	L7Required bool  `json:"l7_required"`
+	L3Allowed  bool  `json:"l3_allowed"`
+	Flags      uint8 `json:"flags"`
 }
 
 // L7PortEntryDump is the JSON-friendly view of one (port, scheme) tuple.
@@ -712,8 +711,6 @@ func dumpDNSQueryTrack(opts DumpOptions, now uint64) (any, error) {
 			L7Required:  value.Flags&uint8(netPolicyFlagL7Required) != 0,
 			L3Allowed:   value.Flags&uint8(netPolicyFlagL3Allowed) != 0,
 			Flags:       value.Flags,
-			PortCount:   value.PortCount,
-			Ports:       l7PortEntriesToDump(value.Ports[:], value.PortCount),
 		})
 	}
 	return entries, wrapIterErr(iter.Err(), MapNameDNSQueryTrack)
