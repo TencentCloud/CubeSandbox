@@ -33,6 +33,10 @@ NETWORK_L7_EGRESS = "network_l7_egress"
 NETWORK_NODE_LOCAL = "network_node_local"
 # Template CubeNetworkConfig merged with per-create network options.
 NETWORK_TEMPLATE_MERGE = "network_template_merge"
+# Sandbox-to-sandbox data plane: CubeProxy Host routing between sandboxes and
+# node host-port mapping (same-host hairpin included), with egress policy
+# enforced on the hairpin path.
+NETWORK_SANDBOX_TO_SANDBOX = "network_sandbox_to_sandbox"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 VOLUME_PLUGIN = "volume_plugin"
@@ -75,6 +79,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         NETWORK_L7_EGRESS,
         NETWORK_NODE_LOCAL,
         NETWORK_TEMPLATE_MERGE,
+        NETWORK_SANDBOX_TO_SANDBOX,
         NETWORK_DYNAMIC_UPDATE,
         PLATFORM_LIFECYCLE,
         HOST_MOUNT,

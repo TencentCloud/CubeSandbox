@@ -115,6 +115,7 @@ Capabilities (Cube-only unless noted):
 | `network_l7_egress` | CubeEgress inject / first-match / deny / TLS MITM / SNI·host |
 | `network_mask_request_host` | `mask_request_host` rewrite |
 | `network_template_merge` | Template `allow_out`/`deny_out` merged with create-time network |
+| `network_sandbox_to_sandbox` | Sandbox-to-sandbox access: CubeProxy Host routing, node host-port mapping (hairpin), egress policy on hairpin |
 
 L7 echo / header observation uses the public service **httpbun.com**
 (`SDK_E2E_L7_ECHO_HOST` to override). Mark those cases `requires_internet`.

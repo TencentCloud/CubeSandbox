@@ -146,6 +146,9 @@ hello cube
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
+| `sandbox-in-sandbox.py` | Control plane — inside sandbox A, use the `cubesandbox` SDK to `Sandbox.connect()` to sandbox B and run commands |
+| `sandbox-curl-sandbox.py` | Data plane — start an HTTP service in sandbox B, then `curl` it from sandbox A via CubeProxy Host routing |
+| `sandbox-port-mapping.py` | Host port mapping — `curl` B's service from sandbox A via the node-level `hostIP:hostPort` DNAT (template `--expose-port`) |
 
 ### exec_code.py — Run Python Code
 
@@ -271,6 +274,87 @@ requests.get(url)
 requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
 ```
 
+### Sandbox-to-Sandbox Access
+
+These scripts demonstrate how one sandbox talks to another. They create
+sandboxes A and B, then reach B from inside A — through the **control plane**
+(SDK), through **CubeProxy** (Host-header routing), and through the
+**node host-port mapping** (eBPF DNAT). For the mechanics of each option,
+how to choose, and the prerequisites and limits (egress policy,
+`allow_public_traffic` token, endpoint lifecycle), see the
+[sandbox-to-sandbox guide](../../docs/guide/sandbox-to-sandbox.md).
+
+```text
+sandbox-in-sandbox.py (control plane / SDK)
+
+  local script                sandbox A                    sandbox B
+      │                     ┌────────────────┐          ┌──────────────┐
+      ├─ Sandbox.create ───►│ pip install    │          │              │
+      ├─ Sandbox.create ────┼───────────────►│          │              │
+      │                     │ cubesandbox    │ connect  │              │
+      │                     │ Sandbox.connect├─────────►│ commands.run │
+      │                     └────────────────┘          └──────────────┘
+      │                          │ CubeAPI :3000 (create/connect)
+      │                          │ CubeProxy :80  (commands.run → envd)
+
+sandbox-curl-sandbox.py (data plane / HTTP)
+
+  sandbox A ── curl ──► CubeProxy :80 ── Host: <port>-<sandboxID-B>.cube.app ──► service in B
+```
+
+Script-specific environment variables:
+
+- `CUBE_INNER_API_URL` / `CUBE_PROXY_NODE_IP` — CubeAPI / CubeProxy addresses
+  as seen from inside the sandbox. By default a loopback host from `.env` is
+  rewritten to the node's egress IP (`127.0.0.1` inside a sandbox points at
+  the sandbox itself).
+- `CUBE_PIP_INDEX_URL` — pip index used by `sandbox-in-sandbox.py` inside A
+  (e.g. an internal mirror). Note pip runs inside the sandbox, so the guest
+  DNS must resolve the index host — guest DNS comes from the template's
+  `--dns` or the cubelet `default_dns_servers`; rebuild the template with
+  `--dns` if the default public resolver is unreachable in your lab.
+- `CUBE_SERVICE_PORT` — service port for `sandbox-port-mapping.py`
+  (default 8080); must be declared in the template's `--expose-port`.
+- `allow_public_traffic=False` on B works too — the curl example forwards
+  B's `traffic_access_token` automatically.
+
+```bash
+# A installs the cubesandbox SDK, connects to B, runs a command there
+python sandbox-in-sandbox.py
+
+# B serves HTTP on :8080, A curls it through CubeProxy
+python sandbox-curl-sandbox.py
+
+# B serves HTTP on an exposed port, A curls the node's hostIP:hostPort mapping
+python sandbox-port-mapping.py
+```
+
+Expected output of `sandbox-in-sandbox.py`:
+
+```text
+[outer] sandbox A: 6d8a025c...  sandbox B: 1b26d1bb...
+[inner] connecting to sandbox B: 1b26d1bb...
+hello-from-B
+```
+
+Expected output of `sandbox-curl-sandbox.py`:
+
+```text
+[outer] service host: 8080-23af3202....cube.app
+[inner:A] curl -sS --fail --resolve 8080-23af3202....cube.app:80:<node-ip> http://...
+hello-from-B-service
+[outer] OK: sandbox A reached the service in sandbox B
+```
+
+Expected output of `sandbox-port-mapping.py`:
+
+```text
+[outer] B exposed endpoint (host port mapping): 9.135.152.214:20006
+[inner:A] curl -sS --fail --max-time 10 http://9.135.152.214:20006/
+hello-from-B-portmapping
+[outer] OK: sandbox A reached B via the node host-port mapping
+```
+
 ## 5. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
@@ -301,6 +385,9 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist
 ├── restrict_public_access.py  # Token-gated public URL access
+├── sandbox-in-sandbox.py      # Sandbox A uses the SDK to run commands in B
+├── sandbox-curl-sandbox.py    # Sandbox A curls an HTTP service in B
+├── sandbox-port-mapping.py    # Sandbox A curls B via node hostIP:hostPort DNAT
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```
