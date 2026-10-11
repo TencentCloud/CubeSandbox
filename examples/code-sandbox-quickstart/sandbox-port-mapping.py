@@ -18,10 +18,6 @@ How it works:
     (`bpf_redirect(..., BPF_F_INGRESS)`), where from_world DNATs them into
     B's tap — no NIC/switch hairpinning required. Off-node clients reach
     the same ingress path over the wire, so the mapping works cluster-wide.
-    Note that host-local clients (curl on the node itself, 127.0.0.1 or the
-    node IP) do NOT traverse NIC ingress and get ECONNREFUSED — use the
-    tap-ip endpoint (`info` API without the X-Cube-Caller-Host-IP override)
-    or CubeProxy for on-node access instead.
 
 Exposed ports come from the TEMPLATE (`cubemastercli tpl create-from-image
 --expose-port ...`); cubemaster `cubelet_conf.enable_exposed_port` must be
@@ -74,8 +70,6 @@ CONNREFUSED_HINT = """\
 [outer]   1. the container port is in the template's --expose-port list;
 [outer]   2. cubemaster cubelet_conf.enable_exposed_port: true;
 [outer]   3. sandbox A's egress policy allows the node IP.
-[outer] Note: curl from the node ITSELF is always refused — host-local
-[outer] traffic never traverses NIC ingress.
 """
 
 
