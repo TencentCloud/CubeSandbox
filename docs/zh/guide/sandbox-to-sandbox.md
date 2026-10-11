@@ -2,17 +2,52 @@
 
 一个沙箱访问另一个沙箱中的服务有两条数据面路径：**CubeProxy Host 路由**
 （与公网 URL 相同的入口）和**母机端口映射**（CubeVS eBPF DNAT）。
-两条路径都通过直接指定节点 IP 来避免域名解析：方式一用 `curl --resolve`
-把 `<port>-<sandboxID>.cube.app` 钉到 CubeProxy 节点 IP（Host 头照常携带，
-路由不受影响），方式二的端点本身就是 `节点IP:hostPort`。因此沙箱内无需
-为 `*.cube.app` 配置 DNS，能访问节点 IP 即可。
+方式一通过 HTTP Host 头部指定访问的沙箱 id 和 port
+（`<port>-<sandboxID>.cube.app`），由 CubeProxy 做路由转发代理到目标沙箱；
+方式二则是直接访问目标沙箱的 nodeIP 和映射的 port，即 `节点IP:hostPort`。
+
+方式一数据流程（CubeProxy 与沙箱不同机）：
 
 ```text
-方式一：CubeProxy Host 路由
-  沙箱 A ──► CubeProxy :80 ── Host: <port>-<sandboxID-B>.cube.app ──► B 内服务
+  源沙箱 A                CubeProxy 节点               目的节点
+ （源节点）               CubeProxy :80                主网卡 ingress
+     │                        │                           │
+     │  ① Host: 8080-B.cube.app                           │
+     │    （--resolve 钉到 CubeProxy 节点 IP）             │
+     │───────────────────────►│                           │
+     │                        │  ② 访问 hostIP:hostPort    │
+     │                        │──────────────────────────►│ from_world DNAT
+     │                        │                           │ 至 sandboxIP:8080
+     │                        │                           │──► 目的沙箱 B :8080
+```
 
-方式二：母机端口映射（hostIP:hostPort）
-  沙箱 A ──► 节点IP:hostPort ── from_world eBPF DNAT（网卡 ingress）──► B 内服务
+方式二数据流程 · 同节点（源节点 = 目的节点）：
+
+```text
+  源沙箱 A            from_cube                  主网卡 ingress
+     │                   │                           │
+     │ ① nodeIP:hostPort │                           │
+     │──────────────────►│ ② SNAT 后软件环回          │
+     │                   │    bpf_redirect           │
+     │                   │    (BPF_F_INGRESS)        │
+     │                   │──────────────────────────►│ from_world DNAT
+     │                   │                           │ 至 sandboxIP:8080
+     │                   │                           │──► 目的沙箱 B :8080
+
+  全程在本节点内完成，不依赖网卡/交换机 hairpin。
+```
+
+方式二数据流程 · 跨节点：
+
+```text
+  源沙箱 A            from_cube                    目的节点
+ （源节点）           （源节点）                   主网卡 ingress
+     │                   │                           │
+     │ ① nodeIP:hostPort │                           │
+     │──────────────────►│ ② SNAT，出物理网卡         │
+     │                   │═══════════════════════════►│ from_world DNAT
+     │                   │      （物理链路）          │ 至 sandboxIP:8080
+     │                   │                           │──► 目的沙箱 B :8080
 ```
 
 完整可运行的示例脚本见
