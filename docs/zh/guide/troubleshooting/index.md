@@ -58,4 +58,5 @@ lang: zh-CN
 | [沙箱网段和局域网冲突导致创建模板超时](./local-network-cidr-conflict.md) | luzhixing12345 | 2026-05-20 | deployment, networking, one-click |
 | [Host Mount 写入时报 Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | [如何查看 CubeSandbox 各组件日志（含 cubecli logs 与 guest kernel log）](./component-log-locations.md) | ls-ggg | 2026-07-15 | logging, cubelet, cubeshim, operations |
+| [Go SDK Connect 流返回 HTML 或文本响应](./sdk-connect-stream-routing.md) | tokove | 2026-09-24 | sdk, networking, cube-proxy |
 | _在这里补充你的文章_ | - | - | - |
