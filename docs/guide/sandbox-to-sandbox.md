@@ -2,8 +2,13 @@
 
 One sandbox can reach a service inside another sandbox over two data-plane
 paths: **CubeProxy Host routing** (the same ingress as the public URL) and
-the **node host-port mapping** (CubeVS eBPF DNAT). Neither requires
-`*.cube.app` DNS — a sandbox only needs the node IP.
+the **node host-port mapping** (CubeVS eBPF DNAT). Both address node IPs
+directly and never resolve the `*.cube.app` wildcard domain: option 1 pins
+`<port>-<sandboxID>.cube.app` to the CubeProxy node IP with
+`curl --resolve` (the Host header still carries the name, so routing is
+unaffected), and option 2's endpoint is a plain `nodeIP:hostPort`. No DNS
+for `*.cube.app` is needed inside the sandbox — reaching the node IP is
+enough.
 
 ```text
 Option 1: CubeProxy Host routing
@@ -24,15 +29,15 @@ Runnable end-to-end examples live in
 | Protocols | HTTP / HTTPS / gRPC only (L7, Host-header routing) | Any TCP protocol (L4 DNAT) |
 | Data plane | Via CubeProxy, one proxy hop | eBPF DNAT straight into the sandbox, no proxy hop |
 | Ingress auth | Supports the per-sandbox token of `allow_public_traffic=False` | No token support; exposure is governed by network policy + expose-port |
-| Service port source | Any port — the `<port>` prefix in the URL selects it | Only ports declared via template `--expose-port` |
+| Service port source | The `<port>` prefix in the URL names B's container port | Query the info API for the `hostIP:hostPort` mapped to B's container port |
 | Endpoint stability | Stable URL format, unchanged across pause/resume | hostIP:hostPort may change across pause/resume (see below) |
 | DNS in sandbox | Not needed (`--resolve` pins the proxy IP) | Not needed (plain node IP) |
 
 Typical scenarios:
 
 - **Option 1**: an agent in one sandbox calls an HTTP API / gRPC service
-  hosted in another; you want to reuse CubeProxy's token auth; the service
-  port is not fixed or is dictated by the image.
+  hosted in another; you want to reuse CubeProxy's token auth and a stable
+  endpoint URL without querying the host port.
 - **Option 2**: arbitrary TCP between sandboxes (databases, message queues,
   custom binary protocols); latency-sensitive paths that should bypass the
   proxy; ports can be declared in the template upfront.
@@ -48,25 +53,32 @@ curl -sS --resolve 8080-<sandboxID-B>.cube.app:80:<proxy-node-ip> \
      http://8080-<sandboxID-B>.cube.app/
 ```
 
-### Template build
+### Template build: declare the service port
 
-Option 1 has **no special template requirements**: CubeProxy forwards to any
-port inside the sandbox based on the `<port>` prefix in the URL, with no
-`--expose-port` declaration needed. The standard template from the
-[Quickstart](./quickstart.md) is enough:
+Option 1's service port should be declared via the template's
+`--expose-port` (same as option 2) — then the caller only needs to name B's
+container port in the Host header and **never has to know whether it is
+co-located with B**: same-node, CubeProxy dials `sandboxIP:containerPort`
+directly; cross-node, it enters B through that port's `hostIP:hostPort`
+mapping (mappings only cover declared ports; an undeclared port gets a 404
+cross-node).
+
+Just append the service port to the standard template (8080 as an example):
 
 ```bash
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
-  --expose-port 49999 \
-  --expose-port 49983 \
+  --expose-port 49999 \   # code interpreter (sandbox-code default)
+  --expose-port 49983 \   # envd (sandbox-code default)
+  --expose-port 8080  \   # your service port
   --probe 49999
 ```
 
-(The two `--expose-port` flags here belong to the sandbox-code image's own
-code interpreter / envd and are unrelated to option-1 routing — under option 1
-the service in B can listen on any port.)
+> Implementation detail: same-node, CubeProxy's direct dial does not consult
+> the port mapping, so undeclared ports happen to work — but that is lenient
+> behavior that turns into a 404 as soon as A and B land on different nodes.
+> Do not rely on it.
 
 Properties:
 
@@ -81,6 +93,8 @@ Limitations:
 - **L7 protocols only**: HTTP / HTTPS / gRPC (gRPC rides HTTP/2, which the
   Host routing handles). Arbitrary TCP/UDP services (databases, Redis, custom
   protocols) cannot use this path — use option 2 instead.
+- The service port should be declared via the template's `--expose-port`
+  (see "Template build" above).
 
 ## Option 2: Node Host-Port Mapping (hostIP:hostPort)
 
@@ -147,11 +161,6 @@ When A and B are on the same node, A's packets are SNATed in `from_cube`
 and looped back into the node NIC ingress in software, which triggers the
 DNAT — this does not depend on NIC/switch hairpinning. Cross-node traffic
 (A and B on different nodes) traverses the wire to the same ingress path.
-One caveat:
-
-- Curling from the **node itself** (127.0.0.1 or the node IP) always fails —
-  host-local traffic never traverses NIC ingress. Use the `tap_ip` endpoint
-  or CubeProxy for on-node access.
 
 Properties:
 
