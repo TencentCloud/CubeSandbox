@@ -632,6 +632,20 @@ sh /tmp/cube-diag-k8s.sh cube-system cube
 
 The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpoints, Events, Helm values/manifests, Pod descriptions, and recent logs for Cube components into a timestamped directory.
 
+## Tracing (optional)
+
+Off by default; the chart never installs a receiver. To export sandbox-lifecycle
+spans, add `OTEL_EXPORTER_OTLP_ENDPOINT` to the trace-emitting components'
+existing per-component `env` arrays. Full instructions — values paths, per-service
+names, the CubeShim env inheritance, and how to disable — are in
+[Helm Install · Tracing configuration](https://cubesandbox.com/guide/kubernetes/install#_8-4-tracing-configuration).
+
+Chinese: [Helm 安装 · 链路追踪配置](https://cubesandbox.com/zh/guide/kubernetes/install#_8-4-链路追踪配置).
+
+For the traced workflows, the span attributes to query on, and how to read stage
+durations, see [Distributed Tracing](https://cubesandbox.com/guide/tracing) /
+[分布式链路追踪](https://cubesandbox.com/zh/guide/tracing).
+
 ## CubeEgress
 
 `cubeEgress.enabled=true` runs CubeEgress inside the Cube Node Big Pod:

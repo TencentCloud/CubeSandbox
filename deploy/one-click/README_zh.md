@@ -168,6 +168,34 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 
 其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 和 `cubeops` 都从 `.one-click.env` 读环境变量。CubeOps 仓库相关项是 `CUBE_OPS_WAREHOUSE_*`（超时、GitHub/CNB 白名单和 token）以及 `CUBE_OPS_S3_*`；默认复用 Volume 的 MinIO/S3 连接、用独立的 `cube-ops` 桶，不需要额外配置。一键安装不写 CubeOps YAML。`cube-api` 默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
+### OpenTelemetry 链路追踪（可选）
+
+链路追踪默认关闭。请在**安装前**在 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT`，然后（重新）执行 `install.sh` 生效——全新安装与升级同样适用。
+
+接收端是外部自备的 OTLP/**gRPC** 接收器——OpenTelemetry Collector 或 Tempo 的 OTLP/gRPC 接收端。明文场景下取值为 `http://<receiver-host>:<OTLP-gRPC-port>`，其中 `receiver-host` 与 `OTLP-gRPC-port` 是接收端实际的 IP 或 DNS 名以及 gRPC 监听端口。请填接收端的 OTLP/gRPC 地址，而不是 Grafana/Tempo 的查询地址。例如：
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.5:4317
+```
+
+Span 来自沙箱生命周期各服务——CubeAPI、CubeMaster、CubeTemplateCenter、Cubelet，以及由 Cubelet 启动的 CubeShim。各服务以各自的服务名上报（`cube-api`、`cubemaster`、`cubetemplatecenter`、`cubelet`、`cube-shim`），因此**不要**设置共享的 `OTEL_SERVICE_NAME`。
+
+安装器会把 endpoint 持久化到 `.one-click.env`，各单元通过 `EnvironmentFile` 加载；重新执行安装后，CubeAPI、CubeMaster、CubeTemplateCenter、Cubelet 会读到新值，因此已有沙箱的请求 span 也会导出。
+
+CubeShim 是例外：它是 Cubelet 为每个沙箱单独启动的进程，只有在新的 shim 进程启动时才继承 Cubelet 的环境变量，因此已在运行的 shim 会保留旧设置，只有新启动沙箱后 CubeShim 的 span 才生效。
+
+由于该 endpoint 是开关式配置项，若要关闭追踪，在 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT=`（空值）并重新执行安装即可——`cp env.example .env` 的注意事项见 [CubeS3lvol 的停止与升级语义](#cubes3lvol-的停止与升级语义) 中的 `ONE_CLICK_ENABLE_S3LVOL` 说明。
+
+one-click 不会安装任何接收端。
+
+要查看某个 trace，可在追踪后端按 trace ID 查询，或用 TraceQL，例如：
+
+```traceql
+{ resource.service.name = "cubelet" && name = "cubelet.sandbox.pause" }
+```
+
+被追踪的工作流以及如何解读 trace，见 [分布式链路追踪](../../docs/zh/guide/tracing.md)。
+
 ## 目标机安装
 
 把 `cube-sandbox-one-click-<version>.tar.gz` 拷到目标机后：
