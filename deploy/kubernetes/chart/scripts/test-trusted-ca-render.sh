@@ -230,6 +230,28 @@ grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/lower-key.err" || {
   exit 1
 }
 
+# 2g5. Prose containing a marker-shaped token fails closed. RFC 7468 allows
+#      free text around PEM blocks and Go's pem.Decode would silently ignore
+#      such a line -- but render-time validation cannot distinguish harmless
+#      prose from an obfuscated non-CERTIFICATE block without re-implementing
+#      Go's parser, so any BEGIN-marker-shaped token that is not the exact
+#      CERTIFICATE marker is rejected and named in the error. Pinned so this
+#      tradeoff is a documented decision, not an accident.
+if helm template guard-prose-marker "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     --set-string trustedCACerts.certs[0]="guide: use -----BEGIN EXAMPLE----- blocks
+-----BEGIN CERTIFICATE-----
+MIIC
+-----END CERTIFICATE-----" >/dev/null 2>"$TMP_DIR/prose-marker.err"; then
+  echo "FAIL: prose containing a marker-shaped token must fail the render" >&2
+  exit 1
+fi
+grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/prose-marker.err" || {
+  echo "FAIL: validation error does not name the offending prose marker:" >&2
+  cat "$TMP_DIR/prose-marker.err" >&2
+  exit 1
+}
+
 # 2h. An empty (or whitespace-only) entry must fail: it would render an
 #     empty ca-N.crt, merge-ca would append nothing and that CA would be
 #     silently absent from the merged bundle.
@@ -247,6 +269,27 @@ fi
 grep -qi 'is empty' "$TMP_DIR/empty-entry.err" || {
   echo "FAIL: validation error does not mention the empty entry:" >&2
   cat "$TMP_DIR/empty-entry.err" >&2
+  exit 1
+}
+
+# 2h2. A YAML null entry (the classic commented-out-value typo) must produce
+#      the designed empty-entry message, not a raw "len of nil pointer"
+#      template error -- the empty check runs before the size accumulation.
+cat >"$TMP_DIR/null-entry-values.yaml" <<'EOF'
+trustedCACerts:
+  enabled: true
+  certs:
+    -
+EOF
+if helm template guard-null-entry "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     -f "$TMP_DIR/null-entry-values.yaml" >/dev/null 2>"$TMP_DIR/null-entry.err"; then
+  echo "FAIL: a null certs entry must fail validation" >&2
+  exit 1
+fi
+grep -qi 'is empty' "$TMP_DIR/null-entry.err" || {
+  echo "FAIL: null entry must hit the designed empty-entry message, got:" >&2
+  cat "$TMP_DIR/null-entry.err" >&2
   exit 1
 }
 
@@ -596,6 +639,22 @@ if run_merge_ca_fallback; then
 fi
 grep -q 'unbalanced BEGIN/END' "$REPLAY/err" || {
   echo "FAIL: fallback rejection message does not mention the unbalanced markers:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+
+# 6f2. An END marker with trailing junk must also fail WITHOUT openssl:
+#      only exact-line CERTIFICATE markers are counted, so the junk line
+#      cannot ride a balanced prefix count -- previously it landed in the
+#      bundle, Go's pem.Decode silently skipped it and the CA was absent
+#      with nothing to attribute the x509 error to.
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE----- junk\n' >"$REPLAY/trusted-ca/ca-0.crt"
+if run_merge_ca_fallback; then
+  echo "FAIL: fallback must reject an END marker with trailing junk" >&2
+  exit 1
+fi
+grep -q 'unbalanced BEGIN/END' "$REPLAY/err" || {
+  echo "FAIL: fallback rejection message does not mention the unbalanced markers for END junk:" >&2
   cat "$REPLAY/err" >&2
   exit 1
 }

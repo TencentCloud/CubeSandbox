@@ -4423,7 +4423,7 @@ TENCENTCLOUD_VERBOSE='${VERBOSE:-1}'
 # terraform LIST, and an empty TF_VAR_ for a list variable is not parseable
 # HCL -- it would fail every subsequent terraform invocation. The string
 # variable would survive an empty round-trip, but omitting it keeps .env
-# minimal and lets the stale-mirror prune (lib-state-sync.sh) detect
+# minimal and lets the stale-mirror migration (lib-state-sync.sh) detect
 # removal unambiguously.
 ${TF_VAR_templatecenter_trusted_ca_existing_config_map:+TF_VAR_templatecenter_trusted_ca_existing_config_map='${TF_VAR_templatecenter_trusted_ca_existing_config_map}'}
 ${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_trusted_ca_certs='${TF_VAR_templatecenter_trusted_ca_certs}'}
@@ -4644,8 +4644,6 @@ write_resolved_tfvars_file() {
 		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
 		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
 		--argjson cube_proxy_admin_port "$(_number_or_default "${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}" 8082)" \
-		--argjson templatecenter_trusted_ca_certs "${TF_VAR_templatecenter_trusted_ca_certs:-[]}" \
-		--arg templatecenter_trusted_ca_existing_config_map "${TF_VAR_templatecenter_trusted_ca_existing_config_map:-}" \
 		'{
 			vpc_name: $vpc_name,
 			region: $region,
@@ -4704,20 +4702,16 @@ write_resolved_tfvars_file() {
 			cube_admin_token: $cube_admin_token,
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 			cube_proxy_admin_port: $cube_proxy_admin_port,
-			# The certs env var must be a JSON array (the shape env.example
-			# documents) -- --argjson mirrors it verbatim; HCL-only extras
-			# terraform would tolerate in a TF_VAR_ are not supported by the
-			# mirror.
-			templatecenter_trusted_ca_certs: $templatecenter_trusted_ca_certs,
-			templatecenter_trusted_ca_existing_config_map: $templatecenter_trusted_ca_existing_config_map,
 		}
-		# An empty certs array is omitted, not written: this file loads last
-		# (alphabetically after any operator-provided *.auto.tfvars), and a
-		# written [] would override certs the operator passed through their
-		# own tfvars file with "feature off". The other keys are plain
-		# strings the deployer itself owns, so mirroring them unconditionally
-		# (modulo the "" drop below) is safe.
-		| with_entries(select(.value != "" and .value != null and ((.value | type) != "array" or (.value | length) > 0)))' >"$tmp"
+		# The trusted-ca variables are deliberately NOT mirrored here (see
+		# the save_env_file trusted-ca block): their certs value is HCL, and
+		# an HCL-valid value this mirror cannot represent losslessly as JSON
+		# would either abort the write or -- worse -- silently drop the
+		# actually-deployed value, un-pinning the deployed config. .env is
+		# the single source of truth for the pair; the loader never
+		# force-exports what this file does not carry, so .env edits
+		# (removals, '[]', value changes) take effect on the next run.
+		| with_entries(select(.value != "" and .value != null))' >"$tmp"
 
 	(
 		umask 077
@@ -5352,6 +5346,11 @@ main() {
 	# the TENCENTCLOUD_* → TF_VAR_* mapping (e.g. region must be set before plan).
 	prompt_deployment_env
 	setup_env
+	# Strip the trusted-ca keys from the resolved mirror before
+	# load_resolved_tfvars_file force-exports it: mirrors written by earlier
+	# versions of this feature recorded the pair, and .env is their single
+	# source of truth from this version on (see write_resolved_tfvars_file).
+	_tc_migrate_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"
 	load_resolved_tfvars_file
 	_setup_jump_proxy
 
@@ -5674,13 +5673,6 @@ main() {
 	# Delete stale/drifted objects so the apply can (re)create the Deployments
 	# with the freshly built images.
 	_reconcile_addons
-	# Keep the resolved tfvars mirror truthful before the apply reads it: it
-	# is only rewritten after a successful run, so a variable removed from
-	# the .env since the last run would stay pinned here (TF_VAR_ env vars
-	# win where set, but an unset one falls back to this file) and, for the
-	# trusted-ca pair, trip the mutual-exclusion precondition on a switch
-	# between the inline and existing_config_map paths.
-	_tc_prune_stale_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"
 	_set_phase_flags "$(phase_addons_flags)"
 	STEP2_LABEL="Step: Deploy TKE addons"
 	STEP2_TARGETS=(

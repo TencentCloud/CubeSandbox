@@ -154,9 +154,17 @@ spec:
                 # Symmetry + presence: an empty or marker-less entry would
                 # append nothing and that CA would be silently absent from
                 # the merged bundle; an unbalanced paste renders blocks Go
-                # silently skips. Same rule as validate.yaml, here for the
+                # silently skips. Only EXACT-line CERTIFICATE markers are
+                # counted (same regex as validate.yaml / the plan-time
+                # validation): an END line with trailing junk must not ride
+                # a balanced prefix count -- without openssl the textual
+                # checks are the only gate, and such a line would otherwise
+                # land in the bundle, be silently skipped by Go's
+                # pem.Decode and leave the CA absent with nothing to
+                # attribute the x509 error to. Non-CERTIFICATE blocks are
+                # rejected by the block-type pass above first. Same rule as validate.yaml, here for the
                 # existingConfigMap path.
-                awk '/^-----BEGIN / { b++ } /^-----END / { e++ } END { if (b == 0) { print "trusted-ca entry " FILENAME " contains no PEM block (empty or not PEM)"; exit 1 } if (b != e) { print "trusted-ca entry " FILENAME " has unbalanced BEGIN/END CERTIFICATE markers (" b " BEGIN vs " e " END)"; exit 1 } }' "$f" 1>&2
+                awk '/^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { b++ } /^-----END CERTIFICATE-----[[:space:]]*$/ { e++ } END { if (b == 0) { print "trusted-ca entry " FILENAME " contains no PEM block (empty or not PEM)"; exit 1 } if (b != e) { print "trusted-ca entry " FILENAME " has unbalanced BEGIN/END CERTIFICATE markers (" b " BEGIN vs " e " END)"; exit 1 } }' "$f" 1>&2
                 # When openssl is available, check that every block actually
                 # parses as X.509: markers intact but the body truncated or
                 # corrupted means Go silently skips the block and the

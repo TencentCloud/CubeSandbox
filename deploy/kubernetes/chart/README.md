@@ -308,7 +308,9 @@ TLS verification stays on — this adds trust, it does not disable it.
   restart keeps it trusted (the security-relevant half: revocation does not
   propagate until the pods roll). `existingConfigMap` must live in the
   release's namespace (a volume can only reference a same-namespace
-  ConfigMap). Keys must end in `.crt` and contain PEM documents; inline
+  ConfigMap) and must exist before the chart is applied — until it does,
+  the TemplateCenter pod waits in ContainerCreating on the missing volume
+  mount. Keys must end in `.crt` and contain PEM documents; inline
   `certs` entries are validated at render time (empty entries, non-
   `CERTIFICATE` PEM blocks — private keys are rejected outright — unbalanced
   `BEGIN`/`END` markers, and a combined payload over 900 KiB all fail the

@@ -466,7 +466,8 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "trustedCACerts.existingConfigMap and trustedCACerts.certs are mutually exclusive: existingConfigMap wins and the inline certs would be silently ignored" }}
 {{- end }}
 {{- /* Gating notes, per check:
-- missing-certs, block-type, PEM-shape, BEGIN/END symmetry, env-override:
+- missing-certs, block-type, PEM-shape, BEGIN/END symmetry, ConfigMap-size,
+  env-override:
   gated on trustedCACerts.enabled + controlPlane.enabled. They protect the
   rendered pod; with the control plane disabled there is no consumer, and a
   disabled feature must stay a no-op even when a shared values file carries
@@ -477,10 +478,17 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
 {{- $certsBytes := 0 -}}
 {{- range $i, $pem := .Values.trustedCACerts.certs }}
-{{- $certsBytes = add $certsBytes (len $pem) }}
-{{- if not (trim $pem) }}
-{{- fail (printf "trustedCACerts.certs[%d] is empty -- it would render an empty ca-%d.crt, merge-ca would append nothing and that CA would be silently absent from the merged bundle" $i $i) }}
+{{- $emptyMsg := printf "trustedCACerts.certs[%d] is empty -- it would render an empty ca-%d.crt, merge-ca would append nothing and that CA would be silently absent from the merged bundle" $i $i }}
+{{- /* A YAML null entry (a commented-out value) must produce the designed
+message, not a raw "len of nil pointer" template error -- hence the empty
+check before the size accumulation below. */ -}}
+{{- if empty $pem }}
+{{- fail $emptyMsg }}
 {{- end }}
+{{- if not (trim $pem) }}
+{{- fail $emptyMsg }}
+{{- end }}
+{{- $certsBytes = add $certsBytes (len $pem) }}
 {{- /* Block-type whitelist: EVERY PEM block must be a CERTIFICATE. A
 combined "cert + key" paste is the most common input shape for a private
 CA and would pass the marker checks below -- writing the private key
