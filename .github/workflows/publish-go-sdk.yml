@@ -40,13 +40,14 @@ jobs:
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#go-sdk-v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "module_tag=sdk/go/v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION"
 
       - name: Check if sdk/go/ changed since last tag
         id: check_changes
         run: |
           CURRENT_TAG="${{ github.ref_name }}"
-          GO_SDK_TAG="sdk/go/${{ steps.extract.outputs.version }}"
+          GO_SDK_TAG="${{ steps.extract.outputs.module_tag }}"
 
           # Skip if Go SDK tag already exists
           if git rev-parse -q --verify "refs/tags/$GO_SDK_TAG" > /dev/null 2>&1; then
@@ -127,7 +128,7 @@ jobs:
       - name: Create and push Go SDK tag
         if: success() && steps.check_changes.outputs.changed == 'true'
         run: |
-          GO_SDK_TAG="sdk/go/${{ steps.extract.outputs.version }}"
+          GO_SDK_TAG="${{ steps.extract.outputs.module_tag }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -146,9 +147,9 @@ jobs:
           if [[ "${{ job.status }}" == "failure" ]]; then
             echo "- **Result**: ❌ Job failed — check logs above" >> "$GITHUB_STEP_SUMMARY"
           elif [[ "${{ steps.check_changes.outputs.skip }}" == "true" ]]; then
-            echo "- **Result**: Go SDK tag \`sdk/go/${{ steps.extract.outputs.version }}\` already exists" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Result**: Go SDK tag \`${{ steps.extract.outputs.module_tag }}\` already exists" >> "$GITHUB_STEP_SUMMARY"
           elif [[ "${{ steps.check_changes.outputs.changed }}" == "false" ]]; then
             echo "- **Result**: Skipped (no changes in sdk/go/)" >> "$GITHUB_STEP_SUMMARY"
           elif [[ "${{ steps.check_changes.outputs.changed }}" == "true" ]]; then
-            echo "- **Result**: ✅ \`sdk/go/${{ steps.extract.outputs.version }}\` created, build + tests passed" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Result**: ✅ \`${{ steps.extract.outputs.module_tag }}\` created, build + tests passed" >> "$GITHUB_STEP_SUMMARY"
           fi

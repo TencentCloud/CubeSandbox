@@ -1,6 +1,6 @@
 {
   "name": "@cubesandbox/sdk",
-  "version": "0.3.0",
+  "version": "0.7.3",
   "description": "Node.js / TypeScript SDK for CubeSandbox",
   "license": "Apache-2.0",
   "author": "Tencent Inc.",

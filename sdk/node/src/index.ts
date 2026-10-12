@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.7.3";
 
 export {
   Sandbox,
