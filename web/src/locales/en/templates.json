@@ -90,7 +90,7 @@
   "delete": {
     "button": "Delete Template",
     "title": "Delete Template",
-    "confirmDesc": "Are you sure you want to delete template",
+    "confirmDesc": "Are you sure you want to delete the template",
     "confirmDescSuffix": "? This action cannot be undone.",
     "cancel": "Cancel",
     "confirm": "Confirm Delete",

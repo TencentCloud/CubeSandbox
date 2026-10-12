@@ -543,7 +543,7 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
             {t('delete.confirmDesc')}{' '}
-            <span className="font-mono font-medium text-foreground">{templateID}</span>{' '}
+            <span className="font-mono font-medium text-foreground">{templateID}</span>
             {t('delete.confirmDescSuffix')}
           </p>
           {mutation.isError && (
