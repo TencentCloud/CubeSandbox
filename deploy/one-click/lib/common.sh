@@ -505,11 +505,12 @@ load_env_file() {
   fi
 }
 
-# Installer toggle keys: on/off switches whose this-run value must survive the
-# upgrade env merge. The merge treats a bundle-.env value as an explicit
-# operator override only when it differs from the new env.example default
-# (the `cp env.example .env` safeguard), so flipping one of these keys BACK to
-# the template default via .env would otherwise be inexpressible on upgrade.
+# Installer toggle keys: switches and string keys whose this-run value must
+# survive the upgrade env merge. The merge treats a bundle-.env value as an
+# explicit operator override only when it differs from the new env.example
+# default (the `cp env.example .env` safeguard), so setting one of these keys
+# BACK to the template default — including an explicit empty value — via .env
+# would otherwise be inexpressible on upgrade.
 # For the keys listed here, presence in the bundle .env or in install.sh's
 # process environment counts as explicit operator intent and is re-applied
 # after the merge (snapshot_one_click_toggles / apply_one_click_toggles).
@@ -520,16 +521,15 @@ load_env_file() {
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   CUBE_PVM_ENABLE
+  OTEL_EXPORTER_OTLP_ENDPOINT
 )
 
-# snapshot_one_click_toggles: capture this-run operator intent for
-# ONE_CLICK_TOGGLE_KEYS from the process environment and the bundle .env.
-# Must run BEFORE any env file is sourced: the upgrade merge later sources the
-# merged old-runtime env, which would otherwise clobber both channels.
-#   ONE_CLICK_TOGGLE_ENV_SNAPSHOT     key -> value from the process environment
-#   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT  key -> value from the bundle .env
-# (presence in .env is enough — a value equal to the env.example default still
-# counts, which is exactly what makes "flip back to default" expressible)
+# Records this-run toggle intent from the process environment and from .env key
+# presence. Must run BEFORE any env file is sourced, since the upgrade merge
+# later sources the old-runtime env and would otherwise clobber both channels.
+# The actual .env values are captured later (capture_one_click_toggle_dotenv_values,
+# after load_env_file), so quoted or variable-expansion values resolve correctly
+# rather than round-tripping raw.
 snapshot_one_click_toggles() {
   local env_file="$1"
   local key
@@ -539,14 +539,28 @@ snapshot_one_click_toggles() {
   # mishandles `declare -gA VAR=()` by creating a function-local array.
   declare -gA ONE_CLICK_TOGGLE_ENV_SNAPSHOT
   declare -gA ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT
+  declare -gA ONE_CLICK_TOGGLE_DOTENV_PRESENT
   ONE_CLICK_TOGGLE_ENV_SNAPSHOT=()
   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT=()
+  ONE_CLICK_TOGGLE_DOTENV_PRESENT=()
   for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
     if [[ -n "${!key+x}" ]]; then
       ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
     fi
     if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
-      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="$(read_env_key "${env_file}" "${key}")"
+      ONE_CLICK_TOGGLE_DOTENV_PRESENT["${key}"]=1
+    fi
+  done
+  return 0
+}
+
+# Must run after load_env_file (+ CLI re-apply) and before the upgrade merge, to
+# capture the resolved .env values.
+capture_one_click_toggle_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_PRESENT[${key}]+x}" ]]; then
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${!key-}"
     fi
   done
   return 0
