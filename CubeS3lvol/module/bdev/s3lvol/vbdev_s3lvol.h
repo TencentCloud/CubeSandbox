@@ -657,6 +657,11 @@ int s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
  * asynchronous even before the snapshot itself starts; \p out_cancelled_decouple,
  * when not NULL, is set synchronously to say whether that happened, so a caller
  * can report that the volume it asked to be decoupled no longer will be.
+ *
+ * Blobstore allows one metadata operation on a blob at a time and answers
+ * -EBUSY for a second. Concurrent snapshots of \p lvol are queued here and the
+ * callback runs when that snapshot has been created, rather than failing the
+ * caller with EBUSY.
  */
 int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 				const char *snapshot_name,
@@ -674,6 +679,10 @@ int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lv
  * **Only read-only lvols can be cloned**, or `-EINVAL` is returned: a
  * simultaneously writable parent and clone means either side can modify a
  * shared cluster, and neither's data is defined any more.
+ *
+ * Concurrent clones of the same snapshot are queued. Blobstore holds the
+ * parent blob for the duration of one clone and returns -EBUSY for the next;
+ * the callback runs once this clone has been created.
  */
 int s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 			     const char *clone_name,
