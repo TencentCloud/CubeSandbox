@@ -535,9 +535,7 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <Card className="w-full max-w-sm shadow-xl">
         <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <CardTitle className="text-base text-destructive">
-            {t('delete.title')}
-          </CardTitle>
+          <CardTitle className="text-base text-destructive">{t('delete.title')}</CardTitle>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X className="h-4 w-4" />
           </button>
@@ -561,9 +559,7 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
               disabled={mutation.isPending}
               onClick={() => mutation.mutate()}
             >
-              {mutation.isPending
-                ? t('delete.deleting')
-                : t('delete.confirm')}
+              {mutation.isPending ? t('delete.deleting') : t('delete.confirm')}
             </Button>
           </div>
         </CardContent>

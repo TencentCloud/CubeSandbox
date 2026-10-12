@@ -740,9 +740,7 @@ export default function TemplateDetailPage() {
         ) : isFailed404 ? (
           <div className="space-y-3">
             <p className="text-sm text-destructive">{t('buildFailed')}</p>
-            <p className="text-xs text-muted-foreground">
-              {t('buildFailedDeleteHint')}
-            </p>
+            <p className="text-xs text-muted-foreground">{t('buildFailedDeleteHint')}</p>
             {showDeleteConfirm ? (
               <div className="space-y-3">
                 <p className="text-sm text-muted-foreground">{t('delete.confirmDesc')}</p>
