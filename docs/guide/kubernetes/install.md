@@ -163,6 +163,10 @@ The default **host network** keeps sandbox devices in the host netns across `cub
 The host-network default is new and not yet validated against every CNI / admission configuration. A `hostNetwork` Pod bypasses CNI IPAM and is not selectable by NetworkPolicy; on an eBPF CNI (e.g. Cilium) the CNI's own eBPF programs may conflict with the cubevs hooks on the host interface, and a cluster enforcing the `restricted` Pod Security Admission standard rejects `hostNetwork` Pods. **Validate the default in a test cluster first** before relying on it in production; if your cluster cannot allow `hostNetwork`, set `cubeNode.hostNetwork: false` (see [8.3](#_8-3-cube-node-networking-and-pod-recreation)).
 :::
 
+**Tracing (optional)**
+
+To export sandbox-lifecycle spans to an external OTLP/gRPC receiver, add `OTEL_EXPORTER_OTLP_ENDPOINT` to the per-component `env` arrays — see [8.4 Tracing configuration](#_8-4-tracing-configuration).
+
 
 ## 5. Helm install
 
@@ -344,6 +348,76 @@ For NetworkPolicy over sandbox traffic to in-cluster Services / Pods *while* sta
 
 - Only traffic destined for the cluster CIDRs is forwarded through a node-local **EgressProxy Pod** and SNAT'd to the Proxy Pod IP, so it is governed by your own NetworkPolicies; all other traffic keeps the normal route.
 :::
+
+
+### 8.4 Tracing configuration
+
+Tracing is off by default, and the chart never installs a receiver. To export
+sandbox-lifecycle spans, configure it **before install** by adding
+`OTEL_EXPORTER_OTLP_ENDPOINT` to the existing per-component `env` arrays in
+`runtime-values.yaml`.
+
+The receiver is an externally supplied OTLP/**gRPC** receiver — an OpenTelemetry
+Collector or a Tempo OTLP/gRPC receiver. The value is
+`http://<receiver-host>:<OTLP-gRPC-port>` for plaintext, where `receiver-host`
+and `OTLP-gRPC-port` are the receiver's actual IP or DNS name and gRPC listener
+port. Use the receiver's OTLP/gRPC address, not a Grafana/Tempo query URL. For
+example:
+
+```yaml
+controlPlane:
+  api:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://10.0.0.5:4317
+  master:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://10.0.0.5:4317
+  templateCenter:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://10.0.0.5:4317
+cubeNode:
+  env:
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://10.0.0.5:4317
+```
+
+These are ordinary Helm values, so the overlay is merged by the same
+`helm upgrade --install` command as section 5 and works for both a fresh install
+and an upgrade. A component's `env` array **replaces** the chart default, so keep
+any entries the chart already sets for that component rather than replacing the
+whole list.
+
+To disable tracing again, set the endpoint to an explicit empty string
+(`value: ""`) for each component and re-apply with the same
+`helm upgrade --install` command — an empty value turns the exporter off.
+
+`cubeNode.env` reaches Cubelet **and** the CubeShim it launches. Helm applies the
+updated env to the compute Pods — no extra manual rollout is needed — so the
+CubeMaster/Cubelet request spans for existing sandboxes work once the Pods pick
+up the change.
+
+The CubeShim is a separate process started by Cubelet's embedded
+containerd shim manager: an already-running shim keeps its previous setting, and
+only a newly created shim inherits the updated env, so CubeShim spans alone
+depend on a new shim process being created.
+
+Each service exports under its own name
+(`cube-api`, `cubemaster`, `cubetemplatecenter`, `cubelet`, `cube-shim`), so do
+**not** set a shared `OTEL_SERVICE_NAME`. CubeOps and the lifecycle manager do not
+emit spans.
+
+To inspect a trace, look it up in your backend by trace ID or with
+TraceQL, e.g.
+
+```traceql
+{ resource.service.name = "cubelet" && name = "cubelet.sandbox.pause" }
+```
+
+For the traced workflows, the span attributes to search on, and how to read stage
+durations, see [Distributed Tracing](../tracing.md).
 
 
 ---

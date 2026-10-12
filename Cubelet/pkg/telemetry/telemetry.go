@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package telemetry provides tracing for sandbox creation.
+// Package telemetry provides tracing for sandbox lifecycle operations.
 package telemetry
 
 import (
