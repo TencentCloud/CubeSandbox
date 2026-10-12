@@ -7,6 +7,10 @@
     "description": "This feature is intended for demos and early validation. APIs, deployment options, and UX may change.",
     "close": "Close preview notice"
   },
+  "env": {
+    "linux": "Linux",
+    "mac": "Personal Mac"
+  },
   "settings": {
     "openAction": "Model Service Settings",
     "title": "Digital Assistant Settings",
