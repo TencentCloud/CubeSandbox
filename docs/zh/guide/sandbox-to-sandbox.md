@@ -80,12 +80,14 @@
 [快速入门](./quickstart.md)，中国大陆环境用 `cube-sandbox-cn` 仓库）：
 
 ```bash
+# 49999/49983 是 sandbox-code 镜像自身的 code interpreter / envd 端口；
+# 把 8080 换成你的服务端口。
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
-  --expose-port 49999 \   # code interpreter（sandbox-code 默认）
-  --expose-port 49983 \   # envd（sandbox-code 默认）
-  --expose-port 8080  \   # 你的服务端口
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --expose-port 8080 \
   --probe 49999
 ```
 

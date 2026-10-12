@@ -655,7 +655,8 @@ static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta
  * arg) avoids "invalid read from stack" errors on older BPF verifiers that
  * do not propagate subprog pointer-arg writes back to the caller's stack.
  */
-static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
+static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta,
+					bool hairpin)
 {
 	__u32 old_saddr, new_saddr, tcp_csum_off;
 	__u16 old_sport, new_sport;
@@ -727,6 +728,13 @@ do_create:
 	switch (verdict) {
 	case FLOW_HTTP:
 	case FLOW_HTTPS:
+		/* Same-host port-mapping hairpin + an L7 rule on the node IP is
+		 * unsupported: the proxy would dial nodeIP:hostPort from the host
+		 * stack, where nothing listens. Fail fast like FLOW_REJECT, before
+		 * create_l7_ingress_session()/create_new_sessions() reserve state
+		 * that the caller would just RST and leave for the reaper. */
+		if (hairpin)
+			return TCP_NAT_PACK(0, TCP_NAT_RESET);
 		if (!create_l7_ingress_session(&key))
 			return TCP_NAT_DROP;
 		l7_endpoint.ifindex = cubegw0_ifindex;
@@ -1150,7 +1158,7 @@ int from_cube(struct __sk_buff *skb)
 	}
 
 	if (proto == IPPROTO_TCP) {
-		tcp_ret = do_tcp_nat(skb, mvm_meta);
+		tcp_ret = do_tcp_nat(skb, mvm_meta, hairpin);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK) {
 			if (hairpin)
 				/* Same-host nodeIP:hostPort access: loop the SNATed
@@ -1163,15 +1171,11 @@ int from_cube(struct __sk_buff *skb)
 				return bpf_redirect(nodenic_ifindex, BPF_F_INGRESS);
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
 		}
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK) {
-			if (hairpin)
-				/* L7 egress rules targeting the node IP are not
-				 * supported for port mapping: the proxy would dial
-				 * nodeIP:hostPort from the host stack, where nothing
-				 * listens. Fail fast instead. */
-				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
+		/* hairpin + an L7 rule on the node IP never returns TCP_L7PROXY_OK:
+		 * do_tcp_nat() fails it fast as TCP_NAT_RESET before reserving any
+		 * session state. */
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
-		}
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
 			return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 		return TC_ACT_SHOT;

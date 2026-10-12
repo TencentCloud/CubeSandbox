@@ -20,12 +20,12 @@ Pytest counterparts of the quickstart demos
 - Egress policy is not bypassed by hairpin: a deny-all sandbox A is rejected
   when curling ``nodeIP:hostPort``.
 
-The host-port mapping cases are scheduler-placement independent (same-node
-hairpin and cross-node wire paths satisfy the same assertions). The CubeProxy
-cases additionally rely on same-node placement: cross-node, CubeProxy can
-only reach ports declared via the template's `--expose-port`
-(CubeProxy/lua/sandbox_backend.lua), while SERVICE_PORT is deliberately not
-declared on the default template.
+All cases are scheduler-placement independent: B is always created from the
+module-provisioned template that declares SERVICE_PORT, so the CubeProxy
+route also resolves cross-node (CubeProxy/lua/sandbox_backend.lua dials the
+host-port mapping for cross-host callers), and the host-port mapping cases
+exercise the same assertions on the same-node hairpin and cross-node wire
+paths. No public internet is needed.
 """
 
 from __future__ import annotations
@@ -360,11 +360,18 @@ def _wait_host_port_endpoint(
 
 
 def test_cubeproxy_host_routing_between_sandboxes(
-    sdk_sandbox, sdk_backend, sdk_e2e_config, request
+    sdk_sandbox, sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
 ):
     """A reaches B's HTTP service through CubeProxy Host-header routing."""
+    if not s2s_expose_template_id:
+        pytest.skip("CubeProxy cases require a CubeSandbox template build")
     proxy_ip = _proxy_node_ip(sdk_e2e_config)
-    sandbox_b = _create_sandbox(sdk_backend, sdk_e2e_config, request)
+    # B carries SERVICE_PORT in --expose-port so the route also resolves when
+    # A and B land on different nodes (CubeProxy's cross-host path dials the
+    # host-port mapping, which only exists for declared ports).
+    sandbox_b = _create_sandbox(
+        sdk_backend, sdk_e2e_config, request, template_id=s2s_expose_template_id
+    )
     try:
         _start_marker_http_server(sandbox_b, sdk_e2e_config)
 
@@ -388,14 +395,17 @@ def test_cubeproxy_host_routing_between_sandboxes(
 
 
 def test_cubeproxy_host_routing_requires_token_when_public_access_restricted(
-    sdk_sandbox, sdk_backend, sdk_e2e_config, request
+    sdk_sandbox, sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
 ):
     """B with allow_public_traffic=False: no token gets 403, B's token gets 200."""
+    if not s2s_expose_template_id:
+        pytest.skip("CubeProxy cases require a CubeSandbox template build")
     proxy_ip = _proxy_node_ip(sdk_e2e_config)
     sandbox_b = _create_sandbox(
         sdk_backend,
         sdk_e2e_config,
         request,
+        template_id=s2s_expose_template_id,
         create_options={"network": {"allow_public_traffic": False}},
     )
     try:
