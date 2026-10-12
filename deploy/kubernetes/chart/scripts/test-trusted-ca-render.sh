@@ -159,6 +159,77 @@ grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/key.err" || {
   exit 1
 }
 
+# The block-type enumeration must scan EVERYWHERE in the value,
+# case-insensitively: a line-anchored or uppercase-label-only scan lets an
+# indented, hyphen-labeled or lowercase private key slip past while the
+# CERTIFICATE shape checks are satisfied by the surrounding certificate, and
+# the key lands verbatim in the ConfigMap and the release Secret.
+grep -qF '(?si)-----BEGIN .*?-----' "$CHART_DIR/templates/validate.yaml" || {
+  echo "FAIL: validate.yaml block-type enumeration must be unanchored and case-insensitive" >&2
+  exit 1
+}
+
+# 2g2. The bot's exact round-5 shape: an INDENTED private key after a valid
+#      certificate. The extra indentation survives the YAML block scalar
+#      (only the 6-space block indent is stripped), the shape checks pass on
+#      the flush-left certificate, and only the unanchored enumeration sees
+#      the key.
+cat >"$TMP_DIR/indented-key-values.yaml" <<'PEMEOF'
+trustedCACerts:
+  certs:
+    - |
+      -----BEGIN CERTIFICATE-----
+      guard
+      -----END CERTIFICATE-----
+          -----BEGIN PRIVATE KEY-----
+          guard
+          -----END PRIVATE KEY-----
+PEMEOF
+if helm template guard-indented-key "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     -f "$TMP_DIR/indented-key-values.yaml" >/dev/null 2>"$TMP_DIR/indented-key.err"; then
+  echo "FAIL: an indented private key must fail validation" >&2
+  exit 1
+fi
+grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/indented-key.err" || {
+  echo "FAIL: validation error does not mention the block-type rule for the indented key:" >&2
+  cat "$TMP_DIR/indented-key.err" >&2
+  exit 1
+}
+
+# 2g3. A hyphen-labeled marker ("PRIVATE-KEY") does not fit an
+#      uppercase-label-only charset -- the enumeration must still see it.
+if helm template guard-hyphen-key "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     --set-string trustedCACerts.certs[0]="-----BEGIN PRIVATE-KEY----- guard" >/dev/null 2>"$TMP_DIR/hyphen-key.err"; then
+  echo "FAIL: a hyphen-labeled private key marker must fail validation" >&2
+  exit 1
+fi
+grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/hyphen-key.err" || {
+  echo "FAIL: validation error does not mention the block-type rule for the hyphen-labeled key:" >&2
+  cat "$TMP_DIR/hyphen-key.err" >&2
+  exit 1
+}
+
+# 2g4. A lowercase-labeled marker: the scan is case-insensitive, so a
+#      lowercase private key after a valid certificate fails the block-type
+#      check (not the shape check, which the certificate satisfies).
+if helm template guard-lower-key "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true \
+     --set-string trustedCACerts.certs[0]="-----BEGIN CERTIFICATE----- guard
+-----END CERTIFICATE-----
+-----begin private key-----
+guard
+-----end private key-----" >/dev/null 2>"$TMP_DIR/lower-key.err"; then
+  echo "FAIL: a lowercase-labeled private key must fail validation" >&2
+  exit 1
+fi
+grep -qi 'only CERTIFICATE blocks' "$TMP_DIR/lower-key.err" || {
+  echo "FAIL: validation error does not mention the block-type rule for the lowercase key:" >&2
+  cat "$TMP_DIR/lower-key.err" >&2
+  exit 1
+}
+
 # 2h. An empty (or whitespace-only) entry must fail: it would render an
 #     empty ca-N.crt, merge-ca would append nothing and that CA would be
 #     silently absent from the merged bundle.
@@ -409,6 +480,36 @@ if run_merge_ca; then
 fi
 grep -q 'non-CERTIFICATE' "$REPLAY/err" || {
   echo "FAIL: rejection message does not mention the block type:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+
+# 6b2. An INDENTED private key in an operator-owned entry must fail the
+#      runtime block-type pass too (the existingConfigMap path: a
+#      line-anchored BEGIN scan would not even see it).
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n   -----BEGIN PRIVATE KEY-----\nCCCC\n   -----END PRIVATE KEY-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+rm -f "$REPLAY/merged/ca-bundle.crt"
+if run_merge_ca; then
+  echo "FAIL: merge-ca must reject an indented private key" >&2
+  exit 1
+fi
+grep -q 'non-exact-line PEM BEGIN marker' "$REPLAY/err" || {
+  echo "FAIL: rejection message does not mention the marker shape for the indented key:" >&2
+  cat "$REPLAY/err" >&2
+  exit 1
+}
+
+# 6b3. A LOWERCASE-labeled private key must fail the runtime pass as well
+#      (Go's pem.Decode would silently skip the block -- the CA absent from
+#      the bundle, the key text still shipped).
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n-----begin private key-----\nCCCC\n-----end private key-----\n' >"$REPLAY/trusted-ca/ca-0.crt"
+rm -f "$REPLAY/merged/ca-bundle.crt"
+if run_merge_ca; then
+  echo "FAIL: merge-ca must reject a lowercase-labeled private key" >&2
+  exit 1
+fi
+grep -q 'non-exact-line PEM BEGIN marker' "$REPLAY/err" || {
+  echo "FAIL: rejection message does not mention the marker shape for the lowercase key:" >&2
   cat "$REPLAY/err" >&2
   exit 1
 }

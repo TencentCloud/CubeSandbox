@@ -147,11 +147,13 @@ locals {
   # no-op -- no ConfigMap, no init container, no SSL_CERT_FILE.
   tc_trusted_ca_inline  = length(var.templatecenter_trusted_ca_certs) > 0
   tc_trusted_ca_enabled = local.tc_trusted_ca_inline || var.templatecenter_trusted_ca_existing_config_map != ""
-  tc_trusted_ca_name    = local.tc_trusted_ca_inline ? "cube-templatecenter-trusted-ca" : var.templatecenter_trusted_ca_existing_config_map
   # Roll the Deployment when the inline set changes: the merged bundle is a
   # one-time copy into an emptyDir at pod start, so a bare ConfigMap update
   # would never reach running pods (the existingConfigMap path is
-  # operator-owned, restart manually).
+  # operator-owned, restart manually). Hashing the variable (not a resource
+  # attribute) keeps the annotation known at plan time; the Deployment's
+  # dependency edge on the ConfigMap comes from the volume's config_map
+  # name reference below, so this local needs no reference of its own.
   tc_trusted_ca_checksum = sha256(join("\n", var.templatecenter_trusted_ca_certs))
 }
 
@@ -820,15 +822,23 @@ resource "kubernetes_deployment" "templatecenter" {
               # same rule on inline certs at plan time; this pass
               # additionally covers the existingConfigMap path, whose content
               # a plan cannot see.
-              # Exact-line match with a POSIX [[:space:]]* tail (LF, CR/CRLF
-              # and stray trailing spaces all match -- portable across awk
-              # implementations, unlike \r? which only gawk honors), so a
-              # file that passed the plan-time validation cannot be rejected
-              # here with a different diagnosis.
+              # The BEGIN scan is case-insensitive and NOT line-anchored, so
+              # an indented, lowercase or hyphen-labeled private key cannot
+              # slip past while the surrounding certificate satisfies the
+              # exact-line CERTIFICATE checks (such markers are things Go's
+              # pem.Decode would silently skip -- the CA would be absent from
+              # the bundle with nothing to attribute the x509 error to, and
+              # the key text would still ship in the ConfigMap). The accept
+              # criterion stays the exact-line match with a POSIX
+              # [[:space:]]* tail (LF, CR/CRLF and stray trailing spaces all
+              # match -- portable across awk implementations, unlike \r?
+              # which only gawk honors), so a file that passed the plan-time
+              # validation cannot be rejected here with a different
+              # diagnosis.
               # The offending block is reported by awk; errexit turns its
               # non-zero exit into a failed init container (fail closed).
               for f in /trusted-ca/*.crt; do
-                awk '/^-----BEGIN / && $0 !~ /^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE PEM block: " $0; exit 1 }' "$f" 1>&2
+                awk 'tolower($0) ~ /-----begin / && $0 !~ /^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE or non-exact-line PEM BEGIN marker: " $0; exit 1 }' "$f" 1>&2
                 # Symmetry + presence: an empty or marker-less entry would
                 # append nothing and that CA would be silently absent from
                 # the merged bundle; an unbalanced paste renders blocks Go
@@ -1012,7 +1022,22 @@ resource "kubernetes_deployment" "templatecenter" {
           content {
             name = "trusted-ca"
             config_map {
-              name = local.tc_trusted_ca_name
+              # Inline path: resolve through the managed resource's name
+              # attribute, not a string local -- the reference is what gives
+              # the Deployment a dependency edge on the ConfigMap it mounts,
+              # so a fresh apply (including the -targeted applies create.sh
+              # drives through STEP2_TARGETS) orders the ConfigMap before
+              # the Deployment instead of the pod sitting on kubelet
+              # MountVolume retries until the ConfigMap lands. Same
+              # convention as the neighbouring nginx volume. The
+              # existingConfigMap path is operator-owned -- no managed
+              # resource exists to reference, so the variable stays a plain
+              # string there. Safe against the zero-count resource: the
+              # ternary only evaluates the chosen branch, and on the inline
+              # path the ConfigMap's count is 1 (this dynamic block only
+              # expands when the feature is on, and then deploy_addons is
+              # true).
+              name = local.tc_trusted_ca_inline ? kubernetes_config_map_v1.templatecenter_trusted_ca[0].metadata[0].name : var.templatecenter_trusted_ca_existing_config_map
             }
           }
         }

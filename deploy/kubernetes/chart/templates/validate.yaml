@@ -485,11 +485,15 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 combined "cert + key" paste is the most common input shape for a private
 CA and would pass the marker checks below -- writing the private key
 into a world-readable ConfigMap and the Helm release Secret. Enumerate
-BEGIN markers with a positive regex (RE2 has no negative lookahead) and
-reject every type but CERTIFICATE; Go only trusts CERTIFICATE blocks
-anyway. */}}
-{{- range $marker := regexFindAll "(?m)^-----BEGIN [A-Z0-9 ]+-----" $pem -1 }}
-{{- if not (regexMatch "^-----BEGIN CERTIFICATE-----" $marker) }}
+every BEGIN-marker-shaped token ANYWHERE in the value, case-insensitively
+(RE2 has no negative lookahead): a line-start anchor or an uppercase-only
+label charset would let an indented, lowercase or hyphen-labeled private
+key slip past enumeration while the CERTIFICATE shape checks below are
+satisfied by the surrounding certificate, and the key would land verbatim
+in the ConfigMap. Reject every type but the exact CERTIFICATE marker;
+Go only trusts CERTIFICATE blocks anyway. */}}
+{{- range $marker := regexFindAll "(?si)-----BEGIN .*?-----" $pem -1 }}
+{{- if ne $marker "-----BEGIN CERTIFICATE-----" }}
 {{- fail (printf "trustedCACerts.certs[%d] contains a PEM block of type %q: only CERTIFICATE blocks are accepted, because a private key pasted alongside the certificate would be written into a world-readable ConfigMap and the Helm release Secret -- export the certificate alone (e.g. openssl x509 -in combined.pem -out cert.crt) and list only that" $i $marker) }}
 {{- end }}
 {{- end }}

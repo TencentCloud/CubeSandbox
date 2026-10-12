@@ -75,6 +75,12 @@ grep -q 'regexall("-----BEGIN CERTIFICATE-----"' "${TF_VARS}" \
   && fail "variables.tf still contains an unanchored BEGIN CERTIFICATE regexall (parity gap with the runtime check)"
 grep -q 'regexall("-----END CERTIFICATE-----"' "${TF_VARS}" \
   && fail "variables.tf still contains an unanchored END CERTIFICATE regexall (parity gap with the runtime check)"
+# The block-type enumeration itself must scan everywhere, case-insensitively
+# (same pattern as validate.yaml): a line-anchored or uppercase-label-only
+# scan lets an indented, hyphen-labeled or lowercase private key slip past
+# while the CERTIFICATE shape checks are satisfied by the surrounding cert.
+grep -qF 'regexall("(?si)-----BEGIN .*?-----"' "${TF_VARS}" \
+  || fail "variables.tf block-type enumeration must be unanchored and case-insensitive (parity with validate.yaml)"
 
 # --- 2. Runtime replay of the terraform copy --------------------------------
 
@@ -119,6 +125,27 @@ if run_merge_ca; then
 fi
 grep -q 'non-CERTIFICATE' "${REPLAY}/err" || fail "rejection message does not mention the block type"
 
+# The BEGIN scan is case-insensitive and not line-anchored: an INDENTED or
+# LOWERCASE-labeled private key must fail the runtime pass too (a
+# line-anchored scan would not even see the indented one, and Go's
+# pem.Decode would silently skip the lowercase block -- CA absent from the
+# bundle, key text still shipped).
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n   -----BEGIN PRIVATE KEY-----\nCCCC\n   -----END PRIVATE KEY-----\n' >"${REPLAY}/trusted-ca/ca-0.crt"
+rm -f "${REPLAY}/merged/ca-bundle.crt"
+if run_merge_ca; then
+  fail "merge-ca must reject an indented private key"
+fi
+grep -q 'non-exact-line PEM BEGIN marker' "${REPLAY}/err" \
+  || fail "rejection message does not mention the marker shape for the indented key"
+
+printf -- '-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n-----begin private key-----\nCCCC\n-----end private key-----\n' >"${REPLAY}/trusted-ca/ca-0.crt"
+rm -f "${REPLAY}/merged/ca-bundle.crt"
+if run_merge_ca; then
+  fail "merge-ca must reject a lowercase-labeled private key"
+fi
+grep -q 'non-exact-line PEM BEGIN marker' "${REPLAY}/err" \
+  || fail "rejection message does not mention the marker shape for the lowercase key"
+
 : >"${REPLAY}/sys/debian.crt"
 rm -f "${REPLAY}/sys/rhel.pem" "${REPLAY}/sys/rhel2.crt" "${REPLAY}/merged/ca-bundle.crt"
 if run_merge_ca; then
@@ -162,6 +189,44 @@ PEM
   if grep -q 'Invalid value for variable' "${TMP_DIR}/good-var.out"; then
     fail "variable validation must accept a real certificate: $(grep -A3 'Invalid value' "${TMP_DIR}/good-var.out" | head -5)"
   fi
+
+  # A private key hidden behind a marker shape the old line-anchored,
+  # uppercase-label-only enumeration missed (indented / lowercase) must be
+  # rejected by the plan-time validation too -- the cert satisfies the
+  # shape and symmetry checks, so the block-type enumeration is what fires.
+  for keycase in 'INDENTED' 'LOWERCASE'; do
+    if [ "${keycase}" = 'INDENTED' ]; then
+      KEYBLOCK='   -----BEGIN PRIVATE KEY-----
+   CCCC
+   -----END PRIVATE KEY-----'
+    else
+      KEYBLOCK='-----begin private key-----
+CCCC
+-----end private key-----'
+    fi
+    echo 'var.templatecenter_trusted_ca_certs' \
+      | terraform -chdir="${TF_DIR}" console -var="templatecenter_trusted_ca_certs=[<<PEM
+$(cat <<PEMBODY
+-----BEGIN CERTIFICATE-----
+MIIBlzCCAT2gAwIBAgIUdth/oWQ0sZk+7Epg3C8VbQQ9B9UwCgYIKoZIzj0EAwIw
+IDEeMBwGA1UEAwwVdHJ1c3RlZC1jYS1ndWFyZC10ZXN0MCAXDTI2MTAwODA2NTQx
+NloYDzIxMjYwOTE0MDY1NDE2WjAgMR4wHAYDVQQDDBV0cnVzdGVkLWNhLWd1YXJk
+LXRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATO8S7IBj3Mx7Vjhuni7hcF
+RlAN819UkutgbvitP5A5BbZv790teGHlQNgHUDsEjCFZ1sE1FAZlcNxE/5c2PoWr
+o1MwUTAdBgNVHQ4EFgQUC5THJvp7KLuSM1CAjJ85UxpDJQwwHwYDVR0jBBgwFoAU
+C5THJvp7KLuSM1CAjJ85UxpDJQwwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD
+AgNIADBFAiB8btp6hv+MX0lvynlT6jCLRMBDq67jEjE/eZxuWxYvUAIhAJ4tLWA9
+rYx/K513++8bo/fIhMKbpB2PUffIbzgC0ubr
+-----END CERTIFICATE-----
+${KEYBLOCK}
+PEMBODY
+)
+PEM
+]" >"${TMP_DIR}/${keycase,,}-key-var.out" 2>&1
+    grep -q 'Invalid value for variable' "${TMP_DIR}/${keycase,,}-key-var.out" \
+      && grep -qi 'only CERTIFICATE blocks' "${TMP_DIR}/${keycase,,}-key-var.out" \
+      || fail "variable validation must reject a ${keycase,,} private key: $(grep -A3 'Invalid value' "${TMP_DIR}/${keycase,,}-key-var.out" | head -5)"
+  done
 else
   echo "terraform not found; skipping variable-validation checks" >&2
 fi
