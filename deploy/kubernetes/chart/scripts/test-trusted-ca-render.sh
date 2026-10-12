@@ -169,11 +169,10 @@ grep -qF '(?si)-----BEGIN .*?-----' "$CHART_DIR/templates/validate.yaml" || {
   exit 1
 }
 
-# 2g2. The bot's exact round-5 shape: an INDENTED private key after a valid
-#      certificate. The extra indentation survives the YAML block scalar
-#      (only the 6-space block indent is stripped), the shape checks pass on
-#      the flush-left certificate, and only the unanchored enumeration sees
-#      the key.
+# 2g2. A private key indented after a valid certificate. The extra
+#      indentation survives the YAML block scalar (only the 6-space block
+#      indent is stripped), the shape checks pass on the flush-left
+#      certificate, and only the unanchored enumeration sees the key.
 cat >"$TMP_DIR/indented-key-values.yaml" <<'PEMEOF'
 trustedCACerts:
   certs:
@@ -336,8 +335,9 @@ for scope in "global.env[0]" "controlPlane.templateCenter.env[0]"; do
   }
 done
 
-# 2k. The merge-ca init container carries resources (N2: same convention as
-#     cubeNodeBootstrap.waitResources) and honors an override.
+# 2k. The merge-ca init container carries resources (same convention as the
+#     wait-node-prep init container, which also runs briefly per pod) and
+#     honors an override.
 awk '/^        - name: merge-ca$/,/^      containers:$/' "$TMP_DIR/on.yaml" >"$TMP_DIR/merge-ca-block.yaml"
 grep -q 'memory: 32Mi' "$TMP_DIR/merge-ca-block.yaml" || {
   echo "FAIL: merge-ca init container must render its default resources" >&2
@@ -490,7 +490,8 @@ REALEOF
 )"
 
 # 6a. Happy path: a system bundle + one CERTIFICATE entry merge into two
-#     blocks, separated (the f3b50154 newline contract, asserted for real).
+#     blocks separated by a newline -- PEM blocks glued together would be
+#     silently dropped by Go's pem.Decode after the first.
 printf -- '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n' >"$REPLAY/sys/debian.crt"
 printf '%s\n' "$REAL_CERT" >"$REPLAY/trusted-ca/ca-0.crt"
 run_merge_ca || {

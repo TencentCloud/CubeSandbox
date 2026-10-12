@@ -4586,6 +4586,19 @@ write_resolved_tfvars_file() {
 	tke_count="$(_number_or_default "$tke_count" 0)"
 
 	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	# The trusted-ca variables are deliberately NOT mirrored here (see the
+	# save_env_file trusted-ca block): their certs value is HCL, and an
+	# HCL-valid value this mirror cannot represent losslessly as JSON would
+	# either abort the write or -- worse -- silently drop the
+	# actually-deployed value, un-pinning the deployed config. .env is the
+	# single source of truth for the pair; the loader never force-exports
+	# what this file does not carry, so .env edits (removals, [], value
+	# changes) take effect on the next run.
+	# This explanation lives HERE rather than inside the jq program below:
+	# the program is one single-quoted shell string, and prose with quotes
+	# inside it is invisible quoting hazard -- one unpaired apostrophe in a
+	# future edit would split the program into extra argv words and break
+	# every resolved-tfvars write.
 	jq -n \
 		--arg vpc_name "${TF_VAR_vpc_name:-${TENCENTCLOUD_VPC_NAME:-cubesandbox-terraform-vpc}}" \
 		--arg region "${TF_VAR_region:-${TENCENTCLOUD_REGION:-ap-guangzhou}}" \
@@ -4703,14 +4716,6 @@ write_resolved_tfvars_file() {
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 			cube_proxy_admin_port: $cube_proxy_admin_port,
 		}
-		# The trusted-ca variables are deliberately NOT mirrored here (see
-		# the save_env_file trusted-ca block): their certs value is HCL, and
-		# an HCL-valid value this mirror cannot represent losslessly as JSON
-		# would either abort the write or -- worse -- silently drop the
-		# actually-deployed value, un-pinning the deployed config. .env is
-		# the single source of truth for the pair; the loader never
-		# force-exports what this file does not carry, so .env edits
-		# (removals, '[]', value changes) take effect on the next run.
 		| with_entries(select(.value != "" and .value != null))' >"$tmp"
 
 	(
@@ -5091,7 +5096,7 @@ kubernetes_secret.cubeproxy_global|-n cubesandbox delete secret cubeproxy-global
 kubernetes_secret.cubeproxy_certs|-n cubesandbox delete secret cubeproxy-certs
 kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubeproxy-nginx-conf
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
-kubernetes_config_map_v1.templatecenter_trusted_ca|-n cubesandbox delete configmap cube-templatecenter-trusted-ca
+kubernetes_config_map.templatecenter_trusted_ca|-n cubesandbox delete configmap cube-templatecenter-trusted-ca
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
 kubernetes_service.templatecenter|-n cubesandbox delete svc cube-templatecenter
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api
@@ -5116,7 +5121,7 @@ kubernetes_deployment.cube_webui|-n cubesandbox delete deploy cube-webui
 		kubernetes_deployment.*)
 			# Always delete Deployments → recreated with the freshly built images.
 			;;
-		kubernetes_config_map_v1.templatecenter_trusted_ca)
+		kubernetes_config_map.templatecenter_trusted_ca)
 			# Inline-certs path only (see _tc_trusted_ca_inline_enabled):
 			# on the existing_config_map path this address is never in
 			# terraform state (resource count 0) and the ConfigMap is
@@ -5682,7 +5687,7 @@ main() {
 		kubernetes_secret.cube_egress_ca[0]
 		kubernetes_secret.cubemaster_conf[0]
 		kubernetes_secret.templatecenter_conf[0]
-		# kubernetes_config_map_v1.templatecenter_trusted_ca is deliberately
+		# kubernetes_config_map.templatecenter_trusted_ca is deliberately
 		# NOT targeted here: the Deployment's volume resolves its config_map
 		# name through the managed resource's attribute (tke-addons.tf), and
 		# -target includes the dependencies of every targeted resource, so

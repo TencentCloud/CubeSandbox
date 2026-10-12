@@ -682,7 +682,7 @@ resource "kubernetes_secret" "templatecenter_conf" {
 # trustedCACerts ConfigMap (inline-certs path only): one .crt key per entry,
 # same naming as the helm chart's trusted-ca.yaml so the merge-ca script's
 # "/trusted-ca/*.crt" glob behaves identically.
-resource "kubernetes_config_map_v1" "templatecenter_trusted_ca" {
+resource "kubernetes_config_map" "templatecenter_trusted_ca" {
   count = (local.deploy_addons && local.tc_trusted_ca_inline) ? 1 : 0
   metadata {
     name      = "cube-templatecenter-trusted-ca"
@@ -1059,7 +1059,7 @@ resource "kubernetes_deployment" "templatecenter" {
               # path the ConfigMap's count is 1 (this dynamic block only
               # expands when the feature is on, and then deploy_addons is
               # true).
-              name = local.tc_trusted_ca_inline ? kubernetes_config_map_v1.templatecenter_trusted_ca[0].metadata[0].name : var.templatecenter_trusted_ca_existing_config_map
+              name = local.tc_trusted_ca_inline ? kubernetes_config_map.templatecenter_trusted_ca[0].metadata[0].name : var.templatecenter_trusted_ca_existing_config_map
             }
           }
         }

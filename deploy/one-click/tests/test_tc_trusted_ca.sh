@@ -374,9 +374,9 @@ _loader_line="$(grep -n '^[[:space:]]*load_resolved_tfvars_file$' "${CREATE_SH}"
   || fail "could not locate the migrate call and the mirror loader call in create.sh"
 [ "${_migrate_line}" -lt "${_loader_line}" ] \
   || fail "the mirror migration (line ${_migrate_line}) must run before load_resolved_tfvars_file (line ${_loader_line}): after the loader the file is suspended and its keys already force-exported"
-grep -qF 'kubernetes_config_map_v1.templatecenter_trusted_ca[0]' "${CREATE_SH}" \
+grep -qF 'kubernetes_config_map.templatecenter_trusted_ca[0]' "${CREATE_SH}" \
   && fail "STEP2_TARGETS must not target the trusted-ca ConfigMap directly (count=0 whenever the inline path is off; the volume's resource-name reference in tke-addons.tf is the dependency edge)"
-grep -qF 'kubernetes_config_map_v1.templatecenter_trusted_ca[0].metadata[0].name' \
+grep -qF 'kubernetes_config_map.templatecenter_trusted_ca[0].metadata[0].name' \
   "${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/tke-addons.tf" \
   || fail "the Deployment volume must reference the managed ConfigMap resource -- that edge is what pulls the ConfigMap into the addons -target apply"
 grep -qF '${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_trusted_ca_certs=' "${CREATE_SH}" \
