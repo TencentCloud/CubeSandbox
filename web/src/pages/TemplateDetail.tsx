@@ -759,7 +759,7 @@ export default function TemplateDetailPage() {
                 </div>
                 {deleteMutation.isError && (
                   <p className="text-xs text-destructive">
-                    {formatDeleteError(deleteMutation.error)}
+                    {formatDeleteError(deleteMutation.error, t)}
                   </p>
                 )}
               </div>
@@ -1081,7 +1081,9 @@ export default function TemplateDetailPage() {
               </Button>
             </div>
             {deleteMutation.isError && (
-              <p className="text-xs text-destructive">{formatDeleteError(deleteMutation.error)}</p>
+              <p className="text-xs text-destructive">
+                {formatDeleteError(deleteMutation.error, t)}
+              </p>
             )}
           </div>
         ) : (

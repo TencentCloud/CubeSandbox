@@ -547,7 +547,7 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
             {t('delete.confirmDescSuffix')}
           </p>
           {mutation.isError && (
-            <p className="text-xs text-destructive">{formatDeleteError(mutation.error)}</p>
+            <p className="text-xs text-destructive">{formatDeleteError(mutation.error, t)}</p>
           )}
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={onClose}>

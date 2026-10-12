@@ -95,5 +95,10 @@
     "cancel": "取消",
     "confirm": "确认删除",
     "deleting": "删除中…"
+  },
+  "errors": {
+    "templateInUse": "该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。",
+    "buildInProgress": "模板正在构建中，请等待构建完成后再删除。",
+    "cleanupMissing": "模板清理信息不完整，无法自动删除，请联系管理员。"
   }
 }

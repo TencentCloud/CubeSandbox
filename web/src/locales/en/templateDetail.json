@@ -101,5 +101,10 @@
   "createdAt": "Created at",
   "imageCopied": "Image URL copied",
   "exposedPorts": "Exposed Ports",
-  "probePath": "Probe Path & Port"
+  "probePath": "Probe Path & Port",
+  "errors": {
+    "templateInUse": "This template has sandbox instances in use. Destroy all related sandboxes before deleting it.",
+    "buildInProgress": "This template is still building. Wait for the build to finish before deleting it.",
+    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator."
+  }
 }
