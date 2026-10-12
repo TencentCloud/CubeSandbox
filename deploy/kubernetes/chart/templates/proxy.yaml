@@ -27,14 +27,8 @@ stringData:
 ---
 {{- else if eq .Values.cubeProxy.tls.mode "selfSigned" }}
 {{- $commonName := default .Values.cubeProxy.domain .Values.cubeProxy.tls.selfSigned.commonName -}}
-{{- $dnsNames := list .Values.cubeProxy.domain -}}
-{{- /* Auto-generate wildcard for the custom domain */ -}}
-{{- $wildcardDomain := printf "*.%s" .Values.cubeProxy.domain -}}
-{{- $dnsNames = append $dnsNames $wildcardDomain -}}
-{{- range .Values.cubeProxy.tls.selfSigned.dnsNames }}
-{{- $dnsNames = append $dnsNames . -}}
-{{- end }}
-{{- $dnsNames = uniq $dnsNames -}}
+{{- $dnsNamesList := include "cube.proxyDnsNames" (dict "domain" .Values.cubeProxy.domain "extraNames" .Values.cubeProxy.tls.selfSigned.dnsNames) -}}
+{{- $dnsNames := fromYamlArray $dnsNamesList -}}
 {{- $ipAddresses := list -}}
 {{- range .Values.cubeProxy.tls.selfSigned.ipAddresses }}
 {{- $ipAddresses = append $ipAddresses . -}}
@@ -88,7 +82,7 @@ spec:
     {{- if .Values.cubeProxy.tls.certManager.dnsNames }}
     {{- toYaml .Values.cubeProxy.tls.certManager.dnsNames | nindent 4 }}
     {{- else }}
-    - {{ .Values.cubeProxy.domain | quote }}
+    {{- include "cube.proxyDnsNames" (dict "domain" .Values.cubeProxy.domain "extraNames" (list)) | nindent 4 }}
     {{- end }}
   {{- with .Values.cubeProxy.tls.certManager.ipAddresses }}
   ipAddresses:

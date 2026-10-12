@@ -1565,3 +1565,18 @@ true
 {{- printf "%s-ops-blobs" (include "cube.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Generate proxy TLS DNS names list (domain + wildcard + extras).
+Usage: {{ include "cube.proxyDnsNames" (dict "domain" .Values.cubeProxy.domain "extraNames" (list)) }}
+*/}}
+{{- define "cube.proxyDnsNames" -}}
+{{- $dnsNames := list .domain -}}
+{{- $wildcardDomain := printf "*.%s" .domain -}}
+{{- $dnsNames = append $dnsNames $wildcardDomain -}}
+{{- range .extraNames -}}
+{{- $dnsNames = append $dnsNames . -}}
+{{- end -}}
+{{- $dnsNames = uniq $dnsNames -}}
+{{- toYaml $dnsNames -}}
+{{- end -}}
