@@ -332,13 +332,24 @@ assert_saved_line() {
 assert_saved_line '["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]'
 
 # 4d. Static wiring pins: the gate must actually gate the trusted-ca entry,
-#     the stale-mirror prune must run before the addons apply, and both
-#     persistence mechanisms must carry the two variables.
+#     the stale-mirror prune must run before the addons apply, both
+#     persistence mechanisms must carry the two variables, the STEP2_TARGETS
+#     must NOT target the trusted-ca ConfigMap directly (the Deployment's
+#     volume config_map name reference in tke-addons.tf is the dependency
+#     edge that pulls it into the addons -target apply -- an explicit target
+#     on an instance index that is count=0 whenever the inline path is off
+#     would be dead there and version-sensitive on top), and that edge must
+#     exist.
 CREATE_SH="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/create.sh"
 grep -q '_tc_trusted_ca_inline_enabled "$RESOLVED_TFVARS_FILE"' "${CREATE_SH}" \
   || fail "_reconcile_addons must gate the trusted-ca ConfigMap entry on the inline path"
 grep -q '_tc_prune_stale_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"' "${CREATE_SH}" \
   || fail "create.sh must prune stale trusted-ca keys from the resolved mirror before the apply"
+grep -qF 'kubernetes_config_map_v1.templatecenter_trusted_ca[0]' "${CREATE_SH}" \
+  && fail "STEP2_TARGETS must not target the trusted-ca ConfigMap directly (count=0 whenever the inline path is off; the volume's resource-name reference in tke-addons.tf is the dependency edge)"
+grep -qF 'kubernetes_config_map_v1.templatecenter_trusted_ca[0].metadata[0].name' \
+  "${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/tke-addons.tf" \
+  || fail "the Deployment volume must reference the managed ConfigMap resource -- that edge is what pulls the ConfigMap into the addons -target apply"
 grep -qF '${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_trusted_ca_certs=' "${CREATE_SH}" \
   || fail "save_env_file must persist the certs TF_VAR_ conditionally (an empty TF_VAR_ for a list variable is not parseable HCL)"
 grep -qF '${TF_VAR_templatecenter_trusted_ca_existing_config_map:+TF_VAR_templatecenter_trusted_ca_existing_config_map=' "${CREATE_SH}" \
@@ -409,6 +420,44 @@ grep -q 'TF_VAR_templatecenter_trusted_ca_certs' "${TF_ENV_EXAMPLE}" \
   || fail "terraform env.example must document the trusted-ca variables (create.sh reads THIS .env)"
 grep -q 'TF_VAR_templatecenter_trusted_ca' "${REPO_ROOT}/deploy/one-click/env.example" \
   && fail "top-level env.example is the target-machine install template; the terraform variable docs belong only in the deployer's env.example"
+
+# 4g. save_env_file must EXECUTE correctly with the trusted-ca lines: inside
+#     an unquoted heredoc, quote characters in a ${VAR:+...} word are literal
+#     data, NOT quoting syntax (the opposite of unquoted command context,
+#     where a reviewer's one-line repro shows them consumed). This pins the
+#     behavior executably instead of by argument: the function's own
+#     two-quote validation loop is the assertion -- if the quotes were ever
+#     consumed, the data line would land with zero quotes and the run below
+#     would exit 1.
+awk '/^save_env_file\(\) \{/,/^\}/' "${CREATE_SH}" >"${TMP_DIR}/save-env-fn.sh"
+[ -s "${TMP_DIR}/save-env-fn.sh" ] || fail "could not extract save_env_file from create.sh"
+grep -q 'templatecenter_trusted_ca' "${TMP_DIR}/save-env-fn.sh" \
+  || fail "extracted save_env_file looks truncated"
+ENV_FILE="${TMP_DIR}/saved.env"
+RED='' YELLOW='' GREEN='' CYAN='' NC=''
+terraform() { return 1; } # no state: the function must fall back to defaults
+# shellcheck source=/dev/null
+source "${TMP_DIR}/save-env-fn.sh"
+
+(
+	set -eu
+	unset TF_VAR_templatecenter_trusted_ca_certs TF_VAR_templatecenter_trusted_ca_existing_config_map
+	save_env_file quiet
+)
+grep -q '^TF_VAR_templatecenter_trusted_ca' "${ENV_FILE}" \
+  && fail "save_env_file must not write the trusted-ca lines when their env vars are unset"
+
+TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]'
+TF_VAR_templatecenter_trusted_ca_existing_config_map='my-ca-certs'
+(
+	set -eu
+	save_env_file quiet
+) || fail "save_env_file must accept the trusted-ca lines (the two-quote validation loop would exit 1 if the heredoc consumed the quotes)"
+grep -qF "TF_VAR_templatecenter_trusted_ca_certs='[\"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\"]'" "${ENV_FILE}" \
+  || fail "the saved certs line must carry its single quotes verbatim: $(grep 'trusted_ca_certs' "${ENV_FILE}" | head -1)"
+grep -qF "TF_VAR_templatecenter_trusted_ca_existing_config_map='my-ca-certs'" "${ENV_FILE}" \
+  || fail "the saved existing_config_map line must carry its single quotes verbatim"
+unset TF_VAR_templatecenter_trusted_ca_certs TF_VAR_templatecenter_trusted_ca_existing_config_map
 
 if [ "${failures}" -gt 0 ]; then
   echo "trusted-ca terraform guard FAILED (${failures} failure(s))" >&2

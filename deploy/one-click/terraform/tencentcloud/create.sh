@@ -5690,7 +5690,14 @@ main() {
 		kubernetes_secret.cube_egress_ca[0]
 		kubernetes_secret.cubemaster_conf[0]
 		kubernetes_secret.templatecenter_conf[0]
-		kubernetes_config_map_v1.templatecenter_trusted_ca[0]
+		# kubernetes_config_map_v1.templatecenter_trusted_ca is deliberately
+		# NOT targeted here: the Deployment's volume resolves its config_map
+		# name through the managed resource's attribute (tke-addons.tf), and
+		# -target includes the dependencies of every targeted resource, so
+		# the ConfigMap is pulled into this apply by that edge. An explicit
+		# target on an instance index that is count=0 whenever the inline
+		# path is off (the default) would be dead on that path and version
+		# -sensitive behavior on top -- the edge is unconditional and exact.
 		kubernetes_deployment.cubemaster[0]
 		kubernetes_service.cubemaster[0]
 		kubernetes_deployment.templatecenter[0]
