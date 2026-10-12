@@ -5,6 +5,11 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - 'deploy/one-click/terraform/**'
+      # The deployer's .env template and its target-machine counterpart are
+      # both pinned by deploy/one-click/tests/test_tc_trusted_ca.sh (the
+      # trusted-ca variables must be documented only in the template the
+      # deployer actually loads) -- changes to either must run that guard.
+      - 'deploy/one-click/env.example'
       # The deployer also depends on the release-bundle builder and the
       # component Dockerfile/package contexts it assembles. Changes there can
       # break bundle layout or image builds, so validate them too (the

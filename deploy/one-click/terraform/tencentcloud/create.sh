@@ -4418,6 +4418,15 @@ TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLO
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
 TENCENTCLOUD_VERBOSE='${VERBOSE:-1}'
+# Trusted CA for the TemplateCenter pod (terraform twin of trustedCACerts).
+# Both lines are written only when set. The certs one MUST be: it is a
+# terraform LIST, and an empty TF_VAR_ for a list variable is not parseable
+# HCL -- it would fail every subsequent terraform invocation. The string
+# variable would survive an empty round-trip, but omitting it keeps .env
+# minimal and lets the stale-mirror prune (lib-state-sync.sh) detect
+# removal unambiguously.
+${TF_VAR_templatecenter_trusted_ca_existing_config_map:+TF_VAR_templatecenter_trusted_ca_existing_config_map='${TF_VAR_templatecenter_trusted_ca_existing_config_map}'}
+${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_trusted_ca_certs='${TF_VAR_templatecenter_trusted_ca_certs}'}
 EOF
 	)
 	chmod 600 "${ENV_FILE}" 2>/dev/null || true
@@ -4635,6 +4644,8 @@ write_resolved_tfvars_file() {
 		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
 		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
 		--argjson cube_proxy_admin_port "$(_number_or_default "${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}" 8082)" \
+		--argjson templatecenter_trusted_ca_certs "${TF_VAR_templatecenter_trusted_ca_certs:-[]}" \
+		--arg templatecenter_trusted_ca_existing_config_map "${TF_VAR_templatecenter_trusted_ca_existing_config_map:-}" \
 		'{
 			vpc_name: $vpc_name,
 			region: $region,
@@ -4693,8 +4704,20 @@ write_resolved_tfvars_file() {
 			cube_admin_token: $cube_admin_token,
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 			cube_proxy_admin_port: $cube_proxy_admin_port,
+			# The certs env var must be a JSON array (the shape env.example
+			# documents) -- --argjson mirrors it verbatim; HCL-only extras
+			# terraform would tolerate in a TF_VAR_ are not supported by the
+			# mirror.
+			templatecenter_trusted_ca_certs: $templatecenter_trusted_ca_certs,
+			templatecenter_trusted_ca_existing_config_map: $templatecenter_trusted_ca_existing_config_map,
 		}
-		| with_entries(select(.value != "" and .value != null))' >"$tmp"
+		# An empty certs array is omitted, not written: this file loads last
+		# (alphabetically after any operator-provided *.auto.tfvars), and a
+		# written [] would override certs the operator passed through their
+		# own tfvars file with "feature off". The other keys are plain
+		# strings the deployer itself owns, so mirroring them unconditionally
+		# (modulo the "" drop below) is safe.
+		| with_entries(select(.value != "" and .value != null and ((.value | type) != "array" or (.value | length) > 0)))' >"$tmp"
 
 	(
 		umask 077
@@ -5098,6 +5121,23 @@ kubernetes_deployment.cube_webui|-n cubesandbox delete deploy cube-webui
 		case "$addr" in
 		kubernetes_deployment.*)
 			# Always delete Deployments → recreated with the freshly built images.
+			;;
+		kubernetes_config_map_v1.templatecenter_trusted_ca)
+			# Inline-certs path only (see _tc_trusted_ca_inline_enabled):
+			# on the existing_config_map path this address is never in
+			# terraform state (resource count 0) and the ConfigMap is
+			# operator-owned -- the plain drift gate alone would read it as
+			# drift on every re-run and delete it, and terraform would not
+			# recreate it (the inline list is empty), leaving the
+			# TemplateCenter pod stuck in ContainerCreating on a missing
+			# trusted-ca volume.
+			if ! _tc_trusted_ca_inline_enabled "$RESOLVED_TFVARS_FILE"; then
+				continue
+			fi
+			if echo "$in_state" | grep -qF "$addr"; then
+				continue
+			fi
+			echo -e "  ${YELLOW}  drift: ${addr} exists in cluster but not in state → deleting${NC}"
 			;;
 		*)
 			# Others: only delete when drifted (missing from state) to avoid
@@ -5634,6 +5674,13 @@ main() {
 	# Delete stale/drifted objects so the apply can (re)create the Deployments
 	# with the freshly built images.
 	_reconcile_addons
+	# Keep the resolved tfvars mirror truthful before the apply reads it: it
+	# is only rewritten after a successful run, so a variable removed from
+	# the .env since the last run would stay pinned here (TF_VAR_ env vars
+	# win where set, but an unset one falls back to this file) and, for the
+	# trusted-ca pair, trip the mutual-exclusion precondition on a switch
+	# between the inline and existing_config_map paths.
+	_tc_prune_stale_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"
 	_set_phase_flags "$(phase_addons_flags)"
 	STEP2_LABEL="Step: Deploy TKE addons"
 	STEP2_TARGETS=(

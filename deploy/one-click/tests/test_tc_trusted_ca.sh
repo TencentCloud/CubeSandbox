@@ -231,6 +231,185 @@ else
   echo "terraform not found; skipping variable-validation checks" >&2
 fi
 
+# --- 4. Reconciler gate + persistence wiring (no terraform needed) ----------
+# The reconciler must never treat the operator-owned ConfigMap as drift on
+# the existing_config_map path: the gate decides delete-vs-keep on every
+# re-run, and the persistence wiring decides whether the gate's inputs
+# survive the run that rewrites .env and resolved.auto.tfvars.json.
+# shellcheck source=../terraform/tencentcloud/lib-state-sync.sh
+source "${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/lib-state-sync.sh"
+
+# 4a. Gate polarity: true only when the inline path is really active; every
+#     ambiguous input (missing file, empty mirror, malformed JSON, no jq)
+#     fails open toward "not managed" -- a false negative merely skips a
+#     delete, a false positive would destroy operator data.
+unset TF_VAR_templatecenter_trusted_ca_certs
+if _tc_trusted_ca_inline_enabled "${TMP_DIR}/nope.json"; then
+  fail "gate must be false without an env var and without a mirror"
+fi
+
+printf '{"templatecenter_trusted_ca_certs":[]}' >"${TMP_DIR}/empty-certs.json"
+if _tc_trusted_ca_inline_enabled "${TMP_DIR}/empty-certs.json"; then
+  fail "gate must be false for an empty mirror"
+fi
+
+printf 'not json' >"${TMP_DIR}/broken.json"
+if _tc_trusted_ca_inline_enabled "${TMP_DIR}/broken.json"; then
+  fail "gate must be false for a malformed mirror (fail open)"
+fi
+
+mkdir -p "${TMP_DIR}/empty-bin"
+BASH_ABS="$(command -v bash)"
+# shellcheck disable=SC2016
+if PATH="${TMP_DIR}/empty-bin" "${BASH_ABS}" -c 'source "${1}"; _tc_trusted_ca_inline_enabled "${2}"' _ \
+     "${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/lib-state-sync.sh" \
+     "${TMP_DIR}/broken.json" >/dev/null 2>&1; then
+  fail "gate must be false when jq is unavailable (fail open)"
+fi
+
+printf '{"templatecenter_trusted_ca_certs":["-----BEGIN CERTIFICATE-----\\nAA==\\n-----END CERTIFICATE-----"]}' >"${TMP_DIR}/with-certs.json"
+if ! _tc_trusted_ca_inline_enabled "${TMP_DIR}/with-certs.json"; then
+  fail "gate must be true when the mirror carries certs"
+fi
+
+TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----"]'
+if ! _tc_trusted_ca_inline_enabled ""; then
+  fail "gate must be true when the env var is set"
+fi
+# An empty-but-set env var must NOT count: save_env_file never writes one
+# (an empty TF_VAR_ for a list variable is not parseable HCL), and counting
+# it would let a hand-cleared line re-enable deletes.
+TF_VAR_templatecenter_trusted_ca_certs=''
+if _tc_trusted_ca_inline_enabled "${TMP_DIR}/empty-certs.json"; then
+  fail "gate must be false for an empty-but-set env var"
+fi
+unset TF_VAR_templatecenter_trusted_ca_certs
+
+# 4b. Mirror pruning: a variable removed from the .env since the last run
+#     must not stay pinned in resolved.auto.tfvars.json -- terraform reads
+#     the stale key when the env var is unset (env vars win only where set),
+#     and the stale certs value trips the mutual-exclusion precondition on
+#     a switch between the inline and existing_config_map paths.
+printf '{"region":"ap-guangzhou","templatecenter_trusted_ca_certs":["x"],"templatecenter_trusted_ca_existing_config_map":"mine"}' >"${TMP_DIR}/mirror.json"
+_tc_prune_stale_trusted_ca_mirror "${TMP_DIR}/mirror.json" # both env vars unset
+jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "${TMP_DIR}/mirror.json" >/dev/null \
+  && fail "stale trusted-ca keys must be pruned when their env vars are unset"
+jq -e '.region == "ap-guangzhou"' "${TMP_DIR}/mirror.json" >/dev/null \
+  || fail "pruning must leave unrelated keys untouched"
+
+TF_VAR_templatecenter_trusted_ca_certs='["x"]'
+printf '{"templatecenter_trusted_ca_certs":["x"],"templatecenter_trusted_ca_existing_config_map":"mine"}' >"${TMP_DIR}/mirror.json"
+_tc_prune_stale_trusted_ca_mirror "${TMP_DIR}/mirror.json" # certs env set
+jq -e 'has("templatecenter_trusted_ca_certs")' "${TMP_DIR}/mirror.json" >/dev/null \
+  || fail "pruning must keep the certs key while its env var is set"
+jq -e 'has("templatecenter_trusted_ca_existing_config_map")' "${TMP_DIR}/mirror.json" >/dev/null \
+  && fail "pruning must drop the existing_config_map key while its env var is unset"
+unset TF_VAR_templatecenter_trusted_ca_certs
+
+printf '{"region":"ap-guangzhou"}' >"${TMP_DIR}/mirror.json"
+_tc_prune_stale_trusted_ca_mirror "${TMP_DIR}/mirror.json"
+jq -e '.region == "ap-guangzhou"' "${TMP_DIR}/mirror.json" >/dev/null \
+  || fail "pruning must not touch a mirror without trusted-ca keys"
+
+printf 'not json' >"${TMP_DIR}/mirror.json"
+_tc_prune_stale_trusted_ca_mirror "${TMP_DIR}/mirror.json" \
+  || fail "pruning must not fail on a malformed mirror (leave it for terraform to report)"
+grep -q 'not json' "${TMP_DIR}/mirror.json" \
+  || fail "pruning must leave a malformed mirror untouched"
+
+if ! _tc_prune_stale_trusted_ca_mirror "${TMP_DIR}/nope.json"; then
+  fail "pruning must be a no-op success for a missing mirror"
+fi
+
+# 4c. Persistence round-trip: the saved line must reload byte-for-byte
+#     through the same _env_value every other .env entry uses.
+CERTS_LINE="TF_VAR_templatecenter_trusted_ca_certs='[\"-----BEGIN CERTIFICATE-----\\nAA==\\n-----END CERTIFICATE-----\"]'"
+assert_saved_line() {
+  local want="$1" got
+  got="$(_env_value "${CERTS_LINE}")"
+  [ "$got" = "$want" ] || fail ".env round-trip drifted: expected '${want}', got '${got}'"
+}
+assert_saved_line '["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]'
+
+# 4d. Static wiring pins: the gate must actually gate the trusted-ca entry,
+#     the stale-mirror prune must run before the addons apply, and both
+#     persistence mechanisms must carry the two variables.
+CREATE_SH="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/create.sh"
+grep -q '_tc_trusted_ca_inline_enabled "$RESOLVED_TFVARS_FILE"' "${CREATE_SH}" \
+  || fail "_reconcile_addons must gate the trusted-ca ConfigMap entry on the inline path"
+grep -q '_tc_prune_stale_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"' "${CREATE_SH}" \
+  || fail "create.sh must prune stale trusted-ca keys from the resolved mirror before the apply"
+grep -qF '${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_trusted_ca_certs=' "${CREATE_SH}" \
+  || fail "save_env_file must persist the certs TF_VAR_ conditionally (an empty TF_VAR_ for a list variable is not parseable HCL)"
+grep -qF '${TF_VAR_templatecenter_trusted_ca_existing_config_map:+TF_VAR_templatecenter_trusted_ca_existing_config_map=' "${CREATE_SH}" \
+  || fail "save_env_file must persist the existing_config_map TF_VAR_"
+grep -qF 'templatecenter_trusted_ca_certs: $templatecenter_trusted_ca_certs,' "${CREATE_SH}" \
+  || fail "write_resolved_tfvars_file must mirror templatecenter_trusted_ca_certs"
+grep -qF 'templatecenter_trusted_ca_existing_config_map: $templatecenter_trusted_ca_existing_config_map,' "${CREATE_SH}" \
+  || fail "write_resolved_tfvars_file must mirror templatecenter_trusted_ca_existing_config_map"
+
+# 4e. write_resolved_tfvars_file must EXECUTE correctly, not merely contain
+#     the right text: a syntax-legal-but-semantically-broken edit inside its
+#     jq continuation chain (a comment line in the middle, a backslash-TAB
+#     instead of backslash-newline) passes `bash -n` and every grep pin and
+#     still kills every real run at the final write with exit 127. Extract
+#     the function and run it with mocked inputs.
+CREATE_SH="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/create.sh"
+awk '/^write_resolved_tfvars_file\(\) \{/,/^\}/' "${CREATE_SH}" >"${TMP_DIR}/resolved-fn.sh"
+[ -s "${TMP_DIR}/resolved-fn.sh" ] || fail "could not extract write_resolved_tfvars_file from create.sh"
+grep -q 'templatecenter_trusted_ca' "${TMP_DIR}/resolved-fn.sh" \
+  || fail "extracted write_resolved_tfvars_file looks truncated"
+# The three numeric/JSON coercion helpers live in create.sh itself (not the
+# lib); the extracted function needs them alongside.
+for _helper in _json_or_default _number_or_default _bool_json; do
+	awk "/^${_helper}\(\) \{/,/^\}/" "${CREATE_SH}" >>"${TMP_DIR}/resolved-fn.sh"
+done
+
+GREEN='' CYAN='' NC=''
+RESOLVED_TFVARS_FILE="${TMP_DIR}/resolved.json"
+RESOLVED_TFVARS_SUSPENDED=''
+SSH_PUB_KEY="${TMP_DIR}/id.pub"
+SSH_PRI_KEY="${TMP_DIR}/id.key"
+touch "${SSH_PUB_KEY}" "${SSH_PRI_KEY}"
+terraform() { return 1; } # no state: the function must fall back to defaults
+# shellcheck source=../terraform/tencentcloud/lib-state-sync.sh
+source "${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/lib-state-sync.sh"
+source "${TMP_DIR}/resolved-fn.sh"
+
+run_resolved() {
+	(
+		set -euo pipefail
+		unset TF_VAR_templatecenter_trusted_ca_certs TF_VAR_templatecenter_trusted_ca_existing_config_map
+		if [ "${1:-}" = "set" ]; then
+			export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]'
+			export TF_VAR_templatecenter_trusted_ca_existing_config_map='my-ca-certs'
+		fi
+		write_resolved_tfvars_file
+	)
+}
+
+rm -f "${RESOLVED_TFVARS_FILE}"
+run_resolved || fail "write_resolved_tfvars_file must succeed on defaults (untrusted-ca vars unset)"
+jq -e '.region == "ap-guangzhou"' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  || fail "resolved mirror must carry the default region: $(cat "${RESOLVED_TFVARS_FILE}")"
+jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  && fail "resolved mirror must omit the trusted-ca keys when their env vars are unset"
+
+run_resolved set || fail "write_resolved_tfvars_file must succeed with the trusted-ca vars set"
+jq -e '.templatecenter_trusted_ca_certs == ["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  || fail "resolved mirror must carry the certs array verbatim: $(cat "${RESOLVED_TFVARS_FILE}")"
+jq -e '.templatecenter_trusted_ca_existing_config_map == "my-ca-certs"' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  || fail "resolved mirror must carry the existing_config_map value"
+
+# 4f. The terraform variable docs live in the DEPLOYER's env template (the
+#     file create.sh copies/loads), not the target-machine install template
+#     an operator following the top-level guidance would edit in vain.
+TF_ENV_EXAMPLE="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/env.example"
+grep -q 'TF_VAR_templatecenter_trusted_ca_certs' "${TF_ENV_EXAMPLE}" \
+  || fail "terraform env.example must document the trusted-ca variables (create.sh reads THIS .env)"
+grep -q 'TF_VAR_templatecenter_trusted_ca' "${REPO_ROOT}/deploy/one-click/env.example" \
+  && fail "top-level env.example is the target-machine install template; the terraform variable docs belong only in the deployer's env.example"
+
 if [ "${failures}" -gt 0 ]; then
   echo "trusted-ca terraform guard FAILED (${failures} failure(s))" >&2
   exit 1

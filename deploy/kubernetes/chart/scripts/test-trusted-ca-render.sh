@@ -616,4 +616,38 @@ run_merge_ca || {
   exit 1
 }
 
+# 7. Chart <-> terraform merge-ca script sync: the executable (non-comment,
+#    non-blank) lines of the two copies must stay byte-identical (the comment
+#    in tke-addons.tf says keep 1:1). terraform-validate.yml runs the same
+#    diff but only triggers on deploy/one-click paths, so a chart-only fix
+#    to the merge-ca args would leave the terraform twin silently behind --
+#    this guard runs under kubernetes-chart-check.yml, which triggers on
+#    chart paths, closing that gap.
+TF_ADDONS="$CHART_DIR/../../one-click/terraform/tencentcloud/tke-addons.tf"
+awk '/<<-MERGE_CA_SCRIPT$/{f=1; next} /^ *MERGE_CA_SCRIPT$/{f=0} f' "$TF_ADDONS" \
+  | sed -e 's/^              //' \
+  | grep -vE '^[[:space:]]*(#|$)' >"$TMP_DIR/tf-script.sh"
+[ -s "$TMP_DIR/tf-script.sh" ] || {
+  echo "FAIL: could not extract the merge-ca script from tke-addons.tf" >&2
+  exit 1
+}
+awk '
+  /^        - name: merge-ca$/ { inmc = 1 }
+  /^      containers:/         { inmc = 0; inargs = 0 }
+  inmc && /^          args:$/           { inargs = 1; next }
+  inmc && inargs && /^          volumeMounts:$/ { inargs = 0 }
+  inmc && inargs { print }
+' "$CHART_DIR/templates/templatecenter.yaml" \
+  | sed -e 's/^            - |-$//' -e 's/^              //' \
+  | grep -vE '^[[:space:]]*(#|$)' >"$TMP_DIR/chart-script.sh"
+[ -s "$TMP_DIR/chart-script.sh" ] || {
+  echo "FAIL: could not extract the merge-ca args from templatecenter.yaml" >&2
+  exit 1
+}
+if ! diff -u "$TMP_DIR/chart-script.sh" "$TMP_DIR/tf-script.sh" >"$TMP_DIR/sync.diff" 2>&1; then
+  echo "FAIL: merge-ca scripts drifted between the chart and the terraform twin (keep 1:1):" >&2
+  sed 's/^/    /' "$TMP_DIR/sync.diff" >&2
+  exit 1
+fi
+
 echo "trusted-ca guard OK"

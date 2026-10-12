@@ -884,6 +884,20 @@ resource "kubernetes_deployment" "templatecenter" {
               name       = "merged-ca"
               mount_path = "/merged"
             }
+            # Same sizing as the helm chart's trustedCACerts.resources
+            # defaults (values.yaml); the merge-ca run is sub-second, but
+            # the two deployment paths must behave identically (with
+            # requests set it is Burstable rather than BestEffort, which
+            # matters for node-packing order on constrained nodes).
+            resources {
+              requests = {
+                cpu    = "20m"
+                memory = "32Mi"
+              }
+              limits = {
+                memory = "64Mi"
+              }
+            }
           }
         }
         container {

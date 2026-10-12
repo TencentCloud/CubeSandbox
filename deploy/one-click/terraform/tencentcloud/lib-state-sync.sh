@@ -177,6 +177,57 @@ _load_env_file() {
 	done <"$file"
 }
 
+# _tc_trusted_ca_inline_enabled [RESOLVED_TFVARS_FILE] — true when the
+#   trusted-ca ConfigMap is terraform-managed (inline-certs path). Sources, in
+#   order: an explicit TF_VAR_ in the environment (including the line loaded
+#   from .env by _load_env_file) or the resolved tfvars mirror written by the
+#   previous run. Consumed by create.sh's _reconcile_addons: on the
+#   existing_config_map path the resource address is never in terraform state
+#   (resource count 0), so the plain drift gate alone would read the
+#   operator's own ConfigMap as drift on every re-run and delete it —
+#   terraform would not recreate it and the TemplateCenter pod would stick
+#   in ContainerCreating on a missing trusted-ca volume. Fails open toward
+#   "not managed" (no delete): a missing/unreadable mirror must never be the
+#   reason an operator-owned ConfigMap is destroyed.
+_tc_trusted_ca_inline_enabled() {
+	[ -n "${TF_VAR_templatecenter_trusted_ca_certs:-}" ] && return 0
+	local resolved="${1:-}"
+	[ -n "$resolved" ] && [ -f "$resolved" ] || return 1
+	command -v jq >/dev/null 2>&1 || return 1
+	[ "$(jq -r '(.templatecenter_trusted_ca_certs // []) | length' "$resolved" 2>/dev/null || echo 0)" -gt 0 ]
+}
+
+# _tc_prune_stale_trusted_ca_mirror [RESOLVED_TFVARS_FILE] — drop the
+#   trusted-ca keys from the resolved tfvars mirror when their TF_VAR_ is no
+#   longer set in the environment. The mirror is only rewritten after a
+#   successful run, so a variable removed from .env since then stays pinned:
+#   terraform falls back to it (env vars win only where set), and the stale
+#   certs value would trip the mutual-exclusion precondition when the
+#   operator switches between the inline and existing_config_map paths —
+#   with both variables seemingly still set. Rewrites in place via
+#   cat > file (keeps the inode and the 600 mode). Never fails the caller:
+#   a missing mirror, missing jq or malformed JSON leaves the file untouched
+#   (terraform reports the real problem if it matters).
+_tc_prune_stale_trusted_ca_mirror() {
+	local resolved="${1:-}"
+	[ -n "$resolved" ] && [ -f "$resolved" ] || return 0
+	command -v jq >/dev/null 2>&1 || return 0
+	local filter=""
+	if [ -z "${TF_VAR_templatecenter_trusted_ca_certs:-}" ] \
+		&& jq -e 'has("templatecenter_trusted_ca_certs")' "$resolved" >/dev/null 2>&1; then
+		filter='del(.templatecenter_trusted_ca_certs)'
+	fi
+	if [ -z "${TF_VAR_templatecenter_trusted_ca_existing_config_map:-}" ] \
+		&& jq -e 'has("templatecenter_trusted_ca_existing_config_map")' "$resolved" >/dev/null 2>&1; then
+		filter="${filter:+${filter} | }del(.templatecenter_trusted_ca_existing_config_map)"
+	fi
+	[ -n "$filter" ] || return 0
+	local tmp
+	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved-prune.XXXXXX")"
+	jq "$filter" "$resolved" >"$tmp" && cat "$tmp" >"$resolved"
+	rm -f "$tmp"
+}
+
 # Resource addresses this library manages. Order matters for import:
 # the node pool needs its cluster id, which is cheapest to read once the
 # cluster is in state.
