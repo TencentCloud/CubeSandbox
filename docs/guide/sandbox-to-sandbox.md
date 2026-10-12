@@ -86,12 +86,14 @@ port to the standard template (8080 as an example; see the
 `cube-sandbox-cn` registry in mainland China):
 
 ```bash
+# 49999/49983 are the sandbox-code image's own code interpreter / envd ports;
+# replace 8080 with your service port.
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
-  --expose-port 49999 \   # code interpreter (sandbox-code default)
-  --expose-port 49983 \   # envd (sandbox-code default)
-  --expose-port 8080  \   # your service port
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --expose-port 8080 \
   --probe 49999
 ```
 

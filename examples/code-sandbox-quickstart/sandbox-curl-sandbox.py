@@ -20,7 +20,9 @@ Required env (see .env.example):
 Optional env:
     CUBE_INNER_API_URL   used only to derive the default proxy node IP
     CUBE_PROXY_NODE_IP   CubeProxy node IP (default: this node's first
-                         non-loopback IPv4 when the API URL is loopback)
+                         non-loopback IPv4 when the API URL is loopback; that
+                         derivation is only correct when this script runs on
+                         the proxy node itself)
     CUBE_PROXY_PORT_HTTP CubeProxy HTTP port (default: 80)
 """
 
@@ -33,6 +35,7 @@ import time
 from urllib.parse import urlparse
 
 from e2b_code_interpreter import Sandbox
+from e2b.sandbox.commands.command_handle import CommandExitException
 from env_utils import _traffic_access_headers, ensure_dev_sidecar, load_local_dotenv
 
 load_local_dotenv()
@@ -111,10 +114,19 @@ def main() -> None:
         )
         print(f"[inner:A] {curl_cmd}")
 
-        # Retry while the http.server in B is still coming up.
+        # Retry while the http.server in B is still coming up. commands.run
+        # raises CommandExitException on a non-zero exit, so transient curl
+        # failures (connection refused, CubeProxy 502) land in the except arm.
         deadline = time.monotonic() + CURL_TIMEOUT_S
         while True:
-            result = sandbox_a.commands.run(curl_cmd, timeout=15)
+            try:
+                result = sandbox_a.commands.run(curl_cmd, timeout=15)
+            except CommandExitException as exc:
+                if time.monotonic() > deadline:
+                    print(f"[outer] curl failed:\n{exc.stdout}{exc.stderr}")
+                    sys.exit(1)
+                time.sleep(1)
+                continue
             if result.exit_code == 0:
                 break
             if time.monotonic() > deadline:

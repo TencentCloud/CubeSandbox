@@ -158,12 +158,13 @@ def main() -> None:
             try:
                 result = sandbox_a.commands.run(curl_cmd, timeout=15)
             except CommandExitException as exc:
-                # curl(7) ECONNREFUSED on a resolved endpoint means the DNAT
-                # path didn't trigger; print the checklist instead of retrying.
-                if exc.exit_code == 7:
-                    sys.stdout.write(CONNREFUSED_HINT)
-                    sys.exit(2)
+                # curl(7) ECONNREFUSED is also the startup race (the service
+                # in B has not bound yet), so only treat it as a datapath
+                # failure once the full retry window has elapsed.
                 if time.monotonic() > deadline:
+                    if exc.exit_code == 7:
+                        sys.stdout.write(CONNREFUSED_HINT)
+                        sys.exit(2)
                     print(f"[outer] curl failed:\n{exc.stdout}{exc.stderr}")
                     sys.exit(1)
                 time.sleep(1)
