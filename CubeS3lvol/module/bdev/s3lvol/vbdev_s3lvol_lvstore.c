@@ -2335,6 +2335,10 @@ lvs_unload_drained(void *cb_arg, int status)
 	lvs_unload_close_lvols(ctx);
 }
 
+/* True while a snapshot or clone of a blob in this lvstore is queued or
+ * in flight. Defined with the derive queue below. */
+static bool s3lvol_derive_pending(const struct s3lvol_lvstore *lvs);
+
 void
 s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 		      spdk_lvs_op_complete cb_fn, void *cb_arg)
@@ -2351,10 +2355,21 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 	/* Materialisation is direct blobstore work, not lvol bdev I/O. Unregistering
 	 * the bdevs below therefore does not drain it: a completion would retain
 	 * d->lvol, d->channel and blobstore pointers after unload freed them.
-	 * Queued decouples retain the same raw pointers and must block unload too. */
+	 * Queued decouples retain the same raw pointers and must block unload too.
+	 * A snapshot or clone queued behind a busy parent retains the parent lvol
+	 * the same way, so unload waits for that queue as well. */
 	if (s3lvol_lvstore_decouple_pending(lvs)) {
 		SPDK_WARNLOG("lvstore '%s' has a running or queued decouple; "
 			     "refusing unload until it completes\n", lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+	if (s3lvol_derive_pending(lvs)) {
+		SPDK_WARNLOG("lvstore '%s' has a snapshot or clone queued behind "
+			     "a busy parent; refusing unload until it completes\n",
+			     lvs->name);
 		if (cb_fn) {
 			cb_fn(cb_arg, -EBUSY);
 		}
@@ -2702,10 +2717,13 @@ s3lvol_lvstore_get_stats(struct s3lvol_lvstore *lvs, struct s3_bs_dev_stats *out
  * lvol creation
  * ========================================================================== */
 
+struct derive_req;
+
 struct lvol_create_ctx {
 	struct s3lvol_lvstore   *lvs;
 	s3lvol_lvol_op_cb        cb_fn;
 	void                    *cb_arg;
+	struct derive_req       *req;
 };
 
 static void
@@ -2835,22 +2853,63 @@ s3lvol_lvol_create(struct s3lvol_lvstore *lvs, const char *name,
  * registers it. */
 static void derive_inflight_put(struct s3lvol_lvstore *lvs);
 
+/* One snapshot or clone at a time per parent blob. The fields are up here
+ * because the completion callback below reads them; the queue itself is
+ * defined with the submit path. */
+struct derive_req {
+	struct s3lvol_lvstore     *lvs;
+	struct spdk_lvol          *parent;
+	char                       name[SPDK_LVOL_NAME_MAX];
+	bool                       is_snapshot;
+	uint32_t                   busy_retries;
+	s3lvol_lvol_op_cb          cb_fn;
+	void                      *cb_arg;
+	TAILQ_ENTRY(derive_req)    link;
+};
+
+struct derive_lane {
+	struct spdk_lvol          *parent;
+	struct derive_req         *inflight;
+	TAILQ_HEAD(, derive_req)   queue;
+	bool                       kicking;
+	struct spdk_poller        *busy_poller;
+	TAILQ_ENTRY(derive_lane)   link;
+};
+
+static struct derive_lane *derive_lane_find(struct spdk_lvol *parent);
+static void derive_busy_again(struct derive_lane *lane, struct derive_req *req);
+static void derive_finish(struct derive_lane *lane, struct derive_req *req,
+			  struct spdk_lvol *lvol, int status);
+
 static void
 s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
 	struct lvol_create_ctx *ctx = cb_arg;
-	s3lvol_lvol_op_cb cb_fn = ctx->cb_fn;
-	void *user_arg = ctx->cb_arg;
+	struct derive_req *req = ctx->req;
+	struct derive_lane *lane = req ? derive_lane_find(req->parent) : NULL;
 	const char *lvs_name = ctx->lvs->name;
 	struct s3lvol_lvstore *lvs = ctx->lvs;
 	int rc;
 
+	/* Blobstore holds the parent for one snapshot or clone and answers
+	 * EBUSY for the next. The caller is already waiting on this callback,
+	 * so the request stays queued and is retried when the lock is free. */
+	if (lvolerrno == -EBUSY && req && lane) {
+		free(ctx);
+		derive_busy_again(lane, req);
+		return;
+	}
+
 	if (lvolerrno != 0) {
-		derive_inflight_put(lvs);
+		s3lvol_lvol_op_cb cb_fn = ctx->cb_fn;
+		void *user_arg = ctx->cb_arg;
+
 		free(ctx);
 		SPDK_ERRLOG("Failed to create snapshot/clone: %s\n",
 			    spdk_strerror(-lvolerrno));
-		if (cb_fn) {
+		if (req) {
+			derive_finish(lane, req, NULL, lvolerrno);
+		} else if (cb_fn) {
 			cb_fn(user_arg, NULL, lvolerrno);
 		}
 		return;
@@ -2902,22 +2961,18 @@ s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	/* After registration. The decouple quiesce set treats a zero count as
 	 * "every descendant bdev is visible", so dropping it earlier lets that
 	 * set close while this bdev is still being registered. A failed
-	 * registration leaves no bdev, so there is nothing further to wait for. */
-	derive_inflight_put(lvs);
+	 * registration leaves no bdev, so there is nothing further to wait for.
+	 * derive_finish() drops the count and starts the next waiter. */
 	free(ctx);
 	if (rc != 0) {
 		SPDK_ERRLOG("lvol '%s' was created but its bdev could not be "
 			    "registered (%d). The data is intact -- re-attach the "
 			    "lvstore to expose it.\n", lvol->name, rc);
-		if (cb_fn) {
-			cb_fn(user_arg, NULL, rc);
-		}
+		derive_finish(lane, req, NULL, rc);
 		return;
 	}
 
-	if (cb_fn) {
-		cb_fn(user_arg, lvol, 0);
-	}
+	derive_finish(lane, req, lvol, 0);
 }
 
 /* The lvol must belong to lvs: the caller looked up both separately, and
@@ -2993,6 +3048,244 @@ derive_ctx_alloc(struct s3lvol_lvstore *lvs, s3lvol_lvol_op_cb cb_fn, void *cb_a
 	return ctx;
 }
 
+/* One snapshot or clone at a time per parent blob.
+ *
+ * Blobstore sets locked_operation_in_progress on that blob for the whole
+ * metadata operation and returns -EBUSY for a second one. The two calls are
+ * independent for different parents, so the queue is per parent: fifty
+ * snapshots of fifty volumes still run together, and fifty snapshots of one
+ * volume, or fifty clones of one snapshot, take turns. The caller's callback
+ * runs when its own turn has finished. */
+#define DERIVE_BUSY_RETRY_US    (10 * 1000)
+#define DERIVE_BUSY_RETRY_MAX   6000
+
+static TAILQ_HEAD(, derive_lane) g_derive_lanes =
+	TAILQ_HEAD_INITIALIZER(g_derive_lanes);
+
+static void derive_lane_kick(struct derive_lane *lane);
+static void derive_issue(struct derive_lane *lane, struct derive_req *req);
+
+static struct derive_lane *
+derive_lane_find(struct spdk_lvol *parent)
+{
+	struct derive_lane *lane;
+
+	TAILQ_FOREACH(lane, &g_derive_lanes, link) {
+		if (lane->parent == parent) {
+			return lane;
+		}
+	}
+	return NULL;
+}
+
+static struct derive_lane *
+derive_lane_ensure(struct spdk_lvol *parent)
+{
+	struct derive_lane *lane;
+
+	lane = derive_lane_find(parent);
+	if (lane) {
+		return lane;
+	}
+	lane = calloc(1, sizeof(*lane));
+	if (!lane) {
+		return NULL;
+	}
+	lane->parent = parent;
+	TAILQ_INIT(&lane->queue);
+	TAILQ_INSERT_TAIL(&g_derive_lanes, lane, link);
+	return lane;
+}
+
+static bool
+s3lvol_derive_pending(const struct s3lvol_lvstore *lvs)
+{
+	struct derive_lane *lane;
+	struct derive_req *req;
+
+	if (!lvs) {
+		return false;
+	}
+	TAILQ_FOREACH(lane, &g_derive_lanes, link) {
+		if (lane->inflight && lane->inflight->lvs == lvs) {
+			return true;
+		}
+		TAILQ_FOREACH(req, &lane->queue, link) {
+			if (req->lvs == lvs) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void
+derive_lane_release(struct derive_lane *lane)
+{
+	if (!lane || lane->inflight || lane->busy_poller ||
+	    !TAILQ_EMPTY(&lane->queue)) {
+		return;
+	}
+	TAILQ_REMOVE(&g_derive_lanes, lane, link);
+	free(lane);
+}
+
+static void
+derive_finish(struct derive_lane *lane, struct derive_req *req,
+	      struct spdk_lvol *lvol, int status)
+{
+	s3lvol_lvol_op_cb cb_fn = NULL;
+	void *cb_arg = NULL;
+	struct s3lvol_lvstore *lvs = NULL;
+
+	if (!req) {
+		return;
+	}
+	cb_fn = req->cb_fn;
+	cb_arg = req->cb_arg;
+	lvs = req->lvs;
+	if (lane && lane->inflight == req) {
+		lane->inflight = NULL;
+	}
+	free(req);
+	if (lvs) {
+		derive_inflight_put(lvs);
+	}
+	if (lane) {
+		derive_lane_kick(lane);
+	}
+	if (cb_fn) {
+		cb_fn(cb_arg, lvol, status);
+	}
+}
+
+static void
+derive_issue(struct derive_lane *lane, struct derive_req *req)
+{
+	struct lvol_create_ctx *ctx;
+
+	lane->inflight = req;
+	ctx = derive_ctx_alloc(req->lvs, req->cb_fn, req->cb_arg);
+	if (!ctx) {
+		derive_finish(lane, req, NULL, -ENOMEM);
+		return;
+	}
+	ctx->req = req;
+	if (req->is_snapshot) {
+		spdk_lvol_create_snapshot(req->parent, req->name,
+					  s3lvol_lvol_derive_cb, ctx);
+	} else {
+		spdk_lvol_create_clone(req->parent, req->name,
+				       s3lvol_lvol_derive_cb, ctx);
+	}
+}
+
+static int
+derive_busy_poll(void *arg)
+{
+	struct derive_lane *lane = arg;
+	struct derive_req *req = lane->inflight;
+
+	spdk_poller_unregister(&lane->busy_poller);
+	if (req) {
+		derive_issue(lane, req);
+	} else {
+		derive_lane_kick(lane);
+	}
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+derive_busy_again(struct derive_lane *lane, struct derive_req *req)
+{
+	uint32_t waited_s;
+
+	req->busy_retries++;
+	if (req->busy_retries > DERIVE_BUSY_RETRY_MAX) {
+		waited_s = (uint32_t)((uint64_t)DERIVE_BUSY_RETRY_MAX *
+				      DERIVE_BUSY_RETRY_US / 1000000);
+		SPDK_ERRLOG("lvol '%s': %s '%s' was still busy after %u s\n",
+			    req->parent->name,
+			    req->is_snapshot ? "snapshot" : "clone",
+			    req->name, waited_s);
+		derive_finish(lane, req, NULL, -EBUSY);
+		return;
+	}
+	if (lane->busy_poller) {
+		return;
+	}
+	lane->busy_poller = SPDK_POLLER_REGISTER(derive_busy_poll, lane,
+						 DERIVE_BUSY_RETRY_US);
+	if (!lane->busy_poller) {
+		derive_finish(lane, req, NULL, -ENOMEM);
+	}
+}
+
+static void
+derive_lane_kick(struct derive_lane *lane)
+{
+	struct derive_req *req;
+
+	if (!lane || lane->kicking) {
+		return;
+	}
+	/* issue() can complete before it returns. A nested kick would free the
+	 * lane, or skip the rest of the queue, while this loop still holds it. */
+	lane->kicking = true;
+	while (!lane->inflight && !lane->busy_poller) {
+		req = TAILQ_FIRST(&lane->queue);
+		if (!req) {
+			break;
+		}
+		TAILQ_REMOVE(&lane->queue, req, link);
+		derive_issue(lane, req);
+	}
+	lane->kicking = false;
+	derive_lane_release(lane);
+}
+
+static int
+derive_submit(struct s3lvol_lvstore *lvs, struct spdk_lvol *parent,
+	      const char *name, bool is_snapshot,
+	      s3lvol_lvol_op_cb cb_fn, void *cb_arg)
+{
+	struct derive_lane *lane;
+	struct derive_req *req;
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		return -ENOMEM;
+	}
+	req->lvs = lvs;
+	req->parent = parent;
+	req->is_snapshot = is_snapshot;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	spdk_strcpy_pad(req->name, name, sizeof(req->name) - 1, '\0');
+
+	lane = derive_lane_ensure(parent);
+	if (!lane) {
+		free(req);
+		return -ENOMEM;
+	}
+
+	/* Counted for the whole wait, not only the blobstore call. A decouple
+	 * that saw zero here would detach while a snapshot was still queued,
+	 * and that snapshot would miss the quiesce set. The callback drops it,
+	 * including when spdk_lvol_create_* fails synchronously. */
+	lvs->derive_inflight++;
+	if (lane->inflight || lane->busy_poller) {
+		TAILQ_INSERT_TAIL(&lane->queue, req, link);
+		SPDK_NOTICELOG("lvol '%s': %s '%s' waits until the current "
+			       "snapshot or clone of it finishes\n",
+			       parent->name,
+			       is_snapshot ? "snapshot" : "clone", name);
+		return 0;
+	}
+	derive_issue(lane, req);
+	return 0;
+}
+
 /* Everything create_snapshot needs to resume after a cancelled decouple.
  *
  * snapshot_name is copied rather than kept: the caller's string belongs to the
@@ -3032,7 +3325,6 @@ s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 			    bool *out_cancelled_decouple,
 			    s3lvol_lvol_op_cb cb_fn, void *cb_arg)
 {
-	struct lvol_create_ctx *ctx;
 	int rc;
 
 	if (out_cancelled_decouple) {
@@ -3091,18 +3383,7 @@ s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		return -EPERM;
 	}
 
-	ctx = derive_ctx_alloc(lvs, cb_fn, cb_arg);
-	if (!ctx) {
-		return -ENOMEM;
-	}
-
-	/* Counted before the call. spdk_lvol_create_snapshot() is void and runs
-	 * the callback on every path, including its synchronous failures, so a
-	 * failure cannot leave the count raised. The callback drops it only
-	 * after the new bdev is registered. */
-	lvs->derive_inflight++;
-	spdk_lvol_create_snapshot(lvol, snapshot_name, s3lvol_lvol_derive_cb, ctx);
-	return 0;
+	return derive_submit(lvs, lvol, snapshot_name, true, cb_fn, cb_arg);
 }
 
 static int
@@ -3110,7 +3391,6 @@ create_clone_common(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		    const char *clone_name,
 		    s3lvol_lvol_op_cb cb_fn, void *cb_arg)
 {
-	struct lvol_create_ctx *ctx;
 	int rc;
 
 	rc = derive_check(lvs, lvol, clone_name);
@@ -3129,16 +3409,7 @@ create_clone_common(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		return -EINVAL;
 	}
 
-	ctx = derive_ctx_alloc(lvs, cb_fn, cb_arg);
-	if (!ctx) {
-		return -ENOMEM;
-	}
-
-	/* Same pairing as create_snapshot: the callback always runs, and the
-	 * count covers bdev registration rather than just the blob operation. */
-	lvs->derive_inflight++;
-	spdk_lvol_create_clone(lvol, clone_name, s3lvol_lvol_derive_cb, ctx);
-	return 0;
+	return derive_submit(lvs, lvol, clone_name, false, cb_fn, cb_arg);
 }
 
 int
