@@ -247,7 +247,7 @@ RCOW_IOBUF_LARGE_BUFSIZE="${RCOW_IOBUF_LARGE_BUFSIZE:-1048576}"
 RCOW_IOBUF_LARGE_POOL="${RCOW_IOBUF_LARGE_POOL:-512}"
 
 # Host-side baseline readahead for activated volumes, in KiB. Matches the chunk
-# size for the same reason RCOW_MAX_IO_SIZE does. Dense imports (at least 50% of
+# size for the same reason RCOW_MAX_IO_SIZE does. Dense imports (at least 20% of
 # manifest chunks present) promote the default 1024 KiB baseline to 4096 KiB.
 # Any other explicit value is kept fixed; 0 disables the tuning entirely.
 #

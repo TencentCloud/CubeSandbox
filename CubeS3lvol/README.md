@@ -177,7 +177,7 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
-| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports promote this default to 4096, `0` disables tuning |
+| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports (at least 20% of chunks present) promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
 | `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |

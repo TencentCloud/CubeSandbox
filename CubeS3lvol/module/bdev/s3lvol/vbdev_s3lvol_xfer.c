@@ -1578,7 +1578,7 @@ s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb)
 			char uuid_str[SPDK_UUID_STRING_LEN];
 			struct s3lvol_import *imp;
 			const struct s3_export_manifest *m;
-			uint64_t half;
+			uint64_t need;
 
 			if (spdk_blob_get_esnap_id(cur, &id, &id_len) != 0 ||
 			    id_len == 0 || id_len >= sizeof(uuid_str)) {
@@ -1595,11 +1595,12 @@ s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb)
 			if (m->num_chunks == 0) {
 				return base_kb;
 			}
-			/* ceil(num_chunks / 2), written without num_chunks + 1
-			 * so even a theoretical UINT64_MAX-sized manifest cannot
-			 * overflow the density calculation. */
-			half = m->num_chunks / 2 + m->num_chunks % 2;
-			return m->present_chunks >= half ?
+			/* ceil(num_chunks * pct / 100), split at 100 so even a
+			 * theoretical UINT64_MAX-sized manifest cannot overflow
+			 * the density calculation. */
+			need = m->num_chunks / 100 * S3LVOL_DENSE_IMPORT_MIN_PCT +
+			       (m->num_chunks % 100 * S3LVOL_DENSE_IMPORT_MIN_PCT + 99) / 100;
+			return m->present_chunks >= need ?
 			       S3LVOL_DENSE_IMPORT_READ_AHEAD_KB : base_kb;
 		}
 
