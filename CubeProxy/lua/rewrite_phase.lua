@@ -20,11 +20,31 @@ local function parse_port_and_instance_from_host(host)
     return container_port, ins_id
 end
 
+-- E2B header routing (official SDKs): E2b-Sandbox-Id is required,
+-- E2b-Sandbox-Port defaults to the envd port.
+local function parse_port_and_instance_from_headers()
+    local ins_id = ngx.var.http_e2b_sandbox_id
+    if utils:is_null(ins_id) or not ins_id:match("^[%w_%-]+$") then
+        return nil, nil
+    end
+    local container_port = ngx.var.http_e2b_sandbox_port
+    if utils:is_null(container_port) then
+        container_port = tostring(request_host.ENVD_PORT)
+    elseif not container_port:match("^%d+$") then
+        return nil, nil
+    end
+    return container_port, ins_id
+end
+
+-- Host routing wins; headers are the fallback for fixed-address (IP:port) access.
 local container_port, ins_id = parse_port_and_instance_from_host(ngx.var.http_host)
 if not container_port or not ins_id then
+    container_port, ins_id = parse_port_and_instance_from_headers()
+end
+if not container_port or not ins_id then
     ngx.log(ngx.ERR, "LEVEL_WARN||",
-        string.format("request %s invalid Host for port/instance parse: %s",
-            ngx.var.http_x_cube_request_id, ngx.var.http_host))
+        string.format("request %s carries no routing attributes in Host or E2b-Sandbox-* headers: host=%s sandbox_id=%s",
+            ngx.var.http_x_cube_request_id, ngx.var.http_host, ngx.var.http_e2b_sandbox_id))
     utils:respond_bad_request()
 end
 
