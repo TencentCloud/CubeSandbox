@@ -50,12 +50,6 @@ type SNATAllocationMetrics struct {
 	PortsUnused   uint64
 }
 
-// NetworkMetricsSnapshot is the userspace snapshot exported to Prometheus.
-type NetworkMetricsSnapshot struct {
-	Sandboxes []SandboxTrafficMetrics
-	SNATs     []SNATAllocationMetrics
-}
-
 type sandboxMetricsValue struct {
 	IngressPackets     uint64
 	IngressBytes       uint64
@@ -66,25 +60,6 @@ type sandboxMetricsValue struct {
 	EgressDropPackets  uint64
 	EgressDropBytes    uint64
 	SNATAllocFailures  uint64
-}
-
-// ReadNetworkMetrics reads current sandbox counters and the latest cached SNAT
-// allocation usage.
-func ReadNetworkMetrics() (*NetworkMetricsSnapshot, error) {
-	sandboxes, err := ReadSandboxTrafficMetrics()
-	if err != nil {
-		return nil, err
-	}
-
-	snats, err := ReadSNATAllocationMetrics()
-	if err != nil {
-		return nil, err
-	}
-
-	return &NetworkMetricsSnapshot{
-		Sandboxes: sandboxes,
-		SNATs:     snats,
-	}, nil
 }
 
 // ReadSandboxTrafficMetrics reads per-sandbox datapath counters from pinned

@@ -8,67 +8,6 @@ import (
 	"time"
 )
 
-func TestReadNetworkMetricsCombinesGranularReaders(t *testing.T) {
-	originalSandboxRead := readSandboxTrafficMetricsFn
-	originalSNATRead := readSNATAllocationMetricsFn
-	t.Cleanup(func() {
-		readSandboxTrafficMetricsFn = originalSandboxRead
-		readSNATAllocationMetricsFn = originalSNATRead
-	})
-
-	wantSandboxes := []SandboxTrafficMetrics{{
-		SandboxIP:      "192.168.0.10",
-		IngressPackets: 11,
-	}}
-	wantSNATs := []SNATAllocationMetrics{{
-		SNATIP:        "203.0.113.2",
-		SessionsInUse: 17,
-	}}
-
-	readSandboxTrafficMetricsFn = func() ([]SandboxTrafficMetrics, error) {
-		return wantSandboxes, nil
-	}
-	readSNATAllocationMetricsFn = func() ([]SNATAllocationMetrics, error) {
-		return wantSNATs, nil
-	}
-
-	got, err := ReadNetworkMetrics()
-	if err != nil {
-		t.Fatalf("ReadNetworkMetrics returned error: %v", err)
-	}
-	if got == nil {
-		t.Fatal("ReadNetworkMetrics returned nil snapshot")
-	}
-	if !reflect.DeepEqual(got.Sandboxes, wantSandboxes) {
-		t.Fatalf("sandboxes mismatch: got=%#v want=%#v", got.Sandboxes, wantSandboxes)
-	}
-	if !reflect.DeepEqual(got.SNATs, wantSNATs) {
-		t.Fatalf("snats mismatch: got=%#v want=%#v", got.SNATs, wantSNATs)
-	}
-}
-
-func TestReadNetworkMetricsPropagatesSandboxReadError(t *testing.T) {
-	originalSandboxRead := readSandboxTrafficMetricsFn
-	originalSNATRead := readSNATAllocationMetricsFn
-	t.Cleanup(func() {
-		readSandboxTrafficMetricsFn = originalSandboxRead
-		readSNATAllocationMetricsFn = originalSNATRead
-	})
-
-	wantErr := errors.New("sandbox read failed")
-	readSandboxTrafficMetricsFn = func() ([]SandboxTrafficMetrics, error) {
-		return nil, wantErr
-	}
-	readSNATAllocationMetricsFn = func() ([]SNATAllocationMetrics, error) {
-		t.Fatal("snat reader should not run after sandbox read failure")
-		return nil, nil
-	}
-
-	if _, err := ReadNetworkMetrics(); !errors.Is(err, wantErr) {
-		t.Fatalf("ReadNetworkMetrics error=%v want=%v", err, wantErr)
-	}
-}
-
 func TestReadSNATAllocationMetricsUsesConfiguredReader(t *testing.T) {
 	original := readSNATAllocationMetricsFn
 	t.Cleanup(func() {

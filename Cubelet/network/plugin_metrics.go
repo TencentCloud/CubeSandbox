@@ -15,9 +15,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 )
 
-const maxConcurrentNetworkMetricScrapes = 2
-
-const networkMetricsPath = "/v1/metrics/network"
+const (
+	maxConcurrentNetworkMetricScrapes = 2
+	networkMetricsPath                = "/v1/metrics/network"
+	networkMetricsSourceSandbox       = "sandbox"
+	networkMetricsSourceSNAT          = "snat"
+)
 
 var (
 	readCubeVSSandboxTrafficMetrics = cubevs.ReadSandboxTrafficMetrics
@@ -27,8 +30,8 @@ var (
 var (
 	networkExporterUp = prometheus.NewDesc(
 		"cube_cubebox_network_exporter_up",
-		"Whether the CubeVS network metrics exporter could read the pinned eBPF maps during the last scrape.",
-		nil, nil,
+		"Whether each CubeVS network metrics source was readable during the last scrape.",
+		[]string{"source"}, nil,
 	)
 
 	sandboxIngressPackets = prometheus.NewDesc(
@@ -162,53 +165,84 @@ func (c *cubeVSNetworkCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *cubeVSNetworkCollector) Collect(ch chan<- prometheus.Metric) {
 	scrapeID := time.Now().UnixNano()
-	if c == nil || c.readSandboxMetrics == nil || c.readSNATMetrics == nil {
-		log.L.Errorf("network metrics collector unavailable: scrape_id=%d collector_nil=%t sandbox_reader_nil=%t snat_reader_nil=%t",
-			scrapeID, c == nil, c == nil || c.readSandboxMetrics == nil, c == nil || c.readSNATMetrics == nil)
-		ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 0)
+	if c == nil {
+		log.L.Errorf("network metrics collector unavailable: scrape_id=%d collector_nil=true", scrapeID)
+		emitNetworkSourceHealth(ch, networkMetricsSourceSandbox, false)
+		emitNetworkSourceHealth(ch, networkMetricsSourceSNAT, false)
 		return
 	}
 
-	sandboxes, err := c.readSandboxMetrics()
-	if err != nil {
-		log.L.Errorf("network metrics collector sandbox read failed: scrape_id=%d err=%v", scrapeID, err)
-		ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 0)
-		return
-	}
-
-	snats, err := c.readSNATMetrics()
-	if err != nil {
-		log.L.Errorf("network metrics collector SNAT read failed: scrape_id=%d err=%v", scrapeID, err)
-		ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 0)
-		return
-	}
-
-	ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, 1)
-
-	for _, sandbox := range sandboxes {
-		labels := []string{sandbox.SandboxIP}
-		ch <- prometheus.MustNewConstMetric(sandboxIngressPackets, prometheus.CounterValue, float64(sandbox.IngressPackets), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxIngressBytes, prometheus.CounterValue, float64(sandbox.IngressBytes), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxIngressDropPackets, prometheus.CounterValue, float64(sandbox.IngressDropPackets), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxIngressDropBytes, prometheus.CounterValue, float64(sandbox.IngressDropBytes), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxEgressPackets, prometheus.CounterValue, float64(sandbox.EgressPackets), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxEgressBytes, prometheus.CounterValue, float64(sandbox.EgressBytes), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxEgressDropPackets, prometheus.CounterValue, float64(sandbox.EgressDropPackets), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxEgressDropBytes, prometheus.CounterValue, float64(sandbox.EgressDropBytes), labels...)
-		ch <- prometheus.MustNewConstMetric(sandboxSNATAllocFailures, prometheus.CounterValue, float64(sandbox.SNATAllocFailures), labels...)
-	}
-
-	seenSNATIPs := make(map[string]struct{}, len(snats))
-	for _, snat := range snats {
-		if _, ok := seenSNATIPs[snat.SNATIP]; ok {
-			log.L.Warnf("network metrics collector skipped duplicate SNAT IP: scrape_id=%d snat_ip=%s", scrapeID, snat.SNATIP)
-			continue
+	var (
+		sandboxes    []cubevs.SandboxTrafficMetrics
+		sandboxReady bool
+	)
+	if c.readSandboxMetrics == nil {
+		log.L.Errorf("network metrics collector sandbox reader unavailable: scrape_id=%d", scrapeID)
+	} else {
+		var err error
+		sandboxes, err = c.readSandboxMetrics()
+		if err != nil {
+			log.L.Errorf("network metrics collector sandbox read failed: scrape_id=%d err=%v", scrapeID, err)
+		} else {
+			sandboxReady = true
 		}
-		seenSNATIPs[snat.SNATIP] = struct{}{}
-
-		labels := []string{snat.SNATIP}
-		ch <- prometheus.MustNewConstMetric(snatSessionsInUse, prometheus.GaugeValue, float64(snat.SessionsInUse), labels...)
-		ch <- prometheus.MustNewConstMetric(snatPortsCapacity, prometheus.GaugeValue, float64(snat.PortsCapacity), labels...)
-		ch <- prometheus.MustNewConstMetric(snatPortsUnused, prometheus.GaugeValue, float64(snat.PortsUnused), labels...)
 	}
+
+	var (
+		snats     []cubevs.SNATAllocationMetrics
+		snatReady bool
+	)
+	if c.readSNATMetrics == nil {
+		log.L.Errorf("network metrics collector SNAT reader unavailable: scrape_id=%d", scrapeID)
+	} else {
+		var err error
+		snats, err = c.readSNATMetrics()
+		if err != nil {
+			log.L.Errorf("network metrics collector SNAT read failed: scrape_id=%d err=%v", scrapeID, err)
+		} else {
+			snatReady = true
+		}
+	}
+
+	emitNetworkSourceHealth(ch, networkMetricsSourceSandbox, sandboxReady)
+	emitNetworkSourceHealth(ch, networkMetricsSourceSNAT, snatReady)
+
+	if sandboxReady {
+		for _, sandbox := range sandboxes {
+			labels := []string{sandbox.SandboxIP}
+			ch <- prometheus.MustNewConstMetric(sandboxIngressPackets, prometheus.CounterValue, float64(sandbox.IngressPackets), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxIngressBytes, prometheus.CounterValue, float64(sandbox.IngressBytes), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxIngressDropPackets, prometheus.CounterValue, float64(sandbox.IngressDropPackets), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxIngressDropBytes, prometheus.CounterValue, float64(sandbox.IngressDropBytes), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxEgressPackets, prometheus.CounterValue, float64(sandbox.EgressPackets), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxEgressBytes, prometheus.CounterValue, float64(sandbox.EgressBytes), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxEgressDropPackets, prometheus.CounterValue, float64(sandbox.EgressDropPackets), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxEgressDropBytes, prometheus.CounterValue, float64(sandbox.EgressDropBytes), labels...)
+			ch <- prometheus.MustNewConstMetric(sandboxSNATAllocFailures, prometheus.CounterValue, float64(sandbox.SNATAllocFailures), labels...)
+		}
+	}
+
+	if snatReady {
+		seenSNATIPs := make(map[string]struct{}, len(snats))
+		for _, snat := range snats {
+			if _, ok := seenSNATIPs[snat.SNATIP]; ok {
+				log.L.Warnf("network metrics collector skipped duplicate SNAT IP: scrape_id=%d snat_ip=%s", scrapeID, snat.SNATIP)
+				continue
+			}
+			seenSNATIPs[snat.SNATIP] = struct{}{}
+
+			labels := []string{snat.SNATIP}
+			ch <- prometheus.MustNewConstMetric(snatSessionsInUse, prometheus.GaugeValue, float64(snat.SessionsInUse), labels...)
+			ch <- prometheus.MustNewConstMetric(snatPortsCapacity, prometheus.GaugeValue, float64(snat.PortsCapacity), labels...)
+			ch <- prometheus.MustNewConstMetric(snatPortsUnused, prometheus.GaugeValue, float64(snat.PortsUnused), labels...)
+		}
+	}
+}
+
+func emitNetworkSourceHealth(ch chan<- prometheus.Metric, source string, ready bool) {
+	value := float64(0)
+	if ready {
+		value = 1
+	}
+	ch <- prometheus.MustNewConstMetric(networkExporterUp, prometheus.GaugeValue, value, source)
 }
