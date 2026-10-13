@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -225,8 +226,8 @@ func newTestService(s AgentStore, cm *fakeServiceCM) *AgentHubService {
 		applyFn: func(_ context.Context, _ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
 			return &CommandOutput{ExitCode: 0, Stdout: "applied", Stderr: ""}, nil
 		},
-		resolveGatewayFn: func(_ context.Context, _ *http.Client, _ string, _ string, _ string, fallback string) string {
-			return fallback
+		resolveGatewayFn: func(_ context.Context, _ *http.Client, _ string, _ string, _ string, fallback string) (string, error) {
+			return fallback, nil
 		},
 		restartFn: func(_ *store.AgentInstance) (*CommandOutput, error) {
 			return &CommandOutput{ExitCode: 0}, nil
@@ -398,9 +399,171 @@ func TestCreateInstance_ApplyFailureCompensates(t *testing.T) {
 	}
 }
 
-// TestCreateInstance_UpsertFailureCompensates verifies that when the DB
-// upsert fails after sandbox creation + OpenClaw apply, the sandbox is
-// compensated. See R10.
+// redirectHostStateRoot points the shared-files state root at a writable temp
+// dir so the create/compensate paths hit a real, isolated tree.
+func redirectHostStateRoot(t *testing.T) string {
+	t.Helper()
+	prev := openclawHostStateRoot
+	root := t.TempDir()
+	openclawHostStateRoot = root
+	t.Cleanup(func() { openclawHostStateRoot = prev })
+	return root
+}
+
+// TestCreateInstance_ApplyFailureRemovesSharedFilesStateDir pins the shared-files
+// compensation branch: an apply failure must not leak the host state dir.
+func TestCreateInstance_ApplyFailureRemovesSharedFilesStateDir(t *testing.T) {
+	stateRoot := redirectHostStateRoot(t)
+
+	cm := &fakeServiceCM{}
+	st := &fakeAgentStore{
+		getSetting: func(_ context.Context, key string) (string, error) {
+			if key == "llm_api_key" {
+				return "test-key", nil
+			}
+			return "", nil
+		},
+	}
+	svc := newTestService(st, cm)
+	svc.applyFn = func(_ context.Context, _ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
+		return nil, errors.New("envd unreachable")
+	}
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:            "x",
+		Engine:          "openclaw",
+		PersistenceMode: "shared_files",
+	})
+	if err == nil {
+		t.Fatal("CreateInstance should have returned an error")
+	}
+	if len(cm.deleteSandboxBodies) == 0 {
+		t.Fatal("compensation DeleteSandbox was not called after apply failure")
+	}
+
+	// The persist dir lives directly under the (redirected) state root; after
+	// compensation nothing must remain under it.
+	entries, rerr := os.ReadDir(stateRoot)
+	if rerr != nil {
+		t.Fatalf("read state root: %v", rerr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("shared-files state dir was not removed on compensation: %d entries remain", len(entries))
+	}
+}
+
+// TestCreateInstance_GatewayTokenRejectedKeepsSandbox verifies a token rejection
+// fails the create but keeps the sandbox: the probe verdict may be a false negative.
+func TestCreateInstance_GatewayTokenRejectedKeepsSandbox(t *testing.T) {
+	cm := &fakeServiceCM{}
+	upserted := false
+	st := &fakeAgentStore{
+		getSetting: func(_ context.Context, key string) (string, error) {
+			if key == "llm_api_key" {
+				return "test-key", nil
+			}
+			return "", nil
+		},
+		upsertInstance: func(_ context.Context, _ *store.AgentInstance) error {
+			upserted = true
+			return nil
+		},
+	}
+	svc := newTestService(st, cm)
+	svc.resolveGatewayFn = func(_ context.Context, _ *http.Client, _ string, _ string, _ string, _ string) (string, error) {
+		return "", ErrGatewayTokenRejected
+	}
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "x",
+		Engine: "openclaw",
+	})
+	if err == nil {
+		t.Fatal("CreateInstance should have failed when the gateway rejects every token")
+	}
+	if len(cm.deleteSandboxBodies) != 0 {
+		t.Error("sandbox was deleted on a token verdict that may be a false negative")
+	}
+	if upserted {
+		t.Error("a dead instance was persisted")
+	}
+}
+
+// TestCreateInstance_UnverifiedTokenStillSucceeds pins the no-regression
+// contract: an unprobeable gateway yields a token, not a failed creation.
+func TestCreateInstance_UnverifiedTokenStillSucceeds(t *testing.T) {
+	cm := &fakeServiceCM{}
+	st := &fakeAgentStore{
+		getSetting: func(_ context.Context, key string) (string, error) {
+			if key == "llm_api_key" {
+				return "test-key", nil
+			}
+			return "", nil
+		},
+		upsertInstance: func(_ context.Context, _ *store.AgentInstance) error { return nil },
+	}
+	svc := newTestService(st, cm)
+	svc.resolveGatewayFn = func(_ context.Context, _ *http.Client, _ string, _ string, _ string, _ string) (string, error) {
+		return "unverified-token", nil
+	}
+
+	res, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "x",
+		Engine: "openclaw",
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if res.Instance.GatewayToken != "unverified-token" {
+		t.Errorf("GatewayToken = %q, want the unverified token", res.Instance.GatewayToken)
+	}
+	if len(cm.deleteSandboxBodies) != 0 {
+		t.Error("sandbox was destroyed despite a usable token")
+	}
+}
+
+// TestCreateInstance_TokenlessURLStillSucceeds pins the no-regression contract:
+// for open/unprobeable gateways an empty token creates the instance, not a teardown.
+func TestCreateInstance_TokenlessURLStillSucceeds(t *testing.T) {
+	cm := &fakeServiceCM{}
+	upserted := false
+	st := &fakeAgentStore{
+		getSetting: func(_ context.Context, key string) (string, error) {
+			if key == "llm_api_key" {
+				return "test-key", nil
+			}
+			return "", nil
+		},
+		upsertInstance: func(_ context.Context, _ *store.AgentInstance) error {
+			upserted = true
+			return nil
+		},
+	}
+	svc := newTestService(st, cm)
+	svc.resolveGatewayFn = func(_ context.Context, _ *http.Client, _ string, _ string, _ string, _ string) (string, error) {
+		return "", nil
+	}
+
+	res, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "x",
+		Engine: "openclaw",
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if res.Instance.GatewayToken != "" {
+		t.Errorf("GatewayToken = %q, want empty", res.Instance.GatewayToken)
+	}
+	if !upserted {
+		t.Error("instance was not persisted")
+	}
+	if len(cm.deleteSandboxBodies) != 0 {
+		t.Error("sandbox was destroyed despite a valid token-less creation")
+	}
+}
+
+// TestCreateInstance_UpsertFailureCompensates verifies that a DB upsert failure
+// after sandbox creation + OpenClaw apply compensates the orphan sandbox.
 func TestCreateInstance_UpsertFailureCompensates(t *testing.T) {
 	cm := &fakeServiceCM{}
 	st := &fakeAgentStore{

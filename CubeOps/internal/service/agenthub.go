@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
@@ -143,7 +142,7 @@ var _ AgentStore = (*store.Store)(nil)
 type applyOpenclawFn func(ctx context.Context, httpClient *http.Client, sandboxID, domain string, plan *LLMRuntimePlan, opts *OpenclawApplyOptions) (*CommandOutput, error)
 
 // resolveGatewayFn is the signature of ResolveGatewayToken.
-type resolveGatewayFn func(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string
+type resolveGatewayFn func(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) (string, error)
 
 // restartOpenclawFn is the signature of RestartOpenclawForInstance.
 type restartOpenclawFn func(inst *store.AgentInstance) (*CommandOutput, error)
@@ -186,6 +185,17 @@ func NewAgentHubService(s *store.Store, cm CubeMasterClient) *AgentHubService {
 		resolveGatewayFn: ResolveGatewayToken,
 		restartFn:        RestartOpenclawForInstance,
 		upgradeFn:        UpgradeOpenclawForInstance,
+	}
+}
+
+// compensateCreate rolls back a failed creation: the sandbox plus the host-side
+// state dir, which no later cleanup can reach without an instance row.
+func (s *AgentHubService) compensateCreate(ctx context.Context, sandboxID, openclawStatePath, reason string) {
+	s.CompensateDeleteSandbox(ctx, sandboxID, reason)
+	if openclawStatePath != "" {
+		if err := os.RemoveAll(openclawStatePath); err != nil {
+			logging.G(ctx).Warnf("compensateCreate: failed to remove OpenClaw state dir %q (reason=%s): %v", openclawStatePath, reason, err)
+		}
 	}
 }
 
@@ -589,11 +599,17 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	}
 	applyOutput, err := s.applyFn(ctx, s.envdClient, sandboxID, domain, plan, applyOpts)
 	if err != nil {
-		s.CompensateDeleteSandbox(ctx, sandboxID, "apply_openclaw")
+		s.compensateCreate(ctx, sandboxID, openclawStatePath, "apply_openclaw")
 		return nil, NewBadGateway("failed to apply OpenClaw config: " + err.Error())
 	}
 
-	gatewayToken := s.resolveGatewayFn(ctx, s.envdClient, sandboxID, domain, openclawStatePath, generatedToken)
+	gatewayToken, err := s.resolveGatewayFn(ctx, s.envdClient, sandboxID, domain, openclawStatePath, generatedToken)
+	if err != nil {
+		// Fail without deleting: the probe verdict may be a false negative, and a kept sandbox is diagnosable.
+		logging.G(ctx).Errorf("CreateInstance: gateway token unresolved, keeping sandbox: sandboxID=%q err=%q", sandboxID, err.Error())
+		return nil, NewBadGateway("failed to resolve a working OpenClaw gateway token: " + err.Error())
+	}
+	SyncGatewayTokenConfig(ctx, s.envdClient, sandboxID, domain, openclawStatePath, gatewayToken)
 
 	// --- Build instance record ---
 	bots := []string{}
@@ -650,7 +666,7 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	}
 
 	if err := s.Store.UpsertInstance(ctx, inst); err != nil {
-		s.CompensateDeleteSandbox(ctx, sandboxID, "upsert_instance")
+		s.compensateCreate(ctx, sandboxID, openclawStatePath, "upsert_instance")
 		return nil, NewInternal("failed to create instance record: " + err.Error())
 	}
 
@@ -1355,14 +1371,20 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 		_ = applyOutput
 	}
 
-	time.Sleep(5 * time.Second)
-
 	fallbackToken := cloneGatewayToken
 	if fallbackToken == "" {
 		fallbackToken = inst.GatewayToken
 	}
-	cloneGatewayToken = s.resolveGatewayFn(ctx, s.envdClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, fallbackToken)
+	// No fixed sleep here: ResolveGatewayToken waits for the gateway itself.
+	cloneGatewayToken, resolveErr := s.resolveGatewayFn(ctx, s.envdClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, fallbackToken)
+	if resolveErr != nil {
+		// Keep the clone sandbox: see CreateInstance for why the verdict is not
+		// trusted enough to delete on.
+		logging.G(ctx).Errorf("CloneAgent: gateway token unresolved, keeping clone sandbox: agentID=%q sandboxID=%q err=%q", agentID, sbResult.SandboxID, resolveErr.Error())
+		return nil, NewBadGateway("failed to resolve a working OpenClaw gateway token: " + resolveErr.Error())
+	}
 	if cloneGatewayToken != "" {
+		SyncGatewayTokenConfig(ctx, s.envdClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, cloneGatewayToken)
 		gatewayURL = gatewayURL + "#token=" + cloneGatewayToken
 	}
 
