@@ -434,10 +434,11 @@ bool s3lvol_nvmf_udev_settled(void);
  * to get queue depth.
  *
  * This is the baseline rather than the complete policy: an imported manifest
- * with at least 50% of its chunks present is promoted to 4 MiB. The
- * operator-facing RCOW_READ_AHEAD_KB in scripts/rcow_common.sh can override
- * that policy -- including setting it back to the kernel default for a purely
- * random workload, where reading ahead whole chunks is waste.
+ * with at least S3LVOL_DENSE_IMPORT_MIN_PCT percent of its chunks present is
+ * promoted to 4 MiB. The operator-facing RCOW_READ_AHEAD_KB in
+ * scripts/rcow_common.sh can override that policy -- including setting it back
+ * to the kernel default for a purely random workload, where reading ahead
+ * whole chunks is waste.
  */
 #define RCOW_DEFAULT_READ_AHEAD_KB 1024
 
@@ -445,6 +446,11 @@ bool s3lvol_nvmf_udev_settled(void);
  * gives a single fault enough outstanding work to hide S3 latency while the
  * transport still keeps every NVMe command at one chunk. */
 #define S3LVOL_DENSE_IMPORT_READ_AHEAD_KB 4096
+
+/* Share of an import's chunks, in percent, that must be present for it to count
+ * as dense. Memory snapshots are read back nearly sequentially even when only a
+ * fraction of guest memory was ever touched, so the bar is kept low. */
+#define S3LVOL_DENSE_IMPORT_MIN_PCT 20
 
 /* The kernel's own default, which is what "nobody has touched this device" looks
  * like. Used to tell an untuned device from one somebody set deliberately; see
@@ -1497,9 +1503,9 @@ int s3lvol_lvol_template_export_uuid(struct spdk_lvol *lvol, char *uuid_out,
  * Select host readahead for an lvol which may ultimately read from an import.
  *
  * The parent chain is followed to its external snapshot. When that import has
- * at least half of its chunks present, the ordinary one-chunk default is
- * promoted to four chunks. An operator override (including 0 or 128 KiB) is
- * returned unchanged.
+ * at least S3LVOL_DENSE_IMPORT_MIN_PCT percent of its chunks present, the
+ * ordinary one-chunk default is promoted to four chunks. An operator override
+ * (including 0 or 128 KiB) is returned unchanged.
  */
 uint32_t s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb);
 
