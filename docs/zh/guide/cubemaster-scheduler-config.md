@@ -43,9 +43,22 @@ host:
 1. **解析请求约束**：读取 `instance_type`、模板 ID、资源规格、显式 host IP、node affinity / annotations 等条件。
 2. **预过滤节点**：排除不健康、资源上报过期、超过 MVM 上限、模板本地副本不可用、实时或本地观测创建数过高、不满足 affinity 的节点；启用 `disk` filter 或 backoff 路径时，也会排除磁盘使用过高的节点。
 3. **节点评分**：对过滤后的候选节点计算分数，例如基于 `mvm_num`、`local_create_num`、`quota_cpu_usage`、`quota_mem_usage` 做加权平均。
-4. **最终选择**：从评分靠前的一组节点中选择。`priority_select_num` 控制进入最终随机选择的高分节点数量，`least_select_name` 默认为 `random`。
+4. **最终选择**：从评分靠前的一组节点中选择。在 legacy 配置下，`priority_select_num` 控制进入最终随机选择的高分节点数量，`least_select_name` 默认为 `random`。在调度 Profile 下，对应的开关是每个 Profile 的 `selection.method`（`highest` / `spread` / `random`）与 `selection.top_n`——见[可扩展调度插件](./scheduler-plugin.md)。
 
 如果没有配置评分，CubeMaster 仍会做过滤，但可能按候选列表顺序选择节点，导致新 sandbox 更容易集中到第一个可用节点，直到资源过滤器把流量推向其他节点。
+
+## 当前生效的调度策略
+
+CubeMaster 按如下优先级决定调度策略：
+
+1. **配置了 `scheduler.profiles`** —— 使用这些 Profile。请求按允许的路由标签（`scheduler.profile_route_label_keys`）或实例类型路由，不匹配任何路由的请求落入标记为 `default: true` 的 Profile。
+2. **未配置 profiles，但配置了 legacy `scheduler.filter` / `scheduler.score` / `scheduler.postscore` 中任意一项** —— legacy 配置会被编译为兼容的 `default` Profile，保留旧的容错语义；`priority_select_num` 与 `least_select_name` 行为不变。
+3. **调度策略相关配置全为空** —— CubeMaster 注入出厂 Profile `burst_balance`、`template_reuse`（按请求标签 `workload` 路由）与 `mixed_binpack`（默认），并在启动时输出告警，因为与旧的空配置行为（无过滤、无评分、随机选点）相比放置会发生变化。设置 `scheduler.disable_factory_profiles: true` 可保持旧行为。
+
+运维需要知道的两个横切细节：
+
+- **Score 因子开关的位置**：内置 Score `real_time_weighted_average`、`image_score`、`multi_factor_weighted_average` 即使被 Profile 引用，其 `enable_weight_factors` / 因子权重仍从 legacy `scheduler.score.plugin_conf` 与 `scheduler.score.resource_weights` 读取。Profile 引用它们但缺少对应 legacy 配置块时，会在启动或热更新的编译期报错。出厂 Profile 内嵌了配套的 legacy score 子树，零配置部署无需额外处理。
+- **预留行为**：创建路径已移除预留账本和同步 Redis reservation 检查。CubeMaster 使用本地节点快照执行准入并派发到 Cubelet；指标独立更新，上报窗口内多副本可能针对同一容量重复准入；一旦发生，创建会在所选节点上直接失败而不会转移到其他节点——Cubelet 在创建路径上不执行节点级配额检查，相应错误码不可重试。旧的 `scheduler.reservation_redis_error_policy` 已废弃，应删除。完整语义与限制见[可扩展调度插件](./scheduler-plugin.md)。
 
 ## 关键 scheduler 字段
 

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	pseudorand "math/rand"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -350,6 +352,15 @@ func TestNodeCloneNilHostFacts(t *testing.T) {
 	}
 }
 
+func TestNodeCloneDeepCopiesLocalTemplates(t *testing.T) {
+	source := &Node{InsID: "node-1", LocalTemplates: []string{"tpl-1"}}
+	cloned := source.Clone()
+	cloned.LocalTemplates[0] = "tpl-2"
+	if source.LocalTemplates[0] != "tpl-1" {
+		t.Fatalf("mutating cloned templates changed source: %v", source.LocalTemplates)
+	}
+}
+
 func TestNodeHostFactsJSONRoundTrip(t *testing.T) {
 	n := &Node{
 		InsID: "node-1",
@@ -406,4 +417,79 @@ func TestNodeCloneDoesNotShareLabelsCache(t *testing.T) {
 	assert.Equal(t, "true", sourceLabels["gpu"])
 	assert.Equal(t, "zone-b", clonedLabels[constants.AffinityKeyZone])
 	assert.Equal(t, "false", clonedLabels["gpu"])
+}
+
+// TestNodeCloneCoversAllFields guards Clone's explicit field list: every
+// exported field is filled with a non-zero value, the node is cloned, and the
+// two are compared field by field. Adding a field to Node without copying it
+// in Clone fails this test; the non-zero fill matters because a forgotten
+// field would be the zero value on both sides and pass silently.
+func TestNodeCloneCoversAllFields(t *testing.T) {
+	source := &Node{}
+	sourceValue := reflect.ValueOf(source).Elem()
+	sourceType := sourceValue.Type()
+	for i := 0; i < sourceType.NumField(); i++ {
+		if sourceType.Field(i).IsExported() {
+			fillNonZeroField(sourceValue.Field(i))
+		}
+	}
+	source.SetSchedulingDisabled(true)
+
+	cloned := source.Clone()
+	clonedValue := reflect.ValueOf(cloned).Elem()
+	for i := 0; i < sourceType.NumField(); i++ {
+		field := sourceType.Field(i)
+		if !field.IsExported() {
+			// schedulingDisabled is copied through SetSchedulingDisabled;
+			// labelsCache is intentionally reset.
+			continue
+		}
+		if !reflect.DeepEqual(sourceValue.Field(i).Interface(), clonedValue.Field(i).Interface()) {
+			t.Errorf("Clone dropped field %s: source=%v clone=%v",
+				field.Name, sourceValue.Field(i).Interface(), clonedValue.Field(i).Interface())
+		}
+	}
+	assert.Equal(t, source.SchedulingDisabled(), cloned.SchedulingDisabled())
+}
+
+func fillNonZeroField(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("nonzero")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1.5)
+	case reflect.Map:
+		m := reflect.MakeMapWithSize(v.Type(), 1)
+		key := reflect.New(v.Type().Key()).Elem()
+		fillNonZeroField(key)
+		value := reflect.New(v.Type().Elem()).Elem()
+		fillNonZeroField(value)
+		m.SetMapIndex(key, value)
+		v.Set(m)
+	case reflect.Slice:
+		slice := reflect.New(v.Type()).Elem()
+		elem := reflect.New(v.Type().Elem()).Elem()
+		fillNonZeroField(elem)
+		v.Set(reflect.Append(slice, elem))
+	case reflect.Pointer:
+		p := reflect.New(v.Type().Elem())
+		fillNonZeroField(p.Elem())
+		v.Set(p)
+	case reflect.Struct:
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			v.Set(reflect.ValueOf(time.Unix(1700000000, 0).UTC()))
+			return
+		}
+		for i := 0; i < v.NumField(); i++ {
+			if v.Type().Field(i).IsExported() {
+				fillNonZeroField(v.Field(i))
+			}
+		}
+	}
 }
