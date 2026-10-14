@@ -1609,6 +1609,122 @@ fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
     handle_child_output(r, &output);
 }
 
+/// Two ivshmem devices on one VM: guest sees both 1af4:1110 functions, each
+/// with its own subsystem id, and BAR2 is the host file bound to that id.
+fn _test_multiple_ivshmem() {
+    let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+    let guest = Guest::new(Box::new(focal));
+    let kernel_path = direct_kernel_boot_path();
+
+    const IVSHMEM_SIZE: u64 = 1 << 20;
+    let generic = TempFile::new().unwrap();
+    let gauge = TempFile::new().unwrap();
+    generic.as_file().set_len(IVSHMEM_SIZE).unwrap();
+    gauge.as_file().set_len(IVSHMEM_SIZE).unwrap();
+
+    {
+        let mut f = generic.as_file();
+        f.seek(std::io::SeekFrom::Start(0)).unwrap();
+        f.write_all(b"AAAA").unwrap();
+        f.sync_all().unwrap();
+        let mut f = gauge.as_file();
+        f.seek(std::io::SeekFrom::Start(0)).unwrap();
+        f.write_all(b"BBBB").unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let generic_spec = format!("path={},size=1M", generic.as_path().to_str().unwrap());
+    let gauge_spec = format!(
+        "path={},size=1M,subsys=0x0101",
+        gauge.as_path().to_str().unwrap()
+    );
+
+    let mut child = GuestCommand::new(&guest)
+        .args(["--cpus", "boot=1"])
+        .args(["--memory", "size=512M"])
+        .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .default_disks()
+        .default_net()
+        .args(["--ivshmem", generic_spec.as_str(), gauge_spec.as_str()])
+        .capture_output()
+        .spawn()
+        .unwrap();
+
+    let r = std::panic::catch_unwind(|| {
+        guest.wait_vm_boot(None).unwrap();
+
+        let listing = guest
+            .ssh_command(
+                "for d in /sys/bus/pci/devices/*; do \
+                   [ \"$(cat \"$d/vendor\")\" = \"0x1af4\" ] || continue; \
+                   [ \"$(cat \"$d/device\")\" = \"0x1110\" ] || continue; \
+                   echo \"$(cat \"$d/subsystem_vendor\") $(cat \"$d/subsystem_device\")\"; \
+                 done | sort",
+            )
+            .unwrap();
+        let lines: Vec<&str> = listing
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            lines,
+            ["0x0000 0x0000", "0x0000 0x0101"],
+            "guest should see two ivshmem devices with distinct subsystem ids: {listing}"
+        );
+
+        // resource2 is mmap-only; sysfs PCI BARs reject a non-page-sized mmap
+        // (the previous mmap(..., 16) exited 1 with empty stdout).
+        const CHECK_PY: &str = r#"import mmap, os, sys
+found = []
+for name in os.listdir("/sys/bus/pci/devices"):
+    d = "/sys/bus/pci/devices/" + name
+    try:
+        vendor = open(d + "/vendor").read().strip()
+        device = open(d + "/device").read().strip()
+        sub = open(d + "/subsystem_device").read().strip()
+    except OSError:
+        continue
+    if vendor != "0x1af4" or device != "0x1110":
+        continue
+    path = d + "/resource2"
+    try:
+        with open(path, "r+b", buffering=0) as f:
+            mm = mmap.mmap(f.fileno(), 4096)
+            found.append(sub + ":" + mm[:4].decode("ascii", "replace"))
+            mm.close()
+    except Exception as e:
+        print("%s: %s" % (path, e), file=sys.stderr)
+        sys.exit(1)
+print("\n".join(sorted(found)))
+"#;
+        guest
+            .ssh_command(&format!(
+                "cat > /tmp/check_ivshmem.py << 'PY'\n{CHECK_PY}PY"
+            ))
+            .unwrap();
+        let magics = guest
+            .ssh_command("sudo python3 /tmp/check_ivshmem.py 2>&1")
+            .unwrap();
+        let magics: Vec<&str> = magics
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            magics,
+            ["0x0000:AAAA", "0x0101:BBBB"],
+            "each ivshmem BAR2 should show the host file bound to that subsystem id: {magics:?}"
+        );
+    });
+
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+
+    handle_child_output(r, &output);
+}
+
 fn get_fd_count(pid: u32) -> usize {
     fs::read_dir(format!("/proc/{}/fd", pid)).unwrap().count()
 }
@@ -3956,6 +4072,11 @@ mod common_parallel {
     #[test]
     fn test_virtio_pmem_with_size() {
         test_virtio_pmem(true, true)
+    }
+
+    #[test]
+    fn test_multiple_ivshmem() {
+        _test_multiple_ivshmem()
     }
 
     #[test]
