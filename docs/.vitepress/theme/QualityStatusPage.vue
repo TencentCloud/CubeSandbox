@@ -34,8 +34,8 @@ const isZh = computed(() => props.locale.startsWith('zh'))
 const words = computed(() =>
   isZh.value
     ? {
-        title: '质量状态',
-        subtitle: 'CubeSandbox nightly E2E 与核心性能基准的公开状态。',
+        title: '每日性能测试报告',
+        subtitle: 'CubeSandbox 每日 E2E 回归与核心性能基准报告。',
         latest: '最近运行',
         commit: '提交',
         generated: '数据快照',
@@ -64,8 +64,8 @@ const words = computed(() =>
         improved: '提升'
       }
     : {
-        title: 'Quality Status',
-        subtitle: 'Public status for CubeSandbox nightly E2E and core performance benchmarks.',
+        title: 'Daily Performance Report',
+        subtitle: 'Daily CubeSandbox E2E regression and core performance benchmark report.',
         latest: 'Last run',
         commit: 'Commit',
         generated: 'Snapshot',

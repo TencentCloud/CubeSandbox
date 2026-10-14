@@ -1,5 +1,9 @@
 # Roadmap
 
+Release milestones, planned work, and current progress are tracked in the
+[CubeSandbox Version Iteration Plan](https://github.com/orgs/TencentCloud/projects/3/views/1).
+This page summarizes the longer-term direction; use the GitHub project for the latest iteration status.
+
 ---
 
 ## Coming Soon
