@@ -11,6 +11,8 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 ## Service designs
 
 - [CubeTemplateCenter Design](./templatecenter-design) — the standalone template build service: control/data plane split, routing rules, callback authentication, artifact lifecycle, deployment wiring, and known limitations.
+- [External HTTP Score](./external-http-score) — optional Score-phase sidecar plugin: wire contract, `failure_policy`, circuit breaker, and Prometheus outcomes.
+- [Topic1 Enhancement Ablation (circuit breaker, 2026-09-14)](./topic1-enhancement-ablation-20260914/) — live R011/R012 conclusion pack (timeout short-circuit under `fail_open`; no raw ledgers).
 
 ## What belongs here
 
