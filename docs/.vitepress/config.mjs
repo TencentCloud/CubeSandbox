@@ -277,6 +277,7 @@ export default withMermaid(defineConfig({
             {
               text: 'Observability & Performance',
               items: [
+                { text: 'CubeAPI Business Metrics', link: '/guide/cubeapi-metrics' },
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
@@ -494,6 +495,7 @@ export default withMermaid(defineConfig({
             {
               text: '可观测性与性能',
               items: [
+                { text: 'CubeAPI 业务指标', link: '/zh/guide/cubeapi-metrics' },
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: '性能基准', link: '/zh/guide/performance-benchmark' },
