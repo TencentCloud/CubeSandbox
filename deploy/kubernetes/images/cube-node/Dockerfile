@@ -30,6 +30,7 @@ COPY package/cube-snapshot ${TOOLBOX_ROOT}/cube-snapshot
 COPY package/scripts/common ${TOOLBOX_ROOT}/scripts/common
 COPY scripts/cube-node-entrypoint.sh /usr/local/bin/cube-node-entrypoint.sh
 COPY scripts/stage-toolbox.sh /usr/local/bin/stage-toolbox.sh
+COPY scripts/cubebox_os_image.sh /usr/local/bin/cubebox_os_image.sh
 
 RUN chmod +x \
       ${TOOLBOX_ROOT}/Cubelet/bin/cubelet \
@@ -39,12 +40,14 @@ RUN chmod +x \
       ${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump \
       /usr/local/bin/cube-node-entrypoint.sh \
       /usr/local/bin/stage-toolbox.sh \
+    && chmod 644 /usr/local/bin/cubebox_os_image.sh \
     && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs /usr/local/bin/containerd-shim-cube-rs \
     && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/cube-runtime /usr/local/bin/cube-runtime \
     && ln -sfn ${TOOLBOX_ROOT}/Cubelet/bin/cubecli /usr/local/bin/cubecli \
     && ln -sfn ${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump /usr/local/bin/cubevsmapdump \
     && mkdir -p \
       /data/cubelet \
+      /data/cubebox_os_image \
       /data/log/Cubelet \
       /data/log/CubeShim \
       /data/log/CubeVmm \
