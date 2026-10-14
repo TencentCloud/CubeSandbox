@@ -474,6 +474,10 @@ impl PciDevice for VfioUserPciDevice {
         self.common.write_bar(base, offset, data)
     }
 
+    fn restore_bar_addr(&mut self, params: &BarReprogrammingParams) {
+        self.common.configuration.restore_bar_addr(params);
+    }
+
     fn move_bar(&mut self, old_base: u64, new_base: u64) -> Result<(), std::io::Error> {
         info!("Moving BAR 0x{:x} -> 0x{:x}", old_base, new_base);
         for mmio_region in self.common.mmio_regions.iter_mut() {

@@ -1022,6 +1022,10 @@ impl PciDevice for VirtioPciDevice {
         Ok(())
     }
 
+    fn restore_bar_addr(&mut self, params: &BarReprogrammingParams) {
+        self.configuration.restore_bar_addr(params);
+    }
+
     fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         match offset {
             o if o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE => self.common_config.read(
