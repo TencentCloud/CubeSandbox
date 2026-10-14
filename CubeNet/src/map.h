@@ -231,6 +231,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
 	__uint(max_entries, MAX_ENTRIES);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, __u32);
 	__type(value, struct sandbox_metrics);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
