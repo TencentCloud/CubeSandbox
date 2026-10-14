@@ -308,7 +308,8 @@ export default withMermaid(defineConfig({
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
                     { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
-                    { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' }
+                    { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' },
+                    { text: 'Agno', link: '/guide/integrations/agno' }
                   ]
                 },
                 {
@@ -525,7 +526,8 @@ export default withMermaid(defineConfig({
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
                     { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
-                    { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' }
+                    { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' },
+                    { text: 'Agno', link: '/zh/guide/integrations/agno' }
                   ]
                 },
                 {

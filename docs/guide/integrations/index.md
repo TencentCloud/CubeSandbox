@@ -53,3 +53,4 @@ lang: en-US
 | [OpenCode Integration Guide (Plugin Hook)](./opencode-plugin.md) | Tantanovo | 2026-07-31 | integration, opencode, coding-agent, plugin |
 | [OpenAI Agents SDK Integration Guide](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
 | [Ubuntu Desktop Sandbox Guide](./ubuntu-desktop.md) | jinlong | 2026-09-15 | integration, ubuntu-desktop, novnc, gui-automation |
+| [Agno Integration Guide](./agno.md) | Lion-Leporidae | 2026-09-24 | integration, agno, agent, sandbox |
