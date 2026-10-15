@@ -1159,6 +1159,14 @@ check_install_preflight() {
   require_cmd grep
   require_cmd pgrep
   require_cmd date
+  # openssl is a hard dependency of cube-egress-prepare.sh, which generates
+  # the CubeEgress root CA (ECDSA P-256) at /etc/cube/ca/cube-root-ca.crt.
+  # cube-egress runs on both control and compute roles; on minimal/cloud
+  # images (e.g. OpenCloudOS 9 minimal) openssl may be absent, causing the
+  # service to restart-loop in ExecStartPre and create-from-image to fail
+  # when it bakes the CA. The /dev/urandom fallback used for the ops-store
+  # signing key below does NOT cover CA generation.
+  require_cmd openssl
 
   if needs_docker_for_install; then
     require_cmd docker
