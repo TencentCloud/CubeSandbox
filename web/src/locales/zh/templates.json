@@ -4,7 +4,34 @@
   "noTemplates": "暂无模板。请使用 CLI 或 SDK 发布模板。",
   "tabs": {
     "list": "模板列表",
+    "snapshots": "快照列表",
     "compat": "兼容性"
+  },
+  "snap": {
+    "none": "暂无快照。可通过 SDK 或 CLI 对运行中的沙箱创建快照。",
+    "emptyPage": "本页暂无快照，请返回上一页。",
+    "loadError": "加载快照列表失败。",
+    "retry": "重试",
+    "copied": "已复制",
+    "col": {
+      "originSandbox": "来源沙箱",
+      "version": "版本",
+      "refs": "沙箱引用数"
+    },
+    "delete": {
+      "button": "删除快照",
+      "title": "删除快照",
+      "confirmDesc": "确定要删除快照",
+      "confirmDescSuffix": "吗？此操作不可撤销。",
+      "cancel": "取消",
+      "confirm": "确认删除",
+      "deleting": "删除中…"
+    },
+    "pagination": {
+      "prev": "上一页",
+      "next": "下一页",
+      "page": "第 {{page}} 页"
+    }
   },
   "compat": {
     "banner": "{{count}} 个模板需要重建。节点升级后，用它们新建沙箱可能失败。请打开模板，点击「重建模板」。",
@@ -99,6 +126,10 @@
   "errors": {
     "templateInUse": "该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。",
     "buildInProgress": "模板正在构建中，请等待构建完成后再删除。",
-    "cleanupMissing": "模板清理信息不完整，无法自动删除，请联系管理员。"
+    "cleanupMissing": "模板清理信息不完整，无法自动删除，请联系管理员。",
+    "snapshotReferenced": "该快照已被助手模板引用，请先在数字助手中删除对应模板后再试。",
+    "snapshotCreating": "快照正在创建中，请稍后再试。",
+    "snapshotDeleting": "快照正在删除中，请稍后再试。",
+    "snapshotBusy": "快照有进行中的操作，请稍后再试。"
   }
 }

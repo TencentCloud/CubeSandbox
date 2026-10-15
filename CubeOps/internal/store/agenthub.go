@@ -392,6 +392,19 @@ func (s *Store) DeleteAgentSnapshot(ctx context.Context, agentID, snapshotID str
 	return nil
 }
 
+// SoftDeleteAgentSnapshotsByInfraID soft-deletes every snapshot row backed by
+// the given infra snapshot id. Returns the number of rows removed.
+func (s *Store) SoftDeleteAgentSnapshotsByInfraID(ctx context.Context, snapshotID string) (int64, error) {
+	result := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_snapshot SET deleted_at = NOW() WHERE snapshot_id = ? AND deleted_at IS NULL`,
+		snapshotID,
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("soft-delete snapshots by infra id: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // AgentOperation matches the old Rust AgentOperationResponse.
 type AgentOperation struct {
 	OperationID   string  `json:"operationId"`
@@ -627,6 +640,20 @@ func (s *Store) FindTemplateIDsByInfraID(ctx context.Context, infraID string) ([
 	return ids, rows.Err()
 }
 
+// CountTemplatesReferencingSnapshot returns the number of live AgentHub
+// templates published from the given snapshot (via source_snapshot_id).
+func (s *Store) CountTemplatesReferencingSnapshot(ctx context.Context, snapshotID string) (int, error) {
+	var n int
+	if err := s.db.WithContext(ctx).Raw(
+		`SELECT COUNT(*) FROM t_agenthub_template
+		 WHERE source_snapshot_id = ? AND deleted_at IS NULL`,
+		snapshotID,
+	).Scan(&n).Error; err != nil {
+		return 0, fmt.Errorf("count templates referencing snapshot: %w", err)
+	}
+	return n, nil
+}
+
 // SoftDeleteAgentHubTemplate soft-deletes a single AgentHub template
 // registration by template_id and clears published_template_id on any
 // snapshots that referenced it. Used by the reverse-sync path; unlike
@@ -687,6 +714,19 @@ func (s *Store) SetBaseSnapshotID(ctx context.Context, agentID, snapshotID strin
 		`UPDATE t_agenthub_instance SET base_snapshot_id = ?, updated_at = NOW() WHERE agent_id = ? AND deleted_at IS NULL`,
 		snapshotID, agentID,
 	).Error
+}
+
+// ClearBaseSnapshotIDBySnapshotID clears base_snapshot_id on every live
+// instance pointing at the given snapshot. Returns rows affected.
+func (s *Store) ClearBaseSnapshotIDBySnapshotID(ctx context.Context, snapshotID string) (int64, error) {
+	result := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_instance SET base_snapshot_id = NULL, updated_at = NOW() WHERE base_snapshot_id = ? AND deleted_at IS NULL`,
+		snapshotID,
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("clear base snapshot id: %w", result.Error)
+	}
+	return result.RowsAffected, nil
 }
 
 // --- helpers ---

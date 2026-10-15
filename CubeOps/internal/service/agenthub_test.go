@@ -26,24 +26,27 @@ import (
 // sentinel error so a missed mock fails loud rather than silently returning
 // zero values.
 type fakeAgentStore struct {
-	getSetting                 func(ctx context.Context, key string) (string, error)
-	getInstance                func(ctx context.Context, agentID string) (*store.AgentInstance, error)
-	upsertInstance             func(ctx context.Context, inst *store.AgentInstance) error
-	softDeleteInstance         func(ctx context.Context, agentID string) error
-	updateInstanceStatus       func(ctx context.Context, agentID, status string) error
-	updateInstanceModel        func(ctx context.Context, agentID, model string) error
-	getAgentWecomConfig        func(ctx context.Context, agentID string) (string, string, error)
-	updateAgentWecomConfig     func(ctx context.Context, agentID, botID, botSecret string) error
-	getAgentSnapshot           func(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
-	deleteAgentSnapshot        func(ctx context.Context, agentID, snapshotID string) error
-	getAgentTemplate           func(ctx context.Context, templateID string) (*store.AgentTemplate, error)
-	getRecommendedTemplate     func(ctx context.Context) (*store.AgentTemplate, error)
-	listAgentTemplates         func(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
-	recordOperation            func(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
-	latestHealthySnapshot      func(ctx context.Context, agentID string) (string, error)
-	setBaseSnapshotID          func(ctx context.Context, agentID, snapshotID string) error
-	findTemplateIDsByInfraID   func(ctx context.Context, infraID string) ([]string, error)
-	softDeleteAgentHubTemplate func(ctx context.Context, templateID string) error
+	getSetting                        func(ctx context.Context, key string) (string, error)
+	getInstance                       func(ctx context.Context, agentID string) (*store.AgentInstance, error)
+	upsertInstance                    func(ctx context.Context, inst *store.AgentInstance) error
+	softDeleteInstance                func(ctx context.Context, agentID string) error
+	updateInstanceStatus              func(ctx context.Context, agentID, status string) error
+	updateInstanceModel               func(ctx context.Context, agentID, model string) error
+	getAgentWecomConfig               func(ctx context.Context, agentID string) (string, string, error)
+	updateAgentWecomConfig            func(ctx context.Context, agentID, botID, botSecret string) error
+	getAgentSnapshot                  func(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
+	deleteAgentSnapshot               func(ctx context.Context, agentID, snapshotID string) error
+	getAgentTemplate                  func(ctx context.Context, templateID string) (*store.AgentTemplate, error)
+	getRecommendedTemplate            func(ctx context.Context) (*store.AgentTemplate, error)
+	listAgentTemplates                func(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
+	recordOperation                   func(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
+	latestHealthySnapshot             func(ctx context.Context, agentID string) (string, error)
+	setBaseSnapshotID                 func(ctx context.Context, agentID, snapshotID string) error
+	findTemplateIDsByInfraID          func(ctx context.Context, infraID string) ([]string, error)
+	softDeleteAgentHubTemplate        func(ctx context.Context, templateID string) error
+	softDeleteSnapshotsByInfraID      func(ctx context.Context, snapshotID string) (int64, error)
+	countTemplatesReferencingSnapshot func(ctx context.Context, snapshotID string) (int, error)
+	clearBaseSnapshotIDBySnapshotID   func(ctx context.Context, snapshotID string) (int64, error)
 }
 
 func (f *fakeAgentStore) GetSetting(ctx context.Context, key string) (string, error) {
@@ -154,6 +157,24 @@ func (f *fakeAgentStore) SoftDeleteAgentHubTemplate(ctx context.Context, templat
 		return nil
 	}
 	return f.softDeleteAgentHubTemplate(ctx, templateID)
+}
+func (f *fakeAgentStore) SoftDeleteAgentSnapshotsByInfraID(ctx context.Context, snapshotID string) (int64, error) {
+	if f.softDeleteSnapshotsByInfraID == nil {
+		return 0, nil
+	}
+	return f.softDeleteSnapshotsByInfraID(ctx, snapshotID)
+}
+func (f *fakeAgentStore) CountTemplatesReferencingSnapshot(ctx context.Context, snapshotID string) (int, error) {
+	if f.countTemplatesReferencingSnapshot == nil {
+		return 0, nil
+	}
+	return f.countTemplatesReferencingSnapshot(ctx, snapshotID)
+}
+func (f *fakeAgentStore) ClearBaseSnapshotIDBySnapshotID(ctx context.Context, snapshotID string) (int64, error) {
+	if f.clearBaseSnapshotIDBySnapshotID == nil {
+		return 0, nil
+	}
+	return f.clearBaseSnapshotIDBySnapshotID(ctx, snapshotID)
 }
 
 // Compile-time assertion.
@@ -1426,4 +1447,84 @@ func TestReverseSync_PartialSoftDeleteFailureContinues(t *testing.T) {
 	if len(deletedIDs) != 3 {
 		t.Errorf("soft-delete called %d times, want 3 (partial failure must not stop the loop)", len(deletedIDs))
 	}
+}
+
+// ── ReverseSyncAgentHubSnapshot tests ───────────────────────────────────────
+
+// TestReverseSyncSnapshot_SoftDeletesMatchingRows verifies that snapshot rows
+// backed by the deleted infra snapshot id are soft-deleted, and that base
+// pointers on instances are cleared for the same id.
+func TestReverseSyncSnapshot_SoftDeletesMatchingRows(t *testing.T) {
+	var gotID string
+	var clearedID string
+	st := &fakeAgentStore{
+		softDeleteSnapshotsByInfraID: func(_ context.Context, snapshotID string) (int64, error) {
+			gotID = snapshotID
+			return 2, nil
+		},
+		clearBaseSnapshotIDBySnapshotID: func(_ context.Context, snapshotID string) (int64, error) {
+			clearedID = snapshotID
+			return 1, nil
+		},
+	}
+	svc := newTestService(st, &fakeServiceCM{})
+
+	svc.ReverseSyncAgentHubSnapshot(context.Background(), "snap-1")
+
+	if gotID != "snap-1" {
+		t.Errorf("SoftDeleteAgentSnapshotsByInfraID got snapshotID=%q, want snap-1", gotID)
+	}
+	if clearedID != "snap-1" {
+		t.Errorf("ClearBaseSnapshotIDBySnapshotID got snapshotID=%q, want snap-1", clearedID)
+	}
+}
+
+// TestReverseSyncSnapshot_ClearBaseFailureDoesNotPanic verifies a clear-base
+// error is logged but not propagated (best-effort semantics).
+func TestReverseSyncSnapshot_ClearBaseFailureDoesNotPanic(t *testing.T) {
+	st := &fakeAgentStore{
+		softDeleteSnapshotsByInfraID: func(_ context.Context, _ string) (int64, error) {
+			return 1, nil
+		},
+		clearBaseSnapshotIDBySnapshotID: func(_ context.Context, _ string) (int64, error) {
+			return 0, errors.New("DB connection lost")
+		},
+	}
+	svc := newTestService(st, &fakeServiceCM{})
+
+	// Should not panic / not return error.
+	svc.ReverseSyncAgentHubSnapshot(context.Background(), "snap-1")
+}
+
+// TestReverseSyncSnapshot_ZeroRowsIsNoop verifies that an infra id with no
+// AgentHub snapshot rows is a silent no-op.
+func TestReverseSyncSnapshot_ZeroRowsIsNoop(t *testing.T) {
+	called := false
+	st := &fakeAgentStore{
+		softDeleteSnapshotsByInfraID: func(_ context.Context, _ string) (int64, error) {
+			called = true
+			return 0, nil
+		},
+	}
+	svc := newTestService(st, &fakeServiceCM{})
+
+	svc.ReverseSyncAgentHubSnapshot(context.Background(), "snap-none")
+
+	if !called {
+		t.Error("SoftDeleteAgentSnapshotsByInfraID was not called")
+	}
+}
+
+// TestReverseSyncSnapshot_QueryFailureDoesNotPanic verifies that a store error
+// is logged but not propagated (best-effort semantics).
+func TestReverseSyncSnapshot_QueryFailureDoesNotPanic(t *testing.T) {
+	st := &fakeAgentStore{
+		softDeleteSnapshotsByInfraID: func(_ context.Context, _ string) (int64, error) {
+			return 0, errors.New("DB connection lost")
+		},
+	}
+	svc := newTestService(st, &fakeServiceCM{})
+
+	// Should not panic / not return error.
+	svc.ReverseSyncAgentHubSnapshot(context.Background(), "snap-1")
 }

@@ -313,6 +313,58 @@ func TestClient_OutboundBodyRequestIDCorrelates(t *testing.T) {
 	}
 }
 
+// TestClient_PathSegmentsAreEscaped: path IDs percent-encoded so ?/#/% cannot inject or truncate the request.
+func TestClient_PathSegmentsAreEscaped(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(c *Client) error
+		want string
+	}{
+		{
+			name: "DeleteSnapshot",
+			call: func(c *Client) error {
+				_, err := c.DeleteSnapshot(context.Background(), "snap?x=1#frag")
+				return err
+			},
+			want: "/cube/snapshot/snap%3Fx=1%23frag",
+		},
+		{
+			name: "GetTemplate",
+			call: func(c *Client) error {
+				_, err := c.GetTemplate(context.Background(), "tpl%2f..")
+				return err
+			},
+			want: "/cube/template/tpl%252f..",
+		},
+		{
+			name: "RollbackSandbox",
+			call: func(c *Client) error {
+				_, err := c.RollbackSandbox(context.Background(), "sb/evil", map[string]interface{}{})
+				return err
+			},
+			want: "/cube/sandbox/sb%2Fevil/rollback",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.EscapedPath()
+				fmt.Fprint(w, `{"ret":{"ret_code":0}}`)
+			}))
+			defer srv.Close()
+
+			if err := tt.call(New(srv.URL)); err != nil {
+				t.Fatalf("call failed: %v", err)
+			}
+			if gotPath != tt.want {
+				t.Errorf("escaped path = %q, want %q", gotPath, tt.want)
+			}
+		})
+	}
+}
+
 func TestClient_OutboundCallerAlwaysCubeOps(t *testing.T) {
 	// Even when the inbound trace carries a client caller (e.g. cubeops-client),
 	// outbound calls to CubeMaster must identify CubeOps as the caller.

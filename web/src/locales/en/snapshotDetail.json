@@ -1,0 +1,61 @@
+{
+  "backToSnapshots": "Back to snapshots",
+  "notFound": "Snapshot not found or already deleted.",
+  "loadError": "Failed to load snapshot detail. Please try again.",
+  "snapshotId": "Snapshot ID",
+  "createdAt": "Created",
+  "section": {
+    "origin": "Origin",
+    "originDesc": "The sandbox and node this snapshot was taken from.",
+    "replicas": "Data location",
+    "replicasDesc": "The node holding the snapshot data and its health.",
+    "refs": "Sandbox references",
+    "refsDesc": "Running sandboxes currently using this snapshot as rootfs.",
+    "danger": "Delete snapshot",
+    "dangerDesc": "This cannot be undone. Replica data on all nodes will be cleaned up."
+  },
+  "fields": {
+    "status": "Status",
+    "backend": "Backend",
+    "version": "version",
+    "rootfsSize": "rootfs size",
+    "originSandbox": "Origin sandbox",
+    "originNode": "Origin node",
+    "instanceType": "Instance type",
+    "snapshotID": "Snapshot ID",
+    "displayName": "Name",
+    "remoteStatus": "S3 sync status",
+    "notSynced": "Not synced",
+    "lastError": "Last error",
+    "node": "Node",
+    "phase": "Phase",
+    "spec": "Spec",
+    "compat": "Compat",
+    "versions": "Versions",
+    "lastJob": "Last job"
+  },
+  "empty": {
+    "replicas": "No replicas.",
+    "refs": "No running sandboxes reference this snapshot."
+  },
+  "delete": {
+    "button": "Delete Snapshot",
+    "confirm": "Confirm Delete",
+    "confirmDesc": "This cannot be undone. Replica data on all nodes will be cleaned up. Continue?",
+    "confirmDescInUse": "This snapshot is referenced by running sandboxes; its data is reclaimed asynchronously after those sandboxes are released. Continue?",
+    "cancel": "Cancel",
+    "deleting": "Deleting…"
+  },
+  "errors": {
+    "templateInUse": "This template has sandbox instances in use. Destroy all related sandboxes before deleting it.",
+    "buildInProgress": "This template is still building. Wait for the build to finish before deleting it.",
+    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator.",
+    "snapshotReferenced": "This snapshot is referenced by an assistant template. Remove the template first in AgentHub.",
+    "snapshotCreating": "This snapshot is still being created. Try again later.",
+    "snapshotDeleting": "This snapshot is already being deleted. Try again later.",
+    "snapshotBusy": "This snapshot has an operation in progress. Try again later."
+  },
+  "copy": "Copy",
+  "copied": "Copied",
+  "clickToCopy": "Click to copy: {{text}}"
+}
