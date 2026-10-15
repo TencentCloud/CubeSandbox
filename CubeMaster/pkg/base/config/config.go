@@ -43,6 +43,11 @@ type Config struct {
 	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
 	CubeProxyConf    *CubeProxyConf        `yaml:"cube_proxy_conf"`
 
+	// Template holds template-build-wide settings, such as the rootfs
+	// packaging format (ext4 / erofs) CubeTemplateCenter produces for a new
+	// template artifact. nil defaults to ext4 (see preHandleTemplate).
+	Template *TemplateConf `yaml:"template"`
+
 	// SoftDeletePurge configures the scheduled hard-purge of soft-deleted
 	// (tombstoned) database rows (issue #973). nil leaves the purger at its
 	// safe defaults (7-day retention, hourly, enabled). See CubeDB/tombstone.
@@ -620,6 +625,24 @@ type CubeEgressConf struct {
 	Required bool `yaml:"required"`
 }
 
+// TemplateConf holds template-build-wide settings.
+type TemplateConf struct {
+	// RootfsFormat selects the rootfs packaging format CubeTemplateCenter
+	// produces for newly built templates. Valid values: "ext4" (default,
+	// historical behavior) and "erofs" (EROFS compressed read-only image).
+	// An empty value defaults to "ext4"; an explicit invalid value fails to
+	// start. Values mirror the ImageStorageMediaType proto enum names so a
+	// configured format maps 1:1 to ImageSpec.storage_media downstream.
+	RootfsFormat string `yaml:"rootfs_format"`
+}
+
+// Rootfs packaging format values, mirroring the ImageStorageMediaType proto
+// enum names so a configured format maps directly to ImageSpec.storage_media.
+const (
+	RootfsFormatExt4  = "ext4"
+	RootfsFormatErofs = "erofs"
+)
+
 // SoftDeletePurgeConf configures the scheduled hard-purge of soft-deleted rows.
 // All fields are optional; zero/nil values fall back to safe defaults enforced
 // by CubeDB/tombstone.Config.Sanitized (7-day retention, hourly interval). The
@@ -775,6 +798,9 @@ func preHandle(config *Config) (*Config, error) {
 	if preHandleAuthConf(config) != nil {
 		return nil, errors.New("preHandleAuthConf failed")
 	}
+	if preHandleTemplate(config) != nil {
+		return nil, errors.New("preHandleTemplate failed")
+	}
 	return config, nil
 }
 func preComHandleConf(config *Config) error {
@@ -894,6 +920,28 @@ func preHandleAuthConf(config *Config) error {
 	}
 
 	return nil
+}
+
+// preHandleTemplate normalizes and validates the template-build config.
+// An absent block (and an empty rootfs_format) default to "ext4" so existing
+// deployments keep their historical ext4 behavior. An explicit-but-invalid
+// value is rejected loudly rather than silently building the wrong format.
+func preHandleTemplate(config *Config) error {
+	if config.Template == nil {
+		config.Template = &TemplateConf{}
+	}
+	if config.Template.RootfsFormat == "" {
+		config.Template.RootfsFormat = RootfsFormatExt4
+		return nil
+	}
+	config.Template.RootfsFormat = strings.ToLower(strings.TrimSpace(config.Template.RootfsFormat))
+	switch config.Template.RootfsFormat {
+	case RootfsFormatExt4, RootfsFormatErofs:
+		return nil
+	default:
+		return fmt.Errorf("template.rootfs_format %q is invalid; must be %q or %q",
+			config.Template.RootfsFormat, RootfsFormatExt4, RootfsFormatErofs)
+	}
 }
 func preHandleCubeletConf(config *Config) error {
 	if config.CubeletConf == nil {
@@ -1236,6 +1284,18 @@ func (c *Config) TemplateCenterAddr() string {
 		return strings.TrimRight(strings.TrimSpace(c.Common.TemplateCenterAddrValue), "/")
 	}
 	return ""
+}
+
+// RootfsFormat returns the configured rootfs packaging format for newly
+// built templates, normalized to a canonical lower-case value. Defaults to
+// "ext4" when the template block is absent or rootfs_format is unset.
+// preHandleTemplate guarantees the default after Init/hot-swap; this method
+// stays nil-safe for callers that build a Config directly (e.g. tests).
+func (c *Config) RootfsFormat() string {
+	if c == nil || c.Template == nil || c.Template.RootfsFormat == "" {
+		return RootfsFormatExt4
+	}
+	return c.Template.RootfsFormat
 }
 
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}

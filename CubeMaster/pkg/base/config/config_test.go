@@ -268,3 +268,64 @@ func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
 	got2 := GetAllowedHostMountPrefixes()
 	assert.Equal(t, "/data/shared/", got2[0])
 }
+
+func TestPreHandleTemplateDefaultsAndValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    *Config
+		want   string
+		wantOK bool
+	}{
+		{name: "block absent defaults to ext4", cfg: &Config{}, want: RootfsFormatExt4, wantOK: true},
+		{name: "empty defaults to ext4", cfg: &Config{Template: &TemplateConf{}}, want: RootfsFormatExt4, wantOK: true},
+		{name: "ext4 preserved", cfg: &Config{Template: &TemplateConf{RootfsFormat: "ext4"}}, want: RootfsFormatExt4, wantOK: true},
+		{name: "erofs preserved", cfg: &Config{Template: &TemplateConf{RootfsFormat: "erofs"}}, want: RootfsFormatErofs, wantOK: true},
+		{name: "uppercase normalized to lower", cfg: &Config{Template: &TemplateConf{RootfsFormat: "EROFS"}}, want: RootfsFormatErofs, wantOK: true},
+		{name: "surrounding whitespace trimmed", cfg: &Config{Template: &TemplateConf{RootfsFormat: "  ext4 "}}, want: RootfsFormatExt4, wantOK: true},
+		{name: "invalid value rejected", cfg: &Config{Template: &TemplateConf{RootfsFormat: "xfs"}}, wantOK: false},
+		{name: "empty-ish invalid rejected", cfg: &Config{Template: &TemplateConf{RootfsFormat: "nfs"}}, wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := preHandleTemplate(tt.cfg)
+			if !tt.wantOK {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.NotNil(t, tt.cfg.Template)
+			assert.Equal(t, tt.want, tt.cfg.Template.RootfsFormat)
+		})
+	}
+}
+
+func TestRootfsFormatAccessor(t *testing.T) {
+	// nil receiver and absent block are nil-safe and default to ext4.
+	var nilCfg *Config
+	assert.Equal(t, RootfsFormatExt4, nilCfg.RootfsFormat())
+	assert.Equal(t, RootfsFormatExt4, (&Config{}).RootfsFormat())
+	assert.Equal(t, RootfsFormatExt4, (&Config{Template: &TemplateConf{}}).RootfsFormat())
+
+	// A configured value surfaces through the accessor after preHandle.
+	cfg := &Config{Template: &TemplateConf{RootfsFormat: "erofs"}}
+	assert.NoError(t, preHandleTemplate(cfg))
+	assert.Equal(t, RootfsFormatErofs, cfg.RootfsFormat())
+}
+
+func TestTemplateConfSnakeCaseRoundTrip(t *testing.T) {
+	var cfg Config
+	err := yaml.Unmarshal([]byte("template:\n  rootfs_format: erofs\n"), &cfg)
+	assert.NoError(t, err)
+	if assert.NotNil(t, cfg.Template) {
+		assert.Equal(t, RootfsFormatErofs, cfg.Template.RootfsFormat)
+	}
+	assert.NoError(t, preHandleTemplate(&cfg))
+	assert.Equal(t, RootfsFormatErofs, cfg.RootfsFormat())
+
+	encoded, err := yaml.Marshal(&cfg)
+	assert.NoError(t, err)
+	text := string(encoded)
+	assert.Contains(t, text, "rootfs_format: erofs")
+	assert.NotContains(t, text, "rootfsFormat:")
+}
