@@ -325,7 +325,9 @@ export default withMermaid(defineConfig({
                     { text: 'unisound', link: '/guide/usecases/unisound-rl-rollout' },
                     { text: 'WeKnora', link: '/guide/usecases/weknora' },
                     { text: 'Huajiao', link: '/guide/usecases/huajiao' },
-                    { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' }
+                    { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' },
+                    { text: 'Galxe Alva', link: '/guide/usecases/galxe-alva' },
+                    { text: 'LambChat', link: '/guide/usecases/lambchat' }
                   ]
                 }
               ]
@@ -542,7 +544,9 @@ export default withMermaid(defineConfig({
                     { text: 'unisound', link: '/zh/guide/usecases/unisound-rl-rollout' },
                     { text: 'WeKnora', link: '/zh/guide/usecases/weknora' },
                     { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
-                    { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' }
+                    { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' },
+                    { text: 'Galxe Alva', link: '/zh/guide/usecases/galxe-alva' },
+                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' }
                   ]
                 }
               ]

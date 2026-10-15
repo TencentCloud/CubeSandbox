@@ -58,3 +58,5 @@ lang: zh-CN
 | [WeKnora：基于 CubeSandbox 的 Agent 持久化运行环境](./weknora.md) | 陈洋、赵海龙 | 2026-09-17 | agent, snapshot, session-persistence, e2b-compat |
 | [花椒：沙箱是选项不是标配的 Agent 平台实践](./huajiao.md) | 王成龙、封冰清 | 2026-09-17 | agent, host-mount, go-sdk, execution-environment |
 | [openFuyao：Kubernetes 中运行 CubeSandbox 的落地实践](./openfuyao.md) | 王文涛、李爱华 | 2026-09-17 | kubernetes, deployment, ebpf, production |
+| [Alva：CubeSandbox 落地 GKE 的选型与排障实践](./galxe-alva.md) | RuiPeng Zhang | 2026-10-15 | agent, gke, kubernetes, security |
+| [LambChat：Agent 平台沙箱迁移到 CubeSandbox 的选型与实录](./lambchat.md) | Clivia | 2026-10-15 | agent, e2b-compat, pause-resume, multi-tenant |
