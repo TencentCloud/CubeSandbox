@@ -57,7 +57,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	if err := runCommand(ctx, "", "truncate", "-s", strconv.FormatInt(estimatedSizeBytes, 10), ext4Path); err != nil {
 		return fmt.Errorf("truncate ext4 image for streaming: %w", err)
 	}
-	if err := runCommand(ctx, "", "mkfs.ext4", "-F", ext4Path); err != nil {
+	if err := runCommand(ctx, "", "mkfs.ext4", "-F", "-b", "4096", ext4Path); err != nil {
 		return fmt.Errorf("mkfs.ext4 for streaming: %w", err)
 	}
 
@@ -204,41 +204,41 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	// 5. Unmount and detach (via cleanup).
 	cleanup()
 
-	// 6. Shrink the ext4 filesystem to minimum size (best-effort).
+	// 6. Verify and shrink the ext4 filesystem to its minimum size. The
+	// streaming and directory-export paths must publish artifacts with the same
+	// integrity guarantees.
+	if err := runE2fsck(cleanupCtx, ext4Path); err != nil {
+		return fmt.Errorf("pre-shrink e2fsck failed: %w", err)
+	}
 	if err := runCommand(cleanupCtx, "", "resize2fs", "-M", ext4Path); err != nil {
-		log.G(ctx).Warnf("resize2fs -M failed (best-effort, using original size): %v", err)
+		return fmt.Errorf("resize2fs shrink failed: %w", err)
 	}
 
 	// 7. Round the image file UP to a pmem-compatible size. The microVM boots the
 	// rootfs as a virtio-pmem device whose backing-file size MUST be a multiple of
-	// 2 MiB, else the host device manager rejects it ("PmemSizeNotAligned"). Phase-1
-	// sizing gets this for free (it aligns up to a 256 MiB boundary); the streaming
-	// path shrinks with resize2fs -M, which truncates the file to the exact
+	// 2 MiB, else the host device manager rejects it ("PmemSizeNotAligned").
+	// resize2fs -M truncates the file to the exact
 	// filesystem length (not 2 MiB-aligned). Align that apparent size up here —
 	// rounding UP never cuts into live filesystem blocks; the small tail is just
 	// unused device space. Use the apparent size (fi.Size(), the fs logical length
 	// after resize2fs -M), NOT the physically-allocated block count, which can be
 	// smaller than the fs length for a minimized image and would truncate below it.
-	const pmemAlignmentBytes = int64(2 * 1024 * 1024)
-	fsSize := estimatedSizeBytes
-	haveActualSize := false
-	if fi, statErr := os.Stat(ext4Path); statErr != nil {
-		log.G(ctx).Warnf("stat %s for pmem alignment failed, using estimated size %d (may over-provision guest address space): %v", ext4Path, estimatedSizeBytes, statErr)
-	} else if fi.Size() > 0 {
-		fsSize = fi.Size()
-		haveActualSize = true
-		if fi.Size() > estimatedSizeBytes {
-			log.G(ctx).Warnf("stat %s reported size %d exceeding estimate %d (unexpected); using the actual size for pmem alignment", ext4Path, fi.Size(), estimatedSizeBytes)
-		}
+	fi, err := os.Stat(ext4Path)
+	if err != nil {
+		return fmt.Errorf("stat shrunk ext4 image failed: %w", err)
+	}
+	fsSize := fi.Size()
+	if fsSize <= 0 {
+		return fmt.Errorf("shrunk ext4 image %s is empty", ext4Path)
 	}
 	alignedSize := alignUp(fsSize, pmemAlignmentBytes)
-	// Skip the truncate only when the real file size is already exactly aligned. If
-	// the stat failed we must still truncate: the file sits at resize2fs -M's length
-	// (very likely unaligned) and estimatedSizeBytes is only a fallback target.
-	if !haveActualSize || alignedSize != fsSize {
+	if alignedSize != fsSize {
 		if err := runCommand(cleanupCtx, "", "truncate", "-s", strconv.FormatInt(alignedSize, 10), ext4Path); err != nil {
-			log.G(ctx).Warnf("truncate to pmem-aligned size %d failed: %v", alignedSize, err)
+			return fmt.Errorf("truncate ext4 image to pmem-aligned size %d failed: %w", alignedSize, err)
 		}
+	}
+	if err := verifyExt4Image(cleanupCtx, ext4Path); err != nil {
+		return fmt.Errorf("post-truncate e2fsck failed: %w", err)
 	}
 
 	return nil
