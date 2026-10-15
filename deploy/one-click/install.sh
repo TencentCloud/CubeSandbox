@@ -1852,9 +1852,20 @@ case "${RCOW_LISTEN_PORT}" in
     ;;
 esac
 
-# Render /data/cubelet/s3.cfg from CUBE_S3_* before the s3lvol preflight
-# looks for it. Hand-written files without the one-click sentinel are kept.
-write_s3lvol_cfg
+# The preflight below only needs a config file to exist. Replacing one that a
+# live target was started from, before the hot swap, makes the new process
+# attach with the new endpoint or bucket while rollback still has to start the
+# old binary against that same file. Keep the existing file through the swap
+# and write the new one only after the swap has succeeded. A first install has
+# nothing to keep, so it still has to be written now.
+S3LVOL_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
+S3LVOL_CFG_DEFERRED=0
+if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" && -f "${S3LVOL_CFG}" ]]; then
+  S3LVOL_CFG_DEFERRED=1
+  log "CubeS3lvol: keeping ${S3LVOL_CFG} until the hot upgrade finishes"
+else
+  write_s3lvol_cfg
+fi
 
 # nvme-cli is not part of a minimal install; provide it before the
 # startup-deps validation below requires it.
@@ -1922,6 +1933,21 @@ if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
   else
     # Nothing is going to start it, so the bare name is put in place here.
     switch_cubes3lvol_bare_to "${S3LVOL_STAGED_DIR}"
+  fi
+
+  # The process that just came up (or the one a rollback brought back) read the
+  # file that was already on disk. Commit the install's S3 settings only after
+  # that has succeeded; a failure leaves the previous file so the old binary can
+  # attach. The running process does not re-read it. A changed endpoint or
+  # bucket takes effect at the next start of this service, not during the swap.
+  if [[ "${S3LVOL_CFG_DEFERRED}" == "1" ]]; then
+    if [[ "${S3LVOL_UPGRADE_RC}" -eq 0 ]]; then
+      log "CubeS3lvol: hot upgrade finished; writing ${S3LVOL_CFG}"
+      log "CubeS3lvol: a target started during the swap keeps the previous endpoint and bucket until its next start"
+      write_s3lvol_cfg
+    else
+      log "CubeS3lvol: hot upgrade failed; leaving ${S3LVOL_CFG} unchanged"
+    fi
   fi
 fi
 

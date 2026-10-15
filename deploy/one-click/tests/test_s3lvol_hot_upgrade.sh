@@ -242,8 +242,112 @@ test_readiness_is_the_attach_not_the_process() {
 
 test_the_start_wait_gates_on_readiness() {
   # Structural: the behavioural half needs a machine to start a target on.
-  awk '/^start_and_wait\(\)/,/^}/' "${HOT_UPGRADE}" | grep -qF 'rcow_target_ready' ||
-    fail "start_and_wait must wait for rcow_target_ready, not for a target process to exist"
+  # Attach is too early. rcow_start.sh writes the ready file only after replay
+  # and its own layout check, and the wait has to be for that.
+  local body
+  body="$(awk '/^start_and_wait\(\)/,/^}/' "${HOT_UPGRADE}")"
+  printf '%s\n' "${body}" | grep -qF 'rcow_target_start_ready' ||
+    fail "start_and_wait must wait for rcow_target_start_ready, not for a target process to exist"
+  printf '%s\n' "${body}" | grep -qF 'RCOW_HOT_START_TIMEOUT' ||
+    fail "start_and_wait must bound itself with RCOW_HOT_START_TIMEOUT"
+}
+
+test_rollback_does_not_take_the_planned_stop() {
+  # A new process that attached and then failed verification used to be stopped
+  # with stop_and_confirm. That has no hot marker, so ExecStop runs rcow_stop.sh
+  # and the rollback itself disconnects every live sandbox.
+  local body
+  body="$(awk '/^stop_without_disconnect\(\)/,/^}/' "${HOT_UPGRADE}")"
+  [[ -n "${body}" ]] || fail "rollback no longer has a disconnect-free stop"
+  printf '%s\n' "${body}" | grep -qF 'rcow_hot_marker_write' ||
+    fail "the rollback stop must record a hot marker before asking the unit to stop"
+  printf '%s\n' "${body}" | grep -qF 'kill -9' ||
+    fail "the rollback stop must kill a target it could not hot-stop, not tear it down"
+  if printf '%s\n' "${body}" | grep -qE 'rcow_stop\.sh|stop_and_confirm'; then
+    fail "the rollback stop must not call the planned teardown"
+  fi
+  awk '/the new build did not come up/,/^exit 1$/' "${HOT_UPGRADE}" |
+    grep -qF 'stop_without_disconnect' ||
+    fail "a failed new build must roll back through stop_without_disconnect"
+  if awk '/the new build did not come up/,/^exit 1$/' "${HOT_UPGRADE}" |
+    grep -qF 'stop_and_confirm'; then
+    fail "a failed new build must not roll back through the cold stop"
+  fi
+}
+
+test_the_symlink_switch_is_checked() {
+  awk '/^switch_bare_to\(\)/,/^}/' "${HOT_UPGRADE}" | grep -qF '|| return 1' ||
+    fail "switch_bare_to must report a failed ln or mv; the script is not set -e"
+  grep -qF 'if ! switch_bare_to "${NEW_VERSION}"' "${HOT_UPGRADE}" ||
+    fail "the swap must notice when the bare name did not move"
+}
+
+test_the_hot_stop_has_one_budget() {
+  # Each online step used to start a fresh RCOW_STOP_TIMEOUT window. Five of
+  # those outlive the unit's TimeoutStopSec, and systemd then kills the script
+  # while the data plane may already be quiesced.
+  local body
+  body="$(awk '/^hot_online_op\(\)/,/^}/' "${RCOW_UPGRADE}")"
+  if printf '%s\n' "${body}" | grep -qF 'SECONDS + RCOW_STOP_TIMEOUT'; then
+    fail "hot_online_op must share the script's stop budget instead of starting its own"
+  fi
+  grep -qF 'HOT_DEADLINE=$((SECONDS + RCOW_STOP_TIMEOUT))' "${RCOW_UPGRADE}" ||
+    fail "rcow_upgrade.sh must start one stop budget for the whole hot stop"
+}
+
+test_an_existing_s3_cfg_survives_a_failed_hot_upgrade() {
+  # The preflight only needs the file to exist. Replacing it before the swap
+  # makes a failed rollback attach the old binary against the new bucket.
+  grep -qF 'S3LVOL_CFG_DEFERRED' "${INSTALL_SH}" ||
+    fail "install.sh must be able to keep the existing s3.cfg across the swap"
+  local keep_line upgrade_line commit_line
+  keep_line="$(grep -n 'S3LVOL_CFG_DEFERRED=1' "${INSTALL_SH}" | head -1 | cut -d: -f1 || true)"
+  upgrade_line="$(grep -n 'cube-s3lvol-hot-upgrade.sh"' "${INSTALL_SH}" | head -1 | cut -d: -f1 || true)"
+  commit_line="$(grep -n 'hot upgrade finished; writing' "${INSTALL_SH}" | head -1 | cut -d: -f1 || true)"
+  [[ -n "${keep_line}" && -n "${upgrade_line}" && -n "${commit_line}" ]] ||
+    fail "install.sh lost the deferred s3.cfg commit"
+  [[ "${keep_line}" -lt "${upgrade_line}" && "${upgrade_line}" -lt "${commit_line}" ]] ||
+    fail "s3.cfg must be kept before the hot upgrade and written only after it (keep=${keep_line}, upgrade=${upgrade_line}, commit=${commit_line})"
+  awk '/S3LVOL_CFG_DEFERRED.*==.*1/,/^[[:space:]]*fi$/' "${INSTALL_SH}" |
+    grep -qF 'hot upgrade failed; leaving' ||
+    fail "a failed hot upgrade must leave the previous s3.cfg in place"
+}
+
+# rcow_target_start_ready is rcow_target_ready plus the pid rcow_start.sh writes
+# after the replay. Prints "ready" or "not-ready".
+probe_start_ready() {
+  local stores="$1" ready_pid="$2"
+  RCOW_LVS_NAME=rcow-test \
+  RCOW_RUN_DIR="${TMP_DIR}/run" \
+  RCOW_ACTIVE_FILE="${TMP_DIR}/run/active_lvols" \
+  RCOW_BSTORE_FILE="${TMP_DIR}/run/bstore.json" \
+  RCOW_RPC_SOCK="${TMP_DIR}/run/no.sock" \
+  RCOW_TGT_BIN="${TMP_DIR}/gone/s3lvol_tgt" \
+  STORES="${stores}" READY_PID="${ready_pid}" \
+    bash -c '
+      set -u
+      . "$1"
+      rcow_target_instances() { printf "%s\n" 4242; }
+      rcow_rpc() { printf "%s" "${STORES}"; return 0; }
+      if [ -n "${READY_PID}" ]; then
+        printf "%s\n" "${READY_PID}" >"${RCOW_START_READY}"
+      else
+        rm -f "${RCOW_START_READY}"
+      fi
+      rcow_target_start_ready && echo ready || echo not-ready
+    ' _ "${TMP_DIR}/prefix/${NEW_VERSION}/scripts/rcow_common.sh"
+}
+
+test_start_ready_is_the_finished_start_not_the_attach() {
+  build_trees
+  [[ "$(probe_start_ready '[{"lvs_name":"rcow-test"}]' 4242)" == ready ]] ||
+    fail "an attached lvstore whose start recorded this pid must be ready"
+  [[ "$(probe_start_ready '[{"lvs_name":"rcow-test"}]' '')" == not-ready ]] ||
+    fail "an attached lvstore with no finished start must not be ready"
+  [[ "$(probe_start_ready '[{"lvs_name":"rcow-test"}]' 9999)" == not-ready ]] ||
+    fail "a ready file naming a dead pid must not be ready"
+  [[ "$(probe_start_ready '[]' 4242)" == not-ready ]] ||
+    fail "a finished-start file does not make a missing lvstore ready"
 }
 
 # Run rcow_hot_marker_consume out of the real rcow_common.sh against a marker
@@ -360,6 +464,11 @@ test_layout_check_takes_the_snapshot_from_rcow_common
 test_the_layout_guard_reads_what_it_sources
 test_readiness_is_the_attach_not_the_process
 test_the_start_wait_gates_on_readiness
+test_start_ready_is_the_finished_start_not_the_attach
+test_rollback_does_not_take_the_planned_stop
+test_the_symlink_switch_is_checked
+test_the_hot_stop_has_one_budget
+test_an_existing_s3_cfg_survives_a_failed_hot_upgrade
 test_the_marker_is_spent_by_the_upgrade_not_by_the_read
 test_a_failed_hot_stop_refuses_rather_than_tearing_down
 test_the_marker_is_spent_after_the_kill

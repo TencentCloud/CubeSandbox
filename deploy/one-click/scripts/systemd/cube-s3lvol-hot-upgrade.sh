@@ -72,9 +72,12 @@ if [ -z "${OLD_DIR}" ]; then
 fi
 
 switch_bare_to() {
-  # Through a rename, so the bare name never points at nothing.
-  ln -sfn "$1" "${INSTALL_PREFIX}/.CubeS3lvol.new"
-  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${BARE}"
+  # Through a rename, so the bare name never points at nothing. The caller has
+  # to see a failure: this script does not run under set -e, and a switch that
+  # did not happen used to be logged as done.
+  ln -sfn "$1" "${INSTALL_PREFIX}/.CubeS3lvol.new" || return 1
+  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${BARE}" || return 1
+  [ "$(readlink "${BARE}" 2>/dev/null || true)" = "$1" ]
 }
 
 # shellcheck source=/dev/null
@@ -135,25 +138,88 @@ stop_and_confirm() {
 # success for a replacement that had not attached its lvstore, and go on to stop
 # the S3 endpoint the attach still needed.
 #
-# The attach is the long part (tens of seconds with a replay), so the wait is
-# sized for it rather than for process startup.
+# Attach is not the end of startup. rcow_start.sh still replays the registry
+# and checks the layout afterwards, and RCOW_HOT_START_TIMEOUT covers that
+# whole script rather than process startup.
 start_and_wait() {
   systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
   systemctl start "${SERVICE}" >/dev/null 2>&1 || return 1
-  local i
-  for i in $(seq 1 90); do
-    if rcow_target_ready; then
+  # rcow_target_ready is true once the lvstore is attached. rcow_start.sh is
+  # still replaying volumes and checking the layout then, and declaring this
+  # done there is what rolled a healthy slow start back. The ready file is
+  # written only after that script has finished.
+  local deadline=$((SECONDS + RCOW_HOT_START_TIMEOUT))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    if rcow_target_start_ready; then
       return 0
     fi
     sleep 2
   done
   if [ -z "$(rcow_target_instances)" ]; then
-    warn "no target came up within 180s"
+    warn "no target came up within ${RCOW_HOT_START_TIMEOUT}s"
+  elif rcow_target_ready; then
+    warn "the lvstore is attached but rcow_start.sh has not finished after ${RCOW_HOT_START_TIMEOUT}s"
+    warn "  replay or the layout check did not finish; the upgrade will roll back"
   else
-    warn "a target is running but has still not attached its lvstore after 180s"
+    warn "a target is running but has still not attached its lvstore after ${RCOW_HOT_START_TIMEOUT}s"
     warn "  it is not serving, and the rest of the install is waiting on it"
   fi
   return 1
+}
+
+# Stop a replacement that is already up without disconnecting the initiator.
+#
+# The planned stop (no hot-restart marker) disconnects nvme and unloads the
+# lvstore. That is a cold outage, and it is the wrong way to undo a hot swap
+# whose new process is the thing that has to go. The marker makes ExecStop run
+# rcow_upgrade.sh. When the marker cannot be written, the process is killed
+# first and the unit is stopped only afterwards, so ExecStop finds no target
+# and leaves the host's controllers in place.
+stop_without_disconnect() {
+  local candidate="${1:-}"
+  local i pid wrote=0 attempt
+
+  systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
+  if [ -n "$(rcow_target_instances)" ] && [ -n "${candidate}" ] &&
+     rcow_hot_marker_write "${candidate}"; then
+    wrote=1
+  elif [ -n "$(rcow_target_instances)" ]; then
+    warn "could not record a hot rollback; the target will be killed directly"
+  fi
+
+  if [ "${wrote}" -eq 1 ]; then
+    if systemctl is-active --quiet "${SERVICE}"; then
+      systemctl stop "${SERVICE}" >/dev/null 2>&1 || true
+    elif [ -x "${BARE}/scripts/rcow_upgrade.sh" ]; then
+      "${BARE}/scripts/rcow_upgrade.sh" --candidate "${candidate}" || true
+    fi
+  fi
+
+  for attempt in 1 2; do
+    [ -z "$(rcow_target_instances)" ] && break
+    for pid in $(rcow_target_instances); do
+      warn "killing target pid ${pid} directly so the rollback does not disconnect the initiator"
+      kill -9 "${pid}" 2>/dev/null || true
+    done
+    for i in $(seq 1 10); do
+      [ -z "$(rcow_target_instances)" ] && break
+      sleep 0.2
+    done
+  done
+
+  if [ -n "$(rcow_target_instances)" ]; then
+    warn "the target is still running; it is holding the WAL"
+    return 1
+  fi
+  # Supervisor restarts a target it notices dying. The unit stop has to happen
+  # while nothing is running, or ExecStop takes the planned teardown.
+  systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
+  systemctl stop "${SERVICE}" >/dev/null 2>&1 || true
+  if [ -n "$(rcow_target_instances)" ]; then
+    warn "a target came back while the unit was stopping; it is holding the WAL"
+    return 1
+  fi
+  return 0
 }
 
 # Nothing running is not a failure: the install's own start brings the new build
@@ -161,7 +227,10 @@ start_and_wait() {
 # -- the caller stages without switching -- and nothing is left running that
 # needs it, so this is where it moves.
 if [ -z "$(rcow_target_instances)" ]; then
-  switch_bare_to "${NEW_VERSION}"
+  if ! switch_bare_to "${NEW_VERSION}"; then
+    warn "could not point ${BARE} at ${NEW_VERSION}"
+    exit 1
+  fi
   log "no target is running; the bare name now points at ${NEW_VERSION}"
   exit 0
 fi
@@ -270,7 +339,13 @@ fi
 
 # ==========================================================================
 # The swap, and the way back.
-switch_bare_to "${NEW_VERSION}"
+if ! switch_bare_to "${NEW_VERSION}"; then
+  warn "could not point ${BARE} at ${NEW_VERSION}; the target is already stopped"
+  if [ -n "${OLD_DIR}" ] && switch_bare_to "$(basename "${OLD_DIR}")"; then
+    start_and_wait || true
+  fi
+  exit 1
+fi
 log "the bare name now points at ${NEW_VERSION}"
 
 # The hot path leaves a snapshot from its own online step, so the layout can be
@@ -295,12 +370,23 @@ if start_and_wait && verify; then
   exit 0
 fi
 
-# Roll back. The replacement never got as far as writing anything (an attach
-# that fails writes nothing), so the outgoing build can take the same WAL back.
+# Roll back without the planned stop. The new process may already have attached
+# the lvstore and resumed uploads; stop_and_confirm would disconnect the
+# initiator and delete the host's gendisks on the way back to the old binary.
 warn "the new build did not come up with the layout intact; rolling back to ${OLD_DIR}"
-stop_and_confirm || true
+CANDIDATE=""
+if [ -n "${OLD_DIR}" ] && [ -x "${OLD_DIR}/bin/s3lvol_tgt" ]; then
+  CANDIDATE="${OLD_DIR}/bin/s3lvol_tgt"
+fi
+if ! stop_without_disconnect "${CANDIDATE}"; then
+  warn "the replacement is still running; not starting another target over its WAL"
+  exit 1
+fi
 if [ -n "${OLD_DIR}" ]; then
-  switch_bare_to "$(basename "${OLD_DIR}")"
+  if ! switch_bare_to "$(basename "${OLD_DIR}")"; then
+    warn "could not point ${BARE} back at $(basename "${OLD_DIR}")"
+    exit 1
+  fi
   if start_and_wait; then
     warn "rolled back to the previous build; it is running and this upgrade did not happen"
   else
