@@ -1,3 +1,4 @@
+local metrics = require "metrics"
 local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
@@ -32,6 +33,7 @@ end
 -- doesn't otherwise set it (only the path-based one does, for proxy_redirect
 -- purposes), so populate it here to make activity tracking work uniformly.
 ngx.var.ins_id = ins_id
+metrics.start_current_request()
 
 -- Auto-pause gate. See sandbox_state.lua for failure-mode semantics.
 state.gate(ins_id)

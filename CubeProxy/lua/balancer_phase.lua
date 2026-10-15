@@ -1,7 +1,9 @@
+local metrics = require "metrics"
 local utils = require "utils"
 if (utils:is_null(ngx.var.backend_ip) or utils:is_null(ngx.var.backend_port)) then
     -- unlikely
     ngx.log(ngx.ERR, "LEVEL_ERROR||", string.format("bad addr (%s:%s)", ngx.var.backend_ip, ngx.var.backend_port))
+    metrics.finish_current_request(503)
     ngx.exit(503)
 end
 
@@ -10,5 +12,6 @@ local ok, err = balancer.set_current_peer(ngx.var.backend_ip, ngx.var.backend_po
 if not ok then
     ngx.log(ngx.ERR, "LEVEL_ERROR||", string.format("connect to backend (%s:%s) err: %s"), ngx.var.backend_ip,
         ngx.var.backend_port, err)
+    metrics.finish_current_request(503)
     ngx.exit(503)
 end

@@ -47,14 +47,16 @@ test:
 		lua tests/sandbox_backend_cache_test.lua; \
 		lua tests/sandbox_route_lookup_test.lua; \
 		lua tests/request_host_test.lua; \
+		lua tests/metrics_test.lua; \
 	elif command -v luajit >/dev/null 2>&1; then \
 		luajit tests/redis_iresty_sentinel_test.lua; \
 		luajit tests/backend_cache_test.lua; \
 		luajit tests/sandbox_backend_cache_test.lua; \
 		luajit tests/sandbox_route_lookup_test.lua; \
 		luajit tests/request_host_test.lua; \
+		luajit tests/metrics_test.lua; \
 	else \
-		echo "skip lua unit tests (no lua/luajit): redis_iresty_sentinel_test.lua backend_cache_test.lua sandbox_backend_cache_test.lua sandbox_route_lookup_test.lua request_host_test.lua"; \
+		echo "skip lua unit tests (no lua/luajit): redis_iresty_sentinel_test.lua backend_cache_test.lua sandbox_backend_cache_test.lua sandbox_route_lookup_test.lua request_host_test.lua metrics_test.lua"; \
 	fi
 
 # Push the architecture-specific image to all registries.
