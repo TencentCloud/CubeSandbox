@@ -943,6 +943,47 @@ func TestValidateConnectResponseJSONDocKeepsClassification(t *testing.T) {
 	}
 }
 
+func TestValidateConnectResponseJSONDocAsHTMLKeepsClassification(t *testing.T) {
+	// A genuine JSON API error document keeps its classification even when a
+	// hop mislabels it as text/html: the body, not the header, decides.
+	// (Regression: the text/html short-circuit used to run before the JSON
+	// document check, misclassifying this as a routing page.)
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(`{"message":"sandbox not found"}`)),
+	}
+	err := validateConnectResponse(resp)
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 JSON-as-html)=%v, want ErrSandboxNotFound", err)
+	}
+	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 JSON-as-html)=%v, should not suggest proxy routing", err)
+	}
+}
+
+func TestValidateConnectResponseNon404RoutingPageClearsSentinel(t *testing.T) {
+	// A routing page on a non-404 status must not keep a sentinel kind that
+	// the status/body heuristics assigned: e.g. an nginx 502 HTML page with
+	// an embedded upstream body mentioning "sandbox not found".
+	resp := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(`<html><head><title>502 Bad Gateway</title></head><body>upstream: {"code":"not_found","message":"sandbox not found"}</body></html>`)),
+	}
+	err := validateConnectResponse(resp)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	if errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(502 routing page)=%v, should not be ErrSandboxNotFound", err)
+	}
+	if !strings.Contains(apiErr.Message, "unreachable") {
+		t.Fatalf("message=%q, want upstream-unreachable hint", apiErr.Message)
+	}
+}
+
 func TestValidateConnectResponseTruncatedJSONDoc(t *testing.T) {
 	// A JSON error document larger than the routing peek cannot be fully
 	// parsed from the prefix; the SDK must not misclassify it as a routing

@@ -340,14 +340,16 @@ If one of the covered Go SDK calls (`Commands.Run`, `Files.WatchDir`,
 `Files.List`/`Stat`/`Exists`/`Remove`/`Move`/`MakeDir`) returns an HTML/text
 page or invalid envelope, check
 the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
-These Connect endpoints reject HTTP 200 responses labeled `text/html`. Any 404
-whose body is HTML or a non-JSON `text/*` page is treated as a routing error,
-so it no longer matches `errors.Is` for any sentinel (`ErrSandboxNotFound`,
-`ErrTemplateNotFound`, `ErrVolumeNotFound`). A JSON body — including a JSON API
+These Connect endpoints reject HTTP 200 responses labeled `text/html`. Any
+routing page (an HTML or non-JSON `text/*` body, on any status) is treated as
+a routing error, so it no longer matches `errors.Is` for any sentinel
+(`ErrSandboxNotFound`, `ErrTemplateNotFound`, `ErrVolumeNotFound`); 401/403
+responses keep `ErrAuthentication`. A JSON body — including a JSON API
 error document served with a `text/*` content type — keeps its classification.
 Non-200 HTML and 404 text error messages are
 truncated to 200 characters before appending the routing hint. This diagnostic
-does not cover `RunCode`, which uses the separate Jupyter endpoint.
+does not cover `RunCode`, which uses the separate Jupyter endpoint, nor the
+plain-HTTP `Files.Read`/`Files.Write` paths.
 
 ## Integration Tests
 

@@ -15,7 +15,7 @@ lang: zh-CN
 
 调用 `Commands.Run`、`Files.WatchDir` 或 `Pty.Create` 等 Go SDK 接口时，出现 HTML/文本响应、无效 Connect 信封或消息过大的错误。实际返回内容可能是浏览器登录页、网关错误页、JSON 响应或被压缩的响应，而不是 Connect 流数据。
 
-已知限制：`RunCode` 使用独立的 Jupyter `/execute` 端点，暂未被该诊断覆盖——误路由的 200 HTML 页面被喂给其流解析器后，表现为返回空结果且无错误（见 [#1759](https://github.com/TencentCloud/CubeSandbox/issues/1759)）。
+已知限制：`RunCode` 使用独立的 Jupyter `/execute` 端点，暂未被该诊断覆盖——误路由的 200 HTML 页面被喂给其流解析器后，表现为返回空结果且无错误（见 [#1759](https://github.com/TencentCloud/CubeSandbox/issues/1759)）。纯 HTTP 的 `Files.Read`/`Files.Write` 路径同样未覆盖：误路由的 200 HTML 页面会被 `readFile` 当作文件内容返回，`writeFile` 则把任何低于 400 的状态码都视为成功。
 
 ## 适用环境
 

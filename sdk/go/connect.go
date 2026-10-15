@@ -130,11 +130,15 @@ func looksLikeJSONErrorDocument(body []byte) bool {
 // isRoutingPage reports whether an HTTP error response looks like a misrouted
 // Web UI / gateway page rather than a genuine API error: an HTML media type
 // or HTML-looking body, or a 404 with a non-empty text body that is not a
-// JSON API error document (e.g. Go's "404 page not found"). Empty bodies and
-// JSON-looking bodies keep the server's classification — there is no positive
-// signal of a routing page in those cases.
+// JSON API error document (e.g. Go's "404 page not found"). A genuine JSON API
+// error document keeps the server's classification even when the Content-Type
+// header says text/* (including text/html); empty bodies and bodies that look
+// like truncated JSON are not positive evidence of a routing page either.
 func isRoutingPage(statusCode int, mediaType string, body []byte) bool {
 	trimmed := bytes.TrimSpace(body)
+	if looksLikeJSONErrorDocument(trimmed) {
+		return false
+	}
 	lowerBody := bytes.ToLower(trimmed)
 	bodyLooksHTML := bytes.HasPrefix(lowerBody, []byte("<!doctype")) || bytes.HasPrefix(lowerBody, []byte("<html"))
 	if mediaType == "text/html" || bodyLooksHTML {
@@ -144,9 +148,6 @@ func isRoutingPage(statusCode int, mediaType string, body []byte) bool {
 		return false
 	}
 	if len(trimmed) == 0 {
-		return false
-	}
-	if looksLikeJSONErrorDocument(trimmed) {
 		return false
 	}
 	// A body starting with '{' is either invalid JSON or a truncated document:
@@ -231,7 +232,12 @@ func validateConnectResponse(resp *http.Response) error {
 			} else {
 				apiErr.Message += "; response may be an HTML/text page instead of a Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service"
 			}
-			if resp.StatusCode == http.StatusNotFound {
+			// A routing page carries no trustworthy classification: clear any
+			// sentinel kind the status/body heuristics assigned (e.g.
+			// apiErrorFromStatus promoting "not found" text on a 5xx page).
+			// Authentication failures keep theirs so callers can still
+			// detect credential problems.
+			if apiErr.Kind != apiErrorKindAuthentication {
 				apiErr.Kind = apiErrorKindAPI
 			}
 		}
