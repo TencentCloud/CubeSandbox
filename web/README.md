@@ -10,6 +10,38 @@ make web-dev     # → http://localhost:5173, proxies /cubeapi to CubeAPI @ :300
 make web-build   # → web/dist/
 ```
 
+## Template-card layout regression
+
+Run the WebUI locally, then use the optional Playwright browser check. It
+intercepts API requests with synthetic responses and never contacts a cluster:
+
+```bash
+# Terminal 1, from web/
+npm ci
+npm run dev
+
+# Terminal 2, from web/; use a disposable Python environment
+python3 -m venv /tmp/cube-web-layout-venv
+/tmp/cube-web-layout-venv/bin/pip install playwright
+/tmp/cube-web-layout-venv/bin/playwright install chromium
+/tmp/cube-web-layout-venv/bin/python scripts/test-template-card-layout.py
+```
+
+The check covers English/Chinese, five viewport widths (360–1440 px), long
+template IDs/aliases, READY/RUNNING/FAILED/PARTIALLY_READY and UNKNOWN
+compatibility. It checks badge/button bounds and collisions, full-name tooltips
+and the delete confirmation without issuing DELETE. Pass `--output <directory>`
+for real Light screenshots and geometry results, or `--browser-executable <path>`
+to reuse an installed Chromium. `--baseline` requires the original bug to
+reproduce instead of passing the fixed layout.
+
+Local Light captures with the same synthetic API responses, before and after
+the fix (not production template data):
+
+![Before: status badges collide with delete buttons or overflow the cards](scripts/fixtures/template-card-layout/before-light.png)
+
+![After: titles truncate and badges stay clear of delete buttons](scripts/fixtures/template-card-layout/after-light.png)
+
 ## Routes
 
 - `/` Overview — cluster KPIs, recent sandboxes, template pipeline
