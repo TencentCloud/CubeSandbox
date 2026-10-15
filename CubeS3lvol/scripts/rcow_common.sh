@@ -343,6 +343,14 @@ RCOW_HOT_MARKER="${RCOW_RUN_DIR}/hot-restart"
 # The layout captured before the target is killed, which rcow_verify_active
 # --expect compares the post-upgrade layout against.
 RCOW_HOT_SNAPSHOT="${RCOW_RUN_DIR}/hot-upgrade.snapshot"
+# Written by rcow_start.sh only after attach, replay and the layout check have
+# all finished. A target answers RPC, and rcow_target_ready is true, while that
+# work is still going on.
+RCOW_START_READY="${RCOW_RUN_DIR}/start.ready"
+# How long the hot-upgrade orchestrator waits for that file. Attach plus replay
+# is not bounded by process startup; 180s was short enough to call a healthy
+# recovery a failure and roll it back.
+RCOW_HOT_START_TIMEOUT="${RCOW_HOT_START_TIMEOUT:-600}"
 
 # Log directory separate from the run directory: the pid lives in a tmpfs location
 # and the log is persistent under /data.
@@ -392,10 +400,12 @@ RCOW_HOT_FLUSH_MS="${RCOW_HOT_FLUSH_MS:-0}"
 # and unwinds (the pause is lifted, the flushers are released), so the stop
 # reports a failed upgrade instead of a hung target.
 #
-# Must stay well inside RCOW_STOP_TIMEOUT. That budget is not a retry loop for
-# this call: hot_online_op only retries -EBUSY, and an expiry is not one, so it
-# goes straight to fail_live_prepared. A value above RCOW_STOP_TIMEOUT*1000
-# would therefore have the client give up first, every time.
+# Must stay well inside RCOW_STOP_TIMEOUT. That budget is one window for the
+# whole hot stop, not a fresh window per RPC: hot_online_op only retries
+# -EBUSY, and an expiry is not one, so it goes straight to fail_live_prepared.
+# A value above RCOW_STOP_TIMEOUT*1000 would therefore have the client give up
+# first, every time. rcow_upgrade.sh also shrinks this call to whatever part of
+# the window the flush and checkpoint have not already used.
 RCOW_HOT_PREPARE_SUSPEND_MS="${RCOW_HOT_PREPARE_SUSPEND_MS:-60000}"
 
 # --------------------------------------------------------------------------
@@ -429,6 +439,16 @@ rcow_need_cmd()
 case "${RCOW_HOT_FLUSH_MS}" in
 ''|*[!0-9]*)
 	rcow_die "RCOW_HOT_FLUSH_MS must be an integer number of milliseconds (0 skips the flush)"
+	;;
+esac
+
+case "${RCOW_HOT_START_TIMEOUT}" in
+''|*[!0-9]*)
+	rcow_die "RCOW_HOT_START_TIMEOUT must be an integer number of seconds"
+	;;
+*)
+	[ "${RCOW_HOT_START_TIMEOUT}" -gt 0 ] ||
+		rcow_die "RCOW_HOT_START_TIMEOUT must be positive"
 	;;
 esac
 
@@ -797,6 +817,25 @@ rcow_target_ready()
 	rcow_lvstore_attached
 }
 
+# The stronger question the orchestrator has to ask. rcow_target_ready becomes
+# true at attach, and rcow_start.sh still has the registry replay, the listeners
+# and its own layout check left to do. Waiting there is what let a slow recovery
+# be rolled back while that script was still running.
+#
+# The file is one pid, written only on rcow_start.sh's success path and removed
+# at the beginning of the next start. A stale pid from a target that has since
+# exited does not count.
+rcow_target_start_ready()
+{
+	local pid
+
+	rcow_target_ready || return 1
+	[ -s "${RCOW_START_READY}" ] || return 1
+	pid="$(tr -dc '0-9' <"${RCOW_START_READY}")"
+	[ -n "${pid}" ] || return 1
+	printf '%s\n' "$(rcow_target_instances)" | grep -qxF -- "${pid}"
+}
+
 # Record "<boot_id> <pid>" of the live target, for a stop an upgrade is about to
 # ask for. Written by the orchestrator; rcow_upgrade.sh deliberately does not,
 # so only an intent to hot-restart can make the marker read as one.
@@ -804,10 +843,24 @@ rcow_hot_marker_write()
 {
 	local pid boot candidate="${1:-}"
 
-	pid="$(rcow_target_pid)" || {
+	# The pidfile check requires the process image to be RCOW_TGT_BIN. A rollback
+	# names the binary it is about to start, which is not the one still running,
+	# so that check misses the only target on the box. One instance found by the
+	# socket scan is still unambiguous, and it is the pid the consumer checks.
+	pid="$(rcow_target_pid 2>/dev/null || true)"
+	if [ -z "${pid}" ]; then
+		local instances count
+
+		instances="$(rcow_target_instances)"
+		count="$(printf '%s\n' "${instances}" | grep -c . || true)"
+		if [ "${count}" -eq 1 ]; then
+			pid="${instances}"
+		fi
+	fi
+	if [ -z "${pid}" ]; then
 		rcow_err "no live target to name in ${RCOW_HOT_MARKER}"
 		return 1
-	}
+	fi
 	boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
 	[ -n "${boot}" ] || {
 		rcow_err "cannot read /proc/sys/kernel/random/boot_id"
