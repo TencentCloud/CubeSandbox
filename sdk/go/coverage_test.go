@@ -723,8 +723,11 @@ func TestValidateConnectResponse(t *testing.T) {
 	if apiErr.StatusCode != http.StatusBadGateway {
 		t.Fatalf("StatusCode=%d, want 502", apiErr.StatusCode)
 	}
-	if !strings.Contains(apiErr.Message, "502 Bad Gateway") || !strings.Contains(apiErr.Message, "CUBE_PROXY_NODE_IP") {
-		t.Fatalf("message=%q, want original error and CUBE_PROXY_NODE_IP hint", apiErr.Message)
+	if !strings.Contains(apiErr.Message, "502 Bad Gateway") || !strings.Contains(apiErr.Message, "unreachable") {
+		t.Fatalf("message=%q, want original error and upstream-unreachable hint", apiErr.Message)
+	}
+	if strings.Contains(apiErr.Message, "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("message=%q, should not suggest proxy node IP for 5xx", apiErr.Message)
 	}
 
 	// 401 HTML preserves ErrAuthentication
@@ -747,6 +750,9 @@ func TestValidateConnectResponse(t *testing.T) {
 	err404HTML := validateConnectResponse(resp404HTML)
 	if errors.Is(err404HTML, ErrSandboxNotFound) {
 		t.Fatalf("validateConnectResponse(404 HTML)=%v, should not be ErrSandboxNotFound", err404HTML)
+	}
+	if !strings.Contains(err404HTML.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 HTML)=%v, want CUBE_PROXY_NODE_IP hint on 4xx", err404HTML)
 	}
 
 	// 404 text/plain (the default response from net/http.NotFound) also clears it.
@@ -778,10 +784,10 @@ func TestValidateConnectResponse(t *testing.T) {
 	if !errors.As(errLongHTML, &apiErrLong) {
 		t.Fatalf("errLongHTML=%v, want *APIError", errLongHTML)
 	}
-	if !strings.Contains(apiErrLong.Message, "...; response may be an HTML/text page") {
+	if !strings.Contains(apiErrLong.Message, "...; received an HTML error page") {
 		t.Fatalf("expected truncated message with '...', got: %q", apiErrLong.Message)
 	}
-	rawPrefix := strings.Split(apiErrLong.Message, "...; response may be")[0]
+	rawPrefix := strings.Split(apiErrLong.Message, "...; received an HTML error page")[0]
 	if len(rawPrefix) != 200 {
 		t.Fatalf("expected truncated prefix length 200, got %d (%q)", len(rawPrefix), rawPrefix)
 	}

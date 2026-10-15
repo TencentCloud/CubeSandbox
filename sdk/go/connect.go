@@ -204,8 +204,12 @@ func validateConnectResponse(resp *http.Response) error {
 
 		var apiErr *APIError
 		if err := apiErrorFromResponse(resp); !errors.As(err, &apiErr) {
-			// apiErrorFromResponse always returns *APIError today; degrade
-			// gracefully instead of panicking if that ever changes.
+			// apiErrorFromResponse always returns *APIError today; never fall
+			// through to nil, which would report an HTTP error as a valid
+			// stream.
+			if err == nil {
+				return apiErrorFromStatus(resp.StatusCode, "")
+			}
 			return err
 		}
 		if routingPage {
@@ -219,6 +223,8 @@ func validateConnectResponse(resp *http.Response) error {
 			}
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				apiErr.Message += "; received an HTML/text page instead of a Connect stream; check credentials or whether a portal is intercepting the request"
+			} else if resp.StatusCode >= http.StatusInternalServerError {
+				apiErr.Message += "; received an HTML error page instead of a Connect stream; the request may have reached CubeProxy but the upstream envd or sandbox node is unreachable"
 			} else {
 				apiErr.Message += "; response may be an HTML/text page instead of a Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service"
 			}
