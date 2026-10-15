@@ -73,8 +73,8 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
-       s3_active_nsid_test
+       s3_export_read_test s3_preheat_test s3_copy_xml_test \
+       s3_pending_persist_test s3_active_nsid_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -236,6 +236,18 @@ s3_cache_test: s3_cache_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(JOURNAL_DPDK_ARGS) \
 	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
+# Real object cache plus real export preheat. S3 is stubbed in the test, so
+# the AWS client must not be linked or s3_get_range would be defined twice.
+# bdev_aio still has to register itself, hence --whole-archive.
+s3_preheat_test: s3_preheat_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) $(JOURNAL_CFLAGS) s3_preheat_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
+	    -Wl,--whole-archive \
+	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
+	    -Wl,--no-whole-archive \
+	    $(JOURNAL_DPDK_ARGS) \
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
+
 # overlay + flusher: no S3 and no local device, but two things still pull in
 # libraries. The flusher registers a poller, so a real spdk_thread is needed, and
 # it calls into the WAL to report truncation progress, which drags in spdk_bdev
@@ -325,8 +337,8 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
-       s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_copy_xml_test \
-       s3_pending_persist_test s3_active_nsid_test
+       s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_preheat_test \
+       s3_copy_xml_test s3_pending_persist_test s3_active_nsid_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -339,6 +351,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_checkpoint_test
 	./s3_export_swap_test
 	./s3_export_read_test
+	./s3_preheat_test
 	./s3_copy_xml_test
 	./s3_pending_persist_test
 	./s3_active_nsid_test

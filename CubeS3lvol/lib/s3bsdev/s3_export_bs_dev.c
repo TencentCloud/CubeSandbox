@@ -45,6 +45,9 @@
 #define EXPORT_FILL_MAX_GETTING 64
 #define EXPORT_FILL_MAX_READY   128
 #define EXPORT_FILL_MAX_LIVE    (EXPORT_FILL_MAX_GETTING + EXPORT_FILL_MAX_READY)
+/* Bound one synchronous manifest walk so a sparse template cannot monopolise
+ * its SPDK reactor. A poller resumes the walk after this many examined chunks. */
+#define EXPORT_PREHEAT_SCAN_BUDGET 1024
 
 struct s3_export_fill;
 struct s3_export_io;
@@ -87,6 +90,22 @@ struct s3_export_fill {
 	bool                        on_pending;
 	bool                        token_held;
 	bool                        lifetime_ref;
+	/* Template preheat, not a blobstore read. A demand that joins this GET
+	 * still completes normally; with no waiter the buffer stays listed only
+	 * until the object cache has accepted it, so a demand read arriving in
+	 * that disk-fill window copies the completed GET instead of re-fetching
+	 * the object, while post-preheat reads still come from the object cache. */
+	bool                        preheat;
+	bool                        populate_wait;
+	bool                        preheat_detach;
+	bool                        preheat_had_waiters;
+	bool                        preheat_ready_hit;
+	int                         populate_status;
+	uint64_t                    completion_bytes;
+	int                         completion_status;
+	bool                        preheat_read_done_published;
+	bool                        preheat_finish_deferred;
+	struct s3_cache_object_reservation *cache_reservation;
 	struct s3_export_fill_waiters waiters;
 	TAILQ_ENTRY(s3_export_fill) link;
 	TAILQ_ENTRY(s3_export_fill) lru_link;
@@ -147,7 +166,7 @@ struct s3_export_dev {
 	uint32_t                   fills_ready;
 	uint32_t                   fills_live;
 
-	bool                       destroying;
+	_Atomic bool               destroying;
 	bool                       unregister_started;
 	uint32_t                   async_refs;
 
@@ -163,6 +182,20 @@ struct s3_export_dev {
 	uint64_t                   shared_cache_hits;
 	uint64_t                   shared_cache_misses;
 	uint64_t                   shared_cache_fallbacks;
+
+	/* One walk of this device's manifest into the lvstore object cache.
+	 * Started at most once. In-flight GETs count toward preheat_inflight
+	 * until the cache accepts or refuses them. */
+	uint64_t                   preheat_cursor;
+	uint64_t                   preheat_retry;
+	uint32_t                   preheat_inflight;
+	bool                       preheat_started;
+	bool                       preheat_idle_logged;
+	_Atomic bool               preheat_stop;
+	bool                       preheat_has_retry;
+	bool                       preheat_pumping;
+	bool                       preheat_lifetime_ref;
+	struct spdk_poller        *preheat_poller;
 };
 
 /* One bs_dev read, possibly spanning several chunks. */
@@ -424,7 +457,7 @@ export_fill_evict_locked(struct s3_export_dev *dev)
 		if (dev->fills_ready <= EXPORT_FILL_MAX_READY) {
 			break;
 		}
-		if (fill->users != 0) {
+		if (fill->users != 0 || fill->populate_wait) {
 			continue;
 		}
 		TAILQ_REMOVE(&dev->fill_lru, fill, lru_link);
@@ -444,7 +477,7 @@ export_fill_evict_one_locked(struct s3_export_dev *dev)
 	struct s3_export_fill *fill;
 
 	TAILQ_FOREACH(fill, &dev->fill_lru, lru_link) {
-		if (fill->users != 0) {
+		if (fill->users != 0 || fill->populate_wait) {
 			continue;
 		}
 		TAILQ_REMOVE(&dev->fill_lru, fill, lru_link);
@@ -572,6 +605,64 @@ export_fill_waiter_finish(void *arg)
 }
 
 static void export_fill_request_token(struct s3_export_fill *fill);
+static void export_preheat_cached(void *cb_arg, int status);
+static void export_preheat_finish(void *arg);
+static void export_preheat_pump(struct s3_export_dev *dev);
+static void export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status);
+
+static void
+export_preheat_read_done_msg(void *arg)
+{
+	struct s3_export_fill *fill = arg;
+
+	export_fill_read_done(fill, fill->completion_bytes,
+			      fill->completion_status);
+}
+
+/* A failed fill may complete after the cursor has advanced far beyond it.
+ * Keep the earliest retry: rewinding the cursor there rechecks every later
+ * object, so several concurrent failures cannot overwrite and lose one
+ * another. Already-resident objects are skipped by cache reservation. */
+static void
+export_preheat_retry_from(struct s3_export_dev *dev, uint64_t chunk)
+{
+	if (!dev->preheat_has_retry || chunk < dev->preheat_retry) {
+		dev->preheat_retry = chunk;
+	}
+	dev->preheat_has_retry = true;
+}
+
+static bool
+export_preheat_get_live(struct s3_export_dev *dev)
+{
+	bool live;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	live = !dev->destroying && !dev->preheat_lifetime_ref;
+	if (live) {
+		dev->preheat_lifetime_ref = true;
+		dev->async_refs++;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+	return live;
+}
+
+/* Transfer the walk's device reference to the caller for a final async_put.
+ * Completion, poller, and destroy paths may race here, so claiming it is part
+ * of the same lock domain as async_refs. */
+static bool
+export_preheat_take_lifetime(struct s3_export_dev *dev)
+{
+	bool held;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	held = dev->preheat_lifetime_ref;
+	if (held) {
+		dev->preheat_lifetime_ref = false;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+	return held;
+}
 
 static void
 export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
@@ -584,6 +675,38 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 	bool release_token;
 	bool lifetime_ref;
 	bool free_failed = false;
+	bool preheat_detach = false;
+	bool preheat_bounce_failed = false;
+	bool fill_preheat;
+	bool fill_populate_wait;
+	bool finish_deferred;
+	uint64_t fill_chunk_index;
+	bool release_preheat_ref = false;
+	int populate_rc = 0;
+
+	/* Preheat cursor, retry, inflight, poller and walk-lifetime state all
+	 * belong to the device's home thread. S3 clients may deliver a completion
+	 * on another thread, so transfer the GET's existing lifetime reference
+	 * with the message before touching any of that state. */
+	if (fill->preheat && dev->home_thread != NULL &&
+	    dev->home_thread != spdk_get_thread()) {
+		fill->completion_bytes = bytes_read;
+		fill->completion_status = status;
+		if (spdk_thread_send_msg(dev->home_thread,
+					 export_preheat_read_done_msg, fill) == 0) {
+			return;
+		}
+		/* A stopped home thread cannot continue an optional walk. The
+		 * fallback below still retires the GET and, during destroy, the
+		 * walk reference. */
+		SPDK_ERRLOG("Could not bounce export %s preheat completion to its "
+			    "home thread; stopping the walk\n", dev->m->uuid_str);
+		/* Do not start another asynchronous cache operation from the wrong
+		 * thread. Treat this optional GET as cancelled and retire all of its
+		 * state below under fill_lock. */
+		preheat_bounce_failed = true;
+		status = -ESHUTDOWN;
+	}
 
 	TAILQ_INIT(&waiters);
 	if (status == 0 && bytes_read != fill->object_len) {
@@ -592,6 +715,10 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 			    fill->key, fill->object_len, bytes_read);
 		status = -EIO;
 	}
+	if (fill->preheat && status != 0 && fill->cache_reservation) {
+		s3_cache_object_reservation_cancel(fill->cache_reservation);
+		fill->cache_reservation = NULL;
+	}
 	if (status == 0 && dev->shared_cache) {
 		struct s3_cache_object_id id = {
 			.endpoint = dev->cache_endpoint,
@@ -599,8 +726,17 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 			.key = fill->key,
 		};
 
-		s3_cache_object_populate(dev->shared_cache, &id, 0, fill->buf,
-					 fill->object_len, fill->object_len);
+		if (fill->preheat) {
+			populate_rc = s3_cache_object_populate_reserved_notify(
+				fill->cache_reservation, fill->buf, fill->object_len,
+				export_preheat_cached, fill);
+			fill->cache_reservation = NULL;
+			fill->populate_wait = populate_rc == 0;
+			fill->populate_status = populate_rc;
+		} else {
+			s3_cache_object_populate(dev->shared_cache, &id, 0, fill->buf,
+						 fill->object_len, fill->object_len);
+		}
 	}
 
 	pthread_mutex_lock(&dev->fill_lock);
@@ -625,17 +761,32 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 	dev->fills_getting--;
 	release_token = fill->token_held;
 	fill->token_held = false;
-	lifetime_ref = fill->lifetime_ref;
-	fill->lifetime_ref = false;
 	fill->status = status;
 
 	while ((waiter = TAILQ_FIRST(&fill->waiters)) != NULL) {
 		TAILQ_REMOVE(&fill->waiters, waiter, link);
 		TAILQ_INSERT_TAIL(&waiters, waiter, link);
 	}
+	/* A preheat with nobody waiting keeps its lifetime ref and its RAM
+	 * entry until the cache callback. A demand read that arrives while the
+	 * cache fill is queued or writing then hits READY instead of issuing a
+	 * duplicate GET; once the cache fill finishes, an unused preheat entry
+	 * is removed so later reads go through the object cache. */
+	fill->preheat_had_waiters = !TAILQ_EMPTY(&waiters);
+	preheat_detach = fill->preheat && fill->populate_wait &&
+			 !fill->preheat_had_waiters;
+	fill->preheat_detach = preheat_detach;
+	if (fill->preheat && fill->populate_wait) {
+		lifetime_ref = false;
+	} else {
+		lifetime_ref = fill->lifetime_ref;
+		fill->lifetime_ref = false;
+	}
 
 	if (status == 0) {
-		bool keep = fill->direct_waiter == NULL;
+		bool keep = fill->direct_waiter == NULL &&
+			    (!fill->preheat || fill->preheat_had_waiters ||
+			     fill->populate_wait);
 
 		fill->state = EXPORT_FILL_READY;
 		dev->whole_gets++;
@@ -663,6 +814,12 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 			free_failed = true;
 		}
 	}
+	fill->preheat_read_done_published = true;
+	finish_deferred = fill->preheat_finish_deferred;
+	fill->preheat_finish_deferred = false;
+	fill_preheat = fill->preheat;
+	fill_populate_wait = fill->populate_wait;
+	fill_chunk_index = fill->chunk_index;
 	if (dev->fills_getting < EXPORT_FILL_MAX_GETTING) {
 		next = TAILQ_FIRST(&dev->fill_pending);
 		if (next) {
@@ -703,12 +860,602 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 			export_fill_waiter_finish(waiter);
 		}
 	}
+	if (fill_preheat && !fill_populate_wait) {
+		if (preheat_bounce_failed) {
+			pthread_mutex_lock(&dev->fill_lock);
+			if (dev->preheat_inflight > 0) {
+				dev->preheat_inflight--;
+			}
+			dev->preheat_stop = true;
+			if (dev->preheat_inflight == 0 &&
+			    dev->preheat_lifetime_ref) {
+				dev->preheat_lifetime_ref = false;
+				release_preheat_ref = true;
+			}
+			pthread_mutex_unlock(&dev->fill_lock);
+		} else {
+			if (dev->preheat_inflight > 0) {
+				dev->preheat_inflight--;
+			}
+			if (populate_rc == -ENOSPC ||
+			    populate_rc == -ESHUTDOWN) {
+				dev->preheat_stop = true;
+			} else if (populate_rc == -EAGAIN) {
+				export_preheat_retry_from(dev, fill_chunk_index);
+			}
+		}
+	}
 	if (free_failed) {
 		export_fill_free(fill);
+		fill = NULL;
 	}
+	if (finish_deferred) {
+		export_preheat_finish(fill);
+		return;
+	}
+	/* Demand completions arrive on the thread that submitted them. The
+	 * walk's cursor and token retry belong to the creating thread. */
+	if (!preheat_bounce_failed) {
+		if (dev->preheat_started && !dev->destroying &&
+		    (dev->home_thread == NULL ||
+		     dev->home_thread == spdk_get_thread())) {
+			export_preheat_pump(dev);
+		} else if ((dev->destroying || dev->preheat_stop) &&
+			   dev->preheat_inflight == 0) {
+			release_preheat_ref = export_preheat_take_lifetime(dev);
+		}
+	}
+	/* A concurrent destroy can free dev here. */
+	if (release_preheat_ref) {
+		export_async_put(dev);
+	}
+	/* This GET reference can be the final device pin. Keep it until every
+	 * completion-side access to dev has finished. */
 	if (lifetime_ref) {
 		export_async_put(dev);
 	}
+}
+
+static void
+export_preheat_finish_aborted(struct s3_export_fill *fill, int status)
+{
+	struct s3_export_dev *dev = fill->dev;
+	bool detach;
+	bool held = false;
+	bool free_fill = false;
+	bool release_preheat_ref = false;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	detach = fill->preheat_detach;
+	fill->populate_wait = false;
+	if (fill->lifetime_ref) {
+		fill->lifetime_ref = false;
+		held = true;
+	}
+	if (detach && status == 0 && !fill->preheat_ready_hit &&
+	    fill->users == 0) {
+		if (fill->on_lru) {
+			TAILQ_REMOVE(&dev->fill_lru, fill, lru_link);
+			fill->on_lru = false;
+			assert(dev->fills_ready > 0);
+			dev->fills_ready--;
+		}
+		if (fill->listed) {
+			TAILQ_REMOVE(&dev->fills, fill, link);
+			fill->listed = false;
+			assert(dev->fills_live > 0);
+			dev->fills_live--;
+			free_fill = true;
+		}
+	} else {
+		export_fill_evict_locked(dev);
+	}
+	if (dev->preheat_inflight > 0) {
+		dev->preheat_inflight--;
+	}
+	dev->preheat_stop = true;
+	if (dev->preheat_inflight == 0 && dev->preheat_lifetime_ref) {
+		dev->preheat_lifetime_ref = false;
+		release_preheat_ref = true;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	if (free_fill) {
+		export_fill_free(fill);
+	}
+	if (held) {
+		export_async_put(dev);
+	}
+	/* May complete destroy; no device access is allowed after this put. */
+	if (release_preheat_ref) {
+		export_async_put(dev);
+	}
+}
+
+static void
+export_preheat_cached(void *cb_arg, int status)
+{
+	struct s3_export_fill *fill = cb_arg;
+	struct s3_export_dev *dev = fill->dev;
+	bool published;
+	int rc;
+
+	fill->populate_status = status;
+	pthread_mutex_lock(&dev->fill_lock);
+	published = fill->preheat_read_done_published;
+	if (!published) {
+		fill->preheat_finish_deferred = true;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+	if (!published) {
+		return;
+	}
+	if (!dev->home_thread || dev->home_thread == spdk_get_thread()) {
+		export_preheat_finish(fill);
+		return;
+	}
+	rc = spdk_thread_send_msg(dev->home_thread, export_preheat_finish, fill);
+	if (rc != 0) {
+		SPDK_ERRLOG("Could not bounce export %s cache completion to its "
+			    "home thread; stopping the walk\n", dev->m->uuid_str);
+		export_preheat_finish_aborted(fill, status);
+	}
+}
+
+static void
+export_preheat_finish(void *arg)
+{
+	struct s3_export_fill *fill = arg;
+	struct s3_export_dev *dev = fill->dev;
+	bool detach = fill->preheat_detach;
+	int status = fill->populate_status;
+	bool held = false;
+	bool free_fill = false;
+	bool release_preheat_ref = false;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	fill->populate_wait = false;
+	if (fill->lifetime_ref) {
+		fill->lifetime_ref = false;
+		held = true;
+	}
+	if (detach && status == 0 && !fill->preheat_ready_hit &&
+	    fill->users == 0) {
+		if (fill->on_lru) {
+			TAILQ_REMOVE(&dev->fill_lru, fill, lru_link);
+			fill->on_lru = false;
+			assert(dev->fills_ready > 0);
+			dev->fills_ready--;
+		}
+		if (fill->listed) {
+			TAILQ_REMOVE(&dev->fills, fill, link);
+			fill->listed = false;
+			assert(dev->fills_live > 0);
+			dev->fills_live--;
+			free_fill = true;
+		}
+	} else {
+		export_fill_evict_locked(dev);
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	if (dev->preheat_inflight > 0) {
+		dev->preheat_inflight--;
+	}
+	if (status == -ENOSPC || status == -ESHUTDOWN) {
+		dev->preheat_stop = true;
+	} else if (status == -EAGAIN && !dev->preheat_stop) {
+		export_preheat_retry_from(dev, fill->chunk_index);
+	}
+	if (free_fill) {
+		export_fill_free(fill);
+	}
+	if (!dev->destroying) {
+		export_preheat_pump(dev);
+	} else if (dev->preheat_inflight == 0) {
+		release_preheat_ref = export_preheat_take_lifetime(dev);
+	}
+	if (release_preheat_ref) {
+		export_async_put(dev);
+	}
+	/* Either put may synchronously free dev; the callback's reference is
+	 * dropped last so no operation below can dereference it. */
+	if (held) {
+		export_async_put(dev);
+	}
+}
+
+static void
+export_preheat_msg(void *arg)
+{
+	struct s3_export_dev *dev = arg;
+
+	(void)s3_export_bs_dev_preheat(&dev->bs_dev);
+	/* The queued message owns a lifetime reference. This must be the final
+	 * access: destroy may already be waiting for this put to free dev. */
+	export_async_put(dev);
+}
+
+static void
+export_preheat_token_unused(void *arg)
+{
+	/* Low-priority acquire does not queue, so this does not run. If it
+	 * ever does, the token must not stick with no GET behind it. */
+	(void)arg;
+	s3_whole_get_token_release();
+}
+
+static int
+export_preheat_poll(void *arg)
+{
+	struct s3_export_dev *dev = arg;
+	bool callback_ref;
+	bool release_preheat_ref = false;
+
+	/* The walk reference normally pins this callback, but pump may retire it
+	 * after a concurrent destroy. A transient callback reference keeps the
+	 * remainder of this function safe in that race. */
+	callback_ref = export_async_get_live(dev);
+	if (dev->destroying || dev->preheat_stop) {
+		spdk_poller_unregister(&dev->preheat_poller);
+		if (dev->preheat_inflight == 0) {
+			release_preheat_ref = export_preheat_take_lifetime(dev);
+		}
+		if (release_preheat_ref) {
+			export_async_put(dev);
+		}
+		if (callback_ref) {
+			export_async_put(dev);
+		}
+		return SPDK_POLLER_IDLE;
+	}
+	export_preheat_pump(dev);
+	/* A retry can be armed after the cursor has already passed the end.
+	 * Dropping the poller there leaves that chunk out of the cache. */
+	if (dev->preheat_inflight != 0 ||
+	    ((dev->preheat_stop ||
+	      (dev->preheat_cursor >= dev->m->num_chunks &&
+	       !dev->preheat_has_retry)) &&
+	     dev->preheat_inflight == 0)) {
+		spdk_poller_unregister(&dev->preheat_poller);
+	}
+	/* May complete a concurrent destroy; do not touch dev afterwards. */
+	if (callback_ref) {
+		export_async_put(dev);
+	}
+	return SPDK_POLLER_BUSY;
+}
+
+static bool
+export_preheat_arm_poller(struct s3_export_dev *dev)
+{
+	/* An in-flight completion is already a wakeup. Deferring poller creation
+	 * also guarantees that a rejected completion bounce never leaves an
+	 * independently registered poller pointing at its device. */
+	if (dev->preheat_inflight != 0) {
+		return true;
+	}
+	if (dev->preheat_poller || dev->destroying) {
+		return dev->preheat_poller != NULL;
+	}
+	if (dev->home_thread != NULL && dev->home_thread != spdk_get_thread()) {
+		return false;
+	}
+	dev->preheat_poller = spdk_poller_register(export_preheat_poll, dev,
+						   10 * 1000);
+	if (!dev->preheat_poller) {
+		/* There is no other guaranteed wakeup when the walk is token- or
+		 * scan-budget-limited. Abort the optional optimisation instead of
+		 * leaving a started walk permanently stranded. */
+		SPDK_ERRLOG("Export %s template preheat could not register its "
+			    "retry poller; stopping the walk\n", dev->m->uuid_str);
+		dev->preheat_stop = true;
+		dev->preheat_has_retry = false;
+		return false;
+	}
+	return true;
+}
+
+/* Returns 1 when a GET was submitted, 0 when this chunk was skipped, and -1
+ * when the walk must wait or stop. */
+static int
+export_preheat_issue(struct s3_export_dev *dev, uint64_t chunk)
+{
+	struct s3_export_fill *fill, *existing;
+	struct s3_cache_object_id id;
+	struct s3_cache_object_reservation *reservation = NULL;
+	char key[S3_EXPORT_KEY_MAX];
+	uint32_t object_len = 0;
+	const struct s3_export_ref *ref;
+	int rc;
+
+	if (!s3_export_manifest_is_present(dev->m, chunk)) {
+		return 0;
+	}
+	export_chunk_key(dev->m, chunk, key, sizeof(key));
+	if (key[0] == '\0') {
+		return 0;
+	}
+	if (dev->m->layout == S3_EXPORT_LAYOUT_REF) {
+		ref = s3_export_manifest_get_ref(dev->m, chunk);
+		if (!ref || ref->valid_bytes == 0) {
+			return 0;
+		}
+		object_len = ref->valid_bytes;
+	} else {
+		object_len = dev->m->chunk_size;
+	}
+	id.endpoint = dev->cache_endpoint;
+	id.bucket = dev->cache_bucket;
+	id.key = key;
+	rc = s3_cache_object_reserve(dev->shared_cache, &id, object_len,
+				     &reservation);
+	if (rc == 1) {
+		return 0;
+	}
+	if (rc == -EAGAIN || rc == -EALREADY) {
+		export_preheat_retry_from(dev, chunk);
+		(void)export_preheat_arm_poller(dev);
+		return -1;
+	}
+	if (rc != 0) {
+		dev->preheat_stop = true;
+		return -1;
+	}
+
+	rc = s3_whole_get_token_acquire_ex(true, export_preheat_token_unused,
+					   NULL, dev);
+	if (rc == -EAGAIN) {
+		s3_cache_object_reservation_cancel(reservation);
+		export_preheat_retry_from(dev, chunk);
+		(void)export_preheat_arm_poller(dev);
+		return -1;
+	}
+	if (rc != 1) {
+		s3_cache_object_reservation_cancel(reservation);
+		return -1;
+	}
+
+	fill = calloc(1, sizeof(*fill));
+	if (!fill) {
+		s3_whole_get_token_release();
+		s3_cache_object_reservation_cancel(reservation);
+		dev->preheat_stop = true;
+		return -1;
+	}
+	fill->dev = dev;
+	fill->chunk_index = chunk;
+	fill->object_len = object_len;
+	fill->preheat = true;
+	fill->cache_reservation = reservation;
+	fill->token_held = true;
+	fill->buf = malloc(object_len);
+	fill->buf_owned = fill->buf != NULL;
+	if (!fill->buf) {
+		s3_whole_get_token_release();
+		s3_cache_object_reservation_cancel(reservation);
+		free(fill);
+		dev->preheat_stop = true;
+		return -1;
+	}
+	snprintf(fill->key, sizeof(fill->key), "%s", key);
+	TAILQ_INIT(&fill->waiters);
+
+	pthread_mutex_lock(&dev->fill_lock);
+	existing = export_fill_find_locked(dev, key, object_len);
+	/* A demand read can leave a READY entry whose opportunistic cache
+	 * populate was dropped because the disk-fill window was full. Reaching
+	 * here with a reservation proves the object is still absent from the
+	 * shared cache, and existing->buf already holds the whole object in RAM.
+	 * Pin that entry across the reserved cache write instead of discarding it
+	 * and fetching the same object from S3 a second time. */
+	if (existing && existing->state == EXPORT_FILL_READY &&
+	    existing->status == 0 && existing->buf != NULL &&
+	    !existing->populate_wait && !dev->destroying) {
+		int populate_rc;
+
+		existing->chunk_index = chunk;
+		existing->preheat = true;
+		existing->preheat_detach = false;
+		existing->populate_wait = true;
+		existing->preheat_read_done_published = true;
+		existing->preheat_finish_deferred = false;
+		existing->lifetime_ref = true;
+		dev->async_refs++;
+		dev->preheat_inflight++;
+		pthread_mutex_unlock(&dev->fill_lock);
+
+		s3_whole_get_token_release();
+		fill->cache_reservation = NULL;
+		export_fill_free(fill);
+
+		populate_rc = s3_cache_object_populate_reserved_notify(
+			reservation, existing->buf, object_len,
+			export_preheat_cached, existing);
+		if (populate_rc != 0) {
+			bool held = false;
+			int issue_rc = 1;
+
+			pthread_mutex_lock(&dev->fill_lock);
+			existing->populate_wait = false;
+			if (existing->lifetime_ref) {
+				existing->lifetime_ref = false;
+				held = true;
+			}
+			export_fill_evict_locked(dev);
+			pthread_mutex_unlock(&dev->fill_lock);
+			if (dev->preheat_inflight > 0) {
+				dev->preheat_inflight--;
+			}
+			if (populate_rc == -ENOSPC || populate_rc == -ESHUTDOWN) {
+				dev->preheat_stop = true;
+				issue_rc = -1;
+			} else if (populate_rc == -EAGAIN) {
+				export_preheat_retry_from(dev, chunk);
+				(void)export_preheat_arm_poller(dev);
+				issue_rc = -1;
+			}
+			/* unregister may synchronously free dev; do not inspect any
+			 * device member after this. */
+			if (held) {
+				export_async_put(dev);
+			}
+			return issue_rc;
+		}
+		return 1;
+	}
+	/* An in-flight demand GET keeps its own buffer, which may be the caller's
+	 * and is released when that read completes. Attaching this reservation to
+	 * it would let a queued disk fill read that buffer after the caller has
+	 * freed it, and the completion can land off the preheat thread. Leave the
+	 * demand GET alone and retry. Once it finishes, either the object is
+	 * durable or the unpinned RAM entry above is discarded and this walk
+	 * downloads it itself. */
+	if (existing || dev->destroying ||
+	    dev->fills_live >= EXPORT_FILL_MAX_LIVE ||
+	    dev->fills_getting >= EXPORT_FILL_MAX_GETTING) {
+		pthread_mutex_unlock(&dev->fill_lock);
+		s3_whole_get_token_release();
+		s3_cache_object_reservation_cancel(reservation);
+		fill->cache_reservation = NULL;
+		export_fill_free(fill);
+		export_preheat_retry_from(dev, chunk);
+		(void)export_preheat_arm_poller(dev);
+		return -1;
+	}
+	fill->listed = true;
+	fill->state = EXPORT_FILL_GETTING;
+	fill->lifetime_ref = true;
+	dev->async_refs++;
+	TAILQ_INSERT_TAIL(&dev->fills, fill, link);
+	dev->fills_live++;
+	dev->fills_getting++;
+	dev->preheat_inflight++;
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	rc = s3_get_range(dev->client, fill->key, 0, fill->object_len, fill->buf,
+			  export_fill_read_done, fill);
+	if (rc != 0) {
+		export_fill_read_done(fill, 0, rc);
+	}
+	return 1;
+}
+
+/* One line when the GET walk has issued every chunk. Disk fills may still be
+ * queued behind it; callers that need the bytes wait on the cache counters. */
+static void
+export_preheat_note_idle(struct s3_export_dev *dev)
+{
+	if (!dev || dev->preheat_idle_logged || dev->destroying ||
+	    dev->preheat_stop || dev->preheat_has_retry ||
+	    dev->preheat_inflight != 0 ||
+	    dev->preheat_cursor < dev->m->num_chunks) {
+		return;
+	}
+	dev->preheat_idle_logged = true;
+	SPDK_NOTICELOG("Export %s template preheat walk finished\n",
+		       dev->m->uuid_str);
+}
+
+static void
+export_preheat_pump(struct s3_export_dev *dev)
+{
+	uint32_t scanned = 0;
+	bool release_preheat_ref = false;
+
+	if (!dev || dev->preheat_pumping || dev->destroying || dev->preheat_stop) {
+		if (dev && dev->preheat_inflight == 0 &&
+		    (dev->destroying || dev->preheat_stop)) {
+			if (dev->home_thread == NULL ||
+			    dev->home_thread == spdk_get_thread()) {
+				spdk_poller_unregister(&dev->preheat_poller);
+				release_preheat_ref =
+					export_preheat_take_lifetime(dev);
+			}
+		}
+		if (release_preheat_ref) {
+			export_async_put(dev);
+		}
+		return;
+	}
+	dev->preheat_pumping = true;
+	/* Finish the current pass before revisiting blocked chunks. Otherwise one
+	 * busy early reservation can repeatedly rewind the cursor and starve every
+	 * later object. */
+	if (dev->preheat_cursor >= dev->m->num_chunks &&
+	    dev->preheat_has_retry) {
+		dev->preheat_cursor = dev->preheat_retry;
+		dev->preheat_has_retry = false;
+	}
+	while (dev->preheat_inflight < S3_EXPORT_PREHEAT_MAX &&
+	       !dev->preheat_stop && !dev->destroying &&
+	       scanned < EXPORT_PREHEAT_SCAN_BUDGET) {
+		uint64_t chunk;
+		int rc;
+
+		if (dev->preheat_cursor >= dev->m->num_chunks) {
+			break;
+		}
+		chunk = dev->preheat_cursor;
+		scanned++;
+		rc = export_preheat_issue(dev, chunk);
+		if (chunk == dev->preheat_cursor) {
+			dev->preheat_cursor++;
+		}
+		if (rc < 0 && dev->preheat_stop) {
+			break;
+		}
+	}
+	dev->preheat_pumping = false;
+	if (!dev->preheat_stop && !dev->destroying &&
+	    ((scanned == EXPORT_PREHEAT_SCAN_BUDGET &&
+	      dev->preheat_cursor < dev->m->num_chunks) ||
+	     (dev->preheat_inflight == 0 && dev->preheat_has_retry &&
+	      dev->preheat_cursor >= dev->m->num_chunks))) {
+		(void)export_preheat_arm_poller(dev);
+	}
+	if (dev->preheat_inflight == 0 &&
+	    (dev->preheat_stop || dev->preheat_cursor >= dev->m->num_chunks) &&
+	    !dev->preheat_has_retry &&
+	    (dev->home_thread == NULL || dev->home_thread == spdk_get_thread())) {
+		export_preheat_note_idle(dev);
+		spdk_poller_unregister(&dev->preheat_poller);
+		release_preheat_ref = export_preheat_take_lifetime(dev);
+	}
+	if (release_preheat_ref) {
+		export_async_put(dev);
+	}
+}
+
+int
+s3_export_bs_dev_preheat(struct spdk_bs_dev *bs_dev)
+{
+	struct s3_export_dev *dev = (struct s3_export_dev *)bs_dev;
+	int rc;
+
+	if (!dev || !dev->shared_cache || dev->destroying) {
+		return -EINVAL;
+	}
+	if (dev->home_thread != NULL && dev->home_thread != spdk_get_thread()) {
+		if (!export_async_get_live(dev)) {
+			return -EINVAL;
+		}
+		rc = spdk_thread_send_msg(dev->home_thread, export_preheat_msg, dev);
+		if (rc != 0) {
+			export_async_put(dev);
+		}
+		return rc == 0 ? 0 : rc;
+	}
+	if (dev->preheat_started) {
+		return 0;
+	}
+	if (!export_preheat_get_live(dev)) {
+		return -EINVAL;
+	}
+	dev->preheat_started = true;
+	SPDK_NOTICELOG("Export %s template preheat started\n", dev->m->uuid_str);
+	export_preheat_pump(dev);
+	return 0;
 }
 
 static void
@@ -726,6 +1473,7 @@ export_fill_attach_locked(struct s3_export_dev *dev,
 	assert(fill->on_lru);
 	TAILQ_REMOVE(&dev->fill_lru, fill, lru_link);
 	TAILQ_INSERT_TAIL(&dev->fill_lru, fill, lru_link);
+	fill->preheat_ready_hit = true;
 	dev->ready_hits++;
 }
 
@@ -1510,6 +2258,7 @@ static void
 export_destroy(struct spdk_bs_dev *bs_dev)
 {
 	struct s3_export_dev *dev = (struct s3_export_dev *)bs_dev;
+	bool home_thread;
 
 	SPDK_NOTICELOG("Releasing imported export %s: %" PRIu64 " read(s), "
 		       "%" PRIu64 " bytes from S3, %" PRIu64 " served as zeroes, "
@@ -1537,13 +2286,30 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	 * would leave blobstore waiting for ever, and the leak would look like a
 	 * hung volume rather than like anything to do with this file. */
 
+	home_thread = dev->home_thread == NULL ||
+		      dev->home_thread == spdk_get_thread();
+	if (home_thread) {
+		spdk_poller_unregister(&dev->preheat_poller);
+	}
+
 	/* Hold an explicit lifetime reference for every queued or in-flight fill.
 	 * Blobstore normally covers demand GETs, but decouple can hot-unplug the
 	 * backing device from a blob as its final reads complete while another
 	 * fill is being promoted from the pending queue.  Prefetch has no
 	 * blobstore I/O lifetime at all. */
 	pthread_mutex_lock(&dev->fill_lock);
+	dev->preheat_stop = true;
 	dev->destroying = true;
+	/* On the home thread the poller has already been removed. If no fill can
+	 * deliver another completion, retire the walk reference here as part of
+	 * the same transition to destroying. Off-home destruction leaves it for
+	 * the poller (or the final fill) to release on the home thread. */
+	if (home_thread && dev->preheat_inflight == 0 &&
+	    dev->preheat_lifetime_ref) {
+		dev->preheat_lifetime_ref = false;
+		assert(dev->async_refs > 0);
+		dev->async_refs--;
+	}
 	if (dev->async_refs == 0) {
 		dev->unregister_started = true;
 		pthread_mutex_unlock(&dev->fill_lock);

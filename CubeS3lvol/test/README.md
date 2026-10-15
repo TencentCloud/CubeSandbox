@@ -142,6 +142,7 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./test/dataplane/run_snapshot_test.sh  -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_export_test.sh    -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_selfimport_test.sh    # reads /data/cubelet/s3.cfg, no arguments
+./test/dataplane/run_preheat_test.sh       # same; import preheat, then cold reads
 ./test/dataplane/run_snapdelete_test.sh    # same
 ./test/dataplane/run_cubecow_client_test.sh    # same; cubecow/Cubelet RPC order
 ./test/dataplane/run_activation_test.sh    # same
@@ -278,6 +279,20 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   that template's copy once. After the copy, another import is a local clone.
   A sample of each burst reads back the source pattern. The payload is 128 MiB
   so the template copy is still running when the burst's clones return.
+
+- `run_preheat_test.sh` -- four exports imported together onto one lvstore
+  with `decouple:false`, which is the path that preheats the hidden template
+  into the shared object cache. The imports are one burst, and at least two
+  preheat walks must start before the first one finishes. The test then waits
+  until every present object has been populated, and only then issues
+  concurrent direct reads of every clone. Those reads must match the source
+  bytes, raise `cache_object_hits`, and leave `cache_object_misses` and
+  `cache_object_populates` unchanged. A second burst imports one other export
+  eight times. Those imports must share one hidden template, start exactly one
+  preheat, and all eight clones must read concurrently from that shared cache.
+  The target is then stopped and started again. Attaching the same lvstore must
+  start one new preheat per template, populate the fresh cache, and serve a
+  later read from that cache.
 
 - `run_cubecow_client_test.sh` -- the cubecow / Cubelet client contract. Cubelet
   never calls JSON-RPC itself; cubecow always uses the same 11 `rcow_*` methods
