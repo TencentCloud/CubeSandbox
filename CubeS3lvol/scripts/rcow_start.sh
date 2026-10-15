@@ -188,7 +188,7 @@ fi
 # consume, and any stop that was going to consume it has already finished by the
 # time a start runs.
 rm -f "${RCOW_RPC_SOCK}" "${RCOW_RPC_SOCK}.lock" "/var/tmp/spdk_cpu_lock_"* \
-	"${RCOW_PIDFILE}" "${RCOW_HOT_MARKER}"
+	"${RCOW_PIDFILE}" "${RCOW_HOT_MARKER}" "${RCOW_START_READY}"
 
 rcow_load_credentials ||
 	rcow_die "could not read access_key_id/secret_access_key from ${RCOW_S3_CFG}"
@@ -498,4 +498,12 @@ if [ "${REPLAY_RC}" -ne 0 ]; then
 restored; see the warnings above"
 	exit 1
 fi
+
+# The orchestrator waits on this, not on the process existing or the lvstore
+# being attached: both of those are true before the replay and the layout check
+# above. A start that exits 1 must not leave the previous run's file behind;
+# it was removed before this process was spawned.
+printf '%s\n' "${TGT_PID}" >"${RCOW_START_READY}.tmp" &&
+	mv -f "${RCOW_START_READY}.tmp" "${RCOW_START_READY}" ||
+	bail "could not record that the start finished (${RCOW_START_READY})"
 exit 0

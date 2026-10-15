@@ -172,18 +172,48 @@ resuming it so the data plane is not left frozen"
 # failure, so back off and retry within the stop budget. Anything else is fatal,
 # except an outcome the caller names in $4: that one is survivable by
 # construction, and retrying it would only spend the budget to arrive here again.
+#
+# HOT_DEADLINE is one window for every online step and the kill that follows,
+# the same way rcow_stop.sh spends RCOW_STOP_TIMEOUT. A fresh window per step
+# is five of those budgets end to end, which is longer than the unit's
+# TimeoutStopSec, and a stop systemd kills mid-prepare can leave the data plane
+# quiesced. KILL_RESERVE stays unused by the RPCs so the SIGKILL still has time
+# to be observed.
+HOT_DEADLINE=0
+KILL_RESERVE=10
+
+hot_remaining()
+{
+	local r=$((HOT_DEADLINE - SECONDS))
+
+	[ "${r}" -lt 0 ] && r=0
+	printf '%s' "${r}"
+}
+
+hot_rpc_remaining()
+{
+	local r=$((HOT_DEADLINE - KILL_RESERVE - SECONDS))
+
+	[ "${r}" -lt 0 ] && r=0
+	printf '%s' "${r}"
+}
+
 hot_online_op()
 {
 	local label="$1" method="$2" params="$3" tolerate="${4:-}"
-	local out delay=2 deadline=$((SECONDS + RCOW_STOP_TIMEOUT))
+	local out delay=2
 
 	while :; do
 		# rcow_rpc defaults to RCOW_RPC_TIMEOUT, which is longer than this
 		# script's whole budget, so a call that hangs would outlive the deadline
 		# the retry loop is watching. What is left of that budget is also this
 		# call's ceiling.
-		local left=$((deadline - SECONDS))
-		[ "${left}" -lt 1 ] && left=1
+		local left nap
+		left="$(hot_rpc_remaining)"
+		if [ "${left}" -lt 1 ]; then
+			rcow_err "${label}: the ${RCOW_STOP_TIMEOUT}s stop budget is spent"
+			return 1
+		fi
 		if out="$(RCOW_RPC_TIMEOUT="${left}" rcow_rpc "${method}" "${params}" 2>&1)"; then
 			rcow_log "${label}: done"
 			return 0
@@ -194,13 +224,16 @@ hot_online_op()
 		fi
 		case "${out}" in
 		*[Bb][Uu][Ss][Yy]*)
-			if [ "${SECONDS}" -ge "${deadline}" ]; then
-				rcow_err "${label}: still busy after \
-$((RCOW_STOP_TIMEOUT))s: ${out}"
+			left="$(hot_rpc_remaining)"
+			if [ "${left}" -lt 1 ]; then
+				rcow_err "${label}: still busy when the \
+${RCOW_STOP_TIMEOUT}s stop budget ran out: ${out}"
 				return 1
 			fi
-			rcow_warn "${label}: busy, retrying in ${delay}s"
-			sleep "${delay}"
+			nap="${delay}"
+			[ "${nap}" -gt "${left}" ] && nap="${left}"
+			rcow_warn "${label}: busy, retrying in ${nap}s"
+			sleep "${nap}"
 			delay=$((delay * 2))
 			[ "${delay}" -gt 30 ] && delay=30
 			;;
@@ -314,6 +347,11 @@ esac
 # ==========================================================================
 LVS_JSON="$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")"
 
+# One budget from here through the kill. Each step used to start its own
+# RCOW_STOP_TIMEOUT window, so flush + checkpoint + snapshot + prepare + kill
+# could outlive TimeoutStopSec and be killed with the data plane still quiesced.
+HOT_DEADLINE=$((SECONDS + RCOW_STOP_TIMEOUT))
+
 # The flush is a lever on the length of the paused window, not a precondition for
 # the restart: what it cannot push is in the WAL and gets replayed. Under a write
 # load the overlay never goes clean, so a bounded drain still waits out every
@@ -339,9 +377,13 @@ hot_online_op "checkpoint" rcow_checkpoint_lvstore "${LVS_JSON}" ||
 rcow_step "layout snapshot to ${RCOW_HOT_SNAPSHOT}"
 
 # Clamped like the online ops above, and for the same reason: rcow_rpc defaults to
-# RCOW_RPC_TIMEOUT, which outlives this script's per-step budget. This one does not
-# retry, so the budget is its ceiling outright.
-if ! RCOW_RPC_TIMEOUT="${RCOW_STOP_TIMEOUT}" \
+# RCOW_RPC_TIMEOUT, which outlives this script's budget. This one does not retry,
+# so whatever the shared budget has left is its ceiling outright.
+SNAP_LEFT="$(hot_rpc_remaining)"
+if [ "${SNAP_LEFT}" -lt 1 ]; then
+	fail_live "the ${RCOW_STOP_TIMEOUT}s stop budget was spent before the layout snapshot"
+fi
+if ! RCOW_RPC_TIMEOUT="${SNAP_LEFT}" \
 	rcow_rpc rcow_get_bdev '{}' >"${RCOW_HOT_SNAPSHOT}.tmp" 2>/dev/null; then
 	rm -f "${RCOW_HOT_SNAPSHOT}.tmp"
 	fail_live "could not capture the active layout"
@@ -408,10 +450,25 @@ fi
 rcow_step "prepare: quiesce namespaces; blobstore stays dirty"
 PREPARED=0
 trap 'rcow_undo_prepare_on_exit' EXIT
-hot_online_op "hot prepare" rcow_prepare_hot_upgrade \
-	"{\"suspend_timeout_ms\":${RCOW_HOT_PREPARE_SUSPEND_MS}}" ||
-	fail_live_prepared "could not prepare the target for hot upgrade"
+# Set before the RPC, not after it returns. The server can finish the quiesce
+# and then the client can be killed (or time out) before the assignment below
+# used to run; the EXIT hook would then leave the data plane frozen. A resume
+# of a prepare that has not quiesced yet is a no-op the target already accepts.
 PREPARED=1
+# The configured suspend has to fit what the shared budget still has, minus a
+# few seconds so the server returns the timeout before the client gives up and
+# the two disagree about whether the prepare happened.
+PREPARE_LEFT="$(hot_rpc_remaining)"
+PREPARE_SUSPEND="${RCOW_HOT_PREPARE_SUSPEND_MS}"
+if [ "${PREPARE_LEFT}" -lt 5 ]; then
+	fail_live_prepared "the ${RCOW_STOP_TIMEOUT}s stop budget was spent before the hot prepare"
+fi
+if [ "$((PREPARE_SUSPEND / 1000))" -ge "$((PREPARE_LEFT - 4))" ]; then
+	PREPARE_SUSPEND=$(((PREPARE_LEFT - 4) * 1000))
+fi
+hot_online_op "hot prepare" rcow_prepare_hot_upgrade \
+	"{\"suspend_timeout_ms\":${PREPARE_SUSPEND}}" ||
+	fail_live_prepared "could not prepare the target for hot upgrade"
 
 # ==========================================================================
 rcow_step "killing the target"
@@ -426,8 +483,7 @@ exited, which is confirmed below"
 fi
 
 GONE=0
-DEADLINE=$((SECONDS + RCOW_STOP_TIMEOUT))
-while [ "${SECONDS}" -lt "${DEADLINE}" ]; do
+while [ "$(hot_remaining)" -gt 0 ]; do
 	# No exe at all, or a different one: the process has exited, or the pid has
 	# been handed to something else. Either way nothing holds the lvstore now.
 	EXE_NOW="$(rcow_pid_exe "${TGT_PID}")"
@@ -443,8 +499,9 @@ if [ "${GONE}" -ne 1 ]; then
 	# prepare left them paused: a host attached to them queues I/O for as long
 	# as the process lives. Undo the quiesce before giving up, so the node is not
 	# left frozen for an operator to restart by hand.
-	rcow_warn "pid ${TGT_PID} survived SIGKILL for ${RCOW_STOP_TIMEOUT}s; \
-something outside this script is holding it, and the target is still alive"
+	rcow_warn "pid ${TGT_PID} survived SIGKILL until the ${RCOW_STOP_TIMEOUT}s \
+stop budget ran out; something outside this script is holding it, and the \
+target is still alive"
 	# Resumed here rather than left to the EXIT hook: this branch has the
 	# operator-facing message, and the hook would only repeat the call.
 	rcow_resume_subsystems
