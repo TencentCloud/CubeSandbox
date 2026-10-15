@@ -243,7 +243,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		logger.Infof("another replica is building spec %s, waiting to reuse", fingerprint[:16])
 
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, req.RootfsFormat, logger)
 		}
 
 		select {
@@ -299,7 +299,7 @@ func runBuildLocked(
 			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.Ext4Path)
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, req.RootfsFormat, logger)
 		}
 	}
 
@@ -363,7 +363,7 @@ func runBuildLocked(
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", req.RootfsFormat, logger); err != nil {
 		return err
 	}
 
@@ -408,6 +408,7 @@ func reportExistingArtifact(
 	caFingerprint string,
 	s3CfgEnabled bool,
 	s3Client *s3store.Client,
+	rootfsFormat string,
 	logger *cubelog.Entry,
 ) error {
 	inStore := false
@@ -427,7 +428,7 @@ func reportExistingArtifact(
 	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
-	}, artifactURL, inStore, s3Client, objectKey, logger)
+	}, artifactURL, inStore, s3Client, objectKey, rootfsFormat, logger)
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -444,6 +445,7 @@ func reportArtifactBuilt(
 	inStore bool,
 	s3Client *s3store.Client,
 	objectKey string,
+	rootfsFormat string,
 	logger *cubelog.Entry,
 ) error {
 	// Two fields deserve explanation:
@@ -475,6 +477,14 @@ func reportArtifactBuilt(
 		"cube_egress_ca_baked":           caResult.Baked,
 		"cube_egress_ca_fingerprint":     caResult.Fingerprint,
 		"cube_egress_ca_targets_written": caResult.TargetsWritten,
+		// rootfs_format echoes the format CubeMaster selected at submit time
+		// (req.RootfsFormat) back to CubeMaster. CubeMaster's persisted request
+		// snapshot already carries it, but reporting it here lets the BUILT
+		// callback path stay self-contained (the resume path can read it from
+		// the result instead of re-deriving it from the request snapshot), and
+		// it defends against a request snapshot that lost the field. An empty
+		// value is normalized to "ext4" (the historical default).
+		"rootfs_format":                  rootfsFormatLabel(rootfsFormat),
 	}
 	if artifactURL != "" {
 		payload["artifact_url"] = artifactURL

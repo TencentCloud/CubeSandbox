@@ -5,6 +5,7 @@ package cube
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,5 +102,35 @@ func TestTemplateJobBuiltCallbackRetryDoesNotStartSecondContinuation(t *testing.
 	}
 	if got := prepareCalls.Load(); got != 1 {
 		t.Fatalf("prepare calls = %d, want 1", got)
+	}
+}
+
+// TestRemoteBuildResultFromPayloadParsesRootfsFormat verifies the BUILT callback
+// payload's rootfs_format (reported by TC) is decoded into RemoteBuildResult so
+// the resume path can fill ImageSpec.StorageMedia from the result.
+func TestRemoteBuildResultFromPayloadParsesRootfsFormat(t *testing.T) {
+	payload := map[string]any{
+		"status":              "BUILT",
+		"artifact_id":         "rfs-1",
+		"ext4_path":           "/data/artifacts/rfs-1/rfs-1.ext4",
+		"ext4_sha256":         "sha256:abc",
+		"ext4_size_bytes":     json.Number("4096"),
+		"master_node_ip":      "http://master:8080",
+		"image_config_json":   `{}`,
+		"rootfs_format":       "erofs",
+	}
+	got := remoteBuildResultFromPayload(payload)
+	if got.RootfsFormat != "erofs" {
+		t.Fatalf("RootfsFormat = %q, want %q", got.RootfsFormat, "erofs")
+	}
+	if got.ArtifactID != "rfs-1" {
+		t.Fatalf("ArtifactID = %q, want %q", got.ArtifactID, "rfs-1")
+	}
+
+	// Absent rootfs_format (older TC) decodes to empty, which Validate treats as
+	// ext4 downstream — proving the rolling-upgrade path.
+	got = remoteBuildResultFromPayload(map[string]any{"artifact_id": "rfs-2"})
+	if got.RootfsFormat != "" {
+		t.Fatalf("absent rootfs_format must decode to empty, got %q", got.RootfsFormat)
 	}
 }

@@ -10,6 +10,8 @@ import (
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 )
 
@@ -104,5 +106,53 @@ func TestRootfsFormatLabel(t *testing.T) {
 		if strings.Contains(rootfsFormatLabel(c.in), " ") {
 			t.Fatalf("label must not contain spaces: %q", rootfsFormatLabel(c.in))
 		}
+	}
+}
+
+// TestReportArtifactBuiltIncludesRootfsFormat verifies the BUILT callback payload
+// carries rootfs_format, normalized via rootfsFormatLabel so CubeMaster receives
+// the format the artifact was built in. The Reporter.Report HTTP call is patched
+// out so this captures the exact payload without a CubeMaster endpoint.
+func TestReportArtifactBuiltIncludesRootfsFormat(t *testing.T) {
+	var captured map[string]any
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyMethod(&Reporter{}, "Report", func(_ *Reporter, _ context.Context, _ string, fields map[string]any) error {
+		captured = fields
+		return nil
+	})
+
+	src := &image.PreparedSource{Digest: "sha256:src", ConfigJSON: "{}", MasterNodeIP: "http://master:8080"}
+	result := image.BuildResult{Ext4Path: "/data/rfs-1.ext4", SHA256: "sha", SizeBytes: 4096}
+	// reportArtifactBuilt only touches the logger on the failure path; the
+	// patched Report succeeds, so a zero Entry (nil inner logger) is safe here.
+	logger := &cubelog.Entry{}
+
+	report := func(format string) {
+		captured = nil
+		if err := reportArtifactBuilt(context.Background(), "job-1", &result, "rfs-1", "fp", src, &Reporter{}, cube_egress_ca.Result{}, "", false, nil, "", format, logger); err != nil {
+			t.Fatalf("reportArtifactBuilt(%q) failed: %v", format, err)
+		}
+	}
+
+	// erofs is reported verbatim.
+	report(config.RootfsFormatErofs)
+	if got := captured["rootfs_format"]; got != "erofs" {
+		t.Fatalf("rootfs_format for erofs = %v, want %q", got, "erofs")
+	}
+	// ext4 is reported verbatim.
+	report(config.RootfsFormatExt4)
+	if got := captured["rootfs_format"]; got != "ext4" {
+		t.Fatalf("rootfs_format for ext4 = %v, want %q", got, "ext4")
+	}
+	// An empty format (legacy request snapshot) is normalized to ext4 so an
+	// older job still reports a usable format.
+	report("")
+	if got := captured["rootfs_format"]; got != "ext4" {
+		t.Fatalf("rootfs_format for empty = %v, want %q (ext4 default)", got, "ext4")
+	}
+	// The payload still carries the other artifact fields untouched.
+	if captured["artifact_id"] != "rfs-1" || captured["ext4_sha256"] != "sha" {
+		t.Fatalf("payload missing core artifact fields: %#v", captured)
 	}
 }

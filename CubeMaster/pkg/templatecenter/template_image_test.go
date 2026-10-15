@@ -1259,6 +1259,51 @@ func writeRootfsArtifactTestFile(t *testing.T, data []byte) (string, string) {
 	return path, hex.EncodeToString(sum[:])
 }
 
+// validRemoteBuildResultForValidate builds a RemoteBuildResult with all the
+// fields Validate requires present and correct, so the RootfsFormat-specific
+// assertions below reach the format check instead of failing on a prior field.
+func validRemoteBuildResultForValidate(t *testing.T) *RemoteBuildResult {
+	t.Helper()
+	return &RemoteBuildResult{
+		ArtifactID:              "rfs-validate",
+		TemplateSpecFingerprint: "fingerprint-validate",
+		SourceImageDigest:       "repo/image@sha256:abc",
+		Ext4Path:                writeFakeArtifactFile(t, "validate.ext4"),
+		Ext4SHA256:              "sha256:def",
+		Ext4SizeBytes:           1024,
+		ImageConfigJSON:         `{}`,
+		MasterNodeIP:            "http://master:8080",
+	}
+}
+
+func TestRemoteBuildResultValidateRootfsFormat(t *testing.T) {
+	// Empty format is accepted (older TC instances predate the field; empty is
+	// treated as ext4 downstream) so a rolling upgrade does not break builds.
+	r := validRemoteBuildResultForValidate(t)
+	r.RootfsFormat = ""
+	if err := r.Validate(); err != nil {
+		t.Fatalf("empty rootfs_format must be accepted (rolling-upgrade compat): %v", err)
+	}
+
+	// Explicit ext4 and erofs are accepted (case-insensitive).
+	for _, f := range []string{config.RootfsFormatExt4, config.RootfsFormatErofs, "EROFS", " Ext4 "} {
+		r := validRemoteBuildResultForValidate(t)
+		r.RootfsFormat = f
+		if err := r.Validate(); err != nil {
+			t.Fatalf("rootfs_format=%q must be accepted: %v", f, err)
+		}
+	}
+
+	// An unknown format is rejected so Cubelet never receives an unrecognized
+	// ImageSpec.StorageMedia and boots the wrong device path.
+	r = validRemoteBuildResultForValidate(t)
+	r.RootfsFormat = "xfs"
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "rootfs_format") {
+		t.Fatalf("unknown rootfs_format must be rejected with a rootfs_format error, got %v", err)
+	}
+}
+
+
 func TestManagedArtifactDirRecognizesWorkAndStoreRoots(t *testing.T) {
 	workRoot := filepath.Join(t.TempDir(), "work")
 	storeRoot := filepath.Join(t.TempDir(), "store")
