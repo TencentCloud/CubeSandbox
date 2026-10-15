@@ -476,17 +476,17 @@ spec:
         - |
           echo '[health-test] check cube-node host runtime assets'
           test -e /dev/kvm
-          test -d {{ .Values.hostPaths.dataCubelet | quote }}
-          test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
+          test -d "/data/cubelet"
+          test -S "/data/cubelet/cubelet.sock"
       volumeMounts:
         - name: dev
           mountPath: /dev
           readOnly: true
         - name: data-cubelet
-          mountPath: {{ .Values.hostPaths.dataCubelet }}
+          mountPath: /data/cubelet
           readOnly: true
         - name: tmp-cube
-          mountPath: {{ .Values.hostPaths.tmpCube }}
+          mountPath: /tmp/cube
           readOnly: true
   volumes:
     - name: dev

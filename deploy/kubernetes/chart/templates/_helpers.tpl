@@ -1151,30 +1151,30 @@ Kubernetes API path prefix for the cube-node DaemonSet (health-test).
 {{- end -}}
 
 {{/*
-Big Pod: shared volumeMounts for component install/run containers.
-Toolbox is mounted whole at the fixed path.
+Big Pod: shared runtime volumeMounts.
+Runtime paths stay fixed; hostPaths only selects the backing host directories.
 */}}
 {{- define "cube.nodeToolboxVolumeMounts" -}}
 - name: toolbox
   mountPath: /usr/local/services/cubetoolbox
 - name: data-cubelet
-  mountPath: {{ .Values.hostPaths.dataCubelet }}
+  mountPath: /data/cubelet
   mountPropagation: Bidirectional
 - name: data-log
-  mountPath: {{ .Values.hostPaths.dataLog }}
+  mountPath: /data/log
 - name: data-cube-shim
-  mountPath: {{ .Values.hostPaths.dataCubeShim }}
+  mountPath: /data/cube-shim
   mountPropagation: Bidirectional
 - name: data-snapshot-pack
-  mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+  mountPath: /data/snapshot_pack
 - name: data-cube-shared
-  mountPath: {{ .Values.hostPaths.dataCubeShared }}
+  mountPath: /data/cube-shared
   mountPropagation: Bidirectional
 - name: data-shared
-  mountPath: {{ .Values.hostPaths.dataShared }}
+  mountPath: /data/shared
   mountPropagation: Bidirectional
 - name: tmp-cube
-  mountPath: {{ .Values.hostPaths.tmpCube }}
+  mountPath: /tmp/cube
   mountPropagation: Bidirectional
 - name: run-containerd
   mountPath: /run/containerd
@@ -1214,7 +1214,7 @@ capabilities:
 {{- end -}}
 
 {{/*
-Installer: toolbox only (no dataplane mounts).
+Installer: toolbox and versioned artifact store.
 */}}
 {{- define "cube.installerVolumeMounts" -}}
 - name: toolbox
@@ -1222,7 +1222,7 @@ Installer: toolbox only (no dataplane mounts).
 - name: bootstrap-state
   mountPath: {{ .Values.hostPaths.bootstrapState }}
 - name: data-cubelet
-  mountPath: {{ .Values.hostPaths.dataCubelet }}
+  mountPath: /data/cubelet
 {{- end -}}
 
 {{- define "cube.installerComponentEnv" -}}
@@ -1234,7 +1234,7 @@ Installer: toolbox only (no dataplane mounts).
 - name: STATE_DIR
   value: {{ .Values.hostPaths.bootstrapState | quote }}
 - name: COMPONENT_VERSIONS_ROOT
-  value: {{ printf "%s/root/component_versions" .Values.hostPaths.dataCubelet | quote }}
+  value: "/data/cubelet/root/component_versions"
 - name: CUBE_PVM_ENABLE
   value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
 {{- end -}}
@@ -1256,6 +1256,8 @@ Bootstrap: host mutation mounts for pvm / node-init.
   mountPath: {{ .Values.hostPaths.bootstrapState }}
 {{- end -}}
 
+{{/* node-init probes XFS locally and mounts it in the host namespace at DATA_CUBELET.
+Keep its mount paths equal to the host paths, unlike the runtime containers. */}}
 {{- define "cube.bootstrapDataVolumeMounts" -}}
 - name: data-cubelet
   mountPath: {{ .Values.hostPaths.dataCubelet }}

@@ -119,6 +119,18 @@ spec:
               value: "true"
             - name: DATA_CUBELET
               value: {{ .Values.hostPaths.dataCubelet | quote }}
+            - name: DATA_LOG
+              value: {{ .Values.hostPaths.dataLog | quote }}
+            - name: DATA_CUBE_SHIM
+              value: {{ .Values.hostPaths.dataCubeShim | quote }}
+            - name: DATA_SNAPSHOT_PACK
+              value: {{ .Values.hostPaths.dataSnapshotPack | quote }}
+            - name: DATA_CUBE_SHARED
+              value: {{ .Values.hostPaths.dataCubeShared | quote }}
+            - name: DATA_SHARED
+              value: {{ .Values.hostPaths.dataShared | quote }}
+            - name: TMP_CUBE
+              value: {{ .Values.hostPaths.tmpCube | quote }}
             - name: REQUIRE_KVM
               value: {{ .Values.bootstrap.nodeInit.requireKVM | quote }}
             - name: REQUIRE_XFS
