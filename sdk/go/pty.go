@@ -124,6 +124,9 @@ func (p *Pty) Connect(ctx context.Context, pid int, opts PtyConnectOptions) (*Pt
 
 // Kill sends SIGKILL to the PTY process identified by pid. It reports false
 // (not an error) when the PID could not be found — e.g. it already exited.
+// Note: if the server answers 404 with an HTML or non-JSON text page (e.g. a
+// misrouted request), Kill returns a routing diagnostic error instead of
+// (false, nil); only JSON 404 responses keep the not-found shortcut.
 func (p *Pty) Kill(ctx context.Context, pid int) (bool, error) {
 	if p == nil || p.sandbox == nil {
 		return false, fmt.Errorf("pty is not attached to a sandbox")

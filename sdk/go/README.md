@@ -335,9 +335,10 @@ cfg := cubesandbox.Config{
 client := cubesandbox.NewClient(cfg)
 ```
 
-If a Go SDK Connect stream returns an HTML/text page or invalid envelope, check
+If a Go SDK Connect call (streaming or unary) returns an HTML/text page or
+invalid envelope, check
 the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
-These stream endpoints reject HTTP 200 responses labeled `text/html`. Any 404
+These Connect endpoints (streaming and unary) reject HTTP 200 responses labeled `text/html`. Any 404
 whose body is HTML or a non-JSON `text/*` page is treated as a routing error,
 so it no longer matches `errors.Is` for any sentinel (`ErrSandboxNotFound`,
 `ErrTemplateNotFound`, `ErrVolumeNotFound`). A JSON body — including a JSON API

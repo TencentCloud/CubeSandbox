@@ -233,6 +233,9 @@ func validateConnectResponse(resp *http.Response) error {
 			}
 		}
 		if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+			// Defence in depth: the SDK's own HTTP clients follow redirects,
+			// so a 3xx only reaches validation when the caller supplies a
+			// custom client via WithHTTPClient with CheckRedirect disabled.
 			if location := resp.Header.Get("Location"); location != "" {
 				apiErr.Message += "; redirect to " + location
 			}
