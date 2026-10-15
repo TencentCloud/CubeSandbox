@@ -1140,6 +1140,80 @@ func TestFilesListReturnsEmptySliceForEmptyDir(t *testing.T) {
 	}
 }
 
+func TestFilesListMisrouted404HTMLReturnsRoutingDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>404 page not found</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	_, err := sb.Files().List(context.Background(), "/x")
+	if err == nil {
+		t.Fatal("List with misrouted 404 HTML returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	var nfe *NotFoundError
+	if errors.As(err, &nfe) {
+		t.Fatalf("err=%v, should not be NotFoundError", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want routing hint", err)
+	}
+	if !strings.Contains(err.Error(), "ListDir") {
+		t.Fatalf("err=%v, want method attribution", err)
+	}
+}
+
+func TestFilesExistsMisrouted404HTMLReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>404 page not found</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	exists, err := sb.Files().Exists(context.Background(), "/x")
+	if err == nil {
+		t.Fatal("Exists with misrouted 404 HTML returned nil error (silent false)")
+	}
+	if exists {
+		t.Fatal("Exists=true on misrouted page")
+	}
+}
+
+func TestFilesExistsGenuineJSON404StillNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"code":"not_found","message":"no such file"}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	exists, err := sb.Files().Exists(context.Background(), "/x")
+	if err != nil {
+		t.Fatalf("Exists with genuine JSON 404 returned error: %v", err)
+	}
+	if exists {
+		t.Fatal("Exists=true for missing file")
+	}
+}
+
 func TestFilesStatReturnsFileEntry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/filesystem.Filesystem/Stat" {
