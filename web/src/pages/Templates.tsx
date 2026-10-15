@@ -665,8 +665,9 @@ export default function TemplatesPage() {
             <div key={tpl.templateID} className="relative group min-w-0">
               <Link to={`/templates/${tpl.templateID}`} className="block">
                 <Card className="panel-hover h-full">
-                  <CardHeader className="flex-wrap pr-7">
-                    <div className="flex min-w-0 flex-1 basis-40 items-center gap-3">
+                  {/* Keep pr-7 in sync with Card's p-5 and the right-2.5/w-7 delete action below. */}
+                  <CardHeader className="flex-wrap justify-end pr-7">
+                    <div className="flex min-w-0 flex-[1_1_10rem] items-center gap-3">
                       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
                         <Package size={18} />
                       </span>

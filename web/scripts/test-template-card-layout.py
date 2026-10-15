@@ -9,7 +9,9 @@ See web/README.md for commands. No application CSS or DOM is altered by the test
 
 import argparse
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
@@ -38,6 +40,55 @@ COMPAT = {
     },
     "templates": [{"templateID": TEMPLATES[-1]["templateID"], "overall": "UNKNOWN", "nodes": []}],
 }
+RESPONSES = {
+    "/templates": TEMPLATES,
+    "/templates/compat": COMPAT,
+    "/opsapi/v1/auth/session": {"authRequired": False, "authenticated": False},
+    "/opsapi/v1/cluster/versions": {
+        "components": [],
+        "nodes": [],
+        "controlPlane": {"version": "0.7.3"},
+    },
+}
+
+
+def route_request(route, base, errors):
+    request = route.request
+    path = urlsplit(request.url).path
+    # Vite's API proxy also matches /templates document navigations.
+    if request.is_navigation_request() and path == "/templates":
+        route.fulfill(response=route.fetch(url=base + "/index.html"))
+    elif request.resource_type in {"fetch", "xhr"}:
+        if request.method != "GET" or path not in RESPONSES:
+            errors.append(
+                {"error": "unexpected fixture request", "method": request.method, "path": path}
+            )
+            route.fulfill(status=500, json={"error": "unexpected layout fixture request"})
+        else:
+            route.fulfill(json=RESPONSES[path])
+    else:
+        route.continue_()
+
+
+def check_fixture_handler():
+    cases = [("GET", path, 200) for path in RESPONSES]
+    cases += [("GET", "/unexpected-endpoint", 500), ("DELETE", "/templates", 500)]
+    for method, path, expected in cases:
+        replies, errors = [], []
+        route = SimpleNamespace(
+            request=SimpleNamespace(
+                url="http://localhost" + path,
+                method=method,
+                resource_type="fetch",
+                is_navigation_request=lambda: False,
+            ),
+            fulfill=lambda replies=replies, **reply: replies.append(reply),
+        )
+        route_request(route, "http://localhost", errors)
+        assert len(replies) == 1, "fixture requests must always be completed"
+        assert replies[0].get("status", 200) == expected
+        assert bool(errors) == (expected == 500)
+    return len(cases)
 
 
 def overlaps(left, right):
@@ -65,31 +116,11 @@ def main():
     if origin.scheme != "http" or origin.hostname not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("only a local test server is allowed")
     base = args.url.rstrip("/")
-    errors, cases = [], 0
+    errors, cases, wrapped_cases = [], 0, 0
+    started = time.monotonic()
+    fixture_checks = check_fixture_handler()
     if args.output:
         args.output.mkdir(parents=True, exist_ok=True)
-
-    def route_request(route):
-        request = route.request
-        path = urlsplit(request.url).path
-        # Vite's API proxy also matches /templates document navigations.
-        if request.is_navigation_request() and path == "/templates":
-            route.fulfill(response=route.fetch(url=base + "/index.html"))
-        elif request.resource_type in {"fetch", "xhr"}:
-            if request.method != "GET":
-                raise AssertionError("layout tests must not mutate a backend")
-            value = (
-                TEMPLATES
-                if path == "/templates"
-                else COMPAT
-                if path == "/templates/compat"
-                else {"authRequired": False, "authenticated": False}
-                if path.endswith("/auth/session")
-                else {"components": [], "nodes": [], "config": {}}
-            )
-            route.fulfill(json=value)
-        else:
-            route.continue_()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, executable_path=args.browser_executable)
@@ -97,7 +128,7 @@ def main():
             context = browser.new_context(
                 viewport={"width": 1440, "height": 1100}, color_scheme="light", locale=language
             )
-            context.route("**/*", route_request)
+            context.route("**/*", lambda route: route_request(route, base, errors))
             context.add_init_script(
                 "localStorage.setItem('cube-theme','light'); localStorage.setItem('cube.lang',"
                 + json.dumps(language)
@@ -105,9 +136,16 @@ def main():
             )
             page = context.new_page()
             page.goto(base + "/templates")
-            expect(
-                page.locator('a[href="/templates/' + TEMPLATES[0]["templateID"] + '"]')
-            ).to_be_visible()
+            try:
+                expect(
+                    page.locator('a[href="/templates/' + TEMPLATES[0]["templateID"] + '"]')
+                ).to_be_visible()
+            except Exception as error:
+                if errors:
+                    raise AssertionError(
+                        "Unexpected fixture requests: " + json.dumps(errors)
+                    ) from error
+                raise
             page.evaluate("document.fonts.ready")
             for width in (360, 768, 1024, 1280, 1440):
                 page.set_viewport_size({"width": width, "height": 1100})
@@ -119,7 +157,6 @@ def main():
                     badge = header.locator("span").last
                     button = wrapper.locator("button")
                     wrapper.hover()
-                    page.wait_for_timeout(180)  # opacity transition, not data loading
                     bounds, status, action = (
                         card.bounding_box(),
                         badge.bounding_box(),
@@ -145,20 +182,63 @@ def main():
                         errors.append({**tag, "error": "title/status overlap"})
                     if badge.evaluate("el => el.scrollWidth > el.clientWidth + 1"):
                         errors.append({**tag, "error": "status clipped"})
+                    title = header.locator(":scope > div").bounding_box()
+                    wrapped = status["y"] >= title["y"] + title["height"] - 1
+                    if wrapped:
+                        wrapped_cases += 1
+                        if not args.baseline:
+                            content_right = header.evaluate(
+                                "el => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight)"
+                            )
+                            if abs(status["x"] + status["width"] - content_right) > 1:
+                                errors.append(
+                                    {**tag, "error": "wrapped status is not right-aligned"}
+                                )
+                    if width == 360 and not args.baseline:
+                        assert wrapped, "the narrow fixture must exercise a wrapped status"
                     expect(header.locator("h3")).to_have_attribute(
                         "title",
                         template["aliases"][0] if template["aliases"] else template["templateID"],
                     )
                     expect(header.locator("p")).to_have_attribute("title", template["templateID"])
                     cases += 1
-                if width == 1440 and args.output:
-                    first = page.locator('a[href="/templates/' + TEMPLATES[0]["templateID"] + '"]')
-                    first.locator("..").hover()
-                    page.wait_for_timeout(180)
-                    grid = first.locator("../..")
-                    grid.screenshot(
-                        path=str(args.output / ("template-cards-" + language + "-light.png"))
-                    )
+                if width in (360, 1440) and args.output:
+                    subject_id = TEMPLATES[1 if width == 360 else 0]["templateID"]
+                    subject = page.locator('a[href="/templates/' + subject_id + '"]')
+                    if width == 360:
+                        # Use ordinary page scrolling and a viewport crop: an
+                        # element screenshot of the tall grid can scroll it
+                        # underneath the dashboard's fixed navigation rail.
+                        page.evaluate("window.scrollTo(0, 0)")
+                        clip = subject.locator("..").bounding_box()
+                        page.evaluate(
+                            "y => window.scrollTo(0, y)",
+                            max(0, clip["y"] + clip["height"] / 2 - 550),
+                        )
+                        clip = subject.locator("..").bounding_box()
+                        page.mouse.move(
+                            clip["x"] + clip["width"] / 2, clip["y"] + clip["height"] / 2
+                        )
+                    else:
+                        subject.locator("..").hover()
+                    # Wait for visible state only when pixels matter. Bounding
+                    # boxes above are independent of the opacity transition.
+                    for template in TEMPLATES:
+                        other = page.locator('a[href="/templates/' + template["templateID"] + '"]')
+                        opacity = (
+                            "1"
+                            if template["templateID"] == subject_id
+                            or template["status"] == "FAILED"
+                            else "0"
+                        )
+                        expect(other.locator("..").locator("button")).to_have_css(
+                            "opacity", opacity
+                        )
+                    target = str(args.output / (f"template-cards-{language}-{width}-light.png"))
+                    if width == 360:
+                        page.screenshot(path=target, clip=clip)
+                    else:
+                        subject.locator("../..").screenshot(path=target)
             if not args.baseline:
                 # Hidden hover actions must also remain visible to keyboard users.
                 ready = page.locator('a[href="/templates/' + TEMPLATES[2]["templateID"] + '"]')
@@ -167,8 +247,7 @@ def main():
                 page.keyboard.press("Tab")
                 button = ready.locator("..").locator("button")
                 expect(button).to_be_focused()
-                page.wait_for_timeout(180)
-                assert button.evaluate("el => getComputedStyle(el).opacity") == "1"
+                expect(button).to_have_css("opacity", "1")
             # Opening the confirmation must not navigate or issue a DELETE.
             first = page.locator('a[href="/templates/' + TEMPLATES[0]["templateID"] + '"]')
             first.locator("..").locator("button").click()
@@ -182,6 +261,9 @@ def main():
         browser.close()
     report = {
         "cases": cases,
+        "fixture_checks": fixture_checks,
+        "wrapped_cases": wrapped_cases,
+        "elapsed_seconds": round(time.monotonic() - started, 2),
         "errors": errors,
         "fixture_responses": True,
         "color_scheme": "light",
