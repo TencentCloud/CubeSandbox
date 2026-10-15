@@ -16,13 +16,15 @@ make web-build   # → web/dist/
 - `/sandboxes` list + lifecycle actions (pause/resume/kill)
 - `/sandboxes/:id` detail + logs
 - `/templates` catalog
+- `/templates?tab=snapshots` snapshot list (paginated, delete)
+- `/snapshots/:id` snapshot detail
 - `/nodes` fleet health
 - `/keys` store `X-API-Key` locally
 - `/network`, `/observability`, `/settings` — roadmap placeholders
 
 ## Backend
 
-Talks to **CubeAPI** (`CubeAPI/` in repo), which proxies templates/cluster/nodes to CubeMaster. See `src/api/client.ts`.
+Talks to **CubeAPI** (`CubeAPI/` in repo), which proxies templates/cluster/nodes to CubeMaster. See `src/api/client.ts`. Snapshot list, detail and delete are served by **CubeOps** (`:3010`).
 
 The `X-API-Key` header (if present in localStorage under `cube.apiKey`) is injected on every request.
 
