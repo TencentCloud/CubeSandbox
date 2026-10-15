@@ -463,6 +463,7 @@ export E2B_API_KEY=e2b_000000
 - `sed`
 - `pgrep`
 - `date`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
 
 条件命令：
 
@@ -514,6 +515,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 - `date`
 - `ip`
 - `awk`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
 
 二选一命令：
 

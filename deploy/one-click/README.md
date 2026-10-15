@@ -556,6 +556,7 @@ Required commands:
 - `sed`
 - `pgrep`
 - `date`
+- `openssl` (hard dependency of cube-egress-prepare.sh for generating the CubeEgress root CA; may be absent on minimal/cloud images such as OpenCloudOS 9 minimal — install with `dnf install -y openssl` or `apt-get install -y openssl`)
 
 Conditional commands:
 
@@ -608,6 +609,7 @@ Required commands:
 - `date`
 - `ip`
 - `awk`
+- `openssl` (hard dependency of cube-egress-prepare.sh for generating the CubeEgress root CA; may be absent on minimal/cloud images such as OpenCloudOS 9 minimal — install with `dnf install -y openssl` or `apt-get install -y openssl`)
 
 One-of-two commands:
 
