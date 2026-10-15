@@ -375,6 +375,16 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any,
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
+	if resp.StatusCode >= http.StatusBadRequest && isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
+		// A misrouted Web UI / gateway page must not masquerade as a
+		// filesystem error (e.g. Exists silently reporting "does not exist"):
+		// surface the routing diagnostic instead. Genuine envd errors are
+		// Connect JSON and keep their existing classification below.
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if verr := validateConnectResponse(resp); verr != nil {
+			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, verr)
+		}
+	}
 	return body, resp.StatusCode, nil
 }
 
