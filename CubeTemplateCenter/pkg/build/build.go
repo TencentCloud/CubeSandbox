@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
@@ -302,7 +303,11 @@ func runBuildLocked(
 		}
 	}
 
-	// Step 7: Build ext4 (export rootfs, bake envd + CA, mkfs)
+	// Step 7: Build the rootfs image (export rootfs, bake envd + CA, mkfs).
+	// The format comes from req.RootfsFormat, stamped by CubeMaster at submit
+	// time from template.rootfs_format and persisted in the job's request
+	// snapshot. ext4 is the default / historical path; erofs packs the same
+	// exported rootfs with mkfs.erofs instead of mkfs.ext4.
 	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
 	var caBakeResult cube_egress_ca.Result
 	opts := image.BuildOptions{ArtifactID: artifactID}
@@ -317,24 +322,24 @@ func runBuildLocked(
 		caBakeResult, err = ApplyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
 		return err
 	}
-	result, err := image.BuildExt4(ctx, source, opts)
+	result, err := buildRootfsImage(ctx, req.RootfsFormat, source, opts)
 	if !pullProgressFlushed {
-		// Dockerless / native modes stream pull progress during BuildExt4, so
+		// Dockerless / native modes stream pull progress during the build, so
 		// flush only once all pull callbacks can no longer fire.
 		pullProgress.flush(err == nil)
 		pullProgressFlushed = true
 	}
 	if err != nil {
-		errMsg := fmt.Sprintf("build ext4 fail: %v", err)
+		errMsg := fmt.Sprintf("build rootfs (%s) fail: %v", rootfsFormatLabel(req.RootfsFormat), err)
 		logger.Errorf(errMsg)
 		// Remove the half-written store dir so a failed build does not leak
-		// disk. BuildExt4 cleans up on its own error paths, but a partially
+		// disk. The build func cleans up on its own error paths, but a partially
 		// created dir (or a PostRootfsExport failure) can survive.
 		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}
 		reportFailed(templatecenter.JobPhaseBuildingExt4, errMsg)
-		return fmt.Errorf("build ext4: %w", err)
+		return fmt.Errorf("build rootfs: %w", err)
 	}
 
 	// Step 8: Upload to the configured blob backend, then report BUILT.
@@ -365,6 +370,31 @@ func runBuildLocked(
 	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d",
 		artifactID, result.SHA256, result.SizeBytes)
 	return nil
+}
+
+// buildRootfsImage dispatches to the format-specific builder. An empty format
+// defaults to ext4, matching CubeMaster's normalizeTemplateImageRequest so a
+// legacy/older request snapshot still builds as ext4. An explicitly erofs
+// request builds an EROFS image via image.BuildErofs.
+func buildRootfsImage(ctx context.Context, rootfsFormat string, source *image.PreparedSource, opts image.BuildOptions) (image.BuildResult, error) {
+	if rootfsFormat == config.RootfsFormatErofs {
+		return image.BuildErofs(ctx, source, opts)
+	}
+	return image.BuildExt4(ctx, source, opts)
+}
+
+// rootfsFormatLabel returns a short human-readable format name for log/error
+// messages. Unknown values surface verbatim so a misconfigured format is not
+// hidden behind a generic label.
+func rootfsFormatLabel(rootfsFormat string) string {
+	switch rootfsFormat {
+	case config.RootfsFormatErofs:
+		return "erofs"
+	case config.RootfsFormatExt4, "":
+		return "ext4"
+	default:
+		return rootfsFormat
+	}
 }
 
 func reportExistingArtifact(
