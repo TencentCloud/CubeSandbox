@@ -705,6 +705,17 @@ type CreateTemplateFromImageReq struct {
 	// Backend is the CoW store (xfs｜s3) for this template and every
 	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.
 	Backend string `json:"backend,omitempty"`
+
+	// RootfsFormat is the rootfs packaging format CubeTemplateCenter produces
+	// for this template's artifact: "ext4" (default, historical) or "erofs".
+	// It is a server-side decision stamped from CubeMaster's
+	// template.rootfs_format config at submit time (see
+	// normalizeTemplateImageRequest), NOT a client-supplied field. It is
+	// persisted in the job's request_json snapshot and folded into the spec
+	// fingerprint, so a replayed build keeps the format it was submitted with
+	// even if the operator later rotates rootfs_format, and ext4/erofs builds
+	// of the same image never share (and thus misuse) each other's artifact.
+	RootfsFormat string `json:"rootfs_format,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -113,6 +114,23 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 			return nil, err
 		}
 		cloned.Backend = backend
+	}
+	// RootfsFormat is a server-side decision (template.rootfs_format), not a
+	// client-supplied field. A fresh submission leaves it empty, so we stamp it
+	// from the current config. A replayed job already carries the format it was
+	// submitted with (decoded from the persisted request snapshot); we keep it
+	// verbatim because the operator may have rotated rootfs_format between
+	// submit and resume, but a build's format is fixed at submit time.
+	if strings.TrimSpace(cloned.RootfsFormat) == "" {
+		cloned.RootfsFormat = config.GetConfig().RootfsFormat()
+	} else {
+		cloned.RootfsFormat = strings.ToLower(strings.TrimSpace(cloned.RootfsFormat))
+		switch cloned.RootfsFormat {
+		case config.RootfsFormatExt4, config.RootfsFormatErofs:
+		default:
+			return nil, fmt.Errorf("rootfs_format %q is invalid; must be %q or %q",
+				cloned.RootfsFormat, config.RootfsFormatExt4, config.RootfsFormatErofs)
+		}
 	}
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err

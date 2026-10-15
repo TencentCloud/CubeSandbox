@@ -23,6 +23,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -57,6 +58,80 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	if req.Backend != "" {
 		t.Fatalf("Backend=%q, omit must stay empty for historical create-from-image", req.Backend)
 	}
+}
+
+func TestNormalizeTemplateImageRequestRootfsFormat(t *testing.T) {
+	// A fresh submission leaves RootfsFormat empty; normalize stamps it from
+	// the server config (template.rootfs_format). In tests config.GetConfig()
+	// is nil, so RootfsFormat() defaults to "ext4".
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatExt4, req.RootfsFormat)
+
+	// A replayed job keeps the format it was submitted with — it is NOT
+	// re-stamped from the current config (the operator may have rotated
+	// rootfs_format between submit and resume, but a build's format is fixed
+	// at submit time).
+	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      config.RootfsFormatErofs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
+
+	// Surrounding whitespace and uppercase are canonicalized.
+	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      "  EROFS ",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
+
+	// An explicit-but-invalid format is rejected loudly rather than silently
+	// building the wrong format.
+	_, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      "xfs",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rootfs_format")
+}
+
+func TestBuildTemplateSpecFingerprintUsesRootfsFormat(t *testing.T) {
+	base := &types.CreateTemplateFromImageReq{
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+	}
+	reqExt4 := *base
+	reqExt4.RootfsFormat = config.RootfsFormatExt4
+	reqErofs := *base
+	reqErofs.RootfsFormat = config.RootfsFormatErofs
+
+	// ext4 and erofs builds of the exact same spec must NOT share a
+	// fingerprint, otherwise CubeMaster/CubeTemplateCenter would reuse one
+	// format's artifact for the other and ship a mislabeled rootfs.
+	fpExt4 := buildTemplateSpecFingerprint(&reqExt4, "sha256:src")
+	fpErofs := buildTemplateSpecFingerprint(&reqErofs, "sha256:src")
+	assert.NotEqual(t, fpExt4, fpErofs)
+
+	// Same format reproduces the same fingerprint (deterministic).
+	assert.Equal(t, fpExt4, buildTemplateSpecFingerprint(&reqExt4, "sha256:src"))
+	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofs, "sha256:src"))
+
+	// An empty (legacy/un-normalized) RootfsFormat differs from an explicit
+	// ext4, so pre-step-2 artifacts are not silently reused for new
+	// explicit-format builds.
+	assert.NotEqual(t, buildTemplateSpecFingerprint(base, "sha256:src"), fpExt4)
 }
 
 func TestNormalizeTemplateImageRequestBackendS3(t *testing.T) {

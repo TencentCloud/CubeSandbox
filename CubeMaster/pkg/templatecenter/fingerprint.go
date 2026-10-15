@@ -68,6 +68,10 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ExposedPorts            []int32                   `json:"exposed_ports,omitempty"`
 		InstanceType            string                    `json:"instance_type"`
 		NetworkType             string                    `json:"network_type"`
+		// RootfsFormat is part of the artifact identity so an ext4 and an
+		// erofs build of the same image+spec produce different fingerprints
+		// and never reuse (and thus mislabel) each other's artifact.
+		RootfsFormat            string                    `json:"rootfs_format"`
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
@@ -78,6 +82,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ExposedPorts:            req.ExposedPorts,
 		InstanceType:            req.InstanceType,
 		NetworkType:             req.NetworkType,
+		RootfsFormat:            req.RootfsFormat,
 		ContainerOverrides:      req.ContainerOverrides,
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 		EnvdBinarySHA256:        envdSHA,
