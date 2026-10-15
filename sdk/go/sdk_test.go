@@ -1977,8 +1977,8 @@ func TestCommandsRunNon200HTMLResponseDiagnostic(t *testing.T) {
 	if !strings.Contains(apiErr.Message, "502 Bad Gateway") {
 		t.Fatalf("message=%q, want original gateway error", apiErr.Message)
 	}
-	if !strings.Contains(apiErr.Message, "CUBE_PROXY_NODE_IP") {
-		t.Fatalf("message=%q, want CUBE_PROXY_NODE_IP hint", apiErr.Message)
+	if !strings.Contains(apiErr.Message, "unreachable") {
+		t.Fatalf("message=%q, want upstream-unreachable hint on 5xx", apiErr.Message)
 	}
 
 	// Also verify 404 HTML error page clears ErrSandboxNotFound classification
