@@ -476,7 +476,7 @@ if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
 	for t in dataplane recovery snapshot export srcdel selfimport derived \
 		 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
-		 import_fanout cubecow_client snapdelete pending_delete fs hot_upgrade \
+		 import_fanout preheat cubecow_client snapdelete pending_delete fs hot_upgrade \
 		 hot_upgrade_negative guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
@@ -486,7 +486,7 @@ else
 		echo "--- dataplane"
 		for t in dataplane recovery snapshot export srcdel selfimport derived \
 			 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
-			 import_fanout cubecow_client snapdelete pending_delete fs hot_upgrade \
+			 import_fanout preheat cubecow_client snapdelete pending_delete fs hot_upgrade \
 			 hot_upgrade_negative guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
@@ -519,6 +519,10 @@ else
 		# join the hidden template; decouple:true must copy that template once.
 		run_suite run_import_fanout_test.sh \
 			./test/dataplane/run_import_fanout_test.sh
+		# Four exports imported in one burst, so their template preheats
+		# overlap, then concurrent cold reads of the clones hit the cache.
+		run_suite run_preheat_test.sh \
+			./test/dataplane/run_preheat_test.sh
 		# Handing on an imported volume without copying it: three lvstores in
 		# turn, so that what the last one reads has to resolve against two
 		# prefixes at once. Next to selfimport because it is the other half of

@@ -2766,7 +2766,10 @@ s3_bs_dev_teardown(struct s3_ctx *ctx)
 	 * fill would land inside it, but "usually long enough" is not a lifetime
 	 * rule. New native fills cannot start because s3_flush_map_updated checks
 	 * ctx->destroying; s3_cache_stop_object_io() closes the imported-object
-	 * lane under the cache lock before this quiescence check.
+	 * lane under the cache lock before this quiescence check. A preheat
+	 * reservation still owns its slot until the GET completes, and
+	 * s3_cache_is_quiesced() stays false for that long so the completion
+	 * does not run against a freed cache.
 	 *
 	 * Off-owner cache hits are not counted in ctx->inflight or in
 	 * s3_cache_is_quiesced() until they take the cache lock. They do not need
