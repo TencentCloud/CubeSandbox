@@ -451,9 +451,10 @@ func (p *Pty) unary(ctx context.Context, method string, payload any, allowNotFou
 		if isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
 			// A misrouted Web UI / gateway page must not masquerade as
 			// "not found" or a misclassified API error: report the routing
-			// diagnostic instead.
+			// diagnostic instead, keeping the "<method> failed: " prefix so
+			// the failing call is attributable in logs.
 			resp.Body = io.NopCloser(bytes.NewReader(body))
-			return false, validateConnectResponse(resp)
+			return false, fmt.Errorf("%s failed: %w", method, validateConnectResponse(resp))
 		}
 		if allowNotFound && isConnectNotFound(resp.StatusCode, body) {
 			return false, nil

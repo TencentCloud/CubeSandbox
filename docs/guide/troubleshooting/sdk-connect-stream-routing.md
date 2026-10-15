@@ -15,6 +15,8 @@ lang: en-US
 
 Go SDK calls such as `Commands.Run`, `Files.WatchDir`, or `Pty.Create` fail with a message about an HTML/text response, an invalid Connect envelope, or a message that is too large. A browser login page, gateway error page, JSON response, or compressed response may be returned instead of a Connect stream.
 
+Known limitation: `RunCode` uses the separate Jupyter `/execute` endpoint, which is not covered by this diagnostic yet — a misrouted 200 HTML page fed to its stream parser surfaces as an empty result with no error (see [#1759](https://github.com/TencentCloud/CubeSandbox/issues/1759)).
+
 ## Environment
 
 - Go SDK Connect streaming calls through CubeProxy

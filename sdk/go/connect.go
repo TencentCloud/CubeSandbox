@@ -178,6 +178,9 @@ func misroutedHTMLDiagnostic(resp *http.Response) *APIError {
 // data planes) arrive as JSON; an HTML or text 404 on a data-plane streaming endpoint
 // indicates the request was misrouted (e.g. to a web UI or a Go net/http.NotFound
 // gateway) rather than reaching CubeProxy.
+// Note: resp.Body is replaced during validation (with a wrapper over the peeked
+// prefix); the replacement's Close does not close the original body, so the caller
+// must keep a reference to the original in order to release the connection.
 // For 200 responses, text/html media types (such as from a misrouted Web UI or portal
 // landing page) are immediately rejected with an *APIError without blocking on body reads.
 // Other content types (and omitted headers) fall through to envelope parsing for maximum
