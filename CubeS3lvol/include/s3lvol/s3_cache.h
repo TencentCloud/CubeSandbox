@@ -124,10 +124,14 @@
  * caller's (see s3_cache_populate), so this bounds both the memory that costs
  * and how much of the local device's queue depth cache fills may take from the
  * WAL. Filling the cache is never more important than acknowledging a write. */
-#define S3_CACHE_STAGING_BUFS   16
+#define S3_CACHE_STAGING_BUFS   32
 /* Export-parent population is opportunistic and must not consume the staging
  * pool needed by native lvstore reads and flushes. */
-#define S3_CACHE_OBJECT_FILLS_MAX 4
+#define S3_CACHE_OBJECT_FILLS_MAX 16
+/* GETs admitted for template preheat across every export of one lvstore.
+ * Completed objects wait for an object-fill position rather than downloading
+ * again, so this can be larger than the disk-fill window above. */
+#define S3_CACHE_PREHEAT_MAX 32
 
 /* Whole-object DRAM hot set. RPC callers use DEFAULT when the parameter is
  * omitted and may pass zero to retain the disk-only behaviour. The limit keeps
@@ -301,6 +305,50 @@ void s3_cache_object_populate(struct s3_cache *cache,
 			      uint32_t offset_in_object, const void *buf,
 			      uint32_t length, uint32_t object_valid_bytes);
 
+/** Completion for a cache populate that must be durably observable. */
+typedef void (*s3_cache_populate_cb)(void *cb_arg, int status);
+
+/**
+ * A cache-global preheat admission ticket.
+ *
+ * Acquiring one reserves an object slot and one of S3_CACHE_PREHEAT_MAX
+ * cache-global preheat positions before the caller starts its GET. The disk
+ * fill window stays at S3_CACHE_OBJECT_FILLS_MAX; a finished GET waits for
+ * that window instead of being downloaded again. Concurrent export walks
+ * share this one admission limit.
+ */
+struct s3_cache_object_reservation;
+
+/**
+ * Reserve capacity for one whole-object preheat.
+ *
+ * \return 0 with *out set on success, 1 when the object is already complete,
+ *         -EALREADY when another preheat owns this identity, -EAGAIN when the
+ *         shared preheat window is full, and -ENOSPC when no free object slot
+ *         exists. -ENOTSUP means the object index is disabled. A negative
+ *         return never owns a reservation.
+ */
+int s3_cache_object_reserve(struct s3_cache *cache,
+			    const struct s3_cache_object_id *id,
+			    uint32_t object_valid_bytes,
+			    struct s3_cache_object_reservation **out);
+
+/** Cancel a reservation whose GET did not produce a usable object. */
+void s3_cache_object_reservation_cancel(
+	struct s3_cache_object_reservation *reservation);
+
+/**
+ * Consume a reservation and populate its whole object.
+ *
+ * A successful call owns the reservation and invokes cb_fn exactly once,
+ * after the object is durable. The source buffer must remain valid until
+ * then: the write may wait for a disk-fill position. A negative return
+ * consumes and releases the reservation without invoking cb_fn.
+ */
+int s3_cache_object_populate_reserved_notify(
+	struct s3_cache_object_reservation *reservation, const void *buf,
+	uint32_t length, s3_cache_populate_cb cb_fn, void *cb_arg);
+
 /**
  * Best-effort alias from a CopyObject destination mapping to an already cached
  * source object. No bytes or disk slots are copied. Registration is skipped
@@ -318,8 +366,11 @@ void s3_cache_object_alias(struct s3_cache *cache,
 			   uint32_t object_valid_bytes);
 
 /* Refuse new imported-object reads/fills before the owning bs_dev waits for
- * quiescence. Existing I/O is unaffected and remains visible to
- * s3_cache_is_quiesced(). */
+ * quiescence. Existing disk I/O is unaffected and remains visible to
+ * s3_cache_is_quiesced(). A preheat GET that already holds a reservation is
+ * not cancelled here; its completion releases the reservation, and quiescence
+ * stays false until then. Reservations already waiting for a disk fill are
+ * failed before this returns. */
 void s3_cache_stop_object_io(struct s3_cache *cache);
 
 /**
@@ -370,7 +421,8 @@ void s3_cache_drop_chunk(struct s3_cache *cache, uint64_t chunk_index);
  * pointer into the cache's internal state while it runs, and it is fire and
  * forget, so there is no completion for a caller to wait on -- this is how it
  * finds out. Reads are covered too, though a caller draining its own I/O has
- * already accounted for those.
+ * already accounted for those. A preheat reservation is outstanding as well:
+ * it owns a slot across the GET, before any disk fill exists.
  */
 bool s3_cache_is_quiesced(const struct s3_cache *cache);
 

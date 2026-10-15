@@ -69,6 +69,10 @@ struct s3lvol_import {
 	 * this node talks to it. */
 	bool                        path_style;
 	bool                        verify_tls;
+	/* Object-cache walk for this process. The cache index is memory only,
+	 * so the next process may start another walk when the template's
+	 * esnap device is created again. */
+	bool                        preheat_started;
 
 	/* Liveness lease.
 	 *
@@ -929,6 +933,10 @@ import_on_swap(void *arg, struct s3_export_manifest *m)
 	}
 }
 
+static bool import_template_preheat_waits(const struct s3lvol_import *imp);
+static void import_start_template_preheat(struct s3lvol_lvstore *lvs,
+					  const char *uuid_str);
+
 int
 s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 			const void *esnap_id, uint32_t id_len,
@@ -979,7 +987,11 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	}
 
 	/* Ownership of the client reference moves into the bs_dev, which releases
-	 * it from destroy(). */
+	 * it from destroy(). During lvstore load the blobstore is not associated
+	 * yet, so the import record is what names the destination cache. */
+	if (!lvs) {
+		lvs = imp->lvs;
+	}
 	if (lvs && imp->lvs == lvs) {
 		shared_cache =
 			s3_bs_dev_get_cache(s3lvol_lvstore_get_bs_dev(lvs));
@@ -988,6 +1000,11 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	if (rc != 0) {
 		s3_client_put(client);
 		return rc;
+	}
+	if (shared_cache && !imp->preheat_started &&
+	    !import_template_preheat_waits(imp) &&
+	    s3_export_bs_dev_preheat(*bs_dev) == 0) {
+		imp->preheat_started = true;
 	}
 	/* A 404 refetch swaps the device's manifest first. Without this the
 	 * import registry, derived exports, and same-bucket decouple would keep
@@ -2931,6 +2948,56 @@ import_clone_lane_ensure(struct s3lvol_lvstore *lvs, const char *uuid_str)
 	return lane;
 }
 
+/* True while this import must not start a template preheat: the creating
+ * batch has not decided whether it will decouple, or a decouple is already
+ * copying the same objects. */
+static bool
+import_template_preheat_waits(const struct s3lvol_import *imp)
+{
+	struct spdk_lvol *template;
+	struct import_clone_lane *lane;
+
+	if (!imp || !imp->lvs || !imp->m) {
+		return true;
+	}
+	if (import_template_build_find(imp->lvs, imp->m->uuid_str)) {
+		return true;
+	}
+	if (export_decouple_finalizing(imp->lvs, imp->m->uuid_str)) {
+		return true;
+	}
+	template = import_template_find(imp->lvs, imp->m->uuid_str);
+	if (template && s3lvol_lvol_decouple_pending(template)) {
+		return true;
+	}
+	lane = import_clone_lane_find(imp->lvs, imp->m->uuid_str);
+	return lane != NULL && lane->defer_decouple;
+}
+
+static void
+import_start_template_preheat(struct s3lvol_lvstore *lvs, const char *uuid_str)
+{
+	struct s3lvol_import *imp;
+	struct spdk_lvol *template;
+	struct spdk_bs_dev *esnap;
+
+	imp = import_find(lvs, uuid_str);
+	if (!imp || imp->preheat_started || import_template_preheat_waits(imp)) {
+		return;
+	}
+	template = import_template_find(lvs, uuid_str);
+	if (!template || !template->blob) {
+		return;
+	}
+	esnap = spdk_blob_get_esnap_bs_dev(template->blob);
+	if (!esnap) {
+		return;
+	}
+	if (s3_export_bs_dev_preheat(esnap) == 0) {
+		imp->preheat_started = true;
+	}
+}
+
 static void
 import_clone_lane_release(struct import_clone_lane *lane)
 {
@@ -2989,6 +3056,7 @@ import_lane_start_decouple(struct import_clone_lane *lane)
 		SPDK_WARNLOG("Could not start decoupling the shared template of "
 			     "%s: %s. Clones of it still read through to the "
 			     "export.\n", lane->uuid_str, spdk_strerror(-rc));
+		import_start_template_preheat(lane->lvs, lane->uuid_str);
 	}
 }
 
@@ -3280,6 +3348,7 @@ import_clone_closed_batch(struct import_ctx *builder)
 	}
 	import_clone_lane_push(lane, builder, true);
 	import_clone_lane_kick(lane);
+	import_start_template_preheat(builder->lvs, builder->uuid_str);
 }
 
 static void
