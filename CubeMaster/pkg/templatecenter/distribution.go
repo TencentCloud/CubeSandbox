@@ -45,7 +45,7 @@ func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandbox
 	}
 }
 
-func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
+func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 	if artifactID == "" {
 		return nil
 	}
@@ -54,23 +54,24 @@ func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType string
 		if target == nil {
 			continue
 		}
-		if _, err := destroyArtifactOnNode(ctx, artifactID, instanceType, target); err != nil {
+		if _, err := destroyArtifactOnNode(ctx, artifactID, instanceType, rootfsFormat, target); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	return cleanupErr
 }
 
-// destroyArtifactOnNode issues an idempotent ext4 artifact destroy to a single
-// node. It fills storage_media=ext4 and the instance-type annotation so the
-// cubelet routes to its synchronous pmem destroy path (a plain DestroyImage is
-// a no-op for ext4 artifacts that are not containerd images).
+// destroyArtifactOnNode issues an idempotent artifact destroy to a single
+// node. It fills storage_media from the artifact's rootfs format and the
+// instance-type annotation so the cubelet routes to its synchronous pmem
+// destroy path (a plain DestroyImage is a no-op for ext4/erofs artifacts that
+// are not containerd images).
 //
 // Returns inUse=true (and nil error) when the node refuses because a running
 // sandbox still references the artifact: that is a protection, not a failure,
 // and the caller keeps the artifact for GC to retry. NotFound is treated as
 // success (idempotent). Any other failure is returned as an error.
-func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType string, target *node.Node) (bool, error) {
+func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType, rootfsFormat string, target *node.Node) (bool, error) {
 	if target == nil {
 		return false, nil
 	}
@@ -83,7 +84,7 @@ func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType string,
 		RequestID: uuid.NewString(),
 		Spec: &imagev1.ImageSpec{
 			Image:        artifactID,
-			StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
+			StorageMedia: normalizedRootfsFormat(rootfsFormat),
 			Annotations: map[string]string{
 				constants.CubeAnnotationsInsType: instanceType,
 			},
@@ -196,7 +197,7 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
-		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
+		StorageMedia: normalizedRootfsFormat(artifact.RootfsFormat),
 		Annotations: map[string]string{
 			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
 			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,

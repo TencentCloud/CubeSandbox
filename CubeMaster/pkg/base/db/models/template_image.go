@@ -43,6 +43,14 @@ type RootfsArtifact struct {
 	CubeEgressCABaked          bool   `json:"cube_egress_ca_baked" gorm:"column:cube_egress_ca_baked"`
 	CubeEgressCAFingerprint    string `json:"cube_egress_ca_fingerprint" gorm:"column:cube_egress_ca_fingerprint"`
 	CubeEgressCATargetsWritten int    `json:"cube_egress_ca_targets_written" gorm:"column:cube_egress_ca_targets_written"`
+
+	// RootfsFormat is the packaging format this artifact was built in
+	// ("ext4" or "erofs"). CubeTemplateCenter reports it in the BUILT callback
+	// (rootfs_format) and CubeMaster persists it here so the distribution /
+	// destroy paths can fill ImageSpec.StorageMedia for Cubelet instead of
+	// hardcoding ext4. Defaults to "ext4" (the historical format) for rows
+	// predating the column. See migrations/20261016120000_rootfs_format.sql.
+	RootfsFormat string `json:"rootfs_format" gorm:"column:rootfs_format"`
 }
 
 func (RootfsArtifact) TableName() string {

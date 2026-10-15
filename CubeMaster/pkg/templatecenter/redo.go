@@ -428,7 +428,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 
 	readyTargets := targets
 	if resumePhase == JobPhaseDistributing {
-		if err := cleanupArtifactOnNodes(ctx, artifact.ArtifactID, generatedReq.InstanceType, targets); err != nil {
+		if err := cleanupArtifactOnNodes(ctx, artifact.ArtifactID, generatedReq.InstanceType, artifact.RootfsFormat, targets); err != nil {
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, fmt.Sprintf("cleanup artifact before redistribute failed: %v", err))
 			return
 		}

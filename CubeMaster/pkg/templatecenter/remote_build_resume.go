@@ -124,6 +124,21 @@ type RemoteBuildResult struct {
 	RootfsFormat string
 }
 
+// normalizedRootfsFormat canonicalizes a rootfs format string to the lowercase
+// value persisted in RootfsArtifact.RootfsFormat / passed as ImageSpec.StorageMedia.
+// Empty (and any value not ext4/erofs) falls back to "ext4", the historical
+// default, so a missing/legacy value never selects the erofs device path by
+// accident. This is the single source of truth for the ext4 default downstream
+// of the BUILT callback.
+func normalizedRootfsFormat(format string) string {
+	switch f := strings.ToLower(strings.TrimSpace(format)); f {
+	case config.RootfsFormatErofs:
+		return config.RootfsFormatErofs
+	default:
+		return config.RootfsFormatExt4
+	}
+}
+
 // Validate checks the fields the downstream distribution guard requires.
 // distributeRootfsArtifact refuses incomplete records (ext4_size_bytes=0 /
 // empty download_token), so catching it here yields a far clearer error.
@@ -649,6 +664,10 @@ func finalizeRemoteArtifact(
 	record.CubeEgressCABaked = result.CubeEgressCABaked
 	record.CubeEgressCAFingerprint = result.CubeEgressCAFingerprint
 	record.CubeEgressCATargetsWritten = result.CubeEgressCATargets
+	// Persist the build format so the distribution / destroy paths can read it
+	// from the artifact row instead of hardcoding ext4. Normalize to ext4 for
+	// an empty result (older TC / pre-step replay) to match the DB column default.
+	record.RootfsFormat = normalizedRootfsFormat(result.RootfsFormat)
 
 	// Same base URL local mode uses (CubeMaster's own request base URL, echoed
 	// back by TC), so the generated request and the distribution annotations
@@ -686,6 +705,7 @@ func finalizeRemoteArtifact(
 		"cube_egress_ca_baked":           record.CubeEgressCABaked,
 		"cube_egress_ca_fingerprint":     record.CubeEgressCAFingerprint,
 		"cube_egress_ca_targets_written": record.CubeEgressCATargetsWritten,
+		"rootfs_format":                  record.RootfsFormat,
 	})
 	if err != nil {
 		return nil, nil, err

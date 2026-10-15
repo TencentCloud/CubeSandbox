@@ -693,6 +693,55 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 }
 
+func TestGenerateTemplateCreateRequestStorageMediaFromFormat(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-fmt"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-fmt",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	baseArtifact := func() *models.RootfsArtifact {
+		return &models.RootfsArtifact{
+			ArtifactID:              "artifact-fmt",
+			TemplateSpecFingerprint: "fingerprint-fmt",
+			Ext4SHA256:              "sha256-fmt",
+			Ext4SizeBytes:           1024,
+			DownloadToken:           "token-fmt",
+		}
+	}
+	// erofs artifact → ImageSpec.StorageMedia = "erofs".
+	artifact := baseArtifact()
+	artifact.RootfsFormat = config.RootfsFormatErofs
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatErofs {
+		t.Fatalf("erofs artifact: StorageMedia=%q, want %q", got.Containers[0].Image.StorageMedia, config.RootfsFormatErofs)
+	}
+	// ext4 artifact → "ext4".
+	artifact = baseArtifact()
+	artifact.RootfsFormat = config.RootfsFormatExt4
+	got, err = generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatExt4 {
+		t.Fatalf("ext4 artifact: StorageMedia=%q, want %q", got.Containers[0].Image.StorageMedia, config.RootfsFormatExt4)
+	}
+	// Empty/legacy artifact (column predating migration) → defaults to ext4.
+	artifact = baseArtifact()
+	got, err = generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatExt4 {
+		t.Fatalf("empty artifact: StorageMedia=%q, want %q (ext4 default)", got.Containers[0].Image.StorageMedia, config.RootfsFormatExt4)
+	}
+}
+
 func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-s3"},
@@ -1303,6 +1352,27 @@ func TestRemoteBuildResultValidateRootfsFormat(t *testing.T) {
 	}
 }
 
+func TestNormalizedRootfsFormat(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", config.RootfsFormatExt4},
+		{"ext4", config.RootfsFormatExt4},
+		{"erofs", config.RootfsFormatErofs},
+		{"EROFS", config.RootfsFormatErofs},
+		{"  erofs ", config.RootfsFormatErofs},
+		// Unknown / legacy values fall back to ext4 so a missing/legacy format
+		// never accidentally selects the erofs device path.
+		{"xfs", config.RootfsFormatExt4},
+		{"future", config.RootfsFormatExt4},
+	}
+	for _, c := range cases {
+		if got := normalizedRootfsFormat(c.in); got != c.want {
+			t.Fatalf("normalizedRootfsFormat(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 
 func TestManagedArtifactDirRecognizesWorkAndStoreRoots(t *testing.T) {
 	workRoot := filepath.Join(t.TempDir(), "work")
@@ -1573,7 +1643,7 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 		return errors.New("cleanup image failed")
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
@@ -1703,7 +1773,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 			return nil, fmt.Errorf("unexpected artifact lookup %d", lookupCalls)
 		}
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 		return nil
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
