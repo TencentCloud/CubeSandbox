@@ -1,0 +1,51 @@
+{
+  "backToSnapshots": "Back to snapshots",
+  "notFound": "Snapshot not found or already deleted.",
+  "loadError": "Failed to load snapshot detail. Please try again.",
+  "snapshotId": "Snapshot ID",
+  "createdAt": "Created",
+  "section": {
+    "origin": "Origin",
+    "originDesc": "The sandbox and node this snapshot was taken from.",
+    "replicas": "Data location",
+    "replicasDesc": "The node holding the snapshot data and its health.",
+    "refs": "Sandbox references",
+    "refsDesc": "Running sandboxes currently using this snapshot as rootfs.",
+    "danger": "Delete snapshot",
+    "dangerDesc": "This cannot be undone. Replica data on all nodes will be cleaned up."
+  },
+  "fields": {
+    "status": "Status",
+    "backend": "Backend",
+    "version": "version",
+    "rootfsSize": "rootfs size",
+    "originSandbox": "Origin sandbox",
+    "originNode": "Origin node",
+    "instanceType": "Instance type",
+    "snapshotID": "Snapshot ID",
+    "displayName": "Name",
+    "remoteStatus": "S3 sync status",
+    "notSynced": "Not synced",
+    "lastError": "Last error",
+    "node": "Node",
+    "phase": "Phase",
+    "spec": "Spec",
+    "compat": "Compat",
+    "versions": "Versions",
+    "lastJob": "Last job"
+  },
+  "empty": {
+    "replicas": "No replicas.",
+    "refs": "No running sandboxes reference this snapshot."
+  },
+  "delete": {
+    "button": "Delete Snapshot",
+    "confirm": "Confirm Delete",
+    "confirmDesc": "This cannot be undone. Replica data on all nodes will be cleaned up. Continue?",
+    "cancel": "Cancel",
+    "deleting": "Deleting…"
+  },
+  "copy": "Copy",
+  "copied": "Copied",
+  "clickToCopy": "Click to copy: {{text}}"
+}

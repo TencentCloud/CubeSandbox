@@ -4,7 +4,32 @@
   "noTemplates": "暂无模板。请使用 CLI 或 SDK 发布模板。",
   "tabs": {
     "list": "模板列表",
+    "snapshots": "快照列表",
     "compat": "兼容性"
+  },
+  "snap": {
+    "none": "暂无快照。可通过 SDK 或 CLI 对运行中的沙箱创建快照。",
+    "emptyPage": "本页暂无快照，请返回上一页。",
+    "copied": "已复制",
+    "col": {
+      "originSandbox": "来源沙箱",
+      "version": "版本",
+      "refs": "沙箱引用数"
+    },
+    "delete": {
+      "button": "删除快照",
+      "title": "删除快照",
+      "confirmDesc": "确定要删除快照",
+      "confirmDescSuffix": "吗？此操作不可撤销。",
+      "cancel": "取消",
+      "confirm": "确认删除",
+      "deleting": "删除中…"
+    },
+    "pagination": {
+      "prev": "上一页",
+      "next": "下一页",
+      "page": "第 {{page}} 页"
+    }
   },
   "compat": {
     "banner": "{{count}} 个模板需要重建。节点升级后，用它们新建沙箱可能失败。请打开模板，点击「重建模板」。",
