@@ -938,19 +938,38 @@ func TestValidateConnectResponseJSONDocKeepsClassification(t *testing.T) {
 }
 
 func TestValidateConnectResponseTruncatedJSONDoc(t *testing.T) {
-	// A JSON error document larger than the routing peek must still keep its
-	// classification: only the prefix is inspected.
+	// A JSON error document larger than the routing peek cannot be fully
+	// parsed from the prefix; the SDK must not misclassify it as a routing
+	// page just because the prefix was cut off.
 	big := `{"message":"` + strings.Repeat("x", maxRoutingPagePeekBytes) + `"}`
 	resp := &http.Response{
 		StatusCode: http.StatusNotFound,
 		Header:     http.Header{"Content-Type": []string{"text/plain"}},
 		Body:       io.NopCloser(strings.NewReader(big)),
 	}
-	// The prefix alone does not parse as a JSON document, so this degrades to
-	// the routing-page path; it must at least stay a well-formed error.
 	err := validateConnectResponse(resp)
-	if err == nil {
-		t.Fatal("validateConnectResponse(404 oversized JSON-as-text) returned nil error")
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 oversized JSON-as-text)=%v, want ErrSandboxNotFound", err)
+	}
+	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 oversized JSON-as-text)=%v, should not suggest proxy routing", err)
+	}
+}
+
+func TestValidateConnectResponseErrorKeyJSONDoc(t *testing.T) {
+	// CubeProxy's own error shape {"error": "..."} keeps its classification
+	// even when a hop mislabels it as text/plain.
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":"not found"}`)),
+	}
+	err := validateConnectResponse(resp)
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 error-key JSON-as-text)=%v, want ErrSandboxNotFound", err)
+	}
+	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 error-key JSON-as-text)=%v, should not suggest proxy routing", err)
 	}
 }
 

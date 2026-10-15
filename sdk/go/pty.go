@@ -386,8 +386,9 @@ func (p *Pty) openStream(ctx context.Context, method string, payload any, user s
 		}
 		return nil, err
 	}
+	body := resp.Body
 	if err := validateConnectResponse(resp); err != nil {
-		defer resp.Body.Close()
+		defer body.Close()
 		control.disconnect()
 		return nil, err
 	}

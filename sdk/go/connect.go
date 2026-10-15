@@ -107,8 +107,9 @@ func responseMediaType(resp *http.Response) string {
 }
 
 // looksLikeJSONErrorDocument reports whether body is a JSON object carrying a
-// "message" or "detail" string — the shape readErrorMessage extracts an API
-// error from. Such a document is a genuine API error even when the
+// "message", "detail", or "error" string — the shapes API errors take in this
+// project (readErrorMessage extracts "message"/"detail"; CubeProxy and CubeOps
+// emit {"error": "..."}). Such a document is a genuine API error even when the
 // Content-Type header says text/*, so it keeps its error classification.
 func looksLikeJSONErrorDocument(body []byte) bool {
 	trimmed := bytes.TrimSpace(body)
@@ -118,11 +119,12 @@ func looksLikeJSONErrorDocument(body []byte) bool {
 	var doc struct {
 		Message string `json:"message"`
 		Detail  string `json:"detail"`
+		Err     string `json:"error"`
 	}
 	if err := json.Unmarshal(trimmed, &doc); err != nil {
 		return false
 	}
-	return strings.TrimSpace(doc.Message) != "" || strings.TrimSpace(doc.Detail) != ""
+	return strings.TrimSpace(doc.Message) != "" || strings.TrimSpace(doc.Detail) != "" || strings.TrimSpace(doc.Err) != ""
 }
 
 // misroutedHTMLDiagnostic reports an HTTP 200 text/html response as a routing
@@ -144,7 +146,8 @@ func misroutedHTMLDiagnostic(resp *http.Response) *APIError {
 // HTML and 404 text pages with actionable hints while clearing false error
 // classifications on 404 routing pages (preserving ErrAuthentication on 401/403 and
 // genuine JSON API error documents, which keep their classification even when served
-// with a text/* content type). Legitimate CubeProxy 404 responses (on both control and
+// with a text/* content type; a body that looks like truncated JSON is left
+// untouched rather than risk misclassification). Legitimate CubeProxy 404 responses (on both control and
 // data planes) arrive as JSON; an HTML or text 404 on a data-plane streaming endpoint
 // indicates the request was misrouted (e.g. to a web UI or a Go net/http.NotFound
 // gateway) rather than reaching CubeProxy.
@@ -166,11 +169,16 @@ func validateConnectResponse(resp *http.Response) error {
 		lowerPeek := bytes.ToLower(bytes.TrimSpace(peek))
 		bodyLooksHTML := bytes.HasPrefix(lowerPeek, []byte("<!doctype")) || bytes.HasPrefix(lowerPeek, []byte("<html"))
 		jsonErrorDoc := looksLikeJSONErrorDocument(peek)
+		// If the peek was cut off at the limit and starts like a JSON document,
+		// it may be a large JSON error document we cannot fully parse: leave
+		// the server's error untouched rather than risk misclassification.
+		trimmedPeek := bytes.TrimSpace(peek)
+		undecidedJSON := !jsonErrorDoc && len(peek) == maxRoutingPagePeekBytes && len(trimmedPeek) > 0 && trimmedPeek[0] == '{'
 
 		mediaType := responseMediaType(resp)
 		isHTML := mediaType == "text/html" || bodyLooksHTML
 		isText404 := resp.StatusCode == http.StatusNotFound && strings.HasPrefix(mediaType, "text/")
-		routingPage := (isHTML || isText404) && !jsonErrorDoc
+		routingPage := (isHTML || isText404) && !jsonErrorDoc && !undecidedJSON
 		if routingPage {
 			// Only the truncated prefix below is used; drop the rest of a
 			// possibly multi-megabyte page instead of buffering it.

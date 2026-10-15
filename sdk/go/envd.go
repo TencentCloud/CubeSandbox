@@ -526,8 +526,9 @@ func (s *Sandbox) watchDir(ctx context.Context, path string, options ...fileRequ
 		cancel()
 		return nil, err
 	}
+	body := resp.Body
 	if err := validateConnectResponse(resp); err != nil {
-		defer resp.Body.Close()
+		defer body.Close()
 		cancel()
 		return nil, err
 	}
