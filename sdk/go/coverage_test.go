@@ -1015,3 +1015,74 @@ func TestMisroutedHTMLDiagnostic(t *testing.T) {
 		t.Fatalf("misroutedHTMLDiagnostic(nil)=%v, want nil", d)
 	}
 }
+
+func TestValidateConnectResponseAuthHint(t *testing.T) {
+	// A 401/403 HTML page keeps ErrAuthentication and gets an
+	// auth-appropriate hint, not the proxy-node-IP hint.
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader("<html>login</html>")),
+	}
+	err := validateConnectResponse(resp)
+	if !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("validateConnectResponse(401 HTML)=%v, want ErrAuthentication", err)
+	}
+	if !strings.Contains(err.Error(), "check credentials") {
+		t.Fatalf("validateConnectResponse(401 HTML)=%v, want auth-appropriate hint", err)
+	}
+	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(401 HTML)=%v, should not suggest proxy node IP", err)
+	}
+}
+
+func TestValidateConnectResponseEmptyBody404KeepsClassification(t *testing.T) {
+	// An empty 404 text body carries no positive routing signal: keep the
+	// server's classification.
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	err := validateConnectResponse(resp)
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 empty text)=%v, want ErrSandboxNotFound", err)
+	}
+	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 empty text)=%v, should not suggest proxy routing", err)
+	}
+}
+
+func TestPtyUnaryRoutingPageDiagnostic(t *testing.T) {
+	// A misrouted 404 HTML page must not be swallowed by the not-found
+	// shortcut as "already exited".
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html>gateway 404</html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	ok, err := sb.Pty().unary(context.Background(), "Kill", map[string]any{"pid": 1}, true)
+	if err == nil {
+		t.Fatal("unary(Kill) on 404 HTML routing page returned nil error")
+	}
+	if ok {
+		t.Fatal("unary(Kill) on 404 HTML routing page returned ok=true")
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want routing diagnostic hint", err)
+	}
+	if errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("err=%v should not be classified as ErrSandboxNotFound", err)
+	}
+}

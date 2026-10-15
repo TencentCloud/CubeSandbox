@@ -127,6 +127,33 @@ func looksLikeJSONErrorDocument(body []byte) bool {
 	return strings.TrimSpace(doc.Message) != "" || strings.TrimSpace(doc.Detail) != "" || strings.TrimSpace(doc.Err) != ""
 }
 
+// isRoutingPage reports whether an HTTP error response looks like a misrouted
+// Web UI / gateway page rather than a genuine API error: an HTML media type
+// or HTML-looking body, or a 404 with a non-empty text body that is not a
+// JSON API error document (e.g. Go's "404 page not found"). Empty bodies and
+// JSON-looking bodies keep the server's classification — there is no positive
+// signal of a routing page in those cases.
+func isRoutingPage(statusCode int, mediaType string, body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	lowerBody := bytes.ToLower(trimmed)
+	bodyLooksHTML := bytes.HasPrefix(lowerBody, []byte("<!doctype")) || bytes.HasPrefix(lowerBody, []byte("<html"))
+	if mediaType == "text/html" || bodyLooksHTML {
+		return true
+	}
+	if statusCode != http.StatusNotFound || !strings.HasPrefix(mediaType, "text/") {
+		return false
+	}
+	if len(trimmed) == 0 {
+		return false
+	}
+	if looksLikeJSONErrorDocument(trimmed) {
+		return false
+	}
+	// A body starting with '{' is either invalid JSON or a truncated document:
+	// not positive evidence of a routing page.
+	return trimmed[0] != '{'
+}
+
 // misroutedHTMLDiagnostic reports an HTTP 200 text/html response as a routing
 // diagnostic: a Connect stream is never labeled text/html, so such a response
 // means the request landed on a Web UI or portal page instead of CubeProxy.
@@ -166,19 +193,7 @@ func validateConnectResponse(resp *http.Response) error {
 		// buffering a whole misrouted page into memory.
 		var peek []byte
 		peek, _ = io.ReadAll(io.LimitReader(resp.Body, maxRoutingPagePeekBytes))
-		lowerPeek := bytes.ToLower(bytes.TrimSpace(peek))
-		bodyLooksHTML := bytes.HasPrefix(lowerPeek, []byte("<!doctype")) || bytes.HasPrefix(lowerPeek, []byte("<html"))
-		jsonErrorDoc := looksLikeJSONErrorDocument(peek)
-		// If the peek was cut off at the limit and starts like a JSON document,
-		// it may be a large JSON error document we cannot fully parse: leave
-		// the server's error untouched rather than risk misclassification.
-		trimmedPeek := bytes.TrimSpace(peek)
-		undecidedJSON := !jsonErrorDoc && len(peek) == maxRoutingPagePeekBytes && len(trimmedPeek) > 0 && trimmedPeek[0] == '{'
-
-		mediaType := responseMediaType(resp)
-		isHTML := mediaType == "text/html" || bodyLooksHTML
-		isText404 := resp.StatusCode == http.StatusNotFound && strings.HasPrefix(mediaType, "text/")
-		routingPage := (isHTML || isText404) && !jsonErrorDoc && !undecidedJSON
+		routingPage := isRoutingPage(resp.StatusCode, responseMediaType(resp), peek)
 		if routingPage {
 			// Only the truncated prefix below is used; drop the rest of a
 			// possibly multi-megabyte page instead of buffering it.
@@ -202,7 +217,11 @@ func validateConnectResponse(resp *http.Response) error {
 				}
 				apiErr.Message = apiErr.Message[:end] + "..."
 			}
-			apiErr.Message += "; response may be an HTML/text page instead of a Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service"
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				apiErr.Message += "; received an HTML/text page instead of a Connect stream; check credentials or whether a portal is intercepting the request"
+			} else {
+				apiErr.Message += "; response may be an HTML/text page instead of a Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service"
+			}
 			if resp.StatusCode == http.StatusNotFound {
 				apiErr.Kind = apiErrorKindAPI
 			}
