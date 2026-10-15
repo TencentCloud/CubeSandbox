@@ -22,6 +22,9 @@ const (
 	connectEndStreamFlag   = byte(0x02)
 	connectCompressedFlag  = byte(0x01)
 	maxConnectEnvelopeSize = 64 * 1024 * 1024
+	// maxRoutingPagePeekBytes bounds the error-body prefix buffered to tell a
+	// JSON API error document apart from an HTML/text routing page.
+	maxRoutingPagePeekBytes = 4096
 )
 
 type connectEndStream struct {
@@ -90,13 +93,61 @@ func parseConnectEndStream(raw []byte) error {
 	return fmt.Errorf("%s", message)
 }
 
+// responseMediaType returns the lower-cased media type of the response's
+// Content-Type header, or "" when the header is missing.
+func responseMediaType(resp *http.Response) string {
+	rawCT := resp.Header.Get("Content-Type")
+	if rawCT == "" {
+		return ""
+	}
+	if mt, _, err := mime.ParseMediaType(rawCT); err == nil {
+		return mt
+	}
+	return strings.ToLower(strings.TrimSpace(strings.Split(rawCT, ";")[0]))
+}
+
+// looksLikeJSONErrorDocument reports whether body is a JSON object carrying a
+// "message" or "detail" string — the shape readErrorMessage extracts an API
+// error from. Such a document is a genuine API error even when the
+// Content-Type header says text/*, so it keeps its error classification.
+func looksLikeJSONErrorDocument(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var doc struct {
+		Message string `json:"message"`
+		Detail  string `json:"detail"`
+	}
+	if err := json.Unmarshal(trimmed, &doc); err != nil {
+		return false
+	}
+	return strings.TrimSpace(doc.Message) != "" || strings.TrimSpace(doc.Detail) != ""
+}
+
+// misroutedHTMLDiagnostic reports an HTTP 200 text/html response as a routing
+// diagnostic: a Connect stream is never labeled text/html, so such a response
+// means the request landed on a Web UI or portal page instead of CubeProxy.
+// It returns nil for anything else and never reads the body.
+func misroutedHTMLDiagnostic(resp *http.Response) *APIError {
+	if resp == nil || resp.StatusCode != http.StatusOK || responseMediaType(resp) != "text/html" {
+		return nil
+	}
+	return &APIError{
+		Kind:    apiErrorKindAPI,
+		Message: fmt.Sprintf("unexpected content-type %q (received HTML instead of Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service)", resp.Header.Get("Content-Type")),
+	}
+}
+
 // validateConnectResponse ensures the HTTP response represents a valid Connect stream.
 // Non-200 responses are parsed into an APIError via apiErrorFromResponse, enriching
 // HTML and 404 text pages with actionable hints while clearing false error
-// classifications on 404 pages (preserving ErrAuthentication on 401/403). Legitimate CubeProxy
-// 404 responses (on both control and data planes) arrive as JSON; an HTML or text 404 on a data-plane
-// streaming endpoint indicates the request was misrouted (e.g. to a web UI or a Go
-// net/http.NotFound gateway) rather than reaching CubeProxy.
+// classifications on 404 routing pages (preserving ErrAuthentication on 401/403 and
+// genuine JSON API error documents, which keep their classification even when served
+// with a text/* content type). Legitimate CubeProxy 404 responses (on both control and
+// data planes) arrive as JSON; an HTML or text 404 on a data-plane streaming endpoint
+// indicates the request was misrouted (e.g. to a web UI or a Go net/http.NotFound
+// gateway) rather than reaching CubeProxy.
 // For 200 responses, text/html media types (such as from a misrouted Web UI or portal
 // landing page) are immediately rejected with an *APIError without blocking on body reads.
 // Other content types (and omitted headers) fall through to envelope parsing for maximum
@@ -106,21 +157,35 @@ func validateConnectResponse(resp *http.Response) error {
 		return errors.New("nil response")
 	}
 
-	var mediaType string
-	if rawCT := resp.Header.Get("Content-Type"); rawCT != "" {
-		if mt, _, err := mime.ParseMediaType(rawCT); err == nil {
-			mediaType = mt
-		} else {
-			mediaType = strings.ToLower(strings.TrimSpace(strings.Split(rawCT, ";")[0]))
-		}
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		apiErr := apiErrorFromResponse(resp).(*APIError)
-		lowerMsg := strings.ToLower(strings.TrimSpace(apiErr.Message))
-		isHTML := mediaType == "text/html" || strings.HasPrefix(lowerMsg, "<!doctype") || strings.HasPrefix(lowerMsg, "<html")
+		// Peek at a bounded prefix of the body so a genuine JSON API error
+		// document can be told apart from an HTML/text routing page without
+		// buffering a whole misrouted page into memory.
+		var peek []byte
+		peek, _ = io.ReadAll(io.LimitReader(resp.Body, maxRoutingPagePeekBytes))
+		lowerPeek := bytes.ToLower(bytes.TrimSpace(peek))
+		bodyLooksHTML := bytes.HasPrefix(lowerPeek, []byte("<!doctype")) || bytes.HasPrefix(lowerPeek, []byte("<html"))
+		jsonErrorDoc := looksLikeJSONErrorDocument(peek)
+
+		mediaType := responseMediaType(resp)
+		isHTML := mediaType == "text/html" || bodyLooksHTML
 		isText404 := resp.StatusCode == http.StatusNotFound && strings.HasPrefix(mediaType, "text/")
-		if isHTML || isText404 {
+		routingPage := (isHTML || isText404) && !jsonErrorDoc
+		if routingPage {
+			// Only the truncated prefix below is used; drop the rest of a
+			// possibly multi-megabyte page instead of buffering it.
+			resp.Body = io.NopCloser(bytes.NewReader(peek))
+		} else {
+			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), resp.Body))
+		}
+
+		var apiErr *APIError
+		if err := apiErrorFromResponse(resp); !errors.As(err, &apiErr) {
+			// apiErrorFromResponse always returns *APIError today; degrade
+			// gracefully instead of panicking if that ever changes.
+			return err
+		}
+		if routingPage {
 			const maxDiagnosticMsgLen = 200
 			if len(apiErr.Message) > maxDiagnosticMsgLen {
 				end := maxDiagnosticMsgLen
@@ -142,11 +207,8 @@ func validateConnectResponse(resp *http.Response) error {
 		return apiErr
 	}
 
-	if mediaType == "text/html" {
-		return &APIError{
-			Kind:    apiErrorKindAPI,
-			Message: fmt.Sprintf("unexpected content-type %q (received HTML instead of Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service)", resp.Header.Get("Content-Type")),
-		}
+	if diag := misroutedHTMLDiagnostic(resp); diag != nil {
+		return diag
 	}
 	return nil
 }

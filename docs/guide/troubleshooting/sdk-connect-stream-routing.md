@@ -22,15 +22,17 @@ Go SDK calls such as `Commands.Run`, `Files.WatchDir`, or `Pty.Create` fail with
 
 ## Root Cause
 
-The SDK data-plane requests must reach the CubeProxy stream endpoint. If `CUBE_PROXY_NODE_IP` is unset, points to the wrong node, or the proxy route is replaced by a web service or gateway, the response is not Connect framed data.
+The SDK data-plane requests must reach the CubeProxy stream endpoint. When `CUBE_PROXY_NODE_IP` is set, it must point at a reachable CubeProxy node; when it is unset, the client must be able to resolve `*.<CUBE_SANDBOX_DOMAIN>` to CubeProxy. If neither holds — or the route is taken over by a web service or gateway — the response is not Connect-framed data.
 
 ## Resolution
 
-1. Set `CUBE_PROXY_NODE_IP` to the IP address of the CubeProxy node reachable from the client:
+1. If `CUBE_PROXY_NODE_IP` is set, make sure it points at the IP address of the CubeProxy node reachable from the client:
 
    ```bash
    export CUBE_PROXY_NODE_IP=<cubeproxy-node-ip>
    ```
+
+   If it is unset, make sure `*.<CUBE_SANDBOX_DOMAIN>` resolves to CubeProxy from the client instead.
 
 2. Confirm that `CUBE_PROXY_PORT_HTTP` and the sandbox domain match the CubeProxy configuration.
 3. Check that the request is sent to the data-plane endpoint and that an intermediate gateway does not rewrite or compress the stream response.

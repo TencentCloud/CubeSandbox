@@ -449,6 +449,12 @@ func (p *Pty) unary(ctx context.Context, method string, payload any, allowNotFou
 		}
 		return false, apiErrorFromStatus(resp.StatusCode, fmt.Sprintf("%s failed: %s", method, extractErrorMessage(body, resp.StatusCode)))
 	}
+	// A 200 text/html response means the request landed on a Web UI or portal
+	// page instead of CubeProxy; surface the routing diagnostic instead of
+	// reporting success on a misrouted page.
+	if diag := misroutedHTMLDiagnostic(resp); diag != nil {
+		return false, diag
+	}
 	return true, nil
 }
 

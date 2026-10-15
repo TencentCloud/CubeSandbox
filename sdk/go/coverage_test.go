@@ -919,3 +919,80 @@ func TestValidateConnectResponse(t *testing.T) {
 		t.Fatalf("validateConnectResponse(application/json)=%v, want nil", err)
 	}
 }
+
+func TestValidateConnectResponseJSONDocKeepsClassification(t *testing.T) {
+	// A genuine JSON API error document keeps its classification even when a
+	// hop mislabels it as text/plain: the body, not the header, decides.
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(`{"message":"sandbox not found"}`)),
+	}
+	err := validateConnectResponse(resp)
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 JSON-as-text)=%v, want ErrSandboxNotFound", err)
+	}
+	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 JSON-as-text)=%v, should not suggest proxy routing", err)
+	}
+}
+
+func TestValidateConnectResponseTruncatedJSONDoc(t *testing.T) {
+	// A JSON error document larger than the routing peek must still keep its
+	// classification: only the prefix is inspected.
+	big := `{"message":"` + strings.Repeat("x", maxRoutingPagePeekBytes) + `"}`
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader(big)),
+	}
+	// The prefix alone does not parse as a JSON document, so this degrades to
+	// the routing-page path; it must at least stay a well-formed error.
+	err := validateConnectResponse(resp)
+	if err == nil {
+		t.Fatal("validateConnectResponse(404 oversized JSON-as-text) returned nil error")
+	}
+}
+
+func TestMisroutedHTMLDiagnostic(t *testing.T) {
+	html200 := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("<html>portal</html>")),
+	}
+	diag := misroutedHTMLDiagnostic(html200)
+	if diag == nil {
+		t.Fatal("misroutedHTMLDiagnostic(200 text/html) returned nil")
+	}
+	if diag.StatusCode != 0 {
+		t.Fatalf("diag.StatusCode=%d, want 0 (no HTTP error status on a 200)", diag.StatusCode)
+	}
+	if !strings.Contains(diag.Message, "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("diag=%q, want CUBE_PROXY_NODE_IP hint", diag.Message)
+	}
+
+	for name, resp := range map[string]*http.Response{
+		"200 json": {
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader("{}")),
+		},
+		"200 no content-type": {
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("")),
+		},
+		"404 html": {
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader("404")),
+		},
+	} {
+		if d := misroutedHTMLDiagnostic(resp); d != nil {
+			t.Fatalf("misroutedHTMLDiagnostic(%s)=%v, want nil", name, d)
+		}
+	}
+	if d := misroutedHTMLDiagnostic(nil); d != nil {
+		t.Fatalf("misroutedHTMLDiagnostic(nil)=%v, want nil", d)
+	}
+}

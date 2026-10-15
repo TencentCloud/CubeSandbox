@@ -22,15 +22,17 @@ lang: zh-CN
 
 ## 根因分析
 
-SDK 的数据面请求必须到达 CubeProxy 的流式端点。如果未设置 `CUBE_PROXY_NODE_IP`、配置了错误的节点，或代理路由被 Web 服务或网关替代，返回内容就不是 Connect 帧格式。
+SDK 的数据面请求必须到达 CubeProxy 的流式端点。当设置了 `CUBE_PROXY_NODE_IP` 时，它必须指向客户端可达的 CubeProxy 节点；未设置时，客户端必须能将 `*.<CUBE_SANDBOX_DOMAIN>` 解析到 CubeProxy。若两者都不成立，或路由被 Web 服务或网关接管，返回内容就不是 Connect 帧格式。
 
 ## 解决方案
 
-1. 将 `CUBE_PROXY_NODE_IP` 设置为客户端可访问的 CubeProxy 节点 IP：
+1. 如果设置了 `CUBE_PROXY_NODE_IP`，请确认它指向客户端可达的 CubeProxy 节点 IP：
 
    ```bash
    export CUBE_PROXY_NODE_IP=<cubeproxy-node-ip>
    ```
+
+   未设置时，请确认客户端能将 `*.<CUBE_SANDBOX_DOMAIN>` 解析到 CubeProxy。
 
 2. 确认 `CUBE_PROXY_PORT_HTTP` 和沙箱域名与 CubeProxy 配置一致。
 3. 确认请求发送到了数据面端点，并检查中间网关没有重写或压缩流式响应。

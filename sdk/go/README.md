@@ -339,7 +339,9 @@ If a Go SDK Connect stream returns an HTML/text page or invalid envelope, check
 the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
 These stream endpoints reject HTTP 200 responses labeled `text/html`. A 404
 HTML or text page otherwise classified as `ErrSandboxNotFound` is treated as a
-routing error; other 404 classifications, including JSON API errors, retain their
+routing error, unless the body is a JSON API error document (which keeps its
+classification even when served with a text/* content type); other 404 classifications,
+including JSON API errors, retain their
 usual `errors.Is` behavior. Non-200 HTML and 404 text error messages are
 truncated to 200 characters before appending the routing hint. This diagnostic
 does not cover `RunCode`, which uses the separate Jupyter endpoint.
