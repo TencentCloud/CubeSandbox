@@ -1575,6 +1575,17 @@ remove_obsolete_templatecenter_unit() {
   systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
+# Ship CubeShim/VMM host logrotate (#1290). Soft-fail: never block the role target.
+install_cubeshim_logrotate() {
+  local install_script="${INSTALL_PREFIX}/scripts/logrotate/install-logrotate.sh"
+  if [[ ! -f "${install_script}" ]]; then
+    log "WARN: logrotate installer missing (${install_script}); skipping"
+    return 0
+  fi
+  bash "${install_script}" \
+    || log "WARN: cube-shim/vmm log rotation was not installed; continuing without it"
+}
+
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
@@ -2191,6 +2202,7 @@ chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
+chmod +x "${INSTALL_PREFIX}/scripts/logrotate/"*.sh 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/CubeS3lvol/scripts/"*.sh 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/CubeS3lvol/bin/s3lvol_tgt" 2>/dev/null || true
@@ -2230,6 +2242,7 @@ restore_selinux_contexts
 # Persist the L7 skb->mark config before the units that consume it start.
 write_l7_marks_conf
 install_systemd_units
+install_cubeshim_logrotate
 mask_external_dep_services
 check_runtime_file_paths_not_directories
 start_systemd_target

@@ -294,12 +294,12 @@ control thread, not by deferred logger initialization or a vCPU/API thread.
 The host-side policy should run hourly and use `rename` + `create`; do not use
 `copytruncate`.
 
-For example, install the following as `/etc/logrotate.d/cubesandbox` and make
-sure the host invokes `logrotate` hourly:
+One-click install ships this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
+(outside `/etc/logrotate.d`) and enables `cube-sandbox-logrotate.timer` hourly.
+Kubernetes / Helm hosts still need a manual install; for example:
 
 ```text
-/data/log/CubeVmm/vmm.log
-/data/log/CubeShim/*.log {
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
     hourly
     rotate 24
     missingok

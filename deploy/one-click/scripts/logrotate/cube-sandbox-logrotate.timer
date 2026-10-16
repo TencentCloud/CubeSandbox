@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+[Unit]
+Description=Hourly CubeSandbox CubeShim/VMM log rotation
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=cube-sandbox-logrotate.service
+
+[Install]
+WantedBy=timers.target

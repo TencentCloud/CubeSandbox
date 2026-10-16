@@ -769,6 +769,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/CubeS3lvol" \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
+  "${PACKAGE_ROOT}/scripts/logrotate" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
   "${PACKAGE_ROOT}/cube-egress" \
   "${PACKAGE_ROOT}/terraform/tencentcloud"
@@ -909,6 +910,7 @@ fi
 # siblings), so the runtime needs every script in this directory.
 copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
+copy_dir_contents "${SCRIPT_DIR}/scripts/logrotate" "${PACKAGE_ROOT}/scripts/logrotate"
 # scripts/{one-click,systemd}/common.sh both `source ../common/validation.sh`,
 # so the shared scripts/common helpers must ship alongside them in the package.
 copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${PACKAGE_ROOT}/scripts/common"
@@ -983,6 +985,7 @@ done
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/logrotate" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
