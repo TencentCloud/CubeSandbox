@@ -8,6 +8,9 @@ common:
   sync_meta_data_interval: 30s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
+  # Max concurrency for distributing a template rootfs artifact to nodes.
+  # Default 4.
+  # distribution_workers: 4
   # CubeMaster's HTTP base URL, used by TC to report build results. Can be set
   # here (persistent, per-deployment) or overridden by CUBE_MASTER_ADDR env
   # (env wins). Defaults to http://127.0.0.1:8089 if both are empty.

@@ -124,6 +124,10 @@ type CommonConf struct {
 	// method on Config. Access via Config.TemplateCenterAddr() which handles the
 	// env > yaml priority.
 	TemplateCenterAddrValue         string          `yaml:"template_center_addr"`
+	// DistributionWorkers is the max concurrency for pushing a rootfs artifact
+	// to cubelet nodes during template distribution (distributeRootfsArtifactToNodes).
+	// Default 4, matching the historical hardcoded behavior.
+	DistributionWorkers             int             `yaml:"distribution_workers"`
 	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`
 	EnableAllCollectSandboxMemory   bool            `yaml:"enable_all_collect_sandbox_memory"`
 	FilterErrMsgErrorCode           map[int]bool    `yaml:"filter_err_msg_error_code"`
@@ -831,6 +835,11 @@ func preComHandleConf(config *Config) error {
 
 	if config.Common.AsyncTaskWorkerNum == 0 {
 		config.Common.AsyncTaskWorkerNum = runtime.NumCPU()
+	}
+	if config.Common.DistributionWorkers <= 0 {
+		// Template rootfs artifact distribution concurrency; 4 matches the
+		// historical hardcoded defaultDistributionWorkers.
+		config.Common.DistributionWorkers = 4
 	}
 	if config.Common.DefaultHeadlessServiceNodesNum == 0 {
 		config.Common.DefaultHeadlessServiceNodesNum = 1
