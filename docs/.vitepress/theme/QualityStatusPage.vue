@@ -73,8 +73,8 @@ const COPY = {
     footer: 'Aggregates only · no hosts, environment ids, or logs'
   },
   zh: {
-    kicker: 'CubeSandbox · 每晚状态',
-    titleA: 'master 每晚',
+    kicker: 'CubeSandbox · 每日构建',
+    titleA: 'master 的每日',
     titleEm: '质量',
     titleB: '状态',
     lead: '每晚从 master 构建 CubeSandbox，回放 SDK 端到端用例，并对照公开基准测试核心操作。',
