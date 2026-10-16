@@ -14,6 +14,11 @@ common:
   # (persistent, per-deployment) or overridden by CUBE_MASTER_ADDR env (env
   # wins). Defaults to http://127.0.0.1:8089 if both are empty.
   master_addr: "__CUBETEMPLATECENTER_MASTER_ADDR__"
+  # Max concurrency for distributing a template rootfs artifact to nodes
+  # (the artifact-push phase of template creation, redo, and the periodic
+  # replica-backfill sweep). Replica creation after the push is not affected
+  # by this knob. Default 4.
+  # distribution_workers: 4
 
 log:
   module: "templatecenter"
