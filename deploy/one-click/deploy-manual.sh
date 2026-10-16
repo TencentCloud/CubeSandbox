@@ -57,12 +57,14 @@ restart_core_services() {
   if [[ "${role}" == "compute" ]]; then
     units=(
       cube-sandbox-cubelet.service
+      cube-sandbox-ops-agent.service
     )
   else
     units=(
       cube-sandbox-cubemaster.service
       cube-sandbox-cube-api.service
       cube-sandbox-cubelet.service
+      cube-sandbox-ops-agent.service
     )
   fi
 

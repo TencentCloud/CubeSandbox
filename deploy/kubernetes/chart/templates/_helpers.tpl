@@ -191,6 +191,10 @@ tolerations:
 {{- printf "%s-master" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.opsAgentName" -}}
+{{- printf "%s-ops-agent" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.apiName" -}}
 {{- printf "%s-api" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -497,6 +501,22 @@ via secretKeyRef at runtime, so there is no fresh-install double generation.
 {{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
 {{- if and $existing $existing.data (index $existing.data "cube-template-callback-token") -}}
 {{- index $existing.data "cube-template-callback-token" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+cube.opsAgentToken resolves the shared secret gating CubeOps pushes to the
+node-local ops-agent (POST /api/v1/config/quota; CubeOps reads it as
+CUBE_OPS_OPSAGENT_TOKEN, ops-agent as OPS_AGENT_SHARED_TOKEN). Persisted as the
+cube-ops-agent-token key in the release Secret, looked up first so upgrades
+keep the value stable; consumed via secretKeyRef by both sides.
+*/}}
+{{- define "cube.opsAgentToken" -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
+{{- if and $existing $existing.data (index $existing.data "cube-ops-agent-token") -}}
+{{- index $existing.data "cube-ops-agent-token" | b64dec -}}
 {{- else -}}
 {{- randAlphaNum 32 -}}
 {{- end -}}

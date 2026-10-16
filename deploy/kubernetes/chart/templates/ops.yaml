@@ -46,6 +46,15 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_OPS_BIND
               value: {{ .Values.cubeOps.bind | quote }}
+            # ops-agent push channel: node-local agents listen on the compute
+            # nodes at .Values.opsAgent.port.
+            - name: CUBE_OPS_OPSAGENT_PORT
+              value: {{ .Values.opsAgent.port | quote }}
+            - name: CUBE_OPS_OPSAGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-ops-agent-token
             - name: CUBE_OPS_WAREHOUSE_WORK_DIR
               value: {{ $workDir | quote }}
             - name: TMPDIR
