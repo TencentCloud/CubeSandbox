@@ -188,7 +188,8 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 
 // distributionWorkerCount returns the configured artifact distribution
 // concurrency (common.distribution_workers), falling back to the built-in
-// default when no config is loaded (e.g. unit tests).
+// default when no config is loaded (e.g. unit tests). The knob sizes only the
+// artifact-push fan-out; replica creation keeps its own fixed concurrency.
 func distributionWorkerCount() int {
 	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil && cfg.Common.DistributionWorkers > 0 {
 		return cfg.Common.DistributionWorkers

@@ -123,9 +123,12 @@ type CommonConf struct {
 	// Named with a Value suffix to avoid colliding with the TemplateCenterAddr()
 	// method on Config. Access via Config.TemplateCenterAddr() which handles the
 	// env > yaml priority.
-	TemplateCenterAddrValue         string          `yaml:"template_center_addr"`
+	TemplateCenterAddrValue string `yaml:"template_center_addr"`
 	// DistributionWorkers is the max concurrency for pushing a rootfs artifact
 	// to cubelet nodes during template distribution (distributeRootfsArtifactToNodes).
+	// It applies to the distribution phase of both template creation and redo,
+	// and covers ONLY the artifact push; the subsequent replica-creation fan-out
+	// (createTemplateReplicasOnNodes) keeps its own fixed concurrency.
 	// Default 4, matching the historical hardcoded behavior.
 	DistributionWorkers             int             `yaml:"distribution_workers"`
 	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`
@@ -654,6 +657,12 @@ type SoftDeletePurgeConf struct {
 // to start).
 const DefaultCubeEgressCAPath = "/etc/cube/ca/cube-root-ca.crt"
 
+// DefaultDistributionWorkers is the default max concurrency for pushing a
+// rootfs artifact to cubelet nodes (common.distribution_workers), matching
+// the historical hardcoded behavior. Exported so templatecenter can derive
+// its own fallback from this single source of truth.
+const DefaultDistributionWorkers = 4
+
 type AppHookConfig struct {
 	PrestartHookByEnvKeys map[string][]*types.Hook `yaml:"prestart_hook_by_env_keys"`
 
@@ -837,9 +846,8 @@ func preComHandleConf(config *Config) error {
 		config.Common.AsyncTaskWorkerNum = runtime.NumCPU()
 	}
 	if config.Common.DistributionWorkers <= 0 {
-		// Template rootfs artifact distribution concurrency; 4 matches the
-		// historical hardcoded defaultDistributionWorkers.
-		config.Common.DistributionWorkers = 4
+		// Template rootfs artifact distribution concurrency.
+		config.Common.DistributionWorkers = DefaultDistributionWorkers
 	}
 	if config.Common.DefaultHeadlessServiceNodesNum == 0 {
 		config.Common.DefaultHeadlessServiceNodesNum = 1
