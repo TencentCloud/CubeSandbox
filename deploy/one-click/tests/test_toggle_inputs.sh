@@ -4,10 +4,11 @@
 #
 # Unit tests for the installer toggle mechanism (ONE_CLICK_TOGGLE_KEYS,
 # snapshot_one_click_toggles, apply_one_click_toggles) in lib/common.sh.
-# Toggle keys are on/off switches whose this-run value (process environment
-# or bundle .env, presence implying explicit intent even for the default
-# value) must survive the upgrade env merge, which otherwise preserves the
-# old runtime value for keys whose .env value equals the env.example default.
+# Toggle keys are on/off switches (plus the optional OTLP endpoint string)
+# whose this-run value (process environment or bundle .env, presence implying
+# explicit intent even for the default value) must survive the upgrade env
+# merge, which otherwise preserves the old runtime value for keys whose .env
+# value equals the env.example default.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,22 +42,28 @@ assert_toggle_keys() {
 # Reset the toggle variables so leftovers from a previous scenario cannot
 # leak into the next snapshot as process-env intent.
 reset_toggle_vars() {
-  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE OTEL_EXPORTER_OTLP_ENDPOINT
 }
 
 # Simulate what install.sh does around the upgrade merge for the toggle keys:
-# snapshot the intent, let the merged old-runtime value clobber the variable
-# (as `load_env_file "${MERGED_ENV}"` would), then re-apply.
+# snapshot presence/process intent, source the .env (stacked as install.sh does),
+# capture the shell-interpreted dotenv values, let the merged old-runtime value
+# clobber the variables (as `load_env_file "${MERGED_ENV}"` would), then re-apply.
 run_toggle_roundtrip() {
   local dotenv="$1"
   snapshot_one_click_toggles "${dotenv}"
+  if [[ -f "${dotenv}" ]]; then
+    load_env_file "${dotenv}"
+    capture_one_click_toggle_dotenv_values
+  fi
   ONE_CLICK_ENABLE_S3LVOL="${MERGED_S3LVOL:-}"
   CUBE_PVM_ENABLE="${MERGED_PVM:-}"
+  OTEL_EXPORTER_OTLP_ENDPOINT="${MERGED_OTEL:-}"
   apply_one_click_toggles 2>/dev/null
 }
 
 test_toggle_keys_registry() {
-  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE OTEL_EXPORTER_OTLP_ENDPOINT
 }
 
 # Core regression: a .env value that equals the env.example default (0) must
@@ -139,11 +146,87 @@ EOF
     || fail "active .env CUBE_PVM_ENABLE=0 must count as intent"
 }
 
+# An explicit empty .env endpoint CLEARS a previously set value on upgrade.
+test_otel_endpoint_can_be_cleared_on_upgrade() {
+  local dotenv="${TMP_DIR}/dotenv5.env"
+  echo "OTEL_EXPORTER_OTLP_ENDPOINT=" > "${dotenv}"
+  reset_toggle_vars
+  MERGED_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]] \
+    || fail "empty .env OTEL endpoint must clear the merged value"
+}
+
+# A non-empty .env endpoint wins over the merged (old runtime) value.
+test_otel_endpoint_dotenv_value_wins() {
+  local dotenv="${TMP_DIR}/dotenv6.env"
+  echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.9:4317" > "${dotenv}"
+  reset_toggle_vars
+  MERGED_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${OTEL_EXPORTER_OTLP_ENDPOINT}" == "http://10.0.0.9:4317" ]] \
+    || fail "expected .env OTEL endpoint to win over the merged value"
+}
+
+# `OTEL_EXPORTER_OTLP_ENDPOINT=x ./install.sh` intent survives with no .env.
+test_otel_endpoint_process_env_is_explicit() {
+  local dotenv="${TMP_DIR}/absent-otel.env"
+  reset_toggle_vars
+  OTEL_EXPORTER_OTLP_ENDPOINT="http://10.0.0.9:4317"
+  MERGED_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${OTEL_EXPORTER_OTLP_ENDPOINT}" == "http://10.0.0.9:4317" ]] \
+    || fail "expected process-env OTEL endpoint to win over the merged value"
+}
+
+# No endpoint intent anywhere: the merged (old runtime) value is preserved.
+test_otel_endpoint_absent_key_keeps_merged_value() {
+  local dotenv="${TMP_DIR}/dotenv7.env"
+  echo "CUBE_SANDBOX_MYSQL_PORT=3307" > "${dotenv}"
+  reset_toggle_vars
+  MERGED_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${OTEL_EXPORTER_OTLP_ENDPOINT}" == "http://10.0.0.5:4317" ]] \
+    || fail "expected no-intent run to keep the merged OTEL endpoint"
+}
+
+# A quoted .env endpoint is stored unquoted (load_env_file strips one quote layer).
+test_otel_endpoint_quoted_dotenv_is_unquoted() {
+  local dotenv="${TMP_DIR}/dotenv8.env"
+  echo 'OTEL_EXPORTER_OTLP_ENDPOINT="http://10.0.0.9:4317"' > "${dotenv}"
+  reset_toggle_vars
+  MERGED_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${OTEL_EXPORTER_OTLP_ENDPOINT}" == "http://10.0.0.9:4317" ]] \
+    || fail "expected quoted .env OTEL endpoint to round-trip unquoted"
+}
+
+# A quoted .env endpoint containing a variable expansion must be shell-interpreted
+# by source, not stored as raw RHS text: the ".env parsing" must expand ${HOST}.
+test_otel_endpoint_quoted_variable_expansion() {
+  local dotenv="${TMP_DIR}/dotenv9.env"
+  cat > "${dotenv}" <<'EOF'
+OTEL_HOST=10.0.0.9
+OTEL_EXPORTER_OTLP_ENDPOINT="http://${OTEL_HOST}:4317"
+EOF
+  reset_toggle_vars
+  MERGED_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${OTEL_EXPORTER_OTLP_ENDPOINT}" == "http://10.0.0.9:4317" ]] \
+    || fail "expected quoted .env OTEL endpoint to expand its variable reference"
+}
+
 test_toggle_keys_registry
 test_dotenv_default_value_is_explicit
 test_process_env_is_explicit
 test_dotenv_beats_process_env
 test_no_intent_keeps_merged_value
 test_commented_dotenv_line_is_not_intent
+test_otel_endpoint_can_be_cleared_on_upgrade
+test_otel_endpoint_dotenv_value_wins
+test_otel_endpoint_process_env_is_explicit
+test_otel_endpoint_absent_key_keeps_merged_value
+test_otel_endpoint_quoted_dotenv_is_unquoted
+test_otel_endpoint_quoted_variable_expansion
 
 echo "test_toggle_inputs: all tests passed"

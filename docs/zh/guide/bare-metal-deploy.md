@@ -69,6 +69,30 @@ cd cube-sandbox-one-click-<version>-arm64
 在部分 aarch64 主机上——较旧的内核、嵌套虚拟化环境、或某些 ARM 核心——KVM 不会向 guest 暴露 PMUv3。这些主机上 MicroVM 仍可正常启动：hypervisor 会在不启用 PMU 的情况下初始化 vCPU，guest 只是看不到硬件性能计数器，无需任何额外操作。
 :::
 
+### OpenTelemetry 链路追踪（可选）
+
+链路追踪默认关闭。请在**安装前**设置 `install.sh` 同级 `.env` 中的
+`OTEL_EXPORTER_OTLP_ENDPOINT`。
+
+接收端为外部自备的 OTLP/**gRPC** 接收端——OpenTelemetry Collector 或 Tempo
+的 OTLP/gRPC 接收端均可。该值的格式为
+`http://<receiver-host>:<OTLP-gRPC-port>`（明文），其中 `receiver-host`
+为接收端实际的 IP 或 DNS 名称，`OTLP-gRPC-port` 为其 gRPC 监听端口。请填接收端的
+OTLP/gRPC 地址，而不是 Grafana/Tempo 的查询地址。例如：
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.5:4317
+```
+
+安装脚本会持久化该值，CubeAPI、CubeMaster、CubeTemplateCenter、Cubelet 以及
+Cubelet 启动的 CubeShim 都会上报 span。shim 在每次新进程启动时继承 Cubelet 的环境
+变量，因此安装后新启动的沙箱会被追踪。各服务以各自的名字上报，请勿设置全局共享的
+`OTEL_SERVICE_NAME`。全新安装与升级均适用，一键安装不会安装任何接收端。要再次关闭
+追踪，在 `.env` 中将其设为 `OTEL_EXPORTER_OTLP_ENDPOINT=`（空）并重新运行安装脚本
+即可——升级细节与 `cp env.example .env` 注意事项见
+[one-click README · OpenTelemetry tracing](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md#opentelemetry-tracing-optional)。
+被追踪的工作流以及如何解读 trace，见 [分布式链路追踪](./tracing.md)。
+
 ## 第二步：制作模板
 
 安装完成后，使用预构建镜像创建代码解释器模板：

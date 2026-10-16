@@ -45,9 +45,16 @@ anyhow = "1"
 # ── Logging / tracing ─────────────────────────────────────────────────────
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-# OpenTelemetry integration (stub, wire up later)
-# tracing-opentelemetry = "0.22"
-# opentelemetry = "0.21"
+
+# ── OpenTelemetry (optional tracing for the sandbox create chain) ─────────
+# Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set. OTLP/gRPC so the one endpoint
+# the Go services read works for cube-api too.
+# Held at 0.30: 0.31 pulls tonic 0.14 + tonic-prost 0.14, which need
+# rustc >= 1.88 and this toolchain is 1.85. 0.30 uses tonic 0.13 / rustc 1.75.
+opentelemetry = "0.30"
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic"] }
+opentelemetry-http = "0.30"
 
 # ── Config ────────────────────────────────────────────────────────────────
 config = "0.13"
@@ -86,8 +93,9 @@ utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-tower = { version = "0.4" }
 axum-test = "14"
+# InMemorySpanExporter, for asserting on spans without an exporter endpoint.
+opentelemetry_sdk = { version = "0.30", features = ["testing"] }
 
 [profile.release]
 # Maximize single-binary performance

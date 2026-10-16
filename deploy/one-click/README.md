@@ -179,6 +179,56 @@ One-click does not create an extra global `configs/` layer on the target machine
 
 `Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is, and its embedded network runtime reads the network plugin configuration from `Cubelet/config/config.toml` directly. `cube-api` and `cubeops` read environment variables from `.one-click.env` on startup. CubeOps warehouse knobs are `CUBE_OPS_WAREHOUSE_*` (timeouts, GitHub/CNB allow-lists and tokens) plus `CUBE_OPS_S3_*`; by default the warehouse reuses the volume MinIO/S3 connection with a dedicated `cube-ops` bucket, so no extra S3 setup is needed. There is no CubeOps YAML file in the one-click layout. `cube-api` listens on `0.0.0.0:3000` by default and forwards to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
 
+### OpenTelemetry tracing (optional)
+
+Tracing is off by default. Configure it **before install** by setting
+`OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and (re-)running `install.sh` — it
+applies to both a fresh install and an upgrade.
+
+The receiver is an externally supplied OTLP/**gRPC** receiver — an OpenTelemetry
+Collector or a Tempo OTLP/gRPC receiver. The value is
+`http://<receiver-host>:<OTLP-gRPC-port>` for plaintext, where `receiver-host`
+and `OTLP-gRPC-port` are the receiver's actual IP or DNS name and gRPC listener
+port. Use the receiver's OTLP/gRPC address, not a Grafana/Tempo query URL. For
+example:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.5:4317
+```
+
+Spans come from the sandbox lifecycle services — CubeAPI, CubeMaster,
+CubeTemplateCenter, Cubelet, and the CubeShim that Cubelet launches. Each exports
+under its own service name (`cube-api`, `cubemaster`, `cubetemplatecenter`,
+`cubelet`, `cube-shim`), so do **not** set a shared `OTEL_SERVICE_NAME`.
+
+The installer persists the endpoint into `.one-click.env`, which every unit loads
+via `EnvironmentFile`; re-running install picks up the new value for CubeAPI,
+CubeMaster, CubeTemplateCenter, and Cubelet, so their request spans for existing
+sandboxes are exported.
+
+The CubeShim is the exception: it is a separate process Cubelet launches per
+sandbox and inherits Cubelet's environment only when a new shim process starts,
+so an already-running shim keeps its previous setting and only CubeShim spans
+wait on a new sandbox being started.
+
+Because the endpoint is a toggle-style key, to turn tracing back off set
+`OTEL_EXPORTER_OTLP_ENDPOINT=` (empty) in `.env` and re-run install — see the
+`ONE_CLICK_ENABLE_S3LVOL` note in
+[CubeS3lvol stop/upgrade semantics](#cubes3lvol-stopupgrade-semantics) for the
+`cp env.example .env` caveat.
+
+One-click never installs a collector.
+
+To inspect a trace, look it up in your tracing backend by trace ID, or with
+TraceQL, e.g.
+
+```traceql
+{ resource.service.name = "cubelet" && name = "cubelet.sandbox.pause" }
+```
+
+For the traced workflows and how to read a trace, see
+[Distributed Tracing](../../docs/guide/tracing.md).
+
 ## Target Machine Installation
 
 After copying `cube-sandbox-one-click-<version>.tar.gz` to the target machine:
