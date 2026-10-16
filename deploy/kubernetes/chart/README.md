@@ -582,7 +582,16 @@ cubeNode:
     sandbox:
       followNodeDns: true          # guests use node/cluster DNS (nameservers+search+options)
                                    # explicit nameservers[] overrides and disables follow-node
+      # Keep false by default. Set true only when the platform owns the default
+      # resolver and needs it reachable for IP-only sandbox policies.
+      autoAllowDefaultResolvers: false
 ```
+
+`autoAllowDefaultResolvers=true` is an operator-controlled networking opt-in,
+not a client API setting. It admits the configured default resolver only when
+the guest actually uses it; per-sandbox `dns_config.servers` cannot trigger the
+exception. The current CubeVS policy map is CIDR-wide, so this permits all ports
+to that resolver IP rather than only UDP/TCP 53.
 
 ## WebUI and CubeOps
 

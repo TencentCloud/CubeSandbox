@@ -875,6 +875,21 @@ patch_common_yaml_list() {
   mv -f "${tmp_file}" "${conf}"
 }
 
+patch_common_yaml_bool() {
+  local key="$1"
+  local value="$2"
+  local conf="${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
+  case "${value}" in
+    true|false) ;;
+    *) fail "${key} must be true or false, got: ${value}" ;;
+  esac
+  if ! grep -q "^[[:space:]]*${key}:[[:space:]]*" "${conf}"; then
+    fail "missing ${key} in ${conf}"
+  fi
+  sed -i -E "s|^([[:space:]]*)${key}:[[:space:]]*.*$|\\1${key}: ${value}|" "${conf}"
+  log "patched ${key}=${value} in ${conf}"
+}
+
 configure_sandbox_dns() {
   if [[ "${CUBE_SANDBOX_DNS_FOLLOW_NODE:-false}" == "true" && -z "${CUBE_SANDBOX_DNS_SERVERS:-}" ]]; then
     CUBE_SANDBOX_DNS_SERVERS="$(
@@ -927,6 +942,7 @@ configure_sandbox_dns() {
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
   patch_common_yaml_list default_dns_searches "${CUBE_SANDBOX_DNS_SEARCHES:-}"
   patch_common_yaml_list default_dns_options "${CUBE_SANDBOX_DNS_OPTIONS:-}"
+  patch_common_yaml_bool auto_allow_default_dns_servers "${CUBE_SANDBOX_AUTO_ALLOW_DEFAULT_DNS_SERVERS:-false}"
 }
 
 write_pidfile() {

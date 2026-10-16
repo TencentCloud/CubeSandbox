@@ -66,6 +66,33 @@ func TestCubeVSTapRegistrationBlockAll(t *testing.T) {
 	}
 }
 
+func TestWithDNSResolverAllowOutPreservesDomainResolverWithoutOperatorOptIn(t *testing.T) {
+	allowInternet := false
+	cfg := &CubeNetworkConfig{AllowInternetAccess: &allowInternet, AllowOut: []string{"api.example.com"}}
+
+	got := withDNSResolverAllowOut(cfg, []string{"10.204.0.10/32", "1.1.1.1/32"}, nil)
+	if got == nil || len(got.AllowOut) != 3 {
+		t.Fatalf("AllowOut=%v, want domain policy plus resolvers", got.AllowOut)
+	}
+}
+
+func TestWithDNSResolverAllowOutKeepsOperatorDefaultResolverForIPOnlyPolicy(t *testing.T) {
+	allowInternet := false
+	got := withDNSResolverAllowOut(&CubeNetworkConfig{AllowInternetAccess: &allowInternet}, []string{"169.254.20.10/32"}, []string{"169.254.20.10/32"})
+	if got == nil || len(got.AllowOut) != 1 || got.AllowOut[0] != "169.254.20.10/32" {
+		t.Fatalf("got=%#v, want operator-approved resolver CIDR", got)
+	}
+}
+
+func TestWithDNSResolverAllowOutKeepsIPOnlyPolicyUnchangedWithoutOperatorOptIn(t *testing.T) {
+	allowInternet := false
+	cfg := &CubeNetworkConfig{AllowInternetAccess: &allowInternet}
+	got := withDNSResolverAllowOut(cfg, []string{"169.254.20.10/32"}, nil)
+	if got != cfg || len(got.AllowOut) != 0 {
+		t.Fatalf("got=%#v, want unchanged IP-only policy", got)
+	}
+}
+
 func TestCubeVSTapRegistrationExtractsL7AllowOut(t *testing.T) {
 	sni := "API.Example.COM."
 	sniWildcard := "*.SNI.Example.COM"

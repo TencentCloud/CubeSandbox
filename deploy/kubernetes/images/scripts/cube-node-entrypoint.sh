@@ -132,6 +132,20 @@ patch_common_yaml_list() {
   log "patched ${key} in ${CUBELET_DYNAMICCONF}"
 }
 
+patch_common_yaml_bool() {
+  local key="$1"
+  local value="$2"
+  case "${value}" in
+    true|false) ;;
+    *) fail "${key} must be true or false, got: ${value}" ;;
+  esac
+  if ! grep -q "^[[:space:]]*${key}:[[:space:]]*" "${CUBELET_DYNAMICCONF}"; then
+    fail "missing ${key} in ${CUBELET_DYNAMICCONF}"
+  fi
+  sed -i -E "s|^([[:space:]]*)${key}:[[:space:]]*.*$|\\1${key}: ${value}|" "${CUBELET_DYNAMICCONF}"
+  log "patched ${key}=${value} in ${CUBELET_DYNAMICCONF}"
+}
+
 configure_sandbox_dns() {
   if [[ -z "${CUBE_SANDBOX_DNS_SERVERS:-}" && "${CUBE_SANDBOX_DNS_FOLLOW_NODE:-false}" == "true" ]]; then
     CUBE_SANDBOX_DNS_SERVERS="$(
@@ -184,6 +198,7 @@ configure_sandbox_dns() {
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
   patch_common_yaml_list default_dns_searches "${CUBE_SANDBOX_DNS_SEARCHES:-}"
   patch_common_yaml_list default_dns_options "${CUBE_SANDBOX_DNS_OPTIONS:-}"
+  patch_common_yaml_bool auto_allow_default_dns_servers "${CUBE_SANDBOX_AUTO_ALLOW_DEFAULT_DNS_SERVERS:-false}"
 }
 
 [[ -x "${CUBELET_BIN}" ]] || fail "missing executable: ${CUBELET_BIN}"
