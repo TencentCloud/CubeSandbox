@@ -140,6 +140,21 @@ locals {
 
   # Precondition for creating the TKE addons
   deploy_addons = var.create_tke && var.deploy_tke_addons
+
+  # trustedCACerts (the terraform twin of the helm chart's trustedCACerts):
+  # either inline PEM certs (rendered into a chart-managed ConfigMap) or a
+  # reference to an operator-managed one. With neither, everything below is a
+  # no-op -- no ConfigMap, no init container, no SSL_CERT_FILE.
+  tc_trusted_ca_inline  = length(var.templatecenter_trusted_ca_certs) > 0
+  tc_trusted_ca_enabled = local.tc_trusted_ca_inline || var.templatecenter_trusted_ca_existing_config_map != ""
+  # Roll the Deployment when the inline set changes: the merged bundle is a
+  # one-time copy into an emptyDir at pod start, so a bare ConfigMap update
+  # would never reach running pods (the existingConfigMap path is
+  # operator-owned, restart manually). Hashing the variable (not a resource
+  # attribute) keeps the annotation known at plan time; the Deployment's
+  # dependency edge on the ConfigMap comes from the volume's config_map
+  # name reference below, so this local needs no reference of its own.
+  tc_trusted_ca_checksum = sha256(join("\n", var.templatecenter_trusted_ca_certs))
 }
 
 resource "random_password" "cube_admin_token" {
@@ -664,6 +679,19 @@ resource "kubernetes_secret" "templatecenter_conf" {
   }
 }
 
+# trustedCACerts ConfigMap (inline-certs path only): one .crt key per entry,
+# same naming as the helm chart's trusted-ca.yaml so the merge-ca script's
+# "/trusted-ca/*.crt" glob behaves identically.
+resource "kubernetes_config_map" "templatecenter_trusted_ca" {
+  count = (local.deploy_addons && local.tc_trusted_ca_inline) ? 1 : 0
+  metadata {
+    name      = "cube-templatecenter-trusted-ca"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-templatecenter" }
+  }
+  data = { for i, pem in var.templatecenter_trusted_ca_certs : "ca-${i}.crt" => pem }
+}
+
 resource "kubernetes_deployment" "templatecenter" {
   count      = local.deploy_addons ? 1 : 0
   depends_on = [kubernetes_deployment.cubemaster, kubernetes_secret.templatecenter_conf]
@@ -687,6 +715,14 @@ resource "kubernetes_deployment" "templatecenter" {
       condition     = var.use_cfs || var.templatecenter_replicas == 1
       error_message = "use_cfs=false requires templatecenter_replicas=1: the artifact store is a node-local hostPath with no cross-node sharing, so a second replica could neither read the first one's ext4 files nor take over its builds. Set use_cfs=true for multiple cube-templatecenter replicas."
     }
+    # A lifecycle precondition, not variable validation: cross-variable
+    # references inside validation rules require terraform >= 1.9, and this
+    # module's floor is 1.2 -- on 1.2-1.8 the validation would hard-fail
+    # every command for every user of the deployer, feature enabled or not.
+    precondition {
+      condition     = !(var.templatecenter_trusted_ca_existing_config_map != "" && length(var.templatecenter_trusted_ca_certs) > 0)
+      error_message = "templatecenter_trusted_ca_existing_config_map and templatecenter_trusted_ca_certs are mutually exclusive: the existing ConfigMap wins and the inline certs would be silently ignored."
+    }
   }
 
   metadata {
@@ -706,6 +742,12 @@ resource "kubernetes_deployment" "templatecenter" {
     template {
       metadata {
         labels = { app = "cube-templatecenter" }
+        # Roll the Deployment when the trusted CA set changes: the merged
+        # bundle is a one-time copy into an emptyDir at pod start, so a bare
+        # ConfigMap update would never reach running pods (same
+        # checksum/trusted-ca annotation as the helm chart; the
+        # existingConfigMap path is operator-owned, restart manually).
+        annotations = local.tc_trusted_ca_inline ? { "checksum/trusted-ca" = local.tc_trusted_ca_checksum } : {}
       }
       spec {
         # With use_cfs=false TC must land on the SAME NODE as a cubemaster
@@ -729,9 +771,159 @@ resource "kubernetes_deployment" "templatecenter" {
             }
           }
         }
+        # Merge the pod image's system CA bundle with the trusted CA certs
+        # into an emptyDir so the main container's outbound TLS (registry
+        # pulls via SSL_CERT_FILE) trusts the private CA. Same script as the
+        # helm chart's merge-ca init container, keep 1:1 when changing either.
+        dynamic "init_container" {
+          for_each = local.tc_trusted_ca_enabled ? [1] : []
+          content {
+            name    = "merge-ca"
+            image   = local.templatecenter_image
+            command = ["/bin/sh", "-ec"]
+            # Use the TemplateCenter image itself (measured): Go's
+            # SSL_CERT_FILE replaces the trust *file* candidate -- it does
+            # NOT disable the system cert directories (/etc/ssl/certs,
+            # /etc/pki/tls/certs are still read; only same-directory symlinks
+            # are skipped). Building the merged bundle from the same image
+            # keeps the file candidate identical to the image's native
+            # bundle instead of depending on distro-specific directory
+            # layouts, and the image is already cached on the node.
+            args = [<<-MERGE_CA_SCRIPT
+              # Probe known system bundle layouts (Debian/Ubuntu first, then
+              # RHEL-family) -- operators may rebuild this image on another
+              # base distro. Fail loudly when none exists. -s, not -f: a
+              # zero-length or truncated bundle (e.g. a failed
+              # update-ca-certificates in a derived image) would be copied
+              # as the base and the container would run with ONLY the
+              # private CA trusted -- every publicly-trusted target starts
+              # failing, silently. Skipping an empty candidate falls
+              # through to the next probe path; all-empty fails here.
+              # NOTE: run under `sh -ec` — probe with an if-form so a missing
+              # candidate does not trip errexit before the next path is tried.
+              BUNDLE=""
+              for b in /etc/ssl/certs/ca-certificates.crt \
+                       /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+                       /etc/pki/tls/certs/ca-bundle.crt; do
+                if [ -s "$b" ]; then BUNDLE="$b"; break; fi
+              done
+              [ -n "$BUNDLE" ] \
+                || { echo "no non-empty system CA bundle found (probed /etc/ssl/certs/ca-certificates.crt, /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, /etc/pki/tls/certs/ca-bundle.crt); the TemplateCenter image must ship ca-certificates" >&2; exit 1; }
+              cp "$BUNDLE" /merged/ca-bundle.crt
+              # Seam: a probed bundle without a trailing newline would glue the
+              # first user cert onto the last END line; normalize before append.
+              printf '\n' >> /merged/ca-bundle.crt
+              ls /trusted-ca/*.crt >/dev/null 2>&1 \
+                || { echo "no .crt keys found in the trusted-ca ConfigMap (keys must end in .crt and contain PEM documents)" >&2; exit 1; }
+              # Block-type whitelist: EVERY PEM block must be a CERTIFICATE.
+              # A combined "cert + key" paste is the most common input shape
+              # for a private CA, and a private key must never reach the
+              # merged bundle. The terraform variable validation enforces the
+              # same rule on inline certs at plan time; this pass
+              # additionally covers the existingConfigMap path, whose content
+              # a plan cannot see.
+              # The BEGIN scan is case-insensitive and NOT line-anchored, so
+              # an indented, lowercase or hyphen-labeled private key cannot
+              # slip past while the surrounding certificate satisfies the
+              # exact-line CERTIFICATE checks (such markers are things Go's
+              # pem.Decode would silently skip -- the CA would be absent from
+              # the bundle with nothing to attribute the x509 error to, and
+              # the key text would still ship in the ConfigMap). The accept
+              # criterion stays the exact-line match with a POSIX
+              # [[:space:]]* tail (LF, CR/CRLF and stray trailing spaces all
+              # match -- portable across awk implementations, unlike \r?
+              # which only gawk honors), so a file that passed the plan-time
+              # validation cannot be rejected here with a different
+              # diagnosis.
+              # The offending block is reported by awk; errexit turns its
+              # non-zero exit into a failed init container (fail closed).
+              for f in /trusted-ca/*.crt; do
+                awk 'tolower($0) ~ /-----begin / && $0 !~ /^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { print "trusted-ca entry " FILENAME " contains a non-CERTIFICATE or non-exact-line PEM BEGIN marker: " $0; exit 1 }' "$f" 1>&2
+                # Symmetry + presence: an empty or marker-less entry would
+                # append nothing and that CA would be silently absent from
+                # the merged bundle; an unbalanced paste renders blocks Go
+                # silently skips. Only EXACT-line CERTIFICATE markers are
+                # counted (same regex as validate.yaml / the plan-time
+                # validation): an END line with trailing junk must not ride
+                # a balanced prefix count -- without openssl the textual
+                # checks are the only gate, and such a line would otherwise
+                # land in the bundle, be silently skipped by Go's
+                # pem.Decode and leave the CA absent with nothing to
+                # attribute the x509 error to. Non-CERTIFICATE blocks are
+                # rejected by the block-type pass above first. Same rule as the variable validation, here
+                # for the existingConfigMap path.
+                awk '/^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { b++ } /^-----END CERTIFICATE-----[[:space:]]*$/ { e++ } END { if (b == 0) { print "trusted-ca entry " FILENAME " contains no PEM block (empty or not PEM)"; exit 1 } if (b != e) { print "trusted-ca entry " FILENAME " has unbalanced BEGIN/END CERTIFICATE markers (" b " BEGIN vs " e " END)"; exit 1 } }' "$f" 1>&2
+                # When openssl is available, check that every block actually
+                # parses as X.509: markers intact but the body truncated or
+                # corrupted means Go silently skips the block and the
+                # operator is back to the same x509 error as before enabling
+                # the feature. openssl x509 only reads the FIRST block of a
+                # file, so split on the markers first -- chain entries
+                # (several certs in one .crt) are validated block by block.
+                # Without openssl the textual checks above still gate shape
+                # and block type; only this ASN.1-level check degrades.
+                if command -v openssl >/dev/null 2>&1; then
+                  T=$(mktemp -d)
+                  awk -v dir="$T" '/^-----BEGIN CERTIFICATE-----[[:space:]]*$/ { n++; fn = sprintf("%s/block-%04d.pem", dir, n) } fn { print > fn } /^-----END CERTIFICATE-----[[:space:]]*$/ { fn = "" }' "$f"
+                  for blk in "$T"/block-*.pem; do
+                    openssl x509 -in "$blk" -noout >/dev/null 2>&1 \
+                      || { echo "trusted-ca entry $f contains a CERTIFICATE block that does not parse as X.509 (truncated or corrupted base64/DER) -- Go would silently skip it and the registry pull would keep failing with x509" >&2; rm -rf "$T"; exit 1; }
+                  done
+                  rm -rf "$T"
+                fi
+              done
+              # Append user certs one at a time with a newline separator:
+              # ConfigMap entries are rendered without a trailing newline
+              # guarantee, so a bare `cat *.crt` would glue PEM blocks
+              # together and silently drop every cert after the first.
+              for f in /trusted-ca/*.crt; do cat "$f"; printf '\n'; done >> /merged/ca-bundle.crt
+              # Operator signal: the init-container log line that says the
+              # merge actually took effect (grep also tolerates a trailing
+              # \r on CRLF PEMs).
+              echo "trusted-ca: merged bundle contains $(grep -c '^-----BEGIN CERTIFICATE-----' /merged/ca-bundle.crt) certificates (system bundle + user entries)" 1>&2
+            MERGE_CA_SCRIPT
+            ]
+            volume_mount {
+              name       = "trusted-ca"
+              mount_path = "/trusted-ca"
+              read_only  = true
+            }
+            volume_mount {
+              name       = "merged-ca"
+              mount_path = "/merged"
+            }
+            # Same sizing as the helm chart's trustedCACerts.resources
+            # defaults (values.yaml); the merge-ca run is sub-second, but
+            # the two deployment paths must behave identically (with
+            # requests set it is Burstable rather than BestEffort, which
+            # matters for node-packing order on constrained nodes).
+            resources {
+              requests = {
+                cpu    = "20m"
+                memory = "32Mi"
+              }
+              limits = {
+                memory = "64Mi"
+              }
+            }
+          }
+        }
         container {
           name  = "cube-templatecenter"
           image = local.templatecenter_image
+          # With the trusted CA feature on, point Go at the merged bundle
+          # (see the merge-ca init container above). Kubernetes keeps the
+          # LAST duplicate env entry, but every env here is terraform-owned
+          # -- there is no operator env knob on this Deployment, so no
+          # override path exists (unlike the helm chart, where validate.yaml
+          # guards global.env / templateCenter.env).
+          dynamic "env" {
+            for_each = local.tc_trusted_ca_enabled ? [1] : []
+            content {
+              name  = "SSL_CERT_FILE"
+              value = "/merged/ca-bundle.crt"
+            }
+          }
           env {
             name  = "CUBE_TEMPLATE_CENTER_CONFIG_PATH"
             value = "/usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml"
@@ -788,6 +980,17 @@ resource "kubernetes_deployment" "templatecenter" {
             mount_path = "/etc/cube/ca"
             read_only  = true
           }
+          # The merged CA bundle built by the merge-ca init container;
+          # read-only in the main container (the trust pool is populated
+          # before it starts, so there is no TOCTOU window).
+          dynamic "volume_mount" {
+            for_each = local.tc_trusted_ca_enabled ? [1] : []
+            content {
+              name       = "merged-ca"
+              mount_path = "/merged"
+              read_only  = true
+            }
+          }
         }
         # Share the same storage backend as CubeMaster: the same NFS export
         # when use_cfs=true, or the same fixed hostPath directory otherwise
@@ -831,6 +1034,40 @@ resource "kubernetes_deployment" "templatecenter" {
               key  = "conf.yaml"
               path = "conf.yaml"
             }
+          }
+        }
+        # trustedCACerts: the ConfigMap (chart-managed on the inline path,
+        # operator-managed via existing_config_map otherwise) and the
+        # emptyDir the merge-ca init container builds the merged bundle in.
+        dynamic "volume" {
+          for_each = local.tc_trusted_ca_enabled ? [1] : []
+          content {
+            name = "trusted-ca"
+            config_map {
+              # Inline path: resolve through the managed resource's name
+              # attribute, not a string local -- the reference is what gives
+              # the Deployment a dependency edge on the ConfigMap it mounts,
+              # so a fresh apply (including the -targeted applies create.sh
+              # drives through STEP2_TARGETS) orders the ConfigMap before
+              # the Deployment instead of the pod sitting on kubelet
+              # MountVolume retries until the ConfigMap lands. Same
+              # convention as the neighbouring nginx volume. The
+              # existingConfigMap path is operator-owned -- no managed
+              # resource exists to reference, so the variable stays a plain
+              # string there. Safe against the zero-count resource: the
+              # ternary only evaluates the chosen branch, and on the inline
+              # path the ConfigMap's count is 1 (this dynamic block only
+              # expands when the feature is on, and then deploy_addons is
+              # true).
+              name = local.tc_trusted_ca_inline ? kubernetes_config_map.templatecenter_trusted_ca[0].metadata[0].name : var.templatecenter_trusted_ca_existing_config_map
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = local.tc_trusted_ca_enabled ? [1] : []
+          content {
+            name = "merged-ca"
+            empty_dir {}
           }
         }
       }

@@ -4418,6 +4418,15 @@ TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLO
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
 TENCENTCLOUD_VERBOSE='${VERBOSE:-1}'
+# Trusted CA for the TemplateCenter pod (terraform twin of trustedCACerts).
+# Both lines are written only when set. The certs one MUST be: it is a
+# terraform LIST, and an empty TF_VAR_ for a list variable is not parseable
+# HCL -- it would fail every subsequent terraform invocation. The string
+# variable would survive an empty round-trip, but omitting it keeps .env
+# minimal and lets the stale-mirror migration (lib-state-sync.sh) detect
+# removal unambiguously.
+${TF_VAR_templatecenter_trusted_ca_existing_config_map:+TF_VAR_templatecenter_trusted_ca_existing_config_map='${TF_VAR_templatecenter_trusted_ca_existing_config_map}'}
+${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_trusted_ca_certs='${TF_VAR_templatecenter_trusted_ca_certs}'}
 EOF
 	)
 	chmod 600 "${ENV_FILE}" 2>/dev/null || true
@@ -4577,6 +4586,19 @@ write_resolved_tfvars_file() {
 	tke_count="$(_number_or_default "$tke_count" 0)"
 
 	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	# The trusted-ca variables are deliberately NOT mirrored here (see the
+	# save_env_file trusted-ca block): their certs value is HCL, and an
+	# HCL-valid value this mirror cannot represent losslessly as JSON would
+	# either abort the write or -- worse -- silently drop the
+	# actually-deployed value, un-pinning the deployed config. .env is the
+	# single source of truth for the pair; the loader never force-exports
+	# what this file does not carry, so .env edits (removals, [], value
+	# changes) take effect on the next run.
+	# This explanation lives HERE rather than inside the jq program below:
+	# the program is one single-quoted shell string, and prose with quotes
+	# inside it is invisible quoting hazard -- one unpaired apostrophe in a
+	# future edit would split the program into extra argv words and break
+	# every resolved-tfvars write.
 	jq -n \
 		--arg vpc_name "${TF_VAR_vpc_name:-${TENCENTCLOUD_VPC_NAME:-cubesandbox-terraform-vpc}}" \
 		--arg region "${TF_VAR_region:-${TENCENTCLOUD_REGION:-ap-guangzhou}}" \
@@ -5074,6 +5096,7 @@ kubernetes_secret.cubeproxy_global|-n cubesandbox delete secret cubeproxy-global
 kubernetes_secret.cubeproxy_certs|-n cubesandbox delete secret cubeproxy-certs
 kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubeproxy-nginx-conf
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
+kubernetes_config_map.templatecenter_trusted_ca|-n cubesandbox delete configmap cube-templatecenter-trusted-ca
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
 kubernetes_service.templatecenter|-n cubesandbox delete svc cube-templatecenter
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api
@@ -5097,6 +5120,23 @@ kubernetes_deployment.cube_webui|-n cubesandbox delete deploy cube-webui
 		case "$addr" in
 		kubernetes_deployment.*)
 			# Always delete Deployments → recreated with the freshly built images.
+			;;
+		kubernetes_config_map.templatecenter_trusted_ca)
+			# Inline-certs path only (see _tc_trusted_ca_inline_enabled):
+			# on the existing_config_map path this address is never in
+			# terraform state (resource count 0) and the ConfigMap is
+			# operator-owned -- the plain drift gate alone would read it as
+			# drift on every re-run and delete it, and terraform would not
+			# recreate it (the inline list is empty), leaving the
+			# TemplateCenter pod stuck in ContainerCreating on a missing
+			# trusted-ca volume.
+			if ! _tc_trusted_ca_inline_enabled "$RESOLVED_TFVARS_FILE"; then
+				continue
+			fi
+			if echo "$in_state" | grep -qF "$addr"; then
+				continue
+			fi
+			echo -e "  ${YELLOW}  drift: ${addr} exists in cluster but not in state → deleting${NC}"
 			;;
 		*)
 			# Others: only delete when drifted (missing from state) to avoid
@@ -5311,6 +5351,11 @@ main() {
 	# the TENCENTCLOUD_* → TF_VAR_* mapping (e.g. region must be set before plan).
 	prompt_deployment_env
 	setup_env
+	# Strip the trusted-ca keys from the resolved mirror before
+	# load_resolved_tfvars_file force-exports it: mirrors written by earlier
+	# versions of this feature recorded the pair, and .env is their single
+	# source of truth from this version on (see write_resolved_tfvars_file).
+	_tc_migrate_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"
 	load_resolved_tfvars_file
 	_setup_jump_proxy
 
@@ -5642,6 +5687,14 @@ main() {
 		kubernetes_secret.cube_egress_ca[0]
 		kubernetes_secret.cubemaster_conf[0]
 		kubernetes_secret.templatecenter_conf[0]
+		# kubernetes_config_map.templatecenter_trusted_ca is deliberately
+		# NOT targeted here: the Deployment's volume resolves its config_map
+		# name through the managed resource's attribute (tke-addons.tf), and
+		# -target includes the dependencies of every targeted resource, so
+		# the ConfigMap is pulled into this apply by that edge. An explicit
+		# target on an instance index that is count=0 whenever the inline
+		# path is off (the default) would be dead on that path and version
+		# -sensitive behavior on top -- the edge is unconditional and exact.
 		kubernetes_deployment.cubemaster[0]
 		kubernetes_service.cubemaster[0]
 		kubernetes_deployment.templatecenter[0]

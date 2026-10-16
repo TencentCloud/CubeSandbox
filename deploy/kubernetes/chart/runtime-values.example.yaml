@@ -136,6 +136,20 @@ redis:
 # global:
 #   imageRegistry: my-mirror.example.com
 #
+# Optional: if that mirror serves a certificate signed by a private CA,
+# trust it for the TemplateCenter pod's pulls (template create-from-image):
+# trustedCACerts:
+#   enabled: true
+#   certs:
+#     - |
+#       -----BEGIN CERTIFICATE-----
+#       ... your private CA's certificate (PEM, certificate only) ...
+#       -----END CERTIFICATE-----
+# Or reference a ConfigMap you manage yourself (same namespace, keys end
+# in .crt): trustedCACerts.existingConfigMap: my-ca-certs
+# See the "Trusted CA certificates" section in chart README.md for scope
+# (process-wide TLS for TemplateCenter; node-side pulls need host config).
+#
 # Or override selected images individually:
 # images:
 #   ops:
