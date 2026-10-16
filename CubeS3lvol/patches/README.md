@@ -289,3 +289,18 @@ writable. A blob-local temporal gate is not sufficient: it also redirects that
 foreground CoW into the ingest callback, where it can either bind an object
 from the wrong manifest or collide with the materializer's single waiter and
 return host-visible EIO.
+
+## 0007-blob-skip-copy-for-full-cluster-overwrite.patch
+
+Skips the parent read/copy when the first write to an unallocated clone cluster
+covers that complete cluster. The queued write supplies every byte, so copying
+the parent first cannot affect the result.
+
+This matters for pause-memory volumes: Cubelet clones the previous memory image
+and the VMM then overlays dirty memory. A contiguous 1 MiB overwrite previously
+performed one cold 1 MiB parent GET, wrote that copy to the new cluster, and
+then wrote the replacement bytes. On an S3-backed parent this put cold-read
+latency in the foreground pause path and doubled destination write traffic.
+
+Partial writes keep the existing copy-on-write path unchanged, including reads
+from the parent needed to preserve bytes outside the write.
