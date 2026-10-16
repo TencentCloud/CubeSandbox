@@ -120,6 +120,14 @@ func TestImageJobStepsRendering(t *testing.T) {
 	if got := stepIndexForPhase("DISTRIBUTING"); got != 4 {
 		t.Fatalf("DISTRIBUTING index=%d want 4", got)
 	}
+	// BUILDING_EROFS occupies the same pipeline slot as BUILDING_EXT4 (index 2)
+	// so an erofs build advances the checklist to the same progress position.
+	if got := stepIndexForPhase("BUILDING_EXT4"); got != 2 {
+		t.Fatalf("BUILDING_EXT4 index=%d want 2", got)
+	}
+	if got := stepIndexForPhase("BUILDING_EROFS"); got != 2 {
+		t.Fatalf("BUILDING_EROFS index=%d want 2 (same slot as BUILDING_EXT4)", got)
+	}
 	if got := stepIndexForPhase("BOGUS"); got != -1 {
 		t.Fatalf("unknown phase should be -1, got %d", got)
 	}
@@ -140,6 +148,105 @@ func TestImageJobStepsRendering(t *testing.T) {
 	view := model.renderSteps()
 	if !strings.Contains(view, "PULLING") || !strings.Contains(view, "CREATING_TEMPLATE") {
 		t.Fatalf("steps view missing entries: %q", view)
+	}
+}
+
+// TestImageJobStepsRenderingErofsLabel verifies the build step label carries
+// the rootfs format: an erofs job shows BUILDING_EROFS, not the hardcoded
+// BUILDING_EXT4, once it reaches the build phase.
+func TestImageJobStepsRenderingErofsLabel(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	m := newImageJobTUI(ctx, "job-1")
+	updated, _ := m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{Status: "RUNNING", Phase: "BUILDING_EROFS"}})
+	model := updated.(imageJobTUI)
+	if got := model.currentStepIndex(); got != 2 {
+		t.Fatalf("BUILDING_EROFS currentStepIndex=%d want 2", got)
+	}
+	view := model.renderSteps()
+	if !strings.Contains(view, "BUILDING_EROFS") {
+		t.Fatalf("erofs build view should show BUILDING_EROFS: %q", view)
+	}
+	if strings.Contains(view, "BUILDING_EXT4") {
+		t.Fatalf("erofs build view must not show BUILDING_EXT4: %q", view)
+	}
+
+	// An ext4 job at the same slot still shows BUILDING_EXT4.
+	updated, _ = m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{Status: "RUNNING", Phase: "BUILDING_EXT4"}})
+	model = updated.(imageJobTUI)
+	view = model.renderSteps()
+	if !strings.Contains(view, "BUILDING_EXT4") {
+		t.Fatalf("ext4 build view should show BUILDING_EXT4: %q", view)
+	}
+}
+
+// TestImageJobStepsRenderingReusedErofsArtifact verifies a reused job (which
+// skips the BUILDING phase: phase jumps PULLING -> READY) still labels the
+// build step BUILDING_EROFS when the reused artifact is erofs. Without the
+// artifact.RootfsFormat fallback the checklist would mislabel it BUILDING_EXT4.
+func TestImageJobStepsRenderingReusedErofsArtifact(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	m := newImageJobTUI(ctx, "job-1")
+	// A reused job is READY with phase READY and an erofs artifact attached.
+	updated, _ := m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
+		Status: "READY",
+		Phase:  "READY",
+		Artifact: &types.RootfsArtifactInfo{ArtifactID: "rfs-x", RootfsFormat: "erofs"},
+	}})
+	model := updated.(imageJobTUI)
+	view := model.renderSteps()
+	if !strings.Contains(view, "BUILDING_EROFS") {
+		t.Fatalf("reused erofs job should label the build step BUILDING_EROFS: %q", view)
+	}
+	if strings.Contains(view, "BUILDING_EXT4") {
+		t.Fatalf("reused erofs job must not show BUILDING_EXT4: %q", view)
+	}
+
+	// A reused ext4 artifact labels it BUILDING_EXT4.
+	updated, _ = m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
+		Status: "READY",
+		Phase:  "READY",
+		Artifact: &types.RootfsArtifactInfo{ArtifactID: "rfs-y", RootfsFormat: "ext4"},
+	}})
+	model = updated.(imageJobTUI)
+	view = model.renderSteps()
+	if !strings.Contains(view, "BUILDING_EXT4") {
+		t.Fatalf("reused ext4 job should label the build step BUILDING_EXT4: %q", view)
+	}
+}
+
+// TestImageJobStepsRenderingErofsLabelBeforeBuild verifies the build step is
+// labeled BUILDING_EROFS even before the build phase is reached (e.g. while
+// PULLING), where the format is only known from the job's request snapshot
+// (job.RootfsFormat), not the phase or the (still-absent) artifact.
+func TestImageJobStepsRenderingErofsLabelBeforeBuild(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	m := newImageJobTUI(ctx, "job-1")
+	// PULLING: artifact not built yet, but rootfs_format is known from the
+	// request snapshot carried on the job info top-level field.
+	updated, _ := m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
+		Status:      "RUNNING",
+		Phase:       "PULLING",
+		RootfsFormat: "erofs",
+	}})
+	model := updated.(imageJobTUI)
+	view := model.renderSteps()
+	if !strings.Contains(view, "BUILDING_EROFS") {
+		t.Fatalf("PULLING erofs job should label the build step BUILDING_EROFS: %q", view)
+	}
+	if strings.Contains(view, "BUILDING_EXT4") {
+		t.Fatalf("PULLING erofs job must not show BUILDING_EXT4: %q", view)
+	}
+
+	// PULLING with ext4 stays BUILDING_EXT4.
+	updated, _ = m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
+		Status:      "RUNNING",
+		Phase:       "PULLING",
+		RootfsFormat: "ext4",
+	}})
+	model = updated.(imageJobTUI)
+	view = model.renderSteps()
+	if !strings.Contains(view, "BUILDING_EXT4") {
+		t.Fatalf("PULLING ext4 job should label the build step BUILDING_EXT4: %q", view)
 	}
 }
 

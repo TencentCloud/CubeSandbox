@@ -106,11 +106,11 @@ func unmarshalRedoScope(scopeJSON string) []string {
 	return scope
 }
 
-func determineRedoResumePhase(job *models.TemplateImageJob, replicas []models.TemplateReplica) string {
+func determineRedoResumePhase(job *models.TemplateImageJob, replicas []models.TemplateReplica, rootfsFormat string) string {
 	if job != nil {
 		switch strings.ToUpper(job.Phase) {
-		case JobPhasePulling, JobPhaseUnpacking, JobPhaseBuildingExt4, JobPhaseGeneratingJSON:
-			return JobPhaseBuildingExt4
+		case JobPhasePulling, JobPhaseUnpacking, JobPhaseBuildingExt4, JobPhaseBuildingErofs, JobPhaseGeneratingJSON:
+			return buildingPhaseForRootfsFormat(rootfsFormat)
 		case JobPhaseDistributing:
 			return JobPhaseDistributing
 		case JobPhaseCreatingTemplate, JobPhaseSnapshotting, JobPhaseRegistering:
@@ -314,6 +314,14 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	}
 	workingReq := newRedoWorkingRequest(sourceReq, req.TemplateID, targets)
 
+	// buildingPhase is the BUILDING_* phase for this job's rootfs format,
+	// used to (re)write the job phase when the redo falls back to a full
+	// rebuild and to label the phase on the redo-only failure paths below.
+	// sourceReq.RootfsFormat was stamped by CubeMaster at submit time and is
+	// the authoritative format source (the artifact may not be built yet in
+	// the redo build branch, so artifact.RootfsFormat would be unreliable).
+	buildingPhase := buildingPhaseForRootfsFormat(sourceReq.RootfsFormat)
+
 	var artifact *models.RootfsArtifact
 	resumePhase := jobRecord.ResumePhase
 	if resumePhase == "" {
@@ -323,7 +331,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	// reuse is no longer usable. Without this, a job that failed distribution
 	// on all nodes is unretryable forever: that path deletes the artifact, so
 	// the reuse branch below can only ever report "record not found".
-	if resumePhase != JobPhaseBuildingExt4 && !rootfsArtifactReusableForRedo(ctx, jobRecord.ArtifactID) {
+	if !isBuildingPhase(resumePhase) && !rootfsArtifactReusableForRedo(ctx, jobRecord.ArtifactID) {
 		// But never rebuild an artifact another CubeMaster holds: the rebuild
 		// would overwrite the shared row (fresh token/sha) and break every
 		// replica the holder already served (issue #1005). Surface it instead.
@@ -335,18 +343,18 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			}
 		}
 		logger.Infof("redo: artifact %q is not reusable, falling back to a full rebuild (resume_phase %s -> %s)",
-			jobRecord.ArtifactID, resumePhase, JobPhaseBuildingExt4)
-		resumePhase = JobPhaseBuildingExt4
+			jobRecord.ArtifactID, resumePhase, buildingPhase)
+		resumePhase = buildingPhase
 		if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-			"phase":        JobPhaseBuildingExt4,
-			"resume_phase": JobPhaseBuildingExt4,
+			"phase":        buildingPhase,
+			"resume_phase": buildingPhase,
 		}); err != nil {
 			logger.Warnf("update redo resume phase fail: %v", err)
 		}
 	}
-	if resumePhase == JobPhaseBuildingExt4 {
+	if isBuildingPhase(resumePhase) {
 		if ShouldInjectEnvdIntoTemplate(&workingReq) {
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, "redo cannot rebuild envd-enabled template rootfs because the original envd payload is not persisted")
+			failRedoTemplateImageJob(ctx, jobID, buildingPhase, "redo cannot rebuild envd-enabled template rootfs because the original envd payload is not persisted")
 			return
 		}
 		// v2: snapshot templates have no source_image_ref, so there is nothing
@@ -356,7 +364,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		// FAILED, so without this guard a snapshot-based template would have
 		// its remaining artifact destroyed on the way to an inevitable failure.
 		if strings.TrimSpace(workingReq.SourceImageRef) == "" {
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4,
+			failRedoTemplateImageJob(ctx, jobID, buildingPhase,
 				"redo cannot rebuild this template: it has no source_image_ref "+
 					"(templates created from a sandbox snapshot cannot be rebuilt from an image); "+
 					"the existing artifact was left untouched")
@@ -384,7 +392,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			// full rebuild must be forwarded to CubeTemplateCenter by the caller
 			// (template_from_image.go:72). Reaching here means the caller's
 			// forwarding logic has a bug.
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4,
+			failRedoTemplateImageJob(ctx, jobID, buildingPhase,
 				"redo requires a full rebuild but local ext4 build is disabled in CubeMaster; "+
 					"this job should have been forwarded to CubeTemplateCenter")
 			return

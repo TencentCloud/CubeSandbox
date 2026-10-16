@@ -317,7 +317,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	if err := result.Validate(); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
-			"phase":         JobPhaseBuildingExt4,
+			"phase":         buildingPhaseForRootfsFormat(result.RootfsFormat),
 			"progress":      100,
 			"error_message": err.Error(),
 		})
@@ -388,7 +388,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		logger.Errorf("%v", failErr)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
-			"phase":           JobPhaseBuildingExt4,
+			"phase":           buildingPhaseForRootfsFormat(result.RootfsFormat),
 			"artifact_id":     result.ArtifactID,
 			"artifact_status": ArtifactStatusFailed,
 			"progress":        100,

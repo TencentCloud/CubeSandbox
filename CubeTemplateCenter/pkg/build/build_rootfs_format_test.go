@@ -10,6 +10,7 @@ import (
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
@@ -105,6 +106,25 @@ func TestRootfsFormatLabel(t *testing.T) {
 		}
 		if strings.Contains(rootfsFormatLabel(c.in), " ") {
 			t.Fatalf("label must not contain spaces: %q", rootfsFormatLabel(c.in))
+		}
+	}
+}
+
+// TestBuildingPhaseForRootfsFormat verifies the reported build phase carries
+// the rootfs packaging format (BUILDING_EXT4 / BUILDING_EROFS) instead of a
+// hardcoded BUILDING_EXT4, with empty/unknown falling back to ext4.
+func TestBuildingPhaseForRootfsFormat(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{config.RootfsFormatExt4, templatecenter.JobPhaseBuildingExt4},
+		{"", templatecenter.JobPhaseBuildingExt4},
+		{config.RootfsFormatErofs, templatecenter.JobPhaseBuildingErofs},
+		{"unknown-format", templatecenter.JobPhaseBuildingExt4},
+	}
+	for _, c := range cases {
+		if got := buildingPhaseForRootfsFormat(c.in); got != c.want {
+			t.Fatalf("buildingPhaseForRootfsFormat(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

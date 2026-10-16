@@ -307,8 +307,10 @@ func runBuildLocked(
 	// The format comes from req.RootfsFormat, stamped by CubeMaster at submit
 	// time from template.rootfs_format and persisted in the job's request
 	// snapshot. ext4 is the default / historical path; erofs packs the same
-	// exported rootfs with mkfs.erofs instead of mkfs.ext4.
-	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
+	// exported rootfs with mkfs.erofs instead of mkfs.ext4. The reported phase
+	// carries the format (BUILDING_EXT4 / BUILDING_EROFS) so the CLI shows the
+	// actual packaging step instead of a hardcoded BUILDING_EXT4.
+	reportPhase(buildingPhaseForRootfsFormat(req.RootfsFormat), 40)
 	var caBakeResult cube_egress_ca.Result
 	opts := image.BuildOptions{ArtifactID: artifactID}
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
@@ -338,7 +340,7 @@ func runBuildLocked(
 		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}
-		reportFailed(templatecenter.JobPhaseBuildingExt4, errMsg)
+		reportFailed(buildingPhaseForRootfsFormat(req.RootfsFormat), errMsg)
 		return fmt.Errorf("build rootfs: %w", err)
 	}
 
@@ -350,7 +352,7 @@ func runBuildLocked(
 	if s3CfgEnabled && s3Client != nil {
 		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
 			if s3Client.BackendName() == "fs" {
-				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
+				reportFailed(buildingPhaseForRootfsFormat(req.RootfsFormat), fmt.Sprintf("upload artifact to fs store: %v", err))
 				return fmt.Errorf("upload artifact to fs store: %w", err)
 			}
 			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
@@ -395,6 +397,22 @@ func rootfsFormatLabel(rootfsFormat string) string {
 	default:
 		return rootfsFormat
 	}
+}
+
+// buildingPhaseForRootfsFormat returns the BUILDING_* job phase constant that
+// matches the rootfs packaging format, so the phase TC reports to CubeMaster
+// (and the CLI renders) carries the format instead of a hardcoded
+// "BUILDING_EXT4" for an erofs build. Empty/unknown falls back to
+// BUILDING_EXT4, matching buildRootfsImage's dispatch and rootfsFormatLabel's
+// default. This mirrors CubeMaster's buildingPhaseForRootfsFormat but lives
+// here because TC cannot call the master-side (unexported)
+// normalizedRootfsFormat helper; the dispatch test matches
+// buildRootfsImage (erofs -> BuildErofs, anything else -> BuildExt4).
+func buildingPhaseForRootfsFormat(rootfsFormat string) string {
+	if rootfsFormat == config.RootfsFormatErofs {
+		return templatecenter.JobPhaseBuildingErofs
+	}
+	return templatecenter.JobPhaseBuildingExt4
 }
 
 func reportExistingArtifact(

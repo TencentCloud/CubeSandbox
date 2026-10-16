@@ -739,6 +739,11 @@ type RootfsArtifactInfo struct {
 	WritableLayerSize       string `json:"writable_layer_size,omitempty"`
 	Status                  string `json:"status,omitempty"`
 	LastError               string `json:"last_error,omitempty"`
+	// RootfsFormat is the packaging format ("ext4" or "erofs") this artifact was
+	// built in. Populated from RootfsArtifact.RootfsFormat so the CLI can render
+	// the build step label (BUILDING_EXT4 / BUILDING_EROFS) correctly even for a
+	// reused job that skips the BUILDING phase and jumps straight to READY.
+	RootfsFormat string `json:"rootfs_format,omitempty"`
 }
 
 type TemplateImageJobInfo struct {
@@ -758,6 +763,14 @@ type TemplateImageJobInfo struct {
 	TemplateSpecFingerprint string              `json:"template_spec_fingerprint,omitempty"`
 	Status                  string              `json:"status,omitempty"`
 	Phase                   string              `json:"phase,omitempty"`
+	// RootfsFormat is the rootfs packaging format ("ext4" or "erofs") this job's
+	// artifact is/will be built in. Populated from the job's request snapshot
+	// (RequestJSON, which CubeMaster stamps from template.rootfs_format at
+	// submit time), so it is available from the very first poll (PULLING) —
+	// before the artifact exists — letting the CLI render the build step label
+	// (BUILDING_EXT4 / BUILDING_EROFS) correctly even before the build phase is
+	// reached. Falls back to the artifact's RootfsFormat once built.
+	RootfsFormat            string              `json:"rootfs_format,omitempty"`
 	Progress                int32               `json:"progress,omitempty"`
 	ErrorMessage            string              `json:"error_message,omitempty"`
 	ExpectedNodeCount       int32               `json:"expected_node_count,omitempty"`

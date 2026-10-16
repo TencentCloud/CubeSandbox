@@ -41,9 +41,20 @@ func jobModelToInfo(ctx context.Context, record *models.TemplateImageJob) (*type
 		PullCompletedLayers:     record.PullCompletedLayers,
 		PullSpeedBPS:            record.PullSpeedBPS,
 	}
+	// RootfsFormat is available from the request snapshot (stamped at submit
+	// time) before the artifact exists, so the CLI can label the build step
+	// from the very first poll. Prefer the artifact's value once it is built
+	// (the single source of truth after BUILT), falling back to the request
+	// snapshot, normalized to the canonical ext4 default when empty/unknown.
+	if req, err := unmarshalTemplateImageJobRequest(record.RequestJSON); err == nil {
+		info.RootfsFormat = normalizedRootfsFormat(req.RootfsFormat)
+	}
 	if record.ArtifactID != "" {
 		if artifact, err := getRootfsArtifactByID(ctx, record.ArtifactID); err == nil {
 			info.Artifact = artifactModelToInfo(artifact)
+			if artifact.RootfsFormat != "" {
+				info.RootfsFormat = normalizedRootfsFormat(artifact.RootfsFormat)
+			}
 		}
 	}
 	return info, nil
@@ -87,5 +98,6 @@ func artifactModelToInfo(record *models.RootfsArtifact) *types.RootfsArtifactInf
 		WritableLayerSize:       record.WritableLayerSize,
 		Status:                  record.Status,
 		LastError:               record.LastError,
+		RootfsFormat:            record.RootfsFormat,
 	}
 }
