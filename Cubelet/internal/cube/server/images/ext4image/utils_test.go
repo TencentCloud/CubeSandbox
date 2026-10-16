@@ -373,3 +373,45 @@ func TestEnsurePmemRootfsMixedEntrypointsReusePreparedFile(t *testing.T) {
 		t.Fatalf("prepared kernel mismatch: err=%v", err)
 	}
 }
+
+func TestIsPmemRootfsMedia(t *testing.T) {
+	// ext4 and erofs are local-file rootfs formats that go through the pmem path.
+	if !IsPmemRootfsMedia(cubeimages.ImageStorageMediaType_ext4.String()) {
+		t.Fatal("ext4 must be a pmem rootfs media")
+	}
+	if !IsPmemRootfsMedia(cubeimages.ImageStorageMediaType_erofs.String()) {
+		t.Fatal("erofs must be a pmem rootfs media")
+	}
+	// docker (containerd OCI) and empty/unknown are NOT pmem rootfs.
+	if IsPmemRootfsMedia(cubeimages.ImageStorageMediaType_docker.String()) {
+		t.Fatal("docker must not be a pmem rootfs media")
+	}
+	if IsPmemRootfsMedia("") {
+		t.Fatal("empty media must not be a pmem rootfs media")
+	}
+	if IsPmemRootfsMedia("nfs") {
+		t.Fatal("nfs must not be a pmem rootfs media")
+	}
+}
+
+func TestEnsurePmemRootfsUsesMediaAwarePath(t *testing.T) {
+	// An erofs spec must name the local file with the .erofs suffix, not .ext4,
+	// so the download target and the mount path agree on the format.
+	initTestPmemPaths(t, t.TempDir())
+	ctx := context.Background()
+	ctx = constants.WithImageSpec(ctx, &cubeimages.ImageSpec{
+		StorageMedia: cubeimages.ImageStorageMediaType_erofs.String(),
+		Annotations:  map[string]string{},
+	})
+
+	// EnsurePmemRootfs returns an error (no download URL configured) but the
+	// error message references the .erofs path, proving it computed the
+	// media-aware path rather than the legacy .ext4 one.
+	err := EnsurePmemRootfs(ctx, "cubebox", "rfs-erofs-path")
+	if err == nil {
+		t.Fatal("expected a download error, got nil")
+	}
+	if !strings.Contains(err.Error(), "rfs-erofs-path.erofs") {
+		t.Fatalf("error must reference the .erofs path, got: %v", err)
+	}
+}

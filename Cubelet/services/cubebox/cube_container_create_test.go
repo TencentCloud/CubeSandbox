@@ -34,6 +34,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
 	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -917,6 +918,31 @@ func TestPrepareImagePmems(t *testing.T) {
 				{PmemFile: tmpFile},
 			},
 			expectPmems: 2,
+		},
+		{
+			name: "erofs fs type propagated to cube.pmem annotation",
+			rootfsConfig: []*virtiofs.CubeRootfsInfo{
+				{PmemFile: tmpFile, PmemFsType: "erofs"},
+			},
+			expectPmems: 1,
+			validate: func(t *testing.T, spec *specs.Spec) {
+				var pmems []pmem.CubePmem
+				require.NoError(t, jsoniter.Unmarshal([]byte(spec.Annotations[constants.AnnotationPmem]), &pmems))
+				require.Len(t, pmems, 1)
+				assert.Equal(t, "erofs", pmems[0].FsType, "erofs PmemFsType must reach CubePmem.FsType")
+			},
+		},
+		{
+			name: "empty fs type defaults to ext4",
+			rootfsConfig: []*virtiofs.CubeRootfsInfo{
+				{PmemFile: tmpFile},
+			},
+			expectPmems: 1,
+			validate: func(t *testing.T, spec *specs.Spec) {
+				var pmems []pmem.CubePmem
+				require.NoError(t, jsoniter.Unmarshal([]byte(spec.Annotations[constants.AnnotationPmem]), &pmems))
+				assert.Equal(t, "ext4", pmems[0].FsType, "empty PmemFsType must default to ext4")
+			},
 		},
 	}
 

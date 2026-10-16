@@ -54,7 +54,7 @@ func (c *CubeImageService) EnsureImage(ctx context.Context, ref, username, passw
 	)
 
 	cubeSpec := constants.GetImageSpec(ctx)
-	if cubeSpec != nil && cubeSpec.GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
+	if cubeSpec != nil && ext4image.IsPmemRootfsMedia(cubeSpec.GetStorageMedia()) {
 		instanceType := resolveExt4InstanceType(ctx, cubeSpec)
 		if instanceType == "" {
 			return nil, fmt.Errorf("create req is nil")
@@ -164,7 +164,14 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 	if cubeSpec != nil {
 		mediaType := cubeSpec.StorageMedia
 		switch mediaType {
-		case cubeimages.ImageStorageMediaType_ext4.String():
+		case "nfs":
+			return "", fmt.Errorf("nfs images are not supported in the open source build")
+		default:
+		}
+		// ext4 and erofs are both local-file rootfs artifacts: download them as
+		// a pmem backing file instead of pulling through containerd. docker/empty
+		// fall through to PullRegistryImage below.
+		if ext4image.IsPmemRootfsMedia(mediaType) {
 			instanceType := resolveExt4InstanceType(ctx, cubeSpec)
 			if instanceType == "" {
 				return "", fmt.Errorf("create req is nil")
@@ -174,9 +181,6 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 				return "", fmt.Errorf("ensure pmem file failed: %v", err)
 			}
 			return name, ErrSkip
-		case "nfs":
-			return "", fmt.Errorf("nfs images are not supported in the open source build")
-		default:
 		}
 	}
 
