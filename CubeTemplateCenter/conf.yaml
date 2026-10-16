@@ -8,8 +8,10 @@ common:
   sync_meta_data_interval: 30s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
-  # Max concurrency for distributing a template rootfs artifact to nodes.
-  # Default 4.
+  # Max concurrency for distributing a template rootfs artifact to nodes
+  # (the artifact-push phase of template creation, redo, and the periodic
+  # replica-backfill sweep). Replica creation after the push is not affected
+  # by this knob. Default 4.
   # distribution_workers: 4
   # CubeMaster's HTTP base URL, used by TC to report build results. Can be set
   # here (persistent, per-deployment) or overridden by CUBE_MASTER_ADDR env

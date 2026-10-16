@@ -125,10 +125,10 @@ type CommonConf struct {
 	// env > yaml priority.
 	TemplateCenterAddrValue string `yaml:"template_center_addr"`
 	// DistributionWorkers is the max concurrency for pushing a rootfs artifact
-	// to cubelet nodes during template distribution (distributeRootfsArtifactToNodes).
-	// It applies to the distribution phase of both template creation and redo,
-	// and covers ONLY the artifact push; the subsequent replica-creation fan-out
-	// (createTemplateReplicasOnNodes) keeps its own fixed concurrency.
+	// to cubelet nodes (distributeRootfsArtifactToNodes): the artifact-push
+	// phase of template creation, redo, and the periodic replica-backfill
+	// sweep. It does not affect the subsequent replica-creation fan-out
+	// (createTemplateReplicasOnNodes), which keeps its own fixed concurrency.
 	// Default 4, matching the historical hardcoded behavior.
 	DistributionWorkers             int             `yaml:"distribution_workers"`
 	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`

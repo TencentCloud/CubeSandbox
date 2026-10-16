@@ -14,6 +14,11 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # Max concurrency for distributing a template rootfs artifact to nodes
+  # (the artifact-push phase of template creation, redo, and the periodic
+  # replica-backfill sweep). Replica creation after the push is not affected
+  # by this knob. Default 4.
+  # distribution_workers: 4
   # CubeMaster no longer builds templates in-process: every template-from-image
   # build is forwarded to the standalone CubeTemplateCenter process. There is
   # no local fallback and no "templatecenter_enabled" switch anymore -- a
