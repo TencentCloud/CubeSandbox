@@ -185,6 +185,7 @@ Client applications need the CubeAPI control-plane address and a route to sandbo
 | --- | --- | :---: | :---: |
 | CubeSandbox SDK with `CUBE_PROXY_NODE_IP` | Python, Go, and Node.js SDKs | No | No |
 | CubeProxy path mode | curl, backend services, generic HTTP clients | No | No |
+| E2B header mode | Official E2B SDK on a fixed address (no wildcard DNS) | No | No |
 | Wildcard DNS | Production, browsers, SPAs, official E2B SDK | Yes | No |
 | E2B dev sidecar | Official E2B SDK in local development without DNS | No | Yes |
 
@@ -217,6 +218,18 @@ curl http://10.0.0.5/sandbox/abc123/49999/health
 
 Path mode requires no DNS or certificate setup and supports WebSocket upgrades. It is not suitable for SPAs that load assets from root-absolute paths such as `/static/app.js`; use wildcard DNS for those applications.
 
+### E2B SDKs on a fixed address: header mode
+
+When a request's Host carries no `<port>-<sandbox-id>.<domain>` routing attributes, CubeProxy falls back to the official E2B routing headers: `E2b-Sandbox-Id` (required) and `E2b-Sandbox-Port` (optional, defaults to the envd port `49983`). The official E2B SDKs read `E2B_SANDBOX_URL` as the data-plane gateway address and attach the `E2b-Sandbox-*` routing headers to sandbox data-plane requests, so they can target CubeProxy directly by IP:
+
+```bash
+export E2B_API_URL="http://<cubeapi-host>:<api-port>"
+export E2B_SANDBOX_URL="http://<cubeproxy-host>:<http-port>"
+export E2B_API_KEY="<your-api-key>"
+```
+
+Host-based routing keeps priority, so existing wildcard-domain traffic is unaffected. Like path mode, header mode exposes the whole data plane on the plaintext listener to anything that can reach CubeProxy — use it on trusted networks only.
+
 ### Production and browser access: wildcard DNS
 
 Host-based routing uses sandbox domains in the form `<port>-<sandbox-id>.<domain>`. Configure a wildcard A record that points to CubeProxy:
@@ -237,7 +250,7 @@ See [HTTPS Certificates & Domain Resolution](./https-and-domain.md) for TLS and 
 
 ### Official E2B SDK without wildcard DNS: dev sidecar
 
-The official E2B SDK does not expose the CubeSandbox SDK's direct-IP option. When wildcard DNS is unavailable in local development, use the [E2B dev sidecar example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar):
+Only E2B SDK versions that read `E2B_SANDBOX_URL` can target a fixed address directly (see [header mode](#e2b-sdks-on-a-fixed-address-header-mode) above). For SDK versions without that knob, use the [E2B dev sidecar example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar):
 
 ```bash
 cd examples/e2b-dev-sidecar
