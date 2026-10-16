@@ -74,3 +74,12 @@ _Example_
 ```
 --ballloon size=0,free_page_reporting=on
 ```
+
+#### Non-resident range filtering
+
+On Linux hosts with `MAP_PRIVATE` guest memory mappings (such as snapshot-restored
+guest memory), the virtio-balloon worker dynamically probes `/proc/self/pagemap`
+during device activation to filter out redundant reclamation on memory ranges that
+are already non-resident. If the pagemap interface is unavailable or fails runtime
+capability checks, the filter automatically self-disables with an informational log
+and safely falls back to standard unconditional reclamation.
