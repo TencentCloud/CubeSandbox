@@ -31,7 +31,7 @@ with Sandbox.create(
     result = sandbox.commands.run(
         "curl -s --max-time 3 https://example.com -o /dev/null -w '%{http_code}' || echo 'blocked'"
     )
-    print("internet access blocked:", result.stdout.strip() == "blocked" or result.exit_code != 0)
+    print("internet access blocked:", "blocked" in result.stdout or result.exit_code != 0)
 
     # Internal sandbox logic still works normally
     result = sandbox.commands.run("echo 'isolated execution ok'")
