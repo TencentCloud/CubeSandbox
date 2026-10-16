@@ -94,22 +94,22 @@
 /* Defaults. seg_size must stay a multiple of S3_WAL_BLOCK_SIZE (I2). */
 #define S3_WAL_DEFAULT_SEG_SIZE (16 * 1024 * 1024)
 
-/* Batch triggers . Whichever fires first assembles the next batch. */
+/* Batch triggers. Whichever fires first assembles the next batch. */
 #define S3_WAL_BATCH_TARGET_BYTES (128 * 1024)
 #define S3_WAL_BATCH_MAX_OPS      64
 #define S3_WAL_BATCH_MAX_US       200
 
 /* Upper bound on one batch, and therefore on the buffer allocated up front.
  * A single op may not exceed this either. */
-#define S3_WAL_BATCH_BUF_SIZE (1024 * 1024)
+#define S3_WAL_BATCH_BUF_SIZE (2 * 1024 * 1024)
 
 /* Largest payload a single append may carry: the batch buffer minus one entry
  * header, rounded down to a block.
  *
  * Callers have to split against this themselves. It is deliberately not hidden
- * inside the WAL: a chunk-sized write (1 MiB) does *not* fit, so the split has
- * to happen where the LBA range is still known, and silently accepting an
- * oversized append would fail the write at submit time instead. */
+ * inside the WAL because silently accepting an oversized append would fail the
+ * write at submit time. The buffer is larger than one 1 MiB chunk so a normal
+ * chunk write plus its entry header stays in one durable batch. */
 #define S3_WAL_MAX_PAYLOAD \
 	(((S3_WAL_BATCH_BUF_SIZE - 64) / S3_WAL_BLOCK_SIZE) * S3_WAL_BLOCK_SIZE)
 
