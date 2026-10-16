@@ -696,6 +696,11 @@ pub enum SandboxStatus {
     Paused,
     Pausing,
     Stopped,
+    /// No backend status currently maps here: `into_first_sandbox` produces
+    /// only `Running`, `Paused`, `Pausing`, `Stopped`, and `Unknown` from
+    /// CubeMaster's container codes, and nothing deserializes this enum from a
+    /// string. Kept so a future backend status can be classified as a failure
+    /// without changing the public state vocabulary.
     Error,
     #[serde(other)]
     Unknown,
