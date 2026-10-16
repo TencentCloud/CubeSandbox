@@ -43,7 +43,7 @@ func wrapEntrypointForEnvd(c *types.Container) {
 	originalCmd := buildOriginalCommand(c)
 	c.Command = []string{"/bin/sh", "-c"}
 	c.Args = []string{
-		fmt.Sprintf(`%s >/var/log/envd.log 2>&1 & exec "$@"`, constants.CubeEnvdInImagePath),
+		fmt.Sprintf(`%s >/var/log/envd.log 2>&1 & ENVD_PID=$! ; "$@" & wait $ENVD_PID`, constants.CubeEnvdInImagePath),
 		"--",
 	}
 	c.Args = append(c.Args, originalCmd...)
