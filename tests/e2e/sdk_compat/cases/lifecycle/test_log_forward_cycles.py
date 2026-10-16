@@ -4,11 +4,12 @@
 """E2E lifecycle smoke test for repeated pause/resume.
 
 Companion to commit "shim: serialize log-forward start/stop across Container
-clones" (CubeShim/shim/src/container/mod.rs). Pause tears down each container's
-log-forward task (``disconnect_agent`` -> ``unset_client`` -> ``stop_log_forward``)
-and resume restarts it (``set_client`` -> ``start_log_forward``); the fix shares
-one mutexed slot and serializes start/stop with a semaphore so exactly one
-caller drains the task to completion instead of falling back to ``abort()``.
+clones" (CubeShim/shim/src/container/mod.rs). Pause freezes the VM with the
+log-forward connections alive and stops the tasks only after the VM is torn
+down (``quiesce_for_pause`` -> snapshot -> ``stop_log_forward_detached``);
+resume restarts forwarding (``set_client`` -> ``start_log_forward``); the fix
+shares one mutexed slot and serializes start/stop with a semaphore so exactly
+one caller drains the task to completion instead of falling back to ``abort()``.
 
 Scope note: these SDK-level checks do NOT directly observe the skipped-IO-drain
 bug. ``run_command`` streams through envd's process API over HTTP and
