@@ -392,6 +392,19 @@ func (s *Store) DeleteAgentSnapshot(ctx context.Context, agentID, snapshotID str
 	return nil
 }
 
+// SoftDeleteAgentSnapshotsByInfraID soft-deletes every snapshot row backed by
+// the given infra snapshot id. Returns the number of rows removed.
+func (s *Store) SoftDeleteAgentSnapshotsByInfraID(ctx context.Context, snapshotID string) (int64, error) {
+	result := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_snapshot SET deleted_at = NOW() WHERE snapshot_id = ? AND deleted_at IS NULL`,
+		snapshotID,
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("soft-delete snapshots by infra id: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // AgentOperation matches the old Rust AgentOperationResponse.
 type AgentOperation struct {
 	OperationID   string  `json:"operationId"`

@@ -313,6 +313,100 @@ func TestSDK_DeleteSandbox_Success(t *testing.T) {
 	}
 }
 
+// ── DeleteSnapshot ───────────────────────────────────────────────────────
+
+func TestSDK_DeleteSnapshot_Success(t *testing.T) {
+	var capturedID string
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, snapshotID string) (json.RawMessage, error) {
+			capturedID = snapshotID
+			return raw(`{"ret": {"ret_code": 0}, "request_id": "r-1"}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-99")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if capturedID != "snap-99" {
+		t.Errorf("CM deleteSnapshot id = %q, want snap-99", capturedID)
+	}
+}
+
+func TestSDK_ListSnapshots_PassesNextTokenHeader(t *testing.T) {
+	cm := &fakeCM{
+		listSnapshots: func(_ context.Context, _ map[string]string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 0}, "data": [], "next_token": "100"}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots?limit=100")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Next-Token"); got != "100" {
+		t.Errorf("X-Next-Token = %q, want 100", got)
+	}
+}
+
+func TestSDK_GetSnapshot_Success(t *testing.T) {
+	var capturedID string
+	cm := &fakeCM{
+		getSnapshot: func(_ context.Context, snapshotID string) (json.RawMessage, error) {
+			capturedID = snapshotID
+			return raw(`{"ret": {"ret_code": 0}, "data": {"snapshot_id": "snap-99", "status": "READY"}}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots/snap-99")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if capturedID != "snap-99" {
+		t.Errorf("CM getSnapshot id = %q, want snap-99", capturedID)
+	}
+	// SDK unwraps the {ret, data} envelope and camelCases the payload.
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if body["snapshotID"] != "snap-99" {
+		t.Errorf("snapshotID = %v, want snap-99", body["snapshotID"])
+	}
+}
+
+func TestSDK_GetSnapshot_NotFoundInCM(t *testing.T) {
+	cm := &fakeCM{
+		getSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 130404, "ret_msg": "snapshot not found"}, "data": null}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots/nope")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSDK_DeleteSnapshot_ConflictInCM(t *testing.T) {
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			// Snapshot in CREATING/DELETING or active job → CubeMaster 130409.
+			return raw(`{"ret": {"ret_code": 130409, "ret_msg": "snapshot in use"}, "data": null}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 (ret_code 130409 must map to Conflict); body=%s", w.Code, w.Body.String())
+	}
+}
+
 // ── PauseSandbox / ResumeSandbox ──────────────────────────────────────────
 
 func TestSDK_PauseSandbox_PassesAction(t *testing.T) {

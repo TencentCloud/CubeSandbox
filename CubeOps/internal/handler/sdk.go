@@ -89,6 +89,8 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 
 	// Snapshots
 	r.GET("/snapshots", h.ListSnapshots)
+	r.GET("/snapshots/:id", h.GetSnapshot)
+	r.DELETE("/snapshots/:id", h.DeleteSnapshot)
 	r.POST("/sandboxes/:id/snapshots", h.CreateSnapshot)
 	r.POST("/sandboxes/:id/rollback", h.RollbackSandbox)
 
@@ -603,6 +605,55 @@ func (h *SDKHandler) ListSnapshots(c *gin.Context) {
 	if err != nil {
 		writeCMError(c, err)
 		return
+	}
+	// Surface the pagination cursor via X-Next-Token; writeSDKResponse drops it.
+	var env struct {
+		NextToken string `json:"next_token"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && env.NextToken != "" {
+		c.Header("X-Next-Token", env.NextToken)
+	}
+	writeSDKResponse(c, raw)
+}
+
+// GetSnapshot — GET /api/v1/sdk/snapshots/{id}
+func (h *SDKHandler) GetSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
+	snapshotID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = snapshotID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	raw, err := h.cm.GetSnapshot(ctx, snapshotID)
+	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// DeleteSnapshot — DELETE /api/v1/sdk/snapshots/{id}
+// Physical delete is synchronous (LVM cleanup), so bounded by longOpTimeout.
+func (h *SDKHandler) DeleteSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
+	snapshotID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = snapshotID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	ctx, cancel := longOpCtx(c)
+	defer cancel()
+	raw, err := h.cm.DeleteSnapshot(ctx, snapshotID)
+	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	// Best-effort reverse-sync of AgentHub registrations referencing the snapshot.
+	if h.agenthubSvc != nil {
+		h.agenthubSvc.ReverseSyncAgentHubTemplate(ctx, snapshotID)
+		h.agenthubSvc.ReverseSyncAgentHubSnapshot(ctx, snapshotID)
 	}
 	writeSDKResponse(c, raw)
 }

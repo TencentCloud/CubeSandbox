@@ -89,6 +89,15 @@ async function refreshAccessToken(): Promise<string | null> {
 // --- SDK API (CubeAPI via CubeOps proxy, JWT Bearer auth) ---
 
 export async function api<T = unknown>(path: string, init: ApiInit = {}): Promise<T> {
+  return (await apiWithHeaders<T>(path, init)).body;
+}
+
+// apiWithHeaders is api() plus response headers, for endpoints that carry
+// pagination cursors in a header.
+export async function apiWithHeaders<T = unknown>(
+  path: string,
+  init: ApiInit = {},
+): Promise<{ body: T; headers: Headers }> {
   const { params, headers, ...rest } = init;
   const query = buildQuery(params);
 
@@ -131,7 +140,7 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
       `${resp.status} ${resp.statusText}`;
     throw new ApiError(resp.status, String(msg), body);
   }
-  return body as T;
+  return { body: body as T, headers: resp.headers };
 }
 
 // --- Ops API (CubeOps, JWT Bearer auth) ---
