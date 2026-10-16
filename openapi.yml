@@ -1029,6 +1029,7 @@ paths:
           type: string
       - name: nextToken
         in: query
+        description: Continuation cursor from the previous response's `x-next-token` header.
         required: false
         schema:
           type: string
@@ -1041,12 +1042,23 @@ paths:
       responses:
         '200':
           description: Sandbox list
+          headers:
+            x-next-token:
+              schema:
+                type: string
+              description: Continuation cursor for the next page. Omitted on the last page.
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: '#/components/schemas/ListedSandbox'
+        '400':
+          description: Malformed nextToken
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
           content:

@@ -1089,6 +1089,19 @@ pub struct ListSandboxResponse {
     #[serde(default, alias = "data")]
     pub sandboxes: Vec<SandboxInfo>,
     pub ret: RetCode,
+    /// Number of nodes this window actually covered
+    /// (`rsp.Size = len(nodeList)`), which is what says whether another window
+    /// remains.
+    #[serde(default, alias = "Size")]
+    pub size: Option<i32>,
+    /// Last node `Index` this window covered — the backend's own cursor, and
+    /// what the walker advances on (`end_idx + 1` is the next node's position
+    /// in both `IndexByPage` branches, `node.go`). It is a node *row id*
+    /// (`Index: int(elem.ID)`), **not** a position, so it must not be compared
+    /// against the healthy-node count the backend also reports as `Total` to
+    /// decide whether more nodes remain — `size` answers that.
+    #[serde(default, alias = "EndIdx")]
+    pub end_idx: Option<i32>,
 }
 
 /// One sandbox entry as returned by /cube/sandbox/list.
