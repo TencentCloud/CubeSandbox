@@ -372,11 +372,17 @@ resource "kubernetes_secret" "cubemaster_conf" {
           enable_filters = ["cpu", "mem", "template_locality", "realtime_create_num"]
         }
         score = {
+          # quota_cpu_usage (not cpu_usage): valid WeightFactorQuotaCpu token.
+          # Previously ignored typo. Timing: next terraform apply that rewrites
+          # cubemaster-conf is enough — resource_weights are read live on every
+          # score pass after hot-reload; no CubeMaster restart. Unrelated infra
+          # applies can therefore change placement. CubeMaster-only upgrades
+          # that leave the secret untouched keep the old inert behaviour.
           enable_scorers = ["real_time_weighted_average"]
           resource_weights = {
             mvm_num          = 2
             local_create_num = 3
-            cpu_usage        = 1
+            quota_cpu_usage  = 1
             quota_mem_usage  = 1
           }
           plugin_conf = {
@@ -385,7 +391,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
               enable_weight_factors = [
                 "mvm_num",
                 "local_create_num",
-                "cpu_usage",
+                "quota_cpu_usage",
                 "quota_mem_usage",
               ]
               time_decay_seconds = 300

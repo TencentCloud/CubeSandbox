@@ -1,0 +1,109 @@
+{
+  "status": "PASS",
+  "arms": [
+    {
+      "arm": "control",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 355.0,
+      "api_p95_ms": 590.8000000000001,
+      "api_max_ms": 701.0,
+      "ready_p50_ms": 800.0,
+      "ready_p95_ms": 982.3000000000002,
+      "ready_max_ms": 1159.0,
+      "node_dist": {
+        "node-d": 8,
+        "node-a": 5,
+        "node-c": 5,
+        "node-b": 2
+      },
+      "metrics_delta": {}
+    },
+    {
+      "arm": "healthy",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 346.5,
+      "api_p95_ms": 449.3500000000001,
+      "api_max_ms": 513.0,
+      "ready_p50_ms": 766.0,
+      "ready_p95_ms": 905.6500000000001,
+      "ready_max_ms": 994.0,
+      "node_dist": {
+        "node-b": 4,
+        "node-a": 10,
+        "node-c": 3,
+        "node-d": 3
+      },
+      "metrics_delta": {
+        "cube_scheduler_external_http_score_outcomes_total": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+        "reason:success": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_sum": 0.022666990999999997,
+        "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+      }
+    },
+    {
+      "arm": "delayed",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 438.5,
+      "api_p95_ms": 623.4000000000002,
+      "api_max_ms": 878.0,
+      "ready_p50_ms": 892.0,
+      "ready_p95_ms": 1194.0500000000002,
+      "ready_max_ms": 1328.0,
+      "node_dist": {
+        "node-a": 6,
+        "node-d": 4,
+        "node-c": 8,
+        "node-b": 2
+      },
+      "metrics_delta": {
+        "cube_scheduler_external_http_score_outcomes_total": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+        "reason:success": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_sum": 1.7886317249999997,
+        "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+      }
+    },
+    {
+      "arm": "timeout",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 558.0,
+      "api_p95_ms": 683.8000000000001,
+      "api_max_ms": 813.0,
+      "ready_p50_ms": 994.5,
+      "ready_p95_ms": 1158.95,
+      "ready_max_ms": 1215.0,
+      "node_dist": {
+        "node-d": 7,
+        "node-a": 7,
+        "node-b": 4,
+        "node-c": 2
+      },
+      "metrics_delta": {
+        "cube_scheduler_external_http_score_outcomes_total": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+        "reason:timeout": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_sum": 4.417560916999999,
+        "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+      }
+    }
+  ],
+  "healthy_api_p95_delta_ms": -141.45,
+  "notes": [
+    "healthy-control delta is negative (−141.45 ms); do not read as a ≤50 ms scorer-cost bound — arm variance dominates.",
+    "Use delayed/timeout vs healthy for injected-cost observability, not healthy vs control as A/B of the scorer alone.",
+    "Producing binary: d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6 (staged candidate). Not re-run against this PR head."
+  ],
+  "evidence_binary_sha": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "arms_not_rerun_on_pr_head": true,
+  "engineering_target_ms": 50,
+  "engineering_target_met_by_healthy_control_delta": false
+}
