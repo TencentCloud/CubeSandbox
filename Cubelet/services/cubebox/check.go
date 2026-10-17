@@ -252,3 +252,16 @@ func transformError(err error) error {
 	}
 	return ret.Err(errorcode.ErrorCode_NewTaskFailed, err.Error())
 }
+
+// stripReservedAnnotations removes internal keys that only Cubelet's spec
+// builders may write, so no caller-supplied annotation map can carry them into
+// the sandbox spec on any path. The dirty-log switch comes from the host
+// config, and a resume request's annotations are the packed ones from the host
+// that took the pause snapshot, so the ingress drops the key before any spec
+// assembly runs regardless of spec-opt order.
+func stripReservedAnnotations(req *cubebox.RunCubeSandboxRequest) {
+	delete(req.Annotations, constants.AnnotationMemoryDirtyLog)
+	for _, c := range req.GetContainers() {
+		delete(c.GetAnnotations(), constants.AnnotationMemoryDirtyLog)
+	}
+}

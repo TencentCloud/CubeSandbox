@@ -24,3 +24,11 @@ host:
   gc:
     code_expiration_time: "72h"
     image_expiration_time: "24h"
+  # KVM dirty-page logging for pause snapshots. When on, sandboxes restored
+  # from a snapshot run with the guest RAM dirty log armed, so the next pause
+  # writes only the pages the guest touched since that restore instead of
+  # rescanning guest memory. Off by default: it changes how every pause
+  # snapshot is produced, so enable it only after validating pause/resume on
+  # this host.
+  memory:
+    dirty_log: false

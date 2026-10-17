@@ -1000,6 +1000,9 @@ impl SandBox {
             disks: Some(disks),
             pmem: Some(pmems),
             vsock: Some(vsock),
+            // Host opt-in: arm dirty-page logging so the next pause only writes
+            // pages touched since this restore.
+            dirty_log: self.conf.memory_dirty_log,
             memory_vol_url: restore_memory_vol_url,
             ivshmem: if enable_ivshmem {
                 Some(Self::default_ivshmem_config(&self.id)?)
