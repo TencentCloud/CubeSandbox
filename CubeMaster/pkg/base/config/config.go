@@ -799,8 +799,8 @@ func preHandle(config *Config) (*Config, error) {
 	if preHandleAuthConf(config) != nil {
 		return nil, errors.New("preHandleAuthConf failed")
 	}
-	if preHandleTemplate(config) != nil {
-		return nil, errors.New("preHandleTemplate failed")
+	if err := preHandleTemplate(config); err != nil {
+		return nil, fmt.Errorf("preHandleTemplate failed: %w", err)
 	}
 	return config, nil
 }

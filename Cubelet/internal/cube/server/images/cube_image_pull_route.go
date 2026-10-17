@@ -171,10 +171,11 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 	}
 	if cubeSpec != nil {
 		mediaType := cubeSpec.StorageMedia
-		switch mediaType {
-		case "nfs":
+		// nfs is explicitly unsupported in the open-source build; reject it up
+		// front. ext4/erofs are handled by the IsPmemRootfsMedia branch below;
+		// docker/empty fall through to PullRegistryImage.
+		if mediaType == "nfs" {
 			return "", fmt.Errorf("nfs images are not supported in the open source build")
-		default:
 		}
 		// ext4 and erofs are both local-file rootfs artifacts: download them as
 		// a pmem backing file instead of pulling through containerd. docker/empty
