@@ -28,6 +28,11 @@ stringData:
 {{- else if eq .Values.cubeProxy.tls.mode "selfSigned" }}
 {{- $commonName := default .Values.cubeProxy.domain .Values.cubeProxy.tls.selfSigned.commonName -}}
 {{- $dnsNames := list .Values.cubeProxy.domain -}}
+{{- /* Auto-generate wildcard for the custom domain */ -}}
+{{- if .Values.cubeProxy.domain }}
+{{- $wildcardDomain := printf "*.%s" .Values.cubeProxy.domain -}}
+{{- $dnsNames = append $dnsNames $wildcardDomain -}}
+{{- end }}
 {{- range .Values.cubeProxy.tls.selfSigned.dnsNames }}
 {{- $dnsNames = append $dnsNames . -}}
 {{- end }}
