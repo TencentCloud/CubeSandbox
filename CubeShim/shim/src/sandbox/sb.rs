@@ -46,6 +46,37 @@ use crate::{debugf, errf, infof, warnf};
 
 //use tokio_uring::fs::UnixStream;
 
+/// Env var overriding the ttrpc deadline for the guest-reset RPCs issued right after
+/// a MicroVM is restored (`reset_guest`).
+const ENV_AGENT_CTX_TIMEOUT_SECS: &str = "CUBE_AGENT_CTX_TIMEOUT_SECS";
+/// Default deadline for those RPCs, in seconds.
+///
+/// `reset_guest` runs immediately after `start_vm`, while the guest is still coming back
+/// from a snapshot. The sandbox-wide 3s budget is not always enough there: creation failed
+/// with `reset guest time failed: ... Receive packet timeout` on 1GiB sandboxes, while
+/// 512MiB and 768MiB stayed under the limit. 15s keeps the call bounded while leaving room
+/// for a slow restore.
+///
+/// This deliberately does *not* change `SandBox::ctx`, which also bounds `stats_container`
+/// (whose client is shared with the per-container control RPCs) and two
+/// `CubeHypervisor::wait_notify` waits.
+const DEFAULT_AGENT_CTX_TIMEOUT_SECS: u64 = 15;
+/// Accepted range for `CUBE_AGENT_CTX_TIMEOUT_SECS`. `0` is not a spelling for "unlimited";
+/// it falls back to the default like any other out-of-range value.
+const AGENT_CTX_TIMEOUT_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=600;
+
+/// Parse `CUBE_AGENT_CTX_TIMEOUT_SECS`. Returns `Err` with the offending text when the
+/// value is present but unusable, so the caller can tell the operator it was ignored.
+fn parse_agent_ctx_timeout_secs(raw: Option<&str>) -> CResult<u64> {
+    match raw {
+        None => Ok(DEFAULT_AGENT_CTX_TIMEOUT_SECS),
+        Some(v) => match v.trim().parse::<u64>() {
+            Ok(n) if AGENT_CTX_TIMEOUT_SECS_RANGE.contains(&n) => Ok(n),
+            _ => Err(v.to_string()),
+        },
+    }
+}
+
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
@@ -465,6 +496,27 @@ impl SandBox {
         let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string());
         let tm = Utc::now();
 
+        // Widen the deadline for these two calls only: the guest is still restoring here.
+        // Mirrors the local override create_sandbox already does.
+        let raw = std::env::var(ENV_AGENT_CTX_TIMEOUT_SECS).ok();
+        let secs = match parse_agent_ctx_timeout_secs(raw.as_deref()) {
+            Ok(n) => n,
+            Err(bad) => {
+                warnf!(
+                    self.log,
+                    "ignoring {}={:?}: want an integer in {}..={} seconds, using {}",
+                    ENV_AGENT_CTX_TIMEOUT_SECS,
+                    bad,
+                    AGENT_CTX_TIMEOUT_SECS_RANGE.start(),
+                    AGENT_CTX_TIMEOUT_SECS_RANGE.end(),
+                    DEFAULT_AGENT_CTX_TIMEOUT_SECS
+                );
+                DEFAULT_AGENT_CTX_TIMEOUT_SECS
+            }
+        };
+        let mut ctx = self.ctx.clone();
+        ctx.timeout_nano = (secs as i64) * 1_000_000_000;
+
         let req = agent::SetGuestDateTimeRequest {
             Sec: tm.timestamp(),
             Usec: tm.timestamp_subsec_micros() as i64,
@@ -472,7 +524,7 @@ impl SandBox {
         };
 
         client
-            .set_guest_date_time(self.ctx.clone(), &req)
+            .set_guest_date_time(ctx.clone(), &req)
             .await
             .map_err(|e| format!("reset guest time failed:{}", e))?;
 
@@ -483,7 +535,7 @@ impl SandBox {
         };
 
         client
-            .reseed_random_dev(self.ctx.clone(), &req)
+            .reseed_random_dev(ctx, &req)
             .await
             .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
         stat.set_ok();
@@ -1810,6 +1862,50 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        parse_agent_ctx_timeout_secs, AGENT_CTX_TIMEOUT_SECS_RANGE, DEFAULT_AGENT_CTX_TIMEOUT_SECS,
+    };
+
+    #[test]
+    fn agent_ctx_timeout_defaults_when_unset() {
+        assert_eq!(
+            parse_agent_ctx_timeout_secs(None),
+            Ok(DEFAULT_AGENT_CTX_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn agent_ctx_timeout_accepts_in_range_values() {
+        assert_eq!(parse_agent_ctx_timeout_secs(Some("25")), Ok(25));
+        assert_eq!(parse_agent_ctx_timeout_secs(Some("  30  ")), Ok(30));
+        assert_eq!(
+            parse_agent_ctx_timeout_secs(Some(&AGENT_CTX_TIMEOUT_SECS_RANGE.start().to_string())),
+            Ok(*AGENT_CTX_TIMEOUT_SECS_RANGE.start())
+        );
+        assert_eq!(
+            parse_agent_ctx_timeout_secs(Some(&AGENT_CTX_TIMEOUT_SECS_RANGE.end().to_string())),
+            Ok(*AGENT_CTX_TIMEOUT_SECS_RANGE.end())
+        );
+    }
+
+    #[test]
+    fn agent_ctx_timeout_reports_unusable_values() {
+        // Out of range, including 0 -- which is not a spelling for "unlimited".
+        for bad in ["0", "601", "-1"] {
+            assert_eq!(
+                parse_agent_ctx_timeout_secs(Some(bad)),
+                Err(bad.to_string())
+            );
+        }
+        // Not an integer.
+        for bad in ["30s", "abc", ""] {
+            assert_eq!(
+                parse_agent_ctx_timeout_secs(Some(bad)),
+                Err(bad.to_string())
+            );
+        }
+    }
+
     use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
     use oci_spec::runtime::SpecBuilder;
     use protobuf::MessageDyn;
