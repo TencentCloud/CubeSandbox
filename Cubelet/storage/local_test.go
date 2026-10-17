@@ -210,6 +210,12 @@ type fakeCowCloneMemoryCall struct {
 	sourceName string
 }
 
+type fakeCowPromoteCall struct {
+	volumeName   string
+	snapshotName string
+	originVolume string
+}
+
 type fakeCowResolveCall struct {
 	name string
 	kind string
@@ -236,8 +242,10 @@ type fakeCowVolumeManager struct {
 	createMemoryCalls   []fakeCowCreateMemoryCall
 	commitMemoryCalls   []fakeCowCommitMemoryCall
 	cloneMemoryCalls    []fakeCowCloneMemoryCall
+	promoteCalls        []fakeCowPromoteCall
 	commitMemoryErr     error
 	cloneMemoryErr      error
+	promoteErr          error
 	resolveCalls        []fakeCowResolveCall
 	deleteCalls         []fakeCowDeleteCall
 	deactivateCalls     []fakeCowDeleteCall
@@ -367,6 +375,23 @@ func (m *fakeCowVolumeManager) CloneSandboxMemory(ctx context.Context, sandboxID
 		}
 	}
 	return &cowVolume{VolumeName: name, Kind: cowKindVolume, Gen: 0, FilePath: path}, nil
+}
+
+func (m *fakeCowVolumeManager) PromoteVolumeToSnapshot(ctx context.Context, volumeName, snapshotName, originVolume string) (*cowVolume, error) {
+	_ = ctx
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.promoteCalls = append(m.promoteCalls, fakeCowPromoteCall{volumeName: volumeName, snapshotName: snapshotName, originVolume: originVolume})
+	if m.promoteErr != nil {
+		return nil, m.promoteErr
+	}
+	path := fmt.Sprintf("/dev/mapper/%s", snapshotName)
+	if m.resolvePaths != nil {
+		if v, ok := m.resolvePaths[snapshotName]; ok {
+			path = v
+		}
+	}
+	return &cowVolume{VolumeName: snapshotName, Kind: cowKindSnapshot, Gen: 0, FilePath: path}, nil
 }
 
 func (m *fakeCowVolumeManager) DeleteByKind(ctx context.Context, name, kind string) error {

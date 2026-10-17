@@ -26,6 +26,8 @@ type fakeCowEngine struct {
 	createSnapshotErr           error
 	createVolumeFromSnapshots   [][2]string
 	createVolumeFromSnapshotErr error
+	promotedVolumes             [][3]string
+	promoteErr                  error
 	activatePaths               map[string]string
 	activatedVolumes            []string
 	deactivatedVolumes          []string
@@ -132,6 +134,27 @@ func (f *fakeCowEngine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName stri
 		size = src.SizeBytes
 	}
 	f.volumeInfos[volumeName] = &cubecow.Volume{DevicePath: path, SizeBytes: size}
+	return path, nil
+}
+
+func (f *fakeCowEngine) PromoteVolumeToSnapshot(volumeName, snapshotName, originVolume string) (string, error) {
+	if f.promotedVolumes == nil {
+		f.promotedVolumes = [][3]string{}
+	}
+	f.promotedVolumes = append(f.promotedVolumes, [3]string{volumeName, snapshotName, originVolume})
+	if f.promoteErr != nil {
+		return "", f.promoteErr
+	}
+	path := "/dev/mapper/" + snapshotName
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	size := uint64(8 << 20)
+	if src := f.volumeInfos[volumeName]; src != nil && src.SizeBytes > 0 {
+		size = src.SizeBytes
+	}
+	f.volumeInfos[snapshotName] = &cubecow.Volume{DevicePath: path, SizeBytes: size}
+	delete(f.volumeInfos, volumeName)
 	return path, nil
 }
 

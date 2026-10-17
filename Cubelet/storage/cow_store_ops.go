@@ -305,6 +305,25 @@ func CommitMemoryFromBaseFor(ctx context.Context, backend string, source *CowSna
 	return cubecowVolumeToSnapshotObject(ctx, store, volume)
 }
 
+// PromoteMemoryVolumeFor turns a sandbox's pre-cloned own memory volume into
+// the tpl-<id>-memory pause snapshot in place: the volume's file becomes the
+// snapshot file, so the pause path pays no reflink clone. originVolume is the
+// namespace directory the current restore image lives in.
+func PromoteMemoryVolumeFor(ctx context.Context, backend string, source *CowSnapshotObject, id, originVolume string) (*CowSnapshotObject, error) {
+	store, err := requireCowStoreFor(backend)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil || strings.TrimSpace(source.Name) == "" {
+		return nil, fmt.Errorf("source memory object is required")
+	}
+	volume, err := store.PromoteVolumeToSnapshot(ctx, source.Name, cowTemplateMemoryName(id), originVolume)
+	if err != nil {
+		return nil, err
+	}
+	return cubecowVolumeToSnapshotObject(ctx, store, volume)
+}
+
 // DeleteObject deletes a CoW volume/snapshot by name and kind on the default Store.
 func DeleteObject(ctx context.Context, name, kind string) error {
 	return DeleteObjectFor(ctx, cow.BackendXFS, name, kind)
@@ -650,15 +669,22 @@ func releaseImportedMemoryAfterRollback(ctx context.Context, backend, sandboxID 
 	if err != nil {
 		return nil
 	}
+	// The restore base changes with the rollback, so any own volume minted
+	// for the old base must not survive into the next pause. The mint
+	// fields go with it: pause must not promote a stale base.
 	name := strings.TrimSpace(info.ImportedMemoryVol)
-	if name == "" {
+	if name == "" && info.MintedMemorySource == "" {
 		return nil
 	}
-	_ = DeactivateObjectFor(ctx, backend, name, cowKindVolume)
-	if err := DeleteObjectFor(ctx, backend, name, cowKindVolume); err != nil {
-		warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
+	if name != "" {
+		_ = DeactivateObjectFor(ctx, backend, name, cowKindVolume)
+		if err := DeleteObjectFor(ctx, backend, name, cowKindVolume); err != nil {
+			warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
+		}
 	}
 	info.ImportedMemoryVol = ""
+	info.MintedMemorySource = ""
+	info.MintedMemoryOrigin = ""
 	info.UpdateAt = time.Now()
 	if err := localStorage.writeBackendFileInfo(ctx, sandboxID, info); err != nil {
 		return fmt.Errorf("clear imported memory %s after rollback: %w", name, err)

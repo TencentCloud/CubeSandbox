@@ -218,6 +218,13 @@ func (m *S3Cow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName st
 	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
 }
 
+// PromoteVolumeToSnapshot is unsupported on S3: a snapshot there is an
+// s3lvol NVMe snapshot, not a file that can be renamed into place.
+func (m *S3Cow) PromoteVolumeToSnapshot(ctx context.Context, volumeName, snapshotName, originVolume string) (*cowVolume, error) {
+	_ = ctx
+	return nil, fmt.Errorf("promote volume to snapshot is not supported on s3")
+}
+
 // cloneVolumeFromWritableSource snapshots a live volume, clones that snap
 // into dest, then deletes the snap. The snap exists only inside this call.
 func (m *S3Cow) cloneVolumeFromWritableSource(ctx context.Context, sourceVol, destVol string) (string, error) {

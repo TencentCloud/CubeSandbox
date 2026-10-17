@@ -1937,10 +1937,18 @@ type StorageInfo struct {
 	RestoreMemoryVolURL string `json:"-"`
 
 	// ImportedMemoryVol is the sandbox-private memory disk Create minted
-	// (cross-node import or same-node S3 pause-resume clone). Destroy
-	// deletes it. Empty means this restore still reads a package memory
-	// snapshot (XFS template / resume / FromSnap always leave this empty).
+	// (cross-node import, same-node S3 pause-resume clone, or the XFS
+	// pause-resume background mint). Destroy deletes it. Empty means this
+	// restore still reads a package memory snapshot.
 	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
+
+	// MintedMemorySource / MintedMemoryOrigin describe the own memory volume
+	// the XFS pause-resume background mint cloned: the snapshot id it cloned
+	// from and the directory the next pause's promote files the snapshot
+	// under. Written only after the clone completed, and only promoted while
+	// the source still is the last restore.
+	MintedMemorySource string `json:"mintedMemorySource,omitempty"`
+	MintedMemoryOrigin string `json:"mintedMemoryOrigin,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
 	// Keyed by Volume.name (the RunCubeSandboxRequest name, not volumeID).

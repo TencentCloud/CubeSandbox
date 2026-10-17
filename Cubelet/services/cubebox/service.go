@@ -36,6 +36,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -476,6 +477,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success {
+		if sid := resumeFromPauseSandboxID(req); sid != "" {
+			if backend, berr := storageBackendFromAnnotations(req.GetAnnotations()); berr == nil {
+				storage.MintSandboxMemoryAfterResume(context.WithoutCancel(ctx), backend, sid, req.GetAnnotations())
+			}
+		}
 	}
 	return rsp, nil
 }
