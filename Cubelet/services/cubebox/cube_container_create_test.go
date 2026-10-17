@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -41,65 +42,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
-
-func TestIsImageStorageMediaType(t *testing.T) {
-	tests := []struct {
-		name      string
-		container *cubebox.ContainerConfig
-		mediaType cubeimages.ImageStorageMediaType
-		want      bool
-	}{
-		{
-			name: "docker image type",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: cubeimages.ImageStorageMediaType_docker.String(),
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_docker,
-			want:      true,
-		},
-		{
-			name: "ext4 image type",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_ext4,
-			want:      true,
-		},
-		{
-			name: "empty storage media defaults to docker",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: "",
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_docker,
-			want:      true,
-		},
-		{
-			name: "mismatched type",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_docker,
-			want:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isImageStorageMediaType(tt.container, tt.mediaType)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
 
 func TestGetMountOptions(t *testing.T) {
 	tests := []struct {
@@ -917,6 +860,31 @@ func TestPrepareImagePmems(t *testing.T) {
 				{PmemFile: tmpFile},
 			},
 			expectPmems: 2,
+		},
+		{
+			name: "erofs fs type propagated to cube.pmem annotation",
+			rootfsConfig: []*virtiofs.CubeRootfsInfo{
+				{PmemFile: tmpFile, PmemFsType: "erofs"},
+			},
+			expectPmems: 1,
+			validate: func(t *testing.T, spec *specs.Spec) {
+				var pmems []pmem.CubePmem
+				require.NoError(t, jsoniter.Unmarshal([]byte(spec.Annotations[constants.AnnotationPmem]), &pmems))
+				require.Len(t, pmems, 1)
+				assert.Equal(t, "erofs", pmems[0].FsType, "erofs PmemFsType must reach CubePmem.FsType")
+			},
+		},
+		{
+			name: "empty fs type defaults to ext4",
+			rootfsConfig: []*virtiofs.CubeRootfsInfo{
+				{PmemFile: tmpFile},
+			},
+			expectPmems: 1,
+			validate: func(t *testing.T, spec *specs.Spec) {
+				var pmems []pmem.CubePmem
+				require.NoError(t, jsoniter.Unmarshal([]byte(spec.Annotations[constants.AnnotationPmem]), &pmems))
+				assert.Equal(t, "ext4", pmems[0].FsType, "empty PmemFsType must default to ext4")
+			},
 		},
 	}
 

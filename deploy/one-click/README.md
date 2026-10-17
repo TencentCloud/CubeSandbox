@@ -562,24 +562,25 @@ Conditional commands:
 - If `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` is enabled and `/etc/docker/daemon.json` already exists, `python3` is required.
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
+- If `CubeMaster/conf.yaml` sets `template.rootfs_format: "erofs"` and CubeTemplateCenter runs directly on the host (not in its container image, which already bundles `erofs-utils`), the host also needs `mkfs.erofs` (`erofs-utils`). The repo-root and one-click CubeTemplateCenter container images install `erofs-utils` themselves, so this only applies to a host-installed TC.
 - If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
   `nvme` (nvme-cli), `python3`, `truncate`, remaining `s3lvol_tgt` shared libraries (`ldd`; OpenSSL is static), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
 
-Recommended packages to satisfy the cubecow command set:
+Recommended packages to satisfy the cubecow command set (and `mkfs.erofs` when erofs is enabled on a host-installed TC):
 
-- Debian / Ubuntu: `e2fsprogs`, `util-linux`
-- OpenCloudOS / RHEL / CentOS: `e2fsprogs`, `util-linux`
+- Debian / Ubuntu: `e2fsprogs`, `util-linux`, `erofs-utils`
+- OpenCloudOS / RHEL / CentOS: `e2fsprogs`, `util-linux`, `erofs-utils`
 
 Example install commands:
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y e2fsprogs util-linux
+sudo apt-get install -y e2fsprogs util-linux erofs-utils
 
 # OpenCloudOS / RHEL / CentOS
-sudo dnf install -y e2fsprogs util-linux || \
-sudo yum install -y e2fsprogs util-linux
+sudo dnf install -y e2fsprogs util-linux erofs-utils || \
+sudo yum install -y e2fsprogs util-linux erofs-utils
 ```
 
 Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1` (libraries only; `nvme-cli` is installed by `install.sh`):
@@ -620,24 +621,25 @@ Conditional commands:
 - If `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` is enabled and `/etc/docker/daemon.json` already exists, `python3` is required.
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
+- If `CubeMaster/conf.yaml` sets `template.rootfs_format: "erofs"` and CubeTemplateCenter runs directly on the host (not in its container image, which already bundles `erofs-utils`), the host also needs `mkfs.erofs` (`erofs-utils`). The repo-root and one-click CubeTemplateCenter container images install `erofs-utils` themselves, so this only applies to a host-installed TC.
 - If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
   `nvme` (nvme-cli), `python3`, `truncate`, remaining `s3lvol_tgt` shared libraries (`ldd`; OpenSSL is static), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
 
-Recommended packages to satisfy the cubecow command set:
+Recommended packages to satisfy the cubecow command set (and `mkfs.erofs` when erofs is enabled on a host-installed TC):
 
-- Debian / Ubuntu: `e2fsprogs`, `util-linux`
-- OpenCloudOS / RHEL / CentOS: `e2fsprogs`, `util-linux`
+- Debian / Ubuntu: `e2fsprogs`, `util-linux`, `erofs-utils`
+- OpenCloudOS / RHEL / CentOS: `e2fsprogs`, `util-linux`, `erofs-utils`
 
 Example install commands:
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y e2fsprogs util-linux
+sudo apt-get install -y e2fsprogs util-linux erofs-utils
 
 # OpenCloudOS / RHEL / CentOS
-sudo dnf install -y e2fsprogs util-linux || \
-sudo yum install -y e2fsprogs util-linux
+sudo dnf install -y e2fsprogs util-linux erofs-utils || \
+sudo yum install -y e2fsprogs util-linux erofs-utils
 ```
 
 Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1` (libraries only; `nvme-cli` is installed by `install.sh`):

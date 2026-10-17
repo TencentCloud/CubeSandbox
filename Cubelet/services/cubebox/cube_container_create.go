@@ -358,7 +358,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 		start := time.Now()
 
-		if isImageStorageMediaType(cntrReq, cubeimages.ImageStorageMediaType_ext4) {
+		if isPmemRootfsContainerImage(cntrReq) {
 
 			ctxTmp = constants.WithAppImageID(ctxTmp, cntrReq.GetImage().GetImage())
 		}
@@ -693,9 +693,14 @@ func (l *local) prepareContainerFiles(ctx context.Context, sandBox *cubeboxstore
 		ctxTmp = context.WithValue(ctxTmp, CubeLog.KeyFunctionType, constants.ContainerTypeContainer)
 	}
 
-	if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if isPmemRootfsContainerImage(containerReq) {
 
-		mountsConfig.PmemFile = pmem.GetRawImageFilePath(flowOpts.ReqInfo.GetInstanceType(), containerReq.GetImage().GetImage())
+		media := containerReq.GetImage().GetStorageMedia()
+		mountsConfig.PmemFile = pmem.GetRawImageFilePathByMedia(flowOpts.ReqInfo.GetInstanceType(), containerReq.GetImage().GetImage(), media)
+		// Carry the fs type so the microVM mounts the pmem backing file as the
+		// right format (ext4 / erofs). Shim reads it from cube.pmem annotation
+		// and hands it to the agent's mount(2) via Storage.fstype.
+		mountsConfig.PmemFsType = pmem.ArtifactFsType(media)
 		appendExt4NetfileMounts(mountsConfig, flowOpts, containerReq.Name)
 	} else {
 		var ovlShare []virtiofs.ShareDirMapping
@@ -859,7 +864,7 @@ func (l *local) containerOciSpec(ctx context.Context, containerReq *cubebox.Cont
 	}
 
 	imageSpecConfig := &imagespec.ImageConfig{}
-	if !isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if !isPmemRootfsContainerImage(containerReq) {
 		var image cristore.Image
 		image, err = l.criImage.LocalResolve(ctx, containerReq.GetImage().GetImage())
 		if err != nil {
@@ -943,11 +948,11 @@ func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox
 	var extendsLabels = map[string]string{
 		constants.LabelContainerImageMedia: containerReq.GetImage().GetStorageMedia(),
 	}
-	if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if isPmemRootfsContainerImage(containerReq) {
 		extendsLabels[constants.LabelContainerImagePem] = ci.Metadata.Config.GetImage().Image
 		sandBox.AddImageReference(cubeboxstore.ImageReference{
 			ID:     ci.Metadata.Config.GetImage().Image,
-			Medium: cubeimages.ImageStorageMediaType_ext4,
+			Medium: pmemRootfsMedium(containerReq),
 		})
 	} else {
 		storedImage, err := l.criImage.LocalResolve(ctx, containerReq.GetImage().GetImage())
@@ -1122,9 +1127,12 @@ func prepareImagePmems(rootfsConfig []*virtiofs.CubeRootfsInfo) oci.SpecOpts {
 					File:          r.PmemFile,
 					DiscardWrites: true,
 					SourceDir:     "/",
-					FsType:        "ext4",
-					Size:          fileSize,
-					ID:            fmt.Sprintf("%s-%d", constants.AnnotationPmemContainerPrefix, len(tmpPmems)),
+					// FsType comes from the rootfs config (derived from the image's
+					// StorageMedia at CubeRootfsInfo build time): ext4 or erofs.
+					// Empty/legacy configs default to ext4 via pmem.ArtifactFsType.
+					FsType: pmem.ArtifactFsType(r.PmemFsType),
+					Size:   fileSize,
+					ID:     fmt.Sprintf("%s-%d", constants.AnnotationPmemContainerPrefix, len(tmpPmems)),
 				})
 			}
 		}
@@ -1803,13 +1811,25 @@ func (l *local) prepareVolumeAnnotations(ctx context.Context, opts *workflow.Cre
 	})}, nil
 }
 
-func isImageStorageMediaType(containerReq *cubebox.ContainerConfig, mediaType cubeimages.ImageStorageMediaType) bool {
-	toCheck := containerReq.GetImage().GetStorageMedia()
-	if toCheck == "" {
-		toCheck = cubeimages.ImageStorageMediaType_docker.String()
-	}
+// isPmemRootfsContainerImage reports whether the container's image is a
+// local-file rootfs (ext4 or erofs) backed by a pmem file, as opposed to a
+// containerd OCI image. It is the container-create counterpart of
+// ext4image.IsPmemRootfsMedia and keeps the "which images go through the pmem
+// rootfs path" decision in one place.
+func isPmemRootfsContainerImage(containerReq *cubebox.ContainerConfig) bool {
+	media := containerReq.GetImage().GetStorageMedia()
+	return media == cubeimages.ImageStorageMediaType_ext4.String() ||
+		media == cubeimages.ImageStorageMediaType_erofs.String()
+}
 
-	return toCheck == mediaType.String()
+// pmemRootfsMedium maps the container image's StorageMedia string to its
+// ImageStorageMediaType enum value for an ext4/erofs rootfs. Defaults to ext4
+// for any unrecognized value (isPmemRootfsContainerImage already gates entry).
+func pmemRootfsMedium(containerReq *cubebox.ContainerConfig) cubeimages.ImageStorageMediaType {
+	if containerReq.GetImage().GetStorageMedia() == cubeimages.ImageStorageMediaType_erofs.String() {
+		return cubeimages.ImageStorageMediaType_erofs
+	}
+	return cubeimages.ImageStorageMediaType_ext4
 }
 
 func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeBox, opts *workflow.CreateContext) {

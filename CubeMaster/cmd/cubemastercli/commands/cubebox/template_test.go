@@ -582,6 +582,7 @@ func TestTemplateImageJobWatchPhaseLabel(t *testing.T) {
 		{name: "pulling", job: &types.TemplateImageJobInfo{Phase: "PULLING"}, want: "[1/7] PULLING"},
 		{name: "unpacking", job: &types.TemplateImageJobInfo{Phase: "UNPACKING"}, want: "[2/7] UNPACKING"},
 		{name: "building ext4", job: &types.TemplateImageJobInfo{Phase: "BUILDING_EXT4"}, want: "[3/7] BUILDING_EXT4"},
+		{name: "building erofs", job: &types.TemplateImageJobInfo{Phase: "BUILDING_EROFS"}, want: "[3/7] BUILDING_EROFS"},
 		{name: "generating json", job: &types.TemplateImageJobInfo{Phase: "GENERATING_JSON"}, want: "[4/7] GENERATING_JSON"},
 		{name: "distributing", job: &types.TemplateImageJobInfo{Phase: "DISTRIBUTING"}, want: "[5/7] DISTRIBUTING"},
 		{name: "creating template", job: &types.TemplateImageJobInfo{Phase: "CREATING_TEMPLATE"}, want: "[6/7] CREATING_TEMPLATE"},

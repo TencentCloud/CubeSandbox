@@ -290,6 +290,7 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
 		CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
 		CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
+		RootfsFormat            string `json:"rootfs_format"`
 	}
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
 		return nil, fmt.Errorf("decode result_json: %w", err)
@@ -309,6 +310,7 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		CubeEgressCABaked:       raw.CubeEgressCABaked,
 		CubeEgressCAFingerprint: raw.CubeEgressCAFingerprint,
 		CubeEgressCATargets:     raw.CubeEgressCATargets,
+		RootfsFormat:            raw.RootfsFormat,
 	}
 	if err := result.Validate(); err != nil {
 		return nil, err

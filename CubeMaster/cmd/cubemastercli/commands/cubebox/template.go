@@ -1507,6 +1507,7 @@ func formatTemplateImageJobWatchPhase(job *types.TemplateImageJobInfo) string {
 		"PULLING":           1,
 		"UNPACKING":         2,
 		"BUILDING_EXT4":     3,
+		"BUILDING_EROFS":    3,
 		"GENERATING_JSON":   4,
 		"DISTRIBUTING":      5,
 		"CREATING_TEMPLATE": 6,

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -121,12 +122,14 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		}
 	}
 
-	// Step 1: Preflight. Assert mkfs.ext4/truncate/cp (and losetup et al. when
-	// loop-mount is enabled) exist and that mkfs.ext4 supports -d BEFORE
-	// spending minutes pulling an image, so a misconfigured host fails fast
-	// at PULLING with a clear message instead of deep inside BUILDING_EXT4.
+	// Step 1: Preflight. Assert the packaging tools the build needs exist
+	// (mkfs.ext4/truncate/cp plus the export backend's tools, and that
+	// mkfs.ext4 supports -d) and, for an erofs build, that mkfs.erofs is also
+	// installed — all BEFORE spending minutes pulling an image, so a
+	// misconfigured host fails fast at PULLING with a clear message instead
+	// of deep inside BUILDING_EXT4 / BUILDING_EROFS.
 	reportPhase(templatecenter.JobPhasePulling, 5)
-	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
+	if err := ensureBuildPreflight(ctx, req.RootfsFormat); err != nil {
 		errMsg := fmt.Sprintf("build preflight fail: %v", err)
 		logger.Errorf(errMsg)
 		reportFailed(templatecenter.JobPhasePulling, errMsg)
@@ -242,7 +245,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		logger.Infof("another replica is building spec %s, waiting to reuse", fingerprint[:16])
 
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, req.RootfsFormat, logger)
 		}
 
 		select {
@@ -298,12 +301,18 @@ func runBuildLocked(
 			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.Ext4Path)
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, req.RootfsFormat, logger)
 		}
 	}
 
-	// Step 7: Build ext4 (export rootfs, bake envd + CA, mkfs)
-	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
+	// Step 7: Build the rootfs image (export rootfs, bake envd + CA, mkfs).
+	// The format comes from req.RootfsFormat, stamped by CubeMaster at submit
+	// time from template.rootfs_format and persisted in the job's request
+	// snapshot. ext4 is the default / historical path; erofs packs the same
+	// exported rootfs with mkfs.erofs instead of mkfs.ext4. The reported phase
+	// carries the format (BUILDING_EXT4 / BUILDING_EROFS) so the CLI shows the
+	// actual packaging step instead of a hardcoded BUILDING_EXT4.
+	reportPhase(buildingPhaseForRootfsFormat(req.RootfsFormat), 40)
 	var caBakeResult cube_egress_ca.Result
 	opts := image.BuildOptions{ArtifactID: artifactID}
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
@@ -317,24 +326,24 @@ func runBuildLocked(
 		caBakeResult, err = ApplyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
 		return err
 	}
-	result, err := image.BuildExt4(ctx, source, opts)
+	result, err := buildRootfsImage(ctx, req.RootfsFormat, source, opts)
 	if !pullProgressFlushed {
-		// Dockerless / native modes stream pull progress during BuildExt4, so
+		// Dockerless / native modes stream pull progress during the build, so
 		// flush only once all pull callbacks can no longer fire.
 		pullProgress.flush(err == nil)
 		pullProgressFlushed = true
 	}
 	if err != nil {
-		errMsg := fmt.Sprintf("build ext4 fail: %v", err)
+		errMsg := fmt.Sprintf("build rootfs (%s) fail: %v", rootfsFormatLabel(req.RootfsFormat), err)
 		logger.Errorf(errMsg)
 		// Remove the half-written store dir so a failed build does not leak
-		// disk. BuildExt4 cleans up on its own error paths, but a partially
+		// disk. The build func cleans up on its own error paths, but a partially
 		// created dir (or a PostRootfsExport failure) can survive.
 		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}
-		reportFailed(templatecenter.JobPhaseBuildingExt4, errMsg)
-		return fmt.Errorf("build ext4: %w", err)
+		reportFailed(buildingPhaseForRootfsFormat(req.RootfsFormat), errMsg)
+		return fmt.Errorf("build rootfs: %w", err)
 	}
 
 	// Step 8: Upload to the configured blob backend, then report BUILT.
@@ -345,7 +354,7 @@ func runBuildLocked(
 	if s3CfgEnabled && s3Client != nil {
 		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
 			if s3Client.BackendName() == "fs" {
-				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
+				reportFailed(buildingPhaseForRootfsFormat(req.RootfsFormat), fmt.Sprintf("upload artifact to fs store: %v", err))
 				return fmt.Errorf("upload artifact to fs store: %w", err)
 			}
 			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
@@ -358,13 +367,77 @@ func runBuildLocked(
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", req.RootfsFormat, logger); err != nil {
 		return err
 	}
 
 	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d",
 		artifactID, result.SHA256, result.SizeBytes)
 	return nil
+}
+
+// ensureBuildPreflight asserts the host has the tools the build needs before
+// the long pull begins, dispatched by rootfs format like buildRootfsImage.
+// The shared image.EnsureArtifactBuildPreflight covers truncate/cp plus the
+// export backend's tools and mkfs.ext4 (with -d support); an erofs build
+// additionally requires mkfs.erofs (image.EnsureErofsBuildPreflight) so a host
+// without erofs-utils fails fast at PULLING instead of deep inside
+// BUILDING_EROFS, after the image is pulled and the rootfs exported. The
+// format is canonicalized through the shared templatecenter.NormalizeRootfsFormat
+// so a non-canonical erofs value ("EROFS", " erofs ") still runs the erofs
+// preflight instead of silently skipping it. An empty/unknown format normalizes
+// to ext4 and skips the erofs check, matching buildRootfsImage's ext4 default
+// for legacy request snapshots.
+func ensureBuildPreflight(ctx context.Context, rootfsFormat string) error {
+	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
+		return err
+	}
+	if templatecenter.NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
+		if err := image.EnsureErofsBuildPreflight(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// buildRootfsImage dispatches to the format-specific builder. The format is
+// canonicalized through the shared templatecenter.NormalizeRootfsFormat (trim +
+// lower + validate, ext4 default) so TC agrees with CubeMaster on what "erofs"
+// means: a non-canonical value ("EROFS", " erofs ") is normalized to erofs and
+// builds as EROFS, instead of falling through to ext4 while CubeMaster records
+// the artifact as erofs for distribution. An empty/unknown format normalizes to
+// ext4 (the historical default), matching CubeMaster's normalizeTemplateImageRequest.
+func buildRootfsImage(ctx context.Context, rootfsFormat string, source *image.PreparedSource, opts image.BuildOptions) (image.BuildResult, error) {
+	if templatecenter.NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
+		return image.BuildErofs(ctx, source, opts)
+	}
+	return image.BuildExt4(ctx, source, opts)
+}
+
+// rootfsFormatLabel returns the canonical rootfs format name for the BUILT
+// payload / log / error messages. It routes through the shared
+// templatecenter.NormalizeRootfsFormat so the value TC reports in the BUILT
+// callback is already canonical ("ext4" / "erofs") — never a raw non-canonical
+// input ("EROFS", " erofs ") that CubeMaster would then normalize differently,
+// shipping an ext4-built artifact as StorageMedia=erofs. Unknown/empty
+// normalizes to "ext4" (the historical default).
+func rootfsFormatLabel(rootfsFormat string) string {
+	return templatecenter.NormalizeRootfsFormat(rootfsFormat)
+}
+
+// buildingPhaseForRootfsFormat returns the BUILDING_* job phase constant that
+// matches the rootfs packaging format, so the phase TC reports to CubeMaster
+// (and the CLI renders) carries the format instead of a hardcoded
+// "BUILDING_EXT4" for an erofs build. It canonicalizes through the shared
+// templatecenter.NormalizeRootfsFormat (the same single source of truth
+// CubeMaster uses), so a non-canonical erofs value reports BUILDING_EROFS
+// instead of silently falling back to BUILDING_EXT4. Empty/unknown normalizes
+// to ext4, matching buildRootfsImage's dispatch and rootfsFormatLabel.
+func buildingPhaseForRootfsFormat(rootfsFormat string) string {
+	if templatecenter.NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
+		return templatecenter.JobPhaseBuildingErofs
+	}
+	return templatecenter.JobPhaseBuildingExt4
 }
 
 func reportExistingArtifact(
@@ -378,6 +451,7 @@ func reportExistingArtifact(
 	caFingerprint string,
 	s3CfgEnabled bool,
 	s3Client *s3store.Client,
+	rootfsFormat string,
 	logger *cubelog.Entry,
 ) error {
 	inStore := false
@@ -397,7 +471,7 @@ func reportExistingArtifact(
 	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
-	}, artifactURL, inStore, s3Client, objectKey, logger)
+	}, artifactURL, inStore, s3Client, objectKey, rootfsFormat, logger)
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -414,6 +488,7 @@ func reportArtifactBuilt(
 	inStore bool,
 	s3Client *s3store.Client,
 	objectKey string,
+	rootfsFormat string,
 	logger *cubelog.Entry,
 ) error {
 	// Two fields deserve explanation:
@@ -445,6 +520,14 @@ func reportArtifactBuilt(
 		"cube_egress_ca_baked":           caResult.Baked,
 		"cube_egress_ca_fingerprint":     caResult.Fingerprint,
 		"cube_egress_ca_targets_written": caResult.TargetsWritten,
+		// rootfs_format echoes the format CubeMaster selected at submit time
+		// (req.RootfsFormat) back to CubeMaster. CubeMaster's persisted request
+		// snapshot already carries it, but reporting it here lets the BUILT
+		// callback path stay self-contained (the resume path can read it from
+		// the result instead of re-deriving it from the request snapshot), and
+		// it defends against a request snapshot that lost the field. An empty
+		// value is normalized to "ext4" (the historical default).
+		"rootfs_format": rootfsFormatLabel(rootfsFormat),
 	}
 	if artifactURL != "" {
 		payload["artifact_url"] = artifactURL

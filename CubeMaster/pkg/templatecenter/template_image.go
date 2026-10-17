@@ -69,7 +69,7 @@ func newCreateTemplateImageJobRecord(jobID string, normalized *types.CreateTempl
 }
 
 func newRedoTemplateImageJobRecord(jobID string, normalized *types.RedoTemplateFromImageReq, latestJob *models.TemplateImageJob, sourceReq *types.CreateTemplateFromImageReq, requestSnapshot string, attemptNo int32, targetScope []string, replicas []models.TemplateReplica) *models.TemplateImageJob {
-	resumePhase := determineRedoResumePhase(latestJob, replicas)
+	resumePhase := determineRedoResumePhase(latestJob, replicas, sourceReq.RootfsFormat)
 	return &models.TemplateImageJob{
 		JobID:             jobID,
 		TemplateID:        normalized.TemplateID,

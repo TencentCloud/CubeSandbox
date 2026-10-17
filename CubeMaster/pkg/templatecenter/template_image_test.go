@@ -23,6 +23,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -57,6 +58,93 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	if req.Backend != "" {
 		t.Fatalf("Backend=%q, omit must stay empty for historical create-from-image", req.Backend)
 	}
+}
+
+func TestNormalizeTemplateImageRequestRootfsFormat(t *testing.T) {
+	// A fresh submission leaves RootfsFormat empty; normalize stamps it from
+	// the server config (template.rootfs_format). In tests config.GetConfig()
+	// is nil, so RootfsFormat() defaults to "ext4".
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatExt4, req.RootfsFormat)
+
+	// A client MAY select the format per request; a non-empty value is kept
+	// (canonicalized) and not overwritten by the config default. The config's
+	// role is to supply the DEFAULT for an empty value, not to override an
+	// explicit client choice. (A replayed job keeps its submitted format for
+	// the same reason: a build's format is fixed at submit time.)
+	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      config.RootfsFormatErofs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
+
+	// Surrounding whitespace and uppercase are canonicalized (client-supplied
+	// values are normalized, not rejected, the same way Backend is).
+	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      "  EROFS ",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
+
+	// An explicit-but-invalid format is rejected loudly rather than silently
+	// building the wrong format.
+	_, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      "xfs",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rootfs_format")
+}
+
+func TestBuildTemplateSpecFingerprintUsesRootfsFormat(t *testing.T) {
+	base := &types.CreateTemplateFromImageReq{
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+	}
+	reqExt4 := *base
+	reqExt4.RootfsFormat = config.RootfsFormatExt4
+	reqErofs := *base
+	reqErofs.RootfsFormat = config.RootfsFormatErofs
+
+	// ext4 and erofs builds of the exact same spec must NOT share a
+	// fingerprint, otherwise CubeMaster/CubeTemplateCenter would reuse one
+	// format's artifact for the other and ship a mislabeled rootfs.
+	fpExt4 := buildTemplateSpecFingerprint(&reqExt4, "sha256:src")
+	fpErofs := buildTemplateSpecFingerprint(&reqErofs, "sha256:src")
+	assert.NotEqual(t, fpExt4, fpErofs)
+
+	// Same format reproduces the same fingerprint (deterministic).
+	assert.Equal(t, fpExt4, buildTemplateSpecFingerprint(&reqExt4, "sha256:src"))
+	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofs, "sha256:src"))
+
+	// Legacy compatibility: an empty (pre-RootfsFormat) and an explicit ext4
+	// RootfsFormat MUST yield the SAME fingerprint. ext4 omits rootfs_format
+	// from the payload (omitempty + blank), so the JSON is byte-identical to
+	// the pre-step-2 payload — existing ext4 artifacts stay reusable across
+	// the upgrade instead of being forced into a one-time full rebuild. This
+	// mirrors TestBuildTemplateSpecFingerprintEmptyCAMatchesLegacy.
+	fpBase := buildTemplateSpecFingerprint(base, "sha256:src")
+	assert.Equal(t, fpBase, fpExt4)
+
+	// A non-canonical erofs value ("EROFS") normalizes to erofs and yields the
+	// erofs fingerprint (NOT legacy ext4), so a non-canonical erofs request does
+	// not silently match a legacy ext4 artifact.
+	reqErofsUpper := *base
+	reqErofsUpper.RootfsFormat = "EROFS"
+	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofsUpper, "sha256:src"))
 }
 
 func TestNormalizeTemplateImageRequestBackendS3(t *testing.T) {
@@ -615,6 +703,55 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 	if _, ok := got.Annotations[constants.CubeAnnotationStorageBackend]; ok {
 		t.Fatal("omitted backend must not inject cube.master.storage.backend")
+	}
+}
+
+func TestGenerateTemplateCreateRequestStorageMediaFromFormat(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-fmt"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-fmt",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	baseArtifact := func() *models.RootfsArtifact {
+		return &models.RootfsArtifact{
+			ArtifactID:              "artifact-fmt",
+			TemplateSpecFingerprint: "fingerprint-fmt",
+			Ext4SHA256:              "sha256-fmt",
+			Ext4SizeBytes:           1024,
+			DownloadToken:           "token-fmt",
+		}
+	}
+	// erofs artifact → ImageSpec.StorageMedia = "erofs".
+	artifact := baseArtifact()
+	artifact.RootfsFormat = config.RootfsFormatErofs
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatErofs {
+		t.Fatalf("erofs artifact: StorageMedia=%q, want %q", got.Containers[0].Image.StorageMedia, config.RootfsFormatErofs)
+	}
+	// ext4 artifact → "ext4".
+	artifact = baseArtifact()
+	artifact.RootfsFormat = config.RootfsFormatExt4
+	got, err = generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatExt4 {
+		t.Fatalf("ext4 artifact: StorageMedia=%q, want %q", got.Containers[0].Image.StorageMedia, config.RootfsFormatExt4)
+	}
+	// Empty/legacy artifact (column predating migration) → defaults to ext4.
+	artifact = baseArtifact()
+	got, err = generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatExt4 {
+		t.Fatalf("empty artifact: StorageMedia=%q, want %q (ext4 default)", got.Containers[0].Image.StorageMedia, config.RootfsFormatExt4)
 	}
 }
 
@@ -1184,6 +1321,71 @@ func writeRootfsArtifactTestFile(t *testing.T, data []byte) (string, string) {
 	return path, hex.EncodeToString(sum[:])
 }
 
+// validRemoteBuildResultForValidate builds a RemoteBuildResult with all the
+// fields Validate requires present and correct, so the RootfsFormat-specific
+// assertions below reach the format check instead of failing on a prior field.
+func validRemoteBuildResultForValidate(t *testing.T) *RemoteBuildResult {
+	t.Helper()
+	return &RemoteBuildResult{
+		ArtifactID:              "rfs-validate",
+		TemplateSpecFingerprint: "fingerprint-validate",
+		SourceImageDigest:       "repo/image@sha256:abc",
+		Ext4Path:                writeFakeArtifactFile(t, "validate.ext4"),
+		Ext4SHA256:              "sha256:def",
+		Ext4SizeBytes:           1024,
+		ImageConfigJSON:         `{}`,
+		MasterNodeIP:            "http://master:8080",
+	}
+}
+
+func TestRemoteBuildResultValidateRootfsFormat(t *testing.T) {
+	// Empty format is accepted (older TC instances predate the field; empty is
+	// treated as ext4 downstream) so a rolling upgrade does not break builds.
+	r := validRemoteBuildResultForValidate(t)
+	r.RootfsFormat = ""
+	if err := r.Validate(); err != nil {
+		t.Fatalf("empty rootfs_format must be accepted (rolling-upgrade compat): %v", err)
+	}
+
+	// Explicit ext4 and erofs are accepted (case-insensitive).
+	for _, f := range []string{config.RootfsFormatExt4, config.RootfsFormatErofs, "EROFS", " Ext4 "} {
+		r := validRemoteBuildResultForValidate(t)
+		r.RootfsFormat = f
+		if err := r.Validate(); err != nil {
+			t.Fatalf("rootfs_format=%q must be accepted: %v", f, err)
+		}
+	}
+
+	// An unknown format is rejected so Cubelet never receives an unrecognized
+	// ImageSpec.StorageMedia and boots the wrong device path.
+	r = validRemoteBuildResultForValidate(t)
+	r.RootfsFormat = "xfs"
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "rootfs_format") {
+		t.Fatalf("unknown rootfs_format must be rejected with a rootfs_format error, got %v", err)
+	}
+}
+
+func TestNormalizedRootfsFormat(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", config.RootfsFormatExt4},
+		{"ext4", config.RootfsFormatExt4},
+		{"erofs", config.RootfsFormatErofs},
+		{"EROFS", config.RootfsFormatErofs},
+		{"  erofs ", config.RootfsFormatErofs},
+		// Unknown / legacy values fall back to ext4 so a missing/legacy format
+		// never accidentally selects the erofs device path.
+		{"xfs", config.RootfsFormatExt4},
+		{"future", config.RootfsFormatExt4},
+	}
+	for _, c := range cases {
+		if got := NormalizeRootfsFormat(c.in); got != c.want {
+			t.Fatalf("NormalizeRootfsFormat(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestManagedArtifactDirRecognizesWorkAndStoreRoots(t *testing.T) {
 	workRoot := filepath.Join(t.TempDir(), "work")
 	storeRoot := filepath.Join(t.TempDir(), "store")
@@ -1340,15 +1542,17 @@ func TestResolveRedoTargetsRejectsWhenNoFailedReplicas(t *testing.T) {
 
 func TestDetermineRedoResumePhase(t *testing.T) {
 	tests := []struct {
-		name    string
-		job     *models.TemplateImageJob
-		replica []models.TemplateReplica
-		want    string
+		name         string
+		job          *models.TemplateImageJob
+		replica      []models.TemplateReplica
+		rootfsFormat string
+		want         string
 	}{
 		{
-			name: "build failure resumes distribution build pipeline",
-			job:  &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
-			want: JobPhaseBuildingExt4,
+			name:         "build failure resumes distribution build pipeline",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
+			rootfsFormat: config.RootfsFormatExt4,
+			want:         JobPhaseBuildingExt4,
 		},
 		{
 			name: "distribution failure resumes distribution",
@@ -1358,13 +1562,33 @@ func TestDetermineRedoResumePhase(t *testing.T) {
 			want: JobPhaseDistributing,
 		},
 		{
-			name: "snapshot failure resumes snapshotting",
-			job:  &models.TemplateImageJob{Phase: JobPhaseCreatingTemplate},
-			want: JobPhaseSnapshotting,
+			name:         "snapshot failure resumes snapshotting",
+			job:          &models.TemplateImageJob{Phase: JobPhaseCreatingTemplate},
+			rootfsFormat: config.RootfsFormatExt4,
+			want:         JobPhaseSnapshotting,
+		},
+		{
+			name:         "erofs build failure resumes erofs build phase",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingErofs},
+			rootfsFormat: config.RootfsFormatErofs,
+			want:         JobPhaseBuildingErofs,
+		},
+		{
+			name:         "erofs request resumes erofs phase regardless of previous phase label",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
+			rootfsFormat: config.RootfsFormatErofs,
+			want:         JobPhaseBuildingErofs,
+		},
+		{
+			// empty rootfs_format (legacy job snapshot) defaults to ext4, never erofs.
+			name:         "empty rootfs_format defaults to ext4 building phase",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingErofs},
+			rootfsFormat: "",
+			want:         JobPhaseBuildingExt4,
 		},
 	}
 	for _, tc := range tests {
-		if got := determineRedoResumePhase(tc.job, tc.replica); got != tc.want {
+		if got := determineRedoResumePhase(tc.job, tc.replica, tc.rootfsFormat); got != tc.want {
 			t.Fatalf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
@@ -1453,7 +1677,7 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 		return errors.New("cleanup image failed")
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
@@ -1583,7 +1807,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 			return nil, fmt.Errorf("unexpected artifact lookup %d", lookupCalls)
 		}
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 		return nil
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {

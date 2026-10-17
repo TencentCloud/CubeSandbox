@@ -44,6 +44,13 @@ var imageJobSteps = []string{
 // the phase is unknown (so the caller can keep its high-water mark instead of
 // snapping the checklist backwards).
 func stepIndexForPhase(phase string) int {
+	// BUILDING_EROFS occupies the same pipeline slot as BUILDING_EXT4, so an
+	// erofs build advances the checklist to the same progress position. The
+	// displayed label is resolved in renderSteps (which shows the actual phase
+	// name); here we only map it to the right slot.
+	if phase == "BUILDING_EROFS" {
+		phase = "BUILDING_EXT4"
+	}
 	for i, s := range imageJobSteps {
 		if s == phase {
 			return i
@@ -239,17 +246,46 @@ func imageJobFailureMessage(job *types.TemplateImageJobInfo) string {
 func (m imageJobTUI) renderSteps() string {
 	cur := m.currentStepIndex()
 	failed := m.job != nil && m.job.Status == "FAILED"
+	// The build step's label carries the rootfs packaging format (BUILDING_EXT4
+	// or BUILDING_EROFS). A freshly built job reports the format in its phase,
+	// so we use that directly. Otherwise we fall back to job.RootfsFormat —
+	// which is populated from the request snapshot from the very first poll
+	// (PULLING), before the artifact exists — and then to the artifact's
+	// rootfs_format. This keeps the label correct at every stage, including a
+	// reused job that skips the BUILDING phase (PULLING -> READY). (This package
+	// cannot import templatecenter, so the phase/format checks are inlined.)
+	buildingLabel := "BUILDING_EXT4"
+	if m.job != nil {
+		switch m.job.Phase {
+		case "BUILDING_EXT4", "BUILDING_EROFS":
+			buildingLabel = m.job.Phase
+		default:
+			rootfsFormat := ""
+			if m.job.RootfsFormat != "" {
+				rootfsFormat = m.job.RootfsFormat
+			} else if m.job.Artifact != nil {
+				rootfsFormat = m.job.Artifact.RootfsFormat
+			}
+			if rootfsFormat == "erofs" {
+				buildingLabel = "BUILDING_EROFS"
+			}
+		}
+	}
 	var b strings.Builder
 	for i, step := range imageJobSteps {
+		label := step
+		if step == "BUILDING_EXT4" {
+			label = buildingLabel
+		}
 		switch {
 		case i < cur:
-			b.WriteString("  " + tuiDoneStyle.Render("✓ "+step) + "\n")
+			b.WriteString("  " + tuiDoneStyle.Render("✓ "+label) + "\n")
 		case i == cur && failed:
-			b.WriteString("  " + tuiErrStyle.Render("✗ "+step) + "\n")
+			b.WriteString("  " + tuiErrStyle.Render("✗ "+label) + "\n")
 		case i == cur:
-			b.WriteString("  " + m.spin.View() + tuiActiveStyle.Render(step) + "\n")
+			b.WriteString("  " + m.spin.View() + tuiActiveStyle.Render(label) + "\n")
 		default:
-			b.WriteString("  " + tuiPendingStyle.Render("○ "+step) + "\n")
+			b.WriteString("  " + tuiPendingStyle.Render("○ "+label) + "\n")
 		}
 	}
 	if m.job != nil && m.job.Status == "READY" {

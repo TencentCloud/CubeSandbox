@@ -38,3 +38,22 @@ func TestSafePrintImageSpecNil(t *testing.T) {
 		t.Errorf("SafePrintImageSpec(nil) = %q, want %q", got, "nil")
 	}
 }
+
+// TestImageStorageMediaTypeStrings guards the enum→string mapping that every
+// cubelet routing site compares against: erofs must render as "erofs" (not the
+// raw number) so master's string-typed StorageMedia matches.
+func TestImageStorageMediaTypeStrings(t *testing.T) {
+	cases := []struct {
+		v    ImageStorageMediaType
+		want string
+	}{
+		{ImageStorageMediaType_docker, "docker"},
+		{ImageStorageMediaType_ext4, "ext4"},
+		{ImageStorageMediaType_erofs, "erofs"},
+	}
+	for _, c := range cases {
+		if got := c.v.String(); got != c.want {
+			t.Errorf("%v.String() = %q, want %q", c.v, got, c.want)
+		}
+	}
+}

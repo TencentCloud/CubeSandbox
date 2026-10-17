@@ -27,6 +27,22 @@ import (
 
 var pmemFileLocks = utils.NewResourceLocks()
 
+// IsPmemRootfsMedia reports whether storageMedia is a local-file rootfs format
+// (ext4 or erofs) that cubelet downloads as a pmem backing file, as opposed to a
+// containerd OCI image (docker) or an empty/unknown value. It is the single
+// predicate every routing site should use instead of hand-comparing against
+// ImageStorageMediaType_ext4.String(), so adding erofs (or a future format) is
+// a one-line change here.
+func IsPmemRootfsMedia(storageMedia string) bool {
+	switch storageMedia {
+	case cubeimages.ImageStorageMediaType_ext4.String(),
+		cubeimages.ImageStorageMediaType_erofs.String():
+		return true
+	default:
+		return false
+	}
+}
+
 func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
 	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
 		return err
@@ -46,6 +62,12 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 		return fmt.Errorf("invalid imageRef: %w", err)
 	}
 	imagePath := pmem.GetRawImageFilePath(instanceType, imageRef)
+	// If the request carries a rootfs format (ext4/erofs), name the local file
+	// with the matching suffix so the microVM mounts the right format. Fall back
+	// to the historical .ext4 path when no spec is in context (legacy callers).
+	if spec := constants.GetImageSpec(ctx); spec != nil {
+		imagePath = pmem.GetRawImageFilePathByMedia(instanceType, imageRef, spec.GetStorageMedia())
+	}
 	// CreateImage and node-distribution requests may legitimately reuse the
 	// same artifact. Lock at this shared entry point so every writer of the
 	// fixed .download path is serialized and waiters recheck the final file.
