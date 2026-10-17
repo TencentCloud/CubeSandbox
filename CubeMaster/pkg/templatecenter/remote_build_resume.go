@@ -124,13 +124,18 @@ type RemoteBuildResult struct {
 	RootfsFormat string
 }
 
-// normalizedRootfsFormat canonicalizes a rootfs format string to the lowercase
+// NormalizeRootfsFormat canonicalizes a rootfs format string to the lowercase
 // value persisted in RootfsArtifact.RootfsFormat / passed as ImageSpec.StorageMedia.
 // Empty (and any value not ext4/erofs) falls back to "ext4", the historical
 // default, so a missing/legacy value never selects the erofs device path by
 // accident. This is the single source of truth for the ext4 default downstream
-// of the BUILT callback.
-func normalizedRootfsFormat(format string) string {
+// of the BUILT callback, and is shared with CubeTemplateCenter (which imports
+// this package) so both sides agree on what "erofs" means — TC's build dispatch,
+// preflight and phase label must use this instead of a raw == "erofs" compare,
+// otherwise a non-canonical value ("EROFS", " erofs ") would build as ext4 on the
+// TC side while CubeMaster normalizes it to erofs for distribution, shipping an
+// ext4 artifact with StorageMedia=erofs that fails to mount.
+func NormalizeRootfsFormat(format string) string {
 	switch f := strings.ToLower(strings.TrimSpace(format)); f {
 	case config.RootfsFormatErofs:
 		return config.RootfsFormatErofs
@@ -667,7 +672,7 @@ func finalizeRemoteArtifact(
 	// Persist the build format so the distribution / destroy paths can read it
 	// from the artifact row instead of hardcoding ext4. Normalize to ext4 for
 	// an empty result (older TC / pre-step replay) to match the DB column default.
-	record.RootfsFormat = normalizedRootfsFormat(result.RootfsFormat)
+	record.RootfsFormat = NormalizeRootfsFormat(result.RootfsFormat)
 
 	// Same base URL local mode uses (CubeMaster's own request base URL, echoed
 	// back by TC), so the generated request and the distribution annotations

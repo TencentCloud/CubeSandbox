@@ -91,16 +91,46 @@ func TestBuildRootfsImageDispatch(t *testing.T) {
 	if !ext4Called || erofsCalled {
 		t.Fatalf("unknown format must fall back to BuildExt4: ext4=%v erofs=%v", ext4Called, erofsCalled)
 	}
+
+	// Non-canonical erofs values ("EROFS", " erofs ") MUST dispatch to BuildErofs,
+	// not BuildExt4. Before sharing NormalizeRootfsFormat, TC compared with a
+	// raw == "erofs" and these fell through to BuildExt4 while CubeMaster
+	// normalized them to erofs for distribution — shipping an ext4-built artifact
+	// as StorageMedia=erofs that fails to mount. This is the regression guard for
+	// that asymmetry: the build dispatch must agree with CubeMaster's
+	// canonicalization.
+	for _, nonCanonical := range []string{"EROFS", " erofs ", "\tErofs\t"} {
+		ext4Called, erofsCalled = false, false
+		if _, err := buildRootfsImage(context.Background(), nonCanonical, src, opts); err != nil {
+			t.Fatalf("non-canonical erofs dispatch %q: %v", nonCanonical, err)
+		}
+		if !erofsCalled || ext4Called {
+			t.Fatalf("non-canonical erofs %q must dispatch to BuildErofs (not ext4): ext4=%v erofs=%v",
+				nonCanonical, ext4Called, erofsCalled)
+		}
+	}
 }
 
 func TestRootfsFormatLabel(t *testing.T) {
+	// rootfsFormatLabel now routes through the shared NormalizeRootfsFormat, so
+	// the BUILT payload carries a CANONICAL format — never a raw non-canonical
+	// input. This is the fix for the TC/CubeMaster asymmetry: previously an
+	// unknown value surfaced verbatim and CubeMaster then normalized it to erofs,
+	// shipping an ext4-built artifact as StorageMedia=erofs. Now an unknown
+	// value normalizes to ext4 (the historical default) on both sides.
 	cases := []struct {
 		in, want string
 	}{
 		{config.RootfsFormatExt4, "ext4"},
 		{"", "ext4"},
 		{config.RootfsFormatErofs, "erofs"},
-		{"future-format", "future-format"},
+		// Non-canonical erofs values normalize to "erofs" (trim + lower), so the
+		// BUILT payload agrees with what CubeMaster records for distribution.
+		{"EROFS", "erofs"},
+		{"  erofs ", "erofs"},
+		// Unknown values normalize to "ext4" (never surface verbatim), so a
+		// misconfigured format never ships as a wrong StorageMedia downstream.
+		{"future-format", "ext4"},
 	}
 	for _, c := range cases {
 		if got := rootfsFormatLabel(c.in); got != c.want {
@@ -122,6 +152,11 @@ func TestBuildingPhaseForRootfsFormat(t *testing.T) {
 		{config.RootfsFormatExt4, templatecenter.JobPhaseBuildingExt4},
 		{"", templatecenter.JobPhaseBuildingExt4},
 		{config.RootfsFormatErofs, templatecenter.JobPhaseBuildingErofs},
+		// Non-canonical erofs values report BUILDING_EROFS (canonicalized), so the
+		// phase TC reports agrees with the format it actually builds — not the
+		// raw input that would have fallen through to BUILDING_EXT4 before.
+		{"EROFS", templatecenter.JobPhaseBuildingErofs},
+		{"  erofs ", templatecenter.JobPhaseBuildingErofs},
 		{"unknown-format", templatecenter.JobPhaseBuildingExt4},
 	}
 	for _, c := range cases {
@@ -172,6 +207,16 @@ func TestReportArtifactBuiltIncludesRootfsFormat(t *testing.T) {
 	report("")
 	if got := captured["rootfs_format"]; got != "ext4" {
 		t.Fatalf("rootfs_format for empty = %v, want %q (ext4 default)", got, "ext4")
+	}
+	// A non-canonical erofs value in the BUILT payload is normalized to "erofs"
+	// (NOT surfaced verbatim), so CubeMaster and TC agree on the format. Before
+	// sharing NormalizeRootfsFormat, rootfsFormatLabel passed "EROFS" through
+	// verbatim and CubeMaster then normalized it to erofs for distribution while
+	// TC built ext4 — the ext4/erofs mismatch that fails at mount. This asserts
+	// the payload is already canonical on the TC side.
+	report("EROFS")
+	if got := captured["rootfs_format"]; got != "erofs" {
+		t.Fatalf("rootfs_format for non-canonical EROFS = %v, want %q (canonicalized, not verbatim)", got, "erofs")
 	}
 	// The payload still carries the other artifact fields untouched.
 	if captured["artifact_id"] != "rfs-1" || captured["ext4_sha256"] != "sha" {
@@ -225,6 +270,22 @@ func TestEnsureBuildPreflightDispatchesByFormat(t *testing.T) {
 	}
 	if !artifactCalled || !erofsCalled {
 		t.Fatalf("erofs must call both preflights: artifact=%v erofs=%v", artifactCalled, erofsCalled)
+	}
+
+	// Non-canonical erofs ("EROFS", " erofs ") must STILL run the erofs preflight
+	// (canonicalized), so a host without mkfs.erofs fails fast at PULLING even
+	// when the request carried a non-canonical value. Before sharing
+	// NormalizeRootfsFormat the raw == "erofs" compare missed these and skipped
+	// the erofs check, letting the build fail deep inside BUILDING_EROFS instead.
+	for _, nonCanonical := range []string{"EROFS", "  erofs "} {
+		artifactCalled, erofsCalled = false, false
+		if err := ensureBuildPreflight(context.Background(), nonCanonical); err != nil {
+			t.Fatalf("non-canonical erofs preflight %q: %v", nonCanonical, err)
+		}
+		if !artifactCalled || !erofsCalled {
+			t.Fatalf("non-canonical erofs %q must call both preflights: artifact=%v erofs=%v",
+				nonCanonical, artifactCalled, erofsCalled)
+		}
 	}
 
 	// An unknown format falls back to the shared preflight only (no erofs

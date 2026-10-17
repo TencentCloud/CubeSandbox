@@ -117,7 +117,7 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	}
 	container := &types.Container{
 		Name:            "cubebox-name-0",
-		Image:           &types.ImageSpec{Image: artifact.ArtifactID, StorageMedia: normalizedRootfsFormat(artifact.RootfsFormat), WritableLayerSize: req.WritableLayerSize, Annotations: imageAnnotations},
+		Image:           &types.ImageSpec{Image: artifact.ArtifactID, StorageMedia: NormalizeRootfsFormat(artifact.RootfsFormat), WritableLayerSize: req.WritableLayerSize, Annotations: imageAnnotations},
 		Command:         command,
 		Args:            args,
 		WorkingDir:      workingDir,

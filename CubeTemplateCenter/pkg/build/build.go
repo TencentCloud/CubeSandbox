@@ -382,14 +382,17 @@ func runBuildLocked(
 // export backend's tools and mkfs.ext4 (with -d support); an erofs build
 // additionally requires mkfs.erofs (image.EnsureErofsBuildPreflight) so a host
 // without erofs-utils fails fast at PULLING instead of deep inside
-// BUILDING_EROFS, after the image is pulled and the rootfs exported. An empty
-// / unknown format skips the erofs check, matching buildRootfsImage's ext4
-// default for legacy request snapshots.
+// BUILDING_EROFS, after the image is pulled and the rootfs exported. The
+// format is canonicalized through the shared templatecenter.NormalizeRootfsFormat
+// so a non-canonical erofs value ("EROFS", " erofs ") still runs the erofs
+// preflight instead of silently skipping it. An empty/unknown format normalizes
+// to ext4 and skips the erofs check, matching buildRootfsImage's ext4 default
+// for legacy request snapshots.
 func ensureBuildPreflight(ctx context.Context, rootfsFormat string) error {
 	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
 		return err
 	}
-	if rootfsFormat == config.RootfsFormatErofs {
+	if templatecenter.NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
 		if err := image.EnsureErofsBuildPreflight(ctx); err != nil {
 			return err
 		}
@@ -397,42 +400,41 @@ func ensureBuildPreflight(ctx context.Context, rootfsFormat string) error {
 	return nil
 }
 
-// buildRootfsImage dispatches to the format-specific builder. An empty format
-// defaults to ext4, matching CubeMaster's normalizeTemplateImageRequest so a
-// legacy/older request snapshot still builds as ext4. An explicitly erofs
-// request builds an EROFS image via image.BuildErofs.
+// buildRootfsImage dispatches to the format-specific builder. The format is
+// canonicalized through the shared templatecenter.NormalizeRootfsFormat (trim +
+// lower + validate, ext4 default) so TC agrees with CubeMaster on what "erofs"
+// means: a non-canonical value ("EROFS", " erofs ") is normalized to erofs and
+// builds as EROFS, instead of falling through to ext4 while CubeMaster records
+// the artifact as erofs for distribution. An empty/unknown format normalizes to
+// ext4 (the historical default), matching CubeMaster's normalizeTemplateImageRequest.
 func buildRootfsImage(ctx context.Context, rootfsFormat string, source *image.PreparedSource, opts image.BuildOptions) (image.BuildResult, error) {
-	if rootfsFormat == config.RootfsFormatErofs {
+	if templatecenter.NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
 		return image.BuildErofs(ctx, source, opts)
 	}
 	return image.BuildExt4(ctx, source, opts)
 }
 
-// rootfsFormatLabel returns a short human-readable format name for log/error
-// messages. Unknown values surface verbatim so a misconfigured format is not
-// hidden behind a generic label.
+// rootfsFormatLabel returns the canonical rootfs format name for the BUILT
+// payload / log / error messages. It routes through the shared
+// templatecenter.NormalizeRootfsFormat so the value TC reports in the BUILT
+// callback is already canonical ("ext4" / "erofs") — never a raw non-canonical
+// input ("EROFS", " erofs ") that CubeMaster would then normalize differently,
+// shipping an ext4-built artifact as StorageMedia=erofs. Unknown/empty
+// normalizes to "ext4" (the historical default).
 func rootfsFormatLabel(rootfsFormat string) string {
-	switch rootfsFormat {
-	case config.RootfsFormatErofs:
-		return "erofs"
-	case config.RootfsFormatExt4, "":
-		return "ext4"
-	default:
-		return rootfsFormat
-	}
+	return templatecenter.NormalizeRootfsFormat(rootfsFormat)
 }
 
 // buildingPhaseForRootfsFormat returns the BUILDING_* job phase constant that
 // matches the rootfs packaging format, so the phase TC reports to CubeMaster
 // (and the CLI renders) carries the format instead of a hardcoded
-// "BUILDING_EXT4" for an erofs build. Empty/unknown falls back to
-// BUILDING_EXT4, matching buildRootfsImage's dispatch and rootfsFormatLabel's
-// default. This mirrors CubeMaster's buildingPhaseForRootfsFormat but lives
-// here because TC cannot call the master-side (unexported)
-// normalizedRootfsFormat helper; the dispatch test matches
-// buildRootfsImage (erofs -> BuildErofs, anything else -> BuildExt4).
+// "BUILDING_EXT4" for an erofs build. It canonicalizes through the shared
+// templatecenter.NormalizeRootfsFormat (the same single source of truth
+// CubeMaster uses), so a non-canonical erofs value reports BUILDING_EROFS
+// instead of silently falling back to BUILDING_EXT4. Empty/unknown normalizes
+// to ext4, matching buildRootfsImage's dispatch and rootfsFormatLabel.
 func buildingPhaseForRootfsFormat(rootfsFormat string) string {
-	if rootfsFormat == config.RootfsFormatErofs {
+	if templatecenter.NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
 		return templatecenter.JobPhaseBuildingErofs
 	}
 	return templatecenter.JobPhaseBuildingExt4

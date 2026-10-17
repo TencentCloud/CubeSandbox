@@ -1369,8 +1369,8 @@ func TestNormalizedRootfsFormat(t *testing.T) {
 		{"future", config.RootfsFormatExt4},
 	}
 	for _, c := range cases {
-		if got := normalizedRootfsFormat(c.in); got != c.want {
-			t.Fatalf("normalizedRootfsFormat(%q) = %q, want %q", c.in, got, c.want)
+		if got := NormalizeRootfsFormat(c.in); got != c.want {
+			t.Fatalf("NormalizeRootfsFormat(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

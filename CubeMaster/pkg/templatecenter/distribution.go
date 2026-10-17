@@ -84,7 +84,7 @@ func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType, rootfs
 		RequestID: uuid.NewString(),
 		Spec: &imagev1.ImageSpec{
 			Image:        artifactID,
-			StorageMedia: normalizedRootfsFormat(rootfsFormat),
+			StorageMedia: NormalizeRootfsFormat(rootfsFormat),
 			Annotations: map[string]string{
 				constants.CubeAnnotationsInsType: instanceType,
 			},
@@ -197,7 +197,7 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
-		StorageMedia: normalizedRootfsFormat(artifact.RootfsFormat),
+		StorageMedia: NormalizeRootfsFormat(artifact.RootfsFormat),
 		Annotations: map[string]string{
 			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
 			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,

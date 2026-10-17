@@ -47,13 +47,13 @@ func jobModelToInfo(ctx context.Context, record *models.TemplateImageJob) (*type
 	// (the single source of truth after BUILT), falling back to the request
 	// snapshot, normalized to the canonical ext4 default when empty/unknown.
 	if req, err := unmarshalTemplateImageJobRequest(record.RequestJSON); err == nil {
-		info.RootfsFormat = normalizedRootfsFormat(req.RootfsFormat)
+		info.RootfsFormat = NormalizeRootfsFormat(req.RootfsFormat)
 	}
 	if record.ArtifactID != "" {
 		if artifact, err := getRootfsArtifactByID(ctx, record.ArtifactID); err == nil {
 			info.Artifact = artifactModelToInfo(artifact)
 			if artifact.RootfsFormat != "" {
-				info.RootfsFormat = normalizedRootfsFormat(artifact.RootfsFormat)
+				info.RootfsFormat = NormalizeRootfsFormat(artifact.RootfsFormat)
 			}
 		}
 	}
