@@ -122,6 +122,7 @@ const (
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"
 	CubeAnnotationEnableIvshmem     = "cube.master.enable_ivshmem"
+	CubeAnnotationCgroupMode        = "cube.master.cgroup-mode"
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
 

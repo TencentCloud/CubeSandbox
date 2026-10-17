@@ -107,6 +107,9 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if cloned.EnableIvshmem != nil && !*cloned.EnableIvshmem {
 		cloned.EnableIvshmem = nil
 	}
+	if cloned.CgroupMode != nil && strings.TrimSpace(*cloned.CgroupMode) == "" {
+		cloned.CgroupMode = nil
+	}
 	if strings.TrimSpace(cloned.Backend) != "" {
 		backend, err := constants.NormalizeSnapshotBackend(cloned.Backend)
 		if err != nil {
