@@ -319,7 +319,24 @@ func doPreStop(ctx context.Context, ci *cubeboxstore.Container) {
 	if c.GetPrestop() == nil || c.GetPrestop().GetLifecyleHandler() == nil {
 		return
 	}
-
+	// When a prePause lifecycle hook is configured, it owns the pre-pause
+	// preparation; skip the legacy fire-and-forget preStop on pause so user
+	// logic is not executed twice with incompatible failure semantics (preStop
+	// ignores failure, prePause blocks on ABORT). Legacy preStop still fires on
+	// destroy.
+	//
+	// prePause is a SANDBOX-level hook: it runs once (on the first/pod
+	// container) for the whole pause transition, whereas legacy preStop was
+	// per-container. Since lifecycle_hooks are template-sourced and copied to
+	// every container, this check fires for all of them — by design, opting
+	// into prePause means the new sandbox-level mechanism replaces per-container
+	// preStop on pause. (Destroy still runs legacy preStop per container.)
+	if constants.GetPreStopType(ctx) == constants.PreStopTypePause {
+		if hooks := c.GetLifecycleHooks(); hooks != nil && hooks.GetPrePause() != nil {
+			log.G(ctx).Infof("skip legacy preStop on pause: prePause lifecycle hook is configured for %s", ci.ID)
+			return
+		}
+	}
 	if c.GetPrestop().TerminationGracePeriodMs <= 0 {
 		log.G(ctx).Errorf("%v", ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid TerminationGracePeriodMs[%v]",
 			c.GetPrestop().TerminationGracePeriodMs))
