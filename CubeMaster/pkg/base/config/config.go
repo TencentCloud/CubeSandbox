@@ -629,10 +629,11 @@ type CubeEgressConf struct {
 type TemplateConf struct {
 	// RootfsFormat selects the rootfs packaging format CubeTemplateCenter
 	// produces for newly built templates. Valid values: "ext4" (default,
-	// historical behavior) and "erofs" (EROFS compressed read-only image).
-	// An empty value defaults to "ext4"; an explicit invalid value fails to
-	// start. Values mirror the ImageStorageMediaType proto enum names so a
-	// configured format maps 1:1 to ImageSpec.storage_media downstream.
+	// historical behavior) and "erofs" (EROFS read-only, uncompressed image —
+	// plain, not -z compressed, because virtio-pmem DAX cannot map compressed
+	// extents). An empty value defaults to "ext4"; an explicit invalid value
+	// fails to start. Values mirror the ImageStorageMediaType proto enum names
+	// so a configured format maps 1:1 to ImageSpec.storage_media downstream.
 	RootfsFormat string `yaml:"rootfs_format"`
 }
 

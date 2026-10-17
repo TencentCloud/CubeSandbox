@@ -2320,6 +2320,7 @@ VolumUtilsResponse volum utils
 | ---- | ------ | ----------- |
 | docker | 0 | Docker means normal oci container images.should be pulled from dockerhub |
 | ext4 | 1 | image from local disk in ext4 format rootfs. |
+| erofs | 2 | image from local disk in erofs format rootfs (read-only, virtio-pmem DAX mountable). |
 
 
 

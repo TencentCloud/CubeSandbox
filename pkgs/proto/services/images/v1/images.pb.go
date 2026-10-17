@@ -34,7 +34,7 @@ const (
 	ImageStorageMediaType_docker ImageStorageMediaType = 0
 	// image from local disk in ext4 format rootfs.
 	ImageStorageMediaType_ext4 ImageStorageMediaType = 1
-	// image from local disk in erofs format rootfs (read-only, compressed,
+	// image from local disk in erofs format rootfs (read-only,
 	// virtio-pmem DAX mountable).
 	ImageStorageMediaType_erofs ImageStorageMediaType = 2
 )
