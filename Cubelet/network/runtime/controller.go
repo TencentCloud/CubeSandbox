@@ -1079,7 +1079,10 @@ func (s *NetworkController) cleanupCubeVSTapState(ifindex int, ip net.IP) error 
 	if err := s.cubevsAdapter.CleanupTAPPolicy(uint32(ifindex)); err != nil {
 		return err
 	}
-	return s.cleanupCubeVSTapMetadata(ifindex, ip)
+	if err := s.cleanupCubeVSTapMetadata(ifindex, ip); err != nil {
+		return err
+	}
+	return s.cubevsAdapter.DeleteSandboxTrafficMetrics(ip)
 }
 
 func (s *NetworkController) cleanupCubeVSTapMetadata(ifindex int, ip net.IP) error {

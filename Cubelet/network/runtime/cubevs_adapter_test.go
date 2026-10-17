@@ -16,11 +16,13 @@ type fakeCubeVSAdapter struct {
 	deletePortMappings     []PortMapping
 	cleanupPolicyCalls     []uint32
 	defaultDenyPolicyCalls []uint32
+	deletedMetricsIPs      []string
 	listPortMappings       map[uint16]cubevs.MVMPort
 	getTAPDeviceByIndex    map[uint32]*cubevs.TAPDevice
 	deletedTAPDevices      map[uint32]struct{}
 	cleanupPolicyErr       error
 	deleteMetadataErr      error
+	deleteMetricsErr       error
 	deletePortMappingErr   error
 	updatedPolicies        []updatedPolicy
 	updateTAPPolicyErr     error
@@ -88,6 +90,14 @@ func (f *fakeCubeVSAdapter) DeleteTAPDeviceMetadata(ifindex uint32, _ net.IP) er
 	}
 	f.deletedTAPDevices[ifindex] = struct{}{}
 	return nil
+}
+
+func (f *fakeCubeVSAdapter) DeleteSandboxTrafficMetrics(ip net.IP) error {
+	if f.recorder != nil {
+		f.recorder.record("cubevs_metrics_deleted")
+	}
+	f.deletedMetricsIPs = append(f.deletedMetricsIPs, ip.String())
+	return f.deleteMetricsErr
 }
 
 func (f *fakeCubeVSAdapter) AttachFilter(_ uint32) error {
