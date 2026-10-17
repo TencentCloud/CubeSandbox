@@ -36,9 +36,17 @@ type Config struct {
 }
 
 type HostConf struct {
-	Quota          HostConfigQuota `yaml:"quota"`
-	GC             HostConfigGC    `yaml:"gc"`
-	SchedulerLabel string          `yaml:"scheduler_label"`
+	Quota          HostConfigQuota  `yaml:"quota"`
+	GC             HostConfigGC     `yaml:"gc"`
+	SchedulerLabel string           `yaml:"scheduler_label"`
+	Memory         HostConfigMemory `yaml:"memory"`
+}
+
+type HostConfigMemory struct {
+	// Mergeable opts this host's sandboxes into host KSM page dedup. Off by
+	// default: merged pages are a cross-VM side channel, so enable it only on
+	// hosts where ksmd is intentionally run and that exposure is acceptable.
+	Mergeable bool `yaml:"mergeable"`
 }
 
 type HostConfigQuota struct {

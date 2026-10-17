@@ -53,6 +53,11 @@ caller  ──UpdateTaskRequest { id, annotations }──▶  CubeShim (ttrpc)
   // [Optional] Enable dirty-log tracking after restore (default: false).
   "dirty_log": false,
 
+  // [Optional] Mark guest RAM mergeable for host KSM. Omit to keep the value
+  // recorded in the snapshot; set false to force merging off (true to force
+  // it on).
+  "mergeable": false,
+
   // [Optional] Replace block devices after restore.
   "disks": [ /* DiskConfig, see below */ ],
 

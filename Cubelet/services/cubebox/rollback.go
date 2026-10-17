@@ -15,6 +15,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -41,6 +42,9 @@ type rollbackRestoreConfig struct {
 	SourceURL    string               `json:"source_url"`
 	MemoryVolURL string               `json:"memory_vol_url,omitempty"`
 	Disks        []rollbackDiskConfig `json:"disks,omitempty"`
+	// Mergeable carries the host KSM policy at rollback time; sent
+	// explicitly so the restored VM cannot inherit a stale snapshot value.
+	Mergeable bool `json:"mergeable"`
 }
 
 type rollbackDiskConfig struct {
@@ -386,6 +390,7 @@ func (s *service) buildRollbackRestoreConfig(ctx context.Context, sandboxID, met
 		SourceURL:    fileURL(snapshotStateDir(metaDir)),
 		MemoryVolURL: memory.DevPath,
 		Disks:        disks,
+		Mergeable:    config.GetHostConf().Memory.Mergeable,
 	}
 	body, err := json.Marshal(cfg)
 	if err != nil {
