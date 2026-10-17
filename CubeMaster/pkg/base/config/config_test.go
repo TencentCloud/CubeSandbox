@@ -283,7 +283,8 @@ func TestPreHandleTemplateDefaultsAndValidation(t *testing.T) {
 		{name: "uppercase normalized to lower", cfg: &Config{Template: &TemplateConf{RootfsFormat: "EROFS"}}, want: RootfsFormatErofs, wantOK: true},
 		{name: "surrounding whitespace trimmed", cfg: &Config{Template: &TemplateConf{RootfsFormat: "  ext4 "}}, want: RootfsFormatExt4, wantOK: true},
 		{name: "invalid value rejected", cfg: &Config{Template: &TemplateConf{RootfsFormat: "xfs"}}, wantOK: false},
-		{name: "empty-ish invalid rejected", cfg: &Config{Template: &TemplateConf{RootfsFormat: "nfs"}}, wantOK: false},
+		{name: "whitespace-only defaults to ext4", cfg: &Config{Template: &TemplateConf{RootfsFormat: "  "}}, want: RootfsFormatExt4, wantOK: true},
+		{name: "nfs rejected", cfg: &Config{Template: &TemplateConf{RootfsFormat: "nfs"}}, wantOK: false},
 	}
 
 	for _, tt := range tests {

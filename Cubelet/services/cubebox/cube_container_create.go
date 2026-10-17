@@ -1811,15 +1811,6 @@ func (l *local) prepareVolumeAnnotations(ctx context.Context, opts *workflow.Cre
 	})}, nil
 }
 
-func isImageStorageMediaType(containerReq *cubebox.ContainerConfig, mediaType cubeimages.ImageStorageMediaType) bool {
-	toCheck := containerReq.GetImage().GetStorageMedia()
-	if toCheck == "" {
-		toCheck = cubeimages.ImageStorageMediaType_docker.String()
-	}
-
-	return toCheck == mediaType.String()
-}
-
 // isPmemRootfsContainerImage reports whether the container's image is a
 // local-file rootfs (ext4 or erofs) backed by a pmem file, as opposed to a
 // containerd OCI image. It is the container-create counterpart of

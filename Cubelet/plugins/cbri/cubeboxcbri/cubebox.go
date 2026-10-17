@@ -490,10 +490,6 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID, storage
 	}
 }
 
-func (e *cubeboxInstancePlugin) getImageFilePath(imageID string) string {
-	return e.artifactPaths.ImageFile(e.config.instanceType, imageID)
-}
-
 // getImageFilePathByMedia returns the artifact rootfs path with a media-aware
 // suffix (.ext4 / .erofs) so the pmem backing file matches the downloaded
 // artifact's format.

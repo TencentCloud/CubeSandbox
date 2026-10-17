@@ -42,65 +42,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
-
-func TestIsImageStorageMediaType(t *testing.T) {
-	tests := []struct {
-		name      string
-		container *cubebox.ContainerConfig
-		mediaType cubeimages.ImageStorageMediaType
-		want      bool
-	}{
-		{
-			name: "docker image type",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: cubeimages.ImageStorageMediaType_docker.String(),
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_docker,
-			want:      true,
-		},
-		{
-			name: "ext4 image type",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_ext4,
-			want:      true,
-		},
-		{
-			name: "empty storage media defaults to docker",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: "",
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_docker,
-			want:      true,
-		},
-		{
-			name: "mismatched type",
-			container: &cubebox.ContainerConfig{
-				Image: &cubeimages.ImageSpec{
-					StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
-				},
-			},
-			mediaType: cubeimages.ImageStorageMediaType_docker,
-			want:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isImageStorageMediaType(tt.container, tt.mediaType)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
 
 func TestGetMountOptions(t *testing.T) {
 	tests := []struct {

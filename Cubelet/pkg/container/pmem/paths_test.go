@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,12 +46,25 @@ func TestArtifactSuffixAndFsType(t *testing.T) {
 		{"docker", ".ext4", "ext4", ".ext4"}, // docker is not a rootfs format; defaults to ext4 suffix
 		{"unknown", ".ext4", "ext4", ".ext4"},
 	}
+	// A fixed instance/image so wantPathSuffix can assert the full path the
+	// media maps to via GetRawImageFilePathByMedia, not just the bare suffix —
+	// this is the path the pmem device/shim actually consumes. Only the suffix
+	// is asserted (HasSuffix) so the test does not depend on the configured
+	// ImageBasePath, which is irrelevant to the media→suffix mapping.
+	const instanceType, imageID = "cubebox", "rfs-suffix"
 	for _, c := range cases {
 		if got := ArtifactSuffix(c.media); got != c.wantSuffix {
 			t.Fatalf("ArtifactSuffix(%q) = %q, want %q", c.media, got, c.wantSuffix)
 		}
 		if got := ArtifactFsType(c.media); got != c.wantFsType {
 			t.Fatalf("ArtifactFsType(%q) = %q, want %q", c.media, got, c.wantFsType)
+		}
+		// The path-level suffix must agree with wantPathSuffix, proving the
+		// suffix helper and the path builder route the same media the same way.
+		wantTail := imageID + c.wantPathSuffix
+		if got := GetRawImageFilePathByMedia(instanceType, imageID, c.media); !strings.HasSuffix(got, wantTail) {
+			t.Fatalf("GetRawImageFilePathByMedia(%q, %q, %q) = %q, want suffix %q",
+				instanceType, imageID, c.media, got, wantTail)
 		}
 	}
 }

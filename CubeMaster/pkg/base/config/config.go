@@ -924,18 +924,21 @@ func preHandleAuthConf(config *Config) error {
 }
 
 // preHandleTemplate normalizes and validates the template-build config.
-// An absent block (and an empty rootfs_format) default to "ext4" so existing
-// deployments keep their historical ext4 behavior. An explicit-but-invalid
-// value is rejected loudly rather than silently building the wrong format.
+// An absent block (and an empty/whitespace-only rootfs_format) default to
+// "ext4" so existing deployments keep their historical ext4 behavior. An
+// explicit-but-invalid value is rejected loudly rather than silently building
+// the wrong format. Trimming before the empty check matches
+// normalizeTemplateImageRequest so the config path and the request path treat
+// a whitespace-only value the same way (default to ext4, not reject).
 func preHandleTemplate(config *Config) error {
 	if config.Template == nil {
 		config.Template = &TemplateConf{}
 	}
+	config.Template.RootfsFormat = strings.ToLower(strings.TrimSpace(config.Template.RootfsFormat))
 	if config.Template.RootfsFormat == "" {
 		config.Template.RootfsFormat = RootfsFormatExt4
 		return nil
 	}
-	config.Template.RootfsFormat = strings.ToLower(strings.TrimSpace(config.Template.RootfsFormat))
 	switch config.Template.RootfsFormat {
 	case RootfsFormatExt4, RootfsFormatErofs:
 		return nil
