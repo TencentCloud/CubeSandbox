@@ -72,10 +72,11 @@ func TestNormalizeTemplateImageRequestRootfsFormat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, config.RootfsFormatExt4, req.RootfsFormat)
 
-	// A replayed job keeps the format it was submitted with — it is NOT
-	// re-stamped from the current config (the operator may have rotated
-	// rootfs_format between submit and resume, but a build's format is fixed
-	// at submit time).
+	// A client MAY select the format per request; a non-empty value is kept
+	// (canonicalized) and not overwritten by the config default. The config's
+	// role is to supply the DEFAULT for an empty value, not to override an
+	// explicit client choice. (A replayed job keeps its submitted format for
+	// the same reason: a build's format is fixed at submit time.)
 	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
@@ -85,7 +86,8 @@ func TestNormalizeTemplateImageRequestRootfsFormat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
 
-	// Surrounding whitespace and uppercase are canonicalized.
+	// Surrounding whitespace and uppercase are canonicalized (client-supplied
+	// values are normalized, not rejected, the same way Backend is).
 	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
