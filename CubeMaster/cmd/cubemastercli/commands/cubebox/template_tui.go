@@ -260,13 +260,13 @@ func (m imageJobTUI) renderSteps() string {
 		case "BUILDING_EXT4", "BUILDING_EROFS":
 			buildingLabel = m.job.Phase
 		default:
-			fmt := ""
+			rootfsFormat := ""
 			if m.job.RootfsFormat != "" {
-				fmt = m.job.RootfsFormat
+				rootfsFormat = m.job.RootfsFormat
 			} else if m.job.Artifact != nil {
-				fmt = m.job.Artifact.RootfsFormat
+				rootfsFormat = m.job.Artifact.RootfsFormat
 			}
-			if fmt == "erofs" {
+			if rootfsFormat == "erofs" {
 				buildingLabel = "BUILDING_EROFS"
 			}
 		}

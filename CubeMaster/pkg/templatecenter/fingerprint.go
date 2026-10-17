@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -71,10 +72,29 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		// RootfsFormat is part of the artifact identity so an ext4 and an
 		// erofs build of the same image+spec produce different fingerprints
 		// and never reuse (and thus mislabel) each other's artifact.
-		RootfsFormat            string                    `json:"rootfs_format"`
+		//
+		// Legacy compatibility: only erofs carries a value here. ext4 (and
+		// empty/unknown, which normalize to ext4) leave the field empty so it
+		// omitempty's out of the JSON — making the ext4 fingerprint byte-identical
+		// to the pre-RootfsFormat fingerprint. Without this, every existing ext4
+		// artifact would change fingerprint on upgrade and force a one-time full
+		// rebuild of every template. This mirrors the CubeEgressCAFingerprint
+		// field below (see TestBuildTemplateSpecFingerprintEmptyCAMatchesLegacy):
+		// the legacy/default value omits, only a non-default value (erofs / a
+		// real CA) enters the payload and yields a distinct fingerprint.
+		RootfsFormat            string                    `json:"rootfs_format,omitempty"`
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
+	}
+	// Only erofs contributes to the fingerprint; ext4/empty/unknown normalize to
+	// ext4 and are left blank so the key omits and the fingerprint matches the
+	// pre-RootfsFormat legacy value. NormalizeRootfsFormat is the shared
+	// canonicalizer (trim + lower, ext4 default) so "EROFS" / " erofs " still
+	// produce the erofs fingerprint rather than silently matching legacy ext4.
+	rootfsFormatForFingerprint := ""
+	if NormalizeRootfsFormat(req.RootfsFormat) == config.RootfsFormatErofs {
+		rootfsFormatForFingerprint = config.RootfsFormatErofs
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
 		SourceImageDigest:       sourceImageDigest,
@@ -82,7 +102,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ExposedPorts:            req.ExposedPorts,
 		InstanceType:            req.InstanceType,
 		NetworkType:             req.NetworkType,
-		RootfsFormat:            req.RootfsFormat,
+		RootfsFormat:            rootfsFormatForFingerprint,
 		ContainerOverrides:      req.ContainerOverrides,
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 		EnvdBinarySHA256:        envdSHA,

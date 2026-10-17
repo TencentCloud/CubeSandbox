@@ -130,10 +130,21 @@ func TestBuildTemplateSpecFingerprintUsesRootfsFormat(t *testing.T) {
 	assert.Equal(t, fpExt4, buildTemplateSpecFingerprint(&reqExt4, "sha256:src"))
 	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofs, "sha256:src"))
 
-	// An empty (legacy/un-normalized) RootfsFormat differs from an explicit
-	// ext4, so pre-step-2 artifacts are not silently reused for new
-	// explicit-format builds.
-	assert.NotEqual(t, buildTemplateSpecFingerprint(base, "sha256:src"), fpExt4)
+	// Legacy compatibility: an empty (pre-RootfsFormat) and an explicit ext4
+	// RootfsFormat MUST yield the SAME fingerprint. ext4 omits rootfs_format
+	// from the payload (omitempty + blank), so the JSON is byte-identical to
+	// the pre-step-2 payload — existing ext4 artifacts stay reusable across
+	// the upgrade instead of being forced into a one-time full rebuild. This
+	// mirrors TestBuildTemplateSpecFingerprintEmptyCAMatchesLegacy.
+	fpBase := buildTemplateSpecFingerprint(base, "sha256:src")
+	assert.Equal(t, fpBase, fpExt4)
+
+	// A non-canonical erofs value ("EROFS") normalizes to erofs and yields the
+	// erofs fingerprint (NOT legacy ext4), so a non-canonical erofs request does
+	// not silently match a legacy ext4 artifact.
+	reqErofsUpper := *base
+	reqErofsUpper.RootfsFormat = "EROFS"
+	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofsUpper, "sha256:src"))
 }
 
 func TestNormalizeTemplateImageRequestBackendS3(t *testing.T) {
