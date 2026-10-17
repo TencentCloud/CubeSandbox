@@ -59,9 +59,9 @@ const (
 	RedoModeFailedOnly  = "FAILED_ONLY"
 	RedoModeFailedNodes = "FAILED_NODES"
 
-	JobPhasePulling            = "PULLING"
-	JobPhaseUnpacking          = "UNPACKING"
-	JobPhaseBuildingExt4       = "BUILDING_EXT4"
+	JobPhasePulling      = "PULLING"
+	JobPhaseUnpacking    = "UNPACKING"
+	JobPhaseBuildingExt4 = "BUILDING_EXT4"
 	// JobPhaseBuildingErofs is the rootfs build phase for erofs-packaged
 	// artifacts (mkfs.erofs). Together with JobPhaseBuildingExt4 it lets the
 	// job phase carry the packaging format so the CLI / API surface shows

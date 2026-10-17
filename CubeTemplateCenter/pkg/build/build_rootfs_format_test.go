@@ -6,15 +6,16 @@ package build
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
-	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // TestBuildRootfsImageDispatch verifies runBuildLocked's format dispatch:
@@ -138,7 +139,7 @@ func TestReportArtifactBuiltIncludesRootfsFormat(t *testing.T) {
 	var captured map[string]any
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
-	patches.ApplyMethod(&Reporter{}, "Report", func(_ *Reporter, _ context.Context, _ string, fields map[string]any) error {
+	patches.ApplyMethod(reflect.TypeOf(&Reporter{}), "Report", func(_ *Reporter, _ context.Context, _ string, fields map[string]any) error {
 		captured = fields
 		return nil
 	})

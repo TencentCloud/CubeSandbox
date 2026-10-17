@@ -748,22 +748,22 @@ type RootfsArtifactInfo struct {
 }
 
 type TemplateImageJobInfo struct {
-	JobID                   string              `json:"job_id,omitempty"`
-	TemplateID              string              `json:"template_id,omitempty"`
-	RequestID               string              `json:"request_id,omitempty"`
-	SandboxID               string              `json:"sandbox_id,omitempty"`
-	ResourceType            string              `json:"resource_type,omitempty"`
-	ResourceID              string              `json:"resource_id,omitempty"`
-	AttemptNo               int32               `json:"attempt_no,omitempty"`
-	RetryOfJobID            string              `json:"retry_of_job_id,omitempty"`
-	Operation               string              `json:"operation,omitempty"`
-	RedoMode                string              `json:"redo_mode,omitempty"`
-	RedoScope               []string            `json:"redo_scope,omitempty"`
-	ResumePhase             string              `json:"resume_phase,omitempty"`
-	ArtifactID              string              `json:"artifact_id,omitempty"`
-	TemplateSpecFingerprint string              `json:"template_spec_fingerprint,omitempty"`
-	Status                  string              `json:"status,omitempty"`
-	Phase                   string              `json:"phase,omitempty"`
+	JobID                   string   `json:"job_id,omitempty"`
+	TemplateID              string   `json:"template_id,omitempty"`
+	RequestID               string   `json:"request_id,omitempty"`
+	SandboxID               string   `json:"sandbox_id,omitempty"`
+	ResourceType            string   `json:"resource_type,omitempty"`
+	ResourceID              string   `json:"resource_id,omitempty"`
+	AttemptNo               int32    `json:"attempt_no,omitempty"`
+	RetryOfJobID            string   `json:"retry_of_job_id,omitempty"`
+	Operation               string   `json:"operation,omitempty"`
+	RedoMode                string   `json:"redo_mode,omitempty"`
+	RedoScope               []string `json:"redo_scope,omitempty"`
+	ResumePhase             string   `json:"resume_phase,omitempty"`
+	ArtifactID              string   `json:"artifact_id,omitempty"`
+	TemplateSpecFingerprint string   `json:"template_spec_fingerprint,omitempty"`
+	Status                  string   `json:"status,omitempty"`
+	Phase                   string   `json:"phase,omitempty"`
 	// RootfsFormat is the rootfs packaging format ("ext4" or "erofs") this job's
 	// artifact is/will be built in. Populated from the job's request snapshot
 	// (RequestJSON, which CubeMaster stamps from template.rootfs_format at
@@ -771,21 +771,21 @@ type TemplateImageJobInfo struct {
 	// before the artifact exists — letting the CLI render the build step label
 	// (BUILDING_EXT4 / BUILDING_EROFS) correctly even before the build phase is
 	// reached. Falls back to the artifact's RootfsFormat once built.
-	RootfsFormat            string              `json:"rootfs_format,omitempty"`
-	Progress                int32               `json:"progress,omitempty"`
-	ErrorMessage            string              `json:"error_message,omitempty"`
-	ExpectedNodeCount       int32               `json:"expected_node_count,omitempty"`
-	ReadyNodeCount          int32               `json:"ready_node_count,omitempty"`
-	FailedNodeCount         int32               `json:"failed_node_count,omitempty"`
-	TemplateStatus          string              `json:"template_status,omitempty"`
-	ArtifactStatus          string              `json:"artifact_status,omitempty"`
-	PullTotalBytes          int64               `json:"pull_total_bytes,omitempty"`
-	PullDownloadedBytes     int64               `json:"pull_downloaded_bytes,omitempty"`
-	PullTotalLayers         int32               `json:"pull_total_layers,omitempty"`
-	PullCompletedLayers     int32               `json:"pull_completed_layers,omitempty"`
-	PullSpeedBPS            int64               `json:"pull_speed_bps,omitempty"`
-	Artifact                *RootfsArtifactInfo `json:"artifact,omitempty"`
-	Template                *Res                `json:"template,omitempty"`
+	RootfsFormat        string              `json:"rootfs_format,omitempty"`
+	Progress            int32               `json:"progress,omitempty"`
+	ErrorMessage        string              `json:"error_message,omitempty"`
+	ExpectedNodeCount   int32               `json:"expected_node_count,omitempty"`
+	ReadyNodeCount      int32               `json:"ready_node_count,omitempty"`
+	FailedNodeCount     int32               `json:"failed_node_count,omitempty"`
+	TemplateStatus      string              `json:"template_status,omitempty"`
+	ArtifactStatus      string              `json:"artifact_status,omitempty"`
+	PullTotalBytes      int64               `json:"pull_total_bytes,omitempty"`
+	PullDownloadedBytes int64               `json:"pull_downloaded_bytes,omitempty"`
+	PullTotalLayers     int32               `json:"pull_total_layers,omitempty"`
+	PullCompletedLayers int32               `json:"pull_completed_layers,omitempty"`
+	PullSpeedBPS        int64               `json:"pull_speed_bps,omitempty"`
+	Artifact            *RootfsArtifactInfo `json:"artifact,omitempty"`
+	Template            *Res                `json:"template,omitempty"`
 }
 
 type CreateTemplateFromImageRes struct {

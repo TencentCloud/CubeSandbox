@@ -17,10 +17,10 @@ func TestBuildingPhaseForRootfsFormat(t *testing.T) {
 	}{
 		{config.RootfsFormatExt4, JobPhaseBuildingExt4},
 		{config.RootfsFormatErofs, JobPhaseBuildingErofs},
-		{"", JobPhaseBuildingExt4},         // empty (legacy) -> ext4, never erofs
-		{"EROFS", JobPhaseBuildingErofs},   // case-insensitive: normalizedRootfsFormat lowercases, so EROFS -> erofs
+		{"", JobPhaseBuildingExt4},           // empty (legacy) -> ext4, never erofs
+		{"EROFS", JobPhaseBuildingErofs},     // case-insensitive: normalizedRootfsFormat lowercases, so EROFS -> erofs
 		{"  erofs  ", JobPhaseBuildingErofs}, // whitespace trimmed too
-		{"unknown", JobPhaseBuildingExt4},  // unknown -> ext4 fallback
+		{"unknown", JobPhaseBuildingExt4},    // unknown -> ext4 fallback
 	}
 	for _, c := range cases {
 		if got := buildingPhaseForRootfsFormat(c.in); got != c.want {

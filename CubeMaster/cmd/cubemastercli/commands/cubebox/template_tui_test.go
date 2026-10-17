@@ -188,8 +188,8 @@ func TestImageJobStepsRenderingReusedErofsArtifact(t *testing.T) {
 	m := newImageJobTUI(ctx, "job-1")
 	// A reused job is READY with phase READY and an erofs artifact attached.
 	updated, _ := m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
-		Status: "READY",
-		Phase:  "READY",
+		Status:   "READY",
+		Phase:    "READY",
 		Artifact: &types.RootfsArtifactInfo{ArtifactID: "rfs-x", RootfsFormat: "erofs"},
 	}})
 	model := updated.(imageJobTUI)
@@ -203,8 +203,8 @@ func TestImageJobStepsRenderingReusedErofsArtifact(t *testing.T) {
 
 	// A reused ext4 artifact labels it BUILDING_EXT4.
 	updated, _ = m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
-		Status: "READY",
-		Phase:  "READY",
+		Status:   "READY",
+		Phase:    "READY",
 		Artifact: &types.RootfsArtifactInfo{ArtifactID: "rfs-y", RootfsFormat: "ext4"},
 	}})
 	model = updated.(imageJobTUI)
@@ -224,8 +224,8 @@ func TestImageJobStepsRenderingErofsLabelBeforeBuild(t *testing.T) {
 	// PULLING: artifact not built yet, but rootfs_format is known from the
 	// request snapshot carried on the job info top-level field.
 	updated, _ := m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
-		Status:      "RUNNING",
-		Phase:       "PULLING",
+		Status:       "RUNNING",
+		Phase:        "PULLING",
 		RootfsFormat: "erofs",
 	}})
 	model := updated.(imageJobTUI)
@@ -239,8 +239,8 @@ func TestImageJobStepsRenderingErofsLabelBeforeBuild(t *testing.T) {
 
 	// PULLING with ext4 stays BUILDING_EXT4.
 	updated, _ = m.Update(imageJobMsg{job: &types.TemplateImageJobInfo{
-		Status:      "RUNNING",
-		Phase:       "PULLING",
+		Status:       "RUNNING",
+		Phase:        "PULLING",
 		RootfsFormat: "ext4",
 	}})
 	model = updated.(imageJobTUI)

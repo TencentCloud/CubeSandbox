@@ -41,7 +41,7 @@ func TestArtifactSuffixAndFsType(t *testing.T) {
 	}{
 		{"ext4", ".ext4", "ext4", ".ext4"},
 		{"erofs", ".erofs", "erofs", ".erofs"},
-		{"", ".ext4", "ext4", ".ext4"},   // empty defaults to ext4
+		{"", ".ext4", "ext4", ".ext4"},       // empty defaults to ext4
 		{"docker", ".ext4", "ext4", ".ext4"}, // docker is not a rootfs format; defaults to ext4 suffix
 		{"unknown", ".ext4", "ext4", ".ext4"},
 	}

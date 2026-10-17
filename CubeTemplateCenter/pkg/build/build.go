@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
@@ -525,7 +525,7 @@ func reportArtifactBuilt(
 		// the result instead of re-deriving it from the request snapshot), and
 		// it defends against a request snapshot that lost the field. An empty
 		// value is normalized to "ext4" (the historical default).
-		"rootfs_format":                  rootfsFormatLabel(rootfsFormat),
+		"rootfs_format": rootfsFormatLabel(rootfsFormat),
 	}
 	if artifactURL != "" {
 		payload["artifact_url"] = artifactURL

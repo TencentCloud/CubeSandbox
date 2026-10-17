@@ -1130,9 +1130,9 @@ func prepareImagePmems(rootfsConfig []*virtiofs.CubeRootfsInfo) oci.SpecOpts {
 					// FsType comes from the rootfs config (derived from the image's
 					// StorageMedia at CubeRootfsInfo build time): ext4 or erofs.
 					// Empty/legacy configs default to ext4 via pmem.ArtifactFsType.
-					FsType:        pmem.ArtifactFsType(r.PmemFsType),
-					Size:          fileSize,
-					ID:            fmt.Sprintf("%s-%d", constants.AnnotationPmemContainerPrefix, len(tmpPmems)),
+					FsType: pmem.ArtifactFsType(r.PmemFsType),
+					Size:   fileSize,
+					ID:     fmt.Sprintf("%s-%d", constants.AnnotationPmemContainerPrefix, len(tmpPmems)),
 				})
 			}
 		}

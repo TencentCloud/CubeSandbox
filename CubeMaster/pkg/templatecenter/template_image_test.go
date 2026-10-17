@@ -1375,7 +1375,6 @@ func TestNormalizedRootfsFormat(t *testing.T) {
 	}
 }
 
-
 func TestManagedArtifactDirRecognizesWorkAndStoreRoots(t *testing.T) {
 	workRoot := filepath.Join(t.TempDir(), "work")
 	storeRoot := filepath.Join(t.TempDir(), "store")

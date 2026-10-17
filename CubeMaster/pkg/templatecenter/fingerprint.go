@@ -63,11 +63,11 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 
 func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
 	type fingerprintPayload struct {
-		SourceImageDigest       string                    `json:"source_image_digest"`
-		WritableLayerSize       string                    `json:"writable_layer_size"`
-		ExposedPorts            []int32                   `json:"exposed_ports,omitempty"`
-		InstanceType            string                    `json:"instance_type"`
-		NetworkType             string                    `json:"network_type"`
+		SourceImageDigest string  `json:"source_image_digest"`
+		WritableLayerSize string  `json:"writable_layer_size"`
+		ExposedPorts      []int32 `json:"exposed_ports,omitempty"`
+		InstanceType      string  `json:"instance_type"`
+		NetworkType       string  `json:"network_type"`
 		// RootfsFormat is part of the artifact identity so an ext4 and an
 		// erofs build of the same image+spec produce different fingerprints
 		// and never reuse (and thus mislabel) each other's artifact.

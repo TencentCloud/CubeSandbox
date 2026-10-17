@@ -47,16 +47,16 @@ type ErofsImagePath struct {
 	LowerDir []string `json:"lower_dir"`
 }
 type CubeRootfsInfo struct {
-	Overlay    *CubeRootfsOverlayInfo `json:"overlay_info,omitempty"`
-	Mounts     []CubeRootfsMount      `json:"mounts,omitempty"`
-	PmemFile   string                 `json:"pmem_file,omitempty"`
+	Overlay  *CubeRootfsOverlayInfo `json:"overlay_info,omitempty"`
+	Mounts   []CubeRootfsMount      `json:"mounts,omitempty"`
+	PmemFile string                 `json:"pmem_file,omitempty"`
 	// PmemFsType is the filesystem type the microVM must mount the pmem backing
 	// file (PmemFile) as: "ext4" or "erofs". It is derived from the image's
 	// ImageSpec.StorageMedia and carried here so prepareImagePmems can set
 	// CubePmem.FsType without re-deriving it. Empty defaults to "ext4"
 	// (historical behavior) for rootfs configs predating this field.
-	PmemFsType string                 `json:"pmem_fs_type,omitempty"`
-	ErofsImage *ErofsImagePath        `json:"ero_image,omitempty"`
+	PmemFsType string          `json:"pmem_fs_type,omitempty"`
+	ErofsImage *ErofsImagePath `json:"ero_image,omitempty"`
 }
 
 type CubeRootfsOverlayInfo struct {

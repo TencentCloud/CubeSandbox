@@ -110,14 +110,14 @@ func TestTemplateJobBuiltCallbackRetryDoesNotStartSecondContinuation(t *testing.
 // the resume path can fill ImageSpec.StorageMedia from the result.
 func TestRemoteBuildResultFromPayloadParsesRootfsFormat(t *testing.T) {
 	payload := map[string]any{
-		"status":              "BUILT",
-		"artifact_id":         "rfs-1",
-		"ext4_path":           "/data/artifacts/rfs-1/rfs-1.ext4",
-		"ext4_sha256":         "sha256:abc",
-		"ext4_size_bytes":     json.Number("4096"),
-		"master_node_ip":      "http://master:8080",
-		"image_config_json":   `{}`,
-		"rootfs_format":       "erofs",
+		"status":            "BUILT",
+		"artifact_id":       "rfs-1",
+		"ext4_path":         "/data/artifacts/rfs-1/rfs-1.ext4",
+		"ext4_sha256":       "sha256:abc",
+		"ext4_size_bytes":   json.Number("4096"),
+		"master_node_ip":    "http://master:8080",
+		"image_config_json": `{}`,
+		"rootfs_format":     "erofs",
 	}
 	got := remoteBuildResultFromPayload(payload)
 	if got.RootfsFormat != "erofs" {
