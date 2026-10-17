@@ -122,3 +122,35 @@ func TestBuildErofsProducesErofsImage(t *testing.T) {
 		t.Fatalf("rootfs dir should be removed after successful build, stat err=%v", err)
 	}
 }
+
+// TestEnsureErofsBuildPreflightAcceptsInstalledMkfsErofs asserts the preflight
+// passes when mkfs.erofs is on PATH. executableLookPath is patched (not a real
+// PATH install) so the test never depends on a local erofs-utils install.
+func TestEnsureErofsBuildPreflightAcceptsInstalledMkfsErofs(t *testing.T) {
+	withExecutableLookPath(t, func(file string) (string, error) {
+		if file == "mkfs.erofs" {
+			return "/usr/bin/mkfs.erofs", nil
+		}
+		return "", exec.ErrNotFound
+	})
+	if err := EnsureErofsBuildPreflight(context.Background()); err != nil {
+		t.Fatalf("EnsureErofsBuildPreflight failed with mkfs.erofs installed: %v", err)
+	}
+}
+
+// TestEnsureErofsBuildPreflightFailsWhenMkfsErofsMissing asserts the preflight
+// fails fast with a clear message naming mkfs.erofs when the tool is absent —
+// the fail-fast behavior the erofs build path relies on (via
+// build.ensureBuildPreflight) instead of failing deep inside BUILDING_EROFS.
+func TestEnsureErofsBuildPreflightFailsWhenMkfsErofsMissing(t *testing.T) {
+	withExecutableLookPath(t, func(file string) (string, error) {
+		return "", exec.ErrNotFound
+	})
+	err := EnsureErofsBuildPreflight(context.Background())
+	if err == nil {
+		t.Fatal("EnsureErofsBuildPreflight should fail when mkfs.erofs is missing")
+	}
+	if !strings.Contains(err.Error(), "mkfs.erofs") {
+		t.Fatalf("error should mention mkfs.erofs, got: %v", err)
+	}
+}

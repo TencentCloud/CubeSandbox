@@ -179,8 +179,10 @@ func createErofsImage(ctx context.Context, rootfsDir, erofsPath string) error {
 }
 
 // EnsureErofsBuildPreflight asserts that mkfs.erofs is installed. It is called
-// on the erofs build path so a host without erofs-utils fails fast at the
-// preflight phase instead of deep inside BUILDING.
+// on the erofs build path (via build.ensureBuildPreflight, after the shared
+// EnsureArtifactBuildPreflight) so a host without erofs-utils fails fast at the
+// PULLING preflight phase instead of deep inside BUILDING_EROFS, after the image
+// is pulled and the rootfs exported.
 func EnsureErofsBuildPreflight(ctx context.Context) error {
 	if _, err := executableLookPath("mkfs.erofs"); err != nil {
 		return fmt.Errorf("required command %q is not available: %w", "mkfs.erofs", err)

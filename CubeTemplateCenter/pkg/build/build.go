@@ -122,12 +122,14 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		}
 	}
 
-	// Step 1: Preflight. Assert mkfs.ext4/truncate/cp (and losetup et al. when
-	// loop-mount is enabled) exist and that mkfs.ext4 supports -d BEFORE
-	// spending minutes pulling an image, so a misconfigured host fails fast
-	// at PULLING with a clear message instead of deep inside BUILDING_EXT4.
+	// Step 1: Preflight. Assert the packaging tools the build needs exist
+	// (mkfs.ext4/truncate/cp plus the export backend's tools, and that
+	// mkfs.ext4 supports -d) and, for an erofs build, that mkfs.erofs is also
+	// installed — all BEFORE spending minutes pulling an image, so a
+	// misconfigured host fails fast at PULLING with a clear message instead
+	// of deep inside BUILDING_EXT4 / BUILDING_EROFS.
 	reportPhase(templatecenter.JobPhasePulling, 5)
-	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
+	if err := ensureBuildPreflight(ctx, req.RootfsFormat); err != nil {
 		errMsg := fmt.Sprintf("build preflight fail: %v", err)
 		logger.Errorf(errMsg)
 		reportFailed(templatecenter.JobPhasePulling, errMsg)
@@ -371,6 +373,27 @@ func runBuildLocked(
 
 	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d",
 		artifactID, result.SHA256, result.SizeBytes)
+	return nil
+}
+
+// ensureBuildPreflight asserts the host has the tools the build needs before
+// the long pull begins, dispatched by rootfs format like buildRootfsImage.
+// The shared image.EnsureArtifactBuildPreflight covers truncate/cp plus the
+// export backend's tools and mkfs.ext4 (with -d support); an erofs build
+// additionally requires mkfs.erofs (image.EnsureErofsBuildPreflight) so a host
+// without erofs-utils fails fast at PULLING instead of deep inside
+// BUILDING_EROFS, after the image is pulled and the rootfs exported. An empty
+// / unknown format skips the erofs check, matching buildRootfsImage's ext4
+// default for legacy request snapshots.
+func ensureBuildPreflight(ctx context.Context, rootfsFormat string) error {
+	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
+		return err
+	}
+	if rootfsFormat == config.RootfsFormatErofs {
+		if err := image.EnsureErofsBuildPreflight(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

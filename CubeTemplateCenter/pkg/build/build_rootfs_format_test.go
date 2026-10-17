@@ -5,6 +5,7 @@ package build
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -174,5 +175,90 @@ func TestReportArtifactBuiltIncludesRootfsFormat(t *testing.T) {
 	// The payload still carries the other artifact fields untouched.
 	if captured["artifact_id"] != "rfs-1" || captured["ext4_sha256"] != "sha" {
 		t.Fatalf("payload missing core artifact fields: %#v", captured)
+	}
+}
+
+// TestEnsureBuildPreflightDispatchesByFormat verifies ensureBuildPreflight runs
+// the shared image.EnsureArtifactBuildPreflight for every format and
+// additionally runs image.EnsureErofsBuildPreflight only for erofs, so the erofs
+// path fails fast at PULLING when mkfs.erofs is missing instead of deep inside
+// BUILDING_EROFS. Both preflights are patched out, so this is a pure dispatch
+// test that needs no mkfs.ext4 / mkfs.erofs on the host.
+func TestEnsureBuildPreflightDispatchesByFormat(t *testing.T) {
+	artifactCalled := false
+	erofsCalled := false
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(image.EnsureArtifactBuildPreflight, func(ctx context.Context) error {
+		artifactCalled = true
+		return nil
+	})
+	patches.ApplyFunc(image.EnsureErofsBuildPreflight, func(ctx context.Context) error {
+		erofsCalled = true
+		return nil
+	})
+
+	// ext4: only the shared preflight.
+	artifactCalled, erofsCalled = false, false
+	if err := ensureBuildPreflight(context.Background(), config.RootfsFormatExt4); err != nil {
+		t.Fatalf("ext4 preflight: %v", err)
+	}
+	if !artifactCalled || erofsCalled {
+		t.Fatalf("ext4 must call only EnsureArtifactBuildPreflight: artifact=%v erofs=%v", artifactCalled, erofsCalled)
+	}
+
+	// Empty format defaults to ext4: only the shared preflight, so a legacy
+	// request snapshot that predates RootfsFormat is not asked for mkfs.erofs.
+	artifactCalled, erofsCalled = false, false
+	if err := ensureBuildPreflight(context.Background(), ""); err != nil {
+		t.Fatalf("empty preflight: %v", err)
+	}
+	if !artifactCalled || erofsCalled {
+		t.Fatalf("empty must call only EnsureArtifactBuildPreflight: artifact=%v erofs=%v", artifactCalled, erofsCalled)
+	}
+
+	// erofs: both the shared preflight and the erofs-specific one.
+	artifactCalled, erofsCalled = false, false
+	if err := ensureBuildPreflight(context.Background(), config.RootfsFormatErofs); err != nil {
+		t.Fatalf("erofs preflight: %v", err)
+	}
+	if !artifactCalled || !erofsCalled {
+		t.Fatalf("erofs must call both preflights: artifact=%v erofs=%v", artifactCalled, erofsCalled)
+	}
+
+	// An unknown format falls back to the shared preflight only (no erofs
+	// check), matching buildRootfsImage's ext4 fallback.
+	artifactCalled, erofsCalled = false, false
+	if err := ensureBuildPreflight(context.Background(), "future-format"); err != nil {
+		t.Fatalf("unknown preflight: %v", err)
+	}
+	if !artifactCalled || erofsCalled {
+		t.Fatalf("unknown must call only EnsureArtifactBuildPreflight: artifact=%v erofs=%v", artifactCalled, erofsCalled)
+	}
+}
+
+// TestEnsureBuildPreflightShortCircuitsOnSharedPreflightFailure verifies that
+// when the shared preflight fails, the erofs-specific check is skipped and the
+// shared error propagates — so a missing mkfs.ext4 is reported once, not masked
+// by a subsequent mkfs.erofs error.
+func TestEnsureBuildPreflightShortCircuitsOnSharedPreflightFailure(t *testing.T) {
+	erofsCalled := false
+	sharedErr := errors.New("shared preflight boom")
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(image.EnsureArtifactBuildPreflight, func(ctx context.Context) error {
+		return sharedErr
+	})
+	patches.ApplyFunc(image.EnsureErofsBuildPreflight, func(ctx context.Context) error {
+		erofsCalled = true
+		return nil
+	})
+
+	err := ensureBuildPreflight(context.Background(), config.RootfsFormatErofs)
+	if !errors.Is(err, sharedErr) {
+		t.Fatalf("expected shared preflight error to propagate, got: %v", err)
+	}
+	if erofsCalled {
+		t.Fatal("erofs preflight must not run when the shared preflight already failed")
 	}
 }
