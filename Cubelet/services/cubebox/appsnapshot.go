@@ -308,6 +308,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// the shim marks the guest as app-snapshotting and disables exec.
 	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
+	// Settle gate: wait until the guest vCPUs stay idle for a sustained
+	// window before freezing memory, so the template captures a settled
+	// guest state. Best-effort: never fails the build. See snapshot_settle.go.
+	// NOTE: must run AFTER collectEnvdVersion (its containerd Exec causes
+	// guest activity) and BEFORE the snapshot.
+	waitGuestSettled(ctx, sandboxID, stepLog)
+
 	stepLog.Info("Step 4: Capturing sandbox snapshot through shim...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is
 	// no base memory blob to overlay onto, so we always ask for a full memory

@@ -112,6 +112,40 @@ type CommonConf struct {
 	ReconcileInterval  time.Duration `yaml:"reconcile_interval"`
 
 	DisableCubeBoxTemplateBaseFormatPoolOfNumberVer bool `yaml:"disable_cube_box_template_base_format_pool_of_number_ver"`
+
+	// TemplateSettle gates the AppSnapshot memory freeze until the guest has
+	// settled; see services/cubebox/snapshot_settle.go. The
+	// CUBE_TEMPLATE_SETTLE_* env vars remain per-node overrides on top.
+	TemplateSettle TemplateSettleConf `yaml:"template_settle"`
+}
+
+// TemplateSettleConf is the managed YAML surface of the AppSnapshot settle
+// gate (services/cubebox/snapshot_settle.go). Every field is optional:
+// zero/nil means "not configured" and falls back to the built-in default,
+// and the CUBE_TEMPLATE_SETTLE_* env vars override whatever is set here.
+// The file is hot-reloaded, so changes take effect on the next AppSnapshot
+// without restarting cubelet.
+type TemplateSettleConf struct {
+	// Enabled switches the gate on/off. It is a pointer so an explicit
+	// "enabled: false" stays distinguishable from "not configured"; when
+	// unset, the built-in default applies (on for arm64, off elsewhere).
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// MaxWait bounds the gate wait. It shares the caller's RPC deadline
+	// budget (master AppSnapshotTimeoutInSec, default 300s).
+	MaxWait      time.Duration `yaml:"max_wait,omitempty"`
+	PollInterval time.Duration `yaml:"poll_interval,omitempty"`
+	QuietWindow  time.Duration `yaml:"quiet_window,omitempty"`
+	MinWait      time.Duration `yaml:"min_wait,omitempty"`
+	// BusyThreshold is the vCPU busy ratio (units of one CPU, summed over
+	// vcpus) at or below which a sample counts as quiet. Range (0,1).
+	BusyThreshold float64 `yaml:"busy_threshold,omitempty"`
+	// QuietRatio is the minimum fraction of quiet samples inside the sliding
+	// QuietWindow for the guest to count as settled. Range (0,1].
+	QuietRatio float64 `yaml:"quiet_ratio,omitempty"`
+	// BailAfter gives up early when not a single quiet sample was seen
+	// within this duration (CPU-bound steady state). Pointer so an explicit
+	// "bail_after: 0s" can disable the early bail; unset keeps the default.
+	BailAfter *time.Duration `yaml:"bail_after,omitempty"`
 }
 
 func Init(configPath string, useDefault bool) (*Config, error) {
@@ -185,6 +219,19 @@ func validate(cfg *Config) error {
 			if !validDNSConfigToken(option) {
 				return fmt.Errorf("invalid common.default_dns_options entry: %q", option)
 			}
+		}
+		ts := cfg.Common.TemplateSettle
+		if ts.BusyThreshold < 0 || ts.BusyThreshold >= 1 {
+			return fmt.Errorf("invalid common.template_settle.busy_threshold: must be in [0,1)")
+		}
+		if ts.QuietRatio < 0 || ts.QuietRatio > 1 {
+			return fmt.Errorf("invalid common.template_settle.quiet_ratio: must be in [0,1]")
+		}
+		if ts.MaxWait < 0 || ts.PollInterval < 0 || ts.QuietWindow < 0 || ts.MinWait < 0 {
+			return fmt.Errorf("invalid common.template_settle: durations must be >= 0")
+		}
+		if ts.BailAfter != nil && *ts.BailAfter < 0 {
+			return fmt.Errorf("invalid common.template_settle.bail_after: must be >= 0")
 		}
 	}
 	return nil
@@ -322,6 +369,17 @@ func GetConfig() *Config {
 //go:noinline
 func GetCommon() *CommonConf {
 	return cfg.Common
+}
+
+// GetTemplateSettle returns the managed settle-gate config section. It is
+// nil-safe: when cubelet config is not initialised (unit tests) or the
+// section is absent it returns the zero value, whose fields all mean
+// "not configured, use the built-in default".
+func GetTemplateSettle() TemplateSettleConf {
+	if cfg == nil || cfg.Common == nil {
+		return TemplateSettleConf{}
+	}
+	return cfg.Common.TemplateSettle
 }
 
 func defaultHostConf() *HostConf {
