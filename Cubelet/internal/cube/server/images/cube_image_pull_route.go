@@ -157,7 +157,15 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 				if err != nil {
 					return "", fmt.Errorf("unmarshal cube image spec failed: %v", err)
 				}
-				constants.WithImageSpec(ctx, cubeSpec)
+				// Keep the returned context: WithImageSpec returns a NEW ctx
+				// (context.WithValue does not mutate the receiver). The CRI
+				// PullImage path recovers the spec from the sandbox annotation
+				// rather than the incoming ctx, so without reassigning ctx the
+				// downstream EnsurePmemRootfs sees no spec in ctx and falls back
+				// to the legacy <artifact>.ext4 path even when mediaType is
+				// erofs — the download target then does not match the
+				// <artifact>.erofs path the pmem device/shim expects.
+				ctx = constants.WithImageSpec(ctx, cubeSpec)
 			}
 		}
 	}
