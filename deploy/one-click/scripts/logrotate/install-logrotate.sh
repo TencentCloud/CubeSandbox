@@ -75,23 +75,22 @@ require_root
 [[ -f "${POLICY_SRC}" && -f "${SERVICE_SRC}" && -f "${TIMER_SRC}" ]] \
   || die "logrotate sources missing under ${SCRIPT_DIR}"
 
-install -d -m 0755 "$(dirname "${POLICY_DST}")"
-install -m 0644 "${POLICY_SRC}" "${POLICY_DST}"
-log "installed ${POLICY_DST}"
-
 # An earlier install may have left the timer enabled. Keep it untouched (this
-# script never stops rotation), but say so: with a missing or rejected policy
-# the timer will fail on every run until an operator disables it.
+# script never stops rotation), but say what it will do next.
 warn_existing_timer() {
   [[ -e "${UNIT_DIR}/cube-sandbox-logrotate.timer" ]] || return 0
-  log "WARNING: existing cube-sandbox-logrotate.timer is still enabled and will fail against the current policy"
-  log "         disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
+  log "WARNING: existing cube-sandbox-logrotate.timer left untouched: $*"
 }
 
 if ! ensure_logrotate; then
+  # Nothing to validate against; stage the policy so a later re-run can enable
+  # rotation. Soft-fail: the role target must not depend on logrotate.
+  install -d -m 0755 "$(dirname "${POLICY_DST}")"
+  install -m 0644 "${POLICY_SRC}" "${POLICY_DST}"
+  log "installed ${POLICY_DST}"
   log "WARNING: logrotate missing; policy staged but hourly timer not installed or enabled"
   log "         install logrotate, then re-run: bash ${SCRIPT_DIR}/install-logrotate.sh"
-  warn_existing_timer
+  warn_existing_timer "it cannot run without logrotate; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
   exit 0
 fi
 
@@ -100,25 +99,42 @@ LOGROTATE_BIN="$(resolve_logrotate)"
 # Some logrotate parse problems (for example an unknown directive) are only
 # reported as "unknown option ... -- ignoring line" with a zero exit status, so
 # check both the exit code and the debug output. --debug writes nothing; the
-# temporary state file keeps the real rotation state untouched.
+# temporary state file keeps the real rotation state untouched. Validate a
+# staged copy first so a rejected upgrade never overwrites the live policy.
 validate_policy() {
-  local out_dir out_file rc
+  local src="$1" out_dir out_file candidate rejected rc
   out_dir="$(mktemp -d)"
+  candidate="${out_dir}/cubesandbox"
+  # logrotate refuses config files owned by non-root when running as root.
+  install -m 0644 "${src}" "${candidate}"
   out_file="${out_dir}/logrotate.out"
   rc=0
-  "${LOGROTATE_BIN}" --debug --state "${out_dir}/status" "${POLICY_DST}" \
+  "${LOGROTATE_BIN}" --debug --state "${out_dir}/status" "${candidate}" \
     >"${out_file}" 2>&1 || rc=$?
   if [[ "${rc}" -ne 0 ]] || grep -qE 'unknown option|error:' "${out_file}"; then
-    log "WARNING: logrotate rejected ${POLICY_DST}; hourly timer not installed or enabled"
+    rejected="$(dirname "$(dirname "${POLICY_DST}")")/cubesandbox.rejected.$(date +%s)"
+    install -d -m 0755 "$(dirname "${rejected}")"
+    install -m 0644 "${src}" "${rejected}"
+    log "WARNING: logrotate rejected the packaged policy; hourly timer not installed or enabled"
+    log "         rejected policy saved for diagnosis: ${rejected}"
+    if [[ -e "${POLICY_DST}" ]]; then
+      log "         live policy left untouched: ${POLICY_DST}"
+      warn_existing_timer "it keeps using the unchanged policy at ${POLICY_DST}"
+    else
+      warn_existing_timer "no live policy is installed; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
+    fi
     sed -n '1,40p' "${out_file}" >&2
-    warn_existing_timer
     rm -rf "${out_dir}"
     exit 0
   fi
   rm -rf "${out_dir}"
 }
 
-validate_policy
+validate_policy "${POLICY_SRC}"
+
+install -d -m 0755 "$(dirname "${POLICY_DST}")"
+install -m 0644 "${POLICY_SRC}" "${POLICY_DST}"
+log "installed ${POLICY_DST}"
 install -d -m 0755 "${UNIT_DIR}"
 render_service "${SERVICE_SRC}" "${UNIT_DIR}/cube-sandbox-logrotate.service" \
   "${LOGROTATE_BIN}" "${POLICY_DST}"

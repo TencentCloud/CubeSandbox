@@ -1575,7 +1575,8 @@ remove_obsolete_templatecenter_unit() {
   systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
-# Ship CubeShim/VMM host logrotate (#1290). Soft-fail: never block the role target.
+# Ship CubeShim/VMM host logrotate (#1290). Compute nodes only: control-plane
+# nodes never run these writers. Soft-fail: never block the role target.
 install_cubeshim_logrotate() {
   local install_script="${INSTALL_PREFIX}/scripts/logrotate/install-logrotate.sh"
   if [[ ! -f "${install_script}" ]]; then
@@ -2242,7 +2243,9 @@ restore_selinux_contexts
 # Persist the L7 skb->mark config before the units that consume it start.
 write_l7_marks_conf
 install_systemd_units
-install_cubeshim_logrotate
+if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
+  install_cubeshim_logrotate
+fi
 mask_external_dep_services
 check_runtime_file_paths_not_directories
 start_systemd_target

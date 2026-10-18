@@ -33,6 +33,10 @@ assert_contains "${SERVICE}" "ExecStart=@LOGROTATE@ --state /var/lib/cube-sandbo
 assert_contains "${SERVICE}" "StateDirectory=cube-sandbox-logrotate"
 assert_contains "${TIMER}" "OnCalendar=hourly"
 assert_contains "${INSTALL_SH}" "install_cubeshim_logrotate"
+grep -Fq 'if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
+  install_cubeshim_logrotate
+fi' "${INSTALL_SH}" \
+  || fail "logrotate install must be limited to the compute role"
 assert_contains "${ONE_CLICK_DIR}/build-release-bundle.sh" 'scripts/logrotate'
 
 run_installer() {
@@ -122,7 +126,8 @@ legacy_dst2="${tmp2}/etc/logrotate.d/cubesandbox"
 unit_dir2="${tmp2}/etc/systemd/system"
 mkdir -p "$(dirname "${policy_dst2}")" "$(dirname "${legacy_dst2}")" "${unit_dir2}" "${tmp2}/bin"
 echo legacy > "${legacy_dst2}"
-# Simulate an upgrade from an install that already enabled the timer.
+# Simulate an upgrade: a working policy and an enabled timer already exist.
+printf 'previous policy\n' > "${policy_dst2}"
 printf 'stale timer\n' > "${unit_dir2}/cube-sandbox-logrotate.timer"
 cat > "${tmp2}/bin/logrotate" <<'E'
 #!/bin/sh
@@ -142,13 +147,16 @@ if ! run_installer "${tmp2}/bin" "${policy_dst2}" "${legacy_dst2}" "${unit_dir2}
 fi
 grep -Fq "WARNING: logrotate rejected" "${tmp2}/install.log" \
   || fail "missing rejection warning (hard failure)"
-[[ -f "${policy_dst2}" ]] || fail "rejected policy should remain staged for diagnosis"
+[[ "$(cat "${policy_dst2}")" == "previous policy" ]] \
+  || fail "rejected upgrade must not overwrite the live policy"
 [[ "$(cat "${unit_dir2}/cube-sandbox-logrotate.timer")" == "stale timer" ]] \
   || fail "rejected policy must leave an existing timer untouched"
-grep -Fq "existing cube-sandbox-logrotate.timer is still enabled" "${tmp2}/install.log" \
-  || fail "missing upgrade warning for an already-enabled timer"
-grep -Fq "systemctl disable --now cube-sandbox-logrotate.timer" "${tmp2}/install.log" \
-  || fail "missing disable hint for an already-enabled timer"
+ls "$(dirname "$(dirname "${policy_dst2}")")"/cubesandbox.rejected.* >/dev/null \
+  || fail "rejected policy copy missing from the policy parent"
+grep -Fq "rejected policy saved for diagnosis" "${tmp2}/install.log" \
+  || fail "missing rejected-copy diagnostic"
+grep -Fq "keeps using the unchanged policy" "${tmp2}/install.log" \
+  || fail "missing last-known-good warning for an already-enabled timer"
 [[ -e "${legacy_dst2}" ]] || fail "legacy must not be retired on rejection"
 [[ ! -e "${tmp2}/systemctl.log" ]] || fail "systemctl must not be invoked on rejection"
 
@@ -177,6 +185,9 @@ if ! run_installer "${tmp3}/bin" "${policy_dst3}" "${legacy_dst3}" "${unit_dir3}
 fi
 grep -Fq "WARNING: logrotate rejected" "${tmp3}/install.log" \
   || fail "unknown directive was not rejected"
+[[ ! -e "${policy_dst3}" ]] || fail "rejected policy must not be installed for an unknown directive"
+ls "$(dirname "$(dirname "${policy_dst3}")")"/cubesandbox.rejected.* >/dev/null \
+  || fail "rejected policy copy missing for an unknown directive"
 [[ ! -e "${unit_dir3}/cube-sandbox-logrotate.timer" ]] || fail "timer must not be installed for an unknown directive"
 [[ -e "${legacy_dst3}" ]] || fail "legacy must not be retired for an unknown directive"
 [[ ! -e "${tmp3}/systemctl.log" ]] || fail "systemctl must not be invoked for an unknown directive"
