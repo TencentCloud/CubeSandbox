@@ -143,8 +143,12 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	realReq := flowOpts.ReqInfo
 
 	for _, c := range realReq.Containers {
-		if c.GetImage().GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
-			specOpts = append(specOpts, e.genPmemOpt(ctx, c.GetImage().GetImage()))
+		// ext4 and erofs rootfs are both pmem-backed local files; add the pmem
+		// device for either. containerd OCI images (docker) have no pmem file.
+		media := c.GetImage().GetStorageMedia()
+		if media == cubeimages.ImageStorageMediaType_ext4.String() ||
+			media == cubeimages.ImageStorageMediaType_erofs.String() {
+			specOpts = append(specOpts, e.genPmemOpt(ctx, c.GetImage().GetImage(), media))
 		}
 	}
 
@@ -439,7 +443,7 @@ func (e *cubeboxInstancePlugin) DestroySandbox(ctx context.Context, sandboxID st
 	return nil
 }
 
-func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) oci.SpecOpts {
+func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID, storageMedia string) oci.SpecOpts {
 	return func(ctx context.Context, client oci.Client, ctr *containers.Container, spec *oci.Spec) error {
 		var oldPmems []pmem.CubePmem
 
@@ -460,7 +464,7 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 			}
 		}
 
-		filePath := e.getImageFilePath(imageID)
+		filePath := e.getImageFilePathByMedia(imageID, storageMedia)
 		var fileSize int64
 		fileInfo, _ := os.Stat(filePath)
 		if fileInfo != nil {
@@ -471,7 +475,7 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 			File:          filePath,
 			DiscardWrites: true,
 			SourceDir:     "/",
-			FsType:        "ext4",
+			FsType:        pmem.ArtifactFsType(storageMedia),
 			Size:          fileSize,
 			ID:            fmt.Sprintf("%s-%d", constants.AnnotationPmemCubeBoxImageIDPrefix, id),
 		})
@@ -486,8 +490,11 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 	}
 }
 
-func (e *cubeboxInstancePlugin) getImageFilePath(imageID string) string {
-	return e.artifactPaths.ImageFile(e.config.instanceType, imageID)
+// getImageFilePathByMedia returns the artifact rootfs path with a media-aware
+// suffix (.ext4 / .erofs) so the pmem backing file matches the downloaded
+// artifact's format.
+func (e *cubeboxInstancePlugin) getImageFilePathByMedia(imageID, storageMedia string) string {
+	return e.artifactPaths.ImageFileByMedia(e.config.instanceType, imageID, storageMedia)
 }
 
 func (e *cubeboxInstancePlugin) syncLatestKernelForImage(ctx context.Context, imageID string) error {

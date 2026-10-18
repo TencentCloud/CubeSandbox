@@ -297,10 +297,11 @@ func (s *service) DestroyImage(ctx context.Context, req *images.DestroyImageRequ
 		return rsp, nil
 	}
 
-	// FIX-1: ext4 OS image artifacts are not containerd images; the legacy
+	// FIX-1: ext4/erofs OS image artifacts are not containerd images; the legacy
 	// CRI RemoveImage path silently no-ops on them (LocalResolve NotFound).
-	// Route ext4 deletions to the synchronous, idempotent pmem destroy path.
-	if req.GetSpec().GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
+	// Route local-file rootfs deletions to the synchronous, idempotent pmem
+	// destroy path.
+	if ext4image.IsPmemRootfsMedia(req.GetSpec().GetStorageMedia()) {
 		return s.destroyExt4Artifact(ctx, req, rsp), nil
 	}
 
