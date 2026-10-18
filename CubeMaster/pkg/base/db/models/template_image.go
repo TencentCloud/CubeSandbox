@@ -30,7 +30,10 @@ type RootfsArtifact struct {
 	ArtifactURL string `json:"artifact_url" gorm:"column:artifact_url"`
 	// StorageBackend is "s3", "fs", or empty (legacy: infer from ArtifactURL).
 	StorageBackend string `json:"storage_backend" gorm:"column:storage_backend"`
-	// ObjectKey is the blobstore key. Empty means derive [prefix/]id.ext4.
+	// ObjectKey is the blobstore key. For an erofs artifact it is
+	// <prefix>/<id>.erofs (written format-aware at migration time); for an ext4
+	// artifact it is <prefix>/<id>.ext4. Empty means derive the legacy
+	// <prefix/>id.ext4 (rows that predate the object_key column or erofs).
 	ObjectKey  string `json:"object_key" gorm:"column:object_key"`
 	Status     string `json:"status" gorm:"column:status"`
 	LastError  string `json:"last_error" gorm:"column:last_error"`
