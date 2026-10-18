@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
@@ -65,8 +66,43 @@ var (
 	artifactStoreOpenErr error
 )
 
+// artifactUserKey is the legacy ext4 object key <artifactID>.ext4. It is the
+// fallback used by artifactStoreKeyWithPrefix when an artifact's object_key
+// column is empty (legacy rows that predate erofs). EROFS artifacts have a
+// non-empty object_key (<prefix>/<id>.erofs, written by artifactUserKeyForFormat
+// at migration time), so they never reach this fallback -- a migrated erofs
+// artifact is therefore NOT keyed .ext4. New writes use artifactUserKeyForFormat
+// (format-aware); this stays for the empty-object_key read fallback only.
 func artifactUserKey(artifactID string) string {
 	return blobstore.ArtifactExt4Key("", artifactID)
+}
+
+// artifactKeySuffix picks the on-disk suffix for an artifact from its
+// RootfsFormat, so an erofs artifact is stored as <id>.erofs -- matching the
+// build path (TC's s3store.Upload and BuildErofs both write <id>.erofs) and the
+// TC read/delete path (s3store.artifactKeyFromFormat derives the key from
+// artifact.RootfsFormat too), instead of being mislabeled <id>.ext4.
+//
+// RootfsFormat is the authoritative source rather than the local file's own
+// extension: it is the same column TC's Stat/Delete read, so a key written here
+// is always read back on the other side even if the on-disk filename and the
+// RootfsFormat column ever drift. ext4 / empty / unknown fall back to .ext4,
+// the historical storage name (and the DB column default). This mirrors
+// CubeTemplateCenter's s3store.artifactSuffixForFormat; the two must stay in
+// lockstep so a key written on either side is read back on the other.
+func artifactKeySuffix(rootfsFormat string) string {
+	if NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
+		return "." + config.RootfsFormatErofs
+	}
+	return "." + config.RootfsFormatExt4
+}
+
+// artifactUserKeyForFormat returns the user key <artifactID><suffix> where
+// suffix is derived from rootfsFormat, so a migrated erofs artifact is uploaded
+// and recorded under <id>.erofs (not the legacy <id>.ext4). The store prefix is
+// applied by blobstore.
+func artifactUserKeyForFormat(artifactID, rootfsFormat string) string {
+	return blobstore.JoinKey("", artifactID+artifactKeySuffix(rootfsFormat))
 }
 
 func sharedArtifactStore() *artifactStore {
@@ -152,12 +188,18 @@ func InitArtifactStore(ctx context.Context) error {
 	return nil
 }
 
-func artifactStoreColumns(artifactID string) (backend, objectKey string) {
+// artifactStoreColumns returns the storage_backend and object_key to persist
+// for a migrated artifact. object_key carries the artifact's RootfsFormat
+// suffix, so an erofs artifact is recorded as <prefix>/<id>.erofs -- matching
+// the key uploadArtifactFileToS3 wrote under and what artifactStoreKey reads
+// back (it prefers this stored object_key). rootfsFormat selects the suffix
+// and is the same value TC's Stat/Delete derive the key from.
+func artifactStoreColumns(artifactID, rootfsFormat string) (backend, objectKey string) {
 	st := sharedArtifactStore()
 	if st == nil {
 		return "", ""
 	}
-	return st.backend, blobstore.ArtifactExt4Key(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), artifactID)
+	return st.backend, blobstore.JoinKey(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), artifactID+artifactKeySuffix(rootfsFormat))
 }
 
 // presignArtifactGetURL is the single signing seam, indirected so tests can
@@ -205,8 +247,15 @@ var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsAr
 	return true, nil
 }
 
-// uploadArtifactFileToS3 uploads filePath as the object of artifactID.
-var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath string) error {
+// uploadArtifactFileToS3 uploads filePath as the object of artifactID. The
+// object key is derived from rootfsFormat, so a migrated erofs artifact is
+// stored under <id>.erofs (matching the build path and TC's read/delete path)
+// rather than the legacy <id>.ext4. The recorded object_key (see
+// artifactStoreColumns) and the read side (artifactStoreKey, which prefers
+// artifact.ObjectKey) both follow the same suffix, so write/read stay
+// consistent. filePath is the local file to read bytes from; rootfsFormat
+// alone selects the object key.
+var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath, rootfsFormat string) error {
 	store := sharedArtifactStore()
 	if store == nil {
 		return errS3PresignNotConfigured
@@ -220,7 +269,7 @@ var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath stri
 	if err != nil {
 		return err
 	}
-	_, err = store.store.Put(ctx, artifactUserKey(artifactID), f, blobstore.PutOptions{
+	_, err = store.store.Put(ctx, artifactUserKeyForFormat(artifactID, rootfsFormat), f, blobstore.PutOptions{
 		ContentType: "application/octet-stream",
 		Size:        st.Size(),
 	})

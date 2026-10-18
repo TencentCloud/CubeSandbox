@@ -111,11 +111,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	result := &TemplateArtifactMigrationResult{TemplateID: templateID}
 
 	type artifactSnapshot struct {
-		artifactID  string
-		objectKey   string
-		status      string
-		artifactURL string
-		ext4Path    string
+		artifactID   string
+		objectKey    string
+		status       string
+		artifactURL  string
+		ext4Path     string
+		rootfsFormat string
 	}
 	snapshot := artifactSnapshot{}
 	if err := withTemplateWriteLock(templateID, func() error {
@@ -138,11 +139,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			return err
 		}
 		snapshot = artifactSnapshot{
-			artifactID:  artifactID,
-			objectKey:   strings.TrimSpace(artifact.ObjectKey),
-			status:      strings.TrimSpace(artifact.Status),
-			artifactURL: strings.TrimSpace(artifact.ArtifactURL),
-			ext4Path:    strings.TrimSpace(artifact.Ext4Path),
+			artifactID:   artifactID,
+			objectKey:    strings.TrimSpace(artifact.ObjectKey),
+			status:       strings.TrimSpace(artifact.Status),
+			artifactURL:  strings.TrimSpace(artifact.ArtifactURL),
+			ext4Path:     strings.TrimSpace(artifact.Ext4Path),
+			rootfsFormat: artifact.RootfsFormat,
 		}
 		return nil
 	}); err != nil {
@@ -216,10 +218,20 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	updates := map[string]any{}
 	uploadedToS3 := false
 	targetExt4Path := ext4Path
-	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path); err == nil {
+	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path, snapshot.rootfsFormat); err == nil {
+		// Derive the format-aware object key ONCE and use it for both the
+		// presigned URL and the persisted object_key column, so artifact_url
+		// and object_key come from the same source. Computing the key after
+		// presigning (the old order) passed the pre-migration snapshot.objectKey
+		// to presign -- empty for legacy rows, so artifactStoreKeyWithPrefix
+		// fell back to <id>.ext4 while the upload at line 211 wrote <id>.erofs,
+		// and the stored artifact_url pointed at an object that was never
+		// created. When re-signing later failed (split-tier without S3 creds),
+		// artifactDownloadURL fell back to that wrong stored URL and 404'd.
+		backend, objectKey := artifactStoreColumns(snapshot.artifactID, snapshot.rootfsFormat)
 		presignedURL, presignErr := presignArtifactGetURL(ctx, &models.RootfsArtifact{
 			ArtifactID: snapshot.artifactID,
-			ObjectKey:  snapshot.objectKey,
+			ObjectKey:  objectKey,
 		})
 		if presignErr != nil {
 			return nil, fmt.Errorf("presign migrated artifact %s: %w", snapshot.artifactID, presignErr)
@@ -230,7 +242,7 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			"status":       ArtifactStatusReady,
 			"last_error":   "",
 		}
-		if backend, objectKey := artifactStoreColumns(snapshot.artifactID); backend != "" {
+		if backend != "" {
 			updates["storage_backend"] = backend
 			updates["object_key"] = objectKey
 		}

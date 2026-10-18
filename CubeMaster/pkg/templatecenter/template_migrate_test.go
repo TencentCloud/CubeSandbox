@@ -9,7 +9,9 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -31,7 +33,7 @@ func newMigrateSharedStoreTestDB(t *testing.T) *gorm.DB {
 func stubMigrateS3Unavailable(t *testing.T) {
 	t.Helper()
 	oldUpload := uploadArtifactFileToS3
-	uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath string) error {
+	uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath, rootfsFormat string) error {
 		return errS3PresignNotConfigured
 	}
 	t.Cleanup(func() { uploadArtifactFileToS3 = oldUpload })
@@ -45,6 +47,14 @@ func stubMigrateTCUpload(t *testing.T, fn func(ctx context.Context, artifactID, 
 }
 
 func seedMigratingTemplate(t *testing.T, db *gorm.DB, templateID, artifactID, ext4Path string) {
+	seedMigratingTemplateWithFormat(t, db, templateID, artifactID, ext4Path, "")
+}
+
+// seedMigratingTemplateWithFormat is the format-aware variant: it sets the
+// artifact row's RootfsFormat so the S3 write path derives the object key from
+// it (the same column TC's Stat/Delete read) rather than from the local file
+// extension.
+func seedMigratingTemplateWithFormat(t *testing.T, db *gorm.DB, templateID, artifactID, ext4Path, rootfsFormat string) {
 	t.Helper()
 	require.NoError(t, db.Create(&models.TemplateDefinition{
 		TemplateID:       templateID,
@@ -52,9 +62,10 @@ func seedMigratingTemplate(t *testing.T, db *gorm.DB, templateID, artifactID, ex
 		RootfsArtifactID: artifactID,
 	}).Error)
 	require.NoError(t, db.Create(&models.RootfsArtifact{
-		ArtifactID: artifactID,
-		Status:     ArtifactStatusReady,
-		Ext4Path:   ext4Path,
+		ArtifactID:   artifactID,
+		Status:       ArtifactStatusReady,
+		Ext4Path:     ext4Path,
+		RootfsFormat: rootfsFormat,
 	}).Error)
 }
 
@@ -162,6 +173,81 @@ func TestMigrateTemplateArtifactToTCDifferentPathCleansUp(t *testing.T) {
 	if _, statErr := os.Stat(srcPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected local source removed, stat err=%v", statErr)
 	}
+}
+
+// TestMigrateTemplateArtifactToTCS3ErofsRecordsErofsObjectKey pins down the
+// RootfsFormat-driven S3 write path: an erofs artifact migrated to S3 must be
+// uploaded and recorded under <prefix>/<id>.erofs (the key TC's Stat/Delete
+// derive from artifact.RootfsFormat), NOT the legacy <id>.ext4. The key source
+// is the artifact row's RootfsFormat column, independent of the local file's
+// own name, so a key written here is always read back on the TC side.
+func TestMigrateTemplateArtifactToTCS3ErofsRecordsErofsObjectKey(t *testing.T) {
+	db := newMigrateSharedStoreTestDB(t)
+	sharedRoot := t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", sharedRoot)
+	t.Setenv(configenv.EnvS3ArtifactPrefix, "template-artifacts")
+
+	artifactID := "rfs-s3-erofs"
+	storeDir := filepath.Join(sharedRoot, artifactID)
+	require.NoError(t, os.MkdirAll(storeDir, 0o755))
+	// The on-disk file carries the .erofs suffix as TC's BuildErofs writes it;
+	// the object key must come from RootfsFormat, not this name, but the two
+	// agree here so the test also doubles as an end-to-end happy-path check.
+	ext4Path := filepath.Join(storeDir, artifactID+".erofs")
+	require.NoError(t, os.WriteFile(ext4Path, []byte("erofs-bytes"), 0o644))
+
+	templateID := "tpl-s3-erofs"
+	seedMigratingTemplateWithFormat(t, db, templateID, artifactID, ext4Path, config.RootfsFormatErofs)
+
+	// artifactStoreColumns reads sharedArtifactStore(); inject a non-nil store
+	// (backend only, no real blobstore.Store needed) so it returns the S3
+	// object_key. uploadArtifactFileToS3 is stubbed below so the store is never
+	// used for the actual Put.
+	_ = sharedArtifactStore()
+	oldStore := artifactStoreInst
+	artifactStoreInst = &artifactStore{backend: "s3"}
+	t.Cleanup(func() { artifactStoreInst = oldStore })
+
+	// Capture the rootfsFormat the write path received; it must be "erofs".
+	var uploadedRootfsFormat string
+	oldUpload := uploadArtifactFileToS3
+	uploadArtifactFileToS3 = func(ctx context.Context, id, filePath, rootfsFormat string) error {
+		uploadedRootfsFormat = rootfsFormat
+		return nil
+	}
+	t.Cleanup(func() { uploadArtifactFileToS3 = oldUpload })
+
+	// presign must succeed so the S3 branch is taken (not the TC-local fallback).
+	// It must also receive the format-aware object key as ObjectKey (NOT the
+	// pre-migration snapshot.objectKey, which is empty here and would make
+	// artifactStoreKeyWithPrefix fall back to <id>.ext4 while the upload wrote
+	// <id>.erofs -- the stored artifact_url would then point at a never-created
+	// object). Capturing the presigned URL's key pins this down.
+	var presignedObjectKey string
+	stubPresign(t, func(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
+		presignedObjectKey = strings.TrimSpace(artifact.ObjectKey)
+		return "https://s3.example/" + artifact.ObjectKey + "?token=x", nil
+	})
+
+	result, err := MigrateTemplateArtifactToTC(context.Background(), templateID)
+	require.NoError(t, err)
+	require.True(t, result.Migrated, "S3 upload branch should mark the artifact migrated")
+
+	require.Equal(t, config.RootfsFormatErofs, uploadedRootfsFormat,
+		"uploadArtifactFileToS3 must receive the artifact's RootfsFormat so the object key is format-derived")
+
+	// presign must have been handed the format-aware key, the same value written
+	// to object_key below -- so artifact_url and object_key come from one source.
+	require.Equal(t, "template-artifacts/"+artifactID+".erofs", presignedObjectKey,
+		"presign must receive the format-aware <prefix>/<id>.erofs object key, not the empty pre-migration objectKey that falls back to .ext4")
+
+	// The persisted row must record the erofs object key TC will Stat/Delete.
+	var row models.RootfsArtifact
+	require.NoError(t, db.Where("artifact_id = ?", artifactID).First(&row).Error)
+	require.Equal(t, "template-artifacts/"+artifactID+".erofs", row.ObjectKey,
+		"object_key must be <prefix>/<id>.erofs so TC's format-aware Stat/Delete find it")
+	require.Equal(t, "s3", row.StorageBackend)
+	require.Equal(t, ArtifactStatusReady, row.Status)
 }
 
 func TestValidateTCLocalArtifactPath(t *testing.T) {

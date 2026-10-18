@@ -35,6 +35,28 @@ func unmarshalTemplateImageJobRequest(payload string) (*types.CreateTemplateFrom
 	// original job's template_id orphaned with no matching definition row
 	// while the real template ended up under the regenerated ID instead.
 	originalTemplateID := strings.TrimSpace(req.TemplateID)
+	// A request_json snapshot persisted before the rootfs_format field existed
+	// (pre-erofs upgrade) decodes with an empty RootfsFormat. normalizeTemplateImageRequest
+	// would then fill it from the CURRENT template.rootfs_format config -- but this
+	// is a REPLAY of an already-submitted job, not a fresh submission: the build
+	// was started under the only format that existed then (ext4), and its format is
+	// fixed at submit time. Letting the current config override it is an upgrade
+	// hazard: an in-flight (or stuck-BUILT) ext4 job replayed after the operator
+	// sets template.rootfs_format=erofs would be re-stamped erofs, then fail the
+	// rootfs_format mismatch guard in prepareTemplateImageJobAfterRemoteBuild
+	// (old TC reports ext4) even though TC did nothing wrong -- and a redo would
+	// silently switch the rebuild to erofs. Pin the legacy format here so an empty
+	// snapshot field means ext4, never the current config default.
+	//
+	// Post-upgrade snapshots never hit this: submissions persist the NORMALIZED
+	// request (marshalTemplateImageJobRequest(normalized) at template_image.go),
+	// and normalize always stamps RootfsFormat non-empty, so an empty value in a
+	// replayed snapshot can only come from a pre-upgrade row. Fresh submissions do
+	// not pass through this function at all, so the config-default semantics of
+	// normalizeTemplateImageRequest's empty branch are unchanged for new creates.
+	if strings.TrimSpace(req.RootfsFormat) == "" {
+		req.RootfsFormat = config.RootfsFormatExt4
+	}
 	req.Request = &types.Request{RequestID: uuid.NewString()}
 	normalized, err := normalizeTemplateImageRequest(req)
 	if err != nil {

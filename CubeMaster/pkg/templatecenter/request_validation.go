@@ -121,10 +121,19 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	// DEFAULT, not the sole authority. A non-empty value is canonicalized
 	// (lowercased, trimmed) and validated; an invalid value is rejected loudly
 	// rather than silently building the wrong format. This mirrors how Backend
-	// is handled just above. A replayed job keeps the format it was submitted
-	// with (decoded from the persisted request snapshot) for the same reason:
-	// a build's format is fixed at submit time even if the operator later
-	// rotates the config default.
+	// is handled just above.
+	//
+	// This empty->config-default branch is correct for FRESH submissions (a
+	// client that omits rootfs_format gets the configured default). It must NOT
+	// re-stamp a REPLAYED pre-upgrade job's format: a snapshot that predates the
+	// rootfs_format field decodes empty, and filling it from the current config
+	// would override the ext4 format the build actually started under (an
+	// upgrade hazard when the operator has since set template.rootfs_format=
+	// erofs). The replay path (unmarshalTemplateImageJobRequest) therefore pins
+	// an empty snapshot field to ext4 BEFORE calling this function, so only
+	// post-upgrade snapshots (always non-empty) reach the normalize below, and
+	// fresh submissions (which do not go through unmarshalTemplateImageJobRequest)
+	// keep the config-default behavior.
 	if strings.TrimSpace(cloned.RootfsFormat) == "" {
 		cloned.RootfsFormat = config.GetConfig().RootfsFormat()
 	} else {
