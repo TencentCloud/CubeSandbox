@@ -20,7 +20,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
-	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
@@ -118,7 +117,7 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	}
 	container := &types.Container{
 		Name:            "cubebox-name-0",
-		Image:           &types.ImageSpec{Image: artifact.ArtifactID, StorageMedia: imagev1.ImageStorageMediaType_ext4.String(), WritableLayerSize: req.WritableLayerSize, Annotations: imageAnnotations},
+		Image:           &types.ImageSpec{Image: artifact.ArtifactID, StorageMedia: NormalizeRootfsFormat(artifact.RootfsFormat), WritableLayerSize: req.WritableLayerSize, Annotations: imageAnnotations},
 		Command:         command,
 		Args:            args,
 		WorkingDir:      workingDir,

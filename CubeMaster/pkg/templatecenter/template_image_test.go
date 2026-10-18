@@ -23,6 +23,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -57,6 +58,55 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	if req.Backend != "" {
 		t.Fatalf("Backend=%q, omit must stay empty for historical create-from-image", req.Backend)
 	}
+}
+
+func TestNormalizeTemplateImageRequestRootfsFormat(t *testing.T) {
+	// A fresh submission leaves RootfsFormat empty; normalize stamps it from
+	// the server config (template.rootfs_format). In tests config.GetConfig()
+	// is nil, so RootfsFormat() defaults to "ext4".
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatExt4, req.RootfsFormat)
+
+	// A client MAY select the format per request; a non-empty value is kept
+	// (canonicalized) and not overwritten by the config default. The config's
+	// role is to supply the DEFAULT for an empty value, not to override an
+	// explicit client choice. (A replayed job keeps its submitted format for
+	// the same reason: a build's format is fixed at submit time.)
+	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      config.RootfsFormatErofs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
+
+	// Surrounding whitespace and uppercase are canonicalized (client-supplied
+	// values are normalized, not rejected, the same way Backend is).
+	req, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      "  EROFS ",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.RootfsFormatErofs, req.RootfsFormat)
+
+	// An explicit-but-invalid format is rejected loudly rather than silently
+	// building the wrong format.
+	_, err = normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		RootfsFormat:      "xfs",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rootfs_format")
 }
 
 func TestNormalizeTemplateImageRequestBackendS3(t *testing.T) {
@@ -618,6 +668,55 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 }
 
+func TestGenerateTemplateCreateRequestStorageMediaFromFormat(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-fmt"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-fmt",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	baseArtifact := func() *models.RootfsArtifact {
+		return &models.RootfsArtifact{
+			ArtifactID:              "artifact-fmt",
+			TemplateSpecFingerprint: "fingerprint-fmt",
+			Ext4SHA256:              "sha256-fmt",
+			Ext4SizeBytes:           1024,
+			DownloadToken:           "token-fmt",
+		}
+	}
+	// erofs artifact → ImageSpec.StorageMedia = "erofs".
+	artifact := baseArtifact()
+	artifact.RootfsFormat = config.RootfsFormatErofs
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatErofs {
+		t.Fatalf("erofs artifact: StorageMedia=%q, want %q", got.Containers[0].Image.StorageMedia, config.RootfsFormatErofs)
+	}
+	// ext4 artifact → "ext4".
+	artifact = baseArtifact()
+	artifact.RootfsFormat = config.RootfsFormatExt4
+	got, err = generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatExt4 {
+		t.Fatalf("ext4 artifact: StorageMedia=%q, want %q", got.Containers[0].Image.StorageMedia, config.RootfsFormatExt4)
+	}
+	// Empty/legacy artifact (column predating migration) → defaults to ext4.
+	artifact = baseArtifact()
+	got, err = generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Containers[0].Image.StorageMedia != config.RootfsFormatExt4 {
+		t.Fatalf("empty artifact: StorageMedia=%q, want %q (ext4 default)", got.Containers[0].Image.StorageMedia, config.RootfsFormatExt4)
+	}
+}
+
 func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-s3"},
@@ -1080,6 +1179,71 @@ func TestValidateReusableRootfsArtifactAllowsLegacyFingerprintlessRecord(t *test
 	}
 	if record == nil || record.ArtifactID != "rfs-legacy" {
 		t.Fatalf("unexpected record: %#v", record)
+	}
+}
+
+// validRemoteBuildResultForValidate builds a RemoteBuildResult with all the
+// fields Validate requires present and correct, so the RootfsFormat-specific
+// assertions below reach the format check instead of failing on a prior field.
+func validRemoteBuildResultForValidate(t *testing.T) *RemoteBuildResult {
+	t.Helper()
+	return &RemoteBuildResult{
+		ArtifactID:              "rfs-validate",
+		TemplateSpecFingerprint: "fingerprint-validate",
+		SourceImageDigest:       "repo/image@sha256:abc",
+		Ext4Path:                writeFakeArtifactFile(t, "validate.ext4"),
+		Ext4SHA256:              "sha256:def",
+		Ext4SizeBytes:           1024,
+		ImageConfigJSON:         `{}`,
+		MasterNodeIP:            "http://master:8080",
+	}
+}
+
+func TestRemoteBuildResultValidateRootfsFormat(t *testing.T) {
+	// Empty format is accepted (older TC instances predate the field; empty is
+	// treated as ext4 downstream) so a rolling upgrade does not break builds.
+	r := validRemoteBuildResultForValidate(t)
+	r.RootfsFormat = ""
+	if err := r.Validate(); err != nil {
+		t.Fatalf("empty rootfs_format must be accepted (rolling-upgrade compat): %v", err)
+	}
+
+	// Explicit ext4 and erofs are accepted (case-insensitive).
+	for _, f := range []string{config.RootfsFormatExt4, config.RootfsFormatErofs, "EROFS", " Ext4 "} {
+		r := validRemoteBuildResultForValidate(t)
+		r.RootfsFormat = f
+		if err := r.Validate(); err != nil {
+			t.Fatalf("rootfs_format=%q must be accepted: %v", f, err)
+		}
+	}
+
+	// An unknown format is rejected so Cubelet never receives an unrecognized
+	// ImageSpec.StorageMedia and boots the wrong device path.
+	r = validRemoteBuildResultForValidate(t)
+	r.RootfsFormat = "xfs"
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "rootfs_format") {
+		t.Fatalf("unknown rootfs_format must be rejected with a rootfs_format error, got %v", err)
+	}
+}
+
+func TestNormalizedRootfsFormat(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", config.RootfsFormatExt4},
+		{"ext4", config.RootfsFormatExt4},
+		{"erofs", config.RootfsFormatErofs},
+		{"EROFS", config.RootfsFormatErofs},
+		{"  erofs ", config.RootfsFormatErofs},
+		// Unknown / legacy values fall back to ext4 so a missing/legacy format
+		// never accidentally selects the erofs device path.
+		{"xfs", config.RootfsFormatExt4},
+		{"future", config.RootfsFormatExt4},
+	}
+	for _, c := range cases {
+		if got := NormalizeRootfsFormat(c.in); got != c.want {
+			t.Fatalf("NormalizeRootfsFormat(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

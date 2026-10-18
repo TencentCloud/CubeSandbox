@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -113,6 +114,34 @@ type RemoteBuildResult struct {
 	CubeEgressCABaked       bool
 	CubeEgressCAFingerprint string
 	CubeEgressCATargets     int
+	// RootfsFormat is the packaging format ("ext4" or "erofs") TC reports in
+	// the BUILT callback so the resume path can fill ImageSpec.StorageMedia from
+	// the result rather than only from the persisted request snapshot. It
+	// mirrors CreateTemplateFromImageReq.RootfsFormat and the config key
+	// template.rootfs_format. Empty is treated as "ext4" downstream (the
+	// historical default), which also keeps older TC instances that predate
+	// this field compatible.
+	RootfsFormat string
+}
+
+// NormalizeRootfsFormat canonicalizes a rootfs format string to the lowercase
+// value persisted in RootfsArtifact.RootfsFormat / passed as ImageSpec.StorageMedia.
+// Empty (and any value not ext4/erofs) falls back to "ext4", the historical
+// default, so a missing/legacy value never selects the erofs device path by
+// accident. This is the single source of truth for the ext4 default downstream
+// of the BUILT callback, and is shared with CubeTemplateCenter (which imports
+// this package) so both sides agree on what "erofs" means — TC's build dispatch,
+// preflight and phase label must use this instead of a raw == "erofs" compare,
+// otherwise a non-canonical value ("EROFS", " erofs ") would build as ext4 on the
+// TC side while CubeMaster normalizes it to erofs for distribution, shipping an
+// ext4 artifact with StorageMedia=erofs that fails to mount.
+func NormalizeRootfsFormat(format string) string {
+	switch f := strings.ToLower(strings.TrimSpace(format)); f {
+	case config.RootfsFormatErofs:
+		return config.RootfsFormatErofs
+	default:
+		return config.RootfsFormatExt4
+	}
 }
 
 // Validate checks the fields the downstream distribution guard requires.
@@ -148,6 +177,17 @@ func (r *RemoteBuildResult) Validate() error {
 	// the artifact dir.
 	if err := r.validateExt4PathWithinStore(); err != nil {
 		return err
+	}
+	// RootfsFormat is optional (older TC instances predate it; empty is treated
+	// as "ext4" downstream). When present it must be a known value, otherwise
+	// Cubelet would receive an unrecognized ImageSpec.StorageMedia and fail to
+	// route the artifact. Fail loudly here rather than silently booting the
+	// wrong device path.
+	switch format := strings.ToLower(strings.TrimSpace(r.RootfsFormat)); format {
+	case "", config.RootfsFormatExt4, config.RootfsFormatErofs:
+	default:
+		return fmt.Errorf("remote build result rootfs_format %q is invalid; must be %q or %q",
+			r.RootfsFormat, config.RootfsFormatExt4, config.RootfsFormatErofs)
 	}
 	return nil
 }
