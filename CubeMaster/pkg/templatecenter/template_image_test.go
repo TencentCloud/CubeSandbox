@@ -1542,15 +1542,17 @@ func TestResolveRedoTargetsRejectsWhenNoFailedReplicas(t *testing.T) {
 
 func TestDetermineRedoResumePhase(t *testing.T) {
 	tests := []struct {
-		name    string
-		job     *models.TemplateImageJob
-		replica []models.TemplateReplica
-		want    string
+		name         string
+		job          *models.TemplateImageJob
+		replica      []models.TemplateReplica
+		rootfsFormat string
+		want         string
 	}{
 		{
-			name: "build failure resumes distribution build pipeline",
-			job:  &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
-			want: JobPhaseBuildingExt4,
+			name:         "build failure resumes distribution build pipeline",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
+			rootfsFormat: config.RootfsFormatExt4,
+			want:         JobPhaseBuildingExt4,
 		},
 		{
 			name: "distribution failure resumes distribution",
@@ -1560,13 +1562,33 @@ func TestDetermineRedoResumePhase(t *testing.T) {
 			want: JobPhaseDistributing,
 		},
 		{
-			name: "snapshot failure resumes snapshotting",
-			job:  &models.TemplateImageJob{Phase: JobPhaseCreatingTemplate},
-			want: JobPhaseSnapshotting,
+			name:         "snapshot failure resumes snapshotting",
+			job:          &models.TemplateImageJob{Phase: JobPhaseCreatingTemplate},
+			rootfsFormat: config.RootfsFormatExt4,
+			want:         JobPhaseSnapshotting,
+		},
+		{
+			name:         "erofs build failure resumes erofs build phase",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingErofs},
+			rootfsFormat: config.RootfsFormatErofs,
+			want:         JobPhaseBuildingErofs,
+		},
+		{
+			name:         "erofs request resumes erofs phase regardless of previous phase label",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
+			rootfsFormat: config.RootfsFormatErofs,
+			want:         JobPhaseBuildingErofs,
+		},
+		{
+			// empty rootfs_format (legacy job snapshot) defaults to ext4, never erofs.
+			name:         "empty rootfs_format defaults to ext4 building phase",
+			job:          &models.TemplateImageJob{Phase: JobPhaseBuildingErofs},
+			rootfsFormat: "",
+			want:         JobPhaseBuildingExt4,
 		},
 	}
 	for _, tc := range tests {
-		if got := determineRedoResumePhase(tc.job, tc.replica); got != tc.want {
+		if got := determineRedoResumePhase(tc.job, tc.replica, tc.rootfsFormat); got != tc.want {
 			t.Fatalf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
@@ -1655,7 +1677,7 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 		return errors.New("cleanup image failed")
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
@@ -1785,7 +1807,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 			return nil, fmt.Errorf("unexpected artifact lookup %d", lookupCalls)
 		}
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType, rootfsFormat string, targets []*node.Node) error {
 		return nil
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {

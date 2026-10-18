@@ -322,7 +322,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	if err := result.Validate(); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
-			"phase":         JobPhaseBuildingExt4,
+			"phase":         buildingPhaseForRootfsFormat(result.RootfsFormat),
 			"progress":      100,
 			"error_message": err.Error(),
 		})
@@ -373,6 +373,53 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		return nil, failErr
 	}
 
+	// Mixed-version rollout guard. An older CubeTemplateCenter (predating erofs
+	// step 3/4) does not recognize req.RootfsFormat: it silently builds ext4 and
+	// omits rootfs_format from the BUILT report. Without this guard CubeMaster
+	// normalizes the empty report to ext4, recording an artifact whose (erofs)
+	// fingerprint contradicts its (ext4) format; because the fingerprint keeps
+	// erofs and ext4 apart, every later identical erofs request then reuses that
+	// ext4 artifact forever and can never retry erofs. Fail loudly so the
+	// operator sees CubeTemplateCenter must be upgraded first. ext4 requests are
+	// unaffected: an empty report normalizes to ext4, matching the ext4 request.
+	requestedFormat := NormalizeRootfsFormat(req.RootfsFormat)
+	reportedFormat := NormalizeRootfsFormat(result.RootfsFormat)
+	if requestedFormat != reportedFormat {
+		failErr := fmt.Errorf("rootfs_format mismatch: request wants %q but CubeTemplateCenter reported %q; "+
+			"CubeTemplateCenter predates erofs support (erofs step 3/4) — upgrade CubeTemplateCenter before requesting erofs, "+
+			"or set template.rootfs_format=ext4", requestedFormat, reportedFormat)
+		log.G(ctx).WithFields(map[string]any{
+			"job_id":           jobID,
+			"template_id":      req.TemplateID,
+			"artifact_id":      result.ArtifactID,
+			"requested_format": requestedFormat,
+			"reported_format":  reportedFormat,
+		}).Errorf("%v", failErr)
+		// TODO(erofs-mismatch-orphan): TC has already reported BUILT, so the
+		// rootfs file exists in TC's store (and, with S3, the object is already
+		// uploaded). This return is BEFORE register creates the rootfs_artifacts
+		// row, so no cleanup path can reach the artifact: cleanupArtifactOnNodes
+		// and artifact_lifecycle.go are row-driven, and TC's CLEANUP_PENDING
+		// sweep (deleter.go) keys off a row CubeMaster never wrote -- its First()
+		// returns ErrRecordNotFound and it returns without deleting anything.
+		// Each mismatch therefore leaves one stale TC store file and one stale
+		// S3 object. This only fires during a version/config mismatch (erofs
+		// request vs an older TC), so it is not a blocker. A real fix needs TC
+		// to expose a row-free cleanup (its cleanupArtifactResidue already
+		// removes the local store dir by artifactID; S3 would need a delete by
+		// artifactID + both candidate formats, since the actual stored format
+		// is ambiguous here). Leaving as-is until the rollout completes.
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":          JobStatusFailed,
+			"phase":           buildingPhaseForRootfsFormat(req.RootfsFormat),
+			"artifact_id":     result.ArtifactID,
+			"artifact_status": ArtifactStatusFailed,
+			"progress":        100,
+			"error_message":   failErr.Error(),
+		})
+		return nil, failErr
+	}
+
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
@@ -393,7 +440,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		logger.Errorf("%v", failErr)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
-			"phase":           JobPhaseBuildingExt4,
+			"phase":           buildingPhaseForRootfsFormat(result.RootfsFormat),
 			"artifact_id":     result.ArtifactID,
 			"artifact_status": ArtifactStatusFailed,
 			"progress":        100,
@@ -669,6 +716,10 @@ func finalizeRemoteArtifact(
 	record.CubeEgressCABaked = result.CubeEgressCABaked
 	record.CubeEgressCAFingerprint = result.CubeEgressCAFingerprint
 	record.CubeEgressCATargetsWritten = result.CubeEgressCATargets
+	// Persist the build format so the distribution / destroy paths can read it
+	// from the artifact row instead of hardcoding ext4. Normalize to ext4 for
+	// an empty result (older TC / pre-step replay) to match the DB column default.
+	record.RootfsFormat = NormalizeRootfsFormat(result.RootfsFormat)
 
 	// Same base URL local mode uses (CubeMaster's own request base URL, echoed
 	// back by TC), so the generated request and the distribution annotations
@@ -706,6 +757,7 @@ func finalizeRemoteArtifact(
 		"cube_egress_ca_baked":           record.CubeEgressCABaked,
 		"cube_egress_ca_fingerprint":     record.CubeEgressCAFingerprint,
 		"cube_egress_ca_targets_written": record.CubeEgressCATargetsWritten,
+		"rootfs_format":                  record.RootfsFormat,
 	})
 	if err != nil {
 		return nil, nil, err

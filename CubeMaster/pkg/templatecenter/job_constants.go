@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
@@ -90,6 +91,27 @@ var createRedoJobOperations = []string{JobOperationCreate, JobOperationRedo}
 
 func isCreateRedoJobOperation(op string) bool {
 	return op == JobOperationCreate || op == JobOperationRedo
+}
+
+// buildingPhaseForRootfsFormat returns the BUILDING_* phase constant matching
+// the rootfs packaging format. Empty/unknown falls back to BUILDING_EXT4 (the
+// historical default) so a missing/legacy value never reports an erofs phase by
+// accident. It reuses NormalizeRootfsFormat as the single source of truth for
+// the ext4 default, keeping one canonicalization path for the BUILT callback
+// downstream (ImageSpec.StorageMedia) and the build phase label here.
+func buildingPhaseForRootfsFormat(rootfsFormat string) string {
+	if NormalizeRootfsFormat(rootfsFormat) == config.RootfsFormatErofs {
+		return JobPhaseBuildingErofs
+	}
+	return JobPhaseBuildingExt4
+}
+
+// isBuildingPhase reports whether phase is a rootfs build phase (ext4 or
+// erofs). Use this wherever the redo/resume paths previously hard-coded
+// `== JobPhaseBuildingExt4`, so both formats are recognized as "in the build
+// step" without enumerating each phase at every call site.
+func isBuildingPhase(phase string) bool {
+	return phase == JobPhaseBuildingExt4 || phase == JobPhaseBuildingErofs
 }
 
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
