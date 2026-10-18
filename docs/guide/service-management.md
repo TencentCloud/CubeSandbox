@@ -297,9 +297,13 @@ The host-side policy should run hourly and use `rename` + `create`; do not use
 One-click install ships this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
 (outside `/etc/logrotate.d`) and enables `cube-sandbox-logrotate.timer` hourly.
 Before enabling the timer, the installer validates the policy with
-`logrotate --debug`; if validation fails, the policy is left in place but hourly
-rotation is not enabled. An existing `/etc/logrotate.d/cubesandbox` is moved to
-`/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>` to avoid double rotation.
+`logrotate --debug`; if validation fails, the policy is left in place but a new
+hourly timer is not installed or enabled. If an earlier install already enabled
+`cube-sandbox-logrotate.timer`, it is left running and will fail against that
+policy until you disable it (`systemctl disable --now
+cube-sandbox-logrotate.timer`). An existing `/etc/logrotate.d/cubesandbox` is
+moved to `/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>` to avoid double
+rotation.
 Kubernetes / Helm hosts still need a manual install; for example:
 
 ```text

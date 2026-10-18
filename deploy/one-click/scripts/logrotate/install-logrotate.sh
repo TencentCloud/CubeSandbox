@@ -79,9 +79,19 @@ install -d -m 0755 "$(dirname "${POLICY_DST}")"
 install -m 0644 "${POLICY_SRC}" "${POLICY_DST}"
 log "installed ${POLICY_DST}"
 
+# An earlier install may have left the timer enabled. Keep it untouched (this
+# script never stops rotation), but say so: with a missing or rejected policy
+# the timer will fail on every run until an operator disables it.
+warn_existing_timer() {
+  [[ -e "${UNIT_DIR}/cube-sandbox-logrotate.timer" ]] || return 0
+  log "WARNING: existing cube-sandbox-logrotate.timer is still enabled and will fail against the current policy"
+  log "         disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
+}
+
 if ! ensure_logrotate; then
-  log "WARNING: logrotate missing; policy staged but hourly rotation inactive"
+  log "WARNING: logrotate missing; policy staged but hourly timer not installed or enabled"
   log "         install logrotate, then re-run: bash ${SCRIPT_DIR}/install-logrotate.sh"
+  warn_existing_timer
   exit 0
 fi
 
@@ -99,11 +109,9 @@ validate_policy() {
   "${LOGROTATE_BIN}" --debug --state "${out_dir}/status" "${POLICY_DST}" \
     >"${out_file}" 2>&1 || rc=$?
   if [[ "${rc}" -ne 0 ]] || grep -qE 'unknown option|error:' "${out_file}"; then
-    log "WARNING: logrotate rejected ${POLICY_DST}; hourly rotation not enabled"
+    log "WARNING: logrotate rejected ${POLICY_DST}; hourly timer not installed or enabled"
     sed -n '1,40p' "${out_file}" >&2
-    if [[ -e "${UNIT_DIR}/cube-sandbox-logrotate.timer" ]]; then
-      log "         existing timer left untouched; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
-    fi
+    warn_existing_timer
     rm -rf "${out_dir}"
     exit 0
   fi
