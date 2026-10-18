@@ -155,7 +155,11 @@ if command -v logrotate >/dev/null 2>&1; then
     logrotate --debug --state "${parse_dir}/status" "${policy_dst}" >"${parse_out}" 2>&1 \
       || { cat "${parse_out}" >&2; fail "real logrotate rejected the installed policy"; }
   elif sudo -n true >/dev/null 2>&1; then
-    sudo -n "$(command -v logrotate)" --debug --state "${parse_dir}/status" "${policy_dst}" >"${parse_out}" 2>&1 \
+    # The installer ran as the test user, so the staged policy is not root-owned.
+    # logrotate refuses config files owned by non-root when invoked as root;
+    # validate a root-owned copy of the same content instead.
+    sudo -n install -m 0644 "${policy_dst}" "${parse_dir}/policy-root"
+    sudo -n "$(command -v logrotate)" --debug --state "${parse_dir}/status" "${parse_dir}/policy-root" >"${parse_out}" 2>&1 \
       || { cat "${parse_out}" >&2; fail "real logrotate rejected the installed policy (sudo)"; }
   else
     sed '/^[[:space:]]*su[[:space:]]/d' "${policy_dst}" >"${parse_dir}/policy-nosu"
