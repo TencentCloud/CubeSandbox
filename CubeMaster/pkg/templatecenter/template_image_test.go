@@ -109,6 +109,44 @@ func TestNormalizeTemplateImageRequestRootfsFormat(t *testing.T) {
 	assert.Contains(t, err.Error(), "rootfs_format")
 }
 
+func TestBuildTemplateSpecFingerprintUsesRootfsFormat(t *testing.T) {
+	base := &types.CreateTemplateFromImageReq{
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+	}
+	reqExt4 := *base
+	reqExt4.RootfsFormat = config.RootfsFormatExt4
+	reqErofs := *base
+	reqErofs.RootfsFormat = config.RootfsFormatErofs
+
+	// ext4 and erofs builds of the exact same spec must NOT share a
+	// fingerprint, otherwise CubeMaster/CubeTemplateCenter would reuse one
+	// format's artifact for the other and ship a mislabeled rootfs.
+	fpExt4 := buildTemplateSpecFingerprint(&reqExt4, "sha256:src")
+	fpErofs := buildTemplateSpecFingerprint(&reqErofs, "sha256:src")
+	assert.NotEqual(t, fpExt4, fpErofs)
+
+	// Same format reproduces the same fingerprint (deterministic).
+	assert.Equal(t, fpExt4, buildTemplateSpecFingerprint(&reqExt4, "sha256:src"))
+	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofs, "sha256:src"))
+
+	// Legacy compatibility: an empty (pre-RootfsFormat) and an explicit ext4
+	// RootfsFormat MUST yield the SAME fingerprint. ext4 omits rootfs_format
+	// from the payload (omitempty + blank), so the JSON is byte-identical to
+	// the pre-step-2 payload — existing ext4 artifacts stay reusable across
+	// the upgrade instead of being forced into a one-time full rebuild. This
+	// mirrors TestBuildTemplateSpecFingerprintEmptyCAMatchesLegacy.
+	fpBase := buildTemplateSpecFingerprint(base, "sha256:src")
+	assert.Equal(t, fpBase, fpExt4)
+
+	// A non-canonical erofs value ("EROFS") normalizes to erofs and yields the
+	// erofs fingerprint (NOT legacy ext4), so a non-canonical erofs request does
+	// not silently match a legacy ext4 artifact.
+	reqErofsUpper := *base
+	reqErofsUpper.RootfsFormat = "EROFS"
+	assert.Equal(t, fpErofs, buildTemplateSpecFingerprint(&reqErofsUpper, "sha256:src"))
+}
+
 func TestNormalizeTemplateImageRequestBackendS3(t *testing.T) {
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
