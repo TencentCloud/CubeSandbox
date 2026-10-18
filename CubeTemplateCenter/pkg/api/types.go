@@ -39,7 +39,11 @@ type ArtifactDeleteResponse struct {
 	ArtifactID string `json:"artifact_id"`
 }
 
-// ArtifactUploadResponse is the response returned after ingesting an ext4 upload.
+// ArtifactUploadResponse is the response returned after ingesting a rootfs
+// artifact upload (ext4 or erofs). The ext4_* field names are retained for
+// wire/DB compatibility with CubeMaster; the stored path they carry now ends
+// in .erofs for an erofs artifact (see storedArtifactFileName). A
+// format-agnostic rename of these fields is tracked as a separate follow-up.
 type ArtifactUploadResponse struct {
 	Status        string `json:"status"`
 	ArtifactID    string `json:"artifact_id"`

@@ -174,11 +174,24 @@ func TestValidateTCLocalArtifactPath(t *testing.T) {
 		t.Fatalf("expected path under shared store root to pass, got %v", err)
 	}
 
+	// An erofs artifact is stored as <id>.erofs (TC preserves the uploaded
+	// suffix), so that layout must validate too -- otherwise the migration of
+	// an erofs template would reject the very path TC returned.
+	validErofs := filepath.Join(primary, "rfs-1", "rfs-1.erofs")
+	if err := validateTCLocalArtifactPath("rfs-1", validErofs); err != nil {
+		t.Fatalf("expected erofs path under shared store root to pass, got %v", err)
+	}
+
 	badRoots := []string{
 		filepath.Join(primary, "rfs-1", "nested", "rfs-1.ext4"),
 		filepath.Join(primary, "rfs-1", "other.ext4"),
 		filepath.Join(filepath.Dir(primary), "rfs-1", "rfs-1.ext4"),
 		filepath.Join(fallback, "rfs-1", "rfs-1.ext4"),
+		// An erofs path misplaced (wrong parent dir) must still be rejected.
+		filepath.Join(primary, "rfs-1", "nested", "rfs-1.erofs"),
+		// A non-ext4/non-erofs suffix is not a valid artifact layout even under
+		// the right root, so a stray file cannot masquerade as an artifact.
+		filepath.Join(primary, "rfs-1", "rfs-1.iso"),
 	}
 	for _, path := range badRoots {
 		if err := validateTCLocalArtifactPath("rfs-1", path); err == nil {

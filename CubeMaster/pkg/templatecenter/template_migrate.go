@@ -42,13 +42,19 @@ type templateCenterUploadResult struct {
 func validateTCLocalArtifactPath(artifactID, path string) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
-		return fmt.Errorf("template center returned an empty ext4 path for artifact %s", artifactID)
+		return fmt.Errorf("template center returned an empty artifact path for artifact %s", artifactID)
 	}
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("template center returned non-absolute ext4 path %q for artifact %s", path, artifactID)
+		return fmt.Errorf("template center returned non-absolute artifact path %q for artifact %s", path, artifactID)
 	}
-	if filepath.Base(path) != artifactID+".ext4" || filepath.Base(filepath.Dir(path)) != artifactID {
-		return fmt.Errorf("template center returned ext4 path %q that does not match the artifact layout for %s", path, artifactID)
+	// The on-disk name is <id>.ext4 or <id>.erofs: TC preserves the uploaded
+	// file's suffix (see storedArtifactFileName) instead of forcing .ext4, so
+	// an erofs artifact is stored as <id>.erofs and still matches this layout
+	// guard. The parent directory must remain <id> so the artifact stays inside
+	// its own store slot.
+	base := filepath.Base(path)
+	if (base != artifactID+".ext4" && base != artifactID+".erofs") || filepath.Base(filepath.Dir(path)) != artifactID {
+		return fmt.Errorf("template center returned artifact path %q that does not match the <id>.ext4/<id>.erofs layout for %s", path, artifactID)
 	}
 	roots := []string{ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
@@ -64,11 +70,13 @@ func validateTCLocalArtifactPath(artifactID, path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("template center returned ext4 path %q outside the TC artifact store roots %v", path, roots)
+	return fmt.Errorf("template center returned artifact path %q outside the TC artifact store roots %v", path, roots)
 }
 
-// uploadArtifactFileToTC uploads one artifact ext4 file into CubeTemplateCenter's
-// own artifact store and returns the stored file metadata.
+// uploadArtifactFileToTC uploads one local rootfs artifact file (ext4 or erofs)
+// into CubeTemplateCenter's own artifact store and returns the stored file
+// metadata. TC preserves the uploaded file's suffix, so the returned path
+// ends in .erofs for an erofs artifact.
 var uploadArtifactFileToTC = func(ctx context.Context, artifactID, filePath string) (*templateCenterUploadResult, error) {
 	endpoint := ""
 	if cfg := config.GetConfig(); cfg != nil {
