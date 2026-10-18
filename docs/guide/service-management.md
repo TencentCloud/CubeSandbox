@@ -296,10 +296,15 @@ The host-side policy should run hourly and use `rename` + `create`; do not use
 
 One-click install ships this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
 (outside `/etc/logrotate.d`) and enables `cube-sandbox-logrotate.timer` hourly.
+Before enabling the timer, the installer validates the policy with
+`logrotate --debug`; if validation fails, the policy is left in place but hourly
+rotation is not enabled. An existing `/etc/logrotate.d/cubesandbox` is moved to
+`/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>` to avoid double rotation.
 Kubernetes / Helm hosts still need a manual install; for example:
 
 ```text
 /data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
+    su root root
     hourly
     rotate 24
     missingok
@@ -320,8 +325,9 @@ but does not promise immediate handling of an arbitrary manual rotation; it
 does not support `copytruncate`.
 
 The example uses `root root` because the bundled one-click systemd services run as
-root. If CubeShim or the VMM run under another account, set the `create` owner and
-group to that account; otherwise a newly-created file may not be reopenable.
+root. If CubeShim or the VMM run under another account, set both the `su`
+user/group and the `create` owner/group to that account; otherwise logrotate
+cannot switch identity and a newly-created file may not be reopenable.
 The `0640` mode in this example applies to files created by `logrotate`; the
 CubeShim and VMM writers themselves continue to use the process umask.
 

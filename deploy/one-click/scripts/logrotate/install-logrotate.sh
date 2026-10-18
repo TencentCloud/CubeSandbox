@@ -86,6 +86,31 @@ if ! ensure_logrotate; then
 fi
 
 LOGROTATE_BIN="$(resolve_logrotate)"
+
+# Some logrotate parse problems (for example an unknown directive) are only
+# reported as "unknown option ... -- ignoring line" with a zero exit status, so
+# check both the exit code and the debug output. --debug writes nothing; the
+# temporary state file keeps the real rotation state untouched.
+validate_policy() {
+  local out_dir out_file rc
+  out_dir="$(mktemp -d)"
+  out_file="${out_dir}/logrotate.out"
+  rc=0
+  "${LOGROTATE_BIN}" --debug --state "${out_dir}/status" "${POLICY_DST}" \
+    >"${out_file}" 2>&1 || rc=$?
+  if [[ "${rc}" -ne 0 ]] || grep -qE 'unknown option|error:' "${out_file}"; then
+    log "WARNING: logrotate rejected ${POLICY_DST}; hourly rotation not enabled"
+    sed -n '1,40p' "${out_file}" >&2
+    if [[ -e "${UNIT_DIR}/cube-sandbox-logrotate.timer" ]]; then
+      log "         existing timer left untouched; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
+    fi
+    rm -rf "${out_dir}"
+    exit 0
+  fi
+  rm -rf "${out_dir}"
+}
+
+validate_policy
 install -d -m 0755 "${UNIT_DIR}"
 render_service "${SERVICE_SRC}" "${UNIT_DIR}/cube-sandbox-logrotate.service" \
   "${LOGROTATE_BIN}" "${POLICY_DST}"
@@ -106,7 +131,7 @@ log "enabled cube-sandbox-logrotate.timer (hourly)"
 
 # Retire pre-#1895 hand-install under /etc/logrotate.d (avoid double rotation).
 if [[ -n "${LEGACY_DST}" && "${LEGACY_DST}" != "${POLICY_DST}" && -e "${LEGACY_DST}" ]]; then
-  bak="$(dirname "${POLICY_DST}")/legacy-cubesandbox.bak.$(date +%s)"
+  bak="$(dirname "$(dirname "${POLICY_DST}")")/legacy-cubesandbox.bak.$(date +%s)"
   log "WARNING: moving legacy ${LEGACY_DST} -> ${bak}"
   mv "${LEGACY_DST}" "${bak}" || log "WARNING: could not retire ${LEGACY_DST}"
 fi

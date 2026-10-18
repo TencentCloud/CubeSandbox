@@ -2,6 +2,9 @@
 # (outside /etc/logrotate.d so the distro daily job does not also process it).
 # CubeShim/CubeVMM keep logs open; use rename+create, never copytruncate.
 /data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
+    # The timer runs as root. su root root also bypasses logrotate's
+    # insecure-parent-directory check so group-writable log dirs still rotate.
+    su root root
     hourly
     rotate 24
     missingok
