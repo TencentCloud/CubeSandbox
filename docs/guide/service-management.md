@@ -297,7 +297,8 @@ The host-side policy should run hourly and use `rename` + `create`; do not use
 One-click installs this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
 and enables an hourly `cube-sandbox-logrotate.timer`. The installer validates a
 new policy before replacing the live one; if validation fails, the live policy
-stays and the timer is not enabled. The one-click file is installer-managed and
+stays, a new timer is not enabled, and an existing timer keeps running the
+previous policy. The one-click file is installer-managed and
 is overwritten on every install or upgrade. An old
 `/etc/logrotate.d/cubesandbox` is moved to
 `/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>`.
