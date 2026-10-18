@@ -294,16 +294,17 @@ control thread, not by deferred logger initialization or a vCPU/API thread.
 The host-side policy should run hourly and use `rename` + `create`; do not use
 `copytruncate`.
 
-One-click install ships this policy as
-`/etc/cube-sandbox/logrotate.d/cubesandbox` (outside `/etc/logrotate.d`) and
-enables `cube-sandbox-logrotate.timer` hourly. Before installing the policy, the
-installer validates the packaged copy with `logrotate --debug`; if validation
-fails, the live policy is left untouched (the rejected copy is saved under
-`/etc/cube-sandbox/cubesandbox.rejected.<epoch>` for diagnosis) and a new hourly
-timer is not installed or enabled. An existing `/etc/logrotate.d/cubesandbox` is
-moved to `/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>` to avoid double
-rotation.
-Kubernetes / Helm hosts still need a manual install; for example:
+One-click installs this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
+and enables an hourly `cube-sandbox-logrotate.timer`. The installer validates a
+new policy before replacing the live one; if validation fails, the live policy
+stays and the timer is not enabled. The one-click file is installer-managed and
+is overwritten on every install or upgrade. An old
+`/etc/logrotate.d/cubesandbox` is moved to
+`/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>`.
+
+On Kubernetes / Helm hosts, save the example below as
+`/etc/logrotate.d/cubesandbox` and run `logrotate` hourly; a distro's default
+daily job rotates only once a day.
 
 ```text
 /data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
@@ -318,7 +319,8 @@ Kubernetes / Helm hosts still need a manual install; for example:
 }
 ```
 
-`rotate 24` retains 24 hourly files; adjust it to the required retention period.
+With hourly invocation, `rotate 24` keeps about 24 hours of logs; adjust it for
+the retention period you need.
 `delaycompress` keeps the newest rotated file uncompressed for one cycle because
 a writer may still use the old descriptor until its next scheduled reopen.
 CubeShim's internal event runs every 30 minutes, while the VMM control thread
