@@ -33,10 +33,6 @@ assert_contains "${SERVICE}" "ExecStart=@LOGROTATE@ --state /var/lib/cube-sandbo
 assert_contains "${SERVICE}" "StateDirectory=cube-sandbox-logrotate"
 assert_contains "${TIMER}" "OnCalendar=hourly"
 assert_contains "${INSTALL_SH}" "install_cubeshim_logrotate"
-grep -Fq 'if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
-  install_cubeshim_logrotate
-fi' "${INSTALL_SH}" \
-  || fail "logrotate install must be limited to the compute role"
 assert_contains "${ONE_CLICK_DIR}/build-release-bundle.sh" 'scripts/logrotate'
 
 run_installer() {

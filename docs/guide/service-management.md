@@ -294,7 +294,7 @@ control thread, not by deferred logger initialization or a vCPU/API thread.
 The host-side policy should run hourly and use `rename` + `create`; do not use
 `copytruncate`.
 
-On compute nodes, one-click install ships this policy as
+One-click install ships this policy as
 `/etc/cube-sandbox/logrotate.d/cubesandbox` (outside `/etc/logrotate.d`) and
 enables `cube-sandbox-logrotate.timer` hourly. Before installing the policy, the
 installer validates the packaged copy with `logrotate --debug`; if validation
