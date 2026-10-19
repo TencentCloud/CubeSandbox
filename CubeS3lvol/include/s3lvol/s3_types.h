@@ -103,6 +103,9 @@ struct s3_lvs_opts {
 	uint32_t             wal_size_mb;
 	uint32_t             journal_size_mb;
 	uint32_t             cache_size_mb;
+	/* Process-shared write-back payload budget for this lvstore. Zero selects
+	 * 4096 MiB. It is runtime policy and may change on a clean attach. */
+	uint32_t             writeback_size_mb;
 	/* Whole-object DRAM cache entries. Process policy: not persisted, and an
 	 * attach may choose a different value. Zero disables the RAM tier. */
 	uint32_t             cache_hot_bufs;

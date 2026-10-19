@@ -74,7 +74,7 @@ APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
        s3_export_read_test s3_preheat_test s3_copy_xml_test \
-       s3_pending_persist_test s3_active_nsid_test
+       s3_pending_persist_test s3_active_nsid_test s3_writeback_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -177,6 +177,14 @@ s3_copy_xml_test: s3_copy_xml_test.c $(S3BSDEV_DIR)/s3_copy_xml.h
 # Pending-delete registry PUT coalescing. Header-only, no S3, no SPDK.
 s3_pending_persist_test: s3_pending_persist_test.c $(MODULE_DIR)/pending_persist_ctl.h
 	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_pending_persist_test.c -o $@
+
+# Process-shared write-back ring: POSIX shm plus SPDK's hardware-accelerated
+# CRC32C helper, no bdev framework or S3.
+s3_writeback_test: s3_writeback_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) s3_writeback_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
+	    -Wl,--start-group $(STUB_SPDK_LIBS) $(SPDK_ISAL_LIB) -Wl,--end-group \
+	    $(TEST_SYS_LIBS) -o $@
 
 # chunk map persistence check: no S3, but it does need the bdev layer.
 #
@@ -338,7 +346,8 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
        s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_preheat_test \
-       s3_copy_xml_test s3_pending_persist_test s3_active_nsid_test
+       s3_copy_xml_test s3_pending_persist_test s3_active_nsid_test \
+       s3_writeback_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -355,6 +364,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_copy_xml_test
 	./s3_pending_persist_test
 	./s3_active_nsid_test
+	./s3_writeback_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:

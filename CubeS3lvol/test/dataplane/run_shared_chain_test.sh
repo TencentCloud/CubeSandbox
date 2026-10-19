@@ -105,6 +105,7 @@ cleanup()
 
 	if [ "${FAIL}" -eq 0 ] && [ -z "${S3LVOL_KEEP_S3:-}" ] && [ -n "${BUCKET}" ]; then
 		for p in "${SRC_LVS}" "${DST_LVS}" "${DST2_LVS}"; do
+			rcow_discard_writeback_shm "${p}" || true
 			python3 "${PREFIX_RM}" -e "${EP}" -b "${BUCKET}" -r "${RG}" \
 				-p "${p}/" >/dev/null 2>&1 || true
 		done

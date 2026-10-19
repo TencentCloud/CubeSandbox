@@ -5,16 +5,14 @@
  *
  *   === What this test proves ===
  *
- *   The WAL exists because the direct-to-S3 write path loses data under
- *   concurrent partial-chunk writes. Before it can be trusted to carry user
- *   writes, the log itself has to hold up, so the central assertion here
- *   mirrors the journal test: *entries survive a full close and reopen*, byte
- *   for byte.
+ *   Current writes live in the process-shared write-back ring. The disk WAL
+ *   still has to replay payload records written by pre-shm releases, so this
+ *   test installs an old-format fixture directly and verifies that it survives
+ *   open and replay byte for byte.
  *
- *     1. format the WAL region
- *     2. append a mix of writes, zeroes, unmaps and a barrier
- *     3. close, which persists the super
- *     4. reopen and replay
+ *     1. format and close the WAL region
+ *     2. install old-format writes, zeroes, unmaps and a barrier
+ *     3. reopen and replay
  *     5. compare every recovered entry against what was written, payload
  *        included
  *
@@ -41,6 +39,7 @@
 #include "spdk/stdinc.h"
 #include "spdk/accel.h"
 #include "spdk/bdev.h"
+#include "spdk/crc32.h"
 #include "spdk/env.h"
 #include "spdk/log.h"
 #include "spdk/thread.h"
@@ -64,6 +63,7 @@
 #define AIO_FILE_SIZE  (64ULL * 1024 * 1024)
 
 #define TEST_CHUNK_SIZE (1024 * 1024)
+#define NUM_BARRIERS 500
 
 static int g_pass;
 static int g_fail;
@@ -134,6 +134,49 @@ async_void_cb(void *cb_arg)
 
 	ctx->status = 0;
 	ctx->done   = true;
+}
+
+static void
+bdev_io_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct async_ctx *ctx = cb_arg;
+
+	spdk_bdev_free_io(bdev_io);
+	ctx->status = success ? 0 : -EIO;
+	ctx->done = true;
+}
+
+static int
+sync_bdev_write(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+		void *buf, uint64_t offset, uint64_t len)
+{
+	struct async_ctx ctx = {0};
+	int rc;
+
+	rc = spdk_bdev_write(desc, ch, buf, offset, len, bdev_io_done, &ctx);
+	if (rc != 0) {
+		return rc;
+	}
+	if (!poll_until(&ctx.done)) {
+		return -ETIMEDOUT;
+	}
+	return ctx.status;
+}
+
+static int
+sync_bdev_flush(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch)
+{
+	struct async_ctx ctx = {0};
+	int rc;
+
+	rc = spdk_bdev_flush(desc, ch, 0, 0, bdev_io_done, &ctx);
+	if (rc != 0) {
+		return rc;
+	}
+	if (!poll_until(&ctx.done)) {
+		return -ETIMEDOUT;
+	}
+	return ctx.status;
 }
 
 struct open_dev_ctx {
@@ -211,6 +254,56 @@ make_aio_file(const char *path, uint64_t size)
 
 #define NUM_WRITES 64
 
+/* Frozen pre-shm wire definitions. Do not replace these with current public
+ * structs or enums: the fixture must remain unchanged if production format
+ * declarations are accidentally edited. */
+#define LEGACY_WAL_SUPER_MAGIC   UINT64_C(0x5341573153444B53)
+#define LEGACY_WAL_SUPER_VERSION 1u
+#define LEGACY_WAL_ENTRY_MAGIC   UINT32_C(0x454C4157)
+#define LEGACY_WAL_WRITE         0u
+#define LEGACY_WAL_WRITE_ZEROES  1u
+#define LEGACY_WAL_UNMAP         2u
+#define LEGACY_WAL_BARRIER       3u
+#define LEGACY_WAL_LAST_IN_BATCH (1u << 1)
+
+struct legacy_wal_entry_hdr {
+	uint32_t magic;
+	uint8_t type;
+	uint8_t flags;
+	uint16_t hdr_len;
+	uint64_t seq;
+	uint64_t batch_id;
+	uint64_t lba;
+	uint32_t nblocks;
+	uint32_t payload_len;
+	uint64_t chunk_index;
+	uint32_t crc_hdr;
+	uint32_t crc_payload;
+	uint8_t reserved[8];
+} __attribute__((packed));
+
+struct legacy_wal_super {
+	uint64_t magic;
+	uint32_t version;
+	uint32_t seg_size;
+	uint32_t seg_count;
+	uint32_t reserved0;
+	uint64_t epoch;
+	uint64_t head;
+	uint64_t tail;
+	uint64_t ckpt_head;
+	uint64_t ckpt_seq;
+	uint64_t seq_next;
+	uint64_t slot_gen;
+	uint32_t crc;
+	uint32_t reserved1;
+} __attribute__((packed));
+
+SPDK_STATIC_ASSERT(sizeof(struct legacy_wal_entry_hdr) == 64,
+		   "released WAL entry header size changed");
+SPDK_STATIC_ASSERT(sizeof(struct legacy_wal_super) == 88,
+		   "released WAL super size changed");
+
 static void
 fill_payload(void *buf, uint64_t lba, uint32_t len)
 {
@@ -234,6 +327,140 @@ payload_matches(const void *buf, uint64_t lba, uint32_t len)
 	return true;
 }
 
+static uint32_t
+fixture_hdr_crc(const struct legacy_wal_entry_hdr *hdr)
+{
+	struct legacy_wal_entry_hdr tmp = *hdr;
+
+	tmp.crc_hdr = 0;
+	return spdk_crc32c_update(&tmp, sizeof(tmp), ~0u);
+}
+
+static uint32_t
+fixture_super_crc(const struct legacy_wal_super *sb)
+{
+	struct legacy_wal_super tmp = *sb;
+
+	tmp.crc = 0;
+	return spdk_crc32c_update(&tmp, sizeof(tmp), ~0u);
+}
+
+static uint8_t *
+fixture_add_entry(uint8_t *cursor, uint8_t type, uint64_t seq,
+		  uint64_t batch_id, uint64_t lba, uint32_t nblocks,
+		  uint64_t chunk_index, bool last)
+{
+	struct legacy_wal_entry_hdr hdr = {
+		.magic = LEGACY_WAL_ENTRY_MAGIC,
+		.type = type,
+		.flags = last ? LEGACY_WAL_LAST_IN_BATCH : 0,
+		.hdr_len = sizeof(hdr),
+		.seq = seq,
+		.batch_id = batch_id,
+		.lba = lba,
+		.nblocks = nblocks,
+		.payload_len = type == LEGACY_WAL_WRITE ?
+			       nblocks * S3_WAL_BLOCK_SIZE : 0,
+		.chunk_index = chunk_index,
+	};
+
+	if (hdr.payload_len != 0) {
+		fill_payload(cursor + sizeof(hdr), lba, hdr.payload_len);
+		hdr.crc_payload = spdk_crc32c_update(cursor + sizeof(hdr),
+						    hdr.payload_len, ~0u);
+	}
+	hdr.crc_hdr = fixture_hdr_crc(&hdr);
+	memcpy(cursor, &hdr, sizeof(hdr));
+	return cursor + sizeof(hdr) + hdr.payload_len;
+}
+
+/* Install bytes produced by the pre-shm WAL format without retaining its
+ * obsolete append API in the production library. */
+static int
+install_legacy_fixture(struct s3_local_dev *local_dev)
+{
+	const struct s3_region *region =
+		s3_local_dev_get_region(local_dev, S3_REGION_WAL);
+	struct spdk_bdev_desc *desc =
+		s3_local_dev_get_desc(local_dev, S3_REGION_WAL);
+	struct spdk_io_channel *ch =
+		s3_local_dev_get_channel(local_dev, S3_REGION_WAL);
+	uint32_t seg_count;
+	const size_t first_batch_len =
+		SPDK_ALIGN_CEIL(NUM_WRITES *
+				(sizeof(struct legacy_wal_entry_hdr) +
+				 S3_WAL_BLOCK_SIZE),
+				S3_WAL_BLOCK_SIZE);
+	const size_t second_batch_len =
+		SPDK_ALIGN_CEIL(3 * sizeof(struct legacy_wal_entry_hdr),
+				S3_WAL_BLOCK_SIZE);
+	const size_t ring_len = first_batch_len + second_batch_len;
+	uint8_t *ring = spdk_dma_zmalloc(ring_len, S3_WAL_BLOCK_SIZE, NULL);
+	uint8_t *supers = spdk_dma_zmalloc(S3_WAL_SUPER_SIZE,
+					   S3_WAL_BLOCK_SIZE, NULL);
+	uint8_t *cursor;
+	uint64_t seq = (UINT64_C(1) << 48) | 1;
+	int rc;
+
+	if (!region || !desc || !ch) {
+		rc = -EINVAL;
+		goto out;
+	}
+	if (!ring || !supers) {
+		rc = -ENOMEM;
+		goto out;
+	}
+	seg_count =
+		(uint32_t)((region->size - S3_WAL_SUPER_SIZE) / TEST_SEG_SIZE) - 2;
+
+	cursor = ring;
+	for (uint64_t i = 0; i < NUM_WRITES; i++) {
+		cursor = fixture_add_entry(cursor, LEGACY_WAL_WRITE, seq++, 1,
+					   i, 1,
+					   i / 256, i + 1 == NUM_WRITES);
+	}
+	cursor = ring + first_batch_len;
+	cursor = fixture_add_entry(cursor, LEGACY_WAL_WRITE_ZEROES, seq++, 2,
+				   1000, 2, 1000 / 256, false);
+	cursor = fixture_add_entry(cursor, LEGACY_WAL_UNMAP, seq++, 2,
+				   2000, 4, 2000 / 256, false);
+	(void)fixture_add_entry(cursor, LEGACY_WAL_BARRIER, seq++, 2,
+				0, 0, 0, true);
+
+	for (uint32_t slot = 0; slot < 2; slot++) {
+		struct legacy_wal_super sb = {
+			.magic = LEGACY_WAL_SUPER_MAGIC,
+			.version = LEGACY_WAL_SUPER_VERSION,
+			.seg_size = TEST_SEG_SIZE,
+			.seg_count = seg_count,
+			.epoch = 1,
+			.head = ring_len,
+			.tail = 0,
+			.ckpt_head = 0,
+			.ckpt_seq = 0,
+			.seq_next = 1 + NUM_WRITES + 3,
+			.slot_gen = 10 + slot,
+		};
+
+		sb.crc = fixture_super_crc(&sb);
+		memcpy(supers + slot * S3_WAL_SUPER_SLOT_SIZE, &sb, sizeof(sb));
+	}
+
+	rc = sync_bdev_write(desc, ch, ring,
+			     region->offset + S3_WAL_SUPER_SIZE, ring_len);
+	if (rc == 0) {
+		rc = sync_bdev_write(desc, ch, supers, region->offset,
+				     S3_WAL_SUPER_SIZE);
+	}
+	if (rc == 0) {
+		rc = sync_bdev_flush(desc, ch);
+	}
+out:
+	spdk_dma_free(ring);
+	spdk_dma_free(supers);
+	return rc;
+}
+
 struct replay_state {
 	uint64_t writes;
 	uint64_t zeroes;
@@ -241,6 +468,7 @@ struct replay_state {
 	uint64_t barriers;
 	uint64_t payload_ok;
 	uint64_t payload_bad;
+	uint64_t zero_batch_ids;
 	uint64_t out_of_order;
 	uint64_t last_seq;
 };
@@ -256,6 +484,9 @@ replay_apply(void *cb_arg, const struct s3_wal_entry_hdr *hdr, const void *paylo
 		st->out_of_order++;
 	}
 	st->last_seq = hdr->seq;
+	if (hdr->batch_id == 0) {
+		st->zero_batch_ids++;
+	}
 
 	switch (hdr->type) {
 	case S3_WAL_WRITE:
@@ -352,19 +583,6 @@ framework_stop(void)
 /* Synchronous wrappers */
 
 static int
-sync_append_write(struct s3_wal *wal, uint64_t lba, const void *payload)
-{
-	struct async_ctx ctx = {0};
-
-	s3_wal_append_write(wal, lba, 1, payload, lba / 256, NULL,
-			    async_int_cb, &ctx);
-	if (!poll_until(&ctx.done)) {
-		return -ETIMEDOUT;
-	}
-	return ctx.status;
-}
-
-static int
 sync_close(struct s3_wal *wal)
 {
 	struct async_ctx ctx = {0};
@@ -400,7 +618,6 @@ main(int argc, char **argv)
 	struct s3_wal *wal = NULL;
 	const char *aio_path = DEFAULT_AIO_PATH;
 	struct s3_wal_opts wal_opts = { .seg_size = TEST_SEG_SIZE };
-	void *payload = NULL;
 	bool file_created = false;
 	bool bdev_created = false;
 	bool framework_up = false;
@@ -496,62 +713,16 @@ main(int argc, char **argv)
 		wal = wctx.wal;
 	}
 
-	payload = spdk_dma_zmalloc(S3_WAL_BLOCK_SIZE, S3_WAL_BLOCK_SIZE, NULL);
-	if (!payload) {
-		goto out_wal;
-	}
-
-	printf("\n[4] appending %d writes plus metadata entries\n", NUM_WRITES);
-	{
-		int failed = 0;
-
-		for (uint64_t i = 0; i < NUM_WRITES; i++) {
-			fill_payload(payload, i, S3_WAL_BLOCK_SIZE);
-			rc = sync_append_write(wal, i, payload);
-			if (rc != 0) {
-				printf("       !! append of lba %" PRIu64
-				       " failed: %d\n", i, rc);
-				failed++;
-				break;
-			}
-		}
-		check_true("all writes acknowledged", failed == 0, NULL);
-	}
-
-	{
-		struct async_ctx ctx = {0};
-
-		s3_wal_append_zeroes(wal, 1000, 2, 1000 / 256, NULL,
-				     async_int_cb, &ctx);
-		poll_until(&ctx.done);
-		check("s3_wal_append_zeroes", ctx.status, 0);
-	}
-	{
-		struct async_ctx ctx = {0};
-
-		s3_wal_append_unmap(wal, 2000, 4, 2000 / 256, NULL,
-				    async_int_cb, &ctx);
-		poll_until(&ctx.done);
-		check("s3_wal_append_unmap", ctx.status, 0);
-	}
-	{
-		struct s3_wal_stats st;
-		char detail[128];
-
-		s3_wal_get_stats(wal, &st);
-		snprintf(detail, sizeof(detail),
-			 "appends=%" PRIu64 " batches=%" PRIu64 " bytes=%" PRIu64,
-			 st.appends, st.batches, st.bytes_written);
-		check_true("every append was batched and written",
-			   st.appends == NUM_WRITES + 2 && st.batches > 0, detail);
-	}
-
-	printf("\n[5] closing the WAL (persists the super)\n");
+	printf("\n[4] installing a pre-shm compatibility fixture\n");
 	rc = sync_close(wal);
 	wal = NULL;
-	check("s3_wal_close", rc, 0);
+	check("close the freshly formatted WAL", rc, 0);
+	if (rc == 0) {
+		rc = install_legacy_fixture(local_dev);
+	}
+	check("install old WRITE/ZEROES/UNMAP records", rc, 0);
 
-	printf("\n[6] reopening and replaying\n");
+	printf("\n[5] reopening and replaying the compatibility fixture\n");
 	{
 		struct open_wal_ctx wctx = {0};
 
@@ -578,7 +749,7 @@ main(int argc, char **argv)
 			 " unmaps, %" PRIu64 " barriers",
 			 st.writes, st.zeroes, st.unmaps, st.barriers);
 		check_true("every entry came back", st.writes == NUM_WRITES &&
-			   st.zeroes == 1 && st.unmaps == 1 && st.barriers == 0,
+			   st.zeroes == 1 && st.unmaps == 1 && st.barriers == 1,
 			   detail);
 
 		snprintf(detail, sizeof(detail), "%" PRIu64 " ok, %" PRIu64 " bad",
@@ -593,13 +764,14 @@ main(int argc, char **argv)
 			   st.out_of_order == 0, detail);
 	}
 
-	printf("\n[7] appending after replay, then replaying again\n");
+	printf("\n[6] appending a current barrier after legacy replay\n");
 	{
 		uint64_t seq_before = s3_wal_get_next_seq(wal);
+		struct async_ctx ctx = {0};
 
-		fill_payload(payload, 5000, S3_WAL_BLOCK_SIZE);
-		rc = sync_append_write(wal, 5000, payload);
-		check("append after replay", rc, 0);
+		s3_wal_append_barrier(wal, NULL, async_int_cb, &ctx);
+		poll_until(&ctx.done);
+		check("append barrier after replay", ctx.status, 0);
 
 		check_true("seq advanced", s3_wal_get_next_seq(wal) > seq_before, NULL);
 
@@ -616,40 +788,37 @@ main(int argc, char **argv)
 			wal = wctx.wal;
 			sync_replay(wal, &st);
 
-			char detail[96];
-			snprintf(detail, sizeof(detail), "%" PRIu64 " writes recovered",
-				 st.writes);
-			/* The entry added after the first replay must be there
-			 * too, so the count grows by one. */
-			check_true("the second replay sees the later append",
-				   st.writes == NUM_WRITES + 1, detail);
+			char detail[128];
+			snprintf(detail, sizeof(detail),
+				 "%" PRIu64 " legacy writes, %" PRIu64 " barriers",
+				 st.writes, st.barriers);
+			check_true("the second replay sees legacy data and new barrier",
+				   st.writes == NUM_WRITES && st.barriers == 2, detail);
 		} else {
 			check("reopen after the second close", wctx.status, 0);
 		}
 	}
 
-	printf("\n[8] crossing a segment boundary\n");
+	printf("\n[7] crossing a segment boundary with current barriers\n");
 	{
-		/* Each 4 KiB payload plus a 64 byte header rounds up to 8 KiB per
-		 * batch when appended one at a time, so a couple of hundred
-		 * appends walk past the 2 MiB segment size and force an END
-		 * sentinel plus a fresh segment. */
 		int failed = 0;
 
-		for (uint64_t i = 0; i < 400; i++) {
-			fill_payload(payload, 10000 + i, S3_WAL_BLOCK_SIZE);
-			rc = sync_append_write(wal, 10000 + i, payload);
-			if (rc != 0) {
-				printf("       !! append %" PRIu64 " failed: %d\n", i, rc);
+		for (uint64_t i = 0; i < NUM_BARRIERS; i++) {
+			struct async_ctx ctx = {0};
+
+			s3_wal_append_barrier(wal, NULL, async_int_cb, &ctx);
+			if (!poll_until(&ctx.done) || ctx.status != 0) {
+				printf("       !! barrier %" PRIu64 " failed: %d\n",
+				       i, ctx.status);
 				failed++;
 				break;
 			}
 		}
-		check_true("400 more appends succeeded across the boundary",
+		check_true("barriers succeeded across the boundary",
 			   failed == 0, NULL);
 	}
 
-	printf("\n[9] replaying across the segment boundary\n");
+	printf("\n[8] replaying across the segment boundary\n");
 	{
 		rc = sync_close(wal);
 		wal = NULL;
@@ -667,26 +836,48 @@ main(int argc, char **argv)
 			rc = sync_replay(wal, &st);
 			check("replay across the boundary", rc, 0);
 
-			char detail[128];
+			char detail[160];
 			snprintf(detail, sizeof(detail),
-				 "%" PRIu64 " writes, %" PRIu64 " bad payloads",
-				 st.writes, st.payload_bad);
-			/* 64 + 1 + 400 writes should all come back with intact
-			 * payloads even though the log rolled over a segment. */
+				 "%" PRIu64 " writes, %" PRIu64 " barriers, %"
+				 PRIu64 " bad payloads, %" PRIu64
+				 " zero batch IDs",
+				 st.writes, st.barriers, st.payload_bad,
+				 st.zero_batch_ids);
 			check_true("entries survived the segment rollover",
-				   st.writes == NUM_WRITES + 1 + 400 &&
-				   st.payload_bad == 0, detail);
+				   st.writes == NUM_WRITES &&
+				   st.barriers == 2 + NUM_BARRIERS &&
+				   st.payload_bad == 0 &&
+				   st.zero_batch_ids == 0, detail);
 		}
 	}
 
-out_wal:
+	printf("\n[9] barriers become no-ops after memory-only sequences start\n");
+	if (wal) {
+		struct s3_wal_stats before = {0}, after = {0};
+		struct async_ctx ctx = {0};
+		uint64_t mem_seq, barrier_seq = UINT64_MAX;
+		uint64_t next_after_mem;
+
+		s3_wal_get_stats(wal, &before);
+		mem_seq = s3_wal_alloc_mem_seq(wal);
+		next_after_mem = s3_wal_get_next_seq(wal);
+		s3_wal_append_barrier(wal, &barrier_seq, async_int_cb, &ctx);
+		s3_wal_get_stats(wal, &after);
+
+		check_true("memory-only sequence allocated", mem_seq != 0, NULL);
+		check_true("memory-mode barrier completes synchronously",
+			   ctx.done && ctx.status == 0, NULL);
+		check_true("memory-mode barrier has no disk sequence",
+			   barrier_seq == 0, NULL);
+		check_true("memory-mode barrier consumes no sequence or WAL append",
+			   s3_wal_get_next_seq(wal) == next_after_mem &&
+			   after.appends == before.appends, NULL);
+	}
+
 	if (wal) {
 		/* Ignore the status here: teardown, not a check. */
 		sync_close(wal);
 		wal = NULL;
-	}
-	if (payload) {
-		spdk_dma_free(payload);
 	}
 out_local:
 	if (local_dev) {

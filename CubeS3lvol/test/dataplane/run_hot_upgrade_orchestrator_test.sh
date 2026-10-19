@@ -8,11 +8,12 @@
 # stop/start split the unit file does, and ExecStop is the real marker rule
 # (hot upgrade, or the planned rcow_stop.sh if the marker is missing).
 #
-# Four passes, each with fio on the volume:
-#   1. same-binary upgrade succeeds and the bare name moves
-#   2. a new binary that exits on start rolls back without a planned stop
-#   3. a layout check that fails rolls back the same way
-#   4. a failed symlink switch starts the previous build again
+# Five passes, each with fio on the volume:
+#   1. a new binary that exits before serving rolls back to the old release
+#   2. a target that fails after attach is not rolled back, even after retry
+#   3. a serving target that fails its layout check is not rolled back
+#   4. the upgrade succeeds and the bare name moves
+#   5. a failed symlink switch starts the previous build again
 #
 # Everything it creates lives under ${BASE} and is removed on the way out,
 # including the S3 prefix of its private lvstore.
@@ -24,6 +25,8 @@ ROOT="$(cd "${SELF_DIR}/../.." && pwd)"
 REPO="$(cd "${ROOT}/.." && pwd)"
 ORCH="${REPO}/deploy/one-click/scripts/systemd/cube-s3lvol-hot-upgrade.sh"
 REAL_BIN="${ROOT}/app/s3lvol_tgt/s3lvol_tgt"
+OLD_ROOT="${S3LVOL_HOTORCH_OLD_ROOT:-${ROOT}}"
+OLD_BIN="${S3LVOL_HOTORCH_OLD_BIN:-${OLD_ROOT}/app/s3lvol_tgt/s3lvol_tgt}"
 
 BASE="${S3LVOL_HOTORCH_BASE:-/data/s3lvol-hotorch-test}"
 PREFIX="${BASE}/prefix"
@@ -32,7 +35,7 @@ LIBDIR="${BASE}/lib"
 LOGDIR="${BASE}/logs"
 
 export RCOW_REPO_ROOT="${ROOT}"
-export RCOW_LVS_NAME=hotorch
+export RCOW_LVS_NAME="hotorch-${BASHPID}"
 export RCOW_WAL_IMG="${BASE}/wal.img"
 export RCOW_WAL_BDEV=hotorch_wal
 export RCOW_CAPACITY_GB=64
@@ -69,6 +72,13 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 [ -x "${ORCH}" ] || { echo "orchestrator missing: ${ORCH}" >&2; exit 1; }
 [ -x "${REAL_BIN}" ] || { echo "target binary missing: ${REAL_BIN}" >&2; exit 1; }
+[ -x "${OLD_BIN}" ] || { echo "old target binary missing: ${OLD_BIN}" >&2; exit 1; }
+[ -d "${OLD_ROOT}/scripts" ] || { echo "old scripts missing: ${OLD_ROOT}/scripts" >&2; exit 1; }
+if [ "${S3LVOL_HOTORCH_REQUIRE_OLD:-0}" = "1" ] &&
+   [ "$(readlink -f "${OLD_BIN}")" = "$(readlink -f "${REAL_BIN}")" ]; then
+	echo "S3LVOL_HOTORCH_REQUIRE_OLD=1 requires a distinct previous-release binary" >&2
+	exit 1
+fi
 command -v fio >/dev/null || { echo "fio is required" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 
@@ -76,6 +86,22 @@ command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 . "${ROOT}/scripts/rcow_common.sh"
 
 rpc() { rcow_rpc "$@"; }
+
+initial_target_ready() {
+	local connected
+
+	rcow_target_ready || return 1
+	# v0.7.3 predates RCOW_START_READY. Its start script is complete once all
+	# fixed-grid controllers have connected; a current target uses the stronger
+	# explicit marker.
+	if [ "$(readlink -f "${OLD_BIN}")" = "$(readlink -f "${REAL_BIN}")" ]; then
+		rcow_target_start_ready
+		return
+	fi
+	connected="$(rcow_connected_nqns |
+		grep -c "^${RCOW_NQN_PREFIX}" || true)"
+	[ "${connected}" -eq "${RCOW_NUM_SUBSYS}" ]
+}
 
 cleanup() {
 	[ "${CLEANED}" -eq 0 ] || return 0
@@ -93,6 +119,9 @@ cleanup() {
 	# over, and the controllers it connected have to go with it.
 	if [ -x "${ROOT}/scripts/rcow_stop.sh" ]; then
 		"${ROOT}/scripts/rcow_stop.sh" --force >/dev/null 2>&1 || true
+	fi
+	if [ -z "$(rcow_target_instances)" ]; then
+		rcow_discard_writeback_shm "${RCOW_LVS_NAME}"
 	fi
 	if [ -n "${BUCKET:-}" ] && [ -n "${ENDPOINT:-}" ]; then
 		python3 "${ROOT}/test/tools/s3_prefix_rm.py" \
@@ -133,19 +162,23 @@ info "private lvstore ${RCOW_LVS_NAME}, port ${RCOW_LISTEN_PORT}"
 
 # --------------------------------------------------------------------------
 # A version directory the orchestrator accepts: scripts plus bin/s3lvol_tgt.
-# mode is real, crash, or badverify.
+# mode is old, real, crash, attachedfail, or badverify.
 # --------------------------------------------------------------------------
 make_version() {
 	local name="$1" mode="$2"
-	local dir="${PREFIX}/${name}" f base
+	local dir="${PREFIX}/${name}" scripts_root="${ROOT}" f base
+	[ "${mode}" = "old" ] && scripts_root="${OLD_ROOT}"
 	rm -rf "${dir}"
 	mkdir -p "${dir}/bin" "${dir}/scripts"
-	for f in "${ROOT}/scripts/"*; do
+	for f in "${scripts_root}/scripts/"*; do
 		[ -f "${f}" ] || continue
 		base="$(basename "${f}")"
 		ln -s "${f}" "${dir}/scripts/${base}"
 	done
 	case "${mode}" in
+	old)
+		ln -s "${OLD_BIN}" "${dir}/bin/s3lvol_tgt"
+		;;
 	real)
 		ln -s "${REAL_BIN}" "${dir}/bin/s3lvol_tgt"
 		;;
@@ -159,6 +192,21 @@ fi
 exit 1
 EOF
 		chmod +x "${dir}/bin/s3lvol_tgt"
+		;;
+	attachedfail)
+		ln -s "${REAL_BIN}" "${dir}/bin/s3lvol_tgt"
+		rm -f "${dir}/scripts/rcow_start.sh"
+		awk '
+			/^# The orchestrator waits on this/ {
+				print "if [ \"${HOTORCH_FAIL_AFTER_ATTACH:-0}\" = \"1\" ]; then"
+				print "\trcow_err \"test injected a failure after attach\""
+				print "\texit 1"
+				print "fi"
+				print ""
+			}
+			{ print }
+		' "${ROOT}/scripts/rcow_start.sh" >"${dir}/scripts/rcow_start.sh"
+		chmod +x "${dir}/scripts/rcow_start.sh"
 		;;
 	badverify)
 		ln -s "${REAL_BIN}" "${dir}/bin/s3lvol_tgt"
@@ -189,9 +237,10 @@ EOF
 	esac
 }
 
-make_version CubeS3lvol-old real
+make_version CubeS3lvol-old old
 make_version CubeS3lvol-new real
 make_version CubeS3lvol-crash crash
+make_version CubeS3lvol-attachedfail attachedfail
 make_version CubeS3lvol-badverify badverify
 make_version CubeS3lvol-badswitch real
 ln -sfn CubeS3lvol-old "${PREFIX}/CubeS3lvol"
@@ -225,7 +274,12 @@ unset RCOW_COMMON_SOURCED
 export RCOW_REPO_ROOT="${ROOT}"
 export RCOW_TGT_BIN="${PREFIX}/CubeS3lvol/bin/s3lvol_tgt"
 rc=0
-"${PREFIX}/CubeS3lvol/scripts/rcow_start.sh" || rc=\$?
+"${PREFIX}/CubeS3lvol/scripts/rcow_start.sh" || {
+	rc=\$?
+	sleep 2
+	rc=0
+	"${PREFIX}/CubeS3lvol/scripts/rcow_start.sh" || rc=\$?
+}
 if [ "\${rc}" -ne 0 ]; then
 	exit "\${rc}"
 fi
@@ -443,6 +497,8 @@ scenario() {
 		fail "${title}: a stop took the planned teardown"
 	elif grep -qx hot "${BASE}/stop-modes" 2>/dev/null; then
 		pass "${title}: every target stop was a hot stop"
+	elif grep -q 'hot stop complete' "${orch_log}" 2>/dev/null; then
+		pass "${title}: the unsupervised target took the direct hot stop"
 	else
 		fail "${title}: no hot stop was recorded"
 	fi
@@ -454,7 +510,7 @@ scenario() {
 	fi
 	local dmesg_after
 	dmesg_after="$(dmesg 2>/dev/null | grep -c 'Buffer I/O error' || true)"
-	if [ "${dmesg_after}" -eq "${dmesg_before}" ]; then
+	if [ "${dmesg_after}" -le "${dmesg_before}" ]; then
 		pass "${title}: no new Buffer I/O error"
 	else
 		fail "${title}: Buffer I/O error count ${dmesg_before} -> ${dmesg_after}"
@@ -470,10 +526,10 @@ echo "=== bring the data plane up ==="
 }
 deadline=$((SECONDS + RCOW_HOT_START_TIMEOUT))
 while [ "${SECONDS}" -lt "${deadline}" ]; do
-	rcow_target_start_ready && break
+	initial_target_ready && break
 	sleep 2
 done
-rcow_target_start_ready || {
+initial_target_ready || {
 	echo "initial start did not become ready" >&2
 	tail -30 "${LOGDIR}/supervisor.log" >&2 || true
 	exit 1
@@ -491,10 +547,13 @@ done
 [ -b "${dev}" ] || { echo "volume has no block device" >&2; exit 1; }
 pass "volume ${VOL} is ${dev}"
 
-scenario happy CubeS3lvol-new "${PREFIX}/CubeS3lvol-old" 0 CubeS3lvol-new 70
-scenario crash CubeS3lvol-crash "${PREFIX}/CubeS3lvol-new" 1 CubeS3lvol-new 160
-scenario verify CubeS3lvol-badverify "${PREFIX}/CubeS3lvol-new" 1 CubeS3lvol-new 160 \
+scenario crash CubeS3lvol-crash "${PREFIX}/CubeS3lvol-old" 1 CubeS3lvol-old 160
+scenario attached CubeS3lvol-attachedfail "${PREFIX}/CubeS3lvol-old" 1 \
+	CubeS3lvol-attachedfail 160 HOTORCH_FAIL_AFTER_ATTACH=1
+scenario verify CubeS3lvol-badverify "${PREFIX}/CubeS3lvol-attachedfail" 1 \
+	CubeS3lvol-badverify 160 \
 	HOTORCH_FAIL_EXPECT=1
+scenario happy CubeS3lvol-new "${PREFIX}/CubeS3lvol-badverify" 0 CubeS3lvol-new 70
 scenario switch CubeS3lvol-badswitch "${PREFIX}/CubeS3lvol-new" 1 CubeS3lvol-new 100 \
 	BASH_ENV="${LIBDIR}/fail-switch.bash" HOTORCH_FAIL_SWITCH=1
 

@@ -85,6 +85,7 @@ cleanup()
 
 	if [ "${FAIL}" -eq 0 ] && [ -z "${S3LVOL_KEEP_S3:-}" ] && [ -n "${BUCKET}" ]; then
 		for p in "${SRC_LVS}" "${DST_LVS}"; do
+			rcow_discard_writeback_shm "${p}" || true
 			python3 "${PREFIX_RM}" -e "${EP}" -b "${BUCKET}" -r "${RG}" \
 				-p "${p}/" >/dev/null 2>&1 || true
 		done
@@ -191,6 +192,29 @@ print(-1 if not isinstance(rows, list) else len(rows))
 		fi
 		sleep 0.5
 	done
+}
+
+wait_decouple_active()
+{
+	local deadline=$((SECONDS + 30))
+	local n
+
+	while [ "${SECONDS}" -lt "${deadline}" ]; do
+		n="$(rpc rcow_get_decouple 2>/dev/null | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = None
+if isinstance(rows, dict):
+    rows = rows.get("queue", [])
+print(-1 if not isinstance(rows, list) else len(rows))
+' 2>/dev/null || echo -1)"
+		[ "${n}" -gt 0 ] 2>/dev/null && return 0
+		sleep 0.05
+	done
+	fail "template copy did not remain active long enough for a late import"
+	return 1
 }
 
 ctrl_of_nqn()
@@ -364,7 +388,7 @@ tgt_rss_kib()
 # One burst. Writes per-import status and milliseconds under $1.
 fanout_burst()
 {
-	local dir="$1" n="$2" decouple="$3"
+	local dir="$1" n="$2" decouple="$3" submit_late="${4:-false}"
 	local i name pid
 	local -a pids=()
 
@@ -389,6 +413,25 @@ fanout_burst()
 		) &
 		pids+=("$!")
 	done
+	if [ "${submit_late}" = "true" ] && wait_decouple_active; then
+		# Submit before waiting for the creating burst. Those RPCs return only
+		# after the shared template copy has completed, which is too late to
+		# exercise an arrival during COPY_IN_PROGRESS.
+		(
+			local rc
+			if python3 "${RPC_PY}" --sock "${RPC_SOCK}" rcow_import_lvol \
+				"$(printf '{"lvol_name":"fan-late","export_uuid":"%s","lvs_name":"%s","decouple":false}' \
+					"${EXP_UUID}" "${DST_LVS}")" \
+				>"${dir}/fan-late.out" 2>"${dir}/fan-late.err"; then
+				rc=0
+			else
+				rc=1
+			fi
+			echo "${rc}" >"${dir}/fan-late.rc"
+		) &
+		pids+=("$!")
+		: >"${dir}/fan-late.submitted"
+	fi
 	for pid in "${pids[@]}"; do
 		wait "${pid}" || true
 	done
@@ -483,8 +526,9 @@ sample_matches()
 
 delete_fan()
 {
-	local n="$1" extra="${2:-}"
+	local n="$1" extra
 	local i name mark deadline
+	shift
 
 	mark="$(wc -l < "${TGT_LOG}")"
 	: >"${WORKDIR}/delete.err"
@@ -494,11 +538,11 @@ delete_fan()
 			>/dev/null 2>>"${WORKDIR}/delete.err" || \
 			info "delete ${name}: $(tail -n 1 "${WORKDIR}/delete.err" | head -c 200)"
 	done
-	if [ -n "${extra}" ]; then
+	for extra in "$@"; do
 		rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${extra}")" \
 			>/dev/null 2>>"${WORKDIR}/delete.err" || \
 			info "delete ${extra}: $(tail -n 1 "${WORKDIR}/delete.err" | head -c 200)"
-	fi
+	done
 	deadline=$((SECONDS + 60))
 	while :; do
 		if tail -n +"${mark}" "${TGT_LOG}" \
@@ -561,7 +605,21 @@ run_width()
 	echo "=== [fanout ${n}] decouple:true"
 	mark="$(wc -l < "${TGT_LOG}")"
 	dir="${WORKDIR}/true-${n}"
-	fanout_burst "${dir}" "${n}" true
+	fanout_burst "${dir}" "${n}" true true
+	if [ -f "${dir}/fan-late.submitted" ]; then
+		if [ "$(cat "${dir}/fan-late.rc" 2>/dev/null || echo 1)" != "0" ]; then
+			fail "import submitted during the active template copy failed"
+			sed 's/^/       /' "${dir}/fan-late.err"
+			return 1
+		fi
+		out="$(cat "${dir}/fan-late.out")"
+		mode="$(import_mode "${out}")"
+		if [ "${mode}" = "local_clone" ]; then
+			pass "an import arriving during the copy waited and became a local clone"
+		else
+			fail "the import arriving during the copy returned mode ${mode}, want local_clone"
+		fi
+	fi
 	summarize_burst "${dir}" "${n}" "decouple:true n=${n}"
 	ok="$(cat "${dir}/ok")"
 	copies="$(decouple_lines "${mark}")"
@@ -595,7 +653,7 @@ run_width()
 		sample_matches "decouple:true n=${n}" fan-01 "$(printf 'fan-%02d' "${n}")" \
 			|| true
 	fi
-	delete_fan "${n}" fan-probe || return 1
+	delete_fan "${n}" fan-late fan-probe || return 1
 }
 
 # --------------------------------------------------------------------------

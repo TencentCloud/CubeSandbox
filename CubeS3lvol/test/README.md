@@ -407,6 +407,16 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   change; without the flag that case is skipped loudly,
   never silently repeated with the same binary. Owns its lvstore and **must not
   run concurrently with anything else on the machine**.
+- `run_hot_upgrade_orchestrator_test.sh` -- drives the deployment-level
+  `cube-s3lvol-hot-upgrade.sh` while fio stays active. It covers successful
+  replacement plus rollback after startup, post-start layout verification, and
+  symlink-switch failures. Set `S3LVOL_HOTORCH_OLD_ROOT` and
+  `S3LVOL_HOTORCH_OLD_BIN` to a checked-out previous release and its target,
+  and `S3LVOL_HOTORCH_REQUIRE_OLD=1`, for the release-compatibility lane. The
+  startup-crash case proves rollback to that actual old target. A separate
+  post-start verification failure proves that, once the new target can accept
+  I/O, the orchestrator leaves it running instead of risking an old target that
+  cannot replay the new volatile write-back format.
 - `run_hot_upgrade_negative_test.sh` -- the same path with faults injected, one
   scenario per function: a new binary that crashes on start and rolls back; the
   version gate refusing a bumped `ckpt_version` / `journal_op_max` while the

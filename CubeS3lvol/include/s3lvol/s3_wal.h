@@ -1,33 +1,21 @@
 /* Copyright (c) 2026 Tencent Inc.
  * SPDX-License-Identifier: Apache-2.0 */
 /*
- *   s3_wal -- write-ahead log on the local bdev 
+ *   s3_wal -- compatibility log and durability barriers on the local bdev
  *
- *   === Why this exists ===
+ *   === Current role ===
  *
- *   Two independent reasons, and the second one was only discovered by
- *   measurement:
- *
- *   1. Performance (the original motivation): writing straight to S3 turns
- *      every 4 KiB metadata write into a 1 MiB GET plus a 1 MiB PUT.
- *   2. *Correctness*: the direct-to-S3 path loses data under concurrent
- *      partial-chunk writes. chunk_size is 1 MiB, nvmf splits
- *      a 1 MiB write into eight concurrent 128 KiB commands, and all eight run
- *      a read-modify-write cycle against a chunk that does not exist yet. Each
- *      zero-fills a buffer, fills in only its own 128 KiB and PUTs a new
- *      object, so seven eighths of the data is lost. A classic lost update.
- *
- *   The WAL removes the race by construction rather than by locking: user
- *   writes land in the log and are acknowledged from there, and the flusher
- *   later performs *one* read-modify-write per chunk. Concurrent writes to one
- *   chunk are coalesced instead of racing.
+ *   User payloads now live in the process-shared write-back ring. This disk log
+ *   retains two jobs:
+ *     - replay WRITE/ZEROES/UNMAP records produced by pre-shm releases;
+ *     - persist BARRIER records used by legacy/control-plane drain ordering.
+ *   New payload records must not be added back here.
  *
  *   === Durability contract ===
  *
- *   A write is acknowledged only once its batch is durable on the local bdev.
- *   After a crash, replaying the WAL restores every acknowledged write (INV1,
- *   W3). An unacknowledged batch may be lost *in its entirety*; a half-applied
- *   batch must never become visible (W4).
+ *   A barrier completes only after its batch is durable on the local bdev.
+ *   Replay still accepts only complete old-format batches: a trailing partial
+ *   batch is discarded in its entirety.
  *
  *   === Disk layout ===
  *
@@ -48,8 +36,8 @@
  *
  *   === Alignment ===
  *
- *   Entries are variable length and deliberately *not* block aligned; alignment
- *   is a property of the batch. The five invariants  are:
+ *   Legacy entries are variable length and deliberately *not* block aligned;
+ *   alignment is a property of the batch. The five invariants are:
  *
  *     I1 the WAL region base is 4 KiB aligned (guaranteed by the formatter)
  *     I2 seg_size is a multiple of 4 KiB (validated here)
@@ -66,9 +54,7 @@
  *
  *   Same contract as the journal and the chunk map: one WAL belongs to one
  *   lvstore and is only touched on that lvstore's owner thread. No internal
- *   locking. Callers arriving on another thread must bounce first -- see the
- *   threading note in s3_bs_dev.c for why that is mandatory rather than
- *   optional.
+ *   locking.
  */
 
 #ifndef S3LVOL_WAL_H
@@ -95,23 +81,11 @@
 #define S3_WAL_DEFAULT_SEG_SIZE (16 * 1024 * 1024)
 
 /* Batch triggers. Whichever fires first assembles the next batch. */
-#define S3_WAL_BATCH_TARGET_BYTES (128 * 1024)
 #define S3_WAL_BATCH_MAX_OPS      64
 #define S3_WAL_BATCH_MAX_US       200
 
-/* Upper bound on one batch, and therefore on the buffer allocated up front.
- * A single op may not exceed this either. */
-#define S3_WAL_BATCH_BUF_SIZE (2 * 1024 * 1024)
-
-/* Largest payload a single append may carry: the batch buffer minus one entry
- * header, rounded down to a block.
- *
- * Callers have to split against this themselves. It is deliberately not hidden
- * inside the WAL because silently accepting an oversized append would fail the
- * write at submit time. The buffer is larger than one 1 MiB chunk so a normal
- * chunk write plus its entry header stays in one durable batch. */
-#define S3_WAL_MAX_PAYLOAD \
-	(((S3_WAL_BATCH_BUF_SIZE - 64) / S3_WAL_BLOCK_SIZE) * S3_WAL_BLOCK_SIZE)
+/* Upper bound on one batch, and therefore on the buffer allocated up front. */
+#define S3_WAL_BATCH_BUF_SIZE (16 * 1024 * 1024)
 
 /* Backpressure thresholds as a percentage of usable capacity (W5). */
 #define S3_WAL_BACKPRESSURE_ON_PCT  85
@@ -239,37 +213,15 @@ void s3_wal_open(struct s3_local_dev *local_dev, s3_wal_open_cb cb_fn, void *cb_
 void s3_wal_close(struct s3_wal *wal, s3_wal_cb cb_fn, void *cb_arg);
 
 /**
- * Append a data write.
+ * Queue an ordering/durability fence.
  *
- * \c payload must hold nblocks * 4096 bytes and is copied into the batch
- * buffer, so it does not need to stay alive and does not need to be aligned.
- * Copying is what decouples caller alignment from the bdev's requirements.
- * \c payload_len may not exceed S3_WAL_MAX_PAYLOAD.
- *
- * *The write is durable when the callback fires*, not when this returns.
- *
- * \param out_seq Optional. Receives the seq assigned to this entry, *before the
- *callback fires*. Whoever tracks how far the log has been
- *                consumed needs it, and it cannot be recovered afterwards.
- *
- * The callback may run before this function returns when submission fails
- * outright. status is -EAGAIN while the WAL is applying backpressure: the
- * caller must retry rather than treat it as an error (W5).
+ * Its callback runs only after every append queued before it has completed the
+ * WAL write+flush commit unit. It carries no data and replay ignores it. Guest
+ * FLUSH/FUA now completes at shared-memory durability; this primitive remains
+ * for legacy WAL mode and control-plane drain/teardown ordering.
  */
-void s3_wal_append_write(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
-			 const void *payload, uint64_t chunk_index,
-			 uint64_t *out_seq, s3_wal_cb cb_fn, void *cb_arg);
-
-/**
- * Append a metadata-only entry. WRITE_ZEROES and UNMAP carry no payload.
- */
-void s3_wal_append_zeroes(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
-			  uint64_t chunk_index, uint64_t *out_seq,
-			  s3_wal_cb cb_fn, void *cb_arg);
-
-void s3_wal_append_unmap(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
-			 uint64_t chunk_index, uint64_t *out_seq,
-			 s3_wal_cb cb_fn, void *cb_arg);
+void s3_wal_append_barrier(struct s3_wal *wal, uint64_t *out_seq,
+			   s3_wal_cb cb_fn, void *cb_arg);
 
 /**
  * Replay from the last checkpoint position.
@@ -339,6 +291,26 @@ bool s3_wal_should_force_flush(const struct s3_wal *wal);
 
 uint64_t s3_wal_get_next_seq(const struct s3_wal *wal);
 
+/* First sequence that has no bytes in the on-disk log.  Zero before replay
+ * seals it.  Checkpoints must not advance past this: an older binary treats
+ * ckpt_seq as "already in S3" and would skip the entries it still needs. */
+uint64_t s3_wal_disk_seq_limit(const struct s3_wal *wal);
+
+/* Next overlay sequence for a write that is durable in shm, not in the log.
+ * Does not submit bdev I/O and does not change the on-disk super. */
+uint64_t s3_wal_alloc_mem_seq(struct s3_wal *wal);
+
+/* Advance the in-memory cursor past a sequence already stored in shm. */
+void s3_wal_note_mem_seq(struct s3_wal *wal, uint64_t seq);
+/* True only when seq was covered by the persisted S3 checkpoint or belonged
+ * to a closed batch accepted by the most recent replay.  Unlike comparing with
+ * get_next_seq(), this does not mistake a torn record from an older epoch for a
+ * durable one after open bumps the epoch. */
+bool s3_wal_seq_recovered(const struct s3_wal *wal, uint64_t seq);
+/* True when S3 itself already contains seq according to the persisted
+ * checkpoint; such a record needs neither WAL re-append nor an overlay ref. */
+bool s3_wal_seq_checkpointed(const struct s3_wal *wal, uint64_t seq);
+
 struct s3_wal_stats {
 	uint64_t appends;
 	uint64_t batches;
@@ -347,6 +319,7 @@ struct s3_wal_stats {
 	uint64_t replayed_entries;
 	uint64_t dropped_batches;
 	uint64_t segments_released;
+	uint32_t max_batch_ops;
 };
 
 void s3_wal_get_stats(const struct s3_wal *wal, struct s3_wal_stats *out);

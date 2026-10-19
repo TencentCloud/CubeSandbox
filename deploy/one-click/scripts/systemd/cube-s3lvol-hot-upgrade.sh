@@ -32,9 +32,9 @@
 #
 # Exit: 0  the target is on the new build (upgraded, or there was nothing to
 #          upgrade because none was running)
-#       non-zero  it is on the old one, or nothing is running. The caller must
-#          not read this as "the install failed" -- the rest of the install is
-#          independent -- but it must not report the upgrade as done either.
+#       non-zero  rollback happened, nothing is running, or the new build was
+#          kept because it attached before failing verification. The caller
+#          must not report the upgrade as done.
 
 set -u
 
@@ -82,6 +82,7 @@ switch_bare_to() {
 
 # shellcheck source=/dev/null
 . "${NEW_DIR}/scripts/rcow_common.sh"
+RCOW_ROLLBACK_EXPECT="${RCOW_RUN_DIR}/rollback.expected"
 
 # The scripts above resolve RCOW_TGT_BIN through the NEW directory, but the
 # process that is running is from the outgoing one -- and the identity check
@@ -141,7 +142,56 @@ stop_and_confirm() {
 # Attach is not the end of startup. rcow_start.sh still replays the registry
 # and checks the layout afterwards, and RCOW_HOT_START_TIMEOUT covers that
 # whole script rather than process startup.
+legacy_target_ready() {
+  local f nqn state live=0 live_json
+
+  rcow_target_ready || return 1
+  if [ -s "${RCOW_ROLLBACK_EXPECT}" ]; then
+    rcow_verify_active 2 >/dev/null 2>&1 || return 1
+    live_json="$(rcow_rpc rcow_get_bdev '{}' 2>/dev/null)" || return 1
+    LIVE_JSON="${live_json}" python3 - "${RCOW_ROLLBACK_EXPECT}" <<'PY' ||
+import json
+import os
+import sys
+
+fields = ("device_name", "uuid", "subsys", "nsid")
+with open(sys.argv[1]) as stream:
+    expected = json.load(stream)
+live = json.loads(os.environ["LIVE_JSON"])
+
+def keyed(entries):
+    return {entry.get("device_name", ""): entry for entry in entries}
+
+want = keyed(expected)
+have = keyed(live)
+if want.keys() != have.keys():
+    raise SystemExit(1)
+for name in want:
+    if any(want[name].get(field) != have[name].get(field) for field in fields):
+        raise SystemExit(1)
+PY
+      return 1
+  elif [ -s "${RCOW_HOT_SNAPSHOT}" ]; then
+    rcow_verify_active --expect "${RCOW_HOT_SNAPSHOT}" 2 >/dev/null 2>&1 ||
+      return 1
+  else
+    return 1
+  fi
+  for f in /sys/class/nvme/nvme*/subsysnqn; do
+    [ -r "${f}" ] || continue
+    nqn="$(cat "${f}" 2>/dev/null || true)"
+    case "${nqn}" in
+    "${RCOW_NQN_PREFIX}"*)
+      state="$(cat "${f%/subsysnqn}/state" 2>/dev/null || true)"
+      [ "${state}" = "live" ] && live=$((live + 1))
+      ;;
+    esac
+  done
+  [ "${live}" -eq "${RCOW_NUM_SUBSYS}" ]
+}
+
 start_and_wait() {
+  local legacy_ok="${1:-0}"
   systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
   systemctl start "${SERVICE}" >/dev/null 2>&1 || return 1
   # rcow_target_ready is true once the lvstore is attached. rcow_start.sh is
@@ -153,13 +203,19 @@ start_and_wait() {
     if rcow_target_start_ready; then
       return 0
     fi
+    # Releases before start.ready can still be a rollback target. Their
+    # startup is complete enough once the lvstore is attached and every
+    # recorded active volume resolves again.
+    if [ "${legacy_ok}" = "legacy" ] && legacy_target_ready; then
+      return 0
+    fi
     sleep 2
   done
   if [ -z "$(rcow_target_instances)" ]; then
     warn "no target came up within ${RCOW_HOT_START_TIMEOUT}s"
   elif rcow_target_ready; then
     warn "the lvstore is attached but rcow_start.sh has not finished after ${RCOW_HOT_START_TIMEOUT}s"
-    warn "  replay or the layout check did not finish; the upgrade will roll back"
+    warn "  replay or the layout check did not finish"
   else
     warn "a target is running but has still not attached its lvstore after ${RCOW_HOT_START_TIMEOUT}s"
     warn "  it is not serving, and the rest of the install is waiting on it"
@@ -262,6 +318,21 @@ if [ -n "${OLD_DIR}" ] && [ ! -x "${OLD_DIR}/scripts/rcow_upgrade.sh" ]; then
   REASON="the running build has no scripts/rcow_upgrade.sh, so it cannot flush online"
 fi
 
+# A cold stop disconnects the controllers, so device paths may change and this
+# cannot be the success-path layout check. It still records the complete set of
+# active volumes: if candidate startup fails, legacy rollback is not declared
+# ready until the old target has restored every one with the same identity and
+# placement.
+rm -f "${RCOW_ROLLBACK_EXPECT}" "${RCOW_ROLLBACK_EXPECT}.tmp"
+if [ "${MODE}" = "cold" ]; then
+  if rcow_rpc rcow_get_bdev '{}' >"${RCOW_ROLLBACK_EXPECT}.tmp" 2>/dev/null; then
+    mv -f "${RCOW_ROLLBACK_EXPECT}.tmp" "${RCOW_ROLLBACK_EXPECT}"
+  else
+    warn "could not snapshot active volumes for cold rollback readiness"
+    rm -f "${RCOW_ROLLBACK_EXPECT}.tmp"
+  fi
+fi
+
 # ==========================================================================
 if [ "${MODE}" = "hot" ]; then
   log "upgrading in place: a live sandbox's I/O pauses for the swap, nothing else"
@@ -342,11 +413,15 @@ fi
 if ! switch_bare_to "${NEW_VERSION}"; then
   warn "could not point ${BARE} at ${NEW_VERSION}; the target is already stopped"
   if [ -n "${OLD_DIR}" ] && switch_bare_to "$(basename "${OLD_DIR}")"; then
-    start_and_wait || true
+    start_and_wait legacy || true
   fi
   exit 1
 fi
 log "the bare name now points at ${NEW_VERSION}"
+if ! rm -f "${RCOW_START_ATTACHED}" "${RCOW_START_ATTACHED}.tmp"; then
+  warn "could not clear the candidate attach marker ${RCOW_START_ATTACHED}"
+  exit 1
+fi
 
 # The hot path leaves a snapshot from its own online step, so the layout can be
 # compared position by position. A cold stop has none -- its stop is the planned
@@ -365,13 +440,38 @@ verify() {
 }
 
 # Not silenced: when this fails, which fields moved is the operator's only clue.
-if start_and_wait && verify; then
-  log "upgraded; ${VERIFY_NOTE}"
-  exit 0
+NEW_STARTED=0
+if start_and_wait; then
+  NEW_STARTED=1
+  if verify; then
+    log "upgraded; ${VERIFY_NOTE}"
+    exit 0
+  fi
+fi
+
+# Once the replacement has served I/O it may have acknowledged writes into a
+# newer volatile write-back format that the old target cannot replay. Killing
+# it and automatically starting an old release can therefore lose acknowledged
+# data even though both releases understand the persistent journal. Keep the
+# replacement running and require operator recovery with this version. A
+# startup failure is different: that candidate never became ready, so no I/O
+# was acknowledged by it and rollback below is safe.
+if [ "${NEW_STARTED}" -eq 1 ]; then
+  warn "the new build is serving but its layout verification failed"
+  warn "refusing automatic rollback: the previous build may not understand writes acknowledged by the new target"
+  warn "the new build remains running and ${BARE} remains on ${NEW_VERSION}; repair or retry with this version"
+  exit 1
+fi
+if [ -s "${RCOW_START_ATTACHED}" ]; then
+  warn "the new build attached the lvstore before startup failed"
+  warn "refusing automatic rollback: it may have created volatile write-back records the previous build cannot replay"
+  warn "${BARE} remains on ${NEW_VERSION}; restart or repair with this version"
+  exit 1
 fi
 
 # Roll back without the planned stop. The new process may already have attached
-# the lvstore and resumed uploads; stop_and_confirm would disconnect the
+# but did not reach the point at which its lvstore was published; stopping the
+# failed process is therefore safe. stop_and_confirm would disconnect the
 # initiator and delete the host's gendisks on the way back to the old binary.
 warn "the new build did not come up with the layout intact; rolling back to ${OLD_DIR}"
 CANDIDATE=""
@@ -387,7 +487,7 @@ if [ -n "${OLD_DIR}" ]; then
     warn "could not point ${BARE} back at $(basename "${OLD_DIR}")"
     exit 1
   fi
-  if start_and_wait; then
+  if start_and_wait legacy; then
     warn "rolled back to the previous build; it is running and this upgrade did not happen"
   else
     warn "the previous build did not come back either: recover by hand, see the runbook"

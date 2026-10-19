@@ -38,6 +38,11 @@
 
 #include "s3lvol/s3_flusher.h"
 #include "s3lvol/s3_wal.h"
+#include "s3lvol/s3_writeback.h"
+
+#define S3_FLUSHER_HEAD_SCAN_CHUNKS 32u
+#define S3_FLUSHER_HEAD_SCAN_RECORDS 1024u
+#define S3_FLUSHER_HEAD_MAX_IN_FLIGHT 32u
 
 struct s3_flusher {
 	struct s3_overlay          *overlay;
@@ -45,12 +50,14 @@ struct s3_flusher {
 	/* Optional: without a WAL there is nothing to truncate, which is the
 	 * mode the unit test uses. */
 	struct s3_wal              *wal;
+	struct s3_writeback        *writeback;
 
 	s3_flusher_upload_fn        upload_fn;
 	void                       *upload_ctx;
 
 	uint32_t                    max_concurrent;
 	uint32_t                    in_flight;
+	uint32_t                    head_in_flight;
 
 	struct spdk_poller *poller;
 
@@ -103,6 +110,7 @@ struct s3_flusher {
 struct flush_req {
 	struct s3_flusher              *flusher;
 	struct s3_overlay_flush_view    view;
+	bool                            ring_head;
 };
 
 static void flusher_check_drain(struct s3_flusher *f);
@@ -163,6 +171,17 @@ flusher_advance_wal(struct s3_flusher *f)
 		safe_seq = min_seq - 1;
 	}
 
+	/* Memory-only write-back sequences are not in the log.  Persisting
+	 * one as ckpt_seq would make an older binary skip WAL entries that
+	 * this process has not necessarily flushed yet. */
+	{
+		uint64_t disk_limit = s3_wal_disk_seq_limit(f->wal);
+
+		if (disk_limit != 0 && safe_seq >= disk_limit) {
+			safe_seq = disk_limit - 1;
+		}
+	}
+
 	if (safe_seq <= f->truncated_seq) {
 		return;
 	}
@@ -213,6 +232,10 @@ flusher_upload_done(void *cb_arg, int status)
 
 	assert(f->in_flight > 0);
 	f->in_flight--;
+	if (req->ring_head) {
+		assert(f->head_in_flight > 0);
+		f->head_in_flight--;
+	}
 
 	if (status == 0) {
 		f->stats.chunks_flushed++;
@@ -238,21 +261,14 @@ flusher_upload_done(void *cb_arg, int status)
 	flusher_check_suspend(f);
 }
 
-static void
-flusher_start_one(struct s3_flusher *f, uint64_t chunk_index)
+static int
+flusher_submit_req(struct s3_flusher *f, struct flush_req *req,
+		   uint64_t chunk_index, bool ring_head)
 {
-	struct flush_req *req;
 	int rc;
 
-	req = calloc(1, sizeof(*req));
-	if (!req) {
-		/* The chunk is off the queue, so put it back by leaving it dirty
-		 * and letting the next write or the poller re-queue it. Nothing
-		 * was claimed yet, so no data is at risk. */
-		SPDK_ERRLOG("Out of memory starting a chunk flush\n");
-		return;
-	}
 	req->flusher = f;
+	req->ring_head = ring_head;
 
 	rc = s3_overlay_flush_begin(f->overlay, chunk_index, &req->view);
 	if (rc != 0) {
@@ -260,23 +276,106 @@ flusher_start_one(struct s3_flusher *f, uint64_t chunk_index)
 		 * being queued and now. -EBUSY cannot happen -- a chunk with a
 		 * live flush is never on the queue. */
 		if (rc != -ENOENT) {
-			SPDK_ERRLOG("Unexpected flush_begin(%" PRIu64 ") result: "
-				    "%d\n", chunk_index, rc);
+			SPDK_ERRLOG("Unexpected %s flush_begin(%" PRIu64
+				    ") result: %d\n",
+				    ring_head ? "ring-head" : "queued",
+				    chunk_index, rc);
 		}
 		free(req);
-		return;
+		return rc;
 	}
 
 	f->in_flight++;
+	if (ring_head) {
+		f->head_in_flight++;
+		f->stats.ring_head_rounds++;
+	}
 	f->stats.rounds++;
 
 	f->upload_fn(f->upload_ctx, &req->view, flusher_upload_done, req);
+	return 0;
+}
+
+static int
+flusher_start_chunk(struct s3_flusher *f, uint64_t chunk_index, bool ring_head)
+{
+	struct flush_req *req;
+
+	/* Allocate before flush_begin dequeues the chunk. An allocation failure
+	 * therefore leaves it visible to the next scheduling pass. */
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("Out of memory starting a chunk flush\n");
+		return -ENOMEM;
+	}
+	return flusher_submit_req(f, req, chunk_index, ring_head);
+}
+
+static int
+flusher_start_next(struct s3_flusher *f, bool force)
+{
+	struct flush_req *req;
+	uint64_t chunk_index;
+	int rc;
+
+	/* next_dirty dequeues its result, so reserve the request first. */
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("Out of memory starting a chunk flush\n");
+		return -ENOMEM;
+	}
+	rc = s3_overlay_next_dirty(f->overlay, force, &chunk_index);
+	if (rc != 0) {
+		free(req);
+		return rc;
+	}
+	return flusher_submit_req(f, req, chunk_index, false);
+}
+
+static void
+flusher_start_ring_head(struct s3_flusher *f)
+{
+	uint64_t chunks[S3_FLUSHER_HEAD_SCAN_CHUNKS];
+	uint32_t count = 0;
+	int rc;
+
+	if (f->in_flight >= f->max_concurrent ||
+	    f->head_in_flight >= S3_FLUSHER_HEAD_MAX_IN_FLIGHT) {
+		return;
+	}
+	rc = s3_writeback_collect_head_chunks(f->writeback, chunks,
+					      SPDK_COUNTOF(chunks),
+					      S3_FLUSHER_HEAD_SCAN_RECORDS,
+					      &count);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to inspect write-back ring head: %d\n", rc);
+		return;
+	}
+	for (uint32_t i = 0;
+	     i < count &&
+	     f->head_in_flight < S3_FLUSHER_HEAD_MAX_IN_FLIGHT &&
+	     f->in_flight < f->max_concurrent;
+	     i++) {
+		/* Ring records remain pending until their upload completes, so a
+		 * later scan naturally sees chunks already owned by an earlier
+		 * round.  Do not drive those through flush_begin again: besides
+		 * being guaranteed -EBUSY, logging that expected result on every
+		 * completion can dominate the owner reactor under pressure. */
+		if (s3_overlay_chunk_is_flushing(f->overlay, chunks[i])) {
+			f->stats.ring_head_in_flight_skips++;
+			continue;
+		}
+		rc = flusher_start_chunk(f, chunks[i], true);
+		if (rc == -ENOMEM) {
+			break;
+		}
+	}
 }
 
 void
 s3_flusher_kick(struct s3_flusher *f)
 {
-	bool force;
+	bool force_all, force_head;
 
 	if (!f) {
 		return;
@@ -295,20 +394,26 @@ s3_flusher_kick(struct s3_flusher *f)
 	 * (85%) is too late on a small WAL: 4K random never fills a chunk, the
 	 * overlay's 45 s age has not expired, and writes hit the cliff with the
 	 * flusher still idle. Half full is still a buffer, not a refusal. */
-	force = (f->drain_cb != NULL) || s3_wal_should_force_flush(f->wal);
+	force_all = (f->drain_cb != NULL) || s3_wal_should_force_flush(f->wal);
+	force_head = !force_all &&
+		s3_writeback_should_force_flush(f->writeback);
+
+	/* Fill the default upload window from exact ring-head blockers. A caller
+	 * configured above that default leaves its remaining slots to full/aged
+	 * chunks below. */
+	if (force_head && !f->stopping && !f->suspended && !f->drain_expired) {
+		flusher_start_ring_head(f);
+	}
 
 	/* An expired drain starts no further round either: refilling would push the
 	 * moment it can report as far away as the writes keep coming. */
 	while (!f->stopping && !f->suspended && !f->drain_expired &&
 	       f->in_flight < f->max_concurrent) {
-		uint64_t chunk_index;
-
-		if (s3_overlay_next_dirty(f->overlay, force, &chunk_index) != 0) {
+		if (flusher_start_next(f, force_all || force_head) != 0) {
 			/* -ENOENT nothing dirty, -EAGAIN dirty but held back. The
 			 * poller comes round again either way. */
 			break;
 		}
-		flusher_start_one(f, chunk_index);
 	}
 
 	flusher_check_drain(f);
@@ -581,6 +686,33 @@ s3_flusher_resume(struct s3_flusher *f)
  * Create / destroy
  * ========================================================================== */
 
+/* opts->max_concurrent wins. Otherwise S3LVOL_FLUSH_MAX_CONCURRENT overrides
+ * the compiled default so a probe can raise PUT concurrency without a rebuild
+ * of the call sites, which all pass a NULL opts today. */
+static uint32_t
+flusher_max_concurrent(const struct s3_flusher_opts *opts)
+{
+	const char *value;
+	char *end = NULL;
+	unsigned long n;
+
+	if (opts && opts->max_concurrent != 0) {
+		return opts->max_concurrent;
+	}
+	value = getenv("S3LVOL_FLUSH_MAX_CONCURRENT");
+	if (!value || value[0] == '\0') {
+		return S3_FLUSHER_DEFAULT_MAX_CONCURRENT;
+	}
+	errno = 0;
+	n = strtoul(value, &end, 10);
+	if (errno != 0 || end == value || *end != '\0' || n < 1 || n > 4096) {
+		SPDK_WARNLOG("Ignoring invalid S3LVOL_FLUSH_MAX_CONCURRENT='%s'\n",
+			     value);
+		return S3_FLUSHER_DEFAULT_MAX_CONCURRENT;
+	}
+	return (uint32_t)n;
+}
+
 int
 s3_flusher_create(struct s3_overlay *overlay, struct s3_wal *wal,
 		  s3_flusher_upload_fn upload_fn, void *upload_ctx,
@@ -603,8 +735,7 @@ s3_flusher_create(struct s3_overlay *overlay, struct s3_wal *wal,
 	f->upload_fn  = upload_fn;
 	f->upload_ctx = upload_ctx;
 
-	f->max_concurrent = (opts && opts->max_concurrent) ?
-			    opts->max_concurrent : S3_FLUSHER_DEFAULT_MAX_CONCURRENT;
+	f->max_concurrent = flusher_max_concurrent(opts);
 	period_us = (opts && opts->poll_period_us) ?
 		    opts->poll_period_us : S3_FLUSHER_DEFAULT_POLL_US;
 
@@ -619,6 +750,15 @@ s3_flusher_create(struct s3_overlay *overlay, struct s3_wal *wal,
 
 	*out = f;
 	return 0;
+}
+
+void
+s3_flusher_set_writeback(struct s3_flusher *f, struct s3_writeback *writeback)
+{
+	if (!f) {
+		return;
+	}
+	f->writeback = writeback;
 }
 
 void

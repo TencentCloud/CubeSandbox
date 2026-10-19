@@ -237,6 +237,8 @@ struct s3lvol_lvstore *s3lvol_lvstore_find_by_lvs(struct spdk_lvol_store *store)
 
 struct spdk_lvol_store *s3lvol_lvstore_get_lvs(struct s3lvol_lvstore *lvs);
 const char             *s3lvol_lvstore_get_name(struct s3lvol_lvstore *lvs);
+bool                    s3lvol_lvstore_is_unloading(
+				const struct s3lvol_lvstore *lvs);
 
 /**
  * The S3 client this lvstore reads and writes through. Its bucket and prefix are
@@ -1044,6 +1046,11 @@ void s3lvol_snapshot_pending_clear_lvs(const struct spdk_uuid *lvs_uuid);
  */
 bool s3lvol_export_inflight_pinning(struct s3lvol_lvstore *lvs,
 				    const char *snapshot_name);
+
+/* True while an export/import operation still retains raw pointers into this
+ * lvstore. Persistent export/import registry entries do not count: only work
+ * whose completion would dereference the lvstore blocks unload. */
+bool s3lvol_xfer_pending(const struct s3lvol_lvstore *lvs);
 
 /* The two ends of the lease clock, together because they are one decision.
  *

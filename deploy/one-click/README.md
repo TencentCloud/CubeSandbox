@@ -249,14 +249,21 @@ inherit one.
     NQN/(subsys, nsid)/UUID grid, so the host reconnects to the same
     `/dev/nvmeXnY` and a sandbox's I/O only pauses (about 8s). The initiator is
     never disconnected and the lvstore never unloaded. Anything the checkpoint
-    could not push is still in the WAL and the replacement replays it, so the
-    pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`). This runs
+    could not push is in the shared-memory write-back ring, not the disk WAL,
+    and the replacement replays that ring. A node reboot loses records that
+    have not reached S3. The pre-kill flush is skipped by default
+    (`RCOW_HOT_FLUSH_MS=0`). Once the new process is serving, or has attached
+    the lvstore, the script refuses to roll back onto the previous binary.
+    This runs
     `cube-s3lvol-hot-upgrade.sh` **before** the rest of the install stops
     anything, because the prepare and the layout snapshot both need the running
     target and the S3 endpoint.
   - A swap that does not come back with the layout intact is **rolled back** to
-    the previous version; `install.sh` still finishes the rest and then exits
-    non-zero. The node is complete but on the old s3lvol.
+    the previous version only when the new process never started serving and
+    never attached the lvstore. After either of those, the script leaves the
+    new build running. `install.sh` still finishes the rest and then exits
+    non-zero. When a rollback did run, the node is complete but on the old
+    s3lvol.
   - `wal_bdev.img` is **never overwritten** (created only on first install; its
     size fixes the journal/WAL layout), and the `RCOW_*` settings in
     `.one-click.env` are merged and kept across the upgrade.
@@ -287,6 +294,11 @@ inherit one.
   tool — no awscli. A hand-written `s3.cfg` without the one-click sentinel
   is left alone. There is **no fallback** from the old `/data/cubelet/cos.cfg`;
   rename it and switch to the new field names.
+- **Shared-memory sizing**: `RCOW_WRITEBACK_MB` controls the payload ring
+  reserved in `/dev/shm` for the lvstore (default 4096 MiB, range 64–4096).
+  `S3LVOL_WRITEBACK_TOTAL_MB` is the target-wide cap (default 8192 MiB).
+  The installer persists both values and startup refuses before launching the
+  target when tmpfs cannot reserve the requested ring.
 
 ### Digital Assistant Environment Variables
 

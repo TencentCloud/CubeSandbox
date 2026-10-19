@@ -54,9 +54,9 @@ The first start creates the sparse WAL if it is missing; `journalMB` / `walMB` /
 
 ## Storage requirements on every node
 
-Every node that runs the s3lvol target needs about **2 CPU + 19 GiB RAM**; x86_64 hosts need AVX2 (Haswell). This includes the default 1 GiB whole-object RAM cache (`RCOW_CACHE_HOT_BUFS=1024`); set it to `0` for disk-only caching.
+Every node that runs the s3lvol target needs about **2 CPU + 23 GiB RAM**; x86_64 hosts need AVX2 (Haswell). This includes the default 1 GiB whole-object RAM cache (`RCOW_CACHE_HOT_BUFS=1024`) and the default 4 GiB `/dev/shm` write-back ring; set the cache to `0` for disk-only caching.
 
-Snapshot objects live in shared S3, but **every node that runs the s3lvol target also needs a local WAL image**. Cross-node restore depends on it: writes to the snapshot are staged on local disk first and flushed to S3 asynchronously, and a node without the image can neither take snapshots nor restore them.
+Snapshot objects live in shared S3, but **every node that runs the s3lvol target also needs a local WAL image**. A node without the image can neither take snapshots nor restore them. Acknowledged writes that have not reached S3 sit in the `/dev/shm` write-back ring, not in the disk WAL. A hot-upgrade replacement process, or a replacement Kubernetes Pod using the same host `/dev/shm`, replays that ring on the same node. A node reboot loses records that have not reached S3.
 
 ### The WAL image
 
@@ -69,7 +69,7 @@ The default 512 GiB is three regions:
 | Region | Default size | Purpose |
 |--------|-------------|---------|
 | Journal | 1024 MiB | records of in-flight writes, replayed when the lvstore is attached |
-| WAL | 32768 MiB (32 GiB) | locally staged writes before they are flushed to S3 |
+| WAL | 32768 MiB (32 GiB) | on-disk region that replays records written by 0.7.2/0.7.3; new acknowledged writes that have not reached S3 live in the `/dev/shm` write-back ring |
 | Chunk cache | 490496 MiB (≈479 GiB) | local cache of recently written chunks |
 
 > The image is **sparse**: provisioning 512 GiB of logical space does not consume 512 GiB of disk up front. Plan physical disk usage around the write working set, not the logical size.

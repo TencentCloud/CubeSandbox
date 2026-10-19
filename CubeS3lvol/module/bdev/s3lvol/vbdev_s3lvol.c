@@ -37,34 +37,31 @@
 static bool g_s3lvol_initialized = false;
 
 /* Compute "the set of cores allowed for background threads" =
- * this process's usable cores - reactor cores.
+ * configured cores - reactor cores.
  *
- * Usable cores come from sched_getaffinity(), not
- * sysconf(_SC_NPROCESSORS_CONF): the former reflects the limits actually
- * imposed by cgroup / taskset, which is what is correct inside a container.
- *
- * Reactor cores are enumerated with SPDK_ENV_FOREACH_CORE() -- asking the env
- * layer for the lcores actually enabled is more reliable than parsing the core
- * mask string.
- *
- * Note no fixed cores are ever excluded. The reference implementation
- * (in-house bdev_erofs) has a block that unconditionally skips cores 0-3;
- * that is specific to a primary/standby dual-process deployment, where the
- * peer's reactors are invisible to this process and must be reserved blindly.
- * s3lvol has no such deployment model; the complement is enough.
+ * By the time module_init runs, DPDK EAL has already pinned the calling main
+ * thread to the master lcore, so sched_getaffinity(0) returns only that one
+ * core rather than the machine's cpuset. Populate from
+ * sysconf(_SC_NPROCESSORS_CONF) instead and carve out the reactor cores.
  */
 static int
 s3lvol_build_spawner_cpuset(cpu_set_t *out)
 {
 	cpu_set_t online;
 	uint32_t core;
+	long nprocs;
 
 	CPU_ZERO(out);
 	CPU_ZERO(&online);
 
-	if (sched_getaffinity(0, sizeof(online), &online) != 0) {
-		SPDK_ERRLOG("sched_getaffinity failed: %s\n", strerror(errno));
-		return -errno;
+	nprocs = sysconf(_SC_NPROCESSORS_CONF);
+	if (nprocs <= 0) {
+		SPDK_ERRLOG("sysconf(_SC_NPROCESSORS_CONF) failed: %ld\n",
+			    nprocs);
+		return -EINVAL;
+	}
+	for (long i = 0; i < nprocs && i < CPU_SETSIZE; i++) {
+		CPU_SET((int)i, &online);
 	}
 
 	memcpy(out, &online, sizeof(online));
