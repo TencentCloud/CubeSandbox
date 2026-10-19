@@ -213,7 +213,11 @@ _tc_migrate_trusted_ca_mirror() {
 #   read as inline-managed or, with existing_config_map also set, the
 #   reconciler would delete an operator-owned ConfigMap terraform would
 #   never recreate. Unparseable values also read as not-managed (fail open
-#   toward "no delete"; terraform hard-fails on them at plan time anyway).
+#   toward "no delete"). Values HCL accepts but jq does not (trailing
+#   comma, `#`/`//` comments) also read as not-managed: terraform does NOT
+#   hard-fail on that class at plan time, so with such a value deployed
+#   and the ConfigMap drifted out of state, the next apply fails with
+#   `already exists` — re-run with a JSON-clean value.
 #   The mirror branch is a fallback for an UNSET env var. In a live
 #   create.sh run it is effectively unreachable (load_resolved_tfvars_file
 #   suspends the mirror file before the reconciler gate runs, and the
