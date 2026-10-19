@@ -9,10 +9,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,6 +167,59 @@ func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 
 	if err := EnsurePmemRootfs(context.Background(), "cubebox", "artifact-4"); err != nil {
 		t.Fatalf("EnsurePmemRootfs error=%v", err)
+	}
+}
+
+func TestEnsurePmemRootfsCleansUpFailedDownload(t *testing.T) {
+	for _, failure := range []string{"interrupted response", "checksum mismatch"} {
+		t.Run(failure, func(t *testing.T) {
+			initTestPmemPaths(t, t.TempDir())
+			content := bytes.Repeat([]byte("rootfs"), 1024)
+			sum := sha256.Sum256(content)
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+				if attempts.Add(1) == 1 {
+					if failure == "interrupted response" {
+						_, _ = w.Write(content[:len(content)/2])
+					} else {
+						_, _ = w.Write(bytes.Repeat([]byte("x"), len(content)))
+					}
+					return
+				}
+				_, _ = w.Write(content)
+			}))
+			defer server.Close()
+			ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{
+				StorageMedia: "ext4",
+				Annotations: map[string]string{
+					constants.MasterAnnotationRootfsArtifactURL:    server.URL,
+					constants.MasterAnnotationRootfsArtifactSHA256: hex.EncodeToString(sum[:]),
+				},
+			})
+			path := rootfsPath(t, pmem.CurrentPaths(), "cubebox", "rfs-failed-download")
+			if err := EnsurePmemRootfs(ctx, "cubebox", "rfs-failed-download"); err == nil {
+				t.Fatal("failed download unexpectedly succeeded")
+			}
+			for _, file := range []string{path, path + ".download"} {
+				if _, err := os.Stat(file); !os.IsNotExist(err) {
+					t.Fatalf("failed download left %s: %v", file, err)
+				}
+			}
+			if err := EnsurePmemRootfs(ctx, "cubebox", "rfs-failed-download"); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(got, content) {
+				t.Fatalf("retry content mismatch: %v", err)
+			}
+			if _, err := os.Stat(path + ".download"); !os.IsNotExist(err) {
+				t.Fatalf("successful download left temporary file: %v", err)
+			}
+			if got := attempts.Load(); got != 2 {
+				t.Fatalf("download attempts = %d, want 2", got)
+			}
+		})
 	}
 }
 
@@ -381,4 +436,52 @@ func rootfsPath(t *testing.T, paths pmem.Paths, instanceType, id string) string 
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestDestroyWaitsForArtifactPreparation(t *testing.T) {
+	initTestPmemPaths(t, t.TempDir())
+	writeSharedKernelFile(t, bytes.Repeat([]byte("k"), 2048))
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write(bytes.Repeat([]byte("r"), 2048))
+	}))
+	defer server.Close()
+	defer unblock()
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{StorageMedia: "ext4", Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL: server.URL,
+	}})
+	prepared := make(chan error, 1)
+	go func() { prepared <- EnsurePmemFile(ctx, "cubebox", "rfs-race") }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("download did not start")
+	}
+	destroyCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var checked bool
+	err := DestroyPmemArtifact(destroyCtx, "cubebox", "rfs-race", func(string) (bool, error) { checked = true; return false, nil })
+	if !errors.Is(err, context.DeadlineExceeded) || checked {
+		t.Fatalf("destroy must wait before checking use: err=%v checked=%v", err, checked)
+	}
+	unblock()
+	if err := <-prepared; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pmem.GetRawKernelFilePath("cubebox", "rfs-race")); err != nil {
+		t.Fatal(err)
+	}
+	if err := DestroyPmemArtifact(context.Background(), "cubebox", "rfs-race", func(string) (bool, error) { return true, nil }); !errors.Is(err, ErrArtifactInUse) {
+		t.Fatalf("in-use artifact: %v", err)
+	}
+	if err := DestroyPmemArtifact(context.Background(), "cubebox", "rfs-race", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rootfsPath(t, pmem.CurrentPaths(), "cubebox", "rfs-race")); !os.IsNotExist(err) {
+		t.Fatalf("artifact survived delete: %v", err)
+	}
 }

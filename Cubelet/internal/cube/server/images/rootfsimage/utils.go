@@ -29,10 +29,27 @@ import (
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
-var pmemFileLocks = utils.NewResourceLocks()
+var pmemArtifactLocks = utils.NewResourceLocks()
+
+// lockPmemArtifact serializes preparation, companion-file writes and deletion
+// using the whole artifact directory, independent of its filesystem format.
+func lockPmemArtifact(ctx context.Context, instanceType, imageRef string) (func(), error) {
+	if err := pathutil.ValidateSafeID(instanceType); err != nil {
+		return nil, fmt.Errorf("invalid instanceType: %w", err)
+	}
+	if err := pathutil.ValidateSafeID(imageRef); err != nil {
+		return nil, fmt.Errorf("invalid imageRef: %w", err)
+	}
+	return pmemArtifactLocks.LockContext(ctx, filepath.Join(pmem.GetPmemBasePath(instanceType), imageRef))
+}
 
 func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
-	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
+	unlock, err := lockPmemArtifact(ctx, instanceType, imageRef)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := ensurePmemRootfs(ctx, instanceType, imageRef); err != nil {
 		return err
 	}
 	return ensureArtifactRuntimeFiles(ctx, instanceType, imageRef)
@@ -40,15 +57,16 @@ func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
 
 // EnsurePmemRootfs ensures the rootfs artifact exists locally.
 func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error {
-	if instanceType == "" || imageRef == "" {
-		return fmt.Errorf("instanceType or imageRef is empty")
+	unlock, err := lockPmemArtifact(ctx, instanceType, imageRef)
+	if err != nil {
+		return err
 	}
-	if err := pathutil.ValidateSafeID(instanceType); err != nil {
-		return fmt.Errorf("invalid instanceType: %w", err)
-	}
-	if err := pathutil.ValidateSafeID(imageRef); err != nil {
-		return fmt.Errorf("invalid imageRef: %w", err)
-	}
+	defer unlock()
+	return ensurePmemRootfs(ctx, instanceType, imageRef)
+}
+
+// ensurePmemRootfs requires the artifact lock to be held by its caller.
+func ensurePmemRootfs(ctx context.Context, instanceType, imageRef string) error {
 	spec := constants.GetImageSpec(ctx)
 	format := ""
 	if spec != nil {
@@ -58,14 +76,6 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 	if err != nil {
 		return err
 	}
-	// CreateImage and node-distribution requests may legitimately reuse the
-	// same artifact. Lock at this shared entry point so every writer of the
-	// fixed .download path is serialized and waiters recheck the final file.
-	unlock, err := pmemFileLocks.LockContext(ctx, imagePath)
-	if err != nil {
-		return err
-	}
-	defer unlock()
 
 	exist, err := utils.FileExistAndValid(imagePath)
 	if err != nil {
@@ -125,6 +135,7 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tmpPath)
 	defer f.Close()
 	hasher := sha256.New()
 	const sparseBufSize = 1024 * 1024 // 1 MiB
@@ -136,6 +147,12 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		if !strings.EqualFold(gotSHA, expectedSHA) {
 			return fmt.Errorf("artifact sha256 mismatch, got %s want %s", gotSHA, expectedSHA)
 		}
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync downloaded artifact: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close downloaded artifact: %w", err)
 	}
 	if err := os.Rename(tmpPath, imagePath); err != nil {
 		return err
@@ -251,6 +268,11 @@ func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int
 
 // RefreshArtifactRuntimeFiles rewrites runtime companion files from the current shared sources.
 func RefreshArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef string) error {
+	unlock, err := lockPmemArtifact(ctx, instanceType, imageRef)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return refreshKernelFile(ctx, instanceType, imageRef)
 }
 
