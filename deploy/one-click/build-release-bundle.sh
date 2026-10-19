@@ -54,6 +54,10 @@ MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert-v1.4.4
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 
+# Validate the host WebUI toolchain before guest-image generation or packaging.
+# A caller supplying a prebuilt dist does not need npm.
+require_web_build_prerequisites "${WEB_DIST_OVERRIDE}"
+
 CUBE_VERSION_FROM_ENV="${CUBE_VERSION:-}"
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 : "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"

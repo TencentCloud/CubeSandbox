@@ -72,6 +72,12 @@ require_cmd() {
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
 }
 
+require_web_build_prerequisites() {
+  local web_dist_override="${1:-}"
+  [[ -n "${web_dist_override}" ]] && return 0
+  require_cmd npm
+}
+
 _version_trim_leading_zeroes() {
   local value="$1"
   value="${value#${value%%[!0]*}}"

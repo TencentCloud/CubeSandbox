@@ -30,6 +30,9 @@ LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v
 : "${ONE_CLICK_DIST_VERSION:=${CUBE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
 export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME ONE_CLICK_DIST_VERSION
 
+# Fail before the expensive component build when the host cannot build WebUI.
+# A caller supplying a prebuilt dist does not need npm.
+require_web_build_prerequisites "${ONE_CLICK_WEB_DIST_DIR:-}"
 require_cmd docker
 require_cmd make
 
