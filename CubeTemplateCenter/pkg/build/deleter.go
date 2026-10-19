@@ -141,15 +141,11 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 		}
 	}
 
-	// Delete the local/shared rootfs file. Only when it sits inside a managed
-	// artifact root (path-traversal guard).
-	if artifact.RootfsPath != "" {
-		if err := deleteLocalRootfs(artifact.RootfsPath); err != nil {
-			logger.Warnf("delete local rootfs fail: %v", err)
-			dataErrs = append(dataErrs, fmt.Errorf("delete local rootfs: %w", err))
-		} else {
-			logger.Infof("deleted local rootfs %s", artifact.RootfsPath)
-		}
+	// A crash can leave directories before BUILT records their path. Derive
+	// those locations from the artifact ID as well as cleaning the recorded path.
+	if err := deleteLocalArtifact(artifact.ArtifactID, artifact.RootfsPath); err != nil {
+		logger.Warnf("delete local artifact fail: %v", err)
+		dataErrs = append(dataErrs, fmt.Errorf("delete local artifact: %w", err))
 	}
 
 	if len(dataErrs) > 0 {
@@ -192,39 +188,63 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	return nil
 }
 
-// deleteLocalRootfs removes the rootfs file's parent directory (the whole
-// artifact dir) after verifying the path is inside a managed artifact root.
-// The root check mirrors Master's validateRootfsPathWithinStore so a tampered
-// rootfs_path in the DB cannot be used to delete arbitrary files.
-func deleteLocalRootfs(rootfsPath string) error {
-	abs, err := filepath.Abs(rootfsPath)
-	if err != nil {
-		return fmt.Errorf("resolve rootfs path: %w", err)
+// deleteLocalArtifact includes unreported build residue without creating any
+// directories. A live build marker defers deletion and keeps the DB retry marker.
+func deleteLocalArtifact(artifactID, rootfsPath string) error {
+	if !image.ValidArtifactID(artifactID) {
+		return fmt.Errorf("invalid artifact id %q", artifactID)
 	}
-	dir := filepath.Dir(abs)
-	if !managedArtifactDir(dir) {
-		return fmt.Errorf("rootfs path %q is outside managed artifact roots; refusing to delete", rootfsPath)
+	var dirs []string
+	for _, root := range managedArtifactRoots() {
+		dir, err := filepath.Abs(filepath.Join(root, artifactID))
+		if err != nil {
+			return fmt.Errorf("resolve artifact directory: %w", err)
+		}
+		dirs = append(dirs, dir)
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove artifact dir %s: %w", dir, err)
+	if rootfsPath != "" {
+		abs, err := filepath.Abs(rootfsPath)
+		if err != nil {
+			return fmt.Errorf("resolve rootfs path: %w", err)
+		}
+		dirs = append(dirs, filepath.Dir(abs))
 	}
-	return nil
+	// Check every directory before removing any: the work directory itself
+	// has no marker, but belongs to the build marked in its store directory.
+	for _, dir := range dirs {
+		if !managedArtifactDir(dir) {
+			return fmt.Errorf("artifact directory %q is outside managed artifact roots; refusing to delete", dir)
+		}
+		if inProgress, _ := image.ArtifactBuildInProgress(dir); inProgress {
+			return fmt.Errorf("artifact directory %q has a build in progress", dir)
+		}
+	}
+	var errs []error
+	for _, dir := range dirs {
+		if err := os.RemoveAll(dir); err != nil {
+			errs = append(errs, fmt.Errorf("remove artifact dir %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
-// managedArtifactDir reports whether dir is inside one of the artifact roots
-// TC writes to: the work dir, the store dir, or the fallback store dir.
-func managedArtifactDir(dir string) bool {
+func managedArtifactRoots() []string {
 	roots := []string{image.ArtifactWorkRootDir(), image.ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
 		roots = append(roots, image.ArtifactFallbackStoreRootDir())
 	}
-	for _, root := range roots {
+	return roots
+}
+
+// managedArtifactDir reports whether dir is strictly below an artifact root.
+func managedArtifactDir(dir string) bool {
+	for _, root := range managedArtifactRoots() {
 		rootAbs, err := filepath.Abs(root)
 		if err != nil {
 			continue
 		}
 		// Strictly BELOW the root only. dir == root would make
-		// deleteLocalRootfs's RemoveAll(dir) wipe the ENTIRE store (every
+		// deleteLocalArtifact's RemoveAll(dir) wipe the ENTIRE store (every
 		// artifact on the node), and the callback-side path validator accepts
 		// exactly such top-level paths (it only rejects escapes via
 		// filepath.Rel), so equality must fail here.

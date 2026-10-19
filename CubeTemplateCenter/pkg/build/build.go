@@ -133,6 +133,15 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		reportFailed(templatecenter.JobPhasePulling, errMsg)
 		return fmt.Errorf("build preflight: %w", err)
 	}
+	// Resolve the shared store before pulling. An explicitly selected fs store
+	// cannot fall back to local-only artifacts when opening it fails.
+	s3Client, s3CfgEnabled := SharedS3Client()
+	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
+		err := fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
+		reportFailed(templatecenter.JobPhasePulling, err.Error())
+		return err
+	}
+
 	// Step 2: Pull image. Progress callbacks stream into the shared Redis
 	// live-snapshot sink so any CubeMaster replica can serve the progress query.
 	pullProgress := newPullProgressSink(ctx, jobID).withReporter(reporter)
@@ -205,15 +214,6 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		"source_image_digest":       source.Digest,
 	}); err != nil {
 		logger.Warnf("report fingerprint fail: %v", err)
-	}
-
-	// Resolve S3 config once for both reuse and fresh-build paths. This is
-	// done before acquiring the artifact lock so the lock-free polling path
-	// can still generate presigned URLs when reusing an artifact built by a
-	// sibling replica.
-	s3Client, s3CfgEnabled := SharedS3Client()
-	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
-		return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
 	}
 
 	// Step 6: Serialize same-spec builds (fingerprint, not artifactID — the

@@ -14,12 +14,60 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/s3store"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
+
+func TestBuildReportsUnavailableFSBeforePull(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(configenv.EnvArtifactStoreBackend, "fs")
+	t.Setenv(configenv.EnvArtifactStoreFSRoot, root)
+	resetSharedS3(t)
+	t.Cleanup(func() { sharedS3 = s3ClientFactory{} })
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFuncReturn(image.EnsureRootfsBuildPreflight, nil)
+	patches.ApplyFunc(image.PrepareSource, func(context.Context, image.SourceSpec) (*image.PreparedSource, error) {
+		t.Error("source pull started with an unavailable fs store")
+		return nil, errors.New("unexpected pull")
+	})
+	reports := make(chan map[string]any, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		reports <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("CUBE_MASTER_ADDR", server.URL)
+	err := Build(context.Background(), "job-fs-unavailable", &types.CreateTemplateFromImageReq{SourceImageRef: "unused"}, "", "", nil)
+	if err == nil || !strings.Contains(err.Error(), "artifact store failed to open") {
+		t.Fatalf("error=%v", err)
+	}
+	var last map[string]any
+	for len(reports) > 0 {
+		last = <-reports
+	}
+	if last["status"] != "FAILED" || last["phase"] != "PULLING" || last["error_message"] != err.Error() {
+		t.Fatalf("missing terminal failure report: %+v", last)
+	}
+}
+
+// Regression coverage for the P1 bug where READY-artifact reuse only ever
+// checked os.Stat(RootfsPath), so an S3-backed artifact built by a sibling TC
+// replica (no shared local disk) was always treated as "missing" and
+// silently rebuilt instead of reused.
 
 func TestArtifactDataExistsS3ObjectConfirmed(t *testing.T) {
 	artifact := &models.RootfsArtifact{

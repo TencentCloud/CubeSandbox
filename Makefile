@@ -486,9 +486,10 @@ cubemaster-test: builder-image
 # CubeTemplateCenter shares CubeMaster's pkg/templatecenter/image, which uses
 # Linux-only syscall constants, so its tests cannot run on a macOS host and go
 # through the builder like every other Go component.
+# Disable inlining so gomonkey patches also intercept calls to small helpers.
 .PHONY: cubetemplatecenter-test
 cubetemplatecenter-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 go test ./... -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 go test -gcflags=all=-l ./... -count=1'
 
 # cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
 # for several Cubelet packages.
