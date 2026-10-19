@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"os"
@@ -952,6 +953,61 @@ func TestResolveArtifactStoreDirFallsBackWhenDefaultUnavailable(t *testing.T) {
 	}
 	if callCount < 2 {
 		t.Fatalf("expected fallback path preparation, callCount=%d", callCount)
+	}
+}
+
+func TestBuildRootfsDiskSpaceFailureCleansDirectories(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
+			workRoot, storeRoot := t.TempDir(), t.TempDir()
+			t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
+			t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", storeRoot)
+			patches := gomonkey.NewPatches()
+			defer patches.Reset()
+			patches.ApplyFuncReturn(loopMountExt4Enabled, streaming)
+			patches.ApplyFuncReturn(canUseLoopMount, true)
+			patches.ApplyFuncReturn(estimateImageSizeFromInspect, int64(1024), nil)
+			spaceErr := errors.New("insufficient disk space")
+			patches.ApplyFuncReturn(checkDiskSpace, spaceErr)
+			_, err := BuildRootfs(context.Background(), &PreparedSource{ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "disk-full"})
+			if !errors.Is(err, spaceErr) {
+				t.Fatalf("error=%v", err)
+			}
+			for _, root := range []string{workRoot, storeRoot} {
+				if _, err := os.Stat(filepath.Join(root, "disk-full")); !os.IsNotExist(err) {
+					t.Fatalf("build directory remains after disk-space failure: %s: %v", root, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildRootfsStreamingChecksumFailureCleansDirectories(t *testing.T) {
+	workRoot, storeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", storeRoot)
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFuncReturn(loopMountExt4Enabled, true)
+	patches.ApplyFuncReturn(canUseLoopMount, true)
+	patches.ApplyFuncReturn(estimateImageSizeFromInspect, int64(1024), nil)
+	patches.ApplyFuncReturn(checkDiskSpace, nil)
+	patches.ApplyFunc(createExt4ImageStreaming, func(_ context.Context, _ *PreparedSource, workDir, path string, _ int64, _ func(context.Context, string) error) error {
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("partial"), 0o600)
+	})
+	checksumErr := errors.New("checksum read failed")
+	patches.ApplyFuncReturn(computeFileSHA256, "", int64(0), checksumErr)
+	_, err := BuildRootfs(context.Background(), &PreparedSource{ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "checksum-failed"})
+	if !errors.Is(err, checksumErr) {
+		t.Fatalf("error=%v", err)
+	}
+	for _, root := range []string{workRoot, storeRoot} {
+		if _, err := os.Stat(filepath.Join(root, "checksum-failed")); !os.IsNotExist(err) {
+			t.Fatalf("streaming directory remains after checksum failure: %s: %v", root, err)
+		}
 	}
 }
 

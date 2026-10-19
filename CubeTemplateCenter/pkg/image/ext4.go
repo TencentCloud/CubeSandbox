@@ -211,6 +211,27 @@ func buildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	}
 	defer releaseMarker()
 
+	defer func() {
+		if workDir != "" {
+			if err := os.RemoveAll(workDir); err != nil {
+				log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
+			}
+		}
+		if !keepStoreDir {
+			if storeDir != "" {
+				if err := os.RemoveAll(storeDir); err != nil {
+					log.G(ctx).Warnf("cleanup storeDir %s failed: %v", storeDir, err)
+				}
+			}
+		} else {
+			if storeRootfsDir != "" {
+				if err := os.RemoveAll(storeRootfsDir); err != nil {
+					log.G(ctx).Warnf("cleanup storeRootfsDir %s failed: %v", storeRootfsDir, err)
+				}
+			}
+		}
+	}()
+
 	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
 	// Passes PostRootfsExport down to be executed before unmounting the loop device.
 	// Streaming Phase 2 is currently only implemented for docker and native modes.
@@ -250,7 +271,6 @@ func buildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 					return BuildResult{}, err
 				}
 				telemetry.End(streamSpan, nil)
-				_ = os.RemoveAll(workDir)
 				keepStoreDir = true
 				return BuildResult{RootfsPath: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
 			}
@@ -265,27 +285,6 @@ func buildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 			return BuildResult{}, err
 		}
 	}
-
-	defer func() {
-		if workDir != "" {
-			if err := os.RemoveAll(workDir); err != nil {
-				log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
-			}
-		}
-		if !keepStoreDir {
-			if storeDir != "" {
-				if err := os.RemoveAll(storeDir); err != nil {
-					log.G(ctx).Warnf("cleanup storeDir %s failed: %v", storeDir, err)
-				}
-			}
-		} else {
-			if storeRootfsDir != "" {
-				if err := os.RemoveAll(storeRootfsDir); err != nil {
-					log.G(ctx).Warnf("cleanup storeRootfsDir %s failed: %v", storeRootfsDir, err)
-				}
-			}
-		}
-	}()
 
 	rootfsCtx, rootfsSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageRootfs,
 		trace.WithAttributes(
