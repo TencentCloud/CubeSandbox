@@ -66,10 +66,13 @@ type TemplateBuildStatus struct {
 }
 
 type BuildTemplateOptions struct {
-	Image               string
-	Name                string
-	InstanceType        string
-	WritableLayerSize   string
+	Image             string
+	Name              string
+	InstanceType      string
+	WritableLayerSize string
+	// Backend selects the template CoW backend ("xfs" or "s3").
+	// Empty keeps the server's xfs default.
+	Backend             string
 	ExposedPorts        []uint16
 	ProbePort           *uint16
 	ProbePath           string
@@ -192,6 +195,9 @@ func buildTemplatePayload(opts BuildTemplateOptions) (map[string]any, error) {
 	}
 	if writableLayerSize := strings.TrimSpace(opts.WritableLayerSize); writableLayerSize != "" {
 		payload["writableLayerSize"] = writableLayerSize
+	}
+	if backend := strings.TrimSpace(opts.Backend); backend != "" {
+		payload["backend"] = backend
 	}
 	if len(opts.ExposedPorts) > 0 {
 		payload["exposedPorts"] = append([]uint16(nil), opts.ExposedPorts...)

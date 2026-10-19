@@ -264,15 +264,22 @@ cubemastercli cubebox template list
 cubemastercli cubebox template info <template-id>
 ```
 
-### 4.4 `tpl create-from-image --backend xfs|s3`
+### 4.4 创建模板时选择 `xfs` 或 `s3`
 
 ```bash
-# 创建模板时声明后端；省略则沿用历史 xfs 路径
+# CLI
 cubemastercli tpl create-from-image \
   --image <img> \
   --writable-layer-size 4Gi \
   --backend s3
+
+# CubeAPI；省略 backend 时仍默认使用 xfs
+curl -X POST http://<cubeapi>:3000/templates \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"<img>","writableLayerSize":"4Gi","backend":"s3"}'
 ```
+
+Go、Python 和 Node SDK 的模板构建参数也提供相同的 `backend` 字段。
 
 > 后端在**模板 / 沙箱创建**时确定；快照创建命令本身**不接受** backend 选择，
 > 永远使用沙箱 / 模板已持久化的后端。

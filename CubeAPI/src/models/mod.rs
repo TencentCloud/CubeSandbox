@@ -1344,6 +1344,11 @@ pub struct CreateTemplateRequest {
     /// Writable layer size for the rootfs, e.g. "1G".
     #[serde(rename = "writableLayerSize", default)]
     pub writable_layer_size: Option<String>,
+    /// CoW backend for this template and its sandboxes/snapshots.
+    /// Accepted values are `xfs` and `s3` (case-insensitive); omitted or empty
+    /// keeps the existing xfs default.
+    #[serde(default)]
+    pub backend: Option<String>,
     /// Ports the container listens on.
     #[serde(rename = "exposedPorts", default)]
     pub exposed_ports: Option<Vec<u16>>,

@@ -229,15 +229,22 @@ cubemastercli cubebox template list
 cubemastercli cubebox template info <template-id>
 ```
 
-### 4.4 `tpl create-from-image --backend xfs|s3`
+### 4.4 Select `xfs` or `s3` when creating a template
 
 ```bash
-# Declare the backend at template create; omit to keep historical xfs
+# CLI
 cubemastercli tpl create-from-image \
   --image <img> \
   --writable-layer-size 4Gi \
   --backend s3
+
+# CubeAPI; omit backend to keep the xfs default
+curl -X POST http://<cubeapi>:3000/templates \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"<img>","writableLayerSize":"4Gi","backend":"s3"}'
 ```
+
+The Go, Python, and Node SDK template-build options expose the same `backend` field.
 
 > The backend is fixed at **template / sandbox create**. Snapshot create does **not** take a backend flag; it always uses the persisted backend.
 
