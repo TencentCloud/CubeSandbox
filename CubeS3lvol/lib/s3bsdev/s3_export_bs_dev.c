@@ -140,7 +140,7 @@ struct s3_export_dev {
 	char                       name[SPDK_UUID_STRING_LEN + 16];
 
 	/* Where the refetch machinery runs, and the only thread that touches the
-	 * three fields below.
+	 * refetch queues and poller below.
 	 *
 	 * The manifest and callbacks are otherwise read-only after construction.
 	 * (The separate fill table has its own short-held mutex.) A refetch is
@@ -154,6 +154,9 @@ struct s3_export_dev {
 	struct spdk_thread        *home_thread;
 	bool                       refetch_in_flight;
 	TAILQ_HEAD(, s3_export_io) refetch_waiters;
+	TAILQ_HEAD(, s3_export_io) refetch_delivery_waiters;
+	struct spdk_poller        *refetch_delivery_poller;
+	bool                       refetch_delivery_lifetime_ref;
 
 	/* Whole-object GET single-flight and its small post-GET working set.
 	 * The key, rather than chunk_index, is the identity: a manifest replacement
@@ -2229,6 +2232,10 @@ export_io_device_unregistered(void *io_device)
 
 	pthread_mutex_lock(&dev->fill_lock);
 	assert(dev->async_refs == 0);
+	assert(dev->refetch_delivery_poller == NULL);
+	assert(!dev->refetch_delivery_lifetime_ref);
+	assert(TAILQ_EMPTY(&dev->refetch_waiters));
+	assert(TAILQ_EMPTY(&dev->refetch_delivery_waiters));
 	assert(dev->fills_getting == 0);
 	assert(TAILQ_EMPTY(&dev->fill_pending));
 	while ((fill = TAILQ_FIRST(&dev->fills)) != NULL) {
@@ -2252,6 +2259,37 @@ export_io_device_unregistered(void *io_device)
 		s3_client_put(dev->client);
 	}
 	free(dev);
+}
+
+static void
+export_refetch_delivery_stop(void *arg)
+{
+	struct s3_export_dev *dev = arg;
+	bool release_ref = false;
+
+	spdk_poller_unregister(&dev->refetch_delivery_poller);
+	pthread_mutex_lock(&dev->fill_lock);
+	if (dev->refetch_delivery_lifetime_ref) {
+		dev->refetch_delivery_lifetime_ref = false;
+		release_ref = true;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+	if (release_ref) {
+		/* The poller reference is the only reason dev remains valid here.
+		 * This put is deliberately the final access. */
+		export_async_put(dev);
+	}
+}
+
+static void
+export_refetch_delivery_stop_msg(void *arg)
+{
+	struct s3_export_dev *dev = arg;
+
+	export_refetch_delivery_stop(dev);
+	/* Paired with the message reference taken by export_destroy(). The
+	 * delivery poller may have retired its own reference first. */
+	export_async_put(dev);
 }
 
 static void
@@ -2300,6 +2338,11 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	pthread_mutex_lock(&dev->fill_lock);
 	dev->preheat_stop = true;
 	dev->destroying = true;
+	if (!home_thread) {
+		/* Keep dev alive even if the poller observes destroying and releases
+		 * its own lifetime reference before this queued callback runs. */
+		dev->async_refs++;
+	}
 	/* On the home thread the poller has already been removed. If no fill can
 	 * deliver another completion, retire the walk reference here as part of
 	 * the same transition to destroying. Off-home destruction leaves it for
@@ -2316,6 +2359,19 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 		spdk_io_device_unregister(dev, export_io_device_unregistered);
 	} else {
 		pthread_mutex_unlock(&dev->fill_lock);
+	}
+
+	if (home_thread) {
+		export_refetch_delivery_stop(dev);
+	} else {
+		/* Do not wait for the periodic retry poller to notice destruction.
+		 * Promptly retire its lifetime reference after messages already
+		 * queued on the home thread have run. If this send itself fails, the
+		 * poller remains pinned and provides the fallback cleanup path. */
+		if (spdk_thread_send_msg(dev->home_thread,
+					export_refetch_delivery_stop_msg, dev) != 0) {
+			export_async_put(dev);
+		}
 	}
 }
 
@@ -2502,6 +2558,26 @@ struct export_refetch_ctx {
 
 static void export_retry_msg(void *arg);
 
+static int
+export_retry_delivery_poll(void *arg)
+{
+	struct s3_export_dev *dev = arg;
+	struct s3_export_io *io, *tmp;
+
+	TAILQ_FOREACH_SAFE(io, &dev->refetch_delivery_waiters, waiter_link, tmp) {
+		if (spdk_thread_send_msg(io->origin, export_retry_msg, io) == 0) {
+			TAILQ_REMOVE(&dev->refetch_delivery_waiters, io, waiter_link);
+		}
+	}
+	if (!TAILQ_EMPTY(&dev->refetch_delivery_waiters)) {
+		return SPDK_POLLER_BUSY;
+	}
+	if (__atomic_load_n(&dev->destroying, __ATOMIC_ACQUIRE)) {
+		export_refetch_delivery_stop(dev);
+	}
+	return SPDK_POLLER_IDLE;
+}
+
 /* Release every waiter back to its own thread. Called on home_thread once the
  * refetch has settled, whatever the outcome: a waiter that is not retried still
  * has to be completed, or blobstore waits for a callback that never comes. */
@@ -2518,7 +2594,10 @@ export_release_waiters(struct s3_export_dev *dev, bool retry)
 		 * export_retry_msg() reads to tell "run it again against the new
 		 * manifest" from "there is no new manifest, report the 404". */
 		io->saw_missing = !retry;
-		spdk_thread_send_msg(io->origin, export_retry_msg, io);
+		if (spdk_thread_send_msg(io->origin, export_retry_msg, io) != 0) {
+			TAILQ_INSERT_TAIL(&dev->refetch_delivery_waiters, io,
+					 waiter_link);
+		}
 	}
 	dev->refetch_in_flight = false;
 }
@@ -2674,7 +2753,19 @@ export_refetch_msg(void *arg)
 static void
 export_io_start_refetch(struct s3_export_io *io)
 {
-	spdk_thread_send_msg(io->dev->home_thread, export_refetch_msg, io);
+	int rc;
+
+	rc = spdk_thread_send_msg(io->dev->home_thread, export_refetch_msg, io);
+	if (rc != 0) {
+		/* Still on the submitting thread, so completing here preserves
+		 * blobstore's channel affinity. Treat a failed dispatch like a
+		 * failed refetch instead of stranding the I/O and its device ref. */
+		SPDK_ERRLOG("export %s: could not dispatch manifest refetch: %s\n",
+			    io->dev->m->uuid_str, spdk_strerror(-rc));
+		io->retried = true;
+		io->saw_missing = true;
+		export_retry_msg(io);
+	}
 }
 
 /* Back on the I/O's own thread, with the manifest already replaced. */
@@ -2760,6 +2851,19 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 	 * started it would send a message to an exited thread, which aborts. */
 	dev->home_thread = spdk_get_thread();
 	TAILQ_INIT(&dev->refetch_waiters);
+	TAILQ_INIT(&dev->refetch_delivery_waiters);
+	/* Allocate the rare send-failure retry path before admitting any I/O.
+	 * Registering it only after a send failure could itself fail under the
+	 * same memory pressure and strand every waiter. It normally polls idle. */
+	dev->refetch_delivery_poller =
+		SPDK_POLLER_REGISTER(export_retry_delivery_poll, dev, 1000);
+	if (!dev->refetch_delivery_poller) {
+		pthread_mutex_destroy(&dev->fill_lock);
+		free(dev);
+		return -ENOMEM;
+	}
+	dev->refetch_delivery_lifetime_ref = true;
+	dev->async_refs++;
 
 	s3_export_manifest_ref(m);
 

@@ -177,6 +177,8 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
+| `RCOW_WRITEBACK_MB` | `4096` | `/dev/shm` payload-ring capacity per lvstore; 64–4096 MiB |
+| `S3LVOL_WRITEBACK_TOTAL_MB` | `8192` | process-wide cap for all write-back rings; must be at least `RCOW_WRITEBACK_MB` |
 | `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports (at least 20% of chunks present) promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
 | `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
@@ -387,6 +389,13 @@ default 1 MiB chunk size, including during attach. Set it to `0` for disk-only
 cache operation. `rcow_get_lvstores` exposes native RAM/disk hit, miss,
 populate, eviction, residency and byte counters, plus separate imported-object
 cache and CopyObject-alias counters under each lvstore's `write_path`.
+
+The write-back payload ring is different from the cache: its complete configured
+size is reserved in `/dev/shm` during create/attach so running out later cannot
+SIGBUS the target. `rcow_start.sh` checks the available tmpfs capacity before
+starting the target and passes `RCOW_WRITEBACK_MB` to both RPC paths. Reduce the
+value on smaller nodes; acknowledged records that have not reached S3 are lost
+on a node reboot because `/dev/shm` is not persistent.
 
 Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `RCOW_LOG_DIR`). The CRT log level is set with

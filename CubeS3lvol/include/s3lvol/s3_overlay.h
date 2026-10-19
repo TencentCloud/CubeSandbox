@@ -113,6 +113,8 @@
 #define S3_OVERLAY_FLUSH_HIGH_PCT     75
 
 struct s3_overlay;
+struct s3_overlay_write_reservation;
+typedef void (*s3_overlay_data_release_fn)(void *cb_arg);
 
 /* What one flush round covers. Produced by s3_overlay_flush_begin() and handed
  * to whoever performs the upload; it stays valid until s3_overlay_flush_end(). */
@@ -151,6 +153,9 @@ struct s3_overlay_stats {
 	uint64_t blocks_dropped;    /* dropped as stale by the seq guard */
 	uint64_t flushes_begun;
 	uint64_t flushes_failed;
+	uint64_t flushes_partial;  /* claimed fewer than one chunk of blocks */
+	uint64_t flushes_repeated; /* chunk had an earlier flush round */
+	uint64_t flushes_repeated_partial;
 	uint64_t peak_bytes;
 
 	/* Why chunks were handed to the flusher. Together these say whether the
@@ -196,6 +201,46 @@ int s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 		     const void *data, uint64_t seq);
 
 /**
+ * Make a write visible before its WAL batch is durable.
+ *
+ * Pending blocks participate in reads and capacity accounting, but a chunk
+ * containing any pending block is not offered to the S3 flusher.  This keeps
+ * WAL truncation and host-crash recovery tied to durable records while the
+ * write-back cache is allowed to acknowledge the caller early.
+ *
+ * Call s3_overlay_mark_durable() from the WAL completion, in submission order.
+ */
+int s3_overlay_write_pending(struct s3_overlay *ov, uint64_t lba,
+			     uint32_t nblocks, const void *data, uint64_t seq);
+
+/* Reserve every allocation before the WAL accepts the write. A successful
+ * commit cannot fail for lack of memory; cancel removes the invisible bytes. */
+int s3_overlay_prepare_write(struct s3_overlay *ov, uint64_t lba,
+			     uint32_t nblocks,
+			     struct s3_overlay_write_reservation **out);
+int s3_overlay_commit_prepared(struct s3_overlay_write_reservation *reservation,
+			       const void *data, uint64_t seq);
+/* Commit data owned by another durable store (normally the shared-memory
+ * write-back ring).  No payload bytes are copied or allocated.  release_fn is
+ * called exactly once for every block when that block is overwritten, dropped,
+ * or successfully flushed. */
+int s3_overlay_commit_prepared_ref(
+	struct s3_overlay_write_reservation *reservation, const void *data,
+	uint64_t seq, s3_overlay_data_release_fn release_fn, void *release_arg);
+void s3_overlay_cancel_prepared(
+	struct s3_overlay_write_reservation *reservation);
+
+/**
+ * Promote a pending range after the WAL reports it durable.
+ *
+ * A block overwritten by a newer pending write is intentionally not changed;
+ * the older sequence is only remembered as the WAL truncation floor.  Once the
+ * newest write becomes durable the chunk becomes eligible for S3 flushing.
+ */
+void s3_overlay_mark_durable(struct s3_overlay *ov, uint64_t lba,
+			     uint32_t nblocks, uint64_t seq);
+
+/**
  * Forget everything a chunk holds, and bump its epoch so a flush already under
  * way cannot publish what it collected. Used by unmap.
  */
@@ -215,6 +260,11 @@ uint32_t s3_overlay_apply(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
  * be read at all.
  */
 bool s3_overlay_covers(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks);
+/* Recovery helper: true only when every block still contains this exact DATA
+ * version. A later write, zero, or unmap means the replayed record is
+ * superseded and must not be republished from shm. */
+bool s3_overlay_data_matches_seq(struct s3_overlay *ov, uint64_t lba,
+				 uint32_t nblocks, uint64_t seq);
 
 /* How many blocks of the range are present. Feeds the overlay_covered field of
  * the chunk-I/O failure log in s3_chunk_io_finish(); not used to decide reads. */
@@ -246,6 +296,12 @@ void s3_overlay_get_stats(const struct s3_overlay *ov, struct s3_overlay_stats *
  * ========================================================================== */
 
 bool s3_overlay_has_dirty(const struct s3_overlay *ov);
+
+/* Owner-thread-only scheduling query.  Ring-head records remain pending while
+ * their chunk is uploaded, so the flusher uses this to avoid attempting a
+ * guaranteed -EBUSY second round. */
+bool s3_overlay_chunk_is_flushing(struct s3_overlay *ov,
+				  uint64_t chunk_index);
 
 /* When to stop holding a dirty chunk back. Zero in any field selects its
  * default. */

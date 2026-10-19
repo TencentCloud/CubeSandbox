@@ -325,6 +325,7 @@ struct rpc_create_lvstore {
 	uint32_t    journal_size_mb;
 	uint32_t    wal_size_mb;
 	uint32_t    cache_hot_bufs;
+	uint32_t    writeback_size_mb;
 
 	/* Seconds between automatic checkpoints; 0 takes the default. Bounds how
 	 * much journal a crash has to replay. */
@@ -351,6 +352,7 @@ static const struct spdk_json_object_decoder rpc_create_lvstore_decoders[] = {
 	{"journal_size_mb", offsetof(struct rpc_create_lvstore, journal_size_mb), spdk_json_decode_uint32, true},
 	{"wal_size_mb",  offsetof(struct rpc_create_lvstore, wal_size_mb),  spdk_json_decode_uint32, true},
 	{"cache_hot_bufs", offsetof(struct rpc_create_lvstore, cache_hot_bufs), spdk_json_decode_uint32, true},
+	{"writeback_size_mb", offsetof(struct rpc_create_lvstore, writeback_size_mb), spdk_json_decode_uint32, true},
 	{"force",        offsetof(struct rpc_create_lvstore, force),        spdk_json_decode_bool,   true},
 	{"checkpoint_interval_sec", offsetof(struct rpc_create_lvstore, checkpoint_interval_sec), spdk_json_decode_uint32, true},
 };
@@ -407,6 +409,13 @@ rpc_rcow_create_lvstore(struct spdk_jsonrpc_request *request,
 			request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 			"cache_hot_bufs must be at most %u",
 			S3_CACHE_HOT_BUFS_MAX);
+		goto cleanup;
+	}
+	if (req.writeback_size_mb != 0 &&
+	    (req.writeback_size_mb < 64 || req.writeback_size_mb > 4096)) {
+		spdk_jsonrpc_send_error_response(request,
+			SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+			"writeback_size_mb must be between 64 and 4096");
 		goto cleanup;
 	}
 
@@ -480,6 +489,7 @@ rpc_rcow_create_lvstore(struct spdk_jsonrpc_request *request,
 	opts.journal_size_mb = req.journal_size_mb;
 	opts.wal_size_mb     = req.wal_size_mb;
 	opts.cache_hot_bufs  = req.cache_hot_bufs;
+	opts.writeback_size_mb = req.writeback_size_mb;
 	opts.checkpoint_interval_sec = req.checkpoint_interval_sec;
 
 	rc = s3lvol_lvstore_create(&opts, rpc_create_lvstore_cb, request);
@@ -518,6 +528,7 @@ struct rpc_attach_lvstore {
 	char *cache_bdev;
 	bool  force;
 	uint32_t cache_hot_bufs;
+	uint32_t writeback_size_mb;
 
 	/* Not read back from the local device on purpose: the interval is a policy
 	 * of this process, not a property of the lvstore, so an attach may
@@ -542,6 +553,7 @@ static const struct spdk_json_object_decoder rpc_attach_lvstore_decoders[] = {
 	{"force",      offsetof(struct rpc_attach_lvstore, force),      spdk_json_decode_bool,   true},
 	{"checkpoint_interval_sec", offsetof(struct rpc_attach_lvstore, checkpoint_interval_sec), spdk_json_decode_uint32, true},
 	{"cache_hot_bufs", offsetof(struct rpc_attach_lvstore, cache_hot_bufs), spdk_json_decode_uint32, true},
+	{"writeback_size_mb", offsetof(struct rpc_attach_lvstore, writeback_size_mb), spdk_json_decode_uint32, true},
 };
 
 static void
@@ -616,6 +628,13 @@ rpc_rcow_attach_lvstore(struct spdk_jsonrpc_request *request,
 			S3_CACHE_HOT_BUFS_MAX);
 		goto cleanup;
 	}
+	if (req.writeback_size_mb != 0 &&
+	    (req.writeback_size_mb < 64 || req.writeback_size_mb > 4096)) {
+		spdk_jsonrpc_send_error_response(request,
+			SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+			"writeback_size_mb must be between 64 and 4096");
+		goto cleanup;
+	}
 
 	tgt = rcow_namespace_to_target(req.ns_name);
 	if (!tgt) {
@@ -633,6 +652,7 @@ rpc_rcow_attach_lvstore(struct spdk_jsonrpc_request *request,
 	opts.cache_bdev_name = req.cache_bdev;
 	opts.force           = req.force;
 	opts.cache_hot_bufs  = req.cache_hot_bufs;
+	opts.writeback_size_mb = req.writeback_size_mb;
 	opts.checkpoint_interval_sec = req.checkpoint_interval_sec;
 
 	rc = s3lvol_lvstore_attach(&opts, rpc_attach_lvstore_cb, request);
@@ -1506,11 +1526,15 @@ rpc_rcow_delete_lvstore(struct spdk_jsonrpc_request *request,
 
 	lvs = s3lvol_lvstore_find(req.lvs_name);
 	if (!lvs) {
-		/* Not loaded here, so there is nothing to delete objects from -- but
-		 * a stale entry may still name it, and leaving that behind would send
-		 * a recovery script after an lvstore that is not coming back. */
-		bstore_remove_entry(req.lvs_name);
-		spdk_jsonrpc_send_bool_response(request, true);
+		/* A name alone cannot identify the ring incarnation safely, and an
+		 * unloaded lvstore is also the only state in which its final chunk
+		 * map is unavailable for deleting S3 objects. Removing just the
+		 * registry entry would falsely report a complete destroy and could
+		 * orphan both a non-empty recovery ring and its objects. */
+		spdk_jsonrpc_send_error_response_fmt(
+			request, -ENODEV,
+			"lvstore '%s' is not loaded; attach it before deleting",
+			req.lvs_name);
 		goto cleanup;
 	}
 
@@ -1890,12 +1914,34 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		spdk_json_write_named_bool(w, "wal_attached", stats.wal_attached);
 		spdk_json_write_named_uint64(w, "wal_writes", stats.wal_writes);
 		spdk_json_write_named_uint64(w, "wal_retries", stats.wal_retries);
+		spdk_json_write_named_uint64(w, "wal_appends", stats.wal_appends);
+		spdk_json_write_named_uint64(w, "wal_batches", stats.wal_batches);
+		spdk_json_write_named_uint64(w, "wal_bytes_written",
+					     stats.wal_bytes_written);
+		spdk_json_write_named_uint64(w, "writeback_capacity_bytes",
+					     stats.writeback_capacity_bytes);
+		spdk_json_write_named_uint64(w, "writeback_occupied_bytes",
+					     stats.writeback_occupied_bytes);
+		spdk_json_write_named_uint64(w, "writeback_pending_records",
+					     stats.writeback_pending_records);
+		spdk_json_write_named_uint64(w, "writeback_publishes",
+					     stats.writeback_publishes);
+		spdk_json_write_named_uint64(w, "writeback_full_events",
+					     stats.writeback_full_events);
+		spdk_json_write_named_uint64(w, "writeback_global_reserved_bytes",
+					     stats.writeback_global_reserved_bytes);
+		spdk_json_write_named_uint64(w, "writeback_global_limit_bytes",
+					     stats.writeback_global_limit_bytes);
+		spdk_json_write_named_uint32(w, "writeback_global_active_rings",
+					     stats.writeback_global_active_rings);
 		spdk_json_write_named_uint64(w, "overlay_hits", stats.overlay_hits);
 		spdk_json_write_named_uint64(w, "overlay_bytes", stats.overlay_bytes);
 		spdk_json_write_named_uint64(w, "overlay_chunks",
 					     stats.overlay_live_chunks);
 		spdk_json_write_named_uint64(w, "chunks_flushed", stats.chunks_flushed);
 		spdk_json_write_named_uint64(w, "flush_failures", stats.flush_failures);
+		spdk_json_write_named_uint32(w, "flush_in_flight",
+					     stats.flush_in_flight);
 		spdk_json_write_named_uint64(w, "rmw_count", stats.rmw_count);
 		spdk_json_write_named_uint64(w, "allocated_chunks",
 					     stats.allocated_chunks);
@@ -1939,6 +1985,15 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 					     stats.overlay_flushed_aged);
 		spdk_json_write_named_uint64(w, "flushed_forced",
 					     stats.overlay_flushed_forced);
+		spdk_json_write_named_uint64(w, "flushed_ring_head",
+					     stats.overlay_flushed_ring_head);
+		spdk_json_write_named_uint64(w, "flushes_partial",
+					     stats.overlay_flushes_partial);
+		spdk_json_write_named_uint64(w, "flushes_repeated",
+					     stats.overlay_flushes_repeated);
+		spdk_json_write_named_uint64(
+			w, "flushes_repeated_partial",
+			stats.overlay_flushes_repeated_partial);
 
 		/* Local read cache. hits vs misses is the number that matters: a
 		 * hit is a read that cost a local round trip instead of an S3 one.
@@ -1964,6 +2019,10 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 						     stats.cache_populates);
 			spdk_json_write_named_uint64(w, "cache_populates_dropped",
 						     stats.cache_populates_dropped);
+			spdk_json_write_named_uint64(w, "cache_populates_failed",
+						     stats.cache_populates_failed);
+			spdk_json_write_named_uint64(w, "cache_populates_skipped",
+						     stats.cache_populates_skipped);
 			spdk_json_write_named_uint64(w, "cache_evictions",
 						     stats.cache_evictions);
 			spdk_json_write_named_uint64(w, "cache_bytes_served",

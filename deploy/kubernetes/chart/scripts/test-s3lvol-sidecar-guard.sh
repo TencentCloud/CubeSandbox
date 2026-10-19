@@ -57,6 +57,10 @@ if grep -q 'name: s3lvol-rpc' "$TMP_DIR/default-node.yaml"; then
   echo "default render must not include the s3lvol-rpc volume" >&2
   exit 1
 fi
+if grep -q 'name: s3lvol-shm' "$TMP_DIR/default-node.yaml"; then
+  echo "default render must not include the s3lvol-shm volume" >&2
+  exit 1
+fi
 if grep -q 'CUBE_S3LVOL_SOCKET' "$TMP_DIR/default-node.yaml"; then
   echo "default render must not set CUBE_S3LVOL_SOCKET on cubelet" >&2
   exit 1
@@ -104,13 +108,20 @@ if "fieldPath: spec.nodeName" not in body:
     raise SystemExit("cube-s3lvol NODE_NAME must use spec.nodeName")
 if "RCOW_LVS_NAME" in body:
     raise SystemExit("default RCOW_LVS_NAME must be derived at runtime by rcow_common, not rendered")
+if not re.search(r"name: s3lvol-shm\s+mountPath: /dev/shm", body):
+    raise SystemExit("cube-s3lvol must mount its dedicated tmpfs at /dev/shm")
 if "livenessProbe:" in body:
     raise SystemExit("cube-s3lvol must not have a livenessProbe")
 if "timeoutSeconds: 8" not in body:
     raise SystemExit("s3lvol probes must allow the 5s RPC timeout (timeoutSeconds >= 8)")
 if "terminationGracePeriodSeconds: 180" not in text:
     raise SystemExit("enabling cube-s3lvol must raise terminationGracePeriodSeconds to at least 180")
-print("ok: NODE_NAME is spec.nodeName; LVS name is derived at runtime; no liveness")
+if not re.search(
+    r"- name: s3lvol-shm\s+emptyDir:\s+medium: Memory\s+sizeLimit: 5Gi",
+    text,
+):
+    raise SystemExit("s3lvol-shm must be a sized memory-backed emptyDir")
+print("ok: NODE_NAME is spec.nodeName; /dev/shm is sized tmpfs; no liveness")
 PY
 
 echo "ok: cubeS3lvol.enabled=true injects sidecar + socket + s3.cfg"

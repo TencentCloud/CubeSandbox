@@ -64,15 +64,28 @@ enum overlay_block_state {
 
 struct overlay_block {
 	/* One block of data, NULL unless state is OVERLAY_DATA. */
-	void            *data;
+	const void      *data;
+	s3_overlay_data_release_fn release_fn;
+	void            *release_arg;
+	bool             borrowed;
 
 	/* seq of the WAL entry this content came from. */
 	uint64_t         seq;
 
+	/* Oldest WAL sequence that must remain recoverable until the current
+	 * content is durable.  A pending overwrite must not let the flusher
+	 * truncate the older, already-durable value that host-crash recovery
+	 * still needs. */
+	uint64_t         durable_floor_seq;
+
 	uint8_t          state;
+	bool             reserved;
 
 	/* Claimed by the flush round currently in progress. */
 	bool             flushing;
+
+	/* False between early publication and the WAL completion. */
+	bool             durable;
 };
 
 struct overlay_chunk {
@@ -84,6 +97,7 @@ struct overlay_chunk {
 	uint32_t         n_present;
 	uint32_t         n_dirty;
 	uint32_t         n_flushing;
+	uint32_t         n_pending;
 
 	/* Minimum seq over present blocks; UINT64_MAX when none. */
 	uint64_t         min_seq;
@@ -116,6 +130,10 @@ struct s3_overlay {
 
 	uint64_t         num_chunks;
 	struct overlay_chunk **chunks;
+	/* One byte per logical chunk, retained after an overlay_chunk is freed.
+	 * This is diagnostic state only: it tells whether a later flush is an
+	 * additional object rewrite rather than the chunk's first round. */
+	uint8_t          *ever_flushed;
 
 	/* Chunks the policy is done holding back, in no particular order: they are
 	 * all equally ready and nothing distinguishes them. */
@@ -137,6 +155,13 @@ struct s3_overlay {
 	uint64_t         flush_high_bytes;    /* high_pct as a byte count */
 
 	struct s3_overlay_stats stats;
+};
+
+struct s3_overlay_write_reservation {
+	struct s3_overlay *ov;
+	uint64_t lba;
+	uint32_t nblocks;
+	uint8_t allocated[];
 };
 
 /* ==========================================================================
@@ -189,8 +214,11 @@ overlay_chunk_enqueue(struct s3_overlay *ov, struct overlay_chunk *c)
 {
 	bool ripe;
 
-	/* A chunk being flushed stays off the queues; flush_end re-queues it. */
-	if (c->flush_active || c->n_dirty == 0) {
+	/* A chunk being flushed stays off the queues; flush_end re-queues it.
+	 * A chunk with an uncommitted block is held as a whole: uploading another
+	 * block could advance the WAL safe point past the durable value hidden by
+	 * a pending overwrite. */
+	if (c->flush_active || c->n_dirty == 0 || c->n_pending != 0) {
 		return;
 	}
 
@@ -276,6 +304,27 @@ overlay_chunk_maybe_free(struct s3_overlay *ov, struct overlay_chunk *c)
  * ========================================================================== */
 
 static void
+overlay_block_release_data(struct s3_overlay *ov, struct overlay_block *b)
+{
+	if (!b->data) {
+		return;
+	}
+	if (b->borrowed) {
+		if (b->release_fn) {
+			b->release_fn(b->release_arg);
+		}
+	} else {
+		free((void *)b->data);
+	}
+	b->data = NULL;
+	b->release_fn = NULL;
+	b->release_arg = NULL;
+	b->borrowed = false;
+	assert(ov->bytes >= ov->block_size);
+	ov->bytes -= ov->block_size;
+}
+
+static void
 overlay_block_release(struct s3_overlay *ov, struct overlay_chunk *c,
 		      struct overlay_block *b)
 {
@@ -283,11 +332,10 @@ overlay_block_release(struct s3_overlay *ov, struct overlay_chunk *c,
 		return;
 	}
 
-	if (b->data) {
-		free(b->data);
-		b->data = NULL;
-		assert(ov->bytes >= ov->block_size);
-		ov->bytes -= ov->block_size;
+	overlay_block_release_data(ov, b);
+	if (!b->durable) {
+		assert(c->n_pending > 0);
+		c->n_pending--;
 	}
 
 	if (b->flushing) {
@@ -306,7 +354,9 @@ overlay_block_release(struct s3_overlay *ov, struct overlay_chunk *c,
 
 	b->state    = OVERLAY_ABSENT;
 	b->flushing = false;
+	b->durable  = false;
 	b->seq      = 0;
+	b->durable_floor_seq = 0;
 }
 
 /* Recompute min_seq from scratch. Only called when blocks go away, which is
@@ -319,8 +369,8 @@ overlay_chunk_recalc_min_seq(struct s3_overlay *ov, struct overlay_chunk *c)
 
 	for (uint32_t i = 0; i < ov->blocks_per_chunk; i++) {
 		if (c->blocks[i].state != OVERLAY_ABSENT &&
-		    c->blocks[i].seq < min) {
-			min = c->blocks[i].seq;
+		    c->blocks[i].durable_floor_seq < min) {
+			min = c->blocks[i].durable_floor_seq;
 		}
 	}
 	c->min_seq = min;
@@ -357,6 +407,12 @@ s3_overlay_create(uint64_t total_blocks, uint32_t block_size,
 
 	ov->chunks = calloc(num_chunks, sizeof(*ov->chunks));
 	if (!ov->chunks) {
+		free(ov);
+		return -ENOMEM;
+	}
+	ov->ever_flushed = calloc(num_chunks, sizeof(*ov->ever_flushed));
+	if (!ov->ever_flushed) {
+		free(ov->chunks);
 		free(ov);
 		return -ENOMEM;
 	}
@@ -414,12 +470,13 @@ s3_overlay_destroy(struct s3_overlay *ov)
 
 	TAILQ_FOREACH_SAFE(c, &ov->live_q, live_link, tmp) {
 		for (uint32_t i = 0; i < ov->blocks_per_chunk; i++) {
-			free(c->blocks[i].data);
+			overlay_block_release_data(ov, &c->blocks[i]);
 		}
 		TAILQ_REMOVE(&ov->live_q, c, live_link);
 		free(c);
 	}
 
+	free(ov->ever_flushed);
 	free(ov->chunks);
 	free(ov);
 }
@@ -428,9 +485,10 @@ s3_overlay_destroy(struct s3_overlay *ov)
  * Write
  * ========================================================================== */
 
-int
-s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
-		 const void *data, uint64_t seq)
+static int
+overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
+	      const void *data, uint64_t seq, bool durable, bool borrow,
+	      s3_overlay_data_release_fn release_fn, void *release_arg)
 {
 	const uint8_t *src = data;
 	uint64_t cur = lba;
@@ -464,11 +522,15 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 		for (uint32_t i = 0; i < this_blocks; i++) {
 			struct overlay_block *b = &c->blocks[first + i];
 			void *nbuf = NULL;
+			bool was_pending;
 
 			/* Monotonic per block: this is what makes replay order
 			 * independent (see the header). */
 			if (b->state != OVERLAY_ABSENT && b->seq > seq) {
 				ov->stats.blocks_dropped++;
+				if (src && borrow && release_fn) {
+					release_fn(release_arg);
+				}
 				continue;
 			}
 
@@ -476,7 +538,7 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 			 * through the accounting would leave the block claiming
 			 * content it does not have, and a block that wrongly reads
 			 * as zero is worse than a failed write. */
-			if (src && !b->data) {
+			if (src && !borrow) {
 				nbuf = malloc(ov->block_size);
 				if (!nbuf) {
 					overlay_chunk_enqueue(ov, c);
@@ -484,6 +546,7 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 				}
 			}
 
+			was_pending = b->state != OVERLAY_ABSENT && !b->durable;
 			if (b->state == OVERLAY_ABSENT) {
 				c->n_present++;
 				c->n_dirty++;
@@ -496,28 +559,42 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 				c->n_dirty++;
 			}
 
+			if (was_pending && durable) {
+				assert(c->n_pending > 0);
+				c->n_pending--;
+			} else if (!was_pending && !durable) {
+				c->n_pending++;
+			}
+
 			if (src) {
-				if (nbuf) {
+				overlay_block_release_data(ov, b);
+				if (borrow) {
+					b->data = src + (size_t)i * ov->block_size;
+					b->borrowed = true;
+					b->release_fn = release_fn;
+					b->release_arg = release_arg;
+				} else {
 					b->data = nbuf;
-					ov->bytes += ov->block_size;
+					memcpy((void *)b->data,
+					       src + (size_t)i * ov->block_size,
+					       ov->block_size);
 				}
-				memcpy(b->data, src + (size_t)i * ov->block_size,
-				       ov->block_size);
+				ov->bytes += ov->block_size;
+				b->reserved = false;
 				b->state = OVERLAY_DATA;
 			} else {
 				/* write_zeroes: drop the buffer, keep the fact. */
-				if (b->data) {
-					free(b->data);
-					b->data = NULL;
-					assert(ov->bytes >= ov->block_size);
-					ov->bytes -= ov->block_size;
-				}
+				overlay_block_release_data(ov, b);
 				b->state = OVERLAY_ZERO;
 			}
 
 			b->seq = seq;
-			if (seq < c->min_seq) {
-				c->min_seq = seq;
+			b->durable = durable;
+			if (durable || b->durable_floor_seq == 0) {
+				b->durable_floor_seq = seq;
+			}
+			if (b->durable_floor_seq < c->min_seq) {
+				c->min_seq = b->durable_floor_seq;
 			}
 			ov->stats.blocks_written++;
 		}
@@ -526,7 +603,12 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 			ov->stats.peak_bytes = ov->bytes;
 		}
 
-		overlay_chunk_enqueue(ov, c);
+		if (c->n_pending != 0) {
+			/* It may have been eligible before this pending overwrite. */
+			overlay_chunk_dequeue(ov, c);
+		} else {
+			overlay_chunk_enqueue(ov, c);
+		}
 
 		if (src) {
 			src += (size_t)this_blocks * ov->block_size;
@@ -536,6 +618,202 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 	}
 
 	return 0;
+}
+
+int
+s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
+		 const void *data, uint64_t seq)
+{
+	return overlay_write(ov, lba, nblocks, data, seq, true, false, NULL,
+			     NULL);
+}
+
+int
+s3_overlay_write_pending(struct s3_overlay *ov, uint64_t lba,
+			 uint32_t nblocks, const void *data, uint64_t seq)
+{
+	return overlay_write(ov, lba, nblocks, data, seq, false, false, NULL,
+			     NULL);
+}
+
+static void
+overlay_reservation_rollback(struct s3_overlay_write_reservation *reservation)
+{
+	struct s3_overlay *ov = reservation->ov;
+
+	for (uint32_t i = 0; i < reservation->nblocks; i++) {
+		uint64_t cur = reservation->lba + i;
+		struct overlay_chunk *c;
+		struct overlay_block *b;
+
+		if (!reservation->allocated[i]) {
+			continue;
+		}
+		c = overlay_chunk_get(ov, cur / ov->blocks_per_chunk);
+		if (!c) {
+			continue;
+		}
+		b = &c->blocks[cur % ov->blocks_per_chunk];
+		if (b->reserved) {
+			b->reserved = false;
+		}
+	}
+}
+
+int
+s3_overlay_prepare_write(struct s3_overlay *ov, uint64_t lba,
+			 uint32_t nblocks,
+			 struct s3_overlay_write_reservation **out)
+{
+	struct s3_overlay_write_reservation *reservation;
+
+	if (!ov || !out || nblocks == 0 ||
+	    lba >= ov->num_chunks * ov->blocks_per_chunk ||
+	    nblocks > ov->num_chunks * ov->blocks_per_chunk - lba) {
+		return -EINVAL;
+	}
+	*out = NULL;
+	reservation = calloc(1, sizeof(*reservation) + nblocks);
+	if (!reservation) {
+		return -ENOMEM;
+	}
+	reservation->ov = ov;
+	reservation->lba = lba;
+	reservation->nblocks = nblocks;
+
+	for (uint32_t i = 0; i < nblocks; i++) {
+		uint64_t cur = lba + i;
+		uint64_t chunk_index = cur / ov->blocks_per_chunk;
+		struct overlay_chunk *c = overlay_chunk_get(ov, chunk_index);
+		struct overlay_block *b;
+
+		if (!c) {
+			c = overlay_chunk_create(ov, chunk_index);
+			if (!c) {
+				overlay_reservation_rollback(reservation);
+				free(reservation);
+				return -ENOMEM;
+			}
+		}
+		b = &c->blocks[cur % ov->blocks_per_chunk];
+		if (b->reserved) {
+			overlay_reservation_rollback(reservation);
+			free(reservation);
+			return -EBUSY;
+		}
+		b->reserved = true;
+		reservation->allocated[i] = 1;
+	}
+	if (ov->bytes > ov->stats.peak_bytes) {
+		ov->stats.peak_bytes = ov->bytes;
+	}
+	*out = reservation;
+	return 0;
+}
+
+int
+s3_overlay_commit_prepared(struct s3_overlay_write_reservation *reservation,
+			   const void *data, uint64_t seq)
+{
+	struct s3_overlay *ov;
+	int rc;
+
+	if (!reservation || !data || seq == 0) {
+		return -EINVAL;
+	}
+	ov = reservation->ov;
+	rc = overlay_write(ov, reservation->lba, reservation->nblocks,
+			   data, seq, false, false, NULL, NULL);
+	/* Committed blocks cleared reserved; this rolls back only allocations
+	 * skipped as stale or left untouched by an unexpected error. */
+	overlay_reservation_rollback(reservation);
+	free(reservation);
+	return rc;
+}
+
+int
+s3_overlay_commit_prepared_ref(
+	struct s3_overlay_write_reservation *reservation, const void *data,
+	uint64_t seq, s3_overlay_data_release_fn release_fn, void *release_arg)
+{
+	struct s3_overlay *ov;
+	int rc;
+
+	if (!reservation || !data || seq == 0 || !release_fn) {
+		return -EINVAL;
+	}
+	ov = reservation->ov;
+	rc = overlay_write(ov, reservation->lba, reservation->nblocks,
+			   data, seq, false, true, release_fn, release_arg);
+	overlay_reservation_rollback(reservation);
+	free(reservation);
+	return rc;
+}
+
+void
+s3_overlay_cancel_prepared(struct s3_overlay_write_reservation *reservation)
+{
+	if (!reservation) {
+		return;
+	}
+	overlay_reservation_rollback(reservation);
+	free(reservation);
+}
+
+void
+s3_overlay_mark_durable(struct s3_overlay *ov, uint64_t lba,
+			 uint32_t nblocks, uint64_t seq)
+{
+	uint64_t cur = lba;
+	uint32_t left = nblocks;
+
+	if (!ov || nblocks == 0) {
+		return;
+	}
+
+	while (left > 0) {
+		uint64_t chunk_index = cur / ov->blocks_per_chunk;
+		uint32_t first = (uint32_t)(cur % ov->blocks_per_chunk);
+		uint32_t this_blocks = spdk_min(left, ov->blocks_per_chunk - first);
+		struct overlay_chunk *c = overlay_chunk_get(ov, chunk_index);
+
+		if (!c) {
+			cur += this_blocks;
+			left -= this_blocks;
+			continue;
+		}
+
+		for (uint32_t i = 0; i < this_blocks; i++) {
+			struct overlay_block *b = &c->blocks[first + i];
+
+			if (b->state == OVERLAY_ABSENT || seq > b->seq) {
+				continue;
+			}
+			if (seq < b->seq) {
+				/* The callback belongs to an overwritten value.  It is
+				 * now the oldest durable fallback for host recovery. */
+				if (b->durable_floor_seq == 0 ||
+				    seq < b->durable_floor_seq) {
+					b->durable_floor_seq = seq;
+				}
+				continue;
+			}
+			if (!b->durable) {
+				b->durable = true;
+				b->durable_floor_seq = seq;
+				assert(c->n_pending > 0);
+				c->n_pending--;
+			}
+		}
+
+		overlay_chunk_recalc_min_seq(ov, c);
+		if (c->n_pending == 0) {
+			overlay_chunk_enqueue(ov, c);
+		}
+
+		cur += this_blocks;
+		left -= this_blocks;
+	}
 }
 
 void
@@ -643,6 +921,38 @@ s3_overlay_covers(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks)
 	return true;
 }
 
+bool
+s3_overlay_data_matches_seq(struct s3_overlay *ov, uint64_t lba,
+			    uint32_t nblocks, uint64_t seq)
+{
+	uint64_t cur = lba;
+	uint32_t left = nblocks;
+
+	if (!ov || nblocks == 0 || seq == 0) {
+		return false;
+	}
+	while (left > 0) {
+		uint64_t chunk_index = cur / ov->blocks_per_chunk;
+		uint32_t first = (uint32_t)(cur % ov->blocks_per_chunk);
+		uint32_t count = spdk_min(left, ov->blocks_per_chunk - first);
+		struct overlay_chunk *c = overlay_chunk_get(ov, chunk_index);
+
+		if (!c) {
+			return false;
+		}
+		for (uint32_t i = 0; i < count; i++) {
+			struct overlay_block *b = &c->blocks[first + i];
+
+			if (b->state != OVERLAY_DATA || b->seq != seq) {
+				return false;
+			}
+		}
+		cur += count;
+		left -= count;
+	}
+	return true;
+}
+
 uint32_t
 s3_overlay_covered_count(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks)
 {
@@ -704,6 +1014,14 @@ bool
 s3_overlay_has_dirty(const struct s3_overlay *ov)
 {
 	return ov && (!TAILQ_EMPTY(&ov->ripe_q) || !TAILQ_EMPTY(&ov->aging_q));
+}
+
+bool
+s3_overlay_chunk_is_flushing(struct s3_overlay *ov, uint64_t chunk_index)
+{
+	struct overlay_chunk *c = ov ? overlay_chunk_get(ov, chunk_index) : NULL;
+
+	return c && c->flush_active;
 }
 
 /* Whether the oldest chunk still being held back should be let go anyway.
@@ -783,27 +1101,44 @@ int
 s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
 		      uint64_t *out_chunk_index)
 {
-	struct overlay_chunk *c;
+	struct overlay_chunk *ripe, *aging, *c;
 
 	if (!ov || !out_chunk_index) {
 		return -EINVAL;
 	}
 
-	/* Ripe first, always. These are the chunks that upload without reading the
-	 * old object back, so they are both the cheapest work available and the
-	 * work the hold-back was waiting to get. */
-	c = TAILQ_FIRST(&ov->ripe_q);
-	if (c) {
+	ripe = TAILQ_FIRST(&ov->ripe_q);
+	aging = TAILQ_FIRST(&ov->aging_q);
+
+	/* When a partial chunk at the head of aging_q is older than the head of
+	 * ripe_q and is already forced or expired, flush it ahead of younger
+	 * full chunks so it cannot pin the FIFO write-back ring head or WAL
+	 * truncation point behind a stream of full writes. */
+	if (aging && (!ripe || aging->min_seq < ripe->min_seq)) {
+		if (force) {
+			ov->stats.flushed_forced++;
+			c = aging;
+			goto take;
+		}
+		if (overlay_aging_head_expired(ov, aging)) {
+			c = aging;
+			goto take;
+		}
+		if (!ripe) {
+			return -EAGAIN;
+		}
+	}
+
+	/* Ripe first otherwise. These are the chunks that upload without reading
+	 * the old object back, so they are both the cheapest work available and
+	 * the work the hold-back was waiting to get. */
+	if (ripe) {
 		ov->stats.flushed_full++;
+		c = ripe;
 		goto take;
 	}
 
-	/* Nothing ripe, so consider the oldest chunk still being held back. Only
-	 * the head, which keeps this O(1) and is sound now that fullness cannot be
-	 * hiding further down: aging_q is ordered by dirty time, so if its head has
-	 * not aged out, nothing behind it has either. */
-	c = TAILQ_FIRST(&ov->aging_q);
-	if (!c) {
+	if (!aging) {
 		return -ENOENT;
 	}
 
@@ -813,9 +1148,10 @@ s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
 		 * attributed to no reason at all, and the three counters would not
 		 * add up to what the flusher reports. */
 		ov->stats.flushed_forced++;
-	} else if (!overlay_aging_head_expired(ov, c)) {
+	} else if (!overlay_aging_head_expired(ov, aging)) {
 		return -EAGAIN;
 	}
+	c = aging;
 
 take:
 	overlay_chunk_dequeue(ov, c);
@@ -850,6 +1186,11 @@ s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 	 * dirty" would hide the real reason. */
 	if (c->flush_active) {
 		return -EBUSY;
+	}
+	if (c->n_pending != 0) {
+		/* Not on a dirty queue, but callers may invoke flush_begin()
+		 * directly.  Never let that bypass the WAL durability gate. */
+		return -EAGAIN;
 	}
 	if (c->n_dirty == 0) {
 		return -ENOENT;
@@ -886,6 +1227,15 @@ s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 	c->flush_active = true;
 	ov->flushes_active++;
 	ov->stats.flushes_begun++;
+	if (claimed < ov->blocks_per_chunk) {
+		ov->stats.flushes_partial++;
+	}
+	if (ov->ever_flushed[chunk_index]) {
+		ov->stats.flushes_repeated++;
+		if (claimed < ov->blocks_per_chunk) {
+			ov->stats.flushes_repeated_partial++;
+		}
+	}
 
 	view->chunk_index = chunk_index;
 	view->epoch       = c->epoch;
@@ -978,6 +1328,8 @@ s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index, bool success)
 
 	if (!success) {
 		ov->stats.flushes_failed++;
+	} else {
+		ov->ever_flushed[chunk_index] = 1;
 	}
 
 	c->flush_active = false;
