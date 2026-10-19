@@ -95,8 +95,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 				if attempt > 0 {
 					time.Sleep(200 * time.Millisecond)
 				}
-				// --detach takes a device argument; an intervening "--" would be
-				// consumed as that argument instead of terminating option parsing.
+				// losetup --detach takes the loop device directly.
 				if err = runCommand(cleanupCtx, "", "losetup", "--detach", loopDevice); err == nil {
 					loopDetached = true
 					return
