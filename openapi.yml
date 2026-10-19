@@ -542,6 +542,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SnapshotInfo'
+        '400':
+          description: Snapshot name starts with a reserved tpl-/snap- prefix
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
           content:
@@ -863,7 +869,7 @@ paths:
       parameters:
       - name: templateID
         in: path
-        description: Template identifier or alias
+        description: Template or snapshot identifier, alias, or snapshot name
         required: true
         schema:
           type: string
@@ -879,11 +885,23 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: snapshot_only
+        in: query
+        description: Only match snapshots by id or name; a miss is 404 and never deletes a template
+        required: false
+        schema:
+          type: boolean
       responses:
         '204':
-          description: Template deleted
+          description: Template or snapshot deleted
         '404':
-          description: Template not found
+          description: Template or snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Name matches both a template alias and a snapshot, or several snapshots
           content:
             application/json:
               schema:

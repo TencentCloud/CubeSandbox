@@ -49,7 +49,7 @@ export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
 
 ## 快照（Snapshot）
 
-`sb.create_snapshot()` 将沙箱的当前状态（文件系统 + 内存）持久化为一份快照，返回 `SnapshotInfo`，其中 `snapshot_id` 可以作为 `Sandbox.create(template=...)` 的入参。
+`sb.create_snapshot()` 将沙箱的当前状态（文件系统 + 内存）持久化为一份快照，返回 `SnapshotInfo`，其中 `snapshot_id` 可以作为 `Sandbox.create(template=...)` 的入参。可选的 `name` 不能以 `tpl-` 或 `snap-` 开头（返回 HTTP 400），因为这两个前缀表示 ID。
 
 ```python
 from cubesandbox import Sandbox
@@ -60,7 +60,7 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
     print(f"snapshot: {snap.snapshot_id}")
 ```
 
-快照的生命周期独立于沙箱：源沙箱被 `kill()` 之后，快照仍然可用。不再需要时，调用 `Sandbox.delete_snapshot(snapshot_id)` 手动清理。
+快照的生命周期独立于沙箱：源沙箱被 `kill()` 之后，快照仍然可用。不再需要时，调用 `Sandbox.delete_snapshot(snapshot_id_or_name)` 手动清理。它既接受快照 ID，也接受创建快照时指定的名称，删除成功返回 `True`、快照不存在返回 `False`。SDK 只匹配快照、不会匹配模板：名称没有对应快照时返回 `False`，即使存在同名模板别名，模板也不会被删除；名称匹配多个快照时返回 HTTP 409 且不删除任何对象，请改用 `snap-` ID。该行为要求 CubeAPI 支持 `snapshot_only`，旧版服务端会忽略该参数，名称没有对应快照时仍会路由到同名模板。
 
 ### 列举快照
 

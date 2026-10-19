@@ -60,7 +60,7 @@ func (c *cloneCleanup) release(ctx context.Context, sandboxID string) {
 	shouldCleanup := c.startCleanupLocked(c.remaining == 0)
 	c.mu.Unlock()
 	if shouldCleanup {
-		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+		_, _ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
 	}
 }
 
@@ -72,7 +72,7 @@ func (c *cloneCleanup) cleanup(ctx context.Context) {
 	shouldCleanup := c.startCleanupLocked(true)
 	c.mu.Unlock()
 	if shouldCleanup {
-		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+		_, _ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
 	}
 }
 
@@ -86,7 +86,7 @@ func (c *cloneCleanup) startCleanupLocked(ready bool) bool {
 
 // CreateSnapshot captures the current sandbox state (POST
 // /sandboxes/:id/snapshots). The snapshot outlives the sandbox. An empty name
-// lets the server pick one; a known name attaches a new build to it.
+// lets the server pick one. A name starting with tpl-/snap- is rejected (HTTP 400).
 func (s *Sandbox) CreateSnapshot(ctx context.Context, name string) (*SnapshotInfo, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
@@ -144,14 +144,23 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (
 	return items, resp.Header.Get("x-next-token"), nil
 }
 
-// DeleteSnapshot permanently removes a snapshot (DELETE /templates/:id).
-// Deleting the originating sandbox does not cascade-delete its snapshots.
-func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) error {
-	if snapshotID == "" {
-		return errors.New("snapshotID is required")
+// DeleteSnapshot removes a snapshot by ID or name; it never matches templates.
+// Reports false when it does not exist; several same-named snapshots are a 409.
+func (c *Client) DeleteSnapshot(ctx context.Context, idOrName string) (bool, error) {
+	if idOrName == "" {
+		return false, errors.New("snapshot id or name is required")
 	}
-	path := "/templates/" + url.PathEscape(snapshotID)
-	return c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	path := "/templates/" + url.PathEscape(idOrName) + "?snapshot_only=true"
+	err := c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	if err != nil {
+		var apiErr *APIError
+		// With snapshot_only the server returns 404 only for a missing snapshot.
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Rollback reverts the sandbox to a snapshot (POST /sandboxes/:id/rollback).

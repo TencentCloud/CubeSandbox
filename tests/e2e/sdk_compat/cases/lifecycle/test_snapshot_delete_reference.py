@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -61,7 +62,7 @@ def _wait_for_physical_cleanup(owner, snapshot_id: str, *, timeout: float) -> No
     last_observation = "DELETE still succeeded for the tombstone"
     while time.monotonic() < deadline:
         try:
-            owner.delete_snapshot(snapshot_id)
+            deleted = owner.delete_snapshot(snapshot_id)
         except Exception as exc:  # noqa: BLE001 - normalize SDK/API versions
             if _is_snapshot_not_found(exc, snapshot_id):
                 return
@@ -69,6 +70,10 @@ def _wait_for_physical_cleanup(owner, snapshot_id: str, *, timeout: float) -> No
                 raise
             last_observation = f"delete remains retryable: {exc}"
         else:
+            # SDKs that return a bool report False once the tombstone row is
+            # physically reclaimed (404); None-returning SDKs raise 404 above.
+            if deleted is False:
+                return
             last_observation = "DELETE still succeeded for the tombstone"
         time.sleep(0.5)
     elapsed = time.monotonic() - started
@@ -177,3 +182,21 @@ def test_delete_referenced_snapshot_retires_new_use_but_keeps_runtime_alive(
                 cleanup_errors.append(exc)
         if not active_failure:
             assert not cleanup_errors, cleanup_errors
+
+
+def test_delete_snapshot_by_name(sdk_sandbox, sdk_e2e_config):
+    """A snapshot can be deleted by its name (E2B-compatible delete semantics)."""
+    name = f"e2e-snap-{uuid.uuid4().hex[:8]}"
+    snapshot_id = sdk_sandbox.create_snapshot(name=name)
+    assert snapshot_id in sdk_sandbox.list_snapshot_ids()
+
+    deleted = sdk_sandbox.delete_snapshot(name)
+    if deleted is not None:
+        assert deleted is True, "delete by name should report success"
+
+    wait_until(
+        lambda: snapshot_id not in sdk_sandbox.list_snapshot_ids(),
+        timeout=sdk_e2e_config.default_timeout,
+        interval=0.5,
+        description=f"snapshot {snapshot_id} to disappear after delete by name",
+    )

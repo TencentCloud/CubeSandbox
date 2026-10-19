@@ -52,6 +52,24 @@ func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 	}
 }
 
+func TestSubmitSandboxSnapshotRejectsReservedPrefixName(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+		t.Fatal("create request must not be loaded for an invalid snapshot name")
+		return nil, nil
+	}
+
+	_, err := SubmitSandboxSnapshot(context.Background(), "req-1", "sb-1", "node-1", "10.0.0.1", "snap-backup", "")
+	if !errors.Is(err, ErrInvalidSnapshotName) {
+		t.Fatalf("err = %v, want ErrInvalidSnapshotName", err)
+	}
+}
+
 func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}

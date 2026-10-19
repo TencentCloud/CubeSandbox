@@ -644,16 +644,20 @@ export class Sandbox {
     return { snapshots, nextToken };
   }
 
-  /** DELETE /templates/:id — delete a snapshot (stored as a template). */
+  /** DELETE /templates/:id?snapshot_only=true — delete a snapshot by ID or name; false when absent. */
   static async deleteSnapshot(
     snapshotId: string,
     options: { config?: Config | ConfigOptions } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     const cfg = resolveConfig(options.config);
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${snapshotId}`, {
+    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${encodeURIComponent(snapshotId)}?snapshot_only=true`, {
       method: "DELETE",
     });
+    if (resp.status === 404) {
+      return false;
+    }
     await checkControlResponse(resp);
+    return true;
   }
 
   // ── Instance methods ────────────────────────────────────────────────────────
@@ -822,7 +826,7 @@ export class Sandbox {
     await this._cloneCleanup?.release(this.sandboxId);
   }
 
-  /** POST /sandboxes/:id/snapshots — create a snapshot. */
+  /** POST /sandboxes/:id/snapshots — create a snapshot; name must not start with tpl-/snap-. */
   async createSnapshot(name?: string): Promise<SnapshotInfo> {
     const payload: Record<string, unknown> = {};
     if (name !== undefined) {

@@ -38,6 +38,7 @@ impl SnapshotService {
         name: Option<String>,
         backend: Option<String>,
     ) -> AppResult<SnapshotInfo> {
+        validate_snapshot_name(name.as_deref())?;
         let request_id = new_request_id();
         let req = CreateSnapshotRequest {
             request_id: request_id.clone(),
@@ -149,19 +150,43 @@ impl SnapshotService {
         }
     }
 
-    pub async fn has_snapshot(&self, snapshot_id: &str) -> AppResult<bool> {
-        // Identity, not visibility: a tombstoned snap- id is still a snapshot
-        // and must keep using DeleteSnapshot (idempotent), not DeleteTemplate.
-        if is_snapshot_identity(snapshot_id) {
-            return Ok(true);
+    /// IDs of the live snapshots whose name exactly matches `name`.
+    pub async fn ids_by_name(&self, name: &str) -> AppResult<Vec<String>> {
+        let req = ListSnapshotsRequest {
+            request_id: new_request_id(),
+            instance_type: self.instance_type.clone(),
+            sandbox_id: None,
+            name: Some(name.to_string()),
+            status: None,
+            limit: None,
+            next_token: None,
+        };
+        let resp = self
+            .cubemaster
+            .list_snapshots(&req)
+            .await
+            .map_err(internal_error)?;
+        resp.ret.as_result().map_err(internal_error)?;
+        Ok(resp.items.into_iter().map(|s| s.snapshot_id).collect())
+    }
+
+    /// Resolve an id or name strictly within snapshots: a miss is a 404 and
+    /// never falls through to templates.
+    pub async fn resolve_only(&self, id_or_name: &str) -> AppResult<String> {
+        let id_or_name = id_or_name.trim();
+        if id_or_name.is_empty() {
+            return Err(AppError::BadRequest(
+                "snapshot id or name is required".to_string(),
+            ));
         }
-        match self.cubemaster.get_snapshot(snapshot_id, false).await {
-            Ok(resp) => {
-                resp.ret.as_result().map_err(internal_error)?;
-                Ok(true)
-            }
-            Err(e) if e.is_not_found() => Ok(false),
-            Err(e) => Err(internal_error(e)),
+        if is_snapshot_identity(id_or_name) {
+            return Ok(id_or_name.to_string());
+        }
+        let mut ids = self.ids_by_name(id_or_name).await?;
+        match ids.len() {
+            0 => Err(snapshot_not_found(id_or_name)),
+            1 => Ok(ids.remove(0)),
+            _ => Err(ambiguous_name_conflict(id_or_name)),
         }
     }
 
@@ -286,6 +311,12 @@ fn sandbox_not_found(sandbox_id: &str) -> AppError {
 
 fn snapshot_not_found(snapshot_id: &str) -> AppError {
     AppError::NotFound(format!("snapshot {} not found", snapshot_id))
+}
+
+pub(crate) fn ambiguous_name_conflict(name: &str) -> AppError {
+    AppError::Conflict(format!(
+        "snapshot name {name:?} is ambiguous; delete by snap- id instead"
+    ))
 }
 
 fn sandbox_or_snapshot_not_found(sandbox_id: &str, snapshot_id: &str) -> AppError {
@@ -415,7 +446,18 @@ fn snapshot_names(resource: &SnapshotResource) -> Vec<String> {
     vec![resource.snapshot_id.clone()]
 }
 
-fn is_snapshot_identity(id: &str) -> bool {
+/// Reject names starting with `tpl-`/`snap-`: they would be read as IDs on delete.
+fn validate_snapshot_name(name: Option<&str>) -> AppResult<()> {
+    let name = name.map(str::trim).unwrap_or_default();
+    if name.starts_with("tpl-") || name.starts_with("snap-") {
+        return Err(AppError::BadRequest(format!(
+            "snapshot name {name:?} must not start with 'tpl-' or 'snap-'"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn is_snapshot_identity(id: &str) -> bool {
     id.trim().starts_with("snap-")
 }
 
@@ -455,6 +497,39 @@ mod tests {
         assert!(!is_snapshot_identity("tpl-abc"));
         assert!(!is_snapshot_identity(""));
         assert!(!is_snapshot_identity("snapshot-1"));
+    }
+
+    #[test]
+    fn snapshot_name_rejects_reserved_id_prefixes() {
+        for name in ["snap-x", "tpl-x", "  snap-x", "snap-", "tpl-"] {
+            assert!(
+                matches!(
+                    validate_snapshot_name(Some(name)),
+                    Err(AppError::BadRequest(_))
+                ),
+                "{name:?} should be rejected"
+            );
+        }
+        for name in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("prod"),
+            Some("Snap-x"),
+            Some("e2e-snap-1"),
+        ] {
+            assert!(validate_snapshot_name(name).is_ok(), "{name:?} should pass");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_reserved_prefix_without_calling_cubemaster() {
+        // The fake has no routes, so any request would fail with Internal, not BadRequest.
+        let svc = service_for(spawn_fake_cubemaster(axum::Router::new()).await);
+        assert!(matches!(
+            svc.create("sb-1", Some("snap-x".into()), None).await,
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
@@ -564,5 +639,151 @@ mod tests {
         assert_eq!(normalize_limit(Some(i32::MAX)), 100);
         assert_eq!(normalize_limit(Some(0)), 100);
         assert_eq!(normalize_limit(Some(-5)), 100);
+    }
+
+    async fn spawn_fake_cubemaster(handler: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, handler)
+                .await
+                .expect("server should run");
+        });
+        format!("http://{addr}")
+    }
+
+    fn service_for(base: String) -> SnapshotService {
+        SnapshotService::new(
+            CubeMasterClient::new(base, reqwest::Client::new()),
+            "cubebox".to_string(),
+        )
+    }
+
+    fn list_response(items: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "RequestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "success" },
+            "data": items,
+            "next_token": ""
+        })
+    }
+
+    fn snapshot_item(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "snapshot_id": id,
+            "display_name": "prod",
+            "status": "READY",
+        })
+    }
+
+    #[tokio::test]
+    async fn ids_by_name_returns_single_match() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        async fn list_handler(
+            Query(params): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            assert_eq!(params.get("name").map(String::as_str), Some("prod"));
+            Json(list_response(serde_json::json!([snapshot_item("snap-x")])))
+        }
+
+        let base =
+            spawn_fake_cubemaster(Router::new().route("/cube/snapshot", get(list_handler))).await;
+        let svc = service_for(base);
+        assert_eq!(
+            svc.ids_by_name("prod").await.unwrap(),
+            vec!["snap-x".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn ids_by_name_no_match_is_empty() {
+        use axum::{routing::get, Json, Router};
+
+        async fn list_handler() -> Json<serde_json::Value> {
+            Json(list_response(serde_json::json!([])))
+        }
+
+        let base =
+            spawn_fake_cubemaster(Router::new().route("/cube/snapshot", get(list_handler))).await;
+        let svc = service_for(base);
+        assert!(svc.ids_by_name("missing").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ids_by_name_returns_all_matches() {
+        use axum::{routing::get, Json, Router};
+
+        async fn list_handler() -> Json<serde_json::Value> {
+            Json(list_response(serde_json::json!([
+                snapshot_item("snap-a"),
+                snapshot_item("snap-b"),
+            ])))
+        }
+
+        let base =
+            spawn_fake_cubemaster(Router::new().route("/cube/snapshot", get(list_handler))).await;
+        let svc = service_for(base);
+        assert_eq!(
+            svc.ids_by_name("prod").await.unwrap(),
+            vec!["snap-a".to_string(), "snap-b".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_only_snap_id_and_empty_make_no_request() {
+        let svc = service_for(spawn_fake_cubemaster(axum::Router::new()).await);
+        assert_eq!(svc.resolve_only("  snap-abc ").await.unwrap(), "snap-abc");
+        assert!(matches!(
+            svc.resolve_only("  ").await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_only_name_miss_is_not_found_even_for_tpl_prefix() {
+        use axum::{routing::get, Json, Router};
+
+        async fn list_handler() -> Json<serde_json::Value> {
+            Json(list_response(serde_json::json!([])))
+        }
+
+        let base =
+            spawn_fake_cubemaster(Router::new().route("/cube/snapshot", get(list_handler))).await;
+        let svc = service_for(base);
+        for name in ["prod", "tpl-abc"] {
+            assert!(matches!(
+                svc.resolve_only(name).await,
+                Err(AppError::NotFound(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_only_name_returns_single_id_and_rejects_duplicates() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        async fn list_handler(
+            Query(params): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            let items = match params.get("name").map(String::as_str) {
+                Some("one") => serde_json::json!([snapshot_item("snap-x")]),
+                _ => serde_json::json!([snapshot_item("snap-a"), snapshot_item("snap-b")]),
+            };
+            Json(list_response(items))
+        }
+
+        let base =
+            spawn_fake_cubemaster(Router::new().route("/cube/snapshot", get(list_handler))).await;
+        let svc = service_for(base);
+        assert_eq!(svc.resolve_only("one").await.unwrap(), "snap-x");
+        match svc.resolve_only("many").await {
+            Err(AppError::Conflict(msg)) => assert!(msg.contains("ambiguous"), "{msg}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
     }
 }

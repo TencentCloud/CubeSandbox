@@ -146,6 +146,16 @@ func validateTemplateAlias(alias string) error {
 	return nil
 }
 
+// validateSnapshotName rejects snapshot names that start with the tpl-/snap-
+// ID prefixes, which would be indistinguishable from IDs on delete.
+func validateSnapshotName(name string) error {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "tpl-") || strings.HasPrefix(name, "snap-") {
+		return fmt.Errorf("%w: %q must not start with 'tpl-' or 'snap-'", ErrInvalidSnapshotName, name)
+	}
+	return nil
+}
+
 func validateTemplateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
 	if cfg == nil || !hasDomainAllowOutTarget(cfg.AllowOut) {
 		return nil

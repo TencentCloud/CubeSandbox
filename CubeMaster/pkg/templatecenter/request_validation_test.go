@@ -5,9 +5,23 @@
 package templatecenter
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestValidateSnapshotName(t *testing.T) {
+	for _, name := range []string{"snap-x", "tpl-x", " snap-x", "tpl-", "snap-"} {
+		if err := validateSnapshotName(name); !errors.Is(err, ErrInvalidSnapshotName) {
+			t.Fatalf("validateSnapshotName(%q) = %v, want ErrInvalidSnapshotName", name, err)
+		}
+	}
+	for _, name := range []string{"", "   ", "prod", "Snap-x", "e2e-snap-1", "My Snapshot", "snapshot-1"} {
+		if err := validateSnapshotName(name); err != nil {
+			t.Fatalf("validateSnapshotName(%q) returned unexpected error: %v", name, err)
+		}
+	}
+}
 
 // TestValidateTemplateAlias exercises the alias format contract used by the
 // template-alias feature (#584): the alias must be lowercase alphanumeric and

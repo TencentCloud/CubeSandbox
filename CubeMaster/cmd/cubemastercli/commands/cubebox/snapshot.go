@@ -134,7 +134,7 @@ var SnapshotCreateCommand = cli.Command{
 	Usage: "create a snapshot from an existing sandbox",
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "sandbox-id", Usage: "sandbox id to snapshot"},
-		cli.StringFlag{Name: "display-name", Usage: "snapshot display name"},
+		cli.StringFlag{Name: "display-name", Usage: "snapshot display name (must not start with tpl-/snap-)"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {

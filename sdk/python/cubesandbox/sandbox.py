@@ -8,6 +8,7 @@ import shlex
 import threading
 import uuid
 from typing import Any, Callable, Dict
+from urllib.parse import quote
 
 import httpx
 import requests
@@ -797,7 +798,8 @@ class Sandbox:
         Args:
             name: Optional template name for the snapshot.  When a template
                 with this name already exists the new build is attached to it
-                rather than creating a new template.
+                rather than creating a new template.  Must not start with
+                ``tpl-`` or ``snap-`` (HTTP 400).
 
         Returns:
             :class:`SnapshotInfo` with ``snapshot_id`` and ``names``.
@@ -859,29 +861,38 @@ class Sandbox:
         return items, nt
 
     @classmethod
-    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> None:
+    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> bool:
         """DELETE /templates/:templateID — Delete a snapshot (1.3).
 
-        Snapshots are stored as templates; this call removes the underlying
-        template permanently.  Deleting the originating sandbox does **not**
-        cascade-delete its snapshots.
+        Accepts either a snapshot ID or a snapshot name and only ever matches
+        snapshots (``snapshot_only``), never templates.  Deleting the
+        originating sandbox does **not** cascade-delete its snapshots.
 
         Args:
-            snapshot_id: The ``snapshotID`` (= templateID) to delete.
+            snapshot_id: The ``snapshotID`` (= templateID) or snapshot name to
+                delete.
             config: SDK config.  Uses default (env-based) config if omitted.
 
+        Returns:
+            ``True`` when the snapshot was deleted, ``False`` when it did not
+            exist.
+
         Raises:
-            TemplateNotFoundError: If the snapshot does not exist (HTTP 404).
-            ApiError: On unexpected backend error.
+            ApiError: HTTP 409 when the name matches several snapshots (use
+                the ``snap-`` ID instead); or on an unexpected error.
         """
         cfg = config or Config()
         s = requests.Session()
         resp = s.delete(
-            f"{cfg.api_url}/templates/{snapshot_id}",
+            f"{cfg.api_url}/templates/{quote(snapshot_id, safe='')}",
+            params={"snapshot_only": "true"},
             headers=_auth_headers(cfg),
             timeout=max(cfg.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
         )
+        if resp.status_code == 404:
+            return False
         _check_response(resp)
+        return True
 
     # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
     # See docstring of :meth:`create` for details.

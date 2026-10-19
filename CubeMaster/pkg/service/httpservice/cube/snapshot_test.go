@@ -73,7 +73,7 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
 		"requestID":"req-1",
 		"sandbox_id":"`+knownSandboxTestID+`",
-		"display_name":"snap-name"
+		"display_name":"my-snapshot"
 	}`))
 	rt := &CubeLog.RequestTrace{}
 	resp := createSnapshot(req, rt)
@@ -93,6 +93,36 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		assert.Equal(t, "READY", got.Operation.Status)
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestCreateSnapshotRejectsReservedPrefixNameAsParamsError(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
+	origCreateSnapshotFn := createSnapshotFn
+	origResolveSnapshotHostFn := resolveSnapshotHostFn
+	t.Cleanup(func() {
+		createSnapshotFn = origCreateSnapshotFn
+		resolveSnapshotHostFn = origResolveSnapshotHostFn
+	})
+	resolveSnapshotHostFn = func(context.Context, string, string) (string, string, error) {
+		return "node-a", "10.0.0.1", nil
+	}
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+		return nil, fmt.Errorf("%w: %q", templatecenter.ErrInvalidSnapshotName, displayName)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
+		"requestID":"req-1",
+		"sandbox_id":"`+knownSandboxTestID+`",
+		"display_name":"snap-backup"
+	}`))
+	resp := createSnapshot(req, &CubeLog.RequestTrace{})
+
+	got, ok := resp.(*snapshotResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
 }
 
 func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {

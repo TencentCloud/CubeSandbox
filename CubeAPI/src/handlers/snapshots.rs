@@ -26,6 +26,7 @@ use crate::{
     request_body = CreateSnapshotRequest,
     responses(
         (status = 201, description = "Snapshot created", body = SnapshotInfo),
+        (status = 400, description = "Snapshot name starts with a reserved tpl-/snap- prefix", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )

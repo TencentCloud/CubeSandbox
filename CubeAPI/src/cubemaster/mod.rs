@@ -266,22 +266,6 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
-    /// GET /cube/snapshot/{snapshot_id} — fetch a single snapshot.
-    pub async fn get_snapshot(
-        &self,
-        snapshot_id: &str,
-        include_request: bool,
-    ) -> Result<SnapshotDetailResponse, CubeMasterError> {
-        validate_path_segment("snapshot_id", snapshot_id)?;
-        let url = format!("{}/cube/snapshot/{}", self.base_url, snapshot_id);
-        let mut builder = self.inner.get(&url);
-        if include_request {
-            builder = builder.query(&[("include_request", "true")]);
-        }
-        let resp = builder.send().await.map_err(CubeMasterError::Http)?;
-        parse_response(resp).await
-    }
-
     /// DELETE /cube/snapshot/{snapshot_id} — delete a snapshot.
     pub async fn delete_snapshot(
         &self,
@@ -1830,16 +1814,6 @@ pub struct ListSnapshotsResponse {
     pub items: Vec<SnapshotResource>,
     #[serde(default)]
     pub next_token: String,
-}
-
-/// GET /cube/snapshot/{snapshot_id} — response.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct SnapshotDetailResponse {
-    #[serde(rename = "RequestID", alias = "requestID", default)]
-    pub request_id: String,
-    pub ret: RetCode,
-    pub snapshot: SnapshotResource,
 }
 
 /// DELETE /cube/snapshot/{snapshot_id} — request body.

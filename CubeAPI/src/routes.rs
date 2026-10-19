@@ -364,6 +364,291 @@ mod tests {
         );
     }
 
+    /// Mock CubeMaster for `DELETE /templates/:id` routing tests. Records every
+    /// call so tests can assert which resource was (not) touched.
+    #[derive(Clone)]
+    struct DeleteMock {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        snapshot_ids: Vec<&'static str>,
+        template_exists: bool,
+    }
+
+    async fn delete_routing_server(
+        snapshot_ids: Vec<&'static str>,
+        template_exists: bool,
+    ) -> (TestServer, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{
+            extract::{Path, State},
+            routing::get,
+        };
+
+        type Mock = State<DeleteMock>;
+
+        async fn list_snapshots(State(m): Mock) -> Json<Value> {
+            m.calls.lock().unwrap().push("list_snapshots".into());
+            let items: Vec<Value> = m
+                .snapshot_ids
+                .iter()
+                .map(|id| serde_json::json!({ "snapshot_id": id, "status": "READY" }))
+                .collect();
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "data": items,
+                "next_token": ""
+            }))
+        }
+
+        async fn get_template(State(m): Mock) -> Json<Value> {
+            m.calls.lock().unwrap().push("get_template".into());
+            if m.template_exists {
+                Json(serde_json::json!({
+                    "RequestID": "req-1",
+                    "ret": { "ret_code": 0, "ret_msg": "success" },
+                    "template_id": "tpl-abc",
+                    "status": "ready",
+                    "replicas": []
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "RequestID": "req-1",
+                    "ret": { "ret_code": 130404, "ret_msg": "template not found" }
+                }))
+            }
+        }
+
+        async fn delete_snapshot(State(m): Mock, Path(id): Path<String>) -> Json<Value> {
+            m.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete_snapshot:{id}"));
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "snapshot_id": id,
+                "operation_id": "op-1",
+                "status": "READY"
+            }))
+        }
+
+        async fn delete_template(State(m): Mock, Json(body): Json<Value>) -> Json<Value> {
+            let id = body["template_id"].as_str().unwrap_or_default();
+            m.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete_template:{id}"));
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" }
+            }))
+        }
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mock = DeleteMock {
+            calls: calls.clone(),
+            snapshot_ids,
+            template_exists,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/cube/snapshot", get(list_snapshots))
+                    .route("/cube/snapshot/:id", delete(delete_snapshot))
+                    .route("/cube/template", get(get_template).delete(delete_template))
+                    .with_state(mock),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..ServerConfig::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+        (server, calls)
+    }
+
+    #[tokio::test]
+    async fn delete_by_snapshot_name_returns_204_with_operation_header() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], false).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "get_template", "delete_snapshot:snap-x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_shared_by_template_and_snapshot_returns_409_and_deletes_nothing() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 409);
+        assert!(
+            error.message.contains("template alias and a snapshot name"),
+            "unexpected message: {}",
+            error.message
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "get_template"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_duplicate_snapshot_name_returns_409_and_deletes_nothing() {
+        let (server, calls) = delete_routing_server(vec!["snap-a", "snap-b"], false).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 409);
+        assert!(error.message.contains("ambiguous"), "{}", error.message);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+    }
+
+    #[tokio::test]
+    async fn delete_by_tpl_id_goes_to_template_without_snapshot_lookup() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server.delete("/templates/tpl-abc").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert!(resp.maybe_header("x-operation-id").is_none());
+        assert_eq!(*calls.lock().unwrap(), vec!["delete_template:tpl-abc"]);
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_without_snapshot_falls_through_to_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "delete_template:prod"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_snap_id_deletes_snapshot_directly() {
+        let (server, calls) = delete_routing_server(vec![], false).await;
+
+        let resp = server.delete("/templates/snap-abc").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(*calls.lock().unwrap(), vec!["delete_snapshot:snap-abc"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_name_miss_is_404_and_never_deletes_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(*calls.lock().unwrap(), vec!["list_snapshots"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_ignores_same_named_template_and_deletes_snapshot() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "delete_snapshot:snap-x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_tpl_id_is_404_and_never_deletes_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server
+            .delete("/templates/tpl-abc")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_duplicate_names_are_409_and_snap_id_is_direct() {
+        let (server, calls) = delete_routing_server(vec!["snap-a", "snap-b"], false).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+
+        let resp = server
+            .delete("/templates/snap-a")
+            .add_query_param("snapshot_only", "true")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap(),
+            "delete_snapshot:snap-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_with_reserved_prefix_name_is_400() {
+        let (server, calls) = delete_routing_server(vec![], false).await;
+
+        let resp = server
+            .post("/sandboxes/sb-1/snapshots")
+            .json(&serde_json::json!({ "name": "snap-backup" }))
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 400);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn v2_create_forwards_flattened_body_without_v2_flags() {
         use axum::{extract::State, routing::post};

@@ -194,7 +194,10 @@ snaps, nextToken, err := client.ListSnapshots(ctx, cubesandbox.ListSnapshotsOpti
 	Limit:     100,
 })
 
-err = client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id
+deleted, err := client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id?snapshot_only=true
+// `deleted` is false when the snapshot no longer exists; a name may be passed
+// instead of an ID. Only snapshots are matched, never templates; several
+// same-named snapshots return an error (HTTP 409), so use the `snap-` ID.
 
 _, err = sb.Rollback(ctx, snap.SnapshotID) // POST /sandboxes/:id/rollback
 
@@ -204,7 +207,7 @@ clones, err := sb.Clone(ctx, cubesandbox.CloneOptions{N: 3, Concurrency: 3})
 forks, err := sb.Fork(ctx, cubesandbox.ForkOptions{Count: cubesandbox.IntPtr(3)})
 ```
 
-`Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+`DeleteSnapshot` accepts a snapshot ID or name and returns `(deleted bool, err error)`; `deleted` is `false` when the snapshot does not exist. `Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
 
 `Fork` returns exactly `Count` entries — each a `ForkResult` with the derived `Sandbox` or that fork's error — so partial success keeps copies without failing the call (unlike `Clone`). `Count` is 1..100, default 1 (`IntPtr` for a value, nil = default); `Timeout` is a `time.Duration` idle TTL per fork. The temporary snapshot is server-managed.
 

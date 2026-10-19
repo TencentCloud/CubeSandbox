@@ -249,19 +249,23 @@ pub struct DeleteTemplateQuery {
     pub instance_type: Option<String>,
     #[serde(default)]
     pub sync: Option<bool>,
+    #[serde(default)]
+    pub snapshot_only: Option<bool>,
 }
 
 #[utoipa::path(
     delete,
     path = "/templates/{templateID}",
     params(
-        ("templateID" = String, Path, description = "Template identifier or alias"),
+        ("templateID" = String, Path, description = "Template or snapshot identifier, alias, or snapshot name"),
         ("instance_type" = Option<String>, Query, description = "CubeMaster instance_type filter"),
-        ("sync" = Option<bool>, Query, description = "Wait for deletion to complete before returning")
+        ("sync" = Option<bool>, Query, description = "Wait for deletion to complete before returning"),
+        ("snapshot_only" = Option<bool>, Query, description = "Only match snapshots by id or name; a miss is 404 and never deletes a template")
     ),
     responses(
-        (status = 204, description = "Template deleted"),
-        (status = 404, description = "Template not found", body = ApiError),
+        (status = 204, description = "Template or snapshot deleted"),
+        (status = 404, description = "Template or snapshot not found", body = ApiError),
+        (status = 409, description = "Name matches both a template alias and a snapshot, or several snapshots", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
@@ -276,10 +280,18 @@ pub async fn delete_template(
     // branch additionally exposes the operation id via a response header so
     // audit trails / debugging can still correlate the deletion with its
     // CubeMaster job, but no body is returned.
-    // Route by snapshot identity (snap- prefix or a live snapshot GET),
-    // not by whether GetSnapshot still exposes the row.
-    if state.services.snapshots.has_snapshot(&template_id).await? {
-        let resp = state.services.snapshots.delete(&template_id).await?;
+    // Route by snapshot id/name; an alias matching both a template and a snapshot is a 409.
+    // With `snapshot_only` the lookup is snapshot-only and never reaches templates.
+    let target = if params.snapshot_only.unwrap_or(false) {
+        Some(state.services.snapshots.resolve_only(&template_id).await?)
+    } else {
+        state
+            .services
+            .resolve_snapshot_delete_target(&template_id)
+            .await?
+    };
+    if let Some(snapshot_id) = target {
+        let resp = state.services.snapshots.delete(&snapshot_id).await?;
         let mut headers = HeaderMap::new();
         if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
             headers.insert("x-operation-id", value);

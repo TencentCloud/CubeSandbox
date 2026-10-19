@@ -90,6 +90,7 @@ var (
 	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
 	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
 	ErrInvalidAlias                 = errors.New("alias is invalid")
+	ErrInvalidSnapshotName          = errors.New("snapshot name is invalid")
 	ErrTemplateNotReady             = errors.New("template is not ready")
 )
 

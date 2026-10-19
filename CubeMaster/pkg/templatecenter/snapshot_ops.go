@@ -119,6 +119,9 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	if sandboxID == "" {
 		return nil, errors.New("sandboxID is required")
 	}
+	if err := validateSnapshotName(displayName); err != nil {
+		return nil, err
+	}
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
 

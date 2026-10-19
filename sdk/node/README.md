@@ -303,16 +303,21 @@ const { snapshots, nextToken } = await Sandbox.listSnapshots({
   limit: 100,
 });
 
-await Sandbox.deleteSnapshot(snap.snapshotId); // DELETE /templates/:id
+const deleted = await Sandbox.deleteSnapshot(snap.snapshotId); // DELETE /templates/:id?snapshot_only=true
+// `deleted` is false when the snapshot no longer exists; a name may be passed
+// instead of an ID. Only snapshots are matched, never templates; several
+// same-named snapshots throw (HTTP 409), so use the `snap-` ID.
 
 await sb.rollback(snap.snapshotId); // POST /sandboxes/:id/rollback
 
 const clones = await sb.clone(3, { concurrency: 3 });
 ```
 
-`clone` snapshots the sandbox, creates `n` sandboxes from it (capped by
-`concurrency`), then deletes the ephemeral snapshot. If any create fails, all
-successful siblings are killed and the first error is re-thrown.
+`deleteSnapshot` accepts a snapshot ID or name and resolves to `true`/`false`
+depending on whether the snapshot existed. `clone` snapshots the sandbox,
+creates `n` sandboxes from it (capped by `concurrency`), then deletes the
+ephemeral snapshot. If any create fails, all successful siblings are killed
+and the first error is re-thrown.
 
 ```ts
 // One server-side call: the backend snapshots sb once and derives N copies.
@@ -450,7 +455,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | `Sandbox.listV2(config?)` | `GET /v2/sandboxes` — list sandboxes (v2) |
 | `Sandbox.health(config?)` | `GET /health` — service health check |
 | `Sandbox.listSnapshots(options?)` | `GET /snapshots` — list snapshots (paginated) |
-| `Sandbox.deleteSnapshot(snapshotId, options?)` | `DELETE /templates/:id` — delete a snapshot |
+| `Sandbox.deleteSnapshot(idOrName, options?)` | `DELETE /templates/:id?snapshot_only=true` — delete a snapshot by ID or name, returns `boolean` |
 
 ### `Volume` — static methods
 

@@ -170,14 +170,35 @@ describe("Sandbox.listSnapshots", () => {
 });
 
 describe("Sandbox.deleteSnapshot", () => {
-  it("DELETEs the snapshot's template id", async () => {
+  it("DELETEs the snapshot's template id and returns true", async () => {
     setHandler((req) => {
       expect(req.method).toBe("DELETE");
       expect(req.pathname).toBe("/templates/snap-abc");
+      expect(req.url.searchParams.get("snapshot_only")).toBe("true");
       return { status: 204 };
     });
-    await Sandbox.deleteSnapshot("snap-abc", { config: makeConfig() });
+    const deleted = await Sandbox.deleteSnapshot("snap-abc", { config: makeConfig() });
+    expect(deleted).toBe(true);
     expect(requests).toHaveLength(1);
+  });
+
+  it("percent-encodes the name in the URL path", async () => {
+    setHandler((req) => {
+      expect(req.pathname).toBe("/templates/team%2Fapp%3Av1%3Fx%23y%2541");
+      expect(req.url.searchParams.get("snapshot_only")).toBe("true");
+      return { status: 204 };
+    });
+    expect(await Sandbox.deleteSnapshot("team/app:v1?x#y%41", { config: makeConfig() })).toBe(true);
+  });
+
+  it("returns false when the snapshot does not exist", async () => {
+    setHandler((req) => {
+      expect(req.pathname).toBe("/templates/missing");
+      expect(req.url.searchParams.get("snapshot_only")).toBe("true");
+      return { status: 404, body: { message: "snapshot missing not found" } };
+    });
+    const deleted = await Sandbox.deleteSnapshot("missing", { config: makeConfig() });
+    expect(deleted).toBe(false);
   });
 });
 

@@ -2444,6 +2444,50 @@ class TestRollback:
         assert sb._client is mock_client
 
 
+# ── Sandbox.delete_snapshot ───────────────────────────────────────────────────
+
+
+class TestDeleteSnapshot:
+    @staticmethod
+    def _delete_response(body=None, status: int = 204):
+        m = MagicMock()
+        m.ok = 200 <= status < 400
+        m.status_code = status
+        m.text = json.dumps(body) if body is not None else ""
+        m.json.return_value = body if body is not None else {}
+        return m
+
+    def test_delete_by_id_returns_true(self):
+        with patch("requests.Session.delete", return_value=self._delete_response()) as delete_m:
+            assert Sandbox.delete_snapshot("snap-1", config=make_config()) is True
+        url = delete_m.call_args.args[0]
+        assert url.endswith("/templates/snap-1")
+        assert delete_m.call_args.kwargs["params"] == {"snapshot_only": "true"}
+
+    def test_delete_escapes_name_in_url_path(self):
+        with patch("requests.Session.delete", return_value=self._delete_response()) as delete_m:
+            Sandbox.delete_snapshot("team/app:v1?x#y%41", config=make_config())
+        url = delete_m.call_args.args[0]
+        assert url.endswith("/templates/team%2Fapp%3Av1%3Fx%23y%2541")
+
+    def test_delete_by_name_returns_true(self):
+        with patch("requests.Session.delete", return_value=self._delete_response()):
+            assert Sandbox.delete_snapshot("prod", config=make_config()) is True
+
+    def test_delete_missing_returns_false(self):
+        resp = self._delete_response({"message": "snapshot missing not found"}, status=404)
+        with patch("requests.Session.delete", return_value=resp):
+            assert Sandbox.delete_snapshot("missing", config=make_config()) is False
+
+    def test_delete_conflict_raises(self):
+        resp = self._delete_response(
+            {"message": 'snapshot name "prod" is ambiguous'}, status=409
+        )
+        with patch("requests.Session.delete", return_value=resp):
+            with pytest.raises(ApiError):
+                Sandbox.delete_snapshot("prod", config=make_config())
+
+
 # ── Sandbox.clone ─────────────────────────────────────────────────────────────
 
 
