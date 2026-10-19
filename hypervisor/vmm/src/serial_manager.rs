@@ -11,8 +11,9 @@ use devices::legacy::Pl011;
 use devices::legacy::Serial;
 use libc::EFD_NONBLOCK;
 use serial_buffer::SerialBuffer;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,9 +44,9 @@ pub enum Error {
     #[error("Error flushing serial device's output buffer: {0}")]
     FlushOutput(#[source] io::Error),
 
-    /// Cannot make the file descriptor non-blocking.
-    #[error("Error making input file descriptor non-blocking: {0}")]
-    SetNonBlocking(#[source] io::Error),
+    /// Cannot open the terminal input file descriptor.
+    #[error("Error opening input file descriptor: {0}")]
+    OpenInput(#[source] io::Error),
 
     /// Cannot create EventFd.
     #[error("Error creating EventFd: {0}")]
@@ -111,18 +112,13 @@ impl SerialManager {
             ConsoleOutputMode::Tty => {
                 // If running on an interactive TTY then accept input
                 if unsafe { libc::isatty(libc::STDIN_FILENO) == 1 } {
-                    let stdin_clone = unsafe { File::from_raw_fd(libc::dup(libc::STDIN_FILENO)) };
-                    let ret = unsafe {
-                        let mut flags = libc::fcntl(stdin_clone.as_raw_fd(), libc::F_GETFL);
-                        flags |= libc::O_NONBLOCK;
-                        libc::fcntl(stdin_clone.as_raw_fd(), libc::F_SETFL, flags)
-                    };
-
-                    if ret < 0 {
-                        return Err(Error::SetNonBlocking(std::io::Error::last_os_error()));
-                    }
-
-                    stdin_clone
+                    // Reopen stdin so setting O_NONBLOCK does not change the
+                    // file status flags shared with stdout.
+                    OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open("/proc/self/fd/0")
+                        .map_err(Error::OpenInput)?
                 } else {
                     return Ok(None);
                 }
