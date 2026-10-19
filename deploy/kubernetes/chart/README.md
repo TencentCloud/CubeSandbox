@@ -343,11 +343,16 @@ TLS verification stays on — this adds trust, it does not disable it.
 
   ```sh
   kubectl exec -n <namespace> <templatecenter-pod> -- \
-    sh -c 'openssl crl2pkcs7 -nocrl -certfile /merged/ca-bundle.crt | openssl pkcs7 -print_certs -noout | grep -c subject='
+    sh -c 'grep -c "^-----BEGIN CERTIFICATE-----" /merged/ca-bundle.crt'
   ```
 
   The count should equal the system bundle's certificates plus the entries
   you configured (the init container logs the same number at pod start).
+  This needs no `openssl`, so it works on slim images where the X.509
+  validation degraded to the textual checks. On an image that does carry
+  `openssl`, the ASN.1-level equivalent is `openssl crl2pkcs7 -nocrl
+  -certfile /merged/ca-bundle.crt | openssl pkcs7 -print_certs -noout |
+  grep -c subject=`.
 - The feature is inert when `controlPlane.enabled=false` (no TemplateCenter
   is deployed): the ConfigMap, init container and checksum are not rendered,
   and the PEM validation does not fire — the one exception is the
