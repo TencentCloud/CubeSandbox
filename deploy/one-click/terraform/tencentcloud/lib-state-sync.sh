@@ -177,33 +177,6 @@ _load_env_file() {
 	done <"$file"
 }
 
-# _tc_migrate_trusted_ca_mirror [RESOLVED_TFVARS_FILE] — strip the trusted-ca
-#   keys from the resolved tfvars mirror, unconditionally. Mirrors written by
-#   earlier versions of this feature DID record the pair; from this version
-#   on, .env is their single source of truth and the pair must never be
-#   force-exported by the loader over the operator's values (see
-#   write_resolved_tfvars_file). Runs on every create, before
-#   load_resolved_tfvars_file, while the file still exists; a no-op once the
-#   mirror has been regenerated without the keys, and for mirrors that never
-#   carried them. Never fails the caller: missing file / jq / malformed
-#   JSON leave everything untouched, and the replacement is an atomic mv --
-#   a failed mv leaves the mirror byte-identical (the next run retries) and
-#   the run proceeds.
-_tc_migrate_trusted_ca_mirror() {
-	local resolved="${1:-}"
-	[ -n "$resolved" ] && [ -f "$resolved" ] || return 0
-	command -v jq >/dev/null 2>&1 || return 0
-	jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "$resolved" >/dev/null 2>&1 || return 0
-	local tmp
-	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved-migrate.XXXXXX")"
-	if jq 'del(.templatecenter_trusted_ca_certs, .templatecenter_trusted_ca_existing_config_map)' "$resolved" >"$tmp" 2>/dev/null; then
-		# Atomic replace: a reader never sees a truncated mirror, and a
-		# failed mv leaves the original intact for the next run's retry.
-		mv "$tmp" "$resolved" 2>/dev/null || rm -f "$tmp"
-	fi
-	rm -f "$tmp" 2>/dev/null || true
-}
-
 # _tc_trusted_ca_inline_enabled [RESOLVED_TFVARS_FILE] — true when the
 #   trusted-ca ConfigMap is terraform-managed (inline-certs path). The env
 #   branch mirrors terraform's definition exactly
@@ -221,10 +194,10 @@ _tc_migrate_trusted_ca_mirror() {
 #   The mirror branch is a fallback for an UNSET env var. In a live
 #   create.sh run it is effectively unreachable (load_resolved_tfvars_file
 #   suspends the mirror file before the reconciler gate runs, and the
-#   trusted-ca keys are deliberately never mirrored -- see
-#   write_resolved_tfvars_file); it exists for direct invocations against a
-#   restored or hand-maintained mirror, where it reads the same length>0
-#   rule and fails open. Consumed by create.sh's _reconcile_addons.
+#   trusted-ca keys it mirrors are never force-exported -- see
+#   load_resolved_tfvars_file's skip list); it exists for direct invocations
+#   against a restored or hand-maintained mirror, where it reads the same
+#   length>0 rule and fails open. Consumed by create.sh's _reconcile_addons.
 _tc_trusted_ca_inline_enabled() {
 	local certs="${TF_VAR_templatecenter_trusted_ca_certs:-}"
 	if [ -n "${TF_VAR_templatecenter_trusted_ca_certs+set}" ]; then

@@ -94,6 +94,22 @@ awk '/- name: merge-ca/,/- name: cube-templatecenter/' "$TMP_DIR/mirror.yaml" \
   exit 1
 }
 
+# 2b2. The NOTES verification snippet must match the init container's own
+#      check (grep -c of the exact BEGIN lines, the same number the init
+#      container logs): an openssl-based snippet fails on slim images where
+#      the README documents openssl as optional, even though the merge
+#      itself succeeded. helm template does not render NOTES.txt, so this
+#      pins the template source directly.
+grep -qF 'grep -c "^-----BEGIN CERTIFICATE-----" /merged/ca-bundle.crt' \
+  "$CHART_DIR/templates/NOTES.txt" || {
+  echo "FAIL: NOTES verification snippet must use the init container's grep check" >&2
+  exit 1
+}
+if grep -q 'crl2pkcs7' "$CHART_DIR/templates/NOTES.txt"; then
+  echo "FAIL: NOTES verification snippet must not require openssl (slim images lack it)" >&2
+  exit 1
+fi
+
 # 2c. Enabled without certs and without existingConfigMap must fail at render
 #     time (otherwise merge-ca would crashloop with stderr swallowed).
 if helm template guard-empty "$CHART_DIR" $COMMON_SETS \

@@ -315,33 +315,6 @@ if _tc_trusted_ca_inline_enabled "${TMP_DIR}/empty-certs.json"; then
 fi
 unset TF_VAR_templatecenter_trusted_ca_certs
 
-# 4b. Legacy mirror migration: mirrors written by earlier versions of this
-#     feature DID record the trusted-ca pair; from this version on .env is
-#     their single source of truth and the pair must never be force-exported
-#     by the loader over the operator's values. The migration strips both
-#     keys unconditionally and must run before load_resolved_tfvars_file.
-printf '{"region":"ap-guangzhou","templatecenter_trusted_ca_certs":["old"],"templatecenter_trusted_ca_existing_config_map":"mine"}' >"${TMP_DIR}/legacy.json"
-_tc_migrate_trusted_ca_mirror "${TMP_DIR}/legacy.json"
-jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "${TMP_DIR}/legacy.json" >/dev/null \
-  && fail "migration must strip both trusted-ca keys from a legacy mirror"
-jq -e '.region == "ap-guangzhou"' "${TMP_DIR}/legacy.json" >/dev/null \
-  || fail "migration must leave unrelated keys untouched"
-
-printf '{"region":"ap-guangzhou"}' >"${TMP_DIR}/legacy.json"
-_tc_migrate_trusted_ca_mirror "${TMP_DIR}/legacy.json"
-jq -e '.region == "ap-guangzhou"' "${TMP_DIR}/legacy.json" >/dev/null \
-  || fail "migration must not touch a mirror without trusted-ca keys"
-
-printf 'not json' >"${TMP_DIR}/legacy.json"
-_tc_migrate_trusted_ca_mirror "${TMP_DIR}/legacy.json" \
-  || fail "migration must not fail on a malformed mirror"
-grep -q 'not json' "${TMP_DIR}/legacy.json" \
-  || fail "migration must leave a malformed mirror untouched"
-
-if ! _tc_migrate_trusted_ca_mirror "${TMP_DIR}/nope.json"; then
-  fail "migration must be a no-op success for a missing mirror"
-fi
-
 # 4c. Persistence round-trip: the saved line must reload byte-for-byte
 #     through the same _env_value every other .env entry uses.
 CERTS_LINE="TF_VAR_templatecenter_trusted_ca_certs='[\"-----BEGIN CERTIFICATE-----\\nAA==\\n-----END CERTIFICATE-----\"]'"
@@ -354,26 +327,21 @@ assert_saved_line '["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE----
 
 # 4d. Static wiring pins: the gate must actually gate the trusted-ca entry,
 #     .env is the persistence for the pair (save_env_file carries both
-#     conditionally) while the resolved mirror must NOT record them (an
-#     HCL-valid value cannot round-trip a JSON mirror losslessly -- recording
-#     it lossily would un-pin the deployed config), the STEP2_TARGETS must
-#     NOT target the trusted-ca ConfigMap directly (the Deployment's volume
-#     config_map name reference in tke-addons.tf is the dependency edge that
-#     pulls it into the addons -target apply -- an explicit target on an
-#     instance index that is count=0 whenever the inline path is off would
-#     be dead there and version-sensitive on top), and that edge must exist.
+#     conditionally) and the resolved mirror must record the pair too -- it
+#     is the drift pin that keeps a raw terraform plan/apply in the
+#     terraform directory reading the DEPLOYED value instead of the
+#     variable defaults (which plan the feature away: destroy the
+#     ConfigMap, drop the merge-ca init container). The loader must skip
+#     the pair on force-export so .env stays authoritative across create.sh
+#     re-runs. The STEP2_TARGETS must NOT target the trusted-ca ConfigMap
+#     directly (the Deployment's volume config_map name reference in
+#     tke-addons.tf is the dependency edge that pulls it into the addons
+#     -target apply -- an explicit target on an instance index that is
+#     count=0 whenever the inline path is off would be dead there and
+#     version-sensitive on top), and that edge must exist.
 CREATE_SH="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud/create.sh"
 grep -q '_tc_trusted_ca_inline_enabled "$RESOLVED_TFVARS_FILE"' "${CREATE_SH}" \
   || fail "_reconcile_addons must gate the trusted-ca ConfigMap entry on the inline path"
-# The legacy-mirror migration must run BEFORE load_resolved_tfvars_file: the
-# loader force-exports every remaining mirror key over the operator's values
-# and then suspends (renames) the file. Assert the ORDER, not just presence.
-_migrate_line="$(grep -n '_tc_migrate_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"' "${CREATE_SH}" | head -1 | cut -d: -f1)" || true
-_loader_line="$(grep -n '^[[:space:]]*load_resolved_tfvars_file$' "${CREATE_SH}" | head -1 | cut -d: -f1)" || true
-[ -n "${_migrate_line}" ] && [ -n "${_loader_line}" ] \
-  || fail "could not locate the migrate call and the mirror loader call in create.sh"
-[ "${_migrate_line}" -lt "${_loader_line}" ] \
-  || fail "the mirror migration (line ${_migrate_line}) must run before load_resolved_tfvars_file (line ${_loader_line}): after the loader the file is suspended and its keys already force-exported"
 grep -qF 'kubernetes_config_map.templatecenter_trusted_ca[0]' "${CREATE_SH}" \
   && fail "STEP2_TARGETS must not target the trusted-ca ConfigMap directly (count=0 whenever the inline path is off; the volume's resource-name reference in tke-addons.tf is the dependency edge)"
 grep -qF 'kubernetes_config_map.templatecenter_trusted_ca[0].metadata[0].name' \
@@ -383,10 +351,10 @@ grep -qF '${TF_VAR_templatecenter_trusted_ca_certs:+TF_VAR_templatecenter_truste
   || fail "save_env_file must persist the certs TF_VAR_ conditionally (an empty TF_VAR_ for a list variable is not parseable HCL)"
 grep -qF '${TF_VAR_templatecenter_trusted_ca_existing_config_map:+TF_VAR_templatecenter_trusted_ca_existing_config_map=' "${CREATE_SH}" \
   || fail "save_env_file must persist the existing_configMap TF_VAR_"
-grep -qF 'templatecenter_trusted_ca_certs: $templatecenter_trusted_ca_certs,' "${CREATE_SH}" \
-  && fail "the resolved mirror must NOT record templatecenter_trusted_ca_certs (HCL-valid values cannot round-trip JSON losslessly; .env is the source of truth)"
-grep -qF 'templatecenter_trusted_ca_existing_config_map: $templatecenter_trusted_ca_existing_config_map,' "${CREATE_SH}" \
-  && fail "the resolved mirror must NOT record templatecenter_trusted_ca_existing_config_map"
+grep -qF '_jq_add_trusted_ca_pair "$tmp"' "${CREATE_SH}" \
+  || fail "write_resolved_tfvars_file must mirror the trusted-ca pair into the resolved snapshot (without it a raw terraform plan reads the variable defaults and plans the feature away)"
+grep -qF 'templatecenter_trusted_ca_certs | templatecenter_trusted_ca_existing_config_map) continue' "${CREATE_SH}" \
+  || fail "load_resolved_tfvars_file must skip the trusted-ca pair on force-export (the mirror records it for raw terraform runs; .env must stay authoritative across create.sh re-runs)"
 
 # 4e. write_resolved_tfvars_file must EXECUTE correctly, not merely contain
 #     the right text: a syntax-legal-but-semantically-broken edit inside its
@@ -399,13 +367,20 @@ awk '/^write_resolved_tfvars_file\(\) \{/,/^\}/' "${CREATE_SH}" >"${TMP_DIR}/res
 [ -s "${TMP_DIR}/resolved-fn.sh" ] || fail "could not extract write_resolved_tfvars_file from create.sh"
 grep -q 'RESOLVED_TFVARS_FILE' "${TMP_DIR}/resolved-fn.sh" \
   || fail "extracted write_resolved_tfvars_file looks truncated"
-# The three numeric/JSON coercion helpers live in create.sh itself (not the
-# lib); the extracted function needs them alongside.
-for _helper in _json_or_default _number_or_default _bool_json; do
+# The numeric/JSON coercion helpers, the declared-variable check, and the
+# trusted-ca mirror helper live in create.sh itself (not the lib); the
+# extracted function needs them alongside. _tf_var_declared greps
+# ${SCRIPT_DIR}/variables.tf -- point SCRIPT_DIR at the real directory,
+# exactly what create.sh's SCRIPT_DIR is at runtime.
+for _helper in _tf_var_declared _json_or_default _number_or_default _bool_json _jq_add_trusted_ca_pair; do
 	awk "/^${_helper}\(\) \{/,/^\}/" "${CREATE_SH}" >>"${TMP_DIR}/resolved-fn.sh"
 done
 
-GREEN='' CYAN='' NC=''
+RED='' GREEN='' YELLOW='' CYAN='' NC=''
+# _tf_var_declared (extracted with the function below) greps
+# ${SCRIPT_DIR}/variables.tf -- point it at the real directory, exactly
+# what create.sh's SCRIPT_DIR is at runtime.
+SCRIPT_DIR="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud"
 RESOLVED_TFVARS_FILE="${TMP_DIR}/resolved.json"
 RESOLVED_TFVARS_SUSPENDED=''
 SSH_PUB_KEY="${TMP_DIR}/id.pub"
@@ -446,30 +421,71 @@ jq -e '.region == "ap-guangzhou"' "${RESOLVED_TFVARS_FILE}" >/dev/null \
 jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "${RESOLVED_TFVARS_FILE}" >/dev/null \
   && fail "resolved mirror must omit the trusted-ca keys when their env vars are unset"
 
-# The mirror never records the pair, with the vars SET either: the certs
-# value is HCL, and an HCL-valid value the JSON mirror cannot represent
-# losslessly (e.g. a trailing comma, which terraform accepts -- verified)
-# would either abort the write or silently drop the deployed value,
-# un-pinning the deployed config. .env is the single source of truth.
+# The mirror MUST record the pair with the vars SET (a JSON-clean certs
+# value round-trips losslessly): it is the drift pin that keeps raw
+# terraform plan/apply runs reading the deployed value instead of the
+# variable defaults, which plan the feature away. .env stays authoritative
+# on the create.sh path because the loader skips the pair (asserted in 4h).
 run_resolved set || fail "write_resolved_tfvars_file must succeed with the trusted-ca vars set"
-jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "${RESOLVED_TFVARS_FILE}" >/dev/null \
-  && fail "resolved mirror must not record the trusted-ca keys (HCL values cannot round-trip JSON losslessly)"
+jq -e '.templatecenter_trusted_ca_certs == ["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  || fail "resolved mirror must record the deployed certs value verbatim: $(cat "${RESOLVED_TFVARS_FILE}")"
 jq -e '.templatecenter_trusted_ca_existing_config_map == "my-ca-certs"' "${RESOLVED_TFVARS_FILE}" >/dev/null \
-  && fail "resolved mirror must not record the existing_config_map value"
+  || fail "resolved mirror must record the existing_config_map value"
 
-# The same holds for an HCL-valid/JSON-invalid certs value: the write must
-# succeed and the mirror must stay clean -- terraform, which does parse
-# HCL, reads the value from the environment and deploys it.
+# The same write with an HCL-valid/JSON-invalid certs value: the write must
+# succeed and the mirror must NOT record certs -- a JSON tfvars file cannot
+# represent the value losslessly, and a lossy substitute would un-pin the
+# deployed config. The operator is warned that raw terraform invocations
+# must pass the pair themselves (documented in env.example). The helper's
+# existing_config_map half is independent: with it ALSO set, it must still
+# be recorded even though certs is unrecordable.
 (
 	set -euo pipefail
 	export TF_VAR_templatecenter_trusted_ca_certs='["a",]'
+	export TF_VAR_templatecenter_trusted_ca_existing_config_map='my-ca-certs'
 	write_resolved_tfvars_file || {
 		echo "write_resolved_tfvars_file failed" >&2
 		exit 1
 	}
-) || fail "write_resolved_tfvars_file must survive an HCL-only certs value (the mirror does not record it)"
+) 2>"${TMP_DIR}/hcl-warn.txt" || fail "write_resolved_tfvars_file must survive an HCL-only certs value (the mirror does not record it)"
+grep -q 'cannot record it losslessly' "${TMP_DIR}/hcl-warn.txt" \
+  || fail "an HCL-only certs value must produce the raw-terraform-drift warning: $(cat "${TMP_DIR}/hcl-warn.txt")"
 jq -e 'has("templatecenter_trusted_ca_certs")' "${RESOLVED_TFVARS_FILE}" >/dev/null \
   && fail "an HCL-only certs value must not reach the mirror"
+jq -e '.templatecenter_trusted_ca_existing_config_map == "my-ca-certs"' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  || fail "the existing_config_map half must still be recorded when only the certs value is unrecordable"
+
+# 4e2. Edge-of-the-domain inputs: a SET-but-EMPTY certs value is the same
+#      unrecordable class (it would hard-fail terraform's list(string)
+#      conversion anyway), so it must be omitted with the same warning; a
+#      SET-but-EMPTY existing_config_map equals its default and must be
+#      silently skipped without dragging the clean certs value out with it.
+(
+	set -euo pipefail
+	export TF_VAR_templatecenter_trusted_ca_certs=''
+	unset TF_VAR_templatecenter_trusted_ca_existing_config_map
+	write_resolved_tfvars_file || {
+		echo "write_resolved_tfvars_file failed" >&2
+		exit 1
+	}
+) 2>"${TMP_DIR}/empty-warn.txt" || fail "write_resolved_tfvars_file must survive a set-but-empty certs value"
+grep -q 'cannot record it losslessly' "${TMP_DIR}/empty-warn.txt" \
+  || fail "a set-but-empty certs value must produce the same warning: $(cat "${TMP_DIR}/empty-warn.txt")"
+jq -e 'has("templatecenter_trusted_ca_certs") or has("templatecenter_trusted_ca_existing_config_map")' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  && fail "a set-but-empty certs value must not reach the mirror"
+(
+	set -euo pipefail
+	export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]'
+	export TF_VAR_templatecenter_trusted_ca_existing_config_map=''
+	write_resolved_tfvars_file || {
+		echo "write_resolved_tfvars_file failed" >&2
+		exit 1
+	}
+) || fail "write_resolved_tfvars_file must survive a set-but-empty existing_config_map"
+jq -e '.templatecenter_trusted_ca_certs == ["-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"]' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  || fail "a clean certs value must still be recorded when existing_config_map is set-but-empty"
+jq -e 'has("templatecenter_trusted_ca_existing_config_map")' "${RESOLVED_TFVARS_FILE}" >/dev/null \
+  && fail "a set-but-empty existing_config_map (equal to its default) must not reach the mirror"
 
 # 4f. The terraform variable docs live in the DEPLOYER's env template (the
 #     file create.sh copies/loads), not the target-machine install template
@@ -517,6 +533,77 @@ grep -qF "TF_VAR_templatecenter_trusted_ca_certs='[\"-----BEGIN CERTIFICATE-----
 grep -qF "TF_VAR_templatecenter_trusted_ca_existing_config_map='my-ca-certs'" "${ENV_FILE}" \
   || fail "the saved existing_config_map line must carry its single quotes verbatim"
 unset TF_VAR_templatecenter_trusted_ca_certs TF_VAR_templatecenter_trusted_ca_existing_config_map
+
+# 4h. The loader's trusted-ca skip must EXECUTE, not merely exist: the
+#     mirror records the pair for raw terraform runs, but a create.sh
+#     re-run must not force-export the snapshot's pair over the operator's
+#     newer .env edits -- that is the same stale-propagation channel the
+#     create_tke skip guards. The loader must also keep exporting every
+#     other mirror key (the region pin below) and keep suspending the file.
+awk '/^_tf_var_declared\(\) \{/,/^\}/' "${CREATE_SH}" >"${TMP_DIR}/loader-fn.sh"
+awk '/^restore_suspended_resolved_tfvars\(\) \{/,/^\}/' "${CREATE_SH}" >>"${TMP_DIR}/loader-fn.sh"
+awk '/^load_resolved_tfvars_file\(\) \{/,/^\}/' "${CREATE_SH}" >>"${TMP_DIR}/loader-fn.sh"
+[ -s "${TMP_DIR}/loader-fn.sh" ] || fail "could not extract load_resolved_tfvars_file from create.sh"
+grep -q 'templatecenter_trusted_ca' "${TMP_DIR}/loader-fn.sh" \
+  || fail "extracted loader looks truncated (trusted-ca skip missing)"
+jq -n '{region: "mirror-region", templatecenter_trusted_ca_certs: ["MIRROR-OLD"], templatecenter_trusted_ca_existing_config_map: "mirror-old-cm"}' \
+  >"${TMP_DIR}/mirror.json"
+CYAN='' NC=''
+(
+	set -euo pipefail
+	unset TF_VAR_templatecenter_trusted_ca_certs TF_VAR_templatecenter_trusted_ca_existing_config_map
+	# The operator has since set a NEWER value in .env; the mirror still
+	# carries the pair from the previous run.
+	TF_VAR_templatecenter_trusted_ca_certs='["NEW-ENV-VALUE"]'
+	# _tf_var_declared greps ${SCRIPT_DIR}/variables.tf -- point it at the
+	# real directory, exactly what create.sh's SCRIPT_DIR is at runtime.
+	SCRIPT_DIR="${REPO_ROOT}/deploy/one-click/terraform/tencentcloud"
+	RESOLVED_TFVARS_FILE="${TMP_DIR}/mirror.json"
+	# shellcheck source=/dev/null
+	source "${TMP_DIR}/loader-fn.sh"
+	load_resolved_tfvars_file
+	[ "${TF_VAR_region:-}" = "mirror-region" ] || {
+		echo "loader lost the ordinary mirror key's force-export" >&2
+		exit 1
+	}
+	[ "${TF_VAR_templatecenter_trusted_ca_certs}" = '["NEW-ENV-VALUE"]' ] || {
+		echo "loader force-exported the mirror's certs over the .env value" >&2
+		exit 1
+	}
+	[ -z "${TF_VAR_templatecenter_trusted_ca_existing_config_map:-}" ] || {
+		echo "loader force-exported the mirror's existing_config_map" >&2
+		exit 1
+	}
+) || fail "the loader must skip the trusted-ca pair on force-export while keeping other keys and .env values"
+[ -f "${TMP_DIR}/mirror.json" ] \
+  || fail "the loader must restore the suspended mirror (the EXIT trap's mv back)"
+
+# 4h2. The removal direction: the operator deletes the .env line entirely
+#      (TF_VAR_ unset) while the mirror still carries the pair from the
+#      previous run. The skip must hold there too -- a loader that only
+#      skips when the variable is SET would resurrect a removed value.
+printf '{"region":"mirror-region2","templatecenter_trusted_ca_certs":["MIRROR-OLD"],"templatecenter_trusted_ca_existing_config_map":"mirror-old-cm"}' \
+  >"${TMP_DIR}/mirror2.json"
+(
+	set -euo pipefail
+	unset TF_VAR_templatecenter_trusted_ca_certs TF_VAR_templatecenter_trusted_ca_existing_config_map
+	RESOLVED_TFVARS_FILE="${TMP_DIR}/mirror2.json"
+	# shellcheck source=/dev/null
+	source "${TMP_DIR}/loader-fn.sh"
+	load_resolved_tfvars_file
+	[ "${TF_VAR_region:-}" = "mirror-region2" ] || {
+		echo "loader lost the ordinary mirror key's force-export" >&2
+		exit 1
+	}
+	[ -z "${TF_VAR_templatecenter_trusted_ca_certs:-}" ] || {
+		echo "loader resurrected the removed certs value from the mirror" >&2
+		exit 1
+	}
+	[ -z "${TF_VAR_templatecenter_trusted_ca_existing_config_map:-}" ] || {
+		echo "loader resurrected the removed existing_config_map value from the mirror" >&2
+		exit 1
+	}
+) || fail "the loader must not resurrect the pair when the .env line is removed entirely"
 
 if [ "${failures}" -gt 0 ]; then
   echo "trusted-ca terraform guard FAILED (${failures} failure(s))" >&2

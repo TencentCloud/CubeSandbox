@@ -4522,6 +4522,29 @@ _jq_add_bool_if_declared() {
 	jq --arg k "$key" --argjson v "$bool" '. + {($k): $v}' "$file" >"$tmp" && mv "$tmp" "$file"
 }
 
+_jq_add_trusted_ca_pair() {
+	local file="$1" certs existing tmp
+	if _tf_var_declared "templatecenter_trusted_ca_certs" && [ -n "${TF_VAR_templatecenter_trusted_ca_certs+set}" ]; then
+		certs="${TF_VAR_templatecenter_trusted_ca_certs:-}"
+		# The -es precheck rejects the multi-document class ('[] []'): jq
+		# parses only its LAST document by default, which would pass a bare
+		# type check and then fail the --argjson below silently. Slurped,
+		# the value must be a one-element array holding an array.
+		if [ -n "$certs" ] && printf '%s' "$certs" | jq -es 'length == 1 and (.[0] | type == "array")' >/dev/null 2>&1; then
+			tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+			jq --argjson v "$certs" '.templatecenter_trusted_ca_certs = $v' "$file" >"$tmp" && mv "$tmp" "$file"
+		else
+			echo -e "  ${YELLOW}WARN: TF_VAR_templatecenter_trusted_ca_certs is set but is not a JSON-clean array, so the resolved mirror cannot record it losslessly. Raw terraform plan/apply runs in this directory will not see this value; pass TF_VAR_templatecenter_trusted_ca_certs and TF_VAR_templatecenter_trusted_ca_existing_config_map (if set) to them yourself (see env.example).${NC}" >&2
+		fi
+	fi
+	_tf_var_declared "templatecenter_trusted_ca_existing_config_map" || return 0
+	[ -n "${TF_VAR_templatecenter_trusted_ca_existing_config_map+set}" ] || return 0
+	existing="${TF_VAR_templatecenter_trusted_ca_existing_config_map:-}"
+	[ -n "$existing" ] || return 0
+	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	jq --arg v "$existing" '.templatecenter_trusted_ca_existing_config_map = $v' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
 restore_suspended_resolved_tfvars() {
 	if [ -n "${RESOLVED_TFVARS_SUSPENDED:-}" ] && [ ! -f "$RESOLVED_TFVARS_FILE" ] && [ -f "$RESOLVED_TFVARS_SUSPENDED" ]; then
 		mv "$RESOLVED_TFVARS_SUSPENDED" "$RESOLVED_TFVARS_FILE" 2>/dev/null || true
@@ -4538,6 +4561,13 @@ load_resolved_tfvars_file() {
 		[ -n "$key" ] || continue
 		case "$key" in
 		create_tke | deploy_tke_addons) continue ;;
+		# The trusted-ca pair is mirrored for raw terraform runs (the drift
+		# pin, see write_resolved_tfvars_file) but stays .env-authoritative
+		# here: force-exporting the snapshot over the operator's newer .env
+		# edits (removals, '[]', value changes) would resurrect values .env
+		# no longer carries -- the same stale-propagation channel the
+		# create_tke skip guards.
+		templatecenter_trusted_ca_certs | templatecenter_trusted_ca_existing_config_map) continue ;;
 		esac
 		_tf_var_declared "$key" || continue
 		value="$(printf '%s' "$entry" | base64 -d | jq -r 'if (.value | type) == "string" then .value else (.value | tojson) end' 2>/dev/null || true)"
@@ -4586,14 +4616,20 @@ write_resolved_tfvars_file() {
 	tke_count="$(_number_or_default "$tke_count" 0)"
 
 	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
-	# The trusted-ca variables are deliberately NOT mirrored here (see the
-	# save_env_file trusted-ca block): their certs value is HCL, and an
-	# HCL-valid value this mirror cannot represent losslessly as JSON would
-	# either abort the write or -- worse -- silently drop the
-	# actually-deployed value, un-pinning the deployed config. .env is the
-	# single source of truth for the pair; the loader never force-exports
-	# what this file does not carry, so .env edits (removals, [], value
-	# changes) take effect on the next run.
+	# The trusted-ca pair IS mirrored (via _jq_add_trusted_ca_pair below):
+	# the mirror is what keeps raw terraform plan/apply runs in this
+	# directory pinned to the deployed value -- without it a raw plan reads
+	# the variable defaults and plans the feature away (destroy the
+	# ConfigMap, drop the merge-ca init container, SSL_CERT_FILE and the
+	# volumes). The pairing half is the loader: it skips the pair on
+	# force-export, so .env remains their single source of truth across
+	# create.sh re-runs -- removals, '[]' and value changes all take effect
+	# on the next run (see load_resolved_tfvars_file). certs is mirrored
+	# only when jq parses it losslessly; an HCL-valid value a JSON tfvars
+	# file cannot represent (trailing comma, `#`/`//` comments) is omitted
+	# with a warning rather than recorded lossily -- with such a value the
+	# raw invocation must pass the TF_VAR_ pair itself (documented in
+	# env.example).
 	# This explanation lives HERE rather than inside the jq program below:
 	# the program is one single-quoted shell string, and prose with quotes
 	# inside it is invisible quoting hazard -- one unpaired apostrophe in a
@@ -4717,6 +4753,8 @@ write_resolved_tfvars_file() {
 			cube_proxy_admin_port: $cube_proxy_admin_port,
 		}
 		| with_entries(select(.value != "" and .value != null))' >"$tmp"
+
+	_jq_add_trusted_ca_pair "$tmp"
 
 	(
 		umask 077
@@ -5351,11 +5389,6 @@ main() {
 	# the TENCENTCLOUD_* → TF_VAR_* mapping (e.g. region must be set before plan).
 	prompt_deployment_env
 	setup_env
-	# Strip the trusted-ca keys from the resolved mirror before
-	# load_resolved_tfvars_file force-exports it: mirrors written by earlier
-	# versions of this feature recorded the pair, and .env is their single
-	# source of truth from this version on (see write_resolved_tfvars_file).
-	_tc_migrate_trusted_ca_mirror "$RESOLVED_TFVARS_FILE"
 	load_resolved_tfvars_file
 	_setup_jump_proxy
 
