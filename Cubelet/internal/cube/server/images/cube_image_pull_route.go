@@ -157,7 +157,7 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 				if err != nil {
 					return "", fmt.Errorf("unmarshal cube image spec failed: %v", err)
 				}
-				constants.WithImageSpec(ctx, cubeSpec)
+				ctx = constants.WithImageSpec(ctx, cubeSpec)
 			}
 		}
 	}

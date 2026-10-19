@@ -13,13 +13,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/rootfsimage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
@@ -71,6 +74,51 @@ func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
 
 	spec := applySpecOpts(t, ctx, specOpts)
 	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func TestSyncLatestKernelForImageWaitsForArtifactCleanup(t *testing.T) {
+	plugin := newTestCubeboxPlugin(t)
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(plugin.artifactPaths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
+	artifactID := "artifact-cleanup"
+	shared := bytes.Repeat([]byte("s"), 4096)
+	old := bytes.Repeat([]byte("o"), 2048)
+	writeTestFile(t, plugin.artifactPaths.SharedKernelPath, shared)
+	target := plugin.getKernelFilePath(artifactID)
+	writeTestFile(t, target, old)
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	var destroyErr error
+	go func() {
+		destroyErr = rootfsimage.DestroyPmemArtifact(context.Background(), plugin.config.instanceType, artifactID, func(string) (bool, error) {
+			close(locked)
+			<-release
+			return true, nil
+		})
+		close(done)
+	}()
+	t.Cleanup(func() { unblock(); <-done })
+	<-locked
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, plugin.syncLatestKernelForImage(ctx, artifactID), context.DeadlineExceeded)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, old, got, "a blocked refresh must not change the kernel")
+
+	unblock()
+	<-done
+	require.ErrorIs(t, destroyErr, rootfsimage.ErrArtifactInUse)
+	require.NoError(t, plugin.syncLatestKernelForImage(context.Background(), artifactID))
+	got, err = os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, shared, got)
 }
 
 func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {

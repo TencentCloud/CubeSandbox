@@ -20,6 +20,7 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/rootfsimage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
@@ -547,11 +548,7 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID, format 
 }
 
 func (e *cubeboxInstancePlugin) syncLatestKernelForImage(ctx context.Context, imageID string) error {
-	return pmem.RefreshKernelFile(
-		ctx,
-		e.artifactPaths.SharedKernelPath,
-		e.getKernelFilePath(imageID),
-	)
+	return rootfsimage.RefreshArtifactKernel(ctx, e.artifactPaths, e.config.instanceType, imageID)
 }
 
 func (e *cubeboxInstancePlugin) getKernelFilePath(imageID string) string {
