@@ -356,16 +356,49 @@ func TestSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("ListSnapshots items=%#v next=%q err=%v", items, next, err)
 	}
 
-	if err := client.DeleteSnapshot(ctx, "snap-1"); err != nil {
-		t.Fatalf("DeleteSnapshot: %v", err)
+	deleted, err := client.DeleteSnapshot(ctx, "snap-1")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteSnapshot deleted=%v err=%v", deleted, err)
 	}
-	if err := client.DeleteSnapshot(ctx, ""); err == nil {
+	if _, err := client.DeleteSnapshot(ctx, ""); err == nil {
 		t.Fatal("DeleteSnapshot without id returned nil error")
 	}
 
 	result, err := sb.Rollback(ctx, "snap-1")
 	if err != nil || result["status"] != "success" {
 		t.Fatalf("Rollback=%#v err=%v", result, err)
+	}
+}
+
+func TestDeleteSnapshotByNameNotFoundAndAmbiguous(t *testing.T) {
+	// Mirrors CubeAPI resolve_id: snap- id or name, 404 for unknown, 409 for ambiguous.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/templates/snap-1", "/templates/prod":
+			w.WriteHeader(http.StatusNoContent)
+		case "/templates/unknown":
+			// Server phrases it "snapshot ... not found"; SDK must still yield (false, nil).
+			http.Error(w, `{"message":"snapshot unknown not found"}`, http.StatusNotFound)
+		case "/templates/dup":
+			http.Error(w, `{"message":"snapshot name \"dup\" is ambiguous"}`, http.StatusConflict)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	ctx := context.Background()
+
+	if deleted, err := client.DeleteSnapshot(ctx, "prod"); err != nil || !deleted {
+		t.Fatalf("DeleteSnapshot by name: deleted=%v err=%v", deleted, err)
+	}
+	if deleted, err := client.DeleteSnapshot(ctx, "unknown"); err != nil || deleted {
+		t.Fatalf("DeleteSnapshot unknown: deleted=%v err=%v (want false, nil)", deleted, err)
+	}
+	if _, err := client.DeleteSnapshot(ctx, "dup"); err == nil {
+		t.Fatal("DeleteSnapshot ambiguous name returned nil error")
 	}
 }
 

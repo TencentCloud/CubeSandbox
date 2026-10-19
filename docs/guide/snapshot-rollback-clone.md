@@ -60,7 +60,7 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
     print(f"snapshot: {snap.snapshot_id}")
 ```
 
-A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id)` to clean up when it is no longer needed.
+A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id_or_name)` to clean up when it is no longer needed. It accepts either a snapshot ID or the name you passed to `create_snapshot`, and returns `True` when the snapshot was deleted or `False` when it did not exist.
 
 ### Listing snapshots
 

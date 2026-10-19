@@ -191,14 +191,16 @@ snaps, nextToken, err := client.ListSnapshots(ctx, cubesandbox.ListSnapshotsOpti
 	Limit:     100,
 })
 
-err = client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id
+deleted, err := client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id
+// `deleted` is false when the snapshot no longer exists; a name may be passed
+// instead of an ID, and an ambiguous name returns an error.
 
 _, err = sb.Rollback(ctx, snap.SnapshotID) // POST /sandboxes/:id/rollback
 
 clones, err := sb.Clone(ctx, cubesandbox.CloneOptions{N: 3, Concurrency: 3})
 ```
 
-`Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+`DeleteSnapshot` accepts a snapshot ID or name and returns `(deleted bool, err error)`; `deleted` is `false` when the snapshot does not exist. `Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
 
 ## Volumes
 

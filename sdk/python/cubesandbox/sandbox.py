@@ -797,25 +797,33 @@ class Sandbox:
         return items, nt
 
     @classmethod
-    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> None:
+    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> bool:
         """DELETE /templates/:templateID — Delete a snapshot (1.3).
 
-        Snapshots are stored as templates; this call removes the underlying
-        template permanently.  Deleting the originating sandbox does **not**
-        cascade-delete its snapshots.
+        Accepts either a snapshot ID or a snapshot name.  Snapshots are stored
+        as templates; this call removes the underlying template permanently.
+        Deleting the originating sandbox does **not** cascade-delete its
+        snapshots.
 
         Args:
-            snapshot_id: The ``snapshotID`` (= templateID) to delete.
+            snapshot_id: The ``snapshotID`` (= templateID) or snapshot name to
+                delete.
             config: SDK config.  Uses default (env-based) config if omitted.
 
+        Returns:
+            ``True`` when the snapshot was deleted, ``False`` when it did not
+            exist.
+
         Raises:
-            TemplateNotFoundError: If the snapshot does not exist (HTTP 404).
-            ApiError: On unexpected backend error.
+            ApiError: On an ambiguous name (HTTP 409) or unexpected error.
         """
         cfg = config or Config()
         s = requests.Session()
         resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}", headers=_auth_headers(cfg))
+        if resp.status_code == 404:
+            return False
         _check_response(resp)
+        return True
 
     # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
     # See docstring of :meth:`create` for details.

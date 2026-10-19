@@ -60,7 +60,7 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
     print(f"snapshot: {snap.snapshot_id}")
 ```
 
-快照的生命周期独立于沙箱：源沙箱被 `kill()` 之后，快照仍然可用。不再需要时，调用 `Sandbox.delete_snapshot(snapshot_id)` 手动清理。
+快照的生命周期独立于沙箱：源沙箱被 `kill()` 之后，快照仍然可用。不再需要时，调用 `Sandbox.delete_snapshot(snapshot_id_or_name)` 手动清理。它既接受快照 ID，也接受创建快照时指定的名称，删除成功返回 `True`、快照不存在返回 `False`。
 
 ### 列举快照
 

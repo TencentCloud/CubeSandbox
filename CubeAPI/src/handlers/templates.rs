@@ -276,10 +276,10 @@ pub async fn delete_template(
     // branch additionally exposes the operation id via a response header so
     // audit trails / debugging can still correlate the deletion with its
     // CubeMaster job, but no body is returned.
-    // Route by snapshot identity (snap- prefix or a live snapshot GET),
-    // not by whether GetSnapshot still exposes the row.
-    if state.services.snapshots.has_snapshot(&template_id).await? {
-        let resp = state.services.snapshots.delete(&template_id).await?;
+    // Route by snapshot identity (snap- prefix) or name; an ambiguous name is
+    // a 409, anything else falls through to the template-delete path.
+    if let Some(snapshot_id) = state.services.snapshots.resolve_id(&template_id).await? {
+        let resp = state.services.snapshots.delete(&snapshot_id).await?;
         let mut headers = HeaderMap::new();
         if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
             headers.insert("x-operation-id", value);

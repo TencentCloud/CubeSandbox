@@ -169,14 +169,24 @@ describe("Sandbox.listSnapshots", () => {
 });
 
 describe("Sandbox.deleteSnapshot", () => {
-  it("DELETEs the snapshot's template id", async () => {
+  it("DELETEs the snapshot's template id and returns true", async () => {
     setHandler((req) => {
       expect(req.method).toBe("DELETE");
       expect(req.pathname).toBe("/templates/snap-abc");
       return { status: 204 };
     });
-    await Sandbox.deleteSnapshot("snap-abc", { config: makeConfig() });
+    const deleted = await Sandbox.deleteSnapshot("snap-abc", { config: makeConfig() });
+    expect(deleted).toBe(true);
     expect(requests).toHaveLength(1);
+  });
+
+  it("returns false when the snapshot does not exist", async () => {
+    setHandler((req) => {
+      expect(req.pathname).toBe("/templates/missing");
+      return { status: 404, body: { message: "snapshot missing not found" } };
+    });
+    const deleted = await Sandbox.deleteSnapshot("missing", { config: makeConfig() });
+    expect(deleted).toBe(false);
   });
 });
 

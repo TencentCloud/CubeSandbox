@@ -225,13 +225,13 @@ class CubeSandboxAdapter(SandboxAdapter):
     def set_timeout(self, timeout: int) -> None:
         self._sandbox.set_timeout(timeout)
 
-    def create_snapshot(self) -> str:
-        return str(self._sandbox.create_snapshot().snapshot_id)
+    def create_snapshot(self, name: str | None = None) -> str:
+        return str(self._sandbox.create_snapshot(name=name).snapshot_id)
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         from cubesandbox import Sandbox
 
-        Sandbox.delete_snapshot(snapshot_id, config=self._sdk_config)
+        return bool(Sandbox.delete_snapshot(snapshot_id, config=self._sdk_config))
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
         return dict(self._sandbox.rollback(snapshot_id))

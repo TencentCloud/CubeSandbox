@@ -235,18 +235,19 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.set_timeout(timeout),
         )
 
-    def create_snapshot(self) -> str:
+    def create_snapshot(self, name: str | None = None) -> str:
         return self._trace.capture(
             "create_snapshot",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
+                "name": name,
             },
-            self._wrapped.create_snapshot,
+            lambda: self._wrapped.create_snapshot(name=name),
             output=lambda snapshot_id: {"snapshot_id": snapshot_id},
         )
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         return self._trace.capture(
             "delete_snapshot",
             {
@@ -255,7 +256,7 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "snapshot_id": snapshot_id,
             },
             lambda: self._wrapped.delete_snapshot(snapshot_id),
-            output=lambda _: {"deleted": True},
+            output=lambda deleted: {"deleted": deleted},
         )
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:

@@ -58,7 +58,7 @@ func (c *cloneCleanup) release(ctx context.Context, sandboxID string) {
 	shouldCleanup := c.startCleanupLocked(c.remaining == 0)
 	c.mu.Unlock()
 	if shouldCleanup {
-		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+		_, _ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
 	}
 }
 
@@ -70,7 +70,7 @@ func (c *cloneCleanup) cleanup(ctx context.Context) {
 	shouldCleanup := c.startCleanupLocked(true)
 	c.mu.Unlock()
 	if shouldCleanup {
-		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+		_, _ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
 	}
 }
 
@@ -142,14 +142,23 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (
 	return items, resp.Header.Get("x-next-token"), nil
 }
 
-// DeleteSnapshot permanently removes a snapshot (DELETE /templates/:id).
-// Deleting the originating sandbox does not cascade-delete its snapshots.
-func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) error {
-	if snapshotID == "" {
-		return errors.New("snapshotID is required")
+// DeleteSnapshot removes a snapshot (DELETE /templates/:id) by ID or name.
+// Reports false when it does not exist; an ambiguous name is an error.
+func (c *Client) DeleteSnapshot(ctx context.Context, idOrName string) (bool, error) {
+	if idOrName == "" {
+		return false, errors.New("snapshot id or name is required")
 	}
-	path := "/templates/" + url.PathEscape(snapshotID)
-	return c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	path := "/templates/" + url.PathEscape(idOrName)
+	err := c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	if err != nil {
+		var apiErr *APIError
+		// Server returns 404 for a missing template or snapshot; match on status.
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Rollback reverts the sandbox to a snapshot (POST /sandboxes/:id/rollback).

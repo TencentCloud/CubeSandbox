@@ -623,16 +623,20 @@ export class Sandbox {
     return { snapshots, nextToken };
   }
 
-  /** DELETE /templates/:id — delete a snapshot (stored as a template). */
+  /** DELETE /templates/:id — delete a snapshot by ID or name; false when absent. */
   static async deleteSnapshot(
     snapshotId: string,
     options: { config?: Config | ConfigOptions } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     const cfg = resolveConfig(options.config);
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${snapshotId}`, {
       method: "DELETE",
     });
+    if (resp.status === 404) {
+      return false;
+    }
     await checkControlResponse(resp);
+    return true;
   }
 
   // ── Instance methods ────────────────────────────────────────────────────────
