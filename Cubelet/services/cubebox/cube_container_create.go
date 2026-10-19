@@ -61,6 +61,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
 	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
@@ -1338,6 +1339,16 @@ func updateCgroup(ctx context.Context, ci *cubeboxstore.Container) error {
 	return nil
 }
 
+// taskWaitContext lets containerd's asynchronous Wait outlive the workflow step.
+// Keep its namespace, but not the step's cancellation or create trace.
+func taskWaitContext(ctx context.Context) context.Context {
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return context.Background()
+	}
+	return namespaces.WithNamespace(context.Background(), ns)
+}
+
 func (l *local) runContainer(
 	ctx context.Context,
 	cubebox *cubeboxstore.CubeBox,
@@ -1350,12 +1361,15 @@ func (l *local) runContainer(
 	if newContainer == nil {
 		newContainer = l.client.NewContainer
 	}
-	c, err := newContainer(ctx, ci.ID, cOpts...)
+	containerCtx, containerSpan := telemetry.Start(ctx, telemetry.SpanRuntimeContainer)
+	c, err := newContainer(containerCtx, ci.ID, cOpts...)
 	if err != nil {
+		telemetry.End(containerSpan, err)
 		workflow.RecordCreateMetric(ctx, ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, err.Error()),
 			constants.CubeNewContainerId, time.Since(start))
 		return ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, fmt.Errorf("failed to create container [%s]: %w", ci.ID, err).Error())
 	}
+	telemetry.End(containerSpan, nil)
 	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, time.Since(start))
 
 	ci.Container = c
@@ -1417,10 +1431,14 @@ func (l *local) runContainer(
 	}
 
 	taskStart := time.Now()
-	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
+	taskCtx, taskSpan := telemetry.Start(ctx, telemetry.SpanRuntimeTask)
+	task, err := c.NewTask(taskCtx, ioCreater, taskOpts...)
 	if err != nil {
-		return transformError(err)
+		taskErr := transformError(err)
+		telemetry.End(taskSpan, taskErr)
+		return taskErr
 	}
+	telemetry.End(taskSpan, nil)
 	workflow.RecordCreateMetric(ctx, err,
 		constants.CubeShimCreatetId,
 		time.Since(taskStart))
@@ -1459,15 +1477,27 @@ func (l *local) runContainer(
 		withdrawIntent = func() {}
 	}
 
-	exitCh, err := task.Wait(ctx)
+	// A successful task ends this wait itself; cancel it if startup fails.
+	waitCtx, cancelWait := context.WithCancel(taskWaitContext(ctx))
+	taskStarted := false
+	defer func() {
+		if !taskStarted {
+			cancelWait()
+		}
+	}()
+	exitCh, err := task.Wait(waitCtx)
 	if err != nil {
 		return ret.Err(errorcode.ErrorCode_WaitTaskFailed, err.Error())
 	}
 	ci.ExitCh = exitCh
 
-	if err := task.Start(ctx); err != nil {
+	startCtx, startSpan := telemetry.Start(ctx, telemetry.SpanRuntimeStart)
+	if err := task.Start(startCtx); err != nil {
+		telemetry.End(startSpan, err)
 		return ret.Err(errorcode.ErrorCode_StartTaskFailed, err.Error())
 	}
+	telemetry.End(startSpan, nil)
+	taskStarted = true
 
 	ci.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Pid = task.Pid()

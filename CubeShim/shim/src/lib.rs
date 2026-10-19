@@ -10,3 +10,4 @@ pub mod log;
 pub mod sandbox;
 pub mod service;
 pub mod snapshot;
+pub mod telemetry;

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -25,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
@@ -80,6 +83,16 @@ type createSandboxContext struct {
 	// paths and we only emit a trace when the corresponding op ran.
 	redisCost time.Duration
 	specCost  time.Duration
+
+	queueSpan    trace.Span
+	queueSpanEnd sync.Once
+}
+
+func (c *createSandboxContext) endQueueSpan() {
+	if c.queueSpan == nil {
+		return
+	}
+	c.queueSpanEnd.Do(func() { c.queueSpan.End() })
 }
 
 type createOriginRequestKey struct{}
@@ -157,7 +170,10 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 	if config.GetConfig().Common.MockCreateDirectHandle {
 		createCtx.Handle()
 	} else {
-
+		_, createCtx.queueSpan = telemetry.Start(ctx, telemetry.SpanCreateQueue,
+			trace.WithAttributes(attribute.String(telemetry.AttrInstanceType, req.InstanceType)))
+		// The worker ends this span; the defer covers cancellation before pickup.
+		defer createCtx.endQueueSpan()
 		scheduler.AddBufferTask(createCtx, req.InstanceType)
 	}
 	createCtx.Wait()
@@ -183,6 +199,7 @@ func (c *createSandboxContext) Wait() {
 
 func (c *createSandboxContext) Handle() {
 	c.startHandleTime = time.Now()
+	c.endQueueSpan()
 	defer func() {
 		if r := recover(); r != nil {
 			log.G(c.ctx).Fatalf("Handle panic:%+v", string(debug.Stack()))
@@ -289,11 +306,18 @@ func (c *createSandboxContext) callCubelet() bool {
 
 	var err error
 	calleeEndpoint := cubelet.GetCubeletAddr(c.selectHost.HostIP())
+	rpcCtx, rpcSpan := telemetry.Start(c.ctx, telemetry.SpanCreateCubelet,
+		trace.WithAttributes(
+			attribute.Int(telemetry.AttrAttempt, int(c.retryTimes)+1),
+			attribute.String(telemetry.AttrNodeID, c.selectHost.ID()),
+		))
 	c.cubeletStartTime = time.Now()
-	c.cubeletRsp, err = cubelet.Create(c.ctx, calleeEndpoint, c.cubeletReq)
+	c.cubeletRsp, err = cubelet.Create(rpcCtx, calleeEndpoint, c.cubeletReq)
 	if err != nil {
+		telemetry.End(rpcSpan, err)
 		return c.errRetry(err)
 	}
+	telemetry.EndWithCode(rpcSpan, int(c.cubeletRsp.GetRet().GetRetCode()))
 	return c.errorCodeRetry()
 }
 
@@ -338,12 +362,18 @@ func (c *createSandboxContext) dealSuccResult() {
 		var redisErr error
 		g.Go(func() error {
 			redisStart := time.Now()
+			_, span := telemetry.Start(c.ctx, telemetry.SpanCreateRedis)
+			defer func() {
+				telemetry.End(span, redisErr)
+			}()
 			redisErr = c.setProxyToRedis()
 			c.redisCost = time.Since(redisStart)
 			return redisErr
 		})
 		g.Go(func() error {
 			specStart := time.Now()
+			_, span := telemetry.Start(c.ctx, telemetry.SpanCreateSpec)
+			defer span.End()
 			c.persistSandboxSpec()
 			c.specCost = time.Since(specStart)
 			return nil
@@ -471,6 +501,11 @@ func (c *createSandboxContext) schedule() (err error) {
 		return nil
 	}
 
+	_, span := telemetry.Start(c.ctx, telemetry.SpanCreateSchedule)
+	defer func() {
+		telemetry.End(span, err)
+	}()
+
 	c.selectHost, err = scheduler.Select(c.selctx)
 	if err != nil {
 		return err
@@ -493,7 +528,10 @@ func (c *createSandboxContext) backoffRetryDelay() {
 	}
 
 	if c.delay > 0 {
+		_, span := telemetry.Start(c.ctx, telemetry.SpanCreateBackoff,
+			trace.WithAttributes(attribute.Int64(telemetry.AttrWaitMS, c.delay.Milliseconds())))
 		time.Sleep(c.delay)
+		span.End()
 	}
 }
 

@@ -55,6 +55,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   apply_cli_overrides
   # Shell-interpret .env DB values (quotes stripped) into the dotenv snapshot.
   capture_one_click_database_dotenv_values
+  capture_one_click_toggle_dotenv_values
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -2068,6 +2069,7 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "OTEL_EXPORTER_OTLP_ENDPOINT" "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;
