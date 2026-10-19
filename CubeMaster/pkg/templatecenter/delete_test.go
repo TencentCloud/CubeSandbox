@@ -32,8 +32,8 @@ func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
 	var replicaCalled, artifactCalled, metadataCalled, jobCalled bool
 	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		replicaCalled = true
-		// v4: locators are deduplicated by (NodeID|NodeIP); SnapshotPath is
-		// no longer part of the identity or the cleanup payload.
+		// NodeID is the durable dedup identity; SnapshotPath is no longer part
+		// of the locator or cleanup payload.
 		if len(locators) != 1 || locators[0].NodeIP != "10.0.0.8" {
 			t.Fatalf("unexpected locators: %+v", locators)
 		}
@@ -84,6 +84,15 @@ func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
 	}
 	if !replicaCalled || !artifactCalled || !metadataCalled || !jobCalled {
 		t.Fatalf("expected all cleanup stages to run, got replica=%v artifact=%v metadata=%v job=%v", replicaCalled, artifactCalled, metadataCalled, jobCalled)
+	}
+}
+
+func TestCleanupTargetsDeduplicateStaleAddressesByNodeID(t *testing.T) {
+	targets := &templateCleanupTargets{}
+	targets.addLocator(templateCleanupLocator{NodeID: "node-a", NodeIP: "10.0.0.1"})
+	targets.addLocator(templateCleanupLocator{NodeID: "node-a", NodeIP: "10.1.0.1"})
+	if len(targets.Locators) != 1 {
+		t.Fatalf("locators = %+v, want one locator for stable node id", targets.Locators)
 	}
 }
 

@@ -235,7 +235,7 @@ func ListTemplatesWithOptions(ctx context.Context, opts TemplateListOptions) (*T
 // and falls back to the DB query, which re-populates the cache.
 func listTemplatesCached(ctx context.Context) ([]TemplateInfo, error) {
 	if cached, ok := getCachedTemplateList(); ok {
-		return cached, nil
+		return applyUnregisteredTemplateListView(ctx, cached)
 	}
 	return listTemplatesFromDB(ctx)
 }
@@ -326,8 +326,10 @@ func listTemplatesFromDB(ctx context.Context) ([]TemplateInfo, error) {
 		out = append(out, templateInfoFromJob(&job))
 		seen[job.TemplateID] = struct{}{}
 	}
+	// Cache the raw DB state. Registry membership is projected dynamically on
+	// every read because it can change without a template-table mutation.
 	setTemplateListCache(out)
-	return out, nil
+	return applyUnregisteredTemplateListView(ctx, out)
 }
 
 // hiddenSnapshotIDs returns DELETED/DELETING snapshot IDs so ListTemplates
@@ -1021,7 +1023,7 @@ func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError s
 func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, error) {
 	templateID = strings.TrimSpace(templateID)
 	if cached, ok := getCachedTemplateInfo(templateID); ok {
-		return cached, nil
+		return applyUnregisteredTemplateInfoView(cached), nil
 	}
 	return getTemplateInfoFromDB(ctx, templateID)
 }
@@ -1043,8 +1045,29 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 			return nil, defErr
 		}
 		info := templateInfoFromJob(job)
+		replicas, replicaErr := ListReplicas(ctx, templateID)
+		if replicaErr != nil {
+			return nil, replicaErr
+		}
+		info.Replicas = make([]ReplicaStatus, 0, len(replicas))
+		for _, replica := range replicas {
+			info.Replicas = append(info.Replicas, replicaModelToStatus(replica))
+		}
+		if len(info.Replicas) == 0 &&
+			(strings.TrimSpace(job.NodeID) != "" || strings.TrimSpace(job.NodeIP) != "") {
+			// A job-only recovery row may predate replica persistence. Its
+			// cleanup locator is still the best evidence for where a reported
+			// READY result lives, so include it in the dynamic registry view.
+			info.Replicas = append(info.Replicas, ReplicaStatus{
+				NodeID:       job.NodeID,
+				NodeIP:       job.NodeIP,
+				InstanceType: job.InstanceType,
+				Status:       strings.ToUpper(info.Status),
+				ArtifactID:   job.ArtifactID,
+			})
+		}
 		setTemplateInfoCache(templateID, &info)
-		return &info, nil
+		return applyUnregisteredTemplateInfoView(&info), nil
 	}
 	// Pause snaps are not user-visible templates/snapshots.
 	if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
@@ -1086,8 +1109,11 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 		out.CubeEgressCATargetsWritten = artifact.CubeEgressCATargetsWritten
 		break
 	}
+	// Cache the persisted state and apply registry membership dynamically on
+	// every read. This lets node retirement and re-registration take effect
+	// without waiting for the template-info cache TTL.
 	setTemplateInfoCache(templateID, out)
-	return out, nil
+	return applyUnregisteredTemplateInfoView(out), nil
 }
 
 func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {

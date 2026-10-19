@@ -40,6 +40,10 @@ type local struct {
 
 	// emptySyncStreak counts consecutive empty CubeOps responses before eviction.
 	emptySyncStreak atomic.Int32
+	// nodeRegistryReady is set after the first successful authoritative node
+	// load. It distinguishes a valid scale-to-zero view from a cache that has
+	// not finished initialization.
+	nodeRegistryReady atomic.Bool
 }
 
 // The node and template-locality stores exist from package load so nodemeta

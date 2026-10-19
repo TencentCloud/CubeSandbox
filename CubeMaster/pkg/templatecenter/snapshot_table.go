@@ -126,7 +126,7 @@ func snapshotInfoFromRecord(rec *models.SnapshotRecord, replicas []ReplicaStatus
 	if rec == nil {
 		return SnapshotInfo{}
 	}
-	return SnapshotInfo{
+	info := SnapshotInfo{
 		SnapshotID:                rec.SnapshotID,
 		InstanceType:              rec.InstanceType,
 		Version:                   rec.Version,
@@ -145,6 +145,8 @@ func snapshotInfoFromRecord(rec *models.SnapshotRecord, replicas []ReplicaStatus
 		Replicas:                  replicas,
 		CreateRequest:             createReq,
 	}
+	info.Status, info.LastError, info.Replicas = applyUnregisteredReplicaView(info.Status, info.LastError, info.Replicas)
+	return info
 }
 
 func snapshotReplicasFromRecord(ctx context.Context, rec *models.SnapshotRecord) ([]ReplicaStatus, error) {
@@ -263,7 +265,13 @@ func releaseSnapshotArtifactReferences(ctx context.Context, snapshotID string, t
 		}); err != nil {
 			return err
 		}
-		if err := tx.Unscoped().Where("template_id = ?", snapshotID).Delete(&models.TemplateReplica{}).Error; err != nil {
+		// Replica rows carrying cleanup_required=true are durable retry
+		// tombstones written immediately before this phase. Keep them until
+		// the orphan-cleanup reconciler either reaches the registered node or
+		// confirms that its stable node ID has been retired.
+		if err := tx.Unscoped().
+			Where("template_id = ? AND cleanup_required = ?", snapshotID, false).
+			Delete(&models.TemplateReplica{}).Error; err != nil {
 			return err
 		}
 		return tx.Unscoped().Where("template_id = ?", snapshotID).Delete(&models.TemplateDefinition{}).Error
