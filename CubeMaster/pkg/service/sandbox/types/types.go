@@ -667,6 +667,8 @@ type ContainerOverrides struct {
 
 type CreateTemplateFromImageReq struct {
 	*Request
+	// RootfsFormat selects the immutable filesystem. Empty retains EXT4.
+	RootfsFormat     string `json:"rootfs_format,omitempty"`
 	SourceImageRef   string `json:"source_image_ref,omitempty"`
 	RegistryUsername string `json:"registry_username,omitempty"`
 	RegistryPassword string `json:"registry_password,omitempty"`
@@ -716,15 +718,16 @@ type RedoTemplateFromImageReq struct {
 }
 
 type RootfsArtifactInfo struct {
+	RootfsFormat            string `json:"rootfs_format,omitempty"`
 	ArtifactID              string `json:"artifact_id,omitempty"`
 	TemplateSpecFingerprint string `json:"template_spec_fingerprint,omitempty"`
 	SourceImageRef          string `json:"source_image_ref,omitempty"`
 	SourceImageDigest       string `json:"source_image_digest,omitempty"`
 	MasterNodeID            string `json:"master_node_id,omitempty"`
 	MasterNodeIP            string `json:"master_node_ip,omitempty"`
-	Ext4Path                string `json:"ext4_path,omitempty"`
-	Ext4SHA256              string `json:"ext4_sha256,omitempty"`
-	Ext4SizeBytes           int64  `json:"ext4_size_bytes,omitempty"`
+	RootfsPath              string `json:"rootfs_path,omitempty"`
+	RootfsSHA256            string `json:"rootfs_sha256,omitempty"`
+	RootfsSizeBytes         int64  `json:"rootfs_size_bytes,omitempty"`
 	WritableLayerSize       string `json:"writable_layer_size,omitempty"`
 	Status                  string `json:"status,omitempty"`
 	LastError               string `json:"last_error,omitempty"`

@@ -24,6 +24,10 @@ import (
 )
 
 func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
+	format, err := imagev1.ResolveRootfsFormat(artifact.RootfsFormat)
+	if err != nil {
+		return nil, err
+	}
 	annotations := map[string]string{
 		constants.CubeAnnotationAppSnapshotTemplateID:      req.TemplateID,
 		constants.CubeAnnotationsAppSnapshotCreate:         "true",
@@ -64,8 +68,8 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
 		constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
 		constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
-		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
-		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
+		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.RootfsSHA256,
+		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.RootfsSizeBytes, 10),
 		constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
 		constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
 	}
@@ -118,7 +122,7 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	}
 	container := &types.Container{
 		Name:            "cubebox-name-0",
-		Image:           &types.ImageSpec{Image: artifact.ArtifactID, StorageMedia: imagev1.ImageStorageMediaType_ext4.String(), WritableLayerSize: req.WritableLayerSize, Annotations: imageAnnotations},
+		Image:           &types.ImageSpec{Image: artifact.ArtifactID, StorageMedia: format, WritableLayerSize: req.WritableLayerSize, Annotations: imageAnnotations},
 		Command:         command,
 		Args:            args,
 		WorkingDir:      workingDir,

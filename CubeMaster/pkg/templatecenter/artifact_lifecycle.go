@@ -113,11 +113,11 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 //	  replica bindings for this artifact, count remaining references; if any
 //	  remain, keep the artifact. Otherwise snapshot the placement nodes and
 //	  mark the row CLEANUP_PENDING.
-//	Phase 2 (no lock, no TX, idempotent): destroy the ext4 files on every
+//	Phase 2 (no lock, no TX, idempotent): destroy the rootfs files on every
 //	  placement node.
 //	Phase 3 (short TX, FOR UPDATE): only if node-side physical deletes
 //	  succeeded, re-check that references are still zero and status is still
-//	  CLEANUP_PENDING, then remove the master-local ext4 under the row lock
+//	  CLEANUP_PENDING, then remove the master-local rootfs under the row lock
 //	  before deleting placement rows and the artifact row; if it was
 //	  re-referenced meanwhile, leave status as-is and return so Phase 1 /
 //	  claimRootfsArtifactForBuild can converge it.
@@ -134,11 +134,11 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 
 	// ── Phase 1 ──────────────────────────────────────────────────────────────
 	var (
-		proceed bool
-		nodes   []models.ArtifactNodePlacement
+		proceed  bool
+		nodes    []models.ArtifactNodePlacement
+		artifact models.RootfsArtifact
 	)
 	if err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var artifact models.RootfsArtifact
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Table(constants.RootfsArtifactTableName).
 			Where("artifact_id = ?", artifactID).First(&artifact).Error
@@ -205,7 +205,7 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			logger.Warnf("artifact cleanup: cannot resolve address for placement node %s", nodes[i].NodeID)
 			continue
 		}
-		inUse, err := destroyArtifactOnNode(ctx, artifactID, instanceType, target)
+		inUse, err := destroyArtifactOnNode(ctx, &artifact, instanceType, target)
 		if inUse {
 			allPhysicalOK = false
 			logger.Infof("artifact cleanup deferred: node %s still uses artifact, GC will retry", target.ID())

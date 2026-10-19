@@ -31,7 +31,7 @@ import (
 // (/cube/template/artifact/download) is reverse-proxied from CubeMaster to TC
 // (see httpservice/cube/routes.go). CubeMaster's own disk never holds a
 // freshly built artifact, so the node-local probe in artifact_presence.go
-// (stat the row's ext4_path on THIS process's disk) can only ever report
+// (stat the row's rootfs_path on THIS process's disk) can only ever report
 // "missing" or "foreign" on CubeMaster. In a Kubernetes deployment the
 // recorded download base URL is the master Service DNS name (it is derived
 // from the request Host header), which matches no local host identity — so

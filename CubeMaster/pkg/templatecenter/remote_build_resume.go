@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	images "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"gorm.io/gorm"
 )
 
@@ -91,46 +92,52 @@ func acquireResumeArtifactLock(artifactID string) func() {
 // register the artifact and continue the pipeline WITHOUT touching the image
 // registry itself: TC pulled the image, so TC reports the image config.
 type RemoteBuildResult struct {
-	ArtifactID              string
-	TemplateSpecFingerprint string
-	SourceImageDigest       string
-	Ext4Path                string
-	Ext4SHA256              string
-	Ext4SizeBytes           int64
-	ImageConfigJSON         string
+	RootfsFormat            string `json:"rootfs_format"`
+	ArtifactID              string `json:"artifact_id"`
+	TemplateSpecFingerprint string `json:"template_spec_fingerprint"`
+	SourceImageDigest       string `json:"source_image_digest"`
+	RootfsPath              string `json:"rootfs_path"`
+	RootfsSHA256            string `json:"rootfs_sha256"`
+	RootfsSizeBytes         int64  `json:"rootfs_size_bytes"`
+	ImageConfigJSON         string `json:"image_config_json"`
 	// MasterNodeIP mirrors the column of the same (misleading) name: it holds
 	// the artifact DOWNLOAD BASE URL, not an IP. TC echoes back the base URL
-	// CubeMaster handed it at submit time, so Cubelet keeps pulling the ext4
+	// CubeMaster handed it at submit time, so Cubelet keeps pulling the rootfs
 	// from CubeMaster exactly as in local mode.
 	//
 	// This is why TC and CubeMaster must share the artifact directory (one CBS
 	// disk / PVC): the file is written by TC and served by CubeMaster.
-	MasterNodeIP string
+	MasterNodeIP string `json:"master_node_ip"`
 	// ArtifactURL is the S3/MinIO presigned download URL or a blobstore: locator.
-	ArtifactURL             string
-	StorageBackend          string
-	ObjectKey               string
-	CubeEgressCABaked       bool
-	CubeEgressCAFingerprint string
-	CubeEgressCATargets     int
+	ArtifactURL             string `json:"artifact_url"`
+	StorageBackend          string `json:"storage_backend"`
+	ObjectKey               string `json:"object_key"`
+	CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
+	CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
+	CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
 }
 
 // Validate checks the fields the downstream distribution guard requires.
-// distributeRootfsArtifact refuses incomplete records (ext4_size_bytes=0 /
+// distributeRootfsArtifact refuses incomplete records (rootfs_size_bytes=0 /
 // empty download_token), so catching it here yields a far clearer error.
 func (r *RemoteBuildResult) Validate() error {
+	format, err := images.ResolveRootfsFormat(r.RootfsFormat)
+	if err != nil {
+		return err
+	}
+	r.RootfsFormat = format
 	var missing []string
 	if strings.TrimSpace(r.ArtifactID) == "" {
 		missing = append(missing, "artifact_id")
 	}
-	if strings.TrimSpace(r.Ext4Path) == "" {
-		missing = append(missing, "ext4_path")
+	if strings.TrimSpace(r.RootfsPath) == "" {
+		missing = append(missing, "rootfs_path")
 	}
-	if strings.TrimSpace(r.Ext4SHA256) == "" {
-		missing = append(missing, "ext4_sha256")
+	if strings.TrimSpace(r.RootfsSHA256) == "" {
+		missing = append(missing, "rootfs_sha256")
 	}
-	if r.Ext4SizeBytes <= 0 {
-		missing = append(missing, "ext4_size_bytes")
+	if r.RootfsSizeBytes <= 0 {
+		missing = append(missing, "rootfs_size_bytes")
 	}
 	// distributeRootfsArtifact refuses to push a CreateImage when this is
 	// empty, and the resulting download URL would fall back to os.Hostname().
@@ -140,24 +147,24 @@ func (r *RemoteBuildResult) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("remote build result is missing required field(s): %s", strings.Join(missing, ", "))
 	}
-	// Path-traversal guard: the status callback is unauthenticated, so
-	// ext4_path is attacker-controlled. It must resolve to a file INSIDE one of
+	// Path-traversal guard: even an authenticated status callback must not let
+	// rootfs_path escape the controlled artifact roots. It must resolve inside one of
 	// the controlled artifact root directories, or Cubelet could be told to
 	// download an arbitrary host path as a rootfs. The check is by prefix on the
 	// cleaned absolute path, matching how artifact_cleanup.go already locates
 	// the artifact dir.
-	if err := r.validateExt4PathWithinStore(); err != nil {
+	if err := r.validateRootfsPathWithinStore(); err != nil {
 		return err
 	}
 	return nil
 }
 
-// validateExt4PathWithinStore rejects an ext4_path that escapes the controlled
+// validateRootfsPathWithinStore rejects a rootfs_path that escapes the controlled
 // artifact store roots.
-func (r *RemoteBuildResult) validateExt4PathWithinStore() error {
-	clean := filepath.Clean(r.Ext4Path)
+func (r *RemoteBuildResult) validateRootfsPathWithinStore() error {
+	clean := filepath.Clean(r.RootfsPath)
 	if !filepath.IsAbs(clean) {
-		return fmt.Errorf("remote build result ext4_path %q is not an absolute path", r.Ext4Path)
+		return fmt.Errorf("remote build result rootfs_path %q is not an absolute path", r.RootfsPath)
 	}
 	roots := []string{ArtifactWorkRootDir(), ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
@@ -174,7 +181,7 @@ func (r *RemoteBuildResult) validateExt4PathWithinStore() error {
 			return nil
 		}
 	}
-	return fmt.Errorf("remote build result ext4_path %q is outside the artifact store roots %v", r.Ext4Path, roots)
+	return fmt.Errorf("remote build result rootfs_path %q is outside the artifact store roots %v", r.RootfsPath, roots)
 }
 
 // remoteBuildReportKey is where TC's BUILT report is preserved inside the job's
@@ -185,8 +192,8 @@ const remoteBuildReportKey = "remote_build_report"
 // result_json instead of letting it be overwritten.
 //
 // The status callback stores TC's raw BUILT payload in result_json, which is the
-// only durable record that the ext4 was produced by CubeTemplateCenter rather
-// than in-process — it carries the ext4 sha256, size and image config TC
+// only durable record that the rootfs was produced by CubeTemplateCenter rather
+// than in-process — it carries the rootfs sha256, size and image config TC
 // measured itself. The finalize step then writes the template payload to the
 // same column, so that evidence used to be destroyed on every job, including the
 // failed ones where it is most needed for diagnosis.
@@ -282,7 +289,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	if err := result.Validate(); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
-			"phase":         JobPhaseBuildingExt4,
+			"phase":         JobPhaseBuildingRootfs,
 			"progress":      100,
 			"error_message": err.Error(),
 		})
@@ -353,7 +360,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		logger.Errorf("%v", failErr)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
-			"phase":           JobPhaseBuildingExt4,
+			"phase":           JobPhaseBuildingRootfs,
 			"artifact_id":     result.ArtifactID,
 			"artifact_status": ArtifactStatusFailed,
 			"progress":        100,
@@ -409,8 +416,8 @@ func ContinueTemplateImageJobAfterRemoteBuild(ctx context.Context, continuation 
 		"artifact_id": continuation.artifact.ArtifactID,
 		"build_mode":  "remote",
 	})
-	logger.Infof("resume step 2/3: artifact registered, entering distribution: artifact_status=%s ext4_size_bytes=%d adopted=%v",
-		continuation.artifact.Status, continuation.artifact.Ext4SizeBytes, continuation.adopted)
+	logger.Infof("resume step 2/3: artifact registered, entering distribution: artifact_status=%s rootfs_size_bytes=%d adopted=%v",
+		continuation.artifact.Status, continuation.artifact.RootfsSizeBytes, continuation.adopted)
 	err := finishTemplateImageJobAfterArtifact(ctx, continuation.jobID, continuation.req, continuation.artifact, continuation.generatedReq, !continuation.adopted)
 	if err != nil {
 		logger.Errorf("resume step 3/3 failed: %v", err)
@@ -424,7 +431,7 @@ func ContinueTemplateImageJobAfterRemoteBuild(ctx context.Context, continuation 
 // performed by the standalone CubeTemplateCenter process. Reconciler replays
 // use this complete path because TC no longer holds the build lock.
 //
-// TC owns only the data-plane work (pull image, bake rootfs, mkfs ext4) and
+// TC owns only the data-plane work (pull image, export rootfs, build filesystem) and
 // reports the result back; every DB write and the whole distribution pipeline
 // stay here, on CubeMaster. This function therefore performs exactly the steps
 // runTemplateImageJob does after ensureRootfsArtifact returns, reusing the same
@@ -455,7 +462,7 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 }
 
 // registerRemoteBuiltArtifact registers the artifact TC reported in the
-// BUILT callback, instead of building the ext4 locally.
+// BUILT callback, instead of building the rootfs locally.
 //
 // The claim+lookup runs under the cluster-wide fingerprint lock
 // (withArtifactRegisterLock, same named lock TC builds hold), and the lookup
@@ -616,9 +623,10 @@ func finalizeRemoteArtifact(
 ) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
 	record.SourceImageDigest = result.SourceImageDigest
 	record.MasterNodeIP = result.MasterNodeIP
-	record.Ext4Path = result.Ext4Path
-	record.Ext4SHA256 = result.Ext4SHA256
-	record.Ext4SizeBytes = result.Ext4SizeBytes
+	record.RootfsFormat = result.RootfsFormat
+	record.RootfsPath = result.RootfsPath
+	record.RootfsSHA256 = result.RootfsSHA256
+	record.RootfsSizeBytes = result.RootfsSizeBytes
 	record.ImageConfigJSON = result.ImageConfigJSON
 	record.DownloadToken = uuid.New().String()
 	record.ArtifactURL = result.ArtifactURL
@@ -651,9 +659,10 @@ func finalizeRemoteArtifact(
 	ok, err := updateRootfsArtifactIfStatus(ctx, record.ArtifactID, ArtifactStatusBuilding, map[string]any{
 		"source_image_digest":            record.SourceImageDigest,
 		"master_node_ip":                 record.MasterNodeIP,
-		"ext4_path":                      record.Ext4Path,
-		"ext4_sha256":                    record.Ext4SHA256,
-		"ext4_size_bytes":                record.Ext4SizeBytes,
+		"rootfs_format":                  record.RootfsFormat,
+		"rootfs_path":                    record.RootfsPath,
+		"rootfs_sha256":                  record.RootfsSHA256,
+		"rootfs_size_bytes":              record.RootfsSizeBytes,
 		"image_config_json":              record.ImageConfigJSON,
 		"generated_request_json":         record.GeneratedRequestJSON,
 		"download_token":                 record.DownloadToken,

@@ -5,6 +5,7 @@ package cube
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,5 +102,54 @@ func TestTemplateJobBuiltCallbackRetryDoesNotStartSecondContinuation(t *testing.
 	}
 	if got := prepareCalls.Load(); got != 1 {
 		t.Fatalf("prepare calls = %d, want 1", got)
+	}
+}
+
+func TestBuiltCallbackRejectsConflictingMetadataBeforePersistence(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "fixture-token")
+	persisted := false
+	original := applyTemplateImageJobBuiltReport
+	applyTemplateImageJobBuiltReport = func(context.Context, string, map[string]any) (bool, error) { persisted = true; return true, nil }
+	t.Cleanup(func() { applyTemplateImageJobBuiltReport = original })
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Params = gin.Params{{Key: "job_id", Value: "job-1"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/internal/template/jobs/job-1/status", strings.NewReader(`{"status":"BUILT","rootfs_path":"/new.ext4","ext4_path":"/old.ext4"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set(constants.TemplateCallbackTokenHeader, "fixture-token")
+	handleTemplateJobStatusCallback(c)
+	if recorder.Code != http.StatusBadRequest || persisted {
+		t.Fatalf("code=%d persisted=%v body=%s", recorder.Code, persisted, recorder.Body.String())
+	}
+}
+
+func TestBuiltCallbackPreservesExactPayloadForReplay(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "fixture-token")
+	const body = `{"status":"BUILT","artifact_id":"rfs-1","rootfs_size_bytes":9007199254740993,"pull_total_bytes":9007199254740993,"future_field":{"value":1}}`
+	var values map[string]any
+	original := applyTemplateImageJobBuiltReport
+	applyTemplateImageJobBuiltReport = func(_ context.Context, _ string, got map[string]any) (bool, error) {
+		values = got
+		return false, nil // Already claimed: no asynchronous continuation.
+	}
+	t.Cleanup(func() { applyTemplateImageJobBuiltReport = original })
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "job_id", Value: "job-1"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/internal/template/jobs/job-1/status", strings.NewReader(body))
+	c.Request.Header.Set(constants.TemplateCallbackTokenHeader, "fixture-token")
+	handleTemplateJobStatusCallback(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if values["result_json"] != body || values["pull_total_bytes"] != int64(9007199254740993) {
+		t.Fatalf("callback changed report bytes or counter: %v", values)
+	}
+	var replay templatecenter.RemoteBuildResult
+	if err := json.Unmarshal([]byte(values["result_json"].(string)), &replay); err != nil {
+		t.Fatal(err)
+	}
+	if replay.RootfsSizeBytes != 9007199254740993 {
+		t.Fatalf("replayed size=%d", replay.RootfsSizeBytes)
 	}
 }

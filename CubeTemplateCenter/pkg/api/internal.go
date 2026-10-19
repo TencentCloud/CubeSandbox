@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
+	images "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 // buildExecutor is the process-wide build owner. Set by RegisterInternalRoutes'
@@ -132,6 +133,11 @@ const maxArtifactUploadBytes = 32 << 30
 
 func handleArtifactUpload(c *gin.Context) {
 	ctx := c.Request.Context()
+	format, err := images.ResolveRootfsFormat(c.Query("rootfs_format"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxArtifactUploadBytes)
 	mr, err := c.Request.MultipartReader()
 	if err != nil {
@@ -168,7 +174,7 @@ func handleArtifactUpload(c *gin.Context) {
 				c.JSON(http.StatusBadRequest, ErrorResponse{Error: "artifact_id field must precede the file part"})
 				return
 			}
-			handleArtifactUploadFilePart(c, ctx, artifactID, part)
+			handleArtifactUploadFilePart(c, ctx, artifactID, format, part)
 			part.Close()
 			return
 		default:
@@ -184,7 +190,7 @@ func handleArtifactUpload(c *gin.Context) {
 
 // handleArtifactUploadFilePart streams one validated file part into the
 // artifact store, deduping on identical content already in place.
-func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactID string, reader io.Reader) {
+func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactID, format string, reader io.Reader) {
 	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("resolve artifact store dir: %v", err)})
@@ -225,17 +231,23 @@ func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactI
 		return
 	}
 
-	dstPath := filepath.Join(storeDir, artifactID+".ext4")
+	filename, err := images.RootfsFilename(artifactID, format)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
+	dstPath := filepath.Join(storeDir, filename)
 	if st, statErr := os.Stat(dstPath); statErr == nil && st.Mode().IsRegular() {
 		dstSha, shaErr := fileSHA256(dstPath)
 		if shaErr == nil && st.Size() == size && dstSha == sha {
 			cleanupTmp = true
 			c.JSON(http.StatusOK, ArtifactUploadResponse{
-				Status:        "reused",
-				ArtifactID:    artifactID,
-				Ext4Path:      dstPath,
-				Ext4SHA256:    dstSha,
-				Ext4SizeBytes: st.Size(),
+				Status:          "reused",
+				ArtifactID:      artifactID,
+				RootfsFormat:    format,
+				RootfsPath:      dstPath,
+				RootfsSHA256:    dstSha,
+				RootfsSizeBytes: st.Size(),
 			})
 			return
 		}
@@ -251,11 +263,12 @@ func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactI
 	}
 
 	c.JSON(http.StatusOK, ArtifactUploadResponse{
-		Status:        "uploaded",
-		ArtifactID:    artifactID,
-		Ext4Path:      dstPath,
-		Ext4SHA256:    sha,
-		Ext4SizeBytes: size,
+		Status:          "uploaded",
+		ArtifactID:      artifactID,
+		RootfsFormat:    format,
+		RootfsPath:      dstPath,
+		RootfsSHA256:    sha,
+		RootfsSizeBytes: size,
 	})
 }
 

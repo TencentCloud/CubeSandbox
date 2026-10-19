@@ -270,45 +270,9 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 	if strings.TrimSpace(payload) == "" {
 		return nil, errors.New("result_json is empty")
 	}
-	var raw struct {
-		ArtifactID              string `json:"artifact_id"`
-		TemplateSpecFingerprint string `json:"template_spec_fingerprint"`
-		SourceImageDigest       string `json:"source_image_digest"`
-		Ext4Path                string `json:"ext4_path"`
-		Ext4SHA256              string `json:"ext4_sha256"`
-		Ext4SizeBytes           int64  `json:"ext4_size_bytes"`
-		ImageConfigJSON         string `json:"image_config_json"`
-		MasterNodeIP            string `json:"master_node_ip"`
-		// ArtifactURL (S3/MinIO presigned URL) MUST be decoded here too: it is
-		// part of the same terminal callback payload TC stored in result_json.
-		// Omitting it used to make replay silently zero out ArtifactURL on
-		// finalizeRemoteArtifact, losing/overwriting the S3 URL for any job
-		// that got stuck and had to be resumed via reconciler replay.
-		ArtifactURL             string `json:"artifact_url"`
-		StorageBackend          string `json:"storage_backend"`
-		ObjectKey               string `json:"object_key"`
-		CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
-		CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
-		CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
-	}
-	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+	result := &RemoteBuildResult{}
+	if err := json.Unmarshal([]byte(payload), result); err != nil {
 		return nil, fmt.Errorf("decode result_json: %w", err)
-	}
-	result := &RemoteBuildResult{
-		ArtifactID:              raw.ArtifactID,
-		TemplateSpecFingerprint: raw.TemplateSpecFingerprint,
-		SourceImageDigest:       raw.SourceImageDigest,
-		Ext4Path:                raw.Ext4Path,
-		Ext4SHA256:              raw.Ext4SHA256,
-		Ext4SizeBytes:           raw.Ext4SizeBytes,
-		ImageConfigJSON:         raw.ImageConfigJSON,
-		MasterNodeIP:            raw.MasterNodeIP,
-		ArtifactURL:             raw.ArtifactURL,
-		StorageBackend:          raw.StorageBackend,
-		ObjectKey:               raw.ObjectKey,
-		CubeEgressCABaked:       raw.CubeEgressCABaked,
-		CubeEgressCAFingerprint: raw.CubeEgressCAFingerprint,
-		CubeEgressCATargets:     raw.CubeEgressCATargets,
 	}
 	if err := result.Validate(); err != nil {
 		return nil, err
@@ -325,8 +289,8 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 	// un-colocated deployment the resume replay can land on a master that
 	// never shared TC's disk at all.
 	if result.ArtifactURL == "" {
-		if _, err := os.Stat(result.Ext4Path); err != nil {
-			return nil, fmt.Errorf("artifact file %s is gone: %w", result.Ext4Path, err)
+		if _, err := os.Stat(result.RootfsPath); err != nil {
+			return nil, fmt.Errorf("artifact file %s is gone: %w", result.RootfsPath, err)
 		}
 	}
 	return result, nil

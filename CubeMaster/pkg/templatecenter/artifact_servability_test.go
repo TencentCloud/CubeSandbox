@@ -84,7 +84,7 @@ func TestVerifyArtifactServabilityRemoteServable(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:    "rfs-ok",
 		Status:        ArtifactStatusReady,
-		Ext4Path:      "/nonexistent/rfs-ok.ext4",
+		RootfsPath:    "/nonexistent/rfs-ok.ext4",
 		MasterNodeIP:  "http://cube-sandbox-master.cube-sandbox.svc.cluster.local:8089",
 		DownloadToken: "tok",
 	}
@@ -107,7 +107,7 @@ func TestVerifyArtifactServabilityLocalOwnershipSkipsRemoteProbe(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:    "rfs-local",
 		Status:        ArtifactStatusReady,
-		Ext4Path:      ext4Path,
+		RootfsPath:    ext4Path,
 		MasterNodeIP:  "",
 		DownloadToken: "tok",
 	}
@@ -129,7 +129,7 @@ func TestVerifyArtifactServabilityRemoteMissingDemotes(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:    "rfs-gone",
 		Status:        ArtifactStatusReady,
-		Ext4Path:      "/nonexistent/rfs-gone.ext4",
+		RootfsPath:    "/nonexistent/rfs-gone.ext4",
 		MasterNodeIP:  "http://master:8089",
 		DownloadToken: "tok",
 	}
@@ -157,7 +157,7 @@ func TestVerifyArtifactServabilityRemoteUnknownKeepsRow(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:    "rfs-unknown",
 		Status:        ArtifactStatusReady,
-		Ext4Path:      "/nonexistent/rfs-unknown.ext4",
+		RootfsPath:    "/nonexistent/rfs-unknown.ext4",
 		MasterNodeIP:  "http://master:8089",
 		DownloadToken: "tok",
 	}
@@ -199,7 +199,7 @@ func TestRootfsArtifactReuseVerdictRemoteTier(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID:    "rfs-reuse",
 		Status:        ArtifactStatusReady,
-		Ext4Path:      "/nonexistent/rfs-reuse.ext4",
+		RootfsPath:    "/nonexistent/rfs-reuse.ext4",
 		MasterNodeIP:  "http://cube-sandbox-master.cube-sandbox.svc.cluster.local:8089",
 		DownloadToken: "tok",
 	}

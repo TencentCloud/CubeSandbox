@@ -60,7 +60,7 @@ func TestStaleThresholdFor(t *testing.T) {
 		{"pending", "PENDING", "", 10 * time.Minute},
 		{"pending ignores phase", "PENDING", "PULLING", 10 * time.Minute},
 		{"running pulling", "RUNNING", "PULLING", 30 * time.Minute},
-		{"running building_ext4", "RUNNING", "BUILDING_EXT4", 1 * time.Hour},
+		{"running building_ext4", "RUNNING", "BUILDING_ROOTFS", 1 * time.Hour},
 		{"running distributing", "RUNNING", "DISTRIBUTING", 1 * time.Hour},
 		{"running empty phase", "RUNNING", "", 1 * time.Hour},
 		{"built not swept", "BUILT", "", 0},
@@ -108,9 +108,9 @@ func TestStaleMessage(t *testing.T) {
 	})
 
 	t.Run("running other phase mentions phase name", func(t *testing.T) {
-		job := staleJob{Status: "RUNNING", Phase: "BUILDING_EXT4", UpdatedAt: updatedAt}
+		job := staleJob{Status: "RUNNING", Phase: "BUILDING_ROOTFS", UpdatedAt: updatedAt}
 		msg := r.staleMessage(job, 1*time.Hour)
-		if !strings.Contains(msg, "BUILDING_EXT4") {
+		if !strings.Contains(msg, "BUILDING_ROOTFS") {
 			t.Fatalf("expected phase name in message, got: %s", msg)
 		}
 		if !strings.Contains(msg, "interrupted") {

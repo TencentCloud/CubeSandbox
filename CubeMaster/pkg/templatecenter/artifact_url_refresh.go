@@ -65,10 +65,6 @@ var (
 	artifactStoreOpenErr error
 )
 
-func artifactUserKey(artifactID string) string {
-	return blobstore.ArtifactExt4Key("", artifactID)
-}
-
 func sharedArtifactStore() *artifactStore {
 	artifactStoreOnce.Do(func() {
 		artifactStoreInst = loadArtifactStore()
@@ -152,14 +148,6 @@ func InitArtifactStore(ctx context.Context) error {
 	return nil
 }
 
-func artifactStoreColumns(artifactID string) (backend, objectKey string) {
-	st := sharedArtifactStore()
-	if st == nil {
-		return "", ""
-	}
-	return st.backend, blobstore.ArtifactExt4Key(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), artifactID)
-}
-
 // presignArtifactGetURL is the single signing seam, indirected so tests can
 // substitute a fake without a live object store.
 var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
@@ -170,7 +158,11 @@ var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArt
 	if st == nil {
 		return "", errS3PresignNotConfigured
 	}
-	u, err := st.store.SignedGetURL(ctx, artifactStoreKey(ctx, artifact), s3PresignExpiry)
+	key, err := artifactStoreKey(artifact)
+	if err != nil {
+		return "", err
+	}
+	u, err := st.store.SignedGetURL(ctx, key, s3PresignExpiry)
 	if err != nil {
 		if errors.Is(err, blobstore.ErrUnsupported) {
 			return "", nil
@@ -195,7 +187,11 @@ var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsAr
 	if st == nil {
 		return false, errS3PresignNotConfigured
 	}
-	_, err := st.store.Stat(ctx, artifactStoreKey(ctx, artifact))
+	key, err := artifactStoreKey(artifact)
+	if err != nil {
+		return false, err
+	}
+	_, err = st.store.Stat(ctx, key)
 	if err != nil {
 		if blobstore.IsNotExist(err) {
 			return false, nil
@@ -206,11 +202,16 @@ var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsAr
 }
 
 // uploadArtifactFileToS3 uploads filePath as the object of artifactID.
-var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath string) error {
+var uploadArtifactFileToS3 = func(ctx context.Context, artifact *models.RootfsArtifact, filePath string) error {
 	store := sharedArtifactStore()
 	if store == nil {
 		return errS3PresignNotConfigured
 	}
+	key, err := artifactStoreKey(artifact)
+	if err != nil {
+		return err
+	}
+	artifactID := artifact.ArtifactID
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("upload artifact %s to s3 from %s: %w", artifactID, filePath, err)
@@ -220,7 +221,7 @@ var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath stri
 	if err != nil {
 		return err
 	}
-	_, err = store.store.Put(ctx, artifactUserKey(artifactID), f, blobstore.PutOptions{
+	_, err = store.store.Put(ctx, key, f, blobstore.PutOptions{
 		ContentType: "application/octet-stream",
 		Size:        st.Size(),
 	})
@@ -254,49 +255,38 @@ func OpenArtifactObject(ctx context.Context, artifact *models.RootfsArtifact) (*
 	if st == nil {
 		return nil, errS3PresignNotConfigured
 	}
-	return st.store.Get(ctx, artifactStoreKey(ctx, artifact), blobstore.GetOptions{})
+	key, err := artifactStoreKey(artifact)
+	if err != nil {
+		return nil, err
+	}
+	return st.store.Get(ctx, key, blobstore.GetOptions{})
 }
 
-func artifactStoreKey(ctx context.Context, artifact *models.RootfsArtifact) string {
-	if artifact == nil {
-		return ""
-	}
-	return artifactStoreKeyWithPrefix(ctx, artifact, artifactStorePrefix())
+func artifactStoreKey(artifact *models.RootfsArtifact) (string, error) {
+	return artifactStoreKeyWithPrefix(artifact, artifactStorePrefix())
 }
 
 func artifactStorePrefix() string {
 	return strings.Trim(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), "/")
 }
 
-func artifactStoreKeyWithPrefix(ctx context.Context, artifact *models.RootfsArtifact, prefix string) string {
-	fallback := artifactUserKey(artifact.ArtifactID)
-	stored := strings.TrimSpace(artifact.ObjectKey)
+func artifactStoreKeyWithPrefix(artifact *models.RootfsArtifact, prefix string) (string, error) {
+	if artifact == nil {
+		return "", fmt.Errorf("rootfs artifact is nil")
+	}
+	stored := artifact.ObjectKey
 	if stored == "" {
-		return fallback
-	}
-	key := userKeyFromStoredObjectKey(stored, prefix)
-	if prefix != "" && strings.Contains(key, "/") {
-		log.G(ctx).Warnf("artifact object_key %q does not match store prefix %q; using derived key %s", stored, prefix, fallback)
-		return fallback
-	}
-	if blobstore.ValidateKey(key) != nil {
-		return fallback
-	}
-	return key
-}
-
-func userKeyFromStoredObjectKey(stored, prefix string) string {
-	stored = strings.Trim(strings.TrimSpace(stored), "/")
-	prefix = strings.Trim(prefix, "/")
-	if prefix != "" {
-		if stored == prefix {
-			return ""
+		key, err := NewArtifactObjectKey("", artifact.ArtifactID, artifact.RootfsFormat)
+		if err != nil {
+			return "", fmt.Errorf("derive object key for artifact %q: %w", artifact.ArtifactID, err)
 		}
-		if p := prefix + "/"; strings.HasPrefix(stored, p) {
-			return strings.TrimPrefix(stored, p)
-		}
+		return key, nil
 	}
-	return stored
+	key, err := blobstore.RelativeObjectKey(stored, prefix)
+	if err != nil {
+		return "", fmt.Errorf("invalid object_key %q for artifact %q with store prefix %q: %w", stored, artifact.ArtifactID, prefix, err)
+	}
+	return key, nil
 }
 
 // artifactDownloadURL resolves the download URL to hand out for an artifact

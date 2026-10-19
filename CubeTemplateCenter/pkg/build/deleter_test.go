@@ -14,7 +14,7 @@ import (
 // flow is exercised by integration tests against a real database, since TC's
 // go.mod does not carry an embedded driver (glebarez/sqlite) today.
 
-func TestDeleteLocalExt4RemovesManagedDir(t *testing.T) {
+func TestDeleteLocalRootfsRemovesManagedDir(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", root)
 
@@ -23,20 +23,20 @@ func TestDeleteLocalExt4RemovesManagedDir(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	ext4Path := filepath.Join(artifactDir, artifactID+".ext4")
-	if err := os.WriteFile(ext4Path, []byte("fake ext4 data"), 0o644); err != nil {
+	rootfsPath := filepath.Join(artifactDir, artifactID+".ext4")
+	if err := os.WriteFile(rootfsPath, []byte("fake ext4 data"), 0o644); err != nil {
 		t.Fatalf("write ext4: %v", err)
 	}
 
-	if err := deleteLocalExt4(ext4Path); err != nil {
-		t.Fatalf("deleteLocalExt4: %v", err)
+	if err := deleteLocalRootfs(rootfsPath); err != nil {
+		t.Fatalf("deleteLocalRootfs: %v", err)
 	}
 	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
 		t.Fatalf("expected artifact dir removed, stat err=%v", err)
 	}
 }
 
-func TestDeleteLocalExt4RefusesPathTraversal(t *testing.T) {
+func TestDeleteLocalRootfsRefusesPathTraversal(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", root)
 
@@ -47,7 +47,7 @@ func TestDeleteLocalExt4RefusesPathTraversal(t *testing.T) {
 		t.Fatalf("write evil file: %v", err)
 	}
 
-	err := deleteLocalExt4(evilPath)
+	err := deleteLocalRootfs(evilPath)
 	if err == nil {
 		t.Fatalf("expected path-traversal refusal, got nil")
 	}
@@ -70,7 +70,7 @@ func TestManagedArtifactDir(t *testing.T) {
 	if managedArtifactDir(outside) {
 		t.Fatalf("expected %q recognized as NOT managed", outside)
 	}
-	// The root itself is deliberately NOT managed: deleteLocalExt4 runs
+	// The root itself is deliberately NOT managed: deleteLocalRootfs runs
 	// RemoveAll(dir), so treating the store root as managed would wipe every
 	// artifact on the node (and the callback-side path validator accepts
 	// exactly such top-level paths).

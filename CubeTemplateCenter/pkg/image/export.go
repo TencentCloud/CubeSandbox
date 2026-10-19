@@ -114,7 +114,7 @@ func dockerlessExportImageRootfs(ctx context.Context, source *PreparedSource, de
 // available on PATH. When they are, the build prefers the daemonless export
 // path (skopeo+umoci) over docker. This auto-detection means installing both
 // tools on a cubemaster node silently switches the source-image handling away
-// from the docker daemon; EnsureArtifactBuildPreflight reflects the resulting
+// from the docker daemon; EnsureRootfsBuildPreflight reflects the resulting
 // command requirements.
 func hasDockerlessRootfsExportTools() bool {
 	if _, err := executableLookPath("skopeo"); err != nil {

@@ -34,7 +34,7 @@ var (
 var imageJobSteps = []string{
 	"PULLING",
 	"UNPACKING",
-	"BUILDING_EXT4",
+	"BUILDING_ROOTFS",
 	"GENERATING_JSON",
 	"DISTRIBUTING",
 	"CREATING_TEMPLATE",
@@ -200,6 +200,9 @@ func (m imageJobTUI) View() string {
 	b.WriteString(tuiKV("job", m.jobID))
 	if imageRef != "" {
 		b.WriteString(tuiKV("image", imageRef))
+	}
+	if m.job != nil && m.job.Artifact != nil {
+		b.WriteString(tuiKV("rootfs_format", m.job.Artifact.RootfsFormat))
 	}
 	b.WriteString("\n")
 

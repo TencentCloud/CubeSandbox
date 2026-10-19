@@ -5,6 +5,7 @@
 package cube
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
@@ -44,7 +46,7 @@ var templateJobStatusUpdatableColumns = map[string]bool{
 }
 
 // templateJobIntColumns lists whitelisted columns whose DB type is integer.
-// JSON decodes numbers as float64, which some drivers reject for int columns.
+// Callback numbers are decoded as json.Number and converted before DB writes.
 var templateJobIntColumns = map[string]bool{
 	"progress":              true,
 	"pull_total_bytes":      true,
@@ -62,7 +64,7 @@ var callbackTokenWarnOnce sync.Once
 
 // templateCallbackConfigured reports whether the shared callback token is
 // set. When it is not, the endpoint fails CLOSED: this handler trusts the
-// BUILT payload wholesale (artifact_url / ext4_path / image config become
+// BUILT payload wholesale (artifact_url / rootfs_path / image config become
 // the rootfs every node boots from), so an anonymous caller could point
 // Cubelet at an attacker-controlled rootfs. The chart, one-click installer
 // and Terraform all generate the token on both sides, so an unset token is
@@ -128,33 +130,49 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 		return
 	}
 
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	var payload map[string]any
-	if err := c.ShouldBindJSON(&payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	var builtResult *templatecenter.RemoteBuildResult
+	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
+		builtResult = &templatecenter.RemoteBuildResult{}
+		if err := json.Unmarshal(data, builtResult); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	values := make(map[string]any, len(payload))
+	if phase, ok := payload["phase"].(string); ok {
+		payload["phase"] = models.NormalizeTemplateImagePhase(phase)
+	}
 	for k, v := range payload {
 		if !templateJobStatusUpdatableColumns[k] {
 			continue
 		}
-		// JSON numbers decode as float64; normalize integer columns to int64
-		// so the update works on both MySQL and Postgres drivers.
+		// Decode integer columns without a float64 round trip, preserving
+		// counters above 2^53 on both MySQL and Postgres.
 		if templateJobIntColumns[k] {
 			v = payloadInt64(payload, k)
 		}
 		values[k] = v
 	}
 
-	// The BUILT report also carries artifact details (ext4_path / sha / size /
+	// The BUILT report also carries artifact details (rootfs_path / sha / size /
 	// image config) that have no image_jobs column. Keep the raw payload in
 	// result_json so the state is inspectable and the resume step can be
 	// replayed from the row if needed.
 	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
-		if raw, err := json.Marshal(payload); err == nil {
-			values["result_json"] = string(raw)
-		}
+		values["result_json"] = string(data)
 	}
 
 	if len(values) == 0 {
@@ -213,7 +231,7 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	// cross-node RPCs and must not be canceled when this handler returns) but
 	// still carries a RequestTrace, like every other detached template job.
 	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
-		result := remoteBuildResultFromPayload(payload)
+		result := builtResult
 		resumeCtx := templatecenter.DetachRemoteBuildResumeContext(ctx, jobID, result.ArtifactID)
 		continuation, err := prepareTemplateImageJobAfterRemoteBuildCallback(ctx, jobID, result)
 		if err != nil {
@@ -243,35 +261,7 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// remoteBuildResultFromPayload extracts the artifact metadata TC reports with
-// the terminal BUILT status. Missing fields are validated downstream by
-// RemoteBuildResult.Validate so the job records a precise error.
-func remoteBuildResultFromPayload(payload map[string]any) *templatecenter.RemoteBuildResult {
-	return &templatecenter.RemoteBuildResult{
-		ArtifactID:              payloadString(payload, "artifact_id"),
-		TemplateSpecFingerprint: payloadString(payload, "template_spec_fingerprint"),
-		SourceImageDigest:       payloadString(payload, "source_image_digest"),
-		Ext4Path:                payloadString(payload, "ext4_path"),
-		Ext4SHA256:              payloadString(payload, "ext4_sha256"),
-		Ext4SizeBytes:           payloadInt64(payload, "ext4_size_bytes"),
-		ImageConfigJSON:         payloadString(payload, "image_config_json"),
-		MasterNodeIP:            payloadString(payload, "master_node_ip"),
-		ArtifactURL:             payloadString(payload, "artifact_url"),
-		StorageBackend:          payloadString(payload, "storage_backend"),
-		ObjectKey:               payloadString(payload, "object_key"),
-		CubeEgressCABaked:       payloadBool(payload, "cube_egress_ca_baked"),
-		CubeEgressCAFingerprint: payloadString(payload, "cube_egress_ca_fingerprint"),
-		CubeEgressCATargets:     int(payloadInt64(payload, "cube_egress_ca_targets_written")),
-	}
-}
-
-func payloadString(payload map[string]any, key string) string {
-	v, _ := payload[key].(string)
-	return strings.TrimSpace(v)
-}
-
-// payloadInt64 handles both float64 (the default for JSON numbers) and
-// json.Number / string encodings.
+// payloadInt64 accepts json.Number from HTTP reports and legacy string values.
 func payloadInt64(payload map[string]any, key string) int64 {
 	switch v := payload[key].(type) {
 	case float64:
@@ -294,17 +284,5 @@ func payloadInt64(payload map[string]any, key string) int64 {
 		return n
 	default:
 		return 0
-	}
-}
-
-func payloadBool(payload map[string]any, key string) bool {
-	switch v := payload[key].(type) {
-	case bool:
-		return v
-	case string:
-		b, err := strconv.ParseBool(strings.TrimSpace(v))
-		return err == nil && b
-	default:
-		return false
 	}
 }

@@ -581,7 +581,7 @@ func TestTemplateImageJobWatchPhaseLabel(t *testing.T) {
 	}{
 		{name: "pulling", job: &types.TemplateImageJobInfo{Phase: "PULLING"}, want: "[1/7] PULLING"},
 		{name: "unpacking", job: &types.TemplateImageJobInfo{Phase: "UNPACKING"}, want: "[2/7] UNPACKING"},
-		{name: "building ext4", job: &types.TemplateImageJobInfo{Phase: "BUILDING_EXT4"}, want: "[3/7] BUILDING_EXT4"},
+		{name: "building ext4", job: &types.TemplateImageJobInfo{Phase: "BUILDING_ROOTFS"}, want: "[3/7] BUILDING_ROOTFS"},
 		{name: "generating json", job: &types.TemplateImageJobInfo{Phase: "GENERATING_JSON"}, want: "[4/7] GENERATING_JSON"},
 		{name: "distributing", job: &types.TemplateImageJobInfo{Phase: "DISTRIBUTING"}, want: "[5/7] DISTRIBUTING"},
 		{name: "creating template", job: &types.TemplateImageJobInfo{Phase: "CREATING_TEMPLATE"}, want: "[6/7] CREATING_TEMPLATE"},
@@ -630,13 +630,13 @@ func TestFormatTemplateImageJobWatchLineIncludesKeyFields(t *testing.T) {
 func TestFormatTemplateImageJobWatchLineIncludesError(t *testing.T) {
 	job := &types.TemplateImageJobInfo{
 		Status:       "FAILED",
-		Phase:        "BUILDING_EXT4",
+		Phase:        "BUILDING_ROOTFS",
 		Progress:     55,
 		ErrorMessage: "build ext4 failed",
 	}
 
 	got := formatTemplateImageJobWatchLine(job)
-	for _, want := range []string{"[3/7] BUILDING_EXT4", "progress=55%", "error=build ext4 failed"} {
+	for _, want := range []string{"[3/7] BUILDING_ROOTFS", "progress=55%", "error=build ext4 failed"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("watch line=%q, want substring %q", got, want)
 		}
@@ -954,5 +954,13 @@ func TestTemplateDeleteCommandContinuesAfterFailure(t *testing.T) {
 	}
 	if got := logBuf.String(); !strings.Contains(got, "template delete failed. delete failed. TemplateId: tpl-fail. RequestId:") {
 		t.Fatalf("failure log %q does not identify failed template", got)
+	}
+}
+
+func TestImageJobTUIShowsRootfsFormat(t *testing.T) {
+	m := imageJobTUI{job: &types.TemplateImageJobInfo{Artifact: &types.RootfsArtifactInfo{RootfsFormat: "ext4"}}}
+	view := m.View()
+	if !strings.Contains(view, "rootfs_format") || !strings.Contains(view, "ext4") {
+		t.Fatalf("missing artifact format: %s", view)
 	}
 }

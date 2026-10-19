@@ -22,17 +22,17 @@ import (
 // artifactBuildLocks serializes ensureRootfsArtifact callers that target the
 // same artifactID. Without this, two templates submitted in quick succession
 // for the same image spec race on buildRootfsArtifact: both goroutines share
-// the same workDir/storeDir/ext4Path, and one goroutine's defer cleanup can
-// wipe the ext4 file while the other is still relying on it — the surviving
+// the same workDir/storeDir/rootfsPath, and one goroutine's defer cleanup can
+// wipe the rootfs file while the other is still relying on it — the surviving
 // caller then reaches distributeRootfsArtifact with a partial record
-// (ext4_size_bytes=0, download_token=""), cubelet rejects the pull with
+// (rootfs_size_bytes=0, download_token=""), cubelet rejects the pull with
 // "invalid size:0", and the template is marked FAILED.
 //
 // The lock is keyed by artifactID (deterministic from image+spec fingerprint)
 // so only racing submits for the same image spec are serialized; different
 // images build in parallel as before. DB claimRootfsArtifactForBuild only
 // covers a short FOR UPDATE transaction and does not protect the filesystem
-// build in image.BuildExt4.
+// build in image.BuildRootfs.
 // claimRootfsArtifactForBuild atomically ensures the artifact row exists and is
 // marked BUILDING while holding its FOR UPDATE lock. It resurrects a
 // soft-deleted row (raced with a concurrent last-owner-cleanup) instead of
@@ -155,24 +155,24 @@ func validateReusableRootfsArtifactFile(record *models.RootfsArtifact) error {
 	if record == nil {
 		return gorm.ErrRecordNotFound
 	}
-	if strings.TrimSpace(record.Ext4Path) == "" {
-		return fmt.Errorf("rootfs artifact %s ext4 path is empty", record.ArtifactID)
+	if strings.TrimSpace(record.RootfsPath) == "" {
+		return fmt.Errorf("rootfs artifact %s rootfs path is empty", record.ArtifactID)
 	}
-	if record.Ext4SizeBytes <= 0 {
-		return fmt.Errorf("rootfs artifact %s ext4 size is invalid: %d", record.ArtifactID, record.Ext4SizeBytes)
+	if record.RootfsSizeBytes <= 0 {
+		return fmt.Errorf("rootfs artifact %s rootfs size is invalid: %d", record.ArtifactID, record.RootfsSizeBytes)
 	}
-	info, err := os.Stat(record.Ext4Path) // NOCC:Path Traversal()
+	info, err := os.Stat(record.RootfsPath) // NOCC:Path Traversal()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("rootfs artifact %s ext4 file %q is missing: %w", record.ArtifactID, record.Ext4Path, err)
+			return fmt.Errorf("rootfs artifact %s rootfs file %q is missing: %w", record.ArtifactID, record.RootfsPath, err)
 		}
-		return fmt.Errorf("stat rootfs artifact %s ext4 file %q: %w", record.ArtifactID, record.Ext4Path, err)
+		return fmt.Errorf("stat rootfs artifact %s rootfs file %q: %w", record.ArtifactID, record.RootfsPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("rootfs artifact %s ext4 path %q is not a regular file", record.ArtifactID, record.Ext4Path)
+		return fmt.Errorf("rootfs artifact %s rootfs path %q is not a regular file", record.ArtifactID, record.RootfsPath)
 	}
-	if info.Size() != record.Ext4SizeBytes {
-		return fmt.Errorf("rootfs artifact %s ext4 size mismatch: got %d want %d", record.ArtifactID, info.Size(), record.Ext4SizeBytes)
+	if info.Size() != record.RootfsSizeBytes {
+		return fmt.Errorf("rootfs artifact %s rootfs size mismatch: got %d want %d", record.ArtifactID, info.Size(), record.RootfsSizeBytes)
 	}
 	return nil
 }

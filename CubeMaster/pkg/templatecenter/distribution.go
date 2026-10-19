@@ -45,8 +45,8 @@ func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandbox
 	}
 }
 
-func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
-	if artifactID == "" {
+func cleanupArtifactOnNodes(ctx context.Context, artifact *models.RootfsArtifact, instanceType string, targets []*node.Node) error {
+	if artifact == nil || artifact.ArtifactID == "" {
 		return nil
 	}
 	var cleanupErr error
@@ -54,40 +54,39 @@ func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType string
 		if target == nil {
 			continue
 		}
-		if _, err := destroyArtifactOnNode(ctx, artifactID, instanceType, target); err != nil {
+		if _, err := destroyArtifactOnNode(ctx, artifact, instanceType, target); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	return cleanupErr
 }
 
-// destroyArtifactOnNode issues an idempotent ext4 artifact destroy to a single
-// node. It fills storage_media=ext4 and the instance-type annotation so the
-// cubelet routes to its synchronous pmem destroy path (a plain DestroyImage is
-// a no-op for ext4 artifacts that are not containerd images).
+// destroyArtifactOnNode issues an idempotent artifact destroy to a single node.
+// It preserves the artifact format and instance type so Cubelet routes to its
+// synchronous PMEM deletion path instead of the containerd image store.
 //
 // Returns inUse=true (and nil error) when the node refuses because a running
 // sandbox still references the artifact: that is a protection, not a failure,
 // and the caller keeps the artifact for GC to retry. NotFound is treated as
 // success (idempotent). Any other failure is returned as an error.
-func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType string, target *node.Node) (bool, error) {
+func destroyArtifactOnNode(ctx context.Context, artifact *models.RootfsArtifact, instanceType string, target *node.Node) (bool, error) {
 	if target == nil {
 		return false, nil
 	}
+	spec, err := artifactImageSpec(artifact)
+	if err != nil {
+		return false, err
+	}
+	artifactID := artifact.ArtifactID
 	instanceType = strings.TrimSpace(instanceType)
 	if instanceType == "" {
 		log.G(ctx).Warnf("artifact cleanup: empty instanceType for artifact %s on node %s, defaulting to cubebox", artifactID, target.ID())
 		instanceType = cubeboxv1.InstanceType_cubebox.String()
 	}
+	spec.Annotations = map[string]string{constants.CubeAnnotationsInsType: instanceType}
 	rsp, err := deleteImageOnCubelet(ctx, getCubeletAddrForDelete(target.HostIP()), &imagev1.DestroyImageRequest{
 		RequestID: uuid.NewString(),
-		Spec: &imagev1.ImageSpec{
-			Image:        artifactID,
-			StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
-			Annotations: map[string]string{
-				constants.CubeAnnotationsInsType: instanceType,
-			},
-		},
+		Spec:      spec,
 	})
 	if err != nil {
 		if isIgnorableArtifactDeleteError(err) {
@@ -152,7 +151,7 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 
 // ensureArtifactDistributable refuses to push a CreateImage to cubelets when
 // the artifact record is obviously incomplete. Without this guard the call
-// proceeds with ext4_size_bytes=0 / download_token=""; cubelet then tries to
+// proceeds with rootfs_size_bytes=0 / download_token=""; cubelet then tries to
 // pull with an empty token against a URL that falls back to os.Hostname()
 // (buildDownloadURL) and reports "invalid size:0", which marks the template
 // FAILED and masks the real cause (concurrent build race; see
@@ -162,15 +161,15 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 		return fmt.Errorf("distributeRootfsArtifact: artifact is nil")
 	}
 	downloadBaseURL := effectiveArtifactDownloadBaseURL("", artifact)
-	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || downloadBaseURL == "" {
+	if artifact.Status != ArtifactStatusReady || artifact.RootfsSizeBytes == 0 || strings.TrimSpace(artifact.RootfsSHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || downloadBaseURL == "" {
 		return fmt.Errorf(
 			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t token_set=%t download_base_url=%q master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
-			artifact.ArtifactID, artifact.Status, artifact.Ext4SizeBytes,
-			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", downloadBaseURL, artifact.MasterNodeIP,
+			artifact.ArtifactID, artifact.Status, artifact.RootfsSizeBytes,
+			strings.TrimSpace(artifact.RootfsSHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", downloadBaseURL, artifact.MasterNodeIP,
 		)
 	}
 	// The five checks above only read the artifact row. A row can be perfectly
-	// READY while the ext4 it points at is not servable — either because the
+	// READY while the rootfs it points at is not servable — either because the
 	// artifact store did not survive a restart (issue #852) or because the
 	// store is node-local and the pull would land on a node that never had
 	// the file (issue #1005). Distributing either way hands every cubelet a
@@ -194,20 +193,21 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 	// node-facing address uniform across local-disk and S3-backed artifacts and
 	// avoids per-node dependence on the object-store endpoint's reachability.
 	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
-	spec := &imagev1.ImageSpec{
-		Image:        artifact.ArtifactID,
-		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
-		Annotations: map[string]string{
-			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
-			constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
-			constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
-			constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
-			constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
-			constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
-			constants.CubeAnnotationsInsType:                req.InstanceType,
-		},
+	spec, err := artifactImageSpec(artifact)
+	if err != nil {
+		return nil, int32(len(targets)), 0, 0, err
 	}
+	spec.Annotations = map[string]string{
+		constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
+		constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
+		constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
+		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.RootfsSHA256,
+		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.RootfsSizeBytes, 10),
+		constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
+		constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
+		constants.CubeAnnotationsInsType:                req.InstanceType,
+	}
+
 	expected := int32(len(targets))
 	ready := int32(0)
 	failed := int32(0)
@@ -284,4 +284,15 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 	}
 	wg.Wait()
 	return readyTargets, expected, ready, failed, firstErr
+}
+
+func artifactImageSpec(artifact *models.RootfsArtifact) (*imagev1.ImageSpec, error) {
+	if artifact == nil || artifact.ArtifactID == "" {
+		return nil, fmt.Errorf("rootfs artifact identity is empty")
+	}
+	format, err := imagev1.ResolveRootfsFormat(artifact.RootfsFormat)
+	if err != nil {
+		return nil, err
+	}
+	return &imagev1.ImageSpec{Image: artifact.ArtifactID, StorageMedia: format}, nil
 }

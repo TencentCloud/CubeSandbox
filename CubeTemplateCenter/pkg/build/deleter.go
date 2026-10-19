@@ -8,8 +8,8 @@
 // deleted, CubeMaster only removes its own rows (template_definitions,
 // template_replicas, image_jobs) and marks the artifact row CLEANUP_PENDING.
 // CubeTemplateCenter owns the actual data removal:
-//   - the ext4 object in S3/MinIO (if the artifact was uploaded)
-//   - the ext4 file on local/shared disk (if present)
+//   - the rootfs object in S3/MinIO (if the artifact was uploaded)
+//   - the rootfs file on local/shared disk (if present)
 //   - the artifact row itself (after the data is gone)
 //
 // Deletion is triggered two ways (belt and suspenders):
@@ -36,7 +36,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ArtifactDeleter removes artifact data (S3 object + local ext4) and the
+// ArtifactDeleter removes artifact data (S3 object + local rootfs) and the
 // artifact row. One instance per TC process; safe for concurrent use.
 type ArtifactDeleter struct {
 	db       *gorm.DB
@@ -133,7 +133,7 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	// Delete the S3 object when the artifact was uploaded.
 	var dataErrs []error
 	if d.s3Client != nil && templatecenter.ArtifactUsesObjectStore(&artifact) {
-		if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
+		if err := d.s3Client.Delete(ctx, templatecenter.ArtifactObjectKey(&artifact)); err != nil {
 			logger.Warnf("delete s3 object fail: %v", err)
 			dataErrs = append(dataErrs, fmt.Errorf("delete s3 object: %w", err))
 		} else {
@@ -141,14 +141,14 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 		}
 	}
 
-	// Delete the local/shared ext4 file. Only when it sits inside a managed
+	// Delete the local/shared rootfs file. Only when it sits inside a managed
 	// artifact root (path-traversal guard).
-	if artifact.Ext4Path != "" {
-		if err := deleteLocalExt4(artifact.Ext4Path); err != nil {
-			logger.Warnf("delete local ext4 fail: %v", err)
-			dataErrs = append(dataErrs, fmt.Errorf("delete local ext4: %w", err))
+	if artifact.RootfsPath != "" {
+		if err := deleteLocalRootfs(artifact.RootfsPath); err != nil {
+			logger.Warnf("delete local rootfs fail: %v", err)
+			dataErrs = append(dataErrs, fmt.Errorf("delete local rootfs: %w", err))
 		} else {
-			logger.Infof("deleted local ext4 %s", artifact.Ext4Path)
+			logger.Infof("deleted local rootfs %s", artifact.RootfsPath)
 		}
 	}
 
@@ -192,18 +192,18 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	return nil
 }
 
-// deleteLocalExt4 removes the ext4 file's parent directory (the whole
+// deleteLocalRootfs removes the rootfs file's parent directory (the whole
 // artifact dir) after verifying the path is inside a managed artifact root.
-// The root check mirrors Master's validateExt4PathWithinStore so a tampered
-// ext4_path in the DB cannot be used to delete arbitrary files.
-func deleteLocalExt4(ext4Path string) error {
-	abs, err := filepath.Abs(ext4Path)
+// The root check mirrors Master's validateRootfsPathWithinStore so a tampered
+// rootfs_path in the DB cannot be used to delete arbitrary files.
+func deleteLocalRootfs(rootfsPath string) error {
+	abs, err := filepath.Abs(rootfsPath)
 	if err != nil {
-		return fmt.Errorf("resolve ext4 path: %w", err)
+		return fmt.Errorf("resolve rootfs path: %w", err)
 	}
 	dir := filepath.Dir(abs)
 	if !managedArtifactDir(dir) {
-		return fmt.Errorf("ext4 path %q is outside managed artifact roots; refusing to delete", ext4Path)
+		return fmt.Errorf("rootfs path %q is outside managed artifact roots; refusing to delete", rootfsPath)
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove artifact dir %s: %w", dir, err)
@@ -224,7 +224,7 @@ func managedArtifactDir(dir string) bool {
 			continue
 		}
 		// Strictly BELOW the root only. dir == root would make
-		// deleteLocalExt4's RemoveAll(dir) wipe the ENTIRE store (every
+		// deleteLocalRootfs's RemoveAll(dir) wipe the ENTIRE store (every
 		// artifact on the node), and the callback-side path validator accepts
 		// exactly such top-level paths (it only rejects escapes via
 		// filepath.Rel), so equality must fail here.

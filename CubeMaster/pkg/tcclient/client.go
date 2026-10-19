@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,11 +34,12 @@ type StatusError struct {
 }
 
 type UploadArtifactResponse struct {
-	Status        string `json:"status"`
-	ArtifactID    string `json:"artifact_id"`
-	Ext4Path      string `json:"ext4_path"`
-	Ext4SHA256    string `json:"ext4_sha256"`
-	Ext4SizeBytes int64  `json:"ext4_size_bytes"`
+	RootfsFormat    string `json:"rootfs_format,omitempty"`
+	Status          string `json:"status"`
+	ArtifactID      string `json:"artifact_id"`
+	RootfsPath      string `json:"rootfs_path"`
+	RootfsSHA256    string `json:"rootfs_sha256"`
+	RootfsSizeBytes int64  `json:"rootfs_size_bytes"`
 }
 
 func (e *StatusError) Error() string {
@@ -75,7 +77,7 @@ func setSharedTokenHeader(req *http.Request) {
 }
 
 // SubmitBuildJob submits a build job to TC.
-// TC will pull the image, build ext4, upload to cbs, and report status back
+// TC will pull the image, build rootfs, upload to cbs, and report status back
 // to CubeMaster via POST /internal/template/jobs/:job_id/status.
 func (c *Client) SubmitBuildJob(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdSHA string, envdData []byte) error {
 	payload := map[string]any{
@@ -117,7 +119,7 @@ func (c *Client) SubmitBuildJob(ctx context.Context, jobID string, req *types.Cr
 }
 
 // DeleteArtifact asks CubeTemplateCenter to remove an artifact's data: the
-// S3/MinIO object (if uploaded), the local/shared ext4 file, and finally the
+// S3/MinIO object (if uploaded), the local/shared rootfs file, and finally the
 // artifact row itself. CubeMaster never touches the filesystem or S3 for an
 // artifact directly -- only CubeTemplateCenter, which wrote the data, is
 // allowed to remove it (see CubeTemplateCenter/pkg/build/deleter.go).
@@ -161,9 +163,9 @@ func (c *Client) DeleteArtifact(ctx context.Context, artifactID string) error {
 	return nil
 }
 
-// UploadArtifact uploads one local ext4 file into CubeTemplateCenter's own
+// UploadArtifact uploads one local rootfs file into CubeTemplateCenter's own
 // artifact store and returns the stored metadata.
-func (c *Client) UploadArtifact(ctx context.Context, artifactID, localFilePath string) (*UploadArtifactResponse, error) {
+func (c *Client) UploadArtifact(ctx context.Context, artifactID, localFilePath, format string) (*UploadArtifactResponse, error) {
 	f, err := os.Open(localFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("open local artifact file: %w", err)
@@ -199,7 +201,7 @@ func (c *Client) UploadArtifact(ctx context.Context, artifactID, localFilePath s
 		writeErrCh <- nil
 	}()
 
-	url := fmt.Sprintf("%s/tc/api/v1/artifact/upload", c.endpoint)
+	url := fmt.Sprintf("%s/tc/api/v1/artifact/upload?rootfs_format=%s", c.endpoint, url.QueryEscape(format))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
