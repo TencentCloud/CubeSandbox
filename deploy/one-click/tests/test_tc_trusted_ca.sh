@@ -306,6 +306,18 @@ for bad_form in 'not json' '["a"' 'null' '"abc"'; do
     fail "gate must fail open for an unparseable env var ($(printf '%q' "${bad_form}"))"
   fi
 done
+# The multi-document class: jq's non-slurped -e reports the LAST document's
+# status, so '[] ["PEM"]' would read as inline-managed even though terraform
+# cannot parse a two-document value at all. Same class the mirror helper's
+# -es precheck guards -- the gate must reject it in one expression.
+TF_VAR_templatecenter_trusted_ca_certs='[] ["-----BEGIN CERTIFICATE-----"]'
+if _tc_trusted_ca_inline_enabled "${TMP_DIR}/with-certs.json"; then
+  fail "gate must fail open for a multi-document env var (jq -e only reports the last document)"
+fi
+TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----"] []'
+if _tc_trusted_ca_inline_enabled "${TMP_DIR}/with-certs.json"; then
+  fail "gate must fail open for a trailing multi-document env var"
+fi
 # An empty-but-set env var must NOT count: save_env_file never writes one
 # (an empty TF_VAR_ for a list variable is not parseable HCL), and counting
 # it would let a hand-cleared line re-enable deletes.

@@ -202,7 +202,7 @@ _tc_trusted_ca_inline_enabled() {
 	local certs="${TF_VAR_templatecenter_trusted_ca_certs:-}"
 	if [ -n "${TF_VAR_templatecenter_trusted_ca_certs+set}" ]; then
 		if command -v jq >/dev/null 2>&1 \
-			&& printf '%s' "$certs" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+			&& printf '%s' "$certs" | jq -es 'length == 1 and (.[0] | type == "array" and length > 0)' >/dev/null 2>&1; then
 			return 0
 		fi
 		return 1
