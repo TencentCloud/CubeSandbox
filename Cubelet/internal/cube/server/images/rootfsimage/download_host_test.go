@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package ext4image
+package rootfsimage
 
 import (
 	"net/url"

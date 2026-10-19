@@ -295,7 +295,7 @@ func TestAppendExt4NetfileMounts(t *testing.T) {
 		NetFile: cnfs,
 	}
 
-	appendExt4NetfileMounts(mountsConfig, flowOpts, containerName)
+	appendRootfsNetfileMounts(mountsConfig, flowOpts, containerName)
 
 	assert.Equal(t, "/pmem/rootfs.ext4", mountsConfig.PmemFile)
 	assert.Len(t, mountsConfig.Mounts, 4)
@@ -379,8 +379,8 @@ func TestAppendExt4NetfileMountsNoopWithoutNetfile(t *testing.T) {
 		PmemFile: "/pmem/rootfs.ext4",
 	}
 
-	appendExt4NetfileMounts(mountsConfig, &workflow.CreateContext{}, "app")
-	appendExt4NetfileMounts(mountsConfig, nil, "app")
+	appendRootfsNetfileMounts(mountsConfig, &workflow.CreateContext{}, "app")
+	appendRootfsNetfileMounts(mountsConfig, nil, "app")
 
 	assert.Equal(t, "/pmem/rootfs.ext4", mountsConfig.PmemFile)
 	assert.Empty(t, mountsConfig.Mounts)
@@ -879,69 +879,6 @@ func TestApplyCgroupInfoToCubeBoxMarksMissingAssignmentBaseline(t *testing.T) {
 
 	require.Nil(t, cb.HostMetricsBaselineCopy())
 	require.True(t, cb.HostMetricsBaselineMissingAtAssignment)
-}
-
-func TestPrepareImagePmems(t *testing.T) {
-
-	tmpFile := t.TempDir() + "/test-image.ext4"
-	err := os.WriteFile(tmpFile, []byte("test content"), 0644)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name         string
-		rootfsConfig []*virtiofs.CubeRootfsInfo
-		expectPmems  int
-		validate     func(*testing.T, *specs.Spec)
-	}{
-		{
-			name:         "no pmem files",
-			rootfsConfig: []*virtiofs.CubeRootfsInfo{},
-			expectPmems:  0,
-		},
-		{
-			name: "one pmem file",
-			rootfsConfig: []*virtiofs.CubeRootfsInfo{
-				{
-					PmemFile: tmpFile,
-				},
-			},
-			expectPmems: 1,
-			validate: func(t *testing.T, spec *specs.Spec) {
-				assert.Contains(t, spec.Annotations, constants.AnnotationPmem)
-			},
-		},
-		{
-			name: "multiple pmem files",
-			rootfsConfig: []*virtiofs.CubeRootfsInfo{
-				{PmemFile: tmpFile},
-				{PmemFile: tmpFile},
-			},
-			expectPmems: 2,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-			spec := &specs.Spec{
-				Annotations: make(map[string]string),
-			}
-			container := &containers.Container{}
-
-			opt := prepareImagePmems(tt.rootfsConfig)
-			err := opt(ctx, nil, container, spec)
-
-			if tt.expectPmems == 0 {
-				assert.NoError(t, err)
-				assert.NotContains(t, spec.Annotations, constants.AnnotationPmem)
-			} else {
-				assert.NoError(t, err)
-				if tt.validate != nil {
-					tt.validate(t, spec)
-				}
-			}
-		})
-	}
 }
 
 func TestSetCgroup(t *testing.T) {

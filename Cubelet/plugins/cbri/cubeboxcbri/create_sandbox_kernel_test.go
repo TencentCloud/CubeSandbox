@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,9 @@ func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
 
 	plugin := newTestCubeboxPlugin(t)
 	artifactID := "artifact-1"
+	rootfsPath, err := plugin.artifactPaths.RootfsFile(plugin.config.instanceType, artifactID, "ext4")
+	require.NoError(t, err)
+	writeTestFile(t, rootfsPath, bytes.Repeat([]byte("rootfs"), 1024))
 	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
 	targetKernelPath := plugin.getKernelFilePath(artifactID)
 	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
@@ -74,6 +78,9 @@ func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
 
 	plugin := newTestCubeboxPlugin(t)
 	artifactID := "artifact-2"
+	rootfsPath, err := plugin.artifactPaths.RootfsFile(plugin.config.instanceType, artifactID, "ext4")
+	require.NoError(t, err)
+	writeTestFile(t, rootfsPath, bytes.Repeat([]byte("rootfs"), 1024))
 	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
 	targetKernelPath := plugin.getKernelFilePath(artifactID)
 	oldKernel := bytes.Repeat([]byte("o"), 2048)
@@ -128,6 +135,9 @@ func TestCreateSandboxNormalStartDoesNotRefreshArtifactKernel(t *testing.T) {
 
 	plugin := newTestCubeboxPlugin(t)
 	artifactID := "artifact-3"
+	rootfsPath, err := plugin.artifactPaths.RootfsFile(plugin.config.instanceType, artifactID, "ext4")
+	require.NoError(t, err)
+	writeTestFile(t, rootfsPath, bytes.Repeat([]byte("rootfs"), 1024))
 	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
 	targetKernelPath := plugin.getKernelFilePath(artifactID)
 	oldKernel := bytes.Repeat([]byte("o"), 2048)
@@ -224,4 +234,26 @@ func TestCreateSandboxWithoutTemplateKeepsInstalledKernel(t *testing.T) {
 	require.NoError(t, err)
 	spec := applySpecOpts(t, context.Background(), opts)
 	require.Equal(t, plugin.artifactPaths.SharedKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func TestGenPmemOptValidatesArtifactBeforeAddingDevice(t *testing.T) {
+	plugin := newTestCubeboxPlugin(t)
+	path, err := plugin.artifactPaths.RootfsFile(plugin.config.instanceType, "rfs-device", "ext4")
+	require.NoError(t, err)
+	opt := plugin.genPmemOpt(context.Background(), "rfs-device", "ext4")
+	spec := &specs.Spec{}
+	require.Error(t, opt(context.Background(), nil, nil, spec))
+	require.Empty(t, spec.Annotations)
+	writeTestFile(t, path, []byte("rootfs"))
+	require.NoError(t, opt(context.Background(), nil, nil, spec))
+	var devices []pmem.CubePmem
+	require.NoError(t, json.Unmarshal([]byte(spec.Annotations[constants.AnnotationPmem]), &devices))
+	require.Len(t, devices, 1)
+	require.Equal(t, "ext4", devices[0].FsType)
+	require.Equal(t, int64(6), devices[0].Size)
+	require.NoError(t, os.Truncate(path, 0))
+	require.Error(t, opt(context.Background(), nil, nil, &specs.Spec{}))
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Mkdir(path, 0700))
+	require.Error(t, opt(context.Background(), nil, nil, &specs.Spec{}))
 }

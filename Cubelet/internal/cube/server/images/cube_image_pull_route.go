@@ -33,7 +33,7 @@ import (
 	"github.com/containerd/containerd/v2/core/transfer/registry"
 	"github.com/containerd/errdefs"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/ext4image"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/rootfsimage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -54,12 +54,12 @@ func (c *CubeImageService) EnsureImage(ctx context.Context, ref, username, passw
 	)
 
 	cubeSpec := constants.GetImageSpec(ctx)
-	if cubeSpec != nil && cubeSpec.GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
-		instanceType := resolveExt4InstanceType(ctx, cubeSpec)
+	if cubeSpec != nil && cubeimages.IsPmemStorageMedia(cubeSpec.GetStorageMedia()) {
+		instanceType := resolveRootfsInstanceType(ctx, cubeSpec)
 		if instanceType == "" {
 			return nil, fmt.Errorf("create req is nil")
 		}
-		err := ext4image.EnsurePmemFile(ctx, instanceType, ref)
+		err := rootfsimage.EnsurePmemFile(ctx, instanceType, ref)
 		if err != nil {
 			return nil, fmt.Errorf("ensure pmem file failed: %v", err)
 		}
@@ -163,18 +163,18 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 	}
 	if cubeSpec != nil {
 		mediaType := cubeSpec.StorageMedia
-		switch mediaType {
-		case cubeimages.ImageStorageMediaType_ext4.String():
-			instanceType := resolveExt4InstanceType(ctx, cubeSpec)
+		switch {
+		case cubeimages.IsPmemStorageMedia(mediaType):
+			instanceType := resolveRootfsInstanceType(ctx, cubeSpec)
 			if instanceType == "" {
 				return "", fmt.Errorf("create req is nil")
 			}
-			err := ext4image.EnsurePmemFile(ctx, instanceType, ref)
+			err := rootfsimage.EnsurePmemFile(ctx, instanceType, ref)
 			if err != nil {
 				return "", fmt.Errorf("ensure pmem file failed: %v", err)
 			}
 			return name, ErrSkip
-		case "nfs":
+		case mediaType == "nfs":
 			return "", fmt.Errorf("nfs images are not supported in the open source build")
 		default:
 		}
@@ -210,7 +210,7 @@ func (sc *staticCredentials) GetCredentials(ctx context.Context, ref, host strin
 	return registry.Credentials{}, nil
 }
 
-func resolveExt4InstanceType(ctx context.Context, cubeSpec *cubeimages.ImageSpec) string {
+func resolveRootfsInstanceType(ctx context.Context, cubeSpec *cubeimages.ImageSpec) string {
 	if req := workflow.GetCreateContext(ctx); req != nil && req.GetInstanceType() != "" {
 		return req.GetInstanceType()
 	}

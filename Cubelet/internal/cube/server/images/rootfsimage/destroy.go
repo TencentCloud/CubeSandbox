@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package ext4image
+package rootfsimage
 
 import (
 	"context"
@@ -16,19 +16,19 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 )
 
-// ErrArtifactInUse indicates the ext4 OS image artifact is still referenced by
+// ErrArtifactInUse indicates the rootfs OS image artifact is still referenced by
 // a running sandbox on this node, so its physical files are intentionally
 // preserved. The caller (CubeMaster last-owner-cleanup / GC) must retry after
 // the referencing sandbox exits. This is a protection, not a leak.
-var ErrArtifactInUse = errors.New("ext4 artifact in use by running sandbox")
+var ErrArtifactInUse = errors.New("rootfs artifact in use by running sandbox")
 
 // ArtifactInUseFunc reports whether the given artifact (image) id is still
 // referenced by any sandbox tracked on this node.
 type ArtifactInUseFunc func(artifactID string) (bool, error)
 
-// DestroyPmemArtifact synchronously and idempotently removes the on-disk ext4
-// OS image artifact directory (rootfs .ext4 + kernel .vm + companion files) for
-// the given instanceType/artifactID. It is the ext4 counterpart of the
+// DestroyPmemArtifact synchronously and idempotently removes the on-disk
+// rootfs artifact directory and its kernel companion files for the given
+// instanceType/artifactID. It is the filesystem artifact counterpart of the
 // containerd image removal path used by DestroyImage.
 //
 // Unlike the containerd path it does NOT go through cdp.PreDelete (which would
@@ -77,8 +77,8 @@ func DestroyPmemArtifact(ctx context.Context, instanceType, artifactID string, i
 	}
 
 	if err := os.RemoveAll(resolved); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove ext4 artifact dir %q: %w", resolved, err)
+		return fmt.Errorf("remove rootfs artifact dir %q: %w", resolved, err)
 	}
-	log.G(ctx).Infof("destroyed ext4 artifact dir %q (instanceType=%s artifactID=%s)", resolved, instanceType, artifactID)
+	log.G(ctx).Infof("destroyed rootfs artifact dir %q (instanceType=%s artifactID=%s)", resolved, instanceType, artifactID)
 	return nil
 }

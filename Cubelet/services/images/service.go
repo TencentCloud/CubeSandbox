@@ -19,7 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/platforms"
 	"github.com/containerd/plugin"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/ext4image"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/rootfsimage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -173,7 +173,7 @@ func parseImageGCPolicy(c ImageGCConfig) ImageGCPolicy {
 
 // imageUsageChecker reports whether an image/artifact id is still referenced by
 // a running sandbox on this node. Implemented by the cubebox store plugin; used
-// by the ext4 artifact destroy path to refuse deleting an in-use OS image.
+// by the rootfs artifact destroy path to refuse deleting an in-use OS image.
 type imageUsageChecker interface {
 	IsImageInUse(imageID string) (bool, error)
 }
@@ -297,11 +297,11 @@ func (s *service) DestroyImage(ctx context.Context, req *images.DestroyImageRequ
 		return rsp, nil
 	}
 
-	// FIX-1: ext4 OS image artifacts are not containerd images; the legacy
+	// Immutable rootfs OS image artifacts are not containerd images; the legacy
 	// CRI RemoveImage path silently no-ops on them (LocalResolve NotFound).
-	// Route ext4 deletions to the synchronous, idempotent pmem destroy path.
-	if req.GetSpec().GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
-		return s.destroyExt4Artifact(ctx, req, rsp), nil
+	// Route rootfs artifact deletions to the synchronous, idempotent pmem destroy path.
+	if cubeimages.IsPmemStorageMedia(req.GetSpec().GetStorageMedia()) {
+		return s.destroyRootfsArtifact(ctx, req, rsp), nil
 	}
 
 	ns := namespaces.Default
@@ -325,36 +325,36 @@ func (s *service) DestroyImage(ctx context.Context, req *images.DestroyImageRequ
 	return rsp, nil
 }
 
-// destroyExt4Artifact removes an ext4 OS image artifact's on-disk files. The
+// destroyRootfsArtifact removes an rootfs OS image artifact's on-disk files. The
 // instanceType is taken from the MasterAnnotationInstanceType annotation (set
 // symmetrically by CreateImage distribution), defaulting to the cubebox
 // instance type (currently the only ext4 instance type). A running-sandbox
 // reference results in a Conflict so an in-use OS image is never deleted;
 // CubeMaster GC retries after the sandbox exits.
-func (s *service) destroyExt4Artifact(ctx context.Context, req *images.DestroyImageRequest, rsp *images.DestroyImageResponse) *images.DestroyImageResponse {
+func (s *service) destroyRootfsArtifact(ctx context.Context, req *images.DestroyImageRequest, rsp *images.DestroyImageResponse) *images.DestroyImageResponse {
 	artifactID := req.GetSpec().GetImage()
 	instanceType := strings.TrimSpace(req.GetSpec().GetAnnotations()[constants.MasterAnnotationInstanceType])
 	if instanceType == "" {
 		instanceType = cubebox.InstanceType_cubebox.String()
 	}
 
-	var inUse ext4image.ArtifactInUseFunc
+	var inUse rootfsimage.ArtifactInUseFunc
 	if s.imageUsage != nil {
 		inUse = s.imageUsage.IsImageInUse
 	}
 
-	err := ext4image.DestroyPmemArtifact(ctx, instanceType, artifactID, inUse)
+	err := rootfsimage.DestroyPmemArtifact(ctx, instanceType, artifactID, inUse)
 	if err == nil {
-		log.G(ctx).Infof("destroyed ext4 artifact %q (instanceType=%s)", artifactID, instanceType)
+		log.G(ctx).Infof("destroyed rootfs artifact %q (instanceType=%s)", artifactID, instanceType)
 		return rsp
 	}
-	if errors.Is(err, ext4image.ErrArtifactInUse) {
+	if errors.Is(err, rootfsimage.ErrArtifactInUse) {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
 		rsp.Ret.RetMsg = err.Error()
 		return rsp
 	}
 	rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-	rsp.Ret.RetMsg = fmt.Sprintf("destroy ext4 artifact %q: %v", artifactID, err)
+	rsp.Ret.RetMsg = fmt.Sprintf("destroy rootfs artifact %q: %v", artifactID, err)
 	return rsp
 }
 
