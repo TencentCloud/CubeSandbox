@@ -121,13 +121,15 @@
 /* Concurrent populates.
  *
  * Populate copies into a staging buffer of its own rather than borrowing the
- * caller's (see s3_cache_populate), so this bounds both the memory that costs
- * and how much of the local device's queue depth cache fills may take from the
- * WAL. Filling the cache is never more important than acknowledging a write. */
-#define S3_CACHE_STAGING_BUFS   32
+ * caller's (see s3_cache_populate), so this bounds both that memory cost and
+ * how much local-device queue depth cache fills may consume. Write payloads
+ * live in the shared-memory write-back ring and no longer compete for this
+ * device; keep half the staging pool outside the opportunistic object-fill
+ * lane so native cache population can still make progress. */
+#define S3_CACHE_STAGING_BUFS   64
 /* Export-parent population is opportunistic and must not consume the staging
  * pool needed by native lvstore reads and flushes. */
-#define S3_CACHE_OBJECT_FILLS_MAX 16
+#define S3_CACHE_OBJECT_FILLS_MAX 32
 /* GETs admitted for template preheat across every export of one lvstore.
  * Completed objects wait for an object-fill position rather than downloading
  * again, so this can be larger than the disk-fill window above. */

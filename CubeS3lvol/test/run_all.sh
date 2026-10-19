@@ -50,7 +50,7 @@
 #  Environment:
 #    S3LVOL_TEST_BUCKET   override the bucket taken from s3.cfg
 #    S3LVOL_SKIP_HOT_UPGRADE=1
-#                         skip the two disruptive hot-upgrade suites
+#                         skip the disruptive hot-upgrade suites
 #    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #                         used as-is when set; otherwise read from s3.cfg
 #
@@ -297,7 +297,8 @@ if [ "${MODE}" = list ]; then
 	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport shared_chain import_fanout"
 	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
 	echo "                     agent_template cubecow_client snapdelete pending_delete"
-	echo "                     fs hot_upgrade hot_upgrade_negative guards activation"
+	echo "                     fs hot_upgrade hot_upgrade_orchestrator hot_upgrade_negative"
+	echo "                     guards activation"
 	echo "                     control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
@@ -370,9 +371,9 @@ echo ""
 
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
-	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
+	 s3_cache_test s3_flush_test s3_writeback_test s3_export_test s3_statefile_test \
 	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-	 s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
+	 s3_export_read_test s3_preheat_test s3_copy_xml_test s3_pending_persist_test \
 	 s3_active_nsid_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
@@ -477,7 +478,7 @@ if [ "${MODE}" != all ]; then
 	for t in dataplane recovery snapshot export srcdel selfimport derived \
 		 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
 		 import_fanout preheat cubecow_client snapdelete pending_delete fs hot_upgrade \
-		 hot_upgrade_negative guards activation control; do
+		 hot_upgrade_orchestrator hot_upgrade_negative guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
 else
@@ -487,7 +488,7 @@ else
 		for t in dataplane recovery snapshot export srcdel selfimport derived \
 			 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
 			 import_fanout preheat cubecow_client snapdelete pending_delete fs hot_upgrade \
-			 hot_upgrade_negative guards activation control; do
+			 hot_upgrade_orchestrator hot_upgrade_negative guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
 	else
@@ -576,10 +577,13 @@ else
 		# still get the last word on whether the machine was left tidy.
 		if [ "${S3LVOL_SKIP_HOT_UPGRADE:-0}" = 1 ]; then
 			report_skip "run_hot_upgrade_test.sh" "not requested" 1
+			report_skip "run_hot_upgrade_orchestrator_test.sh" "not requested" 1
 			report_skip "run_hot_upgrade_negative_test.sh" "not requested" 1
 		else
 			run_suite run_hot_upgrade_test.sh \
 				./test/dataplane/run_hot_upgrade_test.sh "${S3_ARGS[@]}"
+			run_suite run_hot_upgrade_orchestrator_test.sh \
+				./test/dataplane/run_hot_upgrade_orchestrator_test.sh
 			run_suite run_hot_upgrade_negative_test.sh \
 				./test/dataplane/run_hot_upgrade_negative_test.sh "${S3_ARGS[@]}"
 		fi

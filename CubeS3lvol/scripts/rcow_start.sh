@@ -204,6 +204,8 @@ S3_BUCKETS="$(rcow_s3_buckets)"
 rcow_log "endpoint ${S3_ENDPOINT}, region ${S3_REGION}"
 rcow_log "buckets: $(printf '%s ' ${S3_BUCKETS})"
 rcow_log "lvstore '${RCOW_LVS_NAME}', WAL image ${RCOW_WAL_IMG}"
+rcow_preflight_writeback_shm ||
+	rcow_die "shared-memory write-back capacity preflight failed"
 
 # ==========================================================================
 rcow_step "starting the target"
@@ -308,6 +310,10 @@ done
 # ==========================================================================
 rcow_step "lvstore '${RCOW_LVS_NAME}'"
 
+printf '%s\n' "${TGT_PID}" >"${RCOW_START_ATTACHED}.tmp" &&
+	mv -f "${RCOW_START_ATTACHED}.tmp" "${RCOW_START_ATTACHED}" ||
+	bail "could not record the create/attach attempt (${RCOW_START_ATTACHED})"
+
 if BSTORE_ENTRY="$(rcow_bstore_entry "${RCOW_LVS_NAME}")"; then
 	LVS_NS="${BSTORE_ENTRY%% *}"
 	LVS_WAL_RECORDED="${BSTORE_ENTRY##* }"
@@ -337,9 +343,10 @@ somewhere else, stop and check which image it meant"
 	rcow_log "found in ${RCOW_BSTORE_FILE} (namespace ${LVS_NS}): attaching, \
 which replays the journal and the WAL"
 
-	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
+	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s,"cache_hot_bufs":%s,"writeback_size_mb":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_WAL_BDEV}" \
-		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}" \
+		"${RCOW_WRITEBACK_MB}")"
 
 	LOG_MARK="$(rcow_log_size)"
 	if ! ATTACH_OUT="$(rcow_rpc rcow_attach_lvstore \
@@ -392,10 +399,11 @@ ${RCOW_BSTORE_FILE}"
 
 	# RCOW_CAPACITY_GB goes straight through: capacity_gib is in GiB, which is
 	# the unit this script always had. It used to multiply out to bytes here.
-	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
+	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s,"cache_hot_bufs":%s,"writeback_size_mb":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_CAPACITY_GB}" \
 		"${RCOW_WAL_BDEV}" "${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}" \
-		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}" \
+		"${RCOW_WRITEBACK_MB}")"
 
 	# A create can hit the same marker: an earlier create that died after
 	# writing it left no bstore.json entry, so this path is reached again.

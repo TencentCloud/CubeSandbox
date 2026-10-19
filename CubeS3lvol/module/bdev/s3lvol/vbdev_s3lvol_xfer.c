@@ -1115,6 +1115,7 @@ export_inflight_remove(const char *uuid)
  * another replacement, and a new export reusing the uuid must not race its
  * final PUT or DELETE. */
 struct export_rewrite {
+	struct s3lvol_lvstore       *lvs;
 	char                         uuid_str[SPDK_UUID_STRING_LEN];
 	TAILQ_ENTRY(export_rewrite)  link;
 };
@@ -1136,7 +1137,7 @@ export_rewrite_find(const char *uuid)
 }
 
 static struct export_rewrite *
-export_rewrite_add(const char *uuid)
+export_rewrite_add(struct s3lvol_lvstore *lvs, const char *uuid)
 {
 	struct export_rewrite *rw;
 
@@ -1147,6 +1148,7 @@ export_rewrite_add(const char *uuid)
 	if (!rw) {
 		return NULL;
 	}
+	rw->lvs = lvs;
 	snprintf(rw->uuid_str, sizeof(rw->uuid_str), "%s", uuid);
 	TAILQ_INSERT_TAIL(&g_export_rewrites, rw, link);
 	return rw;
@@ -2051,6 +2053,9 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 	if (!lvs || !snapshot || !snapshot->blob) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 	if (snapshot->lvol_store != s3lvol_lvstore_get_lvs(lvs)) {
 		SPDK_ERRLOG("lvol '%s' does not belong to lvstore '%s'\n",
 			    snapshot->name, s3lvol_lvstore_get_name(lvs));
@@ -2337,6 +2342,9 @@ s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	if (!lvs || !export_uuid) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 
 	exp = s3lvol_export_find(lvs, export_uuid);
 	if (!exp) {
@@ -2405,7 +2413,7 @@ s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	ctx->cb_arg = cb_arg;
 	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", export_uuid);
 	snprintf(ctx->snapshot, sizeof(ctx->snapshot), "%s", entry.snapshot);
-	ctx->rewrite = export_rewrite_add(export_uuid);
+	ctx->rewrite = export_rewrite_add(lvs, export_uuid);
 	if (!ctx->rewrite) {
 		free(ctx);
 		return -ENOMEM;
@@ -2693,7 +2701,39 @@ struct import_ctx {
 
 	s3lvol_lvol_op_cb          cb_fn;
 	void                      *cb_arg;
+	TAILQ_ENTRY(import_ctx)    inflight_link;
 };
+
+static TAILQ_HEAD(, import_ctx) g_import_inflight =
+	TAILQ_HEAD_INITIALIZER(g_import_inflight);
+
+bool
+s3lvol_xfer_pending(const struct s3lvol_lvstore *lvs)
+{
+	struct export_inflight *inf;
+	struct export_rewrite *rw;
+	struct import_ctx *ctx;
+
+	if (!lvs) {
+		return false;
+	}
+	TAILQ_FOREACH(inf, &g_inflight, link) {
+		if (inf->lvs == lvs) {
+			return true;
+		}
+	}
+	TAILQ_FOREACH(rw, &g_export_rewrites, link) {
+		if (rw->lvs == lvs) {
+			return true;
+		}
+	}
+	TAILQ_FOREACH(ctx, &g_import_inflight, inflight_link) {
+		if (ctx->lvs == lvs) {
+			return true;
+		}
+	}
+	return false;
+}
 
 static void import_registry_saved(void *cb_arg, int status);
 static bool export_decouple_finalizing(struct s3lvol_lvstore *lvs, const char *uuid);
@@ -2734,6 +2774,7 @@ import_report(struct import_ctx *ctx, struct spdk_lvol *lvol, int status)
 	}
 	s3_export_manifest_unref(ctx->m);
 	free(ctx->body);
+	TAILQ_REMOVE(&g_import_inflight, ctx, inflight_link);
 	free(ctx);
 
 	if (cb_fn) {
@@ -4025,6 +4066,9 @@ s3lvol_lvol_import(struct s3lvol_lvstore *lvs, const struct s3lvol_import_opts *
 	if (!lvs || !opts || !opts->lvol_name || !opts->export_uuid) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 	if (spdk_uuid_parse(&uuid, opts->export_uuid) != 0) {
 		SPDK_ERRLOG("export_uuid '%s' is not a uuid\n", opts->export_uuid);
 		return -EINVAL;
@@ -4101,8 +4145,12 @@ s3lvol_lvol_import(struct s3lvol_lvstore *lvs, const struct s3lvol_import_opts *
 
 	s3_export_manifest_key(ctx->uuid_str, ctx->key, sizeof(ctx->key));
 
+	/* Every completion from here retains ctx->lvs. Make that lifetime visible
+	 * before submission, which may complete inline on an error path. */
+	TAILQ_INSERT_TAIL(&g_import_inflight, ctx, inflight_link);
 	rc = s3_head(ctx->client, ctx->key, &ctx->size, import_head_done, ctx);
 	if (rc != 0) {
+		TAILQ_REMOVE(&g_import_inflight, ctx, inflight_link);
 		s3_client_put(ctx->client);
 		free(ctx);
 	}
@@ -4589,7 +4637,8 @@ decouple_rewrite_exports(struct s3lvol_decouple *d)
 			 "%s", info.snapshot);
 		ctx->entries[i].expires_at = info.expires_at;
 		ctx->entries[i].generation = info.generation;
-		ctx->entries[i].rewrite = export_rewrite_add(info.export_uuid);
+		ctx->entries[i].rewrite = export_rewrite_add(d->lvs,
+							     info.export_uuid);
 		if (!ctx->entries[i].rewrite) {
 			ctx->first_error = export_rewrite_find(info.export_uuid) ?
 					   -EBUSY : -ENOMEM;
@@ -5659,6 +5708,9 @@ s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	if (!lvs || !lvol || !lvol->blob) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 
 	snprintf(display_name, sizeof(display_name), "%s", lvol->name);
 	if (!spdk_blob_is_esnap_clone(lvol->blob)) {
@@ -6350,6 +6402,9 @@ export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	if (!lvs || !export_uuid) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 	if (export_rewrite_find(export_uuid)) {
 		SPDK_ERRLOG("export %s is being rewritten; release it after that "
 			    "finishes\n", export_uuid);
@@ -6425,7 +6480,7 @@ export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	ctx->cb_fn  = cb_fn;
 	ctx->cb_arg = cb_arg;
 	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", export_uuid);
-	ctx->rewrite = export_rewrite_add(export_uuid);
+	ctx->rewrite = export_rewrite_add(lvs, export_uuid);
 	if (!ctx->rewrite) {
 		free(ctx);
 		return -ENOMEM;

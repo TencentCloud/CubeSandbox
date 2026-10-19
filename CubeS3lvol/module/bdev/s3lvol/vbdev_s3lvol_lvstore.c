@@ -43,6 +43,7 @@
 #include "s3lvol/s3_local_dev.h"
 #include "s3lvol/s3_types.h"
 #include "s3lvol/s3_wal.h"
+#include "s3lvol/s3_writeback.h"
 
 #include "vbdev_s3lvol.h"
 
@@ -86,6 +87,10 @@ struct s3lvol_lvstore {
 	 * whoever actually wrote it. Releasing one we never acquired would clear
 	 * another process's claim -- the exact thing this is meant to prevent. */
 	bool                    owner_held;
+	/* Admission closes before the asynchronous drain starts. Without this,
+	 * an export/import/derive/decouple can enter after unload's pending-work
+	 * checks and retain raw lvstore pointers past s3lvol_lvstore_free(). */
+	bool                    unloading;
 	size_t                  derive_inflight;
 	/* esnap clones whose bdev is not registered yet. The decouple quiesce
 	 * set waits for these, then refuses any further import of that export. */
@@ -126,6 +131,9 @@ struct lvs_setup_ctx {
 
 	/* Attach only. */
 	bool                     attaching;
+	/* Re-entry guard while the process-shared ring is replayed before
+	 * blobstore is allowed to issue reads. */
+	bool                     writeback_recovered;
 	/* Take the lvstore over even if S3 says somebody else holds it. */
 	bool                     force;
 	/* Journal LSN to replay from, i.e. what the last checkpoint covered. */
@@ -200,6 +208,7 @@ struct lvs_setup_ctx {
 struct lvs_destroy_ctx {
 	/* Copies, because the unload frees the lvstore before the deletes run. */
 	char                   *lvs_name;
+	struct spdk_uuid         lvs_uuid;
 	struct s3_client*client;
 
 	spdk_lvs_op_complete    cb_fn;
@@ -302,6 +311,14 @@ lvs_destroy_finish(struct lvs_destroy_ctx *ctx, int status)
 	 * loaded and its data intact, and the entry is what a recovery script
 	 * needs to find it again. */
 	if (ctx->unloaded) {
+		int rc = s3_writeback_discard(ctx->lvs_name,
+					     ctx->lvs_uuid.u.raw);
+
+		if (rc != 0 && rc != -ENOENT) {
+			SPDK_WARNLOG("lvstore '%s' destroyed, but its shared "
+				     "write-back ring could not be discarded: %s\n",
+				     ctx->lvs_name, spdk_strerror(-rc));
+		}
 		bstore_remove_entry(ctx->lvs_name);
 	}
 
@@ -454,6 +471,7 @@ s3lvol_lvstore_destroy(struct s3lvol_lvstore *lvs,
 		}
 		return;
 	}
+	spdk_uuid_copy(&ctx->lvs_uuid, &lvs->lvs->uuid);
 
 	/* A reference of our own, because the deletes outlive the lvstore: the
 	 * unload frees it, and with it its reference to this same pooled client.
@@ -632,6 +650,12 @@ s3lvol_lvstore_get_name(struct s3lvol_lvstore *lvs)
 	return lvs ? lvs->name : NULL;
 }
 
+bool
+s3lvol_lvstore_is_unloading(const struct s3lvol_lvstore *lvs)
+{
+	return lvs && lvs->unloading;
+}
+
 /* ==========================================================================
  * lvstore creation
  *
@@ -643,7 +667,8 @@ s3lvol_lvstore_get_name(struct s3lvol_lvstore *lvs)
  *   -> s3_wal_create ... format the write-ahead log
  *   -> s3_bs_dev_create
  *   -> s3_bs_dev_attach_journal ... chunk map changes become durable
- *   -> s3_bs_dev_attach_wal ... writes are acknowledged from the log
+ *   -> s3_bs_dev_attach_wal ... writes are acknowledged from shm; an
+ *      existing data WAL is still replayed so an older volume can upgrade
  *   -> spdk_lvs_init
  *
  * Without a wal_bdev the middle steps are skipped and the bs_dev writes
@@ -875,11 +900,14 @@ lvs_create_uuid_recorded(void *cb_arg, int status)
 	lvs_setup_report(ctx);
 }
 
+static void lvs_unload_ignored(void *cb_arg, int lvserrno);
+
 static void
 s3lvol_lvs_init_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrno)
 {
 	struct lvs_setup_ctx *ctx = cb_arg;
 	struct s3lvol_lvstore *lvs = ctx->lvs;
+	int rc;
 
 	if (lvserrno != 0) {
 		SPDK_ERRLOG("Failed to init lvstore '%s': %s\n",
@@ -903,6 +931,18 @@ s3lvol_lvs_init_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	 * free runs, and the free is where this lvstore's pending-delete marks
 	 * are dropped. */
 	spdk_uuid_copy(&lvs->uuid, &lvol_store->uuid);
+	rc = s3_bs_dev_bind_writeback_instance(lvs->bs_dev,
+					       &lvol_store->uuid);
+	if (rc != 0) {
+		SPDK_ERRLOG("lvstore '%s': could not bind shared write-back "
+			    "state to its uuid: %d\n", lvs->name, rc);
+		lvs->lvs = NULL;
+		ctx->status = rc;
+		if (spdk_lvs_unload(lvol_store, lvs_unload_ignored, NULL) != 0) {
+			lvs_setup_fail(ctx, rc);
+		}
+		return;
+	}
 
 	/* The create context is about to go away, so drop its destroy callback;
 	 * the unload path registers its own. */
@@ -927,12 +967,33 @@ s3lvol_lvs_init_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	lvs_setup_report(ctx);
 }
 
+static void lvs_create_start_blobstore(struct lvs_setup_ctx *ctx);
+
+static void
+lvs_create_writeback_recovered(void *cb_arg, int status)
+{
+	struct lvs_setup_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to recover shared write-back data for '%s': %d\n",
+			    ctx->lvs->name, status);
+		lvs_setup_fail(ctx, status);
+		return;
+	}
+	ctx->writeback_recovered = true;
+	lvs_create_start_blobstore(ctx);
+}
+
 static void
 lvs_create_start_blobstore(struct lvs_setup_ctx *ctx)
 {
 	struct s3lvol_lvstore *lvs = ctx->lvs;
 	struct spdk_lvs_opts lvs_opts;
 	int rc;
+
+	if (ctx->writeback_recovered) {
+		goto init_blobstore;
+	}
 
 	rc = s3_bs_dev_create(&ctx->opts, lvs->client,
 			      ctx->opts.capacity_bytes, &lvs->bs_dev);
@@ -967,8 +1028,13 @@ lvs_create_start_blobstore(struct lvs_setup_ctx *ctx)
 			lvs_setup_fail(ctx, rc);
 			return;
 		}
+		s3_bs_dev_recover_writeback(lvs->bs_dev,
+					   lvs_create_writeback_recovered, ctx);
+		return;
 	}
 
+	ctx->writeback_recovered = true;
+init_blobstore:
 	spdk_lvs_opts_init(&lvs_opts);
 
 	/* The cluster size follows the device's chunk size unless it was asked for
@@ -1379,6 +1445,17 @@ s3lvol_lvstore_create(const struct s3_lvs_opts *opts,
 		return -EEXIST;
 	}
 
+	/* Do this before formatting the local device.  A non-empty same-name
+	 * ring belongs to an earlier incarnation whose disk must be attached for
+	 * recovery; formatting first would destroy that only recovery source. */
+	rc = s3_writeback_cleanup(opts->lvs_name);
+	if (rc != 0 && rc != -ENOENT) {
+		SPDK_ERRLOG("Cannot create lvstore '%s': its shared write-back "
+			    "ring still contains recovery data (%s)\n",
+			    opts->lvs_name, spdk_strerror(-rc));
+		return rc;
+	}
+
 	rc = lvs_setup_begin(opts, cb_fn, cb_arg, &ctx);
 	if (rc != 0) {
 		return rc;
@@ -1597,6 +1674,7 @@ s3lvol_lvs_load_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 {
 	struct lvs_setup_ctx *ctx = cb_arg;
 	struct s3lvol_lvstore *lvs = ctx->lvs;
+	int rc;
 
 	if (lvserrno != 0) {
 		SPDK_ERRLOG("Failed to load lvstore '%s': %s\n",
@@ -1654,6 +1732,18 @@ s3lvol_lvs_load_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	 * free runs, and the free is where this lvstore's pending-delete marks
 	 * are dropped. */
 	spdk_uuid_copy(&lvs->uuid, &lvol_store->uuid);
+	rc = s3_bs_dev_bind_writeback_instance(lvs->bs_dev,
+					       &lvol_store->uuid);
+	if (rc != 0) {
+		SPDK_ERRLOG("lvstore '%s': shared write-back identity does not "
+			    "match the loaded lvstore uuid: %d\n", lvs->name, rc);
+		lvs->lvs = NULL;
+		ctx->status = rc;
+		if (spdk_lvs_unload(lvol_store, lvs_unload_ignored, NULL) != 0) {
+			lvs_setup_fail(ctx, rc);
+		}
+		return;
+	}
 
 	/* The create context is about to go away, so drop its destroy callback;
 	 * the unload path registers its own. */
@@ -1799,6 +1889,22 @@ lvs_attach_blobstore_flusher_held(void *cb_arg, int status)
 }
 
 static void
+lvs_attach_writeback_recovered(void *cb_arg, int status)
+{
+	struct lvs_setup_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Shared write-back recovery failed on '%s': %d\n",
+			    ctx->wal_bdev_name, status);
+		lvs_setup_fail(ctx, status);
+		return;
+	}
+	ctx->writeback_recovered = true;
+	s3_bs_dev_log_overlay(ctx->lvs->bs_dev);
+	lvs_attach_start_blobstore(ctx);
+}
+
+static void
 lvs_attach_wal_replayed(void *cb_arg, int status)
 {
 	struct lvs_setup_ctx *ctx = cb_arg;
@@ -1816,9 +1922,8 @@ lvs_attach_wal_replayed(void *cb_arg, int status)
 		       "dropped %" PRIu64 " unclosed batch(es)\n",
 		       ctx->lvs->name, st.replayed_entries,
 		       st.dropped_batches);
-	s3_bs_dev_log_overlay(ctx->lvs->bs_dev);
-
-	lvs_attach_start_blobstore(ctx);
+	s3_bs_dev_recover_writeback(ctx->lvs->bs_dev,
+				   lvs_attach_writeback_recovered, ctx);
 }
 
 static void
@@ -2187,6 +2292,7 @@ lvs_unload_report_error(struct lvs_unload_ctx *ctx, int status)
 
 	/* The lvstore stays in the registry: an unload that failed leaves it
 	 * usable, and removing it would turn it into an unreachable object. */
+	lvs->unloading = false;
 	free(ctx);
 
 	if (cb_fn) {
@@ -2324,12 +2430,13 @@ lvs_unload_drained(void *cb_arg, int status)
 	struct lvs_unload_ctx *ctx = cb_arg;
 
 	if (status != 0) {
-		/* Carry on regardless. Refusing to unload because S3 is unreachable
-		 * would leave the process unable to shut down, and the data is
-		 * durable in the log either way -- it just has to be replayed. */
-		SPDK_WARNLOG("lvstore '%s': not everything reached S3 before "
-			     "unload (%d); the rest stays in the WAL\n",
-			     ctx->lvs->name, status);
+		/* Nothing destructive has started yet. Keep the lvstore loaded so
+		 * the caller can retry instead of reporting a clean unload while
+		 * recovery data remains only in shm/WAL. */
+		SPDK_ERRLOG("lvstore '%s': drain failed before unload (%d); "
+			    "leaving it loaded\n", ctx->lvs->name, status);
+		lvs_unload_report_error(ctx, status);
+		return;
 	}
 
 	lvs_unload_close_lvols(ctx);
@@ -2351,6 +2458,12 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 		}
 		return;
 	}
+	if (lvs->unloading) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
 
 	/* Materialisation is direct blobstore work, not lvol bdev I/O. Unregistering
 	 * the bdevs below therefore does not drain it: a completion would retain
@@ -2369,6 +2482,16 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 	if (s3lvol_derive_pending(lvs)) {
 		SPDK_WARNLOG("lvstore '%s' has a snapshot or clone queued behind "
 			     "a busy parent; refusing unload until it completes\n",
+			     lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+	if (s3lvol_xfer_pending(lvs) ||
+	    s3lvol_lvstore_import_clone_inflight(lvs)) {
+		SPDK_WARNLOG("lvstore '%s' has an export or import operation in "
+			     "flight; refusing unload until it completes\n",
 			     lvs->name);
 		if (cb_fn) {
 			cb_fn(cb_arg, -EBUSY);
@@ -2412,6 +2535,7 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 
 	/* Registered before anything else: spdk_lvs_unload() destroys the bs_dev
 	 * internally, and this is the only signal for when that finished. */
+	lvs->unloading = true;
 	s3_bs_dev_set_destroy_cb(lvs->bs_dev, lvs_unload_bs_dev_gone, ctx);
 
 	s3_bs_dev_drain(lvs->bs_dev, 0, lvs_unload_drained, ctx);
@@ -3251,6 +3375,10 @@ derive_submit(struct s3lvol_lvstore *lvs, struct spdk_lvol *parent,
 {
 	struct derive_lane *lane;
 	struct derive_req *req;
+
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 
 	req = calloc(1, sizeof(*req));
 	if (!req) {

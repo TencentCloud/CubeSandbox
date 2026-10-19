@@ -157,6 +157,15 @@ RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
 RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
 RCOW_CKPT_INTERVAL_SEC="${RCOW_CKPT_INTERVAL_SEC:-60}"
 
+# Process-shared payload ring reserved in /dev/shm for each lvstore. The target
+# reserves the whole file with posix_fallocate so a full ring fails at attach,
+# rather than SIGBUS later on the write path. Keep the process-wide budget
+# explicit too: a direct script invocation must pass the same policy to the
+# target that one-click persists in its EnvironmentFile.
+RCOW_WRITEBACK_MB="${RCOW_WRITEBACK_MB:-4096}"
+S3LVOL_WRITEBACK_TOTAL_MB="${S3LVOL_WRITEBACK_TOTAL_MB:-8192}"
+export S3LVOL_WRITEBACK_TOTAL_MB
+
 # Must agree with vbdev_s3lvol.h; see the header comment.
 RCOW_NUM_SUBSYS="${RCOW_NUM_SUBSYS:-32}"
 RCOW_NS_PER_SUBSYS="${RCOW_NS_PER_SUBSYS:-64}"
@@ -291,6 +300,54 @@ export S3LVOL_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB}"
 # this RAM tier; the RPC enforces the hard maximum of 8192.
 RCOW_CACHE_HOT_BUFS="${RCOW_CACHE_HOT_BUFS:-1024}"
 
+rcow_preflight_writeback_shm()
+{
+	local leaf path candidate existing_alloc=0 required delta available blocks
+
+	case "${RCOW_WRITEBACK_MB}" in
+	''|0|0*|?????*|*[!0-9]*) rcow_err "RCOW_WRITEBACK_MB must be a decimal integer from 64 to 4096"; return 1 ;;
+	esac
+	case "${S3LVOL_WRITEBACK_TOTAL_MB}" in
+	''|0|0*|????????*|*[!0-9]*) rcow_err "S3LVOL_WRITEBACK_TOTAL_MB must be a decimal integer from 64 to 1048576"; return 1 ;;
+	esac
+	if [ "${RCOW_WRITEBACK_MB}" -lt 64 ] ||
+	   [ "${RCOW_WRITEBACK_MB}" -gt 4096 ]; then
+		rcow_err "RCOW_WRITEBACK_MB must be between 64 and 4096"
+		return 1
+	fi
+	if [ "${S3LVOL_WRITEBACK_TOTAL_MB}" -lt "${RCOW_WRITEBACK_MB}" ]; then
+		rcow_err "S3LVOL_WRITEBACK_TOTAL_MB (${S3LVOL_WRITEBACK_TOTAL_MB}) is smaller than RCOW_WRITEBACK_MB (${RCOW_WRITEBACK_MB})"
+		return 1
+	fi
+	if [ "${S3LVOL_WRITEBACK_TOTAL_MB}" -gt 1048576 ]; then
+		rcow_err "S3LVOL_WRITEBACK_TOTAL_MB must be at most 1048576"
+		return 1
+	fi
+
+	leaf="$(rcow_writeback_shm_leaf "${RCOW_LVS_NAME}")" || return 1
+	path="/dev/shm/s3lvol-wb-$(id -u)/${leaf}"
+	for candidate in "${path}" "/dev/shm/${leaf}"; do
+		[ -e "${candidate}" ] || continue
+		blocks="$(stat -c %b "${candidate}" 2>/dev/null)" || {
+			rcow_err "cannot inspect existing write-back ring ${candidate}"
+			return 1
+		}
+		existing_alloc=$((blocks * 512))
+		break
+	done
+	required=$((RCOW_WRITEBACK_MB * 1024 * 1024 + 4096))
+	[ "${existing_alloc}" -ge "${required}" ] && return 0
+	delta=$((required - existing_alloc))
+	available="$(df -PB1 /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }')"
+	case "${available}" in
+	''|*[!0-9]*) rcow_err "cannot determine free capacity of /dev/shm"; return 1 ;;
+	esac
+	if [ "${available}" -lt "${delta}" ]; then
+		rcow_err "/dev/shm has ${available} free bytes, but lvstore '${RCOW_LVS_NAME}' needs ${delta} more bytes for its ${RCOW_WRITEBACK_MB} MiB write-back ring"
+		return 1
+	fi
+}
+
 # Default -m: last two CPUs from this process's Cpus_allowed_list (CPU0 stays
 # free for housekeeping when the set is 0..N-1). An explicit RCOW_TGT_CPUMASK
 # always wins. See rcow_cpumask.sh.
@@ -343,6 +400,12 @@ RCOW_HOT_MARKER="${RCOW_RUN_DIR}/hot-restart"
 # The layout captured before the target is killed, which rcow_verify_active
 # --expect compares the post-upgrade layout against.
 RCOW_HOT_SNAPSHOT="${RCOW_RUN_DIR}/hot-upgrade.snapshot"
+# Written immediately before rcow_start.sh first attempts create/attach, so no
+# new-format replay can happen before the rollback barrier exists. It is
+# deliberately sticky across supervisor retries; only the upgrade orchestrator
+# clears it immediately before its one candidate start. An upgrade failure may
+# roll back to an older write-back format only while this marker is absent.
+RCOW_START_ATTACHED="${RCOW_RUN_DIR}/start.attached"
 # Written by rcow_start.sh only after attach, replay and the layout check have
 # all finished. A target answers RPC, and rcow_target_ready is true, while that
 # work is still going on.
@@ -762,6 +825,66 @@ rcow_target_instances()
 		printf '%s\n' "${pids[@]}"
 	fi
 	return 0
+}
+
+# Derive the leaf used by s3_writeback_shm_name(). Kept here so disruptive
+# tests that permanently discard their lvstore can clean the ring after the
+# target has already stopped. Production unload must never call the discard
+# helper below: a non-empty ring is crash-recovery data.
+rcow_writeback_shm_leaf()
+{
+	python3 - "${1:-${RCOW_LVS_NAME}}" <<'PY'
+import sys
+
+MASK = (1 << 64) - 1
+
+def hash_name(name, seed):
+    value = seed
+    for byte in name.encode():
+        value = ((value ^ byte) * 1099511628211) & MASK
+    value ^= value >> 33
+    value = (value * 0xff51afd7ed558ccd) & MASK
+    value ^= value >> 33
+    value = (value * 0xc4ceb9fe1a85ec53) & MASK
+    return (value ^ (value >> 33)) & MASK
+
+name = sys.argv[1]
+print(
+    "s3lvol-wb-"
+    f"{hash_name(name, 1469598103934665603):016x}"
+    f"{hash_name(name, 7809847782465536322):016x}"
+)
+PY
+}
+
+rcow_discard_writeback_shm()
+{
+	local leaf path fd
+
+	[ -z "$(rcow_target_instances)" ] || {
+		rcow_err "refusing to discard write-back shm while a target is running"
+		return 1
+	}
+	leaf="$(rcow_writeback_shm_leaf "${1:-${RCOW_LVS_NAME}}")" || return 1
+	for path in "/dev/shm/${leaf}" "/dev/shm/s3lvol-wb-$(id -u)/${leaf}"; do
+		[ -e "${path}" ] || continue
+
+		# Use the same advisory lock as s3_writeback_open(). Holding it
+		# across unlink closes the check/remove race: an existing target
+		# makes flock fail, while a target starting afterward cannot claim
+		# this inode before it has been removed.
+		exec {fd}<>"${path}" || return 1
+		if ! flock -n "${fd}"; then
+			rcow_err "refusing to discard live write-back shm ${path}"
+			exec {fd}>&-
+			return 1
+		fi
+		rm -f -- "${path}" || {
+			exec {fd}>&-
+			return 1
+		}
+		exec {fd}>&-
+	done
 }
 
 # Echo the pid of the running target, or nothing. The identity check is not

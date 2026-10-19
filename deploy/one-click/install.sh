@@ -1839,6 +1839,19 @@ case "${RCOW_CACHE_HOT_BUFS}" in
   *) (( RCOW_CACHE_HOT_BUFS <= 8192 )) ||
        die "RCOW_CACHE_HOT_BUFS must be at most 8192" ;;
 esac
+RCOW_WRITEBACK_MB="${RCOW_WRITEBACK_MB:-4096}"
+S3LVOL_WRITEBACK_TOTAL_MB="${S3LVOL_WRITEBACK_TOTAL_MB:-8192}"
+case "${RCOW_WRITEBACK_MB}" in
+  ''|0|0*|?????*|*[!0-9]*) die "RCOW_WRITEBACK_MB must be a decimal integer from 64 to 4096" ;;
+  *) (( RCOW_WRITEBACK_MB >= 64 && RCOW_WRITEBACK_MB <= 4096 )) ||
+       die "RCOW_WRITEBACK_MB must be between 64 and 4096" ;;
+esac
+case "${S3LVOL_WRITEBACK_TOTAL_MB}" in
+  ''|0|0*|????????*|*[!0-9]*) die "S3LVOL_WRITEBACK_TOTAL_MB must be a decimal integer from 64 to 1048576" ;;
+  *) (( S3LVOL_WRITEBACK_TOTAL_MB >= RCOW_WRITEBACK_MB &&
+         S3LVOL_WRITEBACK_TOTAL_MB <= 1048576 )) ||
+       die "S3LVOL_WRITEBACK_TOTAL_MB must be between RCOW_WRITEBACK_MB and 1048576" ;;
+esac
 # Leave RCOW_TGT_CPUMASK unset unless the operator (or a previous
 # .one-click.env) set it. rcow_common.sh derives last-two at service start
 # from the service's own affinity; freezing the installer's mask would be
@@ -2222,6 +2235,8 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_HOT_BUFS" "${RCOW_CACHE_HOT_BUFS}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WRITEBACK_MB" "${RCOW_WRITEBACK_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "S3LVOL_WRITEBACK_TOTAL_MB" "${S3LVOL_WRITEBACK_TOTAL_MB}"
 if [[ -n "${RCOW_TGT_CPUMASK:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
 fi

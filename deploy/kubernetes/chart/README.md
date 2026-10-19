@@ -756,7 +756,7 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 
 ## CubeS3lvol
 
-`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 23 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
 
 When enabled, the sidecar:
 
@@ -769,6 +769,9 @@ When enabled, the sidecar:
 - uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
 - reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
   per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
+- provisions a dedicated memory-backed `/dev/shm` (`writebackShmSize: 5Gi`)
+  for the default 4 GiB write-back ring. This tmpfs counts against the
+  sidecar's memory limit; increase both settings together if the ring grows.
 
 ```yaml
 cubeS3lvol:
