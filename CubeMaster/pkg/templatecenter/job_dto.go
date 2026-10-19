@@ -75,15 +75,16 @@ func cloneTemplateImageJobInfo(src *types.TemplateImageJobInfo) *types.TemplateI
 
 func artifactModelToInfo(record *models.RootfsArtifact) *types.RootfsArtifactInfo {
 	return &types.RootfsArtifactInfo{
+		RootfsFormat:            record.RootfsFormat,
 		ArtifactID:              record.ArtifactID,
 		TemplateSpecFingerprint: record.TemplateSpecFingerprint,
 		SourceImageRef:          record.SourceImageRef,
 		SourceImageDigest:       record.SourceImageDigest,
 		MasterNodeID:            record.MasterNodeID,
 		MasterNodeIP:            record.MasterNodeIP,
-		Ext4Path:                record.Ext4Path,
-		Ext4SHA256:              record.Ext4SHA256,
-		Ext4SizeBytes:           record.Ext4SizeBytes,
+		RootfsPath:              record.RootfsPath,
+		RootfsSHA256:            record.RootfsSHA256,
+		RootfsSizeBytes:         record.RootfsSizeBytes,
 		WritableLayerSize:       record.WritableLayerSize,
 		Status:                  record.Status,
 		LastError:               record.LastError,

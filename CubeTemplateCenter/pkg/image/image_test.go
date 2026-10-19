@@ -853,7 +853,7 @@ func TestOciLayoutImageRefUsesExplicitSourceTag(t *testing.T) {
 	}
 }
 
-func TestEnsureArtifactBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testing.T) {
+func TestEnsureRootfsBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testing.T) {
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir)
 	for _, cmd := range []string{"truncate", "cp", "skopeo", "umoci", "resize2fs", "e2fsck"} {
@@ -861,12 +861,12 @@ func TestEnsureArtifactBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testi
 	}
 	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
 
-	if err := EnsureArtifactBuildPreflight(context.Background()); err != nil {
-		t.Fatalf("EnsureArtifactBuildPreflight failed: %v", err)
+	if err := EnsureRootfsBuildPreflight(context.Background(), ""); err != nil {
+		t.Fatalf("EnsureRootfsBuildPreflight failed: %v", err)
 	}
 }
 
-func TestEnsureArtifactBuildPreflightRequiresTarForDockerFallback(t *testing.T) {
+func TestEnsureRootfsBuildPreflightRequiresTarForDockerFallback(t *testing.T) {
 	disableNativeRootfsExport(t)
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir)
@@ -875,7 +875,7 @@ func TestEnsureArtifactBuildPreflightRequiresTarForDockerFallback(t *testing.T) 
 	}
 	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
 
-	err := EnsureArtifactBuildPreflight(context.Background())
+	err := EnsureRootfsBuildPreflight(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), `required command "tar"`) {
 		t.Fatalf("unexpected preflight error: %v", err)
 	}
@@ -955,7 +955,7 @@ func TestResolveArtifactStoreDirFallsBackWhenDefaultUnavailable(t *testing.T) {
 	}
 }
 
-func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
+func TestBuildRootfsStreamingSuccessSkipsPhase1(t *testing.T) {
 	workRoot := t.TempDir()
 	storeRoot := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
@@ -994,9 +994,9 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 		return nil
 	})
 
-	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-stream"})
+	result, err := BuildRootfs(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-stream"})
 	if err != nil {
-		t.Fatalf("BuildExt4 failed: %v", err)
+		t.Fatalf("BuildRootfs failed: %v", err)
 	}
 	if !streamingCalled {
 		t.Fatal("expected streaming build to run")
@@ -1009,7 +1009,7 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 	}
 }
 
-func TestBuildExt4StreamingWithPostExport(t *testing.T) {
+func TestBuildRootfsStreamingWithPostExport(t *testing.T) {
 	workRoot := t.TempDir()
 	storeRoot := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
@@ -1053,9 +1053,9 @@ func TestBuildExt4StreamingWithPostExport(t *testing.T) {
 		return nil
 	}
 
-	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeDocker}, BuildOptions{ArtifactID: "artifact-post", PostRootfsExport: postHook})
+	result, err := BuildRootfs(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeDocker}, BuildOptions{ArtifactID: "artifact-post", PostRootfsExport: postHook})
 	if err != nil {
-		t.Fatalf("BuildExt4 failed: %v", err)
+		t.Fatalf("BuildRootfs failed: %v", err)
 	}
 	if !streamingCalled {
 		t.Fatal("expected streaming build to run")
@@ -1068,7 +1068,7 @@ func TestBuildExt4StreamingWithPostExport(t *testing.T) {
 	}
 }
 
-func TestBuildExt4StreamingFailureFallsBackToPhase1(t *testing.T) {
+func TestBuildRootfsStreamingFailureFallsBackToPhase1(t *testing.T) {
 	workRoot := t.TempDir()
 	storeRoot := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
@@ -1110,9 +1110,9 @@ func TestBuildExt4StreamingFailureFallsBackToPhase1(t *testing.T) {
 		return "sha-phase-1", 7, nil
 	})
 
-	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-fallback"})
+	result, err := BuildRootfs(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-fallback"})
 	if err != nil {
-		t.Fatalf("BuildExt4 failed: %v", err)
+		t.Fatalf("BuildRootfs failed: %v", err)
 	}
 	if result.SHA256 != "sha-phase-1" || result.SizeBytes != 7 {
 		t.Fatalf("unexpected result: %#v", result)
@@ -1125,7 +1125,7 @@ func TestBuildExt4StreamingFailureFallsBackToPhase1(t *testing.T) {
 	}
 }
 
-func TestBuildExt4Phase1FailureCleansStoreDir(t *testing.T) {
+func TestBuildRootfsPhase1FailureCleansStoreDir(t *testing.T) {
 	workRoot := t.TempDir()
 	storeRoot := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
@@ -1148,7 +1148,7 @@ func TestBuildExt4Phase1FailureCleansStoreDir(t *testing.T) {
 		return errors.New("export failed")
 	})
 
-	_, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-fail"})
+	_, err := BuildRootfs(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-fail"})
 	if err == nil || !strings.Contains(err.Error(), "export failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1229,6 +1229,17 @@ func TestPrepareLocalSourceRejectsInvalidImageRef(t *testing.T) {
 		// and "invalid image reference" for refs with forbidden characters.
 		if !strings.Contains(err.Error(), "invalid image reference") && !strings.Contains(err.Error(), "empty image reference") {
 			t.Errorf("PrepareLocalSource(%q) error=%v, want validation failure", ref, err)
+		}
+	}
+}
+
+func TestBuildRootfsRejectsUnsupportedFormatBeforeExport(t *testing.T) {
+	for _, format := range []string{"erofs", "unknown"} {
+		if _, err := BuildRootfs(context.Background(), nil, BuildOptions{RootfsFormat: format}); err == nil || !strings.Contains(err.Error(), "unsupported rootfs format") {
+			t.Fatalf("format=%q err=%v", format, err)
+		}
+		if err := EnsureRootfsBuildPreflight(context.Background(), format); err == nil {
+			t.Fatalf("unsupported format %q accepted", format)
 		}
 	}
 }

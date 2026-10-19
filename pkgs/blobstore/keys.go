@@ -89,16 +89,6 @@ func JoinKey(prefix, key string) string {
 	}
 }
 
-// ArtifactExt4Key is the object key CubeTemplateCenter and CubeMaster share
-// for a rootfs artifact: [prefix/]<artifactID>.ext4.
-func ArtifactExt4Key(prefix, artifactID string) string {
-	id := strings.TrimSpace(artifactID)
-	if id == "" {
-		return ""
-	}
-	return JoinKey(prefix, id+".ext4")
-}
-
 const (
 	// LocatorScheme is the URL scheme for a store-relative object locator
 	// (blobstore:<driver>:<fullKey>) used when SignedGetURL is unsupported.
@@ -125,4 +115,29 @@ func IsObjectLocator(raw string) bool {
 // BaseName returns the last path element of a key.
 func BaseName(key string) string {
 	return path.Base(key)
+}
+
+// RelativeObjectKey converts a recorded full object key for a prefixed store.
+// A bare filename is also accepted for historical records. Foreign prefixes
+// are rejected rather than silently selecting a different object.
+func RelativeObjectKey(fullKey, prefix string) (string, error) {
+	prefix = strings.Trim(prefix, "/")
+	if err := ValidateKey(fullKey); err != nil {
+		return "", err
+	}
+	key := fullKey
+	if prefix != "" {
+		if err := ValidateKey(prefix); err != nil {
+			return "", err
+		}
+		if fullKey == prefix {
+			return "", ErrInvalidKey
+		}
+		if strings.HasPrefix(fullKey, prefix+"/") {
+			key = strings.TrimPrefix(fullKey, prefix+"/")
+		} else if strings.Contains(fullKey, "/") {
+			return "", ErrInvalidKey
+		}
+	}
+	return key, nil
 }

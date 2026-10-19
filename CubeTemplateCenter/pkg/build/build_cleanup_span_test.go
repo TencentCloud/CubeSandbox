@@ -26,7 +26,7 @@ func TestSourceCleanupSpanCoversOnlyCleanup(t *testing.T) {
 
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(image.EnsureArtifactBuildPreflight, func(context.Context) error { return nil })
+	patches.ApplyFunc(image.EnsureRootfsBuildPreflight, func(context.Context, string) error { return nil })
 
 	cleanedAt := make(chan time.Time, 1)
 	patches.ApplyFunc(image.PrepareSource, func(context.Context, image.SourceSpec) (*image.PreparedSource, error) {

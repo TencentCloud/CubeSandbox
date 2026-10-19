@@ -62,9 +62,13 @@ clears it.
 ### 3.2 Build job states
 
 `t_cube_template_image_job.status`: PENDING → RUNNING → BUILT | FAILED.
-Phase (`phase`) tracks the pipeline step (PULLING / BUILDING / UPLOADING /
+Phase (`phase`) tracks the pipeline step (PULLING / BUILDING_ROOTFS / UPLOADING /
 DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 (§3.5) then registers the artifact and distributes it.
+
+The build pipeline pulls and unpacks the source image, builds a rootfs artifact according to `rootfs_format` (currently EXT4), computes the template fingerprint and artifact metadata, and reports back to CubeMaster. CubeMaster then registers the artifact, distributes it to nodes, and finalizes the template and job state.
+
+`BuildRootfs` selects the filesystem through `BuildOptions.RootfsFormat`. Both `/cube/template/from-image` and `cubemastercli tpl create-from-image --rootfs-format ext4` default to EXT4. Artifact metadata uses `rootfs_format`, `rootfs_path`, `rootfs_sha256`, and `rootfs_size_bytes`, and the build phase is `BUILDING_ROOTFS`. Upgrades accept historical `ext4_*` fields and `BUILDING_EXT4`; EXT4 results still include the legacy JSON fields. Templates and nodes continue to carry the format through `ImageSpec.storage_media`. Existing files and objects keep their names, and subsequent storage reads, writes, and deletion use the recorded `object_key`.
 
 ### 3.3 Error mapping
 

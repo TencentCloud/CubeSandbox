@@ -49,21 +49,6 @@ func TestValidatePrefixPartial(t *testing.T) {
 	}
 }
 
-func TestArtifactExt4Key(t *testing.T) {
-	if g, w := ArtifactExt4Key("", "abc"), "abc.ext4"; g != w {
-		t.Fatalf("got %q want %q", g, w)
-	}
-	if g, w := ArtifactExt4Key("template-artifacts/", "abc"), "template-artifacts/abc.ext4"; g != w {
-		t.Fatalf("got %q want %q", g, w)
-	}
-	if g, w := ArtifactExt4Key("template-artifacts", "abc"), "template-artifacts/abc.ext4"; g != w {
-		t.Fatalf("got %q want %q", g, w)
-	}
-	if g, w := ArtifactExt4Key("  ", "rfs-1"), "rfs-1.ext4"; g != w {
-		t.Fatalf("got %q want %q", g, w)
-	}
-}
-
 func TestJoinKey(t *testing.T) {
 	if g := JoinKey("a/", "/b"); g != "a/b" {
 		t.Fatalf("got %q", g)
@@ -79,5 +64,27 @@ func TestObjectLocator(t *testing.T) {
 	}
 	if !IsObjectLocator("blobstore:fs:k") || IsObjectLocator("https://example/k") {
 		t.Fatal("IsObjectLocator")
+	}
+}
+
+func TestRelativeObjectKey(t *testing.T) {
+	cases := []struct {
+		key, prefix, want string
+		fail              bool
+	}{
+		{"artifacts/nested/custom.img", "artifacts", "nested/custom.img", false},
+		{"old.ext4", "artifacts", "old.ext4", false},
+		{"custom/file.img", "", "custom/file.img", false},
+		{"foreign/file.img", "artifacts", "", true},
+		{"artifacts", "artifacts", "", true},
+		{"artifacts/../file.img", "artifacts", "", true},
+		{"/artifacts/file.img", "artifacts", "", true},
+		{"", "artifacts", "", true},
+	}
+	for _, c := range cases {
+		got, err := RelativeObjectKey(c.key, c.prefix)
+		if got != c.want || (err != nil) != c.fail {
+			t.Fatalf("key=%q prefix=%q got=%q err=%v", c.key, c.prefix, got, err)
+		}
 	}
 }

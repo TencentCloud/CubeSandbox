@@ -220,7 +220,7 @@ func reconcileDeferredArtifactPlacements(ctx context.Context) {
 			continue // resurrected by a rebuild: do not touch its files
 		}
 		target := &node.Node{InsID: p.NodeID, IP: cached.HostIP()}
-		inUse, err := destroyArtifactOnNode(ctx, p.ArtifactID, p.InstanceType, target)
+		inUse, err := destroyArtifactOnNode(ctx, &models.RootfsArtifact{ArtifactID: p.ArtifactID}, p.InstanceType, target)
 		if inUse || err != nil {
 			logger.Warnf("deferred placement cleanup pending: artifact=%s node=%s inUse=%v err=%v", p.ArtifactID, p.NodeID, inUse, err)
 			continue

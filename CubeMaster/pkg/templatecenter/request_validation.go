@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, error) {
@@ -135,6 +136,11 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, err
 	}
 	cloned.Qos = resolvedQos
+	format, err := imagev1.ResolveRootfsFormat(req.RootfsFormat)
+	if err != nil {
+		return nil, err
+	}
+	cloned.RootfsFormat = format
 	exposedPorts, err := normalizeTemplateExposedPorts(req.ExposedPorts)
 	if err != nil {
 		return nil, err

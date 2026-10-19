@@ -132,12 +132,12 @@ func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 	}
 	job := &models.TemplateImageJob{JobID: "job-1", RequestJSON: string(raw)}
 	artifact := &models.RootfsArtifact{
-		ArtifactID:    "rfs-jfs",
-		Status:        ArtifactStatusReady,
-		Ext4SHA256:    "deadbeef",
-		Ext4SizeBytes: 1024,
-		DownloadToken: "tok",
-		MasterNodeIP:  "http://cube-master:8089",
+		ArtifactID:      "rfs-jfs",
+		Status:          ArtifactStatusReady,
+		RootfsSHA256:    "deadbeef",
+		RootfsSizeBytes: 1024,
+		DownloadToken:   "tok",
+		MasterNodeIP:    "http://cube-master:8089",
 	}
 	nodes := []*node.Node{
 		testNode("node-a", "10.0.0.1"),
@@ -184,12 +184,12 @@ func TestBackfillTemplateReplicasJFSSkipsFullyPlaced(t *testing.T) {
 	}
 	job := &models.TemplateImageJob{JobID: "job-1", RequestJSON: string(raw)}
 	artifact := &models.RootfsArtifact{
-		ArtifactID:    "rfs-jfs",
-		Status:        ArtifactStatusReady,
-		Ext4SHA256:    "deadbeef",
-		Ext4SizeBytes: 1024,
-		DownloadToken: "tok",
-		MasterNodeIP:  "http://cube-master:8089",
+		ArtifactID:      "rfs-jfs",
+		Status:          ArtifactStatusReady,
+		RootfsSHA256:    "deadbeef",
+		RootfsSizeBytes: 1024,
+		DownloadToken:   "tok",
+		MasterNodeIP:    "http://cube-master:8089",
 	}
 	nodes := []*node.Node{testNode("node-a", "10.0.0.1")}
 	placements := []models.ArtifactNodePlacement{{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1", InstanceType: "test"}}

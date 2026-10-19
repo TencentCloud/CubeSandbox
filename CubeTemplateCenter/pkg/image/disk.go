@@ -213,7 +213,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	// A lazy umount only removes the mount from the namespace. Until detach
 	// succeeds the kernel may still use the filesystem, and fsck on the regular
 	// backing file cannot reliably detect that. Fail before modifying the image
-	// so BuildExt4 can re-export through Phase 1 instead.
+	// so BuildRootfs can re-export through Phase 1 instead.
 	if mountStuck || (!unmountedNormally && !loopDetached) {
 		return fmt.Errorf("cannot shrink ext4 image: normal unmount failed and lazy unmount with loop detach did not complete")
 	}
@@ -222,7 +222,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 }
 
 // artifactStoreDirOf returns the artifact store root for an ext4 image path,
-// mirroring the <store>/<artifact>/<artifact>.ext4 layout BuildExt4 constructs
+// mirroring the <store>/<artifact>/<artifact>.ext4 layout BuildRootfs constructs
 // (including when it falls back to ArtifactFallbackStoreRootDir, so a fallback
 // build only ever reclaims fallback-store orphans). A path of another shape just
 // yields a prefix that matches nothing in orphanLoopCandidates, i.e. reclaim

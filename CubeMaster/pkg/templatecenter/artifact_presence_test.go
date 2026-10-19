@@ -217,7 +217,7 @@ func TestReadyArtifactUsableForReusePresentArtifact(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID: "rfs-ok",
 		Status:     ArtifactStatusReady,
-		Ext4Path:   ext4Path,
+		RootfsPath: ext4Path,
 	}
 	demoted := captureArtifactDemotions(t)
 	if !readyArtifactUsableForReuse(context.Background(), record) {
@@ -238,7 +238,7 @@ func TestReadyArtifactUsableForReuseMissingArtifact(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID: "rfs-gone",
 		Status:     ArtifactStatusReady,
-		Ext4Path:   filepath.Join(t.TempDir(), "rfs-gone.ext4"),
+		RootfsPath: filepath.Join(t.TempDir(), "rfs-gone.ext4"),
 	}
 	demoted := captureArtifactDemotions(t)
 	if readyArtifactUsableForReuse(context.Background(), record) {
@@ -263,7 +263,7 @@ func TestReadyArtifactUsableForReuseUnknownPresence(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID: "rfs-unknown",
 		Status:     ArtifactStatusReady,
-		Ext4Path:   filepath.Join(t.TempDir(), "rfs-unknown.ext4"),
+		RootfsPath: filepath.Join(t.TempDir(), "rfs-unknown.ext4"),
 	}
 	demoted := captureArtifactDemotions(t)
 	if readyArtifactUsableForReuse(context.Background(), record) {
@@ -378,7 +378,7 @@ func TestResolveMissingArtifactDemotesOwnedArtifact(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID:   "rfs-owned",
 		Status:       ArtifactStatusReady,
-		Ext4Path:     filepath.Join(t.TempDir(), "rfs-owned.ext4"),
+		RootfsPath:   filepath.Join(t.TempDir(), "rfs-owned.ext4"),
 		MasterNodeIP: "http://master-a:8080",
 	}
 	demoted := captureArtifactDemotions(t)
@@ -405,7 +405,7 @@ func TestResolveMissingArtifactLeavesForeignArtifactAlone(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID:   "rfs-foreign",
 		Status:       ArtifactStatusReady,
-		Ext4Path:     filepath.Join(t.TempDir(), "rfs-foreign.ext4"),
+		RootfsPath:   filepath.Join(t.TempDir(), "rfs-foreign.ext4"),
 		MasterNodeIP: "http://10.228.161.14:8080",
 	}
 	demoted := captureArtifactDemotions(t)
@@ -440,7 +440,7 @@ func TestResolveMissingArtifactPresentFileIsNone(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID:   "rfs-present",
 		Status:       ArtifactStatusReady,
-		Ext4Path:     ext4Path,
+		RootfsPath:   ext4Path,
 		MasterNodeIP: "http://master-a:8080",
 	}
 	demoted := captureArtifactDemotions(t)
@@ -520,7 +520,7 @@ func TestReadyArtifactUsableForReuseRejectsForeignArtifact(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID:   "rfs-foreign-reuse",
 		Status:       ArtifactStatusReady,
-		Ext4Path:     filepath.Join(t.TempDir(), "rfs-foreign-reuse.ext4"),
+		RootfsPath:   filepath.Join(t.TempDir(), "rfs-foreign-reuse.ext4"),
 		MasterNodeIP: "http://10.228.161.14:8080",
 	}
 	demoted := captureArtifactDemotions(t)
@@ -546,10 +546,10 @@ func TestRootfsArtifactReuseVerdictSizeMismatch(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 	record := &models.RootfsArtifact{
-		ArtifactID:    "rfs-size",
-		Status:        ArtifactStatusReady,
-		Ext4Path:      ext4Path,
-		Ext4SizeBytes: 1 << 30, // row says 1 GiB, file is 7 bytes
+		ArtifactID:      "rfs-size",
+		Status:          ArtifactStatusReady,
+		RootfsPath:      ext4Path,
+		RootfsSizeBytes: 1 << 30, // row says 1 GiB, file is 7 bytes
 	}
 	demoted := captureArtifactDemotions(t)
 
@@ -578,10 +578,10 @@ func TestRootfsArtifactReuseVerdictSizeMatch(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 	record := &models.RootfsArtifact{
-		ArtifactID:    "rfs-match",
-		Status:        ArtifactStatusReady,
-		Ext4Path:      ext4Path,
-		Ext4SizeBytes: int64(len(body)),
+		ArtifactID:      "rfs-match",
+		Status:          ArtifactStatusReady,
+		RootfsPath:      ext4Path,
+		RootfsSizeBytes: int64(len(body)),
 	}
 	if err := rootfsArtifactReuseVerdict(context.Background(), record); err != nil {
 		t.Fatalf("matching size must be reusable, got %v", err)
@@ -596,10 +596,10 @@ func TestRootfsArtifactReuseVerdictZeroRecordedSize(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 	record := &models.RootfsArtifact{
-		ArtifactID:    "rfs-legacy",
-		Status:        ArtifactStatusReady,
-		Ext4Path:      ext4Path,
-		Ext4SizeBytes: 0,
+		ArtifactID:      "rfs-legacy",
+		Status:          ArtifactStatusReady,
+		RootfsPath:      ext4Path,
+		RootfsSizeBytes: 0,
 	}
 	if err := rootfsArtifactReuseVerdict(context.Background(), record); err != nil {
 		t.Fatalf("zero recorded size must disable the size check, got %v", err)
@@ -613,7 +613,7 @@ func TestRootfsArtifactReuseVerdictForeignIsSentinel(t *testing.T) {
 	record := &models.RootfsArtifact{
 		ArtifactID:   "rfs-foreign-sentinel",
 		Status:       ArtifactStatusReady,
-		Ext4Path:     filepath.Join(t.TempDir(), "absent.ext4"),
+		RootfsPath:   filepath.Join(t.TempDir(), "absent.ext4"),
 		MasterNodeIP: "http://10.228.161.14:8080",
 	}
 	demoted := captureArtifactDemotions(t)
