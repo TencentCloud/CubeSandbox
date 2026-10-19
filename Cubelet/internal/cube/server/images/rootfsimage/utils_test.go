@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package ext4image
+package rootfsimage
 
 import (
 	"bytes"
@@ -52,7 +52,7 @@ func writeSharedKernelFile(t *testing.T, content []byte) {
 
 func writeRawImageFile(t *testing.T, instanceType, imageRef string, content []byte) {
 	t.Helper()
-	writeTestFile(t, pmem.GetRawImageFilePath(instanceType, imageRef), content)
+	writeTestFile(t, rootfsPath(t, pmem.CurrentPaths(), instanceType, imageRef), content)
 }
 
 func writeRawKernelFile(t *testing.T, instanceType, imageRef string, content []byte) {
@@ -300,7 +300,7 @@ func TestDownloadArtifactWithIndependentKernelSource(t *testing.T) {
 	if err := EnsurePmemFile(ctx, "cubebox", "rfs-download"); err != nil {
 		t.Fatal(err)
 	}
-	for path, want := range map[string][]byte{paths.ImageFile("cubebox", "rfs-download"): rootfs, paths.KernelFile("cubebox", "rfs-download"): kernel} {
+	for path, want := range map[string][]byte{rootfsPath(t, paths, "cubebox", "rfs-download"): rootfs, paths.KernelFile("cubebox", "rfs-download"): kernel} {
 		got, err := os.ReadFile(path)
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("artifact %s: err=%v, content matches=%v", path, err, bytes.Equal(got, want))
@@ -309,7 +309,7 @@ func TestDownloadArtifactWithIndependentKernelSource(t *testing.T) {
 	if err := DestroyPmemArtifact(ctx, "cubebox", "rfs-download", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(paths.ImageFile("cubebox", "rfs-download")); !os.IsNotExist(err) {
+	if _, err := os.Stat(rootfsPath(t, paths, "cubebox", "rfs-download")); !os.IsNotExist(err) {
 		t.Fatalf("artifact was not deleted: %v", err)
 	}
 	if _, err := os.Stat(paths.SharedKernelPath); err != nil {
@@ -366,10 +366,19 @@ func TestEnsurePmemRootfsMixedEntrypointsReusePreparedFile(t *testing.T) {
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("download requests = %d, want 1", got)
 	}
-	if got, err := os.ReadFile(pmem.GetRawImageFilePath("cubebox", "rfs-concurrent")); err != nil || !bytes.Equal(got, rootfs) {
+	if got, err := os.ReadFile(rootfsPath(t, pmem.CurrentPaths(), "cubebox", "rfs-concurrent")); err != nil || !bytes.Equal(got, rootfs) {
 		t.Fatalf("prepared rootfs mismatch: err=%v", err)
 	}
 	if got, err := os.ReadFile(pmem.GetRawKernelFilePath("cubebox", "rfs-concurrent")); err != nil || !bytes.Equal(got, kernel) {
 		t.Fatalf("prepared kernel mismatch: err=%v", err)
 	}
+}
+
+func rootfsPath(t *testing.T, paths pmem.Paths, instanceType, id string) string {
+	t.Helper()
+	path, err := paths.RootfsFile(instanceType, id, "ext4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
