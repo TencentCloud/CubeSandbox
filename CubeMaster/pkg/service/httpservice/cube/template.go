@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
@@ -45,6 +46,7 @@ type templateResponse struct {
 	JobID                      string                         `json:"job_id,omitempty"`
 	Replicas                   []templatecenter.ReplicaStatus `json:"replicas,omitempty"`
 	CreateRequest              *types.CreateCubeSandboxReq    `json:"create_request,omitempty"`
+	ConfiguredQos              *qos.Config                    `json:"configured_qos,omitempty"`
 	CubeEgressCABaked          bool                           `json:"cube_egress_ca_baked,omitempty"`
 	CubeEgressCAFingerprint    string                         `json:"cube_egress_ca_fingerprint,omitempty"`
 	CubeEgressCATargetsWritten int                            `json:"cube_egress_ca_targets_written,omitempty"`
@@ -146,7 +148,8 @@ func templateResponseFromInfo(info *templatecenter.TemplateInfo, createReq *type
 		ImageInfo:                  info.ImageInfo,
 		JobID:                      info.JobID,
 		Replicas:                   info.Replicas,
-		CreateRequest:              createReq,
+		CreateRequest:              sanitizeTemplateCreateRequest(createReq),
+		ConfiguredQos:              info.ConfiguredQos,
 		CubeEgressCABaked:          info.CubeEgressCABaked,
 		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
 		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
@@ -332,6 +335,15 @@ func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 func createTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req, err := constructCreateReq(r)
 	if err != nil {
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  err.Error(),
+			}},
+		}
+	}
+	if err := rejectCallerSuppliedQos(req); err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
 		return &templateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
