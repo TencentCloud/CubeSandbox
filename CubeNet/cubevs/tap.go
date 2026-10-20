@@ -19,11 +19,31 @@ type L7Target struct {
 	Scheme uint8  // one of L7SchemeNone / L7SchemeHTTP / L7SchemeHTTPS
 }
 
+// DNSCatchAllPort is one explicit (port, scheme) tuple on a catch-all rule.
+// Port is host byte order. Scheme is L7SchemeHTTP or L7SchemeHTTPS.
+type DNSCatchAllPort struct {
+	Port   uint16
+	Scheme uint8
+}
+
+// DNSCatchAll is the userspace description of one dns_allow_v2 rule that
+// matches every queried name. It is not stored in mvm_meta.
+//
+// An empty Ports slice means port_count 0: the datapath expands it to
+// {80/http, 443/https}. That form is used only when every catch-all rule
+// omitted both port and scheme. A non-empty Ports slice is the explicit set,
+// the same encoding as a per-host L7 rule. A scheme without a port is stored
+// as that scheme's default port (http → 80, https → 443).
+type DNSCatchAll struct {
+	Ports []DNSCatchAllPort
+}
+
 type MVMOptions struct {
 	AllowInternetAccess *bool
 	AllowOut            *[]string   // CIDR, IP, or domain
 	L7AllowOut          *[]L7Target // Host + optional (port, scheme) for L7 policy handling
 	DenyOut             *[]string   // CIDR or IP
+	DNSCatchAll         *DNSCatchAll
 }
 
 type tapMetadataMapOps interface {

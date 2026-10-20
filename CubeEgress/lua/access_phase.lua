@@ -100,7 +100,13 @@ end
 local function domain_match(pattern, value)
     pattern = lower(pattern)
     value = lower(value)
-    if not pattern or not value then return false end
+    if not pattern or not value or value == "" then return false end
+    -- Standalone "*" matches any non-empty identity, including IP literals.
+    -- One trailing dot is ignored so "*." is the same token. This is not the
+    -- leading "*." wildcard, which still excludes the apex.
+    local star = pattern
+    if string.sub(star, -1) == "." then star = string.sub(star, 1, -2) end
+    if star == "*" then return true end
     -- Match cubevs DNS allow semantics: only leading "*." is a wildcard,
     -- and it matches subdomains only, not the apex domain.
     if string.sub(pattern, 1, 2) == "*." and #pattern > 2 then

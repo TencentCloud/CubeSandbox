@@ -1296,6 +1296,21 @@ mod tests {
     }
 
     #[test]
+    fn update_network_converts_e2b_catch_all_host() {
+        let (_, net) = update_parts(
+            r#"{"rules": {"*": [{"transform": {"headers": {"Authorization": "sek"}}}]}}"#,
+        )
+        .expect("catch-all host should convert");
+        let rules = net.expect("policy").rules.expect("rules");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "e2b-transform-*");
+        assert_eq!(rules[0].r#match.host.as_deref(), Some("*"));
+        let inject = rules[0].action.inject.as_ref().expect("inject");
+        assert_eq!(inject[0].header, "Authorization");
+        assert_eq!(inject[0].secret, "sek");
+    }
+
+    #[test]
     fn update_network_converts_e2b_per_host_rules() {
         let (_, net) = update_parts(
             r#"{"rules": {"api.example.com": [{"transform": {"headers": {"X-Token": "abc"}}}]}}"#,

@@ -619,6 +619,60 @@ class TestNetworkRules:
         assert wire["match"]["path"] == "/v1/chat"
         assert wire["match"]["sni"] == "api.deepseek.com"
 
+    def _rules_payload(self, rules):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": rules}, config=make_config())
+        return m.call_args.kwargs["json"]
+
+    def test_create_network_rules_catch_all_without_inject(self):
+        from cubesandbox import Action, Match, Rule
+        rules = [
+            Rule(name="audit_all_http", match=Match(scheme="http", host="*"),
+                 action=Action(allow=True, audit="metadata")),
+            Rule(name="audit_all_https", match=Match(scheme="https", sni="*"),
+                 action=Action(allow=True, audit="metadata")),
+        ]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["match"] == {"scheme": "http", "host": "*"}
+        assert body["network"]["rules"][1]["match"] == {"scheme": "https", "sni": "*"}
+
+    def test_create_network_rules_catch_all_allows_inject(self):
+        from cubesandbox import Action, Inject, Match, Rule
+        rules = [Rule(
+            name="leak",
+            match=Match(host="*"),
+            action=Action(allow=True, inject=[Inject(header="Authorization", secret="sek")]),
+        )]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["action"]["inject"] == [
+            {"header": "Authorization", "secret": "sek"},
+        ]
+
+    def test_create_network_rules_wildcard_inject_still_allowed(self):
+        from cubesandbox import Action, Inject, Match, Rule
+        rules = [Rule(
+            name="scoped",
+            match=Match(host="*.example.com"),
+            action=Action(allow=True, inject=[Inject(header="Authorization", secret="sek")]),
+        )]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["match"]["host"] == "*.example.com"
+
+    def test_create_network_rules_catch_all_allows_custom_port(self):
+        rules = [{"name": "wide", "match": {"host": "*", "port": 8443, "scheme": "https"},
+                  "action": {"allow": True}}]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["match"] == {
+            "host": "*", "port": 8443, "scheme": "https",
+        }
+
+    def test_create_network_rules_e2b_star_allows_inject(self):
+        body = self._rules_payload({"*": [{"transform": {"headers": {"Authorization": "sek"}}}]})
+        rule = body["network"]["rules"][0]
+        assert rule["match"]["host"] == "*"
+        assert rule["name"] == "e2b-transform-*"
+        assert rule["action"]["inject"] == [{"header": "Authorization", "secret": "sek"}]
+
     def test_create_network_rules_with_inject(self):
         from cubesandbox import Action, Inject, Match, Rule
         rules = [Rule(
