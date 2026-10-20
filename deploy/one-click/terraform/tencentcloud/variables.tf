@@ -358,7 +358,7 @@ variable "templatecenter_trusted_ca_certs" {
 }
 
 variable "templatecenter_trusted_ca_existing_config_map" {
-  description = "Name of an operator-managed ConfigMap (in the cubesandbox namespace) whose keys hold PEM content, mounted instead of the terraform-managed one. The ConfigMap must exist before the apply: until it does, the cube-templatecenter pod waits in ContainerCreating on the missing volume. Changes to its content take effect only after the pods restart (kubectl -n cubesandbox rollout restart deploy/cube-templatecenter). Mutually exclusive with templatecenter_trusted_ca_certs."
+  description = "Name of an operator-managed ConfigMap (in the cubesandbox namespace) whose keys hold PEM content, mounted instead of the terraform-managed one. The ConfigMap must exist before the apply: otherwise the Deployment's volume never mounts and the apply blocks waiting for the rollout until it fails at the provider timeout. Changes to its content take effect only after the pods restart (kubectl -n cubesandbox rollout restart deploy/cube-templatecenter). Mutually exclusive with templatecenter_trusted_ca_certs."
   type        = string
   default     = ""
 }

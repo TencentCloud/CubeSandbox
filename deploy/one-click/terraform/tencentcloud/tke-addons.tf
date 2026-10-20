@@ -705,8 +705,12 @@ resource "kubernetes_config_map" "templatecenter_trusted_ca" {
 
   # One key per entry, matching the chart's ca-N.crt naming. A single entry
   # may hold several certificates (a chain): Go's directory loader parses
-  # every PEM document in the file.
-  data = { for i, pem in var.templatecenter_trusted_ca_certs : "ca-${i}.crt" => pem }
+  # every PEM document in the file. Lines are whitespace-trimmed when
+  # written: Go's PEM decoder only recognizes BEGIN/END markers at column
+  # 0, so a block pasted with indentation would otherwise pass the guard
+  # and then be silently ignored at pull time.
+  data = { for i, pem in var.templatecenter_trusted_ca_certs :
+  "ca-${i}.crt" => join("\n", [for line in split("\n", pem) : trimspace(line)]) }
 }
 
 resource "kubernetes_deployment" "templatecenter" {

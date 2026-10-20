@@ -838,11 +838,15 @@ export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n..
   rendered as keys of a terraform-managed ConfigMap mounted at
   `/etc/cube/trusted-ca` and exposed through `SSL_CERT_DIR`, which Go reads
   **in addition to** the system bundle — publicly-trusted registries keep
-  working. Certificate blocks only: a pasted private key fails the plan.
+  working. Certificate blocks only: a pasted private key fails the plan, and
+  lines are whitespace-trimmed when written, so blocks copied out of YAML
+  manifests work.
 - Alternative: `templatecenter_trusted_ca_existing_config_map` names a
-  ConfigMap you own (create it in the `cubesandbox` namespace before applying;
-  until it exists the pod waits in ContainerCreating). Mutually exclusive with
-  the certs variable.
+  ConfigMap you own (create it in the `cubesandbox` namespace before
+  applying; if it is missing, the apply blocks waiting for the rollout and
+  fails at the provider timeout; its keys must hold standard column-0 PEM,
+  which Go parses strictly -- indented blocks are ignored). Mutually
+  exclusive with the certs variable.
 - Certificate changes roll the pod (checksum annotation on the inline path);
   changes to an operator-owned ConfigMap need a manual
   `kubectl -n cubesandbox rollout restart deploy/cube-templatecenter`.
