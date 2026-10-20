@@ -718,6 +718,29 @@ Before the first `create.sh` apply:
 
 > **E2B SDK:** the cluster deployment does not include single-machine CoreDNS split DNS. Besides `E2B_API_URL`, you must configure `*.cube.app` resolution (Private DNS or equivalent). See the [full guide — E2B and the cube.app domain](../../docs/guide/tencentcloud-terraform-deploy.md#e2b-and-the-cubeapp-domain).
 
+### Private-CA registry trust (trusted CA certificates)
+
+If the image registries the TemplateCenter pod pulls from sit behind a private
+CA, pass the certificates as Terraform variables (tfvars / `-var` / `TF_VAR_`;
+they are **not** read from or written to `.env`):
+
+```bash
+terraform apply -var='templatecenter_trusted_ca_certs=["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"]'
+```
+
+- Each entry may hold one or several certificates (a chain); entries are
+  rendered as keys of a terraform-managed ConfigMap mounted at
+  `/etc/cube/trusted-ca` and exposed through `SSL_CERT_DIR`, which Go reads
+  **in addition to** the system bundle — publicly-trusted registries keep
+  working. Certificate blocks only: a pasted private key fails the plan.
+- Alternative: `templatecenter_trusted_ca_existing_config_map` names a
+  ConfigMap you own (create it in the namespace before applying; until it
+  exists the pod waits in ContainerCreating). Mutually exclusive with the
+  certs variable.
+- Certificate changes roll the pod (checksum annotation on the inline path);
+  changes to an operator-owned ConfigMap need a manual
+  `kubectl rollout restart deploy/cube-templatecenter`.
+
 The deployer is surfaced at the **top level** of the extracted bundle, so right
 after extracting the package you can run it directly:
 

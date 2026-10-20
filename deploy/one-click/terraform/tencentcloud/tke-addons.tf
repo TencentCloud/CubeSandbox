@@ -664,6 +664,48 @@ resource "kubernetes_secret" "templatecenter_conf" {
   }
 }
 
+# Private-CA trust for the cube-templatecenter pod (chart-side design: PR
+# #1995). Rendered only on the inline-certs path; an operator-owned
+# templatecenter_trusted_ca_existing_config_map is referenced by the
+# Deployment's volume instead of being created here.
+resource "kubernetes_config_map" "templatecenter_trusted_ca" {
+  count = local.deploy_addons && length(var.templatecenter_trusted_ca_certs) > 0 ? 1 : 0
+
+  # The inline path is mutually exclusive with the operator-owned ConfigMap.
+  # Checked here (not variable validation) because cross-variable references
+  # in variable validation need Terraform >= 1.9 and this module supports 1.2+;
+  # with both set the count above is 1, so the precondition always evaluates.
+  lifecycle {
+    precondition {
+      condition     = var.templatecenter_trusted_ca_existing_config_map == ""
+      error_message = "templatecenter_trusted_ca_certs and templatecenter_trusted_ca_existing_config_map are mutually exclusive: inline certs render a terraform-managed ConfigMap; existing_config_map references one you own."
+    }
+    # One content guard, same as the chart's render-time check: every PEM
+    # block must be a CERTIFICATE. A pasted private key must not reach the
+    # registry-facing pod. Deliberately no symmetry/prose-marker/size
+    # duplicates.
+    precondition {
+      condition = alltrue([
+        for pem in var.templatecenter_trusted_ca_certs :
+        length(regexall("(?mi)^-----BEGIN [A-Z ]+-----", pem)) ==
+        length(regexall("(?mi)^-----BEGIN CERTIFICATE-----", pem))
+      ])
+      error_message = "templatecenter_trusted_ca_certs must contain CERTIFICATE blocks only; a pasted private key must not reach the registry-facing pod."
+    }
+  }
+
+  metadata {
+    name      = "cube-templatecenter-trusted-ca"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-templatecenter" }
+  }
+
+  # One key per entry, matching the chart's ca-N.crt naming. A single entry
+  # may hold several certificates (a chain): Go's directory loader parses
+  # every PEM document in the file.
+  data = { for i, pem in var.templatecenter_trusted_ca_certs : "ca-${i}.crt" => pem }
+}
+
 resource "kubernetes_deployment" "templatecenter" {
   count      = local.deploy_addons ? 1 : 0
   depends_on = [kubernetes_deployment.cubemaster, kubernetes_secret.templatecenter_conf]
@@ -706,6 +748,12 @@ resource "kubernetes_deployment" "templatecenter" {
     template {
       metadata {
         labels = { app = "cube-templatecenter" }
+        # Roll the pod when the inline certs change: the process reads
+        # SSL_CERT_DIR once at startup. The existing-config-map path is
+        # operator-owned (restart manually).
+        annotations = length(var.templatecenter_trusted_ca_certs) > 0 ? {
+          "checksum/trusted-ca" = md5(jsonencode(var.templatecenter_trusted_ca_certs))
+        } : {}
       }
       spec {
         # With use_cfs=false TC must land on the SAME NODE as a cubemaster
@@ -759,6 +807,20 @@ resource "kubernetes_deployment" "templatecenter" {
             name  = "CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR"
             value = "/data/CubeMaster/storage"
           }
+          # Private-CA trust for outbound TLS (registries behind a private
+          # CA). Go reads SSL_CERT_DIR as the directory-candidate list:
+          # listing the ConfigMap mount first ADDS the mounted certificates
+          # while the system bundle file candidate
+          # (/etc/ssl/certs/ca-certificates.crt) stays active, so
+          # publicly-trusted registries keep working. Verified on Go 1.25
+          # and on a live cluster (chart-side PR #1995).
+          dynamic "env" {
+            for_each = length(var.templatecenter_trusted_ca_certs) > 0 || var.templatecenter_trusted_ca_existing_config_map != "" ? [1] : []
+            content {
+              name  = "SSL_CERT_DIR"
+              value = "/etc/cube/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs"
+            }
+          }
           port {
             name           = "http"
             container_port = 8090
@@ -787,6 +849,14 @@ resource "kubernetes_deployment" "templatecenter" {
             name       = "cube-egress-ca"
             mount_path = "/etc/cube/ca"
             read_only  = true
+          }
+          dynamic "volume_mount" {
+            for_each = length(var.templatecenter_trusted_ca_certs) > 0 || var.templatecenter_trusted_ca_existing_config_map != "" ? [1] : []
+            content {
+              name       = "trusted-ca"
+              mount_path = "/etc/cube/trusted-ca"
+              read_only  = true
+            }
           }
         }
         # Share the same storage backend as CubeMaster: the same NFS export
@@ -830,6 +900,21 @@ resource "kubernetes_deployment" "templatecenter" {
             items {
               key  = "conf.yaml"
               path = "conf.yaml"
+            }
+          }
+        }
+        # Operator-owned ConfigMap wins; otherwise the terraform-managed one.
+        # The reference to the managed resource's attribute both keeps the
+        # ordering right and pulls the ConfigMap into a -target'ed addons
+        # apply through the dependency edge. The false branch of the ternary
+        # is lazy and dynamic blocks are not evaluated when their for_each is
+        # empty, so the [0] index is safe with the feature off.
+        dynamic "volume" {
+          for_each = length(var.templatecenter_trusted_ca_certs) > 0 || var.templatecenter_trusted_ca_existing_config_map != "" ? [1] : []
+          content {
+            name = "trusted-ca"
+            config_map {
+              name = var.templatecenter_trusted_ca_existing_config_map != "" ? var.templatecenter_trusted_ca_existing_config_map : kubernetes_config_map.templatecenter_trusted_ca[0].metadata[0].name
             }
           }
         }
