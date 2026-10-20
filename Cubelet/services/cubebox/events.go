@@ -262,10 +262,17 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 		exitCode := int32(e.ExitStatus)
 		exitReason := restartpolicy.ReasonForTaskExit(e.Pid, e.ExitStatus)
 		sandboxID := cb.ID
+		eventPID := e.Pid
+		currentPID := uint32(0)
+		if cntr.Status != nil {
+			currentPID = cntr.Status.Get().Pid
+		}
 		if podExit {
 			cb.Unlock()
 			locked = false
-			em.restarts.OnExit(sandboxID, exitCode, exitReason)
+			if !em.restarts.swallowRestartDestroyExit(sandboxID, eventPID, currentPID) {
+				em.restarts.OnExit(sandboxID, exitCode, exitReason)
+			}
 		}
 	case *eventtypes.TaskOOM:
 

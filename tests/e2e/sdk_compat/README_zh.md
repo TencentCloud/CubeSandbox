@@ -333,8 +333,8 @@ cp env.example .env
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`：等待绑定中删除 `409` / 解绑后 `204`
   的秒数，默认 `60`；
 - `SDK_E2E_RESTART_POLICY_WAIT`：每次等待重启状态变化的秒数，默认 `300`。
-  用例随 `--run-e2e` 执行。集群需开启 CubeMaster `enable_restart_policy`，
-  模板需暴露 envd 49983，guest 里 root 可以写 `/proc/sysrq-trigger`。
+  用例随 `--run-e2e` 执行。模板需暴露 envd 49983，guest 里 root 可以写
+  `/proc/sysrq-trigger`。
 
 ### 失败时保留 sandbox
 
@@ -507,8 +507,8 @@ capability 集合中启用。
 `host_mount` 是 CubeSandbox 独有扩展；`cases/host-mount/` 通过
 `@pytest.mark.requires_capability("host_mount")` 跳过不支持宿主目录挂载的后端（如 e2b）。
 `volume_plugin` 仅用于 CubeSandbox Volume Plugin 用例。
-`restart_policy` 仅用于 CubeSandbox。集群需开启 `enable_restart_policy`、
-模板暴露 envd 49983，以及 guest 内 root 可以触发 sysrq。运行：
+`restart_policy` 仅用于 CubeSandbox。模板需暴露 envd 49983，以及 guest 内
+root 可以触发 sysrq。运行：
 `pytest --run-e2e -m restart_policy`。
 
 ## 清理

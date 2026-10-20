@@ -351,20 +351,13 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	return out, nil
 }
 
-// applyRestartPolicy is the only place CubeMaster decides whether a restart
-// policy reaches Cubelet. The flag stays off until every node can honor it.
+// applyRestartPolicy maps restart fields onto the Cubelet request. Restart
+// fields are ordinary create fields; there is no feature gate.
 func applyRestartPolicy(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 	if req == nil || out == nil {
 		return nil
 	}
-	enabled := config.GetConfig() != nil && config.GetConfig().CubeletConf != nil && config.GetConfig().CubeletConf.EnableRestartPolicy
 	asked := strings.TrimSpace(req.RestartPolicy) != "" || req.RestartBackoff != nil || req.LivenessProbe != nil || containerHasLiveness(req)
-	if !enabled {
-		if asked {
-			return fmt.Errorf("restart policy is disabled on this CubeMaster")
-		}
-		return nil
-	}
 	if !asked {
 		return nil
 	}
@@ -385,7 +378,7 @@ func applyRestartPolicy(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 	if req.LivenessProbe != nil && len(out.Containers) > 0 && out.Containers[0].GetLivenessProbe() == nil {
 		out.Containers[0].LivenessProbe = req.LivenessProbe
 	}
-	if policy != "RESTART_POLICY_NEVER" {
+	if policy != sandboxrestart.WireNever {
 		clampMaxRestarts(out)
 	}
 	return nil
@@ -407,6 +400,23 @@ func clampMaxRestarts(out *cubebox.RunCubeSandboxRequest) {
 	}
 }
 
+// CopyTemplateRestartFields fills policy, backoff and the top-level probe
+// the caller left empty. Container probes are copied by the template merge.
+func CopyTemplateRestartFields(templateReq, req *types.CreateCubeSandboxReq) {
+	if templateReq == nil || req == nil {
+		return
+	}
+	if strings.TrimSpace(req.RestartPolicy) == "" {
+		req.RestartPolicy = templateReq.RestartPolicy
+	}
+	if req.RestartBackoff == nil {
+		req.RestartBackoff = templateReq.RestartBackoff
+	}
+	if req.LivenessProbe == nil {
+		req.LivenessProbe = templateReq.LivenessProbe
+	}
+}
+
 func containerHasLiveness(req *types.CreateCubeSandboxReq) bool {
 	for _, c := range req.Containers {
 		if c != nil && c.LivenessProbe != nil {
@@ -422,9 +432,8 @@ func containerHasLiveness(req *types.CreateCubeSandboxReq) bool {
 // The caller decides the transport status; CubeMaster maps the error to
 // MasterParamsError (130400) and CubeAPI surfaces that as HTTP 400.
 //
-// The check looks only at the request: a probe a template merges in later is
-// not considered here, so a template with a probe does not force every caller
-// away from Never.
+// The check runs after template merge, so a probe contributed by a template
+// is considered too.
 func ValidateRestartLiveness(req *types.CreateCubeSandboxReq) error {
 	if req == nil {
 		return nil

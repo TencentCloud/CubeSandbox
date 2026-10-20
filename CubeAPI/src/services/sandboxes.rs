@@ -191,6 +191,9 @@ impl SandboxService {
         if let Some(mounts) = volume_mounts.as_ref() {
             validate_unique_volume_mount_names(mounts)?;
         }
+        if let Some(probe) = liveness_probe.as_ref() {
+            validate_liveness_probe(probe)?;
+        }
         let mut annotations = HashMap::from([
             (
                 "cube.master.appsnapshot.template.id".to_string(),
@@ -1602,6 +1605,16 @@ fn to_restart_backoff(b: RestartBackoff) -> RestartBackoffConfig {
         jitter: b.jitter,
         stable_duration_second: b.stable_duration_second,
     }
+}
+
+fn validate_liveness_probe(p: &LivenessProbe) -> AppResult<()> {
+    let handlers = p.http_get.is_some() as u8 + p.tcp_socket.is_some() as u8;
+    if handlers != 1 {
+        return Err(AppError::BadRequest(
+            "livenessProbe must set exactly one of httpGet or tcpSocket".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn to_liveness_probe(p: &LivenessProbe) -> CubeLivenessProbe {

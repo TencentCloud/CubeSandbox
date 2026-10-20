@@ -106,6 +106,13 @@ func Upsert(ctx context.Context, rec *models.SandboxStatus) (bool, string, error
 	return tx.RowsAffected > 0, existing.RestartState, nil
 }
 
+func exitCodeColumn(code *int32) any {
+	if code == nil {
+		return gorm.Expr("NULL")
+	}
+	return *code
+}
+
 func statusUpdates(rec *models.SandboxStatus) map[string]any {
 	return map[string]any{
 		"host_id":                    rec.HostID,
@@ -113,7 +120,7 @@ func statusUpdates(rec *models.SandboxStatus) map[string]any {
 		"restart_policy":             rec.RestartPolicy,
 		"restart_state":              rec.RestartState,
 		"restart_count":              rec.RestartCount,
-		"last_exit_code":             rec.LastExitCode,
+		"last_exit_code":             exitCodeColumn(rec.LastExitCode),
 		"last_exit_reason":           rec.LastExitReason,
 		"last_finished_at":           rec.LastFinishedAt,
 		"last_restart_at":            rec.LastRestartAt,

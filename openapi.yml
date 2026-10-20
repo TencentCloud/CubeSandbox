@@ -1906,7 +1906,7 @@ components:
           format: int32
     LivenessProbe:
       type: object
-      description: One health check. Exactly one of tcp, http or ping.
+      description: One health check. Exactly one of tcp or http.
       properties:
         failureThreshold:
           type:
@@ -2130,6 +2130,7 @@ components:
           - number
           - 'null'
           format: double
+          description: 0 or omitted uses the node default (0.1). It does not turn jitter off.
         maxIntervalSecond:
           type:
           - integer
@@ -2146,6 +2147,7 @@ components:
           - number
           - 'null'
           format: double
+          description: 0 or omitted uses the node default (2). It does not select a constant interval.
         stableDurationSecond:
           type:
           - integer

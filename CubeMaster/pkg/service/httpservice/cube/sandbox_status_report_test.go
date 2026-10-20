@@ -66,3 +66,21 @@ func TestSandboxStatusBatchSeq(t *testing.T) {
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &parsed))
 }
+
+func TestSandboxStatusBatchRejectsMalformedWithoutFailingBatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	name := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
+	client, err := gorm.Open(sqlite.Open(name), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	require.NoError(t, client.AutoMigrate(&models.SandboxStatus{}))
+	require.NoError(t, sandboxstatus.Init(client))
+	engine := gin.New()
+	RegisterInternalSandboxStatusRoutes(engine.Group(""))
+	body := `{"items":[{"sandbox_id":"","status_seq":1},{"sandbox_id":"sb-ok","status_seq":1,"restart_state":"Running"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandbox-status:batch", bytes.NewReader([]byte(body)))
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, err = sandboxstatus.Get(context.Background(), "sb-ok")
+	require.NoError(t, err)
+}

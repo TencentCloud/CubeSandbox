@@ -197,6 +197,8 @@ func Validate(req *cubebox.RunCubeSandboxRequest) error {
 		return fmt.Errorf("invalid restart policy %q", req.GetRestartPolicy())
 	}
 	if cfg := req.GetRestartBackoff(); cfg != nil {
+		// Proto3 cannot tell an omitted field from 0. Zero means the node
+		// default (multiplier 2, jitter 0.1), not a constant interval.
 		if cfg.GetMultiplier() < 0 {
 			return fmt.Errorf("restart_backoff.multiplier must be >= 0")
 		}
@@ -244,8 +246,11 @@ func Apply(req *cubebox.RunCubeSandboxRequest) error {
 
 // ValidateProbe accepts a nil probe. A set probe must name exactly one handler.
 func ValidateProbe(probe *cubebox.LivenessProbe) error {
-	if probe == nil || probe.GetProbeHandler() == nil {
+	if probe == nil {
 		return nil
+	}
+	if probe.GetProbeHandler() == nil {
+		return fmt.Errorf("liveness_probe must set exactly one of tcp_socket, http_get, ping")
 	}
 	h := probe.GetProbeHandler()
 	n := 0

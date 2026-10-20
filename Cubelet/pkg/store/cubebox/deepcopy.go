@@ -156,6 +156,7 @@ func (m Metadata) DeepCopy() Metadata {
 		RestartState:            m.RestartState,
 		NextRestartAt:           m.NextRestartAt,
 		StatusSeq:               m.StatusSeq,
+		DestroyFailCount:        m.DestroyFailCount,
 		OriginalRequest:         append([]byte(nil), m.OriginalRequest...),
 	}
 

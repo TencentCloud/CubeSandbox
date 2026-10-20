@@ -7,6 +7,7 @@ package cubebox
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -216,14 +217,56 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	return nil
 }
 
+// statusWithCause keeps a ret status message and the original error.
+// ret.Err stores only the text, so errors.Is would miss a deadline.
+type statusWithCause struct {
+	status error
+	cause  error
+}
+
+func (e *statusWithCause) Error() string {
+	if e == nil || e.status == nil {
+		if e != nil && e.cause != nil {
+			return e.cause.Error()
+		}
+		return ""
+	}
+	return e.status.Error()
+}
+
+func (e *statusWithCause) Unwrap() error { return e.cause }
+
+func statusErr(code errorcode.ErrorCode, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &statusWithCause{status: ret.Err(code, cause.Error()), cause: cause}
+}
+
 // onlyDeadlineErrors reports that every failure came from a canceled destroy
-// context. A real remove error must still fail the restart.
+// context. A real remove error must still fail the restart. The aggregate is
+// walked child by child: errors.Is on a multierror is true when any child matches.
 func onlyDeadlineErrors(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, context.DeadlineExceeded.Error()) || strings.Contains(msg, context.Canceled.Error())
+	var multi *multierror.Error
+	if stderrors.As(err, &multi) && multi != nil {
+		if len(multi.Errors) == 0 {
+			return false
+		}
+		for _, child := range multi.Errors {
+			if !isDeadlineError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return isDeadlineError(err)
+}
+
+func isDeadlineError(err error) bool {
+	return err != nil && (stderrors.Is(err, context.DeadlineExceeded) || stderrors.Is(err, context.Canceled))
 }
 
 // releaseRestartRuntime deletes the task and containerd container after the
@@ -410,7 +453,7 @@ func (l *local) cleanContainerdContainer(ctx context.Context, container containe
 	} else if err != nil {
 
 		log.G(ctx).Warnf("stopTask %s error: %s", id, err)
-		return ret.Err(errorcode.ErrorCode_DeleteTaskFailed, err.Error())
+		return statusErr(errorcode.ErrorCode_DeleteTaskFailed, err)
 	}
 
 	err = deleteContainer(ctx, container)
@@ -418,7 +461,7 @@ func (l *local) cleanContainerdContainer(ctx context.Context, container containe
 		log.G(ctx).Warnf("ignore delete container [%s] fail: %v", container.ID(), err)
 	} else if err != nil {
 		log.G(ctx).Errorf("deleteContainer %s error: %s", id, err)
-		return ret.Err(errorcode.ErrorCode_DeleteContainerFromMetaDataFailed, err.Error())
+		return statusErr(errorcode.ErrorCode_DeleteContainerFromMetaDataFailed, err)
 	}
 	return nil
 }

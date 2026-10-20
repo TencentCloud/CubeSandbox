@@ -19,8 +19,9 @@ import (
 const sandboxStatusMaxItems = 1000
 
 // RegisterInternalSandboxStatusRoutes mounts Cubelet restart-status reports
-// outside HMAC. Cubelet cannot sign those routes. The sandbox network cannot
-// reach this ClusterIP, so the handler does not check a token.
+// outside HMAC. Cubelet cannot sign those routes. Cubelet and CubeMaster sit
+// on the internal network, which sandboxes cannot reach, so the handler does
+// not check a token.
 func RegisterInternalSandboxStatusRoutes(g *gin.RouterGroup) {
 	g.POST("/internal/v1/sandbox-status:batch", handleSandboxStatusBatch)
 }
@@ -60,12 +61,13 @@ func handleSandboxStatusBatch(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	accepted := 0
+	rejected := 0
 	failed := 0
 	for i := range body.Items {
 		item := body.Items[i]
 		item.SandboxID = strings.TrimSpace(item.SandboxID)
 		if item.SandboxID == "" || item.StatusSeq < 0 {
-			failed++
+			rejected++
 			continue
 		}
 		if strings.TrimSpace(item.HostID) == "" {
@@ -104,10 +106,10 @@ func handleSandboxStatusBatch(c *gin.Context) {
 	// already landed are ignored as stale seq. A 200 would make the node
 	// ack the failed ids and never send them again.
 	if failed > 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"accepted": accepted, "failed": failed})
+		c.JSON(http.StatusInternalServerError, gin.H{"accepted": accepted, "rejected": rejected, "failed": failed})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accepted": accepted, "failed": failed})
+	c.JSON(http.StatusOK, gin.H{"accepted": accepted, "rejected": rejected, "failed": failed})
 }
 
 func lifecycleStateForRestart(state string) (string, bool) {

@@ -86,6 +86,24 @@ func TestSoftDeleteWithoutRowBlocksLaterReport(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
+func TestUpsertClearsExitCode(t *testing.T) {
+	newTestDB(t)
+	ctx := context.Background()
+	code := int32(0)
+	_, _, err := Upsert(ctx, &models.SandboxStatus{
+		SandboxID: "sb", StatusSeq: 1, LastExitCode: &code, LastExitReason: "Error", ReportedAt: time.Now(),
+	})
+	require.NoError(t, err)
+	_, _, err = Upsert(ctx, &models.SandboxStatus{
+		SandboxID: "sb", StatusSeq: 2, LastExitReason: "LivenessProbeFailed", ReportedAt: time.Now(),
+	})
+	require.NoError(t, err)
+	got, err := Get(ctx, "sb")
+	require.NoError(t, err)
+	require.Nil(t, got.LastExitCode)
+	require.Equal(t, "LivenessProbeFailed", got.LastExitReason)
+}
+
 func TestDisplayPolicyUsesK8sNames(t *testing.T) {
 	for _, raw := range []string{"RESTART_POLICY_ON_FAILURE", "always", "", "nope"} {
 		if got, want := DisplayPolicy(raw), sandboxrestart.Display(raw); got != want {

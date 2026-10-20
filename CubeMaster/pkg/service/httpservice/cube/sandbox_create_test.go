@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -92,6 +93,23 @@ func TestCreateSandboxKeepsOtherTemplateErrorsAsParamsError(t *testing.T) {
 // as MasterParamsError (130400), which CubeAPI maps to HTTP 400. The probe
 // could never restart the sandbox, so it would only kill it.
 func TestCreateSandboxRejectsNeverWithLivenessProbe(t *testing.T) {
+	origDealFn := createSandboxDealCubeboxCreateReqWithTemplateFn
+	origCreateFn := createSandboxRunFn
+	t.Cleanup(func() {
+		createSandboxDealCubeboxCreateReqWithTemplateFn = origDealFn
+		createSandboxRunFn = origCreateFn
+	})
+
+	// Exercise the HTTP status mapping without depending on a configured
+	// template store; the merge+validate sequence has its own unit tests.
+	createSandboxDealCubeboxCreateReqWithTemplateFn = func(_ context.Context, req *types.CreateCubeSandboxReq) error {
+		return sandbox.ValidateRestartLiveness(req)
+	}
+	createSandboxRunFn = func(context.Context, *types.CreateCubeSandboxReq) *types.CreateCubeSandboxRes {
+		t.Fatalf("sandbox.CreateSandbox should not be called for an invalid restart probe")
+		return nil
+	}
+
 	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
 		"requestID":"req-never-probe",
 		"restart_policy":"Never",

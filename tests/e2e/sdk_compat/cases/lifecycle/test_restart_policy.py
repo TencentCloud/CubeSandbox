@@ -10,8 +10,8 @@ clears the streak, pause during backoff abandons that restart, and resume
 clears the count. Host-side scenarios (killing the hypervisor, restarting
 cubelet, CubeMaster down) are not driven from this suite.
 
-CubeMaster must have enable_restart_policy set, and the template must expose
-envd on port 49983 so the default liveness probe can see a guest crash.
+The template must expose envd on port 49983 so the default liveness probe
+can see a guest crash.
 """
 
 from __future__ import annotations
@@ -470,7 +470,7 @@ def test_max_restarts_gives_up(sdk_sandbox, sdk_e2e_config):
     )
 
 
-def _assert_restarted(sdk_sandbox, sdk_e2e_config, sandbox_id: str, address: str, *, reason: str, code: int, count: int = 1):
+def _assert_restarted(sdk_sandbox, sdk_e2e_config, sandbox_id: str, address: str, *, reason: str, code: int | None, count: int = 1):
     status = wait_for_restart_status(
         sdk_sandbox,
         lambda item: bool(item)
@@ -941,7 +941,8 @@ def test_liveness_probe_failure_restarts(sdk_sandbox, sdk_e2e_config, policy):
     """Stop envd and let the default probe restart the sandbox.
 
     This case intentionally keeps the default liveness probe so it covers the
-    30s initial delay + 3 * 10s detection window.
+    30s initial delay + 3 * 10s detection window. A probe failure has no
+    process exit code, so lastExitCode stays unset.
     """
     sandbox_id = sdk_sandbox.sandbox_id
     wait_until_data_plane_ready(
@@ -958,5 +959,5 @@ def test_liveness_probe_failure_restarts(sdk_sandbox, sdk_e2e_config, policy):
         sandbox_id,
         address,
         reason="LivenessProbeFailed",
-        code=0,
+        code=None,
     )

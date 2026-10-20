@@ -103,8 +103,12 @@ func TestClearRestartCountForResume(t *testing.T) {
 	box.RestartCount = 2
 	box.RestartState = restartpolicy.StateBackOff
 	clearRestartCountForResume(box)
-	if box.RestartCount != 0 || box.RestartState != restartpolicy.StateRunning {
-		t.Fatalf("count=%d state=%s", box.RestartCount, box.RestartState)
+	if box.RestartCount != 0 || box.RestartState != restartpolicy.StateRunning || box.StatusSeq != 1 {
+		t.Fatalf("count=%d state=%s seq=%d", box.RestartCount, box.RestartState, box.StatusSeq)
+	}
+	clearRestartCountForResume(box)
+	if box.StatusSeq != 1 {
+		t.Fatalf("unchanged resume bumped seq to %d", box.StatusSeq)
 	}
 	clearRestartCountForResume(nil)
 }
@@ -153,3 +157,101 @@ func (m *memBoxes) SyncByID(context.Context, string, ...cubes.UpdateCubeboxOpt) 
 	return nil
 }
 func (m *memBoxes) Delete(context.Context, *cubes.DeleteOption) error { return nil }
+
+func TestCreateWindowExitZeroStaysDown(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	cb.ID = "sb"
+	m := newRestartMgr(&memBoxes{cb: cb})
+	m.armCreate("sb", &cubebox.RunCubeSandboxRequest{RestartPolicy: restartpolicy.OnFailure})
+	if run := m.runs["sb"]; run == nil || !run.pending {
+		t.Fatal("expected a pending run without probes")
+	}
+	m.OnExit("sb", 0, restartpolicy.ReasonCompleted)
+	if cb.RestartState == restartpolicy.StateSucceeded {
+		t.Fatal("exit during create was finalized")
+	}
+	m.finishCreate("sb", true)
+	if cb.RestartState != restartpolicy.StateSucceeded || cb.LastExitReason != string(restartpolicy.ReasonCompleted) {
+		t.Fatalf("state=%s reason=%s", cb.RestartState, cb.LastExitReason)
+	}
+}
+
+func TestCreateWindowQueuesNonZero(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	cb.ID = "sb"
+	m := newRestartMgr(&memBoxes{cb: cb})
+	m.armCreate("sb", &cubebox.RunCubeSandboxRequest{RestartPolicy: restartpolicy.OnFailure})
+	m.OnExit("sb", 7, restartpolicy.ReasonError)
+	run := m.runs["sb"]
+	if run == nil || run.queued == nil || run.queued.code != 7 {
+		t.Fatal("non-zero exit was not queued")
+	}
+	if cb.RestartState == restartpolicy.StateFailed {
+		t.Fatal("queued exit was finalized")
+	}
+}
+
+func TestAbandonedCreateIgnoresLateExit(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	cb.ID = "sb"
+	cb.RestartState = restartpolicy.StateRunning
+	m := newRestartMgr(&memBoxes{cb: cb})
+	m.armCreate("sb", &cubebox.RunCubeSandboxRequest{RestartPolicy: restartpolicy.OnFailure})
+	m.abandonCreate("sb")
+	m.OnExit("sb", 1, restartpolicy.ReasonError)
+	if cb.RestartState != restartpolicy.StateRunning {
+		t.Fatalf("late exit changed state to %s", cb.RestartState)
+	}
+}
+
+func TestRestartingCreateQueuesExit(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	cb.ID = "sb"
+	m := newRestartMgr(&memBoxes{cb: cb})
+	m.runs["sb"] = &restartRun{restarting: true}
+	m.OnExit("sb", 0, restartpolicy.ReasonCompleted)
+	if m.runs["sb"].queued == nil {
+		t.Fatal("exit during restart create was dropped")
+	}
+	if cb.LastExitReason != "" {
+		t.Fatalf("queued exit was recorded as %s", cb.LastExitReason)
+	}
+}
+
+func TestDestroySIGKILLIsNotANewExit(t *testing.T) {
+	m := newRestartMgr(&memBoxes{})
+	m.runs["sb"] = &restartRun{restarting: true}
+	m.noteDestroyPID("sb", 42)
+	if !m.swallowRestartDestroyExit("sb", 42, 42) {
+		t.Fatal("exit of the pid destroy is killing was not swallowed")
+	}
+	if !m.swallowRestartDestroyExit("sb", 0, 42) {
+		t.Fatal("pid 0 during restart destroy was not swallowed")
+	}
+	if m.swallowRestartDestroyExit("sb", 99, 99) {
+		t.Fatal("new pid was swallowed")
+	}
+	m.OnExit("sb", 1, restartpolicy.ReasonError)
+	if m.runs["sb"].queued == nil || m.runs["sb"].queued.code != 1 {
+		t.Fatal("create-window exit was not queued")
+	}
+	m.clearDestroySuppress("sb")
+	if m.swallowRestartDestroyExit("sb", 42, 99) {
+		t.Fatal("suppress leaked after the cold start was accepted")
+	}
+}
+
+func TestDestroyWithNoShimPIDSwallowsUntilNewPID(t *testing.T) {
+	m := newRestartMgr(&memBoxes{})
+	m.runs["sb"] = &restartRun{restarting: true}
+	m.noteDestroyPID("sb", 0)
+	if !m.swallowRestartDestroyExit("sb", 9, 0) {
+		t.Fatal("exit 9 while stored pid is still 0 was not swallowed")
+	}
+	if !m.swallowRestartDestroyExit("sb", 0, 77) {
+		t.Fatal("pid 0 after the new pid was published was not swallowed")
+	}
+	if m.swallowRestartDestroyExit("sb", 77, 77) {
+		t.Fatal("new pid exit was swallowed")
+	}
+}

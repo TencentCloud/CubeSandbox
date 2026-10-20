@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	stderrors "errors"
 	"sort"
 	"time"
 
@@ -17,16 +18,40 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"google.golang.org/protobuf/proto"
 )
 
+// maxRetainedDestroyAttempts bounds host-side cleanup retries after a
+// restart destroy fails. Each attempt already spends a full destroy
+// deadline, and shim Wait consumes that window, so three attempts are
+// minutes rather than a tight spin. e2fsck exit 4/8 does not use this
+// counter; that failure is deterministic and stops immediately.
+const maxRetainedDestroyAttempts int32 = 3
+
+type restartClass int
+
+const (
+	restartOK restartClass = iota
+	restartStop
+	restartLockBusy
+	restartDestroyRetryable
+	restartDestroyUnrecoverable
+	restartCreateFailed
+)
+
 // Restart rebuilds a sandbox in place: destroy keeps disk, network, volume
 // metadata and the cubebox row; create reuses the sandbox ID and cold-boots.
 // Callers must have already decided that the policy allows a restart.
 func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
+	rsp, _, err := s.restartClassified(ctx, req)
+	return rsp, err
+}
+
+func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, restartClass, error) {
 	rsp := &cubebox.RunCubeSandboxResponse{
 		RequestID: req.GetRequestID(),
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
@@ -34,13 +59,13 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 	if req == nil || req.GetAnnotations() == nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = "restart requires the original create request"
-		return rsp, nil
+		return rsp, restartStop, nil
 	}
 	sandboxID := req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]
 	if sandboxID == "" {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = "restart requires cube.master.desired.sandbox.id"
-		return rsp, nil
+		return rsp, restartStop, nil
 	}
 	rsp.SandboxID = sandboxID
 
@@ -48,7 +73,7 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 	if lockErr != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 		rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress"
-		return rsp, nil
+		return rsp, restartLockBusy, nil
 	}
 	defer unlock()
 
@@ -56,19 +81,19 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 	if err != nil || old == nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = "sandbox is not found"
-		return rsp, nil
+		return rsp, restartStop, nil
 	}
 	if old.IsPaused() {
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 		rsp.Ret.RetMsg = "sandbox is paused"
-		return rsp, nil
+		return rsp, restartStop, nil
 	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
 		rsp.Ret.RetCode = rerr.Code()
 		s.noteRestartFailure(sandboxID, old.RestartCount)
-		return rsp, nil
+		return rsp, restartCreateFailed, nil
 	}
 
 	ids := savedContainerIDs(old)
@@ -91,7 +116,7 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = rtErr.Error()
 		s.noteRestartFailure(sandboxID, oldCount)
-		return rsp, nil
+		return rsp, restartCreateFailed, nil
 	}
 	base := constants.WithRuntimeType(namespaces.WithNamespace(ctx, ns), runtime.Type)
 	// Same bound as user delete, applied separately to Destroy and Create.
@@ -116,6 +141,13 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: sandboxID},
 	}
 	destroyCtx = context.WithValue(destroyCtx, workflow.KDestroyContext, destroyInfo)
+	destroyPID := uint32(0)
+	if st := old.MainStatus(); st != nil {
+		destroyPID = st.Get().Pid
+	}
+	if s.restarts != nil {
+		s.restarts.noteDestroyPID(sandboxID, destroyPID)
+	}
 	if err := s.engine.Destroy(destroyCtx, destroyInfo); err != nil {
 		// Destroy did not finish. Cold start on a half-released sandbox leaves
 		// the guest health port closed, and that failure must not consume
@@ -125,7 +157,11 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 		rsp.Ret.RetMsg = rerr.Message()
 		rsp.Ret.RetCode = rerr.Code()
 		log.G(base).Warnf("restart destroy %s failed: %v", sandboxID, err)
-		return rsp, nil
+		class := restartDestroyRetryable
+		if stderrors.Is(err, storage.ErrExt4RepairUnrecoverable) {
+			class = restartDestroyUnrecoverable
+		}
+		return rsp, class, nil
 	}
 
 	// Failover stays off. A failed cold start must not start engine.failover:
@@ -154,11 +190,11 @@ func (s *service) Restart(ctx context.Context, req *cubebox.RunCubeSandboxReques
 		// Destroy already finished. A guest that did not become ready used
 		// this restart attempt.
 		s.noteRestartFailure(sandboxID, oldCount)
-		return rsp, nil
+		return rsp, restartCreateFailed, nil
 	}
 	s.noteRestartSuccess(sandboxID)
 	log.G(ctx).Infof("restarted sandbox %s", sandboxID)
-	return rsp, nil
+	return rsp, restartOK, nil
 }
 
 func restartRequestTrace(req *cubebox.RunCubeSandboxRequest, sandboxID, callee, action string) *CubeLog.RequestTrace {
@@ -205,28 +241,34 @@ func clearRestartCountForResume(box *cubeboxstore.CubeBox) {
 	if box == nil {
 		return
 	}
+	changed := box.RestartCount != 0 || box.RestartState != restartpolicy.StateRunning || box.DestroyFailCount != 0
 	box.RestartCount = 0
+	box.DestroyFailCount = 0
 	box.RestartState = restartpolicy.StateRunning
+	if changed {
+		box.StatusSeq++
+	}
 }
 
 // restartTransition is one write of the restart fields on a CubeBox.
 // Callers lock and save; this function only assigns fields.
 type restartTransition struct {
-	state         string
-	setState      bool
-	nextRestartAt int64
-	setNext       bool
-	exitCode      int32
-	setExit       bool
-	reason        string
-	setReason     bool
-	incrementFrom int32
-	increment     bool
-	markFailed    bool
-	markSuccess   bool
-	bumpSeq       bool
-	resetCount    bool
-	now           int64
+	state             string
+	setState          bool
+	nextRestartAt     int64
+	setNext           bool
+	exitCode          int32
+	setExit           bool
+	reason            string
+	setReason         bool
+	incrementFrom     int32
+	increment         bool
+	markFailed        bool
+	markSuccess       bool
+	bumpSeq           bool
+	resetCount        bool
+	clearDestroyFails bool
+	now               int64
 }
 
 func applyRestartTransition(box *cubeboxstore.CubeBox, t restartTransition) {
@@ -235,6 +277,9 @@ func applyRestartTransition(box *cubeboxstore.CubeBox, t restartTransition) {
 	}
 	if t.resetCount {
 		box.RestartCount = 0
+	}
+	if t.clearDestroyFails {
+		box.DestroyFailCount = 0
 	}
 	if t.increment && box.RestartCount <= t.incrementFrom {
 		box.RestartCount = t.incrementFrom + 1
@@ -308,12 +353,13 @@ func (s *service) noteRestartSuccess(sandboxID string) {
 	cb.Lock()
 	defer cb.Unlock()
 	applyRestartTransition(cb, restartTransition{
-		markSuccess:   true,
-		now:           time.Now().UnixNano(),
-		setState:      true,
-		state:         restartpolicy.StateRunning,
-		setNext:       true,
-		nextRestartAt: 0,
+		markSuccess:       true,
+		now:               time.Now().UnixNano(),
+		setState:          true,
+		state:             restartpolicy.StateRunning,
+		setNext:           true,
+		nextRestartAt:     0,
+		clearDestroyFails: true,
 	})
 	if err := s.cubeboxMgr.cubeboxManger.Save(context.Background(), cb); err != nil {
 		log.G(context.Background()).Warnf("restart: save success for %s: %v", sandboxID, err)

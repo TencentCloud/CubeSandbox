@@ -33,7 +33,12 @@ type statusReporter struct {
 
 	mu      sync.Mutex
 	pending map[string]statusclient.Item
-	acked   map[string]int64
+	acked   map[string]ackMark
+}
+
+type ackMark struct {
+	seq  int64
+	seen bool
 }
 
 func (m *restartMgr) startStatusReporter() {
@@ -46,7 +51,7 @@ func (m *restartMgr) startStatusReporter() {
 		store:   m.store,
 		hostID:  host,
 		pending: map[string]statusclient.Item{},
-		acked:   map[string]int64{},
+		acked:   map[string]ackMark{},
 	}
 	m.reporter = r
 	go r.run()
@@ -131,7 +136,7 @@ func statusItem(cb *cubeboxstore.CubeBox, host string) (statusclient.Item, bool)
 		LastFailedRestartAt:     unixNanoTime(cb.LastFailedRestartAt),
 		NextRestartAt:           unixNanoTime(cb.NextRestartAt),
 	}
-	if cb.LastExitReason != "" || cb.LastExitCode != 0 {
+	if cb.LastExitReason != string(restartpolicy.ReasonLivenessFailed) && (cb.LastExitReason != "" || cb.LastExitCode != 0) {
 		code := cb.LastExitCode
 		item.LastExitCode = &code
 	}
@@ -161,7 +166,7 @@ func unixNanoTime(ns int64) *time.Time {
 func (r *statusReporter) enqueue(item statusclient.Item) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.acked[item.SandboxID] >= item.StatusSeq && item.StatusSeq > 0 {
+	if mark, ok := r.acked[item.SandboxID]; ok && mark.seen && mark.seq >= item.StatusSeq {
 		return
 	}
 	if prev, ok := r.pending[item.SandboxID]; ok && prev.StatusSeq > item.StatusSeq {
@@ -217,8 +222,9 @@ func (r *statusReporter) ack(items []statusclient.Item) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, item := range items {
-		if r.acked[item.SandboxID] < item.StatusSeq {
-			r.acked[item.SandboxID] = item.StatusSeq
+		prev := r.acked[item.SandboxID]
+		if !prev.seen || prev.seq < item.StatusSeq {
+			r.acked[item.SandboxID] = ackMark{seq: item.StatusSeq, seen: true}
 		}
 	}
 }

@@ -469,12 +469,32 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
+	armedID := ""
+	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
+		id := ""
+		if req.GetAnnotations() != nil {
+			id = strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+		}
+		if id == "" && constants.IsCubeRuntime(ctx) {
+			id = utils.GenerateID()
+			if req.Annotations == nil {
+				req.Annotations = map[string]string{}
+			}
+			req.Annotations[constants.MasterAnnotationDesiredSandboxID] = id
+		}
+		if id != "" {
+			createInfo.SandboxID = id
+			s.restarts.armCreate(id, req)
+			armedID = id
+		}
+	}
 	var createErr error
 	if constants.IsCubeRuntime(ctx) {
 		createErr = s.engine.Create(ctx, createInfo)
 	} else {
-
-		createInfo.SandboxID = utils.GenerateID()
+		if createInfo.SandboxID == "" {
+			createInfo.SandboxID = utils.GenerateID()
+		}
 		createErr = s.otherRuntime.Create(ctx, createInfo)
 	}
 
@@ -489,8 +509,12 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
 	}
-	if s.restarts != nil && ret.IsSuccessCode(rsp.Ret.RetCode) {
-		s.restarts.Start(createInfo.SandboxID, req)
+	if s.restarts != nil {
+		if armedID != "" {
+			s.restarts.finishCreate(armedID, ret.IsSuccessCode(rsp.Ret.RetCode))
+		} else if ret.IsSuccessCode(rsp.Ret.RetCode) {
+			s.restarts.Start(createInfo.SandboxID, req)
+		}
 	}
 	return rsp, nil
 }

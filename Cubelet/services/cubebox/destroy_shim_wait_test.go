@@ -15,12 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 // localWithIntentTTL builds the destroy-path receiver with a shim-intent TTL
@@ -62,8 +64,22 @@ func TestOnlyDeadlineErrors(t *testing.T) {
 	assert.False(t, onlyDeadlineErrors(nil))
 	assert.True(t, onlyDeadlineErrors(context.DeadlineExceeded))
 	assert.True(t, onlyDeadlineErrors(fmt.Errorf("delete task: %w", context.DeadlineExceeded)))
-	assert.True(t, onlyDeadlineErrors(fmt.Errorf("stopTask: %s", context.Canceled.Error())))
+	assert.False(t, onlyDeadlineErrors(fmt.Errorf("stopTask: %s", context.Canceled.Error())))
 	assert.False(t, onlyDeadlineErrors(fmt.Errorf("delete task: connection refused")))
+	assert.False(t, onlyDeadlineErrors(statusErr(errorcode.ErrorCode_DeleteTaskFailed, fmt.Errorf("context deadline exceeded"))))
+	assert.True(t, onlyDeadlineErrors(statusErr(errorcode.ErrorCode_DeleteTaskFailed, context.DeadlineExceeded)))
+
+	mixed := multierror.Append(
+		fmt.Errorf("wait: %w", context.DeadlineExceeded),
+		fmt.Errorf("runc clean: connection refused"),
+	)
+	assert.False(t, onlyDeadlineErrors(mixed.ErrorOrNil()))
+
+	all := multierror.Append(
+		fmt.Errorf("wait: %w", context.DeadlineExceeded),
+		fmt.Errorf("stop: %w", context.Canceled),
+	)
+	assert.True(t, onlyDeadlineErrors(all.ErrorOrNil()))
 }
 
 func TestShimWaitContextLeavesCallerDeadline(t *testing.T) {

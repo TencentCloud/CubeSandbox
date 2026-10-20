@@ -45,8 +45,8 @@ type batchRequest struct {
 	Items  []Item `json:"items"`
 }
 
-// Client posts batches to CubeMaster. The sandbox network cannot reach this
-// address, so the request carries no token.
+// Client posts batches to CubeMaster. Cubelet and CubeMaster sit on the
+// internal network, which sandboxes cannot reach, so the request carries no token.
 type Client struct {
 	base string
 	http *http.Client

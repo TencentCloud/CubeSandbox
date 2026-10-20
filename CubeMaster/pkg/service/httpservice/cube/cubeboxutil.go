@@ -89,6 +89,7 @@ func dealCubeboxReqTemplateByLocalConfig(ctx context.Context, reqInOut *types.Cr
 		reqInOut.NetworkType = templateReq.NetworkType
 	}
 
+	sandbox.CopyTemplateRestartFields(templateReq, reqInOut)
 	log.G(ctx).Infof("Successfully dealCubeboxReqTemplateByLocalConfig: %s", utils.InterfaceToString(reqInOut))
 	return nil
 }
@@ -391,20 +392,18 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 	if reqInOut.InstanceType != cubebox.InstanceType_cubebox.String() {
 		return nil
 	}
-	// Reject Never + a caller-supplied liveness probe before a template can
-	// merge its own probe in. Validating after the merge would couple the
-	// check to the template; validating here keeps it about the request.
-	if err := sandbox.ValidateRestartLiveness(reqInOut); err != nil {
-		return err
-	}
 	constants.NormalizeAppSnapshotAnnotations(reqInOut.Annotations)
 
 	templateID, hasTemplateID := reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 
 	if !hasTemplateID && config.GetConfig().Common.EnableAGSColdStartSwitch {
-		return handleColdStartCompatibility(reqInOut)
+		if err := handleColdStartCompatibility(reqInOut); err != nil {
+			return err
+		}
+		return sandbox.ValidateRestartLiveness(reqInOut)
 	}
 
+	var mergeErr error
 	if constants.GetAppSnapshotVersion(reqInOut.Annotations) == templatecenter.DefaultTemplateVersion {
 		// Alias resolution: only on the template-center / v2 path. Resolving
 		// before the version split would break non-v2 requests that carry a
@@ -418,10 +417,14 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 				reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 			}
 		}
-		return dealCubeboxCreateReqWithTemplateCenter(ctx, templateID, reqInOut)
+		mergeErr = dealCubeboxCreateReqWithTemplateCenter(ctx, templateID, reqInOut)
+	} else {
+		mergeErr = dealCubeboxReqTemplateByLocalConfig(ctx, reqInOut)
 	}
-
-	return dealCubeboxReqTemplateByLocalConfig(ctx, reqInOut)
+	if mergeErr != nil {
+		return mergeErr
+	}
+	return sandbox.ValidateRestartLiveness(reqInOut)
 }
 
 func handleColdStartCompatibility(reqInOut *types.CreateCubeSandboxReq) error {
@@ -544,6 +547,7 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	if reqInOut.Annotations != nil && reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "" {
 		reqInOut.Labels[constants.CubeAnnotationAppSnapshotTemplateID] = reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 	}
+	sandbox.CopyTemplateRestartFields(templateReq, reqInOut)
 	if log.IsDebug() {
 		log.G(ctx).Debugf("dealCubeboxCreateReqWithTemplateCenter success:%s", utils.InterfaceToString(reqInOut))
 	} else {

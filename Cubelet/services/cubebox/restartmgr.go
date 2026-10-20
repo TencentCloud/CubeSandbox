@@ -21,7 +21,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -31,13 +30,19 @@ import (
 type restartMgr struct {
 	store     cubes.CubeboxAPI
 	restarter interface {
-		Restart(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error)
+		restartClassified(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, restartClass, error)
 	}
 
-	mu       sync.Mutex
-	runs     map[string]*restartRun
-	httpC    *http.Client
-	reporter *statusReporter
+	mu        sync.Mutex
+	runs      map[string]*restartRun
+	abandoned map[string]struct{}
+	httpC     *http.Client
+	reporter  *statusReporter
+}
+
+type queuedExit struct {
+	code   int32
+	reason restartpolicy.Reason
 }
 
 type restartRun struct {
@@ -46,20 +51,30 @@ type restartRun struct {
 	backoff    restartpolicy.Backoff
 	restarting bool
 	suspended  bool
+	pending    bool
+	queued     *queuedExit
+	// suppressArmed ignores TaskExits produced by this restart's own destroy.
+	// It stays set until the cold start is accepted and probes start.
+	suppressArmed bool
+	// suppressPID is the main-container pid snapshotted before destroy.
+	// Zero means the shim was already gone.
+	suppressPID uint32
 }
 
 func newRestartMgr(store cubes.CubeboxAPI) *restartMgr {
 	return &restartMgr{
-		store: store,
-		runs:  map[string]*restartRun{},
-		httpC: newEnvdHTTPClient(),
+		store:     store,
+		runs:      map[string]*restartRun{},
+		abandoned: map[string]struct{}{},
+		httpC:     newEnvdHTTPClient(),
 	}
 }
 
-func (m *restartMgr) bind(r interface {
-	Restart(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error)
-}) {
-	m.restarter = r
+func (m *restartMgr) bind(s *service) {
+	if m == nil {
+		return
+	}
+	m.restarter = s
 }
 
 func restartDisabled() bool {
@@ -83,11 +98,105 @@ func (m *restartMgr) Start(sandboxID string, req *cubebox.RunCubeSandboxRequest)
 	}
 	stored.Annotations[constants.MasterAnnotationDesiredSandboxID] = sandboxID
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.startLocked(sandboxID, stored)
+	m.mu.Unlock()
+	m.observe(sandboxID)
+}
+
+// armCreate registers a run before engine.Create so an exit in that window
+// is queued. It does not start probes.
+func (m *restartMgr) armCreate(sandboxID string, req *cubebox.RunCubeSandboxRequest) {
+	if m == nil || restartDisabled() || sandboxID == "" || req == nil {
+		return
+	}
+	if !restartpolicy.KeepsRequest(req.GetRestartPolicy()) {
+		return
+	}
+	stored := proto.Clone(req).(*cubebox.RunCubeSandboxRequest)
+	if stored.Annotations == nil {
+		stored.Annotations = map[string]string{}
+	}
+	stored.Annotations[constants.MasterAnnotationDesiredSandboxID] = sandboxID
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.abandoned, sandboxID)
+	if prev := m.runs[sandboxID]; prev != nil && prev.cancel != nil {
+		prev.cancel()
+	}
+	_, cancel := context.WithCancel(context.Background())
+	m.runs[sandboxID] = &restartRun{
+		cancel:  cancel,
+		req:     stored,
+		backoff: restartpolicy.FromProto(stored.GetRestartBackoff()),
+		pending: true,
+	}
+}
+
+// abandonCreate drops a create that failed and remembers the id so a late
+// TaskExit is not recorded as a terminal restart state.
+func (m *restartMgr) abandonCreate(sandboxID string) {
+	if m == nil || sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if run := m.runs[sandboxID]; run != nil && run.cancel != nil {
+		run.cancel()
+	}
+	delete(m.runs, sandboxID)
+	if m.abandoned == nil {
+		m.abandoned = map[string]struct{}{}
+	}
+	m.abandoned[sandboxID] = struct{}{}
+}
+
+// finishCreate starts probes, or the restart loop when an exit was queued
+// during create. A failed create is abandoned.
+func (m *restartMgr) finishCreate(sandboxID string, ok bool) {
+	if m == nil || sandboxID == "" {
+		return
+	}
+	if !ok {
+		m.abandonCreate(sandboxID)
+		return
+	}
+	m.mu.Lock()
+	run := m.runs[sandboxID]
+	delete(m.abandoned, sandboxID)
+	if run == nil || run.req == nil {
+		m.mu.Unlock()
+		return
+	}
+	queued := run.queued
+	run.queued = nil
+	policy := run.req.GetRestartPolicy()
+	if queued != nil && !restartpolicy.ShouldRestart(policy, queued.reason) {
+		m.mu.Unlock()
+		m.noteTerminal(sandboxID, queued.code, queued.reason)
+		m.Stop(sandboxID)
+		return
+	}
+	if queued != nil {
+		if run.cancel != nil {
+			run.cancel()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		run.cancel = cancel
+		run.pending = false
+		run.restarting = true
+		req := run.req
+		backoff := run.backoff
+		m.mu.Unlock()
+		go m.restartLoop(ctx, sandboxID, req, backoff, queued.code, queued.reason)
+		return
+	}
+	req := run.req
+	m.mu.Unlock()
+	m.Start(sandboxID, req)
 }
 
 func (m *restartMgr) startLocked(sandboxID string, req *cubebox.RunCubeSandboxRequest) {
+	delete(m.abandoned, sandboxID)
 	if prev := m.runs[sandboxID]; prev != nil && prev.cancel != nil {
 		prev.cancel()
 	}
@@ -158,20 +267,96 @@ func (m *restartMgr) Resume(sandboxID string) {
 	m.startLocked(sandboxID, run.req)
 }
 
+// noteDestroyPID marks exits from this restart's own destroy so they are not
+// treated as a new guest failure. pid is the main container pid before
+// destroy; zero means the shim was already gone. The queue is cleared
+// because the loop already holds the exit that started this attempt.
+func (m *restartMgr) noteDestroyPID(sandboxID string, pid uint32) {
+	if m == nil || sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run := m.runs[sandboxID]
+	if run == nil {
+		return
+	}
+	run.suppressArmed = true
+	run.suppressPID = pid
+	run.queued = nil
+}
+
+// clearDestroySuppress stops ignoring destroy exits. Call it only after the
+// cold start is the one the loop will keep.
+func (m *restartMgr) clearDestroySuppress(sandboxID string) {
+	if m == nil || sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run := m.runs[sandboxID]
+	if run == nil {
+		return
+	}
+	run.suppressArmed = false
+	run.suppressPID = 0
+}
+
+// swallowRestartDestroyExit reports that this TaskExit was produced by the
+// in-flight restart destroy. eventPID is the containerd pid. currentPID is
+// the main container pid the caller already read under the CubeBox lock.
+// pid 0 stays suppressed until clearDestroySuppress: Destroy holds that lock,
+// so the event is handled only after Destroy returns.
+func (m *restartMgr) swallowRestartDestroyExit(sandboxID string, eventPID, currentPID uint32) bool {
+	if m == nil || sandboxID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run := m.runs[sandboxID]
+	if run == nil || !run.suppressArmed {
+		return false
+	}
+	if eventPID == 0 {
+		return true
+	}
+	if run.suppressPID != 0 && eventPID == run.suppressPID {
+		return true
+	}
+	// The snapshot was taken after the shim was already gone. Any exit
+	// observed while the stored pid is still 0 belongs to that teardown.
+	// Once Create publishes a new pid, only pid 0 remains suppressed.
+	if run.suppressPID == 0 && currentPID == 0 {
+		return true
+	}
+	return false
+}
+
 // OnExit is the only entry for "the sandbox is unhealthy".
 func (m *restartMgr) OnExit(sandboxID string, exitCode int32, reason restartpolicy.Reason) {
 	if m == nil || restartDisabled() || sandboxID == "" {
 		return
 	}
 	m.mu.Lock()
+	_, abandoned := m.abandoned[sandboxID]
 	run := m.runs[sandboxID]
+	if run != nil && (run.pending || run.restarting) && !run.suspended {
+		run.queued = &queuedExit{code: exitCode, reason: reason}
+		m.mu.Unlock()
+		return
+	}
+	if abandoned && run == nil {
+		m.mu.Unlock()
+		return
+	}
 	if run == nil || run.restarting || run.suspended {
 		m.mu.Unlock()
 		// No run means this sandbox is not inside a restart. Record the exit
 		// so a Never sandbox (and any other sandbox without a loop) becomes
 		// Succeeded or Failed instead of looking like it is still Running.
 		// A loop that is already restarting or suspended owns the sandbox.
-		if run == nil {
+		// An abandoned create keeps the late exit from becoming that record.
+		if run == nil && !abandoned {
 			m.noteTerminal(sandboxID, exitCode, reason)
 		}
 		return
@@ -295,24 +480,118 @@ func (m *restartMgr) restartLoop(ctx context.Context, sandboxID string, req *cub
 			return
 		}
 		m.setState(sandboxID, restartpolicy.StateRestarting, 0)
-		rsp, err := m.restarter.Restart(ctx, req)
-		if err != nil || rsp == nil || rsp.GetRet().GetRetCode() != errorcode.ErrorCode_Success {
+		if m.restarter == nil {
+			log.G(ctx).Errorf("restart: sandbox %s has no restarter", sandboxID)
+			return
+		}
+		rsp, class, err := m.restarter.restartClassified(ctx, req)
+		if err != nil {
+			m.dropQueued(sandboxID)
+			log.G(ctx).Errorf("restart: sandbox %s failed: %v", sandboxID, err)
+			continue
+		}
+		switch class {
+		case restartStop:
+			return
+		case restartLockBusy:
+			m.dropQueued(sandboxID)
+			continue
+		case restartDestroyUnrecoverable:
+			m.dropQueued(sandboxID)
+			m.setState(sandboxID, restartpolicy.StateGaveUp, 0)
+			m.Stop(sandboxID)
+			return
+		case restartDestroyRetryable:
+			m.dropQueued(sandboxID)
+			if m.addDestroyFail(sandboxID) >= maxRetainedDestroyAttempts {
+				m.setState(sandboxID, restartpolicy.StateGaveUp, 0)
+				m.Stop(sandboxID)
+				return
+			}
 			msg := ""
-			if err != nil {
-				msg = err.Error()
-			} else if rsp != nil && rsp.GetRet() != nil {
+			if rsp != nil && rsp.GetRet() != nil {
+				msg = rsp.GetRet().GetRetMsg()
+			}
+			log.G(ctx).Errorf("restart: sandbox %s destroy failed: %s", sandboxID, msg)
+			continue
+		case restartOK:
+			if q := m.takeQueued(sandboxID); q != nil {
+				if !restartpolicy.ShouldRestart(req.GetRestartPolicy(), q.reason) {
+					m.clearDestroySuppress(sandboxID)
+					m.writeTerminal(sandboxID, q.code, q.reason, true)
+					m.Stop(sandboxID)
+					return
+				}
+				exitCode, reason = q.code, q.reason
+				m.noteExit(sandboxID, exitCode, reason)
+				continue
+			}
+			m.clearDestroySuppress(sandboxID)
+			m.setState(sandboxID, restartpolicy.StateRunning, 0)
+			m.Start(sandboxID, req)
+			return
+		default:
+			m.dropQueued(sandboxID)
+			msg := ""
+			if rsp != nil && rsp.GetRet() != nil {
 				msg = rsp.GetRet().GetRetMsg()
 			}
 			log.G(ctx).Errorf("restart: sandbox %s failed: %s", sandboxID, msg)
 			continue
 		}
-		m.setState(sandboxID, restartpolicy.StateRunning, 0)
-		m.Start(sandboxID, req)
+	}
+}
+
+func (m *restartMgr) addDestroyFail(sandboxID string) int32 {
+	if m == nil || m.store == nil {
+		return maxRetainedDestroyAttempts
+	}
+	cb, err := m.store.Get(context.Background(), sandboxID)
+	if err != nil || cb == nil {
+		return maxRetainedDestroyAttempts
+	}
+	cb.Lock()
+	cb.DestroyFailCount++
+	n := cb.DestroyFailCount
+	err = m.store.Save(context.Background(), cb)
+	cb.Unlock()
+	if err != nil {
+		log.G(context.Background()).Warnf("restart: save destroy failures for %s: %v", sandboxID, err)
+	}
+	return n
+}
+
+func (m *restartMgr) takeQueued(sandboxID string) *queuedExit {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run := m.runs[sandboxID]
+	if run == nil || run.queued == nil {
+		return nil
+	}
+	q := run.queued
+	run.queued = nil
+	return q
+}
+
+func (m *restartMgr) dropQueued(sandboxID string) {
+	if m == nil {
 		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if run := m.runs[sandboxID]; run != nil {
+		run.queued = nil
 	}
 }
 
 func (m *restartMgr) noteTerminal(sandboxID string, exitCode int32, reason restartpolicy.Reason) {
+	m.writeTerminal(sandboxID, exitCode, reason, false)
+}
+
+func (m *restartMgr) writeTerminal(sandboxID string, exitCode int32, reason restartpolicy.Reason, force bool) {
 	if m == nil || m.store == nil || sandboxID == "" {
 		return
 	}
@@ -320,9 +599,11 @@ func (m *restartMgr) noteTerminal(sandboxID string, exitCode int32, reason resta
 	if err != nil || cb == nil || cb.IsPaused() || cb.UserMarkDeletedTime != nil {
 		return
 	}
-	switch cb.RestartState {
-	case restartpolicy.StateRestarting, restartpolicy.StateBackOff, restartpolicy.StateGaveUp:
-		return
+	if !force {
+		switch cb.RestartState {
+		case restartpolicy.StateRestarting, restartpolicy.StateBackOff, restartpolicy.StateGaveUp:
+			return
+		}
 	}
 	state := restartpolicy.StateFailed
 	if reason == restartpolicy.ReasonCompleted {

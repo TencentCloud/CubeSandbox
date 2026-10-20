@@ -566,9 +566,6 @@ type CubeletConf struct {
 	DestroyConcurentLimit int64                `yaml:"destroy_concurent_limit"`
 	ExposedPortList       []string             `yaml:"exposed_port_list"`
 	EnableExposedPort     bool                 `yaml:"enable_exposed_port"`
-	// EnableRestartPolicy forwards restart_policy to Cubelet. Leave false
-	// until every node runs a Cubelet that understands the fields.
-	EnableRestartPolicy bool `yaml:"enable_restart_policy"`
 	// MaxRestartsCap clamps restart_backoff.max_restarts. 0 means no cap.
 	MaxRestartsCap        int32         `yaml:"max_restarts_cap"`
 	DisableRedisProxyPort bool          `yaml:"disable_redis_proxy_port"`

@@ -533,9 +533,9 @@ Capability markers:
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that
   do not support host-directory mounts.
 - `volume_plugin` is available only to CubeSandbox Volume Plugin cases.
-- `restart_policy` is available only to CubeSandbox. The cluster needs
-  CubeMaster `enable_restart_policy`, a template that exposes envd on port
-  49983, and root sysrq in the guest. Run with `pytest --run-e2e -m restart_policy`.
+- `restart_policy` is available only to CubeSandbox. The cluster needs a
+  template that exposes envd on port 49983 and root sysrq in the guest.
+  Run with `pytest --run-e2e -m restart_policy`.
 
 ## Cleanup
 

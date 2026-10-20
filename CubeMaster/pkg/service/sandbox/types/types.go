@@ -72,7 +72,6 @@ type CreateCubeSandboxReq struct {
 	Backend string `json:"backend,omitempty"`
 
 	// RestartPolicy is Never, OnFailure or Always. Empty means Never.
-	// Forwarded to Cubelet only when CubeletConf.EnableRestartPolicy is set.
 	RestartPolicy  string                          `json:"restart_policy,omitempty"`
 	RestartBackoff *cubeboxv1.RestartBackoffConfig `json:"restart_backoff,omitempty"`
 	// LivenessProbe is applied to the first container when that container

@@ -11,11 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart"
 )
 
 func ensureSandboxTestConfig(t *testing.T) *config.Config {
@@ -461,6 +463,206 @@ func TestValidateRestartLiveness(t *testing.T) {
 			if err := ValidateRestartLiveness(tc.req); err != nil {
 				t.Fatalf("expected acceptance, got %v", err)
 			}
+		})
+	}
+}
+
+func restartTestProbe() *cubebox.LivenessProbe {
+	return &cubebox.LivenessProbe{
+		ProbeHandler: &cubebox.ProbeHandler{
+			HttpGet: &cubebox.HTTPGetAction{Port: 49983},
+		},
+	}
+}
+
+func TestApplyRestartPolicyForwardsRestartFields(t *testing.T) {
+	topProbe := restartTestProbe()
+	containerProbe := restartTestProbe()
+	backoff := &cubebox.RestartBackoffConfig{InitialIntervalSecond: 5, MaxRestarts: 3}
+
+	cases := []struct {
+		name               string
+		req                *types.CreateCubeSandboxReq
+		wantPolicy         string
+		wantBackoff        *cubebox.RestartBackoffConfig
+		wantTopProbe       bool
+		wantContainerProbe bool
+	}{
+		{
+			name: "policy, backoff and top-level probe",
+			req: &types.CreateCubeSandboxReq{
+				RestartPolicy:  "OnFailure",
+				RestartBackoff: backoff,
+				LivenessProbe:  topProbe,
+				Containers:     []*types.Container{{Name: "ctr-0"}},
+			},
+			wantPolicy:   sandboxrestart.WireOnFailure,
+			wantBackoff:  backoff,
+			wantTopProbe: true,
+		},
+		{
+			name: "container probe and on-wire policy",
+			req: &types.CreateCubeSandboxReq{
+				RestartPolicy: "RESTART_POLICY_ALWAYS",
+				Containers:    []*types.Container{{Name: "ctr-0", LivenessProbe: containerProbe}},
+			},
+			wantPolicy:         sandboxrestart.WireAlways,
+			wantContainerProbe: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &cubebox.RunCubeSandboxRequest{
+				Containers: []*cubebox.ContainerConfig{{Name: "ctr-0"}},
+			}
+			if err := applyRestartPolicy(tc.req, out); err != nil {
+				t.Fatalf("applyRestartPolicy: %v", err)
+			}
+			assert.Equal(t, tc.wantPolicy, out.RestartPolicy)
+			if tc.wantBackoff == nil {
+				assert.Nil(t, out.RestartBackoff)
+			} else {
+				assert.Same(t, tc.wantBackoff, out.RestartBackoff)
+			}
+			if tc.wantTopProbe {
+				assert.Same(t, topProbe, out.Containers[0].LivenessProbe)
+			}
+			if tc.wantContainerProbe {
+				assert.Same(t, containerProbe, out.Containers[0].LivenessProbe)
+			}
+		})
+	}
+}
+
+func TestApplyRestartPolicyNoopWithoutRestartFields(t *testing.T) {
+	out := &cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{{Name: "ctr-0"}},
+	}
+	if err := applyRestartPolicy(&types.CreateCubeSandboxReq{}, out); err != nil {
+		t.Fatalf("applyRestartPolicy: %v", err)
+	}
+	assert.Empty(t, out.RestartPolicy)
+	assert.Nil(t, out.RestartBackoff)
+	assert.Nil(t, out.Containers[0].LivenessProbe)
+}
+
+func TestApplyRestartPolicyRejectsInvalidPolicy(t *testing.T) {
+	err := applyRestartPolicy(
+		&types.CreateCubeSandboxReq{RestartPolicy: "Sometimes"},
+		&cubebox.RunCubeSandboxRequest{},
+	)
+	if err == nil {
+		t.Fatal("expected an invalid policy error")
+	}
+	assert.Contains(t, err.Error(), "invalid restart policy")
+}
+
+func TestApplyRestartPolicyClampsMaxRestarts(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(config.GetConfig, func() *config.Config {
+		return &config.Config{CubeletConf: &config.CubeletConf{MaxRestartsCap: 7}}
+	})
+
+	cases := []struct {
+		name string
+		in   int32
+		want int32
+	}{
+		{name: "unlimited is tightened to the cap", in: 0, want: 7},
+		{name: "above the cap is tightened", in: 10, want: 7},
+		{name: "below the cap is kept", in: 3, want: 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &cubebox.RunCubeSandboxRequest{}
+			req := &types.CreateCubeSandboxReq{
+				RestartPolicy:  "OnFailure",
+				RestartBackoff: &cubebox.RestartBackoffConfig{MaxRestarts: tc.in},
+			}
+			if err := applyRestartPolicy(req, out); err != nil {
+				t.Fatalf("applyRestartPolicy: %v", err)
+			}
+			if out.RestartBackoff == nil {
+				t.Fatal("expected restart backoff to be forwarded")
+			}
+			assert.Equal(t, tc.want, out.RestartBackoff.GetMaxRestarts())
+		})
+	}
+}
+
+func TestCopyTemplateRestartFields(t *testing.T) {
+	templateProbe := restartTestProbe()
+	templateBackoff := &cubebox.RestartBackoffConfig{MaxRestarts: 2}
+	templateReq := &types.CreateCubeSandboxReq{
+		RestartPolicy:  "OnFailure",
+		RestartBackoff: templateBackoff,
+		LivenessProbe:  templateProbe,
+	}
+
+	req := &types.CreateCubeSandboxReq{}
+	CopyTemplateRestartFields(templateReq, req)
+	assert.Equal(t, "OnFailure", req.RestartPolicy)
+	assert.Same(t, templateBackoff, req.RestartBackoff)
+	assert.Same(t, templateProbe, req.LivenessProbe)
+
+	callerProbe := restartTestProbe()
+	callerBackoff := &cubebox.RestartBackoffConfig{MaxRestarts: 9}
+	callerReq := &types.CreateCubeSandboxReq{
+		RestartPolicy:  "Never",
+		RestartBackoff: callerBackoff,
+		LivenessProbe:  callerProbe,
+	}
+	CopyTemplateRestartFields(templateReq, callerReq)
+	assert.Equal(t, "Never", callerReq.RestartPolicy)
+	assert.Same(t, callerBackoff, callerReq.RestartBackoff)
+	assert.Same(t, callerProbe, callerReq.LivenessProbe)
+
+	CopyTemplateRestartFields(nil, req)
+	CopyTemplateRestartFields(templateReq, nil)
+}
+
+func TestTemplateRestartFieldsMergeThenValidate(t *testing.T) {
+	probe := restartTestProbe()
+	cases := []struct {
+		name     string
+		template *types.CreateCubeSandboxReq
+		caller   *types.CreateCubeSandboxReq
+		wantErr  bool
+	}{
+		{
+			name:     "template policy and probe satisfy the rule",
+			template: &types.CreateCubeSandboxReq{RestartPolicy: "OnFailure", LivenessProbe: probe},
+			caller:   &types.CreateCubeSandboxReq{},
+		},
+		{
+			name:     "template probe without a policy stays Never",
+			template: &types.CreateCubeSandboxReq{LivenessProbe: probe},
+			caller:   &types.CreateCubeSandboxReq{},
+			wantErr:  true,
+		},
+		{
+			name:     "caller Never wins and conflicts with the template probe",
+			template: &types.CreateCubeSandboxReq{RestartPolicy: "OnFailure", LivenessProbe: probe},
+			caller:   &types.CreateCubeSandboxReq{RestartPolicy: "Never"},
+			wantErr:  true,
+		},
+		{
+			name:     "caller OnFailure accepts the template probe",
+			template: &types.CreateCubeSandboxReq{LivenessProbe: probe},
+			caller:   &types.CreateCubeSandboxReq{RestartPolicy: "OnFailure"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			CopyTemplateRestartFields(tc.template, tc.caller)
+			err := ValidateRestartLiveness(tc.caller)
+			if tc.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "liveness_probe requires restart policy")
+				return
+			}
+			assert.NoError(t, err)
 		})
 	}
 }

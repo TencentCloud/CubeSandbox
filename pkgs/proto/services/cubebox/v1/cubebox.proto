@@ -307,7 +307,9 @@ message RestartStats {
   int64 last_successful_restart_at = 2;
   int64 last_failed_restart_at = 3;
   int64 last_restart_at = 4;
-  // Running, Restarting, BackOff, GaveUp. Empty when no policy is set.
+  // Running, Restarting, BackOff, GaveUp, Succeeded, Failed.
+  // Succeeded and Failed are terminal restart states. Empty until a non-Never
+  // policy is set or the sandbox has exited.
   string restart_state = 5;
   int32 last_exit_code = 6;
   string last_exit_reason = 7;

@@ -68,6 +68,9 @@ type Metadata struct {
 	NextRestartAt           int64  `json:"next_restart_at,omitempty"`
 	// StatusSeq is the monotonic counter reported to CubeMaster.
 	StatusSeq int64 `json:"status_seq,omitempty"`
+	// DestroyFailCount counts restart destroys that did not finish.
+	// It is not the user-visible restart count.
+	DestroyFailCount int32 `json:"destroy_fail_count,omitempty"`
 
 	MetaLock sync.Mutex `json:"-"`
 }

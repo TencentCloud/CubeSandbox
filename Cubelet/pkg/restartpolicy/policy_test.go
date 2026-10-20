@@ -84,6 +84,27 @@ func TestResetCount(t *testing.T) {
 	}
 }
 
+func TestFromProtoZeroUsesDefaults(t *testing.T) {
+	got := FromProto(&cubebox.RestartBackoffConfig{MaxRestarts: 4})
+	def := DefaultBackoff()
+	if got.Multiplier != def.Multiplier || got.Jitter != def.Jitter || got.StableDuration != def.StableDuration {
+		t.Fatalf("zero fields changed defaults: %+v", got)
+	}
+	if got.MaxRestarts != 4 {
+		t.Fatalf("max restarts %d", got.MaxRestarts)
+	}
+}
+
+func TestValidateEmptyProbeHandler(t *testing.T) {
+	req := &cubebox.RunCubeSandboxRequest{
+		RestartPolicy: OnFailure,
+		Containers:    []*cubebox.ContainerConfig{{LivenessProbe: &cubebox.LivenessProbe{}}},
+	}
+	if err := Validate(req); err == nil {
+		t.Fatal("empty probe handler")
+	}
+}
+
 func TestValidateNeverWithProbe(t *testing.T) {
 	req := &cubebox.RunCubeSandboxRequest{
 		RestartPolicy: Never,

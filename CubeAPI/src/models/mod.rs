@@ -543,6 +543,7 @@ pub struct RestartBackoff {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_interval_second: Option<i32>,
+    /// 0 or omitted uses the node default (2). It does not select a constant interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multiplier: Option<f64>,
     /// 0 means unlimited.
@@ -553,6 +554,7 @@ pub struct RestartBackoff {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_restarts: Option<i32>,
+    /// 0 or omitted uses the node default (0.1). It does not turn jitter off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<f64>,
     #[serde(
@@ -564,7 +566,7 @@ pub struct RestartBackoff {
     pub stable_duration_second: Option<i32>,
 }
 
-/// One health check. Exactly one of tcp, http or ping.
+/// One health check. Exactly one of tcp or http.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct LivenessProbe {
     #[serde(
