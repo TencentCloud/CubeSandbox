@@ -163,12 +163,23 @@ compute nodes and plan data preservation before the upgrade, including logs,
 - With loopback XFS enabled, `bootstrap.nodeInit.dataCubelet.loopback.imagePath`
   independently selects the backing image. Put it on the intended host filesystem;
   changing `hostPaths.dataCubelet` does not move the image.
-- Storage paths are not part of the node-prep fingerprint. After changing storage
-  or loopback settings on already-prepared nodes, change
-  `cubeNodeBootstrap.prepGeneration` to a new value so bootstrap reruns directory
-  preparation and XFS checks. Otherwise a matching `node-prep-ready` marker skips
-  node-init. Verify bootstrap completion and the target XFS mount before resuming
-  workloads; a generation change does not copy data to the new paths.
+- The seven storage paths (`dataCubelet`, `dataLog`, `dataCubeShim`,
+  `dataSnapshotPack`, `dataCubeShared`, `dataShared`, `tmpCube`) and
+  `bootstrap.nodeInit.dataCubelet.loopback.imagePath` are included in the
+  version-2 node-prep fingerprint. Changes invalidate readiness and rerun enabled
+  node-init directory preparation and XFS checks. The Big Pod waits for a marker
+  matching its storage paths; unrelated PVM/kernel policy remains host-derived.
+  For other preparation settings, including loopback size/enabled changes, still
+  change `cubeNodeBootstrap.prepGeneration` to a new value.
+- Upgrade `images.nodeInit` and `images.waitNodePrep` together to builds containing
+  this fingerprint format (the latter contains both the writer and waiter).
+  Bootstrap invalidates legacy version-1 node-prep markers, reruns enabled
+  preparation, and writes version 2; the new waiter rejects the old marker while
+  this happens. The separate PVM host marker remains version 1 and does not block
+  this migration. This one-time re-preparation also applies to default paths.
+  Verify bootstrap completion and the target XFS mount before resuming workloads.
+  If node-init is disabled, storage must already be prepared externally. Neither
+  a path change nor a generation change copies data to the new paths.
 
 For an existing custom `hostPaths.dataShared`, the host directory is now exposed
 inside the Big Pod at `/data/shared`. For example, host `/mnt/shared/project`

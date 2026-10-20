@@ -176,8 +176,11 @@ image file's location on the host.
 
 `runContainerd` and `runVc` are independent host paths; set them explicitly when
 relocating the Cubelet tree. On an existing cluster, storage changes require a
-planned maintenance window and a new `cubeNodeBootstrap.prepGeneration` to rerun
-node preparation. Changing paths does not migrate existing data. See the
+planned maintenance window. The seven storage paths and `loopback.imagePath`
+are part of the node-prep fingerprint, so changing them automatically reruns
+enabled node preparation; old markers without storage fields are replaced after
+preparation. Other preparation settings still require a new
+`cubeNodeBootstrap.prepGeneration`. Changing paths does not migrate existing data. See the
 [storage upgrade notes](../../../docs/guide/kubernetes/upgrade.md#changing-host-storage-paths),
 including the `/data/shared/` path required by Host Mount requests.
 

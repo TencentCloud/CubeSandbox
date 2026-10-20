@@ -1151,6 +1151,30 @@ Kubernetes API path prefix for the cube-node DaemonSet (health-test).
 {{- end -}}
 
 {{/*
+Host storage expectations shared by node-init, the ready writer, invalidator and
+Big Pod waiter. Do not add PVM/kernel/prepGeneration policy here: those settings
+must remain outside the Big Pod template.
+*/}}
+{{- define "cube.nodePrepStorageEnv" -}}
+- name: DATA_CUBELET
+  value: {{ .Values.hostPaths.dataCubelet | quote }}
+- name: DATA_LOG
+  value: {{ .Values.hostPaths.dataLog | quote }}
+- name: DATA_CUBE_SHIM
+  value: {{ .Values.hostPaths.dataCubeShim | quote }}
+- name: DATA_SNAPSHOT_PACK
+  value: {{ .Values.hostPaths.dataSnapshotPack | quote }}
+- name: DATA_CUBE_SHARED
+  value: {{ .Values.hostPaths.dataCubeShared | quote }}
+- name: DATA_SHARED
+  value: {{ .Values.hostPaths.dataShared | quote }}
+- name: TMP_CUBE
+  value: {{ .Values.hostPaths.tmpCube | quote }}
+- name: LOOPBACK_IMAGE_PATH
+  value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.imagePath | quote }}
+{{- end -}}
+
+{{/*
 Big Pod: shared runtime volumeMounts.
 Runtime paths stay fixed; hostPaths only selects the backing host directories.
 */}}

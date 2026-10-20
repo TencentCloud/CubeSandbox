@@ -157,11 +157,20 @@ Chart 的 `hostPaths` 存储配置选择宿主机目录；运行时容器仍使�
 - 启用 loopback XFS 时，`bootstrap.nodeInit.dataCubelet.loopback.imagePath`
   独立决定镜像文件的位置。应将其放在预期的宿主机文件系统上；修改
   `hostPaths.dataCubelet` 不会移动该镜像。
-- 存储路径不包含在 node-prep 指纹中。在已准备好的节点上修改存储或 loopback
-  配置后，应将 `cubeNodeBootstrap.prepGeneration` 改为一个新值，让 bootstrap
-  重新创建目录并检查 XFS。否则，匹配的 `node-prep-ready` 标记会让 node-init
-  跳过执行。恢复工作负载前，应确认 bootstrap 完成且目标 XFS 已挂载；修改
-  generation 不会将数据复制到新路径。
+- 七个存储路径（`dataCubelet`、`dataLog`、`dataCubeShim`、`dataSnapshotPack`、
+  `dataCubeShared`、`dataShared`、`tmpCube`）以及
+  `bootstrap.nodeInit.dataCubelet.loopback.imagePath` 已包含在 version-2 node-prep
+  指纹中。修改它们会使就绪标记失效，并重新运行已启用的 node-init 目录准备和
+  XFS 检查。Big Pod 会等待与自身存储路径匹配的标记；无关的 PVM/内核策略仍从
+  宿主机标记读取。其他准备配置（包括 loopback 大小或启用状态）发生变化时，
+  仍需将 `cubeNodeBootstrap.prepGeneration` 改为新值。
+- 应同时将 `images.nodeInit` 和 `images.waitNodePrep` 升级到包含此指纹格式的
+  构建（后者包含标记写入器和等待器）。Bootstrap 会使旧 version-1 node-prep
+  标记失效，重新运行已启用的准备步骤并写入 version 2；新等待器在此期间拒绝
+  旧标记。独立的 PVM host 标记仍为 version 1，不会阻塞此迁移。默认路径也会
+  执行这次准备。恢复工作负载前，应确认 bootstrap 完成且目标 XFS 已挂载。
+  如果禁用了 node-init，则必须事先在外部完成存储准备。修改路径或 generation
+  都不会将数据复制到新路径。
 
 已有的自定义 `hostPaths.dataShared` 现在会在 Big Pod 内暴露为 `/data/shared`。
 例如，配置 `hostPaths.dataShared: /mnt/shared` 时，宿主机上的 `/mnt/shared/project`

@@ -43,6 +43,7 @@ spec:
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
           env:
+            {{- include "cube.nodePrepStorageEnv" . | nindent 12 }}
             - name: STATE_DIR
               value: {{ .Values.hostPaths.bootstrapState | quote }}
           volumeMounts:
