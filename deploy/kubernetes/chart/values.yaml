@@ -1225,10 +1225,16 @@ cubeS3lvol:
     # Default: true only when filling from chart MinIO; external path-style
     # endpoints must set pathStyle: true.
     # pathStyle: true
+  # Probes look up this node's lvstore by name (rcow_get_lvol) and pass only
+  # once it is attached. They avoid rcow_get_lvstores, which walks every lvol
+  # on the single RPC thread. No livenessProbe: a restart runs rcow_stop, which
+  # disconnects every NVMe namespace; the entrypoint already exits when the
+  # target dies.
   probes:
+    # s3lvol_rpc.py --timeout; each kubelet timeoutSeconds must exceed it.
+    rpcTimeoutSeconds: 5
     startup:
       enabled: true
-      # Probe RPC uses --timeout 5; kubelet default timeoutSeconds is 1.
       timeoutSeconds: 8
       periodSeconds: 10
       failureThreshold: 30
@@ -1236,8 +1242,8 @@ cubeS3lvol:
       enabled: true
       timeoutSeconds: 8
       initialDelaySeconds: 5
-      periodSeconds: 10
-      failureThreshold: 12
+      periodSeconds: 30
+      failureThreshold: 4
   resources:
     requests:
       cpu: "2"

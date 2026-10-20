@@ -389,6 +389,13 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "minio.rootPassword must be at least 8 characters when set (leave empty to generate one)" }}
 {{- end }}
 {{- if eq (include "cube.s3lvolEnabled" .) "true" }}
+{{- $s3lvolRPCTimeout := int (((.Values.cubeS3lvol).probes).rpcTimeoutSeconds | default 5) }}
+{{- range $name := list "startup" "readiness" }}
+{{- $probe := index (default dict ($.Values.cubeS3lvol).probes) $name | default dict }}
+{{- if and $probe.enabled (le (int $probe.timeoutSeconds) $s3lvolRPCTimeout) }}
+{{- fail (printf "cubeS3lvol.probes.%s.timeoutSeconds must exceed cubeS3lvol.probes.rpcTimeoutSeconds (%d)" $name $s3lvolRPCTimeout) }}
+{{- end }}
+{{- end }}
 {{- if not ((.Values.images.cubeS3lvol).repository) }}
 {{- fail "cubeS3lvol.enabled=true requires images.cubeS3lvol.repository" }}
 {{- end }}

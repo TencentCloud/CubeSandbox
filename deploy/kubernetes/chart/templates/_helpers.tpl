@@ -1484,8 +1484,34 @@ false
 {{- end -}}
 {{- end -}}
 
+{{/*
+cube.s3lvolProbeCommand passes only once this node's lvstore is attached, using
+one by-name lookup. It must not call rcow_get_lvstores: that handler walks every
+lvol, snapshot and clone synchronously on the single RPC thread, so each probe
+stalls cubelet's concurrent s3lvol RPCs, and it answers [] before the lvstore
+is attached. rcow_get_lvol is SPDK_RPC_RUNTIME (fails before framework init)
+and rpc_lookup_lvol answers "lvstore '<lvs>' has no lvol '<name>'" only when
+the lvstore exists. The lvstore name mirrors cube-s3lvol-entrypoint.sh
+(s3lvol_derived_lvs_name) unless cubeS3lvol.lvsName pins it.
+*/}}
 {{- define "cube.s3lvolProbeCommand" -}}
-sock={{ include "cube.s3lvolSocketPath" . }}; test -S "${sock}" && python3 /opt/s3lvol/scripts/s3lvol_rpc.py --sock "${sock}" --timeout 5 rcow_get_lvstores >/dev/null
+sock={{ include "cube.s3lvolSocketPath" . | quote }}
+test -S "${sock}" || exit 1
+{{- if .Values.cubeS3lvol.lvsName }}
+lvs={{ .Values.cubeS3lvol.lvsName | quote }}
+{{- else }}
+[[ -n "${NODE_NAME:-}" ]] || exit 1
+lvs="rcow-$(printf '%s' "${NODE_NAME}" | sha256sum | cut -c1-8)"
+{{- end }}
+probe='__k8s_probe__'
+if out="$(python3 -I /opt/s3lvol/scripts/s3lvol_rpc.py --sock "${sock}" --timeout {{ .Values.cubeS3lvol.probes.rpcTimeoutSeconds | default 5 }} rcow_get_lvol "{\"lvs_name\":\"${lvs}\",\"lvol_name\":\"${probe}\"}" 2>&1)"; then
+  exit 0
+fi
+case "${out}" in
+  *"lvstore '${lvs}' has no lvol '${probe}'"*) exit 0 ;;
+esac
+printf 's3lvol not ready (lvstore %s): %s\n' "${lvs}" "${out}" >&2
+exit 1
 {{- end -}}
 
 {{/* Big Pod grace = max(cubeNode, cubeS3lvol) terminationGracePeriodSeconds. */}}
