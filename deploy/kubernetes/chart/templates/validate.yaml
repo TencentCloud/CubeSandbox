@@ -269,6 +269,9 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and (eq .Values.cubeProxy.tls.mode "certManager") (not .Values.cubeProxy.tls.certManager.issuerRef.name) }}
 {{- fail "cubeProxy.tls.mode=certManager requires cubeProxy.tls.certManager.issuerRef.name" }}
 {{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "selfSigned") (not (kindIs "bool" ((default dict .Values.cubeProxy.tls.selfSigned).rotateOnSanChange | default false))) }}
+{{- fail "cubeProxy.tls.selfSigned.rotateOnSanChange must be a boolean" }}
+{{- end }}
 {{- $clbSecurityGroups := index (default dict .Values.cubeProxy.service.annotations) "service.cloud.tencent.com/security-groups" | default "" -}}
 {{- if and (eq (.Values.cubeProxy.service.type | default "ClusterIP") "LoadBalancer") (hasPrefix "CHANGE_ME" $clbSecurityGroups) }}
 {{- fail "cubeProxy.service.annotations[\"service.cloud.tencent.com/security-groups\"] still equals the CHANGE_ME_* sentinel from values-tke.yaml. Override it with your VPC security group id(s) (comma-separated), or set it to \"\" if you manage CLB security groups outside Helm." }}
@@ -305,6 +308,9 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- end }}
 {{- if and .Values.cubeProxy.ingress.enabled (not .Values.cubeProxy.domain) (not .Values.cubeProxy.ingress.hosts) }}
 {{- fail "cubeProxy.ingress.enabled=true requires cubeProxy.domain or cubeProxy.ingress.hosts" }}
+{{- end }}
+{{- if and .Values.cubeProxy.domain (hasPrefix "*." .Values.cubeProxy.domain) }}
+{{- fail "cubeProxy.domain must be the base domain (for example sandbox.example.com), not a wildcard" }}
 {{- end }}
 {{- if ne (include "cube.lifecycleManagerEnabled" .) "true" }}
 {{- fail "cubeProxy.enabled=true requires lifecycleManager.enabled=true (cube-lifecycle-manager replaces the obsolete cube-proxy-sidecar)" }}

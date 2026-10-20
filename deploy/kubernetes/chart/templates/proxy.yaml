@@ -10,6 +10,10 @@
 {{- end -}}
 {{- $redisPort := default .Values.redis.port .Values.cubeProxy.redis.port -}}
 {{- $proxyCertSecretName := include "cube.proxyCertSecretName" . -}}
+{{- /* Self-signed cert rotation is opt-in: the default keeps reusing an
+     existing Secret across upgrades. */ -}}
+{{- $rotateOnSanChange := (default dict .Values.cubeProxy.tls.selfSigned).rotateOnSanChange | default false -}}
+{{- $certChecksum := "" -}}
 {{- if eq .Values.cubeProxy.tls.mode "inline" }}
 apiVersion: v1
 kind: Secret
@@ -27,12 +31,13 @@ stringData:
 ---
 {{- else if eq .Values.cubeProxy.tls.mode "selfSigned" }}
 {{- $commonName := default .Values.cubeProxy.domain .Values.cubeProxy.tls.selfSigned.commonName -}}
-{{- $dnsNames := list .Values.cubeProxy.domain -}}
-{{- /* Auto-generate wildcard for the custom domain */ -}}
-{{- if .Values.cubeProxy.domain }}
-{{- $wildcardDomain := printf "*.%s" .Values.cubeProxy.domain -}}
-{{- $dnsNames = append $dnsNames $wildcardDomain -}}
-{{- end }}
+{{- $dnsNames := list -}}
+{{- /* Auto-generate the base domain and its wildcard. The guard also avoids
+     an empty DNS SAN when cubeProxy.domain is unset. */ -}}
+{{- if .Values.cubeProxy.domain -}}
+{{- $dnsNames = append $dnsNames .Values.cubeProxy.domain -}}
+{{- $dnsNames = append $dnsNames (printf "*.%s" .Values.cubeProxy.domain) -}}
+{{- end -}}
 {{- range .Values.cubeProxy.tls.selfSigned.dnsNames }}
 {{- $dnsNames = append $dnsNames . -}}
 {{- end }}
@@ -41,11 +46,18 @@ stringData:
 {{- range .Values.cubeProxy.tls.selfSigned.ipAddresses }}
 {{- $ipAddresses = append $ipAddresses . -}}
 {{- end }}
+{{- $ipAddresses = uniq $ipAddresses -}}
+{{- $certSpec := printf "cn=%s|dns=%s|ip=%s|certDays=%d|caDays=%d" $commonName (join "," (sortAlpha $dnsNames)) (join "," (sortAlpha $ipAddresses)) (int .Values.cubeProxy.tls.selfSigned.certValidityDays) (int .Values.cubeProxy.tls.selfSigned.caValidityDays) -}}
+{{- $certSpecHash := $certSpec | sha256sum -}}
 {{- $certKey := .Values.cubeProxy.tls.certSecretKey -}}
 {{- $keyKey := .Values.cubeProxy.tls.keySecretKey -}}
 {{- $caKey := .Values.cubeProxy.tls.caSecretKey -}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace $proxyCertSecretName -}}
-{{- $hasExisting := and $existing (hasKey $existing.data $certKey) (hasKey $existing.data $keyKey) (hasKey $existing.data $caKey) -}}
+{{- $existingHash := "" -}}
+{{- if and $rotateOnSanChange $existing -}}
+{{- $existingHash = index ($existing.metadata.annotations | default dict) "cube.tencent.com/self-signed-cert-spec" | default "" -}}
+{{- end -}}
+{{- $hasExisting := and $existing (hasKey $existing.data $certKey) (hasKey $existing.data $keyKey) (hasKey $existing.data $caKey) (or (not $rotateOnSanChange) (eq $existingHash $certSpecHash)) -}}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -53,8 +65,13 @@ metadata:
   labels:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: cube-proxy
+  {{- if $rotateOnSanChange }}
+  annotations:
+    cube.tencent.com/self-signed-cert-spec: {{ $certSpecHash | quote }}
+  {{- end }}
 type: Opaque
 {{ if $hasExisting }}
+{{- $certChecksum = b64dec (index $existing.data $certKey) | trim | sha256sum -}}
 data:
   {{ $certKey | quote }}: {{ index $existing.data $certKey | quote }}
   {{ $keyKey | quote }}: {{ index $existing.data $keyKey | quote }}
@@ -62,6 +79,7 @@ data:
 {{- else }}
 {{- $ca := genCA (printf "%s-proxy-ca" (include "cube.fullname" .)) (int .Values.cubeProxy.tls.selfSigned.caValidityDays) -}}
 {{- $cert := genSignedCert $commonName $ipAddresses $dnsNames (int .Values.cubeProxy.tls.selfSigned.certValidityDays) $ca -}}
+{{- $certChecksum = $cert.Cert | trim | sha256sum -}}
 stringData:
   {{ .Values.cubeProxy.tls.certSecretKey | quote }}: |-
 {{ $cert.Cert | nindent 4 }}
@@ -131,6 +149,9 @@ spec:
         app.kubernetes.io/component: cube-proxy
       annotations:
         checksum/entrypoint: {{ $proxyEntrypointChecksum | quote }}
+        {{- if and (eq .Values.cubeProxy.tls.mode "selfSigned") $rotateOnSanChange }}
+        checksum/proxy-cert: {{ $certChecksum | quote }}
+        {{- end }}
       {{- with .Values.cubeProxy.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -967,7 +967,8 @@ cubeProxy:
   # Traffic reaches CubeProxy via ClusterIP Service + Ingress (TLS still
   # terminates in CubeProxy; Ingress uses SSL passthrough / HTTPS backend).
   enabled: true
-  # Public sandbox domain (also used for TLS CN / wildcard DNS / Ingress hosts).
+  # Public sandbox domain (also used for TLS CN/SAN, wildcard DNS, and Ingress
+  # hosts). Keep controlPlane.api.sandboxDomain consistent with this value.
   # For production, point external DNS at the Ingress entrypoint.
   domain: cube.app
   podAnnotations: {}
@@ -1045,6 +1046,8 @@ cubeProxy:
         kind: ClusterIssuer
         name: ""
       commonName: ""
+      # Explicit SAN list. The chart does not auto-add *.domain here because
+      # wildcard certificates normally require a DNS-01 issuer.
       dnsNames: []
       ipAddresses: []
       duration: ""
@@ -1055,12 +1058,20 @@ cubeProxy:
         - server auth
     selfSigned:
       commonName: ""
+      # Additive to cubeProxy.domain and its wildcard; the chart always adds
+      # both automatically when cubeProxy.domain is set.
       dnsNames:
         - cube.app
         - "*.cube.app"
         - localhost
       ipAddresses:
         - 127.0.0.1
+      # When true, record the desired certificate spec on the proxy-certs
+      # Secret and re-issue the certificate (and CA) when that spec changes
+      # (domain, dnsNames, ipAddresses, commonName, or validity). This rotates
+      # ca.crt: re-import it into clients. Default false preserves the existing
+      # Secret across helm upgrades.
+      rotateOnSanChange: false
       caValidityDays: 3650
       certValidityDays: 3650
     # Used only when tls.mode=inline.

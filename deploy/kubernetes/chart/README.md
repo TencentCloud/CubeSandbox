@@ -508,28 +508,95 @@ cubeProxy:
         - "*.sandbox.example.com"
 ```
 
-Wildcard public certificates usually require a DNS-01 issuer.
+The chart does **not** derive `*.domain` for `certManager` mode. Set
+`certManager.dnsNames` explicitly to the base domain and its wildcard. Wildcard
+public certificates usually require a DNS-01 issuer.
 
 ### Self-signed TLS for test only
 
 For offline test environments, explicitly opt in to a chart-generated self-signed certificate:
 
 ```yaml
+controlPlane:
+  api:
+    sandboxDomain: sandbox.example.com
 cubeProxy:
   enabled: true
-  domain: cube.app
+  domain: sandbox.example.com
   tls:
     mode: selfSigned
     selfSigned:
+      # Optional extra SANs. cubeProxy.domain and *.cubeProxy.domain are
+      # always added automatically.
       dnsNames:
-        - cube.app
-        - "*.cube.app"
         - localhost
       ipAddresses:
         - 127.0.0.1
 ```
 
-This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required. Do not use this mode for production.
+For the default `cube.app` quick start, keep `domain: cube.app` and omit the
+`controlPlane` override; the chart's default `dnsNames` already covers
+`cube.app` and `*.cube.app`.
+
+The chart always adds `cubeProxy.domain` and `*.${cubeProxy.domain}` to the
+certificate SANs when `cubeProxy.domain` is set, so sandbox hosts such as
+`49999-<sandboxId>.sandbox.example.com` verify correctly. `selfSigned.dnsNames`
+is additive, not a replacement for those two entries. Keep
+`controlPlane.api.sandboxDomain` equal to `cubeProxy.domain`; otherwise CubeAPI
+returns a different sandbox host and this certificate is not used.
+
+This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and
+`ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required.
+Do not use this mode for production.
+
+IP-based access (Pod IP or NodePort IP) is not covered unless you add the IP to
+`selfSigned.ipAddresses`.
+
+#### Rotating the self-signed certificate
+
+By default the chart reuses an existing `<fullname>-proxy-certs` Secret across
+upgrades. Changing `cubeProxy.domain`, `selfSigned.dnsNames`, or
+`selfSigned.ipAddresses` does **not** re-issue the certificate unless you enable
+rotation:
+
+```yaml
+cubeProxy:
+  tls:
+    mode: selfSigned
+    selfSigned:
+      rotateOnSanChange: true
+```
+
+With `rotateOnSanChange: true`, the chart records a hash of the desired
+certificate spec (common name, DNS SANs, IP SANs, and validity) on the Secret.
+When that spec changes — or when you enable the flag on an existing release for
+the first time — it re-issues the certificate **and the CA**, and updates a Pod
+annotation so the proxy Deployment rolls. Because the CA changes, clients that
+imported the old `ca.crt` must re-import it. Back up the Secret before enabling
+rotation; `helm rollback` is not a certificate rollback.
+
+```bash
+kubectl -n <namespace> get secret <fullname>-proxy-certs -o yaml > proxy-certs-backup.yaml
+```
+
+To rotate manually (for example, when `rotateOnSanChange` is false):
+
+```bash
+kubectl -n <namespace> delete secret <fullname>-proxy-certs
+helm upgrade --install <release> ./deploy/kubernetes/chart \
+  -n <namespace> -f runtime-values.yaml
+kubectl -n <namespace> rollout restart deploy/<fullname>-proxy
+kubectl -n <namespace> get secret <fullname>-proxy-certs \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName
+# Re-import ca.crt into clients:
+kubectl -n <namespace> get secret <fullname>-proxy-certs \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+```
+
+`<fullname>` is the Helm fullname: the release name if it already contains
+`cube`, otherwise `<release>-cube`. For release `cube`, the objects are
+`cube-proxy-certs` and `cube-proxy`; for release `prod`, they are
+`prod-cube-proxy-certs` and `prod-cube-proxy`.
 
 `cube-proxy` uses `placement.controlPlane`. The chart does not create node labels.
 
