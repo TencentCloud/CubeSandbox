@@ -126,6 +126,31 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// GET /cube/sandbox/info with container_port — resolve the exposed-port
+    /// endpoint (hostIP:hostPort for remote callers, sandboxIP:containerPort
+    /// for same-node callers). caller_host_ip is forwarded as
+    /// X-Cube-Caller-Host-IP so CubeMaster's same-node check sees the real
+    /// caller instead of this proxy hop; None leaves the decision to
+    /// CubeMaster's RemoteAddr fallback.
+    pub async fn get_sandbox_exposed_port(
+        &self,
+        sandbox_id: &str,
+        container_port: i32,
+        caller_host_ip: Option<&str>,
+    ) -> Result<GetSandboxResponse, CubeMasterError> {
+        let url = format!("{}/cube/sandbox/info", self.base_url);
+        let port = container_port.to_string();
+        let mut req = self
+            .inner
+            .get(&url)
+            .query(&[("sandbox_id", sandbox_id), ("container_port", &port)]);
+        if let Some(ip) = caller_host_ip {
+            req = req.header("X-Cube-Caller-Host-IP", ip);
+        }
+        let resp = req.send().await.map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// POST /cube/sandbox/update — pause or resume a sandbox (action: "pause" | "resume").
     pub async fn update_sandbox(
         &self,
@@ -1304,6 +1329,16 @@ pub struct GetSandboxDataItem {
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub host_ip: String,
+    #[serde(default)]
+    pub sandbox_ip: String,
+    #[serde(default)]
+    pub exposed_port_endpoint: String,
+    #[serde(default)]
+    pub exposed_port_mode: String,
+    #[serde(default)]
+    pub exposed_port_host_port: i32,
 }
 
 #[derive(Debug, Deserialize)]

@@ -2170,3 +2170,25 @@ pub struct VolumeAndToken {
     #[serde(default)]
     pub token: String,
 }
+
+/// Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+///
+/// `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+/// hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+/// sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+/// node).
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ExposedPortEndpoint {
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: String,
+    #[serde(rename = "containerPort")]
+    pub container_port: i32,
+    pub mode: String,
+    pub endpoint: String,
+    #[serde(rename = "hostIP", skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+    #[serde(rename = "hostPort", skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<i32>,
+    #[serde(rename = "sandboxIP", skip_serializing_if = "Option::is_none")]
+    pub sandbox_ip: Option<String>,
+}
