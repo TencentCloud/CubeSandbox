@@ -129,10 +129,6 @@ int s3_writeback_publish(struct s3_writeback *writeback,
 			 uint64_t chunk_index, uint64_t *out_seq,
 			 struct s3_writeback_record *out_record);
 
-/* Look up one still-resident record by sequence number. */
-int s3_writeback_get_record(const struct s3_writeback *writeback, uint64_t seq,
-			    struct s3_writeback_record *record);
-
 /* Iterate non-completed records in sequence order. The returned payload points
  * into the mapping and remains valid until the record is reclaimed or close. */
 void s3_writeback_iter_begin(const struct s3_writeback *writeback,
@@ -141,11 +137,7 @@ int s3_writeback_iter_next(const struct s3_writeback *writeback,
 			   struct s3_writeback_iter *iter,
 			   struct s3_writeback_record *record);
 
-/* Record an outcome. Completion may happen out of order. */
-int s3_writeback_mark_complete(struct s3_writeback *writeback,
-			       uint64_t seq, int32_t outcome);
-
-/* O(1) completion for records returned by publish/get/iteration. */
+/* O(1) completion for records returned by publish or iteration. */
 int s3_writeback_mark_record_complete(struct s3_writeback *writeback,
 				      const struct s3_writeback_record *record,
 				      int32_t outcome);

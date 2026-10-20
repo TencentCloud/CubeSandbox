@@ -628,14 +628,6 @@ s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 			     NULL);
 }
 
-int
-s3_overlay_write_pending(struct s3_overlay *ov, uint64_t lba,
-			 uint32_t nblocks, const void *data, uint64_t seq)
-{
-	return overlay_write(ov, lba, nblocks, data, seq, false, false, NULL,
-			     NULL);
-}
-
 static void
 overlay_reservation_rollback(struct s3_overlay_write_reservation *reservation)
 {
@@ -709,26 +701,6 @@ s3_overlay_prepare_write(struct s3_overlay *ov, uint64_t lba,
 	}
 	*out = reservation;
 	return 0;
-}
-
-int
-s3_overlay_commit_prepared(struct s3_overlay_write_reservation *reservation,
-			   const void *data, uint64_t seq)
-{
-	struct s3_overlay *ov;
-	int rc;
-
-	if (!reservation || !data || seq == 0) {
-		return -EINVAL;
-	}
-	ov = reservation->ov;
-	rc = overlay_write(ov, reservation->lba, reservation->nblocks,
-			   data, seq, false, false, NULL, NULL);
-	/* Committed blocks cleared reserved; this rolls back only allocations
-	 * skipped as stale or left untouched by an unexpected error. */
-	overlay_reservation_rollback(reservation);
-	free(reservation);
-	return rc;
 }
 
 int

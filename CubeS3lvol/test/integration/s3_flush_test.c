@@ -481,7 +481,8 @@ test_overlay_write_reservation(void)
 	struct s3_overlay_write_reservation *reservation = NULL;
 	uint8_t *data = malloc(2 * BLOCK_SIZE);
 	uint8_t *out = calloc(1, 2 * BLOCK_SIZE);
-	unsigned releases = 0;
+	unsigned first_releases = 0;
+	unsigned second_releases = 0;
 	int rc;
 
 	printf("\n[4] atomic overlay write reservation\n");
@@ -505,7 +506,9 @@ test_overlay_write_reservation(void)
 
 	rc = s3_overlay_prepare_write(ov, 0, 2, &reservation);
 	check_true("reserve a second time", rc == 0, NULL);
-	rc = s3_overlay_commit_prepared(reservation, data, 20);
+	rc = s3_overlay_commit_prepared_ref(reservation, data, 20,
+					    count_overlay_release,
+					    &first_releases);
 	reservation = NULL;
 	check_true("prepared pending write commits atomically",
 		   rc == 0 && s3_overlay_covers(ov, 0, 2), NULL);
@@ -516,16 +519,18 @@ test_overlay_write_reservation(void)
 	rc = s3_overlay_prepare_write(ov, 0, 2, &reservation);
 	check_true("reserve blocks for borrowed shm payload", rc == 0, NULL);
 	rc = s3_overlay_commit_prepared_ref(reservation, data, 21,
-					    count_overlay_release, &releases);
+					    count_overlay_release,
+					    &second_releases);
 	reservation = NULL;
 	check_true("borrowed payload is retained without early release",
-		   rc == 0 && releases == 0, NULL);
+		   rc == 0 && first_releases == 2 && second_releases == 0,
+		   NULL);
 	rc = s3_overlay_write(ov, 0, 1, data, 22);
 	check_true("overwriting one block releases exactly one shm ref",
-		   rc == 0 && releases == 1, NULL);
+		   rc == 0 && second_releases == 1, NULL);
 	s3_overlay_drop_chunk(ov, 0);
 	check_true("dropping the chunk releases the final shm ref",
-		   releases == 2, NULL);
+		   second_releases == 2, NULL);
 
 out:
 	s3_overlay_cancel_prepared(reservation);
@@ -541,6 +546,8 @@ test_overlay_pending_durability(void)
 	uint8_t *old = malloc(BLOCK_SIZE);
 	uint8_t *new = malloc(BLOCK_SIZE);
 	uint8_t *out = malloc(BLOCK_SIZE);
+	struct s3_overlay_write_reservation *reservation = NULL;
+	unsigned releases = 0;
 	uint64_t idx = 0;
 	int rc;
 
@@ -556,8 +563,13 @@ test_overlay_pending_durability(void)
 	fill_pattern(new, 1, 0, 0x32);
 	check_true("publish durable predecessor",
 		   s3_overlay_write(ov, 0, 1, old, 10) == 0, NULL);
+	rc = s3_overlay_prepare_write(ov, 0, 1, &reservation);
+	check_true("reserve pending overwrite", rc == 0, NULL);
 	check_true("publish pending overwrite",
-		   s3_overlay_write_pending(ov, 0, 1, new, 11) == 0, NULL);
+		   s3_overlay_commit_prepared_ref(
+			   reservation, new, 11, count_overlay_release,
+			   &releases) == 0, NULL);
+	reservation = NULL;
 
 	memset(out, 0, BLOCK_SIZE);
 	s3_overlay_apply(ov, 0, 1, out);
@@ -585,6 +597,7 @@ test_overlay_pending_durability(void)
 		  s3_overlay_min_seq(ov), 11);
 
 out:
+	s3_overlay_cancel_prepared(reservation);
 	s3_overlay_destroy(ov);
 	free(old);
 	free(new);
