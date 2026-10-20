@@ -162,6 +162,23 @@ storageClass:
 persistence:
   storageClassName: ""
 
+# Private-CA trust for the CubeTemplateCenter pod's outbound TLS (image
+# registries behind a private CA). Off by default: with enabled=false the
+# render is byte-identical to a release without this block. Enabled, the
+# certificates are exposed to the pod via SSL_CERT_DIR (Go reads the mounted
+# directory IN ADDITION to the system bundle, so publicly-trusted registries
+# keep working). See the chart README for the exact value shapes.
+trustedCACerts:
+  enabled: false
+  # Inline PEM certificates — a list of CERTIFICATE blocks (or multi-cert
+  # chains), rendered into a chart-managed ConfigMap. Private keys are
+  # rejected at render time.
+  certs: []
+  # OR (mutually exclusive with certs): reference an operator-managed
+  # ConfigMap in the release namespace whose keys hold PEM content. Changes
+  # require a pod restart (NOTES prints the exact command).
+  existingConfigMap: ""
+
 placement:
   # Control-plane components run only on dedicated control nodes.
   controlPlane:

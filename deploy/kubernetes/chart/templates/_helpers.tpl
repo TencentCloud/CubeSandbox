@@ -199,6 +199,10 @@ tolerations:
 {{- printf "%s-templatecenter" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.trustedCaConfigMapName" -}}
+{{- printf "%s-trusted-ca" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.cubemastercliName" -}}
 {{- printf "%s-cubemastercli" (include "cube.fullname" .) -}}
 {{- end -}}

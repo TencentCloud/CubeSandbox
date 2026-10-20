@@ -276,6 +276,33 @@ volumeS3:
 When `minio.rootPassword` is set, it must be at least 8 characters (MinIO
 requirement).
 
+## Private-CA registry trust (trustedCACerts)
+
+If the image registries the TemplateCenter pod pulls from sit behind a
+private CA, enable the feature and the pod trusts those registries in
+addition to the public roots (Go's `SSL_CERT_DIR`; default-off renders
+byte-identical to a release without it):
+
+```yaml
+trustedCACerts:
+  enabled: true
+  certs:
+    - |
+      -----BEGIN CERTIFICATE-----
+      ...your CA PEM...
+      -----END CERTIFICATE-----
+```
+
+- Multiple entries (and multi-cert chain files) are supported; each entry
+  becomes a key in a chart-managed ConfigMap mounted at `/etc/cube/trusted-ca`.
+- `certs` and `existingConfigMap` are mutually exclusive; with
+  `existingConfigMap: <name>` the chart mounts your own ConfigMap (same
+  namespace) instead of rendering one. Certificate blocks only — a pasted
+  private key fails the render.
+- Certificate changes (inline certs or `existingConfigMap` edits) take
+  effect after the pods restart — inline certs roll automatically via a
+  checksum annotation, `existingConfigMap` needs a manual restart.
+
 ## CubeMaster configuration
 
 The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.

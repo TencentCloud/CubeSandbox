@@ -459,3 +459,23 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "cubeOps S3 endpoint is set but no credentials: set cubeOps.s3.existingSecret (keys s3-access-key-id / s3-secret-access-key), cubeOps.s3.accessKeyId+secretAccessKey, or volumeS3.accessKeyId+secretAccessKey. volumeS3.existingSecret (volume-s3.conf) is not a CubeOps credential source." }}
 {{- end }}
 {{- end }}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
+{{- $tc := .Values.trustedCACerts }}
+{{- if and (empty $tc.certs) (empty $tc.existingConfigMap) }}
+{{- fail "trustedCACerts.enabled=true requires certs or existingConfigMap -- without either the feature renders nothing and every private-registry pull keeps failing with x509" }}
+{{- end }}
+{{- if and (not (empty $tc.certs)) (not (empty $tc.existingConfigMap)) }}
+{{- fail "trustedCACerts.certs and trustedCACerts.existingConfigMap are mutually exclusive: inline certs render a chart-managed ConfigMap; existingConfigMap references one you own" }}
+{{- end }}
+{{- /* One render-time content guard: every PEM block must be a CERTIFICATE.
+     A pasted private key would otherwise ship inside the ConfigMap; this is
+     the only content check (deliberately no symmetry/prose-marker/size
+     duplicates). */ -}}
+{{- range $i, $pem := $tc.certs }}
+{{- range $m := regexFindAll "(?mi)^-----BEGIN [A-Z ]+-----" $pem -1 }}
+{{- if not (regexMatch "^-----BEGIN CERTIFICATE-----[[:space:]]*$" (trim $m)) }}
+{{- fail (printf "trustedCACerts.certs[%d] contains a non-CERTIFICATE PEM block (%s) -- certificate blocks only; a pasted private key must not reach the registry-facing pod" $i (trim $m)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

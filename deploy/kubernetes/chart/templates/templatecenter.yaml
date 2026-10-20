@@ -45,6 +45,13 @@ spec:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
+      {{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.certs (not .Values.trustedCACerts.existingConfigMap) }}
+      # Roll the Deployment when the inline certs change (the Go process reads
+      # SSL_CERT_DIR once at startup). The existingConfigMap path is owned by
+      # the operator — restart manually (see NOTES).
+      annotations:
+        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toJson | sha256sum }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -96,6 +103,16 @@ spec:
             privileged: true
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
+            {{- if .Values.trustedCACerts.enabled }}
+            # Private-CA trust for outbound TLS (image registries behind a
+            # private CA). Go reads SSL_CERT_DIR as the directory-candidate
+            # list: listing the ConfigMap mount first ADDS the mounted
+            # certificates while the system bundle file candidate
+            # (/etc/ssl/certs/ca-certificates.crt) stays active, so
+            # publicly-trusted registries keep working. Verified on Go 1.25.
+            - name: SSL_CERT_DIR
+              value: /etc/cube/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs
+            {{- end }}
             # All CUBE_TEMPLATE_CENTER_*: the pre-rename CUBE_TC_* /
             # CUBEMASTER_* spellings still work as a fallback and log a
             # deprecation notice. See CubeTemplateCenter/pkg/tcconfig.
@@ -180,6 +197,11 @@ spec:
               mountPath: /usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml
               subPath: conf.yaml
               readOnly: true
+          {{- if .Values.trustedCACerts.enabled }}
+            - name: trusted-ca
+              mountPath: /etc/cube/trusted-ca
+              readOnly: true
+          {{- end }}
           {{- if .Values.cubeEgress.enabled }}
             # Read by the --with-cube-ca bake, which is what TC does before mkfs.
             - name: cube-egress-ca
@@ -198,6 +220,11 @@ spec:
         - name: cube-templatecenter-config
           secret:
             secretName: {{ include "cube.templateCenterConfigSecretName" . }}
+      {{- if .Values.trustedCACerts.enabled }}
+        - name: trusted-ca
+          configMap:
+            name: {{ .Values.trustedCACerts.existingConfigMap | default (include "cube.trustedCaConfigMapName" .) }}
+      {{- end }}
       {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:

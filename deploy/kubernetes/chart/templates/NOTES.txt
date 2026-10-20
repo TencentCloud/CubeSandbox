@@ -188,6 +188,12 @@ Useful commands:
   kubectl get configmap -n {{ .Release.Namespace }} {{ include "cube.fullname" . }}-diagnostics -o jsonpath='{.data.cube-diag-k8s\.sh}' > /tmp/cube-diag-k8s.sh
   sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
 {{- end }}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
+Trusted CA (trustedCACerts): private-CA registry trust via SSL_CERT_DIR.
+  Mounted entries: kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.templateCenterName" . }} -- \
+    sh -c 'ls /etc/cube/trusted-ca/'
+  Cert changes (including existingConfigMap edits) take effect after the pods restart.
+{{- end }}
 
 Docs: https://cubesandbox.com/guide/kubernetes/ (Install · Architecture · Upgrade · FAQ)
       https://cubesandbox.com/zh/guide/kubernetes/ (中文)
