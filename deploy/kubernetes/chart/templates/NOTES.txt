@@ -192,7 +192,8 @@ Useful commands:
 Trusted CA (trustedCACerts): private-CA registry trust via SSL_CERT_DIR.
   Mounted entries: kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.templateCenterName" . }} -- \
     sh -c 'ls /etc/cube/trusted-ca/'
-  Cert changes (including existingConfigMap edits) take effect after the pods restart.
+  Cert changes (including existingConfigMap edits) take effect after the pods restart:
+  kubectl rollout restart deploy/{{ include "cube.templateCenterName" . }} -n {{ .Release.Namespace }}
 {{- end }}
 
 Docs: https://cubesandbox.com/guide/kubernetes/ (Install · Architecture · Upgrade · FAQ)

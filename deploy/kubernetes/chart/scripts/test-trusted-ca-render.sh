@@ -143,5 +143,24 @@ else
   ok
 fi
 
+# --- 6. External control plane: no TC, so no trusted-ca artifacts ---------
+# With controlPlane.enabled=false nothing consumes the certs; rendering a
+# chart ConfigMap holding them (and skipping the validation with it) would
+# be an unused copy of the trust material.
+if helm template extcp "$CHART_DIR" $COMMON_SETS \
+     --set trustedCACerts.enabled=true -f "$TMP_DIR/certs-values.yaml" \
+     --set controlPlane.enabled=false --set externalControlPlane.enabled=true \
+     --set externalControlPlane.masterEndpoint=http://external:8089 \
+     --set externalControlPlane.opsEndpoint=http://external:3010 \
+     >"$TMP_DIR/extcp.yaml" 2>"$TMP_DIR/extcp.err"; then
+  if grep -qE 'trusted-ca|SSL_CERT_DIR' "$TMP_DIR/extcp.yaml"; then
+    bad "external control plane render leaks trusted-ca artifacts"
+  else
+    ok
+  fi
+else
+  bad "external control plane render failed outright: $(head -1 "$TMP_DIR/extcp.err")"
+fi
+
 echo "trusted-ca render guard: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
