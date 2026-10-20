@@ -104,7 +104,10 @@ c2=$(grep 'checksum/trusted-ca' "$TMP_DIR/rotated.yaml" | awk '{print $2}')
 # --- 4. existingConfigMap path -------------------------------------------
 render existing --set trustedCACerts.enabled=true \
   --set trustedCACerts.existingConfigMap=my-own-ca-certs
-if grep -q 'name: existing-trusted-ca' "$TMP_DIR/existing.yaml"; then
+# Assert by template source, not by name: the chart-managed ConfigMap would
+# render as "<release>-cube-trusted-ca", and a hardcoded needle is exactly
+# the kind of negative assertion that silently stops matching.
+if awk '/^# Source: / { keep = ($0 ~ /trusted-ca-configmap.yaml/) } keep' "$TMP_DIR/existing.yaml" | grep -q .; then
   bad "existingConfigMap path must not render a chart-managed ConfigMap"
 else
   ok
