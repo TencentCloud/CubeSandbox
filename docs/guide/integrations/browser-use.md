@@ -39,7 +39,7 @@ Host                                     Cube Sandbox (MicroVM)
 | Python | 3.11+ (required by browser-use) |
 | cubesandbox SDK | `>= 0.6.0` |
 | Browser template image | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` (Chromium serving CDP on port `9000`) |
-| CubeSandbox platform | `>= 0.3.0` |
+| CubeSandbox platform | `>= 0.6.0` (template aliases and `sandbox.pause()` used by this guide) |
 
 browser-use evolves quickly and its connection API differs across major releases; pin the version
 you validate and check the [Caveats](#caveats) section when upgrading.
@@ -102,8 +102,9 @@ Notes:
 - `create-from-image` blocks and watches the build job by default; pass `--detach` and poll later
   with `cubemastercli tpl watch --job-id <job_id>`. Once the job reaches `READY`, note the
   `template_id` (with `--alias browser-use` you can also pass the alias to `Sandbox.create`).
-- Heavy pages render better with more resources — raise `--cpu` / `--memory` (defaults are 2 cores
-  and 2000 MB) if the agent works on media-rich sites.
+- Heavy pages render better with more resources — raise `--cpu` / `--memory` if the agent works on
+  media-rich sites. `--cpu` is in **millicores** (`--cpu 4000` requests 4 cores; the default is
+  `2000`, i.e. 2 cores) and `--memory` is in MB (default `2000`).
 
 Any custom image that runs Chromium with `--remote-debugging-port` works too; see
 [bring your own image](../tutorials/bring-your-own-image.md) and
@@ -117,6 +118,19 @@ source .venv/bin/activate
 pip install "browser-use>=0.3" "cubesandbox>=0.6.0" python-dotenv
 ```
 
+::: warning Legacy browser-use 0.1.x needs a separate venv
+The legacy 0.1.x snippet under [Key code snippets](#key-code-snippets) cannot coexist with
+`browser-use>=0.3` in the same virtualenv (the `Browser`/`BrowserConfig` API was removed in 0.3),
+and it additionally imports `langchain_openai`, which the install above does not provide. To try
+that path, create a second virtualenv with a downgraded install:
+
+```bash
+python3 -m venv .venv-legacy
+source .venv-legacy/bin/activate
+pip install "browser-use>=0.1,<0.2" langchain-openai "cubesandbox>=0.6.0" python-dotenv
+```
+:::
+
 ### 3. Configure environment variables
 
 ```bash
@@ -125,7 +139,7 @@ CUBE_API_URL=http://<cube-host>:3000
 CUBE_TEMPLATE_ID=browser-use
 OPENAI_API_KEY=<your-llm-key>
 OPENAI_BASE_URL=https://tokenhub.tencentmaas.com/v1
-CHAT_MODEL=deepseek-v3
+CHAT_MODEL=hunyuan-vision
 EOF
 ```
 
@@ -136,7 +150,7 @@ EOF
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | Template ID or alias from step 1 |
 | `OPENAI_API_KEY` / `TOKENHUB_API_KEY` | LLM client | OpenAI-compatible key; stays on the host |
 | `OPENAI_BASE_URL` | LLM client | e.g. `https://tokenhub.tencentmaas.com/v1` |
-| `CHAT_MODEL` | LLM client | Use a vision-capable model, e.g. `deepseek-v3` |
+| `CHAT_MODEL` | LLM client | Must be a **vision-capable** model, e.g. `hunyuan-vision` (or any other multimodal model your endpoint offers); text-only models like `deepseek-v3` will fail |
 | `SSL_CERT_FILE` | Python TLS | CA bundle for a self-signed/mkcert CubeProxy deployment |
 | `NODE_EXTRA_CA_CERTS` | Playwright driver | Only for the legacy browser-use `0.1.x` path |
 
@@ -161,8 +175,9 @@ async def main() -> None:
     # The context manager calls sandbox.kill() on exit, so no VM leaks.
     with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"], timeout=900) as sandbox:
         # Chromium inside the VM serves CDP on port 9000; CubeProxy publishes
-        # it as https://9000-<sandbox-id>.cube.app with the endpoint under /cdp.
-        cdp_url = f"https://{sandbox.get_host(9000)}/cdp"
+        # it as https://9000-<sandbox-id>.cube.app. The trailing "?" matches
+        # the URL shape verified by examples/browser-sandbox.
+        cdp_url = f"https://{sandbox.get_host(9000)}/cdp?"
 
         agent = Agent(
             task=(
@@ -170,7 +185,7 @@ async def main() -> None:
                 "the current top post."
             ),
             llm=ChatOpenAI(
-                model=os.getenv("CHAT_MODEL", "deepseek-v3"),
+                model=os.getenv("CHAT_MODEL", "hunyuan-vision"),
                 base_url=os.getenv("OPENAI_BASE_URL",
                                    "https://tokenhub.tencentmaas.com/v1"),
                 api_key=os.getenv("OPENAI_API_KEY") or os.getenv("TOKENHUB_API_KEY"),
@@ -199,7 +214,9 @@ of the current Hacker News top post (the exact value obviously depends on the li
 
 ### Legacy browser-use 0.1.x (Playwright-based)
 
-On the old API the connection is identical to the bundled
+This path requires the downgraded install in a separate virtualenv described in step 2
+(`browser-use>=0.1,<0.2` plus `langchain-openai`); it does not run against a `browser-use>=0.3`
+install. The connection itself is identical to the bundled
 [`examples/browser-sandbox/browser.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/browser-sandbox/browser.py)
 — `BrowserConfig(cdp_url=...)` is passed straight to Playwright's `connect_over_cdp`, including the
 trailing `?` on the URL:
@@ -213,7 +230,7 @@ browser = Browser(config=BrowserConfig(
 ))
 agent = Agent(
     task="...",
-    llm=ChatOpenAI(model="deepseek-v3",
+    llm=ChatOpenAI(model=os.environ.get("CHAT_MODEL", "hunyuan-vision"),
                    base_url="https://tokenhub.tencentmaas.com/v1",
                    api_key=os.environ["OPENAI_API_KEY"]),
     browser=browser,
@@ -227,13 +244,20 @@ Because a cold start is under 60 ms, the natural pattern is a fresh MicroVM per 
 agents in parallel without any shared browser state:
 
 ```python
+# One shared vision-capable LLM client, reused by all parallel agents.
+llm = ChatOpenAI(
+    model=os.getenv("CHAT_MODEL", "hunyuan-vision"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
+    api_key=os.getenv("OPENAI_API_KEY") or os.getenv("TOKENHUB_API_KEY"),
+)
+
 async def run_task(task: str) -> str:
     with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"], timeout=900) as sandbox:
         agent = Agent(
             task=task,
             llm=llm,
             browser_session=BrowserSession(
-                cdp_url=f"https://{sandbox.get_host(9000)}/cdp"),
+                cdp_url=f"https://{sandbox.get_host(9000)}/cdp?"),
         )
         history = await agent.run()
         return history.final_result() or ""
@@ -258,12 +282,13 @@ data = base64.b64decode(result.stdout)          # raw PNG bytes
 
 - **CDP endpoint discovery varies by browser-use version.** `BrowserSession(cdp_url=...)` expects
   the browser's CDP endpoint; newer releases connect with a pure-Python CDP client instead of
-  Playwright. If your version cannot resolve the WebSocket endpoint from the `https://…/cdp` URL,
-  query `https://<host>/cdp/json/version` (the same URL the readiness probe uses) and pass a
-  WebSocket URL built from its `webSocketDebuggerUrl` field — replacing the loopback host with the
-  proxy host — as `cdp_url`. Verify against
-  [`examples/browser-sandbox`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox),
-  which pins the exact URL shape this image expects.
+  Playwright. The snippets above use the trailing-`?` form (`https://<host>/cdp?`) — the exact URL
+  shape verified against this image by
+  [`examples/browser-sandbox`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox).
+  If your browser-use release cannot resolve the WebSocket endpoint from that URL, query
+  `https://<host>/cdp/json/version` (the same URL the readiness probe uses) and pass a WebSocket
+  URL built from its `webSocketDebuggerUrl` field — replacing the loopback host with the proxy
+  host — as `cdp_url`.
 - **DNS is on you for the CDP leg.** `CUBE_PROXY_NODE_IP` only rewrites hostnames inside
   `cubesandbox` SDK calls. browser-use opens the CDP WebSocket itself, so the host machine must
   resolve `*.cube.app` (wildcard DNS or dnsmasq entry pointing at CubeProxy).

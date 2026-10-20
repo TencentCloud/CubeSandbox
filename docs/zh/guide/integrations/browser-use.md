@@ -38,7 +38,7 @@ MicroVM 里。Agent 主循环与 LLM 凭证都留在本地；Agent 访问的每�
 | Python | 3.11+（browser-use 的要求） |
 | cubesandbox SDK | `>= 0.6.0` |
 | 浏览器模板镜像 | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`（Chromium 在 `9000` 端口提供 CDP） |
-| CubeSandbox 平台 | `>= 0.3.0` |
+| CubeSandbox 平台 | `>= 0.6.0`（本文使用的模板别名与 `sandbox.pause()` 均自该版本引入） |
 
 browser-use 迭代很快，各大版本之间的连接 API 有差异；请固定你验证过的版本，升级前先阅读
 [注意事项](#注意事项)。
@@ -98,8 +98,9 @@ cubemastercli tpl create-from-image \
 - `create-from-image` 默认阻塞并跟踪构建任务；也可加 `--detach` 提交后用
   `cubemastercli tpl watch --job-id <job_id>` 轮询。任务到达 `READY` 后记下 `template_id`
   （加了 `--alias browser-use` 之后，`Sandbox.create` 也可以直接传别名）。
-- 页面较重时建议提高资源配额——如果 Agent 要访问富媒体站点，可调大 `--cpu` / `--memory`
-  （默认 2 核、2000 MB）。
+- 页面较重时建议提高资源配额——如果 Agent 要访问富媒体站点，可调大 `--cpu` / `--memory`。
+  `--cpu` 的单位是**毫核**（`--cpu 4000` 表示 4 核；默认 `2000`，即 2 核），`--memory` 的单位是
+  MB（默认 `2000`）。
 
 任何以 `--remote-debugging-port` 启动 Chromium 的自定义镜像同样可用；参见
 [自定义镜像](../tutorials/bring-your-own-image.md)与
@@ -113,6 +114,18 @@ source .venv/bin/activate
 pip install "browser-use>=0.3" "cubesandbox>=0.6.0" python-dotenv
 ```
 
+::: warning 旧版 browser-use 0.1.x 需要单独的 venv
+后文[关键代码片段](#关键代码片段)中的旧版 0.1.x 写法无法与 `browser-use>=0.3` 共存于同一个虚拟环境
+（`Browser`/`BrowserConfig` API 在 0.3 中已移除），而且该片段还会导入 `langchain_openai`——上面的安装
+命令并不包含它。如需尝试旧版写法，请另建一个虚拟环境并降级安装：
+
+```bash
+python3 -m venv .venv-legacy
+source .venv-legacy/bin/activate
+pip install "browser-use>=0.1,<0.2" langchain-openai "cubesandbox>=0.6.0" python-dotenv
+```
+:::
+
 ### 3. 配置环境变量
 
 ```bash
@@ -121,7 +134,7 @@ CUBE_API_URL=http://<cube-host>:3000
 CUBE_TEMPLATE_ID=browser-use
 OPENAI_API_KEY=<your-llm-key>
 OPENAI_BASE_URL=https://tokenhub.tencentmaas.com/v1
-CHAT_MODEL=deepseek-v3
+CHAT_MODEL=hunyuan-vision
 EOF
 ```
 
@@ -132,7 +145,7 @@ EOF
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 第 1 步得到的模板 ID 或别名 |
 | `OPENAI_API_KEY` / `TOKENHUB_API_KEY` | LLM 客户端 | OpenAI 兼容密钥；只留在宿主机 |
 | `OPENAI_BASE_URL` | LLM 客户端 | 例如 `https://tokenhub.tencentmaas.com/v1` |
-| `CHAT_MODEL` | LLM 客户端 | 使用支持视觉的模型，例如 `deepseek-v3` |
+| `CHAT_MODEL` | LLM 客户端 | 必须是**支持视觉输入**的模型，例如 `hunyuan-vision`（或端点上提供的其他多模态模型）；`deepseek-v3` 等纯文本模型无法工作 |
 | `SSL_CERT_FILE` | Python TLS | CubeProxy 使用自签名/mkcert 证书时的 CA bundle |
 | `NODE_EXTRA_CA_CERTS` | Playwright 驱动 | 仅旧版 browser-use `0.1.x` 路径需要 |
 
@@ -157,8 +170,9 @@ async def main() -> None:
     # with 语句退出时会调用 sandbox.kill()，不会泄漏 VM。
     with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"], timeout=900) as sandbox:
         # VM 内的 Chromium 在 9000 端口提供 CDP；CubeProxy 将其发布为
-        # https://9000-<sandbox-id>.cube.app，端点位于 /cdp 路径下。
-        cdp_url = f"https://{sandbox.get_host(9000)}/cdp"
+        # https://9000-<sandbox-id>.cube.app。末尾的 "?" 是
+        # examples/browser-sandbox 已验证过的 URL 形态。
+        cdp_url = f"https://{sandbox.get_host(9000)}/cdp?"
 
         agent = Agent(
             task=(
@@ -166,7 +180,7 @@ async def main() -> None:
                 "the current top post."
             ),
             llm=ChatOpenAI(
-                model=os.getenv("CHAT_MODEL", "deepseek-v3"),
+                model=os.getenv("CHAT_MODEL", "hunyuan-vision"),
                 base_url=os.getenv("OPENAI_BASE_URL",
                                    "https://tokenhub.tencentmaas.com/v1"),
                 api_key=os.getenv("OPENAI_API_KEY") or os.getenv("TOKENHUB_API_KEY"),
@@ -194,7 +208,8 @@ browser-use 驱动 VM 内 Chromium 时会逐步打印日志（`📍 Step N: ...`
 
 ### 旧版 browser-use 0.1.x（基于 Playwright）
 
-旧 API 的连接方式与仓库自带的
+该路径需要第 2 步中说明的单独虚拟环境与降级安装（`browser-use>=0.1,<0.2` 加 `langchain-openai`），
+无法运行在 `browser-use>=0.3` 的安装之上。连接方式本身与仓库自带的
 [`examples/browser-sandbox/browser.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/browser-sandbox/browser.py)
 完全一致——`BrowserConfig(cdp_url=...)` 会被原样传给 Playwright 的 `connect_over_cdp`，URL 末尾
 同样带 `?`：
@@ -208,7 +223,7 @@ browser = Browser(config=BrowserConfig(
 ))
 agent = Agent(
     task="...",
-    llm=ChatOpenAI(model="deepseek-v3",
+    llm=ChatOpenAI(model=os.environ.get("CHAT_MODEL", "hunyuan-vision"),
                    base_url="https://tokenhub.tencentmaas.com/v1",
                    api_key=os.environ["OPENAI_API_KEY"]),
     browser=browser,
@@ -222,13 +237,20 @@ history = await agent.run()
 浏览器状态：
 
 ```python
+# 所有并行 Agent 复用同一个支持视觉的 LLM 客户端。
+llm = ChatOpenAI(
+    model=os.getenv("CHAT_MODEL", "hunyuan-vision"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
+    api_key=os.getenv("OPENAI_API_KEY") or os.getenv("TOKENHUB_API_KEY"),
+)
+
 async def run_task(task: str) -> str:
     with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"], timeout=900) as sandbox:
         agent = Agent(
             task=task,
             llm=llm,
             browser_session=BrowserSession(
-                cdp_url=f"https://{sandbox.get_host(9000)}/cdp"),
+                cdp_url=f"https://{sandbox.get_host(9000)}/cdp?"),
         )
         history = await agent.run()
         return history.final_result() or ""
@@ -251,12 +273,13 @@ data = base64.b64decode(result.stdout)          # 原始 PNG 字节
 ## 注意事项
 
 - **CDP 端点发现方式随 browser-use 版本变化。** `BrowserSession(cdp_url=...)` 需要浏览器的 CDP
-  端点；新版本使用纯 Python 的 CDP 客户端而不是 Playwright。如果你的版本无法从 `https://…/cdp`
-  解析出 WebSocket 端点，可请求 `https://<host>/cdp/json/version`（与就绪探针相同的 URL），用返回
-  的 `webSocketDebuggerUrl` 字段构造 WebSocket URL——把其中的回环地址替换为代理主机——再作为
-  `cdp_url` 传入。具体 URL 形态请以
+  端点；新版本使用纯 Python 的 CDP 客户端而不是 Playwright。上文代码采用带尾部 `?` 的形态
+  （`https://<host>/cdp?`）——这正是
   [`examples/browser-sandbox`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox)
-  为准，它固定了该镜像期望的写法。
+  针对该镜像验证过的 URL 写法。如果你的 browser-use 版本无法从该 URL 解析出 WebSocket 端点，
+  可请求 `https://<host>/cdp/json/version`（与就绪探针相同的 URL），用返回的
+  `webSocketDebuggerUrl` 字段构造 WebSocket URL——把其中的回环地址替换为代理主机——再作为
+  `cdp_url` 传入。
 - **CDP 这一段需要自行解决 DNS。** `CUBE_PROXY_NODE_IP` 只改写 `cubesandbox` SDK 内部请求的主机
   名。CDP WebSocket 由 browser-use 自己发起，因此宿主机必须能解析 `*.cube.app`（配置泛域名 DNS 或
   dnsmasq 指向 CubeProxy）。
