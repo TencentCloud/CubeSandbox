@@ -163,18 +163,26 @@ sandbox — **no CubeProxy involved**.
 
 ### Discovering the allocated host port
 
-Host ports are allocated per sandbox. Query CubeMaster's info API:
+Host ports are allocated per sandbox. Query with the SDK (recommended):
 
-```bash
-curl -s -H 'X-Cube-Caller-Host-IP: 198.51.100.254' \
-  'http://<cubemaster>:8089/cube/sandbox/info?sandbox_id=<B>&container_port=8080'
-# → data[0].exposed_port_endpoint = "9.135.152.214:20006"
-#   data[0].exposed_port_mode     = "host_port"
+```python
+ep = sandbox_b.get_exposed_port_endpoint(8080)
+ep.endpoint  # "9.135.152.214:20006" (mode == "host_port")
 ```
 
 Callers on the sandbox's own node get the `tap_ip` endpoint
-(`sandboxIP:containerPort`) by default; the `X-Cube-Caller-Host-IP` header
-forces the `host_port` answer.
+(`sandboxIP:containerPort`) by default; pass `caller_host_ip` with any
+out-of-node address (e.g. `"198.51.100.254"`) to force the `host_port`
+answer. The Go / Node SDKs expose the same method as
+`GetExposedPortEndpoint` / `getExposedPortEndpoint`.
+
+HTTP fallback (CubeAPI forwards to CubeMaster):
+
+```bash
+curl -s 'http://<cubeapi>:3000/sandboxes/<B>/exposed-ports/8080?callerHostIP=198.51.100.254'
+# → {"sandboxID":"<B>","containerPort":8080,"mode":"host_port",
+#    "endpoint":"9.135.152.214:20006","hostIP":"9.135.152.214","hostPort":20006}
+```
 
 ### Accessing from sandbox A
 

@@ -148,17 +148,25 @@ B 用按上文声明了服务端口的模板创建。调用方在 Host 头里指
 
 ### 查询分配的 hostPort
 
-hostPort 按沙箱动态分配，通过 CubeMaster info 接口查询：
+hostPort 按沙箱动态分配，用 SDK 查询（推荐）：
 
-```bash
-curl -s -H 'X-Cube-Caller-Host-IP: 198.51.100.254' \
-  'http://<cubemaster>:8089/cube/sandbox/info?sandbox_id=<B>&container_port=8080'
-# → data[0].exposed_port_endpoint = "9.135.152.214:20006"
-#   data[0].exposed_port_mode     = "host_port"
+```python
+ep = sandbox_b.get_exposed_port_endpoint(8080)
+ep.endpoint  # "9.135.152.214:20006"（mode == "host_port"）
 ```
 
 与沙箱同节点的调用方默认拿到的是 `tap_ip` 端点（`sandboxIP:containerPort`）；
-`X-Cube-Caller-Host-IP` 头用于强制返回 `host_port` 端点。
+传 `caller_host_ip="198.51.100.254"`（任意节点外地址）可强制返回
+`host_port` 端点。Go / Node SDK 同样有 `GetExposedPortEndpoint` /
+`getExposedPortEndpoint`。
+
+HTTP 兜底（CubeAPI 转发到 CubeMaster）：
+
+```bash
+curl -s 'http://<cubeapi>:3000/sandboxes/<B>/exposed-ports/8080?callerHostIP=198.51.100.254'
+# → {"sandboxID":"<B>","containerPort":8080,"mode":"host_port",
+#    "endpoint":"9.135.152.214:20006","hostIP":"9.135.152.214","hostPort":20006}
+```
 
 ### 沙箱 A 访问
 

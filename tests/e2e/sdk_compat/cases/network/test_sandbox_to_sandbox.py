@@ -12,7 +12,7 @@ Pytest counterparts of the quickstart demos
   node IP with ``curl --resolve`` (no wildcard DNS inside the sandbox).
 - Node host-port mapping: B is created from a module-provisioned template
   exposing SERVICE_PORT, CubeVS DNATs ``nodeIP:hostPort`` into B, and A curls
-  the endpoint reported by CubeMaster's info API. When A and B land on the
+  the endpoint resolved by the SDK's exposed-port query. When A and B land on the
   same node the traffic is SNATed in ``from_cube`` and looped back into the
   primary NIC ingress (hairpin); cross-node it traverses the wire. Either
   placement satisfies the same assertion, so no scheduling constraint is
@@ -38,7 +38,6 @@ from dataclasses import replace
 from urllib.parse import urlparse
 
 import pytest
-import requests
 
 from adapters import create_adapter_with_capacity_retry
 from framework.assertions import assert_command_ok
@@ -62,7 +61,7 @@ TEMPLATE_EXPOSED_PORTS = [49999, 49983, SERVICE_PORT]
 TEMPLATE_READY_TIMEOUT = 300
 CURL_DEADLINE_SECONDS = 30
 ENDPOINT_QUERY_TIMEOUT_SECONDS = 60
-# TEST-NET-2 placeholder: forces CubeMaster's info API to answer with the
+# TEST-NET-2 placeholder: forces the exposed-port query to answer with the
 # host_port endpoint instead of the same-node tap_ip endpoint.
 CALLER_HOST_IP_OVERRIDE = "198.51.100.254"
 
@@ -237,14 +236,6 @@ def _proxy_node_ip(config: SdkE2EConfig) -> str:
         )
 
 
-def _cubemaster_url(config: SdkE2EConfig) -> str:
-    override = os.environ.get("CUBEMASTER_URL", "").strip()
-    if override:
-        return override.rstrip("/")
-    host = urlparse(config.cube_api_url).hostname or "127.0.0.1"
-    return f"http://{host}:8089"
-
-
 def _start_marker_http_server(sandbox, config: SdkE2EConfig) -> None:
     result = sandbox.run_command(
         f"mkdir -p /tmp/s2s_www && echo '{SERVICE_BODY}' > /tmp/s2s_www/index.html",
@@ -325,37 +316,29 @@ def _curl_until_ready(
         time.sleep(1)
 
 
-def _wait_host_port_endpoint(
-    master: str, sandbox_id: str, container_port: int
-) -> str:
-    """Poll CubeMaster's info API for the ``hostIP:hostPort`` endpoint."""
+def _wait_host_port_endpoint(sandbox_b, config: SdkE2EConfig) -> str:
+    """Poll the SDK's exposed-port query until the host-port endpoint appears.
+
+    CALLER_HOST_IP_OVERRIDE forces host_port mode: without it a caller on B's
+    own node would get the tap_ip endpoint instead.
+    """
     deadline = time.monotonic() + ENDPOINT_QUERY_TIMEOUT_SECONDS
     last = "not queried"
     while time.monotonic() < deadline:
         try:
-            resp = requests.get(
-                f"{master}/cube/sandbox/info",
-                params={"sandbox_id": sandbox_id, "container_port": container_port},
-                headers={"X-Cube-Caller-Host-IP": CALLER_HOST_IP_OVERRIDE},
-                timeout=10,
+            ep = sandbox_b.get_exposed_port_endpoint(
+                SERVICE_PORT, caller_host_ip=CALLER_HOST_IP_OVERRIDE
             )
-            payload = resp.json()
-            data = payload.get("data") or []
-            if data:
-                item = data[0]
-                endpoint = item.get("exposed_port_endpoint", "")
-                mode = item.get("exposed_port_mode", "")
-                if endpoint and mode == "host_port":
-                    return endpoint
-                last = f"mode={mode!r} endpoint={endpoint!r}"
-            else:
-                last = f"empty data: {payload!r}"
-        except (requests.RequestException, ValueError) as exc:
+            if ep.endpoint and ep.mode == "host_port":
+                return ep.endpoint
+            last = f"mode={ep.mode!r} endpoint={ep.endpoint!r}"
+        except Exception as exc:  # mapping not programmed yet (404), etc.
             last = f"{type(exc).__name__}: {exc}"
         time.sleep(1)
     raise AssertionError(
-        f"host-port endpoint for sandbox {sandbox_id} port {container_port} "
-        f"was not published within {ENDPOINT_QUERY_TIMEOUT_SECONDS}s: {last}"
+        f"host-port endpoint for sandbox {sandbox_b.sandbox_id} port "
+        f"{SERVICE_PORT} was not published within "
+        f"{ENDPOINT_QUERY_TIMEOUT_SECONDS}s: {last}"
     )
 
 
@@ -453,9 +436,7 @@ def test_host_port_mapping_between_sandboxes(
     )
     try:
         _start_marker_http_server(sandbox_b, sdk_e2e_config)
-        endpoint = _wait_host_port_endpoint(
-            _cubemaster_url(sdk_e2e_config), sandbox_b.sandbox_id, SERVICE_PORT
-        )
+        endpoint = _wait_host_port_endpoint(sandbox_b, sdk_e2e_config)
         node_ip = endpoint.split(":")[0]
 
         # The node IP may fall inside the built-in always-denied private
@@ -491,9 +472,7 @@ def test_host_port_mapping_respects_egress_policy(
     )
     try:
         _start_marker_http_server(sandbox_b, sdk_e2e_config)
-        endpoint = _wait_host_port_endpoint(
-            _cubemaster_url(sdk_e2e_config), sandbox_b.sandbox_id, SERVICE_PORT
-        )
+        endpoint = _wait_host_port_endpoint(sandbox_b, sdk_e2e_config)
 
         sandbox_a = _create_sandbox(
             sdk_backend,
