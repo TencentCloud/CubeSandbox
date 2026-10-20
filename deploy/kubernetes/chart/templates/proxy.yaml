@@ -131,6 +131,12 @@ spec:
       {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- with include "cube.proxyServiceAccountName" . }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      {{- if not (kindIs "invalid" $.Values.cubeProxy.hostUsers) }}
+      hostUsers: {{ $.Values.cubeProxy.hostUsers }}
+      {{- end }}
       dnsPolicy: ClusterFirst
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
