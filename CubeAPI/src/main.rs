@@ -237,9 +237,14 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     tracing::info!("cube-api listening on {}", cfg.bind);
 
     // ── Graceful shutdown ──────────────────────────────────────────────────
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // ConnectInfo is used by the exposed-port endpoint to derive the caller's
+    // address for CubeMaster's same-node (tap_ip vs host_port) decision.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     logging::Logger::flush(&*logger).await;
     tracing::info!("cube-api shut down gracefully");

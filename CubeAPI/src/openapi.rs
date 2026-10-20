@@ -72,6 +72,7 @@ impl Modify for SecurityAddon {
         handlers::sandboxes::create_sandbox_v2,
         handlers::sandboxes::list_sandboxes_v2,
         handlers::sandboxes::get_sandbox,
+        handlers::sandboxes::get_sandbox_exposed_port,
         handlers::sandboxes::kill_sandbox,
         handlers::sandboxes::pause_sandbox,
         handlers::sandboxes::resume_sandbox,
