@@ -21,14 +21,15 @@ How it works:
 
 Exposed ports come from the TEMPLATE (`cubemastercli tpl create-from-image
 --expose-port ...`); cubemaster `cubelet_conf.enable_exposed_port` must be
-true (shipped default). The host port is discovered via CubeMaster's info API:
+true (shipped default). The host port is discovered with the CubeSandbox SDK:
 
-    GET /cube/sandbox/info?sandbox_id=<B>&container_port=<port>
-    → data[0].exposed_port_endpoint = "<hostIP>:<hostPort>"  (mode host_port)
+    ep = sandbox_b.get_exposed_port_endpoint(8080)
+    ep.endpoint  # "<hostIP>:<hostPort>" (mode "host_port")
 
-CubeMaster returns the tap_ip endpoint (sandboxIP:containerPort) when the
-caller is on the sandbox's own node; this script forces host_port mode with
-the X-Cube-Caller-Host-IP header because that is the endpoint under test.
+A caller on the sandbox's own node gets the tap_ip endpoint
+(sandboxIP:containerPort) by default; this script passes
+caller_host_ip="198.51.100.254" to force host_port mode because that is the
+endpoint under test.
 
 Required env (see .env.example):
     CUBE_TEMPLATE_ID     template used for both sandboxes
@@ -37,21 +38,17 @@ Required env (see .env.example):
 Optional env:
     CUBE_SERVICE_PORT    container port the test service listens on; must be
                          one of the template's exposed ports (default: 8080)
-    CUBEMASTER_URL       CubeMaster HTTP address (default: CUBE_API_URL host
-                         with port 8089)
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-import urllib.request
-from urllib.parse import urlparse
 
 from e2b_code_interpreter import Sandbox
 from e2b.sandbox.commands.command_handle import CommandExitException
+from cubesandbox import Sandbox as CubeSandbox
 from env_utils import ensure_dev_sidecar, load_local_dotenv
 
 load_local_dotenv()
@@ -73,49 +70,24 @@ CONNREFUSED_HINT = """\
 """
 
 
-def cubemaster_url() -> str:
-    override = os.environ.get("CUBEMASTER_URL", "").strip()
-    if override:
-        return override.rstrip("/")
-    outer = os.environ.get("CUBE_API_URL") or os.environ.get("E2B_API_URL", "")
-    host = urlparse(outer).hostname or "127.0.0.1"
-    return f"http://{host}:8089"
-
-
-def query_exposed_endpoint(master: str, sandbox_id: str, container_port: int) -> str:
+def query_exposed_endpoint(sandbox_b: CubeSandbox) -> str:
     """Return '<hostIP>:<hostPort>' for the sandbox's exposed container port."""
-    url = (
-        f"{master}/cube/sandbox/info?sandbox_id={sandbox_id}"
-        f"&container_port={container_port}"
-    )
-    req = urllib.request.Request(
-        url,
+    ep = sandbox_b.get_exposed_port_endpoint(
+        SERVICE_PORT,
         # Force host_port mode: without a caller host IP that differs from the
         # sandbox's node, single-node clusters answer with the tap-ip endpoint.
-        headers={"X-Cube-Caller-Host-IP": "198.51.100.254"},
+        caller_host_ip="198.51.100.254",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        payload = json.load(resp)
-    if payload.get("ret", {}).get("ret_code") != 200:
-        raise RuntimeError(f"info API error: {payload.get('ret')}")
-    data = payload.get("data") or []
-    if not data:
-        raise RuntimeError("info API returned no sandbox data")
-    item = data[0]
-    mode = item.get("exposed_port_mode", "")
-    endpoint = item.get("exposed_port_endpoint", "")
-    if not endpoint:
+    if ep.mode != "host_port" or not ep.endpoint:
         raise RuntimeError(
-            "no exposed_port_endpoint yet (port mapping not programmed?)"
+            f"unexpected exposed-port answer: mode={ep.mode!r} endpoint={ep.endpoint!r}"
         )
-    if mode != "host_port":
-        raise RuntimeError(f"unexpected exposed_port_mode {mode!r}, want host_port")
-    return endpoint
+    return ep.endpoint
 
 
 def main() -> None:
-    master = cubemaster_url()
-    print(f"[outer] cubemaster: {master}")
+    api_url = (os.environ.get("CUBE_API_URL") or os.environ.get("E2B_API_URL", "")).rstrip("/")
+    print(f"[outer] cube-api: {api_url}")
     print(f"[outer] service container port: {SERVICE_PORT} "
           "(must be in the template's exposed ports)")
 
@@ -137,12 +109,14 @@ def main() -> None:
             "--directory /tmp/www >/tmp/http.log 2>&1 </dev/null &"
         )
 
-        # Discover the node-level host port mapping for B's service.
+        # Discover the node-level host port mapping for B's service via the
+        # CubeSandbox SDK (the e2b-compatible SDK has no equivalent).
+        cube_b = CubeSandbox.connect(b_id)
         endpoint = None
         deadline = time.monotonic() + QUERY_TIMEOUT_S
         while True:
             try:
-                endpoint = query_exposed_endpoint(master, b_id, SERVICE_PORT)
+                endpoint = query_exposed_endpoint(cube_b)
                 break
             except Exception as exc:
                 if time.monotonic() > deadline:

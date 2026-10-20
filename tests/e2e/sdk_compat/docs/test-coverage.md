@@ -158,14 +158,14 @@ data-plane access (`network_sandbox_to_sandbox`, CubeSandbox only), mirroring
   HTTP 403, B's traffic access token gets 200;
 - node host-port mapping: B is created from a module-provisioned template
   exposing the service port, the `hostIP:hostPort` endpoint is discovered via
-  CubeMaster's info API (`X-Cube-Caller-Host-IP` forces `host_port` mode),
+  the SDK's `get_exposed_port_endpoint` (a caller-IP override forces
+  `host_port` mode),
   and A is created with `allow_out` for the node IP so the case also holds
   when the node IP falls inside the built-in always-denied private ranges;
 - egress policy applied to hairpin traffic: a deny-all A is rejected when
   curling `nodeIP:hostPort`.
 
-The host-port mapping cases need a reachable CubeMaster (`CUBEMASTER_URL`,
-defaulting to the `CUBE_API_URL` host on port 8089). All cases create B from a module-provisioned template that declares the
+All cases create B from a module-provisioned template that declares the
 service port (same pattern as `test_mask_request_host.py`), which makes them
 scheduler-placement independent: the CubeProxy route resolves cross-node via
 the host-port mapping, and same-node pairs exercise the in-software hairpin
