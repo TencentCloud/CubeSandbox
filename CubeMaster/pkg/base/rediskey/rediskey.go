@@ -125,3 +125,11 @@ func ReadKeysWithFallback(newKey, legacyKey string) []string {
 func DeleteKeys(newKey, legacyKey string) []string {
 	return []string{newKey, legacyKey}
 }
+
+// WebhookDelivery returns the fixed task hash and scheduling indexes. The shared
+// hash tag keeps multi-key scripts in one slot; it does not add Cluster routing.
+func WebhookDelivery() (tasks, due, terminal string) {
+	return join(Prefix, Version, ScopeMaster, "webhook", "tasks", "{delivery}"),
+		join(Prefix, Version, ScopeMaster, "webhook", "due", "{delivery}"),
+		join(Prefix, Version, ScopeMaster, "webhook", "terminal", "{delivery}")
+}
