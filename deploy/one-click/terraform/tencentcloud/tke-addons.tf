@@ -682,13 +682,16 @@ resource "kubernetes_config_map" "templatecenter_trusted_ca" {
     }
     # One content guard, same as the chart's render-time check: every PEM
     # block must be a CERTIFICATE. A pasted private key must not reach the
-    # registry-facing pod. Deliberately no symmetry/prose-marker/size
-    # duplicates.
+    # registry-facing pod. BEGIN markers are counted at any indentation
+    # (PEM copied out of YAML/secret manifests is commonly indented), and
+    # an entry must contain at least one block. Deliberately no
+    # symmetry/prose-marker/size duplicates.
     precondition {
       condition = alltrue([
         for pem in var.templatecenter_trusted_ca_certs :
-        length(regexall("(?mi)^-----BEGIN [A-Z ]+-----", pem)) ==
-        length(regexall("(?mi)^-----BEGIN CERTIFICATE-----", pem))
+        length(regexall("(?mi)^[ \t]*-----BEGIN [A-Z ]+-----", pem)) > 0 &&
+        length(regexall("(?mi)^[ \t]*-----BEGIN [A-Z ]+-----", pem)) ==
+        length(regexall("(?mi)^[ \t]*-----BEGIN CERTIFICATE-----", pem))
       ])
       error_message = "templatecenter_trusted_ca_certs must contain CERTIFICATE blocks only; a pasted private key must not reach the registry-facing pod."
     }

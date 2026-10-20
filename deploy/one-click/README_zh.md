@@ -613,20 +613,6 @@ sudo yum install -y python3 libaio libnuma libuuid
 
 > **E2B SDK：** 集群版不含单机 one-click 的 CoreDNS split DNS。除配置 `E2B_API_URL` 外，还须为 `*.cube.app` 配置 Private DNS 或等价解析，详见[完整指南 — E2B 与 cube.app 域名](../../docs/zh/guide/tencentcloud-terraform-deploy.md#e2b-与-cubeapp-域名)。
 
-### 私有 CA 镜像仓库信任（可信 CA 证书）
-
-若 TemplateCenter 拉取镜像的仓库使用私有 CA 签发的证书，请以 Terraform 变量形式传入证书。这些值**不会**读入或写入 `.env`，因此每次运行 `create.sh` 前都需重新提供（导出环境变量，或写入 `terraform.tfvars` 文件）：
-
-```bash
-export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"]'
-./terraform/tencentcloud/create.sh
-```
-
-- 该值必须在每次运行 `create.sh` 时提供（`TF_VAR_` 环境变量，或放在 `variables.tf` 旁、可跨运行持久生效的 `terraform.tfvars`）；重跑时不提供会删除该 ConfigMap 及挂载，信任随之失效。
-- 每个条目可含一或多个证书（证书链）；条目会渲染为 Terraform 管理的 ConfigMap 的 key，挂载到 `/etc/cube/trusted-ca` 并通过 `SSL_CERT_DIR` 暴露——Go 在系统信任库**之外追加**读取该目录，公共 CA 仓库不受影响。仅接受证书块：混入私钥会被 plan 拒绝。
-- 另一种方式：`templatecenter_trusted_ca_existing_config_map` 指向你自建的 ConfigMap（apply 前先在 `cubesandbox` namespace 创建；在此之前 pod 会停在 ContainerCreating）。与 certs 变量互斥。
-- 证书变更会滚动 pod（inline 路径的 checksum 注解）；自建 ConfigMap 的内容变更需手动执行 `kubectl -n cubesandbox rollout restart deploy/cube-templatecenter`。
-
 该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
 
 ```bash
@@ -693,6 +679,20 @@ export TENCENTCLOUD_BUILD_IMAGES=0          # 复用已推送的镜像
 > 当某个销毁步骤失败或回收站清理未确认成功时，`destroy.sh` 也会打印这些链接进行提醒。
 
 上述文件也内嵌在 `assets/package/sandbox-package.tar.gz` 中（供跳板机侧的 `build_images.sh` 使用）；顶层副本只是让部署器无需先解压内层包即可访问。
+
+### 私有 CA 镜像仓库信任（可信 CA 证书）
+
+若 TemplateCenter 拉取镜像的仓库使用私有 CA 签发的证书，请以 Terraform 变量形式传入证书。这些值**不会**读入或写入 `.env`，因此每次运行 `create.sh` 前都需重新提供（导出环境变量，或写入 `terraform.tfvars` 文件）：
+
+```bash
+export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"]'
+./terraform/tencentcloud/create.sh
+```
+
+- 该值必须在每次运行 `create.sh` 时提供（`TF_VAR_` 环境变量，或放在 `variables.tf` 旁、可跨运行持久生效的 `terraform.tfvars`）；重跑时不提供会删除该 ConfigMap 及挂载，信任随之失效。
+- 每个条目可含一或多个证书（证书链）；条目会渲染为 Terraform 管理的 ConfigMap 的 key，挂载到 `/etc/cube/trusted-ca` 并通过 `SSL_CERT_DIR` 暴露——Go 在系统信任库**之外追加**读取该目录，公共 CA 仓库不受影响。仅接受证书块：混入私钥会被 plan 拒绝。
+- 另一种方式：`templatecenter_trusted_ca_existing_config_map` 指向你自建的 ConfigMap（apply 前先在 `cubesandbox` namespace 创建；在此之前 pod 会停在 ContainerCreating）。与 certs 变量互斥。
+- 证书变更会滚动 pod（inline 路径的 checksum 注解）；自建 ConfigMap 的内容变更需手动执行 `kubectl -n cubesandbox rollout restart deploy/cube-templatecenter`。
 
 ### 运行环境要求与 Terraform 说明
 
