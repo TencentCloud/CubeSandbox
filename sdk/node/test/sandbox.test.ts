@@ -448,6 +448,54 @@ describe("Sandbox instance operations", () => {
     sb.close();
   });
 
+  it("resolves an exposed-port endpoint via GET /sandboxes/:id/exposed-ports/:port", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/exposed-ports/8080`);
+      expect(req.method).toBe("GET");
+      expect(req.url.searchParams.get("callerHostIP")).toBe("198.51.100.254");
+      return {
+        status: 200,
+        json: {
+          sandboxID: SANDBOX_ID,
+          containerPort: 8080,
+          mode: "host_port",
+          endpoint: "9.135.152.214:20006",
+          hostIP: "9.135.152.214",
+          hostPort: 20006,
+          sandboxIP: "192.168.0.20",
+        },
+      };
+    });
+    const ep = await sb.getExposedPortEndpoint(8080, "198.51.100.254");
+    expect(ep.mode).toBe("host_port");
+    expect(ep.endpoint).toBe("9.135.152.214:20006");
+    expect(ep.hostPort).toBe(20006);
+    sb.close();
+  });
+
+  it("resolves an exposed-port endpoint without a caller override", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      expect(req.url.searchParams.get("callerHostIP")).toBeNull();
+      return {
+        status: 200,
+        json: {
+          sandboxID: SANDBOX_ID,
+          containerPort: 8080,
+          mode: "tap_ip",
+          endpoint: "192.168.0.20:8080",
+          sandboxIP: "192.168.0.20",
+        },
+      };
+    });
+    const ep = await sb.getExposedPortEndpoint(8080);
+    expect(ep.mode).toBe("tap_ip");
+    expect(ep.endpoint).toBe("192.168.0.20:8080");
+    expect(ep.hostPort).toBeUndefined();
+    sb.close();
+  });
+
   it("kills via DELETE /sandboxes/:id", async () => {
     const sb = await createSandbox();
     setHandler((req) => {

@@ -16,6 +16,7 @@ export {
   type NetworkOptions,
   type UpdateNetworkOptions,
   type LifecycleOptions,
+  type ExposedPortEndpoint,
 } from "./sandbox.js";
 
 export { Config, resolveConfig, NEVER_TIMEOUT, type ConfigOptions } from "./config.js";

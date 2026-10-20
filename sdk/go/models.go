@@ -242,3 +242,19 @@ func (e *Execution) mainText() string {
 	}
 	return ""
 }
+
+// ExposedPortEndpoint is the resolved endpoint of a template-declared exposed
+// port (GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}). Mode
+// selects the address family of Endpoint: "host_port" (Endpoint is
+// HostIP:HostPort, usable from any caller) or "tap_ip" (Endpoint is
+// SandboxIP:ContainerPort, only meaningful for callers on the sandbox's own
+// node).
+type ExposedPortEndpoint struct {
+	SandboxID     string `json:"sandboxID"`
+	ContainerPort int    `json:"containerPort"`
+	Mode          string `json:"mode"`
+	Endpoint      string `json:"endpoint"`
+	HostIP        string `json:"hostIP,omitempty"`
+	HostPort      int    `json:"hostPort,omitempty"`
+	SandboxIP     string `json:"sandboxIP,omitempty"`
+}

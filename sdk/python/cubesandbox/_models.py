@@ -432,3 +432,22 @@ def _serialize_results(results: list[Result]) -> list[dict[str, Any]]:
         item["text"] = result.text
         serialized.append(item)
     return serialized
+
+
+@dataclass(frozen=True)
+class ExposedPortEndpoint:
+    """Endpoint of a template-declared exposed port, resolved by CubeMaster.
+
+    ``mode`` selects the address family of ``endpoint``: ``"host_port"`` —
+    ``endpoint`` is ``hostIP:hostPort`` and usable from any caller — or
+    ``"tap_ip"`` — ``endpoint`` is ``sandboxIP:containerPort`` and only
+    meaningful for callers on the sandbox's own node.
+    """
+
+    sandbox_id: str
+    container_port: int
+    mode: str
+    endpoint: str
+    host_ip: str | None = None
+    host_port: int | None = None
+    sandbox_ip: str | None = None

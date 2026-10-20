@@ -3,7 +3,7 @@
 
 from .sandbox import Sandbox, NEVER_TIMEOUT
 from ._config import Config
-from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo, SandboxInfo, SandboxState
+from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo, SandboxInfo, SandboxState, ExposedPortEndpoint
 from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError, VolumeNotFoundError, FilesystemNotFoundError, PartialWriteError
 from ._commands import CommandResult
 from ._pty import Pty, PtyHandle, PtyOutput, PtySize
@@ -23,6 +23,7 @@ __all__ = [
     "SnapshotInfo",
     "SandboxInfo",
     "SandboxState",
+    "ExposedPortEndpoint",
     "CubeSandboxError",
     "SandboxNotFoundError",
     "TemplateNotFoundError",

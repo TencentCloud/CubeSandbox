@@ -51,6 +51,27 @@ func (s *Sandbox) GetInfo(ctx context.Context) (*SandboxInfo, error) {
 	return &info, nil
 }
 
+// GetExposedPortEndpoint resolves the endpoint of a template-declared exposed
+// port. callerHostIP optionally overrides CubeMaster's same-node detection
+// (any out-of-node address forces the host_port form); empty means the
+// connection's remote address is used, which for an in-sandbox caller is its
+// node IP after SNAT.
+func (s *Sandbox) GetExposedPortEndpoint(ctx context.Context, port int, callerHostIP string) (*ExposedPortEndpoint, error) {
+	if err := s.ensureClient(); err != nil {
+		return nil, err
+	}
+
+	path := fmt.Sprintf("/sandboxes/%s/exposed-ports/%d", url.PathEscape(s.SandboxID), port)
+	if callerHostIP != "" {
+		path += "?callerHostIP=" + url.QueryEscape(callerHostIP)
+	}
+	var endpoint ExposedPortEndpoint
+	if err := s.client.doJSON(ctx, http.MethodGet, path, nil, &endpoint, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return &endpoint, nil
+}
+
 func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {
 	if err := s.ensureClient(); err != nil {
 		return err
