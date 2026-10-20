@@ -59,6 +59,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # ── High-concurrency in-memory state ──────────────────────────────────────
 # Lock-free concurrent HashMap: O(1) reads without global lock
 dashmap = "5"
+sha2 = "0.10"
 # Atomic counters / flags
 # (std::sync::atomic is sufficient for simple cases)
 

@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// on every request, so real data must live behind Arc.
 #[derive(Clone)]
 pub struct AppState {
-    /// Per-API-key rate limiter (token bucket).
+    /// Per-identity rate limiter (token bucket), keyed on the validated credential.
     pub rate_limiter: Arc<DefaultKeyedRateLimiter<String>>,
 
     /// Shared reqwest connection pool.
@@ -38,6 +38,7 @@ impl AppState {
     pub async fn new(config: crate::config::ServerConfig, logger: ArcLogger) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_per_sec.max(1)).unwrap());
         let rate_limiter = Arc::new(RateLimiter::keyed(quota));
+        spawn_rate_limiter_gc(rate_limiter.clone());
 
         let http_client = reqwest::Client::builder()
             .pool_max_idle_per_host(100)
@@ -55,5 +56,75 @@ impl AppState {
             logger,
             config: Arc::new(config),
         }
+    }
+}
+
+fn spawn_rate_limiter_gc(limiter: Arc<DefaultKeyedRateLimiter<String>>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            limiter.retain_recent();
+        }
+    });
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+    use std::num::NonZeroU32;
+
+    fn limiter(per_sec: u32) -> DefaultKeyedRateLimiter<String> {
+        RateLimiter::keyed(Quota::per_second(NonZeroU32::new(per_sec).unwrap()))
+    }
+
+    #[test]
+    fn retain_recent_does_not_hand_an_active_key_a_fresh_bucket() {
+        let l = limiter(1);
+        let key = "active".to_string();
+
+        assert!(l.check_key(&key).is_ok(), "first request should pass");
+        assert!(
+            l.check_key(&key).is_err(),
+            "second request should be throttled"
+        );
+
+        l.retain_recent();
+
+        assert!(
+            l.check_key(&key).is_err(),
+            "retain_recent reset an active key's bucket, so a client at its burst \
+             boundary would get a full quota back on every sweep"
+        );
+    }
+
+    #[test]
+    fn retain_recent_reclaims_idle_keys() {
+        let l = limiter(1000);
+        for i in 0..64 {
+            assert!(l.check_key(&format!("idle-{i}")).is_ok());
+        }
+        assert_eq!(l.len(), 64, "keys should be tracked before the sweep");
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        l.retain_recent();
+
+        assert_eq!(
+            l.len(),
+            0,
+            "idle keys were not reclaimed, so the map grows without bound"
+        );
+    }
+
+    #[test]
+    fn distinct_keys_do_not_share_a_bucket() {
+        let l = limiter(1);
+
+        assert!(l.check_key(&"a".to_string()).is_ok());
+        assert!(l.check_key(&"a".to_string()).is_err());
+        assert!(
+            l.check_key(&"b".to_string()).is_ok(),
+            "a second identity was throttled by the first one's traffic"
+        );
     }
 }
