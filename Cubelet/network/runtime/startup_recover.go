@@ -802,7 +802,7 @@ func (s *NetworkController) cleanupConflictingTap(ip net.IP) error {
 	if err := s.checkTapConflict(tap, ip); err != nil {
 		return err
 	}
-	if err := s.tapAdapter.Destroy(tap.Index); err != nil {
+	if err := s.destroyTapIndex(tap.Index); err != nil {
 		return fmt.Errorf("destroy stale tap %s(%d): %w", tap.Name, tap.Index, err)
 	}
 	s.dropPooledTapFD(tap.Name)

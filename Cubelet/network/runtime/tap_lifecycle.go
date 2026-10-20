@@ -345,15 +345,17 @@ func (s *NetworkController) createPoolTap() error {
 		s.allocator.Release(ip)
 		return err
 	}
+	// newTap already attached. Record it before any later acquire can see the TAP.
+	s.markFilterAttached(tap.Index)
 	if err := s.resetTapPolicyForPool(tap); err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return err
 	}
 	if err := s.addReadyTap(tap); err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return err
 	}

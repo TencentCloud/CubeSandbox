@@ -84,6 +84,10 @@ type NetworkController struct {
 	routeMu      sync.Mutex
 	routeEnsured bool
 
+	// attachedFilters records ifindexes whose AttachFilter succeeded in this
+	// process. Destroy deletes the record.
+	attachedFilters sync.Map
+
 	// cubeEgressAdapter is the loopback admin adapter toward CubeEgress. nil when
 	// CubeEgressAdminURL is empty (dev / test setups). The push and
 	// delete sites tolerate nil; the dump endpoint exposes the current
@@ -401,6 +405,11 @@ func (s *NetworkController) startControllerRuntime() error {
 	// controller to request-serving code so it cannot race a new TAP lifecycle.
 	s.runStaleNetPolicyMapGC()
 	startCubeVSSessionLogDrain()
+
+	// Recovered TAPs attach off this path. acquireTap attaches any ifindex
+	// the background job has not recorded yet. A failure there does not fail
+	// startup; the next acquire retries.
+	s.startAsyncAttachFilters()
 
 	// Pool warmup runs in the background so first-deploy startup
 	// (~63ms × TapInitNum) does not block NewNetworkController and trip
@@ -817,6 +826,9 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		// GetTapFile handoff is a cache hit. Nil after a runtime restart;
 		// GetTapFile then falls back to a lazy open.
 		tap.File = s.takePooledTapFD(entry.TapName)
+		if err := s.ensureAttachFilter(tap.Index); err != nil {
+			return nil, nil, s.rollbackUnattachedAcquire(owner, tap, entry, err)
+		}
 		return tap, entry, nil
 	}
 	ip, err := s.allocator.Allocate()
@@ -832,24 +844,29 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
+	// newTap already attached. Record it so the ensure below does not attach again.
+	s.markFilterAttached(tap.Index)
 	if err := s.resetTapPolicyForPool(tap); err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
 	entry, err = tapPoolEntryFromDevice(tap, "", TapPoolReady)
 	if err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
 	if err := s.tapPool.AddReserved(entry, owner); err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return nil, nil, err
+	}
+	if err := s.ensureAttachFilter(tap.Index); err != nil {
+		return nil, nil, s.rollbackUnattachedAcquire(owner, tap, entry, err)
 	}
 	return tap, entry, nil
 }
