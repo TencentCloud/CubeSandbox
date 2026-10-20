@@ -47,6 +47,36 @@ fill_pattern(uint8_t *buf, size_t len, uint8_t seed)
 }
 
 static int
+find_pending_record(const struct s3_writeback *writeback, uint64_t seq,
+		    struct s3_writeback_record *record)
+{
+	struct s3_writeback_iter iter;
+	int rc;
+
+	s3_writeback_iter_begin(writeback, &iter);
+	while ((rc = s3_writeback_iter_next(writeback, &iter, record)) == 1) {
+		if (record->seq == seq) {
+			return 0;
+		}
+	}
+	return rc == 0 ? -ENOENT : rc;
+}
+
+static int
+mark_seq_complete(struct s3_writeback *writeback, uint64_t seq,
+		  int32_t outcome)
+{
+	struct s3_writeback_record record;
+	int rc;
+
+	rc = find_pending_record(writeback, seq, &record);
+	if (rc != 0) {
+		return rc;
+	}
+	return s3_writeback_mark_record_complete(writeback, &record, outcome);
+}
+
+static int
 publish_initial(const char *lvstore, const uint8_t *payload,
 		uint64_t *first_seq)
 {
@@ -161,16 +191,16 @@ test_ring(void)
 	check_true("head scheduling query preserves ring order",
 		   rc == 0 && head_count == 2 &&
 		   head_chunks[0] == 7 && head_chunks[1] == 8);
-	rc = s3_writeback_get_record(writeback, initial_seq, &record);
+	rc = find_pending_record(writeback, initial_seq, &record);
 	check_true("first record can be addressed by its stable handle", rc == 0);
 	rc = s3_writeback_set_wal_seq(writeback, &record, 1234);
 	check_true("assigned WAL identity is persisted", rc == 0);
-	rc = s3_writeback_get_record(writeback, initial_seq, &record);
+	rc = find_pending_record(writeback, initial_seq, &record);
 	check_true("WAL identity is visible before host acknowledgement",
 		   rc == 0 && record.wal_seq == 1234);
 
 	printf("\n[2] out-of-order completion reclaims only a prefix\n");
-	rc = s3_writeback_get_record(writeback, seqs[0], &record);
+	rc = find_pending_record(writeback, seqs[0], &record);
 	check_true("middle record has an O(1) completion handle", rc == 0);
 	rc = s3_writeback_mark_record_complete(writeback, &record, -EIO);
 	check_true("middle record stores its outcome", rc == 0);
@@ -202,11 +232,11 @@ test_ring(void)
 		   rc == 0 && count == 2 && seqs[0] == initial_seq &&
 		   seqs[1] == initial_seq + 2);
 	check_true("complete first record",
-		   s3_writeback_mark_complete(writeback, initial_seq, 0) == 0);
+		   mark_seq_complete(writeback, initial_seq, 0) == 0);
 	check_true("contiguous first and middle records reclaim together",
 		   s3_writeback_reclaim(writeback) == 2);
 	check_true("complete final initial record",
-		   s3_writeback_mark_complete(writeback, initial_seq + 2, 0) == 0);
+		   mark_seq_complete(writeback, initial_seq + 2, 0) == 0);
 	check_true("final initial record reclaims",
 		   s3_writeback_reclaim(writeback) == 1);
 
@@ -227,9 +257,9 @@ test_ring(void)
 		   rc == 0 && head_count == 2 &&
 		   head_chunks[0] == 1000 && head_chunks[1] == 1001);
 	check_true("first wrap record completes",
-		   s3_writeback_mark_complete(writeback, wrap_seq[0], 0) == 0);
+		   mark_seq_complete(writeback, wrap_seq[0], 0) == 0);
 	check_true("second wrap record completes",
-		   s3_writeback_mark_complete(writeback, wrap_seq[1], 0) == 0);
+		   mark_seq_complete(writeback, wrap_seq[1], 0) == 0);
 	check_true("two-record prefix reclaims",
 		   s3_writeback_reclaim(writeback) == 2);
 	rc = s3_writeback_publish(writeback, S3_WRITEBACK_WRITE, 200, 2,
@@ -250,11 +280,11 @@ test_ring(void)
 		   rc == 0 && count == 2 && seqs[0] == wrap_seq[2] &&
 		   seqs[1] == wrap_seq[3]);
 	check_true("later wrapped record completes first",
-		   s3_writeback_mark_complete(writeback, wrap_seq[3], 0) == 0);
+		   mark_seq_complete(writeback, wrap_seq[3], 0) == 0);
 	check_true("later completion cannot pass prefix",
 		   s3_writeback_reclaim(writeback) == 0);
 	check_true("older wrapped record completes",
-		   s3_writeback_mark_complete(writeback, wrap_seq[2], 0) == 0);
+		   mark_seq_complete(writeback, wrap_seq[2], 0) == 0);
 	check_true("padding and both wrapped records reclaim",
 		   s3_writeback_reclaim(writeback) == 2);
 
@@ -284,7 +314,7 @@ test_ring(void)
 		   stats.occupied_bytes > 0);
 	for (int i = count - 1; i >= 0; i--) {
 		check_true("backpressure record completes",
-			   s3_writeback_mark_complete(writeback, seqs[i], 0) == 0);
+			   mark_seq_complete(writeback, seqs[i], 0) == 0);
 	}
 	check_true("all backpressure records reclaim contiguously",
 		   s3_writeback_reclaim(writeback) == (uint64_t)count);

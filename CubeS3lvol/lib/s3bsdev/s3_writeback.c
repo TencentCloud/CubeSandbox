@@ -982,35 +982,6 @@ export_record(const struct s3_wb_record_header *record,
 	out->completed = state == S3_WB_STATE_COMPLETE;
 }
 
-int
-s3_writeback_get_record(const struct s3_writeback *writeback, uint64_t seq,
-			struct s3_writeback_record *out)
-{
-	struct s3_wb_record_header *record;
-	uint64_t position, tail, advance;
-	int rc;
-
-	if (!writeback || !out || seq == 0) {
-		return -EINVAL;
-	}
-	position = __atomic_load_n(&writeback->header->head, __ATOMIC_ACQUIRE);
-	tail = __atomic_load_n(&writeback->header->tail, __ATOMIC_ACQUIRE);
-	while (position < tail) {
-		rc = record_at(writeback, position, &record, &advance);
-		if (rc != 0 || advance == 0 || advance > tail - position) {
-			return rc != 0 ? rc : -EBADMSG;
-		}
-		position += advance;
-		if (!record || record->type == S3_WB_PAD_TYPE ||
-		    record->seq != seq) {
-			continue;
-		}
-		export_record(record, out, position - advance);
-		return 0;
-	}
-	return -ENOENT;
-}
-
 void
 s3_writeback_iter_begin(const struct s3_writeback *writeback,
 			 struct s3_writeback_iter *iter)
@@ -1124,45 +1095,6 @@ s3_writeback_mark_record_complete(struct s3_writeback *writeback,
 	__atomic_add_fetch(&writeback->header->completed_records, 1,
 			   __ATOMIC_RELAXED);
 	return 0;
-}
-
-int
-s3_writeback_mark_complete(struct s3_writeback *writeback,
-			   uint64_t seq, int32_t outcome)
-{
-	struct s3_wb_record_header *record;
-	uint64_t position, tail, advance;
-	int rc;
-
-	if (!writeback || seq == 0) {
-		return -EINVAL;
-	}
-	position = __atomic_load_n(&writeback->header->head, __ATOMIC_ACQUIRE);
-	tail = __atomic_load_n(&writeback->header->tail, __ATOMIC_ACQUIRE);
-	while (position < tail) {
-		rc = record_at(writeback, position, &record, &advance);
-		if (rc != 0 || advance == 0 || advance > tail - position) {
-			return rc != 0 ? rc : -EBADMSG;
-		}
-		position += advance;
-		if (!record || record->type == S3_WB_PAD_TYPE ||
-		    record->seq != seq) {
-			continue;
-		}
-		if (__atomic_load_n(&record->state, __ATOMIC_ACQUIRE) ==
-		    S3_WB_STATE_COMPLETE) {
-			return -EALREADY;
-		}
-		__atomic_store_n(&record->state, S3_WB_STATE_COMPLETE,
-				 __ATOMIC_RELEASE);
-		record->outcome = outcome;
-		__atomic_sub_fetch(&writeback->header->pending_records, 1,
-				   __ATOMIC_RELAXED);
-		__atomic_add_fetch(&writeback->header->completed_records, 1,
-				   __ATOMIC_RELAXED);
-		return 0;
-	}
-	return -ENOENT;
 }
 
 uint64_t

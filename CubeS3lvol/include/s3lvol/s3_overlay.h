@@ -200,26 +200,11 @@ void s3_overlay_destroy(struct s3_overlay *ov);
 int s3_overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 		     const void *data, uint64_t seq);
 
-/**
- * Make a write visible before its WAL batch is durable.
- *
- * Pending blocks participate in reads and capacity accounting, but a chunk
- * containing any pending block is not offered to the S3 flusher.  This keeps
- * WAL truncation and host-crash recovery tied to durable records while the
- * write-back cache is allowed to acknowledge the caller early.
- *
- * Call s3_overlay_mark_durable() from the WAL completion, in submission order.
- */
-int s3_overlay_write_pending(struct s3_overlay *ov, uint64_t lba,
-			     uint32_t nblocks, const void *data, uint64_t seq);
-
 /* Reserve every allocation before the WAL accepts the write. A successful
  * commit cannot fail for lack of memory; cancel removes the invisible bytes. */
 int s3_overlay_prepare_write(struct s3_overlay *ov, uint64_t lba,
 			     uint32_t nblocks,
 			     struct s3_overlay_write_reservation **out);
-int s3_overlay_commit_prepared(struct s3_overlay_write_reservation *reservation,
-			       const void *data, uint64_t seq);
 /* Commit data owned by another durable store (normally the shared-memory
  * write-back ring).  No payload bytes are copied or allocated.  release_fn is
  * called exactly once for every block when that block is overwritten, dropped,
