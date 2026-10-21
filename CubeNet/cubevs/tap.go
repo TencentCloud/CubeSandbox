@@ -212,7 +212,10 @@ func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
 	if err := CleanupTAPDevicePolicy(ifindex); err != nil {
 		return err
 	}
-	return DeleteTAPDeviceMetadata(ifindex, ip)
+	if err := DeleteTAPDeviceMetadata(ifindex, ip); err != nil {
+		return err
+	}
+	return DeleteSandboxTrafficMetrics(ip)
 }
 
 // DeleteTAPDeviceMetadata removes TAP identity metadata from CubeVS without touching
