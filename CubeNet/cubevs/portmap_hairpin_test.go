@@ -364,6 +364,9 @@ func TestHairpinForwardSNATAndLoopback(t *testing.T) {
 	if !ok {
 		t.Fatal("egress session for the hairpin flow missing")
 	}
+	if sess.PacketClass != packetClassHairpin {
+		t.Fatalf("session packet_class=%d, want HAIRPIN_PACKET (%d)", sess.PacketClass, packetClassHairpin)
+	}
 	if sess.NodeIp != ipToUint32(net.ParseIP(hairpinNodeIP)) || ntohs(sess.NodePort) != hairpinSnatPort {
 		t.Fatalf("session node tuple=%s:%d, want %s:%d",
 			uint32ToIP(sess.NodeIp), ntohs(sess.NodePort), hairpinNodeIP, hairpinSnatPort)
@@ -432,6 +435,13 @@ func TestHairpinForwardAllowedByRule(t *testing.T) {
 	if out.sport != hairpinSnatPort {
 		t.Fatalf("SNAT src port=%d, want %d", out.sport, hairpinSnatPort)
 	}
+	sess, ok := env.egressSession(t, hairpinVmAIP, hairpinNodeIP, hairpinClientPort, hairpinHostPort, 7)
+	if !ok {
+		t.Fatal("egress session for the hairpin flow missing")
+	}
+	if sess.PacketClass != packetClassHairpin {
+		t.Fatalf("session packet_class=%d, want HAIRPIN_PACKET (%d)", sess.PacketClass, packetClassHairpin)
+	}
 }
 
 // TestNodeIPTrafficWithoutMappingUnchanged covers T4: nodeIP traffic whose
@@ -463,6 +473,10 @@ func TestNodeIPTrafficWithoutMappingUnchanged(t *testing.T) {
 		}
 		if sess.NodeIfindex != hairpinGwIfindex {
 			t.Fatalf("session node_ifindex=%d, want cubegw0 (%d)", sess.NodeIfindex, hairpinGwIfindex)
+		}
+		if sess.PacketClass != packetClassSNAT {
+			t.Fatalf("session packet_class=%d, want SNAT_PACKET (%d); node-local traffic must not be flagged hairpin",
+				sess.PacketClass, packetClassSNAT)
 		}
 	})
 
@@ -595,6 +609,13 @@ func TestHairpinEstablishedFlowKeepsSession(t *testing.T) {
 	if out.sport != hairpinSnatPort {
 		t.Fatalf("established flow src port=%d, want reused %d", out.sport, hairpinSnatPort)
 	}
+	sess, ok := env.egressSession(t, hairpinVmAIP, hairpinNodeIP, hairpinClientPort, hairpinHostPort, 7)
+	if !ok {
+		t.Fatal("egress session for the hairpin flow missing")
+	}
+	if sess.PacketClass != packetClassHairpin {
+		t.Fatalf("session packet_class=%d, want HAIRPIN_PACKET (%d)", sess.PacketClass, packetClassHairpin)
+	}
 }
 
 // TestHairpinTimeWaitTupleReuse covers T9: a SYN reusing a TIME_WAIT tuple
@@ -649,5 +670,8 @@ func TestHairpinTimeWaitTupleReuse(t *testing.T) {
 	if sess.State == uint8(tcpCTTimeWait) || ntohs(sess.NodePort) != hairpinSnatPort+1 {
 		t.Fatalf("session state=%d node_port=%d, want fresh SYN-session on port %d",
 			sess.State, ntohs(sess.NodePort), hairpinSnatPort+1)
+	}
+	if sess.PacketClass != packetClassHairpin {
+		t.Fatalf("recreated session packet_class=%d, want HAIRPIN_PACKET (%d)", sess.PacketClass, packetClassHairpin)
 	}
 }
