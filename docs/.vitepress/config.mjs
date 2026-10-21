@@ -279,6 +279,7 @@ export default withMermaid(defineConfig({
               text: 'Observability & Performance',
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
+                { text: 'Sandbox Network Metrics', link: '/guide/network-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
                 { text: 'QualityStatus', link: '/guide/quality-status' }

@@ -129,12 +129,19 @@ func TestReapSessionMapsDeletesExpiredWithoutRevisiting(t *testing.T) {
 		}
 	}
 
-	count, err := reapSessionMaps(egress, ingress, now)
+	count, usageByNodeIP, err := reapSessionMapsWithUsage(egress, ingress, now)
 	if err != nil {
-		t.Fatalf("reapSessionMaps: %v", err)
+		t.Fatalf("reapSessionMapsWithUsage: %v", err)
 	}
 	if count != n {
 		t.Fatalf("visited %d sessions, want %d", count, n)
+	}
+	wantUsage := snatSessionUsage{
+		sessionsInUse: n - uint64(len(expired)),
+		portsInUse:    n - uint64(len(expired)),
+	}
+	if got := usageByNodeIP[0x0a000003]; got != wantUsage {
+		t.Fatalf("SNAT usage = %+v, want %+v", got, wantUsage)
 	}
 
 	for _, key := range order {
@@ -174,6 +181,43 @@ func TestReapSessionMapsEmpty(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("visited %d sessions, want 0", count)
+	}
+}
+
+func TestDeleteExpiredSessionKeepsSessionRefreshedAfterBatchRead(t *testing.T) {
+	egress := newTestHashMap(t, uint32(unsafe.Sizeof(sessionKey{})), uint32(unsafe.Sizeof(natSession{})), 1)
+	ingress := newTestHashMap(t, uint32(unsafe.Sizeof(sessionKey{})), uint32(unsafe.Sizeof(ingressSessionValue{})), 1)
+	now := uint64(4 * time.Hour)
+	key := sessionKey{
+		SourceIP:   0x0a000001,
+		TargetIP:   0x0a000002,
+		SourcePort: 10000,
+		TargetPort: 80,
+		Protocol:   unix.IPPROTO_TCP,
+	}
+	current := natSession{
+		AccessTime: now,
+		NodeIP:     0x0a000003,
+		NodePort:   40000,
+		State:      uint8(tcpCTEstablished),
+	}
+	if err := egress.Put(&key, &current); err != nil {
+		t.Fatalf("put current session: %v", err)
+	}
+
+	staleBatchValue := current
+	staleBatchValue.AccessTime = 0
+	staleBatchValue.State = uint8(tcpCTClose)
+	if present := deleteExpiredSession(egress, ingress, now, &key, &staleBatchValue); !present {
+		t.Fatal("refreshed session reported absent")
+	}
+
+	var got natSession
+	if err := egress.Lookup(&key, &got); err != nil {
+		t.Fatalf("refreshed session was deleted: %v", err)
+	}
+	if got.AccessTime != now {
+		t.Fatalf("access time = %d, want %d", got.AccessTime, now)
 	}
 }
 

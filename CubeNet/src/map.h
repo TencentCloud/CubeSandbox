@@ -227,6 +227,16 @@ struct {
 	__type(value, struct dns_response_state);
 } dns_response_state SEC(".maps");
 
+/* Per-sandbox traffic counters keyed by sandbox IP. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_ENTRIES);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, __u32);
+	__type(value, struct sandbox_metrics);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} sandbox_metrics SEC(".maps");
+
 /* Tail-call jump table for the DNS parser pipeline. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);

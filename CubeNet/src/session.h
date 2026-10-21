@@ -96,11 +96,14 @@ static __always_inline __u32 current_gen_by_ip(__be32 vm_ip)
 }
 
 /* session_is_stale reports whether the session was created in a previous
- * rollback generation: its stamped gen differs from the VM's current version.
- * A sandbox rollback bumps mvm_meta->version, orphaning older sessions. */
+ * sandbox lifecycle or rollback generation. Missing metadata, an IP mismatch,
+ * or a generation mismatch means the session no longer has a live owner. */
 static __always_inline bool session_is_stale(const struct nat_session *sess)
 {
-	return sess->gen != current_gen(sess->vm_ifindex);
+	struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta,
+						    &sess->vm_ifindex);
+
+	return !meta || meta->ip != sess->vm_ip || meta->version != sess->gen;
 }
 
 /* port_mapping_key builds the egress_sessions key for a port_mapping

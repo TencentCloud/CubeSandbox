@@ -60,6 +60,11 @@ func ListTAPDevices() ([]TAPDevice, error) {
 
 // AddTAPDevice adds a new device to CubeVS.
 func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
+	// A reused sandbox IP starts a new metrics lifecycle. Clear any residual
+	// counters before publishing metadata that lets the datapath recreate them.
+	if err := DeleteSandboxTrafficMetrics(ip); err != nil {
+		return fmt.Errorf("reset sandbox traffic metrics: %w", err)
+	}
 	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {
 		return err
 	}
@@ -76,6 +81,9 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint32) error {
 	if len(id) > maxIDLength {
 		return ErrTooLong
+	}
+	if err := ensureSandboxTrafficMetrics(ip); err != nil {
+		return fmt.Errorf("ensure sandbox traffic metrics: %w", err)
 	}
 
 	mvmIP := ipToUint32(ip)
@@ -212,7 +220,10 @@ func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
 	if err := CleanupTAPDevicePolicy(ifindex); err != nil {
 		return err
 	}
-	return DeleteTAPDeviceMetadata(ifindex, ip)
+	if err := DeleteTAPDeviceMetadata(ifindex, ip); err != nil {
+		return err
+	}
+	return DeleteSandboxTrafficMetrics(ip)
 }
 
 // DeleteTAPDeviceMetadata removes TAP identity metadata from CubeVS without touching

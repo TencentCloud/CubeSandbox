@@ -1096,7 +1096,18 @@ func (s *NetworkController) cleanupCubeVSTapState(ifindex int, ip net.IP) error 
 	if err := s.cubevsAdapter.CleanupTAPPolicy(uint32(ifindex)); err != nil {
 		return err
 	}
-	return s.cleanupCubeVSTapMetadata(ifindex, ip)
+	if err := s.cleanupCubeVSTapMetadata(ifindex, ip); err != nil {
+		return err
+	}
+	if err := s.cubevsAdapter.DeleteSandboxTrafficMetrics(ip); err != nil {
+		// Metrics are observability state and must not block TAP, IP, or port
+		// reclamation. AddTAPDevice resets the counters before reusing the IP.
+		CubeLog.WithContext(context.Background()).Warnf(
+			"network runtime delete sandbox traffic metrics failed: ifindex=%d sandbox_ip=%s err=%v",
+			ifindex, ip.String(), err,
+		)
+	}
+	return nil
 }
 
 func (s *NetworkController) cleanupCubeVSTapMetadata(ifindex int, ip net.IP) error {
