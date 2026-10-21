@@ -645,9 +645,11 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 				Namespace:    sandBox.Namespace,
 				InstanceType: realReq.GetInstanceType(),
 			},
-			IP:     sandBox.IP,
-			Status: cubeboxstore.StoreStatus(cubeboxstore.Status{CreatedAt: createdAt}),
-			IsPod:  isPod,
+			IP:              sandBox.IP,
+			Status:          cubeboxstore.StoreStatus(cubeboxstore.Status{CreatedAt: createdAt}),
+			IsPod:           isPod,
+			RequestIndex:    i,
+			RequestIndexSet: true,
 		}
 
 		if set := cntrReq.GetAnnotations()[constants.AnnotationsDebugStdout]; set == "true" {

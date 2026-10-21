@@ -183,6 +183,9 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 	// Destroy's parallel steps already DeepCopy'd the trace.
 	rt.CalleeAction = "Create"
 	createCtx = CubeLog.WithRequestTrace(createCtx, rt)
+	// Same rules as Create: the numa annotation pins the node, and a request
+	// without it round-robins. Create does not check this error.
+	s.setRequestResource(createInfo, req)
 	if err := s.engine.Create(createCtx, createInfo); err != nil {
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
@@ -382,16 +385,37 @@ func savedContainerIDs(cb *cubeboxstore.CubeBox) map[int]string {
 		return out
 	}
 	out[0] = cb.ID
-	var rest []*cubeboxstore.Container
+	var legacy []*cubeboxstore.Container
 	for _, c := range cb.AllContainers() {
 		if c == nil || c.IsPod || c.ID == cb.ID {
 			continue
 		}
-		rest = append(rest, c)
+		if c.RequestIndexSet && c.RequestIndex > 0 {
+			if _, taken := out[c.RequestIndex]; !taken {
+				out[c.RequestIndex] = c.ID
+				continue
+			}
+		}
+		legacy = append(legacy, c)
 	}
-	sort.Slice(rest, func(i, j int) bool { return rest[i].CreatedAt < rest[j].CreatedAt })
-	for i, c := range rest {
-		out[i+1] = c.ID
+	// Old rows have no request index. CreatedAt can tie, so the order is
+	// creation time and then container ID.
+	sort.SliceStable(legacy, func(i, j int) bool {
+		if legacy[i].CreatedAt != legacy[j].CreatedAt {
+			return legacy[i].CreatedAt < legacy[j].CreatedAt
+		}
+		return legacy[i].ID < legacy[j].ID
+	})
+	slot := 1
+	for _, c := range legacy {
+		for {
+			if _, taken := out[slot]; !taken {
+				break
+			}
+			slot++
+		}
+		out[slot] = c.ID
+		slot++
 	}
 	return out
 }

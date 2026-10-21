@@ -6,8 +6,10 @@ package cubebox
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
@@ -253,5 +255,110 @@ func TestDestroyWithNoShimPIDSwallowsUntilNewPID(t *testing.T) {
 	}
 	if m.swallowRestartDestroyExit("sb", 77, 77) {
 		t.Fatal("new pid exit was swallowed")
+	}
+}
+
+func TestRestartPinsTheAnnotatedNumaNode(t *testing.T) {
+	restoreNumaQueries(t, 2, 2)
+	s := &service{numaNodeIndex: 1}
+	info := &workflow.CreateContext{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationsNumaNode: "1"},
+	}
+	if err := s.setRequestResource(info, req); err != nil {
+		t.Fatal(err)
+	}
+	if info.NumaNode != 1 {
+		t.Fatalf("numa node %d", info.NumaNode)
+	}
+}
+
+func TestRestartRoundRobinsWhenNumaIsUnspecified(t *testing.T) {
+	restoreNumaQueries(t, 2, 2)
+	s := &service{}
+	info := &workflow.CreateContext{}
+	if err := s.setRequestResource(info, &cubebox.RunCubeSandboxRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if info.NumaNode != 1 {
+		t.Fatalf("numa node %d, want the next round-robin slot", info.NumaNode)
+	}
+}
+
+func restoreNumaQueries(t *testing.T, maxID, count int) {
+	t.Helper()
+	prevMax, prevCount := numaMaxNodeID, numaNodeCount
+	numaMaxNodeID = func() int { return maxID }
+	numaNodeCount = func() int { return count }
+	t.Cleanup(func() {
+		numaMaxNodeID = prevMax
+		numaNodeCount = prevCount
+	})
+}
+
+func TestSavedContainerIDsKeepRequestIndexWhenCreatedAtTies(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb"}}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata:        cubeboxstore.Metadata{ID: "sb", CreatedAt: 100},
+		IsPod:           true,
+		RequestIndex:    0,
+		RequestIndexSet: true,
+	})
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata:        cubeboxstore.Metadata{ID: "side-b", CreatedAt: 100},
+		RequestIndex:    2,
+		RequestIndexSet: true,
+	})
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata:        cubeboxstore.Metadata{ID: "side-a", CreatedAt: 100},
+		RequestIndex:    1,
+		RequestIndexSet: true,
+	})
+	got := savedContainerIDs(cb)
+	if got[0] != "sb" || got[1] != "side-a" || got[2] != "side-b" {
+		t.Fatalf("ids %v", got)
+	}
+}
+
+func TestSavedContainerIDsStableSortForOldRows(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb"}}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{ID: "sb"},
+		IsPod:    true,
+	})
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{ID: "side-b", CreatedAt: 50},
+	})
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{ID: "side-a", CreatedAt: 50},
+	})
+	got := savedContainerIDs(cb)
+	if got[1] != "side-a" || got[2] != "side-b" {
+		t.Fatalf("ids %v", got)
+	}
+}
+
+func TestRequestIndexZeroIsDistinctFromAnOldRow(t *testing.T) {
+	raw, err := json.Marshal(&cubeboxstore.Container{
+		Metadata:        cubeboxstore.Metadata{ID: "sb"},
+		RequestIndex:    0,
+		RequestIndexSet: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored cubeboxstore.Container
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.RequestIndex != 0 || !restored.RequestIndexSet {
+		t.Fatalf("index 0 was not stored: %+v", restored)
+	}
+	var old cubeboxstore.Container
+	if err := json.Unmarshal([]byte(`{"ID":"old"}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.RequestIndexSet {
+		t.Fatal("an old row was treated as request index 0")
 	}
 }

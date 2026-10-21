@@ -432,9 +432,15 @@ type Container struct {
 
 	ExitCh <-chan containerd.ExitStatus `json:"-"`
 
-	IsDebugStdout  bool                     `json:"is_debug_stdout,omitempty"`
-	IsPod          bool                     `json:"is_pod,omitempty"`
-	CubeRootfsInfo *virtiofs.CubeRootfsInfo `json:"cube_rootfs_info,omitempty"`
+	IsDebugStdout bool `json:"is_debug_stdout,omitempty"`
+	IsPod         bool `json:"is_pod,omitempty"`
+
+	// RequestIndex is this container's position in the create request.
+	// Index 0 is the sandbox container. RequestIndexSet is stored separately
+	// so a missing field on an old row is not read as index 0.
+	RequestIndex    int                      `json:"request_index,omitempty"`
+	RequestIndexSet bool                     `json:"request_index_set,omitempty"`
+	CubeRootfsInfo  *virtiofs.CubeRootfsInfo `json:"cube_rootfs_info,omitempty"`
 
 	Snapshotter string              `json:"snapshotter,omitempty"`
 	SnapshotKey string              `json:"snapshot_key,omitempty"`

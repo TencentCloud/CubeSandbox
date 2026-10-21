@@ -219,12 +219,14 @@ func (c *Container) DeepCopy() *Container {
 	}
 
 	copied := &Container{
-		Metadata:      c.Metadata.DeepCopy(),
-		IP:            c.IP,
-		IsDebugStdout: c.IsDebugStdout,
-		IsPod:         c.IsPod,
-		Snapshotter:   c.Snapshotter,
-		SnapshotKey:   c.SnapshotKey,
+		Metadata:        c.Metadata.DeepCopy(),
+		IP:              c.IP,
+		IsDebugStdout:   c.IsDebugStdout,
+		IsPod:           c.IsPod,
+		RequestIndex:    c.RequestIndex,
+		RequestIndexSet: c.RequestIndexSet,
+		Snapshotter:     c.Snapshotter,
+		SnapshotKey:     c.SnapshotKey,
 	}
 
 	if c.Status != nil {
