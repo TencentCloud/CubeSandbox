@@ -202,12 +202,10 @@ spec:
               mountPath: /etc/cube/trusted-ca
               readOnly: true
           {{- end }}
-          {{- if .Values.cubeEgress.enabled }}
             # Read by the --with-cube-ca bake, which is what TC does before mkfs.
             - name: cube-egress-ca
               mountPath: /etc/cube/ca
               readOnly: true
-          {{- end }}
             - name: cube-templatecenter-log
               mountPath: /data/log/CubeTemplateCenter
             - name: cube-master-storage
@@ -225,11 +223,9 @@ spec:
           configMap:
             name: {{ .Values.trustedCACerts.existingConfigMap | default (include "cube.trustedCaConfigMapName" .) }}
       {{- end }}
-      {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
-      {{- end }}
         - name: cube-templatecenter-log
           emptyDir: {}
         # The SAME volume CubeMaster mounts. hostPath and PVC are both honoured so

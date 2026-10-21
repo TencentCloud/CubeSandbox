@@ -324,10 +324,10 @@ invalidate_pvm_gate_sentinels() {
 }
 
 # Ports cube-node binds on the host under hostNetwork; the chart overrides this
-# via env, the default covers direct runs. CubeEgress is excluded: its server
-# is indistinguishable from a foreign one by name or exe, so reserving those
-# ports would false-positive on our own sidecar. They are not preflighted —
-# check them yourself if cubeEgress is enabled.
+# via env, the default covers direct runs. CubeEgress always runs as a sidecar
+# and is excluded: its server is indistinguishable from a foreign one by name
+# or exe, so reserving those ports would false-positive on our own sidecar.
+# They are not preflighted.
 HOST_PORT_RESERVED_PORTS="${HOST_PORT_RESERVED_PORTS:-9998 9999 9966}"
 # Holders that are not conflicts: our own components, including a Big Pod that
 # is still exiting. Matched against /proc/<pid>/exe basename first (thread

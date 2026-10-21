@@ -1131,10 +1131,8 @@ cubeProxy:
   resources: {}
 
 cubeEgress:
-  # Transparent outbound egress/MITM data-plane component. When enabled, the
-  # Cube Node Big Pod gets a cube-egress sidecar and a cube-egress-net helper
-  # sidecar that owns host TPROXY iptables/ip-rule state.
-  enabled: true
+  # Transparent outbound egress/MITM data-plane component. cube-egress-net
+  # owns the host TPROXY iptables and ip-rule state configured under network.
   # Loopback admin API port (policy push from Cubelet). Default 9091 avoids
   # colliding with CubeProxy plaintext gRPC on 9090. Keep cubeNode / Cubelet
   # cube_egress_admin_url in sync (chart sets CUBE_EGRESS_ADMIN_PORT on both).
@@ -1164,7 +1162,6 @@ cubeEgress:
       placeholderCert: ""
       placeholderKey: ""
   network:
-    enabled: true
     ingressInterface: cube-dev
     # Must match cube-dev gateway (first usable IP of cubeNode.network.cidr).
     tproxyOnIP: 172.16.0.1

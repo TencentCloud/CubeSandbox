@@ -365,7 +365,6 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "cubeOps.enabled=true requires images.ops.repository" }}
 {{- end }}
 {{- end }}
-{{- if .Values.cubeEgress.enabled }}
 {{- if not (has .Values.cubeEgress.ca.mode (list "existingSecret" "selfSigned" "inline")) }}
 {{- fail "cubeEgress.ca.mode must be one of: existingSecret, selfSigned, inline" }}
 {{- end }}
@@ -375,9 +374,8 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and (eq .Values.cubeEgress.ca.mode "inline") (or (not .Values.cubeEgress.ca.inline.rootCert) (not .Values.cubeEgress.ca.inline.rootKey) (not .Values.cubeEgress.ca.inline.placeholderCert) (not .Values.cubeEgress.ca.inline.placeholderKey)) }}
 {{- fail "cubeEgress.ca.mode=inline requires rootCert, rootKey, placeholderCert, and placeholderKey" }}
 {{- end }}
-{{- if and .Values.cubeEgress.network.enabled (not .Values.cubeEgress.network.ingressInterface) }}
-{{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
-{{- end }}
+{{- if not .Values.cubeEgress.network.ingressInterface }}
+{{- fail "cubeEgress.network.ingressInterface is required" }}
 {{- end }}
 {{- if .Values.volumeCos.enabled }}
 {{- if and (not .Values.volumeCos.existingSecret) (or (not .Values.volumeCos.secretId) (not .Values.volumeCos.secretKey) (not .Values.volumeCos.bucket)) }}

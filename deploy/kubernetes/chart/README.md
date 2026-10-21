@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; host network by default (`cubeNode.hostNetwork: true`). Image/template changes recreate the Pod: sandbox tap devices and cubevs hooks live in the Pod netns, so they survive that on the host network and are lost on the Pod network. Switching the mode on an existing release is gated by the `cube-node-hostnet-preflight` Hook.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + CubeEgress; host network by default (`cubeNode.hostNetwork: true`). Image/template changes recreate the Pod: sandbox tap devices and cubevs hooks live in the Pod netns, so they survive that on the host network and are lost on the Pod network. Switching the mode on an existing release is gated by the `cube-node-hostnet-preflight` Hook.
 - **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
@@ -728,7 +728,7 @@ The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpo
 
 ## CubeEgress
 
-`cubeEgress.enabled=true` runs CubeEgress inside the Cube Node Big Pod:
+CubeEgress always runs inside the Cube Node Big Pod:
 
 - `cube-egress` mounts `/etc/cube/ca` and exposes the loopback admin API on `127.0.0.1:9091` by default (`cubeEgress.adminPort` / `CUBE_EGRESS_ADMIN_PORT`);
 - `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-proxy-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
@@ -747,7 +747,6 @@ For production CA lifecycle control, pre-create a Secret and use:
 
 ```yaml
 cubeEgress:
-  enabled: true
   ca:
     mode: existingSecret
     existingSecret: cube-egress-ca

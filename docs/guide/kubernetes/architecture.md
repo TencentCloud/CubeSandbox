@@ -18,7 +18,7 @@ For install steps, see [Helm Install](./install.md). For compute image upgrades,
 | Admin entry | WebUI | Deployment + Service + ConfigMap | Static console; reverse-proxies `/opsapi/` and `/cubeapi/v1/` to CubeOps (depends on `cubeOps.enabled`) |
 | Ops entry | cubemastercli | Deployment | CLI for `kubectl exec`; injects this Release’s CubeMaster endpoint |
 | Dependent storage | MySQL / Redis / MinIO | Built-in StatefulSet or third-party | Business data / Proxy and lifecycle state / S3 volume backend |
-| Compute · runtime | `cube-node` (Big Pod) | Native `apps/v1` DaemonSet | `wait-node-prep` init + cubelet with embedded network runtime + optional egress / s3lvol |
+| Compute · runtime | `cube-node` (Big Pod) | Native `apps/v1` DaemonSet | `wait-node-prep` init + cubelet with embedded network runtime + egress / optional s3lvol |
 | Compute · artifacts | `cube-node-installer` | Native `apps/v1` DaemonSet | Installs shim / kernel / guest into the host toolbox |
 | Compute · node bootstrap | `cube-node-bootstrap` | Native `apps/v1` DaemonSet | `wait-pvm-host`, `cube-node-init`, writes `node-prep-ready` |
 | Compute · PVM host | `cube-node-pvm` | Native `apps/v1` DaemonSet (`placement.pvm` only) | PVM host kernel install (may reboot); manages L0 taints and writes fingerprints |
@@ -139,7 +139,7 @@ All four compute lines (Big Pod / installer / bootstrap / PVM) are native `apps/
 | --- | --- | --- |
 | `wait-node-prep` (init) | `images.waitNodePrep` | Read-only hostPath `node-prep-ready` self-describing fingerprint; exits when matched so run containers can start |
 | `cubelet` | `images.cubelet` | Starts after self-stage; includes embedded network runtime and CubeVS tools |
-| `cube-egress` / `cube-egress-net` | matching images | Optional; transparent egress / TPROXY |
+| `cube-egress` / `cube-egress-net` | matching images | Transparent egress proxy and host TPROXY rules |
 | `cube-s3lvol` | `images.cubeS3lvol` | Optional; SPDK NVMe/TCP target for S3 CoW / cross-node snapshots |
 
 **Container names / volumeMount / securityContext / imagePullPolicy changes also recreate**.
@@ -423,7 +423,6 @@ Does not install built-in Master / API / MySQL / Redis / MinIO / WebUI; by defau
 | `volumeS3.endpoint` / `existingSecret` | `""` | S3 config source: auto-filled from the built-in MinIO when both are empty and `minio.enabled=true`; setting either explicitly requires `minio.enabled=false` (pick one, mutually exclusive) |
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Required when Proxy is enabled |
-| `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
 | `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar (recreates the Pod; ~2 CPU / 19 GiB / 512 GiB sparse WAL, including the default 1 GiB RAM cache) |
 | `cubeOps.enabled` | `true` | CubeOps (JWT ops API; WebUI upstream) |
 | `webui.enabled` | `true` | WebUI (requires `cubeOps.enabled=true`) |
