@@ -125,7 +125,7 @@ func BenchmarkSparseCopy(b *testing.B) {
 					b.Fatal(err)
 				}
 				hasher.Reset()
-				if _, err := sparseCopy(dst, hasher, bytes.NewReader(tc.payload), 1024*1024); err != nil {
+				if _, err := sparseCopy(dst, hasher, bytes.NewReader(tc.payload), 1024*1024, 0); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -168,7 +168,7 @@ func TestSparseCopyPropagatesUnexpectedEOF(t *testing.T) {
 			}
 			defer f.Close()
 			src := &sparseTestReader{data: payload, chunkSize: 1024 * 1024, finalErr: io.ErrUnexpectedEOF}
-			n, err := sparseCopy(f, nil, src, 1024*1024)
+			n, err := sparseCopy(f, nil, src, 1024*1024, 0)
 			if !errors.Is(err, io.ErrUnexpectedEOF) {
 				t.Fatalf("error = %v, want ErrUnexpectedEOF", err)
 			}
@@ -216,7 +216,7 @@ func copyAndVerify(t *testing.T, fullPayload []byte, src io.Reader) *countingSpa
 	dst := &countingSparseFile{File: f}
 
 	hasher := sha256.New()
-	n, err := sparseCopy(dst, hasher, src, 1024*1024)
+	n, err := sparseCopy(dst, hasher, src, 1024*1024, 0)
 	if err != nil {
 		t.Fatalf("sparseCopy failed: %v", err)
 	}
