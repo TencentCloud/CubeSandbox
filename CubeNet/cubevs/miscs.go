@@ -328,6 +328,10 @@ func Init(params Params) (retErr error) {
 	// re-learned from the kernel neighbor table via fib, so always start from a
 	// fresh map. This also drops any stale pin with a different value size.
 	_ = os.Remove(pinPath(MapNameDirectNeigh)) // NOCC:Path Traversal()
+	// sandbox_metrics is runtime observability state. Recreate it so map
+	// definition changes, such as enabling on-demand allocation, don't make an
+	// existing pin incompatible with the new datapath object.
+	_ = os.Remove(pinPath(MapNameSandboxMetrics)) // NOCC:Path Traversal()
 
 	err = loadObject(params, loadLocalgw, "loadLocalgw")
 	if err != nil {

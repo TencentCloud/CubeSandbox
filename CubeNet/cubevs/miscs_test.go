@@ -8,6 +8,34 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+func TestSandboxMetricsMapAllocatesOnDemand(t *testing.T) {
+	const bpfFNoPrealloc = 1
+
+	for name, loader := range map[string]func() (*ebpf.CollectionSpec, error){
+		"localgw": loadLocalgw,
+		"mvmtap":  loadMvmtap,
+		"nodenic": loadNodenic,
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec, err := loader()
+			if err != nil {
+				t.Fatalf("load collection spec: %v", err)
+			}
+
+			metrics := spec.Maps[MapNameSandboxMetrics]
+			if metrics == nil {
+				t.Fatalf("%s map missing", MapNameSandboxMetrics)
+			}
+			if metrics.Type != ebpf.PerCPUHash {
+				t.Fatalf("type=%s, want %s", metrics.Type, ebpf.PerCPUHash)
+			}
+			if metrics.Flags&bpfFNoPrealloc == 0 {
+				t.Fatalf("flags=%#x, want BPF_F_NO_PREALLOC", metrics.Flags)
+			}
+		})
+	}
+}
+
 func TestPopulateDNSTailCallsBindsQueryPipelinePrograms(t *testing.T) {
 	spec := &ebpf.CollectionSpec{
 		Maps: map[string]*ebpf.MapSpec{

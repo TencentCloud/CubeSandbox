@@ -279,6 +279,7 @@ export default withMermaid(defineConfig({
               text: 'Observability & Performance',
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
+                { text: 'Sandbox Network Metrics', link: '/guide/network-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
                 { text: 'QualityStatus', link: '/guide/quality-status' }
@@ -499,6 +500,7 @@ export default withMermaid(defineConfig({
               text: '可观测性与性能',
               items: [
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
+                { text: '沙箱网络指标', link: '/zh/guide/network-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: '性能基准', link: '/zh/guide/performance-benchmark' },
                 { text: '质量状态', link: '/zh/guide/quality-status' }

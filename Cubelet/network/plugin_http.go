@@ -22,9 +22,9 @@ const (
 // RegisterHTTP exposes the network endpoints served by Cubelet itself.
 //
 // /v1/policies/dump is used by CubeEgress bootstrap. /v1/network/taps is a
-// read-only operator endpoint for inspecting the embedded network runtime.
-// Both handlers reject non-loopback clients because Cubelet HTTP may bind all
-// host interfaces.
+// read-only operator endpoint for inspecting the embedded network runtime. The
+// dump and taps endpoints reject non-loopback clients because Cubelet HTTP may
+// bind all host interfaces.
 func (l *local) RegisterHTTP(handlers map[string]http.Handler) error {
 	if handlers == nil {
 		return fmt.Errorf("http handlers map is nil")
@@ -32,6 +32,7 @@ func (l *local) RegisterHTTP(handlers map[string]http.Handler) error {
 	for path, handler := range map[string]http.Handler{
 		egressPolicyDumpPath: http.HandlerFunc(l.handleDumpEgressPolicies),
 		networkTapsPath:      http.HandlerFunc(l.handleListNetworkTaps),
+		networkMetricsPath:   newNetworkMetricsHandler(),
 	} {
 		if handlers[path] != nil {
 			return fmt.Errorf("duplicate http handler for %s", path)
