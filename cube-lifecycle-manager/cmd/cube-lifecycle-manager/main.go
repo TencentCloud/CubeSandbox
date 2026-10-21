@@ -507,6 +507,13 @@ func resolvePromotionState(local, shared string) string {
 	case "pausing", "resuming", "killing", lifecycle.StateKilled:
 		return ""
 	}
+	// A restarting sandbox must not be forced to paused just because the
+	// shared key still says running. The leader writes that key; a standby
+	// that only saw the stream event still has to win promotion.
+	switch local {
+	case lifecycle.StateRestarting, lifecycle.StateBackOff:
+		return local
+	}
 	if local == "" {
 		return shared
 	}

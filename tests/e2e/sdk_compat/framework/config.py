@@ -49,6 +49,7 @@ class SdkE2EConfig:
     volume_plugin_enabled: bool
     volume_driver: str
     volume_refcount_wait: int
+    restart_policy_wait: int
     create_capacity_retries: int
     create_capacity_backoff: float
     create_capacity_backoff_max: float
@@ -101,6 +102,7 @@ class SdkE2EConfig:
             volume_plugin_enabled=volume_plugin_enabled_from_env(),
             volume_driver=os.environ.get("SDK_E2E_VOLUME_DRIVER", "s3").strip() or "s3",
             volume_refcount_wait=int(os.environ.get("SDK_E2E_VOLUME_REFCOUNT_WAIT", "60")),
+            restart_policy_wait=int(os.environ.get("SDK_E2E_RESTART_POLICY_WAIT", "300")),
             create_capacity_retries=int(
                 os.environ.get("SDK_E2E_CREATE_CAPACITY_RETRIES", "5")
             ),

@@ -6,6 +6,8 @@
 package types
 
 import (
+	"time"
+
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -68,6 +70,15 @@ type CreateCubeSandboxReq struct {
 	// Backend is the CoW store (xfs｜s3) for snapshot restore / create-from-snap.
 	// Empty means xfs.
 	Backend string `json:"backend,omitempty"`
+
+	// RestartPolicy is Never, OnFailure or Always. Empty means Never.
+	// Forwarded to Cubelet only when CubeletConf.EnableRestartPolicy is set.
+	RestartPolicy  string                          `json:"restart_policy,omitempty"`
+	RestartBackoff *cubeboxv1.RestartBackoffConfig `json:"restart_backoff,omitempty"`
+	// LivenessProbe is applied to the first container when that container
+	// has none. CubeAPI has no per-container body, so this is how a caller
+	// names a probe.
+	LivenessProbe *cubeboxv1.LivenessProbe `json:"liveness_probe,omitempty"`
 
 	RuntimeHandler string `json:"runtime_handler,omitempty"`
 	Namespace      string `json:"namespace,omitempty"`
@@ -340,6 +351,9 @@ type Container struct {
 
 	Probe *Probe `json:"probe,omitempty"`
 
+	// LivenessProbe is the runtime health check (seconds). Distinct from Probe.
+	LivenessProbe *cubeboxv1.LivenessProbe `json:"liveness_probe,omitempty"`
+
 	Sysctls map[string]string `json:"sysctls,omitempty" `
 
 	Syscalls []*SysCall `json:"syscalls,omitempty"`
@@ -585,6 +599,7 @@ type SandboxBriefData struct {
 	PauseAt         int64              `json:"pause_at,omitempty"`
 	EndAt           int64              `json:"end_at,omitempty"`
 	VolumeMounts    []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	RestartStatus   *RestartStatus     `json:"restart_status,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -617,6 +632,21 @@ type SandboxData struct {
 	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
 	EndAt                  int64              `json:"end_at,omitempty"`
 	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	RestartStatus          *RestartStatus     `json:"restart_status,omitempty"`
+}
+
+// RestartStatus is the control-plane view of node-local restarts. It is
+// separate from the sandbox lifecycle state (running / paused).
+type RestartStatus struct {
+	RestartPolicy           string     `json:"restart_policy,omitempty"`
+	RestartState            string     `json:"restart_state,omitempty"`
+	RestartCount            int32      `json:"restart_count,omitempty"`
+	LastExitCode            *int32     `json:"last_exit_code,omitempty"`
+	LastExitReason          string     `json:"last_exit_reason,omitempty"`
+	LastRestartAt           *time.Time `json:"last_restart_at,omitempty"`
+	LastSuccessfulRestartAt *time.Time `json:"last_successful_restart_at,omitempty"`
+	LastFailedRestartAt     *time.Time `json:"last_failed_restart_at,omitempty"`
+	NextRestartAt           *time.Time `json:"next_restart_at,omitempty"`
 }
 
 // VolumeMountInfo is one container volume mount exposed in sandbox info/list APIs.

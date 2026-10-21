@@ -50,6 +50,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = "sandboxID is required"
 		return rsp, nil
 	}
+	defer s.holdProbes(rsp.SandboxID)()
 
 	rt := &CubeLog.RequestTrace{
 		Action:       "CommitSandbox",

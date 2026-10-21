@@ -510,6 +510,9 @@ func fillResumeRecreateFields(ctx context.Context, sandboxID string, out *cubebo
 		// Non-fatal: Cubelet may still recover ports from packed annotations.
 		log.G(ctx).Warnf("resume: restore exposed_ports from sandboxspec for %s: %v", sandboxID, err)
 	}
+	if err := applyRestartPolicy(createReq, out); err != nil {
+		log.G(ctx).Warnf("resume: restore restart policy for %s: %v", sandboxID, err)
+	}
 }
 
 // refreshProxyMapAfterResume rewrites sandbox→backend routing for CubeProxy.

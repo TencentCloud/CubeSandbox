@@ -13,8 +13,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
+
+	cubesem "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 func TestLimiter(t *testing.T) {
@@ -97,4 +101,95 @@ func TestErrgroupWithCancel(t *testing.T) {
 	case <-unexpected:
 		t.Fatal("unexpected")
 	}
+}
+
+type recordingDestroyStep struct {
+	name     string
+	calls    int
+	ctxErr   error
+	deadline time.Time
+	hasDue   bool
+}
+
+func (s *recordingDestroyStep) ID() string { return s.name }
+
+func (s *recordingDestroyStep) Init(context.Context, *InitInfo) error { return nil }
+
+func (s *recordingDestroyStep) Create(context.Context, *CreateContext) error { return nil }
+
+func (s *recordingDestroyStep) CleanUp(context.Context, *CleanContext) error { return nil }
+
+func (s *recordingDestroyStep) Destroy(ctx context.Context, _ *DestroyContext) error {
+	s.calls++
+	s.ctxErr = ctx.Err()
+	s.deadline, s.hasDue = ctx.Deadline()
+	return nil
+}
+
+func twoStepDestroyEngine(first, second *recordingDestroyStep) *Engine {
+	engine := &Engine{}
+	engine.AddFlow(flow_destroy, &Workflow{
+		Name:    flow_destroy,
+		Limiter: cubesem.NewLimiter(1),
+		Steps: []*Step{
+			{Name: first.ID(), Actions: []Flow{first}},
+			{Name: second.ID(), Actions: []Flow{second}},
+		},
+	})
+	return engine
+}
+
+func withDestroyTrace(ctx context.Context) context.Context {
+	return CubeLog.WithRequestTrace(ctx, &CubeLog.RequestTrace{RequestID: "restart-destroy"})
+}
+
+func TestRestartDestroyContinuesStepsAfterDeadline(t *testing.T) {
+	first := &recordingDestroyStep{name: "cubebox"}
+	second := &recordingDestroyStep{name: "cgroup"}
+	engine := twoStepDestroyEngine(first, second)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	err := engine.Destroy(withDestroyTrace(ctx), &DestroyContext{
+		BaseWorkflowInfo: BaseWorkflowInfo{SandboxID: "sb-restart"},
+		IsRestartDestroy: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, first.calls)
+	assert.ErrorIs(t, first.ctxErr, context.DeadlineExceeded)
+	assert.Equal(t, 1, second.calls)
+	assert.NoError(t, second.ctxErr)
+	require.True(t, second.hasDue)
+	assert.True(t, second.deadline.After(time.Now()))
+}
+
+func TestRestartDestroyStopsWhenCallerCancels(t *testing.T) {
+	first := &recordingDestroyStep{name: "cubebox"}
+	second := &recordingDestroyStep{name: "cgroup"}
+	engine := twoStepDestroyEngine(first, second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := engine.Destroy(withDestroyTrace(ctx), &DestroyContext{
+		BaseWorkflowInfo: BaseWorkflowInfo{SandboxID: "sb-cancel"},
+		IsRestartDestroy: true,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, first.calls)
+	assert.Zero(t, second.calls)
+}
+
+func TestDestroyStopsAfterDeadlineWhenNotRestart(t *testing.T) {
+	first := &recordingDestroyStep{name: "cubebox"}
+	second := &recordingDestroyStep{name: "cgroup"}
+	engine := twoStepDestroyEngine(first, second)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	err := engine.Destroy(withDestroyTrace(ctx), &DestroyContext{
+		BaseWorkflowInfo: BaseWorkflowInfo{SandboxID: "sb-delete"},
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, 1, first.calls)
+	assert.Zero(t, second.calls)
 }

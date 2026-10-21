@@ -271,6 +271,49 @@ message Probe {
   int32 probe_timeout_ms = 7;
 }
 
+// LivenessProbe is the runtime health check that restarts the whole sandbox
+// after consecutive failures. Times are seconds. Distinct from Probe, which is
+// the create-time readiness check and uses milliseconds.
+message LivenessProbe {
+  ProbeHandler probe_handler = 1;
+  // Seconds to wait after the sandbox starts before the first check. Default 30.
+  int32 initial_delay_second = 2;
+  // Seconds between checks. Default 10.
+  int32 period_second = 3;
+  // Consecutive successes required to clear a failure streak. Must be 1.
+  int32 success_threshold = 4;
+  // Consecutive failures that trigger a sandbox restart. Default 3.
+  int32 failure_threshold = 5;
+  // Per-check timeout in seconds. Default 1.
+  int32 probe_timeout_second = 6;
+}
+
+// RestartBackoffConfig is the optional per-sandbox override of the restart
+// backoff. Zero fields fall back to the node default (10s, x2, cap 300s,
+// unlimited restarts, 10min stable window).
+message RestartBackoffConfig {
+  int32 initial_interval_second = 1;
+  int32 max_interval_second = 2;
+  double multiplier = 3;
+  // 0 means unlimited.
+  int32 max_restarts = 4;
+  double jitter = 5;
+  int32 stable_duration_second = 6;
+}
+
+// RestartStats is the sandbox-level restart bookkeeping exposed on List.
+message RestartStats {
+  int32 restart_count = 1;
+  int64 last_successful_restart_at = 2;
+  int64 last_failed_restart_at = 3;
+  int64 last_restart_at = 4;
+  // Running, Restarting, BackOff, GaveUp. Empty when no policy is set.
+  string restart_state = 5;
+  int32 last_exit_code = 6;
+  string last_exit_reason = 7;
+  int64 next_restart_at = 8;
+}
+
 // LifecycleHandler defines a specific action that should be taken in a lifecycle hook. One and only one of the fields, except TCPSocket must be specified
 message LifecycleHandler {
   HTTPGetAction   http_get = 1;
@@ -369,6 +412,8 @@ message ContainerConfig {
   Hooks hooks = 20;
   // CDI
   OCIConfig oci_config = 21;
+  // Runtime liveness check. Times are seconds; see LivenessProbe.
+  LivenessProbe liveness_probe = 22;
 }
 
 message OCIConfig {
@@ -561,6 +606,11 @@ message RunCubeSandboxRequest {
   // CoW backend from Master (xfs｜s3). Empty means xfs.
   // Used when Create restores from a snapshot / pause-snap.
   string backend = 17;
+
+  // restart_policy is Never, OnFailure or Always (RESTART_POLICY_* also accepted).
+  // Empty means Never. OnFailure and Always persist the request for later restarts.
+  string restart_policy = 18;
+  RestartBackoffConfig restart_backoff = 19;
 }
 
 message RunCubeSandboxResponse {
@@ -697,6 +747,8 @@ message Container {
   int64 paused_at = 9;
   // Mounts declared on the container spec (including host-dir mounts).
   repeated VolumeMounts volume_mounts = 10;
+  // restart_stats is set on the sandbox (pod) container.
+  RestartStats restart_stats = 11;
 }
 
 // ContainerState represents the lifecycle state of a container.

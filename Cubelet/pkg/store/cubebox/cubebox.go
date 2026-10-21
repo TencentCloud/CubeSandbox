@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -53,7 +54,96 @@ type Metadata struct {
 
 	DeletedTime *time.Time `json:"deleted_time,omitempty"`
 
+	// OriginalRequest is the create request, kept only when a restart policy
+	// needs it. Credentials are not part of the open-source request schema.
+	OriginalRequest []byte `json:"original_request,omitempty"`
+
+	RestartCount            int32  `json:"restart_count,omitempty"`
+	LastRestartAt           int64  `json:"last_restart_at,omitempty"`
+	LastSuccessfulRestartAt int64  `json:"last_successful_restart_at,omitempty"`
+	LastFailedRestartAt     int64  `json:"last_failed_restart_at,omitempty"`
+	LastExitCode            int32  `json:"last_exit_code,omitempty"`
+	LastExitReason          string `json:"last_exit_reason,omitempty"`
+	RestartState            string `json:"restart_state,omitempty"`
+	NextRestartAt           int64  `json:"next_restart_at,omitempty"`
+	// StatusSeq is the monotonic counter reported to CubeMaster.
+	StatusSeq int64 `json:"status_seq,omitempty"`
+
 	MetaLock sync.Mutex `json:"-"`
+}
+
+// SetOriginalRequest stores a detached copy of the create request with
+// image pull tokens removed. A restart reuses the local disk, so it does
+// not need the token, and the bolt row should not keep it.
+func (m *Metadata) SetOriginalRequest(req *cubebox.RunCubeSandboxRequest) error {
+	if m == nil || req == nil {
+		return nil
+	}
+	cloned := proto.Clone(req).(*cubebox.RunCubeSandboxRequest)
+	stripRestartSecrets(cloned)
+	b, err := proto.Marshal(cloned)
+	if err != nil {
+		return err
+	}
+	m.OriginalRequest = b
+	return nil
+}
+
+func stripRestartSecrets(req *cubebox.RunCubeSandboxRequest) {
+	if req == nil {
+		return
+	}
+	dropToken(req.Annotations)
+	for _, c := range req.GetContainers() {
+		if c == nil {
+			continue
+		}
+		dropToken(c.GetAnnotations())
+		if c.GetImage() != nil {
+			dropToken(c.GetImage().GetAnnotations())
+		}
+	}
+}
+
+func dropToken(ann map[string]string) {
+	if ann == nil {
+		return
+	}
+	delete(ann, constants.MasterAnnotationsImagetoken)
+	delete(ann, "cube.image.token")
+}
+
+// ParseOriginalRequest unmarshals the stored create request. A missing
+// request returns (nil, nil).
+func (m *Metadata) ParseOriginalRequest() (*cubebox.RunCubeSandboxRequest, error) {
+	if m == nil || len(m.OriginalRequest) == 0 {
+		return nil, nil
+	}
+	req := &cubebox.RunCubeSandboxRequest{}
+	if err := proto.Unmarshal(m.OriginalRequest, req); err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+// CopyOriginalRequest is safe to call without holding the cubebox write lock:
+// it copies the bytes under RLock. Callers that already hold the write lock
+// must use ParseOriginalRequest instead (RWMutex is not reentrant).
+func (cb *CubeBox) CopyOriginalRequest() (*cubebox.RunCubeSandboxRequest, error) {
+	if cb == nil {
+		return nil, nil
+	}
+	cb.RLock()
+	raw := append([]byte(nil), cb.OriginalRequest...)
+	cb.RUnlock()
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	req := &cubebox.RunCubeSandboxRequest{}
+	if err := proto.Unmarshal(raw, req); err != nil {
+		return nil, err
+	}
+	return req, nil
 }
 
 func (m *Metadata) AddAnnotations(annotations map[string]string) {
@@ -177,6 +267,15 @@ type UserDeleteMark struct {
 
 func (cb *CubeBox) MainStatus() *StatusStorage {
 	return cb.mainContainerStatus()
+}
+
+// IsPaused reports whether the sandbox is pausing or paused.
+func (cb *CubeBox) IsPaused() bool {
+	if cb == nil {
+		return false
+	}
+	st := cb.GetStatus()
+	return st != nil && st.IsPaused()
 }
 
 func (cb *CubeBox) mainContainerStatus() *StatusStorage {

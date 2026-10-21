@@ -32,7 +32,7 @@ func TestCubeMasterPurgeTables(t *testing.T) {
 	}
 
 	// Always purged regardless of disable_hard_delete (not instance records).
-	for _, tb := range []string{"t_cube_sandbox_spec", "t_cube_template_replica"} {
+	for _, tb := range []string{"t_cube_sandbox_spec", "t_cube_sandbox_status", "t_cube_template_replica"} {
 		mustContain(defaultTables, tb)
 		mustContain(retainTables, tb)
 	}

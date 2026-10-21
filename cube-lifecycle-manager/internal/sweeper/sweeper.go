@@ -415,6 +415,10 @@ func skipSweepState(state string, autoPause bool) bool {
 	switch state {
 	case "pausing", "resuming", "killing", lifecycle.StateKilled:
 		return true
+	case lifecycle.StateRestarting, lifecycle.StateBackOff:
+		// Auto-pause would race the restart. Timeout kill still runs so a
+		// sandbox stuck in backoff is reaped with the idle deadline.
+		return autoPause
 	case lifecycle.StatePaused:
 		return autoPause
 	default:

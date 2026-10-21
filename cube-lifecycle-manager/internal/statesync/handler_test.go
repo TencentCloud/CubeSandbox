@@ -241,6 +241,61 @@ func TestHandle_NilStatePayload(t *testing.T) {
 	}
 }
 
+func TestHandle_RestartingWritesRedisNotProxy(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = lifecycle.StateRunning
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRestarting, lifecycle.ActorCubeMaster))
+	if got := r.states["sbx-1"]; got != lifecycle.StateRestarting {
+		t.Fatalf("redis state %q", got)
+	}
+	if len(p.recorded()) != 0 {
+		t.Fatalf("proxy must not learn restarting: %+v", p.recorded())
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StateRestarting {
+		t.Fatalf("runtime %q", got)
+	}
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateGaveUp, lifecycle.ActorCubeMaster))
+	if got := r.states["sbx-1"]; got != lifecycle.StateRunning {
+		t.Fatalf("gave up redis state %q", got)
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StateRunning {
+		t.Fatalf("gave up runtime %q", got)
+	}
+}
+
+func TestHandle_CubeletRunningDoesNotUndoPause(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = lifecycle.StatePaused
+	ev := stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster)
+	ev.State.Source = "cubelet"
+	Handle(context.Background(), d, ev)
+	if got := r.states["sbx-1"]; got != lifecycle.StatePaused {
+		t.Fatalf("redis state %q", got)
+	}
+	if len(p.recorded()) != 0 {
+		t.Fatalf("proxy push %+v", p.recorded())
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != "" {
+		t.Fatalf("runtime %q", got)
+	}
+	if got := reg.Get("sbx-1").LastActiveMs; got != 0 {
+		t.Fatalf("last active %d", got)
+	}
+
+	r.states["sbx-1"] = lifecycle.StateBackOff
+	Handle(context.Background(), d, ev)
+	if got := r.states["sbx-1"]; got != lifecycle.StateRunning {
+		t.Fatalf("redis after backoff %q", got)
+	}
+	if len(p.recorded()) != 0 {
+		t.Fatalf("proxy learned running %+v", p.recorded())
+	}
+	if got := reg.Get("sbx-1").LastActiveMs; got != 0 {
+		t.Fatalf("idle timer refreshed %d", got)
+	}
+}
+
 func TestHandle_InvalidState(t *testing.T) {
 	cases := []string{"pausing", "resuming", "", "UNKNOWN"}
 	for _, bad := range cases {

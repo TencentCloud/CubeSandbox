@@ -37,6 +37,7 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_negative_and_timeout.py` | create/connect 目标不存在、删除后 pause、在线更新 timeout | `lifecycle`、`pause_resume`、`set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | kill 后不可连接、列表移除、重复 kill 终态语义 | `lifecycle` | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause、手动/自动恢复、重入、auto-kill、主动 pause 与 timeout 的交互 | `platform_lifecycle`、CubeProxy、lifecycle-manager；部分需 Code Interpreter | P1 + `slow`，每日运行 |
+| `cases/lifecycle/test_restart_policy.py` | info 中的策略、默认 Never、非法取值拒绝、健康沙箱不重启、guest 崩溃后同 ID 且落盘文件仍在、删除不重启、达到 maxRestarts 放弃、退出码 0 只有 Always 重启、主进程非 0 退出、退避间隔、稳定期清零、退避中暂停、冷启动后暂停再恢复、退避中删除、存活探测失败 | `restart_policy`（仅 CubeSandbox）。随 `--run-e2e` 执行。集群需 `enable_restart_policy`，模板暴露 envd 49983。暂停类另需 `pause_resume` | P1 控制面；崩溃、退出、退避与放弃为 P2/P3 + `slow` |
 
 当前清单中的 `platform_lifecycle` 前提只代表本分支的执行配置：
 它依赖 CubeProxy 与 lifecycle-manager 协调，但 E2B 暂未启用是因为其 SDK

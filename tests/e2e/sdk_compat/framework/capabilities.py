@@ -39,6 +39,8 @@ VOLUME_PLUGIN = "volume_plugin"
 AUTH_SIMPLE_KEY = "auth_simple_key"
 # E2B-compatible `mcp` create option served by the in-sandbox mcp-gateway.
 MCP_GATEWAY = "mcp_gateway"
+# Node-local restart policy (Never / OnFailure / Always) and restartStatus.
+RESTART_POLICY = "restart_policy"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -80,6 +82,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         AUTH_SIMPLE_KEY,
         NETWORK_L7_CUSTOM_PORT,
         MCP_GATEWAY,
+        RESTART_POLICY,
     }
 )
 

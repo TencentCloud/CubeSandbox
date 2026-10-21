@@ -233,6 +233,7 @@ const (
 	SnapshotRuntimeRefTableName    = "t_cube_snapshot_runtime_ref"
 	SnapshotRuntimeActiveTableName = "t_cube_snapshot_runtime_active"
 	SandboxSpecTableName           = "t_cube_sandbox_spec"
+	SandboxStatusTableName         = "t_cube_sandbox_status"
 	// SnapshotTableName holds user Commit snapshots (independent of template
 	// definitions). Pause bindings live in PauseSnapshotTableName.
 	SnapshotTableName      = "t_cube_snapshot"

@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,34 @@ func startSleeper(t *testing.T) utils.ProcessIdentity {
 	id, err := utils.ReadProcessIdentity(cmd.Process.Pid)
 	require.NoError(t, err)
 	return id
+}
+
+func TestOnlyDeadlineErrors(t *testing.T) {
+	assert.False(t, onlyDeadlineErrors(nil))
+	assert.True(t, onlyDeadlineErrors(context.DeadlineExceeded))
+	assert.True(t, onlyDeadlineErrors(fmt.Errorf("delete task: %w", context.DeadlineExceeded)))
+	assert.True(t, onlyDeadlineErrors(fmt.Errorf("stopTask: %s", context.Canceled.Error())))
+	assert.False(t, onlyDeadlineErrors(fmt.Errorf("delete task: connection refused")))
+}
+
+func TestShimWaitContextLeavesCallerDeadline(t *testing.T) {
+	old := shimWaitBound
+	shimWaitBound = 30 * time.Millisecond
+	t.Cleanup(func() { shimWaitBound = old })
+
+	parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	parentDeadline, ok := parent.Deadline()
+	require.True(t, ok)
+
+	waitCtx, waitCancel := shimWaitContext(parent)
+	defer waitCancel()
+	waitDeadline, ok := waitCtx.Deadline()
+	require.True(t, ok)
+	assert.True(t, waitDeadline.Before(parentDeadline))
+
+	<-waitCtx.Done()
+	assert.NoError(t, parent.Err())
 }
 
 func TestReadPidFile(t *testing.T) {
@@ -160,6 +189,13 @@ func TestWaitSandboxRuntimeGoneTimesOut(t *testing.T) {
 	defer cancel()
 	ev := sandboxRuntimeEvidence{identities: []utils.ProcessIdentity{live}}
 	require.Error(t, waitSandboxRuntimeGone(ctx, "sb-timeout", ev))
+}
+
+func TestReapShimProcessWithoutManager(t *testing.T) {
+	var missing *local
+	missing.reapShimProcess(context.Background(), "sb")
+	(&local{}).reapShimProcess(context.Background(), "")
+	(&local{}).reapShimProcess(context.Background(), "sb")
 }
 
 func TestSandboxShimLookupIDsDedups(t *testing.T) {
