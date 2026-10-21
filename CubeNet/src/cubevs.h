@@ -371,7 +371,8 @@ struct nat_session {
 	__u8 state;
 	__u8 active_close;	/* 1 if ORIGINAL/initiator closed first. For SNAT/L7 the
 				 * initiator is the guest; for PORT_MAPPING it is the client. */
-	__u8 packet_class;	/* SNAT_PACKET, L7PROXY_PACKET, or PORT_MAPPING_PACKET */
+	__u8 packet_class;	/* SNAT_PACKET, L7PROXY_PACKET, PORT_MAPPING_PACKET, or
+				 * HAIRPIN_PACKET */
 	__u8 l7_scheme;		/* L7_SCHEME_*; NONE for non-L7 sessions */
 	__u32 policy_version;	/* mvm_meta.policy_version at create / last re-check */
 	__u32 gen;		/* mvm_meta->version at creation; a sandbox rollback
