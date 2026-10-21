@@ -380,9 +380,19 @@ variable "templatecenter_trusted_ca_certs" {
 }
 
 variable "templatecenter_trusted_ca_existing_config_map" {
-  description = "Name of an operator-managed ConfigMap (in the cubesandbox namespace) whose keys hold PEM content, mounted instead of the terraform-managed one. The ConfigMap must exist before the apply: otherwise the Deployment's volume never mounts and the apply blocks waiting for the rollout until it fails at the provider timeout. Changes to its content take effect only after the pods restart (kubectl -n cubesandbox rollout restart deploy/cube-templatecenter). Mutually exclusive with templatecenter_trusted_ca_certs."
+  description = "Name of an operator-managed ConfigMap (in the cubesandbox namespace) whose keys hold PEM content, mounted instead of the terraform-managed one. The namespace itself is created by the same addons apply, so on a first deployment this variable is only usable on a rerun: create the ConfigMap after the namespace exists, then run create.sh again. If the ConfigMap is missing, the Deployment's volume never mounts and the apply blocks waiting for the rollout until it fails at the provider timeout. Changes to its content take effect only after the pods restart (kubectl -n cubesandbox rollout restart deploy/cube-templatecenter). The name cube-templatecenter-trusted-ca is reserved for the inline path and rejected by plan. Mutually exclusive with templatecenter_trusted_ca_certs."
   type        = string
   default     = ""
+
+  # The reconcile table in create.sh deletes cluster objects whose
+  # Terraform address is absent from state, and this resource is count=0
+  # on this path -- so an operator ConfigMap named exactly like the
+  # managed one would be deleted as drift on every rerun. Rejecting the
+  # reserved name here makes that collision impossible.
+  validation {
+    condition     = var.templatecenter_trusted_ca_existing_config_map != "cube-templatecenter-trusted-ca"
+    error_message = "'cube-templatecenter-trusted-ca' is reserved for the terraform-managed ConfigMap on the inline path; choose a different name for your own ConfigMap."
+  }
 }
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS

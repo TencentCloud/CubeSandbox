@@ -844,11 +844,14 @@ export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n..
   lines are whitespace-trimmed when written, so blocks copied out of YAML
   manifests work.
 - Alternative: `templatecenter_trusted_ca_existing_config_map` names a
-  ConfigMap you own (create it in the `cubesandbox` namespace before
-  applying; if it is missing, the apply blocks waiting for the rollout and
-  fails at the provider timeout; its keys must hold standard column-0 PEM,
-  which Go parses strictly -- indented blocks are ignored). Mutually
-  exclusive with the certs variable.
+  ConfigMap you own in the `cubesandbox` namespace. That namespace is
+  created by the same addons apply, so on a **first** deployment this path
+  only becomes usable on a rerun: let the first apply fail waiting for the
+  rollout, create the ConfigMap, then run `create.sh` again. The name
+  `cube-templatecenter-trusted-ca` is reserved for the inline path and
+  rejected by plan. Its keys must hold standard column-0 PEM, which Go
+  parses strictly -- indented blocks are ignored. Mutually exclusive with
+  the certs variable.
 - Certificate changes roll the pod (checksum annotation on the inline path);
   changes to an operator-owned ConfigMap need a manual
   `kubectl -n cubesandbox rollout restart deploy/cube-templatecenter`.
