@@ -667,7 +667,9 @@ resource "kubernetes_secret" "templatecenter_conf" {
 # Private-CA trust for the cube-templatecenter pod (chart-side design: PR
 # #1995). Rendered only on the inline-certs path; an operator-owned
 # templatecenter_trusted_ca_existing_config_map is referenced by the
-# Deployment's volume instead of being created here.
+# Deployment's volume instead of being created here. The CERTIFICATE-blocks
+# content guard lives in the variable's validation block (variables.tf) so
+# it runs on the first plan.
 resource "kubernetes_config_map" "templatecenter_trusted_ca" {
   count = local.deploy_addons && length(var.templatecenter_trusted_ca_certs) > 0 ? 1 : 0
 
@@ -679,21 +681,6 @@ resource "kubernetes_config_map" "templatecenter_trusted_ca" {
     precondition {
       condition     = var.templatecenter_trusted_ca_existing_config_map == ""
       error_message = "templatecenter_trusted_ca_certs and templatecenter_trusted_ca_existing_config_map are mutually exclusive: inline certs render a terraform-managed ConfigMap; existing_config_map references one you own."
-    }
-    # One content guard, same as the chart's render-time check: every PEM
-    # block must be a CERTIFICATE. A pasted private key must not reach the
-    # registry-facing pod. BEGIN markers are counted at any indentation
-    # (PEM copied out of YAML/secret manifests is commonly indented), and
-    # an entry must contain at least one block. Deliberately no
-    # symmetry/prose-marker/size duplicates.
-    precondition {
-      condition = alltrue([
-        for pem in var.templatecenter_trusted_ca_certs :
-        length(regexall("(?mi)^[ \t]*-----BEGIN [A-Z ]+-----", pem)) > 0 &&
-        length(regexall("(?mi)^[ \t]*-----BEGIN [A-Z ]+-----", pem)) ==
-        length(regexall("(?mi)^[ \t]*-----BEGIN CERTIFICATE-----", pem))
-      ])
-      error_message = "templatecenter_trusted_ca_certs must contain CERTIFICATE blocks only; a pasted private key must not reach the registry-facing pod."
     }
   }
 
@@ -707,8 +694,8 @@ resource "kubernetes_config_map" "templatecenter_trusted_ca" {
   # may hold several certificates (a chain): Go's directory loader parses
   # every PEM document in the file. Lines are whitespace-trimmed when
   # written: Go's PEM decoder only recognizes BEGIN/END markers at column
-  # 0, so a block pasted with indentation would otherwise pass the guard
-  # and then be silently ignored at pull time.
+  # 0, so the write must produce the same normalized text that the
+  # variable's content guard checked in variables.tf.
   data = { for i, pem in var.templatecenter_trusted_ca_certs :
   "ca-${i}.crt" => join("\n", [for line in split("\n", pem) : trimspace(line)]) }
 }

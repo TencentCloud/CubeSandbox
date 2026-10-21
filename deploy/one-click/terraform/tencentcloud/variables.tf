@@ -355,6 +355,28 @@ variable "templatecenter_trusted_ca_certs" {
   description = "Inline PEM certificates (CERTIFICATE blocks only) trusting private-CA image registries for the cube-templatecenter pod. Each entry may hold one or several certificates (a chain); entries are rendered as keys of a terraform-managed ConfigMap mounted at /etc/cube/trusted-ca and exposed through SSL_CERT_DIR, which Go reads IN ADDITION to the system bundle -- publicly-trusted registries keep working. Set via tfvars / -var / TF_VAR_ only (never persisted to .env or the resolved mirror: terraform's own state and plan manage the ConfigMap's lifecycle). A pasted private key is rejected at plan time. Empty list (default) disables the feature; mutually exclusive with templatecenter_trusted_ca_existing_config_map."
   type        = list(string)
   default     = []
+
+  # Content guard, same rule as the chart's render-time check: every PEM
+  # block must be a CERTIFICATE. Checked in a validation block (a
+  # validation may reference its own variable since 1.2; the cross-variable
+  # mutual-exclusion check therefore stays a resource precondition) so the
+  # FIRST plan fails -- including create.sh's early phases that run with
+  # deploy_tke_addons=false, where a resource precondition is skipped. The
+  # check runs on the whitespace-trimmed text (the exact bytes written to
+  # the ConfigMap): Go's PEM decoder only recognizes markers at column 0,
+  # and trimspace strips every Unicode space, so a key indented with e.g.
+  # a non-breaking space must not slip past a check made on raw input.
+  validation {
+    condition = alltrue([
+      for norm in [for pem in var.templatecenter_trusted_ca_certs :
+        join("\n", [for line in split("\n", pem) : trimspace(line)])
+      ] :
+      length(regexall("(?mi)^-----BEGIN [A-Z ]+-----", norm)) > 0 &&
+      length(regexall("(?mi)^-----BEGIN [A-Z ]+-----", norm)) ==
+      length(regexall("(?mi)^-----BEGIN CERTIFICATE-----", norm))
+    ])
+    error_message = "templatecenter_trusted_ca_certs must contain CERTIFICATE blocks only; a pasted private key must not reach the registry-facing pod."
+  }
 }
 
 variable "templatecenter_trusted_ca_existing_config_map" {

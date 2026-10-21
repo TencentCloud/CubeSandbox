@@ -833,7 +833,9 @@ export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n..
 
 - The value must be supplied on every `create.sh` run (via `TF_VAR_`, or via a
   `terraform.tfvars` next to `variables.tf`, which persists across runs); a
-  rerun without it removes the ConfigMap and the mount, dropping the trust.
+  rerun without it drops the mount and `SSL_CERT_DIR`, so the trust stops
+  working. The ConfigMap object itself stays until `destroy.sh` or a full
+  (non-targeted) apply.
 - Each entry may hold one or several certificates (a chain); entries are
   rendered as keys of a terraform-managed ConfigMap mounted at
   `/etc/cube/trusted-ca` and exposed through `SSL_CERT_DIR`, which Go reads

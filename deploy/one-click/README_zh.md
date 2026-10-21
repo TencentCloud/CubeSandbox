@@ -689,7 +689,7 @@ export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n..
 ./terraform/tencentcloud/create.sh
 ```
 
-- 该值必须在每次运行 `create.sh` 时提供（`TF_VAR_` 环境变量，或放在 `variables.tf` 旁、可跨运行持久生效的 `terraform.tfvars`）；重跑时不提供会删除该 ConfigMap 及挂载，信任随之失效。
+- 该值必须在每次运行 `create.sh` 时提供（`TF_VAR_` 环境变量，或放在 `variables.tf` 旁、可跨运行持久生效的 `terraform.tfvars`）；重跑时不提供会移除挂载与 `SSL_CERT_DIR`，信任随之失效。ConfigMap 对象本身会保留，直到 `destroy.sh` 或一次非 -target 的全量 apply 才删除。
 - 每个条目可含一或多个证书（证书链）；条目会渲染为 Terraform 管理的 ConfigMap 的 key，挂载到 `/etc/cube/trusted-ca` 并通过 `SSL_CERT_DIR` 暴露——Go 在系统信任库**之外追加**读取该目录，公共 CA 仓库不受影响。仅接受证书块：混入私钥会被 plan 拒绝；写入时会逐行去除首尾空白，因此从 YAML 清单中复制出来的缩进块也能正常生效。
 - 另一种方式：`templatecenter_trusted_ca_existing_config_map` 指向你自建的 ConfigMap（apply 前先在 `cubesandbox` namespace 创建；若缺失，apply 会因等待滚动完成而阻塞，直至 provider 超时报错；其 key 须为列 0 标准 PEM——Go 解析严格，缩进块会被忽略）。与 certs 变量互斥。
 - 证书变更会滚动 pod（inline 路径的 checksum 注解）；自建 ConfigMap 的内容变更需手动执行 `kubectl -n cubesandbox rollout restart deploy/cube-templatecenter`。
