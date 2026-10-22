@@ -432,7 +432,9 @@ mod tests {
     async fn preserves_root_e2b_routes() {
         let server = test_server().await;
 
-        server.get("/health").await.assert_status_ok();
+        let health = server.get("/health").await;
+        health.assert_status_ok();
+        health.assert_json(&serde_json::json!({"status": "ok"}));
         assert_ne!(
             server.get("/v2/sandboxes").await.status_code(),
             StatusCode::NOT_FOUND

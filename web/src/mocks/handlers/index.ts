@@ -43,7 +43,7 @@ function opsError(status: number, error: string, code?: string) {
 export const handlers = [
   http.get('/cubeapi/v1/health', async () => {
     await mockDelay();
-    return HttpResponse.json({ status: 'ok', sandboxes: listSandboxes().length });
+    return HttpResponse.json({ status: 'ok' });
   }),
 
   http.get('/cubeapi/v1/cluster/overview', async () => {

@@ -13,7 +13,6 @@ use utoipa::ToSchema;
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: &'static str,
-    pub sandboxes: usize,
 }
 
 /// GET /health
@@ -31,11 +30,5 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         .log(LogEvent::new(LogLevel::Debug, "api.request").field("handler", "health"))
         .await;
 
-    (
-        StatusCode::OK,
-        Json(HealthResponse {
-            status: "ok",
-            sandboxes: 0,
-        }),
-    )
+    (StatusCode::OK, Json(HealthResponse { status: "ok" }))
 }

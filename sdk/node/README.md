@@ -379,7 +379,7 @@ credential) — read the field directly when the actual value is needed.
 ### List & health check
 
 ```ts
-console.log(await Sandbox.health()); // { status: "ok", sandboxes: 4 }
+console.log(await Sandbox.health()); // { status: "ok" }
 console.log(await Sandbox.list()); // list of running sandboxes
 console.log(await Sandbox.listV2()); // v2 API (supports filtering)
 ```

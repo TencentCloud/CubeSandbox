@@ -314,7 +314,6 @@ export interface components {
             [key: string]: string;
         };
         HealthResponse: {
-            sandboxes: number;
             status: string;
         };
         /** @description One entry in GET /sandboxes (RunningSandbox in OpenAPI spec). */

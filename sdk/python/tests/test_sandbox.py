@@ -963,10 +963,9 @@ class TestListSandboxesV2:
 class TestHealth:
     def test_health_ok(self):
         with patch("requests.Session.get",
-                   return_value=mock_response({"status": "ok", "sandboxes": 2})):
+                   return_value=mock_response({"status": "ok"})):
             result = Sandbox.health(config=make_config())
-        assert result["status"] == "ok"
-        assert result["sandboxes"] == 2
+        assert result == {"status": "ok"}
 
     def test_health_server_error(self):
         with patch("requests.Session.get",

@@ -326,7 +326,7 @@ invalid names raise `ValueError` before any network call. See
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # list of running sandbox dicts
 print(Sandbox.list_v2())    # v2 API (supports filtering)
 ```
