@@ -151,6 +151,19 @@ Also: `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, `global.ti
 
 ## Changing host storage paths
 
+::: warning One-time storage upgrade
+Upgrading from a chart whose `wait-node-prep` lacks the eight storage environment
+variables changes the `cube-node` Pod template **even when all `hostPaths` values
+are unchanged or default**. With the default `RollingUpdate` strategy, this
+recreates the Big Pod on every compute node.
+
+**Drain compute nodes before this upgrade** (see [Node Operations](../node-operations.md)):
+- **Pod network** (`cubeNode.hostNetwork: false`): recreation destroys the netns and
+  interrupts existing sandbox networking. Drain is mandatory.
+- **Host network (default)**: taps survive, but drain remains the supported procedure
+  until sandbox survival through a cubelet restart is live-validated.
+:::
+
 The chart's `hostPaths` storage values select host directories; runtime containers
 keep their fixed `/data/...` and `/tmp/cube` paths. Changing a host path recreates
 the affected Pods and **does not migrate existing data**. Drain the affected

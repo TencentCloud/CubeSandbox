@@ -147,6 +147,18 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 ## 修改宿主机存储路径
 
+::: warning 存储升级的一次性提示
+从 `wait-node-prep` 尚未包含这八个存储环境变量的 Chart 升级时，
+会修改 `cube-node` Pod template，**即使所有 `hostPaths` 值未改动或仍为默认值**。
+使用默认的 `RollingUpdate` 策略时，这会重建每个计算节点上的 Big Pod。
+
+**本次升级前先排空计算节点上的沙箱**（参阅[节点相关操作](../node-operations.md)）：
+- **Pod 网络**（`cubeNode.hostNetwork: false`）：重建会销毁 netns，
+  中断现有沙箱网络，必须排空。
+- **宿主机网络（默认）**：tap 设备会保留，但在 cubelet 重启后沙箱存活得到实机验证前，
+  排空仍是支持的升级流程。
+:::
+
 Chart 的 `hostPaths` 存储配置选择宿主机目录；运行时容器仍使用固定的 `/data/...`
 和 `/tmp/cube` 路径。修改宿主机路径会重建受影响的 Pod，且**不会迁移现有数据**。
 升级前应排空受影响的计算节点并安排数据保留，包括日志、`dataCubeShared/volume`
