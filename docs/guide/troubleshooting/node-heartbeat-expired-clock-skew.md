@@ -14,7 +14,7 @@ lang: en-US
 
 ## Symptom
 
-A compute node shows `Healthy=false` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls --json` (or the WebUI `/nodes` page), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
+A compute node shows `Healthy=false` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls --json` (the WebUI `/nodes` page shows the node as **Degraded** but does not surface the reason), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
 
 The key tell: the node's `MetaDataUpdateAt` timestamp keeps advancing (the heartbeat IS arriving), but the node is still judged expired.
 
@@ -47,13 +47,14 @@ This is not a code bug — it's the standard distributed-systems assumption that
 
 ## Diagnosis
 
-1. Check the node state and reason. The default `node ls` table only prints `NODE_ID / NODE_IP / INSTANCE_TYPE / ZONE / CPU_TYPE / HEALTHY / SCHEDULING_DISABLED / HOST_STATUS` — it does **not** show `UnhealthyReason` or the heartbeat timestamp, so use `--json` (full fields) or `--score-only` (adds `METADATA_UPDATE`):
+1. Check the node state and reason. The default `node ls` table only prints `NODE_ID / NODE_IP / INSTANCE_TYPE / ZONE / CPU_TYPE / HEALTHY / SCHEDULING_DISABLED / HOST_STATUS` — it does **not** show `UnhealthyReason` or the heartbeat timestamp, so use `--json` (full fields, shows both) or `--score-only` (switches to a score/time view that includes `METADATA_UPDATE` but drops `HEALTHY`):
 
    ```bash
    cubeopscli node ls --json          # full fields: Healthy, UnhealthyReason, MetaDataUpdateAt
-   # or, to watch the heartbeat timestamp advance:
-   cubeopscli node ls --score-only    # NODE_ID / SCORE / ... / METADATA_UPDATE
+   # or, to watch the heartbeat timestamp advance (this view drops HEALTHY/UnhealthyReason):
+   cubeopscli node ls --score-only    # NODE_ID / SCORE / METRIC_UPDATE / METRIC_LOCAL_UPDATE / METADATA_UPDATE
    # Look for: Healthy=false, UnhealthyReason=HeartbeatExpired, and a recent MetaDataUpdateAt
+   # (--json is the mode that shows both the reason and the timestamp together)
    ```
 
 2. Distinguish clock skew from a genuinely offline node. **If `MetaDataUpdateAt` stopped advancing days ago**, `cubelet` is actually stopped/dead — that is a real offline node, not this issue. **If `MetaDataUpdateAt` keeps updating** but the node is still `HeartbeatExpired`, the clocks disagree.

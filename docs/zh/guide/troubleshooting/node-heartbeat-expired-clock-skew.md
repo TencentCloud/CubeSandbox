@@ -14,7 +14,7 @@ lang: zh-CN
 
 ## 症状
 
-`cubeopscli node ls --json`（或 WebUI `/nodes` 页面）显示某计算节点 `Healthy=false`、`UnhealthyReason=HeartbeatExpired`，但该节点其实正常在线——`cubelet` 在运行、心跳也在上报。本应调度到该节点的沙箱创建失败，报 `no ready replica` / `no more resource`，因为调度器会过滤掉 `HeartbeatExpired` 节点。
+`cubeopscli node ls --json`（WebUI `/nodes` 页面只显示节点为 **Degraded**，不显示原因）显示某计算节点 `Healthy=false`、`UnhealthyReason=HeartbeatExpired`，但该节点其实正常在线——`cubelet` 在运行、心跳也在上报。本应调度到该节点的沙箱创建失败，报 `no ready replica` / `no more resource`，因为调度器会过滤掉 `HeartbeatExpired` 节点。
 
 关键判据：该节点的 `MetaDataUpdateAt` 时间戳一直在推进（心跳**确实**在到达），但节点仍被判过期。
 
@@ -47,13 +47,14 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
 
 ## 诊断
 
-1. 查看节点状态与原因。默认 `node ls` 表只打印 `NODE_ID / NODE_IP / INSTANCE_TYPE / ZONE / CPU_TYPE / HEALTHY / SCHEDULING_DISABLED / HOST_STATUS`——**不**显示 `UnhealthyReason` 和心跳时间戳，需用 `--json`（完整字段）或 `--score-only`（加 `METADATA_UPDATE`）：
+1. 查看节点状态与原因。默认 `node ls` 表只打印 `NODE_ID / NODE_IP / INSTANCE_TYPE / ZONE / CPU_TYPE / HEALTHY / SCHEDULING_DISABLED / HOST_STATUS`——**不**显示 `UnhealthyReason` 和心跳时间戳，需用 `--json`（完整字段，两者都能看）或 `--score-only`（切到含 `METADATA_UPDATE` 的分数/时间视图，但会去掉 `HEALTHY`）：
 
    ```bash
    cubeopscli node ls --json          # 完整字段：Healthy, UnhealthyReason, MetaDataUpdateAt
-   # 或，观察心跳时间戳是否在推进：
-   cubeopscli node ls --score-only    # NODE_ID / SCORE / ... / METADATA_UPDATE
+   # 或，观察心跳时间戳是否在推进（此视图去掉 HEALTHY/UnhealthyReason）：
+   cubeopscli node ls --score-only    # NODE_ID / SCORE / METRIC_UPDATE / METRIC_LOCAL_UPDATE / METADATA_UPDATE
    # 关注：Healthy=false, UnhealthyReason=HeartbeatExpired, 且 MetaDataUpdateAt 较新
+   #（--json 是能同时看到原因和时间戳的模式）
    ```
 
 2. 区分"时钟偏移"与"真离线"。**若 `MetaDataUpdateAt` 几天没变**，是 `cubelet` 真的停了——那是真离线，不是本问题。**若 `MetaDataUpdateAt` 一直在更新**但节点仍 `HeartbeatExpired`，就是两端时钟不一致。
