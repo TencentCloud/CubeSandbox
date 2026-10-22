@@ -14,7 +14,7 @@ lang: en-US
 
 ## Symptom
 
-A compute node shows `Healthy=false` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls --json` (the WebUI `/nodes` page shows the node as **Degraded** but does not surface the reason), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
+A compute node shows `Healthy=false` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls --json` (the WebUI `/nodes` page only marks the node with an amber dot — it renders no status text and does not surface the reason), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
 
 The key tell: the node's `MetaDataUpdateAt` timestamp keeps advancing (the heartbeat IS arriving), but the node is still judged expired.
 
@@ -26,7 +26,7 @@ The key tell: the node's `MetaDataUpdateAt` timestamp keeps advancing (the heart
 
 ## Root Cause
 
-Cubelet reports a status heartbeat every ~1–2s to `cube-ops` (`POST /internal/v1/node-agent/nodes/<ip>/status`), and the `HeartbeatTime` field is stamped with the **compute node's local wall clock**. `cube-ops` evaluates health with its **own** local wall clock as `now`:
+Cubelet reports a status heartbeat about once per second to `cube-ops` (`POST /internal/v1/node-agent/nodes/<ip>/status`; `node_status_update_frequency` defaults to `1s` in `Cubelet/config/config.toml`), and the `HeartbeatTime` field is stamped with the **compute node's local wall clock**. `cube-ops` evaluates health with its **own** local wall clock as `now`:
 
 ```go
 // CubeOps/internal/nodemanagement/service/health.go

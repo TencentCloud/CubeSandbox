@@ -14,7 +14,7 @@ lang: zh-CN
 
 ## 症状
 
-`cubeopscli node ls --json`（WebUI `/nodes` 页面只显示节点为 **Degraded**，不显示原因）显示某计算节点 `Healthy=false`、`UnhealthyReason=HeartbeatExpired`，但该节点其实正常在线——`cubelet` 在运行、心跳也在上报。本应调度到该节点的沙箱创建失败，报 `no ready replica` / `no more resource`，因为调度器会过滤掉 `HeartbeatExpired` 节点。
+`cubeopscli node ls --json`（WebUI `/nodes` 页面只用橙点标记该节点——不渲染状态文字、也不显示原因）显示某计算节点 `Healthy=false`、`UnhealthyReason=HeartbeatExpired`，但该节点其实正常在线——`cubelet` 在运行、心跳也在上报。本应调度到该节点的沙箱创建失败，报 `no ready replica` / `no more resource`，因为调度器会过滤掉 `HeartbeatExpired` 节点。
 
 关键判据：该节点的 `MetaDataUpdateAt` 时间戳一直在推进（心跳**确实**在到达），但节点仍被判过期。
 
@@ -26,7 +26,7 @@ lang: zh-CN
 
 ## 根因
 
-`cubelet` 每 ~1–2s 向 `cube-ops` 上报一次心跳（`POST /internal/v1/node-agent/nodes/<ip>/status`），其中 `HeartbeatTime` 用**计算节点本地 wall clock** 打戳。`cube-ops` 用**自己**本地 wall clock 作为 `now` 判定健康：
+`cubelet` 每秒左右向 `cube-ops` 上报一次心跳（`POST /internal/v1/node-agent/nodes/<ip>/status`；`node_status_update_frequency` 在 `Cubelet/config/config.toml` 默认 `1s`），其中 `HeartbeatTime` 用**计算节点本地 wall clock** 打戳。`cube-ops` 用**自己**本地 wall clock 作为 `now` 判定健康：
 
 ```go
 // CubeOps/internal/nodemanagement/service/health.go
