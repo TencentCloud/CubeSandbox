@@ -29,15 +29,53 @@ pub struct ReadDir<P> {
 }
 
 impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
-    pub fn new<D: AsRawFd>(dir: &D, offset: libc::off64_t, buf: P) -> io::Result<Self> {
+    pub fn new<D: AsRawFd>(dir: &D, offset: u64, buf: P) -> io::Result<Self> {
         // Safe because this doesn't modify any memory and we check the return value.
-        let res = unsafe { libc::lseek64(dir.as_raw_fd(), offset, libc::SEEK_SET) };
+        let res =
+            unsafe { libc::lseek64(dir.as_raw_fd(), offset as libc::off64_t, libc::SEEK_SET) };
         if res < 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            // NFS cookies are opaque u64 values. The host rejects cookies whose
+            // high bit becomes a negative seek offset, even though readdir returns them.
+            if error.raw_os_error() == Some(libc::EINVAL) && offset > i64::MAX as u64 {
+                return Self::walk_to(dir, offset, buf);
+            }
+            return Err(error);
         }
 
         // Safe because we used lseek() to get to the correct position
         unsafe { Self::new_no_seek(dir, buf) }
+    }
+
+    fn walk_to<D: AsRawFd>(dir: &D, offset: u64, mut buf: P) -> io::Result<Self> {
+        // Safe because seeking doesn't modify memory and the caller holds the directory lock.
+        if unsafe { libc::lseek64(dir.as_raw_fd(), 0, libc::SEEK_SET) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        loop {
+            // Safe because this method rewound the exclusively held directory FD.
+            let mut entries = unsafe { Self::new_no_seek(dir, buf)? };
+            if entries.remaining() == 0 {
+                return Ok(entries);
+            }
+            if entries.skip_cookie(offset) {
+                if entries.remaining() != 0 {
+                    return Ok(entries);
+                }
+                // A cookie points after its entry. At a batch boundary, read the next batch.
+                return unsafe { Self::new_no_seek(dir, entries.buf) };
+            }
+            buf = entries.buf;
+        }
+    }
+
+    fn skip_cookie(&mut self, offset: u64) -> bool {
+        while let Some(entry) = self.next() {
+            if entry.offset == offset {
+                return true;
+            }
+        }
+        false
     }
 
     /// Continue reading from the current position in the directory without seeking.
@@ -134,6 +172,121 @@ fn strip_padding(b: &[u8]) -> &CStr {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::fs::{self, File};
+    use vmm_sys_util::tempdir::TempDir;
+
+    #[test]
+    fn large_directory_cookie_does_not_fail_with_einval() {
+        let directory = TempDir::new_with_prefix("/tmp/virtiofsd-cookie-").unwrap();
+        let file = File::open(directory.as_path()).unwrap();
+        let result = ReadDir::new(&file, (u64::MAX - 1) as _, vec![0; 4096]);
+        assert!(
+            result.is_ok(),
+            "large cookie failed: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(result.unwrap().remaining(), 0);
+    }
+
+    fn cookie_entries(cookies: &[u64]) -> ReadDir<Vec<u8>> {
+        let mut buf = Vec::new();
+        for &cookie in cookies {
+            let entry = LinuxDirent64 {
+                d_ino: 1,
+                d_off: cookie as libc::off64_t,
+                d_reclen: 24,
+                d_ty: libc::DT_REG,
+            };
+            buf.extend_from_slice(entry.as_slice());
+            buf.extend_from_slice(b"name\0");
+        }
+        let end = buf.len();
+        ReadDir {
+            buf,
+            current: 0,
+            end,
+        }
+    }
+
+    #[test]
+    fn cookie_scan_preserves_unsigned_cookies_and_resume_position() {
+        let cookies = [1, (1 << 63) + 42, u64::MAX - 1];
+        for index in 0..cookies.len() {
+            let mut entries = cookie_entries(&cookies);
+            assert!(entries.skip_cookie(cookies[index]));
+            let mut remaining = Vec::new();
+            while let Some(entry) = entries.next() {
+                remaining.push(entry.offset);
+            }
+            assert_eq!(remaining, cookies[index + 1..]);
+        }
+        let mut entries = cookie_entries(&cookies);
+        assert!(!entries.skip_cookie(123));
+        assert_eq!(entries.remaining(), 0);
+        assert!(!cookie_entries(&[]).skip_cookie(123));
+    }
+
+    #[test]
+    fn cookie_scan_resumes_across_directory_batches_and_at_eof() {
+        let directory = TempDir::new_with_prefix("/tmp/virtiofsd-batches-").unwrap();
+        for index in 0..24 {
+            fs::write(directory.as_path().join(format!("file-{index}")), []).unwrap();
+        }
+        let file = File::open(directory.as_path()).unwrap();
+        let mut all = ReadDir::new(&file, 0, vec![0; 4096]).unwrap();
+        let mut expected = Vec::new();
+        while let Some(entry) = all.next() {
+            expected.push((entry.offset, entry.name.to_owned()));
+        }
+        assert_eq!(expected.len(), 26);
+        for (index, (cookie, _)) in expected.iter().enumerate() {
+            let mut resumed = ReadDir::walk_to(&file, *cookie, vec![0; 128]).unwrap();
+            let next = resumed
+                .next()
+                .map(|entry| (entry.offset, entry.name.to_owned()));
+            assert_eq!(next.as_ref(), expected.get(index + 1));
+        }
+    }
+
+    #[test]
+    fn non_directory_errors_are_not_hidden_by_cookie_fallback() {
+        let directory = TempDir::new_with_prefix("/tmp/virtiofsd-errors-").unwrap();
+        let path = directory.as_path().join("file");
+        fs::write(&path, []).unwrap();
+        let file = File::open(path).unwrap();
+        let error = ReadDir::new(&file, 0, vec![0; 4096]).err().unwrap();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR));
+    }
+
+    #[test]
+    #[ignore = "requires VIRTIOFSD_TEST_NFS_DIRECTORY pointing to an existing NFS directory"]
+    fn reads_existing_nfs_directory_without_missing_or_duplicate_entries() {
+        let path = std::env::var_os("VIRTIOFSD_TEST_NFS_DIRECTORY").unwrap();
+        let file = File::open(&path).unwrap();
+        let mut expected: Vec<_> = fs::read_dir(&path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_encoded_bytes())
+            .collect();
+        let mut names = Vec::new();
+        let mut offset = 0;
+        for _ in 0..expected.len() + 4 {
+            let mut entries = ReadDir::new(&file, offset, vec![0; 128]).unwrap();
+            if entries.remaining() == 0 {
+                names.sort();
+                expected.sort();
+                assert_eq!(names, expected);
+                return;
+            }
+            while let Some(entry) = entries.next() {
+                offset = entry.offset;
+                let name = entry.name.to_bytes();
+                if name != b"." && name != b".." {
+                    names.push(name.to_vec());
+                }
+            }
+        }
+        panic!("directory pagination did not reach EOF");
+    }
 
     #[test]
     fn padded_cstrings() {

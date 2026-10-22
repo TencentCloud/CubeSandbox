@@ -1651,7 +1651,7 @@ impl FileSystem for PassthroughFs {
         #[allow(clippy::readonly_write_lock)]
         let dir = data.file.get()?.write().unwrap();
 
-        ReadDir::new(&*dir, offset as libc::off64_t, buf)
+        ReadDir::new(&*dir, offset, buf)
     }
 
     fn open(
