@@ -3,7 +3,10 @@ title: Compute nodes report HeartbeatExpired while still online (clock skew)
 author: Cold-E
 date: 2026-10-22
 tags:
-  - troubleshooting
+  - heartbeat
+  - clock
+  - chrony
+  - cube-ops
 lang: en-US
 ---
 
@@ -11,7 +14,7 @@ lang: en-US
 
 ## Symptom
 
-A compute node shows `Healthy=False` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls` (or the WebUI `/nodes` page), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
+A compute node shows `Healthy=false` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls --json` (or the WebUI `/nodes` page), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
 
 The key tell: the node's `MetaDataUpdateAt` timestamp keeps advancing (the heartbeat IS arriving), but the node is still judged expired.
 
@@ -68,13 +71,17 @@ This is not a code bug — it's the standard distributed-systems assumption that
    # On the compute node, note the time, then SSH to the control node and compare:
    date +%s   # on compute node
    ssh <control-node-ip> date +%s   # on control node
-   # A difference larger than 15s reproduces the false HeartbeatExpired.
+   # The compute node must be BEHIND the control node: EvaluateHealth checks
+   # `now.Sub(heartbeatTime) > timeout`, so only a slow compute clock reproduces
+   # HeartbeatExpired. A compute node that is ahead stays healthy (the delta is
+   # negative). A difference larger than 15s in that direction reproduces the
+   # false HeartbeatExpired.
    ```
 
-   Or, for a one-shot offset measurement against a specific NTP source, run this **on the compute node** (it prints `System clock ... wrong by <N> seconds` and does not modify the clock):
+   Or, for a one-shot offset measurement against a specific NTP source, run this **on the compute node** (it prints `System clock ... wrong by <N> seconds` and does not modify the clock). The target must actually serve NTP — use the same `<your-ntp-server>` the control node syncs to (see Resolution step 1); if the control node is not an NTP server, point this at a real NTP source instead:
 
    ```bash
-   chronyd -Q 'server <control-node-ip> iburst'   # one-shot probe; prints the offset vs. that server
+   chronyd -Q 'server <your-ntp-server> iburst'   # one-shot probe; prints the offset vs. that server
    ```
 
 ## Resolution

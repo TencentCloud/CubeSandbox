@@ -3,7 +3,10 @@ title: 计算节点在线却被判 HeartbeatExpired（时钟偏移）
 author: Cold-E
 date: 2026-10-22
 tags:
-  - troubleshooting
+  - heartbeat
+  - clock
+  - chrony
+  - cube-ops
 lang: zh-CN
 ---
 
@@ -11,7 +14,7 @@ lang: zh-CN
 
 ## 症状
 
-`cubeopscli node ls`（或 WebUI `/nodes` 页面）显示某计算节点 `Healthy=False`、`UnhealthyReason=HeartbeatExpired`，但该节点其实正常在线——`cubelet` 在运行、心跳也在上报。本应调度到该节点的沙箱创建失败，报 `no ready replica` / `no more resource`，因为调度器会过滤掉 `HeartbeatExpired` 节点。
+`cubeopscli node ls --json`（或 WebUI `/nodes` 页面）显示某计算节点 `Healthy=false`、`UnhealthyReason=HeartbeatExpired`，但该节点其实正常在线——`cubelet` 在运行、心跳也在上报。本应调度到该节点的沙箱创建失败，报 `no ready replica` / `no more resource`，因为调度器会过滤掉 `HeartbeatExpired` 节点。
 
 关键判据：该节点的 `MetaDataUpdateAt` 时间戳一直在推进（心跳**确实**在到达），但节点仍被判过期。
 
@@ -68,13 +71,16 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
    # 在计算节点记下时间，再 SSH 到控制节点比对：
    date +%s          # 计算节点
    ssh <control-node-ip> date +%s   # 控制节点
-   # 差值大于 15s 即可复现误判 HeartbeatExpired
+   # 计算节点必须落后于控制节点：EvaluateHealth 检查的是
+   # `now.Sub(heartbeatTime) > timeout`，只有计算节点时钟偏慢才会
+   # 复现 HeartbeatExpired。计算节点偏快则保持健康（delta 为负）。
+   # 在该方向上差值大于 15s 即可复现误判 HeartbeatExpired。
    ```
 
-   若要对指定 NTP 源做一次性偏移测量，在**计算节点**上跑（打印 `System clock ... wrong by <N> seconds`，不修改时钟）：
+   若要对指定 NTP 源做一次性偏移测量，在**计算节点**上跑（打印 `System clock ... wrong by <N> seconds`，不修改时钟）。目标必须真的提供 NTP 服务——用控制节点所同步的同一个 `<your-ntp-server>`（见修复步骤 1）；若控制节点不是 NTP server，改指向一个真正的 NTP 源：
 
    ```bash
-   chronyd -Q 'server <control-node-ip> iburst'   # 一次性探测，打印相对该 server 的偏移
+   chronyd -Q 'server <your-ntp-server> iburst'   # 一次性探测，打印相对该 server 的偏移
    ```
 
 ## 修复
