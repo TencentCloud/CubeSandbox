@@ -254,7 +254,21 @@ const (
 	// the sandbox: empty = default unified v2 hierarchy; "legacy" lets the
 	// guest mount cgroup v1 controllers itself (required by Android init).
 	MasterAnnotationCgroupMode = "cube.master.cgroup-mode"
+	// MasterAnnotationEnableIvshmem asks the shim to attach an ivshmem
+	// device to the guest (see CubeShim ANNO_ENABLE_IVSHMEM).
+	MasterAnnotationEnableIvshmem = "cube.master.enable_ivshmem"
 )
+
+// GuestAffectingMasterAnnotations lists the cube.master.* request-level
+// annotations that alter the guest environment and therefore must be copied
+// from the sandbox request into the sandbox OCI spec annotations. The
+// annotation map assembled in CreateSandbox otherwise carries only
+// platform-internal keys, so without this passthrough these flags are
+// silently dropped before the shim can see them.
+var GuestAffectingMasterAnnotations = []string{
+	MasterAnnotationCgroupMode,
+	MasterAnnotationEnableIvshmem,
+}
 
 // Inventory version annotations used by Ensure
 const (

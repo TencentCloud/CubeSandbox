@@ -927,7 +927,7 @@ impl SandBox {
             .annotations()
             .as_ref()
             .and_then(|anno| anno.get(ANNO_CGROUP_MODE))
-            .map(|v| v == "legacy")
+            .map(|v| v.trim() == "legacy")
             .unwrap_or(false)
     }
 
@@ -2035,17 +2035,20 @@ mod tests {
         let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
         let mut sb = SandBox::new("ut".to_string(), log, false, tx);
         let mut annos = HashMap::new();
-        annos.insert(
-            "cube.master.cgroup-mode".to_string(),
-            "legacy".to_string(),
-        );
+        annos.insert("cube.master.cgroup-mode".to_string(), "legacy".to_string());
         sb.spec = SpecBuilder::default().annotations(annos).build().unwrap();
-        sb.conf.kernel = "ut_kernel".to_string();
+        // Use a real (non-ELF) placeholder file rather than a bare name so
+        // the test keeps passing once from_spec validates the kernel image
+        // format: a missing file must not fail kernel-format validation.
+        let kernel = std::env::temp_dir().join("ut_cgroup_legacy_kernel_img");
+        std::fs::write(&kernel, b"placeholder-non-elf-kernel-image").unwrap();
+        sb.conf.kernel = kernel.to_string_lossy().to_string();
         sb.conf.vm_res.cpu = 999;
         sb.conf.vm_res.memory = 999;
         sb.conf.product = PRODUCT_CUBEBOX.to_string();
 
         let vmconfig = sb.prepare_resource().await;
+        let _ = std::fs::remove_file(&kernel);
         assert!(vmconfig.is_ok());
         let vm_config = vmconfig.unwrap();
         assert!(
