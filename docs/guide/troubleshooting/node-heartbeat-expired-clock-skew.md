@@ -1,0 +1,113 @@
+---
+title: Compute nodes report HeartbeatExpired while still online (clock skew)
+author: Cold-E
+date: 2026-10-22
+tags:
+  - troubleshooting
+lang: en-US
+---
+
+# Compute nodes report HeartbeatExpired while still online (clock skew)
+
+## Symptom
+
+A compute node shows `Healthy=False` with `UnhealthyReason=HeartbeatExpired` in `cubeopscli node ls` (or the WebUI `/nodes` page), yet the node is actually up — `cubelet` is running and posting heartbeats. Sandbox creation that should land on this node fails with `no ready replica` / `no more resource`, because the scheduler filters out `HeartbeatExpired` nodes.
+
+The key tell: the node's `MetaDataUpdateAt` timestamp keeps advancing (the heartbeat IS arriving), but the node is still judged expired.
+
+## Environment
+
+- CubeSandbox v0.7.x, multi-node deployment (control node and compute node(s) on separate hosts)
+- Compute node clock is not synchronized to a common time source (NTP/chrony)
+- Related components: `cubelet` (heartbeat reporter), `cube-ops` (health evaluator)
+
+## Root Cause
+
+Cubelet reports a status heartbeat every ~1–2s to `cube-ops` (`POST /internal/v1/node-agent/nodes/<ip>/status`), and the `HeartbeatTime` field is stamped with the **compute node's local wall clock**. `cube-ops` evaluates health with its **own** local wall clock as `now`:
+
+```go
+// CubeOps/internal/nodemanagement/service/health.go
+func EvaluateHealth(reportedReady bool, heartbeatTime, now time.Time, timeout time.Duration) HealthStatus {
+    if heartbeatTime.IsZero() || now.Sub(heartbeatTime) > timeout {
+        return HealthStatus{Healthy: false, UnhealthyReason: model.ReasonHeartbeatExpired}
+    }
+    ...
+}
+
+// MetadataTimeout returns the cubelet heartbeat expiry window (15s)
+func MetadataTimeout() time.Duration { return 15 * time.Second }
+```
+
+The window is 15s. If the compute node's clock is more than 15s behind the control node's clock, the `HeartbeatTime` it stamps is more than 15s in the past from `cube-ops`'s perspective — so every fresh heartbeat is already "expired" on arrival. The heartbeat traffic is fine; only the two clocks disagree.
+
+This is not a code bug — it's the standard distributed-systems assumption that all nodes share a common time reference. Compute nodes whose `chrony` has no server configured (`Stratum=0`, `Reference ID=00000000`) drift freely, and VM/PVM compute nodes are especially prone to drift.
+
+## Diagnosis
+
+1. Check the node state and reason:
+
+   ```bash
+   cubeopscli node ls
+   # Look for: Healthy=False, UnhealthyReason=HeartbeatExpired, and a recent MetaDataUpdateAt
+   ```
+
+2. Distinguish clock skew from a genuinely offline node. **If `MetaDataUpdateAt` stopped advancing days ago**, `cubelet` is actually stopped/dead — that is a real offline node, not this issue. **If `MetaDataUpdateAt` keeps updating** but the node is still `HeartbeatExpired`, the clocks disagree.
+
+3. On the compute node, check whether chrony is synchronized:
+
+   ```bash
+   chronyc tracking
+   # Stratum: 0  and  Reference ID: 00000000  => NOT synchronized, free-running
+   ```
+
+4. Measure the offset between the compute node and the control node. The simplest way is to compare wall clocks:
+
+   ```bash
+   # On the compute node, note the time, then SSH to the control node and compare:
+   date +%s   # on compute node
+   ssh <control-node-ip> date +%s   # on control node
+   # A difference larger than 15s reproduces the false HeartbeatExpired.
+   ```
+
+   Or, if the control node is a chrony server, measure directly:
+
+   ```bash
+   chronyc -h <control-node-ip> tracking   # offset field
+   ```
+
+## Resolution
+
+Synchronize the compute node's clock to the **same** time source the control node uses.
+
+1. Confirm the time source. If your control node runs chrony as a local NTP server (e.g. `local stratum 10` + `allow`), use it; otherwise use a public NTP pool or your organization's NTP server. Pick exactly the source the control node is synced to, so both clocks agree.
+
+2. Configure chrony on the compute node. Replace any existing `server`/`pool` lines so there is no conflict:
+
+   ```bash
+   # Example: public NTP pool
+   sudo sed -i '/^server /d; /^pool /d' /etc/chrony.conf
+   echo 'server pool.ntp.org iburst' | sudo tee -a /etc/chrony.conf
+   # Or, for an internal NTP server:
+   # echo 'server <your-ntp-server> iburst' | sudo tee -a /etc/chrony.conf
+   ```
+
+3. Restart chrony and verify the offset collapses to near zero:
+
+   ```bash
+   sudo systemctl restart chronyd
+   chronyc tracking   # Stratum should now be non-zero; offset should be ~0
+   ```
+
+4. The node turns healthy within the next heartbeat cycle — verify:
+
+   ```bash
+   cubeopscli node ls   # Healthy=True for the fixed node
+   ```
+
+No `cubelet`/`cube-ops` restart or config change is needed; once the clocks agree, the existing heartbeat stream is evaluated as fresh.
+
+## References
+
+- Heartbeat evaluation: `CubeOps/internal/nodemanagement/service/health.go` (`EvaluateHealth`, `MetadataTimeout`)
+- Heartbeat reporting: `Cubelet/pkg/cubelet/node_status.go` (`HeartbeatTime: kl.clock.Now()`)
+- Related: #455 (stale node health handling — this is a different failure mode: the heartbeat arrives on time, but the clocks disagree)
