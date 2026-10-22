@@ -371,6 +371,8 @@ func (a *App) WebhookPublisher() webhook.Publisher {
 func (a *App) startWebhooks(ctx context.Context, cfg *config.Config) {
 	var err error
 	a.webhooks, err = webhook.NewRuntime(ctx, cfg.Webhooks, cfg.RedisConf)
+	sandbox.SetWebhookPublisher(a.WebhookPublisher())
+	templatecenter.SetWebhookPublisher(a.WebhookPublisher())
 	if err != nil {
 		CubeLog.Warnf("webhooks disabled: invalid startup configuration; values redacted")
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -75,6 +76,7 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		log.G(ctx).Error(err)
 		return rsp
 	}
+	ctx = webhook.WithResolvedStart(ctx, resolveResult.TemplateID, strings.EqualFold(resolveResult.Kind, templatecenter.TemplateKindSnapshot))
 	ret := createSandboxRunFn(ctx, req)
 	if ret != nil && ret.Ret != nil && ret.Ret.RetCode == int(errorcode.ErrorCode_Success) {
 		if err := registerCreatedSandboxRuntimeRef(ctx, req, ret); err != nil {
@@ -140,6 +142,7 @@ func constructCreateReq(r *http.Request) (*types.CreateCubeSandboxReq, error) {
 		return nil, errors.New("requestID is nil")
 	}
 
+	req.WebhookMetadata = webhook.UserMetadata(req.Labels)
 	if req.Labels == nil {
 		req.Labels = map[string]string{}
 	}

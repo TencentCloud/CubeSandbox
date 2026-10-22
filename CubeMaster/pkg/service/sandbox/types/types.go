@@ -42,7 +42,17 @@ type HostChangeEvent struct {
 	EventType string
 }
 
+// WebhookMetadata records only the pre-template user label boundary. Nil pointer
+// means unknown provenance (including old stored specs); nil Values means absent.
+type WebhookMetadata struct {
+	Values   map[string]string `json:"values"`
+	TooLarge bool              `json:"too_large,omitempty"`
+}
+
 type CreateCubeSandboxReq struct {
+	// Internal only: decoded separately by sandboxspec, never from API JSON.
+	WebhookMetadata *WebhookMetadata `json:"-"`
+
 	*Request
 
 	// Optional idle TTL in seconds; nil = client omitted the field.

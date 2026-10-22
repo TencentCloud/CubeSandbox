@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Fixed field count and a per-string limit bound the entire P1 capture.
+// Common identity strings are bounded separately from lifecycle field budgets.
 const maxStringBytes = 4096
 
 // CaptureInput contains values already available at the success boundary.
@@ -27,6 +27,7 @@ type CaptureInput struct {
 	BuildID     string
 	TeamID      string
 	OccurredAt  time.Time
+	Fields      LifecycleFields
 }
 
 // CapturedEvent owns a value snapshot; no mutable input is exposed.
@@ -43,6 +44,9 @@ func validateCapture(in CaptureInput) error {
 		if len(s) > maxStringBytes {
 			return ErrCaptureTooLarge
 		}
+	}
+	if err := validateFields(in.Fields); err != nil {
+		return err
 	}
 	if in.ID == uuid.Nil || in.OccurredAt.IsZero() ||
 		!validType(in.Type) || strings.TrimSpace(in.SandboxID) == "" {
@@ -70,6 +74,14 @@ func Capture(in CaptureInput) (*CapturedEvent, error) {
 	}
 	captureCounters[0].Inc()
 	in.OccurredAt = in.OccurredAt.UTC()
+	in.Type = strings.Clone(in.Type)
+	in.Origin = Origin(strings.Clone(string(in.Origin)))
+	in.TemplateID = strings.Clone(in.TemplateID)
+	in.SandboxID = strings.Clone(in.SandboxID)
+	in.ExecutionID = strings.Clone(in.ExecutionID)
+	in.BuildID = strings.Clone(in.BuildID)
+	in.TeamID = strings.Clone(in.TeamID)
+	in.Fields = cloneFields(in.Fields)
 	return &CapturedEvent{input: in}, nil
 }
 

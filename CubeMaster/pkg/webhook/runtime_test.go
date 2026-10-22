@@ -597,12 +597,21 @@ func TestWatcherDoesNotReplaceSubscriptionSnapshot(t *testing.T) {
 	p, err := NewStaticConfigSubscriptionProvider(data.(*config.Config).Webhooks)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, []byte("webhooks: {enabled: true, workers: invalid-secret}\n"), 0600))
-	select {
-	case cfg := <-changes:
-		require.True(t, cfg.Webhooks.Invalid)
-	case <-time.After(3 * time.Second):
-		t.Fatal("watcher did not report invalid local update")
+	// WriteFile may deliver a notification between truncate and write. Wait
+	// for the completed invalid update, not the transient empty document.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case cfg := <-changes:
+			if cfg.Webhooks.Invalid {
+				goto updated
+			}
+		case <-deadline:
+			t.Fatal("watcher did not report invalid local update")
+		}
 	}
+updated:
+
 	require.True(t, p.List()[0].Enabled)
 	require.Contains(t, p.List()[0].URL, "/old?")
 }
