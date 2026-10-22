@@ -58,11 +58,15 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
 
 2. 区分"时钟偏移"与"真离线"。**若 `MetaDataUpdateAt` 几天没变**，是 `cubelet` 真的停了——那是真离线，不是本问题。**若 `MetaDataUpdateAt` 一直在更新**但节点仍 `HeartbeatExpired`，就是两端时钟不一致。
 
+   注意偏移是**双向**的：`EvaluateHealth` 用 `cube-ops` 的 wall clock（控制节点上 `now = time.Now()`）做 `now.Sub(heartbeatTime)` 比较，所以同一症状——`HeartbeatExpired` 且 `MetaDataUpdateAt` 推进——既会在计算节点时钟**偏慢**时出现，也会在控制节点时钟**向前跳**时出现（如控制节点自己的 chrony 未同步、或控制节点 VM pause/resume）。下面的诊断先查计算节点，但若计算节点时钟正常而节点仍 expired，须同样检查**控制**节点时钟（在控制节点上跑 `chronyc tracking`）。
+
 3. 在计算节点上检查 chrony 是否同步：
 
    ```bash
    chronyc tracking
    # Stratum: 0 且 Reference ID: 00000000 => 未同步，自由运行
+   # 若此处计算节点看着正常但节点仍 HeartbeatExpired，
+   # 在控制节点上也跑一次同样的检查——它可能向前跳了。
    ```
 
 4. 测量计算节点与控制节点的时钟差，最简单的办法是直接比对 wall clock：
@@ -85,9 +89,9 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
 
 ## 修复
 
-将计算节点时钟同步到**与控制节点相同**的时间源。
+两端都必须同步到同一时间源——症状是对称的，若控制节点时钟向前跳了，只修计算节点无法恢复该节点。先确认两端时钟都已同步（诊断步骤 3 在两个节点上各跑一次），再同步偏移的那一端。
 
-1. 确认时间源。若控制节点以 chrony 作本地 NTP server（如 `local stratum 10` + `allow`），用它；否则用公网 NTP pool 或企业内网 NTP server。务必选与控制节点一致的时间源，两端时钟才能对齐。
+1. 确认时间源。若控制节点以 chrony 作本地 NTP server（如 `local stratum 10` + `allow`），用它；否则用公网 NTP pool 或企业内网 NTP server。务必选与控制节点一致的时间源，两端时钟才能对齐。若控制节点自身未同步（其 `chronyc tracking` 显示 `Stratum=0`），先修控制节点——把计算节点指向一个控制节点没用的时间源，两端时钟仍对不齐。
 
 2. 在计算节点配置 chrony，配置文件路径和服务名因发行版而异：
 

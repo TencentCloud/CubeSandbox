@@ -58,11 +58,15 @@ This is not a code bug — it's the standard distributed-systems assumption that
 
 2. Distinguish clock skew from a genuinely offline node. **If `MetaDataUpdateAt` stopped advancing days ago**, `cubelet` is actually stopped/dead — that is a real offline node, not this issue. **If `MetaDataUpdateAt` keeps updating** but the node is still `HeartbeatExpired`, the clocks disagree.
 
+   Note the skew is **bidirectional**: `EvaluateHealth` compares `now.Sub(heartbeatTime)` using `cube-ops`'s wall clock (`now = time.Now()` on the control node), so the same symptom — `HeartbeatExpired` with an advancing `MetaDataUpdateAt` — appears both when the compute node's clock is **behind** and when the control node's clock has jumped **ahead** (e.g. its own chrony unsynced, or a VM pause/resume on the control node). The diagnosis below checks the compute node first, but if the compute node's clock looks fine and the node is still expired, verify the **control** node's clock too (`chronyc tracking` on the control node).
+
 3. On the compute node, check whether chrony is synchronized:
 
    ```bash
    chronyc tracking
    # Stratum: 0  and  Reference ID: 00000000  => NOT synchronized, free-running
+   # If the compute node looks fine here but the node is still HeartbeatExpired,
+   # run the same check on the CONTROL node — it may have jumped ahead.
    ```
 
 4. Measure the offset between the compute node and the control node. The simplest way is to compare wall clocks:
@@ -86,9 +90,9 @@ This is not a code bug — it's the standard distributed-systems assumption that
 
 ## Resolution
 
-Synchronize the compute node's clock to the **same** time source the control node uses.
+Both ends must be synchronized to a common time source — the symptom is symmetric, so fixing only the compute node does not recover the node if the control node's clock jumped ahead. First verify both clocks are synced (diagnosis step 3 on each node), then synchronize whichever end is drifting.
 
-1. Confirm the time source. If your control node runs chrony as a local NTP server (e.g. `local stratum 10` + `allow`), use it; otherwise use a public NTP pool or your organization's NTP server. Pick exactly the source the control node is synced to, so both clocks agree.
+1. Confirm the time source. If your control node runs chrony as a local NTP server (e.g. `local stratum 10` + `allow`), use it; otherwise use a public NTP pool or your organization's NTP server. Pick exactly the source the control node is synced to, so both clocks agree. If the control node itself is not synced (its `chronyc tracking` shows `Stratum=0`), fix the control node first — pointing the compute node at a source the control node does not use will not make the clocks agree.
 
 2. Configure chrony on the compute node. The config path and service name differ by distribution:
 
