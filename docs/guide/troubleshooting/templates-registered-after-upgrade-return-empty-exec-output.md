@@ -22,20 +22,32 @@ After upgrading v0.7.0 → v0.7.3, templates registered **before** the upgrade k
 
 ## Root Cause
 
-Template memory snapshots carry a shim-version tag: pre-upgrade templates pin v0.7.0 (their sandboxes still get the v0.7.0 shim), templates registered after the upgrade get tagged v0.7.3 and hit the new snapshot machinery. A guest agent resurrected from a memory snapshot never runs the CreateContainer path, so the agent-side `reset_log_stream_readers` fix (agent/src/rpc.rs) never fires — the log-stream read ends are stale and the shim-side forwarder spins on empty reads. Note the product exec API itself is not broken: CubeMaster `/cube/sandbox/exec` is fire-and-forget (dummy IO, no output collection); what breaks is reading output back from a restored agent, a behavior the product never relied on.
+What is verified is the correlation: the failing sandboxes are exactly those whose template snapshots pin the v0.7.3 shim (post-upgrade registrations), and swapping only the shim binary (below) restores readback — a same-node, same-window controlled experiment leaves the shim binary as the only variable.
+
+The precise internal mechanism still needs maintainer confirmation. Our initial reading (an agent resurrected from a memory snapshot never runs CreateContainer, so the `reset_log_stream_readers` fix in agent/src/rpc.rs never fires) is **incomplete**: restore-from-template does reach CreateContainer with the `cube.appsnapshot.container.id` stamp (Cubelet/plugins/cbri/.../cubebox.go), which is where the reset is called. Something in the v0.7.3 snapshot/restore path leaves the log-stream readback dead despite that reset — we report the symptom, the controlled experiment, and the workaround, and leave the exact break to #2015.
+
+Note the product exec API itself is not affected: CubeMaster `/cube/sandbox/exec` is fire-and-forget (dummy IO); we verified commands really run inside the guest. What breaks is output readback via containerd task exec — a behavior external tooling may rely on.
 
 ## Resolution
 
-Controlled downgrade of the shim slot — replace the v0.7.3 binary with the v0.7.0 one on every node, leaving the rest of the v0.7.3 stack untouched:
+Controlled downgrade of the shim slot — replace the v0.7.3 binary with the v0.7.0 one, leaving the rest of the v0.7.3 stack untouched:
 
 ```sh
 cd /data/cubelet/root/component_versions/cube-shim/v0.7.3/bin
 cp containerd-shim-cube-rs containerd-shim-cube-rs.v073.bak
-cp ../v0.7.0/bin/containerd-shim-cube-rs /tmp/.s && chmod +x /tmp/.s
-mv /tmp/.s containerd-shim-cube-rs   # plain cp fails with "Text file busy" while shims run
+# stage the replacement INSIDE the target directory, then mv: same-filesystem
+# rename(2) is atomic; staging under /tmp (often tmpfs) degrades mv to
+# copy+unlink and re-hits ETXTBSY, plus drags a /tmp SELinux label along.
+cp ../v0.7.0/bin/containerd-shim-cube-rs ./.stage && chmod +x ./.stage
+mv ./.stage containerd-shim-cube-rs
 ```
 
-Running sandboxes are unaffected (they keep the old inode); new sandboxes fall back to the v0.7.0 shim. Verify by launching a sandbox from a post-upgrade template — exec output comes back. Caveat for triage: the GitHub compare API truncates at 300 files, so verify tag-to-tag CubeShim/hypervisor changes via tree shas or a source diff, not the compare file list.
+**Caveats (know the trade-off):**
+- Running sandboxes keep the old inode and are unaffected; new sandboxes get the v0.7.0 shim behavior. Verified in production across mixed workloads.
+- A snapshot binds the shim **and its sibling cube-runtime** as a pair (`cubebox.proto`: `cube-shim (and sibling cube-runtime) version bound when this snapshot was created`). After this swap the "v0.7.3" slot holds a v0.7.0 shim with a v0.7.3 cube-runtime and `version.json` still says v0.7.3 — a deliberately mixed slot that works in practice here but does not self-heal and will confuse version reporting. Treat it as a bridge until the underlying defect is fixed, not a permanent state.
+- The node artifact redistributor may restore the original binary; re-apply after component redistribution.
+
+Triage tip from the same incident: the GitHub compare API truncates at 300 files — verify tag-to-tag CubeShim/hypervisor changes via tree shas or a source diff, not the compare file list.
 
 ## References
 
