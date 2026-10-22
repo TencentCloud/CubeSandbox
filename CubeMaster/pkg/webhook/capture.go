@@ -58,8 +58,17 @@ func validateCapture(in CaptureInput) error {
 // mapping, serialization, or I/O. Oversized fields are rejected, not truncated.
 func Capture(in CaptureInput) (*CapturedEvent, error) {
 	if err := validateCapture(in); err != nil {
+		switch err {
+		case ErrCaptureTooLarge:
+			captureCounters[1].Inc()
+		case ErrSuppressed:
+			captureCounters[2].Inc()
+		default:
+			captureCounters[3].Inc()
+		}
 		return nil, err
 	}
+	captureCounters[0].Inc()
 	in.OccurredAt = in.OccurredAt.UTC()
 	return &CapturedEvent{input: in}, nil
 }

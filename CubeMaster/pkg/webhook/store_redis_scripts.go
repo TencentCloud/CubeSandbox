@@ -86,6 +86,9 @@ if op=='put' then
  local raw=encode(r)
  redis.call('HSET',tasks,key,raw); redis.call('ZADD',due,next,key)
  return 1
+elseif op=='sample' then
+ local oldest=redis.call('ZRANGE',due,0,0,'WITHSCORES')
+ return {redis.call('ZCARD',due),oldest[2] or '0'}
 elseif op=='claim' or op=='prune' then
  local now=number(ARGV[2],1,9999999999999); local limit=number(ARGV[3],1,32)
  local lease,token,retention
@@ -97,6 +100,7 @@ elseif op=='claim' or op=='prune' then
  local index=due; if op=='prune' then index=terminal end
  local keys=redis.call('ZRANGEBYSCORE',index,'-inf',now,'LIMIT',0,limit)
  local records,encoded={},{}
+ local reclaimed,exhaustedCount=0,0
  for i,key in ipairs(keys) do
   local r=read(key)
   if op=='prune' then
@@ -105,8 +109,9 @@ elseif op=='claim' or op=='prune' then
    assert(r.state=='pending' or r.state=='inflight','CORRUPT due state')
    local score=r.next; if r.state=='inflight' then score=r.lease end
    assert(tonumber(redis.call('ZSCORE',due,key))==score and score<=now,'CORRUPT due score')
-   if r.attempts>=r.max then finish(r,now,exhausted)
+   if r.attempts>=r.max then finish(r,now,exhausted); exhaustedCount=exhaustedCount+1
    else
+    if r.state=='inflight' then reclaimed=reclaimed+1 end
     r.state='inflight'; r.attempts=r.attempts+1; r.generation=r.generation+1
     r.token=token; r.lease=now+lease
    end
@@ -129,6 +134,7 @@ elseif op=='claim' or op=='prune' then
   end
  end
  if op=='prune' then return #keys end
+ table.insert(out,1,tostring(exhaustedCount)); table.insert(out,1,tostring(reclaimed))
  return out
 elseif op=='complete' or op=='retry' then
  local key=ARGV[2]; local generation=number(ARGV[3],1,1000); local token=ARGV[4]
