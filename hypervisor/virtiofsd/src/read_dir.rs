@@ -56,7 +56,8 @@ impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
             // Safe because this method rewound the exclusively held directory FD.
             let mut entries = unsafe { Self::new_no_seek(dir, buf)? };
             if entries.remaining() == 0 {
-                return Ok(entries);
+                // EOF before a match means the resume cookie is no longer valid.
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
             }
             if entries.skip_cookie(offset) {
                 if entries.remaining() != 0 {
@@ -176,16 +177,13 @@ mod test {
     use vmm_sys_util::tempdir::TempDir;
 
     #[test]
-    fn large_directory_cookie_does_not_fail_with_einval() {
+    fn unknown_high_bit_cookie_is_not_reported_as_eof() {
         let directory = TempDir::new_with_prefix("/tmp/virtiofsd-cookie-").unwrap();
         let file = File::open(directory.as_path()).unwrap();
-        let result = ReadDir::new(&file, (u64::MAX - 1) as _, vec![0; 4096]);
-        assert!(
-            result.is_ok(),
-            "large cookie failed: {:?}",
-            result.as_ref().err()
-        );
-        assert_eq!(result.unwrap().remaining(), 0);
+        let error = ReadDir::new(&file, u64::MAX - 1, vec![0; 4096])
+            .err()
+            .expect("an unknown high-bit cookie must not be reported as EOF");
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
     }
 
     fn cookie_entries(cookies: &[u64]) -> ReadDir<Vec<u8>> {
@@ -246,6 +244,38 @@ mod test {
                 .map(|entry| (entry.offset, entry.name.to_owned()));
             assert_eq!(next.as_ref(), expected.get(index + 1));
         }
+    }
+
+    #[test]
+    fn cookie_scan_reports_a_cookie_removed_between_reads() {
+        let directory = TempDir::new_with_prefix("/tmp/virtiofsd-removed-cookie-").unwrap();
+        for index in 0..12 {
+            fs::write(directory.as_path().join(format!("file-{index}")), []).unwrap();
+        }
+        let file = File::open(directory.as_path()).unwrap();
+        let mut entries = ReadDir::new(&file, 0, vec![0; 4096]).unwrap();
+        let mut before = Vec::new();
+        while let Some(entry) = entries.next() {
+            before.push(entry.offset);
+        }
+
+        for index in 0..8 {
+            fs::remove_file(directory.as_path().join(format!("file-{index}"))).unwrap();
+        }
+        let mut entries = ReadDir::new(&file, 0, vec![0; 4096]).unwrap();
+        let mut after = Vec::new();
+        while let Some(entry) = entries.next() {
+            after.push(entry.offset);
+        }
+        assert_eq!(after.len(), 6);
+        let removed_cookie = before
+            .into_iter()
+            .find(|cookie| !after.contains(cookie))
+            .expect("removing directory entries must remove at least one cookie");
+        let error = ReadDir::walk_to(&file, removed_cookie, vec![0; 128])
+            .err()
+            .expect("a disappeared cookie must not silently skip the remaining entries");
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
     }
 
     #[test]
