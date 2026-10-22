@@ -44,11 +44,13 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
 
 ## 诊断
 
-1. 查看节点状态与原因：
+1. 查看节点状态与原因。默认 `node ls` 表只打印 `NODE_ID / NODE_IP / INSTANCE_TYPE / ZONE / CPU_TYPE / HEALTHY / SCHEDULING_DISABLED / HOST_STATUS`——**不**显示 `UnhealthyReason` 和心跳时间戳，需用 `--json`（完整字段）或 `--score-only`（加 `METADATA_UPDATE`）：
 
    ```bash
-   cubeopscli node ls
-   # 关注：Healthy=False, UnhealthyReason=HeartbeatExpired, 且 MetaDataUpdateAt 较新
+   cubeopscli node ls --json          # 完整字段：Healthy, UnhealthyReason, MetaDataUpdateAt
+   # 或，观察心跳时间戳是否在推进：
+   cubeopscli node ls --score-only    # NODE_ID / SCORE / ... / METADATA_UPDATE
+   # 关注：Healthy=false, UnhealthyReason=HeartbeatExpired, 且 MetaDataUpdateAt 较新
    ```
 
 2. 区分"时钟偏移"与"真离线"。**若 `MetaDataUpdateAt` 几天没变**，是 `cubelet` 真的停了——那是真离线，不是本问题。**若 `MetaDataUpdateAt` 一直在更新**但节点仍 `HeartbeatExpired`，就是两端时钟不一致。
@@ -81,20 +83,32 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
 
 1. 确认时间源。若控制节点以 chrony 作本地 NTP server（如 `local stratum 10` + `allow`），用它；否则用公网 NTP pool 或企业内网 NTP server。务必选与控制节点一致的时间源，两端时钟才能对齐。
 
-2. 在计算节点配置 chrony，先删掉旧的 `server`/`pool` 行避免冲突：
+2. 在计算节点配置 chrony，配置文件路径和服务名因发行版而异：
 
    ```bash
-   # 示例：公网 NTP pool
+   # ── RPM 系（OpenCloudOS / TencentOS / RHEL / CentOS）：/etc/chrony.conf，服务名 chronyd ──
    sudo sed -i '/^server /d; /^pool /d' /etc/chrony.conf
-   echo 'server pool.ntp.org iburst' | sudo tee -a /etc/chrony.conf
+   echo 'pool pool.ntp.org iburst' | sudo tee -a /etc/chrony.conf
    # 或用内网 NTP server：
    # echo 'server <your-ntp-server> iburst' | sudo tee -a /etc/chrony.conf
+   sudo systemctl restart chronyd
+
+   # ── Debian / Ubuntu：/etc/chrony/chrony.conf，服务名 chrony ──
+   #（Ubuntu 默认用 systemd-timesyncd，若未装 chrony 需先安装）
+   # sudo apt-get install -y chrony
+   sudo sed -i '/^server /d; /^pool /d' /etc/chrony/chrony.conf
+   echo 'pool pool.ntp.org iburst' | sudo tee -a /etc/chrony/chrony.conf
+   # 或用内网 NTP server：
+   # echo 'server <your-ntp-server> iburst' | sudo tee -a /etc/chrony/chrony.conf
+   sudo systemctl restart chrony
    ```
 
-3. 重启 chrony 并确认 offset 收敛到接近 0：
+   > 解析到多个地址的名字（如 `pool.ntp.org`）用 `pool` 指令；`server` 会在启动时只固定一个解析到的地址。单个内网 NTP 主机用 `server`。
+
+3. 重启 chrony 并确认 offset 收敛到接近 0（RPM 系：`chronyd`；Debian/Ubuntu：`chrony`）：
 
    ```bash
-   sudo systemctl restart chronyd
+   sudo systemctl restart chronyd    # RPM 系 —— 或：sudo systemctl restart chrony   （Debian/Ubuntu）
    chronyc tracking   # Stratum 应为非 0，offset 应接近 0
    ```
 
