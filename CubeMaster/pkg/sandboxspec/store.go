@@ -107,7 +107,7 @@ func doPut(ctx context.Context, sandboxID string, req *sandboxtypes.CreateCubeSa
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(canonical)
+	payload, err := marshalStoredSpec(canonical)
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func doPut(ctx context.Context, sandboxID string, req *sandboxtypes.CreateCubeSa
 			canonical.Annotations = map[string]string{}
 		}
 		canonical.Annotations[constants.CubeAnnotationStorageBackend] = normalized
-		payload, err = json.Marshal(canonical)
+		payload, err = marshalStoredSpec(canonical)
 		if err != nil {
 			return err
 		}
@@ -345,6 +345,13 @@ func decodeSpec(rec *models.SandboxSpec) (*sandboxtypes.CreateCubeSandboxReq, er
 	if err := json.Unmarshal([]byte(rec.RequestJSON), out); err != nil {
 		return nil, err
 	}
+	var internal struct {
+		Metadata *sandboxtypes.WebhookMetadata `json:"_webhook_metadata"`
+	}
+	if err := json.Unmarshal([]byte(rec.RequestJSON), &internal); err != nil {
+		return nil, err
+	}
+	out.WebhookMetadata = internal.Metadata
 	if strings.TrimSpace(out.Backend) == "" && strings.TrimSpace(rec.Backend) != "" {
 		out.Backend = rec.Backend
 	}
@@ -433,6 +440,16 @@ func CanonicalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.
 	if err := json.Unmarshal(payload, out); err != nil {
 		return nil, err
 	}
+	if req.WebhookMetadata != nil {
+		m := *req.WebhookMetadata
+		if m.Values != nil {
+			m.Values = make(map[string]string, len(req.WebhookMetadata.Values))
+			for k, v := range req.WebhookMetadata.Values {
+				m.Values[k] = v
+			}
+		}
+		out.WebhookMetadata = &m
+	}
 	if out.Annotations == nil {
 		out.Annotations = map[string]string{}
 	}
@@ -462,4 +479,13 @@ func stripTransientSnapshotAnnotations(annotations map[string]string) {
 	}
 	delete(annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
+}
+
+// The private provenance extension lives only inside the existing spec record.
+func marshalStoredSpec(req *sandboxtypes.CreateCubeSandboxReq) ([]byte, error) {
+	type plain sandboxtypes.CreateCubeSandboxReq
+	return json.Marshal(struct {
+		*plain
+		Metadata *sandboxtypes.WebhookMetadata `json:"_webhook_metadata,omitempty"`
+	}{(*plain)(req), req.WebhookMetadata})
 }

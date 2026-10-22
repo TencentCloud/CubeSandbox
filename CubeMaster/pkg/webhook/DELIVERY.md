@@ -1,8 +1,8 @@
-# Configurable persistent delivery (P3)
+# Configurable persistent lifecycle delivery (P3/P4)
 
-This stage installs delivery infrastructure in CubeMaster. It does **not** yet
-publish real sandbox lifecycle events. P4/P5 must wire actual successful business
-operations and their field mappings. There is no public test-event API.
+CubeMaster publishes created, resumed, paused and checkpointed through the P3
+persistent pipeline. Independent updated and killed producers remain P5.
+There is no public test-event API.
 
 ## Configuration
 
@@ -21,6 +21,10 @@ webhook block is invalid. Existing requests and old instances cannot be recalled
 For sensitive revocation, globally disable all instances and finish deployment.
 Reusing an old ID and identical URL can resume unfinished old tasks; use a new ID
 when a new identity is required. There is no subscription generation history.
+
+For P4, select `sandbox.lifecycle.created`, `sandbox.lifecycle.resumed`,
+`sandbox.lifecycle.paused`, and/or `sandbox.lifecycle.checkpointed` in each
+subscription's events list. The default switches remain off.
 
 | Option | Default | Limit / relation |
 | --- | --- | --- |
@@ -108,9 +112,13 @@ are fixed; shutdown adds one temporary join waiter. There is no per-event
 application goroutine. HTTP/Redis library goroutines and sockets are additionally
 bounded by concurrency, pool limits and timeouts.
 
-The current captured structure has seven bounded strings (≤4096 bytes each), so
-1024 buffered captures retain at most a conservative 28 MiB of string contents
-plus structs/channel overhead; the maximum 4096 setting is 112 MiB. One event's
+P4 captures retain seven common strings (≤4096 bytes each), up to 16 KiB of
+metadata key/value bytes (64 entries; keys ≤256, values ≤4096), two resource
+strings (≤128 each) and two mode strings (≤16 each). Content alone is bounded
+by approximately 45 MiB at capacity 1024, or 180 MiB at 4096; structs, map
+buckets/string headers and channel storage are additional. Preparation and
+Capture temporarily hold separate bounded copies. Oversize input drops the
+whole notification and increments capture-too-large; it never truncates values. One event's
 ≤64 target table shares its immutable Event. Bodies are ≤256 KiB and records
 ≤512 KiB; worker encoding/transport copies and Redis allocation/index overhead
 are additional. 10000 records can represent **4.88 GiB of record content alone**;
@@ -133,12 +141,69 @@ Shared queue gauges must not be summed across Masters. Runtime repetition does
 not register duplicate collectors. Only one production Runtime per App is
 supported; process-wide local gauges aggregate/observe that ownership.
 
-## P4/P5 integration
+## P4 lifecycle integration and compatibility
 
-Use `App.WebhookPublisher()` after startup, defaulting to `NopPublisher` before
-installation. At an actual successful business boundary, construct bounded
-`CaptureInput` from already available data and call Capture then TryPublish.
-Publication outcomes are observations, never business errors. Add the required
-business fields and pure background MapToProtocol mapping with those real
-callers; do not call Encode, query Redis/DNS or wait for queue room in business
-code. P3 synthetic created events do not validate real lifecycle success points.
+App installs the same P3 Publisher in sandbox and templatecenter through atomic
+holders. No second Runtime, event goroutine, synchronous persistence, encoding,
+resource parsing or remote lookup is added to business publication.
+
+- `created`: final create proxy/spec post-processing succeeds and wins the
+  existing response-once decision. Proxy errors or cancellation winning that
+  decision suppress publication; spec/hook warn-only errors still permit it.
+  MockCreateDirect remains a bypass with no event.
+- `resumed`: trusted user-snapshot kind from existing HTTP template resolution,
+  or successful pause restoration after the final proxy purge check. Both are
+  memory restore paths (`resume_mode=restore`). Template fast-start alone is
+  still created. Internal callers without a trusted resolution context default
+  to created; no additional classification lookup is made.
+- `paused`: Cubelet local completion plus `pausesnap.Complete`; `pause_mode=full`.
+- `checkpointed`: the PENDING claim winner, after local commit, replica/snapshot
+  state and final job READY persistence. Original template identity is copied
+  before snapshot annotations are rewritten. READY reads, template commits and
+  upload callbacks have no producer. A later final-read failure does not retract
+  a successfully committed READY event.
+
+XFS and S3 follow the same local success rules. Empty export UUIDs, uploads in
+progress and later remote failures do not suppress or generate another event.
+These events do not assert remote durability or cross-node recoverability.
+
+Metadata is captured from incoming labels before internal injection/template
+merge. Exact `host-mount`, `X-Caller`, and the reserved `cube.master.` namespace
+are excluded; ordinary user keys containing token/secret/password are retained.
+Annotations, env vars, network credentials and template labels are not exported.
+The internal request field is excluded from API JSON. Only sandboxspec stores
+its provenance extension inside existing request_json, with no new table or
+extra query. Known nil is omitted; known empty is `{}`. Old specs, internal
+requests without provenance and template fallback have unknown metadata, which
+is omitted. CubeAPI has already moved host-mount out of labels; upstream
+information that was collapsed cannot be recovered. Template request cloning
+does not turn template-owned labels into known user metadata.
+
+Paused execution resources are mapped only for a single-container `cubebox`
+spec. Cubelet cgroup.GetResourceWithOverhead directly assigns its CPU/memory to
+VM quantities in that branch; MatchVMSnapshotSpec passes CPU and getMbSize to
+VmSnapshotSpec; genCgroupAnnotationOpt supplies it to the VM annotation.
+Other instance types add overhead/select snapshots and are not inferred.
+Multiple container quotas are not summed by the webhook mapper.
+CPU must be an exact positive integer (1000m=1; 1500m omitted). Memory follows
+Cubelet's ceil-to-byte then integer MiB conversion (1Gi=1024, 512M=488,
+1.5Mi=1). Invalid, nonpositive, overflow/saturated quantities are omitted per
+field and counted as mapping cpu_unavailable/memory_unavailable. No reliable
+execution start exists in the current spec: started_at remains empty and
+execution_time is absent. Missing time does not discard available resources;
+no execution/build/team identity is invented. Strict receivers requiring those
+identities, a valid started_at, or complete numeric fields require adaptation.
+No new execution tracking model is introduced.
+
+Create failover carries OriginCreateFailover in the actual queued Task context,
+including retries and the handler's WithoutCancel. Resume timeout refresh alone
+carries OriginResumeTimeoutRefresh; outer resumed retains lifecycle origin.
+Pause Update and origin-package cleanup carry OriginPauseTeardown locally.
+Cubelet keep_tombstone destruction stays inside its existing RPC, without a new
+proto field or Master ordinary-delete call. P5 must consume origins at actual
+updated/killed producers and test both suppression and normal notifications;
+P4's lack of those producers is not evidence of completed P5 suppression.
+
+See [P4-VALIDATION.md](P4-VALIDATION.md) for this run's commands, evidence,
+measurements, skips and P5/P6 handoff. Signature, API, backend, retry, loss and
+ordering limitations above remain unchanged.

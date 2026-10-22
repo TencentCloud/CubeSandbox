@@ -29,12 +29,11 @@ type NetworkEgressData struct {
 	AllowedDomains []string `json:"allowed_domains"`
 }
 
-// MapToProtocol runs in the background. P1 only validates common context.
-// Business mappings will be added alongside their real lifecycle callers;
-// Encode still rejects missing required data for paused/resumed/updated.
+// MapToProtocol runs in the Writer, including resource parsing.
+// Encode still rejects missing required modes or update data.
 func MapToProtocol(c *CapturedEvent) (*ProtocolEventData, error) {
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
-	return &ProtocolEventData{}, nil
+	return mapLifecycle(c), nil
 }

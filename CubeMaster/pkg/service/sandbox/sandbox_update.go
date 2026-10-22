@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -121,7 +122,7 @@ func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
 	// refreshTimeoutMeta updates lifecycle metadata through the timeout
 	// provider. Resume does not return endAt, so the computed value is
 	// intentionally ignored.
-	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
+	refreshTimeoutMeta(webhook.WithOrigin(ctx, webhook.OriginResumeTimeoutRefresh), req.SandboxID, *req.Timeout)
 }
 
 func applyLifecycleLockError(rsp *types.Res, err error) {

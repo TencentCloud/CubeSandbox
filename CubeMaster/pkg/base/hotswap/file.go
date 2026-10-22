@@ -73,11 +73,11 @@ func (o *FileOperator) Init() (interface{}, error) {
 		return nil, err
 	}
 	o.backupOldCfg = new
+	o.data = config // Publish initial state before the watcher can reload it.
 	err = o.listenFile(o.path)
 	if err != nil {
 		return nil, err
 	}
-	o.data = config
 	return config, nil
 }
 
