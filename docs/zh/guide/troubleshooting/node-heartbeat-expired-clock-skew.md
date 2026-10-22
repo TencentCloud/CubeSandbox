@@ -53,7 +53,10 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
    cubeopscli node ls --json          # 完整字段：Healthy, UnhealthyReason, MetaDataUpdateAt
    # 或，观察心跳时间戳是否在推进（此视图去掉 HEALTHY/UnhealthyReason）：
    cubeopscli node ls --score-only    # NODE_ID / SCORE / METRIC_UPDATE / METRIC_LOCAL_UPDATE / METADATA_UPDATE
-   # 关注：Healthy=false, UnhealthyReason=HeartbeatExpired, 且 MetaDataUpdateAt 较新
+   # 关注：Healthy=false, UnhealthyReason=HeartbeatExpired,
+   # 且 MetaDataUpdateAt 仍在推进（它可能因偏移量而看起来偏旧——
+   # 因为它来自计算节点自己的 HeartbeatTime；采样两次确认它在动，
+   # 而不是按控制节点的时钟判断"较新"）。
    #（--json 是能同时看到原因和时间戳的模式）
    ```
 

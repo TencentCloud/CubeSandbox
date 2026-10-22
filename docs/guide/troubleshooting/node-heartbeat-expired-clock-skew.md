@@ -53,7 +53,11 @@ This is not a code bug — it's the standard distributed-systems assumption that
    cubeopscli node ls --json          # full fields: Healthy, UnhealthyReason, MetaDataUpdateAt
    # or, to watch the heartbeat timestamp advance (this view drops HEALTHY/UnhealthyReason):
    cubeopscli node ls --score-only    # NODE_ID / SCORE / METRIC_UPDATE / METRIC_LOCAL_UPDATE / METADATA_UPDATE
-   # Look for: Healthy=false, UnhealthyReason=HeartbeatExpired, and a recent MetaDataUpdateAt
+   # Look for: Healthy=false, UnhealthyReason=HeartbeatExpired,
+   # and a MetaDataUpdateAt that is still ADVANCING (it may look stale
+   # by the skew amount, since it is populated from the compute node's
+   # own HeartbeatTime — sample it twice to confirm it moves, rather
+   # than judging "recent" by the control node's clock).
    # (--json is the mode that shows both the reason and the timestamp together)
    ```
 
