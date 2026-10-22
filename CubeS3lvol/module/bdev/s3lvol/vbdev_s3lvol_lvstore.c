@@ -47,6 +47,9 @@
 
 #include "vbdev_s3lvol.h"
 
+struct lvol_destroy_op;
+struct lvol_destroy_waiter;
+
 struct s3lvol_lvstore {
 	struct spdk_lvol_store  *lvs;
 	struct spdk_bs_dev      *bs_dev;
@@ -95,6 +98,12 @@ struct s3lvol_lvstore {
 	/* esnap clones whose bdev is not registered yet. The decouple quiesce
 	 * set waits for these, then refuses any further import of that export. */
 	size_t                  import_clone_inflight;
+	TAILQ_HEAD(, s3lvol_lvol_open_failure) open_failures;
+	struct s3lvol_lvol_open_failure *open_failure_storage;
+	struct lvol_destroy_op *destroy_op;
+	TAILQ_HEAD(, lvol_destroy_waiter) destroy_queue;
+	bool                    destroy_kicking;
+	bool                    destroy_completing;
 
 	TAILQ_ENTRY(s3lvol_lvstore) link;
 };
@@ -106,6 +115,26 @@ static TAILQ_HEAD(, s3lvol_lvstore) g_lvstores = TAILQ_HEAD_INITIALIZER(g_lvstor
  * can be requested at any point in the attach/prepare lifetime. */
 static bool g_hot_prepare_active;
 static bool g_hot_prepare_done;
+
+#define LVS_OPEN_MAX_INFLIGHT 16
+#define LVS_OPEN_MAX_ATTEMPTS 32
+#define LVS_OPEN_RETRY_US     10000
+#define LVS_OPEN_TIMEOUT_SEC  30
+
+enum lvol_open_state {
+	LVOL_OPEN_INITIAL,
+	LVOL_OPEN_INFLIGHT,
+	LVOL_OPEN_RETRY,
+	LVOL_OPEN_DONE,
+};
+
+struct lvol_open_item {
+	struct lvs_setup_ctx *setup;
+	struct spdk_lvol     *lvol;
+	struct s3lvol_lvol_open_failure *failure;
+	enum lvol_open_state  state;
+	uint32_t              attempts;
+};
 
 /* State carried across the create *or* attach chain. The lvstore is only
  * published in g_lvstores once blobstore is up.
@@ -145,11 +174,23 @@ struct lvs_setup_ctx {
 	 * status matters -- but it has to outlive the async call, so it cannot be
 	 * a local in lvs_create_prefix_check(). */
 	uint64_t                 prefix_probe_size;
-	/* Attach only: outstanding spdk_lvol_open() calls, plus one self
-	 * reference so an inline completion cannot finish the round early. */
-	uint32_t                 lvols_pending;
+	/* Attach only: bounded lvol-open scheduler. spdk_lvol_open() can complete
+	 * inline, including with a NULL callback lvol on request-allocation
+	 * failure, so each callback owns an explicit item rather than relying on
+	 * the callback handle. */
+	struct lvol_open_item   *open_items;
+	size_t                   open_items_count;
+	size_t                   open_initial_next;
+	uint32_t                 open_inflight;
+	bool                     open_pumping;
+	struct spdk_poller      *open_retry_poller;
+	uint64_t                 open_deadline_ticks;
 	uint32_t                 lvols_ok;
 	uint32_t                 lvols_failed;
+#ifdef DEBUG
+	char                     test_open_fail_name[SPDK_LVOL_NAME_MAX];
+	uint32_t                 test_open_fail_attempts;
+#endif
 
 	/* Carried through the unwind: the bs_dev teardown is asynchronous, so the
 	 * failure that started it has to be remembered somewhere. */
@@ -656,6 +697,25 @@ s3lvol_lvstore_is_unloading(const struct s3lvol_lvstore *lvs)
 	return lvs && lvs->unloading;
 }
 
+const struct s3lvol_lvol_open_failure *
+s3lvol_lvstore_open_failure_first(const struct s3lvol_lvstore *lvs)
+{
+	return lvs ? TAILQ_FIRST(&lvs->open_failures) : NULL;
+}
+
+const struct s3lvol_lvol_open_failure *
+s3lvol_lvstore_open_failure_next(
+	const struct s3lvol_lvol_open_failure *failure)
+{
+	return failure ? TAILQ_NEXT(failure, link) : NULL;
+}
+
+bool
+s3lvol_lvstore_has_open_failures(const struct s3lvol_lvstore *lvs)
+{
+	return lvs && !TAILQ_EMPTY(&lvs->open_failures);
+}
+
 /* ==========================================================================
  * lvstore creation
  *
@@ -709,6 +769,8 @@ s3lvol_lvstore_release_local(struct s3lvol_lvstore *lvs)
 static void
 s3lvol_lvstore_free(struct s3lvol_lvstore *lvs)
 {
+	struct s3lvol_lvol_open_failure *failure, *tmp;
+
 	if (!lvs) {
 		return;
 	}
@@ -745,12 +807,20 @@ s3lvol_lvstore_free(struct s3lvol_lvstore *lvs)
 	free(lvs->bs_name);
 	free(lvs->ns_name);
 	free(lvs->name);
+	TAILQ_FOREACH_SAFE(failure, &lvs->open_failures, link, tmp) {
+		TAILQ_REMOVE(&lvs->open_failures, failure, link);
+	}
+	free(lvs->open_failure_storage);
 	free(lvs);
 }
 
 static void
 lvs_setup_ctx_free(struct lvs_setup_ctx *ctx)
 {
+	if (ctx->open_retry_poller) {
+		spdk_poller_unregister(&ctx->open_retry_poller);
+	}
+	free(ctx->open_items);
 	free(ctx->wal_bdev_name);
 	free(ctx->cache_bdev_name);
 	free(ctx);
@@ -1181,6 +1251,8 @@ lvs_setup_begin(const struct s3_lvs_opts *opts, s3lvol_lvs_op_cb cb_fn,
 	ctx->lvs = lvs;
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
+	TAILQ_INIT(&lvs->open_failures);
+	TAILQ_INIT(&lvs->destroy_queue);
 
 	lvs->name = strdup(opts->lvs_name);
 	if (!lvs->name) {
@@ -1559,76 +1631,226 @@ lvs_attach_lvols_done(struct lvs_setup_ctx *ctx)
 	lvs_setup_report(ctx);
 }
 
-/* One lvol's blob is open (or failed to open). Give it a bdev.
- *
- * A failure here does not fail the attach. An lvol without a bdev is invisible
- * to nvmf, which matters -- but refusing the whole lvstore over one bad lvol
- * would take the healthy ones down with it, so log, count and carry on. Upstream
- * vbdev_lvol makes the same call in _vbdev_lvs_examine_finish. */
+static void lvs_attach_open_pump(struct lvs_setup_ctx *ctx, bool retry_tick);
+
 static void
-lvs_attach_lvol_opened(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
+lvs_attach_record_open_failure(struct lvol_open_item *item, int status)
 {
-	struct lvs_setup_ctx *ctx = cb_arg;
+	struct lvs_setup_ctx *ctx = item->setup;
 	struct s3lvol_lvstore *lvs = ctx->lvs;
+	struct s3lvol_lvol_open_failure *failure;
+	struct spdk_lvol *lvol = item->lvol;
+
+	failure = item->failure;
+	assert(failure != NULL);
+	snprintf(failure->name, sizeof(failure->name), "%s", lvol->name);
+	snprintf(failure->uuid, sizeof(failure->uuid), "%s", lvol->uuid_str);
+	failure->status = status;
+	failure->attempts = item->attempts;
+	TAILQ_INSERT_TAIL(&lvs->open_failures, failure, link);
+
+	SPDK_ERRLOG("lvstore '%s': could not open lvol '%s' after %u "
+		    "attempt(s): %s\n", lvs->name, lvol->name, item->attempts,
+		    spdk_strerror(-status));
+
+	/* An unopened lvol cannot remain in this list: unload would call close on
+	 * its NULL blob and fail with -EINVAL. */
+	assert(lvol->blob == NULL);
+	TAILQ_REMOVE(&lvs->lvs->lvols, lvol, link);
+	if (lvs->lvs->lvol_count > 0) {
+		lvs->lvs->lvol_count--;
+	}
+	free(lvol);
+	item->lvol = NULL;
+	item->state = LVOL_OPEN_DONE;
+	ctx->lvols_failed++;
+}
+
+static void
+lvs_attach_lvol_opened(void *cb_arg, struct spdk_lvol *opened, int lvolerrno)
+{
+	struct lvol_open_item *item = cb_arg;
+	struct lvs_setup_ctx *ctx = item->setup;
+	struct s3lvol_lvstore *lvs = ctx->lvs;
+	struct spdk_lvol *lvol = item->lvol;
 	int rc;
 
-	/* NULL lvol means this is the self reference being released by
-	 * lvs_attach_open_lvols() after it finished submitting, not a real
-	 * completion. Without this it would register a NULL lvol and count a
-	 * phantom failure. */
-	if (lvol == NULL) {
-		goto out;
+	assert(item->state == LVOL_OPEN_INFLIGHT);
+	assert(ctx->open_inflight > 0);
+	ctx->open_inflight--;
+
+	/* spdk_lvol_open() reports request-allocation failure as
+	 * (NULL, -ENOMEM). The item, not that optional handle, owns identity. */
+	if (opened) {
+		assert(opened == lvol);
 	}
 
+	if (lvolerrno == -ENOMEM &&
+	    item->attempts < LVS_OPEN_MAX_ATTEMPTS &&
+	    spdk_get_ticks() < ctx->open_deadline_ticks) {
+		item->state = LVOL_OPEN_RETRY;
+		lvs_attach_open_pump(ctx, false);
+		return;
+	}
 	if (lvolerrno != 0) {
-		SPDK_ERRLOG("lvstore '%s': could not open lvol '%s': %s\n",
-			    lvs->name, lvol->name, spdk_strerror(-lvolerrno));
-
-		/* Drop it from the lvstore rather than leaving it behind.
-		 *
-		 * This is not tidiness: an lvol whose blob never opened has
-		 * lvol->blob == NULL, and the unload path would call
-		 * spdk_lvol_close() on it, which fails with -EINVAL and makes the
-		 * whole lvstore impossible to unload. Upstream removes and frees
-		 * it for the same reason.
-		 *
-		 * Upstream also retries -ENOMEM via retry_open_lvols. Not doing
-		 * that here: it would mean draining a retry queue inside the
-		 * attach chain, and an lvol short of memory at attach time is
-		 * better reported than silently deferred. */
-		TAILQ_REMOVE(&lvs->lvs->lvols, lvol, link);
-		if (lvs->lvs->lvol_count > 0) {
-			lvs->lvs->lvol_count--;
-		}
-		free(lvol);
-		ctx->lvols_failed++;
-		goto out;
+		lvs_attach_record_open_failure(item, lvolerrno);
+		lvs_attach_open_pump(ctx, false);
+		return;
 	}
 
-	/* Only now is this safe: vbdev_s3lvol_bdev_register() needs lvol->blob for
-	 * the block count, and spdk_lvs_load() leaves every blob closed -- it
-	 * walks them with the blobstore iterator, which closes each one as it
-	 * moves on. Registering straight after the load is what returned -EINVAL
-	 * on the first live run. */
+	/* Only now is this safe: registration needs lvol->blob for block count. */
 	rc = vbdev_s3lvol_bdev_register(lvol, lvs->name);
 	if (rc != 0) {
 		SPDK_ERRLOG("lvstore '%s': could not register a bdev for lvol "
 			    "'%s': %d\n", lvs->name, lvol->name, rc);
-		/* Left in the list on purpose: the blob *is* open, so the unload
-		 * path's spdk_lvol_close() is both correct and necessary. */
+		/* The blob is open, so leave it in the list for unload to close. */
 		ctx->lvols_failed++;
-		goto out;
+	} else {
+		ctx->lvols_ok++;
 	}
+	item->state = LVOL_OPEN_DONE;
+	lvs_attach_open_pump(ctx, false);
+}
 
-	ctx->lvols_ok++;
+static bool
+lvs_attach_has_retry(const struct lvs_setup_ctx *ctx)
+{
+	size_t i;
 
-out:
-	assert(ctx->lvols_pending > 0);
-	if (--ctx->lvols_pending > 0) {
+	for (i = 0; i < ctx->open_items_count; i++) {
+		if (ctx->open_items[i].state == LVOL_OPEN_RETRY) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+lvs_attach_submit_open(struct lvol_open_item *item)
+{
+#ifdef DEBUG
+	struct lvs_setup_ctx *ctx = item->setup;
+
+	/* Deterministic coverage for SPDK's request-allocation failure shape.
+	 * Kept out of release builds and inert unless the dataplane test exports
+	 * both variables. Completing inline also exercises the scheduler's
+	 * re-entry guard, while NULL verifies that identity comes from the item. */
+	if (ctx->test_open_fail_attempts > 0 &&
+	    strcmp(item->lvol->name, ctx->test_open_fail_name) == 0 &&
+	    item->attempts <= ctx->test_open_fail_attempts) {
+		lvs_attach_lvol_opened(item, NULL, -ENOMEM);
 		return;
 	}
+#endif
 
-	lvs_attach_lvols_done(ctx);
+	spdk_lvol_open(item->lvol, lvs_attach_lvol_opened, item);
+}
+
+static int
+lvs_attach_open_retry_poll(void *arg)
+{
+	lvs_attach_open_pump(arg, true);
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+lvs_attach_open_pump(struct lvs_setup_ctx *ctx, bool retry_tick)
+{
+	struct lvol_open_item *item = NULL;
+	bool finish = false;
+	size_t i;
+
+	if (ctx->open_pumping) {
+		return;
+	}
+	ctx->open_pumping = true;
+
+	while (ctx->open_initial_next < ctx->open_items_count &&
+	       ctx->open_inflight < LVS_OPEN_MAX_INFLIGHT) {
+		item = &ctx->open_items[ctx->open_initial_next++];
+		item->state = LVOL_OPEN_INFLIGHT;
+		item->attempts++;
+		ctx->open_inflight++;
+		lvs_attach_submit_open(item);
+	}
+
+	if (ctx->open_initial_next == ctx->open_items_count &&
+	    ctx->open_inflight == 0) {
+		if (spdk_get_ticks() >= ctx->open_deadline_ticks) {
+			for (i = 0; i < ctx->open_items_count; i++) {
+				item = &ctx->open_items[i];
+				if (item->state == LVOL_OPEN_RETRY) {
+					lvs_attach_record_open_failure(item, -ENOMEM);
+				}
+			}
+		} else if (retry_tick) {
+			for (i = 0; i < ctx->open_items_count; i++) {
+				item = &ctx->open_items[i];
+				if (item->state != LVOL_OPEN_RETRY) {
+					continue;
+				}
+				if (item->attempts >= LVS_OPEN_MAX_ATTEMPTS) {
+					lvs_attach_record_open_failure(item, -ENOMEM);
+					continue;
+				}
+				item->state = LVOL_OPEN_INFLIGHT;
+				item->attempts++;
+				ctx->open_inflight++;
+				lvs_attach_submit_open(item);
+				break; /* retries are deliberately serial */
+			}
+		}
+
+		if (ctx->open_inflight == 0 && !lvs_attach_has_retry(ctx)) {
+			if (ctx->open_retry_poller) {
+				spdk_poller_unregister(&ctx->open_retry_poller);
+			}
+			finish = true;
+		} else if (!ctx->open_retry_poller) {
+			ctx->open_retry_poller = SPDK_POLLER_REGISTER(
+				lvs_attach_open_retry_poll, ctx,
+				LVS_OPEN_RETRY_US);
+			if (!ctx->open_retry_poller) {
+				for (i = 0; i < ctx->open_items_count; i++) {
+					item = &ctx->open_items[i];
+					if (item->state == LVOL_OPEN_RETRY) {
+						lvs_attach_record_open_failure(
+							item, -ENOMEM);
+					}
+				}
+				finish = ctx->open_inflight == 0;
+			}
+		}
+	}
+
+	ctx->open_pumping = false;
+	if (finish) {
+		lvs_attach_lvols_done(ctx);
+	}
+}
+
+static void
+lvs_attach_open_setup_failed(struct lvs_setup_ctx *ctx, int status)
+{
+	struct s3lvol_lvstore *lvs = ctx->lvs;
+	struct spdk_lvol_store *store = lvs->lvs;
+	int rc;
+
+	/* spdk_lvs_load_ext() already transferred the bs_dev into a live
+	 * blobstore. Destroying that device directly would leave the loaded
+	 * lvol_store behind and violate the blobstore/device teardown order.
+	 * None of its lvols has been opened yet, so unload can release the store
+	 * as-is and its bs_dev destroy callback completes the ordinary setup
+	 * unwind. */
+	ctx->status = status;
+	lvs->lvs = NULL;
+	s3_bs_dev_set_destroy_cb(lvs->bs_dev, lvs_setup_bs_dev_gone, ctx);
+	rc = spdk_lvs_unload(store, lvs_unload_ignored, NULL);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to unload lvstore '%s' after open scheduler "
+			    "setup failed: %s\n", lvs->name, spdk_strerror(-rc));
+		lvs_setup_fail(ctx, status);
+	}
 }
 
 /* Open every lvol the load found, then export each as a bdev.
@@ -1640,19 +1862,65 @@ static void
 lvs_attach_open_lvols(struct lvs_setup_ctx *ctx)
 {
 	struct s3lvol_lvstore *lvs = ctx->lvs;
-	struct spdk_lvol *lvol, *tmp;
+	struct spdk_lvol *lvol;
+	size_t i = 0;
+#ifdef DEBUG
+	const char *fail_name = getenv("S3LVOL_TEST_OPEN_FAIL_NAME");
+	const char *fail_attempts = getenv("S3LVOL_TEST_OPEN_FAIL_ATTEMPTS");
+	char *end = NULL;
+	unsigned long attempts;
+#endif
 
-	/* Self reference, so an open that completes inline cannot run the
-	 * finish before the loop below has submitted everything. */
-	ctx->lvols_pending = 1;
-
-	/* _SAFE because the failure path above removes entries from this list. */
-	TAILQ_FOREACH_SAFE(lvol, &lvs->lvs->lvols, link, tmp) {
-		ctx->lvols_pending++;
-		spdk_lvol_open(lvol, lvs_attach_lvol_opened, ctx);
+	ctx->open_items_count = lvs->lvs->lvol_count;
+	if (ctx->open_items_count == 0) {
+		lvs_attach_lvols_done(ctx);
+		return;
+	}
+#ifdef DEBUG
+	if (getenv("S3LVOL_TEST_OPEN_SETUP_ENOMEM")) {
+		SPDK_WARNLOG("test hook: failing lvol-open scheduler setup with "
+			     "ENOMEM\n");
+		lvs_attach_open_setup_failed(ctx, -ENOMEM);
+		return;
+	}
+#endif
+	ctx->open_items = calloc(ctx->open_items_count,
+				 sizeof(*ctx->open_items));
+	lvs->open_failure_storage = calloc(ctx->open_items_count,
+					   sizeof(*lvs->open_failure_storage));
+	if (!ctx->open_items || !lvs->open_failure_storage) {
+		lvs_attach_open_setup_failed(ctx, -ENOMEM);
+		return;
 	}
 
-	lvs_attach_lvol_opened(ctx, NULL, 0);
+	TAILQ_FOREACH(lvol, &lvs->lvs->lvols, link) {
+		assert(i < ctx->open_items_count);
+		ctx->open_items[i].setup = ctx;
+		ctx->open_items[i].lvol = lvol;
+		ctx->open_items[i].failure = &lvs->open_failure_storage[i];
+		ctx->open_items[i].state = LVOL_OPEN_INITIAL;
+		i++;
+	}
+	ctx->open_items_count = i;
+	ctx->open_deadline_ticks = spdk_get_ticks() +
+		LVS_OPEN_TIMEOUT_SEC * spdk_get_ticks_hz();
+#ifdef DEBUG
+	if (fail_name && fail_name[0] != '\0' && fail_attempts) {
+		errno = 0;
+		attempts = strtoul(fail_attempts, &end, 10);
+		if (errno == 0 && end != fail_attempts && *end == '\0' &&
+		    attempts > 0 && attempts <= LVS_OPEN_MAX_ATTEMPTS) {
+			snprintf(ctx->test_open_fail_name,
+				 sizeof(ctx->test_open_fail_name), "%s", fail_name);
+			ctx->test_open_fail_attempts = (uint32_t)attempts;
+			SPDK_WARNLOG("test hook: failing the first %u open "
+				     "attempt(s) for lvol '%s' with ENOMEM\n",
+				     ctx->test_open_fail_attempts,
+				     ctx->test_open_fail_name);
+		}
+	}
+#endif
+	lvs_attach_open_pump(ctx, false);
 }
 
 /* spdk_lvs_unload() calls its callback unconditionally on the -EBUSY paths, so a
@@ -2027,28 +2295,44 @@ lvs_attach_checkpoint_loaded(void *cb_arg, uint64_t lsn, uint64_t gen,
 		return;
 	}
 
-	/* Replay resumes from what the snapshot actually covers, not from what the
-	 * super block claims.
-	 *
-	 * They agree in normal operation, because a checkpoint uploads the snapshot
-	 * before updating the super block. A disagreement means a crash landed
-	 * between those two steps, and then the *snapshot* is the authority on what
-	 * has been restored -- resuming from the larger of the two would skip
-	 * journal records the snapshot never captured. */
-	if (ctx->from_lsn != lsn) {
-		SPDK_NOTICELOG("lvstore '%s': the super block records checkpoint "
-			       "LSN %" PRIu64 " but the snapshot in S3 covers %"
-			       PRIu64 "; replaying from the snapshot's value\n",
-			       lvs->name, ctx->from_lsn, lsn);
+	/* A checkpoint upload always precedes the super block update, and
+	 * truncation only happens after the super block records checkpoint_lsn.
+	 * So a snapshot in S3 can legitimately be *ahead* of ctx->from_lsn (a
+	 * crash landed between upload and super block write), but it can never
+	 * be *behind* it unless the S3 object was deleted or rolled back out of
+	 * band. Continuing from a lower LSN after truncation would start with a
+	 * chunk map missing every mapping at or below ctx->from_lsn that has
+	 * already been evicted from the journal ring. */
+	if (ctx->from_lsn > 0 && lsn == 0) {
+		SPDK_ERRLOG("lvstore '%s': the local super block records "
+			    "checkpoint LSN %" PRIu64 ", but '%s/meta/checkpoint' "
+			    "is missing in S3. Refusing to attach: journal "
+			    "records at or below that LSN may already have been "
+			    "truncated, so replaying without the checkpoint "
+			    "would lose mappings\n",
+			    lvs->name, ctx->from_lsn, lvs->name);
+		lvs_setup_fail(ctx, -ENOENT);
+		return;
+	}
+	if (lsn < ctx->from_lsn) {
+		SPDK_ERRLOG("lvstore '%s': the local super block records "
+			    "checkpoint LSN %" PRIu64 ", but '%s/meta/checkpoint' "
+			    "in S3 only covers LSN %" PRIu64 " (gen=%" PRIu64 "). "
+			    "Refusing to attach against a stale checkpoint\n",
+			    lvs->name, ctx->from_lsn, lvs->name, lsn, gen);
+		lvs_setup_fail(ctx, -ESTALE);
+		return;
 	}
 	if (lsn > ctx->from_lsn) {
 		/* The snapshot is *ahead* of the super block: the upload landed and
 		 * the super block update did not. Harmless -- the journal still
 		 * holds everything from the super block's LSN onwards, so replaying
 		 * from the snapshot's higher LSN skips nothing. */
-		SPDK_NOTICELOG("lvstore '%s': checkpoint gen=%" PRIu64 " is newer "
-			       "than the super block; a crash interrupted the last "
-			       "checkpoint after the upload\n", lvs->name, gen);
+		SPDK_NOTICELOG("lvstore '%s': checkpoint gen=%" PRIu64 " (LSN %"
+			       PRIu64 ") is newer than the super block (LSN %"
+			       PRIu64 "); a crash interrupted the last checkpoint "
+			       "after the upload, replaying from the snapshot's "
+			       "value\n", lvs->name, gen, lsn, ctx->from_lsn);
 	}
 	ctx->from_lsn = lsn;
 
@@ -2493,6 +2777,15 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 		SPDK_WARNLOG("lvstore '%s' has an export or import operation in "
 			     "flight; refusing unload until it completes\n",
 			     lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+	if (lvs->destroy_op || lvs->destroy_kicking || lvs->destroy_completing ||
+	    !TAILQ_EMPTY(&lvs->destroy_queue)) {
+		SPDK_WARNLOG("lvstore '%s' has an lvol destroy in flight; "
+			     "refusing unload until it completes\n", lvs->name);
 		if (cb_fn) {
 			cb_fn(cb_arg, -EBUSY);
 		}
@@ -3595,8 +3888,29 @@ s3lvol_lvstore_import_clone_inflight(const struct s3lvol_lvstore *lvs)
  * lvol deletion
  * ========================================================================== */
 
+static void destroy_mark_pending(struct spdk_lvol *lvol,
+				 enum s3lvol_pending_reason reason);
+
+struct lvol_destroy_op {
+	struct s3lvol_lvstore *owner;
+	struct spdk_uuid       uuid;
+};
+
+struct lvol_destroy_waiter {
+	struct s3lvol_lvstore *owner;
+	char                   name[SPDK_LVOL_NAME_MAX];
+	struct spdk_uuid       uuid;
+	bool                   release_chain;
+	spdk_lvol_op_complete  cb_fn;
+	void                  *cb_arg;
+	TAILQ_ENTRY(lvol_destroy_waiter) link;
+};
+
+static void lvol_destroy_queue_kick(struct s3lvol_lvstore *owner);
+
 struct lvol_destroy_ctx {
 	struct spdk_lvol        *lvol;
+	struct lvol_destroy_op  *op;
 
 	/* Where to look afterwards, and for what. All three are read *before* the
 	 * blob goes away: once the destroy succeeds there is no lvol left to ask
@@ -3624,6 +3938,65 @@ struct lvol_destroy_ctx {
 	spdk_lvol_op_complete    cb_fn;
 	void                    *cb_arg;
 };
+
+static void
+lvol_destroy_op_release(struct lvol_destroy_op *op)
+{
+	if (!op) {
+		return;
+	}
+	assert(op->owner != NULL);
+	assert(op->owner->destroy_op == op);
+	op->owner->destroy_op = NULL;
+	free(op);
+}
+
+static void
+lvol_destroy_op_release_and_kick(struct lvol_destroy_op *op)
+{
+	struct s3lvol_lvstore *owner;
+
+	if (!op) {
+		return;
+	}
+	owner = op->owner;
+	lvol_destroy_op_release(op);
+	lvol_destroy_queue_kick(owner);
+}
+
+static int
+lvol_destroy_op_acquire(struct spdk_lvol *lvol,
+			 struct lvol_destroy_op **out, bool from_queue)
+{
+	struct s3lvol_lvstore *owner;
+	struct lvol_destroy_op *op;
+
+	*out = NULL;
+	owner = lvol && lvol->lvol_store
+		? s3lvol_lvstore_find_by_lvs(lvol->lvol_store) : NULL;
+	if (!owner) {
+		return 0;
+	}
+	if (s3lvol_lvstore_is_unloading(owner) || owner->destroy_completing ||
+	    (owner->destroy_kicking && !from_queue)) {
+		return -EBUSY;
+	}
+	if (owner->destroy_op) {
+		if (lvol->blob && spdk_blob_is_read_only(lvol->blob)) {
+			destroy_mark_pending(lvol, S3LVOL_PENDING_DESTROY_BUSY);
+		}
+		return -EBUSY;
+	}
+	op = calloc(1, sizeof(*op));
+	if (!op) {
+		return -ENOMEM;
+	}
+	op->owner = owner;
+	spdk_uuid_copy(&op->uuid, &lvol->uuid);
+	owner->destroy_op = op;
+	*out = op;
+	return 0;
+}
 
 /* Record the "a delete was asked for and refused" mark.
  *
@@ -3669,6 +4042,15 @@ static void
 s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 {
 	struct lvol_destroy_ctx *ctx = cb_arg;
+	struct s3lvol_lvstore *owner = ctx->owner;
+	struct lvol_destroy_op *op = ctx->op;
+
+	/* Keep callbacks inside a completion guard. They may issue another delete
+	 * or unload synchronously; the former is queued and the latter is refused
+	 * until this completion has stopped using the lvstore. */
+	if (owner) {
+		owner->destroy_completing = true;
+	}
 
 	if (lvolerrno == 0) {
 		/* A delete that finally went through clears any pending mark. */
@@ -3694,8 +4076,22 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 		}
 
 		if (ctx->esnap_uuid[0] != '\0') {
+			/* Wait for an unused hidden template to finish reaping
+			 * before completing the caller's delete: reaping acquires
+			 * the lvstore destroy reservation, and answering earlier
+			 * would make the caller's next delete or unload race it. */
+			lvol_destroy_op_release(ctx->op);
+			ctx->op = NULL;
 			s3lvol_import_template_reap_if_unused(ctx->owner,
-							      ctx->esnap_uuid);
+							      ctx->esnap_uuid,
+							      ctx->cb_fn,
+							      ctx->cb_arg);
+			free(ctx);
+			if (owner) {
+				owner->destroy_completing = false;
+				lvol_destroy_queue_kick(owner);
+			}
+			return;
 		}
 	} else {
 		if (ctx->release_chain && ctx->lvol) {
@@ -3729,6 +4125,11 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 		ctx->cb_fn(ctx->cb_arg, lvolerrno);
 	}
 	free(ctx);
+	if (owner) {
+		lvol_destroy_op_release(op);
+		owner->destroy_completing = false;
+		lvol_destroy_queue_kick(owner);
+	}
 }
 
 static void
@@ -3753,6 +4154,7 @@ s3lvol_lvol_bdev_unregistered(void *cb_arg, int bdeverrno)
 		if (ctx->cb_fn) {
 			ctx->cb_fn(ctx->cb_arg, bdeverrno);
 		}
+		lvol_destroy_op_release_and_kick(ctx->op);
 		free(ctx);
 		return;
 	}
@@ -3763,6 +4165,7 @@ s3lvol_lvol_bdev_unregistered(void *cb_arg, int bdeverrno)
 
 struct snapshot_export_release_ctx {
 	struct spdk_lvol      *lvol;
+	struct lvol_destroy_op *op;
 	spdk_lvol_op_complete  cb_fn;
 	void                  *cb_arg;
 };
@@ -3771,19 +4174,37 @@ static int
 snapshot_destroy_check_clones(struct spdk_lvol *lvol)
 {
 	struct spdk_blob_store *bs;
-	size_t clone_count = 0;
+	struct spdk_lvol *clone_lvol;
+	spdk_blob_id clone_id = SPDK_BLOBID_INVALID;
+	size_t clone_count = 1;
 	int rc;
 
 	if (!lvol->blob) {
 		return 0;
 	}
 	bs = lvol->lvol_store->blobstore;
-	rc = spdk_blob_get_clones(bs, lvol->blob_id, NULL, &clone_count);
+	rc = spdk_blob_get_clones(bs, lvol->blob_id, &clone_id, &clone_count);
 	if (rc != 0 && rc != -ENOMEM) {
 		SPDK_ERRLOG("cannot tell how many clones snapshot '%s' has (%s); "
 			    "refusing to delete it\n", lvol->name,
 			    spdk_strerror(-rc));
 		return -EBUSY;
+	}
+	if (rc == 0 && clone_count == 1) {
+		TAILQ_FOREACH(clone_lvol, &lvol->lvol_store->lvols, link) {
+			if (clone_lvol->blob_id == clone_id) {
+				break;
+			}
+		}
+		if (!clone_lvol || !clone_lvol->blob) {
+			SPDK_ERRLOG("snapshot '%s' has clone blob %" PRIu64
+				    " but that clone is not open; refusing to "
+				    "destroy against an incomplete lvol topology\n",
+				    lvol->name, clone_id);
+			destroy_mark_pending(lvol,
+					     S3LVOL_PENDING_DESTROY_BUSY);
+			return -EBUSY;
+		}
 	}
 	if (clone_count > 1) {
 		SPDK_ERRLOG("lvol '%s' is a snapshot with %zu clones; blobstore can "
@@ -3797,7 +4218,8 @@ snapshot_destroy_check_clones(struct spdk_lvol *lvol)
 
 static int s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 				    spdk_lvol_op_complete cb_fn, void *cb_arg,
-				    bool release_chain);
+				    bool release_chain,
+				    struct lvol_destroy_op *op);
 
 static void
 snapshot_export_released(void *cb_arg, int status)
@@ -3812,30 +4234,34 @@ snapshot_export_released(void *cb_arg, int status)
 		lvol->action_in_progress = false;
 		s3lvol_decouple_kick_queue();
 		destroy_mark_pending(lvol, S3LVOL_PENDING_FAILED);
-		free(ctx);
 		if (cb_fn) {
 			cb_fn(op_arg, status);
 		}
+		lvol_destroy_op_release_and_kick(ctx->op);
+		free(ctx);
 		return;
 	}
 
 	/* There may be several exports of one snapshot. Re-entering releases the
 	 * next one; once none remain it follows the ordinary destroy path. */
+	struct lvol_destroy_op *op = ctx->op;
+
 	free(ctx);
-	rc = s3lvol_lvol_destroy_impl(lvol, cb_fn, op_arg, true);
+	rc = s3lvol_lvol_destroy_impl(lvol, cb_fn, op_arg, true, op);
 	if (rc != 0) {
 		lvol->action_in_progress = false;
 		s3lvol_decouple_kick_queue();
 		if (cb_fn) {
 			cb_fn(op_arg, rc);
 		}
+		lvol_destroy_op_release_and_kick(op);
 	}
 }
 
 static int
 s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 			 spdk_lvol_op_complete cb_fn, void *cb_arg,
-			 bool release_chain)
+			 bool release_chain, struct lvol_destroy_op *op)
 {
 	struct s3lvol_lvstore *owner;
 	struct s3lvol_export *pin;
@@ -3941,6 +4367,7 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 				return -ENOMEM;
 			}
 			release_ctx->lvol = lvol;
+			release_ctx->op = op;
 			release_ctx->cb_fn = cb_fn;
 			release_ctx->cb_arg = cb_arg;
 
@@ -4044,6 +4471,7 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 		return -ENOMEM;
 	}
 	ctx->lvol   = lvol;
+	ctx->op     = op;
 	ctx->owner  = owner;
 	ctx->cb_fn  = cb_fn;
 	ctx->cb_arg = cb_arg;
@@ -4099,18 +4527,132 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 	return 0;
 }
 
+static int
+lvol_destroy_enqueue(struct spdk_lvol *lvol, bool release_chain,
+		     spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct s3lvol_lvstore *owner;
+	struct lvol_destroy_waiter *w;
+
+	if (!lvol || !lvol->lvol_store || !cb_fn) {
+		return -EBUSY;
+	}
+	owner = s3lvol_lvstore_find_by_lvs(lvol->lvol_store);
+	if (!owner || s3lvol_lvstore_is_unloading(owner)) {
+		return -EBUSY;
+	}
+	if (owner->destroy_op &&
+	    spdk_uuid_compare(&owner->destroy_op->uuid, &lvol->uuid) == 0) {
+		return -EBUSY;
+	}
+	TAILQ_FOREACH(w, &owner->destroy_queue, link) {
+		if (spdk_uuid_compare(&w->uuid, &lvol->uuid) == 0) {
+			return -EBUSY;
+		}
+	}
+	w = calloc(1, sizeof(*w));
+	if (!w) {
+		return -ENOMEM;
+	}
+	w->owner = owner;
+	snprintf(w->name, sizeof(w->name), "%s", lvol->name);
+	spdk_uuid_copy(&w->uuid, &lvol->uuid);
+	w->release_chain = release_chain;
+	w->cb_fn = cb_fn;
+	w->cb_arg = cb_arg;
+	TAILQ_INSERT_TAIL(&owner->destroy_queue, w, link);
+	return 0;
+}
+
+static void
+lvol_destroy_queue_kick(struct s3lvol_lvstore *owner)
+{
+	struct lvol_destroy_waiter *w;
+	struct spdk_lvol *lvol;
+	struct lvol_destroy_op *op;
+	int rc;
+
+	if (!owner || owner->destroy_kicking) {
+		return;
+	}
+	owner->destroy_kicking = true;
+	while (!owner->destroy_op &&
+	       (w = TAILQ_FIRST(&owner->destroy_queue)) != NULL) {
+		TAILQ_REMOVE(&owner->destroy_queue, w, link);
+		lvol = s3lvol_lvol_find(owner, w->name);
+		if (!lvol || spdk_uuid_compare(&lvol->uuid, &w->uuid) != 0) {
+			w->cb_fn(w->cb_arg, -ENOENT);
+			free(w);
+			continue;
+		}
+		rc = lvol_destroy_op_acquire(lvol, &op, true);
+		if (rc != 0) {
+			w->cb_fn(w->cb_arg, rc);
+			free(w);
+			continue;
+		}
+		rc = s3lvol_lvol_destroy_impl(lvol, w->cb_fn, w->cb_arg,
+					      w->release_chain, op);
+		if (rc != 0) {
+			lvol_destroy_op_release_and_kick(op);
+			w->cb_fn(w->cb_arg, rc);
+		}
+		free(w);
+	}
+	owner->destroy_kicking = false;
+}
+
 int
 s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 		    spdk_lvol_op_complete cb_fn, void *cb_arg)
 {
-	return s3lvol_lvol_destroy_impl(lvol, cb_fn, cb_arg, false);
+	struct lvol_destroy_op *op;
+	int rc;
+
+	if (!lvol) {
+		return -EINVAL;
+	}
+	if (s3lvol_lvol_is_import_template(lvol)) {
+		SPDK_ERRLOG("lvol '%s' is an import template; it is removed when "
+			    "its last clone goes away\n", lvol->name);
+		return -EPERM;
+	}
+	rc = lvol_destroy_op_acquire(lvol, &op, false);
+	if (rc == -EBUSY && lvol->blob && !spdk_blob_is_read_only(lvol->blob)) {
+		return lvol_destroy_enqueue(lvol, false, cb_fn, cb_arg);
+	}
+	if (rc != 0) {
+		return rc;
+	}
+	rc = s3lvol_lvol_destroy_impl(lvol, cb_fn, cb_arg, false, op);
+	if (rc != 0) {
+		lvol_destroy_op_release_and_kick(op);
+	}
+	return rc;
 }
 
 int
 s3lvol_lvol_destroy_locked(struct spdk_lvol *lvol,
 			   spdk_lvol_op_complete cb_fn, void *cb_arg)
 {
-	return s3lvol_lvol_destroy_impl(lvol, cb_fn, cb_arg, true);
+	struct lvol_destroy_op *op;
+	int rc;
+
+	if (!lvol) {
+		return -EINVAL;
+	}
+	rc = lvol_destroy_op_acquire(lvol, &op, false);
+	if (rc == -EBUSY) {
+		return lvol_destroy_enqueue(lvol, true, cb_fn, cb_arg);
+	}
+	if (rc != 0) {
+		return rc;
+	}
+	rc = s3lvol_lvol_destroy_impl(lvol, cb_fn, cb_arg, true, op);
+	if (rc != 0) {
+		lvol_destroy_op_release_and_kick(op);
+	}
+	return rc;
 }
 
 /* ==========================================================================

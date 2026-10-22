@@ -557,6 +557,28 @@ static const struct spdk_json_object_decoder rpc_attach_lvstore_decoders[] = {
 };
 
 static void
+rpc_write_lvol_open_failures(struct spdk_json_write_ctx *w,
+			      struct s3lvol_lvstore *lvs)
+{
+	const struct s3lvol_lvol_open_failure *failure;
+
+	spdk_json_write_named_bool(w, "lvol_open_failures_complete", true);
+	spdk_json_write_named_array_begin(w, "lvol_open_failures");
+	for (failure = s3lvol_lvstore_open_failure_first(lvs); failure;
+	     failure = s3lvol_lvstore_open_failure_next(failure)) {
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_string(w, "name", failure->name);
+		spdk_json_write_named_string(w, "uuid", failure->uuid);
+		spdk_json_write_named_int32(w, "errno", failure->status);
+		spdk_json_write_named_string(w, "error",
+					     spdk_strerror(-failure->status));
+		spdk_json_write_named_uint32(w, "attempts", failure->attempts);
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_array_end(w);
+}
+
+static void
 rpc_attach_lvstore_cb(void *cb_arg, struct s3lvol_lvstore *lvs, int lvserrno)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
@@ -599,6 +621,7 @@ rpc_attach_lvstore_cb(void *cb_arg, struct s3lvol_lvstore *lvs, int lvserrno)
 		spdk_json_write_object_end(w);
 	}
 	spdk_json_write_array_end(w);
+	rpc_write_lvol_open_failures(w, lvs);
 	spdk_json_write_object_end(w);
 	spdk_jsonrpc_end_result(request, w);
 }
@@ -2083,6 +2106,7 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		}
 		spdk_json_write_object_end(w);
 
+		rpc_write_lvol_open_failures(w, lvs);
 		spdk_json_write_named_array_begin(w, "lvols");
 		TAILQ_FOREACH(lvol, &store->lvols, link) {
 			if (rpc_hides_lvol(lvol)) {

@@ -28,6 +28,14 @@
 struct spdk_lvol;
 struct s3lvol_lvstore;
 
+struct s3lvol_lvol_open_failure {
+	char name[SPDK_LVOL_NAME_MAX];
+	char uuid[SPDK_UUID_STRING_LEN];
+	int status;
+	uint32_t attempts;
+	TAILQ_ENTRY(s3lvol_lvol_open_failure) link;
+};
+
 /**
  * Get this vbdev module's handle, needed when registering bdevs.
  */
@@ -239,6 +247,12 @@ struct spdk_lvol_store *s3lvol_lvstore_get_lvs(struct s3lvol_lvstore *lvs);
 const char             *s3lvol_lvstore_get_name(struct s3lvol_lvstore *lvs);
 bool                    s3lvol_lvstore_is_unloading(
 				const struct s3lvol_lvstore *lvs);
+const struct s3lvol_lvol_open_failure *
+s3lvol_lvstore_open_failure_first(const struct s3lvol_lvstore *lvs);
+const struct s3lvol_lvol_open_failure *
+s3lvol_lvstore_open_failure_next(
+	const struct s3lvol_lvol_open_failure *failure);
+bool s3lvol_lvstore_has_open_failures(const struct s3lvol_lvstore *lvs);
 
 /**
  * The S3 client this lvstore reads and writes through. Its bucket and prefix are
@@ -927,6 +941,7 @@ enum s3lvol_pending_reason {
 	S3LVOL_PENDING_EXPORT_INFLIGHT,	/* an export is publishing right now */
 	S3LVOL_PENDING_CLONE_COUNT,	/* more than one clone */
 	S3LVOL_PENDING_DECOUPLE,	/* a decouple is running on it */
+	S3LVOL_PENDING_DESTROY_BUSY,	/* another destroy owns this lvstore */
 	S3LVOL_PENDING_FAILED,		/* the destroy failed asynchronously */
 };
 
@@ -1290,9 +1305,12 @@ bool s3lvol_lvol_is_import_template(const struct spdk_lvol *lvol);
 
 /* Drop the hidden template of \c export_uuid when it has no clones left, then
  * recheck the imports registry. A template that still has clones, or one whose
- * decouple is still running, is left in place and only the registry is rechecked. */
+ * decouple is still running, is left in place and only the registry is rechecked.
+ * When \p cb_fn is non-NULL, it runs once the reap and recheck have finished. */
 void s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
-					   const char *export_uuid);
+					   const char *export_uuid,
+					   spdk_lvol_op_complete cb_fn,
+					   void *cb_arg);
 
 /**
  * Delete an export's objects.
