@@ -71,10 +71,10 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
    # 差值大于 15s 即可复现误判 HeartbeatExpired
    ```
 
-   若控制节点是 chrony server，可直接测量：
+   若要对指定 NTP 源做一次性偏移测量，在**计算节点**上跑（打印 `System clock ... wrong by <N> seconds`，不修改时钟）：
 
    ```bash
-   chronyc -h <control-node-ip> tracking   # 看 offset 字段
+   chronyd -Q 'server <control-node-ip> iburst'   # 一次性探测，打印相对该 server 的偏移
    ```
 
 ## 修复

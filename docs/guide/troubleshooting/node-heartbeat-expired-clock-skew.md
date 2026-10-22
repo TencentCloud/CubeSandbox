@@ -71,10 +71,10 @@ This is not a code bug — it's the standard distributed-systems assumption that
    # A difference larger than 15s reproduces the false HeartbeatExpired.
    ```
 
-   Or, if the control node is a chrony server, measure directly:
+   Or, for a one-shot offset measurement against a specific NTP source, run this **on the compute node** (it prints `System clock ... wrong by <N> seconds` and does not modify the clock):
 
    ```bash
-   chronyc -h <control-node-ip> tracking   # offset field
+   chronyd -Q 'server <control-node-ip> iburst'   # one-shot probe; prints the offset vs. that server
    ```
 
 ## Resolution
