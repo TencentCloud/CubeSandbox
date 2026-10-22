@@ -857,13 +857,21 @@ main(int argc, char **argv)
 		struct async_ctx ctx = {0};
 		uint64_t mem_seq, barrier_seq = UINT64_MAX;
 		uint64_t next_after_mem;
+		uint64_t disk_limit = s3_wal_disk_seq_limit(wal);
 
+		/* Replay bumped the epoch, so disk_seq_limit stays in the
+		 * on-disk epoch and never jumps into the new epoch's sequence
+		 * space where older shm write-back records would look
+		 * checkpointed. */
 		s3_wal_get_stats(wal, &before);
 		mem_seq = s3_wal_alloc_mem_seq(wal);
 		next_after_mem = s3_wal_get_next_seq(wal);
 		s3_wal_append_barrier(wal, &barrier_seq, async_int_cb, &ctx);
 		s3_wal_get_stats(wal, &after);
 
+		check_true("disk_seq_limit stays below new-epoch sequences",
+			   disk_limit != 0 &&
+			   (disk_limit >> 48) < (mem_seq >> 48), NULL);
 		check_true("memory-only sequence allocated", mem_seq != 0, NULL);
 		check_true("memory-mode barrier completes synchronously",
 			   ctx.done && ctx.status == 0, NULL);

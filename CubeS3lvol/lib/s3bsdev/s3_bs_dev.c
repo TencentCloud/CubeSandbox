@@ -4648,6 +4648,7 @@ struct s3_writeback_recovery {
 	bool pumping;
 	bool pump_again;
 	bool admission_blocked;
+	bool need_rebind;
 	int status;
 	s3_bs_dev_cb cb_fn;
 	void *cb_arg;
@@ -4732,7 +4733,16 @@ s3_writeback_recovery_submit(void *arg)
 	}
 
 	/* Not in the on-disk log.  Republish from shm and let the flusher
-	 * upload it.  Re-appending would put the payload back on the HDD. */
+	 * upload it.  Re-appending would put the payload back on the HDD.
+	 * Once recovery assigns a new sequence to an unbound record, later
+	 * records from an older WAL epoch must also be rebound so overlay
+	 * sequence ordering remains monotonic. */
+	if (record->wal_seq == 0) {
+		recovery->need_rebind = true;
+	} else if (recovery->need_rebind &&
+		   record->wal_seq < s3_wal_get_next_seq(ctx->wal)) {
+		record->wal_seq = 0;
+	}
 	rc = s3_writeback_assign_seq(ctx, record, &op->wal_seq);
 	if (rc != 0) {
 		s3_writeback_recovery_fail(recovery, rc);

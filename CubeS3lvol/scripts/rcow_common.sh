@@ -605,6 +605,27 @@ rcow_fsync_file()
 	PY
 }
 
+rcow_fsync_parent()
+{
+	python3 - "$1" <<-'PY' || return 1
+	import errno, os, sys
+
+	path = os.path.abspath(sys.argv[1])
+	try:
+	    fd = os.open(os.path.dirname(path), os.O_RDONLY)
+	except OSError as e:
+	    print("%s: %s" % (os.path.dirname(path), e.strerror), file=sys.stderr)
+	    sys.exit(1)
+	try:
+	    os.fsync(fd)
+	except OSError as e:
+	    if e.errno != errno.EINVAL:
+	        raise
+	finally:
+	    os.close(fd)
+	PY
+}
+
 # --------------------------------------------------------------------------
 # s3.cfg
 #
@@ -1882,9 +1903,11 @@ for name, e in d.items():
 PY
 }
 
-# "<name>\t<uuid>" for every lvol and snapshot the target currently has. Used to
-# tell a replay of the recorded volume from a replay onto a different volume that
-# has since taken its name.
+# A complete inventory of opened lvols and terminal open failures:
+# "<state>\t<name>\t<uuid>\t<errno>\t<error>", followed by "C\t1" when the
+# target supports failure reporting. The completeness marker lets a new script
+# fail closed when it is paired with an older target: absence there is ambiguous,
+# not proof that a recorded volume was deleted.
 rcow_volume_uuids()
 {
 	rcow_rpc rcow_get_lvstores 2>/dev/null | python3 -c '
@@ -1893,10 +1916,22 @@ try:
     stores = json.load(sys.stdin)
 except ValueError:
     sys.exit(0)
+expected = sys.argv[1]
+complete = False
 for st in stores:
+    if st.get("lvs_name") != expected:
+        continue
+    complete = st.get("lvol_open_failures_complete") is True
     for lv in st.get("lvols", []):
-        print("%s\t%s" % (lv.get("name", ""), lv.get("uuid", "")))
-'
+        print("O\t%s\t%s\t\t" % (lv.get("name", ""), lv.get("uuid", "")))
+    for failure in st.get("lvol_open_failures", []):
+        error = str(failure.get("error", "")).replace("\t", " ").replace("\n", " ")
+        print("F\t%s\t%s\t%s\t%s" % (
+            failure.get("name", ""), failure.get("uuid", ""),
+            failure.get("errno", ""), error))
+if complete:
+    print("C\t1")
+' "${RCOW_LVS_NAME}"
 }
 
 # Keep only the named entries in a registry file; remove the file when none are
@@ -1905,19 +1940,25 @@ rcow_registry_keep()
 {
 	local file="$1"; shift
 	local tmp="${file}.tmp.$$"
+	local rc
 
 	if [ "$#" -eq 0 ]; then
-		rm -f "${file}"
+		rm -f "${file}" || return 1
+		rcow_fsync_parent "${file}" || {
+			rcow_err "could not make removal of replay plan ${file} durable"
+			return 1
+		}
 		return 0
 	fi
 
-	if python3 - "${file}" "${tmp}" "$@" <<'PY'
+	python3 - "${file}" "${tmp}" "$@" <<'PY'
 import json, os, sys
 src, dst, keep = sys.argv[1], sys.argv[2], set(sys.argv[3:])
 try:
     d = json.load(open(src))
-except Exception:
-    d = {}
+except Exception as e:
+    print("cannot parse %s: %s" % (src, e), file=sys.stderr)
+    sys.exit(1)
 d = {k: v for k, v in d.items() if k in keep}
 if not d:
     sys.exit(2)
@@ -1926,12 +1967,33 @@ with open(dst, "w") as f:
     f.flush()
     os.fsync(f.fileno())
 PY
-	then
-		mv -f "${tmp}" "${file}"
-	else
-		rm -f "${tmp}" "${file}"
-	fi
-	return 0
+	rc=$?
+	case "${rc}" in
+	0)
+		if ! mv -f "${tmp}" "${file}"; then
+			rm -f "${tmp}"
+			rcow_err "could not replace replay plan ${file}; keeping the original"
+			return 1
+		fi
+		if ! rcow_fsync_file "${file}"; then
+			rcow_err "could not make rewritten replay plan ${file} durable"
+			return 1
+		fi
+		;;
+	2)
+		rm -f "${tmp}"
+		rm -f "${file}" || return 1
+		rcow_fsync_parent "${file}" || {
+			rcow_err "could not make removal of replay plan ${file} durable"
+			return 1
+		}
+		;;
+	*)
+		rm -f "${tmp}"
+		rcow_err "could not rewrite replay plan ${file}; keeping the original"
+		return 1
+		;;
+	esac
 }
 
 # Re-attach every volume the previous process had exposed, at exactly the
@@ -1971,9 +2033,10 @@ PY
 rcow_replay_registry()
 {
 	local plan="${RCOW_REPLAY_FILE}"
-	local uuid_map name subsys nsid want_uuid have_uuid out payload res first row
+	local uuid_map name subsys nsid want_uuid have_uuid have_state have_errno
+	local have_error inventory_complete out payload res first row
 	local -a accepted=()
-	local -a pending=()
+	local -a replayable=()
 	local done_n=0 refused_n=0 failed_n=0
 
 	if [ -s "${plan}" ]; then
@@ -2007,26 +2070,46 @@ by hand once you have decided what it should have said"
 
 	uuid_map="$(mktemp "${RCOW_RUN_DIR}/uuids.XXXXXX")" || return 1
 	rcow_volume_uuids >"${uuid_map}"
+	inventory_complete="$(awk -F'\t' '$1 == "C" && $2 == "1" { print 1; exit }' \
+		"${uuid_map}")"
 
 	while IFS=$'\t' read -r name subsys nsid want_uuid; do
 		[ -n "${name}" ] || continue
 
-		have_uuid="$(awk -F'\t' -v n="${name}" '$1 == n { print $2; exit }' \
-			"${uuid_map}")"
+		IFS=$'\t' read -r have_state have_uuid have_errno have_error <<<"$(
+			awk -F'\t' -v n="${name}" \
+			    '($1 == "O" || $1 == "F") && $2 == n {
+				print $1 "\t" $3 "\t" $4 "\t" $5; exit
+			    }' "${uuid_map}"
+		)"
 
-		# Dropped rather than retried: neither of these becomes true later,
-		# and keeping them in the plan would mean it never completes.
-		if [ -z "${have_uuid}" ]; then
-			rcow_warn "'${name}' was active at subsys ${subsys} nsid \
-${nsid} but no longer exists in the lvstore; not restored"
-			refused_n=$((refused_n + 1))
+		if [ "${have_state}" = "F" ] &&
+		   [ "${have_uuid}" = "${want_uuid}" ]; then
+			rcow_err "'${name}' could not be opened by the target: \
+${have_error:-errno ${have_errno}}; keeping it in ${plan} for retry"
+			replayable+=("${name}")
+			failed_n=$((failed_n + 1))
 			continue
 		fi
-		if [ "${have_uuid}" != "${want_uuid}" ]; then
+		if [ -n "${have_uuid}" ] && [ "${have_uuid}" != "${want_uuid}" ]; then
 			rcow_warn "'${name}' was active with uuid ${want_uuid} but the \
 volume of that name now has uuid ${have_uuid}. A different volume has taken the \
 name; not restored, because the host would mount it believing it was the old one"
 			refused_n=$((refused_n + 1))
+			continue
+		fi
+		if [ -z "${have_uuid}" ]; then
+			if [ "${inventory_complete}" = "1" ]; then
+				rcow_warn "'${name}' was active at subsys ${subsys} nsid \
+${nsid} but no longer exists in the lvstore; not restored"
+				refused_n=$((refused_n + 1))
+			else
+				rcow_err "'${name}' is absent, but this target does not \
+report a complete lvol-open inventory; keeping it in ${plan} rather than \
+mistaking an open failure for deletion"
+				replayable+=("${name}")
+				failed_n=$((failed_n + 1))
+			fi
 			continue
 		fi
 
@@ -2035,6 +2118,7 @@ name; not restored, because the host would mount it believing it was the old one
 		# and the whole point of the registry is that the layout comes back
 		# unchanged.
 		accepted+=("${name}"$'\t'"${subsys}"$'\t'"${nsid}")
+		replayable+=("${name}")
 	done < <(rcow_registry_tsv "${plan}")
 
 	rm -f "${uuid_map}"
@@ -2083,7 +2167,8 @@ except Exception:
 print("%d\t%d" % (int(r.get("restored", 0)),
                   int(r.get("already_active", 0))))
 for f in r.get("failed") or []:
-    print("F\t%s" % (f.get("device_name", "")))
+    error = str(f.get("error", "")).replace("\t", " ").replace("\n", " ")
+    print("F\t%s\t%s" % (f.get("device_name", ""), error))
 ')"
 		fi
 
@@ -2098,27 +2183,30 @@ for f in r.get("failed") or []:
 			rcow_warn "the rcow_active_bdev_batch reply could not be read \
 as a result (${out}); treating all ${#accepted[@]} volume(s) as pending rather \
 than dropping any"
-			for row in "${accepted[@]}"; do
-				pending+=("${row%%$'\t'*}")
-			done
 			failed_n=$((failed_n + ${#accepted[@]}))
 			;;
 		*)
 			first="$(printf '%s\n' "${res}" | head -n 1)"
 			done_n=$(( ${first%%$'\t'*} + ${first##*$'\t'} ))
-			while IFS=$'\t' read -r row name; do
+			while IFS=$'\t' read -r row name have_error; do
 				[ "${row}" = "F" ] || continue
-				pending+=("${name}")
+				rcow_err "'${name}' could not be restored: \
+${have_error:-unknown activation error}; keeping it in ${plan}"
 				failed_n=$((failed_n + 1))
 			done < <(printf '%s\n' "${res}" | tail -n +2)
 			;;
 		esac
 	fi
 
-	if [ "${#pending[@]}" -eq 0 ]; then
-		rcow_registry_keep "${plan}"
+	# The plan is the restart transaction, not merely a same-process retry
+	# queue. Until every replayable volume succeeds, retain successful entries
+	# alongside failures: if this target is stopped before the next retry, its
+	# in-memory namespaces disappear and those successes must be replayed too.
+	# Terminal refusals are still removed immediately.
+	if [ "${failed_n}" -eq 0 ]; then
+		rcow_registry_keep "${plan}" || return 1
 	else
-		rcow_registry_keep "${plan}" "${pending[@]}"
+		rcow_registry_keep "${plan}" "${replayable[@]}" || return 1
 	fi
 
 	rcow_log "replay: ${done_n} restored, ${refused_n} refused, \

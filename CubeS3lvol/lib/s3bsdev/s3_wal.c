@@ -1383,6 +1383,8 @@ wal_replay_done(struct wal_replay_ctx *rctx, int status)
 	s3_wal_cb done_fn = rctx->done_fn;
 	void *done_arg = rctx->done_arg;
 
+	uint64_t next_local;
+
 	/* An unclosed trailing batch is discarded, which is exactly W4. */
 	if (rctx->batch_count > 0) {
 		SPDK_NOTICELOG("WAL replay dropping an unclosed trailing batch of "
@@ -1391,11 +1393,14 @@ wal_replay_done(struct wal_replay_ctx *rctx, int status)
 	}
 
 	wal->head     = rctx->scan_pos;
-	wal->seq_next = (rctx->max_seq & 0xFFFFFFFFFFFFULL) + 1;
+	next_local    = (rctx->max_seq & 0xFFFFFFFFFFFFULL) + 1;
+	if (next_local > wal->seq_next) {
+		wal->seq_next = next_local;
+	}
 	/* Seal the on-disk high water before any memory-only seq is handed
 	 * out.  Replay of an older volume stops here; everything above it
 	 * lives in shm and must not be checkpointed as if the log had it. */
-	wal->disk_seq_limit = wal_make_seq(wal, wal->seq_next);
+	wal->disk_seq_limit = rctx->max_seq + 1;
 
 	wal->stats.replayed_entries += rctx->applied;
 	wal->stats.dropped_batches  += rctx->dropped;

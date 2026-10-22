@@ -2698,6 +2698,8 @@ struct import_ctx {
 	/* The lane starts the template decouple once, after the gate. This
 	 * clone's own completion must not start another. */
 	bool                       decouple_from_lane;
+	/* Original import error reported after an orphan template is removed. */
+	int                        orphan_status;
 
 	s3lvol_lvol_op_cb          cb_fn;
 	void                      *cb_arg;
@@ -3476,11 +3478,24 @@ static void import_template_sealed(void *cb_arg, int bserrno);
 static void
 import_orphan_destroyed(void *cb_arg, int status)
 {
-	(void)cb_arg;
+	struct import_ctx *ctx = cb_arg;
+	struct import_template_build *build;
+	struct spdk_lvol *orphan;
+
 	if (status != 0) {
 		SPDK_WARNLOG("could not remove an import template that was not "
 			     "sealed: %s\n", spdk_strerror(-status));
+		orphan = import_template_find(ctx->lvs, ctx->uuid_str);
+		if (orphan) {
+			orphan->action_in_progress = false;
+			s3lvol_decouple_kick_queue();
+		}
 	}
+	build = import_template_build_find(ctx->lvs, ctx->uuid_str);
+	if (build) {
+		import_template_build_finish(build, NULL, ctx->orphan_status);
+	}
+	import_report(ctx, NULL, ctx->orphan_status);
 }
 
 /* The esnap blob exists under the template name but could not be frozen.
@@ -3494,7 +3509,18 @@ import_template_abort(struct import_ctx *ctx, struct spdk_lvol *lvol, int status
 	s3lvol_lvstore_import_clone_end(ctx->lvs);
 	build = import_template_build_find(ctx->lvs, ctx->uuid_str);
 	if (lvol) {
-		spdk_lvol_destroy(lvol, import_orphan_destroyed, NULL);
+		int rc;
+
+		ctx->orphan_status = status;
+		lvol->action_in_progress = true;
+		rc = s3lvol_lvol_destroy_locked(lvol, import_orphan_destroyed,
+						ctx);
+		if (rc == 0) {
+			return;
+		}
+		lvol->action_in_progress = false;
+		SPDK_WARNLOG("could not schedule removal of an import template "
+			     "that was not sealed: %s\n", spdk_strerror(-rc));
 	}
 	if (build) {
 		import_template_build_finish(build, NULL, status);
@@ -6035,12 +6061,16 @@ struct import_template_reap_ctx {
 	struct s3lvol_lvstore *lvs;
 	struct spdk_lvol      *template;
 	char                   uuid_str[SPDK_UUID_STRING_LEN];
+	spdk_lvol_op_complete  cb_fn;
+	void                  *cb_arg;
 };
 
 static void
 import_template_reaped(void *cb_arg, int lvolerrno)
 {
 	struct import_template_reap_ctx *ctx = cb_arg;
+	spdk_lvol_op_complete cb_fn = ctx->cb_fn;
+	void *user_arg = ctx->cb_arg;
 
 	if (lvolerrno != 0 && ctx->template) {
 		ctx->template->action_in_progress = false;
@@ -6055,11 +6085,16 @@ import_template_reaped(void *cb_arg, int lvolerrno)
 	 * An esnap template that is still present keeps its registry entry. */
 	s3lvol_imports_recheck(ctx->lvs, ctx->uuid_str);
 	free(ctx);
+	if (cb_fn) {
+		cb_fn(user_arg, 0);
+	}
 }
 
 void
 s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
-				      const char *uuid_str)
+				      const char *uuid_str,
+				      spdk_lvol_op_complete cb_fn,
+				      void *cb_arg)
 {
 	struct import_template_reap_ctx *ctx;
 	struct spdk_lvol *template;
@@ -6067,12 +6102,18 @@ s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
 	int rc;
 
 	if (!lvs || !uuid_str || uuid_str[0] == '\0') {
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
 		return;
 	}
 	template = import_template_find(lvs, uuid_str);
 	if (!template || template->action_in_progress ||
 	    s3lvol_lvol_decouple_pending(template)) {
 		s3lvol_imports_recheck(lvs, uuid_str);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
 		return;
 	}
 
@@ -6080,6 +6121,9 @@ s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
 				  template->blob_id, NULL, &clone_count);
 	if ((rc != 0 && rc != -ENOMEM) || clone_count != 0) {
 		s3lvol_imports_recheck(lvs, uuid_str);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
 		return;
 	}
 
@@ -6088,11 +6132,16 @@ s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
 	if (!ctx) {
 		template->action_in_progress = false;
 		s3lvol_imports_recheck(lvs, uuid_str);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
 		return;
 	}
 	ctx->lvs = lvs;
 	ctx->template = template;
 	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", uuid_str);
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
 	rc = s3lvol_lvol_destroy_locked(template, import_template_reaped, ctx);
 	if (rc != 0) {
 		import_template_reaped(ctx, rc);
