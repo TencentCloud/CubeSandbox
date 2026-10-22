@@ -59,7 +59,7 @@ This is not a code bug — it's the standard distributed-systems assumption that
 
 2. Distinguish clock skew from a genuinely offline node. **If `MetaDataUpdateAt` stopped advancing days ago**, `cubelet` is actually stopped/dead — that is a real offline node, not this issue. **If `MetaDataUpdateAt` keeps updating** but the node is still `HeartbeatExpired`, the clocks disagree.
 
-   Note the skew is **bidirectional**: `EvaluateHealth` compares `now.Sub(heartbeatTime)` using `cube-ops`'s wall clock (`now = time.Now()` on the control node), so the same symptom — `HeartbeatExpired` with an advancing `MetaDataUpdateAt` — appears both when the compute node's clock is **behind** and when the control node's clock has jumped **ahead** (e.g. its own chrony unsynced, or a VM pause/resume on the control node). The diagnosis below checks the compute node first, but if the compute node's clock looks fine and the node is still expired, verify the **control** node's clock too (`chronyc tracking` on the control node).
+   Note the comparison is **relative**: `EvaluateHealth` checks `now.Sub(heartbeatTime)` using `cube-ops`'s wall clock (`now = time.Now()` on the control node), so it trips only when the heartbeat time is in the **past** relative to the control node's clock — i.e. when the compute node's clock is **behind** the control node's. Either end failing to sync can cause that: the compute node drifting slow, or the control node jumping ahead (its own chrony unsynced, or a VM pause/resume on the control node). The symptom itself is one-directional (a compute node that is fast stays healthy), but either clock can be the source of the relative skew, so check **both** — the compute node first, and if it looks fine, the **control** node too (`chronyc tracking` on each).
 
 3. On the compute node, check whether chrony is synchronized:
 
@@ -91,7 +91,7 @@ This is not a code bug — it's the standard distributed-systems assumption that
 
 ## Resolution
 
-Both ends must be synchronized to a common time source — the symptom is symmetric, so fixing only the compute node does not recover the node if the control node's clock jumped ahead. First verify both clocks are synced (diagnosis step 3 on each node), then synchronize whichever end is drifting.
+Both ends must be synchronized to a common time source — the comparison is relative, so fixing only the compute node does not recover the node if it was the control node's clock that jumped ahead. First verify both clocks are synced (diagnosis step 3 on each node), then synchronize whichever end is drifting.
 
 1. Confirm the time source. If your control node runs chrony as a local NTP server (e.g. `local stratum 10` + `allow`), use it; otherwise use a public NTP pool or your organization's NTP server. Pick exactly the source the control node is synced to, so both clocks agree. If the control node itself is not synced (its `chronyc tracking` shows `Stratum=0`), fix the control node first — pointing the compute node at a source the control node does not use will not make the clocks agree.
 
