@@ -122,3 +122,21 @@ volume_plugins:
   - name: cos
     type: binary
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
+
+# Static cluster-wide webhooks; changes take effect after all Masters restart.
+# P3 provides delivery infrastructure; real lifecycle producers follow in P4/P5.
+webhooks:
+  enabled: false
+  ingress_capacity: 1024
+  workers: 4
+  request_timeout: 5s
+  max_attempts: 3
+  store:
+    backend: redis
+  subscriptions:
+    - id: lifecycle-receiver
+      enabled: false
+      url: https://receiver.example.com/cubesandbox/events
+      events:
+        - sandbox.lifecycle.created
+        - sandbox.lifecycle.killed

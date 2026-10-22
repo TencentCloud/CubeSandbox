@@ -30,6 +30,7 @@ import (
 var cfg *Config
 
 type Config struct {
+	Webhooks         WebhookConf           `yaml:"webhooks"`
 	Common           *CommonConf           `yaml:"common"`
 	AuthConf         *AuthConf             `yaml:"auth"`
 	Log              *log.Conf             `yaml:"log"`
@@ -730,7 +731,7 @@ func Init() (*Config, error) {
 		return nil, fmt.Errorf("validate config fail:%v", err)
 	}
 	cfg = newCfg
-	fmt.Printf("cfg:%+v\n", utils.InterfaceToString(cfg))
+	fmt.Printf("cfg:%+v\n", utils.InterfaceToString(redactedConfig(cfg)))
 	return newCfg, nil
 }
 
@@ -745,15 +746,16 @@ type listener struct {
 func (l *listener) OnEvent(data interface{}) {
 	conf, err := preHandle(data.(*Config))
 	if err != nil {
-		CubeLog.Fatalf("preHandle Config:%v fail:%v", data, err)
+		CubeLog.Fatalf("preHandle Config:%v fail:%v", redactedConfig(data.(*Config)), err)
 		return
 	}
 	err = validate(conf)
 	if err != nil {
-		CubeLog.Fatalf("validate Config:%v fail:%v", data, err)
+		CubeLog.Fatalf("validate Config:%v fail:%v", redactedConfig(data.(*Config)), err)
 		return
 	}
 	cfg = conf
+	CubeLog.Warnf("webhooks configuration update requires restart; running snapshot unchanged")
 	notify(conf)
 }
 
@@ -1328,4 +1330,19 @@ func HasEnvVirtiofsCacheHook(app string, envKey string) string {
 	}
 
 	return cache
+}
+
+// redactedConfig is only for logging; watcher comparison retains real values.
+func redactedConfig(c *Config) *Config {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.RedisConf != nil {
+		r := *c.RedisConf
+		r.Password = "[redacted]"
+		r.SentinelPassword = "[redacted]"
+		out.RedisConf = &r
+	}
+	return &out
 }

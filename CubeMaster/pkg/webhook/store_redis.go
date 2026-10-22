@@ -188,6 +188,17 @@ func (s *RedisDeliveryStore) Claim(ctx context.Context, now time.Time, limit int
 	if err != nil {
 		return nil, err
 	}
+	if len(values) < 2 || len(values)%2 != 0 {
+		return nil, ErrStoreCorrupt
+	}
+	reclaimed, e1 := strconv.Atoi(values[0])
+	exhausted, e2 := strconv.Atoi(values[1])
+	if e1 != nil || e2 != nil {
+		return nil, ErrStoreCorrupt
+	}
+	deliveryCounts.WithLabelValues("claim", "lease_recovered").Add(float64(reclaimed))
+	deliveryCounts.WithLabelValues("claim", "exhausted").Add(float64(exhausted))
+	values = values[2:]
 	out := make([]ClaimedTask, 0, len(values)/2)
 	for i := 0; i < len(values); i += 2 {
 		var r deliveryRecord
@@ -226,4 +237,26 @@ func (s *RedisDeliveryStore) Prune(ctx context.Context, now time.Time, limit int
 		return 0, ErrInvalidDelivery
 	}
 	return redis.Int(s.run(ctx, "prune", now.UnixMilli(), limit))
+}
+
+// QueueSample reads only bounded scheduling metadata, never task bodies.
+// DueDelay measures the oldest scheduling due time, not event creation age.
+type QueueSample struct {
+	PendingAndInflight int
+	DueDelay           time.Duration
+}
+
+func (s *RedisDeliveryStore) Sample(ctx context.Context, now time.Time) (QueueSample, error) {
+	values, err := redis.Int64s(s.run(ctx, "sample"))
+	if err != nil {
+		return QueueSample{}, err
+	}
+	if len(values) != 2 {
+		return QueueSample{}, ErrStoreCorrupt
+	}
+	delay := time.Duration(0)
+	if values[1] > 0 && now.UnixMilli() > values[1] {
+		delay = now.Sub(time.UnixMilli(values[1]))
+	}
+	return QueueSample{int(values[0]), delay}, nil
 }

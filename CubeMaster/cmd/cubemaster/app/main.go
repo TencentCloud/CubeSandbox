@@ -36,6 +36,7 @@ import (
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/rpc"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
@@ -45,6 +46,7 @@ import (
 )
 
 type App struct {
+	webhooks *webhook.Runtime
 }
 
 func New() *App {
@@ -66,6 +68,9 @@ func (a *App) Run() {
 		stdlog.Fatalf("core init fail:%v", recov.DumpStacktrace(3, err))
 		return
 	}
+
+	a.startWebhooks(ctx, cfg)
+	defer a.webhooks.Shutdown(context.Background())
 
 	type srvResp struct {
 		s   *server.Server
@@ -353,4 +358,20 @@ func initVolumePlugins(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+// WebhookPublisher is the injection point for future lifecycle success paths.
+// Run installs the immutable runtime once, before starting the HTTP server.
+func (a *App) WebhookPublisher() webhook.Publisher {
+	if a.webhooks == nil {
+		return webhook.NopPublisher{}
+	}
+	return a.webhooks.Publisher()
+}
+func (a *App) startWebhooks(ctx context.Context, cfg *config.Config) {
+	var err error
+	a.webhooks, err = webhook.NewRuntime(ctx, cfg.Webhooks, cfg.RedisConf)
+	if err != nil {
+		CubeLog.Warnf("webhooks disabled: invalid startup configuration; values redacted")
+	}
 }
