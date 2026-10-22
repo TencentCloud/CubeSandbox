@@ -26,7 +26,7 @@ lang: zh-CN
 
 ## 根因
 
-`cubelet` 每秒左右向 `cube-ops` 上报一次心跳（`POST /internal/v1/node-agent/nodes/<ip>/status`；`node_status_update_frequency` 在 `Cubelet/config/config.toml` 默认 `1s`），其中 `HeartbeatTime` 用**计算节点本地 wall clock** 打戳。`cube-ops` 用**自己**本地 wall clock 作为 `now` 判定健康：
+`cubelet` 每秒左右向 `cube-ops` 上报一次心跳（`POST /internal/v1/node-agent/nodes/<node-id>/status`；`node_status_update_frequency` 在 `Cubelet/config/config.toml` 默认 `1s`；`<node-id>` 是节点标识——K8s chart 下是节点名，one-click/裸金属路径下通常是配置的 node ID），其中 `HeartbeatTime` 用**计算节点本地 wall clock** 打戳。`cube-ops` 用**自己**本地 wall clock 作为 `now` 判定健康：
 
 ```go
 // CubeOps/internal/nodemanagement/service/health.go
@@ -116,14 +116,17 @@ func MetadataTimeout() time.Duration { return 15 * time.Second }
 
    > 解析到多个地址的名字（如 `pool.ntp.org`）用 `pool` 指令；`server` 会在启动时只固定一个解析到的地址。单个内网 NTP 主机用 `server`。
 
-3. 重启 chrony 并确认 offset 收敛到接近 0（RPM 系：`chronyd`；Debian/Ubuntu：`chrony`）：
+3. 重启 chrony 并确认 offset 收敛到接近 0（RPM 系：`chronyd`；Debian/Ubuntu：`chrony`）。重启后若偏移很大，chrony 默认用**slewing**（缓慢纠正，默认最大速率 ~8.3%/s）而非步进——超过 15s 的偏移要远多于一个心跳周期才能补上，几分钟/几小时的偏移可能要几小时。若需快速恢复，立即步进时钟：
 
    ```bash
    sudo systemctl restart chronyd    # RPM 系 —— 或：sudo systemctl restart chrony   （Debian/Ubuntu）
-   chronyc tracking   # Stratum 应为非 0，offset 应接近 0
+   chronyc tracking   # Stratum 应为非 0
+   sudo chronyc makestep   # 立即步进时钟，不走 slewing；offset 仍大可重复执行
+   chronyc tracking   # offset 此时应接近 0
+   #（或在 chrony 配置加 `makestep 1.0 3`，让前 3 次超过 1s 的更新自动步进）
    ```
 
-4. 节点会在下一个心跳周期内变为健康，验证：
+4. 时钟对齐后，节点在下一次心跳被评估时变为健康，验证：
 
    ```bash
    cubeopscli node ls   # 修复的节点 Healthy=True

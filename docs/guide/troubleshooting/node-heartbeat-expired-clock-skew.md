@@ -26,7 +26,7 @@ The key tell: the node's `MetaDataUpdateAt` timestamp keeps advancing (the heart
 
 ## Root Cause
 
-Cubelet reports a status heartbeat about once per second to `cube-ops` (`POST /internal/v1/node-agent/nodes/<ip>/status`; `node_status_update_frequency` defaults to `1s` in `Cubelet/config/config.toml`), and the `HeartbeatTime` field is stamped with the **compute node's local wall clock**. `cube-ops` evaluates health with its **own** local wall clock as `now`:
+Cubelet reports a status heartbeat about once per second to `cube-ops` (`POST /internal/v1/node-agent/nodes/<node-id>/status`; `node_status_update_frequency` defaults to `1s` in `Cubelet/config/config.toml`; `<node-id>` is the node's identifier — under the K8s chart it is the node name, under the one-click/bare-metal path it is typically the configured node ID), and the `HeartbeatTime` field is stamped with the **compute node's local wall clock**. `cube-ops` evaluates health with its **own** local wall clock as `now`:
 
 ```go
 // CubeOps/internal/nodemanagement/service/health.go
@@ -117,14 +117,17 @@ Both ends must be synchronized to a common time source — the symptom is symmet
 
    > Use `pool` for a name that resolves to multiple addresses (like `pool.ntp.org`); `server` pins a single resolved address at startup. Use `server` for a single internal NTP host.
 
-3. Restart chrony and verify the offset collapses to near zero (RPM family: `chronyd`; Debian/Ubuntu: `chrony`):
+3. Restart chrony and verify the offset collapses to near zero (RPM family: `chronyd`; Debian/Ubuntu: `chrony`). After the restart, if the offset is large, chrony corrects it by **slewing** (gradually, default max slew rate ~8.3%/s) unless told to step — a skew beyond 15s can take much longer than one heartbeat cycle to close, and a skew of minutes/hours can take hours. Step the clock immediately if the node needs to recover fast:
 
    ```bash
    sudo systemctl restart chronyd    # RPM family — or: sudo systemctl restart chrony   (Debian/Ubuntu)
-   chronyc tracking   # Stratum should now be non-zero; offset should be ~0
+   chronyc tracking   # Stratum should now be non-zero
+   sudo chronyc makestep   # step the clock now instead of slewing; safe to repeat if offset remains
+   chronyc tracking   # offset should now be ~0
+   # (or add `makestep 1.0 3` to the chrony config so the first 3 updates past 1s step automatically)
    ```
 
-4. The node turns healthy within the next heartbeat cycle — verify:
+4. Once the clocks agree, the node turns healthy once the next heartbeat is evaluated — verify:
 
    ```bash
    cubeopscli node ls   # Healthy=True for the fixed node
