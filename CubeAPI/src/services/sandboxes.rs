@@ -586,14 +586,6 @@ impl SandboxService {
         // FinishedAt (Cubelet/services/cubebox/pause_cow.go), so pause and
         // failed-pause windows surface as `Pausing`/`Paused`/`Unknown`, which
         // still take the connect paths below.
-        if matches!(&d.status, SandboxStatus::Stopped | SandboxStatus::Error) {
-            return Err(AppError::Conflict(format!(
-                "sandbox {} is not connectable in state '{}'",
-                sandbox_id,
-                sandbox_status_label(&d.status)
-            )));
-        }
-
         if d.status == SandboxStatus::Paused {
             let resume_timeout = timeout.filter(|timeout| {
                 should_extend_connect_timeout(d.end_at.clone(), *timeout, chrono::Utc::now())
@@ -625,13 +617,19 @@ impl SandboxService {
             if let Some(timeout) = timeout {
                 // Preserve a known longer deadline during the short
                 // CREATED/PAUSING transition. Missing metadata is left alone
-                // because it also represents never-timeout sandboxes. Terminal
-                // states never reach this arm: the guard above rejects
-                // `Stopped` before the state machine runs.
+                // because it also represents never-timeout sandboxes.
                 if should_extend_connect_timeout(d.end_at.clone(), timeout, chrono::Utc::now()) {
                     self.set_timeout(sandbox_id, timeout).await?;
                 }
             }
+        }
+
+        if matches!(&d.status, SandboxStatus::Stopped | SandboxStatus::Error) {
+            return Err(AppError::Conflict(format!(
+                "sandbox {} is not connectable in state '{}'",
+                sandbox_id,
+                sandbox_status_label(&d.status)
+            )));
         }
 
         let envd_version = envd_version_from_annotations(&d.annotations);
@@ -2072,6 +2070,45 @@ mod tests {
             "expected a conflict naming the terminal state, got {err:?}"
         );
         assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn connect_checks_status_after_resume() {
+        for (status_after_resume, should_reject) in [(1, false), (2, true)] {
+            let status = Arc::new(Mutex::new(5));
+            let service = spawn_fake_cubemaster(
+                Router::new()
+                    .route(
+                        "/cube/sandbox/info",
+                        get(|State(status): State<Arc<Mutex<i32>>>| async move {
+                            sandbox_detail_envelope(*status.lock().await)
+                        }),
+                    )
+                    .route(
+                        "/cube/sandbox/update",
+                        post(move |State(status): State<Arc<Mutex<i32>>>| async move {
+                            *status.lock().await = status_after_resume;
+                            ret_envelope(0, "ok")
+                        }),
+                    )
+                    .with_state(status),
+            )
+            .await;
+
+            let result = service.connect_sandbox("sbx-1", None).await;
+            if should_reject {
+                let err = result.expect_err("a sandbox that exited after resume must not connect");
+                assert!(matches!(err, AppError::Conflict(ref m) if m.contains("stopped")));
+                assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+            } else {
+                assert_eq!(
+                    result
+                        .expect("a resumed running sandbox should connect")
+                        .sandbox_id,
+                    "sbx-1"
+                );
+            }
+        }
     }
 
     #[tokio::test]
