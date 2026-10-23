@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,15 +179,14 @@ func decodeB64Lossy(s string) string {
 
 // ── OpenClaw gateway token resolution ───────────────────────────────────────
 
-// ReadOpenclawGatewayTokenFromHost reads the gateway auth token directly from
-// the host-side OpenClaw state directory (shared_files persistence mode).
-// This avoids a round-trip through envd and is more reliable because the host
-// file is not subject to in-process rewrites by OpenClaw during startup.
-func ReadOpenclawGatewayTokenFromHost(statePath string) string {
+// readOpenclawGatewayTokenFromHostFile reads the gateway token from a named
+// file in the host-side OpenClaw state dir (shared_files). Note the host file
+// is the same mounted sandbox file, so it is subject to OpenClaw rewrites.
+func readOpenclawGatewayTokenFromHostFile(statePath, filename string) string {
 	if statePath == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(statePath, "openclaw.json"))
+	data, err := os.ReadFile(filepath.Join(statePath, filename))
 	if err != nil {
 		return ""
 	}
@@ -202,53 +203,440 @@ func ReadOpenclawGatewayTokenFromHost(statePath string) string {
 	return strings.TrimSpace(v.Gateway.Auth.Token)
 }
 
-// ResolveGatewayToken returns the OpenClaw gateway token, matching the
-// priority used by the old Rust handler (CubeAPI/src/handlers/agenthub.rs):
-// host file → sandbox file (via envd) → fallback (the token CubeOps passed
-// to the apply script). The 5s sleep lets OpenClaw finish its in-process
-// reload before we read the freshly written openclaw.json.
-func ResolveGatewayToken(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string {
-	time.Sleep(5 * time.Second)
+// writeOpenclawGatewayTokenToHostFile sets gateway.auth.token in the host-side
+// openclaw.json, preserving other fields. The replace is atomic so a crash
+// mid-write cannot truncate the config.
+func writeOpenclawGatewayTokenToHostFile(statePath, token string) error {
+	path := filepath.Join(statePath, "openclaw.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
 
-	if hostToken := ReadOpenclawGatewayTokenFromHost(hostStatePath); hostToken != "" {
-		logging.G(ctx).Debugf("ResolveGatewayToken: using host-side token: sandboxID=%q hostStatePath=%q", sandboxID, hostStatePath)
-		return hostToken
+	gateway, _ := cfg["gateway"].(map[string]interface{})
+	if gateway == nil {
+		gateway = map[string]interface{}{}
+		cfg["gateway"] = gateway
 	}
-	if sandboxToken := readOpenclawGatewayToken(httpClient, sandboxID, domain); sandboxToken != "" {
-		logging.G(ctx).Debugf("ResolveGatewayToken: using sandbox-side token: sandboxID=%q", sandboxID)
-		return sandboxToken
+	auth, _ := gateway["auth"].(map[string]interface{})
+	if auth == nil {
+		auth = map[string]interface{}{}
+		gateway["auth"] = auth
 	}
-	logging.G(ctx).Debugf("ResolveGatewayToken: using fallback (generated) token: sandboxID=%q", sandboxID)
-	return fallbackToken
+	if _, ok := auth["mode"]; !ok {
+		auth["mode"] = "token"
+	}
+	auth["token"] = token
+
+	updated, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(statePath, "openclaw.json.*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(updated); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
-// readOpenclawGatewayToken reads the gateway auth token from
-// /root/.openclaw/openclaw.json inside the sandbox via envd.
-// Matches old Rust read_openclaw_gateway_token.
-func readOpenclawGatewayToken(httpClient *http.Client, sandboxID, domain string) string {
-	req := map[string]interface{}{
-		"process": map[string]interface{}{
-			"cmd": "/bin/bash",
-			"args": []string{"-l", "-c", `python3 - <<'PY'
+// ReadOpenclawGatewayTokenFromHost reads the gateway token from the host-side
+// openclaw.json (shared_files), avoiding an envd round-trip.
+func ReadOpenclawGatewayTokenFromHost(statePath string) string {
+	return readOpenclawGatewayTokenFromHostFile(statePath, "openclaw.json")
+}
+
+// readOpenclawGatewayTokenSandboxFile reads the gateway token from a named file
+// in the sandbox via envd. Returns "" if the read fails or the token is absent.
+func readOpenclawGatewayTokenSandboxFile(httpClient *http.Client, sandboxID, domain, filename string) string {
+	if httpClient == nil {
+		return ""
+	}
+	script := fmt.Sprintf(`python3 - <<'PY'
 import json
 try:
-    token = json.load(open('/root/.openclaw/openclaw.json')).get('gateway', {}).get('auth', {}).get('token')
+    token = json.load(open('/root/.openclaw/%s')).get('gateway', {}).get('auth', {}).get('token')
     if token:
         print(token)
 except Exception:
     pass
-PY`},
+PY`, filename)
+	req := map[string]interface{}{
+		"process": map[string]interface{}{
+			"cmd":  "/bin/bash",
+			"args": []string{"-l", "-c", script},
 			"envs": map[string]string{},
 			"cwd":  "/root",
 		},
 		"stdin": false,
 	}
-
 	output, err := RunEnvdCommand(httpClient, sandboxID, domain, req)
 	if err != nil || output.ExitCode != 0 {
 		return ""
 	}
 	return strings.TrimSpace(output.Stdout)
+}
+
+// Gateway token resolution tunables. Vars, not consts, so tests can shrink them.
+var (
+	gatewayReadyTimeout  = 30 * time.Second
+	gatewayReadyInterval = 500 * time.Millisecond
+)
+
+// defaultGatewayProbePath is the Control-UI bootstrap config, behind gateway
+// auth: 200 for an accepted token, 401 for a rejected one. An OpenClaw-internal
+// route, hence overridable in case a future release renames it.
+const defaultGatewayProbePath = "/__openclaw/control-ui-config.json"
+
+func gatewayProbePath() string {
+	if path := os.Getenv("AGENTHUB_GATEWAY_PROBE_PATH"); path != "" {
+		return path
+	}
+	return defaultGatewayProbePath
+}
+
+// gatewayAuthMode is how the live gateway answers an anonymous request.
+type gatewayAuthMode int
+
+const (
+	// gatewayAuthUnknown: the probe never reached a Control-UI gateway (envd
+	// failure, a dead sandbox, or an image predating the endpoint).
+	gatewayAuthUnknown gatewayAuthMode = iota
+	// gatewayAuthEnforced: anonymous requests are rejected, so tokens can be verified.
+	gatewayAuthEnforced
+	// gatewayAuthOpen: anonymous requests are served, so no token can be verified.
+	gatewayAuthOpen
+)
+
+// probeGatewayAuth returns the HTTP status the live gateway answers token with.
+// The bool is false when no verdict was reached; treating that as "rejected"
+// would turn an envd hiccup into an auth failure.
+//
+// The token travels in the environment, not argv, keeping it out of the guest
+// process list and envd logs.
+func probeGatewayAuth(httpClient *http.Client, sandboxID, domain, token string) (int, bool) {
+	if httpClient == nil {
+		return 0, false
+	}
+	// Port read in the guest (like openclaw_ready), so CubeOps' own environment
+	// cannot mislead the probe. Fixed loopback URL: no SSRF surface. ProxyHandler({})
+	// forces a direct connection so the image's http_proxy cannot answer here.
+	script := fmt.Sprintf(`python3 - <<'PY'
+import os, urllib.error, urllib.request
+port = os.environ.get("OPENCLAW_PORT", "") or "%d"
+req = urllib.request.Request(f"http://127.0.0.1:{port}%s")
+token = os.environ.get("OPENCLAW_PROBE_TOKEN", "")
+if token:
+    req.add_header("Authorization", "Bearer " + token)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(req, timeout=3) as rsp:
+        print(rsp.status)
+except urllib.error.HTTPError as err:
+    print(err.code)
+except Exception:
+    print(0)
+PY`, OpenclawUIPort, gatewayProbePath())
+
+	req := map[string]interface{}{
+		"process": map[string]interface{}{
+			"cmd":  "/bin/bash",
+			"args": []string{"-l", "-c", script},
+			"envs": map[string]string{"OPENCLAW_PROBE_TOKEN": token},
+			"cwd":  "/root",
+		},
+		"stdin": false,
+	}
+	output, err := RunEnvdCommand(httpClient, sandboxID, domain, req)
+	if err != nil || output.ExitCode != 0 {
+		return 0, false
+	}
+	status, err := strconv.Atoi(strings.TrimSpace(output.Stdout))
+	if err != nil || status == 0 {
+		return 0, false
+	}
+	return status, true
+}
+
+// waitGatewayAuthMode polls until the gateway answers an anonymous probe, the
+// point where token verification becomes meaningful. The last status is
+// returned too, telling a stale probe path (404) from a dead gateway (0).
+func waitGatewayAuthMode(ctx context.Context, httpClient *http.Client, sandboxID, domain string) (gatewayAuthMode, int) {
+	if httpClient == nil {
+		return gatewayAuthUnknown, 0
+	}
+	deadline := time.Now().Add(gatewayReadyTimeout)
+	lastStatus := 0
+	for {
+		if status, ok := probeGatewayAuth(httpClient, sandboxID, domain, ""); ok {
+			lastStatus = status
+			switch {
+			case status == http.StatusUnauthorized:
+				// 401 alone proves the gateway arbitrates on the token. A 403
+				// may come from a layer no token can satisfy, so it does not
+				// make tokens verifiable.
+				return gatewayAuthEnforced, status
+			case status == http.StatusOK:
+				return gatewayAuthOpen, status
+			case status >= 400 && status < 500:
+				// A settled answer that simply is not about auth; retrying it
+				// would only burn the timeout.
+				return gatewayAuthUnknown, status
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return gatewayAuthUnknown, lastStatus
+		}
+		select {
+		case <-ctx.Done():
+			return gatewayAuthUnknown, lastStatus
+		case <-time.After(gatewayReadyInterval):
+		}
+	}
+}
+
+// Candidate token sources, ordered as gatewayTokenCandidates emits them.
+const (
+	gatewayTokenSourceApply    = "apply-script"
+	gatewayTokenSourceConfig   = "openclaw.json"
+	gatewayTokenSourceLastGood = "openclaw.json.last-good"
+)
+
+// gatewayTokenCandidate pairs a token with its origin, so the winning source
+// reaches the logs and later 401 reports can be traced back.
+type gatewayTokenCandidate struct {
+	source string
+	token  string
+}
+
+// gatewayTokenCandidates collects every plausible token, deduplicated. None is
+// authoritative, hence candidates to verify rather than answers to trust.
+func gatewayTokenCandidates(httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) []gatewayTokenCandidate {
+	read := func(filename string) string {
+		if hostStatePath != "" {
+			return readOpenclawGatewayTokenFromHostFile(hostStatePath, filename)
+		}
+		return readOpenclawGatewayTokenSandboxFile(httpClient, sandboxID, domain, filename)
+	}
+
+	ordered := []gatewayTokenCandidate{
+		{gatewayTokenSourceApply, fallbackToken},
+		{gatewayTokenSourceConfig, read("openclaw.json")},
+		{gatewayTokenSourceLastGood, read("openclaw.json.last-good")},
+	}
+
+	candidates := make([]gatewayTokenCandidate, 0, len(ordered))
+	seen := make(map[string]struct{}, len(ordered))
+	for _, c := range ordered {
+		if c.token == "" {
+			continue
+		}
+		if _, dup := seen[c.token]; dup {
+			continue
+		}
+		seen[c.token] = struct{}{}
+		candidates = append(candidates, c)
+	}
+	return candidates
+}
+
+// unverifiedGatewayToken picks a token when the gateway cannot be probed. It
+// keeps the historical preference (what OpenClaw last wrote beats what CubeOps
+// asked for) so unverifiable images behave exactly as before.
+func unverifiedGatewayToken(candidates []gatewayTokenCandidate) (string, string) {
+	for _, source := range []string{gatewayTokenSourceConfig, gatewayTokenSourceLastGood, gatewayTokenSourceApply} {
+		for _, c := range candidates {
+			if c.source == source {
+				return c.token, c.source
+			}
+		}
+	}
+	return "", ""
+}
+
+// ErrGatewayTokenRejected means the gateway turned down every candidate. Only
+// such a confirmed rejection justifies tearing the sandbox down.
+var ErrGatewayTokenRejected = errors.New("gateway rejected every candidate token")
+
+// waitLastGoodFresherThanConfig blocks until .last-good is newer than
+// openclaw.json (OpenClaw's signal that its config patch is done and the
+// on-disk token is stable). Timeouts and stat errors fall through silently.
+func waitLastGoodFresherThanConfig(ctx context.Context, hostStatePath string) {
+	jsonPath := filepath.Join(hostStatePath, "openclaw.json")
+	lgPath := filepath.Join(hostStatePath, "openclaw.json.last-good")
+	deadline := time.Now().Add(gatewayReadyTimeout)
+	for {
+		jsonInfo, err1 := os.Stat(jsonPath)
+		lgInfo, err2 := os.Stat(lgPath)
+		if err1 == nil && err2 == nil && lgInfo.ModTime().After(jsonInfo.ModTime()) {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(gatewayReadyInterval):
+		}
+	}
+}
+
+// ResolveGatewayToken resolves the gateway token to persist.
+//
+// Config files cannot answer this: a template image may rewrite openclaw.json
+// after the gateway loaded its token, without restarting it. So we ask the
+// gateway itself, and read the file only when it cannot be probed.
+func ResolveGatewayToken(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) (string, error) {
+	// Wait for OpenClaw to finish its own config patch before reading
+	// candidates: a fresh .last-good signals the on-disk token is stable.
+	if hostStatePath != "" {
+		waitLastGoodFresherThanConfig(ctx, hostStatePath)
+	}
+
+	mode, lastStatus := waitGatewayAuthMode(ctx, httpClient, sandboxID, domain)
+
+	// Read after the wait: openclaw.json is the very file OpenClaw may rewrite
+	// while starting, so an earlier snapshot could already be stale.
+	candidates := gatewayTokenCandidates(httpClient, sandboxID, domain, hostStatePath, fallbackToken)
+	if len(candidates) == 0 {
+		if mode == gatewayAuthEnforced {
+			// An enforcing gateway with no token to offer can never be reached.
+			logging.G(ctx).Errorf("ResolveGatewayToken: gateway enforces auth but no token exists: sandboxID=%q", sandboxID)
+			return "", ErrGatewayTokenRejected
+		}
+		// Open or unprobeable: a token-less URL is the historical behaviour.
+		logging.G(ctx).Warnf("ResolveGatewayToken: no token found, persisting a token-less URL: sandboxID=%q", sandboxID)
+		return "", nil
+	}
+
+	switch mode {
+	case gatewayAuthEnforced:
+		rejected := 0
+		for _, c := range candidates {
+			status, ok := probeGatewayAuth(httpClient, sandboxID, domain, c.token)
+			switch {
+			case !ok:
+				logging.G(ctx).Warnf("ResolveGatewayToken: probe inconclusive: sandboxID=%q source=%q", sandboxID, c.source)
+			case status == http.StatusOK:
+				logging.G(ctx).Infof("ResolveGatewayToken: gateway accepted token: sandboxID=%q source=%q", sandboxID, c.source)
+				return c.token, nil
+			case status == http.StatusUnauthorized:
+				// The only status that means "this token is wrong". Anything
+				// else (403 from a second authz layer, 5xx, a moved endpoint)
+				// says nothing about the token and must stay inconclusive.
+				rejected++
+				logging.G(ctx).Warnf("ResolveGatewayToken: gateway rejected token: sandboxID=%q source=%q", sandboxID, c.source)
+			default:
+				logging.G(ctx).Warnf("ResolveGatewayToken: probe inconclusive: sandboxID=%q source=%q status=%d", sandboxID, c.source, status)
+			}
+		}
+		if rejected == len(candidates) {
+			logging.G(ctx).Errorf("ResolveGatewayToken: no candidate accepted: sandboxID=%q candidates=%d", sandboxID, rejected)
+			return "", ErrGatewayTokenRejected
+		}
+		// No verdict on some candidate, so nothing is proven wrong: an envd
+		// hiccup must not be mistaken for an auth failure.
+		token, source := unverifiedGatewayToken(candidates)
+		logging.G(ctx).Errorf("ResolveGatewayToken: probes were inconclusive, persisting unverified token: sandboxID=%q source=%q candidates=%d", sandboxID, source, len(candidates))
+		return token, nil
+
+	case gatewayAuthOpen:
+		// Auth is off, so any value would let the UI in and none can be checked.
+		token, source := unverifiedGatewayToken(candidates)
+		logging.G(ctx).Warnf("ResolveGatewayToken: gateway serves anonymous requests, persisting unverified token: sandboxID=%q source=%q", sandboxID, source)
+		return token, nil
+
+	default:
+		// Logged at error level: the token is a guess, and a 404 here means the
+		// probe path is stale rather than the image being old.
+		token, source := unverifiedGatewayToken(candidates)
+		logging.G(ctx).Errorf("ResolveGatewayToken: gateway not probeable, persisting unverified token: sandboxID=%q source=%q lastStatus=%d probePath=%q", sandboxID, source, lastStatus, gatewayProbePath())
+		return token, nil
+	}
+}
+
+// SyncGatewayTokenConfig rewrites openclaw.json to advertise the token the
+// gateway enforces, so the next restart cannot invalidate the URL just handed
+// to the user. Reads and writes stay on the same side. Best-effort: a verified
+// token is already persisted.
+func SyncGatewayTokenConfig(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, enforcedToken string) {
+	if enforcedToken == "" {
+		return
+	}
+
+	if hostStatePath != "" {
+		if readOpenclawGatewayTokenFromHostFile(hostStatePath, "openclaw.json") == enforcedToken {
+			return
+		}
+		logging.G(ctx).Warnf("SyncGatewayTokenConfig: openclaw.json disagrees with the gateway, rewriting: sandboxID=%q", sandboxID)
+		if err := writeOpenclawGatewayTokenToHostFile(hostStatePath, enforcedToken); err != nil {
+			logging.G(ctx).Warnf("SyncGatewayTokenConfig: host rewrite failed: sandboxID=%q err=%q", sandboxID, err.Error())
+		}
+		return
+	}
+
+	if httpClient == nil {
+		return
+	}
+	if readOpenclawGatewayTokenSandboxFile(httpClient, sandboxID, domain, "openclaw.json") == enforcedToken {
+		return
+	}
+	logging.G(ctx).Warnf("SyncGatewayTokenConfig: openclaw.json disagrees with the gateway, rewriting: sandboxID=%q", sandboxID)
+
+	// Token via environment, not argv; atomic replace so a crash mid-write
+	// cannot leave OpenClaw with a truncated config.
+	const script = `python3 - <<'PY'
+import json, os, tempfile
+path = "/root/.openclaw/openclaw.json"
+token = os.environ.get("OPENCLAW_SYNC_TOKEN", "")
+if not token:
+    raise SystemExit(1)
+with open(path) as fh:
+    cfg = json.load(fh)
+if not isinstance(cfg, dict):
+    raise SystemExit(1)
+auth = cfg.setdefault("gateway", {}).setdefault("auth", {})
+auth.setdefault("mode", "token")
+auth["token"] = token
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY`
+
+	req := map[string]interface{}{
+		"process": map[string]interface{}{
+			"cmd":  "/bin/bash",
+			"args": []string{"-l", "-c", script},
+			"envs": map[string]string{"OPENCLAW_SYNC_TOKEN": enforcedToken},
+			"cwd":  "/root",
+		},
+		"stdin": false,
+	}
+	output, err := RunEnvdCommand(httpClient, sandboxID, domain, req)
+	if err != nil {
+		logging.G(ctx).Warnf("SyncGatewayTokenConfig: envd request failed: sandboxID=%q err=%q", sandboxID, err.Error())
+		return
+	}
+	if output.ExitCode != 0 {
+		logging.G(ctx).Warnf("SyncGatewayTokenConfig: rewrite failed: sandboxID=%q exitCode=%d stderr=%q", sandboxID, output.ExitCode, output.Stderr)
+	}
 }
 
 // ── OpenClaw restart / upgrade scripts ──────────────────────────────────────
@@ -1247,7 +1635,6 @@ PY
 const (
 	// Host directories for OpenClaw shared-files persistence.
 	// Must be under CubeMaster's allowed_host_mount_prefixes (default: /data/shared/).
-	openclawHostStateRoot    = "/data/shared/agenthub/openclaw"
 	openclawHostSnapshotRoot = "/data/shared/agenthub/openclaw-snapshots"
 	openclawSandboxStatePath = "/root/.openclaw"
 
@@ -1256,6 +1643,10 @@ const (
 	// Matches old Rust HOSTDIR_MOUNT_KEY.
 	HostdirMountKey = "host-mount"
 )
+
+// openclawHostStateRoot is the parent of every active shared-files state dir.
+// A var, not a const, so tests can redirect it to a writable temp root.
+var openclawHostStateRoot = "/data/shared/agenthub/openclaw"
 
 // NewOpenclawPersistID generates a new persist ID (UUID without hyphens).
 // Matches old Rust new_openclaw_persist_id.
