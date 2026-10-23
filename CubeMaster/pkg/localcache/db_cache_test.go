@@ -103,6 +103,47 @@ func TestSyncAllFromDB_EmptyStreakEvictsEmptyCache(t *testing.T) {
 		"empty cache stays empty after eviction")
 }
 
+func TestSyncAllFromDB_NodeRegistryReadiness(t *testing.T) {
+	t.Run("initial empty load remains fail closed", func(t *testing.T) {
+		l := newTestLocal()
+		withExternalNodeLoader(t, emptyLoader())
+
+		assert.NoError(t, l.syncAllFromDB(context.Background(), false))
+		assert.False(t, l.nodeRegistryReady.Load())
+	})
+
+	t.Run("sustained empty loads confirm scale to zero", func(t *testing.T) {
+		l := newTestLocal()
+		withExternalNodeLoader(t, emptyLoader())
+
+		assert.NoError(t, l.syncAllFromDB(context.Background(), false))
+		for i := 0; i < emptySyncEvictThreshold; i++ {
+			assert.NoError(t, l.syncAllFromDB(context.Background(), true))
+		}
+		assert.True(t, l.nodeRegistryReady.Load())
+	})
+
+	t.Run("initial nonempty load is authoritative", func(t *testing.T) {
+		l := newTestLocal()
+		withExternalNodeLoader(t, func(context.Context) ([]*node.Node, error) {
+			return []*node.Node{{InsID: "node-1"}}, nil
+		})
+
+		assert.NoError(t, l.syncAllFromDB(context.Background(), false))
+		assert.True(t, l.nodeRegistryReady.Load())
+	})
+
+	t.Run("failed initial load is not authoritative", func(t *testing.T) {
+		l := newTestLocal()
+		withExternalNodeLoader(t, func(context.Context) ([]*node.Node, error) {
+			return nil, errors.New("cubeops unavailable")
+		})
+
+		assert.Error(t, l.syncAllFromDB(context.Background(), false))
+		assert.False(t, l.nodeRegistryReady.Load())
+	})
+}
+
 func TestSyncAllFromDB_NonEmptyResetsStreak(t *testing.T) {
 	l := newTestLocal()
 	calls := 0

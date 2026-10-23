@@ -100,6 +100,12 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 			}
 			// quiet when the DB view is empty (expected wipe); else keep per-node ERRORs.
 			l.checkDirty(ctx, allFromDb, len(allFromDb) == 0)
+			l.nodeRegistryReady.Store(true)
+		} else if len(allFromDb) > 0 {
+			// A non-empty initial response is immediately usable. An initial
+			// empty response remains fail-closed until the regular sync loop
+			// confirms scale-to-zero for emptySyncEvictThreshold rounds.
+			l.nodeRegistryReady.Store(true)
 		}
 		return nil
 	}
@@ -166,6 +172,7 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 	if update {
 		l.checkDirty(ctx, allFromDb, false)
 	}
+	l.nodeRegistryReady.Store(true)
 	return nil
 }
 

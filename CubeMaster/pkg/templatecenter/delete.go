@@ -33,7 +33,7 @@ var (
 	deleteImageOnCubelet     = cubelet.DeleteImage
 	getCubeletAddrForDelete  = cubelet.GetCubeletAddr
 	listTemplateSandboxes    = sandbox.ListSandbox
-	runReplicaCleanup        = cleanupTemplateReplicasWithLocators
+	runReplicaCleanup        = cleanupTemplateReplicasForDelete
 	runArtifactCleanup       = cleanupTemplateArtifact
 	runMetadataCleanup       = cleanupTemplateMetadata
 	runTemplateJobCleanup    = cleanupTemplateJobs
@@ -70,14 +70,15 @@ type templateCleanupTargets struct {
 	InstanceType string
 }
 
-// cleanupLocatorKey produces a stable dedup key for a locator. v4: identity
-// is purely the (node id, node ip) pair; SnapshotPath is no longer included
-// because master does not track it.
+// cleanupLocatorKey produces a stable dedup key for a locator. A node id is
+// the durable identity: snapshot/job rows may retain an old IP for the same
+// node, but cleanup must resolve and call that node only once. IP is used only
+// for legacy locators that have no node id.
 func cleanupLocatorKey(locator templateCleanupLocator) string {
-	return strings.Join([]string{
-		strings.TrimSpace(locator.NodeID),
-		strings.TrimSpace(locator.NodeIP),
-	}, "|")
+	if nodeID := strings.TrimSpace(locator.NodeID); nodeID != "" {
+		return "node:" + nodeID
+	}
+	return "ip:" + strings.TrimSpace(locator.NodeIP)
 }
 
 // DeleteTemplateOptions carries the non-identifying knobs of a delete.
@@ -320,8 +321,14 @@ func (t *templateCleanupTargets) addLocator(locator templateCleanupLocator) {
 		return
 	}
 	key := cleanupLocatorKey(locator)
-	for _, existing := range t.Locators {
+	for i, existing := range t.Locators {
 		if cleanupLocatorKey(existing) == key {
+			// Snapshot/job rows can retain different generations of the same
+			// stable node locator. Keep one RPC target, but do not let an
+			// earlier empty address discard a usable address found later.
+			if strings.TrimSpace(existing.NodeIP) == "" && strings.TrimSpace(locator.NodeIP) != "" {
+				t.Locators[i].NodeIP = locator.NodeIP
+			}
 			return
 		}
 	}
@@ -393,8 +400,13 @@ func (t *templateCleanupTargets) shouldCheckInUse() bool {
 
 func cleanupTemplateMetadata(ctx context.Context, templateID string) error {
 	var cleanupErr error
+	// Keep retry tombstones for registered-but-unreachable nodes. The
+	// orphan-replica reconciler removes each row after cubelet cleanup
+	// succeeds, or immediately once CubeOps confirms that the node was
+	// permanently removed.
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateReplicaTableName).
-		Where("template_id = ?", templateID).Delete(&models.TemplateReplica{}).Error; err != nil {
+		Where("template_id = ? AND cleanup_required = ?", templateID, false).
+		Delete(&models.TemplateReplica{}).Error; err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateDefinitionTableName).
@@ -452,10 +464,22 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 	backend = pinnedCleanupBackend(backend)
 	var cleanupErr error
 	for _, locator := range locators {
-		hostIP := locator.NodeIP
-		if hostIP == "" && locator.NodeID != "" {
-			if n, ok := localcache.GetNode(locator.NodeID); ok && n != nil {
-				hostIP = n.HostIP()
+		hostIP := strings.TrimSpace(locator.NodeIP)
+		nodeID := strings.TrimSpace(locator.NodeID)
+		if nodeID != "" {
+			// Prefer the live registry address. A node that re-registered
+			// under the same id has a new IP; dialing the stored one times
+			// out forever.
+			if liveIP, present := lookupRegisteredNodeIP(nodeID); present {
+				if liveIP != "" {
+					hostIP = liveIP
+				}
+			} else if cleanupNodeRegistryAuthoritative() {
+				// The node id was explicitly removed from CubeOps. Its disk
+				// is no longer addressable, so a stored IP must not turn a
+				// retired node into an endless timeout/retry loop.
+				logRetiredCleanupSkip(ctx, templateID, locator)
+				continue
 			}
 		}
 		if hostIP == "" {
