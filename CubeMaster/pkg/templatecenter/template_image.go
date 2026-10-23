@@ -390,7 +390,7 @@ func GetRootfsArtifactInfo(ctx context.Context, artifactID string) (*types.Rootf
 }
 
 // GetRootfsArtifactForRedirect loads the artifact row and validates the
-// download token, but does NOT open the ext4 file. Used by the download
+// download token, but does NOT open the rootfs file. Used by the download
 // handler to decide whether to 302-redirect to the artifact's presigned S3
 // URL (artifact_url non-empty) or fall through to the local-file stream
 // (artifact_url empty, i.e. legacy/local-disk artifacts).
@@ -413,7 +413,7 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 	if record.DownloadToken != "" && token != record.DownloadToken {
 		return nil, nil, fmt.Errorf("invalid artifact token")
 	}
-	f, err := os.Open(record.Ext4Path)
+	f, err := os.Open(record.RootfsPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// This is where the row/file drift is usually discovered: the row is

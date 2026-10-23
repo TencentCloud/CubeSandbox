@@ -33,6 +33,58 @@ func testExecutor(t *testing.T, maxConcurrent int, buildFn func(ctx context.Cont
 
 func req() *types.CreateTemplateFromImageReq { return &types.CreateTemplateFromImageReq{} }
 
+func TestExecutorNormalizesRootfsFormatWithoutChangingCaller(t *testing.T) {
+	for _, format := range []string{"", "ext4"} {
+		t.Run("format="+format, func(t *testing.T) {
+			e := NewExecutor(0)
+			t.Cleanup(e.Shutdown)
+			request := &types.CreateTemplateFromImageReq{RootfsFormat: format}
+			e.lookupJob = func(_ context.Context, _ string, normalized *types.CreateTemplateFromImageReq) error {
+				if normalized.RootfsFormat != "ext4" || normalized == request {
+					t.Errorf("lookup received format=%q original=%t", normalized.RootfsFormat, normalized == request)
+				}
+				return nil
+			}
+			built := make(chan string, 1)
+			e.build = func(_ context.Context, _ string, normalized *types.CreateTemplateFromImageReq, _, _ string, _ []byte) error {
+				built <- normalized.RootfsFormat
+				return nil
+			}
+			if err := e.Submit("job-1", request, "", "", nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-built:
+				if got != "ext4" {
+					t.Fatalf("build format=%q", got)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("build did not start")
+			}
+			if request.RootfsFormat != format {
+				t.Fatal("Submit changed the caller's request")
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsInvalidRootfsBeforeLookup(t *testing.T) {
+	for _, request := range []*types.CreateTemplateFromImageReq{nil, {RootfsFormat: "unknown"}} {
+		e := NewExecutor(0)
+		t.Cleanup(e.Shutdown)
+		e.lookupJob = func(context.Context, string, *types.CreateTemplateFromImageReq) error {
+			t.Fatal("invalid format reached the database")
+			return nil
+		}
+		if err := e.Submit("job-1", request, "", "", nil); !errors.Is(err, ErrBuildJobRequestMismatch) {
+			t.Fatalf("got %v", err)
+		}
+		if e.InFlight() != 0 {
+			t.Fatal("invalid request registered an in-flight build")
+		}
+	}
+}
+
 func TestExecutorRejectsDuplicateJobID(t *testing.T) {
 	release := make(chan struct{})
 	e, _ := testExecutor(t, 0, func(ctx context.Context, jobID string) error {

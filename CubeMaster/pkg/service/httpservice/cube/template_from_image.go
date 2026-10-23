@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	images "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"gorm.io/gorm"
 )
 
@@ -235,9 +236,9 @@ func openTemplateArtifactForDownload(c *gin.Context) (name string, file *os.File
 	}
 	c.Writer.Header().Set("Content-Type", "application/octet-stream")
 	c.Writer.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
-	c.Writer.Header().Set("ETag", record.Ext4SHA256)
+	c.Writer.Header().Set("ETag", record.RootfsSHA256)
 	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
-	return filepath.Base(record.Ext4Path), f, st, true
+	return filepath.Base(record.RootfsPath), f, st, true
 }
 
 // artifactProxyHTTPClient has no total Timeout on purpose: artifact streams
@@ -388,7 +389,7 @@ func artifactStreamsFromStore(record *models.RootfsArtifact) bool {
 
 func setArtifactIdentityHeaders(c *gin.Context, record *models.RootfsArtifact) {
 	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
-	c.Writer.Header().Set("ETag", record.Ext4SHA256)
+	c.Writer.Header().Set("ETag", record.RootfsSHA256)
 }
 
 func streamArtifactFromStore(c *gin.Context, record *models.RootfsArtifact) (bool, bool) {
@@ -405,7 +406,12 @@ func streamArtifactFromStore(c *gin.Context, record *models.RootfsArtifact) (boo
 	defer obj.Body.Close()
 	setArtifactIdentityHeaders(c, record)
 	if rs, ok := obj.Body.(io.ReadSeeker); ok {
-		http.ServeContent(c.Writer, c.Request, record.ArtifactID+".ext4", obj.LastModified, rs)
+		filename, err := images.RootfsFilename(record.ArtifactID, record.RootfsFormat)
+		if err != nil {
+			c.AbortWithStatus(http.StatusBadGateway)
+			return true, false
+		}
+		http.ServeContent(c.Writer, c.Request, filename, obj.LastModified, rs)
 		return true, true
 	}
 	c.Status(http.StatusOK)

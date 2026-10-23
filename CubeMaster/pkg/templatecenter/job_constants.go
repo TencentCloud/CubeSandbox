@@ -60,7 +60,7 @@ const (
 
 	JobPhasePulling            = "PULLING"
 	JobPhaseUnpacking          = "UNPACKING"
-	JobPhaseBuildingExt4       = "BUILDING_EXT4"
+	JobPhaseBuildingRootfs     = "BUILDING_ROOTFS"
 	JobPhaseGeneratingJSON     = "GENERATING_JSON"
 	JobPhaseDistributing       = "DISTRIBUTING"
 	JobPhaseCreatingTemplate   = "CREATING_TEMPLATE"

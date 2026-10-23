@@ -3,7 +3,7 @@
 //
 
 // Package build implements the core template building logic for CubeTemplateCenter.
-// It ONLY does the build work (pull image, mkfs ext4) and reports status back
+// It ONLY does the build work (pull image, build rootfs) and reports status back
 // to CubeMaster via HTTP callback.
 package build
 
@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"gorm.io/gorm"
 )
 
@@ -81,7 +82,7 @@ func (k *keyedMutex) Lock(key string) func() {
 // What TC does:
 //   - Pull image (image.PrepareSource)
 //   - Compute fingerprint + artifact ID (same helpers as local mode)
-//   - Build ext4 (image.BuildExt4), baking envd + CubeEgress CA into rootfs
+//   - Build rootfs (image.BuildRootfs), baking envd + CubeEgress CA into rootfs
 //   - Report status back to CubeMaster via HTTP callback
 //
 // What TC does NOT do (CubeMaster's job):
@@ -124,13 +125,21 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 	// Step 1: Preflight. Assert mkfs.ext4/truncate/cp (and losetup et al. when
 	// loop-mount is enabled) exist and that mkfs.ext4 supports -d BEFORE
 	// spending minutes pulling an image, so a misconfigured host fails fast
-	// at PULLING with a clear message instead of deep inside BUILDING_EXT4.
+	// at PULLING with a clear message instead of deep inside BUILDING_ROOTFS.
 	reportPhase(templatecenter.JobPhasePulling, 5)
-	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
+	if err := image.EnsureRootfsBuildPreflight(ctx, req.RootfsFormat); err != nil {
 		errMsg := fmt.Sprintf("build preflight fail: %v", err)
 		logger.Errorf(errMsg)
 		reportFailed(templatecenter.JobPhasePulling, errMsg)
 		return fmt.Errorf("build preflight: %w", err)
+	}
+	// Resolve the shared store before pulling. An explicitly selected fs store
+	// cannot fall back to local-only artifacts when opening it fails.
+	s3Client, s3CfgEnabled := SharedS3Client()
+	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
+		err := fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
+		reportFailed(templatecenter.JobPhasePulling, err.Error())
+		return err
 	}
 
 	// Step 2: Pull image. Progress callbacks stream into the shared Redis
@@ -154,7 +163,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		defer source.Cleanup(context.Background())
 	}
 	// Docker/Podman engine pulls complete inside PrepareSource; dockerless and
-	// native modes keep streaming during BuildExt4, so their flush waits.
+	// native modes keep streaming during BuildRootfs, so their flush waits.
 	pullProgressFlushed := false
 	if source.ExportMode == image.ExportModeDocker {
 		pullProgress.flush(true)
@@ -207,15 +216,6 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		logger.Warnf("report fingerprint fail: %v", err)
 	}
 
-	// Resolve S3 config once for both reuse and fresh-build paths. This is
-	// done before acquiring the artifact lock so the lock-free polling path
-	// can still generate presigned URLs when reusing an artifact built by a
-	// sibling replica.
-	s3Client, s3CfgEnabled := SharedS3Client()
-	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
-		return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
-	}
-
 	// Step 6: Serialize same-spec builds (fingerprint, not artifactID — the
 	// latter includes a UUID). The in-process lock protects filesystem work
 	// between goroutines; the DB session lock excludes sibling TC replicas.
@@ -253,7 +253,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 	}
 }
 
-// runBuildLocked performs the reuse check, ext4 conversion, S3 upload and
+// runBuildLocked performs the reuse check, rootfs construction, S3 upload and
 // BUILT report while holding the per-artifact lock. It is used both by the
 // in-process fallback and by the cross-instance DB session lock.
 func runBuildLocked(
@@ -295,17 +295,17 @@ func runBuildLocked(
 
 	if db := templatecenter.GetDB(); db != nil {
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
-			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.Ext4Path)
-			// The reused ext4 already contains the CA baked at build time; report
+			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.RootfsPath)
+			// The reused rootfs already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
 			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
 		}
 	}
 
-	// Step 7: Build ext4 (export rootfs, bake envd + CA, mkfs)
-	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
+	// Step 7: Build rootfs (export rootfs, bake envd + CA, mkfs)
+	reportPhase(templatecenter.JobPhaseBuildingRootfs, 40)
 	var caBakeResult cube_egress_ca.Result
-	opts := image.BuildOptions{ArtifactID: artifactID}
+	opts := image.BuildOptions{ArtifactID: artifactID, RootfsFormat: req.RootfsFormat}
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
 		if _, err := templatecenter.InjectEnvdPayloadIntoRootfs(ctx, rootfsDir, envdPayload); err != nil {
 			return err
@@ -317,48 +317,47 @@ func runBuildLocked(
 		caBakeResult, err = ApplyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
 		return err
 	}
-	result, err := image.BuildExt4(ctx, source, opts)
+	result, err := image.BuildRootfs(ctx, source, opts)
 	if !pullProgressFlushed {
-		// Dockerless / native modes stream pull progress during BuildExt4, so
+		// Dockerless / native modes stream pull progress during BuildRootfs, so
 		// flush only once all pull callbacks can no longer fire.
 		pullProgress.flush(err == nil)
 		pullProgressFlushed = true
 	}
 	if err != nil {
-		errMsg := fmt.Sprintf("build ext4 fail: %v", err)
+		errMsg := fmt.Sprintf("build rootfs fail: %v", err)
 		logger.Errorf(errMsg)
 		// Remove the half-written store dir so a failed build does not leak
-		// disk. BuildExt4 cleans up on its own error paths, but a partially
+		// disk. BuildRootfs cleans up on its own error paths, but a partially
 		// created dir (or a PostRootfsExport failure) can survive.
 		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}
-		reportFailed(templatecenter.JobPhaseBuildingExt4, errMsg)
-		return fmt.Errorf("build ext4: %w", err)
+		reportFailed(templatecenter.JobPhaseBuildingRootfs, errMsg)
+		return fmt.Errorf("build rootfs: %w", err)
 	}
 
 	// Step 8: Upload to the configured blob backend, then report BUILT.
 	// backend=s3 keeps today's fallback-to-local-disk on upload failure.
 	// backend=fs is explicit: a failed put is a failed build.
-	artifactURL := ""
-	uploaded := false
+	var location artifactStoreLocation
 	if s3CfgEnabled && s3Client != nil {
-		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
+		objectKey, err := s3Client.Upload(ctx, s3Client.FullObjectKey(filepath.Base(result.RootfsPath)), result.RootfsPath, result.SHA256)
+		if err != nil {
 			if s3Client.BackendName() == "fs" {
-				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
+				reportFailed(templatecenter.JobPhaseBuildingRootfs, fmt.Sprintf("upload artifact to fs store: %v", err))
 				return fmt.Errorf("upload artifact to fs store: %w", err)
 			}
 			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
 		} else {
-			uploaded = true
-			artifactURL = artifactPresignedURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
+			location = storedArtifactLocation(ctx, s3Client, objectKey, logger)
 		}
 	}
 
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, location, logger); err != nil {
 		return err
 	}
 
@@ -380,24 +379,31 @@ func reportExistingArtifact(
 	s3Client *s3store.Client,
 	logger *cubelog.Entry,
 ) error {
-	inStore := false
-	objectKey := ""
-	if s3Client != nil {
-		exists, err := s3Client.Stat(ctx, existing.ArtifactID)
-		if err == nil && exists {
-			inStore = true
-			objectKey = strings.TrimSpace(existing.ObjectKey)
-		}
+	objectKey := templatecenter.ArtifactObjectKey(existing)
+	if existing.ObjectKey == "" && s3Client != nil {
+		objectKey = s3Client.FullObjectKey(objectKey)
 	}
-	artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
+	var location artifactStoreLocation
+	if s3CfgEnabled && s3Client != nil {
+		location = findStoredArtifact(ctx, s3Client, objectKey, logger)
+	}
 	return reportArtifactBuilt(ctx, jobID, &image.BuildResult{
-		Ext4Path:  existing.Ext4Path,
-		SHA256:    existing.Ext4SHA256,
-		SizeBytes: existing.Ext4SizeBytes,
+		RootfsFormat: existing.RootfsFormat,
+		RootfsPath:   existing.RootfsPath,
+		SHA256:       existing.RootfsSHA256,
+		SizeBytes:    existing.RootfsSizeBytes,
 	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
-	}, artifactURL, inStore, s3Client, objectKey, logger)
+	}, location, logger)
+}
+
+// artifactStoreLocation describes a confirmed durable copy, independently of
+// whether a download URL could be signed for it.
+type artifactStoreLocation struct {
+	URL       string
+	Backend   string
+	ObjectKey string
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -410,10 +416,7 @@ func reportArtifactBuilt(
 	source *image.PreparedSource,
 	reporter *Reporter,
 	caResult cube_egress_ca.Result,
-	artifactURL string,
-	inStore bool,
-	s3Client *s3store.Client,
-	objectKey string,
+	location artifactStoreLocation,
 	logger *cubelog.Entry,
 ) error {
 	// Two fields deserve explanation:
@@ -426,7 +429,7 @@ func reportArtifactBuilt(
 	// BASE URL (image.PrepareSource sets it to
 	// NormalizeBaseURL(spec.DownloadBaseURL)). CubeMaster passed its own
 	// request base URL down when submitting the job, so echoing it back
-	// keeps the data plane identical to local mode: Cubelet pulls the ext4
+	// keeps the data plane identical to local mode: Cubelet pulls the rootfs
 	// from CubeMaster, not from TC. distributeRootfsArtifact rejects an
 	// empty value, so it must be reported.
 	payload := map[string]any{
@@ -437,27 +440,22 @@ func reportArtifactBuilt(
 		"artifact_status":                templatecenter.ArtifactStatusReady,
 		"template_spec_fingerprint":      fingerprint,
 		"source_image_digest":            source.Digest,
-		"ext4_path":                      result.Ext4Path,
-		"ext4_sha256":                    result.SHA256,
-		"ext4_size_bytes":                result.SizeBytes,
 		"image_config_json":              source.ConfigJSON,
 		"master_node_ip":                 source.MasterNodeIP,
 		"cube_egress_ca_baked":           caResult.Baked,
 		"cube_egress_ca_fingerprint":     caResult.Fingerprint,
 		"cube_egress_ca_targets_written": caResult.TargetsWritten,
 	}
-	if artifactURL != "" {
-		payload["artifact_url"] = artifactURL
+	imagev1.AddRootfsMetadata(payload, imagev1.RootfsMetadata{Format: result.RootfsFormat, Path: result.RootfsPath, SHA256: result.SHA256, SizeBytes: result.SizeBytes})
+	if location.URL != "" {
+		payload["artifact_url"] = location.URL
 	}
 	// Only stamp backend/key after a successful upload (or reuse of an
 	// already-stored object). A configured client that failed Put must
 	// leave the three store columns empty so Master stays on local disk.
-	if inStore && s3Client != nil {
-		payload["storage_backend"] = s3Client.BackendName()
-		if objectKey == "" {
-			objectKey = s3Client.FullObjectKey(artifactID)
-		}
-		payload["object_key"] = objectKey
+	if location.ObjectKey != "" {
+		payload["storage_backend"] = location.Backend
+		payload["object_key"] = location.ObjectKey
 	}
 	if err := reporter.Report(ctx, jobID, payload); err != nil {
 		logger.Errorf("report BUILT status fail: %v", err)
@@ -466,48 +464,52 @@ func reportArtifactBuilt(
 	return nil
 }
 
-// artifactS3Ops is the subset of s3store.Client artifactPresignedURL needs;
+// artifactS3Ops is the subset of s3store.Client used to resolve stored artifacts;
 // an interface so tests can fake the bucket.
 type artifactS3Ops interface {
-	Stat(ctx context.Context, artifactID string) (bool, error)
-	PresignedGetURL(ctx context.Context, artifactID string) (string, error)
+	Stat(ctx context.Context, objectKey string) (bool, error)
+	PresignedGetURL(ctx context.Context, objectKey string) (string, error)
+	BackendName() string
 }
 
-// artifactPresignedURL returns a presigned URL for an S3-backed artifact, or
-// an empty string when S3 is disabled, the object is missing, or URL
-// generation fails.
+// findStoredArtifact confirms the durable copy before reporting its location.
 //
 // The Stat guard matters on the REUSE path: reuseExistingArtifact can match a
 // legacy artifact that predates S3 (built local-only, artifact_url empty,
-// ext4 still on disk). Presigning a URL for an object that was never uploaded
+// rootfs still on disk). Presigning a URL for an object that was never uploaded
 // hands Cubelets a signed URL that 404s (NoSuchKey) -- worse than no URL at
 // all, because the row then looks S3-backed and the local-file serving path
-// is skipped. Returning "" keeps the artifact on the local-disk download path
+// is skipped. An empty location keeps the artifact on the local-disk download path
 // (and `tpl merge` can migrate it to S3 later).
-func artifactPresignedURL(ctx context.Context, s3CfgEnabled bool, s3Client artifactS3Ops, artifactID string, logger *cubelog.Entry) string {
-	if !s3CfgEnabled || s3Client == nil {
-		return ""
-	}
-	exists, err := s3Client.Stat(ctx, artifactID)
+func findStoredArtifact(ctx context.Context, store artifactS3Ops, objectKey string, logger *cubelog.Entry) artifactStoreLocation {
+	exists, err := store.Stat(ctx, objectKey)
 	if err != nil {
 		logger.Warnf("stat s3 object before presign fail: %v", err)
-		return ""
+		return artifactStoreLocation{}
 	}
 	if !exists {
-		logger.Warnf("artifact %s has no s3 object (predates s3 or was never uploaded); not presigning, keeping the local-disk download path", artifactID)
-		return ""
+		logger.Warnf("artifact %s has no s3 object (predates s3 or was never uploaded); not presigning, keeping the local-disk download path", objectKey)
+		return artifactStoreLocation{}
 	}
-	url, err := s3Client.PresignedGetURL(ctx, artifactID)
+	return storedArtifactLocation(ctx, store, objectKey, logger)
+}
+
+// storedArtifactLocation is used after a successful upload or existence check.
+// A signing failure must not discard the confirmed backend and object key.
+func storedArtifactLocation(ctx context.Context, store artifactS3Ops, objectKey string, logger *cubelog.Entry) artifactStoreLocation {
+	location := artifactStoreLocation{Backend: store.BackendName(), ObjectKey: objectKey}
+	url, err := store.PresignedGetURL(ctx, objectKey)
 	if err != nil {
 		if !errors.Is(err, blobstore.ErrUnsupported) {
 			logger.Warnf("generate s3 presigned url fail: %v", err)
 		}
-		return ""
+		return location
 	}
 	if blobstore.IsObjectLocator(url) {
-		return ""
+		return location
 	}
-	return url
+	location.URL = url
+	return location
 }
 
 // cleanupArtifactResidue removes the work dir and the artifact store dir for a
@@ -555,7 +557,7 @@ func isBuildInProgress(storeDir string) bool {
 }
 
 // reuseExistingArtifact returns a READY artifact for fingerprint when its
-// data is still present (object store HEAD, or local ext4). Used so a
+// data is still present (object store HEAD, or local rootfs). Used so a
 // sibling replica's just-finished build is reused instead of rebuilt.
 func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string, s3CfgEnabled bool, s3Client *s3store.Client) (*models.RootfsArtifact, bool) {
 	var artifact models.RootfsArtifact
@@ -572,7 +574,7 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 
 	var statS3 func() (bool, error)
 	if s3CfgEnabled && s3Client != nil {
-		statS3 = func() (bool, error) { return s3Client.Stat(ctx, artifact.ArtifactID) }
+		statS3 = func() (bool, error) { return s3Client.Stat(ctx, templatecenter.ArtifactObjectKey(&artifact)) }
 	}
 	reason, ok := artifactDataExists(&artifact, statS3)
 	if !ok {
@@ -591,7 +593,7 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 //   - Object-store artifacts (StorageBackend or ArtifactURL set) are verified
 //     via statS3 (a HEAD against the bucket), NOT os.Stat. Multiple TC
 //     replicas do not necessarily share local disk when S3/MinIO is
-//     configured -- checking only os.Stat(Ext4Path) meant a replica other
+//     configured -- checking only os.Stat(RootfsPath) meant a replica other
 //     than the one that built the artifact would always see the local file
 //     "missing" and silently fall through to a full rebuild.
 //   - If the HEAD check itself errors (transient network issue, not
@@ -614,8 +616,8 @@ func artifactDataExists(artifact *models.RootfsArtifact, statS3 func() (bool, er
 		}
 	}
 
-	if _, err := os.Stat(artifact.Ext4Path); err != nil {
-		return fmt.Sprintf("ext4 file %s missing: %v", artifact.Ext4Path, err), false
+	if _, err := os.Stat(artifact.RootfsPath); err != nil {
+		return fmt.Sprintf("rootfs file %s missing: %v", artifact.RootfsPath, err), false
 	}
-	return fmt.Sprintf("ext4: %s, %d bytes", artifact.Ext4Path, artifact.Ext4SizeBytes), true
+	return fmt.Sprintf("rootfs (%s): %s, %d bytes", artifact.RootfsFormat, artifact.RootfsPath, artifact.RootfsSizeBytes), true
 }

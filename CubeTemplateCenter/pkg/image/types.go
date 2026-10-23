@@ -23,19 +23,21 @@ type SourceSpec struct {
 }
 
 type BuildOptions struct {
-	ArtifactID string
+	ArtifactID   string
+	RootfsFormat string
 	// PostRootfsExport is invoked after the image rootfs has been exported to
-	// the working directory but before mkfs.ext4 runs, so callers can mutate
+	// the working directory but before filesystem creation, so callers can mutate
 	// the rootfs (e.g. bake the CubeEgress root CA into the trust store). The
-	// callback receives the rootfs directory path that mkfs.ext4 will consume.
+	// callback receives the rootfs directory consumed by the filesystem builder.
 	// A non-nil error aborts the build.
 	PostRootfsExport func(ctx context.Context, rootfsDir string) error
 }
 
 type BuildResult struct {
-	Ext4Path  string
-	SHA256    string
-	SizeBytes int64
+	RootfsFormat string
+	RootfsPath   string
+	SHA256       string
+	SizeBytes    int64
 }
 
 type dockerInspectImage struct {

@@ -98,7 +98,7 @@ func TestSharedTokenHeader(t *testing.T) {
 	if err := c.SubmitBuildJob(context.Background(), "job-1", nil, "", "", nil); err != nil {
 		t.Fatalf("SubmitBuildJob() error = %v", err)
 	}
-	if _, err := c.UploadArtifact(context.Background(), "art-1", artifactPath); err != nil {
+	if _, err := c.UploadArtifact(context.Background(), "art-1", artifactPath, "ext4"); err != nil {
 		t.Fatalf("UploadArtifact() error = %v", err)
 	}
 	if gotDelete != "s3cr3t" || gotSubmit != "s3cr3t" || gotUpload != "s3cr3t" {
@@ -113,7 +113,7 @@ func TestSharedTokenHeader(t *testing.T) {
 	if err := c.SubmitBuildJob(context.Background(), "job-1", nil, "", "", nil); err != nil {
 		t.Fatalf("SubmitBuildJob() error = %v", err)
 	}
-	if _, err := c.UploadArtifact(context.Background(), "art-1", artifactPath); err != nil {
+	if _, err := c.UploadArtifact(context.Background(), "art-1", artifactPath, "ext4"); err != nil {
 		t.Fatalf("UploadArtifact() error = %v", err)
 	}
 	if gotDelete != "" || gotSubmit != "" || gotUpload != "" {
@@ -152,17 +152,17 @@ func TestUploadArtifactStreamsMultipart(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(UploadArtifactResponse{
-			Status:        "uploaded",
-			ArtifactID:    gotArtifactID,
-			Ext4Path:      artifactPath,
-			Ext4SHA256:    "sha256",
-			Ext4SizeBytes: int64(len(gotFileBytes)),
+			Status:          "uploaded",
+			ArtifactID:      gotArtifactID,
+			RootfsPath:      artifactPath,
+			RootfsSHA256:    "sha256",
+			RootfsSizeBytes: int64(len(gotFileBytes)),
 		})
 	}))
 	defer srv.Close()
 
 	client := NewClient(srv.URL)
-	resp, err := client.UploadArtifact(context.Background(), "rfs-test", artifactPath)
+	resp, err := client.UploadArtifact(context.Background(), "rfs-test", artifactPath, "ext4")
 	if err != nil {
 		t.Fatalf("UploadArtifact failed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestUploadArtifactStreamsMultipart(t *testing.T) {
 	if string(gotFileBytes) != string(payload) {
 		t.Fatalf("uploaded bytes=%q, want %q", string(gotFileBytes), string(payload))
 	}
-	if resp.Ext4SizeBytes != int64(len(payload)) {
-		t.Fatalf("resp.Ext4SizeBytes=%d, want %d", resp.Ext4SizeBytes, len(payload))
+	if resp.RootfsSizeBytes != int64(len(payload)) {
+		t.Fatalf("resp.RootfsSizeBytes=%d, want %d", resp.RootfsSizeBytes, len(payload))
 	}
 }

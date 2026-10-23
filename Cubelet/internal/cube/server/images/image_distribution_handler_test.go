@@ -78,7 +78,8 @@ func TestEnsureDistributedTemplateImageExt4DoesNotRequireKernelFile(t *testing.T
 	baseDir := t.TempDir()
 	initTestPmemPaths(t, baseDir)
 
-	imagePath := pmem.GetRawImageFilePath(cubebox.InstanceType_cubebox.String(), "artifact-2")
+	imagePath, pathErr := pmem.GetRootfsFilePath(cubebox.InstanceType_cubebox.String(), "artifact-2", "ext4")
+	require.NoError(t, pathErr)
 	writeImageTestFile(t, imagePath, bytes.Repeat([]byte("e"), 4096))
 
 	err := ensureDistributedTemplateImage(context.Background(), nil, &templatetypes.TemplateImage{

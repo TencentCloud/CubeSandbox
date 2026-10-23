@@ -321,7 +321,7 @@ func TestIsTerminalReport(t *testing.T) {
 		// A non-string status is a caller bug; treating it as terminal would
 		// silently triple the retry budget.
 		{name: "non-string-status", fields: map[string]any{"status": 200}},
-		{name: "unknown-status", fields: map[string]any{"status": "BUILDING_EXT4"}},
+		{name: "unknown-status", fields: map[string]any{"status": "BUILDING_ROOTFS"}},
 	}
 
 	for _, tc := range tests {

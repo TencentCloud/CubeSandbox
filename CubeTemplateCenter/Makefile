@@ -23,14 +23,13 @@ $(APPS): %:
 		          -X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=$(VERSION)" \
 		./cmd/$@/
 
-# 本仓库无业务测试, test target 仅编译验证 (CGO=0 + GOOS=linux 跨编译).
-# 在 mac 上 GOOS=linux + CGO_ENABLED=1 会因为缺 Linux header 失败,
-# 所以 CGO_ENABLED=0 (不启用 race). CI 里跑测试请用 Linux 容器.
+# Tests use Linux-only code and gomonkey patches, so run them in the Linux
+# builder with inlining disabled. These targets use CGO=0 without race detection.
 test:
-	CGO_ENABLED=0 go test -short -count=1 ./...
+	CGO_ENABLED=0 go test -short -gcflags=all=-l -count=1 ./...
 
 test-integration:
-	CGO_ENABLED=0 CUBEMASTER_REQUIRE_DOCKER_TESTS=1 go test -count=1 ./...
+	CGO_ENABLED=0 CUBEMASTER_REQUIRE_DOCKER_TESTS=1 go test -gcflags=all=-l -count=1 ./...
 
 fmt:
 	go fmt ./...

@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
+	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 // TemplateArtifactMigrationResult is the outcome of migrating one template's
@@ -28,9 +29,10 @@ type TemplateArtifactMigrationResult struct {
 }
 
 type templateCenterUploadResult struct {
-	Ext4Path   string
-	Ext4SHA256 string
-	SizeBytes  int64
+	RootfsFormat string
+	RootfsPath   string
+	RootfsSHA256 string
+	SizeBytes    int64
 }
 
 // validateTCLocalArtifactPath ensures the path TC reports back for a migrated
@@ -39,16 +41,20 @@ type templateCenterUploadResult struct {
 // misconfigured or malicious upload response could leave rootfs_artifacts
 // pointing at an arbitrary host path, which later breaks download probes,
 // reuse checks, and cleanup.
-func validateTCLocalArtifactPath(artifactID, path string) error {
+func validateTCLocalArtifactPath(artifactID, path, format string) error {
+	filename, err := imagev1.RootfsFilename(artifactID, format)
+	if err != nil {
+		return err
+	}
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
-		return fmt.Errorf("template center returned an empty ext4 path for artifact %s", artifactID)
+		return fmt.Errorf("template center returned an empty rootfs path for artifact %s", artifactID)
 	}
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("template center returned non-absolute ext4 path %q for artifact %s", path, artifactID)
+		return fmt.Errorf("template center returned non-absolute rootfs path %q for artifact %s", path, artifactID)
 	}
-	if filepath.Base(path) != artifactID+".ext4" || filepath.Base(filepath.Dir(path)) != artifactID {
-		return fmt.Errorf("template center returned ext4 path %q that does not match the artifact layout for %s", path, artifactID)
+	if filepath.Base(path) != filename || filepath.Base(filepath.Dir(path)) != artifactID {
+		return fmt.Errorf("template center returned rootfs path %q that does not match the artifact layout for %s", path, artifactID)
 	}
 	roots := []string{ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
@@ -64,12 +70,12 @@ func validateTCLocalArtifactPath(artifactID, path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("template center returned ext4 path %q outside the TC artifact store roots %v", path, roots)
+	return fmt.Errorf("template center returned rootfs path %q outside the TC artifact store roots %v", path, roots)
 }
 
-// uploadArtifactFileToTC uploads one artifact ext4 file into CubeTemplateCenter's
+// uploadArtifactFileToTC uploads one artifact rootfs file into CubeTemplateCenter's
 // own artifact store and returns the stored file metadata.
-var uploadArtifactFileToTC = func(ctx context.Context, artifactID, filePath string) (*templateCenterUploadResult, error) {
+var uploadArtifactFileToTC = func(ctx context.Context, artifact *models.RootfsArtifact, filePath string) (*templateCenterUploadResult, error) {
 	endpoint := ""
 	if cfg := config.GetConfig(); cfg != nil {
 		endpoint = cfg.TemplateCenterAddr()
@@ -77,19 +83,20 @@ var uploadArtifactFileToTC = func(ctx context.Context, artifactID, filePath stri
 	if strings.TrimSpace(endpoint) == "" {
 		return nil, fmt.Errorf("template center endpoint is not configured")
 	}
-	res, err := tcclient.NewClient(endpoint).UploadArtifact(ctx, artifactID, filePath)
+	res, err := tcclient.NewClient(endpoint).UploadArtifact(ctx, artifact.ArtifactID, filePath, artifact.RootfsFormat)
 	if err != nil {
 		return nil, err
 	}
 	return &templateCenterUploadResult{
-		Ext4Path:   res.Ext4Path,
-		Ext4SHA256: res.Ext4SHA256,
-		SizeBytes:  res.Ext4SizeBytes,
+		RootfsFormat: res.RootfsFormat,
+		RootfsPath:   res.RootfsPath,
+		RootfsSHA256: res.RootfsSHA256,
+		SizeBytes:    res.RootfsSizeBytes,
 	}, nil
 }
 
 // MigrateTemplateArtifactToTC migrates one template's rootfs artifact to
-// TC-backed storage and removes the local ext4 file on CubeMaster.
+// TC-backed storage and removes the local rootfs file on CubeMaster.
 //
 // The caller must pass a concrete template ID (resolve alias beforehand).
 func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*TemplateArtifactMigrationResult, error) {
@@ -103,11 +110,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	result := &TemplateArtifactMigrationResult{TemplateID: templateID}
 
 	type artifactSnapshot struct {
-		artifactID  string
-		objectKey   string
-		status      string
-		artifactURL string
-		ext4Path    string
+		artifactID   string
+		rootfsFormat string
+		objectKey    string
+		status       string
+		artifactURL  string
+		rootfsPath   string
 	}
 	snapshot := artifactSnapshot{}
 	if err := withTemplateWriteLock(templateID, func() error {
@@ -130,11 +138,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			return err
 		}
 		snapshot = artifactSnapshot{
-			artifactID:  artifactID,
-			objectKey:   strings.TrimSpace(artifact.ObjectKey),
-			status:      strings.TrimSpace(artifact.Status),
-			artifactURL: strings.TrimSpace(artifact.ArtifactURL),
-			ext4Path:    strings.TrimSpace(artifact.Ext4Path),
+			artifactID:   artifactID,
+			rootfsFormat: artifact.RootfsFormat,
+			objectKey:    strings.TrimSpace(artifact.ObjectKey),
+			status:       strings.TrimSpace(artifact.Status),
+			artifactURL:  strings.TrimSpace(artifact.ArtifactURL),
+			rootfsPath:   strings.TrimSpace(artifact.RootfsPath),
 		}
 		return nil
 	}); err != nil {
@@ -145,8 +154,9 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	// Already S3-backed: verify object existence, then clean local residue.
 	if snapshot.artifactURL != "" {
 		exists, statErr := statArtifactObjectInS3(ctx, &models.RootfsArtifact{
-			ArtifactID: snapshot.artifactID,
-			ObjectKey:  snapshot.objectKey,
+			ArtifactID:   snapshot.artifactID,
+			ObjectKey:    snapshot.objectKey,
+			RootfsFormat: snapshot.rootfsFormat,
 		})
 		if statErr != nil {
 			return nil, fmt.Errorf("check s3 object for artifact %s: %w", snapshot.artifactID, statErr)
@@ -158,12 +168,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 				"migration cannot repair it (there is nothing left to upload) -- rebuild the rootfs instead "+
 				"(`cubemastercli tpl redo --template-id %s`)", snapshot.artifactID, templateID)
 		}
-		cleaned, cleanErr := removeLocalArtifactFile(snapshot.ext4Path)
+		cleaned, cleanErr := removeLocalArtifactFile(snapshot.rootfsPath)
 		if cleanErr != nil {
 			// Best-effort: the artifact is already fully durable in S3, so
 			// failing the whole job over a stale local file would be misleading.
 			log.G(ctx).Errorf("artifact %s already migrated to s3 but failed to remove stale local file %q; will retry on next `tpl merge`: %v",
-				snapshot.artifactID, snapshot.ext4Path, cleanErr)
+				snapshot.artifactID, snapshot.rootfsPath, cleanErr)
 			result.Migrated = false
 			result.Cleaned = false
 			return result, nil
@@ -176,14 +186,14 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 		return result, nil
 	}
 
-	ext4Path := snapshot.ext4Path
-	if ext4Path == "" {
-		return nil, fmt.Errorf("artifact %s ext4_path is empty", snapshot.artifactID)
+	rootfsPath := snapshot.rootfsPath
+	if rootfsPath == "" {
+		return nil, fmt.Errorf("artifact %s rootfs_path is empty", snapshot.artifactID)
 	}
-	info, err := os.Stat(ext4Path)
+	info, err := os.Stat(rootfsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Idempotency: in split-tier mode, a migrated artifact's ext4_path may
+			// Idempotency: in split-tier mode, a migrated artifact's rootfs_path may
 			// point to TC-local disk and therefore be absent on CubeMaster.
 			if artifactServedByRemoteTier() {
 				artifact, loadErr := getRootfsArtifactByID(ctx, snapshot.artifactID)
@@ -195,60 +205,67 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 					}
 				}
 			}
-			return nil, fmt.Errorf("artifact %s local ext4 is missing at %q", snapshot.artifactID, ext4Path)
+			return nil, fmt.Errorf("artifact %s local rootfs is missing at %q", snapshot.artifactID, rootfsPath)
 		}
-		return nil, fmt.Errorf("stat local ext4 %q for artifact %s: %w", ext4Path, snapshot.artifactID, err)
+		return nil, fmt.Errorf("stat local rootfs %q for artifact %s: %w", rootfsPath, snapshot.artifactID, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("artifact %s ext4 path %q is not a regular file", snapshot.artifactID, ext4Path)
+		return nil, fmt.Errorf("artifact %s rootfs path %q is not a regular file", snapshot.artifactID, rootfsPath)
 	}
 
 	// Upload happens OUTSIDE the template write lock so long transfers do not
 	// block unrelated writes (delete/redo/alias updates) for this template.
 	updates := map[string]any{}
 	uploadedToS3 := false
-	targetExt4Path := ext4Path
-	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path); err == nil {
-		presignedURL, presignErr := presignArtifactGetURL(ctx, &models.RootfsArtifact{
-			ArtifactID: snapshot.artifactID,
-			ObjectKey:  snapshot.objectKey,
-		})
+	targetRootfsPath := rootfsPath
+	target := &models.RootfsArtifact{ArtifactID: snapshot.artifactID, RootfsFormat: snapshot.rootfsFormat, ObjectKey: snapshot.objectKey}
+	if target.ObjectKey == "" {
+		key, err := NewArtifactObjectKey(artifactStorePrefix(), target.ArtifactID, target.RootfsFormat)
+		if err != nil {
+			return nil, err
+		}
+		target.ObjectKey = key
+	}
+	if err := uploadArtifactFileToS3(ctx, target, rootfsPath); err == nil {
+		presignedURL, presignErr := presignArtifactGetURL(ctx, target)
 		if presignErr != nil {
 			return nil, fmt.Errorf("presign migrated artifact %s: %w", snapshot.artifactID, presignErr)
 		}
 		uploadedToS3 = true
 		updates = map[string]any{
-			"artifact_url": presignedURL,
-			"status":       ArtifactStatusReady,
-			"last_error":   "",
+			"artifact_url":  presignedURL,
+			"rootfs_format": snapshot.rootfsFormat,
+			"status":        ArtifactStatusReady,
+			"last_error":    "",
 		}
-		if backend, objectKey := artifactStoreColumns(snapshot.artifactID); backend != "" {
-			updates["storage_backend"] = backend
-			updates["object_key"] = objectKey
+		if st := sharedArtifactStore(); st != nil {
+			updates["storage_backend"] = st.backend
+			updates["object_key"] = target.ObjectKey
 		}
 	} else {
 		if !errors.Is(err, errS3PresignNotConfigured) {
 			return nil, err
 		}
-		uploadRes, uploadErr := uploadArtifactFileToTC(ctx, snapshot.artifactID, ext4Path)
+		uploadRes, uploadErr := uploadArtifactFileToTC(ctx, target, rootfsPath)
 		if uploadErr != nil {
 			return nil, fmt.Errorf("upload artifact %s to template center store: %w", snapshot.artifactID, uploadErr)
 		}
-		if err := validateTCLocalArtifactPath(snapshot.artifactID, uploadRes.Ext4Path); err != nil {
+		if err := validateTCLocalArtifactPath(snapshot.artifactID, uploadRes.RootfsPath, snapshot.rootfsFormat); err != nil {
 			return nil, fmt.Errorf("invalid template center upload path for artifact %s: %w", snapshot.artifactID, err)
 		}
-		targetExt4Path = uploadRes.Ext4Path
+		targetRootfsPath = uploadRes.RootfsPath
 		updates = map[string]any{
-			"artifact_url": "",
-			"ext4_path":    uploadRes.Ext4Path,
-			"status":       ArtifactStatusReady,
-			"last_error":   "",
+			"artifact_url":  "",
+			"rootfs_format": snapshot.rootfsFormat,
+			"rootfs_path":   uploadRes.RootfsPath,
+			"status":        ArtifactStatusReady,
+			"last_error":    "",
 		}
-		if strings.TrimSpace(uploadRes.Ext4SHA256) != "" {
-			updates["ext4_sha256"] = uploadRes.Ext4SHA256
+		if strings.TrimSpace(uploadRes.RootfsSHA256) != "" {
+			updates["rootfs_sha256"] = uploadRes.RootfsSHA256
 		}
 		if uploadRes.SizeBytes > 0 {
-			updates["ext4_size_bytes"] = uploadRes.SizeBytes
+			updates["rootfs_size_bytes"] = uploadRes.SizeBytes
 		}
 	}
 
@@ -291,7 +308,7 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 		return nil, err
 	}
 
-	if !uploadedToS3 && shouldSkipLocalCleanup(ext4Path, targetExt4Path) {
+	if !uploadedToS3 && shouldSkipLocalCleanup(rootfsPath, targetRootfsPath) {
 		// Nothing was removed, but the row's stored path did change above.
 		result.Migrated = true
 		result.Cleaned = false
@@ -300,14 +317,14 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	}
 
 	// Local cleanup is best-effort in both branches.
-	cleaned, cleanErr := removeLocalArtifactFile(ext4Path)
+	cleaned, cleanErr := removeLocalArtifactFile(rootfsPath)
 	if cleanErr != nil {
 		if uploadedToS3 {
 			log.G(ctx).Errorf("artifact %s migrated to s3 but failed to remove stale local file %q; will retry on next `tpl merge`: %v",
-				snapshot.artifactID, ext4Path, cleanErr)
+				snapshot.artifactID, rootfsPath, cleanErr)
 		} else {
 			log.G(ctx).Errorf("artifact %s migrated to template center store but failed to remove stale local file %q; manual cleanup required: %v",
-				snapshot.artifactID, ext4Path, cleanErr)
+				snapshot.artifactID, rootfsPath, cleanErr)
 		}
 		result.Migrated = true
 		result.Cleaned = false

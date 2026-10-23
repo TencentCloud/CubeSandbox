@@ -46,8 +46,8 @@ func cleanupFailedRootfsArtifact(ctx context.Context, artifact *models.RootfsArt
 	return cleanupArtifactFully(ctx, artifact.ArtifactID, instanceType, templateID)
 }
 
-func cleanupLocalRootfsArtifact(artifactID, ext4Path string) error {
-	if ext4Path == "" {
+func cleanupLocalRootfsArtifact(artifactID, rootfsPath string) error {
+	if rootfsPath == "" {
 		return nil
 	}
 	// S8/L8: only ever RemoveAll inside a recognised managed artifact root. A
@@ -55,7 +55,7 @@ func cleanupLocalRootfsArtifact(artifactID, ext4Path string) error {
 	// it indicates corrupt metadata or an attempted out-of-bounds delete and is
 	// surfaced as an error for manual handling rather than risking deletion of
 	// an arbitrary host file.
-	if dir, ok := managedArtifactDir(artifactID, ext4Path); ok {
+	if dir, ok := managedArtifactDir(artifactID, rootfsPath); ok {
 		// Never delete a directory a build is actively writing. The per-artifact
 		// build lock only covers this process, but CubeTemplateCenter builds in
 		// a separate process while sharing this disk, and the native exporter
@@ -74,16 +74,16 @@ func cleanupLocalRootfsArtifact(artifactID, ext4Path string) error {
 		return os.RemoveAll(dir) // NOCC:Path Traversal()
 	}
 	log.G(context.Background()).Errorf(
-		"refusing to delete rootfs artifact %s: ext4 path %q is outside managed artifact roots; manual cleanup required",
-		artifactID, ext4Path)
-	return fmt.Errorf("rootfs artifact %s ext4 path %q is outside managed artifact roots", artifactID, ext4Path)
+		"refusing to delete rootfs artifact %s: rootfs path %q is outside managed artifact roots; manual cleanup required",
+		artifactID, rootfsPath)
+	return fmt.Errorf("rootfs artifact %s rootfs path %q is outside managed artifact roots", artifactID, rootfsPath)
 }
 
-func managedArtifactDir(artifactID, ext4Path string) (string, bool) {
-	if strings.TrimSpace(artifactID) == "" || strings.TrimSpace(ext4Path) == "" {
+func managedArtifactDir(artifactID, rootfsPath string) (string, bool) {
+	if strings.TrimSpace(artifactID) == "" || strings.TrimSpace(rootfsPath) == "" {
 		return "", false
 	}
-	dir := filepath.Clean(filepath.Dir(ext4Path))
+	dir := filepath.Clean(filepath.Dir(rootfsPath))
 	if filepath.Base(dir) != artifactID {
 		return "", false
 	}

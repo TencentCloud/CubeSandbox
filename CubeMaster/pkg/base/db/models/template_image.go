@@ -11,15 +11,20 @@ import (
 
 type RootfsArtifact struct {
 	gorm.Model
+	RootfsFormat string `json:"rootfs_format" gorm:"column:rootfs_format;default:ext4"`
+	// Deprecated columns are maintained only by rootfs_compat.go.
+	LegacyExt4Path          string `json:"-" gorm:"column:ext4_path"`
+	LegacyExt4SHA256        string `json:"-" gorm:"column:ext4_sha256"`
+	LegacyExt4SizeBytes     int64  `json:"-" gorm:"column:ext4_size_bytes"`
 	ArtifactID              string `json:"artifact_id" gorm:"column:artifact_id"`
 	TemplateSpecFingerprint string `json:"template_spec_fingerprint" gorm:"column:template_spec_fingerprint"`
 	SourceImageRef          string `json:"source_image_ref" gorm:"column:source_image_ref"`
 	SourceImageDigest       string `json:"source_image_digest" gorm:"column:source_image_digest"`
 	MasterNodeID            string `json:"master_node_id" gorm:"column:master_node_id"`
 	MasterNodeIP            string `json:"master_node_ip" gorm:"column:master_node_ip"`
-	Ext4Path                string `json:"ext4_path" gorm:"column:ext4_path"`
-	Ext4SHA256              string `json:"ext4_sha256" gorm:"column:ext4_sha256"`
-	Ext4SizeBytes           int64  `json:"ext4_size_bytes" gorm:"column:ext4_size_bytes"`
+	RootfsPath              string `json:"rootfs_path" gorm:"column:rootfs_path"`
+	RootfsSHA256            string `json:"rootfs_sha256" gorm:"column:rootfs_sha256"`
+	RootfsSizeBytes         int64  `json:"rootfs_size_bytes" gorm:"column:rootfs_size_bytes"`
 	ImageConfigJSON         string `json:"image_config_json" gorm:"column:image_config_json"`
 	GeneratedRequestJSON    string `json:"generated_request_json" gorm:"column:generated_request_json"`
 	WritableLayerSize       string `json:"writable_layer_size" gorm:"column:writable_layer_size"`

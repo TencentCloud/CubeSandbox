@@ -72,7 +72,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	//   - delete (DELETE /cube/template): CubeMaster owns the whole
 	//     control-plane delete — in-use check, failing in-flight work,
 	//     replica cleanup on nodes, artifact node-destroys, and the DB
-	//     metadata removal. Only the artifact's physical data (local ext4 /
+	//     metadata removal. Only the artifact's physical data (local rootfs /
 	//     S3 object) is removed by TC, and even then only because CubeMaster
 	//     calls TC's internal /tc/api/v1/artifact/delete endpoint after
 	//     marking the row CLEANUP_PENDING (see

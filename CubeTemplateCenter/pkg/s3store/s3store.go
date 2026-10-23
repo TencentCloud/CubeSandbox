@@ -105,20 +105,29 @@ func openConfiguredStore(cfg Config) (blobstore.Store, error) {
 	}
 }
 
-// ObjectKey returns the user key (artifactID.ext4). The store prefix is applied by blobstore.
-func (c *Client) ObjectKey(artifactID string) string {
-	return blobstore.ArtifactExt4Key("", artifactID)
+// ObjectKey converts a persisted full object key to the store-relative key.
+// The store applies its configured prefix exactly once. Empty keys are rejected
+// by the store; callers resolve historical defaults before crossing this seam.
+func (c *Client) ObjectKey(objectKey string) (string, error) {
+	key, err := blobstore.RelativeObjectKey(objectKey, c.cfg.ArtifactPrefix)
+	if err != nil {
+		return "", fmt.Errorf("invalid object key %q with artifact prefix %q: %w", objectKey, c.cfg.ArtifactPrefix, err)
+	}
+	return key, nil
 }
 
 // FullObjectKey is the on-backend key including the configured prefix.
-func (c *Client) FullObjectKey(artifactID string) string {
-	return blobstore.ArtifactExt4Key(c.cfg.ArtifactPrefix, artifactID)
+func (c *Client) FullObjectKey(filename string) string {
+	return blobstore.JoinKey(c.cfg.ArtifactPrefix, filename)
 }
 
-// Upload uploads a local ext4 file and returns the object key.
+// Upload uploads a local rootfs file and returns the object key.
 // sha256 is optional; when set it is written as UserMetadata on the original PUT.
-func (c *Client) Upload(ctx context.Context, artifactID, localPath, sha256 string) (string, error) {
-	key := c.ObjectKey(artifactID)
+func (c *Client) Upload(ctx context.Context, objectKey, localPath, sha256 string) (string, error) {
+	key, err := c.ObjectKey(objectKey)
+	if err != nil {
+		return "", err
+	}
 	f, err := os.Open(localPath)
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", localPath, err)
@@ -136,22 +145,34 @@ func (c *Client) Upload(ctx context.Context, artifactID, localPath, sha256 strin
 	if err != nil {
 		return "", fmt.Errorf("put object %s: %w", key, err)
 	}
-	return c.FullObjectKey(artifactID), nil
+	return blobstore.JoinKey(c.cfg.ArtifactPrefix, key), nil
 }
 
 // PresignedGetURL generates a download URL for the artifact.
-func (c *Client) PresignedGetURL(ctx context.Context, artifactID string) (string, error) {
-	return c.store.SignedGetURL(ctx, c.ObjectKey(artifactID), c.cfg.PresignExpiry)
+func (c *Client) PresignedGetURL(ctx context.Context, objectKey string) (string, error) {
+	key, err := c.ObjectKey(objectKey)
+	if err != nil {
+		return "", err
+	}
+	return c.store.SignedGetURL(ctx, key, c.cfg.PresignExpiry)
 }
 
 // Delete removes the artifact object.
-func (c *Client) Delete(ctx context.Context, artifactID string) error {
-	return c.store.Delete(ctx, c.ObjectKey(artifactID))
+func (c *Client) Delete(ctx context.Context, objectKey string) error {
+	key, err := c.ObjectKey(objectKey)
+	if err != nil {
+		return err
+	}
+	return c.store.Delete(ctx, key)
 }
 
 // Stat checks whether the artifact object exists.
-func (c *Client) Stat(ctx context.Context, artifactID string) (bool, error) {
-	_, err := c.store.Stat(ctx, c.ObjectKey(artifactID))
+func (c *Client) Stat(ctx context.Context, objectKey string) (bool, error) {
+	key, err := c.ObjectKey(objectKey)
+	if err != nil {
+		return false, err
+	}
+	_, err = c.store.Stat(ctx, key)
 	if err != nil {
 		if blobstore.IsNotExist(err) {
 			return false, nil

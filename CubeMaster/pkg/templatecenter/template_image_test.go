@@ -573,8 +573,8 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-1",
 		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
+		RootfsSHA256:            "sha256-1",
+		RootfsSizeBytes:         1024,
 		DownloadToken:           "token-1",
 	}
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{
@@ -630,8 +630,8 @@ func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-s3",
 		TemplateSpecFingerprint: "fingerprint-s3",
-		Ext4SHA256:              "sha256-s3",
-		Ext4SizeBytes:           2048,
+		RootfsSHA256:            "sha256-s3",
+		RootfsSizeBytes:         2048,
 		DownloadToken:           "token-s3",
 		MasterNodeIP:            "http://0.0.0.0:8089",
 		ArtifactURL:             "http://minio:9000/cube-volumes/artifact-s3.ext4?sig=stale",
@@ -658,8 +658,8 @@ func TestGenerateTemplateCreateRequestFallsBackToArtifactRowForS3WhenNoExplicitB
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-s3-row",
 		TemplateSpecFingerprint: "fingerprint-s3-row",
-		Ext4SHA256:              "sha256-s3-row",
-		Ext4SizeBytes:           2048,
+		RootfsSHA256:            "sha256-s3-row",
+		RootfsSizeBytes:         2048,
 		DownloadToken:           "token-s3-row",
 		MasterNodeIP:            "http://master-from-row:8089",
 		ArtifactURL:             "http://minio:9000/cube-volumes/artifact-s3-row.ext4?sig=stale",
@@ -689,8 +689,8 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-1",
 		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
+		RootfsSHA256:            "sha256-1",
+		RootfsSizeBytes:         1024,
 		DownloadToken:           "token-1",
 	}
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
@@ -752,8 +752,8 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-1",
 		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
+		RootfsSHA256:            "sha256-1",
+		RootfsSizeBytes:         1024,
 		DownloadToken:           "token-1",
 	}
 
@@ -809,8 +809,8 @@ func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-1",
 		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
+		RootfsSHA256:            "sha256-1",
+		RootfsSizeBytes:         1024,
 		DownloadToken:           "token-1",
 	}
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
@@ -1114,10 +1114,10 @@ func TestValidateReusableRootfsArtifactFileAcceptsMatchingStat(t *testing.T) {
 	path, _ := writeRootfsArtifactTestFile(t, data)
 
 	err := validateReusableRootfsArtifactFile(&models.RootfsArtifact{
-		ArtifactID:    "rfs-1",
-		Ext4Path:      path,
-		Ext4SHA256:    strings.Repeat("b", 64),
-		Ext4SizeBytes: int64(len(data)),
+		ArtifactID:      "rfs-1",
+		RootfsPath:      path,
+		RootfsSHA256:    strings.Repeat("b", 64),
+		RootfsSizeBytes: int64(len(data)),
 	})
 	if err != nil {
 		t.Fatalf("validateReusableRootfsArtifactFile failed: %v", err)
@@ -1126,10 +1126,10 @@ func TestValidateReusableRootfsArtifactFileAcceptsMatchingStat(t *testing.T) {
 
 func TestValidateReusableRootfsArtifactFileRejectsMissingFile(t *testing.T) {
 	err := validateReusableRootfsArtifactFile(&models.RootfsArtifact{
-		ArtifactID:    "rfs-1",
-		Ext4Path:      filepath.Join(t.TempDir(), "missing.ext4"),
-		Ext4SHA256:    strings.Repeat("a", 64),
-		Ext4SizeBytes: 1024,
+		ArtifactID:      "rfs-1",
+		RootfsPath:      filepath.Join(t.TempDir(), "missing.ext4"),
+		RootfsSHA256:    strings.Repeat("a", 64),
+		RootfsSizeBytes: 1024,
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected missing file error, got %v", err)
@@ -1140,9 +1140,9 @@ func TestValidateReusableRootfsArtifactFileRejectsSizeMismatch(t *testing.T) {
 	path, _ := writeRootfsArtifactTestFile(t, []byte("artifact-data"))
 
 	err := validateReusableRootfsArtifactFile(&models.RootfsArtifact{
-		ArtifactID:    "rfs-1",
-		Ext4Path:      path,
-		Ext4SizeBytes: 1,
+		ArtifactID:      "rfs-1",
+		RootfsPath:      path,
+		RootfsSizeBytes: 1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
 		t.Fatalf("expected size mismatch error, got %v", err)
@@ -1151,9 +1151,9 @@ func TestValidateReusableRootfsArtifactFileRejectsSizeMismatch(t *testing.T) {
 
 func TestValidateReusableRootfsArtifactFileRejectsNonRegularFile(t *testing.T) {
 	err := validateReusableRootfsArtifactFile(&models.RootfsArtifact{
-		ArtifactID:    "rfs-1",
-		Ext4Path:      t.TempDir(),
-		Ext4SizeBytes: 1,
+		ArtifactID:      "rfs-1",
+		RootfsPath:      t.TempDir(),
+		RootfsSizeBytes: 1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("expected non-regular file error, got %v", err)
@@ -1248,7 +1248,7 @@ func TestCleanupFailedRootfsArtifactDelegatesToLastOwnerCleanup(t *testing.T) {
 
 	if err := cleanupFailedRootfsArtifact(context.Background(), &models.RootfsArtifact{
 		ArtifactID: "artifact-1",
-		Ext4Path:   filepath.Join(t.TempDir(), "artifact-1", "artifact-1.ext4"),
+		RootfsPath: filepath.Join(t.TempDir(), "artifact-1", "artifact-1.ext4"),
 	}, cubeboxv1.InstanceType_cubebox.String(), "tpl-owner"); err != nil {
 		t.Fatalf("cleanupFailedRootfsArtifact returned error: %v", err)
 	}
@@ -1347,8 +1347,8 @@ func TestDetermineRedoResumePhase(t *testing.T) {
 	}{
 		{
 			name: "build failure resumes distribution build pipeline",
-			job:  &models.TemplateImageJob{Phase: JobPhaseBuildingExt4},
-			want: JobPhaseBuildingExt4,
+			job:  &models.TemplateImageJob{Phase: JobPhaseBuildingRootfs},
+			want: JobPhaseBuildingRootfs,
 		},
 		{
 			name: "distribution failure resumes distribution",
@@ -1444,16 +1444,16 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 	patches.ApplyFunc(getRootfsArtifactByID, func(ctx context.Context, artifactID string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
 			ArtifactID:           artifactID,
-			Ext4Path:             artifactPath,
-			Ext4SHA256:           artifactSHA,
-			Ext4SizeBytes:        int64(len(artifactData)),
+			RootfsPath:           artifactPath,
+			RootfsSHA256:         artifactSHA,
+			RootfsSizeBytes:      int64(len(artifactData)),
 			DownloadToken:        "token-1",
 			MasterNodeIP:         "http://master.example",
 			Status:               ArtifactStatusReady,
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifact *models.RootfsArtifact, instanceType string, targets []*node.Node) error {
 		return errors.New("cleanup image failed")
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
@@ -1491,14 +1491,14 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
 	// The row as this redo first observes it: the previous build FAILED, so
 	// the reusability gate rejects it and the redo downgrades to the
-	// BUILDING_EXT4 branch -- the only path that still reloads the row under
+	// BUILDING_ROOTFS branch -- the only path that still reloads the row under
 	// artifactBuildLocks (prepareRootfsArtifactForRedoBuild).
 	staleArtifact := &models.RootfsArtifact{
 		ArtifactID:              artifactID,
 		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4Path:                artifactPath,
-		Ext4SHA256:              artifactSHA,
-		Ext4SizeBytes:           int64(len(artifactData)),
+		RootfsPath:              artifactPath,
+		RootfsSHA256:            artifactSHA,
+		RootfsSizeBytes:         int64(len(artifactData)),
 		DownloadToken:           staleToken,
 		Status:                  ArtifactStatusFailed,
 		GeneratedRequestJSON:    `{}`,
@@ -1510,7 +1510,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	freshArtifact := *staleArtifact
 	freshArtifact.Status = ArtifactStatusReady
 	freshArtifact.DownloadToken = freshToken
-	freshArtifact.Ext4SHA256 = strings.Repeat("b", 64)
+	freshArtifact.RootfsSHA256 = strings.Repeat("b", 64)
 
 	buildLock := &sync.Mutex{}
 	buildLock.Lock()
@@ -1563,7 +1563,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		switch lookupCalls {
 		case 1:
 			// Reusability gate (unlocked): previous build failed -> not
-			// reusable, so the redo downgrades to BUILDING_EXT4.
+			// reusable, so the redo downgrades to BUILDING_ROOTFS.
 			close(initialRead)
 			copy := *staleArtifact
 			return &copy, nil
@@ -1583,12 +1583,12 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 			return nil, fmt.Errorf("unexpected artifact lookup %d", lookupCalls)
 		}
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifact *models.RootfsArtifact, instanceType string, targets []*node.Node) error {
 		return nil
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
 		distributedToken = artifact.DownloadToken
-		distributedSHA = artifact.Ext4SHA256
+		distributedSHA = artifact.RootfsSHA256
 		if generatedReq != nil && len(generatedReq.Containers) > 0 && generatedReq.Containers[0].Image != nil {
 			generatedToken = generatedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactToken]
 			generatedSHA = generatedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactSHA256]
@@ -1651,8 +1651,8 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	if distributedToken != freshToken || generatedToken != freshToken {
 		t.Fatalf("distributed token=%q generated token=%q, want refreshed %q", distributedToken, generatedToken, freshToken)
 	}
-	if distributedSHA != freshArtifact.Ext4SHA256 || generatedSHA != freshArtifact.Ext4SHA256 {
-		t.Fatalf("distributed sha=%q generated sha=%q, want refreshed %q", distributedSHA, generatedSHA, freshArtifact.Ext4SHA256)
+	if distributedSHA != freshArtifact.RootfsSHA256 || generatedSHA != freshArtifact.RootfsSHA256 {
+		t.Fatalf("distributed sha=%q generated sha=%q, want refreshed %q", distributedSHA, generatedSHA, freshArtifact.RootfsSHA256)
 	}
 }
 
@@ -1717,7 +1717,7 @@ func TestRunRedoTemplateImageJobFailsOnArtifactReloadError(t *testing.T) {
 	if lookupCalls != 3 {
 		t.Fatalf("artifact lookups = %d, want reusability gate + foreign re-check + locked reload", lookupCalls)
 	}
-	if lastUpdate == nil || lastUpdate["status"] != JobStatusFailed || lastUpdate["phase"] != JobPhaseBuildingExt4 {
+	if lastUpdate == nil || lastUpdate["status"] != JobStatusFailed || lastUpdate["phase"] != JobPhaseBuildingRootfs {
 		t.Fatalf("unexpected redo failure update: %+v", lastUpdate)
 	}
 	// prepareRootfsArtifactForRedoBuild deliberately collapses the reload

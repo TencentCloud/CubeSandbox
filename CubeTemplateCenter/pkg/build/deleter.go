@@ -8,8 +8,8 @@
 // deleted, CubeMaster only removes its own rows (template_definitions,
 // template_replicas, image_jobs) and marks the artifact row CLEANUP_PENDING.
 // CubeTemplateCenter owns the actual data removal:
-//   - the ext4 object in S3/MinIO (if the artifact was uploaded)
-//   - the ext4 file on local/shared disk (if present)
+//   - the rootfs object in S3/MinIO (if the artifact was uploaded)
+//   - the rootfs file on local/shared disk (if present)
 //   - the artifact row itself (after the data is gone)
 //
 // Deletion is triggered two ways (belt and suspenders):
@@ -36,7 +36,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ArtifactDeleter removes artifact data (S3 object + local ext4) and the
+// ArtifactDeleter removes artifact data (S3 object + local rootfs) and the
 // artifact row. One instance per TC process; safe for concurrent use.
 type ArtifactDeleter struct {
 	db       *gorm.DB
@@ -133,7 +133,7 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	// Delete the S3 object when the artifact was uploaded.
 	var dataErrs []error
 	if d.s3Client != nil && templatecenter.ArtifactUsesObjectStore(&artifact) {
-		if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
+		if err := d.s3Client.Delete(ctx, templatecenter.ArtifactObjectKey(&artifact)); err != nil {
 			logger.Warnf("delete s3 object fail: %v", err)
 			dataErrs = append(dataErrs, fmt.Errorf("delete s3 object: %w", err))
 		} else {
@@ -141,15 +141,11 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 		}
 	}
 
-	// Delete the local/shared ext4 file. Only when it sits inside a managed
-	// artifact root (path-traversal guard).
-	if artifact.Ext4Path != "" {
-		if err := deleteLocalExt4(artifact.Ext4Path); err != nil {
-			logger.Warnf("delete local ext4 fail: %v", err)
-			dataErrs = append(dataErrs, fmt.Errorf("delete local ext4: %w", err))
-		} else {
-			logger.Infof("deleted local ext4 %s", artifact.Ext4Path)
-		}
+	// A crash can leave directories before BUILT records their path. Derive
+	// those locations from the artifact ID as well as cleaning the recorded path.
+	if err := deleteLocalArtifact(artifact.ArtifactID, artifact.RootfsPath); err != nil {
+		logger.Warnf("delete local artifact fail: %v", err)
+		dataErrs = append(dataErrs, fmt.Errorf("delete local artifact: %w", err))
 	}
 
 	if len(dataErrs) > 0 {
@@ -192,39 +188,63 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	return nil
 }
 
-// deleteLocalExt4 removes the ext4 file's parent directory (the whole
-// artifact dir) after verifying the path is inside a managed artifact root.
-// The root check mirrors Master's validateExt4PathWithinStore so a tampered
-// ext4_path in the DB cannot be used to delete arbitrary files.
-func deleteLocalExt4(ext4Path string) error {
-	abs, err := filepath.Abs(ext4Path)
-	if err != nil {
-		return fmt.Errorf("resolve ext4 path: %w", err)
+// deleteLocalArtifact includes unreported build residue without creating any
+// directories. A live build marker defers deletion and keeps the DB retry marker.
+func deleteLocalArtifact(artifactID, rootfsPath string) error {
+	if !image.ValidArtifactID(artifactID) {
+		return fmt.Errorf("invalid artifact id %q", artifactID)
 	}
-	dir := filepath.Dir(abs)
-	if !managedArtifactDir(dir) {
-		return fmt.Errorf("ext4 path %q is outside managed artifact roots; refusing to delete", ext4Path)
+	var dirs []string
+	for _, root := range managedArtifactRoots() {
+		dir, err := filepath.Abs(filepath.Join(root, artifactID))
+		if err != nil {
+			return fmt.Errorf("resolve artifact directory: %w", err)
+		}
+		dirs = append(dirs, dir)
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove artifact dir %s: %w", dir, err)
+	if rootfsPath != "" {
+		abs, err := filepath.Abs(rootfsPath)
+		if err != nil {
+			return fmt.Errorf("resolve rootfs path: %w", err)
+		}
+		dirs = append(dirs, filepath.Dir(abs))
 	}
-	return nil
+	// Check every directory before removing any: the work directory itself
+	// has no marker, but belongs to the build marked in its store directory.
+	for _, dir := range dirs {
+		if !managedArtifactDir(dir) {
+			return fmt.Errorf("artifact directory %q is outside managed artifact roots; refusing to delete", dir)
+		}
+		if inProgress, _ := image.ArtifactBuildInProgress(dir); inProgress {
+			return fmt.Errorf("artifact directory %q has a build in progress", dir)
+		}
+	}
+	var errs []error
+	for _, dir := range dirs {
+		if err := os.RemoveAll(dir); err != nil {
+			errs = append(errs, fmt.Errorf("remove artifact dir %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
-// managedArtifactDir reports whether dir is inside one of the artifact roots
-// TC writes to: the work dir, the store dir, or the fallback store dir.
-func managedArtifactDir(dir string) bool {
+func managedArtifactRoots() []string {
 	roots := []string{image.ArtifactWorkRootDir(), image.ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
 		roots = append(roots, image.ArtifactFallbackStoreRootDir())
 	}
-	for _, root := range roots {
+	return roots
+}
+
+// managedArtifactDir reports whether dir is strictly below an artifact root.
+func managedArtifactDir(dir string) bool {
+	for _, root := range managedArtifactRoots() {
 		rootAbs, err := filepath.Abs(root)
 		if err != nil {
 			continue
 		}
 		// Strictly BELOW the root only. dir == root would make
-		// deleteLocalExt4's RemoveAll(dir) wipe the ENTIRE store (every
+		// deleteLocalArtifact's RemoveAll(dir) wipe the ENTIRE store (every
 		// artifact on the node), and the callback-side path validator accepts
 		// exactly such top-level paths (it only rejects escapes via
 		// filepath.Rel), so equality must fail here.

@@ -20,8 +20,8 @@ import (
 // step writes the template payload to the same column. Losing it means a failed
 // remote build cannot be told apart from a failed local one.
 func TestMergeRemoteBuildReport(t *testing.T) {
-	builtReport := `{"status":"BUILT","artifact_id":"rfs-abc","ext4_sha256":"deadbeef",` +
-		`"ext4_size_bytes":1073741824,"image_config_json":"{}"}`
+	builtReport := `{"status":"BUILT","artifact_id":"rfs-abc","rootfs_sha256":"deadbeef",` +
+		`"rootfs_size_bytes":1073741824,"image_config_json":"{}"}`
 	finalPayload := []byte(`{"template_id":"tpl-abc","status":"FAILED","last_error":"shim timeout"}`)
 
 	tests := []struct {
@@ -80,7 +80,7 @@ func TestMergeRemoteBuildReport(t *testing.T) {
 		},
 		{
 			name:       "lowercase-status-still-counts",
-			prior:      `{"status":"built","ext4_sha256":"abc"}`,
+			prior:      `{"status":"built","rootfs_sha256":"abc"}`,
 			final:      finalPayload,
 			wantMerged: true,
 		},
@@ -119,7 +119,7 @@ func TestMergeRemoteBuildReport(t *testing.T) {
 				t.Fatalf("merged result does not carry %q: %s", remoteBuildReportKey, got)
 			}
 			// The ext4 metadata is the part that proves TC measured it.
-			if report["ext4_sha256"] == nil {
+			if report["rootfs_sha256"] == nil {
 				t.Fatalf("preserved report lost the ext4 metadata: %s", got)
 			}
 		})
@@ -131,7 +131,7 @@ func TestMergeRemoteBuildReport(t *testing.T) {
 // the column without bound.
 func TestMergeRemoteBuildReportDoesNotNest(t *testing.T) {
 	first := mergeRemoteBuildReport(
-		`{"status":"BUILT","ext4_sha256":"abc"}`,
+		`{"status":"BUILT","rootfs_sha256":"abc"}`,
 		[]byte(`{"template_id":"tpl-1","status":"FAILED"}`))
 
 	// Feed the merged result back in as the prior value. Its status is FAILED,
@@ -154,8 +154,8 @@ func TestMergeRemoteBuildReportDoesNotNest(t *testing.T) {
 // TestMergeRemoteBuildReportStripsNestedReport covers the defensive delete: if a
 // BUILT report somehow already carries a nested report, only one level is kept.
 func TestMergeRemoteBuildReportStripsNestedReport(t *testing.T) {
-	prior := `{"status":"BUILT","ext4_sha256":"abc","` + remoteBuildReportKey +
-		`":{"status":"BUILT","ext4_sha256":"old"}}`
+	prior := `{"status":"BUILT","rootfs_sha256":"abc","` + remoteBuildReportKey +
+		`":{"status":"BUILT","rootfs_sha256":"old"}}`
 	got := mergeRemoteBuildReport(prior, []byte(`{"template_id":"tpl-1","status":"READY"}`))
 
 	var payload map[string]any
@@ -169,7 +169,7 @@ func TestMergeRemoteBuildReportStripsNestedReport(t *testing.T) {
 	if _, nested := report[remoteBuildReportKey]; nested {
 		t.Fatalf("only one level of report must be kept: %s", got)
 	}
-	if report["ext4_sha256"] != "abc" {
+	if report["rootfs_sha256"] != "abc" {
 		t.Fatalf("the outer report's metadata must win: %s", got)
 	}
 }

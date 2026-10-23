@@ -105,9 +105,9 @@ func TestProxyS3ArtifactSuccessGET(t *testing.T) {
 
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
-			ArtifactID:  "rfs-abc",
-			ArtifactURL: upstream.URL + "/bucket/rfs-abc.ext4?X-Amz-Signature=xyz",
-			Ext4SHA256:  "deadbeef",
+			ArtifactID:   "rfs-abc",
+			ArtifactURL:  upstream.URL + "/bucket/rfs-abc.ext4?X-Amz-Signature=xyz",
+			RootfsSHA256: "deadbeef",
 		}, nil
 	})
 
@@ -157,9 +157,9 @@ func TestProxyS3ArtifactSuccessHEAD(t *testing.T) {
 
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
-			ArtifactID:  "rfs-head",
-			ArtifactURL: upstream.URL + "/bucket/rfs-head.ext4?X-Amz-Signature=xyz",
-			Ext4SHA256:  "sha-head",
+			ArtifactID:   "rfs-head",
+			ArtifactURL:  upstream.URL + "/bucket/rfs-head.ext4?X-Amz-Signature=xyz",
+			RootfsSHA256: "sha-head",
 		}, nil
 	})
 
@@ -201,9 +201,9 @@ func TestProxyS3ArtifactHEADClientRange(t *testing.T) {
 
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
-			ArtifactID:  "rfs-range",
-			ArtifactURL: upstream.URL + "/bucket/rfs-range.ext4?X-Amz-Signature=xyz",
-			Ext4SHA256:  "sha-range",
+			ArtifactID:   "rfs-range",
+			ArtifactURL:  upstream.URL + "/bucket/rfs-range.ext4?X-Amz-Signature=xyz",
+			RootfsSHA256: "sha-range",
 		}, nil
 	})
 
@@ -242,9 +242,9 @@ func TestProxyS3ArtifactNilRecord(t *testing.T) {
 func TestProxyS3ArtifactUpstreamFailureReportedAsFailure(t *testing.T) {
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
-			ArtifactID:  "rfs-down",
-			ArtifactURL: "http://127.0.0.1:1/bucket/rfs-down.ext4?X-Amz-Signature=xyz",
-			Ext4SHA256:  "sha-down",
+			ArtifactID:   "rfs-down",
+			ArtifactURL:  "http://127.0.0.1:1/bucket/rfs-down.ext4?X-Amz-Signature=xyz",
+			RootfsSHA256: "sha-down",
 		}, nil
 	})
 

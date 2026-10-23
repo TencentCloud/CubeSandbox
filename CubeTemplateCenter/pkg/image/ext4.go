@@ -119,9 +119,8 @@ func runE2fsck(ctx context.Context, ext4Path string) error {
 	return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 }
 
-// EnsureArtifactBuildPreflight asserts that the host has all necessary tools
-// installed to build images before starting a long-running workflow.
-func EnsureArtifactBuildPreflight(ctx context.Context) error {
+// ensureExt4BuildPreflight checks the tools used to export and build EXT4.
+func ensureExt4BuildPreflight(ctx context.Context) error {
 	requiredCommands := []string{"mkfs.ext4", "truncate", "cp", "resize2fs", "e2fsck"}
 	if !nativeRootfsExportEnabled() {
 		if hasDockerlessRootfsExportTools() {
@@ -180,7 +179,7 @@ func isCrossDeviceRenameErr(err error) bool {
 	return errors.Is(err, syscall.EXDEV)
 }
 
-func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (BuildResult, error) {
+func buildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (BuildResult, error) {
 	workDir := filepath.Join(ArtifactWorkRootDir(), opts.ArtifactID)
 	storeDir, err := ResolveArtifactStoreDir(ctx, opts.ArtifactID)
 	if err != nil {
@@ -194,7 +193,7 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	// plausible, and the in-progress marker expires after 2h, so neither can
 	// prove completion. The build marker now only guards against concurrent
 	// cleanup; existence of the final name is what reuse trusts.
-	tmpExt4Path := ext4Path + ".tmp." + strconv.Itoa(os.Getpid())
+	tmpRootfsPath := ext4Path + ".tmp." + strconv.Itoa(os.Getpid())
 	keepStoreDir := false
 
 	// Publish the in-progress marker before anything is written under storeDir.
@@ -208,46 +207,6 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 		log.G(ctx).Warnf("cannot mark artifact build in progress for %s: %v", storeDir, err)
 	}
 	defer releaseMarker()
-
-	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
-	// Passes PostRootfsExport down to be executed before unmounting the loop device.
-	// Streaming Phase 2 is currently only implemented for docker and native modes.
-	if loopMountExt4Enabled() && canUseLoopMount() && (source.ExportMode == ExportModeDocker || source.ExportMode == ExportModeNative) {
-		estimatedPhase2, err := estimateImageSizeFromInspect(ctx, source)
-		if err != nil {
-			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
-		} else {
-			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
-				return BuildResult{}, err
-			}
-			if err := createExt4ImageStreaming(ctx, source, workDir, tmpExt4Path, estimatedPhase2, opts.PostRootfsExport); err != nil {
-				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
-				_ = os.RemoveAll(workDir)
-				_ = os.Remove(tmpExt4Path)
-			} else {
-				if err := os.Rename(tmpExt4Path, ext4Path); err != nil { // NOCC:Path Traversal()
-					_ = os.Remove(tmpExt4Path)
-					return BuildResult{}, fmt.Errorf("publish ext4 artifact failed: %w", err)
-				}
-				shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
-				if err != nil {
-					return BuildResult{}, err
-				}
-				_ = os.RemoveAll(workDir)
-				keepStoreDir = true
-				return BuildResult{Ext4Path: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
-			}
-		}
-	}
-
-	estimatedSizeBytes, err := estimateImageSizeFromInspect(ctx, source)
-	if err != nil {
-		log.G(ctx).Warnf("cannot estimate image size for disk-space check, skipping: %v", err)
-	} else if estimatedSizeBytes > 0 {
-		if err := checkDiskSpace(ctx, storeDir, estimatedSizeBytes); err != nil {
-			return BuildResult{}, err
-		}
-	}
 
 	defer func() {
 		if workDir != "" {
@@ -269,6 +228,45 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 			}
 		}
 	}()
+
+	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
+	// Passes PostRootfsExport down to be executed before unmounting the loop device.
+	// Streaming Phase 2 is currently only implemented for docker and native modes.
+	if loopMountExt4Enabled() && canUseLoopMount() && (source.ExportMode == ExportModeDocker || source.ExportMode == ExportModeNative) {
+		estimatedPhase2, err := estimateImageSizeFromInspect(ctx, source)
+		if err != nil {
+			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
+		} else {
+			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
+				return BuildResult{}, err
+			}
+			if err := createExt4ImageStreaming(ctx, source, workDir, tmpRootfsPath, estimatedPhase2, opts.PostRootfsExport); err != nil {
+				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
+				_ = os.RemoveAll(workDir)
+				_ = os.Remove(tmpRootfsPath)
+			} else {
+				if err := os.Rename(tmpRootfsPath, ext4Path); err != nil { // NOCC:Path Traversal()
+					_ = os.Remove(tmpRootfsPath)
+					return BuildResult{}, fmt.Errorf("publish ext4 artifact failed: %w", err)
+				}
+				shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
+				if err != nil {
+					return BuildResult{}, err
+				}
+				keepStoreDir = true
+				return BuildResult{RootfsPath: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
+			}
+		}
+	}
+
+	estimatedSizeBytes, err := estimateImageSizeFromInspect(ctx, source)
+	if err != nil {
+		log.G(ctx).Warnf("cannot estimate image size for disk-space check, skipping: %v", err)
+	} else if estimatedSizeBytes > 0 {
+		if err := checkDiskSpace(ctx, storeDir, estimatedSizeBytes); err != nil {
+			return BuildResult{}, err
+		}
+	}
 
 	if isLocalFastFS(storeDir) {
 		if err := exportImageRootfs(ctx, source, storeRootfsDir); err != nil {
@@ -299,12 +297,12 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 		}
 	}
 
-	if err := createExt4Image(ctx, storeRootfsDir, tmpExt4Path); err != nil {
-		_ = os.Remove(tmpExt4Path)
+	if err := createExt4Image(ctx, storeRootfsDir, tmpRootfsPath); err != nil {
+		_ = os.Remove(tmpRootfsPath)
 		return BuildResult{}, err
 	}
-	if err := os.Rename(tmpExt4Path, ext4Path); err != nil { // NOCC:Path Traversal()
-		_ = os.Remove(tmpExt4Path)
+	if err := os.Rename(tmpRootfsPath, ext4Path); err != nil { // NOCC:Path Traversal()
+		_ = os.Remove(tmpRootfsPath)
 		return BuildResult{}, fmt.Errorf("publish ext4 artifact failed: %w", err)
 	}
 	shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
@@ -312,5 +310,5 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 		return BuildResult{}, err
 	}
 	keepStoreDir = true
-	return BuildResult{Ext4Path: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
+	return BuildResult{RootfsPath: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
 }

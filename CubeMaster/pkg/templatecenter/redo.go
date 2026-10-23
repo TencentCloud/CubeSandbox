@@ -109,8 +109,8 @@ func unmarshalRedoScope(scopeJSON string) []string {
 func determineRedoResumePhase(job *models.TemplateImageJob, replicas []models.TemplateReplica) string {
 	if job != nil {
 		switch strings.ToUpper(job.Phase) {
-		case JobPhasePulling, JobPhaseUnpacking, JobPhaseBuildingExt4, JobPhaseGeneratingJSON:
-			return JobPhaseBuildingExt4
+		case JobPhasePulling, JobPhaseUnpacking, JobPhaseBuildingRootfs, JobPhaseGeneratingJSON:
+			return JobPhaseBuildingRootfs
 		case JobPhaseDistributing:
 			return JobPhaseDistributing
 		case JobPhaseCreatingTemplate, JobPhaseSnapshotting, JobPhaseRegistering:
@@ -200,7 +200,7 @@ func rootfsArtifactReusableForRedo(ctx context.Context, artifactID string) bool 
 	if !artifactStatusReusableForRedo(artifact.Status) {
 		return false
 	}
-	// A READY row still has to be backed by its ext4 file. When the artifact
+	// A READY row still has to be backed by its rootfs file. When the artifact
 	// store did not survive a restart the row outlives the file, and reusing it
 	// here would make the redo re-distribute a phantom artifact — which is the
 	// one thing a redo exists to fix. Demote it so this redo falls through to the
@@ -211,7 +211,7 @@ func rootfsArtifactReusableForRedo(ctx context.Context, artifactID string) bool 
 // artifactStatusReusableForRedo is the status half of the decision above, kept
 // separate from the DB lookup so the state matrix can be tested directly.
 //
-// Only READY means "the ext4 exists and is complete". Everything else must
+// Only READY means "the rootfs exists and is complete". Everything else must
 // rebuild:
 //   - PENDING/BUILDING belongs to an in-flight build owned by someone else;
 //     reusing it would read a half-written file.
@@ -237,7 +237,7 @@ func failRedoTemplateImageJob(ctx context.Context, jobID, phase, message string)
 }
 
 // prepareRootfsArtifactForRedoBuild removes leftovers from an interrupted
-// BUILDING_EXT4 attempt while holding the same process-local lock used by
+// BUILDING_ROOTFS attempt while holding the same process-local lock used by
 // ensureRootfsArtifact. If another caller completed a reusable artifact before
 // this redo acquired the lock, keep that fresh artifact instead of deleting it.
 func prepareRootfsArtifactForRedoBuild(ctx context.Context, artifactID string) (*models.RootfsArtifact, bool) {
@@ -259,8 +259,8 @@ func prepareRootfsArtifactForRedoBuild(ctx context.Context, artifactID string) (
 			return previousArtifact, true
 		}
 	}
-	if previousArtifact.Ext4Path != "" {
-		_ = cleanupLocalRootfsArtifact(previousArtifact.ArtifactID, previousArtifact.Ext4Path)
+	if previousArtifact.RootfsPath != "" {
+		_ = cleanupLocalRootfsArtifact(previousArtifact.ArtifactID, previousArtifact.RootfsPath)
 	}
 	_ = updateRootfsArtifact(ctx, previousArtifact.ArtifactID, map[string]any{
 		"status":     ArtifactStatusFailed,
@@ -323,7 +323,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	// reuse is no longer usable. Without this, a job that failed distribution
 	// on all nodes is unretryable forever: that path deletes the artifact, so
 	// the reuse branch below can only ever report "record not found".
-	if resumePhase != JobPhaseBuildingExt4 && !rootfsArtifactReusableForRedo(ctx, jobRecord.ArtifactID) {
+	if resumePhase != JobPhaseBuildingRootfs && !rootfsArtifactReusableForRedo(ctx, jobRecord.ArtifactID) {
 		// But never rebuild an artifact another CubeMaster holds: the rebuild
 		// would overwrite the shared row (fresh token/sha) and break every
 		// replica the holder already served (issue #1005). Surface it instead.
@@ -335,28 +335,28 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			}
 		}
 		logger.Infof("redo: artifact %q is not reusable, falling back to a full rebuild (resume_phase %s -> %s)",
-			jobRecord.ArtifactID, resumePhase, JobPhaseBuildingExt4)
-		resumePhase = JobPhaseBuildingExt4
+			jobRecord.ArtifactID, resumePhase, JobPhaseBuildingRootfs)
+		resumePhase = JobPhaseBuildingRootfs
 		if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-			"phase":        JobPhaseBuildingExt4,
-			"resume_phase": JobPhaseBuildingExt4,
+			"phase":        JobPhaseBuildingRootfs,
+			"resume_phase": JobPhaseBuildingRootfs,
 		}); err != nil {
 			logger.Warnf("update redo resume phase fail: %v", err)
 		}
 	}
-	if resumePhase == JobPhaseBuildingExt4 {
+	if resumePhase == JobPhaseBuildingRootfs {
 		if ShouldInjectEnvdIntoTemplate(&workingReq) {
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, "redo cannot rebuild envd-enabled template rootfs because the original envd payload is not persisted")
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingRootfs, "redo cannot rebuild envd-enabled template rootfs because the original envd payload is not persisted")
 			return
 		}
 		// v2: snapshot templates have no source_image_ref, so there is nothing
 		// to rebuild FROM (issue #1159). Checked here, before the destructive
 		// cleanup in prepareRootfsArtifactForRedoBuild, for the same reason as
-		// before: that path deletes the previous ext4 and marks the artifact
+		// before: that path deletes the previous rootfs and marks the artifact
 		// FAILED, so without this guard a snapshot-based template would have
 		// its remaining artifact destroyed on the way to an inevitable failure.
 		if strings.TrimSpace(workingReq.SourceImageRef) == "" {
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4,
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingRootfs,
 				"redo cannot rebuild this template: it has no source_image_ref "+
 					"(templates created from a sandbox snapshot cannot be rebuilt from an image); "+
 					"the existing artifact was left untouched")
@@ -384,8 +384,8 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			// full rebuild must be forwarded to CubeTemplateCenter by the caller
 			// (template_from_image.go:72). Reaching here means the caller's
 			// forwarding logic has a bug.
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4,
-				"redo requires a full rebuild but local ext4 build is disabled in CubeMaster; "+
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingRootfs,
+				"redo requires a full rebuild but local rootfs build is disabled in CubeMaster; "+
 					"this job should have been forwarded to CubeTemplateCenter")
 			return
 		}
@@ -428,7 +428,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 
 	readyTargets := targets
 	if resumePhase == JobPhaseDistributing {
-		if err := cleanupArtifactOnNodes(ctx, artifact.ArtifactID, generatedReq.InstanceType, targets); err != nil {
+		if err := cleanupArtifactOnNodes(ctx, artifact, generatedReq.InstanceType, targets); err != nil {
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, fmt.Sprintf("cleanup artifact before redistribute failed: %v", err))
 			return
 		}
