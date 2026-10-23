@@ -10,6 +10,7 @@ import (
 
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,6 +19,16 @@ import (
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// testAbsPath builds a platform-absolute path for host-mount prefix tests.
+// On Windows filepath.IsAbs("/data/...") is false, so Unix-style fixtures
+// cannot express a "valid absolute path" there.
+func testAbsPath(elems ...string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(append([]string{"C:\\"}, elems...)...)
+	}
+	return "/" + filepath.Join(elems...)
+}
 
 func TestInit(t *testing.T) {
 	mydir, err := os.Getwd()
@@ -187,20 +198,26 @@ func TestDefaultNodeAffinitySelectorAllowedKeySet(t *testing.T) {
 }
 
 func TestValidateAllowedHostMountPrefixes(t *testing.T) {
+	validShared := testAbsPath("data", "shared")
+	validSharedSlash := validShared + string(filepath.Separator)
+	validNFS := testAbsPath("mnt", "nfs") + string(filepath.Separator)
+
 	tests := []struct {
 		name     string
 		prefixes []string
 		wantErr  bool
 	}{
-		{"valid with trailing slash", []string{"/data/shared/"}, false},
-		{"valid without trailing slash", []string{"/data/shared"}, false},
-		{"multiple valid", []string{"/data/shared/", "/mnt/nfs/"}, false},
+		{"valid with trailing slash", []string{validSharedSlash}, false},
+		{"valid without trailing slash", []string{validShared}, false},
+		{"multiple valid", []string{validSharedSlash, validNFS}, false},
+		// "/" is rejected on Unix as root; on Windows it fails filepath.IsAbs.
 		{"reject root path /", []string{"/"}, true},
+		// "/data/.." cleans to "/" on Unix; on Windows it fails filepath.IsAbs.
 		{"reject root via traversal", []string{"/data/.."}, true},
 		{"reject empty string", []string{""}, true},
 		{"reject relative path", []string{"data/shared/"}, true},
 		{"reject dot path", []string{"."}, true},
-		{"one valid one invalid", []string{"/data/shared/", ""}, true},
+		{"one valid one invalid", []string{validSharedSlash, ""}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
