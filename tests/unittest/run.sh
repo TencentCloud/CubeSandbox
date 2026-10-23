@@ -116,6 +116,8 @@ WITH_TESTS=(
 	# The root package command does not execute workspace member tests, so run
 	# block_util explicitly. Runtime-KVM tests run in `hypervisor-kvm` below.
 	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins && cargo test -p block_util --lib'"
+	# Shell-only test; no builder or KVM needed.
+	"cubeegress|Shell|0|bash CubeEgress/tests/cube-egress-iptables-init_test.sh"
 )
 
 GATED_TESTS=(
@@ -143,7 +145,6 @@ GATED_TESTS=(
 )
 
 NO_TESTS=(
-	"cubeegress|no unit tests present in CubeEgress/"
 	"web|no unit test script in web/package.json"
 	# CubeS3lvol ships integration tests only (test/integration/, driven by
 	# `make check` / `make check-offline`). They need a full SPDK/DPDK/AWS
