@@ -1,0 +1,9 @@
+# LangGraph StateGraph demos — require Python 3.10+
+# langgraph 1.x: langchain-openai>=1.0 requires langchain-core>=1.0, which
+# langgraph 0.x (langchain-core<0.4) cannot satisfy.
+langgraph>=1,<2
+langchain-openai>=1.0,<2.0
+# Official CubeSandbox Python SDK (from cubesandbox import Sandbox).
+# >=0.6.0 for the envd-process commands/files API these demos rely on.
+cubesandbox>=0.6.0
+python-dotenv
