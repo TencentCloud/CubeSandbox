@@ -30,6 +30,7 @@ use crate::{
 const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
+const RET_CODE_NOT_FOUND_AT_CUBELET: i32 = 130406;
 const RET_CODE_CONFLICT: i32 = 130409;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
@@ -882,10 +883,13 @@ impl SandboxService {
             .cubemaster
             .get_sandbox(sandbox_id, &self.instance_type)
             .await
-            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+            .map_err(|e| map_sandbox_detail_err(e, sandbox_id))?;
 
         if !is_success_ret_code(resp.ret.ret_code) {
-            if resp.ret.ret_code == RET_CODE_NOT_FOUND {
+            if matches!(
+                resp.ret.ret_code,
+                RET_CODE_NOT_FOUND | RET_CODE_NOT_FOUND_AT_CUBELET
+            ) {
                 return Err(AppError::NotFound(format!(
                     "sandbox {} not found",
                     sandbox_id
@@ -1236,6 +1240,20 @@ fn ensure_create_result(ret_code: i32, ret_msg: String) -> AppResult<()> {
         return Err(AppError::Conflict(ret_msg));
     }
     Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
+}
+
+// CubeMaster returns NotFoundAtCubelet when a cached route reaches a Cubelet
+// that successfully answers with no sandbox. Keep this detail-only: other
+// resources use different not-found contracts, and transport failures are 5xx.
+fn map_sandbox_detail_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, .. }
+            if matches!(ret_code, RET_CODE_NOT_FOUND | RET_CODE_NOT_FOUND_AT_CUBELET) =>
+        {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        other => params_error_or_internal(other),
+    }
 }
 
 fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppError {
@@ -2318,6 +2336,45 @@ mod tests {
             .await
             .expect_err("rejected detail request should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn detail_and_connect_map_cubelet_absence_to_not_found() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(|| async { ret_envelope(130406, "NotFoundAtCubelet") }),
+        ))
+        .await;
+
+        let detail_err = service
+            .get_sandbox("sb-stale-route")
+            .await
+            .expect_err("detail of an absent runtime should fail");
+        assert_eq!(detail_err.into_response().status(), StatusCode::NOT_FOUND);
+
+        let connect_err = service
+            .connect_sandbox("sb-stale-route", None)
+            .await
+            .expect_err("connect to an absent runtime should fail");
+        assert_eq!(connect_err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn detail_keeps_cubelet_request_failure_internal() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(|| async { ret_envelope(130595, "Cubelet request failed") }),
+        ))
+        .await;
+
+        let err = service
+            .get_sandbox("sb-upstream-failure")
+            .await
+            .expect_err("a Cubelet request failure must remain internal");
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
