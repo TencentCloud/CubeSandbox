@@ -544,6 +544,83 @@ pub fn physical_bits(max_phys_bits: u8, hypervisor_type: HypervisorType) -> u8 {
     cmp::min(host_phys_bits, guest_phys_bits)
 }
 
+/// Caps the rate memory is sent at during the live part of a migration, as QEMU's max-bandwidth
+/// migration parameter does. The average since the limiter was created stays at or below
+/// `bytes_per_sec`; the copy after the VM is paused is sent without it, so the limit does not
+/// lengthen the downtime.
+pub struct SendRateLimit {
+    bytes_per_sec: u64,
+    start: std::time::Instant,
+    sent: u64,
+}
+
+impl SendRateLimit {
+    /// Largest write between two checks of the rate.
+    pub const CHUNK: u64 = 1 << 20;
+
+    pub fn new(bytes_per_sec: u64) -> Self {
+        assert!(
+            bytes_per_sec > 0,
+            "a rate of 0 is no limit; do not build a limiter"
+        );
+        SendRateLimit {
+            bytes_per_sec,
+            start: std::time::Instant::now(),
+            sent: 0,
+        }
+    }
+
+    /// Records `bytes` sent and sleeps while the average is above the rate.
+    pub fn pace(&mut self, bytes: u64) {
+        self.sent += bytes;
+        let due = std::time::Duration::from_secs_f64(self.sent as f64 / self.bytes_per_sec as f64);
+        let elapsed = self.start.elapsed();
+        if due > elapsed {
+            std::thread::sleep(due - elapsed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod send_rate_limit_tests {
+    use super::SendRateLimit;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_send_rate_limit_paces_to_the_rate() {
+        // 8 MiB at 64 MiB/s takes at least 125 ms
+        let start = Instant::now();
+        let mut limit = SendRateLimit::new(64 << 20);
+        for _ in 0..8 {
+            limit.pace(SendRateLimit::CHUNK);
+        }
+        assert!(
+            start.elapsed() >= Duration::from_millis(125),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a rate of 0 is no limit")]
+    fn test_send_rate_limit_rejects_zero() {
+        let _ = SendRateLimit::new(0);
+    }
+
+    #[test]
+    fn test_send_rate_limit_does_not_wait_below_the_rate() {
+        // 1 MiB at 1 GiB/s is due after about 1 ms
+        let start = Instant::now();
+        let mut limit = SendRateLimit::new(1 << 30);
+        limit.pace(SendRateLimit::CHUNK);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+}
+
 pub struct Vm {
     #[cfg(feature = "tdx")]
     kernel: Option<File>,
@@ -2465,10 +2542,12 @@ impl Vm {
         Ok(())
     }
 
+    /// Writes the guest memory in `ranges` to `fd`; with `limit`, no faster than its rate.
     pub fn send_memory_regions<F>(
         &mut self,
         ranges: &MemoryRangeTable,
         fd: &mut F,
+        mut limit: Option<&mut SendRateLimit>,
     ) -> std::result::Result<(), MigratableError>
     where
         F: WriteVolatile,
@@ -2484,18 +2563,21 @@ impl Vm {
             // following the correct behavior. For more info about this issue
             // see: https://github.com/rust-vmm/vm-memory/issues/174
             loop {
+                let mut count = range.length - offset;
+                if limit.is_some() {
+                    count = count.min(SendRateLimit::CHUNK);
+                }
                 let bytes_written = mem
-                    .write_volatile_to(
-                        GuestAddress(range.gpa + offset),
-                        fd,
-                        (range.length - offset) as usize,
-                    )
+                    .write_volatile_to(GuestAddress(range.gpa + offset), fd, count as usize)
                     .map_err(|e| {
                         MigratableError::MigrateSend(anyhow!(
                             "Error transferring memory to socket: {}",
                             e
                         ))
                     })?;
+                if let Some(l) = limit.as_deref_mut() {
+                    l.pace(bytes_written as u64);
+                }
                 if bytes_written == 0 && offset < range.length {
                     return Err(MigratableError::MigrateSend(anyhow!(
                         "Migration socket accepted no data with {} of {} bytes left at gpa {:#x}",

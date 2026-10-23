@@ -268,6 +268,10 @@ pub struct VmSendMigrationData {
     /// the default (5 without downtime_ms, 30 with it).
     #[serde(default)]
     pub max_iterations: u32,
+    /// Bytes per second memory is sent at while the VM runs (QEMU's max-bandwidth); the copy
+    /// after the pause is not limited. 0 is no limit.
+    #[serde(default)]
+    pub max_bandwidth: u64,
 }
 
 pub enum ApiResponsePayload {

@@ -142,12 +142,12 @@ while the source VM is terminated gracefully.
 
 By default, `send-migration` copies all guest memory while the VM runs,
 then up to five passes of dirty memory, and pauses the VM for the last pass
-however much is left. Two parameters of the `send-migration` API change
+however much is left. Three parameters of the `send-migration` API change
 that. `ch-remote` passes them as options:
 
 ```bash
 $ target/release/ch-remote --api-socket=/tmp/api1 send-migration \
-    --downtime-ms 300 --max-iterations 30 unix:/tmp/sock
+    --downtime-ms 300 --max-iterations 30 --max-bandwidth 512M unix:/tmp/sock
 ```
 
 - `downtime_ms` — keep sending dirty memory while the VM runs until what is
@@ -157,9 +157,14 @@ $ target/release/ch-remote --api-socket=/tmp/api1 send-migration \
   otherwise paused with almost a full pass left.
 - `max_iterations` — the most dirty passes while the VM runs before it is
   paused anyway (30 with `downtime_ms`, 5 without).
+- `max_bandwidth` — the rate, in bytes per second, memory is sent at while
+  the VM runs (`ch-remote` accepts size suffixes such as `512M`); 0 means no
+  limit. The copy after the VM is paused is not limited, so the limit trades
+  a longer copy for a smaller impact on the guest's own network traffic; the
+  downtime estimate uses the limited rate.
 
-Both default to 0, which keeps the behaviour described above.
+All three default to 0, which keeps the behaviour described above.
 
 Note that the copy runs on the VMM's control thread: while memory is being
-sent the VMM does not answer API requests and handles `SIGTERM` only after
-the copy finishes.
+sent, and longer still with a low `max_bandwidth`, the VMM does not answer
+API requests and handles `SIGTERM` only after the copy finishes.

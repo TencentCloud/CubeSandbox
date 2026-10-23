@@ -22,7 +22,7 @@ use crate::memory_manager::MemoryManager;
 use crate::migration::get_vm_snapshot;
 use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
-use crate::vm::{Error as VmError, Vm, VmState};
+use crate::vm::{Error as VmError, SendRateLimit, Vm, VmState};
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use crate::vm_config::CompatibleMode;
 use crate::vm_config::{
@@ -1642,6 +1642,7 @@ impl Vmm {
     fn vm_maybe_send_dirty_pages<T>(
         vm: &mut Vm,
         socket: &mut T,
+        limit: Option<&mut SendRateLimit>,
     ) -> result::Result<bool, MigratableError>
     where
         T: Read + Write + WriteVolatile,
@@ -1654,7 +1655,7 @@ impl Vmm {
             return Ok(false);
         }
 
-        Self::vm_send_dirty_table(vm, socket, &table)?;
+        Self::vm_send_dirty_table(vm, socket, &table, limit)?;
         Ok(true)
     }
 
@@ -1662,6 +1663,7 @@ impl Vmm {
         vm: &mut Vm,
         socket: &mut T,
         table: &MemoryRangeTable,
+        limit: Option<&mut SendRateLimit>,
     ) -> result::Result<(), MigratableError>
     where
         T: Read + Write + WriteVolatile,
@@ -1669,7 +1671,7 @@ impl Vmm {
         Request::memory(table.length()).write_to(socket)?;
         table.write_to(socket)?;
         // And then the memory itself
-        vm.send_memory_regions(table, socket)?;
+        vm.send_memory_regions(table, socket, limit)?;
         let res = Response::read_from(socket)?;
         if res.status() != Status::Ok {
             warn!("Error during dirty memory migration");
@@ -1689,7 +1691,8 @@ impl Vmm {
 
     // Sends dirty memory while the VM runs until what is left is expected to go out within
     // `downtime`, then pauses the VM and sends the rest. Bandwidth is the average over
-    // everything sent so far, including the first full pass.
+    // everything sent so far, including the first full pass; with `limit` that is the limited
+    // rate, as in QEMU, although the copy after the pause goes out without the limit.
     fn vm_converge_dirty_pages<T>(
         vm: &mut Vm,
         socket: &mut T,
@@ -1697,6 +1700,7 @@ impl Vmm {
         max_iterations: u32,
         mut sent_bytes: u64,
         mut sent_time: Duration,
+        mut limit: Option<&mut SendRateLimit>,
     ) -> result::Result<(), MigratableError>
     where
         T: Read + Write + WriteVolatile,
@@ -1720,7 +1724,7 @@ impl Vmm {
                 break;
             }
             let start = Instant::now();
-            Self::vm_send_dirty_table(vm, socket, &table)?;
+            Self::vm_send_dirty_table(vm, socket, &table, limit.as_deref_mut())?;
             sent_bytes += bytes;
             sent_time += start.elapsed();
         }
@@ -1734,11 +1738,11 @@ impl Vmm {
         vm.pause()?;
         if let Some(table) = pending {
             if !table.regions().is_empty() {
-                Self::vm_send_dirty_table(vm, socket, &table)?;
+                Self::vm_send_dirty_table(vm, socket, &table, None)?;
             }
         }
         // Pages written between the last dirty log and the pause
-        Self::vm_maybe_send_dirty_pages(vm, socket)?;
+        Self::vm_maybe_send_dirty_pages(vm, socket, None)?;
         Ok(())
     }
 
@@ -1833,13 +1837,17 @@ impl Vmm {
             // Start logging dirty pages
             vm.start_dirty_log()?;
 
+            let mut limit = match send_data_migration.max_bandwidth {
+                0 => None,
+                rate => Some(SendRateLimit::new(rate)),
+            };
             // Send memory table
             let full_start = Instant::now();
             let table = vm.memory_range_table()?;
             Request::memory(table.length()).write_to(&mut socket)?;
             table.write_to(&mut socket)?;
             // And then the memory itself
-            vm.send_memory_regions(&table, &mut socket)?;
+            vm.send_memory_regions(&table, &mut socket, limit.as_mut())?;
             let res = Response::read_from(&mut socket)?;
             if res.status() != Status::Ok {
                 warn!("Error during memory migration");
@@ -1862,6 +1870,7 @@ impl Vmm {
                     max_iterations,
                     Self::table_bytes(&table),
                     full_start.elapsed(),
+                    limit.as_mut(),
                 )?;
             } else {
                 // Try at most 5 passes of dirty memory sending
@@ -1871,7 +1880,7 @@ impl Vmm {
                 };
                 for i in 0..max_dirty_migrations {
                     info!("Dirty memory migration {} of {}", i, max_dirty_migrations);
-                    if !Self::vm_maybe_send_dirty_pages(vm, &mut socket)? {
+                    if !Self::vm_maybe_send_dirty_pages(vm, &mut socket, limit.as_mut())? {
                         break;
                     }
                 }
@@ -1880,7 +1889,7 @@ impl Vmm {
                 vm.pause()?;
 
                 // Send last batch of dirty pages
-                Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
+                Self::vm_maybe_send_dirty_pages(vm, &mut socket, None)?;
             }
 
             // Stop logging dirty pages

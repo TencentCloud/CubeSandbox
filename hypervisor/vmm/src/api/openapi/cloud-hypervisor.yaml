@@ -1210,3 +1210,10 @@ components:
           description: >-
             Upper bound of dirty passes before the VM is paused regardless of what is left; 0
             means 5 without downtime_ms and 30 with it.
+        max_bandwidth:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: >-
+            Bytes per second memory is sent at while the VM runs, the full pass and the dirty
+            passes. The copy after the VM is paused is not limited. 0 means no limit.

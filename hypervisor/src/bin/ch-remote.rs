@@ -363,13 +363,18 @@ fn send_migration_api_command(
     local: bool,
     downtime_ms: u64,
     max_iterations: u32,
+    max_bandwidth: Option<&str>,
 ) -> Result<(), Error> {
+    let max_bandwidth = match max_bandwidth {
+        Some(b) => b.parse::<ByteSized>().map_err(Error::InvalidMemorySize)?.0,
+        None => 0,
+    };
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url.to_owned(),
         local,
         downtime_ms,
         max_iterations,
-        ..Default::default()
+        max_bandwidth,
     };
     simple_api_command(
         socket,
@@ -555,6 +560,8 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 sub.get_one::<u32>("send_migration_max_iterations")
                     .copied()
                     .unwrap_or(0),
+                sub.get_one::<String>("send_migration_max_bandwidth")
+                    .map(|s| s.as_str()),
             )
         }
         Some("receive-migration") => receive_migration_api_command(
@@ -782,6 +789,12 @@ fn main() {
                         .num_args(1)
                         .value_parser(clap::value_parser!(u32))
                         .help("most dirty passes while the VM runs"),
+                )
+                .arg(
+                    Arg::new("send_migration_max_bandwidth")
+                        .long("max-bandwidth")
+                        .num_args(1)
+                        .help("rate memory is sent at while the VM runs, e.g. 512M (bytes per second)"),
                 ),
         )
         .subcommand(
