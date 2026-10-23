@@ -157,6 +157,15 @@ RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
 RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
 RCOW_CKPT_INTERVAL_SEC="${RCOW_CKPT_INTERVAL_SEC:-60}"
 
+# Process-shared payload ring reserved in /dev/shm for each lvstore. The target
+# reserves the whole file with posix_fallocate so a full ring fails at attach,
+# rather than SIGBUS later on the write path. Keep the process-wide budget
+# explicit too: a direct script invocation must pass the same policy to the
+# target that one-click persists in its EnvironmentFile.
+RCOW_WRITEBACK_MB="${RCOW_WRITEBACK_MB:-4096}"
+S3LVOL_WRITEBACK_TOTAL_MB="${S3LVOL_WRITEBACK_TOTAL_MB:-8192}"
+export S3LVOL_WRITEBACK_TOTAL_MB
+
 # Must agree with vbdev_s3lvol.h; see the header comment.
 RCOW_NUM_SUBSYS="${RCOW_NUM_SUBSYS:-32}"
 RCOW_NS_PER_SUBSYS="${RCOW_NS_PER_SUBSYS:-64}"
@@ -247,7 +256,7 @@ RCOW_IOBUF_LARGE_BUFSIZE="${RCOW_IOBUF_LARGE_BUFSIZE:-1048576}"
 RCOW_IOBUF_LARGE_POOL="${RCOW_IOBUF_LARGE_POOL:-512}"
 
 # Host-side baseline readahead for activated volumes, in KiB. Matches the chunk
-# size for the same reason RCOW_MAX_IO_SIZE does. Dense imports (at least 50% of
+# size for the same reason RCOW_MAX_IO_SIZE does. Dense imports (at least 20% of
 # manifest chunks present) promote the default 1024 KiB baseline to 4096 KiB.
 # Any other explicit value is kept fixed; 0 disables the tuning entirely.
 #
@@ -290,6 +299,54 @@ export S3LVOL_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB}"
 # cache deliberately uses MAP_POPULATE. Zero keeps the disk cache but disables
 # this RAM tier; the RPC enforces the hard maximum of 8192.
 RCOW_CACHE_HOT_BUFS="${RCOW_CACHE_HOT_BUFS:-1024}"
+
+rcow_preflight_writeback_shm()
+{
+	local leaf path candidate existing_alloc=0 required delta available blocks
+
+	case "${RCOW_WRITEBACK_MB}" in
+	''|0|0*|?????*|*[!0-9]*) rcow_err "RCOW_WRITEBACK_MB must be a decimal integer from 64 to 4096"; return 1 ;;
+	esac
+	case "${S3LVOL_WRITEBACK_TOTAL_MB}" in
+	''|0|0*|????????*|*[!0-9]*) rcow_err "S3LVOL_WRITEBACK_TOTAL_MB must be a decimal integer from 64 to 1048576"; return 1 ;;
+	esac
+	if [ "${RCOW_WRITEBACK_MB}" -lt 64 ] ||
+	   [ "${RCOW_WRITEBACK_MB}" -gt 4096 ]; then
+		rcow_err "RCOW_WRITEBACK_MB must be between 64 and 4096"
+		return 1
+	fi
+	if [ "${S3LVOL_WRITEBACK_TOTAL_MB}" -lt "${RCOW_WRITEBACK_MB}" ]; then
+		rcow_err "S3LVOL_WRITEBACK_TOTAL_MB (${S3LVOL_WRITEBACK_TOTAL_MB}) is smaller than RCOW_WRITEBACK_MB (${RCOW_WRITEBACK_MB})"
+		return 1
+	fi
+	if [ "${S3LVOL_WRITEBACK_TOTAL_MB}" -gt 1048576 ]; then
+		rcow_err "S3LVOL_WRITEBACK_TOTAL_MB must be at most 1048576"
+		return 1
+	fi
+
+	leaf="$(rcow_writeback_shm_leaf "${RCOW_LVS_NAME}")" || return 1
+	path="/dev/shm/s3lvol-wb-$(id -u)/${leaf}"
+	for candidate in "${path}" "/dev/shm/${leaf}"; do
+		[ -e "${candidate}" ] || continue
+		blocks="$(stat -c %b "${candidate}" 2>/dev/null)" || {
+			rcow_err "cannot inspect existing write-back ring ${candidate}"
+			return 1
+		}
+		existing_alloc=$((blocks * 512))
+		break
+	done
+	required=$((RCOW_WRITEBACK_MB * 1024 * 1024 + 4096))
+	[ "${existing_alloc}" -ge "${required}" ] && return 0
+	delta=$((required - existing_alloc))
+	available="$(df -PB1 /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }')"
+	case "${available}" in
+	''|*[!0-9]*) rcow_err "cannot determine free capacity of /dev/shm"; return 1 ;;
+	esac
+	if [ "${available}" -lt "${delta}" ]; then
+		rcow_err "/dev/shm has ${available} free bytes, but lvstore '${RCOW_LVS_NAME}' needs ${delta} more bytes for its ${RCOW_WRITEBACK_MB} MiB write-back ring"
+		return 1
+	fi
+}
 
 # Default -m: last two CPUs from this process's Cpus_allowed_list (CPU0 stays
 # free for housekeeping when the set is 0..N-1). An explicit RCOW_TGT_CPUMASK
@@ -343,6 +400,20 @@ RCOW_HOT_MARKER="${RCOW_RUN_DIR}/hot-restart"
 # The layout captured before the target is killed, which rcow_verify_active
 # --expect compares the post-upgrade layout against.
 RCOW_HOT_SNAPSHOT="${RCOW_RUN_DIR}/hot-upgrade.snapshot"
+# Written immediately before rcow_start.sh first attempts create/attach, so no
+# new-format replay can happen before the rollback barrier exists. It is
+# deliberately sticky across supervisor retries; only the upgrade orchestrator
+# clears it immediately before its one candidate start. An upgrade failure may
+# roll back to an older write-back format only while this marker is absent.
+RCOW_START_ATTACHED="${RCOW_RUN_DIR}/start.attached"
+# Written by rcow_start.sh only after attach, replay and the layout check have
+# all finished. A target answers RPC, and rcow_target_ready is true, while that
+# work is still going on.
+RCOW_START_READY="${RCOW_RUN_DIR}/start.ready"
+# How long the hot-upgrade orchestrator waits for that file. Attach plus replay
+# is not bounded by process startup; 180s was short enough to call a healthy
+# recovery a failure and roll it back.
+RCOW_HOT_START_TIMEOUT="${RCOW_HOT_START_TIMEOUT:-600}"
 
 # Log directory separate from the run directory: the pid lives in a tmpfs location
 # and the log is persistent under /data.
@@ -392,10 +463,12 @@ RCOW_HOT_FLUSH_MS="${RCOW_HOT_FLUSH_MS:-0}"
 # and unwinds (the pause is lifted, the flushers are released), so the stop
 # reports a failed upgrade instead of a hung target.
 #
-# Must stay well inside RCOW_STOP_TIMEOUT. That budget is not a retry loop for
-# this call: hot_online_op only retries -EBUSY, and an expiry is not one, so it
-# goes straight to fail_live_prepared. A value above RCOW_STOP_TIMEOUT*1000
-# would therefore have the client give up first, every time.
+# Must stay well inside RCOW_STOP_TIMEOUT. That budget is one window for the
+# whole hot stop, not a fresh window per RPC: hot_online_op only retries
+# -EBUSY, and an expiry is not one, so it goes straight to fail_live_prepared.
+# A value above RCOW_STOP_TIMEOUT*1000 would therefore have the client give up
+# first, every time. rcow_upgrade.sh also shrinks this call to whatever part of
+# the window the flush and checkpoint have not already used.
 RCOW_HOT_PREPARE_SUSPEND_MS="${RCOW_HOT_PREPARE_SUSPEND_MS:-60000}"
 
 # --------------------------------------------------------------------------
@@ -429,6 +502,16 @@ rcow_need_cmd()
 case "${RCOW_HOT_FLUSH_MS}" in
 ''|*[!0-9]*)
 	rcow_die "RCOW_HOT_FLUSH_MS must be an integer number of milliseconds (0 skips the flush)"
+	;;
+esac
+
+case "${RCOW_HOT_START_TIMEOUT}" in
+''|*[!0-9]*)
+	rcow_die "RCOW_HOT_START_TIMEOUT must be an integer number of seconds"
+	;;
+*)
+	[ "${RCOW_HOT_START_TIMEOUT}" -gt 0 ] ||
+		rcow_die "RCOW_HOT_START_TIMEOUT must be positive"
 	;;
 esac
 
@@ -519,6 +602,27 @@ rcow_fsync_file()
 	        raise
 	finally:
 	    os.close(dfd)
+	PY
+}
+
+rcow_fsync_parent()
+{
+	python3 - "$1" <<-'PY' || return 1
+	import errno, os, sys
+
+	path = os.path.abspath(sys.argv[1])
+	try:
+	    fd = os.open(os.path.dirname(path), os.O_RDONLY)
+	except OSError as e:
+	    print("%s: %s" % (os.path.dirname(path), e.strerror), file=sys.stderr)
+	    sys.exit(1)
+	try:
+	    os.fsync(fd)
+	except OSError as e:
+	    if e.errno != errno.EINVAL:
+	        raise
+	finally:
+	    os.close(fd)
 	PY
 }
 
@@ -744,6 +848,66 @@ rcow_target_instances()
 	return 0
 }
 
+# Derive the leaf used by s3_writeback_shm_name(). Kept here so disruptive
+# tests that permanently discard their lvstore can clean the ring after the
+# target has already stopped. Production unload must never call the discard
+# helper below: a non-empty ring is crash-recovery data.
+rcow_writeback_shm_leaf()
+{
+	python3 - "${1:-${RCOW_LVS_NAME}}" <<'PY'
+import sys
+
+MASK = (1 << 64) - 1
+
+def hash_name(name, seed):
+    value = seed
+    for byte in name.encode():
+        value = ((value ^ byte) * 1099511628211) & MASK
+    value ^= value >> 33
+    value = (value * 0xff51afd7ed558ccd) & MASK
+    value ^= value >> 33
+    value = (value * 0xc4ceb9fe1a85ec53) & MASK
+    return (value ^ (value >> 33)) & MASK
+
+name = sys.argv[1]
+print(
+    "s3lvol-wb-"
+    f"{hash_name(name, 1469598103934665603):016x}"
+    f"{hash_name(name, 7809847782465536322):016x}"
+)
+PY
+}
+
+rcow_discard_writeback_shm()
+{
+	local leaf path fd
+
+	[ -z "$(rcow_target_instances)" ] || {
+		rcow_err "refusing to discard write-back shm while a target is running"
+		return 1
+	}
+	leaf="$(rcow_writeback_shm_leaf "${1:-${RCOW_LVS_NAME}}")" || return 1
+	for path in "/dev/shm/${leaf}" "/dev/shm/s3lvol-wb-$(id -u)/${leaf}"; do
+		[ -e "${path}" ] || continue
+
+		# Use the same advisory lock as s3_writeback_open(). Holding it
+		# across unlink closes the check/remove race: an existing target
+		# makes flock fail, while a target starting afterward cannot claim
+		# this inode before it has been removed.
+		exec {fd}<>"${path}" || return 1
+		if ! flock -n "${fd}"; then
+			rcow_err "refusing to discard live write-back shm ${path}"
+			exec {fd}>&-
+			return 1
+		fi
+		rm -f -- "${path}" || {
+			exec {fd}>&-
+			return 1
+		}
+		exec {fd}>&-
+	done
+}
+
 # Echo the pid of the running target, or nothing. The identity check is not
 # decoration: a pidfile outlives the process it names, and a recycled pid would
 # make rcow_start.sh refuse to start and rcow_stop.sh signal a stranger.
@@ -797,6 +961,25 @@ rcow_target_ready()
 	rcow_lvstore_attached
 }
 
+# The stronger question the orchestrator has to ask. rcow_target_ready becomes
+# true at attach, and rcow_start.sh still has the registry replay, the listeners
+# and its own layout check left to do. Waiting there is what let a slow recovery
+# be rolled back while that script was still running.
+#
+# The file is one pid, written only on rcow_start.sh's success path and removed
+# at the beginning of the next start. A stale pid from a target that has since
+# exited does not count.
+rcow_target_start_ready()
+{
+	local pid
+
+	rcow_target_ready || return 1
+	[ -s "${RCOW_START_READY}" ] || return 1
+	pid="$(tr -dc '0-9' <"${RCOW_START_READY}")"
+	[ -n "${pid}" ] || return 1
+	printf '%s\n' "$(rcow_target_instances)" | grep -qxF -- "${pid}"
+}
+
 # Record "<boot_id> <pid>" of the live target, for a stop an upgrade is about to
 # ask for. Written by the orchestrator; rcow_upgrade.sh deliberately does not,
 # so only an intent to hot-restart can make the marker read as one.
@@ -804,10 +987,24 @@ rcow_hot_marker_write()
 {
 	local pid boot candidate="${1:-}"
 
-	pid="$(rcow_target_pid)" || {
+	# The pidfile check requires the process image to be RCOW_TGT_BIN. A rollback
+	# names the binary it is about to start, which is not the one still running,
+	# so that check misses the only target on the box. One instance found by the
+	# socket scan is still unambiguous, and it is the pid the consumer checks.
+	pid="$(rcow_target_pid 2>/dev/null || true)"
+	if [ -z "${pid}" ]; then
+		local instances count
+
+		instances="$(rcow_target_instances)"
+		count="$(printf '%s\n' "${instances}" | grep -c . || true)"
+		if [ "${count}" -eq 1 ]; then
+			pid="${instances}"
+		fi
+	fi
+	if [ -z "${pid}" ]; then
 		rcow_err "no live target to name in ${RCOW_HOT_MARKER}"
 		return 1
-	}
+	fi
 	boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
 	[ -n "${boot}" ] || {
 		rcow_err "cannot read /proc/sys/kernel/random/boot_id"
@@ -1706,9 +1903,11 @@ for name, e in d.items():
 PY
 }
 
-# "<name>\t<uuid>" for every lvol and snapshot the target currently has. Used to
-# tell a replay of the recorded volume from a replay onto a different volume that
-# has since taken its name.
+# A complete inventory of opened lvols and terminal open failures:
+# "<state>\t<name>\t<uuid>\t<errno>\t<error>", followed by "C\t1" when the
+# target supports failure reporting. The completeness marker lets a new script
+# fail closed when it is paired with an older target: absence there is ambiguous,
+# not proof that a recorded volume was deleted.
 rcow_volume_uuids()
 {
 	rcow_rpc rcow_get_lvstores 2>/dev/null | python3 -c '
@@ -1717,10 +1916,22 @@ try:
     stores = json.load(sys.stdin)
 except ValueError:
     sys.exit(0)
+expected = sys.argv[1]
+complete = False
 for st in stores:
+    if st.get("lvs_name") != expected:
+        continue
+    complete = st.get("lvol_open_failures_complete") is True
     for lv in st.get("lvols", []):
-        print("%s\t%s" % (lv.get("name", ""), lv.get("uuid", "")))
-'
+        print("O\t%s\t%s\t\t" % (lv.get("name", ""), lv.get("uuid", "")))
+    for failure in st.get("lvol_open_failures", []):
+        error = str(failure.get("error", "")).replace("\t", " ").replace("\n", " ")
+        print("F\t%s\t%s\t%s\t%s" % (
+            failure.get("name", ""), failure.get("uuid", ""),
+            failure.get("errno", ""), error))
+if complete:
+    print("C\t1")
+' "${RCOW_LVS_NAME}"
 }
 
 # Keep only the named entries in a registry file; remove the file when none are
@@ -1729,19 +1940,25 @@ rcow_registry_keep()
 {
 	local file="$1"; shift
 	local tmp="${file}.tmp.$$"
+	local rc
 
 	if [ "$#" -eq 0 ]; then
-		rm -f "${file}"
+		rm -f "${file}" || return 1
+		rcow_fsync_parent "${file}" || {
+			rcow_err "could not make removal of replay plan ${file} durable"
+			return 1
+		}
 		return 0
 	fi
 
-	if python3 - "${file}" "${tmp}" "$@" <<'PY'
+	python3 - "${file}" "${tmp}" "$@" <<'PY'
 import json, os, sys
 src, dst, keep = sys.argv[1], sys.argv[2], set(sys.argv[3:])
 try:
     d = json.load(open(src))
-except Exception:
-    d = {}
+except Exception as e:
+    print("cannot parse %s: %s" % (src, e), file=sys.stderr)
+    sys.exit(1)
 d = {k: v for k, v in d.items() if k in keep}
 if not d:
     sys.exit(2)
@@ -1750,12 +1967,33 @@ with open(dst, "w") as f:
     f.flush()
     os.fsync(f.fileno())
 PY
-	then
-		mv -f "${tmp}" "${file}"
-	else
-		rm -f "${tmp}" "${file}"
-	fi
-	return 0
+	rc=$?
+	case "${rc}" in
+	0)
+		if ! mv -f "${tmp}" "${file}"; then
+			rm -f "${tmp}"
+			rcow_err "could not replace replay plan ${file}; keeping the original"
+			return 1
+		fi
+		if ! rcow_fsync_file "${file}"; then
+			rcow_err "could not make rewritten replay plan ${file} durable"
+			return 1
+		fi
+		;;
+	2)
+		rm -f "${tmp}"
+		rm -f "${file}" || return 1
+		rcow_fsync_parent "${file}" || {
+			rcow_err "could not make removal of replay plan ${file} durable"
+			return 1
+		}
+		;;
+	*)
+		rm -f "${tmp}"
+		rcow_err "could not rewrite replay plan ${file}; keeping the original"
+		return 1
+		;;
+	esac
 }
 
 # Re-attach every volume the previous process had exposed, at exactly the
@@ -1795,9 +2033,10 @@ PY
 rcow_replay_registry()
 {
 	local plan="${RCOW_REPLAY_FILE}"
-	local uuid_map name subsys nsid want_uuid have_uuid out payload res first row
+	local uuid_map name subsys nsid want_uuid have_uuid have_state have_errno
+	local have_error inventory_complete out payload res first row
 	local -a accepted=()
-	local -a pending=()
+	local -a replayable=()
 	local done_n=0 refused_n=0 failed_n=0
 
 	if [ -s "${plan}" ]; then
@@ -1831,26 +2070,46 @@ by hand once you have decided what it should have said"
 
 	uuid_map="$(mktemp "${RCOW_RUN_DIR}/uuids.XXXXXX")" || return 1
 	rcow_volume_uuids >"${uuid_map}"
+	inventory_complete="$(awk -F'\t' '$1 == "C" && $2 == "1" { print 1; exit }' \
+		"${uuid_map}")"
 
 	while IFS=$'\t' read -r name subsys nsid want_uuid; do
 		[ -n "${name}" ] || continue
 
-		have_uuid="$(awk -F'\t' -v n="${name}" '$1 == n { print $2; exit }' \
-			"${uuid_map}")"
+		IFS=$'\t' read -r have_state have_uuid have_errno have_error <<<"$(
+			awk -F'\t' -v n="${name}" \
+			    '($1 == "O" || $1 == "F") && $2 == n {
+				print $1 "\t" $3 "\t" $4 "\t" $5; exit
+			    }' "${uuid_map}"
+		)"
 
-		# Dropped rather than retried: neither of these becomes true later,
-		# and keeping them in the plan would mean it never completes.
-		if [ -z "${have_uuid}" ]; then
-			rcow_warn "'${name}' was active at subsys ${subsys} nsid \
-${nsid} but no longer exists in the lvstore; not restored"
-			refused_n=$((refused_n + 1))
+		if [ "${have_state}" = "F" ] &&
+		   [ "${have_uuid}" = "${want_uuid}" ]; then
+			rcow_err "'${name}' could not be opened by the target: \
+${have_error:-errno ${have_errno}}; keeping it in ${plan} for retry"
+			replayable+=("${name}")
+			failed_n=$((failed_n + 1))
 			continue
 		fi
-		if [ "${have_uuid}" != "${want_uuid}" ]; then
+		if [ -n "${have_uuid}" ] && [ "${have_uuid}" != "${want_uuid}" ]; then
 			rcow_warn "'${name}' was active with uuid ${want_uuid} but the \
 volume of that name now has uuid ${have_uuid}. A different volume has taken the \
 name; not restored, because the host would mount it believing it was the old one"
 			refused_n=$((refused_n + 1))
+			continue
+		fi
+		if [ -z "${have_uuid}" ]; then
+			if [ "${inventory_complete}" = "1" ]; then
+				rcow_warn "'${name}' was active at subsys ${subsys} nsid \
+${nsid} but no longer exists in the lvstore; not restored"
+				refused_n=$((refused_n + 1))
+			else
+				rcow_err "'${name}' is absent, but this target does not \
+report a complete lvol-open inventory; keeping it in ${plan} rather than \
+mistaking an open failure for deletion"
+				replayable+=("${name}")
+				failed_n=$((failed_n + 1))
+			fi
 			continue
 		fi
 
@@ -1859,6 +2118,7 @@ name; not restored, because the host would mount it believing it was the old one
 		# and the whole point of the registry is that the layout comes back
 		# unchanged.
 		accepted+=("${name}"$'\t'"${subsys}"$'\t'"${nsid}")
+		replayable+=("${name}")
 	done < <(rcow_registry_tsv "${plan}")
 
 	rm -f "${uuid_map}"
@@ -1907,7 +2167,8 @@ except Exception:
 print("%d\t%d" % (int(r.get("restored", 0)),
                   int(r.get("already_active", 0))))
 for f in r.get("failed") or []:
-    print("F\t%s" % (f.get("device_name", "")))
+    error = str(f.get("error", "")).replace("\t", " ").replace("\n", " ")
+    print("F\t%s\t%s" % (f.get("device_name", ""), error))
 ')"
 		fi
 
@@ -1922,27 +2183,30 @@ for f in r.get("failed") or []:
 			rcow_warn "the rcow_active_bdev_batch reply could not be read \
 as a result (${out}); treating all ${#accepted[@]} volume(s) as pending rather \
 than dropping any"
-			for row in "${accepted[@]}"; do
-				pending+=("${row%%$'\t'*}")
-			done
 			failed_n=$((failed_n + ${#accepted[@]}))
 			;;
 		*)
 			first="$(printf '%s\n' "${res}" | head -n 1)"
 			done_n=$(( ${first%%$'\t'*} + ${first##*$'\t'} ))
-			while IFS=$'\t' read -r row name; do
+			while IFS=$'\t' read -r row name have_error; do
 				[ "${row}" = "F" ] || continue
-				pending+=("${name}")
+				rcow_err "'${name}' could not be restored: \
+${have_error:-unknown activation error}; keeping it in ${plan}"
 				failed_n=$((failed_n + 1))
 			done < <(printf '%s\n' "${res}" | tail -n +2)
 			;;
 		esac
 	fi
 
-	if [ "${#pending[@]}" -eq 0 ]; then
-		rcow_registry_keep "${plan}"
+	# The plan is the restart transaction, not merely a same-process retry
+	# queue. Until every replayable volume succeeds, retain successful entries
+	# alongside failures: if this target is stopped before the next retry, its
+	# in-memory namespaces disappear and those successes must be replayed too.
+	# Terminal refusals are still removed immediately.
+	if [ "${failed_n}" -eq 0 ]; then
+		rcow_registry_keep "${plan}" || return 1
 	else
-		rcow_registry_keep "${plan}" "${pending[@]}"
+		rcow_registry_keep "${plan}" "${replayable[@]}" || return 1
 	fi
 
 	rcow_log "replay: ${done_n} restored, ${refused_n} refused, \

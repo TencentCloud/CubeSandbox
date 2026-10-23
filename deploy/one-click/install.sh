@@ -1839,6 +1839,19 @@ case "${RCOW_CACHE_HOT_BUFS}" in
   *) (( RCOW_CACHE_HOT_BUFS <= 8192 )) ||
        die "RCOW_CACHE_HOT_BUFS must be at most 8192" ;;
 esac
+RCOW_WRITEBACK_MB="${RCOW_WRITEBACK_MB:-4096}"
+S3LVOL_WRITEBACK_TOTAL_MB="${S3LVOL_WRITEBACK_TOTAL_MB:-8192}"
+case "${RCOW_WRITEBACK_MB}" in
+  ''|0|0*|?????*|*[!0-9]*) die "RCOW_WRITEBACK_MB must be a decimal integer from 64 to 4096" ;;
+  *) (( RCOW_WRITEBACK_MB >= 64 && RCOW_WRITEBACK_MB <= 4096 )) ||
+       die "RCOW_WRITEBACK_MB must be between 64 and 4096" ;;
+esac
+case "${S3LVOL_WRITEBACK_TOTAL_MB}" in
+  ''|0|0*|????????*|*[!0-9]*) die "S3LVOL_WRITEBACK_TOTAL_MB must be a decimal integer from 64 to 1048576" ;;
+  *) (( S3LVOL_WRITEBACK_TOTAL_MB >= RCOW_WRITEBACK_MB &&
+         S3LVOL_WRITEBACK_TOTAL_MB <= 1048576 )) ||
+       die "S3LVOL_WRITEBACK_TOTAL_MB must be between RCOW_WRITEBACK_MB and 1048576" ;;
+esac
 # Leave RCOW_TGT_CPUMASK unset unless the operator (or a previous
 # .one-click.env) set it. rcow_common.sh derives last-two at service start
 # from the service's own affinity; freezing the installer's mask would be
@@ -1852,9 +1865,20 @@ case "${RCOW_LISTEN_PORT}" in
     ;;
 esac
 
-# Render /data/cubelet/s3.cfg from CUBE_S3_* before the s3lvol preflight
-# looks for it. Hand-written files without the one-click sentinel are kept.
-write_s3lvol_cfg
+# The preflight below only needs a config file to exist. Replacing one that a
+# live target was started from, before the hot swap, makes the new process
+# attach with the new endpoint or bucket while rollback still has to start the
+# old binary against that same file. Keep the existing file through the swap
+# and write the new one only after the swap has succeeded. A first install has
+# nothing to keep, so it still has to be written now.
+S3LVOL_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
+S3LVOL_CFG_DEFERRED=0
+if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" && -f "${S3LVOL_CFG}" ]]; then
+  S3LVOL_CFG_DEFERRED=1
+  log "CubeS3lvol: keeping ${S3LVOL_CFG} until the hot upgrade finishes"
+else
+  write_s3lvol_cfg
+fi
 
 # nvme-cli is not part of a minimal install; provide it before the
 # startup-deps validation below requires it.
@@ -1922,6 +1946,21 @@ if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
   else
     # Nothing is going to start it, so the bare name is put in place here.
     switch_cubes3lvol_bare_to "${S3LVOL_STAGED_DIR}"
+  fi
+
+  # The process that just came up (or the one a rollback brought back) read the
+  # file that was already on disk. Commit the install's S3 settings only after
+  # that has succeeded; a failure leaves the previous file so the old binary can
+  # attach. The running process does not re-read it. A changed endpoint or
+  # bucket takes effect at the next start of this service, not during the swap.
+  if [[ "${S3LVOL_CFG_DEFERRED}" == "1" ]]; then
+    if [[ "${S3LVOL_UPGRADE_RC}" -eq 0 ]]; then
+      log "CubeS3lvol: hot upgrade finished; writing ${S3LVOL_CFG}"
+      log "CubeS3lvol: a target started during the swap keeps the previous endpoint and bucket until its next start"
+      write_s3lvol_cfg
+    else
+      log "CubeS3lvol: hot upgrade failed; leaving ${S3LVOL_CFG} unchanged"
+    fi
   fi
 fi
 
@@ -2196,6 +2235,8 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_HOT_BUFS" "${RCOW_CACHE_HOT_BUFS}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WRITEBACK_MB" "${RCOW_WRITEBACK_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "S3LVOL_WRITEBACK_TOTAL_MB" "${S3LVOL_WRITEBACK_TOTAL_MB}"
 if [[ -n "${RCOW_TGT_CPUMASK:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
 fi

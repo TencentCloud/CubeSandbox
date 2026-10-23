@@ -636,14 +636,12 @@ python3 "${RCOW_SPDK_RPC_PY}" -s "${RCOW_RPC_SOCK}" bdev_aio_create \
 	"${DST_WAL_IMG}" "${DST_WAL_BDEV}" 4096 >/dev/null || {
 	fail "bdev_aio_create ${DST_WAL_BDEV}"; exit 1; }
 
-S3LVOL_EXTRA_JSON=""
-[ "${S3LVOL_TEST_PATH_STYLE:-0}" -eq 1 ] && S3LVOL_EXTRA_JSON+=',"path_style":true'
-[ "${S3LVOL_TEST_NO_TLS:-0}" -eq 1 ] && S3LVOL_EXTRA_JSON+=',"no_tls":true'
-
+# TLS and path style belong to rcow_add_s3_config, which rcow_start.sh
+# already applied from s3.cfg. rcow_create_lvstore rejects those fields.
 rpc rcow_create_lvstore \
-	"$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"%s","journal_size_mb":%d,"wal_size_mb":%d%s}' \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"%s","journal_size_mb":%d,"wal_size_mb":%d}' \
 		"${DST_LVS}" "${BUCKET}" "${RCOW_CAPACITY_GB}" "${DST_WAL_BDEV}" \
-		"${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}" "${S3LVOL_EXTRA_JSON}")" >/dev/null || {
+		"${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}")" >/dev/null || {
 	fail "create dst lvstore"; exit 1; }
 DST_CREATED=1
 pass "dst lvstore ${DST_LVS} created"

@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CubeS3lvol <noreply@example.com>
+Date: Fri, 16 Oct 2026 14:45:00 +0800
+Subject: [PATCH] blob: skip parent copy for full cluster overwrite
+
+A write covering a complete unallocated clone cluster does not need any bytes
+from its parent. Avoid reading and writing those bytes before immediately
+overwriting them.
+---
+ lib/blob/blobstore.c                     | 31 +++++++++-
+ test/unit/lib/blob/blob.c/blob_ut.c      | 84 ++++++++++++++++++++++++++
+ 2 files changed, 113 insertions(+), 2 deletions(-)
+
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -2663,6 +2663,20 @@ struct spdk_blob_free_cluster_ctx {
+ 	struct spdk_bs_channel *bs_channel;
+ };
+ 
++static bool
++blob_op_is_full_cluster_overwrite(struct spdk_blob *blob, spdk_bs_user_op_t *op,
++				   uint64_t cluster_start_io_unit)
++{
++	struct spdk_bs_request_set *set = (struct spdk_bs_request_set *)op;
++	struct spdk_bs_user_op_args *args = &set->u.user_op;
++
++	return (args->type == SPDK_BLOB_WRITE ||
++		args->type == SPDK_BLOB_WRITEV ||
++		args->type == SPDK_BLOB_WRITE_ZEROES) &&
++	       args->offset == cluster_start_io_unit &&
++	       args->length == bs_io_units_per_cluster(blob);
++}
++
+ static void
+ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+ {
+@@ -2877,6 +2891,7 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 	bool is_zeroes;
+ 	bool can_copy;
+ 	bool is_valid_range;
++	bool full_cluster_overwrite;
+ 	uint64_t copy_src_lba;
+ 	int rc;
+ 
+@@ -2897,6 +2912,13 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 	 * cluster is supposed to be at. */
+ 	cluster_number = bs_io_unit_to_cluster_number(blob, io_unit);
+ 
++	/* A write covering the complete newly allocated cluster does not need any
++	 * bytes from its parent. Copying them first doubles the destination writes
++	 * and, for a cold external or S3-backed parent, adds a whole-cluster read
++	 * to the foreground write for data that is immediately overwritten. */
++	full_cluster_overwrite =
++		blob_op_is_full_cluster_overwrite(blob, op, cluster_start_io_unit);
++
+ 	ctx = calloc(1, sizeof(*ctx));
+ 	if (!ctx) {
+ 		bs_user_op_abort(op, -ENOMEM);
+@@ -2929,7 +2948,8 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 	is_zeroes = is_valid_range && blob->back_bs_dev->is_zeroes(blob->back_bs_dev,
+ 			bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit),
+ 			bs_dev_byte_to_lba(blob->back_bs_dev, blob->bs->cluster_sz));
+-	if (blob->parent_id != SPDK_BLOBID_INVALID && !is_zeroes && !can_copy) {
++	if (blob->parent_id != SPDK_BLOBID_INVALID && !is_zeroes && !can_copy &&
++	    !full_cluster_overwrite) {
+ 		ctx->buf = spdk_malloc(blob->bs->cluster_sz, blob->back_bs_dev->blocklen,
+ 				       NULL, SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
+ 		if (!ctx->buf) {
+@@ -2977,7 +2997,8 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 	/* Queue the user op to block other incoming operations */
+ 	TAILQ_INSERT_TAIL(&ch->need_cluster_alloc, op, link);
+ 
+-	if (blob->parent_id != SPDK_BLOBID_INVALID && !is_zeroes) {
++	if (blob->parent_id != SPDK_BLOBID_INVALID && !is_zeroes &&
++	    !full_cluster_overwrite) {
+ 		if (can_copy) {
+ 			blob_copy(ctx, op, copy_src_lba);
+ 		} else {
+diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -5720,6 +5720,89 @@ blob_snapshot_rw(void)
+ 	g_blobid = 0;
+ }
+ 
++static void
++blob_snapshot_full_cluster_overwrite(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_blob *blob, *snapshot;
++	struct spdk_io_channel *channel;
++	struct spdk_blob_opts opts;
++	spdk_blob_id blobid, snapshotid;
++	uint64_t cluster_size = spdk_bs_get_cluster_size(bs);
++	uint64_t io_unit_size = spdk_bs_get_io_unit_size(bs);
++	uint64_t io_units = cluster_size / io_unit_size;
++	uint64_t read_bytes_start, copy_bytes_start;
++	uint8_t *parent_data, *clone_data, *read_data;
++
++	parent_data = spdk_zmalloc(cluster_size, 0x1000, NULL,
++				   SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++	clone_data = spdk_zmalloc(cluster_size, 0x1000, NULL,
++				  SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++	read_data = spdk_zmalloc(cluster_size, 0x1000, NULL,
++				 SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++	SPDK_CU_ASSERT_FATAL(parent_data != NULL);
++	SPDK_CU_ASSERT_FATAL(clone_data != NULL);
++	SPDK_CU_ASSERT_FATAL(read_data != NULL);
++	memset(parent_data, 0x5A, cluster_size);
++	memset(clone_data, 0xA5, cluster_size);
++
++	channel = spdk_bs_alloc_io_channel(bs);
++	SPDK_CU_ASSERT_FATAL(channel != NULL);
++
++	ut_spdk_blob_opts_init(&opts);
++	opts.thin_provision = true;
++	opts.num_clusters = 1;
++	blob = ut_blob_create_and_open(bs, &opts);
++	blobid = spdk_blob_get_id(blob);
++
++	spdk_blob_io_write(blob, channel, parent_data, 0, io_units,
++			   blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++
++	spdk_bs_create_snapshot(bs, blobid, NULL, blob_op_with_id_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	snapshotid = g_blobid;
++
++	spdk_bs_open_blob(bs, snapshotid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
++	snapshot = g_blob;
++
++	read_bytes_start = g_dev_read_bytes;
++	copy_bytes_start = g_dev_copy_bytes;
++	spdk_blob_io_write(blob, channel, clone_data, 0, io_units,
++			   blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(g_dev_read_bytes == read_bytes_start);
++	CU_ASSERT(g_dev_copy_bytes == copy_bytes_start);
++
++	spdk_blob_io_read(blob, channel, read_data, 0, io_units,
++			  blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(memcmp(clone_data, read_data, cluster_size) == 0);
++
++	spdk_blob_io_read(snapshot, channel, read_data, 0, io_units,
++			  blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(memcmp(parent_data, read_data, cluster_size) == 0);
++
++	ut_blob_close_and_delete(bs, blob);
++	ut_blob_close_and_delete(bs, snapshot);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++	spdk_free(parent_data);
++	spdk_free(clone_data);
++	spdk_free(read_data);
++	g_blob = NULL;
++	g_blobid = 0;
++}
++
+ static void
+ blob_snapshot_rw_iov(void)
+ {
+@@ -10709,6 +10792,7 @@ main(int argc, char **argv)
+ 		CU_ADD_TEST(suite_bs, blob_thin_prov_unmap_update_extpage_ordered);
+ 		CU_ADD_TEST(suite, bs_load_iter_test);
+ 		CU_ADD_TEST(suite_bs, blob_snapshot_rw);
++		CU_ADD_TEST(suite_bs, blob_snapshot_full_cluster_overwrite);
+ 		CU_ADD_TEST(suite_bs, blob_snapshot_rw_iov);
+ 		CU_ADD_TEST(suite, blob_relations);
+ 		CU_ADD_TEST(suite, blob_relations2);
+-- 
+2.43.0

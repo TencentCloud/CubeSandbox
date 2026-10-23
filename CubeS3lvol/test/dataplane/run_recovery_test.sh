@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Crash-recovery verification for the s3lvol vbdev: does rcow_attach_lvstore
-# actually bring back what the WAL promised?
+# actually bring back what shared write-back promised?
 #
 # === Why this is a separate script from run_dataplane_test.sh ===
 #
@@ -21,21 +21,23 @@
 #
 #   - If round 2 fails, the metadata journal did not replay: the objects are in
 #     the bucket but nothing maps an LBA to them. Nothing to do with the WAL.
-#   - If round 3 fails, the WAL did not replay: writes that were acknowledged to
-#     the host never reached S3 and were not recovered from the log. That is a
-#     durability violation (INV1), the defect class the WAL exists to prevent.
+#   - If round 3 fails, shared write-back did not replay: writes that were
+#     acknowledged to the host never reached S3 and were not recovered from the
+#     ring. That is a durability violation (INV1), the defect class write-back
+#     exists to prevent.
 #
 # === What makes the SIGKILL meaningful ===
 #
-# Killing the target proves nothing unless there really was unflushed data at
-# the time. So round 2 deliberately does *not* flush, and asserts
-# overlay_bytes > 0 immediately before the kill. Without that assertion a
-# too-eager flusher would turn this into a re-run of the clean case and it would
-# still pass.
+# Killing the target proves nothing unless there really is data not yet in S3.
+# Round 2 deliberately issues a host FLUSH (`conv=fsync`) and then asserts
+# writeback_occupied_bytes and writeback_pending_records immediately before the
+# kill. This pins the intended contract: FLUSH reaches process-shared shm, but
+# does not drain S3. Without the pending assertion an accidental S3 drain would
+# turn this into a re-run of the clean case and it would still pass.
 #
 # SIGKILL specifically, not SIGTERM: SIGTERM gives SPDK a chance to shut down,
-# which would drain the flusher and close the log. What we want is the state a
-# power loss leaves behind -- an open log with a live tail.
+# which would drain the flusher and close the ring. What we want is the state a
+# process crash leaves behind -- pending records in the shared mapping.
 #
 # === What it cannot check ===
 #
@@ -84,14 +86,25 @@ LVOL_SIZE=$((LVOL_GIB * 1024 * 1024 * 1024))
 # and before the kill.
 #
 # B is much larger than A on purpose. It is the region that has to be recovered
-# from the log, so the test is only meaningful if a decent backlog is still
-# unflushed at the moment of the kill -- and the flusher runs 8 concurrent
-# uploads, so a few MiB disappear into S3 faster than the script can get from the
-# dd to the kill. 32 MiB is enough that it cannot win the race.
+# from shared write-back, so the test is only meaningful if a decent backlog is
+# still unflushed at the moment of the kill. Limit this test's flusher to one
+# upload: production concurrency can drain 32 MiB before the stats RPC returns,
+# turning a crash-replay test into another clean-S3 recovery test.
 A_OFF_MB=0
 A_LEN_MB=8
 B_OFF_MB=16
 B_LEN_MB=32
+# Seed a separate 4 MiB region before the clean unload, then issue partial
+# WRITE ZEROES and DSM deallocate commands into it immediately before SIGKILL.
+# Partial ranges force ZEROES/UNMAP records through the shm replay path rather
+# than reducing to whole-object mapping removal.
+C_OFF_MB=64
+C_LEN_MB=4
+ZERO_OFF_4K=$((C_OFF_MB * 256 + 16))
+UNMAP_OFF_4K=$(((C_OFF_MB + 2) * 256 + 16))
+ZERO_LEN_4K=32
+FUA_OFF_4K=$((72 * 256 + 16))
+RECOVERY_FLUSH_MAX_CONCURRENT="${S3LVOL_RECOVERY_FLUSH_MAX_CONCURRENT:-1}"
 
 # Interval the round-3 attach asks for, and how long to wait for that trigger to
 # fire. The wait is generous relative to the interval because the poller checks
@@ -158,6 +171,8 @@ Credentials are read from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
 
 Environment:
   S3LVOL_CKPT_INTERVAL_SEC  interval round 3 attaches with (default: ${CKPT_INTERVAL_SEC})
+  S3LVOL_RECOVERY_FLUSH_MAX_CONCURRENT
+                            flusher concurrency used by this test (default: ${RECOVERY_FLUSH_MAX_CONCURRENT})
   S3LVOL_KEEP_S3            keep the S3 objects even after a clean run
   S3LVOL_KEEP_LOGS          keep the target logs even after a clean run
 
@@ -255,8 +270,11 @@ start_target()
 	# New process, so nothing it held is still configured.
 	TRANSPORT_READY=0
 
+	# Keep the crash round deterministic: with production upload concurrency a
+	# fast backend can empty the ring between dd and the stats RPC.
 	# shellcheck disable=SC2086
-	"${TGT_BIN}" -m "${TGT_CPUMASK}" ${TGT_ARGS} >"${TGT_LOG}" 2>&1 &
+	env S3LVOL_FLUSH_MAX_CONCURRENT="${RECOVERY_FLUSH_MAX_CONCURRENT}" \
+		"${TGT_BIN}" -m "${TGT_CPUMASK}" ${TGT_ARGS} >"${TGT_LOG}" 2>&1 &
 	TGT_PID=$!
 
 	local i
@@ -483,8 +501,18 @@ ulimit -c unlimited 2>/dev/null || true
 # equal if the data came back from the wrong offset.
 dd if=/dev/urandom of="${WORKDIR}/pat_a.bin" bs=1M count=${A_LEN_MB} status=none
 dd if=/dev/urandom of="${WORKDIR}/pat_b.bin" bs=1M count=${B_LEN_MB} status=none
+dd if=/dev/urandom of="${WORKDIR}/pat_c.bin" bs=1M count=${C_LEN_MB} status=none
+dd if=/dev/urandom of="${WORKDIR}/pat_fua.bin" bs=4K count=1 status=none
 A_HASH="$(sha256sum "${WORKDIR}/pat_a.bin" | cut -d' ' -f1)"
 B_HASH="$(sha256sum "${WORKDIR}/pat_b.bin" | cut -d' ' -f1)"
+C_HASH="$(sha256sum "${WORKDIR}/pat_c.bin" | cut -d' ' -f1)"
+cp "${WORKDIR}/pat_c.bin" "${WORKDIR}/pat_c_zeroed.bin"
+dd if=/dev/zero of="${WORKDIR}/pat_c_zeroed.bin" bs=4K count=${ZERO_LEN_4K} \
+	seek=$((ZERO_OFF_4K - C_OFF_MB * 256)) conv=notrunc status=none
+dd if=/dev/zero of="${WORKDIR}/pat_c_zeroed.bin" bs=4K count=${ZERO_LEN_4K} \
+	seek=$((UNMAP_OFF_4K - C_OFF_MB * 256)) conv=notrunc status=none
+C_ZERO_HASH="$(sha256sum "${WORKDIR}/pat_c_zeroed.bin" | cut -d' ' -f1)"
+FUA_HASH="$(sha256sum "${WORKDIR}/pat_fua.bin" | cut -d' ' -f1)"
 
 verify_region()
 {
@@ -508,6 +536,27 @@ verify_region()
 
 	fail "round ${ROUND}: region ${label} differs (want ${want:0:16}..., got ${got:0:16}...)"
 	cmp "${WORKDIR}/pat_${label}.bin" "${out}" 2>&1 | head -3 | sed 's/^/       /'
+	return 1
+}
+
+verify_4k_region()
+{
+	local label="$1" off_4k="$2" want="$3"
+	local out="${WORKDIR}/read_${label}_r${ROUND}.bin"
+	local got
+
+	if ! dd if="${NVME_DEV}" of="${out}" bs=4K count=1 skip="${off_4k}" \
+			iflag=direct status=none \
+			2>"${WORKDIR}/dd_${label}_r${ROUND}.err"; then
+		fail "round ${ROUND}: reading 4 KiB region ${label}"
+		return 1
+	fi
+	got="$(sha256sum "${out}" | cut -d' ' -f1)"
+	if [ "${want}" = "${got}" ]; then
+		pass "round ${ROUND}: 4 KiB region ${label} intact"
+		return 0
+	fi
+	fail "round ${ROUND}: 4 KiB region ${label} differs"
 	return 1
 }
 
@@ -590,6 +639,15 @@ fi
 pass "round 1: wrote pattern A (${A_LEN_MB} MiB @ ${A_OFF_MB} MiB)"
 check_target "round 1, writing pattern A" || exit 1
 
+if ! dd if="${WORKDIR}/pat_c.bin" of="${NVME_DEV}" bs=1M count=${C_LEN_MB} \
+		seek=${C_OFF_MB} oflag=direct conv=fsync status=none \
+		2>"${WORKDIR}/dd_wc.err"; then
+	fail "round 1: writing ZEROES/UNMAP seed region"
+	sed 's/^/       /' "${WORKDIR}/dd_wc.err"
+	exit 1
+fi
+pass "round 1: wrote the ZEROES/UNMAP seed region"
+
 disconnect_nvme
 ${RPC} nvmf_delete_subsystem "${NQN}" >/dev/null 2>&1 || true
 
@@ -649,7 +707,7 @@ fi
 TGT_PID=""
 
 # ==========================================================================
-# Round 2: attach, verify A, write B, then kill without flushing
+# Round 2: attach, verify A, write B with host FLUSH, then kill
 # ==========================================================================
 echo
 echo "[round 2] attach, verify A, write pattern B, then SIGKILL"
@@ -713,6 +771,7 @@ fi
 
 # The core check of the clean case: the chunk map came back from the journal.
 verify_region a "${A_OFF_MB}" "${A_LEN_MB}" "${A_HASH}" || true
+verify_region c_seed "${C_OFF_MB}" "${C_LEN_MB}" "${C_HASH}" || true
 check_target "round 2, verifying pattern A" || exit 1
 
 if ! dd if="${WORKDIR}/pat_b.bin" of="${NVME_DEV}" bs=1M count=${B_LEN_MB} \
@@ -723,16 +782,48 @@ if ! dd if="${WORKDIR}/pat_b.bin" of="${NVME_DEV}" bs=1M count=${B_LEN_MB} \
 	check_target "round 2, writing pattern B" || exit 1
 	exit 1
 fi
-pass "round 2: wrote pattern B (${B_LEN_MB} MiB @ ${B_OFF_MB} MiB), acknowledged from the log"
+pass "round 2: host FLUSH returned with pattern B (${B_LEN_MB} MiB @ ${B_OFF_MB} MiB) in shared write-back"
 check_target "round 2, writing pattern B" || exit 1
+
+SECTOR_SIZE="$(blockdev --getss "${NVME_DEV}")"
+FUA_START_LBA=$((FUA_OFF_4K * 4096 / SECTOR_SIZE))
+if nvme write "${NVME_DEV}" --start-block="${FUA_START_LBA}" \
+		--block-count="$((4096 / SECTOR_SIZE - 1))" --data-size=4096 \
+		--data="${WORKDIR}/pat_fua.bin" --force-unit-access \
+		>/dev/null 2>"${WORKDIR}/fua.err"; then
+	pass "round 2: NVMe FUA write completed before the crash"
+else
+	fail "round 2: NVMe FUA write failed"
+	sed 's/^/       /' "${WORKDIR}/fua.err"
+fi
+ZERO_START_LBA=$((ZERO_OFF_4K * 4096 / SECTOR_SIZE))
+UNMAP_OFF_BYTES=$((UNMAP_OFF_4K * 4096))
+ZERO_LEN_BYTES=$((ZERO_LEN_4K * 4096))
+ZERO_BLOCK_COUNT=$((ZERO_LEN_BYTES / SECTOR_SIZE - 1))
+if nvme write-zeroes "${NVME_DEV}" --start-block="${ZERO_START_LBA}" \
+		--block-count="${ZERO_BLOCK_COUNT}" >/dev/null \
+		2>"${WORKDIR}/write_zeroes.err"; then
+	pass "round 2: partial NVMe WRITE ZEROES completed before the crash"
+else
+	fail "round 2: partial NVMe WRITE ZEROES failed"
+	sed 's/^/       /' "${WORKDIR}/write_zeroes.err"
+fi
+if blkdiscard -o "${UNMAP_OFF_BYTES}" -l "${ZERO_LEN_BYTES}" "${NVME_DEV}" \
+		2>"${WORKDIR}/unmap.err"; then
+	pass "round 2: partial NVMe deallocate completed before the crash"
+else
+	fail "round 2: partial NVMe deallocate failed"
+	sed 's/^/       /' "${WORKDIR}/unmap.err"
+fi
+check_target "round 2, issuing ZEROES/UNMAP" || exit 1
 
 # Kill the target *immediately* after sampling what is still pending.
 #
-# The first live run passed while barely testing anything: it sampled
-# overlay_bytes right after the dd, then made another stats RPC, then
+# The first live run passed while barely testing anything: it sampled pending
+# bytes right after the dd, then made another stats RPC, then
 # disconnected nvme (which sleeps a second), and only then killed. In those~6
-# seconds the flusher uploaded almost everything, so round 3 replayed 3 entries
-# instead of the backlog -- a green run that proved nearly nothing.
+# seconds the flusher uploaded almost everything, so round 3 recovered almost
+# nothing from the ring -- a green run that proved nearly nothing.
 #
 # So: one stats call, then kill, and nothing in between. nvme is disconnected
 # *after* the kill, which is also the more faithful order -- a host does not
@@ -746,7 +837,7 @@ info "round 2: SIGKILLed pid ${KILLED_PID} with no drain and no log close"
 
 disconnect_nvme
 
-OVERLAY_BYTES="$(printf '%s' "${STATS}" | python3 -c '
+WRITEBACK_BYTES="$(printf '%s' "${STATS}" | python3 -c '
 import json, sys
 try:
     stores = json.load(sys.stdin)
@@ -754,8 +845,21 @@ except ValueError:
     print("missing"); sys.exit(0)
 for st in stores:
     wp = st.get("write_path", {})
-    if "overlay_bytes" in wp:
-        print(wp["overlay_bytes"]); break
+    if "writeback_occupied_bytes" in wp:
+        print(wp["writeback_occupied_bytes"]); break
+else:
+    print("missing")
+' 2>/dev/null)"
+WRITEBACK_PENDING="$(printf '%s' "${STATS}" | python3 -c '
+import json, sys
+try:
+    stores = json.load(sys.stdin)
+except ValueError:
+    print("missing"); sys.exit(0)
+for st in stores:
+    wp = st.get("write_path", {})
+    if "writeback_pending_records" in wp:
+        print(wp["writeback_pending_records"]); break
 else:
     print("missing")
 ' 2>/dev/null)"
@@ -775,10 +879,10 @@ else:
 # so the old floor had turned into a requirement that the flusher be inefficient.
 #
 # Two chunks is what the assertion is actually there to catch: the original bug
-# was a run that drained everything and replayed three entries. It is far enough
-# below what is observed to not be a coin flip, and far enough above zero that a
-# drained backlog still fails. The direct measure of recovery work is the replay
-# count in round 3, which is asserted separately and is not a proxy for anything.
+# was a run that drained everything before the kill. It is far enough below what
+# is observed to not be a coin flip, and far enough above zero that a drained
+# backlog still fails. The byte-for-byte B-region check in round 3 is the direct
+# proof that these pending records were recovered.
 # Two chunks is the floor on a remote store. A local one (MinIO in CI) keeps
 # far closer to the writer, so the floor is tunable.
 MIN_PENDING="${S3LVOL_TEST_MIN_PENDING:-$((2 * 1024 * 1024))}"
@@ -788,21 +892,24 @@ if [ "${S3LVOL_TEST_SKIP_RECOVERY_QUANTITY:-0}" -eq 1 ]; then
 	# still verify recovery; only the "was there enough to recover" floors
 	# are skipped.
 	pass "round 2: pending-size floor skipped (fast local backend)"
-elif [ "${OVERLAY_BYTES}" = "missing" ]; then
-	fail "round 2: could not read overlay_bytes before the kill"
-elif [ "${OVERLAY_BYTES}" -ge "${MIN_PENDING}" ] 2>/dev/null; then
-	pass "round 2: $((OVERLAY_BYTES / 1048576)) MiB acknowledged but not yet in S3 (>= $((MIN_PENDING / 1048576)) MiB needed to make this a real crash)"
+elif [ "${WRITEBACK_BYTES}" = "missing" ] ||
+     [ "${WRITEBACK_PENDING}" = "missing" ]; then
+	fail "round 2: could not read shared write-back occupancy before the kill"
+elif [ "${WRITEBACK_BYTES}" -ge "${MIN_PENDING}" ] 2>/dev/null &&
+     [ "${WRITEBACK_PENDING}" -gt 0 ] 2>/dev/null; then
+	pass "round 2: $((WRITEBACK_BYTES / 1048576)) MiB in ${WRITEBACK_PENDING} pending shared write-back record(s) (>= $((MIN_PENDING / 1048576)) MiB needed to make this a real crash)"
 else
-	fail "round 2: only ${OVERLAY_BYTES} bytes were pending, need >= ${MIN_PENDING}"
+	fail "round 2: only ${WRITEBACK_BYTES} bytes / ${WRITEBACK_PENDING} record(s) were pending, need >= ${MIN_PENDING} bytes and at least one record"
 	info "the flusher kept up with the writer, so there is almost nothing for"
 	info "round 3 to recover and a green result there would be meaningless"
 fi
-pass "round 2: target killed with data still in the log"
+pass "round 2: target killed with data still in shared write-back"
 
 # ==========================================================================
 # Round 3: attach again and check that *both* patterns are there
 #
-# A must survive because it was in S3 already; B can only come back from the WAL.
+# A must survive because it was in S3 already; B can only come back from shared
+# write-back.
 #
 # This round also checks the owner marker, and the three rounds happen to cover
 # its whole contract:
@@ -828,6 +935,24 @@ if ! raw_rpc rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bu
 	fail "rcow_add_s3_config (round 3)"
 	exit 1
 fi
+
+# Deleting by name while the lvstore is unloaded must not claim success. At
+# this point the crashed ring is the only copy of pattern B; removing its
+# registry/ring by name would make the force-attach below unrecoverable.
+if raw_rpc rcow_delete_lvstore "$(printf '{"lvs_name":"%s"}' "${LVS_NAME}")" \
+		>"${WORKDIR}/delete_unloaded.json" \
+		2>"${WORKDIR}/delete_unloaded.err"; then
+	fail "round 3: deleting the unloaded lvstore succeeded and risked discarding crash recovery"
+else
+	if grep -qi 'not loaded.*attach.*before deleting' \
+			"${WORKDIR}/delete_unloaded.err"; then
+		pass "round 3: unloaded delete was refused, preserving the crashed ring"
+	else
+		fail "round 3: unloaded delete failed without the expected safety error"
+		sed 's/^/       /' "${WORKDIR}/delete_unloaded.err"
+	fi
+fi
+check_target "round 3, refusing unloaded delete" || exit 1
 
 # The crash left the marker behind on purpose -- it does not self-expire, because
 # guessing whether the other owner is alive from a timestamp is worse than making
@@ -871,36 +996,24 @@ else
 	info "the rest of the interval checks below will be meaningless"
 fi
 
-# Replaying nothing would be a silent failure: the attach would succeed and the
-# data would simply be missing. And replaying just a handful of entries means the
-# flusher had drained the backlog before the kill, so the round is not actually
-# exercising recovery -- which is why there is a floor here and not just "> 0".
-# A 1 MiB write becomes about two WAL entries (a full chunk does not fit in one
-# batch buffer), so the >= 8 MiB backlog asserted in round 2 has to show up as
-# well over 8 entries.
-REPLAYED="$(grep -o 'replayed [0-9]* WAL entries' "${TGT_LOG}" | \
-	grep -o '[0-9]*' | tail -1 || true)"
-if [ "${S3LVOL_TEST_SKIP_RECOVERY_QUANTITY:-0}" -eq 1 ]; then
-	pass "round 3: replay-count floor skipped (fast local backend); replayed ${REPLAYED:-0} entries"
-elif [ -z "${REPLAYED}" ]; then
-	fail "round 3: the log does not say anything was replayed"
-	grep -iE 'replay|wal' "${TGT_LOG}" | tail -10 | sed 's/^/       /'
-elif [ "${REPLAYED}" -ge 8 ] 2>/dev/null; then
-	pass "round 3: replayed ${REPLAYED} WAL entries from the crashed log"
-else
-	fail "round 3: only ${REPLAYED} WAL entries were replayed"
-	info "too little was left in the log for this to be a real recovery test"
-fi
+# The pre-kill assertion proved that B had pending records in shared write-back.
+# Its byte-for-byte verification below is therefore the definitive replay check;
+# the legacy on-disk WAL replay count is expected to be zero on this write path.
+pass "round 3: attach completed with the crashed shared write-back ring"
 
 export_and_connect || exit 1
 
 # A: was already in S3 before the crash. Failing here means the journal replay
-# broke, not the WAL.
+# broke, not shared write-back.
 verify_region a "${A_OFF_MB}" "${A_LEN_MB}" "${A_HASH}" || true
-# B: acknowledged to the host but never uploaded. This can only come back from
-# the WAL, so it is the durability check (INV1).
+# B: acknowledged to the host with records still pending at the kill. This can
+# only come back from shared write-back, so it is the durability check (INV1).
 verify_region b "${B_OFF_MB}" "${B_LEN_MB}" "${B_HASH}" || true
-check_target "round 3, verifying both patterns" || exit 1
+verify_4k_region fua "${FUA_OFF_4K}" "${FUA_HASH}" || true
+# C: both partial commands completed before SIGKILL. Their ranges must replay as
+# zero while every neighbouring byte retains the original random seed.
+verify_region c_zeroes_unmap "${C_OFF_MB}" "${C_LEN_MB}" "${C_ZERO_HASH}" || true
+check_target "round 3, verifying recovered operations" || exit 1
 
 # Now push the recovered data out and read it back through a fresh connection:
 # without this, B could still be coming from the overlay that the replay filled,
@@ -930,6 +1043,8 @@ export_and_connect || exit 1
 
 verify_region a "${A_OFF_MB}" "${A_LEN_MB}" "${A_HASH}" || true
 verify_region b "${B_OFF_MB}" "${B_LEN_MB}" "${B_HASH}" || true
+verify_4k_region fua_s3 "${FUA_OFF_4K}" "${FUA_HASH}" || true
+verify_region c_zeroes_unmap_s3 "${C_OFF_MB}" "${C_LEN_MB}" "${C_ZERO_HASH}" || true
 check_target "round 3b, re-reading from S3" || exit 1
 
 # ==========================================================================
@@ -1046,12 +1161,12 @@ echo "[3d] unloading with a ${CKPT_INTERVAL_SEC}s checkpoint interval running"
 #   - the poller still running, which is the bug.
 #
 # So enough data is written to leave the flusher seconds of uploading to do. The
-# writes are acknowledged from the WAL, so this returns long before S3 has any of
-# it, and the drain then holds the window open across several polls.
+# writes are acknowledged from shared write-back, so this returns long before S3
+# has all of it, and the drain then holds the window open across several polls.
 PRE_UNLOAD_MB=0
 for off in 64 72 80 88; do
 	if dd if="${WORKDIR}/pat_a.bin" of="${NVME_DEV}" bs=1M count="${A_LEN_MB}" \
-			seek="${off}" oflag=direct conv=fsync status=none \
+			seek="${off}" oflag=direct status=none \
 			2>"${WORKDIR}/dd_pre_unload.err"; then
 		PRE_UNLOAD_MB=$((PRE_UNLOAD_MB + A_LEN_MB))
 	else

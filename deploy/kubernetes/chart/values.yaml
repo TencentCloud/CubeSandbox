@@ -1213,9 +1213,9 @@ cubeEgress:
 # Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
 # in the cube-node Big Pod. Off by default, same as one-click. Enabling it
 # recreates the Big Pod and adds ~2 CPU
-# + 19 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
-# The 19 GiB request is 16 GiB tgtMemMB plus the default 1 GiB RAM cache and
-# process overhead, still under the 20 GiB limit.
+# + 23 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
+# The 23 GiB request is 16 GiB tgtMemMB, the default 1 GiB RAM cache, a 4 GiB
+# process-shared write-back ring, and process overhead.
 cubeS3lvol:
   enabled: false
   # Optional cluster-wide pin. Empty: the sidecar hashes the full Kubernetes
@@ -1230,6 +1230,9 @@ cubeS3lvol:
   # Whole-object RAM cache slots per lvstore. With 1 MiB chunks, 1024 is
   # 1 GiB of resident memory; set 0 to keep only the disk cache.
   cacheHotBufs: 1024
+  # The write-back ring defaults to 4 GiB per lvstore. Kubernetes tmpfs needs
+  # room for its header too, so mount a slightly larger explicit /dev/shm.
+  writebackShmSize: 5Gi
   journalMB: 1024
   walMB: 32768
   cacheMB: 490496
@@ -1266,9 +1269,9 @@ cubeS3lvol:
   resources:
     requests:
       cpu: "2"
-      memory: "19Gi"
+      memory: "23Gi"
     limits:
-      memory: "20Gi"
+      memory: "24Gi"
 
 bootstrap:
   pvmHostKernel:

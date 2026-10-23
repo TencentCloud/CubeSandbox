@@ -36,6 +36,7 @@
 
 #include "s3lvol/s3_flusher.h"
 #include "s3lvol/s3_overlay.h"
+#include "s3lvol/s3_writeback.h"
 
 #define BLOCK_SIZE 4096
 #define CHUNK_SIZE (1024 * 1024)
@@ -462,6 +463,144 @@ test_overlay_basics(void)
 	s3_overlay_destroy(ov);
 out:
 	free(blk);
+	free(out);
+}
+
+static void
+count_overlay_release(void *cb_arg)
+{
+	unsigned *releases = cb_arg;
+
+	(*releases)++;
+}
+
+static void
+test_overlay_write_reservation(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_overlay_write_reservation *reservation = NULL;
+	uint8_t *data = malloc(2 * BLOCK_SIZE);
+	uint8_t *out = calloc(1, 2 * BLOCK_SIZE);
+	unsigned first_releases = 0;
+	unsigned second_releases = 0;
+	int rc;
+
+	printf("\n[4] atomic overlay write reservation\n");
+	rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+	check_true("create reservation-test overlay",
+		   rc == 0 && ov != NULL, NULL);
+	if (rc != 0 || !data || !out) {
+		goto out;
+	}
+	fill_pattern(data, 2, 0, 0x44);
+	rc = s3_overlay_prepare_write(ov, 0, 2, &reservation);
+	check_true("reserve blocks without allocating a payload copy",
+		   rc == 0 && reservation != NULL &&
+		   s3_overlay_get_bytes(ov) == 0 &&
+		   !s3_overlay_covers(ov, 0, 2), NULL);
+	s3_overlay_cancel_prepared(reservation);
+	reservation = NULL;
+	check_true("cancelling an invisible reservation releases its bytes",
+		   s3_overlay_get_bytes(ov) == 0 &&
+		   !s3_overlay_covers(ov, 0, 2), NULL);
+
+	rc = s3_overlay_prepare_write(ov, 0, 2, &reservation);
+	check_true("reserve a second time", rc == 0, NULL);
+	rc = s3_overlay_commit_prepared_ref(reservation, data, 20,
+					    count_overlay_release,
+					    &first_releases);
+	reservation = NULL;
+	check_true("prepared pending write commits atomically",
+		   rc == 0 && s3_overlay_covers(ov, 0, 2), NULL);
+	s3_overlay_apply(ov, 0, 2, out);
+	check_true("committed reservation preserves the complete payload",
+		   check_pattern(out, 2, 0, 0x44), NULL);
+
+	rc = s3_overlay_prepare_write(ov, 0, 2, &reservation);
+	check_true("reserve blocks for borrowed shm payload", rc == 0, NULL);
+	rc = s3_overlay_commit_prepared_ref(reservation, data, 21,
+					    count_overlay_release,
+					    &second_releases);
+	reservation = NULL;
+	check_true("borrowed payload is retained without early release",
+		   rc == 0 && first_releases == 2 && second_releases == 0,
+		   NULL);
+	rc = s3_overlay_write(ov, 0, 1, data, 22);
+	check_true("overwriting one block releases exactly one shm ref",
+		   rc == 0 && second_releases == 1, NULL);
+	s3_overlay_drop_chunk(ov, 0);
+	check_true("dropping the chunk releases the final shm ref",
+		   second_releases == 2, NULL);
+
+out:
+	s3_overlay_cancel_prepared(reservation);
+	s3_overlay_destroy(ov);
+	free(data);
+	free(out);
+}
+
+static void
+test_overlay_pending_durability(void)
+{
+	struct s3_overlay *ov = NULL;
+	uint8_t *old = malloc(BLOCK_SIZE);
+	uint8_t *new = malloc(BLOCK_SIZE);
+	uint8_t *out = malloc(BLOCK_SIZE);
+	struct s3_overlay_write_reservation *reservation = NULL;
+	unsigned releases = 0;
+	uint64_t idx = 0;
+	int rc;
+
+	printf("\n[4] pending overlay durability gate\n");
+
+	rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+	check_true("create pending-test overlay", rc == 0 && ov != NULL, NULL);
+	if (rc != 0 || !old || !new || !out) {
+		goto out;
+	}
+
+	fill_pattern(old, 1, 0, 0x31);
+	fill_pattern(new, 1, 0, 0x32);
+	check_true("publish durable predecessor",
+		   s3_overlay_write(ov, 0, 1, old, 10) == 0, NULL);
+	rc = s3_overlay_prepare_write(ov, 0, 1, &reservation);
+	check_true("reserve pending overwrite", rc == 0, NULL);
+	check_true("publish pending overwrite",
+		   s3_overlay_commit_prepared_ref(
+			   reservation, new, 11, count_overlay_release,
+			   &releases) == 0, NULL);
+	reservation = NULL;
+
+	memset(out, 0, BLOCK_SIZE);
+	s3_overlay_apply(ov, 0, 1, out);
+	check_true("pending data is immediately readable",
+		   check_pattern(out, 1, 0, 0x32), NULL);
+	check_true("a pending chunk is hidden even from a forced flush",
+		   !s3_overlay_has_dirty(ov) &&
+		   s3_overlay_next_dirty(ov, true, &idx) == -ENOENT, NULL);
+	check_u64("pending overwrite retains predecessor truncation floor",
+		  s3_overlay_min_seq(ov), 10);
+
+	/* The older completion must not accidentally promote the newer bytes. */
+	s3_overlay_mark_durable(ov, 0, 1, 10);
+	check_true("older WAL completion leaves the chunk gated",
+		   !s3_overlay_has_dirty(ov), NULL);
+	check_u64("older completion keeps the same floor",
+		  s3_overlay_min_seq(ov), 10);
+
+	s3_overlay_mark_durable(ov, 0, 1, 11);
+	check_true("latest WAL completion makes the chunk flushable",
+		   s3_overlay_has_dirty(ov), NULL);
+	check_true("forced selection now returns the chunk",
+		   s3_overlay_next_dirty(ov, true, &idx) == 0 && idx == 0, NULL);
+	check_u64("durable latest value advances the truncation floor",
+		  s3_overlay_min_seq(ov), 11);
+
+out:
+	s3_overlay_cancel_prepared(reservation);
+	s3_overlay_destroy(ov);
+	free(old);
+	free(new);
 	free(out);
 }
 
@@ -1047,6 +1186,148 @@ out:
 	}
 }
 
+static void
+test_head_aware_flusher(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_flusher *fl = NULL;
+	struct s3_writeback *wb = NULL;
+	struct s3_writeback_opts wb_opts = {
+		.capacity_bytes = 64 * 1024,
+		.record_alignment = 64,
+		.flags = S3_WRITEBACK_OPEN_CREATE,
+	};
+	struct s3_writeback_record records[8] = {};
+	struct s3_flusher_opts fl_opts = {
+		.max_concurrent = 2,
+		.poll_period_us = 100,
+	};
+	struct s3_flusher_stats stats = {};
+	struct fake_uploader fake = {};
+	uint8_t *blk = malloc(BLOCK_SIZE);
+	uint8_t *chunkbuf = malloc(CHUNK_SIZE);
+	char lvstore[96];
+	uint64_t seq;
+	int rc;
+
+	printf("\n[13] write-back pressure selects exact ring-head chunks\n");
+	snprintf(lvstore, sizeof(lvstore), "flush-head-test-%ld", (long)getpid());
+	wb_opts.lvstore_name = lvstore;
+
+	if (!blk || !chunkbuf) {
+		check_true("head-aware buffers allocate", false, NULL);
+		goto out;
+	}
+	for (uint32_t i = 0; i < TEST_CHUNKS; i++) {
+		fake.image[i] = malloc(CHUNK_SIZE);
+		if (!fake.image[i]) {
+			check_true("head-aware fake image allocation", false, NULL);
+			goto out;
+		}
+	}
+	rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE,
+			       256 * 1024, &ov);
+	check_true("head-aware overlay creates", rc == 0, NULL);
+	if (rc != 0) {
+		goto out;
+	}
+	fake.ov = ov;
+	rc = s3_flusher_create(ov, NULL, fake_upload, &fake, &fl_opts, &fl);
+	check_true("head-aware flusher creates", rc == 0, NULL);
+	if (rc != 0) {
+		goto out;
+	}
+	rc = s3_writeback_open(&wb_opts, &wb);
+	check_true("head-aware write-back ring creates", rc == 0, NULL);
+	if (rc != 0) {
+		goto out;
+	}
+
+	/* Chunk 15 is older in the overlay queue but absent from the ring. The
+	 * pressured scheduler must start chunks 4 and 5, the first ring records. */
+	/* Start chunk 4 through the ordinary queue first.  It remains at the
+	 * write-back ring head while that upload is live, which used to make
+	 * every pressured scan call flush_begin(4) and log -EBUSY. */
+	fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 4 * BLOCKS_PER_CHUNK, 0xCF);
+	s3_overlay_write(ov, 4 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK,
+			 chunkbuf, 350);
+	s3_flusher_kick(fl);
+	check_true("ordinary upload occupies one slot",
+		   fake.n_pending == 1 &&
+		   fake.pending[0].chunk_index == 4, NULL);
+
+	fill_pattern(blk, 1, 15 * BLOCKS_PER_CHUNK, 0xD0);
+	s3_overlay_write(ov, 15 * BLOCKS_PER_CHUNK, 1, blk, 400);
+	for (uint32_t i = 0; i < SPDK_COUNTOF(records); i++) {
+		uint64_t chunk = 4 + i;
+
+		fill_pattern(blk, 1, chunk * BLOCKS_PER_CHUNK,
+			     (uint8_t)(0xD1 + i));
+		s3_overlay_write(ov, chunk * BLOCKS_PER_CHUNK, 1, blk,
+				 401 + i);
+		rc = s3_writeback_publish(wb, S3_WRITEBACK_WRITE,
+					  chunk * BLOCKS_PER_CHUNK, 1,
+					  blk, BLOCK_SIZE, chunk, &seq,
+					  &records[i]);
+		check_true("head-aware pressure record publishes", rc == 0, NULL);
+		if (rc != 0) {
+			goto out;
+		}
+	}
+	check_true("test ring crosses force threshold",
+		   s3_writeback_should_force_flush(wb), NULL);
+	s3_flusher_set_writeback(fl, wb);
+	s3_flusher_kick(fl);
+	check_true("ring-head chunks start ahead of older unrelated overlay data",
+		   fake.n_pending == 2 &&
+		   fake.pending[0].chunk_index == 4 &&
+		   fake.pending[1].chunk_index == 5, NULL);
+	s3_flusher_get_stats(fl, &stats);
+	check_u64("only the newly started round is attributed to ring head",
+		  stats.ring_head_rounds, 1);
+	check_u64("ring-head scan skips the already active chunk",
+		  stats.ring_head_in_flight_skips, 1);
+
+	/* Detach before completing uploads so cleanup does not schedule more from
+	 * records whose test-only payload releases are not wired to the overlay. */
+	s3_flusher_set_writeback(fl, NULL);
+	fake_complete_all(&fake, 0);
+	for (uint32_t i = 0; i < SPDK_COUNTOF(records); i++) {
+		check_true("head-aware pressure record completes",
+			   s3_writeback_mark_record_complete(wb, &records[i], 0) == 0,
+			   NULL);
+	}
+	check_u64("head-aware records reclaim", s3_writeback_reclaim(wb),
+		  SPDK_COUNTOF(records));
+
+	flush_without_holding_back(ov);
+	s3_flusher_kick(fl);
+	while (fake.n_pending > 0) {
+		fake_complete_all(&fake, 0);
+	}
+
+out:
+	if (fl) {
+		s3_flusher_set_writeback(fl, NULL);
+		while (fake.n_pending > 0) {
+			fake_complete_all(&fake, 0);
+		}
+		s3_flusher_destroy(fl);
+	}
+	if (ov) {
+		s3_overlay_destroy(ov);
+	}
+	if (wb) {
+		s3_writeback_close(wb);
+	}
+	(void)s3_writeback_cleanup(lvstore);
+	free(blk);
+	free(chunkbuf);
+	for (uint32_t i = 0; i < TEST_CHUNKS; i++) {
+		free(fake.image[i]);
+	}
+}
+
 /* ==========================================================================
  * main
  * ========================================================================== */
@@ -1092,10 +1373,13 @@ main(void)
 	spdk_set_thread(thread);
 
 	test_overlay_basics();
+	test_overlay_write_reservation();
+	test_overlay_pending_durability();
 	test_concurrent_partial_writes();
 	test_flush_handshake();
 	test_flusher();
 	test_flush_policy();
+	test_head_aware_flusher();
 
 	spdk_thread_exit(thread);
 	while (!spdk_thread_is_exited(thread)) {

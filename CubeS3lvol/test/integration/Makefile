@@ -73,8 +73,8 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
-       s3_active_nsid_test
+       s3_export_read_test s3_preheat_test s3_copy_xml_test \
+       s3_pending_persist_test s3_active_nsid_test s3_writeback_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -178,6 +178,14 @@ s3_copy_xml_test: s3_copy_xml_test.c $(S3BSDEV_DIR)/s3_copy_xml.h
 s3_pending_persist_test: s3_pending_persist_test.c $(MODULE_DIR)/pending_persist_ctl.h
 	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_pending_persist_test.c -o $@
 
+# Process-shared write-back ring: POSIX shm plus SPDK's hardware-accelerated
+# CRC32C helper, no bdev framework or S3.
+s3_writeback_test: s3_writeback_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) s3_writeback_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
+	    -Wl,--start-group $(STUB_SPDK_LIBS) $(SPDK_ISAL_LIB) -Wl,--end-group \
+	    $(TEST_SYS_LIBS) -o $@
+
 # chunk map persistence check: no S3, but it does need the bdev layer.
 #
 # The local device is the upstream bdev_aio plus a sparse file created with
@@ -230,6 +238,18 @@ s3_cache_test: s3_cache_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	$(CC) $(COMMON_CFLAGS) $(JOURNAL_CFLAGS) s3_cache_test.c \
 	    $(S3BSDEV_DIR)/libs3bsdev.a \
 	    $(AWS_LIBS) \
+	    -Wl,--whole-archive \
+	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
+	    -Wl,--no-whole-archive \
+	    $(JOURNAL_DPDK_ARGS) \
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
+
+# Real object cache plus real export preheat. S3 is stubbed in the test, so
+# the AWS client must not be linked or s3_get_range would be defined twice.
+# bdev_aio still has to register itself, hence --whole-archive.
+s3_preheat_test: s3_preheat_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) $(JOURNAL_CFLAGS) s3_preheat_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
 	    -Wl,--whole-archive \
 	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
 	    -Wl,--no-whole-archive \
@@ -325,8 +345,9 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
-       s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_copy_xml_test \
-       s3_pending_persist_test s3_active_nsid_test
+       s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_preheat_test \
+       s3_copy_xml_test s3_pending_persist_test s3_active_nsid_test \
+       s3_writeback_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -339,9 +360,11 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_checkpoint_test
 	./s3_export_swap_test
 	./s3_export_read_test
+	./s3_preheat_test
 	./s3_copy_xml_test
 	./s3_pending_persist_test
 	./s3_active_nsid_test
+	./s3_writeback_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:
