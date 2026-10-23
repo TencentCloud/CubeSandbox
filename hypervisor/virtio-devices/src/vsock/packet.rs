@@ -254,6 +254,9 @@ impl VsockPacket {
             );
         } else {
             let buf_size: usize = head.len() as usize - VSOCK_PKT_HDR_SIZE;
+            if buf_size < pkt.len() as usize {
+                return Err(VsockError::BufDescTooSmall);
+            }
             pkt.buf_size = buf_size;
             pkt.buf = Some(
                 get_host_address_range(
