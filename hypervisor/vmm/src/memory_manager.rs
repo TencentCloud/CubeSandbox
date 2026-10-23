@@ -2313,6 +2313,14 @@ impl MemoryManager {
                             e
                         ))
                     })?;
+                if bytes_read == 0 && offset < range.length {
+                    return Err(MigratableError::MigrateReceive(anyhow!(
+                        "Migration socket closed with {} of {} bytes left at gpa {:#x}",
+                        range.length - offset,
+                        range.length,
+                        range.gpa
+                    )));
+                }
                 offset += bytes_read as u64;
 
                 if offset == range.length {

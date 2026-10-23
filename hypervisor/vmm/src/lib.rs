@@ -1641,7 +1641,7 @@ impl Vmm {
             return Ok(false);
         }
 
-        Request::memory(table.length()).write_to(socket).unwrap();
+        Request::memory(table.length()).write_to(socket)?;
         table.write_to(socket)?;
         // And then the memory itself
         vm.send_memory_regions(&table, socket)?;
@@ -1751,9 +1751,7 @@ impl Vmm {
 
             // Send memory table
             let table = vm.memory_range_table()?;
-            Request::memory(table.length())
-                .write_to(&mut socket)
-                .unwrap();
+            Request::memory(table.length()).write_to(&mut socket)?;
             table.write_to(&mut socket)?;
             // And then the memory itself
             vm.send_memory_regions(&table, &mut socket)?;

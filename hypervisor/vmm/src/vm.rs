@@ -2496,6 +2496,14 @@ impl Vm {
                             e
                         ))
                     })?;
+                if bytes_written == 0 && offset < range.length {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "Migration socket accepted no data with {} of {} bytes left at gpa {:#x}",
+                        range.length - offset,
+                        range.length,
+                        range.gpa
+                    )));
+                }
                 offset += bytes_written as u64;
 
                 if offset == range.length {
