@@ -927,8 +927,8 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cub
 # rather than the whole dir so we don't pull in the legacy
 # cube-proxy-net.service unit that conflicts with our deploy/one-click
 # integration.
-copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
-          "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
+copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-egress-iptables-init.sh" \
+          "${PACKAGE_ROOT}/scripts/cube-egress/cube-egress-iptables-init.sh"
 
 # Host-side version marker for cube-egress: cubelet's versioninfo.Collector
 # detects the component by the presence of cube-egress/version and reports

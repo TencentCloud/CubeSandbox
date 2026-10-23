@@ -624,8 +624,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cube-egress-net-ctx/scripts
-          cp CubeEgress/scripts/cube-proxy-iptables-init.sh \
-            cube-egress-net-ctx/scripts/cube-proxy-iptables-init.sh
+          cp CubeEgress/scripts/cube-egress-iptables-init.sh \
+            cube-egress-net-ctx/scripts/cube-egress-iptables-init.sh
           cp deploy/kubernetes/images/scripts/cube-egress-net-entrypoint.sh \
             cube-egress-net-ctx/scripts/cube-egress-net-entrypoint.sh
           chmod +x cube-egress-net-ctx/scripts/*.sh

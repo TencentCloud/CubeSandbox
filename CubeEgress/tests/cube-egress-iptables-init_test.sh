@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../scripts/cube-proxy-iptables-init.sh
-source "${ROOT_DIR}/scripts/cube-proxy-iptables-init.sh"
+# shellcheck source=../scripts/cube-egress-iptables-init.sh
+source "${ROOT_DIR}/scripts/cube-egress-iptables-init.sh"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -89,6 +89,42 @@ install_routing
 remove_routing
 [[ "$(grep -c 'rule del fwmark' "${CALLS}" || true)" -eq 2 ]]
 [[ ! -s "${RULES_STATE}" ]]
+
+# --- install_routing: route-existence check handles both kernel output formats --
+# iproute2 on older kernels prints "local 0.0.0.0/0 dev lo scope host";
+# on Linux 6.18+ the same entry is shown as "local default dev lo scope host".
+# Both must be recognised so that ip-route-add is not re-run on every 30s
+# reapply cycle (where it fails EEXIST and causes the script to exit non-zero).
+ROUTE_SHOW_OUTPUT=""
+ip() {
+    printf '%s\n' "$*" >> "${CALLS}"
+    case "$1 $2" in
+        "rule show")  : ;;
+        "rule add")   : ;;
+        "route show") printf '%s\n' "${ROUTE_SHOW_OUTPUT}" ;;
+        "route add")  : ;;
+    esac
+    return 0
+}
+
+# Empty table: route add must be called exactly once.
+ROUTE_SHOW_OUTPUT=""
+: > "${CALLS}"
+install_routing
+[[ "$(grep -c '^route add' "${CALLS}")" -eq 1 ]]
+
+# Old kernel output already present: route add must NOT be called.
+ROUTE_SHOW_OUTPUT="local 0.0.0.0/0 dev lo scope host"
+: > "${CALLS}"
+install_routing
+[[ "$(grep -c '^route add' "${CALLS}")" -eq 0 ]]
+
+# Linux 6.18+ kernel output already present: route add must NOT be called.
+ROUTE_SHOW_OUTPUT="local default dev lo scope host"
+: > "${CALLS}"
+install_routing
+[[ "$(grep -c '^route add' "${CALLS}")" -eq 0 ]]
+unset -f ip
 
 # --- install_chain builds into a scratch chain and swaps atomically ----------
 # A steering-rule failure must abort BEFORE the live chain / PREROUTING jump is
@@ -243,4 +279,4 @@ for bad in "10.0.0.0/33" "10.0.0.0/0" "notacidr" "1.2.3.256/24" "10.0.0.0"; do
     fi
 done
 
-printf 'cube-proxy-iptables-init_test: PASS\n'
+printf 'cube-egress-iptables-init_test: PASS\n'
