@@ -1,0 +1,12 @@
+{
+  "binary_restored": true,
+  "conf_restored": true,
+  "binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "conf_sha": "a0ac521bda69c1f1cfe0f849403caa0365514d90ab8919d145a35c201b9159d8",
+  "sandbox_count": 0,
+  "host_cubelet": "inactive",
+  "passed": true,
+  "status": "PASS",
+  "phase": "E5_binpack_probe",
+  "stub_gone": true
+}

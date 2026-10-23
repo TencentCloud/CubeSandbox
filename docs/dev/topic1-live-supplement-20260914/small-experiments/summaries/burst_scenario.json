@@ -1,0 +1,37 @@
+{
+  "experiment": "burst_scenario",
+  "status": "PASS",
+  "arms": [
+    {
+      "arm": "default",
+      "success": 8,
+      "n": 8,
+      "node_distribution": {
+        "node-a": 4,
+        "node-d": 2,
+        "node-b": 2
+      },
+      "hot_node_max": 4,
+      "usable_p50_ms": 3044.0,
+      "usable_p95_ms": 3070.65
+    },
+    {
+      "arm": "binpack_utilization",
+      "success": 8,
+      "n": 8,
+      "node_distribution": {
+        "node-d": 2,
+        "node-b": 2,
+        "node-a": 2,
+        "node-c": 2
+      },
+      "hot_node_max": 2,
+      "usable_p50_ms": 2216.5,
+      "usable_p95_ms": 2296.8
+    }
+  ],
+  "business_read": "burst_dispersion_and_ready_latency",
+  "default_hot_max": 4,
+  "binpack_hot_max": 2,
+  "title": "突发短创建：节点分散与启动延迟"
+}

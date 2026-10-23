@@ -7,10 +7,24 @@
 ## 约定
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
+- [Scheduler Profile 配置示例](./scheduler-profile-config-example)——CubeMaster 运行时 `scheduler.profile` / `binpack_score` 可复制 YAML 契约（不是离线模拟器模型；无在线性能断言）。
+- [External HTTP Score 运维路径](./external-http-score-operator)——HTTP scorer 演示的启用 / 观测 / 故障 / 回滚步骤（指向 `CubeMaster/examples/external-http-score/VERIFY.md`）。
+- [External HTTP Score](./external-http-score)——协议、failure_policy / 熔断与指标约定。
+- [课题一熔断消融结论（2026-09-14）](/dev/topic1-enhancement-ablation-20260914/)——R011/R012 结论文档包（无原始 ledger；英文页，无 zh 镜像）。
 
 ## 服务设计
 
 - [CubeTemplateCenter 设计](./templatecenter-design)——独立模板构建服务：管控面/数据面拆分、路由规则、回调认证、artifact 生命周期、部署接线与已知限制。
+
+## 调度离线基准
+
+- [调度 Simulator 基准](./scheduler-simulator-benchmark)——一键离线 profile × workload 运行、报告输出与验收检查。
+- [调度评估指标](./scheduler-metrics)——指标定义、测量口径，以及 simulator 数字能证明与不能证明什么。
+- [调度基准报告 Schema](./scheduler-benchmark-report-schema)——JSON/Markdown 报告合同，含 `comparisons[].notes` 形态。
+
+## Topic1 live supplement（内部研究）
+
+- [Topic1 Live Supplement（2026-09-14）](/dev/topic1-live-supplement-20260914/)——**内部 / PR 审阅证据包**（STATUS/GATE/RESTORE 结论）。不是产品参考文档；未挂在开发者侧栏。**不**覆盖正式 `VALID_NO_IMPROVEMENT`。
 
 ## 适合放在这里的内容
 
