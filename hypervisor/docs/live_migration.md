@@ -137,3 +137,29 @@ When the above commands completed, the source VM should be successfully
 migrated to the destination VM without interrupting our testing guest
 workload. Now the destination VM is running the testing guest workload
 while the source VM is terminated gracefully.
+
+## Pre-copy Tuning
+
+By default, `send-migration` copies all guest memory while the VM runs,
+then up to five passes of dirty memory, and pauses the VM for the last pass
+however much is left. Two parameters of the `send-migration` API change
+that. `ch-remote` passes them as options:
+
+```bash
+$ target/release/ch-remote --api-socket=/tmp/api1 send-migration \
+    --downtime-ms 300 --max-iterations 30 unix:/tmp/sock
+```
+
+- `downtime_ms` — keep sending dirty memory while the VM runs until what is
+  left is expected to go out within this many milliseconds, at the average
+  rate measured so far (the full copy included), then pause the VM and send
+  the rest. A guest that writes memory faster than the link drains is
+  otherwise paused with almost a full pass left.
+- `max_iterations` — the most dirty passes while the VM runs before it is
+  paused anyway (30 with `downtime_ms`, 5 without).
+
+Both default to 0, which keeps the behaviour described above.
+
+Note that the copy runs on the VMM's control thread: while memory is being
+sent the VMM does not answer API requests and handles `SIGTERM` only after
+the copy finishes.

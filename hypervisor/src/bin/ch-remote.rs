@@ -361,10 +361,15 @@ fn send_migration_api_command(
     socket: &mut UnixStream,
     url: &str,
     local: bool,
+    downtime_ms: u64,
+    max_iterations: u32,
 ) -> Result<(), Error> {
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url.to_owned(),
         local,
+        downtime_ms,
+        max_iterations,
+        ..Default::default()
     };
     simple_api_command(
         socket,
@@ -538,18 +543,20 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 .get_one::<String>("coredump_config")
                 .unwrap(),
         ),
-        Some("send-migration") => send_migration_api_command(
-            &mut socket,
-            matches
-                .subcommand_matches("send-migration")
-                .unwrap()
-                .get_one::<String>("send_migration_config")
-                .unwrap(),
-            matches
-                .subcommand_matches("send-migration")
-                .unwrap()
-                .get_flag("send_migration_local"),
-        ),
+        Some("send-migration") => {
+            let sub = matches.subcommand_matches("send-migration").unwrap();
+            send_migration_api_command(
+                &mut socket,
+                sub.get_one::<String>("send_migration_config").unwrap(),
+                sub.get_flag("send_migration_local"),
+                sub.get_one::<u64>("send_migration_downtime_ms")
+                    .copied()
+                    .unwrap_or(0),
+                sub.get_one::<u32>("send_migration_max_iterations")
+                    .copied()
+                    .unwrap_or(0),
+            )
+        }
         Some("receive-migration") => receive_migration_api_command(
             &mut socket,
             matches
@@ -761,6 +768,20 @@ fn main() {
                         .long("local")
                         .num_args(0)
                         .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("send_migration_downtime_ms")
+                        .long("downtime-ms")
+                        .num_args(1)
+                        .value_parser(clap::value_parser!(u64))
+                        .help("pause the VM for the last copy once the rest fits in this downtime (ms)"),
+                )
+                .arg(
+                    Arg::new("send_migration_max_iterations")
+                        .long("max-iterations")
+                        .num_args(1)
+                        .value_parser(clap::value_parser!(u32))
+                        .help("most dirty passes while the VM runs"),
                 ),
         )
         .subcommand(

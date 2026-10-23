@@ -1195,3 +1195,18 @@ components:
           type: string
         local:
           type: boolean
+        downtime_ms:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: >-
+            Pause the VM for the last copy once the remaining dirty memory is expected to go
+            out within this many milliseconds at the rate measured so far. 0 keeps the fixed
+            number of dirty passes.
+        max_iterations:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: >-
+            Upper bound of dirty passes before the VM is paused regardless of what is left; 0
+            means 5 without downtime_ms and 30 with it.

@@ -469,6 +469,19 @@ pub struct Vmm {
     vcpu_started: Arc<AtomicBool>,
 }
 
+/// Time `bytes` of dirty memory take to send at the average rate seen so far (`sent_bytes` in
+/// `sent_time`). Pre-copy pauses the VM once this is within the downtime target. With no rate
+/// measured yet there is no estimate; `Duration::MAX` keeps the VM running.
+fn expected_send_time(bytes: u64, sent_bytes: u64, sent_time: Duration) -> Duration {
+    if bytes == 0 {
+        return Duration::ZERO;
+    }
+    if sent_bytes == 0 || sent_time.is_zero() {
+        return Duration::MAX;
+    }
+    Duration::from_secs_f64(bytes as f64 * sent_time.as_secs_f64() / sent_bytes as f64)
+}
+
 impl Vmm {
     pub const HANDLED_SIGNALS: [i32; 2] = [SIGTERM, SIGINT];
 
@@ -1641,10 +1654,22 @@ impl Vmm {
             return Ok(false);
         }
 
+        Self::vm_send_dirty_table(vm, socket, &table)?;
+        Ok(true)
+    }
+
+    fn vm_send_dirty_table<T>(
+        vm: &mut Vm,
+        socket: &mut T,
+        table: &MemoryRangeTable,
+    ) -> result::Result<(), MigratableError>
+    where
+        T: Read + Write + WriteVolatile,
+    {
         Request::memory(table.length()).write_to(socket)?;
         table.write_to(socket)?;
         // And then the memory itself
-        vm.send_memory_regions(&table, socket)?;
+        vm.send_memory_regions(table, socket)?;
         let res = Response::read_from(socket)?;
         if res.status() != Status::Ok {
             warn!("Error during dirty memory migration");
@@ -1655,7 +1680,66 @@ impl Vmm {
             )));
         }
 
-        Ok(true)
+        Ok(())
+    }
+
+    fn table_bytes(table: &MemoryRangeTable) -> u64 {
+        table.regions().iter().map(|r| r.length).sum()
+    }
+
+    // Sends dirty memory while the VM runs until what is left is expected to go out within
+    // `downtime`, then pauses the VM and sends the rest. Bandwidth is the average over
+    // everything sent so far, including the first full pass.
+    fn vm_converge_dirty_pages<T>(
+        vm: &mut Vm,
+        socket: &mut T,
+        downtime: Duration,
+        max_iterations: u32,
+        mut sent_bytes: u64,
+        mut sent_time: Duration,
+    ) -> result::Result<(), MigratableError>
+    where
+        T: Read + Write + WriteVolatile,
+    {
+        let mut pending = None;
+        for i in 0..max_iterations {
+            let table = vm.dirty_log()?;
+            let bytes = Self::table_bytes(&table);
+            let bandwidth = sent_bytes as f64 / sent_time.as_secs_f64().max(1e-6);
+            let expected = expected_send_time(bytes, sent_bytes, sent_time);
+            info!(
+                "Dirty memory pass {}: {} MiB, {} ms at {} MiB/s, downtime target {} ms",
+                i,
+                bytes >> 20,
+                expected.as_millis(),
+                (bandwidth as u64) >> 20,
+                downtime.as_millis()
+            );
+            if expected <= downtime {
+                pending = Some(table);
+                break;
+            }
+            let start = Instant::now();
+            Self::vm_send_dirty_table(vm, socket, &table)?;
+            sent_bytes += bytes;
+            sent_time += start.elapsed();
+        }
+        if pending.is_none() {
+            info!(
+                "Dirty memory did not converge in {} passes, pausing anyway",
+                max_iterations
+            );
+        }
+
+        vm.pause()?;
+        if let Some(table) = pending {
+            if !table.regions().is_empty() {
+                Self::vm_send_dirty_table(vm, socket, &table)?;
+            }
+        }
+        // Pages written between the last dirty log and the pause
+        Self::vm_maybe_send_dirty_pages(vm, socket)?;
+        Ok(())
     }
 
     fn send_migration(
@@ -1750,6 +1834,7 @@ impl Vmm {
             vm.start_dirty_log()?;
 
             // Send memory table
+            let full_start = Instant::now();
             let table = vm.memory_range_table()?;
             Request::memory(table.length()).write_to(&mut socket)?;
             table.write_to(&mut socket)?;
@@ -1765,20 +1850,38 @@ impl Vmm {
                 )));
             }
 
-            // Try at most 5 passes of dirty memory sending
-            const MAX_DIRTY_MIGRATIONS: usize = 5;
-            for i in 0..MAX_DIRTY_MIGRATIONS {
-                info!("Dirty memory migration {} of {}", i, MAX_DIRTY_MIGRATIONS);
-                if !Self::vm_maybe_send_dirty_pages(vm, &mut socket)? {
-                    break;
+            if send_data_migration.downtime_ms > 0 {
+                let max_iterations = match send_data_migration.max_iterations {
+                    0 => 30,
+                    n => n,
+                };
+                Self::vm_converge_dirty_pages(
+                    vm,
+                    &mut socket,
+                    Duration::from_millis(send_data_migration.downtime_ms),
+                    max_iterations,
+                    Self::table_bytes(&table),
+                    full_start.elapsed(),
+                )?;
+            } else {
+                // Try at most 5 passes of dirty memory sending
+                let max_dirty_migrations = match send_data_migration.max_iterations {
+                    0 => 5,
+                    n => n,
+                };
+                for i in 0..max_dirty_migrations {
+                    info!("Dirty memory migration {} of {}", i, max_dirty_migrations);
+                    if !Self::vm_maybe_send_dirty_pages(vm, &mut socket)? {
+                        break;
+                    }
                 }
+
+                // Now pause VM
+                vm.pause()?;
+
+                // Send last batch of dirty pages
+                Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
             }
-
-            // Now pause VM
-            vm.pause()?;
-
-            // Send last batch of dirty pages
-            Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
 
             // Stop logging dirty pages
             vm.stop_dirty_log()?;
@@ -2321,6 +2424,37 @@ const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn test_expected_send_time() {
+        // 1 GiB went out in 1 s: 100 MiB of dirty memory takes about 98 ms
+        let t = expected_send_time(100 << 20, 1 << 30, Duration::from_secs(1));
+        assert!(
+            t > Duration::from_millis(97) && t < Duration::from_millis(99),
+            "{t:?}"
+        );
+        // nothing dirty: no time, whatever the rate
+        assert_eq!(
+            expected_send_time(0, 1 << 30, Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        assert_eq!(expected_send_time(0, 0, Duration::ZERO), Duration::ZERO);
+        // no rate measured yet: no estimate, so the VM is not paused early
+        assert_eq!(
+            expected_send_time(1 << 20, 0, Duration::from_millis(1)),
+            Duration::MAX
+        );
+        assert_eq!(
+            expected_send_time(1 << 20, 1 << 30, Duration::ZERO),
+            Duration::MAX
+        );
+        // the bandwidth is the average over the full pass and the dirty passes
+        assert_eq!(
+            expected_send_time(64 << 20, 1 << 30, Duration::from_secs(2)),
+            Duration::from_millis(125)
+        );
+    }
+
     use crate::vm_config::{CompatibleMode, CpuFeatures};
     use vm_config::{
         ConsoleConfig, ConsoleOutputMode, CpusConfig, HotplugMethod, MemoryConfig, PayloadConfig,
