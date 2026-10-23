@@ -511,7 +511,7 @@ class Sandbox:
 
         Returns:
             A dict with at least a ``status`` key, e.g.
-            ``{"status": "ok", "sandboxes": 0}``.
+            ``{"status": "ok"}``.
         """
         cfg = config or Config()
         s = requests.Session()

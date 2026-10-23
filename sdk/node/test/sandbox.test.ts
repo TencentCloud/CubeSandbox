@@ -414,11 +414,10 @@ describe("Sandbox list / health", () => {
   it("reports health", async () => {
     setHandler((req) => {
       expect(req.pathname).toBe("/health");
-      return { status: 200, json: { status: "ok", sandboxes: 2 } };
+      return { status: 200, json: { status: "ok" } };
     });
     const health = await Sandbox.health(makeConfig());
-    expect(health.status).toBe("ok");
-    expect(health.sandboxes).toBe(2);
+    expect(health).toEqual({ status: "ok" });
   });
 });
 

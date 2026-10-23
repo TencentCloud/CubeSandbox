@@ -233,7 +233,7 @@ func TestLifecycleEndpoints(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/sandboxes":
 			fmt.Fprint(w, "["+sandboxInfoJSON(testSandboxID, "paused")+"]")
 		case r.Method == http.MethodGet && r.URL.Path == "/health":
-			fmt.Fprint(w, `{"status":"ok","sandboxes":1}`)
+			fmt.Fprint(w, `{"status":"ok"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/"+testSandboxID:
 			fmt.Fprint(w, sandboxInfoJSON(testSandboxID, "paused"))
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/pause":

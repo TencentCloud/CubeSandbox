@@ -302,7 +302,7 @@ Volume.destroy(vol.volume_id)           # -> bool；先杀掉所有挂载它的�
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # 运行中沙箱列表
 print(Sandbox.list_v2())    # v2 API（支持过滤）
 ```
