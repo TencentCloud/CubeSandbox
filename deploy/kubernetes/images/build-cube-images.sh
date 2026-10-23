@@ -938,13 +938,13 @@ build_cube_s3lvol_image() {
 
 copy_cube_egress_net_context() {
   local ctx="$1"
-  local init_script="${REPO_ROOT}/CubeEgress/scripts/cube-proxy-iptables-init.sh"
+  local init_script="${REPO_ROOT}/CubeEgress/scripts/cube-egress-iptables-init.sh"
 
   [[ -f "${init_script}" ]] || fail "missing CubeEgress network init script: ${init_script}"
-  cp "${init_script}" "${ctx}/scripts/cube-proxy-iptables-init.sh"
+  cp "${init_script}" "${ctx}/scripts/cube-egress-iptables-init.sh"
   cp "${SCRIPT_DIR}/scripts/cube-egress-net-entrypoint.sh" "${ctx}/scripts/cube-egress-net-entrypoint.sh"
   chmod +x \
-    "${ctx}/scripts/cube-proxy-iptables-init.sh" \
+    "${ctx}/scripts/cube-egress-iptables-init.sh" \
     "${ctx}/scripts/cube-egress-net-entrypoint.sh"
 }
 

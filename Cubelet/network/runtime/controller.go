@@ -325,7 +325,7 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 }
 
 // l7MarksConfigPath is the install-time config shared with the
-// cube-proxy-iptables-init script, so the dataplane (eBPF globals) and the
+// cube-egress-iptables-init script, so the dataplane (eBPF globals) and the
 // iptables TPROXY rules stamp/match the same skb->mark values. It is a var so
 // tests can point it at a temp file instead of the real /etc path.
 var l7MarksConfigPath = "/etc/cubeegress/l7-marks.conf"

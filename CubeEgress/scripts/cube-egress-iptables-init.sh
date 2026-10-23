@@ -22,9 +22,9 @@
 # else in mangle/PREROUTING.
 #
 # Usage:
-#   sudo cube-proxy-iptables-init.sh up      # install rules
-#   sudo cube-proxy-iptables-init.sh down    # remove rules
-#   sudo cube-proxy-iptables-init.sh status  # show installed rules
+#   sudo cube-egress-iptables-init.sh up      # install rules
+#   sudo cube-egress-iptables-init.sh down    # remove rules
+#   sudo cube-egress-iptables-init.sh status  # show installed rules
 #
 # Required before this runs:
 #   - cube-dev interface exists (host-side gateway iface for sandbox VMs)
@@ -93,12 +93,12 @@ fi
 # comparison in cubevs.resolveL7Marks.
 validate_l7_marks() {
     if (( CUBE_L7_MARK_HTTP == CUBE_L7_MARK_HTTPS )); then
-        echo "cube-proxy-iptables-init: CUBE_L7_MARK_HTTP (${CUBE_L7_MARK_HTTP}) must differ from CUBE_L7_MARK_HTTPS" >&2
+        echo "cube-egress-iptables-init: CUBE_L7_MARK_HTTP (${CUBE_L7_MARK_HTTP}) must differ from CUBE_L7_MARK_HTTPS" >&2
         exit 1
     fi
     if [ $(( CUBE_L7_MARK_HTTP & ~CUBE_L7_MARK_MASK )) -ne 0 ] || \
        [ $(( CUBE_L7_MARK_HTTPS & ~CUBE_L7_MARK_MASK )) -ne 0 ]; then
-        echo "cube-proxy-iptables-init: L7 marks must set bits only within CUBE_L7_MARK_MASK (${CUBE_L7_MARK_MASK})" >&2
+        echo "cube-egress-iptables-init: L7 marks must set bits only within CUBE_L7_MARK_MASK (${CUBE_L7_MARK_MASK})" >&2
         exit 1
     fi
 }
@@ -191,7 +191,10 @@ install_routing() {
         fi
     done
 
-    if ! ip route show table "${ROUTE_TABLE}" | grep -q "local 0.0.0.0/0 dev lo"; then
+    # ip route show normalises 0.0.0.0/0 to "default"; match both forms for safety.
+    if ! ip route show table "${ROUTE_TABLE}" | grep -qF \
+            -e "local 0.0.0.0/0 dev lo" \
+            -e "local default dev lo"; then
         ip route add local 0.0.0.0/0 dev lo table "${ROUTE_TABLE}"
     fi
 }
