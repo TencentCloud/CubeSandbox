@@ -259,6 +259,19 @@ pub struct VmSendMigrationData {
     /// Send memory across socket without copying
     #[serde(default)]
     pub local: bool,
+    /// Pause the VM for the last copy once the remaining dirty memory is expected to go out
+    /// within this many milliseconds at the measured bandwidth. 0 keeps the fixed number of
+    /// dirty passes.
+    #[serde(default)]
+    pub downtime_ms: u64,
+    /// Upper bound of dirty passes before the VM is paused regardless of what is left; 0 means
+    /// the default (5 without downtime_ms, 30 with it).
+    #[serde(default)]
+    pub max_iterations: u32,
+    /// Bytes per second memory is sent at while the VM runs (QEMU's max-bandwidth); the copy
+    /// after the pause is not limited. 0 is no limit.
+    #[serde(default)]
+    pub max_bandwidth: u64,
 }
 
 pub enum ApiResponsePayload {
