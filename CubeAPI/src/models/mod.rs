@@ -1838,6 +1838,10 @@ pub struct CreateTemplateRequest {
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
+    /// CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
+    /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
+    #[serde(rename = "backend", default)]
+    pub backend: Option<String>,
 }
 
 /// Body for POST /templates/:id (rebuild).

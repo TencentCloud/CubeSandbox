@@ -175,6 +175,7 @@ export interface TemplateBuildOptions {
   dns?: string[];
   allowOut?: string[];
   denyOut?: string[];
+  backend?: string;
   config?: Config | ConfigOptions;
   extra?: Record<string, unknown>;
 }
@@ -260,6 +261,7 @@ export class Template {
     if (options.dns !== undefined) payload.dns = options.dns;
     if (options.allowOut !== undefined) payload.allowOut = options.allowOut;
     if (options.denyOut !== undefined) payload.denyOut = options.denyOut;
+    if (options.backend !== undefined) payload.backend = options.backend;
     if (options.extra) Object.assign(payload, options.extra);
 
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates`, {

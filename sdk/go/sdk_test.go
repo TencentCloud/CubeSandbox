@@ -1747,6 +1747,7 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 		DNS:                 []string{"8.8.8.8", "1.1.1.1"},
 		AllowOut:            []string{"172.67.0.0/16"},
 		DenyOut:             []string{"10.0.0.0/8"},
+		Backend:             "s3",
 	})
 	if err != nil {
 		t.Fatalf("BuildTemplate returned error: %v", err)
@@ -1755,6 +1756,7 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 	assertString(t, got, "image", "registry.example.com/app:latest")
 	assertString(t, got, "writableLayerSize", "20Gi")
 	assertString(t, got, "networkType", "tap")
+	assertString(t, got, "backend", "s3")
 	assertString(t, got, "registryUsername", "pull-user")
 	assertString(t, got, "registryPassword", "pull-pass")
 	assertString(t, got, "probePath", "/health")
@@ -1777,6 +1779,30 @@ func TestBuildTemplateRequiresImage(t *testing.T) {
 	client := NewClient(Config{APIURL: "http://example.com", Timeout: 300 * time.Second})
 	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{}); err == nil {
 		t.Fatal("BuildTemplate without image returned nil error")
+	}
+}
+
+func TestBuildTemplateOmitsBackendWhenBlank(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"job-1","templateID":"tpl-1","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image:   "python:3.11-slim",
+		Backend: "   ",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	if _, ok := got["backend"]; ok {
+		t.Fatalf("blank backend must be omitted, got %#v", got["backend"])
 	}
 }
 

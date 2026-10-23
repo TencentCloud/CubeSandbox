@@ -2297,6 +2297,9 @@ pub struct CreateTemplateFromImageReq {
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
+    /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// Minimal container overrides for template creation.

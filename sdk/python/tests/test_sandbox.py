@@ -3028,6 +3028,7 @@ class TestTemplateAPI:
                 allow_out=["172.67.0.0/16"],
                 deny_out=["10.0.0.0/8"],
                 enable_ivshmem=True,
+                backend="s3",
                 config=config,
             )
 
@@ -3046,9 +3047,20 @@ class TestTemplateAPI:
                 "allowOut": ["172.67.0.0/16"],
                 "denyOut": ["10.0.0.0/8"],
                 "enableIvshmem": True,
+                "backend": "s3",
             },
             headers={"Content-Type": "application/json"},
         )
+
+    def test_build_omits_backend_when_none(self):
+        body = {
+            "jobID": "job-003",
+            "templateID": "tpl-backend",
+            "status": "accepted",
+        }
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", config=make_config())
+        assert "backend" not in post.call_args.kwargs["json"]
 
     def test_build_rejects_allow_out_domain_without_deny_all(self):
         with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:

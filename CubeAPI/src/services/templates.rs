@@ -159,6 +159,7 @@ impl TemplateService {
             cube_network_config,
             enable_ivshmem: body.enable_ivshmem,
             with_cube_ca: body.with_cube_ca,
+            backend: non_empty_option(body.backend),
         };
 
         let resp = self
@@ -697,6 +698,7 @@ mod tests {
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
             enable_ivshmem: Some(true),
             with_cube_ca: Some(false),
+            backend: Some("s3".to_string()),
         }
     }
 
@@ -945,6 +947,97 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert_eq!(body["alias"], "stable-python");
+    }
+
+    #[tokio::test]
+    async fn create_template_forwards_backend_to_cubemaster() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        // s3 backend must reach CubeMaster verbatim.
+        let mut req = sample_request();
+        req.backend = Some("s3".to_string());
+        service
+            .create_template(req)
+            .await
+            .expect("template create should succeed");
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert_eq!(body["backend"], "s3");
+
+        // Omitted backend must be absent from the wire, not sent as null.
+        let mut req = sample_request();
+        req.backend = None;
+        service
+            .create_template(req)
+            .await
+            .expect("template create should succeed");
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert!(body.get("backend").is_none());
+    }
+
+    #[test]
+    fn non_empty_option_normalizes_blank_backend_to_none() {
+        // Blank backend must collapse to None so it is omitted on the wire,
+        // mirroring CubeMaster's `backend,omitempty` (empty = historical xfs).
+        assert_eq!(non_empty_option(Some("".to_string())), None);
+        assert_eq!(non_empty_option(Some("   ".to_string())), None);
+        assert_eq!(non_empty_option(Some("\t".to_string())), None);
+        assert_eq!(non_empty_option(None), None);
+        assert_eq!(
+            non_empty_option(Some("s3".to_string())),
+            Some("s3".to_string())
+        );
     }
 
     #[tokio::test]
