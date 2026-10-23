@@ -172,6 +172,15 @@ describe("Template.build", () => {
     await Template.build({ image: "python:3.11-slim", name: "my-alias", config: makeConfig() });
   });
 
+  it("forwards the template storage backend", async () => {
+    handler = (req) => {
+      const body = JSON.parse(req.body.toString());
+      expect(body.backend).toBe("s3");
+      return { status: 200, json: { jobID: "job-backend", templateID: "tpl-backend" } };
+    };
+    await Template.build({ image: "python:3.11-slim", backend: "s3", config: makeConfig() });
+  });
+
   it("omits name when undefined", async () => {
     handler = (req) => {
       const body = JSON.parse(req.body.toString());

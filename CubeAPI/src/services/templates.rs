@@ -134,6 +134,7 @@ impl TemplateService {
         }
 
         let dns_servers = validate_dns_servers(body.dns.as_deref())?;
+        let backend = validate_template_backend(body.backend.as_deref())?;
         let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
         let cube_network_config = build_template_cube_network_config(&body)?;
         let alias = template_alias_from_request(&body);
@@ -149,6 +150,7 @@ impl TemplateService {
             template_id: String::new(),
             source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
+            backend,
             alias,
             exposed_ports: body.exposed_ports,
             network_type: non_empty_option(body.network_type),
@@ -524,6 +526,20 @@ fn non_empty_vec(values: Option<Vec<String>>) -> Option<Vec<String>> {
     })
 }
 
+fn validate_template_backend(backend: Option<&str>) -> AppResult<Option<String>> {
+    let Some(raw) = backend else {
+        return Ok(None);
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" => Ok(None),
+        "xfs" | "s3" => Ok(Some(normalized)),
+        _ => Err(AppError::BadRequest(format!(
+            "unsupported backend {raw:?} (want \"xfs\" or \"s3\")"
+        ))),
+    }
+}
+
 fn validate_dns_servers(servers: Option<&[String]>) -> AppResult<Option<Vec<String>>> {
     let Some(servers) = servers else {
         return Ok(None);
@@ -679,6 +695,7 @@ mod tests {
             instance_type: Some("cubebox".to_string()),
             image: "python:3.11-slim".to_string(),
             writable_layer_size: Some("1G".to_string()),
+            backend: None,
             exposed_ports: Some(vec![8080]),
             probe_port: Some(8080),
             probe_path: Some("/health".to_string()),
@@ -884,6 +901,30 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
+    #[test]
+    fn validate_template_backend_normalizes_supported_values() {
+        assert_eq!(
+            validate_template_backend(Some(" S3 ")).unwrap(),
+            Some("s3".to_string())
+        );
+        assert_eq!(
+            validate_template_backend(Some("XFS")).unwrap(),
+            Some("xfs".to_string())
+        );
+        assert_eq!(validate_template_backend(Some("  ")).unwrap(), None);
+        assert_eq!(validate_template_backend(None).unwrap(), None);
+    }
+
+    #[test]
+    fn validate_template_backend_rejects_unsupported_value() {
+        let err = validate_template_backend(Some("ceph")).unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::BadRequest(ref message)
+                if message == "unsupported backend \"ceph\" (want \"xfs\" or \"s3\")"
+        ));
+    }
+
     #[tokio::test]
     async fn create_template_forwards_name_as_cubemaster_alias() {
         use axum::{extract::State, routing::post, Json, Router};
@@ -932,6 +973,7 @@ mod tests {
         let mut req = sample_request();
         req.name = Some("team-slug/stable-python:v1".to_string());
         req.alias = Some("legacy-python".to_string());
+        req.backend = Some("S3".to_string());
 
         service
             .create_template(req)
@@ -945,6 +987,7 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert_eq!(body["alias"], "stable-python");
+        assert_eq!(body["backend"], "s3");
     }
 
     #[tokio::test]

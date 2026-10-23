@@ -1484,6 +1484,14 @@ components:
           items:
             type: string
           description: Override container CMD args.
+        backend:
+          type:
+          - string
+          - 'null'
+          description: |-
+            CoW backend for this template and its sandboxes/snapshots.
+            Accepted values are `xfs` and `s3` (case-insensitive); omitted or empty
+            keeps the existing xfs default.
         command:
           type:
           - array
