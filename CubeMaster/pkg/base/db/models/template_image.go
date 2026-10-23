@@ -30,7 +30,10 @@ type RootfsArtifact struct {
 	ArtifactURL string `json:"artifact_url" gorm:"column:artifact_url"`
 	// StorageBackend is "s3", "fs", or empty (legacy: infer from ArtifactURL).
 	StorageBackend string `json:"storage_backend" gorm:"column:storage_backend"`
-	// ObjectKey is the blobstore key. Empty means derive [prefix/]id.ext4.
+	// ObjectKey is the blobstore key. For an erofs artifact it is
+	// <prefix>/<id>.erofs (written format-aware at migration time); for an ext4
+	// artifact it is <prefix>/<id>.ext4. Empty means derive the legacy
+	// <prefix/>id.ext4 (rows that predate the object_key column or erofs).
 	ObjectKey  string `json:"object_key" gorm:"column:object_key"`
 	Status     string `json:"status" gorm:"column:status"`
 	LastError  string `json:"last_error" gorm:"column:last_error"`
@@ -43,6 +46,14 @@ type RootfsArtifact struct {
 	CubeEgressCABaked          bool   `json:"cube_egress_ca_baked" gorm:"column:cube_egress_ca_baked"`
 	CubeEgressCAFingerprint    string `json:"cube_egress_ca_fingerprint" gorm:"column:cube_egress_ca_fingerprint"`
 	CubeEgressCATargetsWritten int    `json:"cube_egress_ca_targets_written" gorm:"column:cube_egress_ca_targets_written"`
+
+	// RootfsFormat is the packaging format this artifact was built in
+	// ("ext4" or "erofs"). CubeTemplateCenter reports it in the BUILT callback
+	// (rootfs_format) and CubeMaster persists it here so the distribution /
+	// destroy paths can fill ImageSpec.StorageMedia for Cubelet instead of
+	// hardcoding ext4. Defaults to "ext4" (the historical format) for rows
+	// predating the column. See migrations/20261016120000_rootfs_format.sql.
+	RootfsFormat string `json:"rootfs_format" gorm:"column:rootfs_format"`
 }
 
 func (RootfsArtifact) TableName() string {

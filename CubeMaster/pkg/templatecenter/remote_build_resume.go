@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -113,6 +114,34 @@ type RemoteBuildResult struct {
 	CubeEgressCABaked       bool
 	CubeEgressCAFingerprint string
 	CubeEgressCATargets     int
+	// RootfsFormat is the packaging format ("ext4" or "erofs") TC reports in
+	// the BUILT callback so the resume path can fill ImageSpec.StorageMedia from
+	// the result rather than only from the persisted request snapshot. It
+	// mirrors CreateTemplateFromImageReq.RootfsFormat and the config key
+	// template.rootfs_format. Empty is treated as "ext4" downstream (the
+	// historical default), which also keeps older TC instances that predate
+	// this field compatible.
+	RootfsFormat string
+}
+
+// NormalizeRootfsFormat canonicalizes a rootfs format string to the lowercase
+// value persisted in RootfsArtifact.RootfsFormat / passed as ImageSpec.StorageMedia.
+// Empty (and any value not ext4/erofs) falls back to "ext4", the historical
+// default, so a missing/legacy value never selects the erofs device path by
+// accident. This is the single source of truth for the ext4 default downstream
+// of the BUILT callback, and is shared with CubeTemplateCenter (which imports
+// this package) so both sides agree on what "erofs" means — TC's build dispatch,
+// preflight and phase label must use this instead of a raw == "erofs" compare,
+// otherwise a non-canonical value ("EROFS", " erofs ") would build as ext4 on the
+// TC side while CubeMaster normalizes it to erofs for distribution, shipping an
+// ext4 artifact with StorageMedia=erofs that fails to mount.
+func NormalizeRootfsFormat(format string) string {
+	switch f := strings.ToLower(strings.TrimSpace(format)); f {
+	case config.RootfsFormatErofs:
+		return config.RootfsFormatErofs
+	default:
+		return config.RootfsFormatExt4
+	}
 }
 
 // Validate checks the fields the downstream distribution guard requires.
@@ -148,6 +177,17 @@ func (r *RemoteBuildResult) Validate() error {
 	// the artifact dir.
 	if err := r.validateExt4PathWithinStore(); err != nil {
 		return err
+	}
+	// RootfsFormat is optional (older TC instances predate it; empty is treated
+	// as "ext4" downstream). When present it must be a known value, otherwise
+	// Cubelet would receive an unrecognized ImageSpec.StorageMedia and fail to
+	// route the artifact. Fail loudly here rather than silently booting the
+	// wrong device path.
+	switch format := strings.ToLower(strings.TrimSpace(r.RootfsFormat)); format {
+	case "", config.RootfsFormatExt4, config.RootfsFormatErofs:
+	default:
+		return fmt.Errorf("remote build result rootfs_format %q is invalid; must be %q or %q",
+			r.RootfsFormat, config.RootfsFormatExt4, config.RootfsFormatErofs)
 	}
 	return nil
 }
@@ -282,7 +322,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	if err := result.Validate(); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
-			"phase":         JobPhaseBuildingExt4,
+			"phase":         buildingPhaseForRootfsFormat(result.RootfsFormat),
 			"progress":      100,
 			"error_message": err.Error(),
 		})
@@ -333,6 +373,53 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		return nil, failErr
 	}
 
+	// Mixed-version rollout guard. An older CubeTemplateCenter (predating erofs
+	// step 3/4) does not recognize req.RootfsFormat: it silently builds ext4 and
+	// omits rootfs_format from the BUILT report. Without this guard CubeMaster
+	// normalizes the empty report to ext4, recording an artifact whose (erofs)
+	// fingerprint contradicts its (ext4) format; because the fingerprint keeps
+	// erofs and ext4 apart, every later identical erofs request then reuses that
+	// ext4 artifact forever and can never retry erofs. Fail loudly so the
+	// operator sees CubeTemplateCenter must be upgraded first. ext4 requests are
+	// unaffected: an empty report normalizes to ext4, matching the ext4 request.
+	requestedFormat := NormalizeRootfsFormat(req.RootfsFormat)
+	reportedFormat := NormalizeRootfsFormat(result.RootfsFormat)
+	if requestedFormat != reportedFormat {
+		failErr := fmt.Errorf("rootfs_format mismatch: request wants %q but CubeTemplateCenter reported %q; "+
+			"CubeTemplateCenter predates erofs support (erofs step 3/4) — upgrade CubeTemplateCenter before requesting erofs, "+
+			"or set template.rootfs_format=ext4", requestedFormat, reportedFormat)
+		log.G(ctx).WithFields(map[string]any{
+			"job_id":           jobID,
+			"template_id":      req.TemplateID,
+			"artifact_id":      result.ArtifactID,
+			"requested_format": requestedFormat,
+			"reported_format":  reportedFormat,
+		}).Errorf("%v", failErr)
+		// TODO(erofs-mismatch-orphan): TC has already reported BUILT, so the
+		// rootfs file exists in TC's store (and, with S3, the object is already
+		// uploaded). This return is BEFORE register creates the rootfs_artifacts
+		// row, so no cleanup path can reach the artifact: cleanupArtifactOnNodes
+		// and artifact_lifecycle.go are row-driven, and TC's CLEANUP_PENDING
+		// sweep (deleter.go) keys off a row CubeMaster never wrote -- its First()
+		// returns ErrRecordNotFound and it returns without deleting anything.
+		// Each mismatch therefore leaves one stale TC store file and one stale
+		// S3 object. This only fires during a version/config mismatch (erofs
+		// request vs an older TC), so it is not a blocker. A real fix needs TC
+		// to expose a row-free cleanup (its cleanupArtifactResidue already
+		// removes the local store dir by artifactID; S3 would need a delete by
+		// artifactID + both candidate formats, since the actual stored format
+		// is ambiguous here). Leaving as-is until the rollout completes.
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":          JobStatusFailed,
+			"phase":           buildingPhaseForRootfsFormat(req.RootfsFormat),
+			"artifact_id":     result.ArtifactID,
+			"artifact_status": ArtifactStatusFailed,
+			"progress":        100,
+			"error_message":   failErr.Error(),
+		})
+		return nil, failErr
+	}
+
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
@@ -353,7 +440,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		logger.Errorf("%v", failErr)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
-			"phase":           JobPhaseBuildingExt4,
+			"phase":           buildingPhaseForRootfsFormat(result.RootfsFormat),
 			"artifact_id":     result.ArtifactID,
 			"artifact_status": ArtifactStatusFailed,
 			"progress":        100,
@@ -629,6 +716,10 @@ func finalizeRemoteArtifact(
 	record.CubeEgressCABaked = result.CubeEgressCABaked
 	record.CubeEgressCAFingerprint = result.CubeEgressCAFingerprint
 	record.CubeEgressCATargetsWritten = result.CubeEgressCATargets
+	// Persist the build format so the distribution / destroy paths can read it
+	// from the artifact row instead of hardcoding ext4. Normalize to ext4 for
+	// an empty result (older TC / pre-step replay) to match the DB column default.
+	record.RootfsFormat = NormalizeRootfsFormat(result.RootfsFormat)
 
 	// Same base URL local mode uses (CubeMaster's own request base URL, echoed
 	// back by TC), so the generated request and the distribution annotations
@@ -666,6 +757,7 @@ func finalizeRemoteArtifact(
 		"cube_egress_ca_baked":           record.CubeEgressCABaked,
 		"cube_egress_ca_fingerprint":     record.CubeEgressCAFingerprint,
 		"cube_egress_ca_targets_written": record.CubeEgressCATargetsWritten,
+		"rootfs_format":                  record.RootfsFormat,
 	})
 	if err != nil {
 		return nil, nil, err

@@ -29,6 +29,9 @@ enum ImageStorageMediaType {
   docker = 0;
   // image from local disk in ext4 format rootfs.
   ext4 = 1;
+  // image from local disk in erofs format rootfs (read-only, 
+  // virtio-pmem DAX mountable).
+  erofs = 2;
 }
 
 // ImageSpec is an internal representation of an image.
@@ -41,7 +44,7 @@ message ImageSpec {
   // ie. annotations["cube.image.token"] = xxx
   map<string, string> annotations = 2;
 
-  // Type of storage media for the image (docker/ext4)
+  // Type of storage media for the image (docker/ext4/erofs)
   string storage_media = 3;
   string namespace  = 6;
   string runtime_handler = 7;

@@ -9,7 +9,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
 
 // stubPresign swaps the signing seam and restores it on cleanup.
@@ -123,5 +125,41 @@ func TestArtifactStoreKeyStripsConfiguredPrefix(t *testing.T) {
 	}
 	if userKeyFromStoredObjectKey("/template-artifacts/rfs-1.ext4", "template-artifacts") != "rfs-1.ext4" {
 		t.Fatal("leading slash on stored key")
+	}
+}
+
+// TestArtifactStoreColumnsFormatAwareKey verifies artifactStoreColumns derives
+// the persisted object_key from the artifact's RootfsFormat, so an erofs
+// artifact is recorded as <prefix>/<id>.erofs (matching the key
+// uploadArtifactFileToS3 wrote under and TC's Stat/Delete derive) rather than
+// the legacy <id>.ext4. The read side (artifactStoreKey) prefers this stored
+// object_key, so write and read stay consistent while the bucket key now
+// reflects the content type.
+func TestArtifactStoreColumnsFormatAwareKey(t *testing.T) {
+	// artifactStoreColumns only reads st.backend, so a store with no real
+	// blobstore.Store is enough here. Force the once-init to run first (so it
+	// does not overwrite our injection when sharedArtifactStore is called),
+	// then inject a non-nil store.
+	_ = sharedArtifactStore()
+	old := artifactStoreInst
+	artifactStoreInst = &artifactStore{backend: "s3"}
+	t.Cleanup(func() { artifactStoreInst = old })
+
+	t.Setenv(configenv.EnvS3ArtifactPrefix, "template-artifacts")
+
+	if backend, key := artifactStoreColumns("rfs-1", config.RootfsFormatErofs); backend != "s3" || key != "template-artifacts/rfs-1.erofs" {
+		t.Fatalf("erofs: backend=%q key=%q, want s3 / template-artifacts/rfs-1.erofs", backend, key)
+	}
+	if _, key := artifactStoreColumns("rfs-1", config.RootfsFormatExt4); key != "template-artifacts/rfs-1.ext4" {
+		t.Fatalf("ext4: key=%q, want template-artifacts/rfs-1.ext4", key)
+	}
+	// Unknown/missing format falls back to .ext4 (the historical key), so a
+	// legacy row whose RootfsFormat column predates erofs still records a
+	// usable key matching its pre-existing object.
+	if _, key := artifactStoreColumns("rfs-1", "future-format"); key != "template-artifacts/rfs-1.ext4" {
+		t.Fatalf("unknown format: key=%q, want template-artifacts/rfs-1.ext4 (legacy fallback)", key)
+	}
+	if _, key := artifactStoreColumns("rfs-1", ""); key != "template-artifacts/rfs-1.ext4" {
+		t.Fatalf("empty format: key=%q, want template-artifacts/rfs-1.ext4 (legacy fallback)", key)
 	}
 }

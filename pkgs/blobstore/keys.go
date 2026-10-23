@@ -89,8 +89,14 @@ func JoinKey(prefix, key string) string {
 	}
 }
 
-// ArtifactExt4Key is the object key CubeTemplateCenter and CubeMaster share
-// for a rootfs artifact: [prefix/]<artifactID>.ext4.
+// ArtifactExt4Key is the legacy object key for an ext4 rootfs artifact:
+// [prefix/]<artifactID>.ext4. It always produces the .ext4 suffix and is now
+// only the fallback path (an empty object_key column, i.e. legacy rows that
+// predate erofs). EROFS artifacts use a format-aware key derived from
+// RootfsFormat instead (CubeMaster's artifactUserKeyForFormat /
+// CubeTemplateCenter's s3store.artifactKeyFromFormat), so an erofs artifact is
+// stored and read as [prefix/]<artifactID>.erofs -- this helper is NOT used for
+// that and would mis-key it as .ext4.
 func ArtifactExt4Key(prefix, artifactID string) string {
 	id := strings.TrimSpace(artifactID)
 	if id == "" {

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -34,6 +35,28 @@ func unmarshalTemplateImageJobRequest(payload string) (*types.CreateTemplateFrom
 	// original job's template_id orphaned with no matching definition row
 	// while the real template ended up under the regenerated ID instead.
 	originalTemplateID := strings.TrimSpace(req.TemplateID)
+	// A request_json snapshot persisted before the rootfs_format field existed
+	// (pre-erofs upgrade) decodes with an empty RootfsFormat. normalizeTemplateImageRequest
+	// would then fill it from the CURRENT template.rootfs_format config -- but this
+	// is a REPLAY of an already-submitted job, not a fresh submission: the build
+	// was started under the only format that existed then (ext4), and its format is
+	// fixed at submit time. Letting the current config override it is an upgrade
+	// hazard: an in-flight (or stuck-BUILT) ext4 job replayed after the operator
+	// sets template.rootfs_format=erofs would be re-stamped erofs, then fail the
+	// rootfs_format mismatch guard in prepareTemplateImageJobAfterRemoteBuild
+	// (old TC reports ext4) even though TC did nothing wrong -- and a redo would
+	// silently switch the rebuild to erofs. Pin the legacy format here so an empty
+	// snapshot field means ext4, never the current config default.
+	//
+	// Post-upgrade snapshots never hit this: submissions persist the NORMALIZED
+	// request (marshalTemplateImageJobRequest(normalized) at template_image.go),
+	// and normalize always stamps RootfsFormat non-empty, so an empty value in a
+	// replayed snapshot can only come from a pre-upgrade row. Fresh submissions do
+	// not pass through this function at all, so the config-default semantics of
+	// normalizeTemplateImageRequest's empty branch are unchanged for new creates.
+	if strings.TrimSpace(req.RootfsFormat) == "" {
+		req.RootfsFormat = config.RootfsFormatExt4
+	}
 	req.Request = &types.Request{RequestID: uuid.NewString()}
 	normalized, err := normalizeTemplateImageRequest(req)
 	if err != nil {
@@ -63,14 +86,37 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 
 func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
 	type fingerprintPayload struct {
-		SourceImageDigest       string                    `json:"source_image_digest"`
-		WritableLayerSize       string                    `json:"writable_layer_size"`
-		ExposedPorts            []int32                   `json:"exposed_ports,omitempty"`
-		InstanceType            string                    `json:"instance_type"`
-		NetworkType             string                    `json:"network_type"`
+		SourceImageDigest string  `json:"source_image_digest"`
+		WritableLayerSize string  `json:"writable_layer_size"`
+		ExposedPorts      []int32 `json:"exposed_ports,omitempty"`
+		InstanceType      string  `json:"instance_type"`
+		NetworkType       string  `json:"network_type"`
+		// RootfsFormat is part of the artifact identity so an ext4 and an
+		// erofs build of the same image+spec produce different fingerprints
+		// and never reuse (and thus mislabel) each other's artifact.
+		//
+		// Legacy compatibility: only erofs carries a value here. ext4 (and
+		// empty/unknown, which normalize to ext4) leave the field empty so it
+		// omitempty's out of the JSON — making the ext4 fingerprint byte-identical
+		// to the pre-RootfsFormat fingerprint. Without this, every existing ext4
+		// artifact would change fingerprint on upgrade and force a one-time full
+		// rebuild of every template. This mirrors the CubeEgressCAFingerprint
+		// field below (see TestBuildTemplateSpecFingerprintEmptyCAMatchesLegacy):
+		// the legacy/default value omits, only a non-default value (erofs / a
+		// real CA) enters the payload and yields a distinct fingerprint.
+		RootfsFormat            string                    `json:"rootfs_format,omitempty"`
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
+	}
+	// Only erofs contributes to the fingerprint; ext4/empty/unknown normalize to
+	// ext4 and are left blank so the key omits and the fingerprint matches the
+	// pre-RootfsFormat legacy value. NormalizeRootfsFormat is the shared
+	// canonicalizer (trim + lower, ext4 default) so "EROFS" / " erofs " still
+	// produce the erofs fingerprint rather than silently matching legacy ext4.
+	rootfsFormatForFingerprint := ""
+	if NormalizeRootfsFormat(req.RootfsFormat) == config.RootfsFormatErofs {
+		rootfsFormatForFingerprint = config.RootfsFormatErofs
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
 		SourceImageDigest:       sourceImageDigest,
@@ -78,6 +124,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ExposedPorts:            req.ExposedPorts,
 		InstanceType:            req.InstanceType,
 		NetworkType:             req.NetworkType,
+		RootfsFormat:            rootfsFormatForFingerprint,
 		ContainerOverrides:      req.ContainerOverrides,
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 		EnvdBinarySHA256:        envdSHA,

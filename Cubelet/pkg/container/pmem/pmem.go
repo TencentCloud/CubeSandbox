@@ -11,6 +11,16 @@ import (
 
 const DefaultToolBaseDir = "/usr/local/services/cubetoolbox"
 
+// storageMediaErofs is the ImageSpec.StorageMedia string value that selects an
+// EROFS rootfs. It is the string form of proto ImageStorageMediaType_erofs
+// (ImageStorageMediaType_erofs.String() == "erofs"); pmem deliberately stays
+// decoupled from the proto package, so this local constant is the single place
+// that names that value. The intended 1:1 mapping between this constant and the
+// proto enum is asserted in TestArtifactSuffixMatchesProtoEnum (the test may
+// import proto; production code here does not), and the enum's own string form
+// is guarded by proto's TestImageStorageMediaTypeStrings.
+const storageMediaErofs = "erofs"
+
 // Paths separates installed kernel sources from node-local rootfs artifacts.
 // ImageBasePath is the final cubebox artifact directory, without another suffix.
 type Paths struct {
@@ -57,6 +67,14 @@ func GetRawImageFilePath(instanceType, imageID string) string {
 	return paths.ImageFile(instanceType, imageID)
 }
 
+// GetRawImageFilePathByMedia is GetRawImageFilePath with a storage-media-aware
+// suffix (.ext4 / .erofs). Use it at sites that know the artifact's
+// ImageSpec.StorageMedia so the downloaded file name matches the format the
+// microVM expects to mount.
+func GetRawImageFilePathByMedia(instanceType, imageID, storageMedia string) string {
+	return paths.ImageFileByMedia(instanceType, imageID, storageMedia)
+}
+
 func GetRawKernelFilePath(instanceType, imageID string) string {
 	return paths.KernelFile(instanceType, imageID)
 }
@@ -84,6 +102,42 @@ func (p Paths) ImageDir(instanceType string) string {
 
 func (p Paths) ImageFile(instanceType, imageID string) string {
 	return filepath.Join(p.ImageDir(instanceType), imageID, imageID+".ext4")
+}
+
+// ImageFileByMedia returns the artifact rootfs file path with a suffix chosen
+// by the image storage media ("ext4" → .ext4, "erofs" → .erofs). An empty/unknown
+// media defaults to the historical ".ext4" so callers without media info
+// (e.g. legacy code paths) keep working. The media value is the
+// ImageSpec.StorageMedia string CubeMaster fills (see
+// ImageStorageMediaType_ext4/erofs .String()).
+func (p Paths) ImageFileByMedia(instanceType, imageID, storageMedia string) string {
+	return filepath.Join(p.ImageDir(instanceType), imageID, imageID+ArtifactSuffix(storageMedia))
+}
+
+// ArtifactSuffix maps an ImageSpec.StorageMedia string to the on-disk artifact
+// file suffix. Unknown/empty values default to ".ext4" (the historical format)
+// so a missing media never produces a suffixless file.
+func ArtifactSuffix(storageMedia string) string {
+	switch storageMedia {
+	case storageMediaErofs:
+		return ".erofs"
+	default:
+		return ".ext4"
+	}
+}
+
+// ArtifactFsType maps an ImageSpec.StorageMedia string to the filesystem type
+// the microVM must mount the pmem backing file as ("ext4" / "erofs"). It is the
+// pmem config counterpart of ArtifactSuffix: the suffix picks the file name,
+// this picks CubePmem.FsType handed to the hypervisor. Unknown/empty defaults
+// to "ext4".
+func ArtifactFsType(storageMedia string) string {
+	switch storageMedia {
+	case storageMediaErofs:
+		return "erofs"
+	default:
+		return "ext4"
+	}
 }
 
 func (p Paths) KernelFile(instanceType, imageID string) string {

@@ -45,7 +45,7 @@ func defaultTemplateImageSpec(ns string, template *templatetypes.TemplateImage) 
 	if template != nil {
 		storageMedia = template.StorageMedia
 		imageRef = template.Image
-		if template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
+		if ext4image.IsPmemRootfsMedia(template.StorageMedia) {
 			annotations[constants.MasterAnnotationInstanceType] = cubebox.InstanceType_cubebox.String()
 		}
 	}
@@ -58,7 +58,7 @@ func defaultTemplateImageSpec(ns string, template *templatetypes.TemplateImage) 
 }
 
 func materializeDistributedTemplateRuntimeFiles(ctx context.Context, template *templatetypes.TemplateImage) error {
-	if template == nil || template.StorageMedia != cubeimages.ImageStorageMediaType_ext4.String() {
+	if template == nil || !ext4image.IsPmemRootfsMedia(template.StorageMedia) {
 		return nil
 	}
 	return ext4image.RefreshArtifactRuntimeFiles(ctx, cubebox.InstanceType_cubebox.String(), template.Image)
@@ -68,7 +68,7 @@ func ensureDistributedTemplateImage(ctx context.Context, c *CubeImageService, te
 	if template == nil {
 		return fmt.Errorf("template image is nil")
 	}
-	if template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
+	if ext4image.IsPmemRootfsMedia(template.StorageMedia) {
 		return ext4image.EnsurePmemRootfs(ctx, cubebox.InstanceType_cubebox.String(), template.Image)
 	}
 	_, err := c.EnsureImage(ctx, template.Image, "", "", &runtime.PodSandboxConfig{})

@@ -113,8 +113,8 @@ func handleArtifactDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, ArtifactDeleteResponse{Status: "deleted", ArtifactID: req.ArtifactID})
 }
 
-// handleArtifactUpload ingests a local ext4 uploaded by CubeMaster and stores
-// it into CubeTemplateCenter's own artifact store.
+// handleArtifactUpload ingests a local rootfs artifact (ext4 or erofs) uploaded
+// by CubeMaster and stores it into CubeTemplateCenter's own artifact store.
 //
 // The body is consumed with a single streaming MultipartReader pass rather
 // than c.PostForm/c.FormFile: those parse the whole form first, buffering up
@@ -126,7 +126,7 @@ func handleArtifactDelete(c *gin.Context) {
 // the id shapes the destination path, so it is validated before any payload
 // byte touches the filesystem.
 // maxArtifactUploadBytes caps the upload body so a stolen callback token (or
-// a buggy Master) cannot fill TC's disk. Ext4 artifacts are single-digit GiB
+// a buggy Master) cannot fill TC's disk. Rootfs artifacts are single-digit GiB
 // in practice; 32 GiB leaves ample headroom while still failing closed.
 const maxArtifactUploadBytes = 32 << 30
 
@@ -168,7 +168,7 @@ func handleArtifactUpload(c *gin.Context) {
 				c.JSON(http.StatusBadRequest, ErrorResponse{Error: "artifact_id field must precede the file part"})
 				return
 			}
-			handleArtifactUploadFilePart(c, ctx, artifactID, part)
+			handleArtifactUploadFilePart(c, ctx, artifactID, part.FileName(), part)
 			part.Close()
 			return
 		default:
@@ -182,9 +182,27 @@ func handleArtifactUpload(c *gin.Context) {
 	c.JSON(http.StatusBadRequest, ErrorResponse{Error: "file is required"})
 }
 
+// storedArtifactFileName picks the on-disk name for an uploaded artifact. The
+// base is always the TC-controlled artifactID (taken from the validated
+// artifact_id form field), so a client-supplied filename can only influence the
+// suffix, never the directory the file lands in. The suffix is taken from the
+// uploaded file's own name so an erofs artifact is stored as <id>.erofs --
+// matching the build path's naming (BuildErofs writes <id>.erofs) instead of
+// being mislabeled <id>.ext4, which is confusing when debugging an erofs
+// artifact on a TC node. An unknown or missing suffix falls back to .ext4, the
+// historical storage name, so legacy or odd uploads keep landing where they
+// always did.
+func storedArtifactFileName(artifactID, uploadedFilename string) string {
+	suffix := strings.ToLower(filepath.Ext(uploadedFilename))
+	if suffix != ".erofs" && suffix != ".ext4" {
+		suffix = ".ext4"
+	}
+	return artifactID + suffix
+}
+
 // handleArtifactUploadFilePart streams one validated file part into the
 // artifact store, deduping on identical content already in place.
-func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactID string, reader io.Reader) {
+func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactID, uploadedFilename string, reader io.Reader) {
 	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("resolve artifact store dir: %v", err)})
@@ -225,7 +243,7 @@ func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactI
 		return
 	}
 
-	dstPath := filepath.Join(storeDir, artifactID+".ext4")
+	dstPath := filepath.Join(storeDir, storedArtifactFileName(artifactID, uploadedFilename))
 	if st, statErr := os.Stat(dstPath); statErr == nil && st.Mode().IsRegular() {
 		dstSha, shaErr := fileSHA256(dstPath)
 		if shaErr == nil && st.Size() == size && dstSha == sha {
