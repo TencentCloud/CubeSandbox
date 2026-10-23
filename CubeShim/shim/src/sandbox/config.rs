@@ -76,6 +76,45 @@ pub struct Config {
     pub extra_kernel_params: Vec<String>,
 }
 
+// Validate the guest kernel image format (aarch64 only). ARM64 direct
+// kernel boot loads the kernel through the PE/COFF loader, which requires
+// the boot Image produced by `make arch/arm64/boot/Image`. Feeding it a
+// raw ELF vmlinux surfaces as a confusing UefiTooBig error deep in the
+// UEFI fallback path, so check the ELF magic here and point the operator
+// at the right artifact.
+//
+// Only a readable-but-ELF image is rejected. A missing or unreadable file is
+// NOT a format problem: it keeps failing later at VM start with the
+// hypervisor's own error, exactly as before this check existed, so unit
+// tests and environments without the kernel installed at the default path
+// are unaffected.
+#[cfg(target_arch = "aarch64")]
+fn check_kernel_image_format(path: &str) -> Result<(), String> {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            if f.read_exact(&mut magic).is_ok() && magic == [0x7f, b'E', b'L', b'F'] {
+                return Err(format!(
+                    "kernel '{}' is an ELF vmlinux; ARM64 direct boot requires the PE-format boot Image (build arch/arm64/boot/Image)",
+                    path
+                ));
+            }
+        }
+        Err(_) => return Ok(()),
+    }
+    Ok(())
+}
+
+// On x86_64 the platform's standard guest kernel is an ELF vmlinux (see the
+// root Makefile's guest-kernel target) that the VMM loads through its ELF
+// loader, so an ELF header is a valid kernel there and the check is
+// compiled out.
+#[cfg(not(target_arch = "aarch64"))]
+fn check_kernel_image_format(_path: &str) -> Result<(), String> {
+    Ok(())
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -156,6 +195,15 @@ impl Config {
 
         if let Some(kernel_path) = anno.get(ANNO_VM_KERNEL) {
             kernel = kernel_path.clone();
+        }
+
+        // ARM64 direct kernel boot requires the PE/COFF-format boot Image
+        // (arch/arm64/boot/Image). A raw ELF vmlinux is unusable: the PE
+        // loader falls through to the UEFI path and fails with a misleading
+        // "Cannot load the UEFI binary in memory: UefiTooBig". Detect the
+        // ELF magic up front and fail with an actionable message instead.
+        if let Err(e) = check_kernel_image_format(&kernel) {
+            return Err(e);
         }
         if let Some(path) = anno.get(ANNO_VM_AGENT) {
             agent_path = path.clone();
@@ -551,5 +599,89 @@ mod tests {
                 .unwrap()
                 .use_passfd_io
         );
+    }
+
+    fn unique_test_path(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "{}-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            nanos,
+            id
+        ))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn utils_config_new_rejects_elf_kernel() {
+        let elf = unique_test_path("ut_kernel_elf");
+        std::fs::write(&elf, [0x7f, b'E', b'L', b'F', 1, 2, 3, 4]).unwrap();
+
+        let mut annotations = HashMap::<String, String>::new();
+        annotations.insert(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#
+                .to_string(),
+        );
+        annotations.insert(
+            ANNO_VM_KERNEL.to_string(),
+            elf.to_string_lossy().to_string(),
+        );
+        let ret = Config::new(&Some(annotations));
+        let _ = std::fs::remove_file(&elf);
+        let err = ret.err().expect("ELF kernel must be rejected");
+        assert!(
+            err.contains("ELF vmlinux"),
+            "error should point at the ELF/PE-format mismatch, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn utils_config_new_accepts_non_elf_kernel_file() {
+        let img = unique_test_path("ut_kernel_pe");
+        std::fs::write(&img, b"MZplaceholder-non-elf-kernel-image").unwrap();
+
+        let mut annotations = HashMap::<String, String>::new();
+        annotations.insert(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#
+                .to_string(),
+        );
+        annotations.insert(
+            ANNO_VM_KERNEL.to_string(),
+            img.to_string_lossy().to_string(),
+        );
+        let ret = Config::new(&Some(annotations));
+        let _ = std::fs::remove_file(&img);
+        let config = ret.expect("a readable non-ELF kernel file must pass the format check");
+        assert_eq!(config.kernel, img.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn utils_config_new_skips_format_check_when_kernel_missing() {
+        // A kernel path that does not exist is not a format problem: it must
+        // keep behaving as before the check existed (accepted here, failing
+        // later at VM start with the hypervisor's own error).
+        let mut annotations = HashMap::<String, String>::new();
+        annotations.insert(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#
+                .to_string(),
+        );
+        annotations.insert(
+            ANNO_VM_KERNEL.to_string(),
+            "/definitely/not/a/kernel".to_string(),
+        );
+        let config = Config::new(&Some(annotations))
+            .expect("missing kernel file must not fail the format check");
+        assert_eq!(config.kernel, "/definitely/not/a/kernel");
     }
 }
