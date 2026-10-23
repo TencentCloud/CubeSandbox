@@ -14,6 +14,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// thirtpartyFilter 第三方过滤插件（占位实现）：
+// 当前仅对特定实例类型且非慢路径的请求生效，且不做实际过滤，直接返回原节点列表
 type thirtpartyFilter struct {
 }
 
@@ -29,6 +31,8 @@ func (l *thirtpartyFilter) String() string {
 	return l.ID()
 }
 
+// Select 当前实现不剔除任何节点：
+// 慢路径请求、未配置实例类型过滤表、或当前实例类型不在过滤表内时直接返回原列表
 func (l *thirtpartyFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	res := selCtx.GetReqRes()
 	sconf := config.GetConfig().Scheduler
