@@ -252,6 +252,23 @@ func TestStateStoreScanRejectsFilenamePayloadSandboxMismatch(t *testing.T) {
 	}
 }
 
+func TestStateStorePersistsOperatorDNSOptIn(t *testing.T) {
+	state := testPersistedState("operator-dns")
+	state.OperatorDNSAllowOutCIDRs = []string{"10.204.0.10/32"}
+
+	data, err := state.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored persistedState
+	if err := restored.UnmarshalJSON(data); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.OperatorDNSAllowOutCIDRs) != 1 || restored.OperatorDNSAllowOutCIDRs[0] != "10.204.0.10/32" {
+		t.Fatalf("operator DNS CIDRs were not preserved: %v", restored.OperatorDNSAllowOutCIDRs)
+	}
+}
+
 func testPersistedState(sandboxID string) *persistedState {
 	return &persistedState{
 		SandboxID:     sandboxID,

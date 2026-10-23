@@ -17,8 +17,12 @@ type EnsureNetworkRequest struct {
 	// DNSAllowOutCIDRs are the resolver /32s the caller already folded into
 	// CubeNetworkConfig.AllowOut. Recorded so a later policy update, which only
 	// carries user-authored targets, can fold the same resolvers back in.
-	DNSAllowOutCIDRs []string          `json:"dnsAllowOutCIDRs,omitempty"`
-	PersistMetadata  map[string]string `json:"persistMetadata,omitempty"`
+	DNSAllowOutCIDRs []string `json:"dnsAllowOutCIDRs,omitempty"`
+	// OperatorDNSAllowOutCIDRs are the subset of resolver CIDRs admitted by an
+	// operator-controlled default-resolver opt-in. They, unlike arbitrary
+	// domain-policy resolver entries, survive an IP-only policy update.
+	OperatorDNSAllowOutCIDRs []string          `json:"operatorDnsAllowOutCIDRs,omitempty"`
+	PersistMetadata          map[string]string `json:"persistMetadata,omitempty"`
 }
 
 // EnsureNetworkResponse is the concrete network shape assigned by the runtime.
