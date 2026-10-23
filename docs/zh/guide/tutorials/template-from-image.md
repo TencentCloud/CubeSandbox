@@ -216,6 +216,9 @@ cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
 
 # 一次删除多个模板
 cubemastercli tpl delete tpl-first tpl-second tpl-third
+
+# 使用 --force 清除卡住的构建工作
+cubemastercli tpl delete --force tpl-748094d2f2374b0a8a37e6ec
 ```
 
 传入多个模板 ID 时，即使其中某个模板删除失败，CLI 也会继续尝试删除其余模板，最后汇总返回失败项。
@@ -226,7 +229,9 @@ cubemastercli tpl delete tpl-first tpl-second tpl-third
 template deleted: tpl-748094d2f2374b0a8a37e6ec
 ```
 
-> ⚠️ 删除操作会同时移除模板元数据和所有节点上的 artifact 副本。已基于该模板运行的沙箱**不受影响**，但此后无法再用该模板创建新沙箱。
+`--force` 只用于清除卡住的构建任务或定义构建，使删除可以继续；它不会覆盖使用中检查：只要仍有运行中的沙箱依赖该模板，后端就会拒绝删除，包括带 `--force` 的请求。
+
+> ⚠️ 删除操作会同时移除模板元数据和所有节点上的 artifact 副本。删除后无法再用该模板创建新沙箱。
 
 
 ## 常见问题

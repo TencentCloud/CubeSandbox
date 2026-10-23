@@ -126,6 +126,7 @@ type templateDeleteRequest struct {
 	TemplateID   string `json:"template_id,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
 	Sync         bool   `json:"sync,omitempty"`
+	Force        bool   `json:"force,omitempty"`
 }
 
 type templateMigrateRequest struct {
@@ -624,6 +625,10 @@ var TemplateDeleteCommand = cli.Command{
 			Name:  "template-id",
 			Usage: "template id to delete",
 		},
+		cli.BoolFlag{
+			Name:  "force",
+			Usage: "clear stuck builds before deleting; templates in use cannot be deleted",
+		},
 	},
 	Action: func(c *cli.Context) error {
 		templateIDs := resolveTemplateIDs(c)
@@ -663,6 +668,7 @@ func deleteTemplate(c *cli.Context, url, templateID string) error {
 	req := &templateDeleteRequest{
 		RequestID:  requestID,
 		TemplateID: templateID,
+		Force:      c.Bool("force"),
 	}
 	body, err := jsoniter.Marshal(req)
 	if err != nil {

@@ -194,9 +194,14 @@ cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
 
 # Delete multiple templates in one command
 cubemastercli tpl delete tpl-first tpl-second tpl-third
+
+# Clear stuck build work before deleting
+cubemastercli tpl delete --force tpl-748094d2f2374b0a8a37e6ec
 ```
 
 When multiple template IDs are provided, the CLI attempts every deletion even if one fails, then returns a combined error for the failed templates.
+
+`--force` clears a stuck build job or definition build so deletion can proceed. It does **not** override the in-use check: the backend rejects deletion, even with `--force`, while a live sandbox still depends on the template.
 
 On success:
 
@@ -205,8 +210,7 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 ```
 
 > ⚠️ Deletion removes both the template metadata and all node-local artifact
-> replicas.  Any sandboxes already running from this template are **not**
-> affected, but new sandboxes can no longer be created from it.
+> replicas. Once deleted, new sandboxes can no longer be created from it.
 
 
 ## Troubleshooting

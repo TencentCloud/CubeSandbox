@@ -956,3 +956,106 @@ func TestTemplateDeleteCommandContinuesAfterFailure(t *testing.T) {
 		t.Fatalf("failure log %q does not identify failed template", got)
 	}
 }
+
+func TestTemplateDeleteCommandForce(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		rejectID    string
+		wantIDs     []string
+		wantForce   bool
+		wantErrText string
+	}{
+		{
+			name:      "force omitted by default",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "tpl-default"},
+			wantIDs:   []string{"tpl-default"},
+			wantForce: false,
+		},
+		{
+			name:      "force on single flagged id",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "--force", "--template-id", "tpl-flag"},
+			wantIDs:   []string{"tpl-flag"},
+			wantForce: true,
+		},
+		{
+			name:      "force on multiple positional ids",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "--force", "tpl-1", "tpl-2"},
+			wantIDs:   []string{"tpl-1", "tpl-2"},
+			wantForce: true,
+		},
+		{
+			name:      "force false omitted",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "--force=false", "tpl-no-force"},
+			wantIDs:   []string{"tpl-no-force"},
+			wantForce: false,
+		},
+		{
+			name:        "force keeps going after in-use rejection",
+			args:        []string{"--address", "127.0.0.1", "--port", "8089", "--force", "tpl-first", "tpl-busy", "tpl-last"},
+			rejectID:    "tpl-busy",
+			wantIDs:     []string{"tpl-first", "tpl-busy", "tpl-last"},
+			wantForce:   true,
+			wantErrText: "tpl-busy: template is in use",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotIDs []string
+			origHTTPClient := http.DefaultClient
+			http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatalf("decode delete request: %v", err)
+				}
+				var id string
+				if err := json.Unmarshal(body["template_id"], &id); err != nil {
+					t.Fatalf("decode template_id: %v", err)
+				}
+				gotIDs = append(gotIDs, id)
+
+				forceRaw, hasForce := body["force"]
+				if tt.wantForce {
+					if !hasForce {
+						t.Fatalf("request for %s omitted force", id)
+					}
+					var force bool
+					if err := json.Unmarshal(forceRaw, &force); err != nil {
+						t.Fatalf("decode force for %s: %v", id, err)
+					}
+					if !force {
+						t.Fatalf("request for %s sent force=false, want true", id)
+					}
+				} else if hasForce {
+					t.Fatalf("request for %s unexpectedly sent force: %s", id, forceRaw)
+				}
+
+				response := `{"ret":{"ret_code":200,"ret_msg":"success"}}`
+				if id == tt.rejectID {
+					response = `{"ret":{"ret_code":409,"ret_msg":"template is in use"}}`
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(response)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			})}
+			t.Cleanup(func() { http.DefaultClient = origHTTPClient })
+
+			ctx := newDeleteContext(t, tt.args)
+			action := TemplateDeleteCommand.Action.(func(*cli.Context) error)
+			err := action(ctx)
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("delete returned error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErrText)
+			}
+			if !reflect.DeepEqual(gotIDs, tt.wantIDs) {
+				t.Fatalf("deleted %v, want %v", gotIDs, tt.wantIDs)
+			}
+		})
+	}
+}
