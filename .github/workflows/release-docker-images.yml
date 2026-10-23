@@ -635,7 +635,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cube-node-init-ctx/scripts
-          for s in cube-node-init.sh wait-pvm-host.sh node-prep-lib.sh; do
+          for s in cube-node-init.sh wait-pvm-host.sh node-prep-lib.sh cubebox_os_image.sh; do
             install -m 0755 "deploy/kubernetes/images/scripts/${s}" \
               "cube-node-init-ctx/scripts/${s}"
           done
