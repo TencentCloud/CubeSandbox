@@ -90,11 +90,8 @@ remove_routing
 [[ "$(grep -c 'rule del fwmark' "${CALLS}" || true)" -eq 2 ]]
 [[ ! -s "${RULES_STATE}" ]]
 
-# --- install_routing: route-existence check handles both kernel output formats --
-# iproute2 on older kernels prints "local 0.0.0.0/0 dev lo scope host";
-# on Linux 6.18+ the same entry is shown as "local default dev lo scope host".
-# Both must be recognised so that ip-route-add is not re-run on every 30s
-# reapply cycle (where it fails EEXIST and causes the script to exit non-zero).
+# --- install_routing: route-existence check handles both iproute2 output forms --
+# ip route show normalises 0.0.0.0/0 to "default"; keep both forms for safety.
 ROUTE_SHOW_OUTPUT=""
 ip() {
     printf '%s\n' "$*" >> "${CALLS}"
@@ -113,13 +110,13 @@ ROUTE_SHOW_OUTPUT=""
 install_routing
 [[ "$(grep -c '^route add' "${CALLS}")" -eq 1 ]]
 
-# Old kernel output already present: route add must NOT be called.
+# 0.0.0.0/0 form present: route add must NOT be called.
 ROUTE_SHOW_OUTPUT="local 0.0.0.0/0 dev lo scope host"
 : > "${CALLS}"
 install_routing
 [[ "$(grep -c '^route add' "${CALLS}")" -eq 0 ]]
 
-# Linux 6.18+ kernel output already present: route add must NOT be called.
+# "default" form present: route add must NOT be called.
 ROUTE_SHOW_OUTPUT="local default dev lo scope host"
 : > "${CALLS}"
 install_routing

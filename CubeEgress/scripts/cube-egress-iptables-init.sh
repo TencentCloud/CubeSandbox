@@ -191,9 +191,7 @@ install_routing() {
         fi
     done
 
-    # Match both "local 0.0.0.0/0 dev lo" (older kernels) and
-    # "local default dev lo scope host" (Linux 6.18+); the route keyword
-    # changed between kernel versions but both represent the same entry.
+    # ip route show normalises 0.0.0.0/0 to "default"; match both forms for safety.
     if ! ip route show table "${ROUTE_TABLE}" | grep -qF \
             -e "local 0.0.0.0/0 dev lo" \
             -e "local default dev lo"; then
