@@ -156,7 +156,7 @@ func FaultPublishers(t *testing.T, fn func(*testing.T, webhook.Publisher)) {
 			defer unblock()
 			c.AllowHTTP = true
 			c.AllowedCIDRs = []string{"127.0.0.0/8"}
-			c.Subscriptions = []config.WebhookSubscription{{ID: uuid.NewString(), Enabled: true, URL: srv.URL, Events: []string{webhook.TypeCreated, webhook.TypeResumed, webhook.TypePaused, webhook.TypeCheckpointed}}}
+			c.Subscriptions = []config.WebhookSubscription{{ID: uuid.NewString(), Enabled: true, URL: srv.URL, Events: []string{webhook.TypeCreated, webhook.TypeResumed, webhook.TypePaused, webhook.TypeCheckpointed, webhook.TypeUpdated, webhook.TypeKilled}}}
 			r, e := webhook.NewRuntime(context.Background(), c, &config.RedisConf{Nodes: addr, Password: os.Getenv("WEBHOOK_P4_REDIS_PASSWORD"), DbNo: 12})
 			require.NoError(t, e)
 			defer func() {

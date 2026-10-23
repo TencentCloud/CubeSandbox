@@ -28,10 +28,13 @@ type LifecycleFields struct {
 	CPU, Memory           string
 	PauseMode, ResumeMode string
 	TooLarge              bool
+	EndAtMS               int64
+	KillReason            string
+	Network               *NetworkFields
 }
 
 func validateFields(f LifecycleFields) error {
-	if f.TooLarge || len(f.Metadata) > maxMetadataEntries || len(f.CPU) > 128 || len(f.Memory) > 128 || len(f.PauseMode) > 16 || len(f.ResumeMode) > 16 {
+	if len(f.KillReason) > maxStringBytes || validateNetwork(f.Network) != nil || f.TooLarge || len(f.Metadata) > maxMetadataEntries || len(f.CPU) > 128 || len(f.Memory) > 128 || len(f.PauseMode) > 16 || len(f.ResumeMode) > 16 {
 		return ErrCaptureTooLarge
 	}
 	total := 0
@@ -56,6 +59,8 @@ func cloneFields(f LifecycleFields) LifecycleFields {
 	}
 	f.PauseMode = strings.Clone(f.PauseMode)
 	f.ResumeMode = strings.Clone(f.ResumeMode)
+	f.KillReason = strings.Clone(f.KillReason)
+	f.Network = cloneNetwork(f.Network)
 	f.CPU = strings.Clone(f.CPU)
 	f.Memory = strings.Clone(f.Memory)
 	return f
@@ -133,7 +138,15 @@ func quantityInteger(raw string, memory bool) *int64 {
 func mapLifecycle(c *CapturedEvent) *ProtocolEventData {
 	f := cloneFields(c.input.Fields)
 	p := &ProtocolEventData{SandboxMetadata: f.Metadata, PauseMode: f.PauseMode, ResumeMode: f.ResumeMode}
-	if c.input.Type == TypePaused {
+	if c.input.Type == TypeUpdated {
+		if f.EndAtMS > 0 {
+			v := time.UnixMilli(f.EndAtMS).UTC().Format(time.RFC3339)
+			p.SetTimeout = &v
+		}
+		p.NetworkEgress = mapNetwork(f.Network)
+	}
+	p.KillReason = f.KillReason
+	if c.input.Type == TypePaused || c.input.Type == TypeKilled {
 		cpu, memory := quantityInteger(f.CPU, false), quantityInteger(f.Memory, true)
 		if f.CPU != "" && cpu == nil {
 			deliveryCounts.WithLabelValues("mapping", "cpu_unavailable").Inc()
@@ -160,6 +173,18 @@ func (h *PublisherHolder) Set(p Publisher) {
 	h.slot.Store(&publisherSlot{p})
 }
 func (h *PublisherHolder) Publish(kind, sandbox, template string, f LifecycleFields) {
+	h.PublishContext(context.Background(), kind, sandbox, template, f)
+}
+
+func (h *PublisherHolder) Enabled() bool {
+	s := h.slot.Load()
+	if s == nil {
+		return false
+	}
+	_, off := s.publisher.(NopPublisher)
+	return !off
+}
+func (h *PublisherHolder) PublishContext(ctx context.Context, kind, sandbox, template string, f LifecycleFields) {
 	s := h.slot.Load()
 	if s == nil {
 		return
@@ -167,7 +192,7 @@ func (h *PublisherHolder) Publish(kind, sandbox, template string, f LifecycleFie
 	if _, off := s.publisher.(NopPublisher); off {
 		return
 	}
-	ev, err := Capture(CaptureInput{ID: uuid.New(), Type: kind, Origin: OriginLifecycle, SandboxID: sandbox, TemplateID: template, OccurredAt: time.Now(), Fields: f})
+	ev, err := Capture(CaptureInput{ID: uuid.New(), Type: kind, Origin: OriginFromContext(ctx), SandboxID: sandbox, TemplateID: template, OccurredAt: time.Now(), Fields: f})
 	if err == nil {
 		s.publisher.TryPublish(ev)
 	}

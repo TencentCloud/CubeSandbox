@@ -365,3 +365,62 @@ func TestDropOriginTombstoneJoinsTombstoneAndCleanupErrors(t *testing.T) {
 	require.Contains(t, err.Error(), "tombstone rpc failed")
 	require.Contains(t, err.Error(), "cleanup rpc failed")
 }
+
+func TestP5PausedDeleteEvidence(t *testing.T) {
+	for _, status := range []string{statusReady, statusFailed, statusCreating, statusDeleteFailed} {
+		for _, reply := range []string{"success", "nil", "no-ret", "not-found", "failure"} {
+			t.Run(status+"/"+reply, func(t *testing.T) {
+				db := setupPauseDeleteTest(t)
+				seedPauseBinding(t, db, "sb", "snap", status, "127.0.0.1")
+				mockCubeletOK(t)
+				destroyOnCubelet = func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+					switch reply {
+					case "nil":
+						return nil, nil
+					case "no-ret":
+						return &cubebox.DestroyCubeSandboxResponse{}, nil
+					case "not-found":
+						return &cubebox.DestroyCubeSandboxResponse{Ret: &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_TaskStateInvalid, RetMsg: "not found"}}, nil
+					case "failure":
+						return nil, errors.New("node")
+					}
+					return &cubebox.DestroyCubeSandboxResponse{Ret: &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_Success}}, nil
+				}
+				evidence := false
+				handled, err := TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", &evidence)
+				require.True(t, handled)
+				require.Equal(t, reply == "success", evidence)
+				if reply == "failure" {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
+	}
+}
+func TestP5PausedCleanupRetryEvidence(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb", "snap", statusReady, "127.0.0.1")
+	mockCubeletOK(t)
+	good := cleanupTemplateOnCubelet
+	cleanupTemplateOnCubelet = func(context.Context, string, *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
+		return nil, errors.New("package")
+	}
+	evidence := false
+	handled, err := TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", &evidence)
+	require.True(t, handled)
+	require.Error(t, err)
+	require.True(t, evidence)
+	cleanupTemplateOnCubelet = good
+	destroyOnCubelet = func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+		return nil, nil
+	}
+	handled, err = TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", &evidence)
+	require.True(t, handled)
+	require.NoError(t, err)
+	require.True(t, evidence)
+	handled, err = TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", new(bool))
+	require.False(t, handled)
+	require.NoError(t, err)
+}

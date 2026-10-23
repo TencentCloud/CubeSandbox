@@ -20,7 +20,7 @@ import (
 // RPCs or background mapping. No timing threshold: distributions are evidence.
 func TestP4CaptureDistribution(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{InstanceType: "cubebox", WebhookMetadata: UserMetadata(map[string]string{"user_token": strings.Repeat("v", 4096), "project": strings.Repeat("p", 4096)}), Containers: []*types.Container{{Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
-	for _, kind := range []string{TypeCreated, TypeResumed, TypePaused, TypeCheckpointed} {
+	for _, kind := range []string{TypeCreated, TypeResumed, TypePaused, TypeCheckpointed, TypeUpdated, TypeKilled} {
 		for _, scenario := range []string{"disabled", "enabled", "full", "stopped", "disconnected", "slow-store", "slow-http"} {
 			t.Run(kind+"/"+scenario, func(t *testing.T) {
 				var p Publisher = NopPublisher{}
@@ -91,6 +91,13 @@ func TestP4CaptureDistribution(t *testing.T) {
 					}
 					if kind == TypeResumed {
 						f.ResumeMode = "restore"
+					}
+					if kind == TypeUpdated {
+						f.EndAtMS = 1700000000123
+						f.Network = &NetworkFields{AllowOut: []string{"8.8.8.8", "*.example.com"}}
+					}
+					if kind == TypeKilled {
+						f.KillReason = "request"
 					}
 					h.Publish(kind, "sb", template, f)
 					samples[i] = time.Since(start).Nanoseconds()

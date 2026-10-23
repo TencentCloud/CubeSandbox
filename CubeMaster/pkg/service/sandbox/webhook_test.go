@@ -285,9 +285,9 @@ func TestP4CreateCancellationDuringPostProcessing(t *testing.T) {
 
 type p4TimeoutProvider struct{ seen []webhook.Origin }
 
-func (p *p4TimeoutProvider) RefreshTimeout(ctx context.Context, _ string, _ int) (int64, error) {
+func (p *p4TimeoutProvider) RefreshTimeout(ctx context.Context, _ string, _ int) (int64, bool, error) {
 	p.seen = append(p.seen, webhook.OriginFromContext(ctx))
-	return 100, nil
+	return 100, true, nil
 }
 func (p *p4TimeoutProvider) LookupEndAt(context.Context, string) (int64, error) { return 0, nil }
 func TestP4ResumeTimeoutOrigin(t *testing.T) {

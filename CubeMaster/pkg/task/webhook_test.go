@@ -31,7 +31,7 @@ func TestP4OriginAcrossDestroyQueueRetry(t *testing.T) {
 		return f(ctx)
 	})
 	p.ApplyFunc(localcache.GetNodesByIp, func(string) (*node.Node, bool) { return &node.Node{}, true })
-	p.ApplyFunc(pausesnap.TryDeletePaused, func(context.Context, string, string, string) (bool, error) { return false, nil })
+	p.ApplyFunc(pausesnap.TryDeletePausedWithEvidence, func(context.Context, string, string, string, *bool) (bool, error) { return false, nil })
 	p.ApplyFunc(reportMetric, func(*Task, error) {})
 	errorcode.InitCubeCodeRetryMap(&config.Config{CubeletConf: &config.CubeletConf{}})
 	var calls atomic.Int32

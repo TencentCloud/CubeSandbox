@@ -15,7 +15,7 @@ import (
 // lifecycle metadata channel without taking a hard build-time dependency on
 // pkg/lifecycle. lifecycle.Init() injects a concrete implementation at startup;
 type TimeoutProvider interface {
-	RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (endAtMs int64, err error)
+	RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (endAtMs int64, applied bool, err error)
 	LookupEndAt(ctx context.Context, sandboxID string) (endAtMs int64, err error)
 }
 

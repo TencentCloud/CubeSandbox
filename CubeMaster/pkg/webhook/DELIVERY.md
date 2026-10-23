@@ -1,7 +1,7 @@
-# Configurable persistent lifecycle delivery (P3/P4)
+# Configurable persistent lifecycle delivery (P3–P5)
 
-CubeMaster publishes created, resumed, paused and checkpointed through the P3
-persistent pipeline. Independent updated and killed producers remain P5.
+CubeMaster publishes created, resumed, paused, checkpointed, supported updated
+and completed killed events through the same P3 persistent pipeline.
 There is no public test-event API.
 
 ## Configuration
@@ -200,10 +200,102 @@ including retries and the handler's WithoutCancel. Resume timeout refresh alone
 carries OriginResumeTimeoutRefresh; outer resumed retains lifecycle origin.
 Pause Update and origin-package cleanup carry OriginPauseTeardown locally.
 Cubelet keep_tombstone destruction stays inside its existing RPC, without a new
-proto field or Master ordinary-delete call. P5 must consume origins at actual
-updated/killed producers and test both suppression and normal notifications;
-P4's lack of those producers is not evidence of completed P5 suppression.
+proto field or Master ordinary-delete call. P5 PublishContext checks the trusted
+origin; deletion captures it before queueing and preserves it independently of
+later logging/context wrappers.
 
 See [P4-VALIDATION.md](P4-VALIDATION.md) for this run's commands, evidence,
 measurements, skips and P5/P6 handoff. Signature, API, backend, retry, loss and
 ordering limitations above remain unchanged.
+
+## P5 updates and completed destruction
+
+App installs its same Publisher into task as well as sandbox/templatecenter.
+No second Runtime, new queue, notification query, per-event goroutine, proto
+change or durable producer deduplication table is introduced.
+
+### Timeout
+
+The lifecycle provider now returns the actual written EndAt plus an independent
+HSET application flag. Both HSET and XADD are still attempted under the existing
+best-effort policy. XADD failure does not erase successful HSET evidence; failed
+or uncertain HSET, disabled store, absent metadata/provider, and read failures
+cannot turn a response fallback deadline into an event. Existing response
+fallbacks remain intact. refreshTimeoutMeta is the single producer for
+SetTimeout/Refresh; trusted resume refresh origin is suppressed.
+
+Positive timeouts and SetTimeout(0) carry the actual Unix-millisecond EndAt.
+Writer formats that captured value in UTC RFC3339 (existing seconds precision);
+Worker never recomputes it. SetTimeout(-1) succeeds normally and emits no
+timeout-only updated. Repeated successful independent requests may each notify.
+Timeout has no existing spec lookup, so template and metadata are omitted/empty
+rather than fetched solely for notification.
+
+### Network
+
+After the existing node update succeeds and the existing best-effort spec write
+is attempted, the producer copies only AllowOut, DenyOut and the effective false
+internet switch from this request. A spec write/read failure does not suppress
+an already applied update. Metadata/resources reuse the spec already read.
+
+Writer maps IPv4 literals to /32 and IPv4 CIDRs to network addresses, separates
+domains/wildcards, and normalizes domain case/trailing dot to node semantics.
+The current node rejects IPv6 policies; unsupported IP/CIDR values are never
+promoted into domains. AllowInternetAccess=false projects denied_cidrs as
+["0.0.0.0/0"], replacing explicit denies; true/nil project the request DenyOut.
+User DNS addresses are ordinary allow entries. Node-injected DNS/private rules
+are absent, and no unapplied E2B default DNS is synthesized.
+
+All three network_egress keys are emitted. Empty categories are JSON null,
+including explicit empty lists after protobuf round-trip (repeated fields lose
+nil/empty distinction). Nonempty categories are arrays. Receivers requiring []
+must adapt. Rules/Inject/credentials/ingress fields are never copied to the event.
+L7-only requests passing this update path can emit three empty categories;
+coverage of other L7-only paths is not promised. No old-policy comparison or
+classification RPC is performed.
+
+### Destruction
+
+DestroySandbox snapshots original reason, trusted origin, and bounded P4
+metadata/resources before reason defaulting and cleanup. HTTP delete supplies
+request for an empty reason; lifecycle-manager supplies timeout; unknown internal
+empty reasons encode as unknown. Explicit nonempty business reasons survive.
+No error strings are used as kill reasons.
+
+Sync and async completion require explicit successful node Ret evidence (or
+confirmed paused deletion), followed by successful proxy/cache cleanup. Enqueue,
+mock bypass, missing node with only Master cleanup, nil/absent Ret, and tolerated
+paused not-found responses cannot independently produce killed. Hook failures
+remain warnings. Pause package cleanup must succeed; pause metadata deletion
+retains its existing warning-only policy, so killed does not promise all GC ended.
+
+The Task retains confirmed node progress, independent of webhook enablement, so
+a retry after proxy cleanup failure completes bookkeeping without repeating an
+already confirmed normal node destruction. Paused tasks still retry package
+cleanup. A task-local atomic publication flag prevents repeated completion
+callbacks from generating new events. Event ID/time are created only at final
+completion, not at request or queue time. This is neither a durable task nor
+global exactly-once: a new request/process cannot borrow old in-memory evidence.
+If all available responses are tolerant/not-found and no confirmed progress
+survives, notification is conservatively omitted, even if cleanup returns nil.
+An independent request returning an explicit success indistinguishable from
+fresh node completion remains subject to the documented cross-request limitation.
+
+Creation rollback has no normal destruction snapshot and carries its internal
+origin. Pause teardown and resume cleanup remain excluded, without relying on
+created delivery. Killed uses the same per-field resource mapper as paused;
+missing execution identity/start/duration, fractional CPU, multi-container and
+legacy metadata limitations remain unchanged. If a request already supplies its
+storage backend, the existing stamp helper skips reading spec; notification does
+not add that read and therefore has unknown template/metadata/resources.
+
+Network capture adds at most 256 combined entries, 1024 bytes per entry and
+16 KiB total; kill_reason is limited to 4096 bytes. These are bounded DTO budgets,
+alongside existing identity/metadata budgets, not policy truncation. Any excess
+drops only the notification and increments existing low-cardinality capture
+observations. No partial network policy is sent.
+
+See [P5-VALIDATION.md](P5-VALIDATION.md) for current commands, real Redis/HTTP
+component evidence, failure isolation and measurement. P6 retains full deployed
+Master/XFS/S3/multinode/restart/power-loss acceptance. Signature, dynamic API,
+pre-persistence loss and possible post-persistence duplicates remain unchanged.
