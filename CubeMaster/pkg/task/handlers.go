@@ -245,12 +245,12 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 		ctx = context.WithoutCancel(ctx)
 		hostIP := strings.Split(t.CallEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
-		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)
+		handled, err := pausesnap.TryDeletePausedWithEvidence(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
 		}
-		if !handled && nodeOK {
+		if !handled && nodeOK && !t.Destroyed {
 			rsp, err := cubelet.Destroy(ctx, t.CallEp, req)
 			defer func() {
 				if log.IsDebug() {
@@ -268,6 +268,9 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 				log.G(ctx).Errorf("Destroy error:%+v", rsp)
 				return ret.Errorf(errorcode.MasterCode(rsp.GetRet().GetRetCode()), "%s", rsp.GetRet().GetRetMsg())
 			}
+			if rsp != nil && rsp.GetRet() != nil {
+				t.Destroyed = true
+			}
 			// Apply any node-level volume ref-count transitions (1→0) reported by
 			// Cubelet so the volume DB releases the reference held by this node.
 			volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
@@ -284,6 +287,9 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 			if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
 				log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
 			}
+		}
+		if t.Destroyed && t.InsType() == cubebox.InstanceType_cubebox.String() {
+			t.Destruction.Complete(&lifecyclePublisher)
 		}
 		return nil
 	})

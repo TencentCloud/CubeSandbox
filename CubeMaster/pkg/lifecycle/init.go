@@ -62,16 +62,16 @@ type storeTimeoutProvider struct {
 // doesn't carry: AutoPause / AutoResume / TemplateID / HostID / HostIP /
 // InstanceType), rewrites CreatedAt + TimeoutSeconds + EndAt, and publishes
 // an OpUpdate event so every sidecar replica converges on the new view.
-func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
+func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, bool, error) {
 	if p == nil || p.store == nil {
-		return 0, nil
+		return 0, false, nil
 	}
 	meta, err := p.store.LoadMeta(ctx, sandboxID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if meta == nil {
-		return 0, nil
+		return 0, false, nil
 	}
 
 	now := time.Now().UnixMilli()
@@ -79,8 +79,8 @@ func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID str
 	meta.TimeoutSeconds = &ts
 	meta.CreatedAt = now
 	meta.EndAt = projectedEndAt(now, timeoutSeconds)
-	p.store.PublishUpdate(ctx, meta)
-	return meta.EndAt, nil
+	applied := p.store.PublishUpdate(ctx, meta)
+	return meta.EndAt, applied, nil
 }
 
 // projectedEndAt maps idle TTL to EndAt (unix ms). See docs/guide/lifecycle.md.

@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -58,6 +59,7 @@ func TestP4AppPublisherRealCreate(t *testing.T) {
 	a.startWebhooks(context.Background(), cfg)
 	defer a.webhooks.Shutdown(context.Background())
 	defer sandbox.SetWebhookPublisher(nil)
+	defer task.SetWebhookPublisher(nil)
 	defer templatecenter.SetWebhookPublisher(nil)
 	p := gomonkey.NewPatches()
 	defer p.Reset()

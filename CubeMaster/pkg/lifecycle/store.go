@@ -22,8 +22,8 @@ type redisDoer interface {
 	Do(cmd string, args ...interface{}) (interface{}, error)
 }
 
-// Store performs the actual Redis writes. It is intentionally tiny and never
-// returns errors to its callers — every error is logged at warn level and
+// Store performs the actual Redis writes. PublishUpdate reports confirmed HSET
+// application separately from best-effort Stream delivery; errors are logged and
 // swallowed so a Redis hiccup cannot fail a sandbox create/destroy.
 type Store struct {
 	doer    redisDoer
@@ -126,7 +126,7 @@ func (s *Store) PublishState(ctx context.Context, sandboxID, state, source strin
 // PublishUpdate refreshes the snapshot for an already-existing sandbox: HSET
 // the new meta JSON, then XADD an OpUpdate event. Used by set_timeout /
 // refresh when only mutable fields (TimeoutSeconds, CreatedAt, EndAt) change.
-func (s *Store) PublishUpdate(ctx context.Context, meta *SandboxLifecycleMeta) {
+func (s *Store) PublishUpdate(ctx context.Context, meta *SandboxLifecycleMeta) (applied bool) {
 	if s == nil || !s.enabled.Load() || s.doer == nil || meta == nil || meta.SandboxID == "" {
 		return
 	}
@@ -137,13 +137,15 @@ func (s *Store) PublishUpdate(ctx context.Context, meta *SandboxLifecycleMeta) {
 		return
 	}
 
-	if _, err := s.doer.Do("HSET", MetaKey, meta.SandboxID, payload); err != nil {
+	_, writeErr := s.doer.Do("HSET", MetaKey, meta.SandboxID, payload)
+	if err := writeErr; err != nil {
 		log.G(ctx).Warnf("lifecycle: HSET (update) %s %s failed: %v", MetaKey, meta.SandboxID, err)
 	}
 
 	if _, err := s.xadd(OpUpdate, meta.SandboxID, payload); err != nil {
 		log.G(ctx).Warnf("lifecycle: XADD update %s failed: %v", meta.SandboxID, err)
 	}
+	return writeErr == nil
 }
 
 // LoadMeta reads back the canonical meta snapshot for a sandbox. Returns nil

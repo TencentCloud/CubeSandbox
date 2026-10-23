@@ -363,7 +363,7 @@ func initVolumePlugins(cfg *config.Config) error {
 	return nil
 }
 
-// WebhookPublisher is the injection point for future lifecycle success paths.
+// WebhookPublisher is the injection point for lifecycle success paths.
 // Run installs the immutable runtime once, before starting the HTTP server.
 func (a *App) WebhookPublisher() webhook.Publisher {
 	if a.webhooks == nil {
@@ -375,6 +375,7 @@ func (a *App) startWebhooks(ctx context.Context, cfg *config.Config) {
 	var err error
 	a.webhooks, err = webhook.NewRuntime(ctx, cfg.Webhooks, cfg.RedisConf)
 	sandbox.SetWebhookPublisher(a.WebhookPublisher())
+	task.SetWebhookPublisher(a.WebhookPublisher())
 	templatecenter.SetWebhookPublisher(a.WebhookPublisher())
 	if err != nil {
 		CubeLog.Warnf("webhooks disabled: invalid startup configuration; values redacted")
