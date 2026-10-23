@@ -86,6 +86,7 @@ type BuildTemplateOptions struct {
 	DNS                 []string
 	AllowOut            []string
 	DenyOut             []string
+	Backend             string
 	// Extra is merged into the request payload after the named fields above,
 	// so duplicate keys override those fields to match Python kwargs behavior.
 	Extra map[string]any
@@ -240,6 +241,9 @@ func buildTemplatePayload(opts BuildTemplateOptions) (map[string]any, error) {
 	}
 	if len(opts.DenyOut) > 0 {
 		payload["denyOut"] = append([]string(nil), opts.DenyOut...)
+	}
+	if backend := strings.TrimSpace(opts.Backend); backend != "" {
+		payload["backend"] = backend
 	}
 	for key, value := range opts.Extra {
 		payload[key] = value
