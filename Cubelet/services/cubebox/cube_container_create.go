@@ -1472,6 +1472,9 @@ func (l *local) runContainer(
 	taskStart := time.Now()
 	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
 	if err != nil {
+		if ci.IsPod {
+			reapOrphanShims(ctx, ci.ID)
+		}
 		return transformError(err)
 	}
 	workflow.RecordCreateMetric(ctx, err,
