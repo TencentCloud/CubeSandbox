@@ -6,11 +6,13 @@ on:
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
+      - 'cube-envd/**'
       - '.github/workflows/build-envd-base-image.yml'
   pull_request:
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
+      - 'cube-envd/**'
       - '.github/workflows/build-envd-base-image.yml'
   workflow_dispatch:
     inputs:
@@ -100,7 +102,7 @@ jobs:
       - name: Build image (load locally for smoke test)
         uses: docker/build-push-action@v6
         with:
-          context: docker
+          context: .
           file: docker/Dockerfile.cube-base
           platforms: ${{ matrix.platform }}
           push: false
@@ -109,6 +111,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
+            CUBE_ENVD_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
 
@@ -139,12 +142,15 @@ jobs:
           echo "envd inside container:"
           docker exec "${cid}" /usr/bin/envd -version
           docker exec "${cid}" /usr/bin/envd -commit
+          echo "rollback binary:"
+          docker exec "${cid}" /usr/bin/envd-go -version
+          docker exec "${cid}" cat /etc/cubesandbox-envd-impl
 
       - name: Push per-arch image
         if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
         uses: docker/build-push-action@v6
         with:
-          context: docker
+          context: .
           file: docker/Dockerfile.cube-base
           platforms: ${{ matrix.platform }}
           push: true
@@ -155,6 +161,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
+            CUBE_ENVD_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
 
