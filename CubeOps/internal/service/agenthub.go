@@ -165,6 +165,13 @@ type AgentStore interface {
 	// id, and soft-delete them. Used after E2B/SDK template/snapshot delete.
 	FindTemplateIDsByInfraID(ctx context.Context, infraID string) ([]string, error)
 	SoftDeleteAgentHubTemplate(ctx context.Context, templateID string) error
+	// Reverse-sync: soft-delete snapshot rows backed by an infra snapshot id
+	// deleted outside AgentHub (SDK snapshot delete). Returns rows removed.
+	SoftDeleteAgentSnapshotsByInfraID(ctx context.Context, snapshotID string) (int64, error)
+	// CountTemplatesReferencingSnapshot counts live templates published from a snapshot.
+	CountTemplatesReferencingSnapshot(ctx context.Context, snapshotID string) (int, error)
+	// ClearBaseSnapshotIDBySnapshotID clears base_snapshot_id pointing at a snapshot.
+	ClearBaseSnapshotIDBySnapshotID(ctx context.Context, snapshotID string) (int64, error)
 	DB() *gorm.DB
 }
 
@@ -255,6 +262,32 @@ func (s *AgentHubService) ReverseSyncAgentHubTemplate(ctx context.Context, infra
 		} else {
 			logging.G(ctx).Debugf("ReverseSyncAgentHubTemplate: soft-deleted AgentHub template %q (infraID=%q)", id, infraID)
 		}
+	}
+}
+
+// SnapshotTemplateRefCount returns how many live AgentHub templates were
+// published from the given snapshot. Callers use it to block deletion.
+func (s *AgentHubService) SnapshotTemplateRefCount(ctx context.Context, snapshotID string) (int, error) {
+	return s.Store.CountTemplatesReferencingSnapshot(ctx, snapshotID)
+}
+
+// ReverseSyncAgentHubSnapshot best-effort soft-deletes AgentHub snapshot rows
+// backed by an infra snapshot deleted outside AgentHub (SDK snapshot delete).
+// Failures are logged, never propagated.
+func (s *AgentHubService) ReverseSyncAgentHubSnapshot(ctx context.Context, infraID string) {
+	n, err := s.Store.SoftDeleteAgentSnapshotsByInfraID(ctx, infraID)
+	if err != nil {
+		logging.G(ctx).Warnf("ReverseSyncAgentHubSnapshot: failed: infraID=%q err=%q", infraID, err.Error())
+		return
+	}
+	if n > 0 {
+		logging.G(ctx).Infof("ReverseSyncAgentHubSnapshot: soft-deleted %d snapshot row(s) (infraID=%q)", n, infraID)
+	}
+	// Clear instance base pointers so downstream flows fall back to a live source.
+	if cleared, err := s.Store.ClearBaseSnapshotIDBySnapshotID(ctx, infraID); err != nil {
+		logging.G(ctx).Warnf("ReverseSyncAgentHubSnapshot: clear base snapshot id failed: infraID=%q err=%q", infraID, err.Error())
+	} else if cleared > 0 {
+		logging.G(ctx).Infof("ReverseSyncAgentHubSnapshot: cleared base_snapshot_id on %d instance(s) (infraID=%q)", cleared, infraID)
 	}
 }
 
@@ -1058,7 +1091,11 @@ func (s *AgentHubService) DeleteSnapshot(ctx context.Context, agentID, snapshotI
 			}
 		case "full_snapshot", "sandbox_snapshot":
 			if _, err := s.CM.DeleteSnapshot(ctx, snapshotID); err != nil {
-				return wrapCMError(err)
+				if !isCMNotFound(err) {
+					return wrapCMError(err)
+				}
+				// Snapshot already gone on CubeMaster; fall through to local cleanup.
+				logging.G(ctx).Warnf("DeleteSnapshot: CM snapshot already gone: agentID=%q snapshotID=%q", agentID, snapshotID)
 			}
 		}
 	}

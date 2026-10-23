@@ -89,6 +89,8 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 
 	// Snapshots
 	r.GET("/snapshots", h.ListSnapshots)
+	r.GET("/snapshots/:id", h.GetSnapshot)
+	r.DELETE("/snapshots/:id", h.DeleteSnapshot)
 	r.POST("/sandboxes/:id/snapshots", h.CreateSnapshot)
 	r.POST("/sandboxes/:id/rollback", h.RollbackSandbox)
 
@@ -157,11 +159,9 @@ func writeCMError(c *gin.Context, err error) {
 	httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 }
 
-// longOpTimeout is the per-request deadline for CubeMaster operations that
-// can legitimately take well beyond the default 30 s — currently snapshot
-// create, snapshot rollback, and template/snapshot delete. These are
-// synchronous Cubelet/LVM operations.
-const longOpTimeout = 240 * time.Second
+// longOpTimeout aligns with CubeMaster's snapshotOperationTimeout (15 min);
+// all four long-op handlers map to synchronous CM snapshot jobs.
+const longOpTimeout = 15 * time.Minute
 
 // longOpCtx returns a request-derived context bounded by longOpTimeout,
 // for synchronous slow CubeMaster calls (snapshot/rollback, template delete).
@@ -602,6 +602,90 @@ func (h *SDKHandler) ListSnapshots(c *gin.Context) {
 	raw, err := h.cm.ListSnapshots(c.Request.Context(), params)
 	if err != nil {
 		writeCMError(c, err)
+		return
+	}
+	// Surface the pagination cursor via X-Next-Token; writeSDKResponse drops it.
+	var env struct {
+		Ret       *cmRet          `json:"ret,omitempty"`
+		Data      json.RawMessage `json:"data,omitempty"`
+		NextToken string          `json:"next_token"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && env.NextToken != "" {
+		c.Header("X-Next-Token", env.NextToken)
+	}
+	// Empty list: CM omits `data` (omitempty), so return [] to honor the array contract.
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage("[]"))
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// GetSnapshot — GET /api/v1/sdk/snapshots/{id}
+func (h *SDKHandler) GetSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
+	snapshotID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = snapshotID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	raw, err := h.cm.GetSnapshot(ctx, snapshotID)
+	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// DeleteSnapshot — DELETE /api/v1/sdk/snapshots/{id}
+// Physical delete is synchronous (LVM cleanup), so bounded by longOpTimeout.
+func (h *SDKHandler) DeleteSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
+	snapshotID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = snapshotID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	// Block deletion while AgentHub templates still reference this snapshot.
+	if h.agenthubSvc != nil {
+		n, err := h.agenthubSvc.SnapshotTemplateRefCount(ctx, snapshotID)
+		if err != nil {
+			logging.G(ctx).Errorf("sdk: count snapshot template refs failed: %v", err)
+			httputil.WriteError(c, http.StatusBadGateway, "failed to check snapshot references")
+			return
+		}
+		if n > 0 {
+			logging.G(ctx).Warnf("sdk: block snapshot delete, referenced by %d template(s): snapshotID=%s", n, snapshotID)
+			httputil.WriteError(c, http.StatusConflict, fmt.Sprintf("snapshot is referenced by %d template(s); remove them first", n))
+			return
+		}
+	}
+	ctx, cancel := longOpCtx(c)
+	defer cancel()
+	raw, err := h.cm.DeleteSnapshot(ctx, snapshotID)
+	if err != nil {
+		// CM 404 (either shape) = already deleted; still clean up AgentHub rows.
+		var cmErr *cubemaster.CMError
+		var httpErr *cubemaster.HTTPError
+		notFound := (errors.As(err, &cmErr) && cmErr.IsNotFound()) ||
+			(errors.As(err, &httpErr) && httpErr.IsNotFound())
+		if !notFound {
+			writeCMError(c, err)
+			return
+		}
+		logging.G(ctx).Warnf("sdk: snapshot already gone on CubeMaster: snapshotID=%s", snapshotID)
+	}
+	// Reverse-sync must outlive the (possibly near-expired) delete deadline.
+	if h.agenthubSvc != nil {
+		syncCtx, syncCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		h.agenthubSvc.ReverseSyncAgentHubSnapshot(syncCtx, snapshotID)
+		syncCancel()
+	}
+	if raw == nil {
+		// Idempotent: CM already deleted it, nothing to return.
+		c.Status(http.StatusNoContent)
 		return
 	}
 	writeSDKResponse(c, raw)

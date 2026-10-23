@@ -33,6 +33,7 @@ type fakeCM struct {
 	listSandboxesWithBody       func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	createSnapshot              func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	listSnapshots               func(ctx context.Context, params map[string]string) (json.RawMessage, error)
+	getSnapshot                 func(ctx context.Context, snapshotID string) (json.RawMessage, error)
 	deleteSnapshot              func(ctx context.Context, snapshotID string) (json.RawMessage, error)
 	rollbackSandbox             func(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error)
 	listTemplates               func(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error)
@@ -126,6 +127,12 @@ func (f *fakeCM) ListSnapshots(ctx context.Context, params map[string]string) (j
 		return nil, errFakeNotConfigured
 	}
 	return f.listSnapshots(ctx, params)
+}
+func (f *fakeCM) GetSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
+	if f.getSnapshot == nil {
+		return nil, errFakeNotConfigured
+	}
+	return f.getSnapshot(ctx, snapshotID)
 }
 func (f *fakeCM) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
 	if f.deleteSnapshot == nil {
