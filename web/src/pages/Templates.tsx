@@ -5,7 +5,7 @@ import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Upload } from 'lucide-react';
 import {
   templateApi,
   type TemplateCompatMatrix,
@@ -49,6 +49,8 @@ interface CreateFormState {
   registryUsername: string;
   registryPassword: string;
   withCubeCa: boolean;
+  enableInjectEnvd: boolean;
+  envdFile: File | null;
 }
 
 const INITIAL_FORM: CreateFormState = {
@@ -72,7 +74,13 @@ const INITIAL_FORM: CreateFormState = {
   registryUsername: '',
   registryPassword: '',
   withCubeCa: true,
+  enableInjectEnvd: false,
+  envdFile: null,
 };
+
+// Mirrors CubeMaster's MaxEnvdPayloadBytes (16 MiB). Final validation is done
+// server-side; this is only for fast client-side feedback.
+const MAX_ENVD_BYTES = 16 * 1024 * 1024;
 
 /** Split a comma- or newline-separated list into a clean string array. */
 function splitList(value: string): string[] {
@@ -142,6 +150,11 @@ function buildCreateBody(state: CreateFormState): Record<string, unknown> {
   setStr('registryPassword', state.registryPassword);
   body.with_cube_ca = state.withCubeCa;
 
+  // envd injection: send a flat flag; CubeOps translates it into the
+  // container_overrides.annotations opt-in. The binary travels separately as
+  // the multipart "envd" file (see templateApi.create).
+  if (state.enableInjectEnvd && state.envdFile) body.enableInjectEnvd = true;
+
   return body;
 }
 
@@ -158,7 +171,12 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   // otherwise). INITIAL_FORM seeds a sensible default of "1G", but a user could
   // still clear the field manually.
   const wlayerValid = form.writableLayerSize.trim().length > 0;
-  const formInvalid = !imageValid || portsInvalid || !wlayerValid;
+  // envd injection: when enabled, a file is required; CubeMaster validates
+  // ELF/size on its side, so the frontend only guards presence and the 16MiB
+  // cap (fast feedback before the upload round-trip).
+  const envdFileTooLarge = form.envdFile != null && form.envdFile.size > MAX_ENVD_BYTES;
+  const envdInvalid = form.enableInjectEnvd && (form.envdFile == null || envdFileTooLarge);
+  const formInvalid = !imageValid || portsInvalid || !wlayerValid || envdInvalid;
 
   const update = <K extends keyof CreateFormState>(key: K, value: CreateFormState[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -181,7 +199,10 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
 
   const mutation = useMutation({
     mutationFn: () =>
-      templateApi.create(buildCreateBody(form) as Parameters<typeof templateApi.create>[0]),
+      templateApi.create(
+        buildCreateBody(form) as Parameters<typeof templateApi.create>[0],
+        form.enableInjectEnvd ? form.envdFile : null,
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['templates'] });
       onClose();
@@ -481,6 +502,54 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
                   />
                   <span className="text-sm">{t('create.withCubeCa')}</span>
                 </label>
+
+                {/* envd injection */}
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border"
+                      checked={form.enableInjectEnvd}
+                      onChange={(e) => update('enableInjectEnvd', e.target.checked)}
+                    />
+                    <span className="text-sm">{t('create.injectEnvd')}</span>
+                  </label>
+                  <p className="text-xs text-muted-foreground">{t('create.injectEnvdHint')}</p>
+
+                  {form.enableInjectEnvd && (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        {t('create.envdFile')}{' '}
+                        <span className="text-destructive text-sm font-bold">*</span>
+                      </label>
+                      <div className="flex items-center justify-center w-full">
+                        <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-border/60 rounded-lg cursor-pointer bg-muted/20 hover:bg-muted/40 transition-colors">
+                          <div className="flex flex-col items-center justify-center py-4">
+                            <Upload className="w-6 h-6 mb-2 text-muted-foreground" />
+                            <p className="text-xs text-muted-foreground px-3 text-center">
+                              {t('create.envdFileHint')}
+                            </p>
+                            {form.envdFile && (
+                              <p className="mt-2 text-sm font-medium text-primary">
+                                {form.envdFile.name}
+                              </p>
+                            )}
+                          </div>
+                          <input
+                            type="file"
+                            className="hidden"
+                            onChange={(e) => update('envdFile', e.target.files?.[0] ?? null)}
+                          />
+                        </label>
+                      </div>
+                      {form.envdFile == null ? (
+                        <p className="text-xs text-destructive">{t('create.envdFileRequired')}</p>
+                      ) : envdFileTooLarge ? (
+                        <p className="text-xs text-destructive">{t('create.envdFileTooLarge')}</p>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

@@ -85,7 +85,13 @@
     "registry": "私有镜像仓库",
     "registryUsername": "仓库用户名",
     "registryPassword": "仓库密码",
-    "withCubeCa": "将 CubeEgress CA 写入 rootfs"
+    "withCubeCa": "将 CubeEgress CA 写入 rootfs",
+    "injectEnvd": "注入 envd",
+    "injectEnvdHint": "将上传的 envd 二进制写入模板 rootfs 的 /usr/local/bin/envd。请确保二进制架构与目标节点一致。",
+    "envdFile": "envd 二进制文件",
+    "envdFileHint": "点击上传本地 envd 二进制（ELF，≤16MiB）。",
+    "envdFileRequired": "已勾选注入 envd，请选择 envd 二进制文件。",
+    "envdFileTooLarge": "envd 文件超过 16MiB 上限。"
   },
   "delete": {
     "button": "删除模板",

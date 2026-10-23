@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -267,6 +268,14 @@ func (c *Client) CreateTemplateFromImage(ctx context.Context, body interface{}) 
 	return c.post(ctx, "/cube/template/from-image", body)
 }
 
+// CreateTemplateFromImageMultipart creates a template from an OCI image with
+// envd injection. The body is marshaled into the "request" form field; envd
+// is the binary payload written to the "envd" form file field. CubeMaster
+// expects Content-Type: multipart/form-data with these exact part names.
+func (c *Client) CreateTemplateFromImageMultipart(ctx context.Context, body interface{}, envd []byte) (json.RawMessage, error) {
+	return c.postMultipart(ctx, "/cube/template/from-image", body, envd)
+}
+
 // RedoTemplate rebuilds an existing template.
 func (c *Client) RedoTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	return c.post(ctx, "/cube/template/redo", body)
@@ -401,6 +410,54 @@ func (c *Client) post(ctx context.Context, path string, body interface{}) (json.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	setTraceHeaders(req, rid)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return readResponse(resp)
+}
+
+// postMultipart sends a multipart/form-data request with a JSON "request"
+// field and an "envd" file field. It mirrors the CubeMaster CLI wire contract
+// (buildCreateFromImageMultipartBody in cubemastercli). EnsureRequestID must
+// run before the body is marshaled so the request id lands inside the JSON
+// "request" part (multipart has no post-hoc body mutation like the JSON path).
+func (c *Client) postMultipart(ctx context.Context, path string, body interface{}, envd []byte) (json.RawMessage, error) {
+	rid := EnsureRequestID(ctx, body)
+
+	buf := &bytes.Buffer{}
+	writer := multipart.NewWriter(buf)
+
+	requestPart, err := writer.CreateFormField("request")
+	if err != nil {
+		return nil, fmt.Errorf("create request part: %w", err)
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal body: %w", err)
+	}
+	if _, err := requestPart.Write(encoded); err != nil {
+		return nil, fmt.Errorf("write request part: %w", err)
+	}
+
+	envdPart, err := writer.CreateFormFile("envd", "envd")
+	if err != nil {
+		return nil, fmt.Errorf("create envd part: %w", err)
+	}
+	if _, err := envdPart.Write(envd); err != nil {
+		return nil, fmt.Errorf("write envd part: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	setTraceHeaders(req, rid)
 	resp, err := c.http.Do(req)
 	if err != nil {

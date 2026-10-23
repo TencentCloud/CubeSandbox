@@ -130,3 +130,43 @@ func TestParseCPUMilli(t *testing.T) {
 		})
 	}
 }
+
+// enableInjectEnvd=true must produce the CubeMaster opt-in annotation nested
+// under container_overrides.annotations.
+func TestTransformCreateTemplateRequest_InjectEnvd(t *testing.T) {
+	cmReq := TransformCreateTemplateRequest(map[string]interface{}{
+		"image":            "reg/foo:1",
+		"enableInjectEnvd": true,
+	})
+	co, ok := cmReq["container_overrides"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("container_overrides missing/wrong type: %#v", cmReq["container_overrides"])
+	}
+	anns, ok := co["annotations"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("annotations missing/wrong type: %#v", co["annotations"])
+	}
+	if anns["cube.master.inject_envd"] != "true" {
+		t.Errorf("inject_envd = %v, want \"true\"", anns["cube.master.inject_envd"])
+	}
+}
+
+// Without the flag, no annotation is emitted — and when there are no other
+// overrides, container_overrides itself must be absent (no empty object).
+func TestTransformCreateTemplateRequest_NoInjectEnvd(t *testing.T) {
+	cmReq := TransformCreateTemplateRequest(map[string]interface{}{
+		"image": "reg/foo:1",
+	})
+	if _, ok := cmReq["container_overrides"]; ok {
+		t.Errorf("container_overrides should be absent when there are no overrides, got %#v", cmReq["container_overrides"])
+	}
+
+	// enableInjectEnvd:false is the same as absent.
+	cmReq2 := TransformCreateTemplateRequest(map[string]interface{}{
+		"image":            "reg/foo:1",
+		"enableInjectEnvd": false,
+	})
+	if _, ok := cmReq2["container_overrides"]; ok {
+		t.Errorf("enableInjectEnvd:false should not create container_overrides, got %#v", cmReq2["container_overrides"])
+	}
+}

@@ -263,29 +263,45 @@ export const templateApi = {
   list: () =>
     api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
-  create: (body: {
-    templateID?: string;
-    image: string;
-    instanceType?: string;
-    writableLayerSize?: string;
-    exposedPorts?: number[];
-    probePort?: number;
-    probePath?: string;
-    cpu?: number;
-    memory?: number;
-    env?: string[];
-    allowInternetAccess?: boolean;
-    networkType?: string;
-    nodes?: string[];
-    registryUsername?: string;
-    registryPassword?: string;
-    command?: string[];
-    args?: string[];
-    dns?: string[];
-    allowOut?: string[];
-    denyOut?: string[];
-    with_cube_ca?: boolean;
-  }) => api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
+  create: (
+    body: {
+      templateID?: string;
+      image: string;
+      instanceType?: string;
+      writableLayerSize?: string;
+      exposedPorts?: number[];
+      probePort?: number;
+      probePath?: string;
+      cpu?: number;
+      memory?: number;
+      env?: string[];
+      allowInternetAccess?: boolean;
+      networkType?: string;
+      nodes?: string[];
+      registryUsername?: string;
+      registryPassword?: string;
+      command?: string[];
+      args?: string[];
+      dns?: string[];
+      allowOut?: string[];
+      denyOut?: string[];
+      with_cube_ca?: boolean;
+      enableInjectEnvd?: boolean;
+    },
+    // When an envd binary is supplied, the request is sent as multipart/form-data
+    // with a "request" (JSON) part and an "envd" (file) part — the wire contract
+    // CubeMaster requires for envd injection. Otherwise the historical JSON path
+    // is used unchanged.
+    envdFile?: File | null,
+  ) => {
+    if (envdFile) {
+      const fd = new FormData();
+      fd.append('request', JSON.stringify(body));
+      fd.append('envd', envdFile, 'envd');
+      return api<unknown>('/templates', { method: 'POST', body: fd });
+    }
+    return api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) });
+  },
   rebuild: (id: string) =>
     api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>

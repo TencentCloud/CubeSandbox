@@ -108,6 +108,10 @@ func (f *fakeCMHandler) CreateTemplateFromImage(ctx context.Context, body interf
 	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("CreateTemplateFromImage")
 }
+func (f *fakeCMHandler) CreateTemplateFromImageMultipart(ctx context.Context, body interface{}, envd []byte) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
+	return nil, errMethodNotConfigured("CreateTemplateFromImageMultipart")
+}
 func (f *fakeCMHandler) RedoTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("RedoTemplate")
