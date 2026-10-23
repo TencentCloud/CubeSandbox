@@ -29,6 +29,7 @@ interface CreateModalProps {
 
 interface CreateFormState {
   image: string;
+  alias: string;
   instanceType: string;
   writableLayerSize: string;
   exposedPorts: string;
@@ -37,8 +38,9 @@ interface CreateFormState {
   cpu: string;
   memory: string;
   envVars: string;
-  allowInternet: boolean;
+  forbidInternet: boolean;
   // advanced
+  useS3Backend: boolean;
   networkType: string;
   nodes: string;
   command: string;
@@ -53,6 +55,7 @@ interface CreateFormState {
 
 const INITIAL_FORM: CreateFormState = {
   image: '',
+  alias: '',
   instanceType: '',
   writableLayerSize: '1G',
   exposedPorts: '',
@@ -61,7 +64,8 @@ const INITIAL_FORM: CreateFormState = {
   cpu: '',
   memory: '',
   envVars: '',
-  allowInternet: false,
+  forbidInternet: false,
+  useS3Backend: false,
   networkType: '',
   nodes: '',
   command: '',
@@ -120,6 +124,7 @@ function buildCreateBody(state: CreateFormState): Record<string, unknown> {
     if (list.length > 0) body[k] = list;
   };
 
+  setStr('alias', state.alias);
   setStr('instanceType', state.instanceType);
   setStr('writableLayerSize', state.writableLayerSize);
   const ports = parsePorts(state.exposedPorts);
@@ -129,8 +134,9 @@ function buildCreateBody(state: CreateFormState): Record<string, unknown> {
   setNum('cpu', state.cpu);
   setNum('memory', state.memory);
   setList('env', state.envVars);
-  if (state.allowInternet) body.allowInternetAccess = true;
+  if (state.forbidInternet) body.allowInternetAccess = false;
 
+  if (state.useS3Backend) body.backend = 's3';
   setStr('networkType', state.networkType);
   setList('nodes', state.nodes);
   setList('command', state.command);
@@ -209,6 +215,17 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               onChange={(e) => update('image', e.target.value)}
             />
             <p className="text-xs text-muted-foreground">{t('create.imageHint')}</p>
+          </div>
+
+          {/* alias */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">{t('create.alias')}</label>
+            <Input
+              placeholder="my-app"
+              value={form.alias}
+              onChange={(e) => update('alias', e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">{t('create.aliasHint')}</p>
           </div>
 
           {/* instanceType + writableLayerSize */}
@@ -324,15 +341,15 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             <p className="text-xs text-muted-foreground">{t('create.envHint')}</p>
           </div>
 
-          {/* allow-internet */}
+          {/* forbid-internet */}
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
               type="checkbox"
               className="h-4 w-4 rounded border"
-              checked={form.allowInternet}
-              onChange={(e) => update('allowInternet', e.target.checked)}
+              checked={form.forbidInternet}
+              onChange={(e) => update('forbidInternet', e.target.checked)}
             />
-            <span className="text-sm">{t('create.allowInternetAccess')}</span>
+            <span className="text-sm">{t('create.forbidInternetAccess')}</span>
           </label>
 
           {/* advanced toggle */}
@@ -470,6 +487,17 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
                     />
                   </div>
                 </div>
+
+                {/* s3 backend */}
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border"
+                    checked={form.useS3Backend}
+                    onChange={(e) => update('useS3Backend', e.target.checked)}
+                  />
+                  <span className="text-sm">{t('create.useS3Backend')}</span>
+                </label>
 
                 {/* with_cube_ca */}
                 <label className="flex items-center gap-2 cursor-pointer select-none">

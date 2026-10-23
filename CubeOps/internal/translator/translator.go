@@ -540,6 +540,12 @@ func TransformCreateTemplateRequest(body map[string]interface{}) map[string]inte
 	// Direct field mappings (frontend camelCase → CubeMaster snake_case).
 	cmReq["source_image_ref"] = strings.TrimSpace(GetString(body, "image"))
 	cmReq["template_id"] = GetString(body, "templateID") // empty = auto-generate
+	if v := GetString(body, "alias"); v != "" {
+		cmReq["alias"] = v
+	}
+	if v := GetString(body, "backend"); v != "" {
+		cmReq["backend"] = v
+	}
 	if v := GetString(body, "instanceType"); v != "" {
 		cmReq["instance_type"] = v
 	}

@@ -41,6 +41,8 @@ export interface TemplateDetail extends TemplateSummary {
   createRequest?: unknown;
   networkType?: string | null;
   allowInternetAccess?: boolean | null;
+  /** CoW backend (xfs|s3). CubeMaster returns `backend`, falling back to `storage_backend`. Empty/absent means the historical xfs path. */
+  backend?: string | null;
 }
 
 export interface TemplateCompatSummary {
@@ -165,6 +167,10 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
     allowInternetAccess:
       (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    backend:
+      (dto as unknown as { backend?: string }).backend?.trim() ||
+      (dto as unknown as { storageBackend?: string }).storageBackend?.trim() ||
+      null,
     displayName:
       dto.aliases?.[0]?.trim() ||
       (dto as unknown as { displayName?: string }).displayName?.trim() ||
@@ -266,6 +272,8 @@ export const templateApi = {
   create: (body: {
     templateID?: string;
     image: string;
+    alias?: string;
+    backend?: string;
     instanceType?: string;
     writableLayerSize?: string;
     exposedPorts?: number[];

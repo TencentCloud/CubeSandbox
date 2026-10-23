@@ -41,6 +41,8 @@
     "required": "必填",
     "image": "镜像",
     "imageHint": "容器镜像地址，例如 registry.example.com/code:latest；明文 HTTP 仓库请加 http:// 前缀",
+    "alias": "别名",
+    "aliasHint": "模板的稳定可读别名（小写字母、数字、连字符，≤64 字符），沙箱可用别名引用而非生成的 Template ID。",
     "instanceType": "实例类型",
     "instanceTypeHint": "留空则使用默认值（标准）。",
     "cancel": "取消",
@@ -62,11 +64,12 @@
     "memoryHint": "MiB，例如 2000。",
     "env": "环境变量",
     "envHint": "每行一条，格式为 KEY=VALUE。",
-    "allowInternetAccess": "允许公网访问",
+    "forbidInternetAccess": "禁止公网访问",
     "advanced": {
       "show": "展开高级选项",
       "hide": "收起高级选项"
     },
+    "useS3Backend": "S3 存储后端",
     "networkType": "网络模式",
     "networkTypeHint": "例如 tap，留空使用集群默认值。",
     "nodes": "分发节点",

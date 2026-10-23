@@ -41,6 +41,8 @@
     "required": "Required",
     "image": "Image",
     "imageHint": "Container image, e.g. registry.example.com/code:latest; prefix plain HTTP registries with http://",
+    "alias": "Alias",
+    "aliasHint": "Stable human-readable alias ([a-z0-9-], ≤64 chars); sandboxes can reference the template by this alias instead of the generated Template ID.",
     "instanceType": "Instance type",
     "instanceTypeHint": "Defaults to standard when empty.",
     "cancel": "Cancel",
@@ -62,11 +64,12 @@
     "memoryHint": "MiB, e.g. 2000.",
     "env": "Environment variables",
     "envHint": "One per line, format KEY=VALUE.",
-    "allowInternetAccess": "Allow internet access",
+    "forbidInternetAccess": "Forbid internet access",
     "advanced": {
       "show": "Show advanced options",
       "hide": "Hide advanced options"
     },
+    "useS3Backend": "S3 storage backend",
     "networkType": "Network type",
     "networkTypeHint": "e.g. tap. Leave empty to use the cluster default.",
     "nodes": "Node scope",

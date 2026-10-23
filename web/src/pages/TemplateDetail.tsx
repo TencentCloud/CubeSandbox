@@ -950,6 +950,7 @@ export default function TemplateDetailPage() {
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />
           <Field label={t('fields.alias')} value={data.displayName || null} />
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
+          <Field label={t('fields.backend')} value={data.backend || 'xfs'} />
           {cfg?.exposedPorts && <Field label={t('exposedPorts')} value={cfg.exposedPorts} mono />}
           {cfg?.probePath && (
             <Field label={t('probePath')} value={`${cfg.probePath} :${cfg.probePort}`} mono dim />

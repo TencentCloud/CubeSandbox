@@ -17,6 +17,7 @@
   "fields": {
     "templateID": "Template ID",
     "alias": "Alias",
+    "backend": "Storage Backend",
     "status": "Status",
     "instanceType": "Instance Type",
     "version": "Version",
