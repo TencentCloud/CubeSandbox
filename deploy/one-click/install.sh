@@ -50,6 +50,7 @@ snapshot_one_click_toggles "${ENV_FILE}"
 snapshot_one_click_database_intent "${ENV_FILE}"
 snapshot_one_click_observability_intent "${ENV_FILE}"
 snapshot_one_click_rcow_log_intent "${ENV_FILE}"
+snapshot_one_click_node_id_intent "${ENV_FILE}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
@@ -63,6 +64,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   capture_one_click_toggle_dotenv_values
   # Only non-default storage log values; template defaults are not intent.
   capture_one_click_rcow_log_dotenv_values
+  capture_one_click_node_id_dotenv_value
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -255,6 +257,15 @@ log "install mode: ${INSTALL_MODE}"
 MERGED_ENV=""
 ENV_DIFF_FILE=""
 UPGRADE_BACKUP_DIR=""
+OLD_RCOW_NODE_ID=""
+OLD_S3LVOL_ENABLED=0
+# Read in both modes: the CubeS3lvol hot swap further down is not gated on
+# INSTALL_MODE, so `--mode=install` over an enabled install also replaces a
+# running target, and the identity guard below has to see what it replaces.
+if detect_existing_install "${INSTALL_PREFIX}"; then
+  OLD_RCOW_NODE_ID="$(env_file_value "${INSTALL_PREFIX}/.one-click.env" RCOW_NODE_ID)"
+  OLD_S3LVOL_ENABLED="$(env_file_value "${INSTALL_PREFIX}/.one-click.env" ONE_CLICK_ENABLE_S3LVOL 0)"
+fi
 if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   RUNTIME_ENV_OLD="${INSTALL_PREFIX}/.one-click.env"
   ensure_file "${RUNTIME_ENV_OLD}"
@@ -293,6 +304,23 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   load_env_file "${MERGED_ENV}"
   apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
+fi
+# The upgrade merge keeps the old RCOW_NODE_ID (it is not an active template
+# key), so replay this run's value before the identity guard reads it. On a
+# fresh install this only repeats what .env and the environment already set.
+apply_one_click_node_id_intent
+
+# The CubeS3lvol hot swap below starts the replacement target before this run's
+# EnvironmentFile is committed, in either mode: an upgrade commits the merged
+# env, an install rewrites it from this run's .env (dropping RCOW_NODE_ID if it
+# is not set). Changing owner identity in that window would leave the running
+# target's marker paired with a different persisted ID; the next crash recovery
+# would safely refuse it, but the node would not restart automatically. Require
+# an explicit clean transition instead: rcow_stop.sh, update the installed
+# .one-click.env, then rerun.
+if ! s3lvol_node_id_upgrade_allowed \
+    "${OLD_S3LVOL_ENABLED}" "${OLD_RCOW_NODE_ID}" "${RCOW_NODE_ID:-}"; then
+  die "RCOW_NODE_ID cannot change while CubeS3lvol is enabled in the existing install (installed '${OLD_RCOW_NODE_ID}', requested '${RCOW_NODE_ID:-}'). Run rcow_stop.sh, set RCOW_NODE_ID in ${INSTALL_PREFIX}/.one-click.env, then retry; the clean unload writes a release proof, so the new identity takes over without force."
 fi
 # Re-apply this-run toggle intent (harmless on fresh install): the merged env
 # above preserves the old runtime values for keys whose .env value equals the
@@ -2046,6 +2074,11 @@ if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && "${DEPLOY_ROLE}" != "compute" && -z "$
 fi
 RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
 RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
+RCOW_NODE_ID="${RCOW_NODE_ID:-}"
+if [[ -n "${RCOW_NODE_ID}" &&
+      ! "${RCOW_NODE_ID}" =~ ^[A-Za-z0-9._-]{1,63}$ ]]; then
+  die "RCOW_NODE_ID must contain 1-63 characters from [A-Za-z0-9._-]"
+fi
 # Chunk cache region on the WAL image. The image is created once, its total
 # size fixes the journal/WAL layout forever, so the default mirrors the README
 # contract: journal + WAL (32768 + 1024 MiB) plus a 479 GiB cache, 512 GiB
@@ -2505,6 +2538,11 @@ for rcow_log_key in RCOW_LOG_DIR RCOW_LOG RCOW_LOG_ARCHIVE_DIR \
     RCOW_LOG_RESERVE_BYTES RCOW_LOG_RESTART_RETAIN; do
   upsert_env_kv "${RUNTIME_ENV_FILE}" "${rcow_log_key}" "${!rcow_log_key:-}"
 done
+if [[ -n "${RCOW_NODE_ID}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_NODE_ID" "${RCOW_NODE_ID}"
+else
+  remove_env_kv "${RUNTIME_ENV_FILE}" "RCOW_NODE_ID"
+fi
 if [[ -n "${RCOW_TGT_CPUMASK:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
 fi

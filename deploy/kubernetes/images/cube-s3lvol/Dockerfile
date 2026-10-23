@@ -68,6 +68,7 @@ ENV S3LVOL_ROOT=/opt/s3lvol \
     RCOW_WAL_IMG=/data/cubelet/rcow/wal_bdev.img \
     RCOW_RUN_DIR=/var/run/s3lvol \
     RCOW_LOG_DIR=/data/log/rcow \
+    RCOW_IDENTITY_FROM_NODE_NAME=1 \
     CUBE_VERSION=${CUBE_VERSION}
 
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/cube-s3lvol-entrypoint.sh"]

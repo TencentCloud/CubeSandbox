@@ -113,6 +113,134 @@ released(void *cb_arg, int status)
 	*(int *)cb_arg = status;
 }
 
+static void
+reset_objects(void)
+{
+	memset(g_object, 0, sizeof(g_object));
+	memset(g_release, 0, sizeof(g_release));
+	memset(g_displaced, 0, sizeof(g_displaced));
+	g_object_len = 0;
+	g_release_len = 0;
+	g_displaced_len = 0;
+	g_object_present = false;
+	g_release_present = false;
+	g_displace_on_release_get = false;
+}
+
+static void
+acquire_fresh(struct s3_client *client, struct acquire_result *out)
+{
+	reset_objects();
+	memset(out, 0, sizeof(*out));
+	s3_owner_acquire(client, "owner-test", NULL, false, acquired, out);
+}
+
+/* The marker is the only thing recovery matches on, and the scripts compare
+ * this field byte for byte, so rcow_common.sh and the entrypoint are only
+ * correct as long as they agree with the function that writes it.
+ * test_lvs_identity.sh compares the two shell copies with each other; these
+ * cases pin the C side to the same rules. */
+static void
+test_node_id_rejects_unsafe(struct s3_client *client)
+{
+	struct acquire_result res;
+
+	assert(setenv("RCOW_NODE_ID", "bad/id", 1) == 0);
+	acquire_fresh(client, &res);
+	/* Rejected, not sanitised: a value the scripts would spell differently
+	 * must never reach the marker. */
+	assert(res.status == -EINVAL);
+	assert(!res.owner_valid);
+	assert(!g_object_present);
+}
+
+static void
+test_node_id_rejects_too_long(struct s3_client *client)
+{
+	struct acquire_result res;
+	char value[S3_OWNER_NODE_ID_MAX + 1];
+
+	memset(value, 'n', S3_OWNER_NODE_ID_MAX);
+	value[S3_OWNER_NODE_ID_MAX] = '\0';
+	assert(setenv("RCOW_NODE_ID", value, 1) == 0);
+	acquire_fresh(client, &res);
+	/* An explicit value is refused rather than truncated; only the
+	 * hostname fallback keeps its first S3_OWNER_NODE_ID_MAX - 1 bytes. */
+	assert(res.status == -ENAMETOOLONG);
+	assert(!res.owner_valid);
+	assert(!g_object_present);
+}
+
+static void
+test_node_id_verbatim(struct s3_client *client)
+{
+	struct acquire_result res;
+	char value[S3_OWNER_NODE_ID_MAX];
+	char needle[S3_OWNER_NODE_ID_MAX + 16];
+
+	/* The longest value that is still accepted, using every character
+	 * class the scripts allow. */
+	memset(value, 'n', S3_OWNER_NODE_ID_MAX - 1);
+	value[S3_OWNER_NODE_ID_MAX - 1] = '\0';
+	value[0] = 'a';
+	value[1] = '-';
+	value[2] = '_';
+	value[3] = '.';
+	value[4] = '9';
+	value[S3_OWNER_NODE_ID_MAX - 2] = 'Z';
+	assert(strlen(value) == S3_OWNER_NODE_ID_MAX - 1);
+	assert(setenv("RCOW_NODE_ID", value, 1) == 0);
+	acquire_fresh(client, &res);
+	assert(res.status == 0 && res.owner_valid && g_object_present);
+	assert(strcmp(res.owner.node_id, value) == 0);
+	snprintf(needle, sizeof(needle), "\"node_id\":\"%s\"", value);
+	assert(strstr(g_object, needle) != NULL);
+}
+
+static void
+test_node_id_hostname_fallback(struct s3_client *client)
+{
+	struct acquire_result res;
+	char host[HOST_NAME_MAX + 1] = {0};
+	char expect[S3_OWNER_NODE_ID_MAX] = {0};
+	char needle[S3_OWNER_NODE_ID_MAX + 16];
+	size_t i;
+
+	/* The runner's hostname cannot be chosen, so derive what the rules
+	 * demand of it -- first S3_OWNER_NODE_ID_MAX - 1 bytes, anything
+	 * outside [A-Za-z0-9._-] replaced -- and require exactly that. */
+	if (gethostname(host, sizeof(host)) != 0) {
+		snprintf(host, sizeof(host), "unknown");
+	}
+	for (i = 0; i + 1 < sizeof(expect) && host[i] != '\0'; i++) {
+		unsigned char c = (unsigned char)host[i];
+
+		expect[i] = (isalnum(c) || c == '.' || c == '-' || c == '_') ?
+			    (char)c : '_';
+	}
+	expect[i] = '\0';
+
+	assert(unsetenv("RCOW_NODE_ID") == 0);
+	acquire_fresh(client, &res);
+	assert(res.status == 0 && res.owner_valid && g_object_present);
+	assert(strcmp(res.owner.node_id, expect) == 0);
+	assert(strlen(res.owner.node_id) < S3_OWNER_NODE_ID_MAX);
+	for (i = 0; res.owner.node_id[i] != '\0'; i++) {
+		unsigned char c = (unsigned char)res.owner.node_id[i];
+
+		assert(isalnum(c) || c == '.' || c == '-' || c == '_');
+	}
+	snprintf(needle, sizeof(needle), "\"node_id\":\"%s\"", expect);
+	assert(strstr(g_object, needle) != NULL);
+
+	/* An empty value is the same as unset, not an identity of its own. */
+	assert(setenv("RCOW_NODE_ID", "", 1) == 0);
+	acquire_fresh(client, &res);
+	assert(res.status == 0 && res.owner_valid);
+	assert(strcmp(res.owner.node_id, expect) == 0);
+	assert(unsetenv("RCOW_NODE_ID") == 0);
+}
+
 int
 main(void)
 {
@@ -120,6 +248,10 @@ main(void)
 	struct acquire_result first = {0}, second = {0}, takeover = {0};
 	struct acquire_result after_release = {0}, displaced = {0};
 	int release_status = INT_MIN;
+
+	/* The acquire cases below do not depend on the identity, but the
+	 * runner's environment must not decide what gets written either. */
+	assert(unsetenv("RCOW_NODE_ID") == 0);
 
 	s3_owner_acquire(client, "owner-test", NULL, false, acquired, &first);
 	assert(first.status == 0 && first.owner_valid && g_object_present);
@@ -167,6 +299,11 @@ main(void)
 	assert(g_displaced_len == g_object_len);
 	assert(memcmp(g_object, g_displaced, g_displaced_len) == 0);
 
-	puts("\n=== result: 1 passed, 0 failed ===");
+	test_node_id_rejects_unsafe(client);
+	test_node_id_rejects_too_long(client);
+	test_node_id_verbatim(client);
+	test_node_id_hostname_fallback(client);
+
+	puts("\n=== result: 5 passed, 0 failed ===");
 	return 0;
 }

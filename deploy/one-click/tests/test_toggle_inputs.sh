@@ -485,6 +485,157 @@ test_rcow_log_non_default_dotenv_beats_process_env() {
   reset_rcow_log_vars
 }
 
+# --- RCOW_NODE_ID across the upgrade merge ---------------------------------
+# RCOW_NODE_ID is only a commented example in env.example, so the merge keeps
+# the old runtime value as a preserved extra. Same order as install.sh:
+# snapshot, source .env, capture, merge, source the merge output, apply -- then
+# the guard sees what this run asked for, not the old value twice.
+run_node_id_upgrade() {
+  local dotenv="$1" old="$2"
+  local out="${TMP_DIR}/node-id-merged.env" diff="${TMP_DIR}/node-id-merged.diff"
+  snapshot_one_click_node_id_intent "${dotenv}"
+  load_env_file "${dotenv}" >/dev/null 2>&1
+  capture_one_click_node_id_dotenv_value
+  merge_env_three_way "${ONE_CLICK_DIR}/env.example" "${old}" "" "${dotenv}" \
+    "${out}" "${diff}" 2>/dev/null
+  load_env_file "${out}" >/dev/null 2>&1
+  apply_one_click_node_id_intent >/dev/null 2>&1
+}
+
+# Old install: enabled, identity inventory-7.
+node_id_old_env() {
+  printf 'ONE_CLICK_ENABLE_S3LVOL=1\nRCOW_NODE_ID=inventory-7\n' > "$1"
+}
+
+# The bot's scenario: a new value in .env must reach the guard and be refused.
+test_node_id_dotenv_change_is_refused() {
+  local dotenv="${TMP_DIR}/node-id-dotenv.env" old="${TMP_DIR}/node-id-old.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  echo "RCOW_NODE_ID=inventory-8" >> "${dotenv}"
+  node_id_old_env "${old}"
+  unset RCOW_NODE_ID
+  run_node_id_upgrade "${dotenv}" "${old}"
+  [[ "${RCOW_NODE_ID}" == "inventory-8" ]] \
+    || fail "the merge must not drop a .env RCOW_NODE_ID (got '${RCOW_NODE_ID}')"
+  if s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}"; then
+    fail "an explicit inventory-7 -> inventory-8 change must be refused, not ignored"
+  fi
+  unset RCOW_NODE_ID
+}
+
+test_node_id_process_env_change_is_refused() {
+  local dotenv="${TMP_DIR}/node-id-copied.env" old="${TMP_DIR}/node-id-old.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  node_id_old_env "${old}"
+  export RCOW_NODE_ID=inventory-8
+  run_node_id_upgrade "${dotenv}" "${old}"
+  [[ "${RCOW_NODE_ID}" == "inventory-8" ]] \
+    || fail "the merge must not drop a process-env RCOW_NODE_ID (got '${RCOW_NODE_ID}')"
+  if s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}"; then
+    fail "a process-env identity change must be refused"
+  fi
+  unset RCOW_NODE_ID
+}
+
+# An explicit clear is a change too.
+test_node_id_explicit_clear_is_refused() {
+  local dotenv="${TMP_DIR}/node-id-clear.env" old="${TMP_DIR}/node-id-old.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  echo "RCOW_NODE_ID=" >> "${dotenv}"
+  node_id_old_env "${old}"
+  unset RCOW_NODE_ID
+  run_node_id_upgrade "${dotenv}" "${old}"
+  [[ -z "${RCOW_NODE_ID}" ]] \
+    || fail "an empty .env RCOW_NODE_ID must clear it (got '${RCOW_NODE_ID}')"
+  if s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}"; then
+    fail "clearing an enabled installation's identity must be refused"
+  fi
+  unset RCOW_NODE_ID
+}
+
+# No intent anywhere: the copied template's commented example is not intent,
+# so the installed identity is kept and the upgrade proceeds.
+test_node_id_no_intent_keeps_installed_value() {
+  local dotenv="${TMP_DIR}/node-id-copied.env" old="${TMP_DIR}/node-id-old.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  grep -q '^# RCOW_NODE_ID=' "${dotenv}" \
+    || fail "env.example is expected to carry only a commented RCOW_NODE_ID"
+  node_id_old_env "${old}"
+  unset RCOW_NODE_ID
+  run_node_id_upgrade "${dotenv}" "${old}"
+  [[ "${RCOW_NODE_ID}" == "inventory-7" ]] \
+    || fail "without intent the installed RCOW_NODE_ID must be kept (got '${RCOW_NODE_ID}')"
+  s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}" \
+    || fail "an unchanged identity must remain upgradeable"
+  unset RCOW_NODE_ID
+}
+
+# Restating the installed value is not a change.
+test_node_id_same_value_is_allowed() {
+  local dotenv="${TMP_DIR}/node-id-same.env" old="${TMP_DIR}/node-id-old.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  echo 'RCOW_NODE_ID="inventory-7"' >> "${dotenv}"
+  node_id_old_env "${old}"
+  export RCOW_NODE_ID=inventory-9
+  run_node_id_upgrade "${dotenv}" "${old}"
+  [[ "${RCOW_NODE_ID}" == "inventory-7" ]] \
+    || fail ".env RCOW_NODE_ID must beat the process env, unquoted (got '${RCOW_NODE_ID}')"
+  s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}" \
+    || fail "restating the installed identity must remain upgradeable"
+  unset RCOW_NODE_ID
+}
+
+# --mode=install has no merge: .env is loaded and the intent replayed, and the
+# runtime env is rewritten from this run's .env. The hot swap still runs, so
+# the guard has to judge the identity that install will persist.
+run_node_id_install() {
+  local dotenv="$1"
+  snapshot_one_click_node_id_intent "${dotenv}"
+  load_env_file "${dotenv}" >/dev/null 2>&1
+  capture_one_click_node_id_dotenv_value
+  apply_one_click_node_id_intent >/dev/null 2>&1
+}
+
+test_node_id_install_mode_change_is_refused() {
+  local dotenv="${TMP_DIR}/node-id-install-change.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  echo "RCOW_NODE_ID=inventory-8" >> "${dotenv}"
+  unset RCOW_NODE_ID
+  run_node_id_install "${dotenv}"
+  [[ "${RCOW_NODE_ID}" == "inventory-8" ]] \
+    || fail "install mode must see the .env RCOW_NODE_ID (got '${RCOW_NODE_ID}')"
+  if s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}"; then
+    fail "install mode over an enabled install must refuse an identity change"
+  fi
+  unset RCOW_NODE_ID
+}
+
+# Install rewrites .one-click.env from .env, so leaving RCOW_NODE_ID out drops
+# the installed identity -- a change, unlike the upgrade merge which keeps it.
+test_node_id_install_mode_omission_is_refused() {
+  local dotenv="${TMP_DIR}/node-id-install-omit.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  unset RCOW_NODE_ID
+  run_node_id_install "${dotenv}"
+  [[ -z "${RCOW_NODE_ID:-}" ]] \
+    || fail "install mode without intent must not invent an RCOW_NODE_ID (got '${RCOW_NODE_ID}')"
+  if s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID:-}"; then
+    fail "install mode that would drop the installed identity must be refused"
+  fi
+  unset RCOW_NODE_ID
+}
+
+test_node_id_install_mode_same_value_is_allowed() {
+  local dotenv="${TMP_DIR}/node-id-install-same.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  unset RCOW_NODE_ID
+  export RCOW_NODE_ID=inventory-7
+  run_node_id_install "${dotenv}"
+  s3lvol_node_id_upgrade_allowed 1 inventory-7 "${RCOW_NODE_ID}" \
+    || fail "install mode restating the installed identity must be allowed"
+  unset RCOW_NODE_ID
+}
+
 test_toggle_keys_registry
 test_dotenv_default_value_is_explicit
 test_process_env_is_explicit
@@ -507,5 +658,13 @@ test_rcow_log_keys_registry
 test_rcow_log_copied_template_keeps_process_env
 test_rcow_log_upgrade_keeps_runtime_and_process_env
 test_rcow_log_non_default_dotenv_beats_process_env
+test_node_id_dotenv_change_is_refused
+test_node_id_process_env_change_is_refused
+test_node_id_explicit_clear_is_refused
+test_node_id_no_intent_keeps_installed_value
+test_node_id_same_value_is_allowed
+test_node_id_install_mode_change_is_refused
+test_node_id_install_mode_omission_is_refused
+test_node_id_install_mode_same_value_is_allowed
 
 echo "test_toggle_inputs: all tests passed"

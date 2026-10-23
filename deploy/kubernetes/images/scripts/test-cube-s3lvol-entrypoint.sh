@@ -30,18 +30,22 @@ cross_hash() {
   rm -rf "${tmp}"
 }
 
-unset RCOW_LVS_NAME RCOW_TGT_CPUMASK
+unset RCOW_LVS_NAME RCOW_NODE_ID RCOW_TGT_CPUMASK
 NODE_NAME=worker-1
 s3lvol_export_optional_knobs
+[[ "${RCOW_NODE_ID}" == "worker-1" ]] \
+  || fail "owner identity must default to the full Kubernetes node name"
 [[ "${RCOW_LVS_NAME}" == "$(s3lvol_derived_lvs_name worker-1)" ]] \
   || fail "worker-1 must derive rcow-<hash of full node name>"
 [[ "${RCOW_LVS_NAME}" == "rcow-$(cross_hash worker-1)" ]] \
   || fail "entrypoint hash of worker-1 must match rcow_node_hash"
 [[ -z "${RCOW_TGT_CPUMASK:-}" ]] || fail "must not invent RCOW_TGT_CPUMASK when unset"
 
-unset RCOW_LVS_NAME
+unset RCOW_LVS_NAME RCOW_NODE_ID
 NODE_NAME=192.0.2.48
 s3lvol_export_optional_knobs
+[[ "${RCOW_NODE_ID}" == "192.0.2.48" ]] \
+  || fail "IP node name must be preserved as the owner identity"
 from48="${RCOW_LVS_NAME}"
 [[ "${from48}" == "$(s3lvol_derived_lvs_name 192.0.2.48)" ]] \
   || fail "192.0.2.48 must derive from the full node name"
@@ -50,7 +54,7 @@ from48="${RCOW_LVS_NAME}"
 [[ "${from48}" != "rcow-$(cross_hash 192)" ]] \
   || fail "192.0.2.48 must not hash like hostname -s"
 
-unset RCOW_LVS_NAME
+unset RCOW_LVS_NAME RCOW_NODE_ID
 NODE_NAME=192.0.2.44
 s3lvol_export_optional_knobs
 from44="${RCOW_LVS_NAME}"
@@ -59,23 +63,59 @@ from44="${RCOW_LVS_NAME}"
 [[ "${from44}" == "rcow-$(cross_hash 192.0.2.44)" ]] \
   || fail "entrypoint hash of 192.0.2.44 must match rcow_node_hash"
 
-unset RCOW_LVS_NAME
+unset RCOW_LVS_NAME RCOW_NODE_ID
 NODE_NAME=n1.zone-a
 s3lvol_export_optional_knobs
 from_zone_a="${RCOW_LVS_NAME}"
-unset RCOW_LVS_NAME
+unset RCOW_LVS_NAME RCOW_NODE_ID
 NODE_NAME=n1.zone-b
 s3lvol_export_optional_knobs
 from_zone_b="${RCOW_LVS_NAME}"
 [[ "${from_zone_a}" != "${from_zone_b}" ]] \
   || fail "n1.zone-a and n1.zone-b must get different LVS names"
 
+# A 64-byte spec.nodeName is legal but one byte over the owner marker field:
+# the derived identity keeps the first 63 bytes so rcow_start.sh accepts it,
+# and the lvstore name still hashes the full name.
+unset RCOW_LVS_NAME RCOW_NODE_ID
+NODE_NAME="node-$(printf 'a%.0s' {1..54})-x9.b"
+[[ "${#NODE_NAME}" -eq 64 ]] || fail "test setup: NODE_NAME must be 64 bytes"
+s3lvol_export_optional_knobs
+[[ "${RCOW_NODE_ID}" == "${NODE_NAME:0:63}" ]] \
+  || fail "a 64-byte node name must give its first 63 bytes as RCOW_NODE_ID (got ${RCOW_NODE_ID})"
+[[ "${RCOW_LVS_NAME}" == "rcow-$(cross_hash "${NODE_NAME}")" ]] \
+  || fail "a 64-byte node name must still hash in full for the lvstore name"
+
 RCOW_LVS_NAME=rcow-explicit
+RCOW_NODE_ID=inventory-node-7
 RCOW_TGT_CPUMASK=0x30
 NODE_NAME=192.0.2.48
 s3lvol_export_optional_knobs
 [[ "${RCOW_LVS_NAME}" == "rcow-explicit" ]] || fail "must keep explicit RCOW_LVS_NAME"
+[[ "${RCOW_NODE_ID}" == "inventory-node-7" ]] || fail "must keep explicit RCOW_NODE_ID"
 [[ "${RCOW_TGT_CPUMASK}" == "0x30" ]] || fail "must keep explicit RCOW_TGT_CPUMASK"
+
+# NODE_NAME is needed only for a value that has to be derived. fail() exits,
+# so the refusals run in a subshell.
+RCOW_LVS_NAME=rcow-explicit
+RCOW_NODE_ID=inventory-node-7
+unset NODE_NAME
+s3lvol_export_optional_knobs
+[[ "${RCOW_NODE_ID}" == "inventory-node-7" && "${RCOW_LVS_NAME}" == "rcow-explicit" ]] \
+  || fail "explicit RCOW_NODE_ID and RCOW_LVS_NAME must be enough without NODE_NAME"
+( unset RCOW_LVS_NAME; s3lvol_export_optional_knobs ) >/dev/null 2>&1 \
+  && fail "without NODE_NAME, a lvstore name that must be derived must refuse"
+( unset RCOW_NODE_ID; s3lvol_export_optional_knobs ) >/dev/null 2>&1 \
+  && fail "without NODE_NAME, an owner identity that must be derived must refuse"
+
+unset RCOW_LVS_NAME RCOW_NODE_ID RCOW_TGT_CPUMASK
+NODE_NAME=worker-with-original-pod-hostname
+hostname() { fail "s3lvol_prepare_identity must not modify the Pod UTS hostname"; }
+s3lvol_prepare_identity
+[[ "${RCOW_NODE_ID}" == "${NODE_NAME}" ]] \
+  || fail "prepare_identity must export NODE_NAME as RCOW_NODE_ID"
+[[ "${RCOW_LVS_NAME}" == "$(s3lvol_derived_lvs_name "${NODE_NAME}")" ]] \
+  || fail "prepare_identity must derive the lvstore without changing hostname"
 
 tmp="$(mktemp)"
 fn="$(mktemp)"

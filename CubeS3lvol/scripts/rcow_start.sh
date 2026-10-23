@@ -139,6 +139,8 @@ rcow_need_cmd nvme "nvme-cli provides connect/disconnect (nvme-cli package)"
 if [ "${DO_CONNECT}" -eq 1 ]; then
 	rcow_need_nvme_tcp
 fi
+rcow_node_id >/dev/null ||
+	rcow_die "RCOW_NODE_ID is invalid; use at most 63 characters from [A-Za-z0-9._-]"
 case "${RCOW_CACHE_HOT_BUFS}" in
 ''|*[!0-9]*)
 	rcow_die "RCOW_CACHE_HOT_BUFS must be an integer from 0 to 8192"

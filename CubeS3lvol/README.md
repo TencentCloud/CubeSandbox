@@ -180,6 +180,7 @@ used ones:
 | `RCOW_S3_CFG` | `/data/cubelet/s3.cfg` | |
 | `RCOW_WAL_IMG` | `/data/cubelet/rcow/wal_bdev.img` | |
 | `RCOW_LVS_NAME` | derived `rcow-<identity-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
+| `RCOW_NODE_ID` | unset (use `hostname`) | stable node identity stored in the S3 owner marker; 1–63 characters from `[A-Za-z0-9._-]` |
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
@@ -197,13 +198,20 @@ used ones:
 
 An lvstore's S3 prefix carries a `<lvs>/meta/owner` marker, written on attach
 and removed on unload. After a crash, `rcow_recovery.sh` force-takes the
-marker only when it names **this hostname** and the recorded pid is **not
-running locally**. That is safe against a different node, but it trusts the
-hostname: two machines with the same hostname (containers, cloned disks)
+marker only when it names **this node** and the recorded pid is **not running
+locally**. `RCOW_NODE_ID` supplies a stable node identity when set; when it is
+unset or empty both the target and recovery use `hostname`, as older versions
+did. (The one difference: older targets recorded a 63- or 64-byte hostname as
+`unknown`, which recovery never matched; it is now kept to its first 63 bytes,
+so after upgrading, a crash marker left by an older target on such a node needs
+one manual force.) That fallback trusts the hostname: two machines with the same
+hostname (containers, cloned disks)
 each consider the other's marker stale and force-take a volume the other is
 still serving, which can corrupt data.
 
-The lvstore name is derived from the same hostname (`rcow-<identity-hash>`),
+`RCOW_NODE_ID` changes only the owner marker, not the lvstore name or S3 prefix.
+This separation keeps an upgrade from moving existing data. The lvstore name
+continues to be derived from the hostname (`rcow-<identity-hash>`),
 so duplicate hostnames also collide on the S3 prefix itself. The identity
 string is `hostname -s` for a DNS name (`worker1.example.com` → `worker1`),
 so an existing prefix survives a domain-suffix change. An address is not an
@@ -217,10 +225,28 @@ hash, looks like a new machine on upgrade (create formats the WAL; the old
 S3 prefix is orphaned unless you pin `RCOW_LVS_NAME` to the old name).
 
 When nodes have a real unique id (an inventory id, a Kubernetes node name,
-an instance id), pin `RCOW_LVS_NAME` to `rcow-<hash of that full id>`
-instead of relying on `hostname -s`, and never let two nodes share a
-hostname. The Helm sidecar does this automatically from the full
-`spec.nodeName`.
+an instance id), set `RCOW_NODE_ID` to that ID and pin `RCOW_LVS_NAME` to
+`rcow-<hash of that full id>` instead of relying on `hostname -s`. Never let two
+nodes share either value: a duplicate `RCOW_NODE_ID` can make recovery
+force-take a live node's owner marker. The Helm sidecar does both automatically
+from the full `spec.nodeName`; the owner identity takes that name in the
+hostname form above (a 64-byte node name keeps its first 63 bytes, and the
+lvstore name still hashes all of it), so a 63- or 64-byte node name with a
+crash marker from an older sidecar also needs that one manual force. Setting a
+new ID on a node that already has a crash marker intentionally requires a
+one-time manual force; an unconfirmed identity change must fail safe rather
+than take ownership.
+
+For the same reason, one-click refuses to change `RCOW_NODE_ID` over an
+existing install whose s3lvol service is enabled, in either `--mode=upgrade` or
+`--mode=install`: both replace a running target in place. An install rewrites
+`.one-click.env` from the new `.env`, so leaving `RCOW_NODE_ID` out of it counts
+as a change. Migrate it by running
+`rcow_stop.sh` first (its unload writes a release proof, so the new identity can
+take over without force), updating the installed
+`.one-click.env`, and then retrying. Before downgrading to a release
+that predates `RCOW_NODE_ID`, cleanly unload the lvstore; an old release cannot
+classify a stale custom-ID marker as belonging to its hostname.
 
 `RCOW_NO_HUGE=1` is a **choice, not a concession**: nothing on this data path
 needs DMA (the local disk goes through `bdev_aio` read/write syscalls, the

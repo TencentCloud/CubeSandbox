@@ -139,6 +139,45 @@ RCOW_WAL_BDEV="${RCOW_WAL_BDEV:-rcow_wal0}"
 # bottom of this file: doing it here is not possible, because the derivation needs
 # rcow_bstore_entry() and the logging helpers, both defined further down.
 #
+# In the cube-s3lvol Kubernetes image the node's identity is spec.nodeName, not
+# the hostname: the Pod hostname changes on every recreate. The entrypoint
+# exports RCOW_NODE_ID and RCOW_LVS_NAME from NODE_NAME into its own process
+# tree, but a script started with `kubectl exec` (rcow_stop.sh, rcow_start.sh,
+# rcow_recovery.sh) does not inherit those exports -- it sees only the container
+# env. Derive the same two values here, the same way, so a manual run unloads,
+# starts and recovers the lvstore the entrypoint attached, under the owner
+# identity the entrypoint wrote. The lvstore name hashes the full NODE_NAME.
+#
+# Gated on RCOW_IDENTITY_FROM_NODE_NAME, which only that image's ENV sets: a
+# NODE_NAME that happens to be in some host's environment must not move a
+# one-click node to a different S3 prefix. Explicit values still win.
+if [ "${RCOW_IDENTITY_FROM_NODE_NAME:-0}" = 1 ]; then
+	# NODE_NAME is needed only for a value that has to be derived; with both
+	# set explicitly, a missing NODE_NAME (misconfigured Pod) is harmless.
+	if [ -z "${NODE_NAME:-}" ] &&
+	   { [ -z "${RCOW_NODE_ID:-}" ] || [ -z "${RCOW_LVS_NAME:-}" ]; }; then
+		printf 'rcow: RCOW_IDENTITY_FROM_NODE_NAME=1 but NODE_NAME is empty and a value must be derived; set RCOW_NODE_ID and RCOW_LVS_NAME explicitly\n' >&2
+		exit 1
+	fi
+	# Derived, not operator intent, so canonicalise it the way s3_owner.c
+	# canonicalises a hostname (first 63 bytes, [A-Za-z0-9._-]) instead of
+	# letting rcow_node_id reject a legal 64-byte node name. Same rule as
+	# s3lvol_derived_node_id in cube-s3lvol-entrypoint.sh. An explicit
+	# RCOW_NODE_ID is left alone and still validated strictly.
+	if [ -z "${RCOW_NODE_ID:-}" ]; then
+		RCOW_NODE_ID="$(LC_ALL=C printf '%.63s' "${NODE_NAME}")"
+		RCOW_NODE_ID="$(printf '%s' "${RCOW_NODE_ID}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')"
+	fi
+	if [ -z "${RCOW_LVS_NAME:-}" ]; then
+		# Same digest as cube-s3lvol-entrypoint.sh and rcow_node_hash.
+		command -v sha256sum >/dev/null 2>&1 || {
+			printf 'rcow: sha256sum is missing; cannot derive RCOW_LVS_NAME from NODE_NAME=%s\n' "${NODE_NAME}" >&2
+			exit 1
+		}
+		RCOW_LVS_NAME="rcow-$(printf '%s' "${NODE_NAME}" | sha256sum | cut -c1-8)"
+	fi
+fi
+
 # Set RCOW_LVS_NAME in the environment to pin an explicit name; nothing below
 # touches it then. The tests all do this, which is also how they stay isolated.
 RCOW_LVS_NAME="${RCOW_LVS_NAME:-}"
@@ -147,6 +186,13 @@ if [ -n "${RCOW_LVS_NAME}" ]; then
 else
 	RCOW_LVS_NAME_EXPLICIT=0
 fi
+
+# Stable identity written into <lvs>/meta/owner. Empty deliberately means the
+# historical hostname behaviour, so merely upgrading does not change an
+# existing node's identity. Unlike RCOW_LVS_NAME this does not select an S3
+# prefix.
+RCOW_NODE_ID="${RCOW_NODE_ID:-}"
+export RCOW_NODE_ID
 
 # Only consulted when there is no lvstore to attach. capacity is the logical
 # size of the blobstore, which is thin, so it costs nothing in S3 until written;
@@ -1409,6 +1455,49 @@ rcow_log_size()
 }
 
 # --------------------------------------------------------------------------
+# This node's identity in the owner marker
+#
+# RCOW_NODE_ID when set, validated the way s3_owner.c validates it (rejected,
+# not sanitised: recovery compares it byte for byte with the marker). Unset or
+# empty falls back to the hostname in the target's canonical form.
+# --------------------------------------------------------------------------
+rcow_legacy_node_id()
+{
+	local host
+
+	host="$(hostname 2>/dev/null)" || host=unknown
+	# Match the marker s3_owner.c writes: keep the first 63 bytes and
+	# replace characters outside the JSON-safe identifier set. Without this,
+	# recovery compares a raw hostname with the canonical value written by
+	# the target and can never recognise its own marker.
+	host="$(LC_ALL=C printf '%.63s' "${host}")"
+	printf '%s' "${host}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'
+}
+
+rcow_node_id()
+{
+	local id="${RCOW_NODE_ID:-}"
+
+	if [ -z "${id}" ]; then
+		rcow_legacy_node_id
+		printf '\n'
+		return
+	fi
+	case "${id}" in
+	*[!A-Za-z0-9._-]*)
+		printf "RCOW_NODE_ID must contain only [A-Za-z0-9._-] (got '%s')\n" \
+			"${id}" >&2
+		return 1
+		;;
+	esac
+	if [ "${#id}" -ge 64 ]; then
+		printf 'RCOW_NODE_ID must be at most 63 characters\n' >&2
+		return 1
+	fi
+	printf '%s\n' "${id}"
+}
+
+# --------------------------------------------------------------------------
 # The owner marker
 #
 # An lvstore's prefix in S3 carries <lvs>/meta/owner, written on attach and
@@ -1448,7 +1537,10 @@ rcow_owner_is_stale()
 
 	node="${line#*node=}"; node="${node%% *}"
 	pid="${line##*pid=}"
-	me="$(hostname)"
+	me="$(rcow_node_id)" || {
+		printf 'this node has an invalid RCOW_NODE_ID'
+		return 1
+	}
 
 	if [ "${node}" != "${me}" ]; then
 		printf "the marker names node '%s', not this one (%s)" "${node}" "${me}"
