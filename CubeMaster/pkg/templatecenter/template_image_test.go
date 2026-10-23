@@ -358,6 +358,40 @@ func TestNormalizeRequestAcceptsTemplateAndSnapshotPrefixes(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequestStripsProbeInitialDelay(t *testing.T) {
+	req, _, err := NormalizeRequest(&types.CreateCubeSandboxReq{
+		Request: &types.Request{RequestID: "req-1"},
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+		},
+		Containers: []*types.Container{
+			{
+				Probe: &types.Probe{
+					InitialDelayMs:      5000,
+					InitialDelaySeconds: 5,
+					TimeoutMs:           30000,
+					PeriodMs:            500,
+					SuccessThreshold:    1,
+					FailureThreshold:    60,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NormalizeRequest failed: %v", err)
+	}
+	if len(req.Containers) != 1 || req.Containers[0] == nil || req.Containers[0].Probe == nil {
+		t.Fatalf("expected one container with a probe, got %+v", req.Containers)
+	}
+	probe := req.Containers[0].Probe
+	if probe.InitialDelayMs != 0 || probe.InitialDelaySeconds != 0 {
+		t.Fatalf("stored probe must not inherit the build-only initial delay, got %+v", probe)
+	}
+	if probe.TimeoutMs != 30000 || probe.PeriodMs != 500 || probe.FailureThreshold != 60 || probe.SuccessThreshold != 1 {
+		t.Fatalf("other probe fields must be preserved, got %+v", probe)
+	}
+}
+
 func TestBuildTemplateSpecFingerprintUsesDigest(t *testing.T) {
 
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{

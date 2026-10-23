@@ -956,3 +956,100 @@ func TestTemplateDeleteCommandContinuesAfterFailure(t *testing.T) {
 		t.Fatalf("failure log %q does not identify failed template", got)
 	}
 }
+
+func TestParseContainerOverridesProbeTCP(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "5555", "--probe-type", "tcp"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Probe == nil || overrides.Probe.ProbeHandler == nil {
+		t.Fatal("expected Probe with handler")
+	}
+	if overrides.Probe.ProbeHandler.TCPSocket == nil {
+		t.Fatalf("expected TCPSocket handler, got %+v", overrides.Probe.ProbeHandler)
+	}
+	if got := overrides.Probe.ProbeHandler.TCPSocket.Port; got != 5555 {
+		t.Fatalf("expected TCPSocket.Port=5555, got %d", got)
+	}
+	if overrides.Probe.ProbeHandler.HttpGet != nil {
+		t.Fatalf("expected no HttpGet handler, got %+v", overrides.Probe.ProbeHandler.HttpGet)
+	}
+	if overrides.Probe.TimeoutMs != 30000 {
+		t.Fatalf("expected default TimeoutMs=30000, got %d", overrides.Probe.TimeoutMs)
+	}
+	if overrides.Probe.FailureThreshold != 60 {
+		t.Fatalf("expected FailureThreshold=60 derived from 30000/500, got %d", overrides.Probe.FailureThreshold)
+	}
+	if overrides.Probe.InitialDelayMs != 0 {
+		t.Fatalf("expected default InitialDelayMs=0, got %d", overrides.Probe.InitialDelayMs)
+	}
+}
+
+func TestParseContainerOverridesProbeTypeCaseInsensitive(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "5555", "--probe-type", " TCP "})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Probe == nil || overrides.Probe.ProbeHandler == nil || overrides.Probe.ProbeHandler.TCPSocket == nil {
+		t.Fatalf("expected TCPSocket handler for case-insensitive ' TCP ', got %+v", overrides)
+	}
+}
+
+func TestParseContainerOverridesProbeTypeInvalid(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "5555", "--probe-type", "raw"})
+	_, err := parseContainerOverrides(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid --probe-type") {
+		t.Fatalf("expected invalid --probe-type error, got %v", err)
+	}
+}
+
+func TestParseContainerOverridesProbeTimeoutWindow(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-type", "tcp", "--probe-timeout", "600000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides.Probe.TimeoutMs != 600000 {
+		t.Fatalf("expected TimeoutMs=600000, got %d", overrides.Probe.TimeoutMs)
+	}
+	if overrides.Probe.FailureThreshold != 1200 {
+		t.Fatalf("expected FailureThreshold=1200 derived from 600000/500, got %d", overrides.Probe.FailureThreshold)
+	}
+}
+
+func TestParseContainerOverridesProbeTimeoutTooSmall(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-timeout", "100"})
+	_, err := parseContainerOverrides(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid --probe-timeout") {
+		t.Fatalf("expected invalid --probe-timeout error for explicit small value, got %v", err)
+	}
+}
+
+func TestParseContainerOverridesProbeTimeoutTooLarge(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-timeout", "7200000"})
+	_, err := parseContainerOverrides(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid --probe-timeout") {
+		t.Fatalf("expected invalid --probe-timeout error for oversized value, got %v", err)
+	}
+}
+
+func TestParseContainerOverridesProbeInitialDelay(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-type", "tcp", "--probe-initial-delay", "5000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides.Probe.InitialDelayMs != 5000 {
+		t.Fatalf("expected InitialDelayMs=5000, got %d", overrides.Probe.InitialDelayMs)
+	}
+}
+
+func TestParseContainerOverridesProbeInitialDelayNegative(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-initial-delay", "-1"})
+	_, err := parseContainerOverrides(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid --probe-initial-delay") {
+		t.Fatalf("expected invalid --probe-initial-delay error, got %v", err)
+	}
+}

@@ -895,8 +895,11 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
-		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
-		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
+		cli.IntFlag{Name: "probe", Usage: "enable readiness probe on the specified port (e.g. --probe 9000); sets period_ms=500"},
+		cli.StringFlag{Name: "probe-type", Value: "http", Usage: "readiness probe transport for --probe: http (GET probe-path) or tcp (raw connect, e.g. adbd :5555); case-insensitive"},
+		cli.IntFlag{Name: "probe-timeout", Value: 30000, Usage: "total readiness probe window in ms (default 30000, one attempt every 500ms); raise for slow-booting guests like full-OS containers; must be 500-3600000 when set explicitly, and is effectively capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)"},
+		cli.IntFlag{Name: "probe-initial-delay", Value: 0, Usage: "delay before the readiness probe starts polling, in ms (default 0); let slow-booting full-OS guests finish booting before probing. Applies to the template build sandbox only: sandboxes restored from the snapshot resume with services already running and start probing immediately"},
+		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set with --probe-type http"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
@@ -1681,24 +1684,56 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		}
 	}
 	if probePort > 0 {
-		probePath := c.String("probe-path")
-		if probePath == "" {
-			probePath = "/health"
-		}
-		host := ""
-		overrides.Probe = &types.Probe{
-			ProbeHandler: &types.ProbeHandler{
+		probeType := strings.ToLower(strings.TrimSpace(c.String("probe-type")))
+		var handler *types.ProbeHandler
+		switch probeType {
+		case "tcp":
+			handler = &types.ProbeHandler{
+				TCPSocket: &types.TCPSocketAction{
+					Port: int32(probePort),
+				},
+			}
+		case "http":
+			probePath := c.String("probe-path")
+			if probePath == "" {
+				probePath = "/health"
+			}
+			host := ""
+			handler = &types.ProbeHandler{
 				HttpGet: &types.HTTPGetAction{
 					Path: &probePath,
 					Port: int32(probePort),
 					Host: &host,
 				},
-			},
-			TimeoutMs:        30000,
+			}
+		default:
+			return nil, fmt.Errorf("invalid --probe-type %q: must be http or tcp", c.String("probe-type"))
+		}
+		probeTimeoutMs := c.Int("probe-timeout")
+		if c.IsSet("probe-timeout") {
+			if probeTimeoutMs < 500 {
+				return nil, fmt.Errorf("invalid --probe-timeout %d: must be at least 500 ms (one probe period) when set explicitly", probeTimeoutMs)
+			}
+			if probeTimeoutMs > 3600000 {
+				return nil, fmt.Errorf("invalid --probe-timeout %d: must be at most 3600000 ms (1h); values above the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s) never get to finish", probeTimeoutMs)
+			}
+		} else if probeTimeoutMs < 500 {
+			probeTimeoutMs = 30000
+		}
+		probeInitialDelayMs := c.Int("probe-initial-delay")
+		if c.IsSet("probe-initial-delay") && probeInitialDelayMs < 0 {
+			return nil, fmt.Errorf("invalid --probe-initial-delay %d: must be >= 0", probeInitialDelayMs)
+		}
+		overrides.Probe = &types.Probe{
+			ProbeHandler:     handler,
+			InitialDelayMs:   int32(probeInitialDelayMs),
+			TimeoutMs:        int32(probeTimeoutMs),
 			PeriodMs:         500,
-			FailureThreshold: 60,
+			FailureThreshold: int32(probeTimeoutMs / 500),
 			SuccessThreshold: 1,
 		}
+	} else if c.IsSet("probe-type") || c.IsSet("probe-timeout") || c.IsSet("probe-initial-delay") || c.IsSet("probe-path") {
+		fmt.Fprintf(os.Stderr, "warning: --probe-type/--probe-timeout/--probe-initial-delay/--probe-path require --probe <port>; ignoring them\n")
 	}
 	if enableInjectEnvd {
 		if overrides.Annotations == nil {
