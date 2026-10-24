@@ -240,14 +240,27 @@ func IsPoolV2ID(fullCgID uint32) bool {
 	return fullCgID >= CgPoolV1IdLimit
 }
 
-func (p *cgPool) Put(ctx context.Context, fullCgID uint32) {
+// prepareForReuse keeps the slot reserved until cleanup or recreation succeeds.
+func (p *cgPool) prepareForReuse(ctx context.Context, fullCgID uint32) error {
 	group := MakeCgroupPathByID(fullCgID)
-	var err error
+	h := p.poolV1Handle
 	if IsPoolV2ID(fullCgID) {
-		err = p.poolV2Handle.CleanForReuse(ctx, group)
-	} else {
-		err = p.poolV1Handle.CleanForReuse(ctx, group)
+		h = p.poolV2Handle
 	}
+	if !l.config.DisableCgroupReuse {
+		return h.CleanForReuse(ctx, group)
+	}
+	if err := h.Delete(ctx, group); err != nil {
+		return fmt.Errorf("delete cgroup %s before recreation: %w", group, err)
+	}
+	if err := p.createCgroup(ctx, fullCgID); err != nil {
+		return fmt.Errorf("recreate cgroup %s: %w", group, err)
+	}
+	return nil
+}
+
+func (p *cgPool) Put(ctx context.Context, fullCgID uint32) {
+	err := p.prepareForReuse(ctx, fullCgID)
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
@@ -276,6 +289,12 @@ func (p *cgPool) Tidy() []error {
 		dirtyWork[k] = v
 	}
 	p.mutex.RUnlock()
+
+	// Retry from the recorded IDs: a failed recreation can leave no directory
+	// for the filesystem scans below to discover.
+	for id := range dirtyWork {
+		p.Put(context.Background(), id)
+	}
 
 	errors := make([]error, 0)
 	if err := p.tidyPoolV1(dirtyWork); err != nil {
@@ -315,7 +334,6 @@ func (p *cgPool) tidyPoolV1(dirtyWork map[uint32]struct{}) error {
 
 		if _, isDirty := dirtyWork[cgId]; isDirty {
 
-			p.Put(context.Background(), cgId)
 			continue
 		}
 		if p.poolV1.cgRanger.Contains(uint16(id)) {
@@ -359,7 +377,6 @@ func (p *cgPool) tidyPoolV2(dirtyWork map[uint32]struct{}) error {
 			fullCgId := MakeFullCgID(uint16(id), true, int32(numaPool.numaNode.NodeId))
 			if _, isDirty := dirtyWork[fullCgId]; isDirty {
 
-				p.Put(context.Background(), fullCgId)
 				continue
 			}
 
