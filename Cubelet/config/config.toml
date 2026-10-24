@@ -57,6 +57,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     root_path = "/data/cubelet/cleanup"
   [plugins."io.cubelet.internal.v1.cgroup"]
     pool_size = 3000
+    # Recreate pooled leaf cgroups on return instead of retaining their counters.
+    disable_cgroup_reuse = false
     pool_workers = 1
     pool_trigger_interval_in_ms = 1000
     vm_cpu_overhead = "0"

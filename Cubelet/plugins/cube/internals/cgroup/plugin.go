@@ -38,7 +38,7 @@ func init() {
 	registry.Register(&plugin.Registration{
 		Type:   constants.InternalPlugin,
 		ID:     constants.CgroupID.ID(),
-		Config: &Config{},
+		Config: &Config{DisableCgroupReuse: false},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 
 			l.config = ic.Config.(*Config)
