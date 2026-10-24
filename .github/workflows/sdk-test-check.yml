@@ -5,10 +5,12 @@ on:
     branches: [master]
     paths:
       - 'sdk/**'
+      - 'tests/e2e/sdk_compat/**'
       - '.github/workflows/sdk-test-check.yml'
   pull_request:
     paths:
       - 'sdk/**'
+      - 'tests/e2e/sdk_compat/**'
       - '.github/workflows/sdk-test-check.yml'
   workflow_dispatch:
 
@@ -86,3 +88,14 @@ jobs:
         # runs only the hermetic unit tests (each SDK's live/integration suite
         # is gated by its own build tag / env flag / pytest non-collection).
         run: tests/unittest/run_sdk_test.sh ${{ matrix.sdk }}
+
+  framework:
+    name: SDK E2E framework (hermetic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r tests/e2e/sdk_compat/requirements.txt
+      - run: python -m pytest tests/e2e/sdk_compat/cases/framework -n 0
