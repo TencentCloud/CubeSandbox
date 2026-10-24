@@ -29,6 +29,7 @@ use crate::log_child;
 use crate::sync::write_count;
 use cube::rootfs;
 use std::string::ToString;
+use std::time::Instant;
 
 // Info reveals information about a particular mounted filesystem. This
 // struct is populated from the content in the /proc/<pid>/mountinfo file.
@@ -157,6 +158,7 @@ pub fn umount2<P: ?Sized + NixPath>(
     Ok(())
 }
 
+#[allow(unused_assignments)]
 pub fn init_rootfs(
     cfd_log: RawFd,
     spec: &Spec,
@@ -168,6 +170,11 @@ pub fn init_rootfs(
     lazy_static::initialize(&OPTIONS);
     lazy_static::initialize(&PROPAGATION);
     lazy_static::initialize(&LINUXDEVICETYPE);
+    let m_start = Instant::now();
+    let mut m_canon = 0u128;
+    let mut m_bind = 0u128;
+    let mut m_spec = 0u128;
+    let mut m_virt = 0u128;
 
     let linux = &spec
         .linux
@@ -191,6 +198,7 @@ pub fn init_rootfs(
     let rootfs = (*root)
         .to_str()
         .ok_or_else(|| anyhow!("Could not convert rootfs path to string"))?;
+    m_canon = m_start.elapsed().as_micros();
 
     mount(None::<&str>, "/", None::<&str>, flags, None::<&str>)
         .map_err(|e| anyhow!("mount / faild.{:}", e))?;
@@ -206,6 +214,7 @@ pub fn init_rootfs(
         None::<&str>,
     )
     .map_err(|e| anyhow!("mount rootfs {:} faild.{:}", rootfs, e))?;
+    m_bind = m_start.elapsed().as_micros();
 
     let mut bind_mount_dev = false;
     for m in &spec.mounts {
@@ -270,6 +279,8 @@ pub fn init_rootfs(
         }
     }
 
+    m_spec = m_start.elapsed().as_micros();
+
     if let Some(ri_str) = spec.annotations.get(rootfs::ANNOTATION_K_ROOTFS_INFO) {
         let ri = rootfs::RootfsInfo::new(ri_str).map_err(|e| anyhow!("{}", e))?;
         if ri.mounts.is_some() {
@@ -295,6 +306,7 @@ pub fn init_rootfs(
         }
     }
 
+    m_virt = m_start.elapsed().as_micros();
     let olddir = unistd::getcwd()?;
     unistd::chdir(rootfs).map_err(|e| anyhow!("chdir {:} failed:{:}", rootfs, e))?;
 
@@ -312,6 +324,16 @@ pub fn init_rootfs(
     }
 
     unistd::chdir(&olddir)?;
+    log_child!(
+        cfd_log,
+        "rootfs_detail_us: canon={}, root_mounts={}, spec_mounts={}, virtiofs={}, symlinks_devices={}, total={}",
+        m_canon,
+        m_bind.saturating_sub(m_canon),
+        m_spec.saturating_sub(m_bind),
+        m_virt.saturating_sub(m_spec),
+        m_start.elapsed().as_micros().saturating_sub(m_virt),
+        m_start.elapsed().as_micros()
+    );
 
     Ok(())
 }
@@ -816,6 +838,24 @@ fn secure_join(rootfs: &str, unsafe_path: &str) -> String {
     path.to_str().unwrap().to_string()
 }
 
+/// Ensure a directory exists without stat-walking every component of an
+/// already-existing path. `create_dir_all` performs one metadata lookup per
+/// component; on an overlay root this turns a no-op into a long FUSE/overlay
+/// walk. A single mkdir that returns EEXIST is enough for the common case.
+fn ensure_dir(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(path)
+            .map_err(|e| anyhow!(format!("create dest error, dest:{:?} err{:?}", path, e))),
+        Err(e) => Err(anyhow!(format!(
+            "create dest error, dest:{:?} err{:?}",
+            path, e
+        ))),
+    }
+}
+
+#[allow(unused_assignments)]
 fn mount_from(
     cfd_log: RawFd,
     m: &Mount,
@@ -824,10 +864,12 @@ fn mount_from(
     data: &str,
     _label: &str,
 ) -> Result<()> {
+    let mf_start = Instant::now();
     let d = String::from(data);
     let dest = secure_join(rootfs, &m.destination);
+    let mf_secure = mf_start.elapsed().as_micros();
 
-    let src = if m.r#type.as_str() == "bind" {
+    let (src, src_is_dir) = if m.r#type.as_str() == "bind" {
         //If the mountpoint path already exists, do not overwrite it
         if m.options.iter().any(|o| o == "propagation-mnt") {
             if let Ok(_) = stat::stat(dest.as_str()) {
@@ -839,51 +881,48 @@ fn mount_from(
         }
 
         let src = fs::canonicalize(m.source.as_str())?;
-        let dir = if src.is_dir() {
-            Path::new(&dest)
-        } else {
-            Path::new(&dest).parent().unwrap()
-        };
-
-        let _ = fs::create_dir_all(dir).map_err(|e| {
-            log_child!(
-                cfd_log,
-                "create dir {}: {}",
-                dir.to_str().unwrap(),
-                e.to_string()
-            )
-        });
-
-        // make sure file exists so we can bind over it
-        if !src.is_dir() {
-            let _ = OpenOptions::new().create(true).write(true).open(&dest);
-        }
-        src.to_str().unwrap().to_string()
+        let is_dir = src.is_dir();
+        (src.to_str().unwrap().to_string(), is_dir)
+    } else if m.r#type.as_str() == "cgroup2" {
+        ("cgroup2".to_string(), true)
     } else {
-        fs::create_dir_all(&dest)
-            .map_err(|e| anyhow!(format!("create dest error, dest:{:?} err{:?}", dest, e)))?;
-        if m.r#type.as_str() == "cgroup2" {
-            "cgroup2".to_string()
-        } else {
-            let tmp = PathBuf::from(&m.source);
-            tmp.to_str().unwrap().to_string()
-        }
+        let tmp = PathBuf::from(&m.source);
+        (tmp.to_str().unwrap().to_string(), true)
     };
 
-    stat::stat(dest.as_str()).map_err(|e| anyhow!(format!("mount dest:{:?} err{:?}", dest, e)))?;
-
-    //stat::stat(dest.as_str())
-    //    .map_err(|e| log_child!(cfd_log, "dest stat error. {}: {:?}", dest.as_str(), e))?;
-
-    mount(
-        Some(src.as_str()),
-        dest.as_str(),
-        Some(m.r#type.as_str()),
-        flags,
-        Some(d.as_str()),
-    )
-    .map_err(|e| anyhow!(format!("mount error, dest:{:?} err{:?}", dest, e)))?;
-
+    let do_mount = |src: &str| {
+        mount(
+            Some(src),
+            dest.as_str(),
+            Some(m.r#type.as_str()),
+            flags,
+            Some(d.as_str()),
+        )
+    };
+    let mut mounted = do_mount(&src);
+    if let Err(e) = mounted {
+        if e == nix::errno::Errno::ENOENT {
+            // The destination is normally present in the image lower layer.
+            // Probe by mounting first: a stat/create_dir_all on the overlay
+            // path can cost milliseconds per component, while mount's own
+            // lookup is dcache-backed. Only pay the creation cost when the
+            // destination is genuinely missing.
+            if m.r#type.as_str() == "bind" {
+                if src_is_dir {
+                    ensure_dir(Path::new(&dest))?;
+                } else {
+                    if let Some(parent) = Path::new(&dest).parent() {
+                        ensure_dir(parent)?;
+                    }
+                    let _ = OpenOptions::new().create(true).write(true).open(&dest);
+                }
+            } else {
+                ensure_dir(Path::new(&dest))?;
+            }
+            mounted = do_mount(&src);
+        }
+        mounted.map_err(|e| anyhow!(format!("mount error, dest:{:?} err{:?}", dest, e)))?;
+    }
     if flags.contains(MsFlags::MS_BIND)
         && flags.intersects(
             !(MsFlags::MS_REC
@@ -905,6 +944,17 @@ fn mount_from(
             log_child!(cfd_log, "remout {}: {:?}", dest.as_str(), e);
             e
         })?;
+    }
+    let mf_total = mf_start.elapsed().as_micros();
+    if mf_total >= 500 {
+        log_child!(
+            cfd_log,
+            "mount_from_us: dest={} type={} secure={} total={}",
+            dest,
+            m.r#type,
+            mf_secure,
+            mf_total
+        );
     }
     Ok(())
 }

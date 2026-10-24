@@ -326,6 +326,7 @@ pub fn init_child() {
     }
 }
 
+#[allow(unused_assignments)]
 fn do_init_child(cwfd: RawFd) -> Result<()> {
     lazy_static::initialize(&NAMESPACES);
     lazy_static::initialize(&DEFAULT_DEVICES);
@@ -336,6 +337,12 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let crfd = std::env::var(CRFD_FD)?.parse::<i32>().unwrap();
     let cfd_log = std::env::var(CLOG_FD)?.parse::<i32>().unwrap();
     let mut start = Instant::now();
+    let mut m_pidfork = 0u128;
+    let mut m_json = 0u128;
+    let mut m_ns = 0u128;
+    let mut m_canon = 0u128;
+    let mut m_rootfs = 0u128;
+    let mut m_hooks = 0u128;
     // get the pidns fd from parent, if parent had passed the pidns fd,
     // then get it and join in this pidns; otherwise, create a new pidns
     // by unshare from the parent pidns.
@@ -362,6 +369,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
             )));
         }
     }
+    m_pidfork = start.elapsed().as_micros();
     let buf = read_sync(crfd)?;
     let spec_str = std::str::from_utf8(&buf)?;
     let spec: oci::Spec = serde_json::from_str(spec_str)?;
@@ -377,6 +385,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let cm_str = std::str::from_utf8(&buf)?;
 
     let cm: FsManager = serde_json::from_str(cm_str)?;
+    m_json = start.elapsed().as_micros();
 
     #[cfg(feature = "standard-oci-runtime")]
     let csocket_fd = console::setup_console_socket(&std::env::var(CONSOLE_SOCKET_FD)?)?;
@@ -511,6 +520,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     }
 
     sched::unshare(to_new & !CloneFlags::CLONE_NEWUSER)?;
+    m_ns = start.elapsed().as_micros();
 
     if userns {
         bind_device = true;
@@ -523,6 +533,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let rootfs = spec.root.as_ref().unwrap().path.as_str();
     let root = fs::canonicalize(rootfs)?;
     let rootfs = root.to_str().unwrap();
+    m_canon = start.elapsed().as_micros();
 
     if to_new.contains(CloneFlags::CLONE_NEWNS) {
         // setup rootfs
@@ -536,6 +547,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
         )
         .map_err(|e| anyhow!("init_rootfs failed.{:}", e))?;
     }
+    m_rootfs = start.elapsed().as_micros();
 
     if init {
         // notify parent to run prestart hooks
@@ -543,6 +555,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
         // wait parent run prestart hooks
         read_sync(crfd)?;
     }
+    m_hooks = start.elapsed().as_micros();
     let duration_prestart = start.elapsed().as_millis();
     start = Instant::now();
     if mount_fd != -1 {
@@ -690,6 +703,17 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
         duration_cap,
         duration_env,
         duration_stat
+    );
+    log_child!(
+        cfd_log,
+        "prestart_detail_us: pidns_fork={}, json={}, ns_cgroup={}, canon={}, rootfs={}, hooks={}, total={}",
+        m_pidfork,
+        m_json.saturating_sub(m_pidfork),
+        m_ns.saturating_sub(m_json),
+        m_canon.saturating_sub(m_ns),
+        m_rootfs.saturating_sub(m_canon),
+        m_hooks.saturating_sub(m_rootfs),
+        m_hooks
     );
     let _ = unistd::close(cfd_log);
     let _ = unistd::close(crfd);
