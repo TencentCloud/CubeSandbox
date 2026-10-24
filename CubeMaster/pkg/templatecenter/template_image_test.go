@@ -478,7 +478,7 @@ func TestBuildTemplateSpecFingerprintWithCAChangesOnRotation(t *testing.T) {
 	if a == b {
 		t.Fatal("CA fingerprint rotation must yield a different spec fingerprint, otherwise the artifact reuse cache would serve stale CAs")
 	}
-	// Same CA → same fingerprint (idempotent for identical inputs).
+	// Same CA 鈫?same fingerprint (idempotent for identical inputs).
 	again := buildTemplateSpecFingerprintWithCA(req, "repo@sha256:aaa", "fp-old")
 	if a != again {
 		t.Fatal("fingerprint should be deterministic for identical inputs")
@@ -1840,5 +1840,79 @@ func TestTemplateImageSubmit_FailFastNodes(t *testing.T) {
 				assert.Equal(t, int64(0), jobCount, "expected no orphan job in DB")
 			}
 		})
+	}
+}
+
+func TestGenerateTemplateCreateRequestAddsCgroupModeAnnotation(t *testing.T) {
+	legacy := "legacy"
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		CgroupMode:        &legacy,
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-1",
+		TemplateSpecFingerprint: "fingerprint-1",
+		Ext4SHA256:              "sha256-1",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-1",
+	}
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Annotations[constants.CubeAnnotationCgroupMode] != "legacy" {
+		t.Fatalf("expected cgroup-mode annotation %q, got %q", "legacy", got.Annotations[constants.CubeAnnotationCgroupMode])
+	}
+}
+
+func TestNormalizeTemplateImageRequestCgroupMode(t *testing.T) {
+	base := func(mode *string) *types.CreateTemplateFromImageReq {
+		return &types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-1"},
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			TemplateID:        "template-1",
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:       cubeboxv1.NetworkType_tap.String(),
+			CgroupMode:        mode,
+		}
+	}
+
+	legacy := " legacy " // must be trimmed to the canonical value
+	got, err := normalizeTemplateImageRequest(base(&legacy))
+	if err != nil {
+		t.Fatalf("NormalizeRequest(legacy): %v", err)
+	}
+	if got.CgroupMode == nil || *got.CgroupMode != "legacy" {
+		t.Fatalf("expected trimmed CgroupMode=\"legacy\", got %+v", got.CgroupMode)
+	}
+
+	blank := "   "
+	got, err = normalizeTemplateImageRequest(base(&blank))
+	if err != nil {
+		t.Fatalf("NormalizeRequest(blank): %v", err)
+	}
+	if got.CgroupMode != nil {
+		t.Fatalf("expected whitespace-only CgroupMode to normalize to nil, got %q", *got.CgroupMode)
+	}
+
+	got, err = normalizeTemplateImageRequest(base(nil))
+	if err != nil {
+		t.Fatalf("NormalizeRequest(nil): %v", err)
+	}
+	if got.CgroupMode != nil {
+		t.Fatalf("expected nil CgroupMode to stay nil, got %q", *got.CgroupMode)
+	}
+
+	for _, bad := range []string{"LEGACY", "v1", "unified", "legac"} {
+		v := bad
+		if _, err := normalizeTemplateImageRequest(base(&v)); err == nil {
+			t.Fatalf("NormalizeRequest(%q): expected error, got nil", bad)
+		}
 	}
 }
