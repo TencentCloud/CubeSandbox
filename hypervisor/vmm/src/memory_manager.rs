@@ -318,6 +318,20 @@ pub struct MemoryManager {
     ram_allocator: AddressAllocator,
     dynamic: bool,
     dirty_log: bool,
+    /// Guest RAM was loaded from an image provided by the caller (restore, or
+    /// migration receive) rather than starting empty (boot). The dirty bitmap
+    /// then only covers writes made since that image was loaded.
+    restored_from_image: bool,
+    /// Union of every dirty-log read since the log was started, keyed by the
+    /// range's guest address: reads clear the bitmaps, so only the union keeps
+    /// the long-window write sets (Incremental, Full) complete.
+    dirty_log_accumulated: Mutex<HashMap<u64, Vec<u64>>>,
+    /// Set when the log is re-armed or read outside a capture (live migration):
+    /// the window no longer starts at the base image, so captures fall back to
+    /// the classified paths for the rest of this VM's life.
+    dirty_log_poisoned: bool,
+    /// Whether the log has been armed once already; a second arming is mid-life.
+    dirty_log_armed: bool,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
@@ -1303,6 +1317,10 @@ impl MemoryManager {
             ram_allocator,
             dynamic,
             dirty_log: config.dirty_log,
+            restored_from_image: restore_data.is_some(),
+            dirty_log_accumulated: Mutex::new(HashMap::new()),
+            dirty_log_poisoned: false,
+            dirty_log_armed: false,
             #[cfg(target_arch = "aarch64")]
             uefi_flash: None,
             thp: config.thp,
@@ -1318,7 +1336,14 @@ impl MemoryManager {
             memory_manager.setup_sgx(sgx_epc_config)?;
         }
 
-        memory_manager.init_dirty_log().map_err(Error::Dirtylog)?;
+        // Arming is an optimisation, so a host that cannot provide the tracking
+        // must not lose the VM: keep it and let captures use the classified
+        // paths, disarming any slot that was armed before the failure.
+        if let Err(e) = memory_manager.init_dirty_log() {
+            warn!("dirty log unavailable, snapshots use the classified paths: {e}");
+            memory_manager.dirty_log = false;
+            let _ = memory_manager.vm.stop_dirty_log();
+        }
 
         Ok(Arc::new(Mutex::new(memory_manager)))
     }
@@ -1695,6 +1720,12 @@ impl MemoryManager {
         start_addr: GuestAddress,
         size: usize,
     ) -> Result<Arc<GuestRegionMmap>, Error> {
+        // The log is started once, before any later region exists, so guest
+        // writes into it would never reach a capture bitmap.
+        if self.dirty_log_armed {
+            self.dirty_log_poisoned = true;
+        }
+
         // Allocate memory for the region
         let region = MemoryManager::create_ram_region(
             &None,
@@ -3022,6 +3053,47 @@ impl Snapshottable for MemoryManager {
     }
 }
 
+/// Whether an armed dirty log may serve this request: `Incremental` and
+/// `SoftDirty` always; `Full` only when guest RAM started from zeroes, since a
+/// restored VM's bitmap does not cover the image content a Full volume lacks.
+/// Serving `Full` on a fresh boot also assumes host writes reach the guest
+/// through the tracked `GuestMemory` accessors, which set the region bitmaps.
+fn dirty_log_serves(snapshot_type: SnapshotType, restored_from_image: bool) -> bool {
+    match snapshot_type {
+        SnapshotType::Full => !restored_from_image,
+        SnapshotType::Incremental | SnapshotType::SoftDirty => true,
+    }
+}
+
+/// Union the pages just read into the set accumulated for `gpa` and return it,
+/// sized to the range as it is now: bits read while the range was a different
+/// length are kept for the words inside it and dropped past its end.
+fn accumulate_dirty_bitmap(
+    accumulated: &mut HashMap<u64, Vec<u64>>,
+    gpa: u64,
+    fresh: &[u64],
+) -> Vec<u64> {
+    let entry = accumulated.entry(gpa).or_default();
+    // A stale tail would be emitted past this range's end and overwrite the
+    // slot of the range that follows it in the destination.
+    entry.resize(fresh.len(), 0);
+    for (slot, bits) in entry.iter_mut().zip(fresh.iter()) {
+        *slot |= bits;
+    }
+    entry.clone()
+}
+
+/// Pick the write set for this request: `SoftDirty`'s base is the previous
+/// capture, so it takes the fresh window; `Incremental`/`Full` overlay bases
+/// from the log's start. A bitmap read outside a capture cycle (the live
+/// migration feed) poisons the log, so neither window is served after one.
+fn dirty_log_write_set(snapshot_type: SnapshotType, fresh: Vec<u64>, union: Vec<u64>) -> Vec<u64> {
+    match snapshot_type {
+        SnapshotType::SoftDirty => fresh,
+        SnapshotType::Incremental | SnapshotType::Full => union,
+    }
+}
+
 impl Transportable for MemoryManager {
     fn send(
         &self,
@@ -3038,7 +3110,10 @@ impl Transportable for MemoryManager {
             config.memory_vol_url.as_deref(),
         )?;
 
-        if self.dirty_log {
+        if self.dirty_log
+            && !self.dirty_log_poisoned
+            && dirty_log_serves(config.snapshot_type, self.restored_from_image)
+        {
             let guest_memory = self.guest_memory.memory();
             let memory_file = memory_file_target.open_for_fresh_write()?;
             info!("Saving dirty guest memory to snapshot image file.");
@@ -3090,11 +3165,17 @@ impl Transportable for MemoryManager {
                         MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
                     })?;
 
-                let dirty_bitmap: Vec<u64> = vm_dirty_bitmap
+                let fresh_bitmap: Vec<u64> = vm_dirty_bitmap
                     .iter()
                     .zip(vmm_dirty_bitmap.iter())
                     .map(|(x, y)| x | y)
                     .collect();
+                let union = accumulate_dirty_bitmap(
+                    &mut self.dirty_log_accumulated.lock().unwrap(),
+                    range.gpa,
+                    &fresh_bitmap,
+                );
+                let dirty_bitmap = dirty_log_write_set(config.snapshot_type, fresh_bitmap, union);
 
                 let sub_table =
                     MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, host_page_size());
@@ -3139,6 +3220,12 @@ impl Migratable for MemoryManager {
     // Just before we do a bulk copy we want to start/clear the dirty log so that
     // pages touched during our bulk copy are tracked.
     fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        // The first arming happens at construction, before the guest runs. Any
+        // later one (live migration) no longer starts at the base image.
+        if std::mem::replace(&mut self.dirty_log_armed, true) {
+            self.dirty_log_poisoned = true;
+        }
+
         self.vm.start_dirty_log().map_err(|e| {
             MigratableError::MigrateSend(anyhow!("Error starting VM dirty log {}", e))
         })?;
@@ -3146,6 +3233,10 @@ impl Migratable for MemoryManager {
         for r in self.guest_memory.memory().iter() {
             r.bitmap().reset();
         }
+
+        // (Re)starting the log opens a new window, so the union collected for
+        // the previous one must not leak into the next set of reads.
+        self.dirty_log_accumulated.lock().unwrap().clear();
 
         Ok(())
     }
@@ -3161,6 +3252,10 @@ impl Migratable for MemoryManager {
     // Generate a table for the pages that are dirty. The dirty pages are collapsed
     // together in the table if they are contiguous.
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        // This feed is not part of a capture cycle: the window it consumes
+        // belongs to no base image.
+        self.dirty_log_poisoned = true;
+
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
             let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.gpa, r.size).map_err(|e| {
@@ -3201,5 +3296,76 @@ impl Migratable for MemoryManager {
             table.extend(sub_table);
         }
         Ok(table)
+    }
+}
+
+#[cfg(test)]
+mod dirty_log_serves_tests {
+    use super::{accumulate_dirty_bitmap, dirty_log_serves, dirty_log_write_set, SnapshotType};
+    use std::collections::HashMap;
+
+    #[test]
+    fn restored_vm_keeps_full_requests_whole() {
+        // A full request hands a fresh destination volume, which holds none of
+        // the image a restored VM's dirty bitmap is a delta against.
+        assert!(!dirty_log_serves(SnapshotType::Full, true));
+        assert!(dirty_log_serves(SnapshotType::Incremental, true));
+        assert!(dirty_log_serves(SnapshotType::SoftDirty, true));
+    }
+
+    #[test]
+    fn fresh_boot_may_overlay_a_fresh_volume() {
+        // Untouched pages of a booted VM are zeroes, exactly what a fresh
+        // destination volume holds.
+        assert!(dirty_log_serves(SnapshotType::Full, false));
+        assert!(dirty_log_serves(SnapshotType::Incremental, false));
+        assert!(dirty_log_serves(SnapshotType::SoftDirty, false));
+    }
+
+    #[test]
+    fn accumulation_keeps_earlier_windows() {
+        let mut accumulated = HashMap::new();
+
+        // Reads are destructive, so a later capture only reports its own
+        // window; the union must still carry the earlier pages.
+        let first = accumulate_dirty_bitmap(&mut accumulated, 0x1000, &[0b0011, 0]);
+        assert_eq!(first, vec![0b0011, 0]);
+        let second = accumulate_dirty_bitmap(&mut accumulated, 0x1000, &[0b0100, 0]);
+        assert_eq!(second, vec![0b0111, 0]);
+
+        // Ranges are tracked per guest address, and a range that grew keeps
+        // the bits read while it was shorter.
+        let other = accumulate_dirty_bitmap(&mut accumulated, 0x9000, &[0b1000]);
+        assert_eq!(other, vec![0b1000]);
+        // A shorter read returns a shorter bitmap: carrying a tail past the
+        // range's end would overwrite the next range's slot on write-out.
+        assert_eq!(
+            accumulate_dirty_bitmap(&mut accumulated, 0x1000, &[0]),
+            vec![0b0111]
+        );
+
+        let grown = accumulate_dirty_bitmap(&mut accumulated, 0x9000, &[0, 0b0001]);
+        assert_eq!(grown, vec![0b1000, 0b0001]);
+        let shrunk = accumulate_dirty_bitmap(&mut accumulated, 0x9000, &[0]);
+        assert_eq!(shrunk, vec![0b1000]);
+    }
+
+    #[test]
+    fn soft_dirty_writes_a_single_window() {
+        let fresh = vec![0b0010];
+        let union = vec![0b0011];
+
+        assert_eq!(
+            dirty_log_write_set(SnapshotType::SoftDirty, fresh.clone(), union.clone()),
+            vec![0b0010]
+        );
+        assert_eq!(
+            dirty_log_write_set(SnapshotType::Incremental, fresh.clone(), union.clone()),
+            vec![0b0011]
+        );
+        assert_eq!(
+            dirty_log_write_set(SnapshotType::Full, fresh, union),
+            vec![0b0011]
+        );
     }
 }

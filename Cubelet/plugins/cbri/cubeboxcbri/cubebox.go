@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/containers"
@@ -20,6 +21,7 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
@@ -169,6 +171,9 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	}
 	annotations[constants.AnnotationsVMKernelPath] = kernelPath
 	annotations[constants.AnnotationsProduct] = e.config.instanceType
+	// Host dirty-log policy, written explicitly so the shim never inherits a
+	// value recorded by a snapshot built on an opted-in host.
+	annotations[constants.AnnotationMemoryDirtyLog] = strconv.FormatBool(config.GetHostConf().Memory.DirtyLog)
 	if appImageID == "" {
 		annotations[constants.AnnotationsVMOSImagePath] = filepath.Join(e.config.BasePath, "cube-image", "cube-guest-image-cpu.img")
 		annotations[constants.AnnotationsVMAgentPath] = filepath.Join(e.config.BasePath, "cube-agent", "cube-agent.ext4")

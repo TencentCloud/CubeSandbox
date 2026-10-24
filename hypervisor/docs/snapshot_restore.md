@@ -109,6 +109,13 @@ subcommands selects how guest RAM is captured. The other snapshot artifacts
 | `incremental` | Only **CoW anonymous** pages (pages the guest has written to since the original `MAP_PRIVATE` mmap was set up). Detected from `/proc/self/pagemap` bit 61 (`PM_FILE`). | Cheap "second" snapshot when a base file already exists. The set of saved pages monotonically grows over the VM's lifetime — every page ever touched is in the delta. |
 | `soft-dirty` | Only the pages written **since the previous `soft-dirty` snapshot** (a true delta). Detected via `/proc/self/clear_refs` + pagemap bit 55. | Repeated incremental snapshots on a long-running VM, where most pages are not touched between cycles. |
 
+### KVM dirty log (host opt-in)
+
+With `host.memory.dirty_log` enabled (off by default), a restored VM's captures
+are served from the KVM dirty bitmap instead of the mechanisms above; `full`
+still dumps whole on a restored VM, and a log re-armed or read outside a
+capture falls back to them.
+
 ### Soft-dirty details
 
 - The first `soft-dirty` snapshot taken after VM start writes a full base
