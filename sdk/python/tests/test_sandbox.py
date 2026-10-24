@@ -1019,6 +1019,51 @@ class TestGetInfo:
         assert "envdAccessToken" not in info.copy()
         assert secret not in json.dumps(info)
 
+    def test_get_exposed_port_endpoint_host_port(self):
+        sb = make_sandbox()
+        body = {
+            "sandboxID": SANDBOX_ID,
+            "containerPort": 8080,
+            "mode": "host_port",
+            "endpoint": "9.135.152.214:20006",
+            "hostIP": "9.135.152.214",
+            "hostPort": 20006,
+            "sandboxIP": "192.168.0.20",
+        }
+        with patch.object(sb._session, "get", return_value=mock_response(body)) as get:
+            ep = sb.get_exposed_port_endpoint(8080)
+        assert ep.endpoint == "9.135.152.214:20006"
+        assert ep.mode == "host_port"
+        assert ep.host_port == 20006
+        assert ep.host_ip == "9.135.152.214"
+        assert ep.sandbox_ip == "192.168.0.20"
+        url = get.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{SANDBOX_ID}/exposed-ports/8080")
+        assert get.call_args.kwargs["params"] is None
+
+    def test_get_exposed_port_endpoint_tap_ip_and_caller_override(self):
+        sb = make_sandbox()
+        body = {
+            "sandboxID": SANDBOX_ID,
+            "containerPort": 8080,
+            "mode": "tap_ip",
+            "endpoint": "192.168.0.20:8080",
+            "sandboxIP": "192.168.0.20",
+        }
+        with patch.object(sb._session, "get", return_value=mock_response(body)) as get:
+            ep = sb.get_exposed_port_endpoint(8080, caller_host_ip="198.51.100.254")
+        assert ep.mode == "tap_ip"
+        assert ep.endpoint == "192.168.0.20:8080"
+        assert ep.host_ip is None and ep.host_port is None
+        assert get.call_args.kwargs["params"] == {"callerHostIP": "198.51.100.254"}
+
+    def test_get_exposed_port_endpoint_not_exposed(self):
+        sb = make_sandbox()
+        resp = mock_response({"message": "port 8081 is not exposed"}, status=404)
+        with patch.object(sb._session, "get", return_value=resp):
+            with pytest.raises(SandboxNotFoundError):
+                sb.get_exposed_port_endpoint(8081)
+
     def test_get_info_returns_sandbox_info(self):
         sb = make_sandbox()
         with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):

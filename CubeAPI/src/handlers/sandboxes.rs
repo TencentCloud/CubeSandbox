@@ -3,24 +3,74 @@
 //
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
+use std::net::SocketAddr;
 use validator::Validate;
 
 use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ConnectSandboxV2, ForkRequest, ForkResult, ListSandboxesQuery,
-        ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest, ResumedSandbox, Sandbox,
-        SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response,
-        SetTimeoutRequest, UpdateSandboxNetworkRequest,
+        ApiError, ConnectSandbox, ConnectSandboxV2, ExposedPortEndpoint, ForkRequest, ForkResult,
+        ListSandboxesQuery, ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest,
+        ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query,
+        SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
+
+#[derive(Debug, Deserialize)]
+pub struct ExposedPortQuery {
+    /// Caller host IP used for CubeMaster's same-node check. Defaults to the
+    /// HTTP client's remote address, which for an in-sandbox caller is its
+    /// node IP after SNAT. Pass any out-of-node address to force the
+    /// host_port endpoint.
+    #[serde(rename = "callerHostIP")]
+    pub caller_host_ip: Option<String>,
+}
+
+// ─── GET /sandboxes/:sandboxID/exposed-ports/:containerPort ──────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/exposed-ports/{containerPort}",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox ID"),
+        ("containerPort" = i32, Path, description = "Container port declared via the template's expose-port list"),
+        ("callerHostIP" = Option<String>, Query, description = "Caller host IP for same-node detection; defaults to the connection's remote address"),
+    ),
+    responses(
+        (status = 200, description = "Exposed port endpoint", body = ExposedPortEndpoint),
+        (status = 400, description = "Invalid container port", body = ApiError),
+        (status = 404, description = "Sandbox not found or port not exposed", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+    )
+)]
+pub async fn get_sandbox_exposed_port(
+    State(state): State<AppState>,
+    Path((sandbox_id, container_port)): Path<(String, i32)>,
+    Query(params): Query<ExposedPortQuery>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+) -> AppResult<impl IntoResponse> {
+    // The explicit query parameter wins; otherwise the caller's real address
+    // drives CubeMaster's same-node (tap_ip vs host_port) decision.
+    let caller_host_ip = params
+        .caller_host_ip
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| remote_addr.ip().to_string());
+    let endpoint = state
+        .services
+        .sandboxes
+        .get_exposed_port_endpoint(&sandbox_id, container_port, Some(&caller_host_ip))
+        .await?;
+    Ok(Json(endpoint))
+}
 
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 

@@ -16,7 +16,15 @@ from ._commands import CommandResult, Commands
 from ._config import Config, _auth_headers
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
-from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
+from ._models import (
+    Execution,
+    ExecutionError,
+    ExposedPortEndpoint,
+    OutputMessage,
+    Result,
+    SandboxInfo,
+    SnapshotInfo,
+)
 from ._policy import (
     Rule,
     _build_network_payload,
@@ -186,6 +194,43 @@ class Sandbox:
         e.g. ``49999-<sandboxID>.cube.app``
         """
         return f"{port}-{self.sandbox_id}.{self.domain}"
+
+    def get_exposed_port_endpoint(
+        self, port: int, *, caller_host_ip: str | None = None
+    ) -> ExposedPortEndpoint:
+        """GET /sandboxes/:sandboxID/exposed-ports/:port - resolve the endpoint
+        of a template-declared exposed port.
+
+        The port must be declared via the template's ``--expose-port``. The
+        returned :class:`ExposedPortEndpoint` carries ``mode`` and a ready-to
+        -dial ``endpoint``: ``host_port`` (``hostIP:hostPort``, works from any
+        caller) or ``tap_ip`` (``sandboxIP:containerPort``, only for callers
+        on the sandbox's own node). CubeMaster picks the mode by comparing
+        the caller's address with the sandbox's node IP; pass
+        ``caller_host_ip`` to override that detection (e.g. any out-of-node
+        address forces the ``host_port`` form).
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist or the port
+                is not exposed.
+            ApiError: On unexpected backend error.
+        """
+        params = {"callerHostIP": caller_host_ip} if caller_host_ip else None
+        resp = self._session.get(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/exposed-ports/{port}",
+            params=params,
+        )
+        _check_response(resp)
+        data = resp.json()
+        return ExposedPortEndpoint(
+            sandbox_id=data["sandboxID"],
+            container_port=data["containerPort"],
+            mode=data["mode"],
+            endpoint=data["endpoint"],
+            host_ip=data.get("hostIP"),
+            host_port=data.get("hostPort"),
+            sandbox_ip=data.get("sandboxIP"),
+        )
 
     def get_mcp_url(self) -> str:
         """Return the streamable-HTTP URL of the sandbox MCP gateway.

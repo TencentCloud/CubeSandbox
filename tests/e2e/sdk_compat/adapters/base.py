@@ -139,6 +139,13 @@ class SandboxAdapter(ABC):
     def get_host(self, port: int) -> str:
         raise UnsupportedCapability(self.backend, "network_public_access")
 
+    def get_exposed_port_endpoint(
+        self, port: int, *, caller_host_ip: str | None = None
+    ) -> Any:
+        """Resolve a template-declared exposed port to its hostIP:hostPort
+        (or same-node sandboxIP:port) endpoint via CubeAPI."""
+        raise UnsupportedCapability(self.backend, "network_sandbox_to_sandbox")
+
     def traffic_access_token(self) -> str | None:
         raise UnsupportedCapability(self.backend, "network_public_access")
 

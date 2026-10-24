@@ -285,6 +285,13 @@ class CubeSandboxAdapter(SandboxAdapter):
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))
 
+    def get_exposed_port_endpoint(
+        self, port: int, *, caller_host_ip: str | None = None
+    ):
+        return self._sandbox.get_exposed_port_endpoint(
+            port, caller_host_ip=caller_host_ip
+        )
+
     def traffic_access_token(self) -> str | None:
         token = getattr(self._sandbox, "traffic_access_token", None)
         if token:
