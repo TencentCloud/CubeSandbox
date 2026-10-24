@@ -58,6 +58,7 @@ type cowEngine interface {
 	CreateVolume(name string, sizeBytes uint64) (string, error)
 	CreateSnapshotFromVolume(sourceName, snapshotName string, activate bool) (string, error)
 	CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error)
+	PromoteVolumeToSnapshot(volumeName, snapshotName, originVolume string) (string, error)
 	ActivateVolume(name string) (string, error)
 	DeactivateVolume(name string) error
 	DeleteVolume(name string) error
@@ -264,11 +265,25 @@ func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateI
 	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
 }
 
-// CloneSandboxMemory is kept on the Store interface. XFS restore no
-// longer calls it (see prefetchRestoreMemoryVolURL); S3 pause resume
-// still does via S3Cow.
+// CloneSandboxMemory copies package memory into sb-<id>-memory. S3 pause
+// resume clones synchronously before Create returns; XFS pause resume mints
+// it asynchronously after Create (see sandbox_memory_mint.go), and the next
+// pause promotes it into its snapshot by rename instead of a reflink clone.
 func (m *XfsCow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
 	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
+}
+
+// PromoteVolumeToSnapshot turns an existing volume into a snapshot of
+// originVolume in place, via cubecow's promote_volume_to_snapshot.
+func (m *XfsCow) PromoteVolumeToSnapshot(ctx context.Context, volumeName, snapshotName, originVolume string) (*cowVolume, error) {
+	devPath, err := m.engine.PromoteVolumeToSnapshot(volumeName, snapshotName, originVolume)
+	if err != nil {
+		if isCowSemantic(err, cubecow.SemAlreadyExists) {
+			return nil, fmt.Errorf("%w: name=%s kind=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot)
+		}
+		return nil, err
+	}
+	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
 }
 
 type sandboxMemoryCloner interface {

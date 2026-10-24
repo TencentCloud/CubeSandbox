@@ -37,6 +37,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -514,6 +515,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			s.restarts.finishCreate(armedID, ret.IsSuccessCode(rsp.Ret.RetCode))
 		} else if ret.IsSuccessCode(rsp.Ret.RetCode) {
 			s.restarts.Start(createInfo.SandboxID, req)
+		}
+	}
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success {
+		if sid := resumeFromPauseSandboxID(req); sid != "" {
+			if backend, berr := storageBackendFromAnnotations(req.GetAnnotations()); berr == nil {
+				storage.MintSandboxMemoryAfterResume(context.WithoutCancel(ctx), backend, sid,
+					strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationRuntimeSnapshotID]))
+			}
 		}
 	}
 	return rsp, nil

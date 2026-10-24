@@ -87,6 +87,21 @@ pub trait Engine: Send + Sync {
         volume_name: &str,
     ) -> CubecowResult<Volume>;
 
+    /// Turn an existing volume into a snapshot of `origin_volume` in place:
+    /// the volume's file becomes the snapshot file, no data is copied, and
+    /// the volume name leaves the namespace. Backends that cannot move data
+    /// between object classes return an error.
+    fn promote_volume_to_snapshot(
+        &self,
+        _volume_name: &str,
+        _snapshot_name: &str,
+        _origin_volume: &str,
+    ) -> CubecowResult<Snapshot> {
+        Err(CubecowError::PreconditionFailed(
+            "promote_volume_to_snapshot is not implemented by this backend".to_string(),
+        ))
+    }
+
     /// List snapshots of a volume with pagination.
     /// Returns (snapshots, next_page_token).
     fn list_snapshots(

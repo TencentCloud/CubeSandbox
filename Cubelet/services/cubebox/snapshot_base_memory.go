@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -235,6 +236,8 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID 
 // preparePauseMemoryArtifact builds the dest the VMM writes an incremental
 // overlay into.
 //
+//  0. The XFS pause-resume mint's own volume, promoted by rename when its
+//     marker still names the last restore.
 //  1. Own memory volume (S3 same-node resume clone or cross-node import).
 //     Resume keeps the pause catalog; this volume is the live clone of
 //     that image (or the cross-node import when no local catalog exists).
@@ -262,6 +265,20 @@ func preparePauseMemoryArtifact(
 			sandboxID = strings.TrimSpace(cb.SandboxID)
 		}
 	}
+	// Tier 0: the own volume Resume pre-cloned in the background. Promote it
+	// by rename so the reflink clone stays off the pause critical path; its
+	// marker must still name this pause's restore base.
+	if base, err := resolveRestoreBaseMemoryObjectFn(ctx, cb, backend); err == nil && base != nil && strings.TrimSpace(base.DevPath) != "" {
+		originVol := filepath.Base(filepath.Dir(base.DevPath))
+		if memoryObject, detail, ok := storage.PromoteSandboxMemoryOwnForPause(ctx, backend, sandboxID, templateID,
+			resolveRestoreBaseSnapshotID(cb), originVol); ok {
+			stepLog.Infof("pause memory artifact: promoted own volume (%s), snapshot type=%s", detail, snapshotTypeIncremental)
+			return memoryObject, snapshotTypeIncremental, nil
+		} else if detail != "" {
+			stepLog.Warnf("pause memory artifact: own volume promote skipped (%s); trying a catalog base", detail)
+		}
+	}
+
 	if live, liveErr := storage.GetImportedSandboxMemoryFor(ctx, backend, sandboxID); liveErr != nil {
 		stepLog.Warnf("pause memory artifact: own volume lookup failed (%v); trying a catalog base", liveErr)
 	} else if live != nil {

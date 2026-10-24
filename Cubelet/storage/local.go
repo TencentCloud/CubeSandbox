@@ -1097,10 +1097,17 @@ func pauseResumeMemoryOwnerID(opts *workflow.CreateContext) string {
 // releaseImportedMemoryVol deletes the memory disk this sandbox cloned or
 // imported. Driven by what Create recorded rather than by the naming
 // convention, so a restore that still reads a package snapshot (empty field)
-// is untouched.
+// is untouched. The XFS pause-resume mint records nothing: its marker is the
+// only evidence the conventionally named own volume was published.
 func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
 	name := strings.TrimSpace(info.ImportedMemoryVol)
 	if name == "" {
+		// The XFS pause-resume mint records nothing, so no record names its
+		// own volume; the name is exclusive to the sandbox and deleting a
+		// missing one is a no-op.
+		if isXFSCleanupBackend(backend) {
+			dropOwnMemory(ctx, backend, SandboxMemoryName(info.SandboxID))
+		}
 		return
 	}
 	store, err := l.storeForBackend(backend)
@@ -1547,6 +1554,14 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		log.G(ctx).Fatalf("readBackendFileInfo fail:%v", err)
 		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, err.Error())
 	}
+	// The mint publishes its marker only while the sandbox record exists, so
+	// the clone, the own-volume release and the record delete must serialize
+	// on the same per-sandbox lock; this defer runs before unlock.
+	if l.useCowStorage() && info != nil && isXFSCleanupBackend(destroyStorageBackend(info, opts)) {
+		lock := mintSerialFor(info.SandboxID)
+		lock.Lock()
+		defer lock.Unlock()
+	}
 	defer func() {
 		if err == nil {
 
@@ -1953,7 +1968,8 @@ type StorageInfo struct {
 	// ImportedMemoryVol is the sandbox-private memory disk Create minted
 	// (cross-node import or same-node S3 pause-resume clone). Destroy
 	// deletes it. Empty means this restore still reads a package memory
-	// snapshot (XFS template / resume / FromSnap always leave this empty).
+	// snapshot. The XFS pause-resume mint names its own volume by convention
+	// instead of recording it here; Destroy deletes that name too.
 	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
