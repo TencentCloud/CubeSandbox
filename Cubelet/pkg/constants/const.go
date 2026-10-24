@@ -292,7 +292,10 @@ const (
 	AnnotationAppSnapshotRestore       = "cube.appsnapshot.restore"
 	AnnotationAppSnapshotContainerID   = "cube.appsnapshot.container.id"
 	AnnotationSnapshotDisable          = "cube.snapshot.disable"
-	AnnotationAppSnapshotFinished      = "cube.appsnapshot.finished"
+	// AnnotationMemoryMergeable opts guest RAM into host KSM page dedup. Only
+	// Cubelet stamps it, explicitly "true"/"false", from host.memory.mergeable.
+	AnnotationMemoryMergeable     = "cube.memory.mergeable"
+	AnnotationAppSnapshotFinished = "cube.appsnapshot.finished"
 
 	DefaultSnapshotDir = "/usr/local/services/cubetoolbox/cube-snapshot"
 

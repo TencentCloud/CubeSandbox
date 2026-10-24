@@ -27,7 +27,7 @@ const ANNO_SNAPSHOT_ID: &str = "cube.shimapi.update.snapshot.id";
 ///   `source_url`  — URL of the snapshot to restore from (e.g. `file:///data/snapshots/foo`)
 ///
 /// Optional fields (replace backend devices after restore):
-///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`, `memory_vol_url`
+///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`, `mergeable`, `memory_vol_url`
 const ANNO_ROLLBACK_RESTORE_CONFIG: &str = "cube.shimapi.update.rollback.restore_config";
 
 /// (PauseToSnapshot) **Required.** JSON-encoded `PauseSnapshotConfig`.
@@ -73,6 +73,11 @@ struct RollbackRestoreConfig {
     #[serde(default)]
     pub dirty_log: bool,
 
+    /// Mark guest RAM mergeable for host KSM. Absent keeps the snapshot's
+    /// recorded value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeable: Option<bool>,
+
     /// Optional URL for reading memory range data from a separate volume.
     /// Mirrors RestoreConfig.memory_vol_url: when set, memory data is read
     /// from this path instead of source_url/<memory-ranges>.
@@ -83,6 +88,7 @@ struct RollbackRestoreConfig {
 impl From<RollbackRestoreConfig> for RestoreConfig {
     fn from(r: RollbackRestoreConfig) -> Self {
         RestoreConfig {
+            mergeable: r.mergeable,
             source_url: PathBuf::from(r.source_url),
             disks: r.disks,
             net: r.net,
