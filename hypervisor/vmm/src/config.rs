@@ -61,6 +61,8 @@ pub enum Error {
     InvalidIvshmemSize(u64),
     /// Invalid Ivshmem backend file path
     InvalidIvshmemPath(std::io::Error),
+    /// Invalid Ivshmem PCI subsystem id
+    InvalidIvshmemSubsystemId(String),
     /// Error parsing memory options
     ParseMemory(OptionParserError),
     /// Error parsing memory zone options
@@ -202,6 +204,15 @@ pub enum ValidationError {
     InvalidMtu(u16),
     /// native virtio-fs shouldn't have socket argument
     NativeVirtioFsSocket,
+    /// Two ivshmem devices share one PCI subsystem id
+    IvshmemSubsystemIdNotUnique(u16),
+    /// Two ivshmem devices share one backend file
+    IvshmemPathNotUnique(String),
+    /// Restore supplied a different number of ivshmem devices than the snapshot has
+    IvshmemCountMismatch {
+        snapshot: usize,
+        restore: usize,
+    },
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -316,6 +327,19 @@ impl fmt::Display for ValidationError {
             NativeVirtioFsSocket => {
                 write!(f, "Native virtio-fs shouldn't have socket argument")
             }
+            IvshmemSubsystemIdNotUnique(s) => write!(
+                f,
+                "Several ivshmem devices use PCI subsystem id 0x{:04x}; the guest cannot tell them apart",
+                s
+            ),
+            IvshmemPathNotUnique(p) => {
+                write!(f, "Several ivshmem devices use backend file: {}", p)
+            }
+            IvshmemCountMismatch { snapshot, restore } => write!(
+                f,
+                "Snapshot has {} ivshmem device(s) but restore supplied {}",
+                snapshot, restore
+            ),
             &InvalidMtu(mtu) => {
                 write!(
                     f,
@@ -339,6 +363,9 @@ impl fmt::Display for Error {
             InvalidCpuFeatures(o) => write!(f, "Invalid feature in --cpus features list: {}", o),
             InvalidIvshmemSize(o) => write!(f, "Invalid ivshmem backend file size: {}", o),
             InvalidIvshmemPath(o) => write!(f, "Invalid ivshmem backend file path: {}", o),
+            InvalidIvshmemSubsystemId(o) => {
+                write!(f, "Invalid ivshmem PCI subsystem id: {}", o)
+            }
             ParseDevice(o) => write!(f, "Error parsing --device: {}", o),
             ParseDevicePathMissing => write!(f, "Error parsing --device: path missing"),
             ParseFileSystem(o) => write!(f, "Error parsing --fs: {}", o),
@@ -433,7 +460,7 @@ pub struct VmParams<'a> {
     pub platform: Option<&'a str>,
     pub tpm: Option<&'a str>,
     pub sys_ctrl: bool,
-    pub ivshmem: Option<&'a str>,
+    pub ivshmem: Option<Vec<&'a str>>,
 }
 
 impl<'a> VmParams<'a> {
@@ -487,7 +514,9 @@ impl<'a> VmParams<'a> {
         let gdb = args.contains_id("gdb");
         let tpm: Option<&str> = args.get_one::<String>("tpm").map(|x| x as &str);
         let sys_ctrl = args.get_flag("sys-ctrl");
-        let ivshmem: Option<&str> = args.get_one::<String>("ivshmem").map(|x| x as &str);
+        let ivshmem: Option<Vec<&str>> = args
+            .get_many::<String>("ivshmem")
+            .map(|x| x.map(|y| y as &str).collect());
         let pvpanic = args.get_flag("pvpanic");
         VmParams {
             cpus,
@@ -2131,10 +2160,14 @@ pub struct RestoreConfig {
     /// source_url/<SNAPSHOT_FILENAME>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_vol_url: Option<String>,
-    /// Optional ivshmem shared memory device configuration.
-    /// When present, the VM will have an ivshmem device for host-guest communication.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ivshmem: Option<IvshmemConfig>,
+    /// Backend files for the snapshot's ivshmem devices, in the same order
+    /// the snapshot lists them. Accepts the legacy single-object form.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_ivshmem_compat"
+    )]
+    pub ivshmem: Option<Vec<IvshmemConfig>>,
 }
 
 impl RestoreConfig {
@@ -2201,15 +2234,33 @@ impl TpmConfig {
 
 impl IvshmemConfig {
     pub const SYNTAX: &'static str = "Ivshmem device \
-        \"(backend file) path=</path/to/a/file>,size=<file_size/must=2^n>\"";
+        \"path=</path/to/a/file>,size=<file_size/must=2^n>,\
+        subsys=<pci_subsystem_id/default=0>\". \
+        Pass several values after one --ivshmem, same as --disk/--pmem";
     pub fn parse(ivshmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("path").add("size");
+        parser.add("path").add("size").add("subsys");
         parser.parse(ivshmem).map_err(Error::ParseIvshmem)?;
         let path = parser
             .get("path")
             .map(PathBuf::from)
             .ok_or(Error::ParseIvshmemPathMissing)?;
+
+        // The guest tells several ivshmem devices apart by this value, so
+        // accept hex (`subsys=0x0101`) as well as decimal.
+        let subsystem_id = match parser.get("subsys") {
+            Some(s) => {
+                let s = s.trim();
+                let parsed =
+                    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                        u16::from_str_radix(hex, 16)
+                    } else {
+                        s.parse::<u16>()
+                    };
+                parsed.map_err(|_| Error::InvalidIvshmemSubsystemId(s.to_owned()))?
+            }
+            None => IVSHMEM_SUBSYSTEM_ID_GENERIC,
+        };
 
         let size = parser
             .convert::<ByteSized>("size")
@@ -2229,6 +2280,7 @@ impl IvshmemConfig {
         Ok(IvshmemConfig {
             path,
             size: size as usize,
+            subsystem_id,
         })
     }
 }
@@ -2431,11 +2483,26 @@ impl VmConfig {
         }
     }
 
-    pub fn update_ivshmem(&mut self, ivshmem_cfg: &IvshmemConfig) {
-        if let Some(ivshmem) = &mut self.ivshmem {
-            ivshmem.path = ivshmem_cfg.path.clone();
-            ivshmem.size = ivshmem_cfg.size;
+    /// Re-point the snapshot's ivshmem devices at the backend files supplied
+    /// by `--restore`.
+    ///
+    /// Entries are matched by position because the snapshot already fixed one
+    /// PCI BDF per entry. A length mismatch would silently drop the tail or
+    /// leave snapshot entries on stale paths, so it is rejected instead.
+    pub fn update_ivshmem(&mut self, ivshmem_cfgs: &[IvshmemConfig]) -> ValidationResult<()> {
+        if let Some(ivshmems) = &mut self.ivshmem {
+            if ivshmems.len() != ivshmem_cfgs.len() {
+                return Err(ValidationError::IvshmemCountMismatch {
+                    snapshot: ivshmems.len(),
+                    restore: ivshmem_cfgs.len(),
+                });
+            }
+            for (ivshmem, cfg) in ivshmems.iter_mut().zip(ivshmem_cfgs.iter()) {
+                ivshmem.path = cfg.path.clone();
+                ivshmem.size = cfg.size;
+            }
         }
+        Ok(())
     }
 
     pub fn update_pmem(&mut self, pmem_cfgs: &[PmemConfig]) {
@@ -2550,6 +2617,26 @@ impl VmConfig {
                 self.iommu |= pmem.iommu;
 
                 Self::validate_identifier(&mut id_list, &pmem.id)?;
+            }
+        }
+
+        if let Some(ivshmems) = &self.ivshmem {
+            // Guest drivers select their device by PCI subsystem id, and each
+            // device owns its backend file exclusively. Duplicates on either
+            // axis boot fine and then misbehave in the guest, so reject here.
+            let mut subsys_list = BTreeSet::new();
+            let mut path_list = BTreeSet::new();
+            for ivshmem in ivshmems {
+                if !subsys_list.insert(ivshmem.subsystem_id) {
+                    return Err(ValidationError::IvshmemSubsystemIdNotUnique(
+                        ivshmem.subsystem_id,
+                    ));
+                }
+                if !path_list.insert(ivshmem.path.clone()) {
+                    return Err(ValidationError::IvshmemPathNotUnique(
+                        ivshmem.path.to_string_lossy().to_string(),
+                    ));
+                }
             }
         }
 
@@ -2827,10 +2914,13 @@ impl VmConfig {
             });
         }
 
-        let mut ivshmem: Option<IvshmemConfig> = None;
-        if let Some(iv) = vm_params.ivshmem {
-            let ivshmem_conf = IvshmemConfig::parse(iv)?;
-            ivshmem = Some(ivshmem_conf);
+        let mut ivshmem: Option<Vec<IvshmemConfig>> = None;
+        if let Some(iv_list) = &vm_params.ivshmem {
+            let mut ivshmem_config_list = Vec::new();
+            for item in iv_list.iter() {
+                ivshmem_config_list.push(IvshmemConfig::parse(item)?);
+            }
+            ivshmem = Some(ivshmem_config_list);
         }
 
         #[cfg(feature = "guest_debug")]
@@ -3474,9 +3564,10 @@ mod tests {
         let restore_ivshmem = IvshmemConfig {
             path: PathBuf::from("/dev/shm/ivshmem-sandbox"),
             size: 1024 * 1024,
+            ..Default::default()
         };
 
-        vm_config.update_ivshmem(&restore_ivshmem);
+        vm_config.update_ivshmem(&[restore_ivshmem]).unwrap();
 
         assert_eq!(vm_config.ivshmem, None);
     }
@@ -3484,20 +3575,76 @@ mod tests {
     #[test]
     fn test_update_ivshmem_updates_existing_backend() {
         let mut vm_config = VmConfig {
-            ivshmem: Some(IvshmemConfig {
+            ivshmem: Some(vec![IvshmemConfig {
                 path: PathBuf::from("/dev/shm/ivshmem-template"),
                 size: 512 * 1024,
-            }),
+                ..Default::default()
+            }]),
             ..Default::default()
         };
         let restore_ivshmem = IvshmemConfig {
             path: PathBuf::from("/dev/shm/ivshmem-sandbox"),
             size: 1024 * 1024,
+            ..Default::default()
         };
 
-        vm_config.update_ivshmem(&restore_ivshmem);
+        vm_config
+            .update_ivshmem(std::slice::from_ref(&restore_ivshmem))
+            .unwrap();
 
-        assert_eq!(vm_config.ivshmem, Some(restore_ivshmem));
+        assert_eq!(vm_config.ivshmem, Some(vec![restore_ivshmem]));
+    }
+
+    #[test]
+    fn test_update_ivshmem_updates_each_device_in_order() {
+        let mut vm_config = VmConfig {
+            ivshmem: Some(vec![
+                IvshmemConfig {
+                    path: PathBuf::from("/dev/shm/tmpl-generic"),
+                    size: 512 * 1024,
+                    subsystem_id: 0x0000,
+                },
+                IvshmemConfig {
+                    path: PathBuf::from("/dev/shm/tmpl-gauge"),
+                    size: 512 * 1024,
+                    subsystem_id: 0x0101,
+                },
+            ]),
+            ..Default::default()
+        };
+        let restore = vec![
+            IvshmemConfig {
+                path: PathBuf::from("/dev/shm/sb-generic"),
+                size: 512 * 1024,
+                ..Default::default()
+            },
+            IvshmemConfig {
+                path: PathBuf::from("/dev/shm/sb-gauge"),
+                size: 512 * 1024,
+                ..Default::default()
+            },
+        ];
+
+        vm_config.update_ivshmem(&restore).unwrap();
+
+        let got = vm_config.ivshmem.unwrap();
+        assert_eq!(got[0].path, PathBuf::from("/dev/shm/sb-generic"));
+        assert_eq!(got[1].path, PathBuf::from("/dev/shm/sb-gauge"));
+        // Topology comes from the snapshot, never from the restore request.
+        assert_eq!(got[0].subsystem_id, 0x0000);
+        assert_eq!(got[1].subsystem_id, 0x0101);
+    }
+
+    #[test]
+    fn test_update_ivshmem_rejects_count_mismatch() {
+        let mut vm_config = VmConfig {
+            ivshmem: Some(vec![IvshmemConfig::default(), IvshmemConfig::default()]),
+            ..Default::default()
+        };
+
+        assert!(vm_config
+            .update_ivshmem(&[IvshmemConfig::default()])
+            .is_err());
     }
 
     #[test]
