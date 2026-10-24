@@ -40,6 +40,12 @@ images:
     tag: v0.7.3
     pullPolicy: IfNotPresent
 
+  # Node-local ops-agent: applies CubeOps-desired config to dynamicconf.
+  opsAgent:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops-agent
+    tag: v0.7.3
+    pullPolicy: IfNotPresent
+
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
     tag: v0.7.3
@@ -787,6 +793,21 @@ minio:
       - ReadWriteOnce
   resources: {}
 
+# Node-local ops-agent DaemonSet: applies CubeOps-desired quota config to the
+# cubelet dynamicconf on every compute node. Shares the compute placement of
+# the cubelet DaemonSet and runs hostNetwork so CubeOps reaches it on the
+# node IP.
+opsAgent:
+  port: 8890
+  resources: {}
+  extraEnv: []
+  # Shared token authenticating CubeOps pushes to ops-agent. Required in
+  # compute-only mode (externalControlPlane.enabled) — reference a pre-created
+  # Secret, since the release Secret is not rendered without the control plane.
+  tokenSecret:
+    name: ""
+    key: cube-ops-agent-token
+
 cubeNode:
   enabled: true
   podAnnotations:
@@ -808,7 +829,9 @@ cubeNode:
   # networking on that node. Trade-offs: NetworkPolicy cannot govern sandbox
   # traffic, and cubelet / CubeS3lvol / cube-egress bind on the host (cubelet
   # is unauthenticated — firewall it like kubelet). Set false only when
-  # NetworkPolicy must apply.
+  # NetworkPolicy must apply. On the Pod network CubeOps cannot push quota to
+  # ops-agent (pushes target the node IP); quota then converges via the 300s
+  # pull reconcile instead.
   hostNetwork: true
   # One-time acknowledgement read by the cube-node-hostnet preflight Hook
   # (pre-install/pre-upgrade/pre-rollback): changing hostNetwork on an existing

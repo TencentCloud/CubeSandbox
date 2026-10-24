@@ -191,6 +191,36 @@ tolerations:
 {{- printf "%s-master" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.opsAgentName" -}}
+{{- printf "%s-ops-agent" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- /*
+ops-agent deploys on compute nodes whenever a CubeOps endpoint is reachable:
+the built-in control plane, or an external one (compute-only mode).
+*/ -}}
+{{- define "cube.opsAgentEnabled" -}}
+{{- if and .Values.cubeNode.enabled (or (eq (include "cube.opsEnabled" .) "true") .Values.externalControlPlane.enabled) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- /*
+Token Secret backing the ops-agent shared token; an operator-supplied Secret
+wins so compute-only mode can authenticate without the release Secret.
+*/ -}}
+{{- define "cube.opsAgentTokenSecretName" -}}
+{{- $ts := default dict .Values.opsAgent.tokenSecret -}}
+{{- if ne (($ts.name) | default "") "" -}}
+{{- $ts.name -}}
+{{- else -}}
+{{- include "cube.secretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsAgentTokenKey" -}}
+{{- $ts := default dict .Values.opsAgent.tokenSecret -}}
+{{- default "cube-ops-agent-token" (($ts.key) | default "") -}}
+{{- end -}}
+
 {{- define "cube.apiName" -}}
 {{- printf "%s-api" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -501,6 +531,22 @@ via secretKeyRef at runtime, so there is no fresh-install double generation.
 {{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
 {{- if and $existing $existing.data (index $existing.data "cube-template-callback-token") -}}
 {{- index $existing.data "cube-template-callback-token" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+cube.opsAgentToken resolves the shared secret gating CubeOps pushes to the
+node-local ops-agent (POST /api/v1/config/quota; CubeOps reads it as
+CUBE_OPS_OPSAGENT_TOKEN, ops-agent as OPS_AGENT_SHARED_TOKEN). Persisted as the
+cube-ops-agent-token key in the release Secret, looked up first so upgrades
+keep the value stable; consumed via secretKeyRef by both sides.
+*/}}
+{{- define "cube.opsAgentToken" -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
+{{- if and $existing $existing.data (index $existing.data "cube-ops-agent-token") -}}
+{{- index $existing.data "cube-ops-agent-token" | b64dec -}}
 {{- else -}}
 {{- randAlphaNum 32 -}}
 {{- end -}}
@@ -929,6 +975,19 @@ podAffinity in templatecenter.yaml enforces.
 {{- .Values.externalControlPlane.opsEndpoint -}}
 {{- else -}}
 {{- printf "%s.%s.svc.%s:%v" (include "cube.opsName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.cubeOps.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+opsEndpoint guaranteed to carry an http(s):// scheme. The external value may
+already include one, the in-cluster FQDN does not.
+*/ -}}
+{{- define "cube.opsEndpointHTTP" -}}
+{{- $e := include "cube.opsEndpoint" . -}}
+{{- if or (hasPrefix "http://" $e) (hasPrefix "https://" $e) -}}
+{{- $e -}}
+{{- else -}}
+{{- printf "http://%s" $e -}}
 {{- end -}}
 {{- end -}}
 
@@ -1392,6 +1451,9 @@ node-init conflict check. Only ports whose holder we can name are listed; see
 deploy/kubernetes/images/scripts/node-prep-lib.sh. */}}
 {{- define "cube.hostPortReserved" -}}
 {{- $ports := list "9998" "9999" "9966" -}}
+{{- if eq (include "cube.opsAgentEnabled" .) "true" -}}
+{{- $ports = append $ports (.Values.opsAgent.port | default 8890 | toString) -}}
+{{- end -}}
 {{- if eq (include "cube.s3lvolEnabled" .) "true" -}}
 {{- $ports = append $ports (((.Values.cubeS3lvol).listenPort) | default 4420 | toString) -}}
 {{- end -}}
