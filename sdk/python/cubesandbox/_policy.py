@@ -30,6 +30,76 @@ AuditLevel = Literal["full", "metadata", "none"]
 SECRET_MAX_BYTES = 2048
 
 
+def _match_token(value: Any) -> Optional[str]:
+    """Normalize a host/sni the way the datapath compares it.
+
+    Trim, drop one trailing dot, and lowercase. ``None`` and non-strings
+    stay unset so callers can tell "field absent" from "field present".
+    """
+    if not isinstance(value, str):
+        return None
+    return value.strip().lower().removesuffix(".")
+
+
+def _is_catch_all_token(value: Any) -> bool:
+    return _match_token(value) == "*"
+
+
+def _rule_is_catch_all(match: Any) -> bool:
+    if isinstance(match, Match):
+        return _is_catch_all_token(match.host) or _is_catch_all_token(match.sni)
+    if isinstance(match, dict):
+        return _is_catch_all_token(match.get("host")) or _is_catch_all_token(match.get("sni"))
+    return False
+
+
+def _catch_all_error(index: int, name: str, reason: str) -> ValueError:
+    return ValueError(f'network.rules[{index}] "{name}": {reason}')
+
+
+def _validate_catch_all_rule(rule: Any, index: int) -> None:
+    """Reject catch-all shapes the proxy must not install.
+
+    ``*`` learns every domain onto ports 80 and 443. Credential injection
+    on that match would attach one secret to every destination, and any
+    other port would open more than the default HTTP/HTTPS set.
+    """
+    if isinstance(rule, Rule):
+        name = rule.name
+        match = rule.match
+        action = rule.action
+        inject = action.inject if action is not None else None
+        port = match.port if match is not None else None
+        scheme = match.scheme if match is not None else None
+    elif isinstance(rule, dict):
+        name = rule.get("name") or ""
+        match = rule.get("match") or {}
+        action = rule.get("action") or {}
+        inject = action.get("inject") if isinstance(action, dict) else None
+        port = match.get("port") if isinstance(match, dict) else None
+        scheme = match.get("scheme") if isinstance(match, dict) else None
+    else:
+        return
+    if not _rule_is_catch_all(match):
+        return
+    if inject:
+        raise _catch_all_error(
+            index, str(name),
+            'catch-all match "*" cannot be combined with action.inject',
+        )
+    if port is None:
+        return
+    scheme_norm = _match_token(scheme)
+    if port == 80 and scheme_norm == "http":
+        return
+    if port == 443 and scheme_norm == "https":
+        return
+    raise _catch_all_error(
+        index, str(name),
+        'catch-all match "*" only allows port 80/http or 443/https',
+    )
+
+
 def _validate_inject_secret(secret: Any, field: str) -> None:
     if not isinstance(secret, str):
         return
@@ -352,6 +422,11 @@ def _convert_e2b_per_host_rules(rules: Dict[str, Any]) -> List[Dict[str, Any]]:
             raise ValueError(
                 "network.rules host keys must be non-empty strings"
             )
+        if _is_catch_all_token(host):
+            raise _catch_all_error(
+                len(converted), host,
+                'catch-all match "*" cannot be combined with action.inject',
+            )
         if not isinstance(entries, list):
             raise ValueError(
                 f"network.rules[{host!r}] must be a list of transform entries, "
@@ -512,6 +587,8 @@ def _build_network_payload(
         # that ``_serialize_rule`` understands.
         normalized_rules = _normalize_rules_arg(network["rules"])
         if normalized_rules:
+            for index, rule in enumerate(normalized_rules):
+                _validate_catch_all_rule(rule, index)
             net["rules"] = [_serialize_rule(r) for r in normalized_rules]
     return net
 

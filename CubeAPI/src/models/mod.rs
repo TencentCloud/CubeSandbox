@@ -303,6 +303,12 @@ impl EgressRulesInput {
             if host.is_empty() {
                 return Err("network rules host keys must be non-empty".to_string());
             }
+            if host.trim().trim_end_matches('.').eq_ignore_ascii_case("*") {
+                return Err(format!(
+                    "network.rules[{}] \"{host}\": catch-all match \"*\" cannot be combined with action.inject",
+                    out.len()
+                ));
+            }
             if entries.is_empty() {
                 return Err(format!(
                     "network rules[{host}] is empty; every host must declare at least one transform"
@@ -1287,6 +1293,18 @@ mod tests {
         assert_eq!(rules[0].name, "n");
         // The deny verdict is exactly what E2B's shape cannot carry.
         assert!(!rules[0].action.allow);
+    }
+
+    #[test]
+    fn update_network_rejects_e2b_catch_all_host() {
+        let err = update_parts(
+            r#"{"rules": {"*": [{"transform": {"headers": {"Authorization": "sek"}}}]}}"#,
+        )
+        .expect_err("catch-all host must be rejected");
+        assert!(
+            err.contains("cannot be combined with action.inject"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -138,8 +138,8 @@ In strict mode with `allow_internet_access=false`, `0.0.0.0/0` is already instal
 
 - `name`: human-readable rule name, used for audit and template merging.
 - `match.scheme`: `http` or `https`.
-- `match.sni`: TLS SNI. Supports exact domains and leading `*.` wildcard domains.
-- `match.host`: HTTP Host. Supports domains, `host:port`, IPv4, IPv4 CIDR, and leading `*.` wildcard domains.
+- `match.sni`: TLS SNI. Supports exact domains, leading `*.` wildcard domains, and standalone `*`.
+- `match.host`: HTTP Host. Supports domains, `host:port`, IPv4, IPv4 CIDR, leading `*.` wildcard domains, and standalone `*`.
 - `match.method`: list of HTTP methods; methods are ORed.
 - `match.path`: exact by default; one trailing `*` means prefix match, such as `/v1/*`.
 - `action.allow`: `true` allows, `false` rejects.
@@ -153,6 +153,14 @@ CubeVS only extracts network reachability from `rules[].match.sni` and `rules[].
 
 Therefore, when `allow_internet_access=false`, each L7 rule that should actually reach an external HTTP/HTTPS service should include `host` or `sni`. A rule with only `method` and `path` may never reach CubeEgress, because the network layer has no destination target to allow.
 :::
+
+### Catch-all `*`
+
+`host="*"` or `sni="*"` matches every DNS name. It is not the same as `*.example.com`, which still matches subdomains only.
+
+Use it with `allow_internet_access=false`. Every name the sandbox resolves with a DNS A query is learned, and only TCP/80 and TCP/443 on those addresses are allowed through CubeEgress. Other ports stay denied. A connection that never sends a DNS query — a cached address or a literal public IP — is not allowed.
+
+`*` does not accept credential injection. A port other than 80 (with `http`) or 443 (with `https`) is rejected. Exact names and `*.example.com` rules still take priority over `*`.
 
 ## Control-plane merge and programming flow
 

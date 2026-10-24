@@ -235,6 +235,8 @@ Behavior:
   schemes.
 - Inject only fires when `action.allow=true`. A deny rule with
   `inject=[…]` is a configuration error — the inject is dropped.
+- `host="*"` and `sni="*"` cannot carry `inject`. That match is every
+  destination, so the API rejects the rule instead of installing the secret.
 
 The point of the inject path is that the secret stays on the
 operator side: it lives in the rule list, gets pushed to

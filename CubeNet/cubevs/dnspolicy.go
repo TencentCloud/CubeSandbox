@@ -89,6 +89,37 @@ type dnsAllowRule struct {
 	domain string
 }
 
+// IsDNSCatchAll reports whether a host or SNI is the standalone "*" token.
+// Comparison matches the datapath: trim, drop one trailing dot, lowercase.
+// "*.example.com" is not a catch-all.
+func IsDNSCatchAll(raw string) bool {
+	token := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	return token == "*"
+}
+
+// makeCatchAllDNSAllowRule builds the single dns_allow_v2 entry for "*".
+// prefixlen 0 is the shortest LPM key, so every name matches it unless a
+// longer exact or "*." rule wins. port == 0 keeps port_count at 0, which the
+// datapath expands to {80/http, 443/https}. A non-zero port writes that one
+// default tuple. The rule is L7-only: no L3_ALLOWED bit, so learning does not
+// open other ports.
+func makeCatchAllDNSAllowRule(port uint16, scheme uint8) dnsAllowRule {
+	value := dnsAllowValue{
+		NameLen: 1,
+		Flags:   uint8(netPolicyFlagL7Required),
+	}
+	if port != 0 {
+		applyPortsToDNSAllowValue(&value, []l7PortEntry{{
+			Port:   htonsPort(port),
+			Scheme: scheme,
+		}})
+	}
+	return dnsAllowRule{
+		value:  value,
+		domain: "*",
+	}
+}
+
 func buildDNSAllowRules(domains []string) ([]dnsAllowRule, error) {
 	rules := make([]dnsAllowRule, 0, len(domains))
 	indexByKey := make(map[dnsAllowKey]int, len(domains))

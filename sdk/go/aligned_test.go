@@ -148,6 +148,62 @@ func TestCreateRejectsInvalidRulePortScheme(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsCatchAllWithoutInject(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	disabled := false
+	if _, err := client.Create(context.Background(), CreateOptions{
+		AllowInternetAccess: &disabled,
+		Network: NetworkOptions{Rules: []Rule{
+			{Name: "audit_all_http", Match: Match{Scheme: "http", Host: "*"}, Action: Action{Allow: true, Audit: "metadata"}},
+			{Name: "audit_all_https", Match: Match{Scheme: "https", SNI: "*"}, Action: Action{Allow: true, Audit: "metadata"}},
+		}},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestCreateRejectsCatchAllInjectAndCustomPort(t *testing.T) {
+	client := NewClient(Config{APIURL: "http://127.0.0.1:1", TemplateID: "tpl-env"})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "leak",
+			Match:  Match{Host: "*"},
+			Action: Action{Allow: true, Inject: []Inject{{Header: "Authorization", Secret: "sek"}}},
+		}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with action.inject") {
+		t.Fatalf("err=%v, want catch-all inject rejection", err)
+	}
+	_, err = client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "scoped",
+			Match:  Match{Host: "*.example.com"},
+			Action: Action{Allow: true, Inject: []Inject{{Header: "Authorization", Secret: "sek"}}},
+		}}},
+	})
+	if err != nil && strings.Contains(err.Error(), "catch-all") {
+		t.Fatalf("wildcard inject rejected: %v", err)
+	}
+	_, err = client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "wide",
+			Match:  Match{Host: "*", Port: 8443, Scheme: "https"},
+			Action: Action{Allow: true},
+		}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only allows port 80/http or 443/https") {
+		t.Fatalf("err=%v, want catch-all port rejection", err)
+	}
+}
+
 func TestCreateRejectsOversizedInjectSecret(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

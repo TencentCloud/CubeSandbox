@@ -187,8 +187,39 @@ function serializeAction(action: Action): Record<string, unknown> {
   return out;
 }
 
+function matchToken(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
+function isCatchAllToken(value: string | undefined): boolean {
+  return matchToken(value) === "*";
+}
+
+function ruleIsCatchAll(match: Match | undefined): boolean {
+  return isCatchAllToken(match?.host) || isCatchAllToken(match?.sni);
+}
+
+/** Reject catch-all shapes the proxy must not install. */
+export function validateCatchAllRule(rule: Rule, index: number): void {
+  if (!ruleIsCatchAll(rule.match)) return;
+  if (rule.action.inject && rule.action.inject.length > 0) {
+    throw new Error(
+      `network.rules[${index}] "${rule.name}": catch-all match "*" cannot be combined with action.inject`,
+    );
+  }
+  if (rule.match.port === undefined) return;
+  const scheme = matchToken(rule.match.scheme);
+  if (rule.match.port === 80 && scheme === "http") return;
+  if (rule.match.port === 443 && scheme === "https") return;
+  throw new Error(
+    `network.rules[${index}] "${rule.name}": catch-all match "*" only allows port 80/http or 443/https`,
+  );
+}
+
 /** Serialize a {@link Rule} to the wire JSON shape used by CubeEgress. */
-export function serializeRule(rule: Rule): Record<string, unknown> {
+export function serializeRule(rule: Rule, index = 0): Record<string, unknown> {
+  validateCatchAllRule(rule, index);
   return {
     name: rule.name,
     match: serializeMatch(rule.match),
@@ -245,6 +276,11 @@ export function convertE2BPerHostRules(rules: E2BPerHostRules): Rule[] {
   for (const [host, entries] of Object.entries(rules)) {
     if (!host) {
       throw new Error("network.rules host keys must be non-empty strings");
+    }
+    if (isCatchAllToken(host)) {
+      throw new Error(
+        `network.rules[${converted.length}] "${host}": catch-all match "*" cannot be combined with action.inject`,
+      );
     }
     if (!Array.isArray(entries)) {
       throw new Error(`network.rules[${host}] must be a list of transform entries`);

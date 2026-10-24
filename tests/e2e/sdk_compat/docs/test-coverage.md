@@ -155,6 +155,16 @@ policies after an SDK pause + connect resume:
 - restricted public access still requires a traffic access token after resume
   (CubeProxy HostIP rewrite path).
 
+`cases/network/test_l7_catch_all.py` covers a `"*"` L7 rule
+(`network_l7_egress` + `network_dns_allow`, CubeSandbox only):
+
+- a name resolved inside the sandbox can use ports 80 and 443, and the HTTPS
+  response is allowed by the catch-all;
+- another open port on that name stays closed;
+- a public IP that was never looked up stays closed;
+- a rule for one name is applied before the catch-all;
+- creating a catch-all rule that injects credentials is rejected.
+
 Shared TCP / public-access probe helpers live in
 `framework/network_probe.py`.
 

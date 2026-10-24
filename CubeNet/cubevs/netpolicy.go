@@ -694,6 +694,10 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 	// so the datapath keeps the plain /32 L3 access alongside the L7 /48
 	// interception for that host.
 	markL3AllowedByPlainCover(dnsAllowRules, dnsAllowDomains)
+	if opts.DNSCatchAll != nil {
+		// Append after the plain-cover mark so "*" does not inherit L3_ALLOWED.
+		dnsAllowRules = append(dnsAllowRules, makeCatchAllDNSAllowRule(opts.DNSCatchAll.Port, opts.DNSCatchAll.Scheme))
+	}
 
 	var denyOutEntries []denyOutPolicyEntry
 	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
@@ -710,11 +714,17 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 		return nil, err
 	}
 
+	l7Names := l7DNSDomainNames(l7DNSRules)
+	if opts.DNSCatchAll != nil {
+		// The catch-all entry is not a makeDNSAllowRule domain. Counting it
+		// here turns on the existing learning flag without a new mvm_meta field.
+		l7Names = append(l7Names, "*")
+	}
 	plan := &netPolicyPlan{
 		allowOutEntries: allowOutEntries,
 		dnsAllowRules:   dnsAllowRules,
 		denyOutEntries:  denyOutEntries,
-		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSDomainNames(l7DNSRules)),
+		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7Names),
 	}
 	if err := validateNetPolicyPlan(plan); err != nil {
 		return nil, err

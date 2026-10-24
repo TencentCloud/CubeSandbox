@@ -1726,6 +1726,7 @@ pub(crate) fn build_cube_network_config(
         for (index, rule) in rs.iter().enumerate() {
             validate_egress_rule_match(&rule.r#match, index)?;
             validate_egress_rule_injects(rule, index)?;
+            validate_catch_all_rule(rule, index)?;
         }
     }
 
@@ -1763,6 +1764,55 @@ pub(crate) fn build_cube_network_config(
 /// Cap inline inject secrets at e2b's maxNetworkRuleHeaderValueLen (2048).
 /// That is well under nginx's default large_client_header_buffers (8k).
 const SECRET_MAX_BYTES: usize = 2048;
+
+fn match_token(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn is_catch_all_token(value: &str) -> bool {
+    match_token(value) == "*"
+}
+
+fn rule_is_catch_all(rule_match: &EgressRuleMatch) -> bool {
+    rule_match.sni.as_deref().is_some_and(is_catch_all_token)
+        || rule_match.host.as_deref().is_some_and(is_catch_all_token)
+}
+
+/// `*` learns every domain onto ports 80 and 443. Injection on that match
+/// would send one secret to every destination, and any other port would
+/// open more than the default HTTP/HTTPS set.
+fn validate_catch_all_rule(rule: &EgressRule, index: usize) -> AppResult<()> {
+    if !rule_is_catch_all(&rule.r#match) {
+        return Ok(());
+    }
+    if rule
+        .action
+        .inject
+        .as_ref()
+        .is_some_and(|injects| !injects.is_empty())
+    {
+        return Err(AppError::BadRequest(format!(
+            "network.rules[{index}] \"{}\": catch-all match \"*\" cannot be combined with action.inject",
+            rule.name
+        )));
+    }
+    let Some(port) = rule.r#match.port else {
+        return Ok(());
+    };
+    let scheme = rule
+        .r#match
+        .scheme
+        .as_deref()
+        .map(match_token)
+        .unwrap_or_default();
+    if (port == 80 && scheme == "http") || (port == 443 && scheme == "https") {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "network.rules[{index}] \"{}\": catch-all match \"*\" only allows port 80/http or 443/https",
+        rule.name
+    )))
+}
 
 fn validate_egress_rule_injects(rule: &EgressRule, index: usize) -> AppResult<()> {
     let Some(injects) = rule.action.inject.as_ref() else {
@@ -3370,6 +3420,66 @@ mod tests {
                 },
             }]),
         }
+    }
+
+    #[test]
+    fn catch_all_rejects_inject_and_custom_port() {
+        let err = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                host: Some("*".to_string()),
+                ..Default::default()
+            })),
+        );
+        assert!(err.is_ok(), "catch-all without inject should pass: {err:?}");
+
+        let mut leaking = network_with_match(EgressRuleMatch {
+            host: Some("*".to_string()),
+            ..Default::default()
+        });
+        leaking.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        let err = build_cube_network_config(None, Some(&leaking))
+            .expect_err("catch-all inject must be rejected");
+        assert!(
+            err.to_string()
+                .contains("cannot be combined with action.inject"),
+            "{err}"
+        );
+
+        let mut wildcard = network_with_match(EgressRuleMatch {
+            host: Some("*.example.com".to_string()),
+            ..Default::default()
+        });
+        wildcard.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        let err = build_cube_network_config(None, Some(&wildcard));
+        assert!(
+            err.is_ok(),
+            "wildcard domain inject should still pass: {err:?}"
+        );
+
+        let err = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                sni: Some("*".to_string()),
+                port: Some(8443),
+                scheme: Some("https".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect_err("custom catch-all port must be rejected");
+        assert!(
+            err.to_string()
+                .contains("only allows port 80/http or 443/https"),
+            "{err}"
+        );
     }
 
     #[test]

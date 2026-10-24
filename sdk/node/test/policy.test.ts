@@ -54,6 +54,44 @@ describe("serializeRule", () => {
     });
   });
 
+  it("accepts a catch-all rule without injection", () => {
+    const wire = serializeRule({
+      name: "audit_all",
+      match: { host: "*", scheme: "http" },
+      action: { allow: true, audit: "metadata" },
+    });
+    expect(wire.match).toEqual({ host: "*", scheme: "http" });
+  });
+
+  it("rejects injection on a catch-all rule", () => {
+    expect(() =>
+      serializeRule({
+        name: "leak",
+        match: { host: "*" },
+        action: { allow: true, inject: [{ header: "Authorization", secret: "sek" }] },
+      }),
+    ).toThrow(/cannot be combined with action.inject/);
+  });
+
+  it("still allows injection on a wildcard domain", () => {
+    const wire = serializeRule({
+      name: "scoped",
+      match: { host: "*.example.com" },
+      action: { allow: true, inject: [{ header: "Authorization", secret: "sek" }] },
+    });
+    expect((wire.match as Record<string, unknown>).host).toBe("*.example.com");
+  });
+
+  it("rejects a catch-all port other than 80 or 443", () => {
+    expect(() =>
+      serializeRule({
+        name: "wide",
+        match: { sni: "*", port: 8443, scheme: "https" },
+        action: { allow: true },
+      }),
+    ).toThrow(/only allows port 80\/http or 443\/https/);
+  });
+
   it("serializes injected credentials", () => {
     const wire = serializeRule({
       name: "r1",
@@ -203,6 +241,14 @@ describe("convertE2BPerHostRules", () => {
       "e2b-transform-api.example.com-0",
       "e2b-transform-api.example.com-1",
     ]);
+  });
+
+  it("rejects a catch-all host key", () => {
+    expect(() =>
+      convertE2BPerHostRules({
+        "*": [{ transform: { headers: { Authorization: "sek" } } }],
+      }),
+    ).toThrow(/cannot be combined with action.inject/);
   });
 
   it("rejects a header value over the byte cap", () => {

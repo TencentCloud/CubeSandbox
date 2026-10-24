@@ -19,11 +19,21 @@ type L7Target struct {
 	Scheme uint8  // one of L7SchemeNone / L7SchemeHTTP / L7SchemeHTTPS
 }
 
+// DNSCatchAll is the userspace description of one dns_allow_v2 rule that
+// matches every queried name. It is not stored in mvm_meta. Port == 0 means
+// the default {80/http, 443/https} set (port_count 0). Port 80 or 443 selects
+// only that default port.
+type DNSCatchAll struct {
+	Port   uint16
+	Scheme uint8
+}
+
 type MVMOptions struct {
 	AllowInternetAccess *bool
 	AllowOut            *[]string   // CIDR, IP, or domain
 	L7AllowOut          *[]L7Target // Host + optional (port, scheme) for L7 policy handling
 	DenyOut             *[]string   // CIDR or IP
+	DNSCatchAll         *DNSCatchAll
 }
 
 type tapMetadataMapOps interface {
