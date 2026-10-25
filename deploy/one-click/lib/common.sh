@@ -2951,9 +2951,9 @@ die_yum_docker_packages_missing() {
   printf '[one-click] ERROR: failed to install %s with yum.\n' "${packages}" >&2
   if host_is_opencloudos "${release}"; then
     cat >&2 <<'EOF'
-[one-click]   On OpenCloudOS, docker is provided by moby in AppStream, and
-[one-click]   docker-compose is published only in the EPOL repository.
-[one-click]   Enable EPOL and install the packages, then rerun this installer:
+[one-click]   A common cause on OpenCloudOS: docker comes from moby in
+[one-click]   AppStream, while docker-compose is published only in EPOL.
+[one-click]   If that is the cause here, enable EPOL and rerun this installer:
 [one-click]     sudo dnf install -y epol-release
 EOF
     printf '[one-click]     sudo dnf install -y %s\n' "${packages}" >&2
@@ -2971,8 +2971,9 @@ EOF
   exit 1
 }
 
-# yum_install_or_die <package>...: install via yum, or abort with a hint.
-yum_install_or_die() {
+# yum_install_docker_or_die <package>...: install via yum, or abort with the
+# Docker-specific hint. Do not reuse for other packages.
+yum_install_docker_or_die() {
   local packages="$*"
   yum install -y "$@" || die_yum_docker_packages_missing "${packages}"
 }
@@ -2991,7 +2992,7 @@ install_docker() {
       apt-get install -y -qq docker.io docker-compose
       ;;
     yum)
-      yum_install_or_die docker docker-compose
+      yum_install_docker_or_die docker docker-compose
       ;;
   esac
   systemctl enable docker && systemctl start docker
@@ -3013,7 +3014,7 @@ install_docker_compose() {
       apt-get update -qq && apt-get install -y -qq docker-compose
       ;;
     yum)
-      yum_install_or_die docker-compose
+      yum_install_docker_or_die docker-compose
       ;;
   esac
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then

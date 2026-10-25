@@ -14,11 +14,14 @@ trap 'rm -rf "${tmp}"' EXIT
 
 # --- OS detection -----------------------------------------------------------
 printf 'ID="opencloudos"\n' >"${tmp}/opencloudos-release"
-printf 'ID="rhel"\n' >"${tmp}/rhel-release"
+printf 'ID="rhel"\nID_LIKE="rhel centos fedora"\n' >"${tmp}/rhel-release"
+# ID does not name OpenCloudOS, only ID_LIKE does.
+printf 'ID="tencentos"\nID_LIKE="centos rhel opencloudos"\n' >"${tmp}/id-like-release"
 
 [[ "$(host_os_release_field ID "${tmp}/opencloudos-release")" == "opencloudos" ]] \
   || die "quoted ID not stripped"
 host_is_opencloudos "${tmp}/opencloudos-release" || die "opencloudos not detected"
+host_is_opencloudos "${tmp}/id-like-release" || die "ID_LIKE opencloudos not detected"
 host_is_opencloudos "${tmp}/rhel-release" && die "rhel wrongly detected"
 host_is_opencloudos "${tmp}/missing" && die "missing os-release wrongly detected"
 
@@ -62,7 +65,8 @@ grep -Fq "failed to install docker docker-compose with yum" <<<"${out}" \
   || die "generic failure hint missing"
 grep -Fq "systemctl should not run" <<<"${out}" && die "systemctl ran after yum failure"
 
-# docker is already usable here, so the message must only mention docker-compose.
+# docker is deliberately absent from PATH (so `docker compose version` fails)
+# and only docker-compose is requested; the hint must name just that package.
 out="$(PATH="${bin}" install_docker_compose 2>&1)" && die "install_docker_compose should fail on yum failure"
 grep -Fq "failed to install docker-compose with yum" <<<"${out}" \
   || die "compose install failure should name only docker-compose"
