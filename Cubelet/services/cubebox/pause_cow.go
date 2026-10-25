@@ -166,7 +166,7 @@ func sandboxHoldsLivePausePackage(sb *cubeboxstore.CubeBox, snapID string) bool 
 	if sb == nil || !sandboxLiveForPauseKeep(sb) {
 		return false
 	}
-	return cubeBoxLabel(sb, constants.MasterAnnotationRuntimeRestoreSnapshotID) == snapID
+	return sb.RestoreBaseID() == snapID
 }
 
 func sandboxLiveForPauseKeep(sb *cubeboxstore.CubeBox) bool {
@@ -323,7 +323,7 @@ func (s *service) updateWithPauseCow(
 		return rsp, nil
 	}
 	// Own volume if this sandbox has one; otherwise the start template/snapshot.
-	memoryObject, snapshotType, err := preparePauseMemoryArtifact(ctx, stepLog, sb, snapID, memorySizeBytes, backend)
+	memoryObject, snapshotType, err := preparePauseMemoryArtifact(ctx, stepLog, sb, snapID, prevLiveSnap, memorySizeBytes, backend)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -653,6 +653,7 @@ func pauseSnapshotIDForGC(sb *cubeboxstore.CubeBox) string {
 		return id
 	}
 	runtimeIDs := []string{
+		strings.TrimSpace(sb.RuntimeBaseID()),
 		strings.TrimSpace(sb.Labels[constants.MasterAnnotationRuntimeSnapshotID]),
 		strings.TrimSpace(sb.Annotations[constants.MasterAnnotationRuntimeSnapshotID]),
 	}

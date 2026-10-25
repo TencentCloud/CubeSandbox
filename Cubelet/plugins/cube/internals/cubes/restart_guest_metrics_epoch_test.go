@@ -84,3 +84,22 @@ func recoverCubeBoxThroughDB(t *testing.T, cb *cubeboxstore.CubeBox) *cubeboxsto
 	require.NoError(t, err)
 	return got
 }
+
+// Recovery must not invent memory lineage from legacy labels or
+// create-request annotations: an unset lineage means "no base", so the next
+// Commit/Pause takes a full capture.
+func TestRecoverAllCubeboxDoesNotDeriveLineageFromMetadata(t *testing.T) {
+	startedAt := time.Date(2026, time.October, 25, 1, 0, 0, 0, time.UTC)
+	legacy := testRecoveryCubeBox(startedAt)
+	legacy.AddLabels(map[string]string{
+		"cube.master.runtime.snapshot.id": "snap-legacy",
+	})
+	legacy.AddAnnotations(map[string]string{
+		"cube.master.appsnapshot.template.id": "tpl-T",
+	})
+	got := recoverCubeBoxThroughDB(t, legacy)
+	require.Nil(t, got.MemoryLineage)
+	require.Equal(t, "", got.RuntimeBaseID())
+	require.Equal(t, "", got.RestoreBaseID())
+	require.Equal(t, "", got.LaunchAncestorID())
+}

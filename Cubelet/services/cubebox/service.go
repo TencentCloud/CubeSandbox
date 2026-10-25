@@ -1167,7 +1167,10 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		cb.Containers = append(cb.Containers, cc)
 	}
 	if opt != nil && opt.GetPrivateWithCubeboxStore() {
-		v, err := jsoniter.MarshalIndent(box, "", "    ")
+		// Serialize a deep copy: MemoryLineage is mutated concurrently by
+		// Commit/Pause under its own lock, and marshaling the live object
+		// would race with those writers and could emit a half-updated tree.
+		v, err := jsoniter.MarshalIndent(box.DeepCopy(), "", "    ")
 		if err != nil {
 			log.L.Errorf("marshal cubebox to json failed: %v", err)
 		}

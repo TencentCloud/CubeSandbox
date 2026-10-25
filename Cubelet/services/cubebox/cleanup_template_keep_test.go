@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -46,7 +45,7 @@ func TestCleanupTemplateKeepsLivePauseAndHonorLiveFalseDeletes(t *testing.T) {
 	}
 	live := newCubeboxWithStatusForTest("sb-live-keep", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(live, snap)
-	live.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
+	live.BindRestoreBase(snap)
 	listCubeboxesForTest = func() []*cubeboxstore.CubeBox { return []*cubeboxstore.CubeBox{live} }
 
 	deleted := 0

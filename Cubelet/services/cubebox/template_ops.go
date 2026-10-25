@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -218,7 +217,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 					// baseline before starting so metadata-fixup failures
 					// force the next commit to take a full snapshot.
 					bindingErr = persistRuntimeSnapshotBinding(
-						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, "",
 					)
 					return bindingErr
 				}, func() error {
@@ -236,9 +235,9 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
 			// Invalidate only once memory capture is about to start.
-			previousLabels := copyCubeBoxLabels(cb)
+			previousLineage := cb.MemoryLineageCopy()
 			bindingErr = persistRuntimeSnapshotBinding(
-				frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+				frozenCtx, s.cubeboxMgr.cubeboxManger, cb, "",
 			)
 			if bindingErr != nil {
 				return bindingErr
@@ -249,9 +248,9 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 				captureStarted = false
 				// A mislabeled shim rejected the action before touching the VM,
 				// so its previous incremental baseline is still valid.
-				restoreCubeBoxLabels(cb, previousLabels)
+				cb.RestoreMemoryLineage(previousLineage)
 				if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
-					setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
+					cb.ClearRuntimeBase()
 					return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
 				}
 			}
@@ -414,7 +413,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// Master; publishing the incremental baseline is only an optimization.
 	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
 	defer publishCancel()
-	if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID, time.Now().UTC()); err != nil {
+	if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID); err != nil {
 		stepLog.Warnf("snapshot %s completed but baseline/component version sync failed; future commits will use a safe fallback: %v", rsp.TemplateID, err)
 	}
 	stepLog.Infof("CommitSandbox completed successfully: snapshotPath=%s", snapshotPath)

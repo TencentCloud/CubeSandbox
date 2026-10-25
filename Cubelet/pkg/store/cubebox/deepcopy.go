@@ -135,6 +135,7 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 
 	copied.HostMetricsBaseline = cb.HostMetricsBaselineCopy()
 	copied.GuestMetricsEpoch = cb.GuestMetricsEpochCopy()
+	copied.MemoryLineage = cb.MemoryLineageCopy()
 
 	return copied
 }

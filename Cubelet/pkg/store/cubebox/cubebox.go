@@ -260,6 +260,13 @@ type CubeBox struct {
 	GuestMetricsEpoch     *GuestMetricsEpoch `json:"guest_metrics_epoch,omitempty"`
 	guestMetricsEpochLock sync.RWMutex       `json:"-"`
 
+	// MemoryLineage is the incremental-snapshot ancestry of this sandbox.
+	// Nil means an upgraded row that has not been migrated yet. Non-nil,
+	// including an empty struct, means the bindings are authoritative and
+	// create-request annotations must not be consulted.
+	MemoryLineage     *MemoryLineage `json:"memory_lineage,omitempty"`
+	memoryLineageLock sync.RWMutex   `json:"-"`
+
 	sync.RWMutex `json:"-"`
 }
 

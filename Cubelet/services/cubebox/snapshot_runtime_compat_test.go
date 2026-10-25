@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -385,16 +384,16 @@ func TestCaptureLegacyCommitMemoryAdvancesBaselineOnlyOnSuccess(t *testing.T) {
 	}{
 		{"success", nil, nil, []string{"invalidate", "capture"}, "next"},
 		{"invalidation failure", invalidateFailure, nil, []string{"invalidate"}, "previous"},
-		{"capture or metadata failure", nil, captureFailure, []string{"invalidate", "capture"}, runtimeSnapshotBindingInvalidID},
+		{"capture or metadata failure", nil, captureFailure, []string{"invalidate", "capture"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
-			setRuntimeSnapshotBindingLabels(cb, "previous", time.Now().UTC())
+			setRuntimeSnapshotBinding(cb, "previous")
 			var calls []string
 			err := captureLegacyCommitMemory(cb, "next", func() error {
 				calls = append(calls, "invalidate")
 				if tc.invalidateErr == nil {
-					setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
+					cb.ClearRuntimeBase()
 				}
 				return tc.invalidateErr
 			}, func() error {
