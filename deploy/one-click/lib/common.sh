@@ -2918,8 +2918,7 @@ EOF
   exit 1
 }
 
-# host_os_release_field: print one key from an os-release file.
-# Quotes around the value are stripped. A missing file or key prints nothing.
+# Print one key from an os-release file (quotes stripped); missing prints nothing.
 host_os_release_field() {
   local key="$1"
   local release="${2:-/etc/os-release}"
@@ -2932,7 +2931,7 @@ host_os_release_field() {
   printf '%s\n' "${value}"
 }
 
-# host_is_opencloudos: true when ID or ID_LIKE names OpenCloudOS.
+# True when ID or ID_LIKE names OpenCloudOS.
 host_is_opencloudos() {
   local release="${1:-/etc/os-release}"
   local id like
@@ -2944,36 +2943,38 @@ host_is_opencloudos() {
   return 1
 }
 
-# die_yum_docker_packages_missing: yum could not install docker / docker-compose.
-# On OpenCloudOS, docker (moby) is in AppStream and docker-compose is only in
-# EPOL, so a host without EPOL fails with "No match for argument: docker-compose"
-# (#1959). Say that explicitly instead of leaving the raw dnf error alone.
+# die_yum_docker_packages_missing <packages> [release]: report a failed yum
+# install. OpenCloudOS ships docker-compose only in EPOL, not AppStream (#1959).
 die_yum_docker_packages_missing() {
-  local release="${1:-/etc/os-release}"
+  local packages="$1"
+  local release="${2:-/etc/os-release}"
+  printf '[one-click] ERROR: failed to install %s with yum.\n' "${packages}" >&2
   if host_is_opencloudos "${release}"; then
     cat >&2 <<'EOF'
-[one-click] ERROR: failed to install docker and docker-compose with yum.
 [one-click]   On OpenCloudOS, docker is provided by moby in AppStream, and
 [one-click]   docker-compose is published only in the EPOL repository.
 [one-click]   Enable EPOL and install the packages, then rerun this installer:
 [one-click]     sudo dnf install -y epol-release
-[one-click]     sudo dnf install -y docker docker-compose
+EOF
+    printf '[one-click]     sudo dnf install -y %s\n' "${packages}" >&2
+    cat >&2 <<'EOF'
 [one-click]   If docker-compose is still missing, the EPOL mirror does not contain it.
 [one-click]   Check with: dnf repolist; rpm -q epol-release
 EOF
   else
     cat >&2 <<'EOF'
-[one-click] ERROR: failed to install docker and docker-compose with yum.
 [one-click]   The packages were not found in the enabled repositories, or the
-[one-click]   package manager returned an error. Install Docker and Docker Compose,
-[one-click]   then rerun this installer.
+[one-click]   package manager returned an error. Install them manually, then
+[one-click]   rerun this installer.
 EOF
   fi
   exit 1
 }
 
+# yum_install_or_die <package>...: install via yum, or abort with a hint.
 yum_install_or_die() {
-  yum install -y "$@" || die_yum_docker_packages_missing
+  local packages="$*"
+  yum install -y "$@" || die_yum_docker_packages_missing "${packages}"
 }
 
 install_docker() {

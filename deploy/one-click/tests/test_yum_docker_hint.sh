@@ -23,9 +23,30 @@ host_is_opencloudos "${tmp}/rhel-release" && die "rhel wrongly detected"
 host_is_opencloudos "${tmp}/missing" && die "missing os-release wrongly detected"
 
 # --- OpenCloudOS hint --------------------------------------------------------
-out="$(die_yum_docker_packages_missing "${tmp}/opencloudos-release" 2>&1)" \
+out="$(die_yum_docker_packages_missing "docker docker-compose" "${tmp}/opencloudos-release" 2>&1)" \
   && die "missing packages should abort"
+grep -Fq "failed to install docker docker-compose with yum" <<<"${out}" \
+  || die "attempted packages missing from the error"
 grep -Fq "epol-release" <<<"${out}" || die "OpenCloudOS epol hint missing"
+grep -Fq "sudo dnf install -y docker docker-compose" <<<"${out}" \
+  || die "OpenCloudOS remediation missing the attempted packages"
+
+# A compose-only failure must not claim docker failed as well (review on #2010).
+out="$(die_yum_docker_packages_missing "docker-compose" "${tmp}/opencloudos-release" 2>&1)" \
+  && die "compose-only failure should abort"
+grep -Fq "failed to install docker-compose with yum" <<<"${out}" \
+  || die "compose-only error should name only docker-compose"
+grep -Fq "failed to install docker and docker-compose" <<<"${out}" \
+  && die "compose-only error wrongly claims docker failed"
+grep -Fq "sudo dnf install -y docker-compose" <<<"${out}" \
+  || die "compose-only remediation should name only docker-compose"
+
+# --- Generic hint for non-OpenCloudOS ---------------------------------------
+out="$(die_yum_docker_packages_missing "docker docker-compose" "${tmp}/rhel-release" 2>&1)" \
+  && die "missing packages should abort on a non-OpenCloudOS host"
+grep -Fq "failed to install docker docker-compose with yum" <<<"${out}" \
+  || die "generic error missing the attempted packages"
+grep -Fq "epol-release" <<<"${out}" && die "EPOL hint leaked to a non-OpenCloudOS host"
 
 # --- yum failure behavior -----------------------------------------------------
 # Only the stub yum + tools the hint needs are on PATH, so host docker cannot
@@ -37,10 +58,15 @@ printf '#!/bin/sh\necho "systemctl should not run" >&2\nexit 0\n' >"${bin}/syste
 chmod +x "${bin}/yum" "${bin}/systemctl"
 
 out="$(PATH="${bin}" install_docker 2>&1)" && die "install_docker should fail on yum failure"
-grep -Fq "failed to install docker and docker-compose with yum" <<<"${out}" \
+grep -Fq "failed to install docker docker-compose with yum" <<<"${out}" \
   || die "generic failure hint missing"
 grep -Fq "systemctl should not run" <<<"${out}" && die "systemctl ran after yum failure"
 
+# docker is already usable here, so the message must only mention docker-compose.
 out="$(PATH="${bin}" install_docker_compose 2>&1)" && die "install_docker_compose should fail on yum failure"
+grep -Fq "failed to install docker-compose with yum" <<<"${out}" \
+  || die "compose install failure should name only docker-compose"
+grep -Fq "failed to install docker and docker-compose" <<<"${out}" \
+  && die "compose install failure wrongly claims docker failed"
 
 echo "yum docker hint tests OK"
