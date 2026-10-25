@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -18,6 +19,7 @@ const (
 
 const (
 	reapSessionsInterval = time.Second * 5
+	snatUsageMaxAge      = reapSessionsInterval * 2
 	maxSessions          = 1048576
 	maxSessionPercentage = 0.8
 )
@@ -109,7 +111,24 @@ func (s icmpConntrackState) String() string {
 var (
 	once     sync.Once
 	vsEvents = make(chan Event, 1024)
+
+	cachedSNATSessionUsage atomic.Pointer[snatSessionUsageSnapshot]
 )
+
+type snatSessionUsageSnapshot struct {
+	usageByNodeIP map[uint32]snatSessionUsage
+	collectedAt   time.Time
+}
+
+type snatSessionUsage struct {
+	sessionsInUse uint64
+	portsInUse    uint64
+}
+
+type snatPort struct {
+	nodeIP   uint32
+	nodePort uint16
+}
 
 var tcpTimeouts = map[tcpConntrackState]time.Duration{
 	tcpCTNone:        time.Second * 0, // 2 mins in kernel
@@ -277,6 +296,52 @@ func reportCount(count int) {
 	}
 }
 
+func publishSNATSessionUsage(usageByNodeIP map[uint32]snatSessionUsage, collectedAt time.Time) {
+	snapshot := &snatSessionUsageSnapshot{
+		usageByNodeIP: make(map[uint32]snatSessionUsage, len(usageByNodeIP)),
+		collectedAt:   collectedAt,
+	}
+	for nodeIP, usage := range usageByNodeIP {
+		snapshot.usageByNodeIP[nodeIP] = usage
+	}
+	cachedSNATSessionUsage.Store(snapshot)
+}
+
+func invalidateSNATSessionUsage() {
+	cachedSNATSessionUsage.Store(nil)
+}
+
+func readCachedSNATSessionUsage(now time.Time) (map[uint32]snatSessionUsage, error) {
+	snapshot := cachedSNATSessionUsage.Load()
+	if snapshot == nil {
+		return nil, errors.New("SNAT session usage cache is not initialized")
+	}
+	if age := now.Sub(snapshot.collectedAt); age > snatUsageMaxAge {
+		return nil, fmt.Errorf("SNAT session usage cache is stale: age=%s max_age=%s", age, snatUsageMaxAge)
+	}
+
+	usageByNodeIP := make(map[uint32]snatSessionUsage, len(snapshot.usageByNodeIP))
+	for nodeIP, usage := range snapshot.usageByNodeIP {
+		usageByNodeIP[nodeIP] = usage
+	}
+	return usageByNodeIP, nil
+}
+
+func recordSNATSessionUsage(usageByNodeIP map[uint32]snatSessionUsage, portsInUse map[snatPort]struct{}, value *natSession) {
+	if value.PacketClass != snatPacketClass || value.NodeIP == 0 {
+		return
+	}
+
+	usage := usageByNodeIP[value.NodeIP]
+	usage.sessionsInUse++
+	port := snatPort{nodeIP: value.NodeIP, nodePort: value.NodePort}
+	if _, exists := portsInUse[port]; !exists {
+		portsInUse[port] = struct{}{}
+		usage.portsInUse++
+	}
+	usageByNodeIP[value.NodeIP] = usage
+}
+
 func sessionExpired(now uint64, key *sessionKey, sess *natSession) bool {
 	var timeout uint64
 	switch key.Protocol {
@@ -329,6 +394,15 @@ func deleteSessions(egressSessions, ingressSessions *ebpf.Map,
 }
 
 func reapSessions() {
+	// A failed collection must not leave the previous snapshot visible.
+	// Successful scans publish a replacement before returning.
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			invalidateSNATSessionUsage()
+		}
+	}()
+
 	m, err := loadPinnedMap(MapNameEgressSessions)
 	if err != nil {
 		enqueueEvent(Event{
@@ -374,6 +448,7 @@ func reapSessions() {
 	}
 
 	reportCount(count)
+	succeeded = true
 }
 
 // reapSessionMaps removes expired egress sessions and their ingress
@@ -384,41 +459,48 @@ func reapSessions() {
 // map from the first bucket. The last key is deleted after the walk finishes.
 func reapSessionMaps(egressSessions, ingressSessions *ebpf.Map, now uint64) (int, error) {
 	var (
-		key     sessionKey
-		value   natSession
-		prevKey sessionKey
-		prevVal natSession
-		hasPrev bool
-		count   int
+		key           sessionKey
+		value         natSession
+		prevKey       sessionKey
+		prevVal       natSession
+		hasPrev       bool
+		count         int
+		usageByNodeIP = make(map[uint32]snatSessionUsage)
+		portsInUse    = make(map[snatPort]struct{})
 	)
 	iter := egressSessions.Iterate()
 	for iter.Next(&key, &value) {
-		if hasPrev {
-			deleteExpiredSession(egressSessions, ingressSessions, now, &prevKey, &prevVal)
+		if hasPrev && deleteExpiredSession(egressSessions, ingressSessions, now, &prevKey, &prevVal) {
+			recordSNATSessionUsage(usageByNodeIP, portsInUse, &prevVal)
 		}
 		prevKey = key
 		prevVal = value
 		hasPrev = true
 		count++
 	}
-	if hasPrev {
-		deleteExpiredSession(egressSessions, ingressSessions, now, &prevKey, &prevVal)
+	if hasPrev && deleteExpiredSession(egressSessions, ingressSessions, now, &prevKey, &prevVal) {
+		recordSNATSessionUsage(usageByNodeIP, portsInUse, &prevVal)
 	}
 	if err := iter.Err(); err != nil {
 		return count, err
 	}
+	publishSNATSessionUsage(usageByNodeIP, time.Now())
 	return count, nil
 }
 
-func deleteExpiredSession(egressSessions, ingressSessions *ebpf.Map, now uint64, key *sessionKey, sess *natSession) {
+func deleteExpiredSession(egressSessions, ingressSessions *ebpf.Map, now uint64, key *sessionKey, sess *natSession) bool {
 	if !sessionExpired(now, key, sess) {
-		return
+		return true
 	}
+
+	sessionPresent := true
 	if err := deleteSessions(egressSessions, ingressSessions, key, sess); err != nil {
 		enqueueEvent(Event{
 			Error:   err,
 			Message: "failed to delete sessions",
 		})
+	} else {
+		sessionPresent = false
 	}
 	if !sessionClosedNormally(key, sess) {
 		enqueueEvent(Event{
@@ -426,4 +508,5 @@ func deleteExpiredSession(egressSessions, ingressSessions *ebpf.Map, now uint64,
 			Message: egressSession(key, sess, now),
 		})
 	}
+	return sessionPresent
 }

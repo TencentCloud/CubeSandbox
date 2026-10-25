@@ -752,6 +752,12 @@ func (s *NetworkController) restoreRecoveredCubeVSMetadata(state *managedState) 
 	if device == nil || device.ID != state.SandboxID || device.Ifindex != state.TapIfIndex || !device.IP.Equal(net.ParseIP(state.SandboxIP)) {
 		return fmt.Errorf("cubevs TAP metadata identity mismatch for sandbox %s: got=%#v want_ifindex=%d want_ip=%s", state.SandboxID, device, state.TapIfIndex, state.SandboxIP)
 	}
+	if err := s.cubevsAdapter.EnsureSandboxTrafficMetrics(net.ParseIP(state.SandboxIP).To4()); err != nil {
+		CubeLog.WithContext(context.Background()).Warnf(
+			"network runtime recover ensure sandbox traffic metrics failed; continuing without counters: sandbox_id=%s tap=%s ifindex=%d sandbox_ip=%s err=%v",
+			state.SandboxID, state.TapName, state.TapIfIndex, state.SandboxIP, err,
+		)
+	}
 	return nil
 }
 

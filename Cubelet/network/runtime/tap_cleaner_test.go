@@ -36,6 +36,7 @@ func TestCleanupTapForReuseDeletesStateBeforeMarkReady(t *testing.T) {
 		"cubevs_port_mapping_deleted",
 		"cubevs_policy_cleaned",
 		"cubevs_tap_metadata_deleted",
+		"cubevs_metrics_deleted",
 		"cubeegress_delete",
 		"cubeegress_verify",
 		"runtime_cleaned",
@@ -155,7 +156,7 @@ func TestCleanupStateOnlyResidueDeletesStateAndReleasesOwnership(t *testing.T) {
 	if err := controller.cleanupStateOnlyResidue(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"cubevs_port_mapping_deleted", "cubevs_policy_cleaned", "cubevs_tap_metadata_deleted", "cubeegress_delete", "cubeegress_verify"}
+	want := []string{"cubevs_port_mapping_deleted", "cubevs_policy_cleaned", "cubevs_tap_metadata_deleted", "cubevs_metrics_deleted", "cubeegress_delete", "cubeegress_verify"}
 	if !reflect.DeepEqual(recorder.events, want) {
 		t.Fatalf("events = %#v, want %#v", recorder.events, want)
 	}
@@ -264,6 +265,24 @@ func TestMaintenanceRetriesCleaningWithoutDestroyingTap(t *testing.T) {
 	}
 	if adapter.destroyCount != 0 {
 		t.Fatalf("Destroy calls = %d, want 0", adapter.destroyCount)
+	}
+}
+
+func TestCleanupTapForReuseContinuesOnMetricsDeleteFailure(t *testing.T) {
+	controller, state := newCleanerTestState(t, nil)
+	adapter := controller.cubevsAdapter.(*fakeCubeVSAdapter)
+	defaultDenyCallsBefore := len(adapter.defaultDenyPolicyCalls)
+	adapter.deleteMetricsErr = errors.New("delete sandbox metrics failed")
+
+	if err := controller.cleanupTapOnce(state, StateFileDeleting, "test"); err != nil {
+		t.Fatalf("cleanup failed on metrics deletion error: %v", err)
+	}
+	poolState, owner, ok := controller.tapPool.StateByName(state.TapName)
+	if !ok || poolState != TapPoolReady || owner != "" {
+		t.Fatalf("tap state=%s owner=%s ok=%v, want Ready without owner", poolState, owner, ok)
+	}
+	if got, want := len(adapter.defaultDenyPolicyCalls), defaultDenyCallsBefore+1; got != want {
+		t.Fatalf("default-deny calls = %d, want %d", got, want)
 	}
 }
 

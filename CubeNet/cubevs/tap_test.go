@@ -2,6 +2,7 @@ package cubevs
 
 import (
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -107,6 +108,25 @@ func TestDeleteTAPDeviceMetadataEntriesLookupErrorDoesNotPartiallyDelete(t *test
 	}
 	if _, ok := ifindexMap.entries[ifindex]; !ok {
 		t.Fatal("ifindex metadata was deleted after reverse lookup failed")
+	}
+}
+
+func TestAddTAPDeviceContinuesWithoutMetricsMap(t *testing.T) {
+	mountBpffs(t)
+	pinTAPMetadataMapsWithoutMetrics(t)
+
+	const ifindex = uint32(41)
+	ip := net.ParseIP("10.0.0.41")
+	if err := AddTAPDevice(ifindex, ip, "sandbox-41", 1, MVMOptions{}); err != nil {
+		t.Fatalf("AddTAPDevice failed without metrics map: %v", err)
+	}
+
+	device, err := GetTAPDevice(ifindex)
+	if err != nil {
+		t.Fatalf("GetTAPDevice: %v", err)
+	}
+	if device.ID != "sandbox-41" || !device.IP.Equal(ip) {
+		t.Fatalf("registered TAP=%+v, want sandbox-41 at %s", device, ip)
 	}
 }
 

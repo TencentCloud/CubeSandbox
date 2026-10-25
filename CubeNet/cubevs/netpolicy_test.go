@@ -1276,15 +1276,26 @@ func newDenyOutOuterMap(t *testing.T) *ebpf.Map {
 	return outer
 }
 
-// pinTAPMetadataMaps pins the two maps UpsertTAPDeviceMetadata writes.
+// pinTAPMetadataMaps pins all maps UpsertTAPDeviceMetadata writes.
 func pinTAPMetadataMaps(t *testing.T) {
 	t.Helper()
-	pin := func(name string, valueSize uint32) {
+	pinTAPMetadataMapsWithMetrics(t, true)
+}
+
+func pinTAPMetadataMapsWithoutMetrics(t *testing.T) {
+	t.Helper()
+	pinTAPMetadataMapsWithMetrics(t, false)
+}
+
+func pinTAPMetadataMapsWithMetrics(t *testing.T, withMetrics bool) {
+	t.Helper()
+	pin := func(name string, valueSize, flags uint32) {
 		m, err := ebpf.NewMap(&ebpf.MapSpec{
 			Type:       ebpf.Hash,
 			KeySize:    uint32(unsafe.Sizeof(uint32(0))),
 			ValueSize:  valueSize,
 			MaxEntries: maxNetPolicyEntries,
+			Flags:      flags,
 		})
 		if err != nil {
 			t.Fatalf("create %s: %v", name, err)
@@ -1294,8 +1305,11 @@ func pinTAPMetadataMaps(t *testing.T) {
 			t.Fatalf("pin %s: %v", name, err)
 		}
 	}
-	pin(MapNameIfindexToMVMMetadata, uint32(unsafe.Sizeof(mvmMetadata{})))
-	pin(MapNameMVMIPToIfindex, uint32(unsafe.Sizeof(uint32(0))))
+	pin(MapNameIfindexToMVMMetadata, uint32(unsafe.Sizeof(mvmMetadata{})), 0)
+	pin(MapNameMVMIPToIfindex, uint32(unsafe.Sizeof(uint32(0))), 0)
+	if withMetrics {
+		pin(MapNameSandboxMetrics, uint32(unsafe.Sizeof(sandboxMetricsValue{})), unix.BPF_F_NO_PREALLOC)
+	}
 }
 
 func mustInner(t *testing.T, mapName string, ifindex uint32) *ebpf.Map {

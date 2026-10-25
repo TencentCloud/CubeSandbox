@@ -309,6 +309,10 @@ func persistentPolicyGenerationExists() (bool, error) {
 
 // Init should be called once before invoking any other CubeVS APIs.
 func Init(params Params) (retErr error) {
+	// Runtime-derived SNAT usage must not survive an in-process CubeVS
+	// reinitialization. The session reaper will publish a fresh snapshot.
+	cachedSNATSessionUsage.Store(nil)
+
 	generationExists, err := persistentPolicyGenerationExists()
 	if err != nil {
 		return err
@@ -328,6 +332,10 @@ func Init(params Params) (retErr error) {
 	// re-learned from the kernel neighbor table via fib, so always start from a
 	// fresh map. This also drops any stale pin with a different value size.
 	_ = os.Remove(pinPath(MapNameDirectNeigh)) // NOCC:Path Traversal()
+	// sandbox_metrics is runtime observability state. Recreate it so map
+	// definition changes don't make an existing pin incompatible with the new
+	// datapath object.
+	_ = os.Remove(pinPath(MapNameSandboxMetrics)) // NOCC:Path Traversal()
 
 	err = loadObject(params, loadLocalgw, "loadLocalgw")
 	if err != nil {

@@ -88,6 +88,38 @@ func TestStartupRecoverClassifiesStateAndHostTaps(t *testing.T) {
 	}
 }
 
+func TestRestoreRecoveredCubeVSMetadataEnsuresMetricsWhenIdentityMatches(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		ensureErr error
+	}{
+		{name: "ensure succeeds"},
+		{name: "ensure failure is best effort", ensureErr: errors.New("metrics map full")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			controller := newRecoverTestController(t)
+			state := recoverState("sandbox-metrics-recover", "10.30.0.30", 30, nil)
+			managed := &managedState{persistedState: *state, tap: recoverTap(state)}
+			adapter := controller.cubevsAdapter.(*fakeCubeVSAdapter)
+			adapter.ensureMetricsErr = tt.ensureErr
+			adapter.getTAPDeviceByIndex = map[uint32]*cubevs.TAPDevice{
+				uint32(state.TapIfIndex): {
+					IP:      net.ParseIP(state.SandboxIP).To4(),
+					ID:      state.SandboxID,
+					Ifindex: state.TapIfIndex,
+				},
+			}
+
+			if err := controller.restoreRecoveredCubeVSMetadata(managed); err != nil {
+				t.Fatalf("restoreRecoveredCubeVSMetadata() error = %v", err)
+			}
+			if len(adapter.ensuredMetricsIPs) != 1 || adapter.ensuredMetricsIPs[0] != state.SandboxIP {
+				t.Fatalf("ensuredMetricsIPs = %#v, want [%s]", adapter.ensuredMetricsIPs, state.SandboxIP)
+			}
+		})
+	}
+}
+
 func TestStartupRecoverStagesNoStateTapForCleanupBeforeReady(t *testing.T) {
 	controller := newRecoverTestController(t)
 	adapter := controller.tapAdapter.(*fakeTapDeviceAdapter)

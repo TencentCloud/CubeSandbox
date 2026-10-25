@@ -3,6 +3,7 @@ package cubevs
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/cilium/ebpf"
@@ -60,6 +61,14 @@ func ListTAPDevices() ([]TAPDevice, error) {
 
 // AddTAPDevice adds a new device to CubeVS.
 func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
+	// A reused sandbox IP starts a new metrics lifecycle. Clear any residual
+	// counters before publishing metadata that lets the datapath recreate them.
+	// Metrics are observability state: reset failure may leave stale counters
+	// after IP reuse, but it must not block TAP registration and forwarding.
+	if err := DeleteSandboxTrafficMetrics(ip); err != nil {
+		log.Printf("cubevs tap: reset sandbox traffic metrics failed; continuing with best-effort counters: sandbox_id=%s ifindex=%d sandbox_ip=%s err=%v",
+			id, ifindex, ip.String(), err)
+	}
 	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {
 		return err
 	}
@@ -76,6 +85,10 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint32) error {
 	if len(id) > maxIDLength {
 		return ErrTooLong
+	}
+	if err := EnsureSandboxTrafficMetrics(ip); err != nil {
+		log.Printf("cubevs tap: ensure sandbox traffic metrics failed; continuing without counters: sandbox_id=%s ifindex=%d sandbox_ip=%s err=%v",
+			id, ifindex, ip.String(), err)
 	}
 
 	mvmIP := ipToUint32(ip)
@@ -212,7 +225,14 @@ func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
 	if err := CleanupTAPDevicePolicy(ifindex); err != nil {
 		return err
 	}
-	return DeleteTAPDeviceMetadata(ifindex, ip)
+	if err := DeleteTAPDeviceMetadata(ifindex, ip); err != nil {
+		return err
+	}
+	if err := DeleteSandboxTrafficMetrics(ip); err != nil {
+		log.Printf("cubevs tap: delete sandbox traffic metrics failed; continuing after TAP deletion: ifindex=%d sandbox_ip=%s err=%v",
+			ifindex, ip.String(), err)
+	}
+	return nil
 }
 
 // DeleteTAPDeviceMetadata removes TAP identity metadata from CubeVS without touching
