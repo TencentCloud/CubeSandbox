@@ -21,28 +21,29 @@ func init() { gin.SetMode(gin.TestMode) }
 // field controls one method; nil fields return an error so tests fail loud
 // if a handler calls a method the test didn't set up.
 type fakeCM struct {
-	listSandboxes               func(ctx context.Context) (json.RawMessage, error)
-	getSandbox                  func(ctx context.Context, sandboxID, instanceType string) (json.RawMessage, error)
-	createSandbox               func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	deleteSandbox               func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	updateSandbox               func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	connectSandboxWithBody      func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	setSandboxTimeout           func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	refreshSandbox              func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	getSandboxLogs              func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	listSandboxesWithBody       func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	createSnapshot              func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	listSnapshots               func(ctx context.Context, params map[string]string) (json.RawMessage, error)
-	deleteSnapshot              func(ctx context.Context, snapshotID string) (json.RawMessage, error)
-	rollbackSandbox             func(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error)
-	listTemplates               func(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error)
-	createTemplateFromImage     func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	redoTemplate                func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	deleteTemplate              func(ctx context.Context, body interface{}) (json.RawMessage, error)
-	getTemplateBuildStatus      func(ctx context.Context, buildID string) (json.RawMessage, error)
-	startTemplateBuild          func(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error)
-	getTemplateCompat           func(ctx context.Context) (json.RawMessage, error)
-	adoptTemplateCompatBaseline func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	listSandboxes                    func(ctx context.Context) (json.RawMessage, error)
+	getSandbox                       func(ctx context.Context, sandboxID, instanceType string) (json.RawMessage, error)
+	createSandbox                    func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	deleteSandbox                    func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	updateSandbox                    func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	connectSandboxWithBody           func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	setSandboxTimeout                func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	refreshSandbox                   func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	getSandboxLogs                   func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	listSandboxesWithBody            func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	createSnapshot                   func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	listSnapshots                    func(ctx context.Context, params map[string]string) (json.RawMessage, error)
+	deleteSnapshot                   func(ctx context.Context, snapshotID string) (json.RawMessage, error)
+	rollbackSandbox                  func(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error)
+	listTemplates                    func(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error)
+	createTemplateFromImage          func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	createTemplateFromImageMultipart func(ctx context.Context, body interface{}, envd []byte) (json.RawMessage, error)
+	redoTemplate                     func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	deleteTemplate                   func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	getTemplateBuildStatus           func(ctx context.Context, buildID string) (json.RawMessage, error)
+	startTemplateBuild               func(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error)
+	getTemplateCompat                func(ctx context.Context) (json.RawMessage, error)
+	adoptTemplateCompatBaseline      func(ctx context.Context, body interface{}) (json.RawMessage, error)
 }
 
 func (f *fakeCM) ListSandboxes(ctx context.Context) (json.RawMessage, error) {
@@ -152,6 +153,13 @@ func (f *fakeCM) CreateTemplateFromImage(ctx context.Context, body interface{}) 
 		return nil, errFakeNotConfigured
 	}
 	return f.createTemplateFromImage(ctx, body)
+}
+func (f *fakeCM) CreateTemplateFromImageMultipart(ctx context.Context, body interface{}, envd []byte) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
+	if f.createTemplateFromImageMultipart == nil {
+		return nil, errFakeNotConfigured
+	}
+	return f.createTemplateFromImageMultipart(ctx, body, envd)
 }
 func (f *fakeCM) RedoTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	cubemaster.EnsureRequestID(ctx, body)

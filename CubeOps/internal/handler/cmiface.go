@@ -33,6 +33,7 @@ type CubeMasterClient interface {
 
 	ListTemplates(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error)
 	CreateTemplateFromImage(ctx context.Context, body interface{}) (json.RawMessage, error)
+	CreateTemplateFromImageMultipart(ctx context.Context, body interface{}, envd []byte) (json.RawMessage, error)
 	RedoTemplate(ctx context.Context, body interface{}) (json.RawMessage, error)
 	DeleteTemplate(ctx context.Context, body interface{}) (json.RawMessage, error)
 	GetTemplateBuildStatus(ctx context.Context, buildID string) (json.RawMessage, error)

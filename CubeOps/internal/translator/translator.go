@@ -653,6 +653,20 @@ func TransformCreateTemplateRequest(body map[string]interface{}) map[string]inte
 		}
 	}
 
+	// envd injection: a flat enableInjectEnvd flag from the frontend becomes the
+	// CubeMaster opt-in annotation nested under container_overrides.annotations.
+	// CubeMaster gates injection on this exact key/value (ShouldInjectEnvdIntoTemplate),
+	// and a request carrying it MUST be sent as multipart with the envd file.
+	if v, ok := body["enableInjectEnvd"].(bool); ok && v {
+		anns, _ := overrides["annotations"].(map[string]interface{})
+		if anns == nil {
+			anns = map[string]interface{}{}
+		}
+		anns["cube.master.inject_envd"] = "true"
+		overrides["annotations"] = anns
+		hasOverrides = true
+	}
+
 	if hasOverrides {
 		cmReq["container_overrides"] = overrides
 	}

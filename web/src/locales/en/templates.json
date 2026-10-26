@@ -85,7 +85,13 @@
     "registry": "Private registry",
     "registryUsername": "Registry username",
     "registryPassword": "Registry password",
-    "withCubeCa": "Bake CubeEgress CA into rootfs"
+    "withCubeCa": "Bake CubeEgress CA into rootfs",
+    "injectEnvd": "Inject envd",
+    "injectEnvdHint": "Writes the uploaded envd binary into the template rootfs at /usr/local/bin/envd. Ensure the binary architecture matches the target node.",
+    "envdFile": "envd binary",
+    "envdFileHint": "Click to upload a local envd binary (ELF, ≤16 MiB).",
+    "envdFileRequired": "Inject envd is enabled — please select an envd binary file.",
+    "envdFileTooLarge": "envd file exceeds the 16 MiB limit."
   },
   "delete": {
     "button": "Delete Template",

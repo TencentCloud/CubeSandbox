@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -699,8 +700,24 @@ func (h *SDKHandler) GetTemplate(c *gin.Context) {
 // the frontend's expected format. Only top-level keys become camelCase;
 // nested `replicas` and `createRequest` keep their internal snake_case
 
+// maxEnvdPayloadBytes caps the uploaded envd binary at 16MiB. Mirrors
+// CubeMaster's constants.MaxEnvdPayloadBytes; kept local so CubeOps does not
+// depend on CubeMaster internals. CubeMaster re-validates the final size/ELF.
+const maxEnvdPayloadBytes = 16 * 1024 * 1024
+
 // CreateTemplate — POST /api/v1/sdk/templates
+//
+// Two content types are accepted. A multipart/form-data body carries an envd
+// binary for injection (WebUI "inject envd" path); anything else is the
+// historical JSON path, left byte-for-byte unchanged.
 func (h *SDKHandler) CreateTemplate(c *gin.Context) {
+	// gin's ContentType() strips any boundary= parameter, so a bare compare is
+	// safe. Any non-multipart type (including empty/odd) falls through to JSON.
+	if c.ContentType() == "multipart/form-data" {
+		h.createTemplateMultipart(c)
+		return
+	}
+
 	ctx := c.Request.Context()
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -724,6 +741,96 @@ func (h *SDKHandler) CreateTemplate(c *gin.Context) {
 	}
 
 	raw, err := h.cm.CreateTemplateFromImage(ctx, cmReq)
+	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	writeSDKJobResponse(c, raw)
+}
+
+// createTemplateMultipart handles the envd-injection create path. The request
+// carries two parts: a JSON "request" field (same shape as the JSON path) and
+// an "envd" file field (the ELF binary). The request JSON still goes through
+// transformCreateTemplateRequest so field mapping stays identical to the JSON
+// path; the only extra work is reading the envd file and forwarding it to
+// CubeMaster as multipart.
+func (h *SDKHandler) createTemplateMultipart(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	mr, err := c.Request.MultipartReader()
+	if err != nil {
+		logging.G(ctx).Errorf("sdk: invalid multipart body: %v", err)
+		httputil.WriteError(c, http.StatusBadRequest, "invalid multipart body")
+		return
+	}
+
+	var (
+		reqJSON  []byte
+		envd     []byte
+		haveReq  bool
+		haveEnvd bool
+	)
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			logging.G(ctx).Errorf("sdk: read multipart part: %v", err)
+			httputil.WriteError(c, http.StatusBadRequest, "invalid multipart body")
+			return
+		}
+		switch part.FormName() {
+		case "request":
+			reqJSON, err = io.ReadAll(io.LimitReader(part, maxEnvdPayloadBytes+1))
+			haveReq = true
+		case "envd":
+			// +1 sentinel so a payload exactly at the limit still reads fully
+			// and an over-limit one is detected by the length check below.
+			envd, err = io.ReadAll(io.LimitReader(part, maxEnvdPayloadBytes+1))
+			haveEnvd = true
+		}
+		_ = part.Close()
+		if err != nil {
+			logging.G(ctx).Errorf("sdk: read multipart part %q: %v", part.FormName(), err)
+			httputil.WriteError(c, http.StatusBadRequest, "failed to read multipart body")
+			return
+		}
+	}
+
+	if !haveReq || len(reqJSON) == 0 {
+		httputil.WriteError(c, http.StatusBadRequest, "multipart field \"request\" is required")
+		return
+	}
+	if !haveEnvd {
+		httputil.WriteError(c, http.StatusBadRequest, "multipart file field \"envd\" is required")
+		return
+	}
+	if len(envd) > maxEnvdPayloadBytes {
+		httputil.WriteError(c, http.StatusRequestEntityTooLarge, "envd binary exceeds 16MiB")
+		return
+	}
+
+	var req map[string]interface{}
+	if err := json.Unmarshal(reqJSON, &req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid request JSON in multipart: %v", err)
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request JSON")
+		return
+	}
+
+	image, _ := req["image"].(string)
+	if strings.TrimSpace(image) == "" {
+		logging.G(ctx).Errorf("sdk: image is required")
+		httputil.WriteError(c, http.StatusBadRequest, "image is required")
+		return
+	}
+
+	cmReq := transformCreateTemplateRequest(req)
+	if _, ok := cmReq["instance_type"]; !ok {
+		cmReq["instance_type"] = sdkInstanceType
+	}
+
+	raw, err := h.cm.CreateTemplateFromImageMultipart(ctx, cmReq, envd)
 	if err != nil {
 		writeCMError(c, err)
 		return
