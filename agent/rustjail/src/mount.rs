@@ -24,12 +24,11 @@ use path_absolutize::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use crate::container::{detail_timing_enabled, DEFAULT_DEVICES};
+use crate::container::DEFAULT_DEVICES;
 use crate::log_child;
 use crate::sync::write_count;
 use cube::rootfs;
 use std::string::ToString;
-use std::time::Instant;
 
 // Info reveals information about a particular mounted filesystem. This
 // struct is populated from the content in the /proc/<pid>/mountinfo file.
@@ -169,11 +168,6 @@ pub fn init_rootfs(
     lazy_static::initialize(&OPTIONS);
     lazy_static::initialize(&PROPAGATION);
     lazy_static::initialize(&LINUXDEVICETYPE);
-    let m_start = Instant::now();
-    let m_canon;
-    let m_bind;
-    let m_spec;
-    let m_virt;
 
     let linux = &spec
         .linux
@@ -197,7 +191,6 @@ pub fn init_rootfs(
     let rootfs = (*root)
         .to_str()
         .ok_or_else(|| anyhow!("Could not convert rootfs path to string"))?;
-    m_canon = m_start.elapsed().as_micros();
 
     mount(None::<&str>, "/", None::<&str>, flags, None::<&str>)
         .map_err(|e| anyhow!("mount / faild.{:}", e))?;
@@ -213,7 +206,6 @@ pub fn init_rootfs(
         None::<&str>,
     )
     .map_err(|e| anyhow!("mount rootfs {:} faild.{:}", rootfs, e))?;
-    m_bind = m_start.elapsed().as_micros();
 
     let mut bind_mount_dev = false;
     for m in &spec.mounts {
@@ -278,8 +270,6 @@ pub fn init_rootfs(
         }
     }
 
-    m_spec = m_start.elapsed().as_micros();
-
     if let Some(ri_str) = spec.annotations.get(rootfs::ANNOTATION_K_ROOTFS_INFO) {
         let ri = rootfs::RootfsInfo::new(ri_str).map_err(|e| anyhow!("{}", e))?;
         if ri.mounts.is_some() {
@@ -305,7 +295,6 @@ pub fn init_rootfs(
         }
     }
 
-    m_virt = m_start.elapsed().as_micros();
     let olddir = unistd::getcwd()?;
     unistd::chdir(rootfs).map_err(|e| anyhow!("chdir {:} failed:{:}", rootfs, e))?;
 
@@ -323,18 +312,6 @@ pub fn init_rootfs(
     }
 
     unistd::chdir(&olddir)?;
-    if detail_timing_enabled() {
-        log_child!(
-            cfd_log,
-            "rootfs_detail_us: canon={}, root_mounts={}, spec_mounts={}, virtiofs={}, symlinks_devices={}, total={}",
-            m_canon,
-            m_bind.saturating_sub(m_canon),
-            m_spec.saturating_sub(m_bind),
-            m_virt.saturating_sub(m_spec),
-            m_start.elapsed().as_micros().saturating_sub(m_virt),
-            m_start.elapsed().as_micros()
-        );
-    }
 
     Ok(())
 }
@@ -893,10 +870,26 @@ fn mount_from(
     data: &str,
     _label: &str,
 ) -> Result<()> {
-    let mf_start = Instant::now();
+    mount_from_with(
+        cfd_log,
+        m,
+        rootfs,
+        flags,
+        data,
+        |src, dest, kind, flags, data| mount(Some(src), dest, kind, flags, data),
+    )
+}
+
+fn mount_from_with(
+    cfd_log: RawFd,
+    m: &Mount,
+    rootfs: &str,
+    flags: MsFlags,
+    data: &str,
+    mut mount_call: impl FnMut(&str, &str, Option<&str>, MsFlags, Option<&str>) -> nix::Result<()>,
+) -> Result<()> {
     let d = String::from(data);
     let dest = secure_join(rootfs, &m.destination);
-    let mf_secure = mf_start.elapsed().as_micros();
 
     let (src, src_is_dir) = if m.r#type.as_str() == "bind" {
         //If the mountpoint path already exists, do not overwrite it
@@ -919,9 +912,9 @@ fn mount_from(
         (tmp.to_str().unwrap().to_string(), true)
     };
 
-    let do_mount = |src: &str| {
-        mount(
-            Some(src),
+    let mut do_mount = |src: &str| {
+        mount_call(
+            src,
             dest.as_str(),
             Some(m.r#type.as_str()),
             flags,
@@ -930,7 +923,9 @@ fn mount_from(
     };
     let mut mounted = do_mount(&src);
     if let Err(e) = mounted {
-        if e == nix::errno::Errno::ENOENT {
+        if e == nix::errno::Errno::ENOENT
+            && matches!(fs::symlink_metadata(&dest), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
             // The destination is normally present in the image lower layer.
             // Probe by mounting first: a stat/create_dir_all on the overlay
             // path can cost milliseconds per component, while mount's own
@@ -939,7 +934,7 @@ fn mount_from(
             prepare_mount_destination(m, &dest, src_is_dir)?;
             mounted = do_mount(&src);
         }
-        mounted.map_err(|e| anyhow!(format!("mount error, dest:{:?} err{:?}", dest, e)))?;
+        mounted.with_context(|| format!("mount error, dest:{:?}", dest))?;
     }
     if flags.contains(MsFlags::MS_BIND)
         && flags.intersects(
@@ -951,10 +946,10 @@ fn mount_from(
                 | MsFlags::MS_SLAVE),
         )
     {
-        mount(
-            Some(dest.as_str()),
+        mount_call(
             dest.as_str(),
-            None::<&str>,
+            dest.as_str(),
+            None,
             flags | MsFlags::MS_REMOUNT,
             None::<&str>,
         )
@@ -962,17 +957,6 @@ fn mount_from(
             log_child!(cfd_log, "remout {}: {:?}", dest.as_str(), e);
             e
         })?;
-    }
-    let mf_total = mf_start.elapsed().as_micros();
-    if mf_total >= 500 && detail_timing_enabled() {
-        log_child!(
-            cfd_log,
-            "mount_from_us: dest={} type={} secure={} total={}",
-            dest,
-            m.r#type,
-            mf_secure,
-            mf_total
-        );
     }
     Ok(())
 }
@@ -1927,5 +1911,215 @@ mod tests {
         let dest = dir.path().join("a").join("b");
         prepare_mount_destination(&test_mount("tmpfs"), dest.to_str().unwrap(), true).unwrap();
         assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn mount_from_retries_missing_destinations_once() {
+        for kind in ["tmpfs", "bind-dir", "bind-file"] {
+            let dir = tempdir().unwrap();
+            let source = dir.path().join("source");
+            let is_file = kind == "bind-file";
+            if is_file {
+                std::fs::write(&source, b"source").unwrap();
+            } else {
+                std::fs::create_dir(&source).unwrap();
+            }
+            let mut spec = test_mount(if kind == "tmpfs" { "tmpfs" } else { "bind" });
+            spec.source = source.to_str().unwrap().to_string();
+            spec.destination = "/missing/target".to_string();
+            let destination = dir.path().join("missing/target");
+            let mut calls = 0;
+            mount_from_with(
+                -1,
+                &spec,
+                dir.path().to_str().unwrap(),
+                MsFlags::empty(),
+                "",
+                |_, target, _, _, _| {
+                    calls += 1;
+                    assert_eq!(Path::new(target), destination);
+                    if calls == 1 {
+                        assert!(!destination.exists());
+                        Err(nix::Error::ENOENT)
+                    } else {
+                        assert_eq!(calls, 2);
+                        assert_eq!(destination.is_file(), is_file);
+                        assert_eq!(destination.is_dir(), !is_file);
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[test]
+    fn mount_from_preserves_errors_and_existing_targets() {
+        for error in [
+            nix::Error::EPERM,
+            nix::Error::EINVAL,
+            nix::Error::ENOTDIR,
+            nix::Error::ENOENT,
+        ] {
+            let dir = tempdir().unwrap();
+            let spec = test_mount("tmpfs");
+            let destination = dir.path().join("dest");
+            std::fs::write(&destination, b"original").unwrap();
+            let mut calls = 0;
+            let result = mount_from_with(
+                -1,
+                &spec,
+                dir.path().to_str().unwrap(),
+                MsFlags::empty(),
+                "",
+                |_, _, _, _, _| {
+                    calls += 1;
+                    Err(error)
+                },
+            );
+            assert_eq!(
+                result.unwrap_err().downcast_ref::<nix::Error>(),
+                Some(&error)
+            );
+            assert_eq!(calls, 1);
+            assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+        }
+        let dir = tempdir().unwrap();
+        let spec = test_mount("tmpfs");
+        let mut calls = 0;
+        let result = mount_from_with(
+            -1,
+            &spec,
+            dir.path().to_str().unwrap(),
+            MsFlags::empty(),
+            "",
+            |_, _, _, _, _| {
+                calls += 1;
+                Err(nix::Error::ENOENT)
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn mount_from_fast_path_and_missing_source_do_not_create_targets() {
+        let dir = tempdir().unwrap();
+        let mut spec = test_mount("tmpfs");
+        let destination = dir.path().join("dest");
+        let mut calls = 0;
+        mount_from_with(
+            -1,
+            &spec,
+            dir.path().to_str().unwrap(),
+            MsFlags::empty(),
+            "",
+            |_, _, _, _, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(!destination.exists());
+        spec.r#type = "bind".to_string();
+        spec.source = dir
+            .path()
+            .join("missing-source")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(mount_from_with(
+            -1,
+            &spec,
+            dir.path().to_str().unwrap(),
+            MsFlags::MS_BIND,
+            "",
+            |_, _, _, _, _| {
+                panic!("missing source must fail before mount");
+            }
+        )
+        .is_err());
+        assert!(!destination.exists());
+    }
+
+    // Run explicitly in a private mount namespace with CAP_SYS_ADMIN:
+    // unshare -m --propagation private cargo test -p rustjail real_mount_ -- --ignored --test-threads=1
+    #[test]
+    #[ignore = "requires a private mount namespace and CAP_SYS_ADMIN"]
+    fn real_mount_preserves_existing_bind_file() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("dest");
+        std::fs::write(&source, b"mounted").unwrap();
+        std::fs::write(&destination, b"original").unwrap();
+        let mut spec = test_mount("bind");
+        spec.source = source.to_str().unwrap().to_string();
+        mount_from_with(
+            -1,
+            &spec,
+            dir.path().to_str().unwrap(),
+            MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+            "",
+            |src, dest, kind, flags, data| nix::mount::mount(Some(src), dest, kind, flags, data),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"mounted");
+        assert_eq!(
+            std::fs::write(&destination, b"changed")
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EROFS)
+        );
+        nix::mount::umount2(&destination, MntFlags::MNT_DETACH).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+    }
+
+    #[test]
+    #[ignore = "requires a private mount namespace and CAP_SYS_ADMIN"]
+    fn real_mount_creates_missing_parents_and_targets() {
+        for kind in ["tmpfs", "bind-dir", "bind-file"] {
+            let dir = tempdir().unwrap();
+            let source = dir.path().join("source");
+            if kind == "bind-file" {
+                std::fs::write(&source, b"mounted").unwrap();
+            } else {
+                std::fs::create_dir(&source).unwrap();
+                std::fs::write(source.join("child"), b"mounted").unwrap();
+            }
+            let mut spec = test_mount(if kind == "tmpfs" { "tmpfs" } else { "bind" });
+            spec.source = source.to_str().unwrap().to_string();
+            spec.destination = "/missing/target".to_string();
+            let flags = if kind == "tmpfs" {
+                MsFlags::empty()
+            } else {
+                MsFlags::MS_BIND
+            };
+            mount_from_with(
+                -1,
+                &spec,
+                dir.path().to_str().unwrap(),
+                flags,
+                "",
+                |src, dest, kind, flags, data| {
+                    nix::mount::mount(Some(src), dest, kind, flags, data)
+                },
+            )
+            .unwrap();
+            let destination = dir.path().join("missing/target");
+            if kind == "bind-file" {
+                assert_eq!(std::fs::read(&destination).unwrap(), b"mounted");
+            } else if kind == "bind-dir" {
+                assert_eq!(
+                    std::fs::read(destination.join("child")).unwrap(),
+                    b"mounted"
+                );
+            } else {
+                std::fs::write(destination.join("child"), b"tmpfs").unwrap();
+                assert_eq!(std::fs::read(destination.join("child")).unwrap(), b"tmpfs");
+            }
+            nix::mount::umount2(&destination, MntFlags::MNT_DETACH).unwrap();
+        }
     }
 }
