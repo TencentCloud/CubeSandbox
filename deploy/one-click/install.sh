@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck source=./scripts/common/config_set.sh
+source "${SCRIPT_DIR}/scripts/common/config_set.sh"
 
 # Install mode and upgrade-related flags (M3-1/M3-2/M3-3).
 #   --mode=install   full reinstall (existing config is reset)
@@ -50,6 +52,7 @@ snapshot_one_click_toggles "${ENV_FILE}"
 snapshot_one_click_database_intent "${ENV_FILE}"
 snapshot_one_click_observability_intent "${ENV_FILE}"
 snapshot_one_click_rcow_log_intent "${ENV_FILE}"
+snapshot_cube_set_process_env
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
@@ -63,6 +66,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   capture_one_click_toggle_dotenv_values
   # Only non-default storage log values; template defaults are not intent.
   capture_one_click_rcow_log_dotenv_values
+  capture_cube_set_dotenv_values "${ENV_FILE}"
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -305,6 +309,9 @@ apply_one_click_rcow_log_intent
 # Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
+# Re-apply this-run CUBE_SET_* so upgrade merge cannot keep stale overlays
+# from .one-click.env when .env declared a new set.
+apply_cube_set_intent
 
 # Old packages had no unified knob. Preserve a previous non-zero Master /
 # per-component DB instead of silently resetting all consumers to DB 0.
@@ -649,6 +656,14 @@ patch_cubemaster_external_deps() {
     patch_conf_external_instance_db "${tc_cfg}"
     one_click_patch_conf_redis_endpoint "${tc_cfg}" "CubeTemplateCenter" "${restore_bundled_redis}"
   fi
+}
+
+# Control-plane conf.yaml generation that runs right before
+# apply_cube_set_overrides; replayed on a scratch tree for the CUBE_SET dry run.
+generate_control_plane_configs() {
+  generate_cubemaster_config_ports
+  generate_templatecenter_config
+  patch_cubemaster_external_deps
 }
 
 # Fail fast when an external MySQL/Redis endpoint is unreachable or rejects the
@@ -2119,6 +2134,11 @@ patch_cubelet_config_template \
   "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" \
   "${CUBE_EGRESS_ADMIN_PORT}"
 
+# Fail on bad CUBE_SET_* before services are stopped or the tree is replaced.
+cube_set_generate_hook=""
+[[ "${DEPLOY_ROLE}" == "compute" ]] || cube_set_generate_hook=generate_control_plane_configs
+validate_cube_set_overrides "${PKG_ROOT}" "${cube_set_generate_hook}"
+
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
 if [[ -n "${detected_installed_role}" ]]; then
@@ -2130,6 +2150,14 @@ fi
 # the swap would leave the node with s3lvol upgraded and everything else
 # stopped.
 assert_safe_install_prefix "${INSTALL_PREFIX}"
+
+# Generated configs and CUBE_SET_* only write PKG_ROOT; do it while the node is
+# untouched so an I/O / ENOSPC failure leaves services running and the old tree
+# in place.
+if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+  generate_control_plane_configs
+fi
+apply_cube_set_overrides "${PKG_ROOT}"
 
 # CubeS3lvol is staged and upgraded first, in place, before anything else is
 # stopped. Both halves of that need something the steps below would take away:
@@ -2255,9 +2283,6 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
     copy_dir_contents "${PKG_ROOT}/CubeObservability" "${INSTALL_PREFIX}/CubeObservability"
   fi
 else
-  generate_cubemaster_config_ports
-  generate_templatecenter_config
-  patch_cubemaster_external_deps
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 
@@ -2327,6 +2352,10 @@ fi
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
 # mode is preserved across every later upsert rather than reverting to 0644.
 chmod 600 "${RUNTIME_ENV_FILE}"
+
+# CUBE_SET_* already landed on PKG_ROOT before the tree swap. Persist the
+# this-run groups (and drop stale indexes when .env declared a new set).
+persist_cube_set_overrides "${RUNTIME_ENV_FILE}"
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
