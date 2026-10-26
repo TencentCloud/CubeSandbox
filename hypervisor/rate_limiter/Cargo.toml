@@ -1,0 +1,9 @@
+[package]
+name = "rate_limiter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2.137"
+log = "0.4.17"
+vmm-sys-util = { workspace = true }

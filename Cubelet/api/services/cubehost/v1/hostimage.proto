@@ -1,0 +1,301 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+/*
+	Copyright The containerd Authors.
+
+	Licensed under the Apache License, Version 2.0 (the "License");
+	you may not use this file except in compliance with the License.
+	You may obtain a copy of the License at
+
+		http://www.apache.org/licenses/LICENSE-2.0
+
+	Unless required by applicable law or agreed to in writing, software
+	distributed under the License is distributed on an "AS IS" BASIS,
+	WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+	See the License for the specific language governing permissions and
+	limitations under the License.
+*/
+
+syntax = "proto3";
+
+package cubelet.services.cubebox.hostimage.v1;
+
+import "google/protobuf/any.proto";
+import "types/v1/images.proto";
+
+option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubehost/v1;cubehost";
+
+service CubeHostImageService {
+    // ReverseStreamForwardImage Reverse forwarding image download interface:
+    // 1. After launching the sandbox, the cubelet on the host first attempts to send a hello message 
+    //    indicating successful connection. The server inside the VM should establish a context 
+    //    representing this connection is ready.
+    // 2. When the server inside the VM receives a CRI image download request, it should send a reverse 
+    //    forwardImageRequest to the host to request image download.
+    // 3. After completing the image download on the host, it should proactively notify the VM with 
+    //    the image information based on the request ID.
+    // 
+    // Note: When the host has not actively connected to the server inside the VM, 
+    // the server is considered invalid and image forwarding is prohibited.
+    rpc ReverseStreamForwardImage(stream ClientMessage) returns (stream ServerMessage);
+
+    // ListImages lists existing images.
+    rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+}
+
+message ClientMessage {
+    string id = 1;
+    ResponseStatus status = 2;
+    MessageType type = 3;
+	oneof content {
+		string hello = 100;          // 客户端连接通知
+		ForwardImageResponse forwardImageResponse = 101; // 下载操作响应
+        string common = 102; // 通用消息
+        ListInflightRequest listInflightRequest = 103; // 列出正在进行的请求
+        ImageFsStats imageFsStats = 104; // 获取镜像文件系统信息
+	}
+}
+
+message ServerMessage {
+    string id = 1;
+    ResponseStatus status = 2;
+    MessageType type = 3;
+	oneof content {
+		string hello = 100;          // 客户端连接通知
+		ForwardImageRequest forwardImageRequest = 101; // 下载操作响应
+        RemoveSnapshotRequest removeSnapshotRequest = 102; // 删除快照请求
+        ListInflightRequest listInflightRequest = 103; // 列出正在进行的请求
+	}
+}
+
+enum MessageType {
+    CLIENT_HELLO = 0;
+    IMAGE_FORWARD = 1;
+    REMOVE_SNAPSHOT = 2;
+    LIST_INFLIGHT_REQUEST = 3;
+    IMAGE_FS_STATS = 4;
+}
+
+message ResponseStatus {
+    ResponseStatusCode code = 1;
+    string message = 2;
+}
+
+enum ResponseStatusCode {
+    OK = 0;
+    ERROR = 1;
+}
+
+message ForwardImageResponse {
+	HostImage image = 1;
+}
+
+message ForwardImageRequest {
+    // Spec of the image.
+    cubelet.types.ImageSpec image = 1;
+    // Authentication configuration for pulling the image.
+    cubelet.types.AuthConfig auth = 2;
+    // Config of the PodSandbox, which is used to pull image in PodSandbox context.
+    PodSandboxConfig sandbox_config = 3;
+}
+
+// Basic information about a container image.
+message HostImage {
+    // ID of the image.
+    string id = 1;
+    // Other names by which this image is known.
+    repeated string repo_tags = 2;
+    // Digests by which this image is known.
+    repeated string repo_digests = 3;
+    // Size of the image in bytes. Must be > 0.
+    uint64 size = 4;
+    // ImageSpec for image which includes annotations
+    cubelet.types.ImageSpec spec = 7;
+
+	// all descriptors for this image
+	repeated google.protobuf.Any descriptors = 9;
+	// LayerMounts is a list of mounts for the image layers.
+	repeated LayerMount LayerMounts = 10;
+
+    // image_devs is list of snapshots belong to erofs image device.
+    // A image can consist of the following components:
+    // 1. Composed solely of erofs layers
+    // 2. The erofs layer serves as the bottom layer, and the regular image 
+    // layer serves as the upper layer
+    // 3. Ordinary image layer
+    // That is to say, the image cannot be composed of a regular image layer 
+    // as the bottom layer and an erofs image layer as the upper layer.
+    // And a maximum of one erofs device can be used for one image.
+    ImageDev image_devs = 11;
+}
+
+// Mount specifies a host volume to mount into a container.
+message LayerMount {
+	string name = 1;
+	string host_path = 2;
+	string vm_path = 3;
+	string digest = 4;
+	string parent = 5;
+    string usage = 6;
+
+    // dev_serial_id  is the serial id of the device.
+    // this fileds is only used when the mount is a device.like erofs.
+    // When a layer belongs to a certain device, it is not allowed 
+    // to use the `host_path` field again
+    string dev_serial_id = 7;
+    LayerType layer_type = 8;
+}
+
+enum LayerType {
+    LAYER_TYPE_FS = 0;
+    LAYER_TYPE_DEVICE = 1;
+}
+
+message ImageDev {
+    string serial_id = 1;
+    string host_device_path = 2;
+
+    // vm_device_path is the path of the device in the VM.
+    // this fileds is only used in the VM.
+    string vm_device_path = 3;
+    // this fileds is only used in the VM.
+    string vm_root_path = 4;
+    // fs_type is the filesystem type of the volume.
+    string fs_type = 5;
+    repeated string mount_options = 6;
+
+    // snapshots is a list of snapshots of the image.
+    repeated string snapshots = 7;
+    // image id of all snapshot
+    string image_id = 8;
+    repeated string image_references = 9;
+    // pci bdf of virtio-blk
+    string bdf = 10;
+}
+
+
+// PodSandboxMetadata holds all necessary information for building the sandbox name.
+// The container runtime is encouraged to expose the metadata associated with the
+// PodSandbox in its user interface for better user experience. For example,
+// the runtime can construct a unique PodSandboxName based on the metadata.
+message PodSandboxMetadata {
+    // Pod name of the sandbox. Same as the pod name in the Pod ObjectMeta.
+    string name = 1;
+    // Pod UID of the sandbox. Same as the pod UID in the Pod ObjectMeta.
+    string uid = 2;
+    // Pod namespace of the sandbox. Same as the pod namespace in the Pod ObjectMeta.
+    string namespace = 3;
+    // Attempt number of creating the sandbox. Default: 0.
+    uint32 attempt = 4;
+}
+
+// PodSandboxConfig holds all the required and optional fields for creating a
+// sandbox.
+message PodSandboxConfig {
+    // Metadata of the sandbox. This information will uniquely identify the
+    // sandbox, and the runtime should leverage this to ensure correct
+    // operation. The runtime may also use this information to improve UX, such
+    // as by constructing a readable name.
+    PodSandboxMetadata metadata = 1;
+    // Hostname of the sandbox. Hostname could only be empty when the pod
+    // network namespace is NODE.
+    string hostname = 2;
+    // Path to the directory on the host in which container log files are
+    // stored.
+    // By default the log of a container going into the LogDirectory will be
+    // hooked up to STDOUT and STDERR. However, the LogDirectory may contain
+    // binary log files with structured logging data from the individual
+    // containers. For example, the files might be newline separated JSON
+    // structured logs, systemd-journald journal files, gRPC trace files, etc.
+    // E.g.,
+    //     PodSandboxConfig.LogDirectory = `/var/log/pods/<NAMESPACE>_<NAME>_<UID>/`
+    //     ContainerConfig.LogPath = `containerName/Instance#.log`
+    string log_directory = 3;
+    // DNS config for the sandbox.
+    DNSConfig dns_config = 4;
+    // Port mappings for the sandbox.
+    // repeated PortMapping port_mappings = 5;
+    // Key-value pairs that may be used to scope and select individual resources.
+    map<string, string> labels = 6;
+    // Unstructured key-value map that may be set by the kubelet to store and
+    // retrieve arbitrary metadata. This will include any annotations set on a
+    // pod through the Kubernetes API.
+    //
+    // Annotations MUST NOT be altered by the runtime; the annotations stored
+    // here MUST be returned in the PodSandboxStatus associated with the pod
+    // this PodSandboxConfig creates.
+    //
+    // In general, in order to preserve a well-defined interface between the
+    // kubelet and the container runtime, annotations SHOULD NOT influence
+    // runtime behaviour.
+    //
+    // Annotations can also be useful for runtime authors to experiment with
+    // new features that are opaque to the Kubernetes APIs (both user-facing
+    // and the CRI). Whenever possible, however, runtime authors SHOULD
+    // consider proposing new typed fields for any new features instead.
+    map<string, string> annotations = 7;
+    // Optional configurations specific to Linux hosts.
+    // LinuxPodSandboxConfig linux = 8;
+    // Optional configurations specific to Windows hosts.
+    // WindowsPodSandboxConfig windows = 9;
+}
+
+// DNSConfig specifies the DNS servers and search domains of a sandbox.
+message DNSConfig {
+    // List of DNS servers of the cluster.
+    repeated string servers = 1;
+    // List of DNS search domains of the cluster.
+    repeated string searches = 2;
+    // List of DNS options. See https://linux.die.net/man/5/resolv.conf
+    // for all available options.
+    repeated string options = 3;
+}
+
+// RemoveSnapshotRequest is the request message for removing a snapshot.
+message RemoveSnapshotRequest {
+    // LayerMounts is a list of mounts for the image layers.
+	repeated LayerMount LayerMounts = 10;
+}
+
+// ListInflightRequest is the request message for listing inflight requests.
+message ListInflightRequest {
+	repeated InflightRequest requests = 1;
+}
+
+message InflightRequest {
+    string id = 1;
+}
+
+message ListImagesRequest {
+    // Filter to list images.
+    cubelet.types.ImageFilter filter = 1;
+}
+
+message ListImagesResponse {
+    // List of images.
+    repeated cubelet.types.Image images = 1;
+}
+
+message ImageFsStats {
+    uint64 AvailableBytes = 1;
+    uint64 CapacityBytes = 2;
+    uint64 UsedBytes = 3;
+}
+
+// CubeVMImageService is used by cube image converter service in vm.
+service CubeVMImageService {
+    // ListImages lists existing images.
+    rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+    // PullImage pulls an image from the host.
+    rpc PullImage(ForwardImageRequest) returns (ForwardImageResponse);
+    // mount image to target path
+    rpc Mount(MountImageRequest) returns (MountImageRequest);
+}
+
+message MountImageRequest {
+    string ref = 1;
+    string target_path = 2;
+    string error_msg = 3;
+}

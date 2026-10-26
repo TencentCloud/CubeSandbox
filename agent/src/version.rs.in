@@ -1,0 +1,19 @@
+// Copyright (c) 2020 Intel Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+
+//
+// WARNING: This file is auto-generated - DO NOT EDIT!
+//
+
+#![allow(dead_code)]
+
+pub const AGENT_VERSION: &str = "@AGENT_VERSION@";
+pub const API_VERSION: &str = "@API_VERSION@";
+pub const VERSION_COMMIT: &str = "@VERSION_COMMIT@";
+pub const GIT_COMMIT: &str = "@COMMIT@";
+pub const BUILD_TIME: &str = "@BUILD_TIME@";
+pub const AGENT_NAME: &str = "@AGENT_NAME@";
+pub const AGENT_DIR: &str = "@BINDIR@";
+pub const AGENT_PATH: &str = "@BINDIR@/@AGENT_NAME@";

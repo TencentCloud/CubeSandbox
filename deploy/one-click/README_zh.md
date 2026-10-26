@@ -1,0 +1,743 @@
+# Cube Sandbox One-Click
+
+本目录用于构建并交付 `cube-sandbox` 的单机一键发布包。
+
+## 目录说明
+
+- `build-release-bundle-builder.sh`：推荐入口；先在 builder 镜像中编译 one-click 需要的组件，再在宿主机继续执行发布包打包。
+- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-runtime`、含 `cube-init` 的 guest image，以及独立的 `cube-agent.ext4`；并收集 guest kernel。
+- `build-guest-image.sh`：构建仅含轻量 `cube-init`（作为 `/sbin/init`）的 guest OS 镜像。
+- `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
+- `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
+- `config-cube.toml`：one-click 默认 runtime 配置模板。
+- `support/`：MySQL/Redis/MinIO 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
+- `cubeproxy/`：`cube proxy` 的 compose 模板、`global.conf` 模板与 CoreDNS 模板。
+- `webui/`：Dashboard 的 Nginx 运行时文件，安装后落到 `/usr/local/services/cubetoolbox/webui/`。
+- `install.sh`：目标机控制节点安装与启动入口（默认 all-in-one）。
+- `install-compute.sh`：目标机计算节点安装入口。
+- `down.sh`：停止 one-click 安装的服务与依赖。
+- `smoke.sh`：执行基础健康检查。
+- `env.example`：目标机环境变量模板。
+- `build.env.example`：构建机环境变量模板，用于组装发布包。
+- `lib/common.sh`：公共 shell 函数。
+- `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
+- `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
+
+## 根目录 Makefile Target（Agent 独立 pmem）
+
+在仓库根目录通过统一 builder 镜像构建（如缺少镜像先执行 `make builder-image`）：
+
+```bash
+make cube-init          # guest PID1 → _output/bin/cube-init（别名 guest-init）
+make agent-ext4         # 独立平面文件 → _output/cube-agent/{cube-agent.ext4,version}
+                        # （别名 cube-agent-ext4）
+make pmem-assets        # 一次产出 cube-init + agent-ext4
+make help               # 查看全部根 target
+```
+
+完整 runtime 布局（shim + guest image + agent.ext4 + kernel）请使用 `./build-vm-assets.sh` 或下方的发布包入口。
+
+## 支持的操作系统
+
+- 构建 / 部署执行机：推荐使用 Linux。腾讯云 Terraform 部署脚本（`terraform/tencentcloud/create.sh` 和 `destroy.sh`）也支持 macOS，包括 macOS 默认的 Bash 3.2 环境。
+- Windows：不支持原生 `cmd.exe` / PowerShell 直接执行。Windows 用户请通过 WSL2（Ubuntu 或其他 Linux 发行版）运行这些 shell 脚本。
+- 目标机：one-click 运行时要求 Linux，并依赖 systemd 与 Docker/containerd 能力。腾讯云 Terraform 部署器会创建 Linux CVM/TKE 资源，并通过 SSH 完成配置。
+
+## 构建输入
+
+必须准备的固定 kernel 制品是普通 guest kernel `vmlinux`，也可以额外打包 PVM guest kernel `vmlinux-pvm`：
+
+- `vmlinux`
+- `vmlinux-pvm`（可选）
+
+默认放在 `assets/kernel-artifacts/`，也可以通过环境变量覆盖：
+
+```bash
+export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
+export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
+```
+
+内核多版本库存（内容寻址）：
+
+- 安装时对 `vmlinux-bm` / `vmlinux-pvm` **分别**按内容 sha256 入库到 `component_versions/cube-kernel-scf/sha256-<12位>/`
+- 每个库存目录内：`vmlinux-bm|pvm`、`vmlinux` 软链、`variant`（`bm`/`pvm`）、`version`（`sha256:<64位>`，供 shim 比对）
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` **不作为**库存目录名；`release-manifest` 的 `kernel.version` / `pvm_version` 同样记录内容短哈希
+- Ensure 从 Master identity 中的 digest 映射到上述短 key
+
+运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。`CUBE_PVM_ENABLE` 是安装器开关：升级时 `CUBE_PVM_ENABLE=0|1 ./install.sh` 或包内 `.env` 出现该 key 即为显式设置（`0` 默认值同样生效），整份 `cp env.example .env` 会把它重置为 `0`。
+
+guest image 不再依赖本地 zip。默认在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
+
+```bash
+export ONE_CLICK_GUEST_IMAGE_DOCKERFILE=/abs/path/to/cube-sandbox/deploy/guest-image/Dockerfile
+# 可选，默认取 Dockerfile 所在目录
+export ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR=/abs/path/to/cube-sandbox/deploy/guest-image
+# 可选，默认是 cube-sandbox-guest-image:one-click
+export ONE_CLICK_GUEST_IMAGE_REF=cube-sandbox-guest-image:one-click
+# 可选，默认跟随当前仓库 revision
+export ONE_CLICK_GUEST_IMAGE_VERSION=custom-guest-image-version
+# 可选；复用已有的 cube-guest-image-*.tar.gz（与 Release / docker 资产同布局）。
+# 设置后会跳过本地 docker/mkfs 重建。
+export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
+```
+
+## 构建发布包
+
+建议先复制构建环境模板：
+
+```bash
+cd deploy/one-click
+cp build.env.example build.env
+```
+
+推荐在宿主机的仓库根目录执行：
+
+```bash
+./deploy/one-click/build-release-bundle-builder.sh
+```
+
+如果希望发布包里的 `cubemastercli` 内嵌默认 `envd`，请先在构建机准备好 `envd` 二进制文件，然后在推荐的 builder 入口中传入 `ENVD_LOCAL_PATH`：
+
+```bash
+ENVD_LOCAL_PATH=/abs/path/to/envd \
+./deploy/one-click/build-release-bundle-builder.sh
+```
+
+设置该变量后，宿主机 wrapper 会先把文件复制到 `deploy/one-click/.work/envd`，builder 容器再用这个文件构建内嵌 `envd` 的 `cubemastercli`。如果不设置 `ENVD_LOCAL_PATH`，发布包中的 `cubemastercli` 不包含默认 `envd`；运行时若模板构建启用 envd 注入，需要显式传入 `--envd-path`。
+
+这个入口会先：
+
+- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`templatecenter`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
+- 在 builder 内对 `CubeMaster`、`CubeTemplateCenter`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
+- 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
+- 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
+
+如果构建机已经具备完整工具链，或者你想手动指定 `ONE_CLICK_*_BIN`，也可以继续直接执行底层入口：
+
+```bash
+./deploy/one-click/build-release-bundle.sh
+```
+
+无论走推荐入口还是直接执行底层入口，`CubeMaster` / `Cubelet` 都不再依赖仓库内 `vendor/`，而是在构建时通过 Go modules 实时解析依赖。
+
+WebUI 会在最终打包阶段于构建机执行构建，因此构建机需要具备 `npm`。目标机不会构建 WebUI 镜像，而是把发布包里的 `webui/dist` 挂载到标准 nginx 容器中。如果要复用已经构建好的 Dashboard，可设置：
+
+```bash
+export ONE_CLICK_WEB_DIST_DIR=/abs/path/to/web/dist
+```
+
+### Go Modules 依赖下载
+
+- 首次构建 `CubeMaster`、`Cubelet` 时会执行 `go mod download`
+- 构建机需要能访问对应的模块源；如处于内网环境，请提前配置 `GOPROXY`、`GOPRIVATE` 和私有仓库凭据
+- 推荐入口会把 builder HOME 持久化到宿主机缓存目录，因此同一台机器上的后续构建通常不会重复全量下载
+- `cubelog` 仍然通过仓库内本地模块 `../pkgs/CubeLog` 引用，不走远端下载
+
+成功后会生成：
+
+```bash
+deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
+```
+
+发布包中会包含：
+
+- `sandbox-package.tar.gz`
+- `CubeAPI/bin/cube-api`
+- `containerd-shim-cube-rs`、`cube-runtime`
+- 本地构建得到的 `cube-image/cube-guest-image-cpu.img`（含 `cube-init` 作为 `/sbin/init`）
+- 独立的 `cube-agent/cube-agent.ext4`（+ `cube-agent/version`）
+- `cubeproxy/` 目录（运行时拉取预构建镜像；`build-context` 仅供私有 TCR 重建）
+- `support/` 目录及其 compose 模板
+- `webui/` 目录、compose 模板、nginx 配置和已构建的 `web/dist` 静态资源
+- 基于 `vmlinux` 现场打包得到的 `cube-kernel-scf.zip`
+- 目标机可直接执行的 `install.sh` / `install-compute.sh` / `down.sh` / `smoke.sh`
+
+## 配置映射
+
+one-click 不会在目标机额外创建一层全局 `configs/`，而是直接落到各组件原生配置入口：
+
+- `configs/single-node/cubemaster.yaml` -> `CubeMaster/conf.yaml`
+  - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
+- `Cubelet/config/` -> `Cubelet/config/`
+- `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-egress-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
+- `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
+- `support/` -> `/usr/local/services/cubetoolbox/support/`
+- `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
+- `webui/` -> `/usr/local/services/cubetoolbox/webui/`
+
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 和 `cubeops` 都从 `.one-click.env` 读环境变量。CubeOps 仓库相关项是 `CUBE_OPS_WAREHOUSE_*`（超时、GitHub/CNB 白名单和 token）以及 `CUBE_OPS_S3_*`；默认复用 Volume 的 MinIO/S3 连接、用独立的 `cube-ops` 桶，不需要额外配置。一键安装不写 CubeOps YAML。`cube-api` 默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
+
+## 目标机安装
+
+把 `cube-sandbox-one-click-<version>.tar.gz` 拷到目标机后：
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+cp env.example .env
+sudo ./install.sh
+```
+
+one-click 固定安装到 `/usr/local/services/cubetoolbox`。
+
+新的 one-click 安装统一只使用 systemd 托管：
+
+- 控制节点：`cube-sandbox-control.target`
+- 计算节点：`cube-sandbox-compute.target`
+
+安装脚本会自动把单元文件安装到 `/etc/systemd/system/`，并按角色执行 `enable --now`。旧的 shell 启停脚本只作为 pre-systemd 历史版本升级时的短期过渡能力保留，不属于新安装的运行接口。
+
+常用命令：
+
+```bash
+sudo ./smoke.sh
+sudo ./down.sh
+```
+
+### CubeS3lvol 的停止与升级语义
+
+CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员被统一管理：
+
+- **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
+- **升级（`install.sh` 升级模式）**：组件安装到**版本化目录**（`CubeS3lvol-<version>/`），裸名 `CubeS3lvol` 是指向它的软链；被替换的版本保留在旁边，更旧的会被清理。
+  - **首次升级**（旧装、或 target 过旧无法自述盘上格式、或脚本早于改名 `rcow_upgrade.sh`）：target 走**停止再启动**，仅这一次有中断。具体原因由 `install.sh` 说明。
+  - **此后每次升级都是原地热升级**：在线 checkpoint、直接 kill，替换进程重建同一套 NQN/(subsys, nsid)/UUID 网格，因此 host 重连到同一个 `/dev/nvmeXnY`，sandbox 的 I/O 只是暂停（约 8s）。initiator 全程不断开，lvstore 从不卸载。checkpoint 没能推上去的数据仍在 WAL 中，由替换进程 replay，因此 kill 前的 flush 默认被跳过（`RCOW_HOT_FLUSH_MS=0`）。该步骤在 `install.sh` 停掉其它组件**之前**运行，因为 prepare 与 layout 快照都需要活着的 target 和 S3 端点。
+  - 若替换后布局未能完整恢复，会**回滚**到上一版本；`install.sh` 仍会把其余部分装完，然后以非零退出。节点是完整的，但 s3lvol 仍是旧版本。
+  - `wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。热升级的两个旋钮 `RCOW_HOT_FLUSH_MS`（默认 `0`，跳过 kill 前 flush）与 `RCOW_HOT_PREPARE_SUSPEND_MS`（默认 `60000`，单次 flusher hold 的上限）也会写入 `.one-click.env`，可直接按常规 `.env` 方式调整。
+- **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
+- **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
+
+控制节点安装完成后，可以打开 Dashboard：
+
+```bash
+http://<target-host>:12088
+```
+
+安装前可以在 `.env` 里显式设置当前节点内网 IP；如果不设置，`install.sh` 会尝试自动探测 `eth0` 的 IPv4：
+
+```bash
+# CUBE_SANDBOX_NODE_IP=10.0.0.10
+```
+
+如果显式设置了 `CUBE_SANDBOX_NODE_IP`，安装脚本会优先使用该值；否则会把自动探测到的节点 IP 写入运行时环境，并用于 `cube proxy` / DNS 的地址渲染。
+
+### 数字助手环境变量
+
+数字助手（AgentHub）需要 CubeOps 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 生成 `DATABASE_URL`（经百分号编码写入 `.one-click.env`；启动脚本回退时直接导出拆分字段，由 CubeOps 直接映射），指向随 one-click 启动的 MySQL：
+
+```bash
+# 可选；未设置时由 CUBE_SANDBOX_MYSQL_* 生成。
+DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
+```
+
+创建或重新配置 OpenClaw 数字助手前，请在 WebUI 的 **AgentHub 设置** 中填写 LLM API Key（以及 provider、Base URL、模型）。
+
+### 计算节点安装
+
+如果第一台机器已经按默认方式部署为控制+计算节点，第二台机器可复用同一个发布包作为计算节点：
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+cp env.example .env
+```
+
+在 `.env` 里至少设置：
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+```
+
+若控制节点用了内置 MinIO（或任何 S3 后端），建议把该节点回填的 `CUBE_S3_*` 拷过来：
+
+```bash
+# 在控制节点执行，把输出拷贝到计算节点 .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+计算节点不部署 MinIO，只消费 `CUBE_S3_*`。该项可选但强烈建议——缺失时仅打印黄色警告并继续安装，S3 卷插件在补上配置并重装前不可用。用内置 MinIO 时还需放行计算节点到控制面的 TCP 9000。
+
+如需显式指定计算节点 IP，或目标机默认网卡不是 `eth0`，再额外设置：
+
+```bash
+CUBE_SANDBOX_NODE_IP=10.0.0.12
+```
+
+然后执行：
+
+```bash
+sudo ./install-compute.sh
+```
+
+计算节点模式会：
+
+- 安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
+- 启动 `cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
+- `cube-egress` 启动前会通过主节点的 `/cube/ca/<file>` 接口拉取与模板一致的 MITM 根 CA（含私钥），保证模板信任 compute 节点上 `cube-egress` 签发的叶子证书
+- 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:3010`（CubeOps node-agent）
+- 通过主节点的 `/internal/v1/node-agent` 接口自动注册节点
+
+注意事项：
+
+- 所有计算节点都需要让 `Cubelet` 监听和主节点配置一致的 gRPC 端口，默认是 `9999`
+- `CUBE_SANDBOX_NODE_IP` 会同时作为 one-click 配置值和 `Cubelet` 节点注册 IP
+- 主节点必须能访问计算节点的 `9999/tcp`，计算节点必须能访问主节点的 `8089/tcp`（使用内置 MinIO 作 S3 Volume 后端时还需 `9000/tcp`）
+
+MySQL/Redis 依赖默认会部署到：
+
+```bash
+/usr/local/services/cubetoolbox/support
+```
+
+安装时会在这个目录下准备运行期文件，并由 systemd 分别管理：
+
+- `mysql:8.0`
+- `redis:7-alpine`
+- `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
+
+### 使用外部 MySQL / PostgreSQL / Redis
+
+如果希望使用已有的 MySQL、PostgreSQL 或 Redis 服务器，而不是内置的本地容器，
+可在执行 `install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）。
+`CUBE_DATABASE_DRIVER` 对齐 Helm 的 `database.driver`：`mysql`（默认）或
+`postgres`（始终外置，one-click 从不自带本地 PostgreSQL）。
+
+```bash
+# 外部 MySQL（默认驱动；凭据字段可按需覆盖）
+# CUBE_DATABASE_DRIVER=mysql
+CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
+CUBE_EXTERNAL_MYSQL_PORT=3306
+CUBE_EXTERNAL_MYSQL_USER=cube
+CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
+CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+
+# 外部 PostgreSQL
+# CUBE_DATABASE_DRIVER=postgres
+# CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
+# CUBE_EXTERNAL_POSTGRES_PORT=5432
+# CUBE_EXTERNAL_POSTGRES_USER=cube
+# CUBE_EXTERNAL_POSTGRES_PASSWORD=cube_pass
+# CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
+
+# 外部 Redis
+CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
+CUBE_EXTERNAL_REDIS_PORT=6379
+CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
+```
+
+当设置了 `CUBE_EXTERNAL_MYSQL_HOST`、`CUBE_EXTERNAL_POSTGRES_HOST`（且
+`CUBE_DATABASE_DRIVER=postgres`）和/或 `CUBE_EXTERNAL_REDIS_HOST` 时，`install.sh` 会：
+
+- 用外部地址改写 `CubeMaster/conf.yaml` 和 `CubeTemplateCenter/conf.yaml` 的 `instance_db_config`（驱动、地址、用户、密码、库名）；
+- 将 `DATABASE_URL`（`mysql://` 或 `postgresql://`）和 `CUBE_PROXY_REDIS_*` 写入 `.one-click.env`，让各服务都连接外部地址；
+- mask 对应的 `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`，本地容器不会再被启动；
+- 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
+
+外部数据库需要预先授予所配置用户对目标库的访问权限。CubeMaster 和 CubeTemplateCenter 都会打开这个库，并在首次启动时执行内置 schema 迁移。
+
+### 内置 MinIO 与 S3 Volume 插件
+
+`CUBE_SANDBOX_MINIO_*` **只负责部署 MinIO 容器**。S3 Volume 插件始终读取
+`CUBE_S3_*`，并用它写入 `volume-s3.conf`。
+
+MinIO 容器在宿主机上占用两个端口（均可通过环境变量覆盖）：
+
+| 用途 | 容器内端口 | 宿主机映射 | 绑定地址 |
+| ---- | ---------- | ---------- | -------- |
+| S3 API | `9000` | `CUBE_SANDBOX_MINIO_API_PORT`（默认 `9000`） | `CUBE_SANDBOX_MINIO_API_BIND`，默认 `CUBE_SANDBOX_NODE_IP`（未探测到时回退 `127.0.0.1`） |
+| Web 控制台 | `9001` | `CUBE_SANDBOX_MINIO_CONSOLE_PORT`（默认 `9001`） | 固定 `127.0.0.1`，仅本机可访问 |
+
+S3 API 默认发布在节点 IP 上，目的是让计算节点的 Cubelet 能直连；若希望 S3 只对
+本机开放，设 `CUBE_SANDBOX_MINIO_API_BIND=127.0.0.1`——代价是计算节点将无法访问
+内置 MinIO，需改用外部 S3。控制台端口始终只绑定 `127.0.0.1`，不会对外暴露。
+
+控制节点默认 `CUBE_SANDBOX_MINIO_ENABLED=1`：`install.sh` 启动 MinIO，密码留空
+则生成 24 位随机密码，然后**用这套 MinIO 填好 `CUBE_S3_*`**（`http://<节点IP>:9000`、用户/
+密码、path-style），两套都写入 `.one-click.env`。MinIO 开启时不要自己再设
+`CUBE_S3_ENDPOINT`。后续升级会从 `.one-click.env` 读回这份本机地址，这是合法
+的；只有另配外部桶时才需要 `CUBE_SANDBOX_MINIO_ENABLED=0`。
+
+其它 MinIO 部署参数：默认用户 `cubeminio`（`CUBE_SANDBOX_MINIO_ROOT_USER`，密码
+至少 8 位，否则 MinIO 拒绝启动）、桶名 `cube-volumes`（`CUBE_SANDBOX_MINIO_BUCKET`）、
+数据卷 `cube-sandbox-minio-data`（`CUBE_SANDBOX_MINIO_VOLUME`，容器内挂载到
+`/data`）、容器名 `cube-sandbox-minio`（`CUBE_SANDBOX_MINIO_CONTAINER`）、镜像
+`CUBE_SANDBOX_MINIO_IMAGE`（默认按 `MIRROR=cn|int` 选择）。MinIO 运行态由
+`cube-sandbox-minio.service` 托管，启动后校验通过
+`curl http://<节点IP>:9000/minio/health/live`（返回 `200` 即正常）。
+
+模板产物与 CubeOps 组件仓库可用 `CUBE_ARTIFACT_STORE_BACKEND=fs`、`CUBE_OPS_STORE_BACKEND=fs` 替代 MinIO（S3 Volume 仍需要 MinIO 或外部 S3）。
+
+改用已有 S3 时，设 `CUBE_SANDBOX_MINIO_ENABLED=0` 并填写 `CUBE_S3_*`：
+
+```bash
+CUBE_SANDBOX_MINIO_ENABLED=0
+CUBE_S3_ENDPOINT=https://s3.example.com
+CUBE_S3_ACCESS_KEY_ID=...
+CUBE_S3_SECRET_ACCESS_KEY=...
+CUBE_S3_BUCKET=cube-volumes
+# CUBE_S3_REGION=us-east-1
+# CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
+
+计算节点从不部署 MinIO。建议把控制节点回填的 `CUBE_S3_*` 拷到计算节点 `.env`：
+
+```bash
+# 在控制节点执行，把输出拷贝到计算节点 .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+该项可选但强烈建议——缺失时仅打印黄色警告并继续安装，S3 卷插件在补上配置并重装前不可用。用内置 MinIO 时还需放行控制面 TCP 9000。
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+CUBE_S3_ACCESS_KEY_ID=cubeminio
+CUBE_S3_SECRET_ACCESS_KEY=<控制面 .one-click.env 里的值>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
+
+`cube proxy` 和它的 DNS 解析在 one-click 里是必选能力，`.env` 中这两个值必须保持为 `1`：
+
+```bash
+CUBE_PROXY_ENABLE=1
+CUBE_PROXY_DNS_ENABLE=1
+```
+
+其它常用参数如下：
+
+```bash
+CUBE_PROXY_HTTPS_PORT=443
+CUBE_PROXY_HTTP_PORT=80
+CUBE_PROXY_GRPC_PORT=9090
+CUBE_EGRESS_ADMIN_PORT=9091
+# 已废弃：CUBE_PROXY_HOST_PORT 会被忽略；如需调整启动后检查端口，请配置 CUBE_PROXY_HTTP_PORT。
+CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
+CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
+WEB_UI_ENABLE=1
+WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+WEB_UI_HOST_PORT=12088
+WEB_UI_UPSTREAM=http://host.docker.internal:3010
+CUBE_API_BIND=0.0.0.0:3000
+CUBE_API_HEALTH_ADDR=127.0.0.1:3000
+CUBE_API_SANDBOX_DOMAIN=cube.app
+```
+
+安装过程中会做这些事：
+
+- 若系统尚未安装 `mkcert`，从安装包内置的 `support/bin/mkcert` 复制到 `/usr/local/bin/mkcert`，再在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下执行 `mkcert -install` 并生成 `cube.app+3.pem`、`cube.app+3-key.pem`
+- 在 `/usr/local/services/cubetoolbox/support/`、`cubeproxy/`、`coredns/`、`webui/` 下生成运行期配置与渲染文件
+- 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
+- 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
+- MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
+- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。若目标机上 NetworkManager 会初始化其 `dnsmasq` 插件但从不真正拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`，而不再依赖 NetworkManager 插件；面向客户端的解析器布局（dummy link、监听地址、入口 IP）在其它方面完全一致。
+- 启动宿主机进程 `cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
+- 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/health`（由 CubeOps 提供）
+
+停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
+
+部署完成后，如需让 E2B 官方 SDK 指向 one-click 节点，可以在客户端侧设置：
+
+```bash
+export E2B_API_URL=http://<target-host>:3000
+export E2B_API_KEY=e2b_000000
+```
+
+## 安装脚本启动前预检清单
+
+`install.sh` / `install-compute.sh` 会在启动早期执行一次性 preflight 检查，确保依赖尽早失败，不会跑到中途才报错。
+
+### compute 角色（`install-compute.sh`）
+
+必需命令：
+
+- `docker`（cube-egress 以 docker 容器运行，安装器会自动安装；docker 是硬性前置依赖，离线/无法自动安装的环境请提前装好 Docker。不支持 snap Docker，读不到 `/usr/local/services`：`sudo snap remove docker`，再安装 docker-ce）
+- `tar`
+- `ss`
+- `bash`
+- `curl`
+- `grep`
+- `sed`
+- `pgrep`
+- `date`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
+
+条件命令：
+
+- 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
+- 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
+  `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
+  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 剩余的共享库（`ldd`；OpenSSL 已静态链入），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
+
+推荐安装包（覆盖上述 `cubecow` 依赖）：
+
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+可直接执行的安装示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y e2fsprogs util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y e2fsprogs util-linux || \
+sudo yum install -y e2fsprogs util-linux
+```
+
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y python3 libaio libnuma libuuid || \
+sudo yum install -y python3 libaio libnuma libuuid
+```
+
+### control 角色（`install.sh`，默认）
+
+必需命令：
+
+- `docker`（不支持 snap Docker，请安装 docker-ce / docker.io）
+- `tar`
+- `ss`
+- `bash`
+- `curl`
+- `grep`
+- `sed`
+- `pgrep`
+- `date`
+- `ip`
+- `awk`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
+
+二选一命令：
+
+- 证书准备阶段：`mkcert`（已内置在安装包中，若系统无此命令会自动从包内安装）
+- DNS 分流阶段：`resolvectl`，或（默认的 `networkmanager` dnsmasq 回退路径需要）`systemctl + NetworkManager`。`standalone` dnsmasq 模式（`CUBE_PROXY_DNSMASQ_MODE=standalone`）不要求已加载/可重启的 `NetworkManager`
+- 若缺少 `dnsmasq` 且走任一 dnsmasq 回退路径（`networkmanager` 或 `standalone`），还需包管理器之一：`dnf` / `yum` / `apt-get`
+
+条件命令：
+
+- 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
+- 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
+  `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
+  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 剩余的共享库（`ldd`；OpenSSL 已静态链入），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
+
+推荐安装包（覆盖上述 `cubecow` 依赖）：
+
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+可直接执行的安装示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y e2fsprogs util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y e2fsprogs util-linux || \
+sudo yum install -y e2fsprogs util-linux
+```
+
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y python3 libaio libnuma libuuid || \
+sudo yum install -y python3 libaio libnuma libuuid
+```
+
+## 前置条件
+
+> **安全提示**：所有核心服务默认绑定 `0.0.0.0`。在将部署放到可被不可信网络访问的
+> 机器上之前，请参阅[网络加固指南](../../docs/zh/guide/network-hardening.md)，了解绑定地址
+> 配置、防火墙规则与凭据轮换。
+
+- 目标机需要 `root` 权限。
+- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。当 NetworkManager 会加载其 `dnsmasq` 插件但从不拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡）时，可在 `.one-click.env` 中设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`。
+- 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
+- `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
+- S3 Volume 插件（`{CubeMaster,Cubelet}/plugin/cube-volume-s3`）是内置 S3 客户端的静态 Go 二进制，打包时从 `examples/volume/s3` 编译。控制节点无需任何 S3 命令行工具；挂载 Volume 的节点仍需 `s3fs`。可用 `ONE_CLICK_VOLUME_S3_BIN` 指定预编译二进制。
+- `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
+- 推荐入口 `build-release-bundle-builder.sh` 需要宿主机具备 `docker` / `make` / `tar` / `python3` / `truncate` / `ldd` / `mkfs.ext4` 等工具。
+- 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。
+- 若直接执行底层入口 `build-release-bundle.sh`，构建机还需要根据 build mode 自行准备 `go` / `cargo` / `make` 等本地工具链。
+- 若直接执行底层入口或首次使用推荐入口，构建机还需要能联网下载 Go modules；受限网络环境建议预先配置可用的 `GOPROXY`。
+- 若启用 VM 路径，目标机仍需满足 `Cubelet` 内置 network runtime、tap、路由等运行权限要求。
+
+## 已知限制
+
+- 如果 `assets/kernel-artifacts/` 下缺少 `vmlinux`，`build-vm-assets.sh` 和 `build-release-bundle.sh` 会立即失败；`vmlinux-pvm` 在构建时是可选制品，但安装时若设置 `CUBE_PVM_ENABLE=1`，发布包内必须包含它；发布包里的 `cube-kernel-scf.zip` 会在打包阶段自动生成。
+- 如果 `deploy/guest-image/Dockerfile` 构建失败，或构建机的 `mkfs.ext4` 不支持 `-d`，guest image 生成会立即失败。
+- `cube-snapshot/spec.json` 在当前 one-click 首版中不是强制产物；缺失时相关插件会退化为告警，而不是阻塞基础启动。
+- 默认的 `NetworkManager + dnsmasq` 回退路径依赖 NetworkManager 拉起 `dnsmasq` 子进程。在 NetworkManager 会初始化插件但从不真正拉起它的目标机上（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本自己拉起并管理 `dnsmasq`。standalone 模式不需要可重启的 `NetworkManager`，但在完全没有任何解析器管理器的目标机上，你必须确保之后没有其它组件覆盖 `/etc/resolv.conf`。该模式下 `dnsmasq` 作为一个不受 systemd 托管的裸子进程运行，若之后崩溃不会自动重启；可通过 `systemctl restart cube-sandbox-dns` 恢复。
+- **不支持 snap Docker。** Ubuntu Server 安装器（Subiquity）在装系统时会将 Docker 列为 "Featured Snap" 可勾选项；勾选后或后续执行 `snap install docker` 装的都是带 AppArmor 沙箱限制的 snap 版 Docker daemon，无法访问 `/usr/local/services` 等受限路径。安装脚本会自动检测并中止，同时给出修复步骤。修复：`sudo snap remove docker`，再按 <https://docs.docker.com/engine/install/ubuntu/> 安装 docker-ce。
+
+## DNS 排障
+
+- 查看当前 split DNS 状态：`resolvectl status`
+- 验证宿主机 stub 是否正常：`dig +tcp +timeout=3 docker.cnb.cool @127.0.0.53`
+- 验证本地 DNS 入口是否正常：在 `systemd-resolved` 路径以及两条 `dnsmasq` 回退路径（`NetworkManager` 托管或 `standalone`）下，客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，回退路径先到 `dnsmasq` 再转发到 CoreDNS。
+- 验证宿主 `/etc/resolv.conf` 是否走该入口：`cat /etc/resolv.conf` 应能看到 `nameserver 169.254.254.53`（两条路径均如此）。
+- 验证容器视角：`docker run --rm alpine cat /etc/resolv.conf` 也应是 `nameserver 169.254.254.53`。如果看到 `nameserver 8.8.8.8`，说明宿主 `/etc/resolv.conf` 退化到了 loopback nameserver，导致 Docker 回退到内置公网 DNS。
+- 若使用 `systemd-resolved` 路径，正常情况下默认网卡不应承载本地 CoreDNS 地址；该地址应只出现在专用 dummy link 上。
+
+## 腾讯云集群部署 (Terraform)
+
+> 完整指南（架构图、资源清单、TKE / PrivateDNS / CFS 前置条件、E2B 与 `*.cube.app` 域名、容量规划、加固与排障）请参阅文档站：[腾讯云集群部署（Terraform）](../../docs/zh/guide/tencentcloud-terraform-deploy.md)。
+
+除了单机的 `install.sh` 之外，发布包还附带一个基于 Terraform 的部署器，可在腾讯云上拉起**集群版** CubeSandbox：由托管的 TKE 控制面运行 `cubemaster` / `cube-api` / `cube-proxy` / `cube-webui`，后端使用云上 MySQL + Redis，并带一个或多个 CVM PVM 计算节点。跳板机（SSH 端口 `443`）既是构建主机，也是这个原本私有 VPC 的堡垒机。
+
+默认部署模式（与 `env.example` / `variables.tf` 一致）使用**公网预置镜像**（`TENCENTCLOUD_USE_TCR=false`），不在跳板机构建镜像；`cubemaster` 默认**单副本**且**不创建 CFS**（`TENCENTCLOUD_USE_CFS=false`，使用 Pod 本地存储）。启用 `TENCENTCLOUD_USE_CFS=true` 且提高 `TENCENTCLOUD_CUBEMASTER_REPLICAS` 时，才会创建 CFS 共享盘供多副本共用 `/data/CubeMaster/storage`。
+
+`cube-proxy` 默认运行**单副本**（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`）。自动暂停 / 自动恢复只有在单副本下才正确，因为每个 sidecar sweeper 只能看到打到自身 Pod 的流量。若要扩展到多副本，前端 LB 必须按 SandboxID 做 hash（会话保持），否则自动暂停 / 自动恢复会误判。
+
+### 部署前准备（摘要）
+
+首次 `create.sh` apply 前建议完成：
+
+1. **TKE 服务角色授权**（必须）：登录 [TKE 控制台](https://console.cloud.tencent.com/tke2) 完成服务授权。文档：[服务授权相关角色权限说明](https://cloud.tencent.com/document/product/457/43416)。子账号还需 [TKE 预设策略授权](https://cloud.tencent.com/document/product/457/46033)。
+2. **Private DNS**（按需）：`USE_TCR=true` 或 E2B SDK 访问 `*.cube.app` 时需开通。控制台：[DNSPod 内网解析](https://console.dnspod.cn/privateDNS)。文档：[Private DNS 产品介绍](https://cloud.tencent.com/document/product/1338/50527)。
+3. **CFS**（按需）：仅 `TENCENTCLOUD_USE_CFS=true` 且 cubemaster 多副本时需要。控制台：[CFS](https://console.cloud.tencent.com/cfs)。文档：[CFS 快速入门](https://cloud.tencent.com/document/product/582/9132)。
+
+> **TKE worker 与 PVM 计算节点是两套资源：** `TENCENTCLOUD_TKE_NODE_COUNT` 控制 TKE worker（运行控制面 Pod）；`TENCENTCLOUD_COMPUTE_NODE_COUNT` 控制 PVM 计算节点（运行 Cubelet / sandbox）。默认均为 `2`，职责不同。
+
+> **E2B SDK：** 集群版不含单机 one-click 的 CoreDNS split DNS。除配置 `E2B_API_URL` 外，还须为 `*.cube.app` 配置 Private DNS 或等价解析，详见[完整指南 — E2B 与 cube.app 域名](../../docs/zh/guide/tencentcloud-terraform-deploy.md#e2b-与-cubeapp-域名)。
+
+该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+
+export TENCENTCLOUD_SECRET_ID="your-secret-id"
+export TENCENTCLOUD_SECRET_KEY="your-secret-key"
+
+./terraform/tencentcloud/create.sh
+```
+
+`create.sh` 完全在解压后的发布包内运行：
+
+- 它会自动探测本地 bundle（外层的 `cube-sandbox-one-click-<version>.tar.gz`，若该 tar 包已不存在则重新打包解压目录），并将其作为组件镜像和计算节点安装的离线源。当探测到本地 bundle 或通过 `TENCENTCLOUD_LOCAL_BUNDLE=/path/to.tar.gz` 指定时，无需任何公网下载；否则跳板机会回退到**在线安装**（下载 `online-install.sh` 与安装包），此时需要公网访问。
+- 如果不存在 SSH 密钥对，它会在 `terraform/tencentcloud/.ssh/` 下自动生成。
+- 它会在跳板机上使用内置的 `mkcert`（随 `assets/package/sandbox-package.tar.gz` 发布，即解压内层包后的 `sandbox-package/support/bin/mkcert`，与 `scripts/one-click/up-cube-proxy.sh` 流程一致）生成 cube-proxy CLB 的 TLS 证书（`cube.app` / `*.cube.app`），在跳板机的 `/root/cubeproxy-certs` 保留一份副本，并下载到本地 `terraform/tencentcloud/cubeproxy-certs/` 供 Secret 挂载。
+- **默认模式**（`TENCENTCLOUD_USE_TCR=false`）：直接拉取公网预置镜像，部署 TKE addons 和 CVM 计算节点。
+- **TCR 模式**（`TENCENTCLOUD_USE_TCR=true`）：创建 TCR 并在跳板机构建/推送四个组件镜像，再部署 TKE addons 和计算节点。默认创建 2 个计算节点；用 `TENCENTCLOUD_COMPUTE_NODE_COUNT` 调整数量。
+
+cube-webui 的 nginx 配置（`webui-nginx.conf`）不单独维护：它派生自规范文件 `deploy/one-click/webui/nginx.conf`（由发布包构建时放入，或在源码树中运行 `create.sh` 时复制）。
+
+运行 `create.sh` 的机器要求：`ssh`、`scp`、`nc`，以及对腾讯云 API 的网络访问。`terraform` 和 `jq` 缺失时会自动安装——`terraform` 从 HashiCorp 发布站点下载（需要 `curl`/`wget` + `unzip`），`jq` 优先用系统包管理器安装，失败时回退到从 GitHub 下载静态二进制。本地无需 `mkcert`/`openssl` —— 证书在跳板机上生成。
+
+常用环境变量覆盖（下方默认值与 `create.sh`、`variables.tf` 中的默认值一致）：
+
+```bash
+export TENCENTCLOUD_REGION=ap-guangzhou
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
+export TENCENTCLOUD_COMPUTE_NODE_COUNT=2          # CVM PVM 计算节点数（默认 2）
+export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker 节点数（默认 2）
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
+export TENCENTCLOUD_USE_TCR=false                 # 默认使用公网预置镜像
+export TENCENTCLOUD_USE_CFS=false                 # 默认无 CFS，cubemaster 单副本
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.3
+```
+
+非交互 / CI 运行时建议显式设置以下变量（没有 TTY 时交互菜单会回退到默认值，显式设置可避免意外）。密码变量是例外：非交互运行会拒绝使用仓库中公开可见的内置演示密码并要求显式设置；如需在临时沙箱中使用不安全的默认密码，可设置 `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1`。
+
+```bash
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
+export TENCENTCLOUD_LOCAL_BUNDLE=/path/to/cube-sandbox-one-click-<version>.tar.gz  # 在已解压的发布包内运行时会自动探测
+export TENCENTCLOUD_PVM_KERNEL_VMLINUX=/path/to/vmlinux-pvm  # 仅当发布包不含 vmlinux-pvm 时需要
+export TENCENTCLOUD_MYSQL_PASSWORD=...      # 非交互运行必填（无不安全回退）
+export TENCENTCLOUD_REDIS_PASSWORD=...      # 非交互运行必填
+export TENCENTCLOUD_CUBE_PASSWORD=...       # 非交互运行必填
+export TENCENTCLOUD_BUILD_IMAGES=0          # 复用已推送的镜像
+```
+
+整体销毁：
+
+```bash
+./terraform/tencentcloud/destroy.sh
+```
+
+`destroy.sh` 同样需要 `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`，并复用 `create.sh` 保存在 `terraform/tencentcloud/.env` 中的选择。不再询问、直接销毁——运行 `destroy.sh` 本身即视为确认。
+
+> **⚠ 避免不合理计费：** 当 `destroy.sh` 无法正常删除全部资源时（例如 MySQL/Redis 处于回收站/隔离状态，或 Terraform 已无法感知的残留资源），请登录腾讯云控制台手动删除残留资源，以免被继续计费：
+> [VPC / 网络资源](https://console.cloud.tencent.com/vpc)、
+> [MySQL 回收站](https://console.cloud.tencent.com/cdb/recycle)、
+> [Redis 回收站](https://console.cloud.tencent.com/redis/recycle)、
+> [CFS 文件系统](https://console.cloud.tencent.com/cfs)（若曾启用 `USE_CFS=true`）。
+> 当某个销毁步骤失败或回收站清理未确认成功时，`destroy.sh` 也会打印这些链接进行提醒。
+
+上述文件也内嵌在 `assets/package/sandbox-package.tar.gz` 中（供跳板机侧的 `build_images.sh` 使用）；顶层副本只是让部署器无需先解压内层包即可访问。
+
+### 运行环境要求与 Terraform 说明
+
+`create.sh` 在你的本地机器上驱动 Terraform，无需事先手动安装 Terraform：
+
+- **凭证：** 必须导出 `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`（在
+  <https://console.cloud.tencent.com/cam/capi> 创建 API 密钥对）。常用的
+  `TENCENTCLOUD_*` 变量见 `terraform/tencentcloud/env.example`；更高级的开关在
+  `create.sh` 头部注释中说明。
+- **本地工具：** `ssh`、`scp`、`nc`，以及对腾讯云 API 的网络访问。`terraform` 和
+  `jq` 缺失时会自动安装——当 `/usr/local/bin` 可写时（例如以 root 运行）装到该目录，
+  否则装到本地 `.bin/`。`terraform` 从 HashiCorp 发布站点下载（需要 `curl`/`wget` +
+  `unzip`）；`jq` 优先用系统包管理器安装，失败时回退到从 GitHub 下载静态二进制。
+  本地**无需** `mkcert` / `openssl`——cube-proxy 证书在跳板机上生成。
+- **Terraform 状态保存在本地** `terraform/tencentcloud/` 下（`*.tfstate`，已
+  gitignore——没有远端 backend）。请保留该目录与生成的 `.env`，以便后续 `destroy.sh`
+  或重新运行能找到并管理同一批资源。不要在临时副本里运行 `create.sh` 后又指望另一个
+  副本来清理。
+- **分阶段、fail-fast 的 apply：** 资源按顺序创建——网络（VPC / 子网 / NAT）→ **（`USE_TCR=true` 时）** TCR →
+  CVM（跳板机 + 计算节点）→ **（TCR 模式）** 在跳板机上构建并推送镜像 → MySQL / Redis → **（`USE_CFS=true` 时）** CFS 共享存储 →
+  TKE 集群 + Kubernetes addons → 健康检查 → 计算节点初始化。Kubernetes provider 只有在
+  TKE API Server 就绪后才会启用。销毁时，若创建了 CFS，会在删除子网之前先删除 CFS（其 NFS 挂载点是该子网
+  内的一块弹性网卡）。
+- 解析后的选择会保存到 `terraform/tencentcloud/.env` 并在下次运行时自动加载；显式设置
+  的环境变量始终优先。
+
+### 部分资源创建失败后的重试
+
+如果某个阶段中途失败（例如所选地域/可用区下机型或可用区售罄、账号配额限制、或临时的
+API 错误），**无需**销毁全部资源重头再来：
+
+- 先修复原因——最常见的是**调整配置**：换一个 `TENCENTCLOUD_AVAILABILITY_ZONE` /
+  `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` / `TENCENTCLOUD_REGION`、提升配额、设置密码等
+  ——然后直接**重新运行 `./terraform/tencentcloud/create.sh`**。
+- 重新运行时，`create.sh` 会从 `.env` 重新加载已保存的选择，与云上已存在的资源做状态
+  对账（刷新并导入有状态资源，而不是重建），并**从上次中断处继续**。已存在的计算节点
+  会被保留（绝不缩容）。
+- 资源可用情况确实因**地域**与**可用区**而异：某个机型在一个可用区可用，在另一个可能
+  不可用。交互式的可用区 / 机型菜单会针对你的地域在线查询，最终选择会在 apply 阶段
+  校验。
+- 只有当你确实想拆除整个部署时才需要 `destroy.sh`；普通重试之间不需要它。
+
+### 高级用法：cube-proxy TLS 证书（使用你自己的证书）
+
+`cube-proxy` 负责为 `cube.app` / `*.cube.app` 终结 TLS，其内置 nginx 配置硬编码了
+证书路径 `…/certs/cube.app+3.pem` 和 `…/certs/cube.app+3-key.pem`：
+
+- 默认情况下，`create.sh`（`prepare_cubeproxy_certs`）会在跳板机上用内置 `mkcert`
+  生成一对**自签名**证书（SAN：`cube.app`、`*.cube.app`、`localhost`、`127.0.0.1`），
+  下载到 `terraform/tencentcloud/cubeproxy-certs/`；Terraform 会把该目录下的所有文件
+  打进 `cubeproxy-certs` Secret（因其包含 TLS 私钥，使用 Secret 而非 ConfigMap），
+  以只读方式挂载到 cube-proxy Pod 的 `/usr/local/openresty/nginx/certs/`。
+- **使用你自己的证书：** 在运行 `create.sh` 前，把你的 PEM 证书 + 私钥放进
+  `terraform/tencentcloud/cubeproxy-certs/`，文件名必须正好是 `cube.app+3.pem` 和
+  `cube.app+3-key.pem`（nginx 期望的名字），并覆盖 `cube.app` 与 `*.cube.app` 这两个
+  SAN。`create.sh` 会复用已存在的文件而不再生成，因此 CA 签发的证书（例如映射到
+  `cube.app` 的真实域名）会被原样使用，不再有自签名告警。
+- **轮换证书：** 替换这两个文件并重新运行 `create.sh`；部署阶段会刷新 `cubeproxy-certs`
+  Secret 并重启 cube-proxy 以加载新证书。自签名默认证书会让浏览器/客户端报“不受信任
+  的 CA”告警，任何非一次性用途都应替换它。

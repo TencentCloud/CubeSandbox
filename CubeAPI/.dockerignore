@@ -1,0 +1,15 @@
+# Build artifacts — never needed in the image build context.
+target/
+
+# VCS / editor noise
+.git/
+.gitignore
+*.swp
+
+# Local env / secrets must not leak into the build context
+.env
+.env.*
+
+# Docker files themselves
+Dockerfile
+.dockerignore

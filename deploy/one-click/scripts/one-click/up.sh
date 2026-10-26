@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+CUBE_API_BIN="${TOOLBOX_ROOT}/CubeAPI/bin/cube-api"
+CUBE_API_LOG_DIR="${CUBE_API_LOG_DIR:-/data/log/CubeAPI}"
+CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
+CUBEMASTER_BIN="${TOOLBOX_ROOT}/CubeMaster/bin/cubemaster"
+CUBEMASTER_CFG="${TOOLBOX_ROOT}/CubeMaster/conf.yaml"
+CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_DEFAULT="/data/CubeMaster/storage"
+CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_CONFIGURED="${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR:-}"
+CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR="${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_CONFIGURED:-${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_DEFAULT}}"
+CUBELET_BIN="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
+CUBELET_CONFIG="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
+CUBELET_DYNAMICCONF="${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
+CUBE_API_OPTIONAL_EXPORTS=""
+CUBELET_OPTIONAL_EXPORTS=""
+
+require_cmd bash
+require_cmd curl
+
+test -x "${CUBE_API_BIN}" || die "cube-api binary missing: ${CUBE_API_BIN}"
+test -x "${CUBEMASTER_BIN}" || die "cubemaster binary missing: ${CUBEMASTER_BIN}"
+test -x "${CUBELET_BIN}" || die "cubelet binary missing: ${CUBELET_BIN}"
+test -f "${CUBEMASTER_CFG}" || die "cubemaster config missing: ${CUBEMASTER_CFG}"
+test -f "${CUBELET_CONFIG}" || die "cubelet config missing: ${CUBELET_CONFIG}"
+test -f "${CUBELET_DYNAMICCONF}" || die "cubelet dynamic config missing: ${CUBELET_DYNAMICCONF}"
+validate_cubelet_cow_startup_deps "${CUBELET_CONFIG}"
+
+mkdir -p "${CUBE_API_LOG_DIR}" /tmp/cube
+
+CUBEMASTER_ARTIFACT_STORE_EXPORT=""
+if [[ -n "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_CONFIGURED}" ]]; then
+  mkdir -p "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}"
+  CUBEMASTER_ARTIFACT_STORE_EXPORT="export CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR=\"${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}\";"
+elif mkdir -p "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}" >/dev/null 2>&1; then
+  CUBEMASTER_ARTIFACT_STORE_EXPORT="export CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR=\"${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}\";"
+else
+  log "cubemaster artifact store ${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR} unavailable, fallback handled by cubemaster"
+fi
+
+if [[ -n "${CUBE_MASTER_ADDR:-}" ]]; then
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_MASTER_ADDR=\"${CUBE_MASTER_ADDR}\"; "
+fi
+if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
+  CUBE_API_OPTIONAL_EXPORTS+="export AUTH_CALLBACK_URL=\"${AUTH_CALLBACK_URL}\"; "
+fi
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"${DATABASE_URL}\"; "
+else
+  # No URL: export the split fields instead of building one, so
+  # URL-reserved characters in the password survive intact. Defaults match
+  # the bundled one-click MySQL.
+  # CubeAPI currently ignores these; cubeops-start.sh is the consumer.
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_HOST=\"${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}\"; "
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_PORT=\"${CUBE_SANDBOX_MYSQL_PORT:-3306}\"; "
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_USER=\"${CUBE_SANDBOX_MYSQL_USER:-cube}\"; "
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_PASSWORD=\"${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}\"; "
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_DB=\"${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}\"; "
+fi
+if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
+  CUBELET_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; "
+fi
+
+"${SCRIPT_DIR}/down-local.sh" >/dev/null 2>&1 || true
+
+
+
+start_with_pidfile \
+  "cubemaster" \
+  "export CUBE_MASTER_CONFIG_PATH=\"${CUBEMASTER_CFG}\"; ${CUBEMASTER_ARTIFACT_STORE_EXPORT} \"${CUBEMASTER_BIN}\""
+
+start_with_pidfile \
+  "cube-api" \
+  "export LOG_DIR=\"${CUBE_API_LOG_DIR}\" CUBE_API_BIND=\"${CUBE_API_BIND:-0.0.0.0:3000}\" CUBE_API_SANDBOX_DOMAIN=\"${CUBE_API_SANDBOX_DOMAIN:-cube.app}\"; ${CUBE_API_OPTIONAL_EXPORTS}\"${CUBE_API_BIN}\""
+
+start_with_pidfile \
+  "cubelet" \
+  "${CUBELET_OPTIONAL_EXPORTS}\"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""
+refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
+
+"${SCRIPT_DIR}/up-cube-egress.sh"
+
+wait_for_http "http://${CUBE_API_HEALTH_ADDR}/health" 30 1 || die "cube-api did not become ready, check logs under ${LOG_DIR}"
+
+# quickcheck.sh now waits for each runtime signal to become ready within a single
+# shared budget (CUBE_QUICKCHECK_READY_TIMEOUT), so a single invocation is
+# already race-tolerant. Do NOT wrap it in an outer retry loop: that would
+# multiply quickcheck's budget on a genuinely broken node.
+if "${SCRIPT_DIR}/quickcheck.sh"; then
+  log "core services ready"
+  exit 0
+fi
+
+die "core services did not become ready, check logs under ${LOG_DIR}"

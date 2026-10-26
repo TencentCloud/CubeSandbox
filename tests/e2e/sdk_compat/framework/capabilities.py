@@ -1,0 +1,100 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+LIFECYCLE = "lifecycle"
+COMMANDS = "commands"
+FILESYSTEM = "filesystem"
+FILESYSTEM_EXTENDED = "filesystem_extended"
+RUN_CODE = "run_code"
+CODE_INTERPRETER = "code_interpreter"
+PAUSE_RESUME = "pause_resume"
+SET_TIMEOUT = "set_timeout"
+ROLLBACK_CLONE = "rollback_clone"
+# E2B added Sandbox.fork in 2.46.4; the suite's validated e2b range
+# (2.21.0-2.37.1, see e2b-versions.txt) predates it, so fork stays
+# CubeSandbox-only until the range catches up.
+FORK = "fork"
+NETWORK_ALLOW_DENY = "network_allow_deny"
+# In-place egress policy replacement on a running sandbox, including
+# re-evaluation of already-established connections.
+NETWORK_DYNAMIC_UPDATE = "network_dynamic_update"
+NETWORK_PUBLIC_ACCESS = "network_public_access"
+NETWORK_MASK_REQUEST_HOST = "network_mask_request_host"
+NETWORK_L7_CUSTOM_PORT = "network_l7_custom_port"
+# CubeVS domain allow_out + DNS A learning (exact / leading "*.").
+NETWORK_DNS_ALLOW = "network_dns_allow"
+# Built-in deny of sandbox-private / link-local CIDRs when public egress is on.
+NETWORK_ALWAYS_DENIED = "network_always_denied"
+# CubeEgress L7 rules: inject, first-match, deny, TLS MITM, SNI/host.
+NETWORK_L7_EGRESS = "network_l7_egress"
+# Sandbox access to a service bound on the node IP (direct and via CubeEgress).
+NETWORK_NODE_LOCAL = "network_node_local"
+# Template CubeNetworkConfig merged with per-create network options.
+NETWORK_TEMPLATE_MERGE = "network_template_merge"
+PLATFORM_LIFECYCLE = "platform_lifecycle"
+HOST_MOUNT = "host_mount"
+VOLUME_PLUGIN = "volume_plugin"
+AUTH_SIMPLE_KEY = "auth_simple_key"
+# E2B-compatible `mcp` create option served by the in-sandbox mcp-gateway.
+MCP_GATEWAY = "mcp_gateway"
+# Node-local restart policy (Never / OnFailure / Always) and restartStatus.
+RESTART_POLICY = "restart_policy"
+
+COMMON_CAPABILITIES = frozenset(
+    {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
+)
+
+E2B_CAPABILITIES = frozenset(
+    {
+        *COMMON_CAPABILITIES,
+        CODE_INTERPRETER,
+        PAUSE_RESUME,
+        SET_TIMEOUT,
+        NETWORK_ALLOW_DENY,
+        NETWORK_PUBLIC_ACCESS,
+        NETWORK_MASK_REQUEST_HOST,
+        MCP_GATEWAY,
+    }
+)
+
+CUBESANDBOX_CAPABILITIES = frozenset(
+    {
+        *COMMON_CAPABILITIES,
+        CODE_INTERPRETER,
+        PAUSE_RESUME,
+        SET_TIMEOUT,
+        ROLLBACK_CLONE,
+        FORK,
+        NETWORK_ALLOW_DENY,
+        NETWORK_PUBLIC_ACCESS,
+        NETWORK_MASK_REQUEST_HOST,
+        NETWORK_DNS_ALLOW,
+        NETWORK_ALWAYS_DENIED,
+        NETWORK_L7_EGRESS,
+        NETWORK_NODE_LOCAL,
+        NETWORK_TEMPLATE_MERGE,
+        NETWORK_DYNAMIC_UPDATE,
+        PLATFORM_LIFECYCLE,
+        HOST_MOUNT,
+        VOLUME_PLUGIN,
+        AUTH_SIMPLE_KEY,
+        NETWORK_L7_CUSTOM_PORT,
+        MCP_GATEWAY,
+        RESTART_POLICY,
+    }
+)
+
+# Canonical backend -> capability-set map. Single source of truth for the
+# sdk_sandbox fixture gate and helpers that drive create_adapter directly
+# (framework.host_mount / cases/volume). Unknown backends resolve to empty.
+BACKEND_CAPABILITIES = {
+    "cubesandbox": CUBESANDBOX_CAPABILITIES,
+    "e2b": E2B_CAPABILITIES,
+}
+
+
+def capabilities_for_backend(backend: str) -> frozenset[str]:
+    """Return the capability set a backend supports (empty for unknown)."""
+    return BACKEND_CAPABILITIES.get(backend, frozenset())

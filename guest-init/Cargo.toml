@@ -1,0 +1,17 @@
+[package]
+name = "cube-init"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Lightweight Guest PID 1 that mounts cube-agent.ext4 and execs cube-agent"
+publish = false
+
+[[bin]]
+name = "cube-init"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+lazy_static = "1.4"
+libc = "0.2"
+nix = "0.26"

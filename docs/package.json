@@ -1,0 +1,25 @@
+{
+  "name": "project-docs",
+  "version": "1.0.0",
+  "description": "VitePress Documentation",
+  "type": "module",
+  "scripts": {
+    "docs:test": "node --test tests/*.test.mjs",
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "mermaid": "^11.13.0",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-llms": "^1.13.5",
+    "vitepress-plugin-mermaid": "^2.0.17",
+    "vue": "^3.5.31"
+  },
+  "dependencies": {
+    "three": "0.183.2"
+  }
+}

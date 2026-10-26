@@ -1,0 +1,41 @@
+# This is an agent configuration file example.
+dev_mode = true
+server_addr = 'vsock://8:2048'
+
+[endpoints]
+# All endpoints are allowed
+allowed = [
+        "AddARPNeighborsRequest",
+        "AddSwapRequest",
+        "CloseStdinRequest",
+        "CopyFileRequest",
+        "CreateContainerRequest",
+        "CreateSandboxRequest",
+        "DestroySandboxRequest",
+        "ExecProcessRequest",
+        "GetMetricsRequest",
+        "GetOOMEventRequest",
+        "GuestDetailsRequest",
+        "ListInterfacesRequest",
+        "ListRoutesRequest",
+        "MemHotplugByProbeRequest",
+        "OnlineCPUMemRequest",
+        "PauseContainerRequest",
+        "PullImageRequest",
+        "ReadStreamRequest",
+        "RemoveContainerRequest",
+        "ReseedRandomDevRequest",
+        "ResizeVolumeRequest",
+        "ResumeContainerRequest",
+        "SetGuestDateTimeRequest",
+        "SignalProcessRequest",
+        "StartContainerRequest",
+        "StatsContainerRequest",
+        "TtyWinResizeRequest",
+        "UpdateContainerRequest",
+        "UpdateInterfaceRequest",
+        "UpdateRoutesRequest",
+        "VolumeStatsRequest",
+        "WaitProcessRequest",
+        "WriteStreamRequest"
+]

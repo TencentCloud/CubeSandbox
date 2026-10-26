@@ -1,0 +1,31 @@
+version: "3"
+services:
+  cube-proxy:
+    image: __CUBE_PROXY_IMAGE__
+    container_name: __CUBE_PROXY_CONTAINER_NAME__
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # ── Service registration (consumed by lua/proxy_registry.lua) ────────
+      # These let this replica announce itself to Redis so
+      # cube-lifecycle-manager can discover it and route pause/resume
+      # coordination through this admin server.
+      CUBE_PROXY_REGISTRY_ENABLE: "__CUBE_PROXY_REGISTRY_ENABLE__"
+      CUBE_PROXY_ID: "__CUBE_PROXY_ID__"
+      CUBE_PROXY_ADMIN_URL: "__CUBE_PROXY_ADMIN_URL__"
+      CUBE_PROXY_RESUME_URL: "__CUBE_PROXY_RESUME_URL__"
+      CUBE_PROXY_NODE_IP: "__CUBE_PROXY_NODE_IP__"
+      CUBE_PROXY_VERSION: "__CUBE_PROXY_VERSION__"
+      CUBE_PROXY_HEARTBEAT_INTERVAL_MS: "__CUBE_PROXY_HEARTBEAT_INTERVAL_MS__"
+      CUBE_PROXY_REGISTRY_REDIS_HOST: "__CUBE_PROXY_REGISTRY_REDIS_HOST__"
+      CUBE_PROXY_REGISTRY_REDIS_PORT: "__CUBE_PROXY_REGISTRY_REDIS_PORT__"
+      CUBE_PROXY_REGISTRY_REDIS_PASSWORD: "__CUBE_PROXY_REGISTRY_REDIS_PASSWORD__"
+      CUBE_PROXY_REGISTRY_REDIS_DB: "__CUBE_PROXY_REGISTRY_REDIS_DB__"
+      CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME: "__CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME__"
+      CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES: "__CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES__"
+      CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD: "__CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD__"
+    volumes:
+      - /data/log/cube-proxy:/data/log/cube-proxy
+      - __CUBE_PROXY_CERT_DIR__:/usr/local/openresty/nginx/certs:ro
+      - __CUBE_PROXY_GLOBAL_CONF__:/usr/local/openresty/nginx/conf/global/global.conf:ro
+      - __CUBE_PROXY_NGINX_CONF__:/usr/local/openresty/nginx/conf/nginx.conf:ro

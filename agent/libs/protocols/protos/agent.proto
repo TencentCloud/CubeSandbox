@@ -1,0 +1,621 @@
+//
+// Copyright 2017 HyperHQ Inc.
+// Copyright (c) 2019-2020 Ant Group
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+option go_package = "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/pkg/agent/protocols/grpc";
+
+package grpc;
+
+import "oci.proto";
+import "csi.proto";
+import "types.proto";
+
+import "google/protobuf/empty.proto";
+
+// unstable
+service AgentService {
+	// execution
+	rpc CreateContainer(CreateContainerRequest) returns (google.protobuf.Empty);
+	rpc StartContainer(StartContainerRequest) returns (google.protobuf.Empty);
+
+	// RemoveContainer will tear down an existing container by forcibly terminating
+	// all processes running inside that container and releasing all internal
+	// resources associated with it.
+	// RemoveContainer will wait for all processes termination before returning.
+	// If any process can not be killed or if it can not be killed after
+	// the RemoveContainerRequest timeout, RemoveContainer will return an error.
+	rpc RemoveContainer(RemoveContainerRequest) returns (google.protobuf.Empty);
+	rpc ExecProcess(ExecProcessRequest) returns (google.protobuf.Empty);
+	rpc SignalProcess(SignalProcessRequest) returns (google.protobuf.Empty);
+	rpc WaitProcess(WaitProcessRequest) returns (WaitProcessResponse); // wait & reap like waitpid(2)
+	rpc UpdateContainer(UpdateContainerRequest) returns (google.protobuf.Empty);
+	rpc StatsContainer(StatsContainerRequest) returns (StatsContainerResponse);
+	rpc PauseContainer(PauseContainerRequest) returns (google.protobuf.Empty);
+	rpc ResumeContainer(ResumeContainerRequest) returns (google.protobuf.Empty);
+
+	// stdio
+	rpc WriteStdin(WriteStreamRequest) returns (WriteStreamResponse);
+	rpc ReadStdout(ReadStreamRequest) returns (ReadStreamResponse);
+	rpc ReadStderr(ReadStreamRequest) returns (ReadStreamResponse);
+	rpc CloseStdin(CloseStdinRequest) returns (google.protobuf.Empty);
+	rpc TtyWinResize(TtyWinResizeRequest) returns (google.protobuf.Empty);
+	rpc ReconnectContainerIO(ReconnectContainerIORequest) returns (google.protobuf.Empty);
+
+	// networking
+	rpc UpdateInterface(UpdateInterfaceRequest) returns (types.Interface);
+	rpc UpdateRoutes(UpdateRoutesRequest) returns (Routes);
+	rpc ListInterfaces(ListInterfacesRequest) returns(Interfaces);
+	rpc ListRoutes(ListRoutesRequest) returns (Routes);
+	rpc AddARPNeighbors(AddARPNeighborsRequest) returns (google.protobuf.Empty);
+	rpc GetIPTables(GetIPTablesRequest) returns (GetIPTablesResponse);
+	rpc SetIPTables(SetIPTablesRequest) returns (SetIPTablesResponse);
+
+	// observability
+	rpc GetMetrics(GetMetricsRequest) returns (Metrics);
+
+	// misc (TODO: some rpcs can be replaced by hyperstart-exec)
+	rpc CreateSandbox(CreateSandboxRequest) returns (google.protobuf.Empty);
+	rpc DestroySandbox(DestroySandboxRequest) returns (google.protobuf.Empty);
+	rpc OnlineCPUMem(OnlineCPUMemRequest) returns (google.protobuf.Empty);
+	rpc ReseedRandomDev(ReseedRandomDevRequest) returns (google.protobuf.Empty);
+	rpc GetGuestDetails(GuestDetailsRequest) returns (GuestDetailsResponse);
+	rpc MemHotplugByProbe(MemHotplugByProbeRequest) returns (google.protobuf.Empty);
+	rpc SetGuestDateTime(SetGuestDateTimeRequest) returns (google.protobuf.Empty);
+	rpc CopyFile(CopyFileRequest) returns (google.protobuf.Empty);
+	rpc GetOOMEvent(GetOOMEventRequest) returns (OOMEvent);
+	rpc AddSwap(AddSwapRequest) returns (google.protobuf.Empty);
+	rpc GetVolumeStats(VolumeStatsRequest) returns (VolumeStatsResponse);
+	rpc ResizeVolume(ResizeVolumeRequest) returns (google.protobuf.Empty);
+
+}
+
+message CreateContainerRequest {
+	string container_id = 1;
+	string exec_id = 2;
+	StringUser string_user = 3;
+	repeated Device devices = 4;
+	repeated Storage storages = 5;
+	Spec OCI = 6;
+
+	// This field is used to indicate if the container needs to join
+	// sandbox shared pid ns or create a new namespace. This field is
+	// meant to override the NEWPID config settings in the OCI spec.
+	// The agent would receive an OCI spec with PID namespace cleared
+	// out altogether and not just the pid ns path.
+	bool sandbox_pidns = 7;
+	repeated CustomFile custom_files = 8;
+	// A zero port keeps the legacy gRPC stream for that direction. A non-zero
+	// port selects direct passfd I/O over the corresponding vsock connection.
+	uint32 stdin_port = 9;
+	uint32 stdout_port = 10;
+	uint32 stderr_port = 11;
+}
+
+message StartContainerRequest {
+	string container_id = 1;
+}
+
+message RemoveContainerRequest {
+	string container_id = 1;
+
+	// RemoveContainer will return an error if
+	// it could not kill some container processes
+	// after timeout seconds.
+	// Setting timeout to 0 means RemoveContainer will
+	// wait for ever.
+	uint32 timeout = 2;
+}
+
+message ExecProcessRequest {
+	string container_id = 1;
+	string exec_id = 2;
+	StringUser string_user = 3;
+	Process process = 4;
+	string runtime_unix_addr = 5;
+	// A zero port keeps the legacy gRPC stream for that direction. A non-zero
+	// port selects direct passfd I/O over the corresponding vsock connection.
+	uint32 stdin_port = 6;
+	uint32 stdout_port = 7;
+	uint32 stderr_port = 8;
+}
+
+// Reconnects direct passfd I/O after VM resume or rollback restore.
+message ReconnectContainerIORequest {
+	string container_id = 1;
+	// Zero means that direction is absent; non-zero is its direct vsock port.
+	uint32 stdin_port = 2;
+	uint32 stdout_port = 3;
+	uint32 stderr_port = 4;
+}
+
+message SignalProcessRequest {
+	string container_id = 1;
+
+	// Special case for SignalProcess(): exec_id can be empty(""),
+	// which means to send the signal to all the processes including their descendants.
+	// Other APIs with exec_id should treat empty exec_id as an invalid request.
+	string exec_id = 2;
+	uint32 signal = 3;
+}
+
+message WaitProcessRequest {
+	string container_id = 1;
+	string exec_id = 2;
+}
+
+message WaitProcessResponse {
+	int32 status = 1;
+}
+
+message UpdateContainerRequest {
+	string container_id = 1;
+	LinuxResources resources = 2;
+}
+
+message StatsContainerRequest {
+    string container_id = 1;
+}
+
+message PauseContainerRequest {
+    string container_id = 1;
+}
+
+message ResumeContainerRequest {
+    string container_id = 1;
+}
+
+message CpuUsage {
+	uint64 total_usage = 1;
+	repeated uint64 percpu_usage = 2;
+	uint64 usage_in_kernelmode = 3;
+	uint64 usage_in_usermode = 4;
+}
+
+message ThrottlingData {
+	uint64 periods = 1;
+	uint64 throttled_periods = 2;
+	uint64 throttled_time = 3;
+}
+
+message CpuStats {
+	CpuUsage cpu_usage = 1;
+	ThrottlingData throttling_data = 2;
+}
+
+message PidsStats {
+	uint64 current = 1;
+	uint64 limit = 2;
+}
+
+message MemoryData {
+	uint64 usage = 1;
+	uint64 max_usage = 2;
+	uint64 failcnt = 3;
+	uint64 limit = 4;
+}
+
+message MemoryStats {
+	uint64 cache = 1;
+	MemoryData usage = 2;
+	MemoryData swap_usage = 3;
+	MemoryData kernel_usage = 4;
+	bool use_hierarchy = 5;
+	map<string, uint64> stats = 6;
+}
+
+
+message BlkioStatsEntry {
+	uint64 major = 1;
+	uint64 minor = 2;
+	string op = 3;
+	uint64 value = 4;
+}
+
+message BlkioStats {
+	repeated BlkioStatsEntry io_service_bytes_recursive = 1; // number of bytes transferred to and from the block device
+	repeated BlkioStatsEntry io_serviced_recursive = 2;
+	repeated BlkioStatsEntry io_queued_recursive = 3;
+	repeated BlkioStatsEntry io_service_time_recursive = 4;
+	repeated BlkioStatsEntry io_wait_time_recursive = 5;
+	repeated BlkioStatsEntry io_merged_recursive = 6;
+	repeated BlkioStatsEntry io_time_recursive = 7;
+	repeated BlkioStatsEntry sectors_recursive = 8;
+}
+
+message HugetlbStats {
+	uint64 usage = 1;
+	uint64 max_usage = 2;
+	uint64 failcnt = 3;
+}
+
+message CgroupStats {
+    CpuStats cpu_stats = 1;
+    MemoryStats memory_stats  = 2;
+    PidsStats pids_stats = 3;
+    BlkioStats blkio_stats = 4;
+    map<string, HugetlbStats> hugetlb_stats = 5; // the map is in the format "size of hugepage: stats of the hugepage"
+
+}
+
+message NetworkStats {
+	string name = 1;
+	uint64 rx_bytes = 2;
+	uint64 rx_packets = 3;
+	uint64 rx_errors  = 4;
+	uint64 rx_dropped = 5;
+	uint64 tx_bytes = 6;
+	uint64 tx_packets = 7;
+	uint64 tx_errors = 8;
+	uint64 tx_dropped = 9;
+}
+
+message StatsContainerResponse {
+	CgroupStats cgroup_stats = 1;
+	repeated NetworkStats network_stats = 2;
+	// Version 1 certifies unified cgroup v2 workload accounting with all
+	// container-owned processes below the reported accounting cgroup.
+	uint32 resource_metrics_version = 3;
+}
+
+message WriteStreamRequest {
+	string container_id = 1;
+	string exec_id = 2;
+	bytes data = 3;
+}
+
+message WriteStreamResponse {
+	uint32 len = 1;
+}
+
+message ReadStreamRequest {
+	string container_id = 1;
+	string exec_id = 2;
+	uint32 len = 3;
+}
+
+message ReadStreamResponse {
+	bytes data = 1;
+}
+
+message CloseStdinRequest {
+	string container_id = 1;
+	string exec_id = 2;
+}
+
+message TtyWinResizeRequest {
+	string container_id = 1;
+	string exec_id = 2;
+	uint32 row = 3;
+	uint32 column = 4;
+}
+
+message KernelModule {
+	// This field is the name of the kernel module.
+	string name = 1;
+	// This field are the parameters for the kernel module which are
+	// whitespace-delimited key=value pairs passed to modprobe(8).
+	repeated string parameters = 2;
+}
+
+enum StartMode {
+	START = 0;
+	SNAPSHOT = 1;
+	RESTORE = 2;
+}
+
+message CreateSandboxRequest {
+	string hostname = 1;
+	repeated string dns = 2;
+	repeated Storage storages = 3;
+
+	// This field means that a pause process needs to be created by the
+	// agent. This pid namespace of the pause process will be treated as
+	// a shared pid namespace. All containers created will join this shared
+	// pid namespace.
+	bool sandbox_pidns = 4;
+	// SandboxId identifies which sandbox is using the agent. We allow only
+	// one sandbox per agent and implicitly require that CreateSandbox is
+	// called before other sandbox/network calls.
+	string sandbox_id = 5;
+	// This field, if non-empty, designates an absolute path to a directory
+	// that the agent will search for OCI hooks to run within the guest.
+	string guest_hook_path = 6;
+	// This field is the list of kernel modules to be loaded in the guest kernel.
+	repeated KernelModule kernel_modules = 7;
+    
+    repeated types.Interface interfaces = 8;
+    repeated types.Route routes = 9;
+    repeated types.ARPNeighbor ARPNeighbors = 10;
+    string cube_vip = 11;
+    uint32 cube_preserve_mem_m = 12;
+	bool cube_mvm_monitor = 13;
+	StartMode start_mode = 14;
+	GPUInfo gpu_info = 15;
+}
+
+message GPUInfo {
+	GpuVendor gpu_vendor = 1;
+	uint64 gpu_overhead_memory = 2;
+	repeated string pciPath = 3;
+}
+
+enum GpuVendor {
+	None = 0;
+	Nvidia = 1;
+}
+
+message DestroySandboxRequest {
+}
+
+message Interfaces {
+	repeated types.Interface Interfaces = 1;
+}
+
+message Routes {
+	repeated types.Route Routes = 1;
+}
+
+message UpdateInterfaceRequest {
+	types.Interface interface = 1;
+}
+
+message UpdateRoutesRequest {
+	Routes routes = 1;
+}
+
+message ListInterfacesRequest {
+}
+
+message ListRoutesRequest {
+}
+
+message ARPNeighbors {
+       repeated types.ARPNeighbor ARPNeighbors = 1;
+}
+
+message AddARPNeighborsRequest {
+       ARPNeighbors neighbors = 1;
+}
+
+message GetIPTablesRequest {
+       bool is_ipv6 = 1;
+}
+
+message GetIPTablesResponse{
+        // raw stdout from iptables-save or ip6tables-save
+        bytes data = 1;
+}
+
+message SetIPTablesRequest {
+       bool is_ipv6 = 1;
+
+       // iptables, in raw format expected to be passed to stdin
+       // of iptables-save or ip6tables-save
+       bytes data = 2;
+}
+
+message SetIPTablesResponse{
+        // raw stdout from iptables-restore or ip6tables-restore
+        bytes data = 1;
+}
+
+message OnlineCPUMemRequest {
+	// Wait specifies if the caller waits for the agent to online all resources.
+	// If true the agent returns once all resources have been connected, otherwise all
+	// resources are connected asynchronously and the agent returns immediately.
+	bool wait = 1;
+
+	// NbCpus specifies the number of CPUs that were added and the agent has to online.
+	uint32 nb_cpus = 2;
+
+	// CpuOnly specifies whether only online CPU or not.
+	bool cpu_only = 3;
+}
+
+message ReseedRandomDevRequest {
+	// Data specifies the random data used to reseed the guest crng.
+	bytes data = 2;
+}
+
+// AgentDetails provides information to the client about the running agent.
+message AgentDetails {
+	// Semantic version of agent (see https://semver.org).
+	string version = 1;
+
+	// Set if the agent is running as PID 1.
+	bool init_daemon = 2;
+
+	// List of available device handlers.
+	repeated string device_handlers = 3;
+
+	// List of available storage handlers.
+	repeated string storage_handlers = 4;
+
+	// Set only if the agent is built with seccomp support and the guest
+	// environment supports seccomp.
+	bool supports_seccomp = 5;
+}
+
+message GuestDetailsRequest {
+	// MemBlockSize asks server to return the system memory block size that can be used
+	// for memory hotplug alignment. Typically the server returns what's in
+	// /sys/devices/system/memory/block_size_bytes.
+	bool mem_block_size = 1;
+
+	// MemoryHotplugProbe asks server to return whether guest kernel supports memory hotplug
+        // via probeinterface. Typically the server will check if the path
+        // /sys/devices/system/memory/probe exists.
+	bool mem_hotplug_probe = 2;
+}
+
+message GuestDetailsResponse {
+	// MemBlockSizeBytes returns the system memory block size in bytes.
+	uint64 mem_block_size_bytes = 1;
+
+	AgentDetails agent_details = 2;
+
+	bool support_mem_hotplug_probe = 3;
+}
+
+message MemHotplugByProbeRequest {
+	// server needs to send the value of memHotplugProbeAddr into file /sys/devices/system/memory/probe,
+	// in order to notify the guest kernel about hot-add memory event
+	repeated uint64 memHotplugProbeAddr = 1;
+}
+
+message SetGuestDateTimeRequest {
+	// Sec the second since the Epoch.
+	int64 Sec = 1;
+	// Usec the microseconds portion of time since the Epoch.
+	int64 Usec = 2;
+}
+
+// FSGroup consists of the group id and group ownership change policy
+// that a volume should have its ownership changed to.
+message FSGroup {
+	// GroupID is the ID that the group ownership of the
+	// files in the mounted volume will need to be changed to.
+	uint32 group_id = 2;
+	// GroupChangePolicy specifies the policy for applying group id
+	// ownership change on a mounted volume.
+	types.FSGroupChangePolicy group_change_policy = 3;
+}
+
+// Storage represents both the rootfs of the container, and any volume that
+// could have been defined through the Mount list of the OCI specification.
+message Storage {
+	// Driver is used to define the way the storage is passed through the
+	// virtual machine. It can be "9p", "blk", or something else, but for
+	// all cases, this will define if some extra steps are required before
+	// this storage gets mounted into the container.
+	string driver = 1;
+	// DriverOptions allows the caller to define a list of options such
+	// as block sizes, numbers of luns, ... which are very specific to
+	// every device and cannot be generalized through extra fields.
+	repeated string driver_options = 2;
+	// Source can be anything representing the source of the storage. This
+	// will be handled by the proper handler based on the Driver used.
+	// For instance, it can be a very simple path if the caller knows the
+	// name of device inside the VM, or it can be some sort of identifier
+	// to let the agent find the device inside the VM.
+	string source = 3;
+	// Fstype represents the filesystem that needs to be used to mount the
+	// storage inside the VM. For instance, it could be "xfs" for block
+	// device, "9p" for shared filesystem, or "tmpfs" for shared /dev/shm.
+	string fstype = 4;
+	// Options describes the additional options that might be needed to
+	// mount properly the storage filesystem.
+	repeated string options = 5;
+	// MountPoint refers to the path where the storage should be mounted
+	// inside the VM.
+	string mount_point = 6;
+	// FSGroup consists of the group ID and group ownership change policy
+	// that the mounted volume must have its group ID changed to when specified.
+	FSGroup fs_group = 7;
+
+	// cbs盘需要被agent格式化类型为fstype
+	bool need_format = 8;
+	// cbs盘需要在子机内调用resize2fs
+	bool need_resize = 9;
+}
+
+// Device represents only the devices that could have been defined through the
+// Linux Device list of the OCI specification.
+message Device {
+	// Id can be used to identify the device inside the VM. Some devices
+	// might not need it to be identified on the VM, and will rely on the
+	// provided VmPath instead.
+	string id = 1;
+	// Type defines the type of device described. This can be "blk",
+	// "scsi", "vfio", ...
+	// Particularly, this should be used to trigger the use of the
+	// appropriate device handler.
+	string type = 2;
+	// VmPath can be used by the caller to provide directly the path of
+	// the device as it will appear inside the VM. For some devices, the
+	// device id or the list of options passed might not be enough to find
+	// the device. In those cases, the caller should predict and provide
+	// this vm_path.
+	string vm_path = 3;
+	// ContainerPath defines the path where the device should be found inside
+	// the container. This path should match the path of the device from
+	// the device list listed inside the OCI spec. This is used in order
+	// to identify the right device in the spec and update it with the
+	// right options such as major/minor numbers as they appear inside
+	// the VM for instance. Note that an empty ctr_path should be used
+	// to make sure the device handler inside the agent is called, but
+	// no spec update needs to be performed. This has to happen for the
+	// case of rootfs, when a device has to be waited for after it has
+	// been hotplugged. An equivalent Storage entry should be defined if
+	// any mount needs to be performed afterwards.
+	string container_path = 4;
+	// Options allows the caller to define a list of options such as block
+	// sizes, numbers of luns, ... which are very specific to every device
+	// and cannot be generalized through extra fields.
+	repeated string options = 5;
+}
+
+message StringUser {
+	string uid = 1;
+	string gid = 2;
+	repeated string additionalGids = 3;
+}
+
+message CopyFileRequest {
+	// Path is the destination file in the guest. It must be absolute,
+	// canonical and below /run.
+	string path = 1;
+	// FileSize is the expected file size, for security reasons write operations
+	// are made in a temporary file, once it has the expected size, it's moved
+	// to the destination path.
+	int64 file_size = 2;
+	// FileMode is the file mode.
+	uint32 file_mode = 3;
+	// DirMode is the mode for the parent directories of destination path.
+	uint32 dir_mode = 4;
+	// Uid is the numeric user id.
+	int32 uid = 5;
+	// Gid is the numeric group id.
+	int32 gid = 6;
+	// Offset for the next write operation.
+	int64 offset = 7;
+	// Data to write in the destination file.
+	bytes data = 8;
+}
+
+message GetOOMEventRequest {}
+
+message OOMEvent {
+	string container_id = 1;
+}
+
+message AddSwapRequest {
+	repeated uint32 PCIPath = 1;
+}
+
+message GetMetricsRequest {}
+
+message Metrics {
+	string metrics = 1;
+}
+
+message VolumeStatsRequest {
+	// The volume path on the guest outside the container
+	string volume_guest_path = 1;
+}
+
+message ResizeVolumeRequest {
+	// Full VM guest path of the volume (outside the container)
+	string volume_guest_path = 1;
+	uint64 size = 2;
+}
+
+message CustomFile {
+	string path = 1;
+	string content = 2;
+}

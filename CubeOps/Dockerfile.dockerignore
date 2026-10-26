@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for CubeOps/Dockerfile (context = repository root).
+# The repo-root .dockerignore excludes everything except docker/ builder files,
+# so CubeOps and the trees this Dockerfile COPYs must be allowed here.
+**
+!CubeOps
+!CubeOps/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**
+!pkgs/blobstore
+!pkgs/blobstore/**
+!pkgs/cubedb
+!pkgs/cubedb/**

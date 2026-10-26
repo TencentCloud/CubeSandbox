@@ -1,0 +1,74 @@
+linters:
+  enable-all: true
+  disable:
+    # Deprecated with replacement
+    - maligned
+    - varcheck
+    - golint
+    - exhaustivestruct
+    - structcheck
+    - nosnakecase
+    - deadcode
+    - scopelint
+    # Deprecated without replacement
+    - ifshort
+    - interfacer
+    # https://github.com/golangci/golangci-lint/issues/2649
+    - rowserrcheck
+    - sqlclosecheck
+    - wastedassign
+    # ignore on purpose
+    - gomoddirectives
+    - paralleltest
+    - testpackage
+    - varnamelen
+    - wsl
+    - nlreturn
+    # FIXME
+    - godox           # enable when we resolve all TODO/FIXME
+    - funlen          # enable when we do a refactor
+    - forcetypeassert # enable when we do a refactor
+    - nestif          # enable when we do a refactor
+    - cyclop          # enable when we do a refactor
+    - gocritic        # enable when we do a refactor
+    - exhaustruct     # enable when we do a refactor
+    - goerr113        # enable when we do a refactor
+    - wrapcheck       # enable when we do a refactor
+    - gocognit        # enable when we do a refactor
+
+run:
+  skip-dirs:
+    - tools
+
+linters-settings:
+  funlen:
+    lines: 80
+    statements: 60
+  tagliatelle:
+    case:
+      rules:
+        json: snake
+
+issues:
+  exclude-rules:
+    - path: tools
+      linters:
+        - exhaustruct
+        - varnamelen
+        - wrapcheck
+        - wsl
+    - path: queue.go
+      linters:
+        - predeclared
+    - path: plugin.go
+      linters:
+        - gochecknoinits
+    - path: ipam.go
+      linters:
+        - gomnd
+    - path: netdevice.go
+      linters:
+        - gomnd
+    - path: netdevice_test.go
+      linters:
+        - unparam

@@ -1,0 +1,48 @@
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_ID            # Execute jobs in merge request context
+    - if: $CI_COMMIT_BRANCH == 'main'     # Execute jobs when a new commit is pushed to main branch
+
+image: "rust:alpine"
+
+clippy:
+  before_script:
+    - apk add musl-dev
+    - rustup component add clippy
+  script:
+    - cargo clippy --verbose -- -Dwarnings
+
+fmt:
+  before_script:
+    - rustup component add rustfmt
+  script:
+    - cargo fmt -v -- --check
+
+test:
+  before_script:
+    - apk add libcap-ng-static libseccomp-static musl-dev
+  script:
+    - rustc --version && cargo --version  # Print version info for debugging
+    - RUSTFLAGS='-C target-feature=+crt-static -C link-self-contained=yes' LIBSECCOMP_LINK_TYPE=static LIBSECCOMP_LIB_PATH=/usr/lib LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH=/usr/lib cargo build --verbose --target x86_64-unknown-linux-musl
+    - RUSTFLAGS='-C target-feature=+crt-static -C link-self-contained=yes' LIBSECCOMP_LINK_TYPE=static LIBSECCOMP_LIB_PATH=/usr/lib LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH=/usr/lib cargo test --verbose --target x86_64-unknown-linux-musl
+  except:
+      # There is an equivalent job ('publish') that will run when code lands
+      # on the 'main' branch, except it will upload a built binary. These are
+      # kept separate to avoid accidentally uploading binaries when it's not
+      # necessary.
+    - main@virtio-fs/virtiofsd
+
+# Build a statically linked and optimized binary for publishing.
+#
+# This only runs when code is merged to the 'main' branch.
+publish:
+  before_script:
+    - apk add libcap-ng-static libseccomp-static musl-dev
+  script:
+    - RUSTFLAGS='-C target-feature=+crt-static -C link-self-contained=yes' LIBSECCOMP_LINK_TYPE=static LIBSECCOMP_LIB_PATH=/usr/lib LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH=/usr/lib cargo build --release --target x86_64-unknown-linux-musl
+  artifacts:
+    name: "virtiofsd-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - target/x86_64-unknown-linux-musl/release/virtiofsd
+  only:
+    - main@virtio-fs/virtiofsd

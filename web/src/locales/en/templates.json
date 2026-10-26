@@ -1,0 +1,107 @@
+{
+  "title": "Templates",
+  "subtitle": "Reusable snapshots used as the starting point of every sandbox.",
+  "noTemplates": "No templates yet. Use the CLI or SDK to publish a template.",
+  "tabs": {
+    "list": "Templates",
+    "compat": "Compatibility"
+  },
+  "compat": {
+    "banner": "{{count}} templates need to be rebuilt. After the node upgrade, creating sandboxes from them may fail. Open a template and click Rebuild Template.",
+    "view": "Rebuild now",
+    "openRebuild": "Open and rebuild",
+    "driftHint": "You can still create sandboxes. Click Rebuild Template only if you want the node's current environment.",
+    "status": {
+      "OK": "Ready",
+      "STALE": "Ready",
+      "UNKNOWN": "Needs rebuild",
+      "MISSING": "Not on this node"
+    },
+    "kpi": {
+      "staleTemplates": "Needs rebuild",
+      "staleReplicas": "Copies to rebuild",
+      "affectedNodes": "Nodes involved",
+      "missingReplicas": "Missing copies",
+      "unknownReplicas": "Copies to rebuild",
+      "driftReplicas": "Newer node environment (rebuild optional)"
+    }
+  },
+  "col": {
+    "instance": "Instance",
+    "created": "Created",
+    "version": "version",
+    "image": "image",
+    "jobID": "Job ID"
+  },
+  "instanceDefault": "standard",
+  "create": {
+    "button": "New Template",
+    "title": "New Template",
+    "templateID": "Template ID",
+    "required": "Required",
+    "image": "Image",
+    "imageHint": "Container image, e.g. registry.example.com/code:latest; prefix plain HTTP registries with http://",
+    "alias": "Alias",
+    "aliasHint": "Stable human-readable alias ([a-z0-9-], ≤64 chars); sandboxes can reference the template by this alias instead of the generated Template ID.",
+    "instanceType": "Instance type",
+    "instanceTypeHint": "Defaults to standard when empty.",
+    "cancel": "Cancel",
+    "submit": "Create",
+    "creating": "Creating…",
+    "error": "Failed to create template.",
+    "writableLayerSize": "Writable layer size",
+    "writableLayerSizeHint": "e.g. 1G, 2G. Required — the backend rejects empty values.",
+    "exposedPorts": "Exposed ports",
+    "exposedPortsHint": "Multiple ports separated by commas, e.g. 49983,9000.",
+    "exposedPortsError": "Ports must be numbers between 1 and 65535.",
+    "probePort": "Probe port",
+    "probePath": "Probe path",
+    "probePathHint": "Defaults to /health when probe port is set.",
+    "probeAutoSyncHint": "Tip: when the Exposed ports field loses focus, the Probe port will auto-fill with the first port (if empty). Once you set a custom probe port, it won't be overwritten by later Exposed port edits.",
+    "cpu": "CPU",
+    "cpuHint": "Millicores, e.g. 2000 means 2 vCPU.",
+    "memory": "Memory",
+    "memoryHint": "MiB, e.g. 2000.",
+    "env": "Environment variables",
+    "envHint": "One per line, format KEY=VALUE.",
+    "forbidInternetAccess": "Forbid internet access",
+    "advanced": {
+      "show": "Show advanced options",
+      "hide": "Hide advanced options"
+    },
+    "useS3Backend": "S3 storage backend",
+    "networkType": "Network type",
+    "networkTypeHint": "e.g. tap. Leave empty to use the cluster default.",
+    "nodes": "Node scope",
+    "nodesHint": "Limit distribution to these node IDs or host IPs (comma separated). Leave empty to let CubeMaster auto-pick from healthy nodes.",
+    "nodesPlaceholder": "node-1,10.0.0.5 (leave empty to auto-pick)",
+    "command": "Entrypoint override",
+    "commandHint": "Override the container ENTRYPOINT. One argument per line.",
+    "args": "CMD args override",
+    "argsHint": "Override the container CMD. One argument per line.",
+    "dns": "DNS nameservers",
+    "dnsHint": "One server per line or comma separated.",
+    "allowOut": "Allow egress (CIDR)",
+    "allowOutHint": "Allowed outbound CIDRs for the egress policy, one per line or comma separated.",
+    "denyOut": "Deny egress (CIDR)",
+    "denyOutHint": "Denied outbound CIDRs for the egress policy, one per line or comma separated.",
+    "registry": "Private registry",
+    "registryUsername": "Registry username",
+    "registryPassword": "Registry password",
+    "withCubeCa": "Bake CubeEgress CA into rootfs"
+  },
+  "delete": {
+    "button": "Delete Template",
+    "title": "Delete Template",
+    "confirmDesc": "Are you sure you want to delete the template",
+    "confirmDescSuffix": "? This action cannot be undone.",
+    "cancel": "Cancel",
+    "confirm": "Confirm Delete",
+    "deleting": "Deleting…"
+  },
+  "errors": {
+    "templateInUse": "This template has sandbox instances in use. Destroy all related sandboxes before deleting it.",
+    "buildInProgress": "This template is still building. Wait for the build to finish before deleting it.",
+    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator."
+  }
+}

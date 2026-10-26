@@ -1,0 +1,114 @@
+From 10d307f8988a24149b1927f1fb3d66c2b8de2bdc Mon Sep 17 00:00:00 2001
+From: Changpeng Liu <changpeliu@tencent.com>
+Date: Wed, 5 Aug 2026 09:43:47 +0800
+Subject: [PATCH] blob: add spdk_blob_get_io_unit_lba()
+
+Translates an offset inside a blob into the LBA on the blobstore's device that
+currently holds it. Read-only, and no existing path is touched.
+
+The gap it fills is for bs_dev implementations that name their backing storage
+by LBA -- an object store keyed by a map from LBA to object, a dedup or tiering
+layer, anything of that shape. blobstore lets a backend define where the bytes
+live, but never tells it where a given part of a blob landed, so such a backend
+cannot describe the contents of a blob without reading all of it. With this it
+can enumerate the objects a snapshot occupies, in memory, and hand that list to
+another machine instead of copying the data.
+
+spdk_blob_get_next_allocated_io_unit() answers which offsets are allocated but
+not where they are, and the cluster table itself is private to lib/blob. Reading
+that table from outside is what this replaces: it works, and it depends on the
+memory layout of struct spdk_blob, so a field added upstream turns into a wrong
+LBA rather than a build failure -- and a wrong LBA names somebody else's object,
+which reads back perfectly well.
+
+The result is only meaningful while the mapping cannot change, i.e. for a
+read-only blob. That is documented on the function, since the obvious misuse is
+to call it on a writable one and cache the answer.
+
+Signed-off-by: Changpeng Liu <changpeliu@tencent.com>
+Assisted-by: CodeBuddy
+---
+ include/spdk/blob.h    | 27 +++++++++++++++++++++++++++
+ lib/blob/blobstore.c   | 18 ++++++++++++++++++
+ lib/blob/spdk_blob.map |  1 +
+ 3 files changed, 46 insertions(+)
+
+diff --git a/include/spdk/blob.h b/include/spdk/blob.h
+index fe982157b..fc61ca2c8 100644
+--- a/include/spdk/blob.h
++++ b/include/spdk/blob.h
+@@ -558,6 +558,33 @@ uint64_t spdk_blob_get_next_allocated_io_unit(struct spdk_blob *blob, uint64_t o
+  */
+ uint64_t spdk_blob_get_next_unallocated_io_unit(struct spdk_blob *blob, uint64_t offset);
+ 
++/**
++ * Get the device LBA backing an io unit of a blob.
++ *
++ * Translates an offset inside a blob into the LBA on the blobstore's device that
++ * currently holds it. Together with spdk_blob_get_next_allocated_io_unit() this
++ * lets a caller enumerate where a blob's data physically lives without reading
++ * any of it.
++ *
++ * The intended user is a bs_dev implementation that names its backing storage by
++ * LBA -- an object store, for instance, keyed by a map from LBA to object. Such a
++ * backend can describe the contents of a snapshot to another machine by listing
++ * objects, instead of copying the data, but only if it can turn blob offsets into
++ * the LBAs its map is keyed by. Nothing else exposes that.
++ *
++ * The result is only meaningful for as long as the mapping cannot change, i.e.
++ * for a read-only blob (a snapshot). For a writable blob a cluster may be
++ * reallocated at any time, and for a thin-provisioned one an unallocated cluster
++ * may be filled in by the next write.
++ *
++ * \param blob Blob struct to query.
++ * \param offset Offset in io units from the beginning of the blob.
++ *
++ * \return the LBA, in blocks of the blobstore device's block size, or UINT64_MAX
++ * if the io unit is beyond the end of the blob or no cluster is allocated for it.
++ */
++uint64_t spdk_blob_get_io_unit_lba(struct spdk_blob *blob, uint64_t offset);
++
+ struct spdk_blob_xattr_opts {
+ 	/* Number of attributes */
+ 	size_t	count;
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 08b79153d..61d20f435 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -6290,6 +6290,24 @@ spdk_blob_get_next_unallocated_io_unit(struct spdk_blob *blob, uint64_t offset)
+ 	return blob_find_io_unit(blob, offset, false);
+ }
+ 
++uint64_t
++spdk_blob_get_io_unit_lba(struct spdk_blob *blob, uint64_t offset)
++{
++	uint64_t lba;
++
++	if (offset >= blob->active.num_clusters * bs_io_units_per_cluster(blob)) {
++		return UINT64_MAX;
++	}
++
++	lba = bs_blob_io_unit_to_lba(blob, offset);
++
++	/* Zero stands for "no cluster allocated here": cluster 0 holds the super
++	 * block, so it is never a data cluster and can serve as the sentinel. Same
++	 * convention as bs_io_unit_is_allocated(), which is not used here only
++	 * because it asserts on thin provisioning. */
++	return lba == 0 ? UINT64_MAX : lba;
++}
++
+ /* START spdk_bs_create_blob */
+ 
+ static void
+diff --git a/lib/blob/spdk_blob.map b/lib/blob/spdk_blob.map
+index d4d85c2b6..09886f49d 100644
+--- a/lib/blob/spdk_blob.map
++++ b/lib/blob/spdk_blob.map
+@@ -24,6 +24,7 @@
+ 	spdk_blob_get_num_allocated_clusters;
+ 	spdk_blob_get_next_allocated_io_unit;
+ 	spdk_blob_get_next_unallocated_io_unit;
++	spdk_blob_get_io_unit_lba;
+ 	spdk_blob_opts_init;
+ 	spdk_bs_create_blob_ext;
+ 	spdk_bs_create_blob;

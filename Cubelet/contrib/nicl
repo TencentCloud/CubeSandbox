@@ -1,0 +1,158 @@
+#!/bin/env python3
+
+import argparse
+import fcntl
+import mmap
+import os
+import socket
+import struct
+
+PCI_DEVICE_PATH = '/sys/bus/pci/devices/'
+SYS_NET_PATH = '/sys/class/net/'
+VIRTIO_VENDOR = '0x1af4'
+VIRTIO_NET_DEVICE = '0x1000'
+
+CAP_POINTER = 0x34
+PCI_CAP_ID_VNDR = 9
+VIRTIO_PCI_CAP_DEVICE_CFG = 4
+SIOCGIFADDR = 0x8915
+
+all_devices = 0
+valid_devices = 0
+all_queues = 0
+iommu_groups = set()
+numa_nodes = set()
+node0_devices = 0
+node0_valid_devices = 0
+node1_devices = 0
+node1_valid_devices = 0
+
+def parse_bar(bdf, bar, offset):
+    bar = f'{PCI_DEVICE_PATH}/{bdf}/resource{bar}'
+    with open(bar, 'rb') as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            mm.seek(offset)
+            a = mm.read(1)[0]
+            b = mm.read(1)[0]
+            c = mm.read(1)[0]
+            d = mm.read(1)[0]
+            e = mm.read(1)[0]
+            f = mm.read(1)[0]
+            _ = mm.read(1)
+            _ = mm.read(1)
+            l = mm.read(1)[0]
+            h = mm.read(1)[0]
+    return (f'{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}', (h << 8) + l)
+
+def parse_pci_cfg(bdf):
+    if True:
+        return parse_bar(bdf, 0, 2112)
+
+    cfg = open(f'{PCI_DEVICE_PATH}/{bdf}/config', 'rb').read()
+    cap_next = struct.unpack_from('<B', cfg, CAP_POINTER)[0]
+    while cap_next:
+        cap_vndr, cap_next, _, cfg_type, bar, _, _, _, offset = struct.unpack_from('<BBBBBBBBL', cfg, cap_next)
+        if cap_vndr == PCI_CAP_ID_VNDR and cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG:
+            return parse_bar(bdf, bar, offset)
+
+    return ('00:00:00:00:00:00', 0)
+
+def get_ip_by_name(name):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            r = fcntl.ioctl(s.fileno(), SIOCGIFADDR, struct.pack('256s', name.encode()))
+            return socket.inet_ntoa(r[20:24])
+        except OSError:
+            return 'N/A'
+
+parser = argparse.ArgumentParser(description='Dump virtio block devices')
+parser.add_argument('-v', '--vf', help='Dump VF devices', action='store_true')
+parser.add_argument('-p', '--pf', help='Dump PF devices', action='store_true')
+parser.add_argument('-n', '--node', help='Dump devices on a specific NUMA node', type=int)
+parser.add_argument('-q', '--queue', help='Dump devices with a specific number of queues', type=int)
+parser.add_argument('-b', '--bdf', help='Dump device with the specific BDF', type=str)
+parser.add_argument('-m', '--mac', help='Dump device with the specific MAC', type=str)
+parser.add_argument('-o', '--online', help='Dump devices that are functional', action='store_true')
+parser.add_argument('-V', '--verbose', help='Verbose output', action='store_true')
+args = parser.parse_args()
+
+addrs = {}
+
+if args.verbose:
+    for root, dirs, _ in os.walk(SYS_NET_PATH):
+        for dev in dirs:
+            if dev == 'lo':
+                continue
+            mac = open(f'{root}/{dev}/address').read().strip()
+            addrs[mac.lower()] = dev
+
+for root, dirs, _ in os.walk(PCI_DEVICE_PATH):
+    for bdf in dirs:
+        vendor = open(f'{root}/{bdf}/vendor').read().strip()
+        if vendor != VIRTIO_VENDOR:
+            continue
+
+        device = open(f'{root}/{bdf}/device').read().strip()
+        if device != VIRTIO_NET_DEVICE:
+            continue
+
+        driver = f'{root}/{bdf}/driver'
+        try:
+            driver = os.path.basename(os.readlink(driver))
+        except FileNotFoundError:
+            driver = 'N/A'
+
+        iommu_group = f'{root}/{bdf}/iommu_group'
+        try:
+            iommu_group = os.path.basename(os.readlink(iommu_group))
+        except FileNotFoundError:
+            iommu_group = 'N/A'
+
+        numa_node = f'{root}/{bdf}/numa_node'
+        numa_node = open(numa_node).read().strip()
+
+        is_vf = True
+        try:
+            physfn = f'{root}/{bdf}/physfn'
+            os.stat(physfn)
+        except FileNotFoundError:
+            is_vf = False
+
+        mac, queues = parse_pci_cfg(bdf)
+
+        if args.vf and args.pf:
+            pass
+        elif args.vf and not is_vf:
+            continue
+        elif args.pf and is_vf:
+            continue
+        if args.node is not None and args.node != int(numa_node):
+            continue
+        if args.queue is not None and args.queue != queues:
+            continue
+        if args.bdf is not None and args.bdf.lower() != bdf.lower():
+            continue
+        if args.mac is not None and args.mac.lower() != mac.lower():
+            continue
+        if args.online and mac == '00:00:00:00:00:00':
+            continue
+
+        all_devices += 1
+        valid_devices += 1 if queues else 0
+        all_queues += queues
+        node0_valid_devices += 1 if queues and numa_node == '0' else 0
+        node1_valid_devices += 1 if queues and numa_node == '1' else 0
+        node0_devices += 1 if numa_node == '0' else 0
+        node1_devices += 1 if numa_node == '1' else 0
+        iommu_groups.add(iommu_group)
+        numa_nodes.add(numa_node)
+
+        print(f'BDF: {bdf}, MAC: {mac}, Queues: {queues:2}, NUMANode: {numa_node}, IOMMUGroup: {iommu_group:>4}, Driver: {driver:10}', end='')
+        if args.verbose and mac.lower() in addrs:
+            name = addrs[mac.lower()]
+            ip = get_ip_by_name(name)
+            print(f', Name: {name:>5}, IP: {ip}')
+        else:
+            print()
+
+print(f'Summary:\n\tDevices: {valid_devices}/{all_devices}, Queues: {all_queues}, NUMA nodes: {len(numa_nodes)}({node0_valid_devices}/{node0_devices}, {node1_valid_devices}/{node1_devices}), IOMMU groups: {len(iommu_groups)}')

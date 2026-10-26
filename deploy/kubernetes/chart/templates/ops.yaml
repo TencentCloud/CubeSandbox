@@ -1,0 +1,261 @@
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- $opsPort := .Values.cubeOps.service.port -}}
+{{- $wh := .Values.cubeOps.warehouse | default dict }}
+{{- $opsS3 := .Values.cubeOps.s3 | default dict }}
+{{- $workDir := .Values.cubeOps.workDir | default "/var/tmp/cubeops-warehouse" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.opsName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+spec:
+  replicas: {{ .Values.cubeOps.replicas }}
+  {{- $opsStrategy := .Values.cubeOps.deploymentStrategy }}
+  {{- /* RWO (or any non-RWX) fs PVC cannot multi-attach during a surge;
+  force Recreate the same way cube-master does for its artifact volume. */}}
+  {{- if and (eq (include "cube.opsStoreBackend" .) "fs") (eq (include "cube.opsFSPersistEnabled" .) "true") (ne (include "cube.opsFSShared" .) "true") }}
+  {{- $opsStrategy = dict "type" "Recreate" }}
+  {{- end }}
+  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" $opsStrategy) | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ops
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ops
+      {{- with .Values.cubeOps.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-ops
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.ops "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.ops.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_OPS_BIND
+              value: {{ .Values.cubeOps.bind | quote }}
+            - name: CUBE_OPS_WAREHOUSE_WORK_DIR
+              value: {{ $workDir | quote }}
+            - name: TMPDIR
+              value: {{ $workDir | quote }}
+            - name: CUBE_OPS_STORE_BACKEND
+              value: {{ include "cube.opsStoreBackend" . | quote }}
+            {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+            - name: CUBE_OPS_STORE_FS_ROOT
+              value: {{ include "cube.opsFSRoot" . | quote }}
+            - name: CUBE_OPS_STORE_FS_PUBLIC_URL
+              value: {{ include "cube.opsFSPublicURL" . | quote }}
+            - name: CUBE_OPS_STORE_FS_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . | quote }}
+                  key: blobstore-signing-key
+            - name: CUBE_OPS_STORE_FS_SHARED
+              value: {{ include "cube.opsFSShared" . | quote }}
+            {{- end }}
+            - name: CUBE_OPS_S3_ENDPOINT
+              value: {{ include "cube.opsS3Endpoint" . | quote }}
+            - name: CUBE_OPS_S3_NODE_ENDPOINT
+              value: {{ include "cube.opsS3NodeEndpoint" . | quote }}
+            - name: CUBE_OPS_S3_BUCKET
+              value: {{ include "cube.opsS3Bucket" . | quote }}
+            - name: CUBE_OPS_S3_REGION
+              value: {{ include "cube.opsS3Region" . | quote }}
+            - name: CUBE_OPS_S3_PATH_STYLE
+              value: {{ include "cube.boolEnvDefaultTrue" $opsS3.pathStyle | quote }}
+            - name: CUBE_OPS_S3_CREATE_BUCKET
+              value: {{ include "cube.boolEnvDefaultTrue" $opsS3.createBucket | quote }}
+            - name: CUBE_OPS_WAREHOUSE_PRESIGN_TTL
+              value: {{ ($wh.presignTTL | default "5m") | quote }}
+            - name: CUBE_OPS_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.opsS3SecretName" . | quote }}
+                  key: s3-access-key-id
+            - name: CUBE_OPS_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.opsS3SecretName" . | quote }}
+                  key: s3-secret-access-key
+            {{- with $wh.githubRepos }}
+            - name: CUBE_OPS_WAREHOUSE_GITHUB_REPOS
+              value: {{ include "cube.csvOrString" . | quote }}
+            {{- end }}
+            {{- with $wh.cnbRepos }}
+            - name: CUBE_OPS_WAREHOUSE_CNB_REPOS
+              value: {{ include "cube.csvOrString" . | quote }}
+            {{- end }}
+            {{- $ghSecret := $wh.githubTokenSecret | default dict }}
+            {{- if $ghSecret.name }}
+            - name: CUBE_OPS_WAREHOUSE_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ghSecret.name | quote }}
+                  key: {{ $ghSecret.key | default "github-token" | quote }}
+            {{- else if $wh.githubToken }}
+            - name: CUBE_OPS_WAREHOUSE_GITHUB_TOKEN
+              value: {{ $wh.githubToken | quote }}
+            {{- end }}
+            {{- $cnbSecret := $wh.cnbTokenSecret | default dict }}
+            {{- if $cnbSecret.name }}
+            - name: CUBE_OPS_WAREHOUSE_CNB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cnbSecret.name | quote }}
+                  key: {{ $cnbSecret.key | default "cnb-token" | quote }}
+            {{- else if $wh.cnbToken }}
+            - name: CUBE_OPS_WAREHOUSE_CNB_TOKEN
+              value: {{ $wh.cnbToken | quote }}
+            {{- end }}
+            - name: CUBE_MASTER_ADDR
+              value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            {{- if eq (include "cube.dbDriver" .) "postgres" }}
+            # CubeOps selects the driver from DATABASE_URL scheme; MYSQL_* only yields mysql://.
+            # Password stays in Secret (urlquery-encoded) rather than a plaintext env value.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: database-url
+            {{- else }}
+            - name: CUBE_SANDBOX_MYSQL_HOST
+              value: {{ include "cube.dbHost" . | quote }}
+            - name: CUBE_SANDBOX_MYSQL_PORT
+              value: {{ include "cube.dbPort" . | quote }}
+            - name: CUBE_SANDBOX_MYSQL_USER
+              value: {{ include "cube.dbUser" . | quote }}
+            - name: CUBE_SANDBOX_MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: mysql-password
+            - name: CUBE_SANDBOX_MYSQL_DB
+              value: {{ include "cube.dbName" . | quote }}
+            {{- end }}
+            - name: CUBE_API_SANDBOX_DOMAIN
+              value: {{ default .Values.cubeProxy.domain .Values.cubeOps.sandboxDomain | quote }}
+            # Shared CubeDB with CubeMaster; skip fingerprint so chart upgrades
+            # do not fail when Master already applied the same migrations.
+            - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
+              value: "true"
+            - name: REDIS_HOST
+              value: {{ include "cube.redisHost" . | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-password
+            - name: REDIS_DB
+              value: {{ include "cube.redisDB" . | quote }}
+            - name: REDIS_MASTER_NAME
+              value: {{ .Values.redis.masterName | default "" | quote }}
+            - name: REDIS_SENTINEL_NODES
+              value: {{ .Values.redis.sentinelNodes | default "" | quote }}
+            - name: REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-sentinel-password
+            {{- with .Values.cubeOps.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $opsPort }}
+          {{- if .Values.cubeOps.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.cubeOps.probes.readiness.path | quote }}
+              port: http
+            initialDelaySeconds: {{ .Values.cubeOps.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeOps.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeOps.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeOps.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.cubeOps.probes.liveness.path | quote }}
+              port: http
+            initialDelaySeconds: {{ .Values.cubeOps.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeOps.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeOps.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- with .Values.cubeOps.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: cube-ops-work
+              mountPath: {{ $workDir | quote }}
+            {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+            - name: cube-ops-blobs
+              mountPath: {{ include "cube.opsFSRoot" . | quote }}
+            {{- end }}
+      volumes:
+        - name: cube-ops-work
+          emptyDir:
+            sizeLimit: {{ .Values.cubeOps.workDirSizeLimit | default "32Gi" | quote }}
+        {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+        - name: cube-ops-blobs
+          {{- if eq (include "cube.opsFSPersistEnabled" .) "true" }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.opsFSClaimName" . | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.opsName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+spec:
+  type: {{ .Values.cubeOps.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+  ports:
+    - name: http
+      port: {{ $opsPort }}
+      targetPort: http
+{{- if and (eq (include "cube.opsStoreBackend" .) "fs") (eq (include "cube.opsFSPersistEnabled" .) "true") }}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) }}
+{{- $persist := default dict $fs.persistence }}
+{{- if not ($persist.existingClaim | default "") }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cube.opsFSClaimName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+spec:
+  accessModes:
+    {{- toYaml ($persist.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  {{- with $persist.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $persist.size | default "20Gi" | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

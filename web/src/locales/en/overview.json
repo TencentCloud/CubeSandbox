@@ -1,0 +1,20 @@
+{
+  "title": "Cluster Overview",
+  "subtitle": "Real-time snapshot of sandboxes, capacity and pipeline.",
+  "kpi": {
+    "runningSandboxes": "Running Sandboxes",
+    "cpuUtilization": "CPU Utilization",
+    "memoryUtilization": "Memory Utilization",
+    "healthyNodes": "Healthy Nodes",
+    "templatesAvailable": "{{count}} templates available",
+    "coresUsed": "{{used}} / {{total}} cores",
+    "memoryUsed": "{{used}} / {{total}} GiB",
+    "maxSlots": "max {{count}} MVM slots"
+  },
+  "recentSandboxes": "Recent sandboxes",
+  "recentSandboxesDesc": "Latest running micro-VMs across the cluster.",
+  "templatePipeline": "Template pipeline",
+  "templatePipelineDesc": "Available templates to launch from.",
+  "noSandboxes": "No sandboxes running.",
+  "noTemplates": "No templates yet."
+}

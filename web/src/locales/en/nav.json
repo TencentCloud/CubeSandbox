@@ -1,0 +1,13 @@
+{
+  "overview": "Overview",
+  "sandboxes": "Sandboxes",
+  "templates": "Templates",
+  "nodes": "Nodes",
+  "versions": "Versions",
+  "network": "Network",
+  "observability": "Observability",
+  "settings": "Settings",
+  "store": "Template Store",
+  "agentHub": "AgentHub",
+  "warehouse": "Warehouse"
+}

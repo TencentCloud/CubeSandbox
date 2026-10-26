@@ -1,0 +1,20 @@
+set $redis_ip "__CUBE_PROXY_REDIS_IP__";
+set $redis_port "__CUBE_PROXY_REDIS_PORT__";
+set $redis_pd "__CUBE_PROXY_REDIS_PASSWORD__";
+set $redis_master_name "__CUBE_PROXY_REDIS_MASTER_NAME__";
+set $redis_sentinel_nodes "__CUBE_PROXY_REDIS_SENTINEL_NODES__";
+set $redis_sentinel_pd "__CUBE_PROXY_REDIS_SENTINEL_PASSWORD__";
+set $redis_index "__CUBE_PROXY_REDIS_DB__";
+set $timeout_min 500;
+set $timeout_max 700;
+set $cube_proxy_host_ip "__CUBE_PROXY_HOST_IP__";
+
+# Auto-pause / auto-resume wiring. $cube_sidecar_addr points at the
+# standalone cube-lifecycle-manager service (on the control node); the Lua
+# name is kept for historical reasons and to avoid a lock-step rename of
+# every reference in the sandbox_state / nginx conf tree. $cube_admin_token
+# is an optional shared secret enforced by CubeProxy's own admin server
+# (loopback-bypassed by CLM); leave empty in single-host dev, set to a
+# non-empty value in multi-node deployments.
+set $cube_sidecar_addr "__CUBE_SIDECAR_NGX_ADDR__";
+set $cube_admin_token "__CUBE_ADMIN_TOKEN__";

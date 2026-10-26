@@ -1,0 +1,76 @@
+#cloud-config
+users:
+  - name: cloud
+    passwd: $6$7125787751a8d18a$sHwGySomUA1PawiNFWVCKYQN.Ec.Wzz0JtPPL1MvzFrkwmop2dq7.4CYf03A5oemPQ4pOFCCrtCelvFBEle/K.
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    inactive: False
+    shell: /bin/bash
+
+ssh_pwauth: True
+
+runcmd:
+  - [ systemctl, daemon-reload]
+  - [ systemctl, enable, notify-booted.service]
+  - [ systemctl, start, --no-block, notify-booted.service ]
+
+write_files:
+  -
+    path: /etc/systemd/system/vfio.service
+    permissions: 0644
+    content: |
+        [Unit]
+        Description=VFIO test systemd service
+
+        [Service]
+        Type=simple
+        ExecStart=/bin/bash /usr/bin/cloud-hypervisor-vfio.sh
+
+        [Install]
+        WantedBy=multi-user.target
+
+  -
+    path: /usr/bin/cloud-hypervisor-vfio.sh
+    permissions: 0755
+    content: |
+        #!/bin/bash
+
+        mount /dev/vdc /mnt
+        bash -c "echo 1af4 1042 > /sys/bus/pci/drivers/vfio-pci/new_id"
+        bash -c "echo 0000:00:05.0 > /sys/bus/pci/devices/0000\:00\:05.0/driver/unbind"
+        bash -c "echo 0000:00:05.0 > /sys/bus/pci/drivers/vfio-pci/bind"
+        bash -c "echo 1af4 1041 > /sys/bus/pci/drivers/vfio-pci/new_id"
+        bash -c "echo 0000:00:07.0 > /sys/bus/pci/devices/0000\:00\:07.0/driver/unbind"
+        bash -c "echo 0000:00:07.0 > /sys/bus/pci/drivers/vfio-pci/bind"
+        bash -c "echo 0000:00:08.0 > /sys/bus/pci/devices/0000\:00\:08.0/driver/unbind"
+        bash -c "echo 0000:00:08.0 > /sys/bus/pci/drivers/vfio-pci/bind"
+        # 1G ram requires 512 pages
+        echo 512 | sudo tee /proc/sys/vm/nr_hugepages
+        sudo chmod a+rwX /dev/hugepages
+        /mnt/cloud-hypervisor --kernel /mnt/vmlinux --cmdline "console=hvc0 reboot=k panic=1 nomodules root=/dev/vda1 VFIOTAG" --disk path=/mnt/focal-server-cloudimg-amd64-custom-20210609-0.raw path=/mnt/cloudinit.img --cpus boot=1 --memory size=512M,hotplug_size=1G,hugepages=on --device path=/sys/bus/pci/devices/0000:00:05.0/ path=/sys/bus/pci/devices/0000:00:07.0/ path=/sys/bus/pci/devices/0000:00:08.0/ --api-socket /tmp/ch_api.sock
+
+  -
+    path: /etc/systemd/system/notify-booted.service
+    permissions: 0644
+    content: |
+        [Unit]
+        Description=Notify the tcp listener on the host that the guest is booted
+        After=sshd.service
+
+        [Service]
+        Type=simple
+        ExecStart=/usr/bin/cloud-hypervisor-notify-booted.sh
+        Restart=on-failure
+        RestartSec=2
+
+        [Install]
+        WantedBy=multi-user.target
+
+  -
+    path: /usr/bin/cloud-hypervisor-notify-booted.sh
+    permissions: 0755
+    content: |
+        #!/bin/bash
+        set -e
+
+        echo -n "@DEFAULT_TCP_LISTENER_MESSAGE" > /dev/tcp/@HOST_IP/@TCP_LISTENER_PORT

@@ -1,0 +1,22 @@
+{
+  "title": "网络",
+  "description": "API 网关配置与节点限流概览。",
+  "gateway": {
+    "title": "API 网关",
+    "desc": "API 网关接入配置。",
+    "domain": "沙箱域名"
+  },
+  "quota": {
+    "title": "节点限流 / Quota",
+    "desc": "各节点的并发创建限制与资源配额。",
+    "colNode": "节点",
+    "colStatus": "状态",
+    "colConcurrent": "并发限制",
+    "colCpuQuota": "CPU Quota",
+    "colMemQuota": "内存 Quota",
+    "colMvmSlots": "MVM 槽位",
+    "ready": "就绪",
+    "degraded": "降级",
+    "empty": "暂无节点数据。"
+  }
+}

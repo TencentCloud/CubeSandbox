@@ -1,0 +1,212 @@
+# HTTPS 证书与域名解析
+
+本文说明 Cube Sandbox 中沙箱访问的域名机制，以及如何解决 **HTTPS 证书**和**域名解析**两类常见问题。
+
+> **说明：** TLS 配置仅影响客户端访问 CubeProxy 的方式。`E2B_API_URL` 始终指向 **Cube API Server**（默认端口 `3000`），与 CubeProxy 是独立的组件。
+
+---
+
+## 沙箱域名机制
+
+E2B 客户端访问沙箱时，域名是**动态生成**的，格式如下：
+
+```
+<sandbox-service-port>-<sandboxId>.<domain>
+```
+
+例如：
+
+```
+49983-1aa1fae8fb364edaa8203a7481995b4d.cube.app
+```
+
+其中：
+- `sandbox-service-port`：沙箱内业务服务监听的端口（如 `49999`）
+- `sandboxId`：沙箱唯一 ID
+- `domain`：基础域名，默认为 `cube.app`，可通过 `--sandbox-domain` 自定义
+
+由于域名中的 `sandboxId` 部分随每个沙箱动态变化，**E2B 客户端所在的网络环境必须具备泛域名（wildcard）解析能力**，即将 `*.<domain>` 解析到 CubeProxy 所在机器的 IP。
+
+### 一键安装内置 CoreDNS（体验用）
+
+Cube 一键安装脚本会在安装节点上启动一个 **CoreDNS** 服务，自动处理 `*.cube.app` 的泛解析，使你能在该机器上直接体验完整流程，无需额外配置 DNS。
+
+> **注意：** 内置 CoreDNS 仅供本机/快速体验使用，不适合生产环境或多机共享部署。
+
+### 生产环境：自定义域名 + 自有 DNS
+
+生产环境中，建议使用自己的域名并配置泛解析 DNS 记录：
+
+```
+*.your.domain.com  →  <CubeProxy 所在节点的 IP>
+```
+
+然后在启动 Cube API Server 时通过启动参数或环境变量指定该域名：
+
+```bash
+# 启动参数
+./cube-api --sandbox-domain your.domain.com
+
+# 或环境变量
+export CUBE_API_SANDBOX_DOMAIN=your.domain.com
+./cube-api
+```
+
+这样 API 响应中的 `domain` 字段会返回 `your.domain.com`，E2B SDK 才能正确构建沙箱访问地址。
+
+---
+
+## 路径式快速访问（免 DNS / 免证书）
+
+除 Host 模式外，CubeProxy 还支持通过 URL **路径**路由到沙箱，适用于本地 Demo、内网临时分享，以及不便配置泛解析 DNS 和 TLS 证书的场景。
+
+```
+http://<cube-proxy-host>:<http-port>/sandbox/<sandbox-id>/<container-port>/<剩余路径>?<query>
+```
+
+例如，沙箱 `abc123` 暴露了 `49999` 端口，CubeProxy 部署在 `10.0.0.5:80`：
+
+```
+http://10.0.0.5/sandbox/abc123/49999/
+http://10.0.0.5/sandbox/abc123/49999/health
+http://10.0.0.5/sandbox/abc123/49999/api/v1/items?limit=10
+```
+
+CubeProxy 会在转发时剥离 `/sandbox/<id>/<port>` 前缀，沙箱内的应用看到的 URI 与从根路径直接访问相同。同一 location 内复用了原有的 `Upgrade` / `Connection` 头处理，因此 WebSocket 升级也照常工作。
+
+为方便应用与前缀协作，CubeProxy 额外会：
+
+- 在转发到上游的请求里附加 `X-Forwarded-Prefix: /sandbox/<id>/<port>`。
+- 改写响应中以根开头的 `Location` 头，把它重新放回 `/sandbox/<id>/<port>/...` 前缀下（比如上游返回 `Location: /login` 时仍能正确跳转）。
+- 把上游 Set-Cookie 中的 `Path=/` 限定到 `Path=/sandbox/<id>/<port>/`，避免与同一 CubeProxy 上其他沙箱的 cookie 相互影响。
+
+两种模式如何选择：
+
+- **Host 模式**（`<port>-<id>.<domain>`）：更适合 SPA 以及任何用根绝对路径加载静态资源（如 `/static/app.js`）的前端，CubeProxy 不会改写 HTML body，使用 Host 模式可以避免这类引用被前缀拦腰打断。
+- **路径模式**（`/sandbox/<id>/<port>/...`）：更适合 HTTP API、简单页面、快速预览和一次性分享，省去 DNS 和证书配置的成本。
+
+两种模式在每个 CubeProxy 实例上同时启用，共享同一份 Redis 路由元数据，无需额外配置即可使用路径形式。
+
+## 面向 E2B SDK 的 header 路由（免 DNS）
+
+CubeProxy 还有第三种回退路由来源，面向官方 E2B SDK：当 `Host` 不带 `<port>-<sandbox-id>.<domain>` 路由属性时，改为读取请求 header `E2b-Sandbox-Id`（必填）和 `E2b-Sandbox-Port`（可选，默认为 `49983`）。读取 `E2B_SANDBOX_URL` 的 E2B SDK 会在沙箱数据面请求上携带这些 header，因此无需泛域名 DNS 即可直接按 IP 指向 CubeProxy。
+
+Host 路由保持优先，存量泛域名流量不受影响。与路径模式一样，该方式在明文端口上暴露整条数据面，请仅在可信网络中使用。客户端配置见[固定地址下的 E2B SDK：header 模式](./multi-node-deploy.md#固定地址下的-e2b-sdkheader-模式)。
+
+## 自定义沙箱服务收到的 Host
+
+部分 Web 框架会校验 HTTP `Host`，而 Cube 的 public URL Host 默认是
+`<port>-<sandbox-id>.<domain>`。创建沙箱时可通过 E2B 兼容的
+`network.maskRequestHost` 设置 CubeProxy 转发给用户服务的 Host：
+
+```python
+from cubesandbox import Sandbox
+
+sandbox = Sandbox.create(
+    network={
+        "mask_request_host": "localhost:${PORT}",
+    },
+)
+```
+
+`${PORT}` 会在每次请求时替换为 public URL 或 Path 模式中的沙箱服务端口：
+
+```text
+访问 3000 端口 -> Host: localhost:3000
+访问 8080 端口 -> Host: localhost:8080
+```
+
+外部 URL、DNS 与 TLS SNI 均不改变。掩码生效时，CubeProxy 还会把原始请求
+Host 写入 `X-Forwarded-Host`。该配置同时适用于 Host 模式、Path 模式以及
+用户服务的 WebSocket 握手。
+
+`maskRequestHost` 是按 sandbox 配置的 create-only 选项，运行中不可更新。
+为避免影响 commands/files/PTY 等内部数据面协议，envd 端口 `49983` 不应用
+该掩码。直接访问 SandboxIP 或节点 HostPort 会绕过 CubeProxy，因此也不会
+发生 Host 改写。
+
+---
+
+## gRPC 接入（明文 HTTP/2）
+
+CubeProxy 还提供独立的沙箱 gRPC 接入监听端口。一键部署默认使用 `9090`，可通过 `.env` 中的 `CUBE_PROXY_GRPC_PORT` 调整。
+
+客户端以明文 HTTP/2 连接 CubeProxy IP，并通过 gRPC `:authority` 指定目标沙箱，格式与 Host 模式一致：
+
+```
+<container-port>-<sandbox-id>
+```
+
+例如，经部署在 `10.0.0.5` 的 CubeProxy 访问沙箱 `abc123` 的 `49983` 端口：
+
+```
+dial: 10.0.0.5:9090
+:authority: 49983-abc123
+```
+
+该模式适用于无法使用泛域名 DNS 或在 CubeProxy 侧终止 TLS 的 gRPC 客户端，路由元数据与 Host 模式共用，无需额外配置。
+
+若沙箱创建时设置了 `network.allow_public_traffic = false`，本监听端口同样会校验
+`e2b-traffic-access-token` / `cube-traffic-access-token`；gRPC 客户端需在每次请求的
+metadata（或等效 header）中携带 token。详见[限制公网访问](./restrict-public-access.md)。
+
+---
+
+## HTTPS 证书配置
+
+CubeProxy 开箱提供 **HTTPS（443 端口）和 HTTP（80 端口）** 两种访问方式。E2B SDK 默认使用 HTTPS。Cube 一键安装已预装 `cube.app` 测试证书，可直接体验 HTTPS。
+
+如需替换为自定义域名或生产证书，有以下几种方式：
+
+### 方式 A — mkcert（本地开发快速验证）
+
+`mkcert` 可在几秒内为自定义域名生成本地可信证书：
+
+```bash
+mkcert -install
+mkcert <your-host-ip-or-domain>
+```
+
+设置 `SSL_CERT_FILE`，让 E2B SDK 信任生成的 CA：
+
+```bash
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+```
+
+> mkcert 证书只在运行过 `mkcert -install` 的机器上受信任，不适合生产环境或多人共享部署。
+
+### 方式 B — 自有证书 / 域名（生产环境）
+
+修改 CubeProxy 的 `nginx.conf`，使用正式证书和私钥：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name your.domain.com;
+
+    ssl_certificate     /path/to/your/cert.pem;
+    ssl_certificate_key /path/to/your/key.pem;
+}
+```
+
+同时通过 `--sandbox-domain` 告知 Cube API Server 对外域名（见上文「生产环境：自定义域名」章节）。
+
+### 方式 C — 仅保留 HTTPS（关闭 HTTP）
+
+CubeProxy 默认同时监听 HTTP 和 HTTPS。如需完全关闭 HTTP 端口，删除 `nginx.conf` 中的 HTTP server block，并在 `docker-compose.yaml` 中去掉对应的端口映射即可。
+
+> E2B SDK 仅使用 HTTPS，关闭 HTTP 不影响基于 SDK 的客户端。
+
+---
+
+## 体验方案：e2b-dev-sidecar
+
+如果你只是在本地开发环境中体验 Cube，不想配置泛解析 DNS，也不想处理自签证书信任问题，可以使用 **e2b-dev-sidecar** 方案。
+
+该方案通过在本地启动一个轻量代理，拦截 E2B SDK 的数据面请求，在转发时自动改写 `Host` 头，从而：
+- **绕过泛解析 DNS**：本地无需配置 `*.cube.app` 解析
+- **绕过 HTTPS 证书**：sidecar 默认不校验服务端证书（`CUBE_REMOTE_PROXY_VERIFY_SSL=false`）
+
+详见：[e2b-dev-sidecar 示例](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
+
+> **注意：** e2b-dev-sidecar 是面向开发体验的最小实现，不适合生产环境。

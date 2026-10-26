@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Multi-stage build for cubemastercli (K8s operational CLI Pod).
+# This image bundles BOTH CLI binaries:
+#   - cubemastercli (from CubeMaster, talks to CubeMaster 8089)
+#   - cubeopscli   (from CubeOps,   talks to CubeOps   3010)
+# so a single Pod can serve both operational needs without a sidecar.
+#
+# Build context MUST be the repository root:
+#   docker build -f CubeMaster/docker/Dockerfile.cubemastercli -t cubemastercli:TAG .
+#
+# See .github/workflows/release-docker-images.yml.
+
+# ── Build stage: cubemastercli ─────────────────────────────────────────────────
+FROM golang:1.25-bookworm AS builder-master
+ARG TARGETARCH
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
+
+WORKDIR /src
+
+COPY CubeMaster/go.mod CubeMaster/go.sum ./
+COPY pkgs/CubeLog/go.mod pkgs/CubeLog/go.sum /pkgs/CubeLog/
+COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
+COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
+COPY pkgs/proto/go.mod pkgs/proto/go.sum /pkgs/proto/
+COPY pkgs/sandboxrestart/go.mod /pkgs/sandboxrestart/
+RUN go mod download
+
+COPY CubeMaster/ ./
+COPY pkgs/CubeLog/ /pkgs/CubeLog/
+COPY pkgs/blobstore/ /pkgs/blobstore/
+COPY pkgs/cubedb/ /pkgs/cubedb/
+COPY pkgs/proto/ /pkgs/proto/
+COPY pkgs/sandboxrestart/ /pkgs/sandboxrestart/
+
+ENV CGO_ENABLED=0
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    GOOS=linux GOARCH="${goarch}" go build -o /out/cubemastercli \
+      -ldflags "-s -w \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=${CUBE_VERSION}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Commit=${CUBE_COMMIT}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=${CUBE_BUILD_TIME}'" \
+      ./cmd/cubemastercli
+
+# ── Build stage: cubeopscli ────────────────────────────────────────────────────
+FROM golang:1.25-bookworm AS builder-ops
+ARG TARGETARCH
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
+
+WORKDIR /src
+
+COPY CubeOps/go.mod CubeOps/go.sum ./
+COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
+COPY pkgs/CubeLog/go.mod pkgs/CubeLog/go.sum /pkgs/CubeLog/
+COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
+RUN go mod download
+
+COPY CubeOps/ ./
+COPY pkgs/cubedb/ /pkgs/cubedb/
+COPY pkgs/CubeLog/ /pkgs/CubeLog/
+COPY pkgs/blobstore/ /pkgs/blobstore/
+
+ENV CGO_ENABLED=0
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    GOOS=linux GOARCH="${goarch}" go build -o /out/cubeopscli \
+      -ldflags "-s -w \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=${CUBE_VERSION}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=${CUBE_COMMIT}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=${CUBE_BUILD_TIME}'" \
+      ./cmd/cubeopscli
+
+# ── Runtime stage ──────────────────────────────────────────────────────────────
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
+
+COPY --from=builder-master --chmod=0755 /out/cubemastercli /usr/local/bin/cubemastercli
+COPY --from=builder-ops    --chmod=0755 /out/cubeopscli   /usr/local/bin/cubeopscli
+
+# Fail early if either binary cannot exec in this image.
+RUN ["/usr/local/bin/cubemastercli", "--help"]
+RUN ["/usr/local/bin/cubeopscli", "--help"]
+# tini is the PID 1 the whole Pod depends on; fail the build if missing.
+RUN ["/usr/bin/tini", "--version"]
+
+# Interactive bash helper for kubectl exec -it ... -- bash:
+# inject CUBEMASTERCLI_ADDRESS / CUBEMASTERCLI_PORT when flags are omitted.
+# Non-interactive commands still execute the original binary unchanged.
+RUN { \
+        printf '%s\n' \
+          '# Cube cubemastercli interactive defaults.' \
+          '# This is intentionally a bash interactive helper, not a wrapper binary:' \
+          '# - kubectl exec -it ... -- bash can run cubemastercli list directly.' \
+          '# - non-interactive commands still execute the original binary unchanged.' \
+          '__cube_cubemastercli_has_flag() {' \
+          '    local flag="$1"' \
+          '    shift' \
+          '' \
+          '    while [ "$#" -gt 0 ]; do' \
+          '        case "$1" in' \
+          '            "${flag}"|"${flag}"=*)' \
+          '                return 0' \
+          '                ;;' \
+          '        esac' \
+          '        shift' \
+          '    done' \
+          '' \
+          '    return 1' \
+          '}' \
+          '' \
+          'cubemastercli() {' \
+          '    local args=()' \
+          '' \
+          '    if [ -n "${CUBEMASTERCLI_ADDRESS:-}" ] && ! __cube_cubemastercli_has_flag "--address" "$@"; then' \
+          '        args+=(--address "${CUBEMASTERCLI_ADDRESS}")' \
+          '    fi' \
+          '' \
+          '    if [ -n "${CUBEMASTERCLI_PORT:-}" ] && ! __cube_cubemastercli_has_flag "--port" "$@"; then' \
+          '        args+=(--port "${CUBEMASTERCLI_PORT}")' \
+          '    fi' \
+          '' \
+          '    command /usr/local/bin/cubemastercli "${args[@]}" "$@"' \
+          '}'; \
+      } >/etc/cubemastercli-interactive.bashrc \
+    && printf '\n%s\n' '[ -f /etc/cubemastercli-interactive.bashrc ] && . /etc/cubemastercli-interactive.bashrc' >>/root/.bashrc
+
+# Interactive bash helper for cubeopscli (same pattern as above).
+RUN { \
+        printf '%s\n' \
+          '__cube_cubeopscli_has_flag() {' \
+          '    local flag="$1"' \
+          '    shift' \
+          '' \
+          '    while [ "$#" -gt 0 ]; do' \
+          '        case "$1" in' \
+          '            "${flag}"|"${flag}"=*)' \
+          '                return 0' \
+          '                ;;' \
+          '        esac' \
+          '        shift' \
+          '    done' \
+          '' \
+          '    return 1' \
+          '}' \
+          '' \
+          'cubeopscli() {' \
+          '    local args=()' \
+          '' \
+          '    if [ -n "${CUBEOPSCLI_ADDRESS:-}" ] && ! __cube_cubeopscli_has_flag "--address" "$@"; then' \
+          '        args+=(--address "${CUBEOPSCLI_ADDRESS}")' \
+          '    fi' \
+          '' \
+          '    if [ -n "${CUBEOPSCLI_PORT:-}" ] && ! __cube_cubeopscli_has_flag "--port" "$@"; then' \
+          '        args+=(--port "${CUBEOPSCLI_PORT}")' \
+          '    fi' \
+          '' \
+          '    command /usr/local/bin/cubeopscli "${args[@]}" "$@"' \
+          '}'; \
+      } >/etc/cubeopscli-interactive.bashrc \
+    && printf '\n%s\n' '[ -f /etc/cubeopscli-interactive.bashrc ] && . /etc/cubeopscli-interactive.bashrc' >>/root/.bashrc
+
+# tini runs as PID 1 and reaps orphaned children: kubectl exec / probe
+# invocations of cubemastercli/cubeopscli would otherwise pile up as
+# <defunct> zombies under "sleep infinity", which never calls wait().
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
+CMD ["sleep", "infinity"]

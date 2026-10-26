@@ -1,0 +1,539 @@
+name: Release One-Click Bundle
+
+# Cube product release (v*). Heavy assets (kernel / guest-image) are NOT built
+# here: they are downloaded from dedicated Releases pinned in
+# deploy/release-assets.yaml. This workflow builds product components,
+# cube-agent, docker images, and one-click bundles.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-one-click-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  packages: read
+
+env:
+  BUILDER_IMAGE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+
+jobs:
+  verify_versions:
+    name: Verify release image tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check hard-coded image tags match the release tag
+        run: scripts/bump-image.sh --check "${GITHUB_REF_NAME}"
+
+  resolve_pins:
+    name: Resolve pinned asset Releases
+    runs-on: ubuntu-latest
+    needs: verify_versions
+    outputs:
+      kernel_bm_amd64_release_tag: ${{ steps.pins.outputs.kernel_bm_amd64_release_tag }}
+      kernel_bm_arm64_release_tag: ${{ steps.pins.outputs.kernel_bm_arm64_release_tag }}
+      kernel_pvm_release_tag: ${{ steps.pins.outputs.kernel_pvm_release_tag }}
+      guest_image_release_tag: ${{ steps.pins.outputs.guest_image_release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Read deploy/release-assets.yaml
+        id: pins
+        run: scripts/read-release-assets.sh --export
+
+      - name: Fail fast if pinned Releases are missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERNEL_BM_AMD64_RELEASE_TAG: ${{ steps.pins.outputs.kernel_bm_amd64_release_tag }}
+          KERNEL_BM_ARM64_RELEASE_TAG: ${{ steps.pins.outputs.kernel_bm_arm64_release_tag }}
+          KERNEL_PVM_RELEASE_TAG: ${{ steps.pins.outputs.kernel_pvm_release_tag }}
+          GUEST_IMAGE_RELEASE_TAG: ${{ steps.pins.outputs.guest_image_release_tag }}
+        run: |
+          set -euo pipefail
+          echo "kernel_bm_amd64 pin: ${KERNEL_BM_AMD64_RELEASE_TAG}"
+          echo "kernel_bm_arm64 pin: ${KERNEL_BM_ARM64_RELEASE_TAG}"
+          echo "kernel_pvm pin: ${KERNEL_PVM_RELEASE_TAG}"
+          echo "guest_image pin: ${GUEST_IMAGE_RELEASE_TAG}"
+
+          require_assets() {
+            local tag="$1"
+            shift
+            local assets
+            if ! assets="$(
+              gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
+                --jq '.assets[].name' 2>/dev/null
+            )"; then
+              echo "pinned Release not found: ${tag}" >&2
+              echo "publish it first: git tag ${tag} && git push origin ${tag}" >&2
+              exit 1
+            fi
+            local name
+            for name in "$@"; do
+              if ! grep -Fxq "${name}" <<<"${assets}"; then
+                echo "missing required asset ${name} on ${tag}" >&2
+                echo "assets on ${tag}:" >&2
+                printf '%s\n' "${assets}" >&2
+                exit 1
+              fi
+            done
+          }
+
+          require_assets "${KERNEL_BM_AMD64_RELEASE_TAG}" vmlinux-amd64 kernel-metadata.json
+          require_assets "${KERNEL_BM_ARM64_RELEASE_TAG}" vmlinux-arm64 kernel-metadata.json
+          require_assets "${KERNEL_PVM_RELEASE_TAG}" vmlinux-pvm-amd64 kernel-metadata.json
+          require_assets "${GUEST_IMAGE_RELEASE_TAG}" \
+            cube-guest-image-amd64.tar.gz \
+            cube-guest-image-arm64.tar.gz
+
+          # Validate metadata fields (dedupe when pins share a Release).
+          declare -A meta_checked=()
+          validate_metadata() {
+            local tag="$1"
+            [[ -n "${meta_checked[${tag}]:-}" ]] && return 0
+            local dir
+            dir="$(mktemp -d)"
+            gh release download "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "kernel-metadata.json" \
+              --dir "${dir}"
+            scripts/read-kernel-metadata.sh "${dir}/kernel-metadata.json" >/dev/null
+            rm -rf "${dir}"
+            meta_checked["${tag}"]=1
+            echo "validated kernel-metadata.json on ${tag}"
+          }
+          validate_metadata "${KERNEL_BM_AMD64_RELEASE_TAG}"
+          validate_metadata "${KERNEL_BM_ARM64_RELEASE_TAG}"
+          validate_metadata "${KERNEL_PVM_RELEASE_TAG}"
+
+          pvm_assets="$(
+            gh release view "${KERNEL_PVM_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+              --jq '.assets[].name'
+          )"
+          has_rpm=0
+          has_deb=0
+          while IFS= read -r name; do
+            [[ -n "${name}" ]] || continue
+            case "${name}" in
+              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
+                case "${name}" in
+                  *headers*) ;;
+                  *) has_rpm=1 ;;
+                esac
+                ;;
+              linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb)
+                case "${name}" in
+                  *-dbg_*) ;;
+                  *) has_deb=1 ;;
+                esac
+                ;;
+            esac
+          done <<<"${pvm_assets}"
+          if [[ "${has_rpm}" -ne 1 || "${has_deb}" -ne 1 ]]; then
+            echo "missing main PVM host rpm/deb on ${KERNEL_PVM_RELEASE_TAG}" >&2
+            printf '%s\n' "${pvm_assets}" >&2
+            exit 1
+          fi
+          echo "pinned Releases exist and contain required assets"
+
+  ensure_release:
+    name: Ensure GitHub Release exists
+    runs-on: ubuntu-latest
+    needs: verify_versions
+    steps:
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated one-click release bundle."
+
+          # Product-side agent assets still live on the v* Release.
+  publish_agent_release_assets:
+    name: Publish agent Release assets (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - ensure_release
+    env:
+      BUNDLE_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install agent image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image
+        run: docker pull "${BUILDER_IMAGE}"
+
+      - name: Build cube-agent in builder
+        env:
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
+          make builder-run \
+            BUILDER_IMAGE="${BUILDER_IMAGE}" \
+            BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && make BINDIR=/workspace/_output/bin install'
+          test -x _output/bin/cube-agent
+
+      - name: Build cube-agent.ext4 artifact
+        env:
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+          ONE_CLICK_CUBE_AGENT_BIN: ${{ github.workspace }}/_output/bin/cube-agent
+          AGENT_OUTPUT_DIR: ${{ github.workspace }}/agent-release-assets/cube-agent
+        run: |
+          set -euo pipefail
+          CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
+          mkdir -p "${AGENT_OUTPUT_DIR}"
+          OUTPUT_DIR="${AGENT_OUTPUT_DIR}" ./deploy/one-click/build-agent-ext4.sh
+          test -f "${AGENT_OUTPUT_DIR}/cube-agent.ext4"
+          test -f "${AGENT_OUTPUT_DIR}/version"
+
+      - name: Pack agent Release asset
+        run: |
+          set -euo pipefail
+          tar -C agent-release-assets/cube-agent -czf \
+            "agent-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" .
+          ls -lh "agent-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz"
+
+      - name: Upload agent asset to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "agent-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  build_one_click_amd64:
+    name: Build one-click bundle (amd64)
+    runs-on: ubuntu-latest
+    needs:
+      - resolve_pins
+      - publish_agent_release_assets
+    env:
+      VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
+      PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
+      KERNEL_BM_AMD64_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_bm_amd64_release_tag }}
+      KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
+      GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Download kernel assets from pinned Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf downloaded-kernel
+          mkdir -p downloaded-kernel/bm-meta downloaded-kernel/pvm-meta
+          gh release download "${KERNEL_BM_AMD64_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "vmlinux-amd64" \
+            --dir downloaded-kernel
+          gh release download "${KERNEL_BM_AMD64_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "kernel-metadata.json" \
+            --dir downloaded-kernel/bm-meta
+          gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "vmlinux-pvm-amd64" \
+            --dir downloaded-kernel
+          if [[ "${KERNEL_PVM_RELEASE_TAG}" == "${KERNEL_BM_AMD64_RELEASE_TAG}" ]]; then
+            cp downloaded-kernel/bm-meta/kernel-metadata.json \
+              downloaded-kernel/pvm-meta/kernel-metadata.json
+          else
+            gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "kernel-metadata.json" \
+              --dir downloaded-kernel/pvm-meta
+          fi
+          install -D -m 0644 \
+            downloaded-kernel/vmlinux-amd64 \
+            "${VMLINUX_RELEASE_PATH}"
+          install -D -m 0644 \
+            downloaded-kernel/vmlinux-pvm-amd64 \
+            "${PVM_VMLINUX_RELEASE_PATH}"
+          test -f "${VMLINUX_RELEASE_PATH}"
+          test -f "${PVM_VMLINUX_RELEASE_PATH}"
+          file "${VMLINUX_RELEASE_PATH}"
+          file "${PVM_VMLINUX_RELEASE_PATH}"
+
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/bm-meta/kernel-metadata.json)"
+          KERNEL_TAG="${KERNEL_BM_SOURCE_TAG}"
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/pvm-meta/kernel-metadata.json)"
+          PVM_KERNEL_TAG="${KERNEL_PVM_SOURCE_TAG}"
+          {
+            echo "KERNEL_TAG=${KERNEL_TAG}"
+            echo "PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+          } >> "${GITHUB_ENV}"
+          echo "KERNEL_TAG=${KERNEL_TAG} PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+
+      - name: Download guest image from pinned Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf downloaded-guest
+          mkdir -p downloaded-guest
+          gh release download "${GUEST_IMAGE_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "cube-guest-image-amd64.tar.gz" \
+            --dir downloaded-guest
+          test -f downloaded-guest/cube-guest-image-amd64.tar.gz
+          ls -lh downloaded-guest/cube-guest-image-amd64.tar.gz
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image
+        run: docker pull "${BUILDER_IMAGE}"
+
+      - name: Build one-click release bundle
+        env:
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+          ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-amd64
+          ONE_CLICK_GUEST_IMAGE_TAR: ${{ github.workspace }}/downloaded-guest/cube-guest-image-amd64.tar.gz
+        run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
+
+      - name: Upload one-click bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-click-bundle-${{ github.ref_name }}-amd64
+          path: deploy/one-click/dist/cube-sandbox-one-click-${{ github.ref_name }}-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish_one_click_amd64:
+    name: Publish one-click bundle (amd64)
+    runs-on: ubuntu-latest
+    needs:
+      - build_one_click_amd64
+      - release_docker_images
+    steps:
+      - name: Download one-click bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: one-click-bundle-${{ github.ref_name }}-amd64
+          path: downloaded-one-click
+
+      - name: Upload one-click bundle to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bundle_path="downloaded-one-click/cube-sandbox-one-click-${GITHUB_REF_NAME}-amd64.tar.gz"
+          test -f "${bundle_path}"
+          gh release upload "${GITHUB_REF_NAME}" "${bundle_path}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  build_one_click_arm64:
+    name: Build one-click bundle (arm64)
+    runs-on: ubuntu-24.04-arm
+    needs:
+      - resolve_pins
+      - publish_agent_release_assets
+    env:
+      VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
+      KERNEL_BM_ARM64_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_bm_arm64_release_tag }}
+      KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
+      GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Download kernel assets from pinned Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf downloaded-kernel
+          mkdir -p downloaded-kernel/bm-meta downloaded-kernel/pvm-meta
+          gh release download "${KERNEL_BM_ARM64_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "vmlinux-arm64" \
+            --dir downloaded-kernel
+          gh release download "${KERNEL_BM_ARM64_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "kernel-metadata.json" \
+            --dir downloaded-kernel/bm-meta
+          if [[ "${KERNEL_PVM_RELEASE_TAG}" == "${KERNEL_BM_ARM64_RELEASE_TAG}" ]]; then
+            cp downloaded-kernel/bm-meta/kernel-metadata.json \
+              downloaded-kernel/pvm-meta/kernel-metadata.json
+          else
+            gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "kernel-metadata.json" \
+              --dir downloaded-kernel/pvm-meta
+          fi
+          install -D -m 0644 \
+            downloaded-kernel/vmlinux-arm64 \
+            "${VMLINUX_RELEASE_PATH}"
+          test -f "${VMLINUX_RELEASE_PATH}"
+          file "${VMLINUX_RELEASE_PATH}"
+
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/bm-meta/kernel-metadata.json)"
+          KERNEL_TAG="${KERNEL_BM_SOURCE_TAG}"
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/pvm-meta/kernel-metadata.json)"
+          PVM_KERNEL_TAG="${KERNEL_PVM_SOURCE_TAG}"
+          {
+            echo "KERNEL_TAG=${KERNEL_TAG}"
+            echo "PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+          } >> "${GITHUB_ENV}"
+          echo "KERNEL_TAG=${KERNEL_TAG} PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+
+      - name: Download guest image from pinned Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf downloaded-guest
+          mkdir -p downloaded-guest
+          gh release download "${GUEST_IMAGE_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "cube-guest-image-arm64.tar.gz" \
+            --dir downloaded-guest
+          test -f downloaded-guest/cube-guest-image-arm64.tar.gz
+          ls -lh downloaded-guest/cube-guest-image-arm64.tar.gz
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image
+        run: docker pull "${BUILDER_IMAGE}"
+
+      - name: Build one-click release bundle
+        env:
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+          ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-arm64
+          ONE_CLICK_GUEST_IMAGE_TAR: ${{ github.workspace }}/downloaded-guest/cube-guest-image-arm64.tar.gz
+        run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
+
+      - name: Upload one-click bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-click-bundle-${{ github.ref_name }}-arm64
+          path: deploy/one-click/dist/cube-sandbox-one-click-${{ github.ref_name }}-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish_one_click_arm64:
+    name: Publish one-click bundle (arm64)
+    runs-on: ubuntu-latest
+    needs:
+      - build_one_click_arm64
+      - release_docker_images
+    steps:
+      - name: Download one-click bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: one-click-bundle-${{ github.ref_name }}-arm64
+          path: downloaded-one-click
+
+      - name: Upload one-click bundle to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bundle_path="downloaded-one-click/cube-sandbox-one-click-${GITHUB_REF_NAME}-arm64.tar.gz"
+          test -f "${bundle_path}"
+          gh release upload "${GITHUB_REF_NAME}" "${bundle_path}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  release_docker_images:
+    name: Build release docker images
+    needs:
+      - verify_versions
+      - resolve_pins
+      - publish_agent_release_assets
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-docker-images.yml
+    with:
+      image_tag: ${{ github.ref_name }}
+      components: all
+      kernel_bm_amd64_release_tag: ${{ needs.resolve_pins.outputs.kernel_bm_amd64_release_tag }}
+      kernel_bm_arm64_release_tag: ${{ needs.resolve_pins.outputs.kernel_bm_arm64_release_tag }}
+      kernel_pvm_release_tag: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
+      guest_image_release_tag: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
+    secrets: inherit

@@ -1,0 +1,6 @@
+{
+    "_doc": "SWE-bench instance ID → cube-sandbox template ID 映射",
+    "_doc2": "未列出的实例使用 .env 中的 CUBE_TEMPLATE_ID 作为默认值",
+    "_doc3": "用法: python scripts/run-concurrent.py swebench --template-map configs/template-mapping.json ...",
+    "django__django-13447": ""
+}

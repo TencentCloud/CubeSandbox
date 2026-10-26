@@ -1,0 +1,146 @@
+# Example runtime values for CubeSandbox (copy & edit locally).
+#
+# Generic Kubernetes (cluster default StorageClass, ClusterIP + Ingress):
+#   cp deploy/kubernetes/chart/runtime-values.example.yaml runtime-values.yaml
+#   # edit passwords / advertiseIP / domain
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -n cube-system --create-namespace \
+#     -f runtime-values.yaml
+#
+# Tencent Cloud TKE (CBS StorageClass + CLB):
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -n cube-system --create-namespace \
+#     -f deploy/kubernetes/chart/values-tke.yaml \
+#     -f runtime-values.yaml
+#   # In runtime-values.yaml override:
+#   #   cubeProxy.service.annotations["service.cloud.tencent.com/security-groups"]
+#
+# Do NOT commit real passwords or cloud security-group IDs.
+# Local copies named runtime-values.yaml are gitignored.
+
+cubeProxy:
+  advertiseIP: "10.0.0.10"   # control-node HostIP, or LB EXTERNAL-IP on TKE
+  domain: "cube.app"
+  tls:
+    mode: selfSigned   # trial; production: existingSecret or certManager
+    # selfSigned:
+    #   rotateOnSanChange: true   # re-issue cert (and CA) when domain/dnsNames change
+  # TKE only (when using values-tke.yaml LoadBalancer):
+  # service:
+  #   annotations:
+  #     service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
+  # No Ingress controller? Set cubeProxy.ingress.enabled: false and expose
+  # the Service yourself, e.g. NodePort with fixed host ports:
+  # service:
+  #   type: NodePort
+  #   nodePorts:
+  #     http: 30080
+  #     https: 30443
+  #     grpc: 30090
+  # ingress:
+  #   enabled: false
+
+# Optional: expose CubeAPI on a fixed NodePort (with service.type=NodePort):
+# controlPlane:
+#   api:
+#     service:
+#       type: NodePort
+#       nodePort: 30030
+
+# REQUIRED: validate.yaml refuses CHANGE_ME_* sentinels from values.yaml.
+mysql:
+  host: ""
+  password: "replace-me-mysql-password"
+  rootPassword: "replace-me-mysql-root-password"
+  # host: "mysql.example.com"   # optional: skip built-in StatefulSet
+#
+# External PostgreSQL instead of MySQL (skips built-in MySQL; CubeMaster gets
+# driver: postgres). Switch the driver and fill in the postgres section:
+# database:
+#   driver: postgres
+# postgres:
+#   host: "10.0.0.10"
+#   port: 5432
+#   user: postgres
+#   password: "replace-me-pg-password"
+#   database: cube_mvp
+redis:
+  host: ""
+  password: "replace-me-redis-password"
+  # External Redis Sentinel (skips chart-managed redis). Example:
+  # masterName: mymaster
+  # sentinelNodes: "10.0.0.11:26379,10.0.0.12:26379,10.0.0.13:26379"
+  # sentinelPassword: ""   # leave empty when Sentinel has no requirepass
+  # password: "replace-me-redis-master-password"
+
+# --- Persistence (optional) ---
+# Default: leave unset → CubeMaster / MySQL / Redis / MinIO PVCs use the cluster's
+# default StorageClass. Chart does NOT create a StorageClass unless you merge
+# values-tke.yaml (or set storageClass.create=true yourself).
+#
+# Pin all four PVCs to one existing SC (e.g. local-path / gp3 / premium-rwo):
+# persistence:
+#   storageClassName: local-path
+#
+# Or set per-component (overrides the top-level key when non-empty):
+# controlPlane:
+#   master:
+#     persistence:
+#       storageClassName: gp3
+# mysql:
+#   persistence:
+#     storageClassName: gp3
+# redis:
+#   persistence:
+#     storageClassName: gp3
+# minio:
+#   persistence:
+#     storageClassName: gp3
+#
+# Single-node / no CSI: use hostPath instead of PVC
+# controlPlane:
+#   master:
+#     persistence:
+#       hostPath: /data/CubeMaster/storage
+# mysql:
+#   persistence:
+#     hostPath: /data/mysql
+# redis:
+#   persistence:
+#     hostPath: /data/redis
+# minio:
+#   persistence:
+#     hostPath: /data/minio
+
+# Optional: cubevs/sandbox CIDR (Chart default is 172.16.0.0/18).
+# Override when it collides with your VPC; keep tproxyOnIP as the CIDR gateway.
+# cubeNode:
+#   network:
+#     cidr: "172.16.0.0/18"
+# cubeEgress:
+#   network:
+#     tproxyOnIP: "172.16.0.1"
+
+# Optional: Cubelet data disk (/data/cubelet must be XFS with reflink).
+# Default: create a loopback XFS image on first bootstrap (25G).
+# bootstrap:
+#   nodeInit:
+#     dataCubelet:
+#       loopback:
+#         enabled: true
+#         imagePath: /data/cubelet-xfs.img
+#         size: 200G          # only applied when the image file does not exist yet
+# Production with a pre-mounted XFS volume at /data/cubelet:
+#         enabled: false
+
+# Optional: mirror the official Cube images into a private registry
+# (only official Cube TCR hosts are rewritten):
+# global:
+#   imageRegistry: my-mirror.example.com
+#
+# Or override selected images individually:
+# images:
+#   ops:
+#     repository: my-mirror.example.com/cube-sandbox/cube-ops
+#     tag: v0.7.3
+#     pullPolicy: Always

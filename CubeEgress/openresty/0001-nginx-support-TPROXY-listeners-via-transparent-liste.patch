@@ -1,0 +1,157 @@
+From 2035492135bda557c6a3fa1b770b2b3369eb505a Mon Sep 17 00:00:00 2001
+From: Hengqi Chen <hengqi.chen@gmail.com>
+Date: Tue, 26 May 2026 11:45:06 +0000
+Subject: [PATCH] nginx: support TPROXY listeners via `transparent` listen
+ option
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds a `transparent` keyword to the HTTP `listen` directive so that a
+listener can act as a TPROXY destination for traffic redirected by
+iptables `TPROXY` / route-based mechanisms.
+
+Three pieces hang together:
+
+* core/ngx_connection.{c,h}: extend `ngx_listening_s` with a
+  `transparent:1` bit; when set, `ngx_open_listening_sockets()` enables
+  `IP_TRANSPARENT` on the listening socket so the kernel will deliver
+  packets whose original destination is not a local address.
+
+* event/ngx_event_accept.c: on a transparent listener the bound listen
+  address is not the dst the client connected to, so `ls->sockaddr` is
+  no longer the right `c->local_sockaddr`. Call `getsockname()` on the
+  accepted fd to capture the real TPROXY destination and stash it in a
+  fresh allocation off `c->pool` (lifetime tied to the connection — no
+  manual free needed). Costs one extra syscall per accepted connection
+  on transparent listeners only. Downstream consumers ($server_addr,
+  HTTP/2, HTTP/3, userid, etc.) then see a non-NULL local_sockaddr that
+  reflects the actual destination rather than the wildcard listen.
+
+* http/ngx_http_core_module.{c,h} + http/ngx_http.c: parse the
+  `transparent` keyword in `listen` (forces `set` and `bind`), carry
+  the bit on `ngx_http_listen_opt_t`, and propagate it from the
+  configured listen-opt to the runtime `ngx_listening_t` in
+  `ngx_http_add_listening()`.
+
+Linux-only (relies on `IP_TRANSPARENT`); the listener process needs
+`CAP_NET_ADMIN`/`CAP_NET_RAW` for the `setsockopt` to succeed —
+failure is logged at `emerg` but does not abort startup, matching the
+existing tone of nearby `setsockopt` paths.
+
+Signed-off-by: Hengqi Chen <hengqi.chen@gmail.com>
+---
+ bundle/nginx-1.29.2/src/core/ngx_connection.c  |  9 +++++++++
+ bundle/nginx-1.29.2/src/core/ngx_connection.h  |  1 +
+ .../nginx-1.29.2/src/event/ngx_event_accept.c  | 18 ++++++++++++++++++
+ bundle/nginx-1.29.2/src/http/ngx_http.c        |  1 +
+ .../src/http/ngx_http_core_module.c            |  7 +++++++
+ .../src/http/ngx_http_core_module.h            |  1 +
+ 6 files changed, 37 insertions(+)
+
+diff --git a/bundle/nginx-1.29.2/src/core/ngx_connection.c b/bundle/nginx-1.29.2/src/core/ngx_connection.c
+index 28eb7b9..ef6bcd1 100644
+--- a/bundle/nginx-1.29.2/src/core/ngx_connection.c
++++ b/bundle/nginx-1.29.2/src/core/ngx_connection.c
+@@ -582,6 +582,15 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+ #endif
+             /* TODO: close on exit */
+ 
++            if (ls[i].transparent) {
++                int value = 1;
++
++                if (setsockopt(s, IPPROTO_IP, IP_TRANSPARENT, (const void *) &value, sizeof(int)) == -1) {
++                    ngx_log_error(NGX_LOG_EMERG, log, ngx_socket_errno, "setsockopt(IP_TRANSPARENT) %V failed, ignored", &ls[i].addr_text);
++                }
++                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "setsockopt(IP_TRANSPARENT) %V successfully", &ls[i].addr_text);
++            }
++
+             if (!(ngx_event_flags & NGX_USE_IOCP_EVENT)) {
+                 if (ngx_nonblocking(s) == -1) {
+                     ngx_log_error(NGX_LOG_EMERG, log, ngx_socket_errno,
+diff --git a/bundle/nginx-1.29.2/src/core/ngx_connection.h b/bundle/nginx-1.29.2/src/core/ngx_connection.h
+index 84dd804..1f75533 100644
+--- a/bundle/nginx-1.29.2/src/core/ngx_connection.h
++++ b/bundle/nginx-1.29.2/src/core/ngx_connection.h
+@@ -71,6 +71,7 @@ struct ngx_listening_s {
+     unsigned            ipv6only:1;
+ #endif
+     unsigned            reuseport:1;
++    unsigned            transparent:1;
+     unsigned            add_reuseport:1;
+     unsigned            keepalive:2;
+     unsigned            quic:1;
+diff --git a/bundle/nginx-1.29.2/src/event/ngx_event_accept.c b/bundle/nginx-1.29.2/src/event/ngx_event_accept.c
+index daaac04..ce3acb9 100644
+--- a/bundle/nginx-1.29.2/src/event/ngx_event_accept.c
++++ b/bundle/nginx-1.29.2/src/event/ngx_event_accept.c
+@@ -247,6 +247,24 @@ ngx_event_accept(ngx_event_t *ev)
+         c->local_sockaddr = ls->sockaddr;
+         c->local_socklen = ls->socklen;
+ 
++        if (ls->transparent) {
++            ngx_sockaddr_t sa;
++            socklen_t len = sizeof(ngx_sockaddr_t);
++
++            if (getsockname(s, &sa.sockaddr, &len) == -1) {
++                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
++                              "getsockname() failed");
++            } else {
++                c->local_sockaddr = ngx_palloc(c->pool, len);
++                if (c->local_sockaddr == NULL) {
++                    ngx_close_accepted_connection(c);
++                    return;
++                }
++                ngx_memcpy(c->local_sockaddr, &sa, len);
++                c->local_socklen = len;
++            }
++        }
++
+ #if (NGX_HAVE_UNIX_DOMAIN)
+         if (c->sockaddr->sa_family == AF_UNIX) {
+             c->tcp_nopush = NGX_TCP_NOPUSH_DISABLED;
+diff --git a/bundle/nginx-1.29.2/src/http/ngx_http.c b/bundle/nginx-1.29.2/src/http/ngx_http.c
+index 7f2b422..6fe54f3 100644
+--- a/bundle/nginx-1.29.2/src/http/ngx_http.c
++++ b/bundle/nginx-1.29.2/src/http/ngx_http.c
+@@ -1881,6 +1881,7 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
+     ls->reuseport = addr->opt.reuseport;
+ #endif
+ 
++    ls->transparent = addr->opt.transparent;
+     ls->wildcard = addr->opt.wildcard;
+ 
+ #if (NGX_HTTP_V3)
+diff --git a/bundle/nginx-1.29.2/src/http/ngx_http_core_module.c b/bundle/nginx-1.29.2/src/http/ngx_http_core_module.c
+index f4a52ec..84a962d 100644
+--- a/bundle/nginx-1.29.2/src/http/ngx_http_core_module.c
++++ b/bundle/nginx-1.29.2/src/http/ngx_http_core_module.c
+@@ -4273,6 +4273,13 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ #endif
+         }
+ 
++        if (ngx_strcmp(value[n].data, "transparent") == 0) {
++            lsopt.transparent = 1;
++            lsopt.set = 1;
++            lsopt.bind = 1;
++            continue;
++        }
++
+         if (ngx_strncmp(value[n].data, "so_keepalive=", 13) == 0) {
+ 
+             if (ngx_strcmp(&value[n].data[13], "on") == 0) {
+diff --git a/bundle/nginx-1.29.2/src/http/ngx_http_core_module.h b/bundle/nginx-1.29.2/src/http/ngx_http_core_module.h
+index a794144..8e599ac 100644
+--- a/bundle/nginx-1.29.2/src/http/ngx_http_core_module.h
++++ b/bundle/nginx-1.29.2/src/http/ngx_http_core_module.h
+@@ -81,6 +81,7 @@ typedef struct {
+ #endif
+     unsigned                   deferred_accept:1;
+     unsigned                   reuseport:1;
++    unsigned                   transparent:1;
+     unsigned                   so_keepalive:2;
+     unsigned                   proxy_protocol:1;
+ 
+-- 
+2.43.5
+

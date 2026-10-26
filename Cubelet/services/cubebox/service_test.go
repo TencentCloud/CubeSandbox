@@ -1,0 +1,817 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package cubebox
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	imagesv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	volpluginv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+)
+
+func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {
+	container := &cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID:     "ctr-1",
+			Labels: map[string]string{},
+			Config: &cubeboxv1.ContainerConfig{
+				Image: &imagesv1.ImageSpec{Image: "img"},
+				Resources: &cubeboxv1.Resource{
+					Cpu: "100m",
+					Mem: "128Mi",
+				},
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "hostdir-0",
+					ContainerPath: "/mnt/data",
+					HostPath:      "/tmp/data",
+					Readonly:      true,
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+	}
+
+	got := toGRPCContainer(container)
+	require.Len(t, got.GetVolumeMounts(), 1)
+	assert.Equal(t, "hostdir-0", got.GetVolumeMounts()[0].GetName())
+	assert.Equal(t, "/mnt/data", got.GetVolumeMounts()[0].GetContainerPath())
+	assert.Equal(t, "/tmp/data", got.GetVolumeMounts()[0].GetHostPath())
+	assert.True(t, got.GetVolumeMounts()[0].GetReadonly())
+}
+
+func TestDeadline(t *testing.T) {
+	expected := time.Duration(10) * time.Second
+
+	t1 := time.Duration(5) * time.Second
+	t2 := time.Duration(5000) * time.Millisecond
+	tSum := time.Duration(0)
+	tSum += t1
+	tSum += t2
+	assert.True(t, expected == tSum)
+
+	t3, _ := time.ParseDuration("5s")
+	tSum = t1
+	tSum += t3
+	assert.True(t, expected == tSum)
+}
+
+func TestDeadlineCtx(t *testing.T) {
+	t1, _ := time.ParseDuration("1ms")
+	t2 := time.Duration(2) * time.Millisecond
+	t3 := time.Duration(3) * time.Microsecond
+	tSum := t1 + t2 + t3
+	ctx, cancel := context.WithTimeout(context.Background(), tSum)
+	defer cancel()
+	timeout := false
+	ch := make(chan int)
+	go func() {
+		time.Sleep(tSum + 10*time.Millisecond)
+		ch <- 0
+	}()
+
+	select {
+	case <-ctx.Done():
+		timeout = true
+	case <-ch:
+	}
+	assert.True(t, timeout)
+}
+
+func TestDeadlineCtxDelay(t *testing.T) {
+	t1, _ := time.ParseDuration("1ms")
+	t2 := time.Duration(2) * time.Millisecond
+	t3 := time.Duration(3) * time.Microsecond
+
+	delaySeconds := 10 * time.Millisecond
+	delta := 100 * time.Millisecond
+	tSum := t1 + t2 + t3
+
+	ctx, cancel := context.WithTimeout(context.Background(), tSum+delaySeconds+delta)
+	defer cancel()
+	timeout := false
+	ch := make(chan int)
+	go func() {
+		select {
+		case <-time.After(delaySeconds):
+			t.Logf("after delay:%v", delaySeconds)
+		case <-ctx.Done():
+			return
+		}
+
+		time.Sleep(tSum + time.Millisecond)
+		ch <- 0
+	}()
+
+	select {
+	case <-ctx.Done():
+		timeout = true
+	case <-ch:
+	}
+	assert.False(t, timeout)
+}
+
+func TestDeadlineCtxZeroDelay(t *testing.T) {
+	t1, _ := time.ParseDuration("1ms")
+	t2 := time.Duration(2) * time.Millisecond
+	t3 := time.Duration(3) * time.Microsecond
+
+	delaySeconds := time.Duration(0)
+	delta := 100 * time.Millisecond
+	tSum := t1 + t2 + t3
+
+	ctx, cancel := context.WithTimeout(context.Background(), tSum+delaySeconds+delta)
+	defer cancel()
+	timeout := false
+	ch := make(chan int)
+	go func() {
+		select {
+		case <-time.After(delaySeconds):
+			t.Logf("after delay:%v", delaySeconds)
+		case <-ctx.Done():
+			return
+		}
+
+		time.Sleep(tSum + time.Millisecond)
+		t.Logf("after job:%v", tSum+time.Millisecond)
+		ch <- 0
+	}()
+
+	select {
+	case <-ctx.Done():
+		timeout = true
+	case <-ch:
+	}
+	assert.False(t, timeout)
+}
+
+func TestGetNextNumaNode(t *testing.T) {
+
+	s := &service{
+		numaNodeIndex: 0,
+	}
+
+	nodeCount := int32(numa.GetNumaNodeCount())
+	require.Greater(t, nodeCount, int32(0), "numa node count should be positive")
+
+	// getNextNumaNode increments the index then takes modulo the node count,
+	// so the sequence cycles through 1, 2, ..., nodeCount-1, 0, 1, ...
+	for i := int32(1); i <= 3*nodeCount; i++ {
+		want := i % nodeCount
+		assert.Equalf(t, want, s.getNextNumaNode(), "call %d should return %d", i, want)
+	}
+}
+
+func TestCubeboxSorting(t *testing.T) {
+
+	now := time.Now().Unix()
+
+	cubeboxes := []*cubeboxstore.CubeBox{
+		{
+			Metadata: cubeboxstore.Metadata{
+				ID:        "box1",
+				CreatedAt: now - 100,
+			},
+			Status: cubeboxstore.StoreStatus(cubeboxstore.Status{
+				StartedAt: now - 50,
+			}),
+		},
+		{
+			Metadata: cubeboxstore.Metadata{
+				ID:        "box2",
+				CreatedAt: now - 50,
+			},
+			Status: cubeboxstore.StoreStatus(cubeboxstore.Status{
+				StartedAt: now - 20,
+			}),
+		},
+		{
+			Metadata: cubeboxstore.Metadata{
+				ID:        "box3",
+				CreatedAt: now - 10,
+			},
+			Status: cubeboxstore.StoreStatus(cubeboxstore.Status{
+				StartedAt: now - 5,
+			}),
+		},
+		{
+			Metadata: cubeboxstore.Metadata{
+				ID:        "box4",
+				CreatedAt: now - 200,
+			},
+			Status: cubeboxstore.StoreStatus(cubeboxstore.Status{
+				FinishedAt: now - 150,
+			}),
+		},
+		{
+			Metadata: cubeboxstore.Metadata{
+				ID:        "box5",
+				CreatedAt: now - 30,
+			},
+			Status: cubeboxstore.StoreStatus(cubeboxstore.Status{
+				FinishedAt: now - 25,
+			}),
+		},
+	}
+
+	sort.Slice(cubeboxes, func(i, j int) bool {
+		if cubeboxes[i].Status.IsTerminated() {
+			return false
+		}
+		return cubeboxes[i].CreatedAt > cubeboxes[j].CreatedAt
+	})
+
+	assert.False(t, cubeboxes[0].Status.IsTerminated(), "First element should not be terminated")
+	assert.False(t, cubeboxes[1].Status.IsTerminated(), "Second element should not be terminated")
+	assert.False(t, cubeboxes[2].Status.IsTerminated(), "Third element should not be terminated")
+	assert.True(t, cubeboxes[3].Status.IsTerminated(), "Fourth element should be terminated")
+	assert.True(t, cubeboxes[4].Status.IsTerminated(), "Fifth element should be terminated")
+
+	assert.Equal(t, "box3", cubeboxes[0].ID, "Newest non-terminated should be first")
+	assert.Equal(t, "box2", cubeboxes[1].ID, "Middle non-terminated should be second")
+	assert.Equal(t, "box1", cubeboxes[2].ID, "Oldest non-terminated should be third")
+
+	assert.Equal(t, "box4", cubeboxes[3].ID, "Older terminated should come before newer terminated")
+	assert.Equal(t, "box5", cubeboxes[4].ID, "Newer terminated should come after older terminated")
+
+	maxListCubebox := 3
+	truncated := cubeboxes[:maxListCubebox]
+	assert.Len(t, truncated, maxListCubebox, "Should truncate to maxListCubebox")
+
+	assert.Equal(t, "box3", truncated[0].ID)
+	assert.Equal(t, "box2", truncated[1].ID)
+	assert.Equal(t, "box1", truncated[2].ID)
+
+	for _, box := range truncated {
+		assert.False(t, box.Status.IsTerminated(), "Truncated list should not contain terminated boxes")
+	}
+}
+
+func TestValidateCommitSandboxTarget(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	rootVolume, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", rootVolume)
+}
+
+func TestValidateCommitSandboxTargetAllowsDeclaredRawHostPath(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Annotations: map[string]string{
+				"host-mount": `[{"hostPath":"/var/lib/data","mountPath":"/data"}]`,
+			},
+		},
+		Volumes: []*cubeboxv1.Volume{{
+			Name: "hostdir-0",
+			VolumeSource: &cubeboxv1.VolumeSource{HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{Name: "hostdir-0", HostPath: "/var/lib/data"}},
+			}},
+		}},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}, {
+					Name:          "hostdir-0",
+					HostPath:      "/var/lib/data",
+					ContainerPath: "/data",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	root, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetRejectsUndeclaredHostPath(t *testing.T) {
+	cb := newRunningCommitSandboxForTest(nil, []*cubeboxv1.VolumeMounts{{
+		Name: "root", ContainerPath: "/",
+	}, {
+		Name: "host", HostPath: "/var/lib/data", ContainerPath: "/data",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not declared")
+}
+
+func TestValidateCommitSandboxTargetRejectsMismatchedRawHostDirBackingVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "hostdir-0",
+		VolumeSource: &cubeboxv1.VolumeSource{HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+			VolumeSources: []*cubeboxv1.HostDirSource{{Name: "hostdir-0", HostPath: "/var/lib/other"}},
+		}},
+	}}, []*cubeboxv1.VolumeMounts{{Name: "root", ContainerPath: "/"}, {
+		Name: "hostdir-0", ContainerPath: "/data", HostPath: "/var/lib/data",
+	}})
+	cb.Annotations = map[string]string{
+		"host-mount": `[{"hostPath":"/var/lib/data","mountPath":"/data"}]`,
+	}
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match")
+}
+
+func TestValidateCommitSandboxTargetRejectsMissingRawHostDirBackingVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest(nil, []*cubeboxv1.VolumeMounts{{
+		Name: "root", ContainerPath: "/",
+	}, {
+		Name: "hostdir-0", ContainerPath: "/data", HostPath: "/var/lib/data",
+	}})
+	cb.Annotations = map[string]string{
+		"host-mount": `[{"hostPath":"/var/lib/data","mountPath":"/data"}]`,
+	}
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "volume hostdir-0 is missing")
+}
+
+func TestValidateCommitSandboxTargetRejectsMissingMountInOneContainer(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "hostdir-0",
+		VolumeSource: &cubeboxv1.VolumeSource{HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+			VolumeSources: []*cubeboxv1.HostDirSource{{Name: "hostdir-0", HostPath: "/var/lib/data"}},
+		}},
+	}}, []*cubeboxv1.VolumeMounts{{Name: "root", ContainerPath: "/"}, {
+		Name: "hostdir-0", ContainerPath: "/data", HostPath: "/var/lib/data",
+	}})
+	cb.Annotations = map[string]string{
+		"host-mount": `[{"hostPath":"/var/lib/data","mountPath":"/data"}]`,
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "second",
+			Config: &cubeboxv1.ContainerConfig{VolumeMounts: []*cubeboxv1.VolumeMounts{{
+				Name: "root", ContainerPath: "/",
+			}}},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "volume mount hostdir-0 is missing")
+}
+
+func TestValidateCommitSandboxTargetAllowsAuxiliaryContainerWithoutRawHostMount(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "hostdir-0",
+		VolumeSource: &cubeboxv1.VolumeSource{HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+			VolumeSources: []*cubeboxv1.HostDirSource{{Name: "hostdir-0", HostPath: "/var/lib/data"}},
+		}},
+	}}, []*cubeboxv1.VolumeMounts{{Name: "root", ContainerPath: "/"}, {
+		Name: "hostdir-0", ContainerPath: "/data", HostPath: "/var/lib/data",
+	}})
+	cb.Annotations = map[string]string{
+		"host-mount": `[{"hostPath":"/var/lib/data","mountPath":"/data"}]`,
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "auxiliary",
+			Config: &cubeboxv1.ContainerConfig{VolumeMounts: []*cubeboxv1.VolumeMounts{{
+				Name: "root", ContainerPath: "/",
+			}}},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+	})
+
+	root, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetRejectsUndeclaredHostPathInAuxiliaryContainer(t *testing.T) {
+	cb := newRunningCommitSandboxForTest(nil, []*cubeboxv1.VolumeMounts{{
+		Name: "root", ContainerPath: "/",
+	}})
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "auxiliary",
+			Config: &cubeboxv1.ContainerConfig{VolumeMounts: []*cubeboxv1.VolumeMounts{{
+				Name: "root", ContainerPath: "/",
+			}, {
+				Name: "host", HostPath: "/var/lib/data", ContainerPath: "/data",
+			}}},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+	})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not declared")
+}
+
+func TestValidateCommitSandboxTargetRejectsDuplicateRawHostDirBackingVolume(t *testing.T) {
+	volume := &cubeboxv1.Volume{
+		Name: "hostdir-0",
+		VolumeSource: &cubeboxv1.VolumeSource{HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+			VolumeSources: []*cubeboxv1.HostDirSource{{Name: "hostdir-0", HostPath: "/var/lib/data"}},
+		}},
+	}
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{volume, volume}, []*cubeboxv1.VolumeMounts{{
+		Name: "root", ContainerPath: "/",
+	}, {
+		Name: "hostdir-0", ContainerPath: "/data", HostPath: "/var/lib/data",
+	}})
+	cb.Annotations = map[string]string{
+		"host-mount": `[{"hostPath":"/var/lib/data","mountPath":"/data"}]`,
+	}
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "volume hostdir-0 is duplicated")
+}
+
+func TestValidatePauseSandboxTargetAllowsHostPath(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}, {
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidatePauseSandboxTargetAllowsHostDirVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "host",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "host",
+		ContainerPath: "/data",
+	}})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetRejectsHostDirVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "host",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "host",
+		ContainerPath: "/data",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "host_dir")
+}
+
+func TestValidateCommitSandboxTargetRejectsSandboxPathHostBind(t *testing.T) {
+	for _, sandboxPathType := range []string{
+		cubeboxv1.SandboxPathType_Directory.String(),
+		cubeboxv1.SandboxPathType_SharedBindMount.String(),
+	} {
+		t.Run(sandboxPathType, func(t *testing.T) {
+			cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+				Name: "host",
+				VolumeSource: &cubeboxv1.VolumeSource{
+					SandboxPath: &cubeboxv1.SandboxPathVolumeSource{
+						Type: sandboxPathType,
+						Path: "/var/lib/data",
+					},
+				},
+			}}, []*cubeboxv1.VolumeMounts{{
+				Name:          "root",
+				ContainerPath: "/",
+			}, {
+				Name:          "host",
+				ContainerPath: "/data",
+			}})
+
+			_, err := validateCommitSandboxTarget(cb)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "sandbox_path")
+		})
+	}
+}
+
+func TestValidateCommitSandboxTargetAllowsPluginVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "data",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			PluginVolume: &volpluginv1.PluginVolumeSource{Driver: "cos-rpc"},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+
+	root, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetAllowsPluginVolumeAnnotation(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name:         "data",
+		VolumeSource: &cubeboxv1.VolumeSource{},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+	cb.Annotations = map[string]string{
+		"plugin-volume-sources": `[{"name":"data","driver":"cos-rpc"}]`,
+	}
+
+	root, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetRejectsMalformedPluginVolumeAnnotation(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name:         "data",
+		VolumeSource: &cubeboxv1.VolumeSource{},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+	cb.Annotations = map[string]string{"plugin-volume-sources": `{bad`}
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid plugin-volume-sources")
+}
+
+func TestValidateCommitSandboxTargetRejectsUnknownEmptyVolumeSource(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name:         "data",
+		VolumeSource: &cubeboxv1.VolumeSource{},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown empty source")
+}
+
+func TestValidatePauseSandboxTargetAllowsPluginVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "data",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			PluginVolume: &volpluginv1.PluginVolumeSource{Driver: "cos-rpc"},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetRejectsUnknownLegacyVolumeSources(t *testing.T) {
+	cb := newRunningCommitSandboxForTest(nil, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without persisted volume sources")
+}
+
+func TestValidateCommitSandboxTargetRequiresRunningSandbox(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{CreatedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not running")
+}
+
+func newRunningCommitSandboxForTest(volumes []*cubeboxv1.Volume, mounts []*cubeboxv1.VolumeMounts) *cubeboxstore.CubeBox {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+		Volumes:  volumes,
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: mounts,
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+	return cb
+}
+
+func TestAppSnapshotRequiresCowBeforeCreate(t *testing.T) {
+	rsp, err := (&service{}).AppSnapshot(context.Background(), &cubeboxv1.AppSnapshotRequest{
+		CreateRequest: &cubeboxv1.RunCubeSandboxRequest{
+			RequestID: "req",
+			Annotations: map[string]string{
+				constants.MasterAnnotationsAppSnapshotCreate:    "true",
+				constants.MasterAnnotationAppSnapshotTemplateID: "template",
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, rsp)
+	assert.Equal(t, errorcode.ErrorCode_PreConditionFailed, rsp.GetRet().GetRetCode())
+	assert.Contains(t, rsp.GetRet().GetRetMsg(), "storage_backend=cubecow")
+}
+
+func TestParseShimIntentTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"unset uses the default", "", defaultShimIntentTTL},
+		{"bare zero disables the bound", "0", 0},
+		{"zero with a unit disables the bound", "0s", 0},
+		{"a duration is parsed", "90s", 90 * time.Second},
+		{"surrounding whitespace is tolerated", "  2m  ", 2 * time.Minute},
+		{"an unparsable value keeps the default rather than disabling the bound", "10 minutes", defaultShimIntentTTL},
+		{"a negative value keeps the default", "-1m", defaultShimIntentTTL},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseShimIntentTTL(tc.raw))
+		})
+	}
+}
+
+// A record written before Endpoint.ShimSpawnedAt existed has no age, and an
+// unknown age is the one thing the TTL cannot bound. Stamping it at startup
+// gives it a full TTL instead of leaving it fail-closed forever.
+func TestBackfillShimIntentTimestampsStampsUndatedRecords(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-undated", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	mgr := &fakeCubeboxAPI{cb: sb}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.False(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Equal(t, []string{"sb-undated"}, mgr.syncIDs, "the stamp has to reach the store")
+}
+
+func TestBackfillShimIntentTimestampsLeavesCurrentAndUnspawnedRecordsAlone(t *testing.T) {
+	stampedAt := time.Now().Add(-time.Hour)
+	dated := newCubeboxWithStatusForTest("sb-dated", cubeboxstore.Status{StartedAt: 1})
+	dated.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: stampedAt}
+	mgr := &fakeCubeboxAPI{cb: dated}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.Equal(t, stampedAt, dated.Endpoint.ShimSpawnedAt, "an existing age must keep accruing")
+	assert.Empty(t, mgr.syncIDs)
+
+	clean := newCubeboxWithStatusForTest("sb-clean", cubeboxstore.Status{StartedAt: 1})
+	cleanMgr := &fakeCubeboxAPI{cb: clean}
+
+	(&local{cubeboxManger: cleanMgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.True(t, clean.Endpoint.ShimSpawnedAt.IsZero(), "a sandbox with no intent must not gain one")
+	assert.Empty(t, cleanMgr.syncIDs)
+}
+
+func TestBackfillShimIntentTimestampsContinuesWhenSyncFails(t *testing.T) {
+	failed := newCubeboxWithStatusForTest("sb-sync-fail", cubeboxstore.Status{StartedAt: 1})
+	failed.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	kept := newCubeboxWithStatusForTest("sb-dated", cubeboxstore.Status{StartedAt: 1})
+	keptAt := time.Now().Add(-time.Hour)
+	kept.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: keptAt}
+	later := newCubeboxWithStatusForTest("sb-later", cubeboxstore.Status{StartedAt: 1})
+	later.Endpoint = sandboxstore.Endpoint{ShimSpawned: true}
+	mgr := &fakeCubeboxAPI{
+		list:    []*cubeboxstore.CubeBox{failed, kept, later},
+		syncErr: errors.New("store unavailable"),
+	}
+
+	(&local{cubeboxManger: mgr}).BackfillShimIntentTimestamps(context.Background())
+
+	assert.True(t, failed.Endpoint.ShimSpawned)
+	assert.False(t, failed.Endpoint.ShimSpawnedAt.IsZero(),
+		"this process still bounds the intent even when the stamp did not reach disk")
+	assert.Equal(t, keptAt, kept.Endpoint.ShimSpawnedAt, "an existing age must keep accruing")
+	assert.False(t, later.Endpoint.ShimSpawnedAt.IsZero(),
+		"a sync failure must not stop the records that follow")
+	assert.Equal(t, []string{"sb-sync-fail", "sb-later"}, mgr.syncIDs)
+}
+
+func TestSetShimIntentTTLIsReadableFromTheDestroyPath(t *testing.T) {
+	l := &local{}
+	l.SetShimIntentTTL(3 * time.Minute)
+	assert.Equal(t, 3*time.Minute, l.ShimIntentTTL())
+}

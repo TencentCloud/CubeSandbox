@@ -1,0 +1,169 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package cubebox
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math/rand"
+	"net"
+	"net/http"
+	"os"
+	"sort"
+	"text/tabwriter"
+	"time"
+
+	"github.com/google/uuid"
+	jsoniter "github.com/json-iterator/go"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/urfave/cli"
+)
+
+var InfoCommand = cli.Command{
+	Name:  "info",
+	Usage: "info sandboxes",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  "sandboxid,s",
+			Usage: "Either sandboxid or hostid; both can be specified, though specifying both has little effect since sandboxid determines the host",
+		},
+		cli.StringFlag{
+			Name:  "hostid,t",
+			Usage: "Either hostid or sandboxid; both can be specified to query a specific instance",
+		},
+		cli.BoolFlag{
+			Name:  "old",
+			Usage: "/cube/sandbox/info legacy API usage",
+		},
+		cli.IntFlag{
+			Name:  "containerport,p",
+			Usage: "Optional, target container port when querying exposed port",
+		},
+		cli.StringFlag{
+			Name:  "callerhostip",
+			Usage: "Optional, simulate the HostIP of the cube proxy node to select tap ip or host port",
+		},
+	},
+	Action: func(c *cli.Context) error {
+		hostID := c.String("hostid")
+		sandboxID := c.String("sandboxid")
+		if hostID == "" && sandboxID == "" {
+			return errors.New("hostid and sandboxid cannot both be empty")
+		}
+
+		serverList = getServerAddrs(c)
+		if len(serverList) == 0 {
+			log.Printf("no server addr\n")
+			return errors.New("no server addr")
+		}
+		port = c.GlobalString("port")
+
+		requestID := uuid.New().String()
+		host := serverList[rand.Int()%len(serverList)]
+		containerPort := c.Int("containerport")
+
+		url := ""
+		var body io.Reader
+		if c.Bool("old") {
+
+			req := &types.GetCubeSandboxReq{
+				RequestID:     requestID,
+				SandboxID:     sandboxID,
+				HostID:        hostID,
+				ContainerPort: int32(containerPort),
+			}
+			reqEn, _ := jsoniter.Marshal(req)
+			body = bytes.NewBuffer(reqEn)
+			url = fmt.Sprintf("http://%s/cube/sandbox/info", net.JoinHostPort(host, port))
+		} else {
+			if hostID != "" {
+				url = fmt.Sprintf("http://%s/cube/sandbox/info?requestID=%s&host_id=%s", net.JoinHostPort(host, port), requestID, hostID)
+			} else {
+				url = fmt.Sprintf("http://%s/cube/sandbox/info?requestID=%s&sandbox_id=%s", net.JoinHostPort(host, port), requestID, sandboxID)
+			}
+			if containerPort > 0 {
+				url = fmt.Sprintf("%s&container_port=%d", url, containerPort)
+			}
+		}
+
+		rsp := &types.GetCubeSandboxRes{}
+		err := doHttpReq(c, url, http.MethodGet, requestID, body, rsp)
+		if err != nil {
+			log.Printf("list_getBodyData err. %s. RequestId: %s\n", err.Error(), requestID)
+			return err
+		}
+		if rsp.Ret.RetCode != 200 {
+			log.Printf("rsp err. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
+			return errors.New(rsp.Ret.RetMsg)
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
+		for idx, sb := range rsp.Data {
+			if idx > 0 {
+				fmt.Fprintln(w)
+			}
+			printSandboxInfoBlock(w, sb)
+		}
+		return w.Flush()
+	},
+}
+
+func printSandboxInfoBlock(w *tabwriter.Writer, sb *types.SandboxData) {
+	fmt.Fprintf(w, "SANDBOX_ID\t%s\n", displayValue(sb.SandboxID))
+	fmt.Fprintf(w, "STATUS\t%s\n", getStatus(sb.Status))
+	fmt.Fprintf(w, "HOST_ID\t%s\n", displayValue(sb.HostID))
+	fmt.Fprintf(w, "HOST_IP\t%s\n", displayValue(sb.HostIP))
+	fmt.Fprintf(w, "SANDBOX_IP\t%s\n", displayValue(sb.SandboxIP))
+	fmt.Fprintf(w, "TEMPLATE_ID\t%s\n", displayValue(sb.TemplateID))
+	fmt.Fprintf(w, "NAMESPACE\t%s\n", displayValue(sb.NameSpace))
+	fmt.Fprintf(w, "ANNOTATIONS\t%s\n", displayValue(utils.InterfaceToString(sb.Annotations)))
+	fmt.Fprintf(w, "LABELS\t%s\n", displayValue(utils.InterfaceToString(sb.Labels)))
+	if len(sb.VolumeMounts) > 0 {
+		fmt.Fprintln(w, "VOLUME_MOUNTS")
+		fmt.Fprintln(w, "NAME\tCONTAINER_PATH\tREAD_ONLY")
+		for _, mount := range sb.VolumeMounts {
+			fmt.Fprintf(w, "%s\t%s\t%t\n",
+				displayValue(mount.Name),
+				displayValue(mount.ContainerPath),
+				mount.Readonly,
+			)
+		}
+	}
+	if sb.ExposedPortEndpoint != "" {
+		fmt.Fprintf(w, "EXPOSED_PORT_MODE\t%s\n", displayValue(sb.ExposedPortMode))
+		fmt.Fprintf(w, "EXPOSED_ENDPOINT\t%s\n", displayValue(sb.ExposedPortEndpoint))
+		fmt.Fprintf(w, "REQUESTED_CONTAINER_PORT\t%d\n", sb.RequestedContainerPort)
+	}
+
+	sort.Slice(sb.Containers, func(i, j int) bool {
+		return sb.Containers[i].CreateAt < sb.Containers[j].CreateAt
+	})
+	fmt.Fprintf(w, "CONTAINERS\t%d\n", len(sb.Containers))
+	fmt.Fprintln(w, "NAME\tCONTAINER\tIMAGE\tSTATUS\tCREATED\tCPU\tMEM\tCONTAINER_TYPE")
+	for _, c := range sb.Containers {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			displayValue(c.Name), displayValue(c.ContainerID), displayValue(c.Image), getStatus(c.Status),
+			formatTime(c.CreateAt), displayValue(c.Cpu), displayValue(c.Mem), displayValue(c.Type))
+	}
+}
+
+func displayValue(v string) string {
+	if v == "" || v == "null" {
+		return "-"
+	}
+	return v
+}
+
+func formatTime(created int64) string {
+	if created == 0 {
+		return "-"
+	}
+	createdAt := time.Unix(0, created).Round(time.Second).Local()
+	return createdAt.Format("2006-01-02 15:04:05")
+}

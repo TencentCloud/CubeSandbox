@@ -1,0 +1,2098 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cdp"
+	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/multilock"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
+
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/plugin"
+	jsoniter "github.com/json-iterator/go"
+	bolt "go.etcd.io/bbolt"
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+)
+
+type local struct {
+	config *Config
+
+	poolFormat sync.Map
+
+	tmpPoolFormat sync.Map
+
+	otherFormatPath           string
+	cubeboxTemplateFormatPath string
+	diskSize                  int64
+	diskWarningSize           int64
+	usedDiskSize              atomic.Int64
+
+	capBlocks, capInodes atomic.Int32
+	db                   *utils.CubeStore
+	hostInfo             *HostStorageMeta
+	cubeboxAPI           cubes.CubeboxAPI
+	multiLock            *multilock.MultiLock
+	cowEngine            *cubecow.Engine
+	s3CowEngine          *cubecow.Engine
+	cowManager           cowVolumeManager // XFS / xfscow Store (reflink handle)
+	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
+	s3InitCancel         context.CancelFunc
+
+	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
+	// It is a sibling file to meta.db in the same db directory.
+	rcDB    *bolt.DB
+	rcStore *refcount.Store
+}
+
+type HostStorageMeta struct {
+	InstanceID string
+	IP         string
+}
+
+var localStorage = &local{}
+
+var cowResetNodeStorage = func(engine *cubecow.Engine) error {
+	return engine.ResetNodeStorage()
+}
+
+var (
+	defaultPoolSize                = 500
+	defaultPoolWorkers             = 8
+	defaultPoolTriggerIntervalInMs = 1000
+	defaultWarningPercent          = 100
+	defaultFormatSize              = "1Gi"
+	defaultCmdTimeout              = 3 * time.Second
+
+	unifiedStorageSize        = resource.MustParse(defaultFormatSize)
+	otherFormatSize           = "othersv2"
+	cubeboxTemplateFormatSize = "cubebox"
+	defaultDiskUUID           = "ef5c2893-ddbd-4d6e-bef6-3853c31d5b94"
+	emptyDir                  = "emptydir"
+	failoverDir               = "failoverdir"
+	dbDir                     = "db"
+
+	bucketName                 = "emptydir/v1"
+	stubKeyName                = "cube_stub"
+	emptyDirInnerSourcePath    = "disk"
+	defaultFreeBlocksThreshold = int32(15)
+	defaultFreeInodesThreshold = int32(15)
+
+	dbBucketList = []*multimeta.BucketDefineInternal{
+		{
+			BucketDefine: &multimetadb.BucketDefine{
+				Name:     bucketName,
+				DbName:   "storage",
+				Describe: "storage plugin db",
+			},
+		},
+		{
+			BucketDefine: &multimetadb.BucketDefine{
+				Name:     nfsBucketName,
+				DbName:   "storage",
+				Describe: "storage plugin db",
+			},
+		},
+		{
+			BucketDefine: &multimetadb.BucketDefine{
+				Name:     s3MetadataBucket,
+				DbName:   "storage",
+				Describe: "s3 node-local metadata base volume",
+			},
+		},
+	}
+	nfsBucketName  = "nfs/v1"
+	failoverNfsDir = "nfsfailoverdir"
+	randomSeed     = rand.New(rand.NewSource(time.Now().UnixNano()))
+)
+
+const (
+	baseFileName         = "base.raw"
+	formatFileName       = "format"
+	storageMetricDB      = "cube-storage-db"
+	storageMetricNewFile = "cube-storage-new"
+)
+
+func (l *local) useCowStorage() bool {
+	return l != nil && l.config != nil && l.config.StorageBackend == "cubecow"
+}
+
+func (l *local) ensureCowManager() error {
+	if l.cowEngine == nil && l.s3CowEngine == nil {
+		// Tests inject Stores without a live cubecow engine. Production
+		// plugin init always sets the engines before this runs.
+		if l.cowManager != nil || l.s3CowManager != nil {
+			return nil
+		}
+		if l.useCowStorage() {
+			return fmt.Errorf("cubecow engine not initialized")
+		}
+		return nil
+	}
+	// Each Store is bound to its own cubecow handle (kind=reflink vs kind=s3).
+	if l.cowManager == nil && l.cowEngine != nil {
+		l.cowManager = newCowVolumeManager(l.cowEngine)
+	}
+	if l.s3CowManager == nil && l.s3CowEngine != nil {
+		l.s3CowManager = newS3CowVolumeManager(l.s3CowEngine)
+	}
+	return nil
+}
+
+func (l *local) resetCowNodeStorage() error {
+	if !l.useCowStorage() {
+		return nil
+	}
+	if l.cowEngine == nil && l.s3CowEngine == nil {
+		return fmt.Errorf("cubecow engine not initialized")
+	}
+	if l.cowEngine != nil {
+		if err := cowResetNodeStorage(l.cowEngine); err != nil {
+			return fmt.Errorf("reset cubecow xfs storage: %w", err)
+		}
+	}
+	if l.s3CowEngine != nil {
+		if err := cowResetNodeStorage(l.s3CowEngine); err != nil {
+			return fmt.Errorf("reset cubecow s3 storage: %w", err)
+		}
+	}
+	l.Close()
+	return nil
+}
+
+func (l *local) cleanupCowStateOnDisk() error {
+	if !l.useCowStorage() {
+		return nil
+	}
+	rootDir, err := l.config.cowReflinkRootDir()
+	if err != nil {
+		return err
+	}
+	if rootDir == "" {
+		// External cubecow.toml owns its own layout; skip best-effort
+		// cleanup rather than reach into a directory we did not pick.
+		return nil
+	}
+	volumesDir := filepath.Join(path.Clean(rootDir), "volumes")
+	if err := os.RemoveAll(volumesDir); err != nil {
+		return fmt.Errorf("%v RemoveAll cubecow reflink volumes dir failed:%v", volumesDir, err.Error())
+	}
+	return nil
+}
+
+func (l *local) reinitCowEngine() error {
+	if !l.useCowStorage() {
+		return nil
+	}
+	if l.cowEngine == nil {
+		engine, initSource, err := initCowEngine(l.config)
+		if err != nil {
+			return err
+		}
+		l.cowEngine = engine
+		CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
+	}
+	// S3 handle is published only by startS3CowInitLoop after metadata base
+	// succeeds; do not bind it synchronously here.
+	return nil
+}
+
+func (l *local) refreshCowPaths(info *StorageInfo) error {
+	if info == nil || len(info.Volumes) == 0 {
+		return nil
+	}
+	backend := storageBackendFromInfo(info)
+	if IsS3Backend(backend) {
+		// On S3 a recorded device path is worse than none: s3lvol hands out a
+		// different /dev/nvmeXn1 on every activate, so a stale one points at
+		// another object's disk. Resolving it here is not an option either —
+		// that would activate every volume this node ever recorded, live or
+		// dead, outside any request. Drop it and let the request that needs a
+		// device resolve it (ResolveDevPath always activates on S3).
+		for _, volume := range info.Volumes {
+			if volume != nil && strings.TrimSpace(volume.VolumeName) != "" {
+				volume.FilePath = ""
+			}
+		}
+		return nil
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil {
+		if !l.useCowStorage() {
+			return nil
+		}
+		return err
+	}
+	return refreshStorageInfoPathsWithManager(context.Background(), info, store)
+}
+
+type StateRecoverer interface {
+	RecoverStorageState(ctx context.Context) error
+	RecoverSandboxStorage(ctx context.Context, sandboxID string) error
+}
+
+func (l *local) RecoverStorageState(ctx context.Context) error {
+	// The S3 init loop can re-enter this before storage init opened the db;
+	// nothing is recorded yet in that case.
+	if !l.useCowStorage() || l.db == nil {
+		return nil
+	}
+
+	all, err := l.readAllFileInfo()
+	if err != nil {
+		return err
+	}
+	for id, data := range all {
+		if id == stubKeyName {
+			continue
+		}
+		info := &StorageInfo{}
+		if err := jsoniter.ConfigFastest.Unmarshal(data, info); err != nil {
+			return fmt.Errorf("unmarshal storage info %s during recover: %w", id, err)
+		}
+		if err := l.recoverStorageInfo(ctx, id, info); err != nil {
+			// If the underlying cubecow volume / snapshot is gone (typical
+			// after a crash mid-template-build, where the build-rootfs
+			// volume has been cleaned up but the storage-info entry was
+			// never erased), the storage info is stale by definition.
+			// Drop the entry instead of preventing the whole node from
+			// coming back online: keeping cubelet hard-fatal here means a
+			// single broken sandbox / template build can wedge the node
+			// permanently and require manual DB surgery.
+			var missingErr *CowObjectMissingError
+			if errors.As(err, &missingErr) {
+				CubeLog.Warnf("storage recover: dropping stale entry id=%s (cubecow object %q kind=%s gone): %v",
+					id, missingErr.VolumeName, missingErr.Kind, err)
+				if delErr := l.db.Delete(bucketName, id); delErr != nil &&
+					!errors.Is(delErr, utils.ErrorKeyNotFound) &&
+					!errors.Is(delErr, utils.ErrorBucketNotFound) {
+					CubeLog.Warnf("storage recover: failed to drop stale entry %s from db: %v", id, delErr)
+				}
+				_ = atomicDelete(filepath.Join(l.failoverDir(), id))
+				continue
+			}
+			// S3 entries are skipped above, so this should be unreachable.
+			// It stays as a guard: the S3 handle is published asynchronously
+			// by the init loop, and a node must never refuse to start
+			// because one of its sandboxes lives on a backend that is still
+			// coming up.
+			if errors.Is(err, ErrS3NotReady) {
+				CubeLog.Warnf("storage recover: skipping id=%s while s3 storage is initializing: %v", id, err)
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *local) RecoverSandboxStorage(ctx context.Context, sandboxID string) error {
+	if !l.useCowStorage() || sandboxID == "" {
+		return nil
+	}
+
+	info, err := l.readBackendFileInfoRaw(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			return nil
+		}
+		return err
+	}
+	return l.recoverStorageInfo(ctx, sandboxID, info)
+}
+
+func (l *local) recoverStorageInfo(ctx context.Context, id string, info *StorageInfo) error {
+	if info == nil {
+		return nil
+	}
+	if IsS3Backend(storageBackendFromInfo(info)) {
+		// Boot does nothing for an S3 sandbox. Every disk it needs is resolved
+		// and attached by the request that uses it, and a restarted Cubelet
+		// cannot tell a leftover from a disk a live sandbox is reading: acting
+		// on that guess is what used to pull the memory snapshot out from
+		// under a resumed VM. Reading this entry later drops the stale device
+		// path (see refreshCowPaths), so there is nothing to persist here.
+		return nil
+	}
+	if err := l.refreshCowPaths(info); err != nil {
+		return fmt.Errorf("recover storage info %s: %w", id, err)
+	}
+	if err := l.writeBackendFileInfo(ctx, id, info); err != nil {
+		return fmt.Errorf("persist recovered storage info %s: %w", id, err)
+	}
+	return nil
+}
+
+func (l *local) init(ic *plugin.InitContext) error {
+	l.multiLock = multilock.NewMultiLock(multilock.NewMultiLockOptions())
+	if l.config.WarningPercent <= 0 {
+		l.config.WarningPercent = int64(defaultWarningPercent)
+	}
+	if l.config.BaseDiskUUID == "" {
+		l.config.BaseDiskUUID = defaultDiskUUID
+	}
+	if l.config.FAdviseSize <= 0 {
+		l.config.FAdviseSize = 256 * 1024
+	}
+	if l.config.FreeBlocksThreshold <= 0 {
+		l.config.FreeBlocksThreshold = defaultFreeBlocksThreshold
+	}
+	if l.config.FreeInodesThreshold <= 0 {
+		l.config.FreeInodesThreshold = defaultFreeInodesThreshold
+	}
+
+	if l.useCowStorage() {
+		for _, d := range []string{l.config.RootPath, l.config.DataPath} {
+			if err := os.MkdirAll(path.Clean(d), os.ModeDir|0755); err != nil {
+				return fmt.Errorf("%v  MkdirAll failed:%v", d, err.Error())
+			}
+		}
+		if err := l.initDb(); err != nil {
+			return err
+		}
+		if err := l.ensureCowManager(); err != nil {
+			return err
+		}
+		if err := l.RecoverStorageState(ic.Context); err != nil {
+			return err
+		}
+	} else {
+		if l.config.PoolSize <= 0 {
+			l.config.PoolSize = defaultPoolSize
+		}
+		if l.config.PoolWorkers <= 0 {
+			l.config.PoolWorkers = defaultPoolWorkers
+		}
+		if l.config.PoolTriggerIntervalInMs <= 0 {
+			l.config.PoolTriggerIntervalInMs = defaultPoolTriggerIntervalInMs
+		}
+		q, err := resource.ParseQuantity(l.config.DiskSize)
+		if err != nil {
+			CubeLog.Errorf("invalid DiskSize :%s", l.config.DiskSize)
+			return err
+		}
+		l.diskSize = q.Value()
+		l.diskWarningSize = l.diskSize * l.config.WarningPercent / 100
+		if len(l.config.PoolDefaultFormatSizeList) == 0 {
+			l.config.PoolDefaultFormatSizeList = append(l.config.PoolDefaultFormatSizeList, defaultFormatSize)
+		}
+		for _, d := range []string{l.config.RootPath, l.config.DataPath} {
+			if err := os.MkdirAll(path.Clean(d), os.ModeDir|0755); err != nil {
+				return fmt.Errorf("%v  MkdirAll failed:%v", d, err.Error())
+			}
+		}
+		if err := l.initDb(); err != nil {
+			return err
+		}
+		if err := l.initEmptyDir(); err != nil {
+			return err
+		}
+	}
+
+	if err := l.initHostInfo(); err != nil {
+		return err
+	}
+	if l.config.ReconcileInterval == 0 {
+		l.config.ReconcileInterval = tomlext.FromStdTime(5 * time.Minute)
+	}
+	go l.loopReconcile(ic.Context)
+	go l.loopUpdateStatus(ic.Context)
+	return nil
+}
+
+func (l *local) loopUpdateStatus(context context.Context) {
+	gcTicker := time.NewTicker(tomlext.ToStdTime(l.config.ReconcileInterval))
+	defer gcTicker.Stop()
+
+	for {
+		select {
+		case <-gcTicker.C:
+			l.updateBlocksCap()
+		case <-context.Done():
+			return
+		}
+	}
+}
+
+func (l *local) Close() error {
+	l.stopS3CowInitLoop()
+	if l.cowEngine != nil {
+		l.cowEngine.Close()
+		l.cowEngine = nil
+	}
+	l.clearS3Cow()
+	l.cowManager = nil
+	return nil
+}
+
+func (l *local) initHostInfo() error {
+	identity, err := utils.GetHostIdentity()
+	if err != nil {
+		return fmt.Errorf("get host identity failed: %w", err)
+	}
+	l.hostInfo = &HostStorageMeta{
+		InstanceID: identity.InstanceID,
+		IP:         identity.LocalIPv4,
+	}
+
+	return nil
+}
+
+func (l *local) initEmptyDir() error {
+	basePath := filepath.Join(l.config.DataPath, emptyDir)
+	l.otherFormatPath = filepath.Join(basePath, otherFormatSize)
+	failoverPath := filepath.Join(l.config.DataPath, failoverDir)
+	l.cubeboxTemplateFormatPath = filepath.Join(basePath, cubeboxTemplateFormatSize)
+	for _, d := range []string{basePath, failoverPath, l.otherFormatPath, l.cubeboxTemplateFormatPath} {
+		if err := os.MkdirAll(path.Clean(d), os.ModeDir|0755); err != nil {
+			return fmt.Errorf("%v  MkdirAll failed:%v", d, err.Error())
+		}
+	}
+
+	dirtyList := l.listDirtyStorage()
+
+	if err := l.initFormatPool(basePath, dirtyList); err != nil {
+		return err
+	}
+
+	if err := l.initOtherFormatPool(dirtyList); err != nil {
+		return err
+	}
+
+	if err := l.initCubeboxFormatPool(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *local) initFormatPool(basePath string, dirtyList map[string]bool) error {
+
+	for _, s := range l.config.PoolDefaultFormatSizeList {
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			CubeLog.Errorf("PoolDefaultFormatSizeList :%s parse fail", s)
+			continue
+		}
+		baseFormatPath := filepath.Join(basePath, q.String())
+		if err := os.MkdirAll(baseFormatPath, os.ModeDir|0755); err != nil {
+			return fmt.Errorf("init dir  [%s]] failed, %s", baseFormatPath, err.Error())
+		}
+
+		switch l.config.PoolType {
+		case cp_type:
+			p := &pool{
+				l:                       l,
+				format:                  q.String(),
+				formatSizeInByte:        q.Value(),
+				baseFormatPath:          baseFormatPath,
+				cap:                     dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+				poolWorkers:             l.config.PoolWorkers,
+				triggerIntervalInSecond: l.config.PoolTriggerIntervalInMs,
+				triggerBurst:            l.config.PoolTriggerBurst,
+				pType:                   l.config.PoolType,
+			}
+			l.poolFormat.Store(p.format, p)
+			if err := p.init(dirtyList); err != nil {
+				return fmt.Errorf("init format [%s]  failed, %s", q.String(), err.Error())
+			}
+			p.start()
+		case cp_reflink_type:
+			p := &poolWithReflink{
+				l:                       l,
+				format:                  q.String(),
+				formatSizeInByte:        q.Value(),
+				baseFormatPath:          baseFormatPath,
+				pType:                   l.config.PoolType,
+				baseNum:                 100,
+				cap:                     dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+				poolWorkers:             l.config.PoolWorkers,
+				triggerIntervalInSecond: l.config.PoolTriggerIntervalInMs,
+				triggerBurst:            l.config.PoolTriggerBurst,
+			}
+			l.poolFormat.Store(p.format, p)
+			if err := p.init(dirtyList); err != nil {
+				return fmt.Errorf("init format [%s]  failed, %s", q.String(), err.Error())
+			}
+			p.start()
+		default:
+			return fmt.Errorf("invalid pooltype %s", l.config.PoolType)
+		}
+	}
+	return nil
+}
+
+func (l *local) listDirtyStorage() map[string]bool {
+
+	all, err := l.readAllFileInfo()
+	if err != nil {
+		return map[string]bool{}
+	}
+	ctx := context.WithValue(context.Background(), CubeLog.KeyCaller, constants.StorageID.ID())
+	ctx = context.WithValue(ctx, CubeLog.KeyCallee, constants.StorageID.ID())
+	dirtyList := make(map[string]bool)
+	for id, data := range all {
+		logEntry := log.G(ctx).WithFields(CubeLog.Fields{
+			string(CubeLog.KeyInstanceId): id,
+			"step":                        "storage listDirtyStorage",
+			"info":                        string(data),
+		})
+		if id == stubKeyName {
+			continue
+		}
+		bf := &StorageInfo{}
+		err = jsoniter.ConfigFastest.Unmarshal(data, bf)
+		if err != nil {
+			logEntry.Errorf("storage data leak: failed to unmarshal StorageInfo: %v", err)
+			continue
+		}
+
+		if bf.InstanceType == cubebox.InstanceType_cubebox.String() && bf.TemplateID != "" {
+			if !bf.UpdateAt.IsZero() && time.Since(bf.UpdateAt) > 7*24*time.Hour {
+				logEntry.Infof("storage data leak: cubebox template %s is outdated, last update at: %v", bf.TemplateID, bf.UpdateAt)
+			}
+			continue
+		}
+
+		if id != bf.SandboxID {
+			logEntry.Warnf("storage data leak: id is not equal to sandbox id:%s,%s", id, bf.SandboxID)
+			continue
+		}
+
+		cb, err := l.cubeboxAPI.Get(ctx, bf.SandboxID)
+		taskExist := err == nil && cb != nil
+		if taskExist {
+			for _, v := range bf.Volumes {
+				if v.Medium == cubebox.StorageMedium_StorageMediumDefault {
+					if fileExist, _ := utils.DenExist(v.FilePath); fileExist {
+						dirtyList[v.FilePath] = true
+
+						l.incrSize(v.SizeLimit)
+					} else {
+
+						logEntry.Fatalf("listDirtyStorage,task %s alive,"+
+							" but storage file not exist:%s", bf.SandboxID, v.FilePath)
+					}
+				}
+			}
+		} else {
+			for range bf.Volumes {
+				logEntry.Errorf("storage data leak: local storage may leaked")
+			}
+			logEntry.Errorf("storage data leak: backend file info for %s may leaked", bf.SandboxID)
+		}
+	}
+	return dirtyList
+}
+
+func (l *local) initDb() error {
+	basePath := filepath.Join(l.config.RootPath, dbDir)
+	if err := os.MkdirAll(path.Clean(basePath), os.ModeDir|0755); err != nil {
+		return fmt.Errorf("init dir failed %s", err.Error())
+	}
+	var err error
+	if l.db, err = utils.NewCubeStoreExt(basePath, "meta.db", 10, nil); err != nil {
+		return err
+	}
+
+	err = l.db.Set(bucketName, stubKeyName, []byte{})
+	if err != nil {
+		return err
+	}
+
+	for _, bucket := range dbBucketList {
+		bucket.CubeStore = l.db
+		multimeta.RegisterBucket(bucket)
+	}
+
+	// Open a dedicated bbolt file for plugin-volume ref-counts.
+	// This is separate from the sharded CubeStore so we can use bbolt
+	// transactions directly.
+	rcDBPath := filepath.Join(basePath, "volume_refcount.db")
+	l.rcDB, err = bolt.Open(rcDBPath, 0644, utils.MakeBoltDBOption())
+	if err != nil {
+		return fmt.Errorf("open volume refcount db %s: %w", rcDBPath, err)
+	}
+	l.rcStore, err = refcount.New(l.rcDB)
+	if err != nil {
+		return fmt.Errorf("init volume refcount store: %w", err)
+	}
+	return nil
+}
+
+func (l *local) ID() string {
+	return constants.StorageID.ID()
+}
+
+func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
+	log.G(ctx).Errorf("Init doing")
+
+	defer log.G(ctx).Errorf("Init end")
+
+	all, err := l.readAllFileInfo()
+
+	if err == nil {
+		for k, v := range all {
+			if k == stubKeyName {
+				continue
+			}
+			bf := &StorageInfo{}
+			err = jsoniter.ConfigFastest.Unmarshal(v, bf)
+			if err != nil {
+				log.G(ctx).Errorf("Init:load Metadata,unmarshal fail:%v", err)
+				continue
+			}
+			if bf.InstanceType == cubebox.InstanceType_cubebox.String() &&
+				bf.TemplateID != "" {
+				continue
+			}
+			err = l.destroy(ctx, bf, nil)
+			if err != nil {
+				log.G(ctx).Errorf("Init:destroy fail:%v", err)
+			}
+		}
+	}
+
+	l.poolFormat.Range(func(key, value interface{}) bool {
+		v := value.(Pool)
+		v.Close()
+		return true
+	})
+
+	_ = l.db.Close()
+	if l.useCowStorage() {
+		if err := l.resetCowNodeStorage(); err != nil {
+			return err
+		}
+	}
+
+	time.Sleep(time.Second)
+	if err := os.RemoveAll(path.Clean(l.config.RootPath)); err != nil {
+		return fmt.Errorf("%v  RemoveAll failed:%v", l.config.RootPath, err.Error())
+	}
+	if err := os.MkdirAll(filepath.Join(l.config.RootPath, failoverDir), os.ModeDir|0755); err != nil {
+		return fmt.Errorf("init dir failed %s", err.Error())
+	}
+
+	if err := os.MkdirAll(path.Clean(l.config.RootPath), os.ModeDir|0755); err != nil {
+		return fmt.Errorf("%v MkdirAll RootPath failed: %s", l.config.RootPath, err.Error())
+	}
+	if err := os.RemoveAll(path.Clean(l.config.DataPath)); err != nil {
+		return fmt.Errorf("%v  RemoveAll failed:%v", l.config.DataPath, err.Error())
+	}
+	if err := os.MkdirAll(path.Clean(l.config.DataPath), os.ModeDir|0755); err != nil {
+		return fmt.Errorf("init DataPath dir failed, %s", err.Error())
+	}
+	if err := l.cleanupCowStateOnDisk(); err != nil {
+		return err
+	}
+
+	if err := l.initDb(); err != nil {
+		return err
+	}
+	if l.useCowStorage() {
+		if err := l.reinitCowEngine(); err != nil {
+			return err
+		}
+		if err := l.ensureCowManager(); err != nil {
+			return err
+		}
+		l.startS3CowInitLoop(ctx)
+	} else {
+		if err := l.initEmptyDir(); err != nil {
+			return err
+		}
+	}
+	if err := l.initHostInfo(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (l *local) CreateCubeboxBaseStorage(ctx context.Context, opts *workflow.CreateContext) (retErr error) {
+	if l.useCowStorage() {
+		return ret.Err(errorcode.ErrorCode_PreConditionFailed, "cubecow snapshot create is not supported in this phase")
+	}
+	templateID, ok := opts.GetSnapshotTemplateID()
+	if !ok || templateID == "" {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "templateID is empty")
+	}
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+	}
+
+	result := &StorageInfo{Namespace: ns, SandboxID: opts.GetSandboxID(), Volumes: make(map[string]*BackendFileInfo),
+		TemplateID: templateID, InstanceType: opts.GetInstanceType(), Backend: optionalCreateContextBackend(opts)}
+	defer func() {
+		start := time.Now()
+		var errs error
+		if err := l.writeBackendFileInfo(ctx, opts.GetSandboxID(), result); err != nil {
+			errs = errors.Join(errs, err)
+		}
+
+		templateResult := &StorageInfo{Namespace: ns, SandboxID: templateID,
+			TemplateID: templateID, InstanceType: opts.GetInstanceType(), CreateAt: time.Now(), UpdateAt: time.Now()}
+		if err := l.writeBackendFileInfo(ctx, templateID, templateResult); err != nil {
+			errs = errors.Join(errs, err)
+		}
+		workflow.RecordCreateMetric(ctx, errs, storageMetricDB, time.Since(start))
+		if retErr != nil || errs != nil {
+
+			if errs != nil {
+				retErr = ret.Err(errorcode.ErrorCode_CreateStorageFailed, errs.Error())
+				log.G(ctx).Fatalf("saveBackendFileInfo fail:%v", errs)
+			}
+			l.Destroy(ctx, &workflow.DestroyContext{
+				BaseWorkflowInfo: workflow.BaseWorkflowInfo{
+					SandboxID:  opts.GetSandboxID(),
+					IsRollBack: true,
+				},
+				DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
+					SandboxID: opts.GetSandboxID(),
+				},
+			})
+			return
+		}
+		opts.StorageInfo = result
+	}()
+
+	defer recov.HandleCrash(func(panicError interface{}) {
+		log.G(ctx).Fatalf("Create panic info:%s, stack:%s", panicError, string(debug.Stack()))
+		retErr = ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "%s", panicError)
+	})
+	for _, v := range opts.ReqInfo.Volumes {
+		if v.GetVolumeSource() == nil || v.GetVolumeSource().GetEmptyDir() == nil {
+			continue
+		}
+		if v.GetVolumeSource().GetEmptyDir().GetMedium() == cubebox.StorageMedium_StorageMediumDefault {
+			sizeLimit := v.GetVolumeSource().GetEmptyDir().SizeLimit
+			sizeq, err := resource.ParseQuantity(sizeLimit)
+			if err != nil {
+				log.G(ctx).Errorf("invalid EmptyDir SizeLimit")
+				return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat,
+					"invalid EmptyDir SizeLimit:%v", sizeLimit)
+			}
+			info := &BackendFileInfo{
+				Name:       v.Name,
+				SizeLimit:  sizeq.Value() + diskSizeOverheadInBytes,
+				Type:       "ext4",
+				SourcePath: "disk",
+				SizeLimitQ: sizeq.String(),
+				FSQuota:    sizeq.Value() + diskSizeExtendInBytes,
+				Medium:     cubebox.StorageMedium_StorageMediumDefault,
+			}
+			result.Volumes[v.Name] = info
+			info.FilePath, err = l.newCubeboxFormatPool(ctx, templateID, sizeLimit)
+			if err != nil {
+				return ret.Err(errorcode.ErrorCode_CreateStorageFailed, err.Error())
+			}
+			return nil
+		}
+	}
+
+	return ret.Err(errorcode.ErrorCode_CreateStorageFailed, "not found default medium")
+}
+
+func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retErr error) {
+	select {
+
+	case <-ctx.Done():
+		return
+	default:
+	}
+	if opts == nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.CreateContext nil")
+	}
+	if workflow.ReuseFor(opts).Storage {
+		info, err := l.readBackendFileInfo(ctx, opts.SandboxID)
+		if err != nil {
+			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "restart storage %s: %v", opts.SandboxID, err)
+		}
+		opts.StorageInfo = info
+		return nil
+	}
+	realReq := opts.ReqInfo
+
+	if opts.IsCreateSnapshot() && !opts.IsCubeboxV2() {
+		if l.useCowStorage() {
+			return ret.Err(errorcode.ErrorCode_PreConditionFailed, "cubecow snapshot create is not supported in this phase")
+		}
+
+		info, err := l.readBackendFileInfo(ctx, opts.GetSandboxID())
+		if err == nil && info.SandboxID == opts.GetSandboxID() {
+			return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
+		}
+		return l.CreateCubeboxBaseStorage(ctx, opts)
+	}
+
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+	}
+
+	result := &StorageInfo{Namespace: ns, SandboxID: opts.SandboxID, Volumes: make(map[string]*BackendFileInfo),
+		Backend: optionalCreateContextBackend(opts)}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if cleanupErr := l.cleanupCreateResult(ctx, result); cleanupErr != nil {
+			retErr = ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "%v (cleanup failed: %v)", retErr, cleanupErr)
+		}
+	}()
+	defer recov.HandleCrash(func(panicError interface{}) {
+		log.G(ctx).Fatalf("Create panic info:%s, stack:%s", panicError, string(debug.Stack()))
+		retErr = ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "%s", panicError)
+	})
+	var restoreMemoryVolURL, importedMemoryVol string
+	eg, groupCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					CubeLog.Errorf("[plugin_volume] prepareRequestVolumes PANIC: %v", r)
+					err = fmt.Errorf("prepareRequestVolumes panic: %v", r)
+				}
+			}()
+			err = l.prepareRequestVolumes(groupCtx, opts, realReq, result)
+		}()
+		if err != nil {
+			CubeLog.Errorf("[plugin_volume] prepareRequestVolumes error: %v", err)
+		}
+		return err
+	})
+	eg.Go(func() error {
+		url, imported, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
+		if err != nil {
+			return err
+		}
+		restoreMemoryVolURL = url
+		importedMemoryVol = imported
+		return nil
+	})
+	if err = eg.Wait(); err != nil {
+		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
+	}
+	result.RestoreMemoryVolURL = restoreMemoryVolURL
+	result.ImportedMemoryVol = importedMemoryVol
+
+	start := time.Now()
+	err = l.writeBackendFileInfo(ctx, opts.SandboxID, result)
+	workflow.RecordCreateMetric(ctx, err, storageMetricDB, time.Since(start))
+	if err != nil {
+		return ret.Err(errorcode.ErrorCode_CreateStorageFailed, err.Error())
+	}
+
+	templateID, ok := opts.GetSnapshotTemplateID()
+	if ok && !opts.IsCubeboxV2() {
+		if err = l.updateCubeBoxBaseInfo(ctx, templateID); err != nil {
+			return ret.Err(errorcode.ErrorCode_CreateStorageFailed, err.Error())
+		}
+	}
+	opts.StorageInfo = result
+
+	return nil
+}
+
+func (l *local) prepareRequestVolumes(ctx context.Context, opts *workflow.CreateContext, realReq *cubebox.RunCubeSandboxRequest, result *StorageInfo) error {
+	for _, v := range realReq.Volumes {
+		if v.VolumeSource == nil {
+			continue
+		}
+		if err := l.prepareDefaultMedium(ctx, opts, v, result); err != nil {
+			return err
+		}
+
+		if err := l.prepareImageVolume(ctx, opts, v, result); err != nil {
+			return err
+		}
+
+		if err := l.prepareHostDirVolume(ctx, opts, v, result); err != nil {
+			return err
+		}
+
+		// plugin_volume: routed entirely through the VolumePlugin framework.
+		if err := l.attachPluginVolume(ctx, opts, v, result); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) error {
+	if result == nil {
+		return nil
+	}
+	cleanupOpts := &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{
+			SandboxID:  result.SandboxID,
+			IsRollBack: true,
+		},
+	}
+	var errs error
+	if err := l.destroy(ctx, result, cleanupOpts); err != nil {
+		errs = errors.Join(errs, err)
+	}
+	l.cleanupHostDirVolumes(ctx, result)
+	if _, err := l.readBackendFileInfoRaw(ctx, result.SandboxID); err == nil {
+		if err := l.deleteBackendFileInfo(ctx, result.SandboxID); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("delete storage metadata after create rollback: %w", err))
+		}
+	} else if !errors.Is(err, utils.ErrorKeyNotFound) && !errors.Is(err, utils.ErrorBucketNotFound) {
+		errs = errors.Join(errs, fmt.Errorf("check storage metadata after create rollback: %w", err))
+	}
+	return errs
+}
+
+// prefetchRestoreMemoryVolURL resolves the memory image the shim restores
+// from, and reports the name of the disk when this create minted one of
+// its own (cross-node import or same-node S3 pause-resume clone) rather
+// than pointing at the package's shared image.
+func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, string, error) {
+	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
+		return "", "", nil
+	}
+	// Emptydir / file pools do not use the cubecow snapshot catalog.
+	if !l.useCowStorage() {
+		return "", "", nil
+	}
+	if _, ok := opts.GetSnapshotTemplateID(); !ok {
+		return "", "", nil
+	}
+	annotations := opts.ReqInfo.GetAnnotations()
+	// Do not trust AnnotationVMSnapshotMemoryVolURL: it may be a stale
+	// file:///dev/nvmeXn1 from a previous activate on this or another node.
+	// Always resolve the catalog vol name and Activate for the live path.
+	backend := createContextStorageBackend(opts)
+	// Cross-node imports a sandbox-private memory volume. XFS template
+	// start / pause resume / FromSnap mmap the original snapshot file
+	// MAP_PRIVATE. Master's Resume CleanupTemplate is a no-op while the
+	// live sandbox still holds that pause id; next Pause or Destroy
+	// unlinks the package (CH keeps the fd open). Same-node S3 pause
+	// resume still clones onto sb-<id>-memory so deactivate of the
+	// package NVMe cannot yank the live disk; the package catalog is
+	// still kept for Snapshot last-restore, like XFS.
+	if imp := CrossNodeSandboxImport(annotations); imp != nil {
+		name, devPath, err := imp.Memory(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		if name != "" {
+			return cowFileURLFromPath(devPath), name, nil
+		}
+	}
+	pauseOwner := ""
+	if pauseResumeClonesLiveMemory(backend) && opts.IsPauseResume() && CrossNodeSandboxImport(annotations) == nil {
+		pauseOwner = pauseResumeMemoryOwnerID(opts)
+		if pauseOwner == "" {
+			// Attaching the S3 package then letting Master delete it
+			// would pull the NVMe out from under the restored VM.
+			return "", "", fmt.Errorf("pause resume requires sandbox id to clone memory off the package")
+		}
+	}
+	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, backend, annotations)
+	if err != nil {
+		return "", "", err
+	}
+	if volumeName == "" {
+		return "", "", nil
+	}
+	if pauseOwner != "" {
+		store, err := l.storeForBackend(backend)
+		if err != nil {
+			return "", "", err
+		}
+		cloned, err := store.CloneSandboxMemory(ctx, pauseOwner, volumeName)
+		if err != nil {
+			return "", "", fmt.Errorf("clone pause memory %s for sandbox %s: %w", volumeName, pauseOwner, err)
+		}
+		if cloned == nil || strings.TrimSpace(cloned.FilePath) == "" {
+			return "", "", fmt.Errorf("clone pause memory %s for sandbox %s: empty device path", volumeName, pauseOwner)
+		}
+		return cowFileURLFromPath(cloned.FilePath), cloned.VolumeName, nil
+	}
+	normalizedKind, err := normalizeCowKind(volumeKind)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil {
+		return "", "", err
+	}
+	devPath, err := store.ResolveDevPath(ctx, volumeName, normalizedKind)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
+	}
+	return cowFileURLFromPath(devPath), "", nil
+}
+
+// pauseResumeClonesLiveMemory is true when same-node pause resume must
+// copy package memory onto a sandbox-private volume before Create
+// returns. XFS is false: the original snapshot file is the restore
+// image. S3 is true because the live disk is an NVMe lvol.
+func pauseResumeClonesLiveMemory(backend string) bool {
+	normalized, err := cow.NormalizeBackend(backend)
+	return err == nil && normalized != cow.BackendXFS
+}
+
+// pauseResumeMemoryOwnerID is the sandbox that must own a private copy of the
+// pause package's memory on backends that clone (S3). Empty means this is
+// not a same-node pause resume that clones (XFS attach, cross-node import,
+// or a template／FromSnap create). A same-node S3 pause resume that still
+// returns empty is missing its sandbox id; the caller must fail rather
+// than attach the package snapshot.
+func pauseResumeMemoryOwnerID(opts *workflow.CreateContext) string {
+	if opts == nil || !opts.IsPauseResume() {
+		return ""
+	}
+	ann := map[string]string{}
+	if opts.ReqInfo != nil {
+		ann = opts.ReqInfo.GetAnnotations()
+	}
+	if CrossNodeSandboxImport(ann) != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(opts.GetSandboxID()); id != "" {
+		return id
+	}
+	return strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID])
+}
+
+// releaseImportedMemoryVol deletes the memory disk this sandbox cloned or
+// imported. Driven by what Create recorded rather than by the naming
+// convention, so a restore that still reads a package snapshot (empty field)
+// is untouched.
+func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
+	name := strings.TrimSpace(info.ImportedMemoryVol)
+	if name == "" {
+		return
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil || store == nil {
+		return
+	}
+	if err := store.DeactivateByKind(ctx, name, cowKindVolume); err != nil {
+		log.G(ctx).Warnf("destroy sandbox %s: deactivate sandbox memory %s: %v", info.SandboxID, name, err)
+	}
+	if err := store.DeleteByKind(ctx, name, cowKindVolume); err != nil {
+		warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
+	}
+}
+
+// resolveSnapshotMemoryVolFromCatalog returns the (memory_vol, memory_kind)
+// pair for the snapshot or template referenced by annotations, looking it up
+// in cubelet's local catalog.
+//
+// Semantics:
+//   - No logical id annotation -> ("", "", nil): non-snapshot create path,
+//     caller skips memory prefetch entirely.
+//   - Logical id present, catalog miss -> error: deliberately fails the
+//     surrounding create flow rather than silently degrading to a cold start
+//     for what was meant to be a memory-snapshot restore.
+//   - Logical id present, catalog hit with empty memory_vol -> ("", "", nil):
+//     the snapshot/template legitimately has no memory image (e.g. rootfs-only
+//     template), so memory prefetch is correctly a no-op.
+//   - Logical id present, catalog hit with memory_vol -> normal restore.
+func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, backend string, annotations map[string]string) (string, string, error) {
+	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
+	if logicalID == "" {
+		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+	}
+	if logicalID == "" {
+		return "", "", nil
+	}
+	if strings.TrimSpace(backend) == "" {
+		backend = annotations[constants.MasterAnnotationStorageBackend]
+	}
+	entry, err := GetLocalSnapshotFor(ctx, backend, logicalID)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
+	}
+	if entry == nil {
+		return "", "", fmt.Errorf("snapshot %s missing from local catalog", logicalID)
+	}
+	volumeName := strings.TrimSpace(entry.MemoryVol)
+	if volumeName == "" {
+		return "", "", nil
+	}
+	volumeKind := strings.TrimSpace(entry.MemoryKind)
+	if volumeKind == "" {
+		volumeKind = CowKindVolume
+	}
+	return volumeName, volumeKind, nil
+}
+
+func cowFileURLFromPath(value string) string {
+	if strings.Contains(value, "://") {
+		return value
+	}
+	return "file://" + filepath.Clean(value)
+}
+
+func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateContext,
+	v *cubebox.Volume, result *StorageInfo) error {
+	if v.GetVolumeSource() == nil || v.GetVolumeSource().GetEmptyDir() == nil ||
+		v.GetVolumeSource().GetEmptyDir().GetMedium() != cubebox.StorageMedium_StorageMediumDefault {
+		return nil
+	}
+	// Plugin volumes are handled by attachPluginVolume (via the
+	// plugin-volume-sources annotation). Keep this skip for mixed-version
+	// clusters: a CubeMaster that still injects Default EmptyDir placeholders
+	// for plugin volumes must not cause a second rootfs derive
+	// (sb-<id>-rootfs-gen0) that collides with cube_rootfs_rw.
+	if isPluginVolume(opts.ReqInfo.GetAnnotations(), v.GetName()) {
+		return nil
+	}
+	sizeLimit := v.GetVolumeSource().GetEmptyDir().SizeLimit
+
+	templateID, hasSnapshotTemplate := opts.GetSnapshotTemplateID()
+	if hasSnapshotTemplate && opts.IsCreateSnapshot() && l.useCowStorage() {
+		if err := l.dealCowTemplateBuildRootfs(ctx, opts, templateID, v.Name, sizeLimit, result); err != nil {
+			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
+		}
+	} else if hasSnapshotTemplate && !opts.IsCubeboxV2() {
+		if err := l.dealCubeboxSnapV1Medium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
+			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
+		}
+	} else if hasSnapshotTemplate && opts.IsCubeboxV2() && l.useCowStorage() {
+		if err := l.dealCowV2SandboxDefaultMedium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
+			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
+		}
+	} else if err := l.dealDefaultMedium(ctx, opts, opts.SandboxID, v.Name, sizeLimit, result); err != nil {
+		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
+	}
+	return nil
+}
+
+type normalizedRootfsSizes struct {
+	backendAllocSize       resource.Quantity
+	snapshotComparableSize resource.Quantity
+	fsQuotaSize            resource.Quantity
+}
+
+func normalizeRootfsSizes(requested resource.Quantity) normalizedRootfsSizes {
+	backendAllocSize := requested.DeepCopy()
+	if backendAllocSize.Value() < unifiedStorageSize.Value() {
+		backendAllocSize = unifiedStorageSize.DeepCopy()
+	}
+
+	snapshotComparableSize := backendAllocSize.DeepCopy()
+	snapshotComparableSize.Add(*resource.NewQuantity(diskSizeOverheadInBytes, resource.BinarySI))
+
+	fsQuotaSize := requested.DeepCopy()
+	fsQuotaSize.Add(*resource.NewQuantity(diskSizeExtendInBytes, resource.BinarySI))
+
+	return normalizedRootfsSizes{
+		backendAllocSize:       backendAllocSize,
+		snapshotComparableSize: snapshotComparableSize,
+		fsQuotaSize:            fsQuotaSize,
+	}
+}
+
+func newDefaultMediumBackendInfo(name, filePath string, requested resource.Quantity, sizes normalizedRootfsSizes, volume *cowVolume) *BackendFileInfo {
+	info := &BackendFileInfo{
+		Name:     name,
+		FilePath: filePath,
+		// SizeLimit is the normalized comparable disk size persisted into
+		// StorageInfo, emitted as cube.disk.size, and later checked against
+		// snapshot metadata during restore. It is not the raw user request.
+		SizeLimit:  sizes.snapshotComparableSize.Value(),
+		Type:       "ext4",
+		SourcePath: "disk",
+		SizeLimitQ: requested.String(),
+		FSQuota:    sizes.fsQuotaSize.Value(),
+		Medium:     cubebox.StorageMedium_StorageMediumDefault,
+	}
+	if volume != nil {
+		info.VolumeName = volume.VolumeName
+		info.Kind = volume.Kind
+		info.Gen = volume.Gen
+	}
+	return info
+}
+
+func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, opts *workflow.CreateContext, templateID, name, sizeStr string, result *StorageInfo) error {
+	size, err := resource.ParseQuantity(sizeStr)
+	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
+	if err != nil {
+		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
+		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
+	}
+	store, err := l.storeForBackend(createContextStorageBackend(opts))
+	if err != nil {
+		return err
+	}
+	sizes := normalizeRootfsSizes(size)
+	volume, err := store.CreateTemplateBuildRootfs(ctx, templateID, uint64(sizes.backendAllocSize.Value()))
+	if err != nil {
+		log.G(ctx).Errorf("allocate cubecow template build rootfs fail:%v", err)
+		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubecow template build rootfs fail:%v", err)
+	}
+	result.Volumes[name] = newDefaultMediumBackendInfo(name, volume.FilePath, size, sizes, volume)
+	return nil
+}
+
+func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
+	size, err := resource.ParseQuantity(sizeStr)
+	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
+	if err != nil {
+		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
+		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
+	}
+	sizes := normalizeRootfsSizes(size)
+	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
+	if err != nil {
+		log.G(ctx).Errorf("derive v2 default-medium from template fail: %v", err)
+		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "derive v2 default-medium from template fail: %v", err)
+	}
+	result.Volumes[name] = newDefaultMediumBackendInfo(name, volume.FilePath, size, sizes, volume)
+	return nil
+}
+
+func createContextStorageBackend(opts *workflow.CreateContext) string {
+	if backend := optionalCreateContextBackend(opts); backend != "" {
+		return backend
+	}
+	return cow.BackendXFS
+}
+
+// storeForBackend returns this node's XFS or S3 Store for the request /
+// persisted backend. Empty / unknown aliases normalize to XFS.
+func (l *local) storeForBackend(backend string) (cow.Store, error) {
+	if l == nil {
+		return nil, fmt.Errorf("storage is not initialized")
+	}
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if l.s3CowManager != nil {
+			return l.s3CowManager, nil
+		}
+		if l.config == nil || !l.config.s3lvolConfigured() {
+			return nil, ErrS3NotConfigured
+		}
+		return nil, ErrS3NotReady
+	default:
+		if l.cowManager != nil {
+			return l.cowManager, nil
+		}
+	}
+	if err := l.ensureCowManager(); err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if l.s3CowManager == nil {
+			if l.config == nil || !l.config.s3lvolConfigured() {
+				return nil, ErrS3NotConfigured
+			}
+			return nil, ErrS3NotReady
+		}
+		return l.s3CowManager, nil
+	default:
+		if l.cowManager == nil {
+			return nil, fmt.Errorf("xfs cow store is not initialized")
+		}
+		return l.cowManager, nil
+	}
+}
+
+func storageBackendFromInfo(info *StorageInfo) string {
+	if info == nil || strings.TrimSpace(info.Backend) == "" {
+		return cow.BackendXFS
+	}
+	backend, err := cow.NormalizeBackend(info.Backend)
+	if err != nil {
+		return cow.BackendXFS
+	}
+	return backend
+}
+
+func destroyStorageBackend(info *StorageInfo, opts *workflow.DestroyContext) string {
+	if info != nil && strings.TrimSpace(info.Backend) != "" {
+		return storageBackendFromInfo(info)
+	}
+	if opts != nil && opts.DestroyInfo != nil {
+		raw := strings.TrimSpace(opts.DestroyInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+		if raw != "" {
+			if backend, err := cow.NormalizeBackend(raw); err == nil {
+				return backend
+			}
+		}
+	}
+	return cow.BackendXFS
+}
+
+func optionalCreateContextBackend(opts *workflow.CreateContext) string {
+	if opts == nil || opts.ReqInfo == nil {
+		return ""
+	}
+	if raw := strings.TrimSpace(opts.ReqInfo.GetBackend()); raw != "" {
+		if backend, err := cow.NormalizeBackend(raw); err == nil {
+			return backend
+		}
+	}
+	raw := strings.TrimSpace(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if raw == "" {
+		return ""
+	}
+	backend, err := cow.NormalizeBackend(raw)
+	if err != nil {
+		return ""
+	}
+	return backend
+}
+
+func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64) (*cowVolume, error) {
+	backend := createContextStorageBackend(opts)
+	store, err := l.storeForBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	// Cross-node: no package here to clone from, so the sandbox imports the
+	// rootfs straight onto the name a clone would have produced.
+	if imp := CrossNodeSandboxImport(opts.ReqInfo.GetAnnotations()); imp != nil {
+		name, dev, err := imp.Rootfs(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		return newCowVolume(name, cowKindVolume, 0, dev), nil
+	}
+	// Cold start and same-node Pause Resume: always clone the package rootfs
+	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
+	// attach the package snap as the live disk — S3 snaps are RO and Commit
+	// requires a volume source (volume follows sandbox lifecycle).
+	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
+	if l.useCowStorage() {
+		size, err := resource.ParseQuantity(sizeStr)
+		log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
+		if err != nil {
+			log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
+			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
+		}
+		if err := l.ensureCowManager(); err != nil {
+			return err
+		}
+		sizes := normalizeRootfsSizes(size)
+		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
+		if err != nil {
+			log.G(ctx).Errorf("allocate cubebox storage fail:%v", err)
+			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubebox storage fail:%v", err)
+		}
+		result.Volumes[name] = newDefaultMediumBackendInfo(name, volume.FilePath, size, sizes, volume)
+		return nil
+	}
+
+	isOk := l.checkDiskAvailable(ctx)
+	if !isOk && !l.config.DisableDiskCheck {
+		return fmt.Errorf("disk exceed limit")
+	}
+	size, err := resource.ParseQuantity(sizeStr)
+	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
+	if err != nil {
+		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
+		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
+	}
+
+	p, ok := l.poolFormat.Load(templateID)
+	if !ok {
+		// Template may still be in the create-time tmp pool until the
+		// creating sandbox is Destroy'd and promoted into poolFormat.
+		p, ok = l.tmpPoolFormat.Load(templateID)
+	}
+	if !ok {
+		return fmt.Errorf("failed to get v1 template storage pool for templateID %s", templateID)
+	}
+	pool := p.(Pool)
+	if devInfo, err := pool.Get(ctx, 0); err != nil {
+		log.G(ctx).Errorf("allocate cubebox storage fail:%v", err)
+		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubebox storage fail:%v", err)
+	} else {
+		info := &BackendFileInfo{
+			Name:       name,
+			FilePath:   devInfo.FilePath,
+			SizeLimit:  size.Value() + diskSizeOverheadInBytes,
+			Type:       "ext4",
+			SourcePath: "disk",
+			SizeLimitQ: size.String(),
+			FSQuota:    size.Value() + diskSizeExtendInBytes,
+			Medium:     cubebox.StorageMedium_StorageMediumDefault,
+		}
+		result.Volumes[name] = info
+		return nil
+	}
+}
+
+func (l *local) dealDefaultMedium(ctx context.Context, opts *workflow.CreateContext, sandboxID, name, sizeStr string, result *StorageInfo) error {
+	size, err := resource.ParseQuantity(sizeStr)
+	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
+	if err != nil {
+		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
+		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
+	}
+	sizes := normalizeRootfsSizes(size)
+
+	if l.useCowStorage() {
+		store, err := l.storeForBackend(createContextStorageBackend(opts))
+		if err != nil {
+			return err
+		}
+		volume, err := store.CreateDefaultMediumVolume(ctx, sandboxID, name, uint64(sizes.backendAllocSize.Value()))
+		if err != nil {
+			log.G(ctx).Errorf("allocate storage fail:%v", err)
+			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate storage fail:%v", err)
+		}
+		result.Volumes[name] = newDefaultMediumBackendInfo(name, volume.FilePath, size, sizes, volume)
+		return nil
+	}
+
+	if devInfo, err := l.getDevInfo(ctx, sizes.backendAllocSize); err != nil {
+		log.G(ctx).Errorf("allocate storage fail:%v", err)
+		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate storage fail:%v", err)
+	} else {
+		info := &BackendFileInfo{
+			Name:       name,
+			FilePath:   devInfo.FilePath,
+			SizeLimit:  sizes.snapshotComparableSize.Value(),
+			Type:       "ext4",
+			SourcePath: "disk",
+			SizeLimitQ: size.String(),
+			FSQuota:    sizes.fsQuotaSize.Value(),
+			Medium:     cubebox.StorageMedium_StorageMediumDefault,
+		}
+		result.Volumes[name] = info
+		return nil
+	}
+}
+
+func (l *local) getDevInfo(ctx context.Context, q resource.Quantity) (*devInfo, error) {
+	isOk := l.checkDiskAvailable(ctx)
+	if !isOk && !l.config.DisableDiskCheck {
+		return nil, fmt.Errorf("disk exceed limit")
+	}
+
+	if p, ok := l.poolFormat.Load(q.String()); ok {
+		return p.(Pool).Get(ctx, 0)
+	} else if p, ok := l.poolFormat.Load(otherFormatSize); ok {
+		return p.(Pool).GetSync(ctx, q.Value())
+	}
+	return nil, fmt.Errorf("failed to get default medium storage device info for size %s", q.String())
+}
+
+func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err error) {
+	if opts == nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
+	}
+	if workflow.RetainFor(opts).Storage {
+		// The guest crashed without unmounting. The retained ext4 still has
+		// the torn directory entries, and the next cold boot hits them
+		// (deleted inode) before the code interpreter can listen.
+		return l.repairRetainedRootfs(ctx, opts.SandboxID)
+	}
+	log.G(ctx).Debugf("Destroy doing")
+	start := time.Now()
+	info, err := l.readBackendFileInfo(ctx, opts.SandboxID)
+	if err != nil && errors.Is(err, ErrCowObjectMissing) {
+		log.G(ctx).Warnf("storage metadata drift detected for %s: %v", opts.SandboxID, err)
+		info, err = l.readBackendFileInfoRaw(ctx, opts.SandboxID)
+	}
+	workflow.RecordDestroyMetric(ctx, err, storageMetricDB, time.Since(start))
+	if err != nil {
+
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			return nil
+		}
+		log.G(ctx).Fatalf("readBackendFileInfo fail:%v", err)
+		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, err.Error())
+	}
+	defer func() {
+		if err == nil {
+
+			l.deleteBackendFileInfo(ctx, opts.SandboxID)
+		}
+	}()
+
+	log.G(ctx).Debugf("Destroy_info:%s", utils.InterfaceToString(info))
+	return l.destroy(ctx, info, opts)
+}
+
+func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.DestroyContext) error {
+	isRollback := false
+	if opts != nil {
+		isRollback = opts.IsRollBack
+	}
+	err := cdp.PreDelete(ctx, &cdp.DeleteOption{
+		ID:                  info.SandboxID,
+		ResourceType:        cdp.ResourceDeleteProtectionTypeStorage,
+		SkipDeleteFlagCheck: isRollback,
+	})
+	if err != nil {
+		return fmt.Errorf("storage destroy: pre delete storage failed: %w", err)
+	}
+
+	var errs error
+	if err := l.destroyCubeBoxTemplateBase(ctx, info, opts); err != nil {
+		errs = errors.Join(errs, err)
+	}
+
+	if err := l.destroyDefaultMediumVolumes(ctx, info, opts); err != nil {
+		errs = errors.Join(errs, err)
+	}
+
+	// Private S3 metadata volume (s3-meta-<sandboxID>) is not always listed in
+	// info.Volumes; release by sandbox id. Also drop the sandbox-owned package
+	// dir used as the cold-start metadata mount point.
+	if l.useCowStorage() && info != nil && strings.TrimSpace(info.SandboxID) != "" {
+		backend := destroyStorageBackend(info, opts)
+		if err := ReleaseS3MetadataVolume(ctx, backend, info.SandboxID); err != nil {
+			log.G(ctx).Warnf("destroy sandbox %s: release s3 metadata: %v", info.SandboxID, err)
+		}
+		// A rollback that was killed mid-flight leaves its copy of the
+		// snapshot metadata behind. It is this sandbox's disk, so it goes here.
+		if err := ReleaseRollbackSnapshotMetadata(ctx, backend, info.SandboxID); err != nil {
+			log.G(ctx).Warnf("destroy sandbox %s: release rollback metadata: %v", info.SandboxID, err)
+		}
+		l.releaseImportedMemoryVol(ctx, backend, info)
+		if home := SnapshotHome(backend, SnapshotKindNormal, info.SandboxID); home != "" {
+			if err := os.RemoveAll(home); err != nil && !os.IsNotExist(err) {
+				log.G(ctx).Warnf("destroy sandbox %s: remove package dir %s: %v", info.SandboxID, home, err)
+			}
+		}
+	}
+
+	// plugin_volume: unmount all volumes that were provisioned via VolumePlugin.
+	if err := l.detachPluginVolumes(ctx, info, opts); err != nil {
+		errs = errors.Join(errs, err)
+	}
+
+	if err := l.cleanupHostDirVolumes(ctx, info); err != nil {
+		errs = errors.Join(errs, err)
+	}
+
+	if errs != nil {
+		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, errs.Error())
+	}
+	return nil
+}
+
+func (l *local) destroyDefaultMediumVolumes(ctx context.Context, info *StorageInfo, opts *workflow.DestroyContext) error {
+	var errs error
+	var store cow.Store
+	for _, v := range info.Volumes {
+		if v == nil {
+			continue
+		}
+		if v.VolumeName != "" {
+			if refuseS3PackageObjectDelete(destroyStorageBackend(info, opts), v.VolumeName, info.SandboxID) {
+				// On S3, package objects are removed by the snapshot delete
+				// flow only. A sandbox that recorded one as its own is a
+				// create-path bug: leaking it here is the correct outcome, so
+				// name it loudly instead of destroying a package another
+				// sandbox may still restore from.
+				log.G(ctx).Errorf("destroy sandbox %s: refusing to delete %s kind %s: not minted for this sandbox",
+					info.SandboxID, v.VolumeName, v.Kind)
+				continue
+			}
+			if store == nil {
+				selected, err := l.storeForBackend(destroyStorageBackend(info, opts))
+				if err != nil {
+					errs = errors.Join(errs, err)
+					continue
+				}
+				store = selected
+			}
+			err := store.DeleteByKind(ctx, v.VolumeName, v.Kind)
+			if err != nil {
+				// Busy / in-flight export is not a Cubelet leak. The
+				// backend collects the object; leak detection greps
+				// volumeDeleteDeferredLog and ignores this name.
+				warnVolumeDeleteDeferred(ctx, v.VolumeName, v.Kind, err)
+			}
+			continue
+		}
+		err := atomicDelete(v.FilePath)
+		if err != nil {
+			errs = errors.Join(errs, err)
+			log.G(ctx).Errorf("delete:%s,fail:%v", v.FilePath, err)
+		} else {
+			l.DecrSize(v.SizeLimit)
+		}
+	}
+	return errs
+}
+
+func (l *local) destroyCubeBoxTemplateBase(ctx context.Context, info *StorageInfo, opts *workflow.DestroyContext) error {
+	if l.useCowStorage() {
+		return nil
+	}
+	if opts == nil {
+		return nil
+	}
+
+	if info.InstanceType != cubebox.InstanceType_cubebox.String() ||
+		info.TemplateID == "" || info.SandboxID == info.TemplateID ||
+		l.config.PoolType != cp_reflink_type {
+		return nil
+	}
+
+	templateID := info.TemplateID
+
+	log.G(ctx).Debugf("destroyCubeBoxTemplateBase:%s", info.TemplateID)
+	if ctx.Value(cleanupCtx{}) != nil || opts.IsRollBack {
+
+		log.G(ctx).Warnf("destroyCubeBoxTemplateBase:%s from cleanup/failover, no need to init base file", templateID)
+		l.tmpPoolFormat.Delete(templateID)
+		return nil
+	}
+
+	p, ok := l.tmpPoolFormat.Load(templateID)
+	if !ok {
+		log.G(ctx).Errorf("templateID not found: %s", templateID)
+		return ret.Errorf(errorcode.ErrorCode_AppSnapshotNotExist, "templateID not found: %s", templateID)
+	}
+	defer l.tmpPoolFormat.Delete(templateID)
+	if err := p.(Pool).InitBaseFile(ctx); err != nil {
+		return err
+	}
+	l.poolFormat.Store(templateID, p)
+	// The creating sandbox's EmptyDir volume points at the template base.
+	// Keep that file for the pool; do not let destroyDefaultMediumVolumes
+	// atomicDelete it afterward.
+	for name, v := range info.Volumes {
+		if v == nil || v.VolumeName != "" {
+			continue
+		}
+		delete(info.Volumes, name)
+	}
+	return nil
+}
+
+func (l *local) updateBlocksCap() {
+	capBlocks, capInodes, err := utils.GetDeviceIdleRatio(l.config.DataPath)
+	if err == nil {
+		l.capBlocks.Store(int32(capBlocks))
+		l.capInodes.Store(int32(capInodes))
+	}
+}
+func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error {
+	log.G(ctx).Errorf("CleanUp doing")
+	sandBoxID := opts.SandboxID
+	ctx = context.WithValue(ctx, cleanupCtx{}, struct{}{})
+	if err := l.Destroy(ctx, &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{
+			SandboxID: sandBoxID,
+		},
+	}); err != nil {
+
+		log.G(ctx).Errorf("CleanUp fail:%v", err)
+		return err
+	}
+
+	return nil
+}
+
+func (l *local) failoverDir() string {
+	return filepath.Join(l.config.RootPath, failoverDir)
+}
+
+func (l *local) deleteBackendFileInfo(ctx context.Context, id string) error {
+
+	err := l.db.Delete(bucketName, id)
+	if err != nil {
+		log.G(ctx).Warnf("db delete id :%s,err:%s", id, err)
+		err = atomicDelete(filepath.Join(l.failoverDir(), id))
+		if err != nil {
+			log.G(ctx).Warnf("db delete failover id :%s,err:%s", id, err)
+		}
+	}
+	return err
+}
+
+func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*StorageInfo, error) {
+	b, err := l.db.Get(bucketName, id)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			fileName := filepath.Join(l.failoverDir(), id)
+			if fileName == l.failoverDir() {
+
+				return nil, utils.ErrorKeyNotFound
+			}
+			if exist, _ := utils.DenExist(fileName); exist {
+				b, err = os.ReadFile(fileName)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				return nil, utils.ErrorKeyNotFound
+			}
+		} else {
+			return nil, utils.ErrorKeyNotFound
+		}
+	}
+	bf := &StorageInfo{}
+	err = jsoniter.ConfigFastest.Unmarshal(b, bf)
+	if err != nil {
+		return nil, err
+	}
+	return bf, nil
+}
+
+func (l *local) readBackendFileInfo(ctx context.Context, id string) (*StorageInfo, error) {
+	bf, err := l.readBackendFileInfoRaw(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.refreshCowPaths(bf); err != nil {
+		return nil, err
+	}
+	return bf, nil
+}
+
+func (l *local) writeBackendFileInfo(ctx context.Context, id string, info *StorageInfo) error {
+	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	err := l.db.Set(bucketName, id, b)
+	if err != nil {
+
+		er := os.WriteFile(filepath.Join(l.failoverDir(), id), b, 0666)
+		if er != nil {
+			_ = atomicDelete(filepath.Join(l.failoverDir(), id))
+			return fmt.Errorf("%w:%s", err, er)
+		}
+	}
+	return nil
+}
+
+func (l *local) updateCubeBoxBaseInfo(ctx context.Context, templateID string) error {
+	info, err := l.readBackendFileInfo(ctx, templateID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			return nil
+		}
+		return err
+	}
+	info.UpdateAt = time.Now()
+	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	err = l.db.Set(bucketName, templateID, b)
+	if err != nil {
+
+		er := os.WriteFile(filepath.Join(l.failoverDir(), templateID), b, 0666)
+		if er != nil {
+			_ = atomicDelete(filepath.Join(l.failoverDir(), templateID))
+			return fmt.Errorf("%w:%s", err, er)
+		}
+	}
+	return nil
+}
+
+func (l *local) readAllFileInfo() (map[string][]byte, error) {
+	all, _ := l.db.ReadAll(bucketName)
+	denList, err := ReadDir(l.failoverDir())
+	if err != nil {
+		return all, nil
+	}
+	for _, den := range denList {
+		if den.IsDir() {
+			continue
+		}
+		filePath := filepath.Join(l.failoverDir(), den.Name())
+		b, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+		if all == nil {
+			all = map[string][]byte{}
+		}
+		all[den.Name()] = b
+	}
+	return all, nil
+}
+
+func (l *local) readAllStorageInfo() (map[string]*StorageInfo, error) {
+	all, err := l.readAllFileInfo()
+	if err != nil {
+		return nil, err
+	}
+	storageInfo := make(map[string]*StorageInfo)
+	for id, data := range all {
+		info := &StorageInfo{}
+		err := jsoniter.ConfigFastest.Unmarshal(data, info)
+		if err != nil {
+			continue
+		}
+		if err := l.refreshCowPaths(info); err != nil {
+			continue
+		}
+		storageInfo[id] = info
+	}
+	return storageInfo, nil
+}
+
+func (l *local) incrSize(s int64) {
+	l.usedDiskSize.Add(s)
+}
+
+func (l *local) DecrSize(s int64) {
+	l.usedDiskSize.Add(-s)
+}
+
+func (l *local) checkDiskAvailable(ctx context.Context) bool {
+
+	if l.capBlocks.Load() != 0 && l.capInodes.Load() != 0 {
+		if l.capBlocks.Load() < l.config.FreeBlocksThreshold || l.capInodes.Load() < l.config.FreeInodesThreshold {
+			log.G(ctx).Fatalf("Storage freeBlocks:%d freeInodes:%d is exceed (%d:%d)",
+				l.capBlocks.Load(), l.capInodes.Load(), l.config.FreeBlocksThreshold, l.config.FreeInodesThreshold)
+			return false
+		}
+	}
+	return true
+}
+
+func GetPCIDiskInfo(ctx context.Context, id string) (*disk.CubePCIDiskInfo, error) {
+	if localStorage == nil {
+		return nil, nil
+	}
+	info, err := localStorage.readBackendFileInfo(ctx, id)
+	if err != nil && !errors.Is(err, utils.ErrorKeyNotFound) {
+		CubeLog.WithContext(ctx).Errorf("GetPCIDiskInfo fail %w", err)
+		return nil, err
+	}
+	if errors.Is(err, utils.ErrorKeyNotFound) {
+		return nil, nil
+	}
+	return info.CubePCIDiskInfo, nil
+}
+
+type BackendFileInfo struct {
+	Name string
+
+	SizeLimit int64
+
+	FSQuota int64
+
+	FilePath string
+
+	VolumeName string
+
+	Kind string
+
+	Gen uint32
+
+	Type string
+
+	SourcePath string
+
+	SizeLimitQ string
+
+	Medium cubebox.StorageMedium
+
+	BDF string
+}
+
+type StorageInfo struct {
+	Namespace string
+
+	SandboxID string
+	Volumes   map[string]*BackendFileInfo
+
+	CubePCIDiskInfo *disk.CubePCIDiskInfo
+
+	CubePCISystemDiskInfo *disk.CubePCISystemDiskInfo
+
+	InstanceType string    `json:"instanceType,omitempty"`
+	TemplateID   string    `json:"templateId,omitempty"`
+	Backend      string    `json:"backend,omitempty"`
+	CreateAt     time.Time `json:"createAt,omitempty"`
+	UpdateAt     time.Time `json:"updateAt,omitempty"`
+
+	HostDirBackendInfos map[string]*HostDirBackendInfo `json:"hostDirBackendInfos,omitempty"`
+
+	RestoreMemoryVolURL string `json:"-"`
+
+	// ImportedMemoryVol is the sandbox-private memory disk Create minted
+	// (cross-node import or same-node S3 pause-resume clone). Destroy
+	// deletes it. Empty means this restore still reads a package memory
+	// snapshot (XFS template / resume / FromSnap always leave this empty).
+	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
+
+	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
+	// Keyed by Volume.name (the RunCubeSandboxRequest name, not volumeID).
+	// Persisted in the same DB bucket as the rest of StorageInfo so
+	// Destroy / CleanUp can reconstruct what to detach.
+	PluginVolumeBackendInfos map[string]*PluginVolumeBackendInfo `json:"pluginVolumeBackendInfos,omitempty"`
+}
+
+func (i *StorageInfo) GetNICQueues() int64 {
+	var queues int64 = 0
+
+	if i.CubePCIDiskInfo != nil && i.CubePCIDiskInfo.Queues > 0 {
+		queues = i.CubePCIDiskInfo.Queues
+	}
+
+	if i.CubePCISystemDiskInfo != nil && i.CubePCISystemDiskInfo.Queues > 0 {
+		queues += i.CubePCISystemDiskInfo.Queues
+	}
+
+	return queues
+}
+
+func atomicDelete(path string) error {
+
+	atomicPath := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s", filepath.Base(path)))
+	if err := os.Rename(path, atomicPath); err != nil && !os.IsExist(err) {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return os.RemoveAll(atomicPath)
+}
+
+func ReadDir(name string) ([]os.DirEntry, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	dirs, err := f.ReadDir(-1)
+	return dirs, err
+}
+
+func (l *local) ensureSymlink(ctx context.Context, uniquePath string, targetPath string) error {
+	lock := l.multiLock.Get(uniquePath)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if linkInfo, err := os.Lstat(uniquePath); err == nil {
+		if linkInfo.Mode()&os.ModeSymlink != 0 {
+
+			target, err := os.Readlink(uniquePath)
+			if err == nil && target == targetPath {
+				log.G(ctx).Debugf("symlink already exists: %s -> %s", uniquePath, target)
+				return nil
+			}
+
+			log.G(ctx).Warnf("symlink target mismatch, removing: %s", uniquePath)
+			if err := os.Remove(uniquePath); err != nil {
+				return fmt.Errorf("failed to remove old symlink: %w", err)
+			}
+		} else {
+
+			return fmt.Errorf("path exists but is not a symlink: %s", uniquePath)
+		}
+	}
+
+	parentDir := filepath.Dir(uniquePath)
+
+	if _, err := os.Stat(parentDir); os.IsNotExist(err) {
+
+		if err := os.MkdirAll(parentDir, os.ModeDir|0755); err != nil {
+			return fmt.Errorf("failed to create parent directory %s: %w", parentDir, err)
+		}
+	}
+
+	if err := os.Symlink(targetPath, uniquePath); err != nil {
+		return fmt.Errorf("failed to create symlink from %s to %s: %w", uniquePath, targetPath, err)
+	}
+
+	log.G(ctx).Infof("created symlink: %s -> %s", uniquePath, targetPath)
+	return nil
+}
+
+func (l *local) readStorageInfo(ctx context.Context, id string, bucketName string, failoverDirFunc func() string, infoType interface{}) error {
+	b, err := l.db.Get(bucketName, id)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			fileName := filepath.Join(failoverDirFunc(), id)
+			if fileName == failoverDirFunc() {
+
+				return utils.ErrorKeyNotFound
+			}
+			if exist, _ := utils.DenExist(fileName); exist {
+				b, err = os.ReadFile(fileName)
+				if err != nil {
+					return err
+				}
+			} else {
+				return utils.ErrorKeyNotFound
+			}
+		} else {
+			return utils.ErrorKeyNotFound
+		}
+	}
+	err = jsoniter.ConfigFastest.Unmarshal(b, infoType)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *local) writeStorageInfo(ctx context.Context, id string, info interface{}, bucketName string, failoverDirFunc func() string) error {
+	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	err := l.db.Set(bucketName, id, b)
+	if err != nil {
+
+		er := os.WriteFile(filepath.Join(failoverDirFunc(), id), b, 0666)
+		if er != nil {
+			if delErr := atomicDelete(filepath.Join(failoverDirFunc(), id)); delErr != nil {
+				return fmt.Errorf("write file failed: %w, delete failed: %v", er, delErr)
+			}
+			return fmt.Errorf("%w:%s", err, er)
+		}
+	}
+	return nil
+}
+
+func (l *local) deleteStorageInfo(ctx context.Context, id string, bucketName string, failoverDirFunc func() string) error {
+	err := l.db.Delete(bucketName, id)
+	if err != nil {
+		log.G(ctx).Warnf("db delete id :%s,err:%s", id, err)
+		delErr := atomicDelete(filepath.Join(failoverDirFunc(), id))
+		if delErr != nil {
+			log.G(ctx).Warnf("db delete failover id :%s,err:%s", id, delErr)
+		}
+	}
+	return err
+}

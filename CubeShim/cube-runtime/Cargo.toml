@@ -1,0 +1,19 @@
+[package]
+name = "cube-runtime"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = { workspace = true }
+containerd-shim-cube-rs = { path = "../shim" }
+clap = { workspace = true, features = ["derive"] }
+log = { workspace = true }
+regex = "1.10.5"
+tokio = { workspace = true, features = ["full"] }
+termion = "4.0.3"
+lazy_static = "1.5.0"
+clap_complete = "4.5.50"
+dirs-next = "2.0.0"

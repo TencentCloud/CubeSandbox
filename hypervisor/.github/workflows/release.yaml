@@ -1,0 +1,141 @@
+name: Cloud Hypervisor Release
+on: [create]
+
+jobs:
+  release:
+    if: github.event_name == 'create' && github.event.ref_type == 'tag'
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v2
+      - name: Install musl-gcc
+        run: sudo apt install -y musl-tools      
+      - name: Create release directory
+        run: rsync -rv --exclude=.git . ../cloud-hypervisor-${{ github.event.ref }}
+      - name: Install Rust toolchain (x86_64-unknown-linux-gnu)
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: "1.62"
+            target: x86_64-unknown-linux-gnu
+      - name: Install Rust toolchain (x86_64-unknown-linux-musl)
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: "1.62"
+            target: x86_64-unknown-linux-musl
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+            toolchain: "1.62"
+            command: build
+            args: --all --release --target=x86_64-unknown-linux-gnu
+      - name: Static Build
+        uses: actions-rs/cargo@v1
+        with:
+            toolchain: "1.62"
+            command: build
+            args: --all --release --target=x86_64-unknown-linux-musl
+      - name: Strip cloud-hypervisor binaries
+        run: strip target/*/release/cloud-hypervisor
+      - name: Install Rust toolchain (aarch64-unknown-linux-musl)
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: "1.62"
+            target: aarch64-unknown-linux-musl
+            override: true
+      - name: Static Build (AArch64)
+        uses: actions-rs/cargo@v1
+        with:
+            use-cross: true
+            command: build
+            args: --all --release --target=aarch64-unknown-linux-musl
+      - name: Vendor
+        working-directory: ../cloud-hypervisor-${{ github.event.ref }}
+        run: |
+          mkdir ../vendor-cargo-home
+          export CARGO_HOME=$(realpath ../vendor-cargo-home)
+          mkdir .cargo
+          cargo vendor > .cargo/config.toml
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: ${{ github.ref }}
+          draft: true
+          prerelease: true
+      - name: Create vendored source archive
+        working-directory: ../
+        run:  tar cJf cloud-hypervisor-${{ github.event.ref }}.tar.xz cloud-hypervisor-${{ github.event.ref }}
+      - name: Upload cloud-hypervisor vendored source archive
+        id: upload-release-cloud-hypervisor-vendored-sources
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ../cloud-hypervisor-${{ github.event.ref }}.tar.xz
+          asset_name: cloud-hypervisor-${{ github.event.ref }}.tar.xz
+          asset_content_type: application/x-xz
+      - name: Upload cloud-hypervisor
+        id: upload-release-cloud-hypervisor
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: target/x86_64-unknown-linux-gnu/release/cloud-hypervisor
+          asset_name: cloud-hypervisor
+          asset_content_type: application/octet-stream
+      - name: Upload static cloud-hypervisor
+        id: upload-release-static-cloud-hypervisor
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: target/x86_64-unknown-linux-musl/release/cloud-hypervisor
+          asset_name: cloud-hypervisor-static
+          asset_content_type: application/octet-stream
+      - name: Upload ch-remote
+        id: upload-release-ch-remote
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: target/x86_64-unknown-linux-gnu/release/ch-remote
+          asset_name: ch-remote
+          asset_content_type: application/octet-stream
+      - name: Upload static-ch-remote
+        id: upload-release-static-ch-remote
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: target/x86_64-unknown-linux-musl/release/ch-remote
+          asset_name: ch-remote-static
+          asset_content_type: application/octet-stream
+      - name: Upload static AArch64 cloud-hypervisor
+        id: upload-release-static-aarch64-cloud-hypervisor
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: target/aarch64-unknown-linux-musl/release/cloud-hypervisor
+          asset_name: cloud-hypervisor-static-aarch64
+          asset_content_type: application/octet-stream
+      - name: Upload static AArch64 ch-remote
+        id: upload-release-static-aarch64-ch-remote
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: target/aarch64-unknown-linux-musl/release/ch-remote
+          asset_name: ch-remote-static-aarch64
+          asset_content_type: application/octet-stream

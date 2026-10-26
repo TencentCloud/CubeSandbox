@@ -1,0 +1,113 @@
+[package]
+name = "cloud-hypervisor-fuzz"
+version = "0.0.0"
+authors = ["Automatically generated"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+block_util = { path = "../block_util" }
+devices = { path = "../devices" }
+epoll = "4.3.1"
+libc = "0.2.135"
+libfuzzer-sys = "0.4.5"
+micro_http = { git = "https://github.com/firecracker-microvm/micro-http", branch = "main" }
+once_cell = "1.16.0"
+qcow = { path = "../qcow" }
+seccompiler = { workspace = true }
+vhdx = { path = "../vhdx" }
+virtio-devices = { path = "../virtio-devices" }
+virtio-queue = "0.11.0"
+vmm = { path = "../vmm" }
+vmm-sys-util = "0.12.1"
+vm-memory = "0.14.1"
+vm-device = { path = "../vm-device" }
+vm-virtio = { path = "../vm-virtio" }
+
+[dependencies.cloud-hypervisor]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "balloon"
+path = "fuzz_targets/balloon.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "block"
+path = "fuzz_targets/block.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cmos"
+path = "fuzz_targets/cmos.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "console"
+path = "fuzz_targets/console.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "http_api"
+path = "fuzz_targets/http_api.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "iommu"
+path = "fuzz_targets/iommu.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mem"
+path = "fuzz_targets/mem.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pmem"
+path = "fuzz_targets/pmem.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "qcow"
+path = "fuzz_targets/qcow.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rng"
+path = "fuzz_targets/rng.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "serial"
+path = "fuzz_targets/serial.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "vhdx"
+path = "fuzz_targets/vhdx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "watchdog"
+path = "fuzz_targets/watchdog.rs"
+test = false
+doc = false

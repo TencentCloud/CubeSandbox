@@ -1,0 +1,200 @@
+package cubevs
+
+import (
+	"reflect"
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
+
+func TestSessionClassificationStrings(t *testing.T) {
+	for _, tt := range []struct {
+		value uint8
+		want  string
+	}{
+		{packetClassSNAT, "snat"},
+		{packetClassL7Proxy, "l7_proxy"},
+		{packetClassPortMapping, "port_mapping"},
+		{9, "unknown(9)"},
+	} {
+		if got := packetClassToString(tt.value); got != tt.want {
+			t.Fatalf("packetClassToString(%d)=%q, want %q", tt.value, got, tt.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		value uint8
+		want  string
+	}{
+		{L7SchemeNone, "none"},
+		{L7SchemeHTTP, "http"},
+		{L7SchemeHTTPS, "https"},
+		{9, "unknown(9)"},
+	} {
+		if got := l7SchemeToString(tt.value); got != tt.want {
+			t.Fatalf("l7SchemeToString(%d)=%q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
+func TestBusinessMapNamesReturnsCopy(t *testing.T) {
+	names := BusinessMapNames()
+	if len(names) == 0 {
+		t.Fatal("BusinessMapNames returned empty list")
+	}
+
+	names[0] = "mutated"
+	if got := BusinessMapNames()[0]; got == "mutated" {
+		t.Fatal("BusinessMapNames returned shared backing array")
+	}
+}
+
+func TestNormalizeBusinessMapNames(t *testing.T) {
+	got, err := normalizeBusinessMapNames([]string{
+		MapNameDNSAllowV2,
+		MapNameDNSAllowV2,
+		MapNameAllowOutV3,
+	})
+	if err != nil {
+		t.Fatalf("normalizeBusinessMapNames returned error: %v", err)
+	}
+
+	want := []string{MapNameDNSAllowV2, MapNameAllowOutV3}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalizeBusinessMapNames()=%v, want %v", got, want)
+	}
+}
+
+func TestNormalizeBusinessMapNamesAll(t *testing.T) {
+	got, err := normalizeBusinessMapNames([]string{"all"})
+	if err != nil {
+		t.Fatalf("normalizeBusinessMapNames returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got, BusinessMapNames()) {
+		t.Fatalf("normalizeBusinessMapNames(all)=%v, want all business maps", got)
+	}
+}
+
+func TestDumpDNSAllowRuleExact(t *testing.T) {
+	key, value, err := makeDNSAllowRule("api.example.com", uint8(netPolicyFlagL7Required))
+	if err != nil {
+		t.Fatalf("makeDNSAllowRule returned error: %v", err)
+	}
+
+	rule, err := dumpDNSAllowRule(key, value)
+	if err != nil {
+		t.Fatalf("dumpDNSAllowRule returned error: %v", err)
+	}
+	if rule.Domain != "api.example.com" {
+		t.Fatalf("Domain=%q, want api.example.com", rule.Domain)
+	}
+	if rule.Wildcard {
+		t.Fatal("Wildcard=true, want false")
+	}
+	if !rule.L7Required {
+		t.Fatal("L7Required=false, want true")
+	}
+}
+
+func TestDumpDNSAllowRuleWildcard(t *testing.T) {
+	key, value, err := makeDNSAllowRule("*.example.com", 0)
+	if err != nil {
+		t.Fatalf("makeDNSAllowRule returned error: %v", err)
+	}
+
+	rule, err := dumpDNSAllowRule(key, value)
+	if err != nil {
+		t.Fatalf("dumpDNSAllowRule returned error: %v", err)
+	}
+	if rule.Domain != "*.example.com" {
+		t.Fatalf("Domain=%q, want *.example.com", rule.Domain)
+	}
+	if !rule.Wildcard {
+		t.Fatal("Wildcard=false, want true")
+	}
+}
+
+func TestApplyDNSPolicyModeDump(t *testing.T) {
+	tests := []struct {
+		name         string
+		flags        uint8
+		wantEnabled  bool
+		wantLearning bool
+	}{
+		{
+			name: "disabled",
+		},
+		{
+			name:         "track only",
+			flags:        dnsPolicyFlagLearningEnabled,
+			wantEnabled:  true,
+			wantLearning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result DNSAllowMapDump
+			applyDNSPolicyModeDump(&result, tt.flags)
+
+			if result.Enabled != tt.wantEnabled {
+				t.Fatalf("Enabled=%v, want %v", result.Enabled, tt.wantEnabled)
+			}
+			if result.LearningEnabled != tt.wantLearning {
+				t.Fatalf("LearningEnabled=%v, want %v", result.LearningEnabled, tt.wantLearning)
+			}
+			if result.Flags != tt.flags {
+				t.Fatalf("Flags=%d, want %d", result.Flags, tt.flags)
+			}
+		})
+	}
+}
+
+func TestDumpSessionKey(t *testing.T) {
+	key := sessionKey{
+		SourceIP:   ipToUint32([]byte{10, 0, 0, 2}),
+		TargetIP:   ipToUint32([]byte{8, 8, 8, 8}),
+		SourcePort: htons(12345),
+		TargetPort: htons(443),
+		Version:    7,
+		Protocol:   unix.IPPROTO_TCP,
+	}
+
+	got := dumpSessionKey(key)
+	if got.SourceIP != "10.0.0.2" || got.TargetIP != "8.8.8.8" {
+		t.Fatalf("dumpSessionKey IPs=%s->%s, want 10.0.0.2->8.8.8.8", got.SourceIP, got.TargetIP)
+	}
+	if got.SourcePort != 12345 || got.TargetPort != 443 {
+		t.Fatalf("dumpSessionKey ports=%d->%d, want 12345->443", got.SourcePort, got.TargetPort)
+	}
+	if got.ProtocolName != "tcp" {
+		t.Fatalf("ProtocolName=%q, want tcp", got.ProtocolName)
+	}
+}
+
+// TestL7PortEntriesToDumpRendersHostByteOrder guards the NBO→host port
+// conversion: ports are stored in network byte order on the datapath, and a
+// regression that drops the ntohs() would render the raw wire value (e.g.
+// 0xEB20) instead of the user-facing host-order port (8443).
+func TestL7PortEntriesToDumpRendersHostByteOrder(t *testing.T) {
+	ports := []l7PortEntry{
+		{Port: htonsPort(8443), Scheme: L7SchemeHTTPS},
+		{Port: htonsPort(8080), Scheme: L7SchemeHTTP},
+	}
+
+	got := l7PortEntriesToDump(ports, 2)
+	if len(got) != 2 {
+		t.Fatalf("len(got)=%d, want 2", len(got))
+	}
+	if got[0].Port != 8443 || got[0].Scheme != "https" {
+		t.Fatalf("entry[0]=%+v, want port 8443 scheme https", got[0])
+	}
+	if got[1].Port != 8080 || got[1].Scheme != "http" {
+		t.Fatalf("entry[1]=%+v, want port 8080 scheme http", got[1])
+	}
+
+	// count == 0 renders nothing (default-set fallback is implicit).
+	if got := l7PortEntriesToDump(ports, 0); got != nil {
+		t.Fatalf("count=0 rendered %v, want nil", got)
+	}
+}

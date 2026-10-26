@@ -1,0 +1,219 @@
+name: Migration Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'pkgs/cubedb/migrate/**'
+      - '.github/workflows/migration-check.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'pkgs/cubedb/migrate/**'
+      - '.github/workflows/migration-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-check:
+    name: Migration naming & immutability (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pkgs/cubedb/go.mod
+          cache-dependency-path: pkgs/cubedb/go.sum
+
+      - name: Validate migration filenames & cross-dialect parity
+        shell: bash
+        working-directory: pkgs/cubedb
+        run: |
+          set -euo pipefail
+          go test ./migrate/ \
+            -run 'TestMigrationFilenames|TestMigrationsDirHasReadme|TestMigrationVersionParityAcrossDialects|TestDefaultsCompatible|TestNormalizeDefaultLiteral|TestClassifyMySQLDefault|TestRequireDockerTests' -v
+
+      - name: Reject changes to already-merged migrations
+        # Applied migrations are immutable: goose tracks them by integer version
+        # only, so editing/renaming/deleting a merged migration silently changes
+        # what new environments apply (or skips it entirely). Only NEW migration
+        # files (status A) are allowed; M/D/R on existing *.sql is rejected.
+        # Runs on both PRs and direct pushes to master so the rule cannot be
+        # bypassed by pushing straight to a branch.
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          migrations_dir="pkgs/cubedb/migrate/migrations"
+          legacy_migrations_dir="CubeDB/migrate/migrations"
+
+          # A same-content relocation CubeDB/ → pkgs/cubedb/ is allowed; any
+          # other rename/edit/delete is still rejected so goose versions stay
+          # immutable.
+          is_cubedb_dir_relocation() {
+            local old="$1" new="$2"
+            local dialect file
+            if [[ "${old}" =~ ^CubeDB/migrate/migrations/(mysql|postgres)/([^/]+\.sql)$ ]]; then
+              dialect="${BASH_REMATCH[1]}"
+              file="${BASH_REMATCH[2]}"
+            else
+              return 1
+            fi
+            [[ "${new}" == "pkgs/cubedb/migrate/migrations/${dialect}/${file}" ]]
+          }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_sha="${PR_BASE_SHA}"
+            head_sha="${PR_HEAD_SHA}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            base_sha="${PUSH_BEFORE_SHA}"
+            head_sha="${PUSH_AFTER_SHA}"
+          else
+            echo "Event ${GITHUB_EVENT_NAME} has no diff base; skipping immutability check."
+            exit 0
+          fi
+
+          # New branch / initial push: no meaningful base to diff against.
+          if [[ -z "${base_sha}" || "${base_sha}" == "0000000000000000000000000000000000000000" ]]; then
+            echo "No base ref to diff against; skipping immutability check."
+            exit 0
+          fi
+
+          # On a force-push, github.event.before can point at a commit that is no
+          # longer reachable (orphaned/gc'd), which would make `git diff` fail or
+          # behave oddly. Verify the base is present; if not, fall back to the
+          # merge-base with origin/master, and skip only if even that is absent.
+          if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            echo "::warning::base ${base_sha} is unreachable (likely a force-push); falling back to merge-base."
+            git fetch --no-tags --depth=1 origin master 2>/dev/null || true
+            if fallback_base="$(git merge-base "${head_sha}" origin/master 2>/dev/null)" && [[ -n "${fallback_base}" ]]; then
+              base_sha="${fallback_base}"
+            else
+              echo "::warning::No reachable base to diff against; skipping immutability check."
+              exit 0
+            fi
+          fi
+
+          # --find-renames so a rename shows up as R (which we reject, except
+          # a same-content CubeDB → pkgs/cubedb relocation), not as an
+          # add+delete pair. The legacy path is included so a relocation does
+          # not slip through as a plain add.
+          changes="$(git diff --name-status --find-renames "${base_sha}" "${head_sha}" -- "${migrations_dir}" "${legacy_migrations_dir}")"
+
+          if [[ -z "${changes}" ]]; then
+            echo "No migration file changes."
+            exit 0
+          fi
+
+          printf 'Migration changes:\n%s\n\n' "${changes}"
+
+          violations=0
+          while IFS=$'\t' read -r status path rest; do
+            [[ -n "${status}" ]] || continue
+            # Only police versioned .sql migrations; docs/README may change.
+            case "${status}" in
+              A*)
+                # New file: allowed.
+                ;;
+              R*)
+                if [[ "${path}" == *.sql ]] && is_cubedb_dir_relocation "${path}" "${rest}" \
+                  && git diff --quiet "${base_sha}:${path}" "${head_sha}:${rest}"; then
+                  echo "Allowed same-content relocation: ${path} -> ${rest}"
+                  continue
+                fi
+                if [[ "${path}" == *.sql ]]; then
+                  echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
+                  violations=$((violations + 1))
+                fi
+                ;;
+              D*)
+                relocated="pkgs/cubedb/${path#CubeDB/}"
+                if [[ "${path}" == CubeDB/migrate/migrations/*/*.sql ]] \
+                  && git cat-file -e "${head_sha}:${relocated}" 2>/dev/null \
+                  && git diff --quiet "${base_sha}:${path}" "${head_sha}:${relocated}"; then
+                  echo "Allowed same-content relocation: ${path} -> ${relocated}"
+                  continue
+                fi
+                if [[ "${path}" == *.sql ]]; then
+                  echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
+                  violations=$((violations + 1))
+                fi
+                ;;
+              M*|C*)
+                # For copies the original path is in $path.
+                if [[ "${path}" == *.sql ]]; then
+                  echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
+                  violations=$((violations + 1))
+                fi
+                ;;
+            esac
+          done <<< "${changes}"
+
+          if [[ "${violations}" -gt 0 ]]; then
+            echo ""
+            echo "::error::${violations} forbidden migration change(s). See pkgs/cubedb/migrate/migrations/mysql/README.md"
+            exit 1
+          fi
+
+          echo "All migration changes are additive (new files only) or a same-content CubeDB → pkgs/cubedb relocation."
+
+  schema-alignment:
+    name: Cross-dialect schema alignment (docker) (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pkgs/cubedb/go.mod
+          cache-dependency-path: pkgs/cubedb/go.sum
+
+      - name: Run migrate integration tests (MySQL + PostgreSQL + alignment)
+        shell: bash
+        working-directory: pkgs/cubedb
+        env:
+          # Forbid t.Skip when Docker is unavailable — job must not go green by skip.
+          # NOTE: env var name is kept as CUBEMASTER_REQUIRE_DOCKER_TESTS for backward
+          # compatibility with the migrate package's requireDockerTestsEnv constant;
+          # rename both sides together if you change this.
+          CUBEMASTER_REQUIRE_DOCKER_TESTS: "1"
+        run: |
+          set -euo pipefail
+          # ubuntu-latest runners have Docker pre-installed. These tests spin
+          # up throwaway MySQL 8.0 and PostgreSQL 16 containers via dockertest.
+          go test ./migrate/ \
+            -run 'Alignment|Postgres|Run_' -v -count=1 -timeout 20m

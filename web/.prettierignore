@@ -1,0 +1,6 @@
+dist
+node_modules
+package-lock.json
+public/mockServiceWorker.js
+src/api/generated
+*.tsbuildinfo

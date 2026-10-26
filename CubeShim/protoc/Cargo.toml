@@ -1,0 +1,18 @@
+[package]
+name = "protoc"
+version = "0.1.0"
+edition = "2018"
+
+[features]
+default = ["with-serde"]
+with-serde = [ "serde", "serde_json" ]
+
+[dependencies]
+ttrpc = { version = "=0.5.8", features = ["async"] }
+async-trait="=0.1.88"
+protobuf = { version = "2.28.0",  features = ["with-serde"] }
+serde = { version = "=1.0.209", features = ["derive"], optional = true }
+serde_json = { version = "=1.0.128", optional = true }
+
+[build-dependencies]
+ttrpc-codegen = "0.2.0"

@@ -1,0 +1,210 @@
+From 5421849e13d8b33fa91db615c2b1161dd7ba2d16 Mon Sep 17 00:00:00 2001
+From: Changpeng Liu <changpeliu@tencent.com>
+Date: Mon, 10 Aug 2026 20:26:14 +0800
+Subject: [PATCH 3/3] blob: add spdk_bs_blob_clear_external_parent()
+
+Removes the external snapshot parent of a blob and leaves the blob thin
+provisioned: the esnap identifier goes out of its metadata, the clone list entry
+goes away, and unallocated clusters read as zeroes from then on. It is
+bs_set_external_parent_refs() run backwards, with a zeroes device as the new
+back_bs_dev.
+
+What it deliberately does not do is what separates it from an inflate. Compared
+with bs_inflate_blob_done()'s allocate_all path this leaves SPDK_BLOB_THIN_PROV
+alone and allocates nothing. A caller that has already copied out the clusters it
+cares about -- see spdk_blob_materialize_cluster() -- can therefore stop reading
+its parent at the cost of the data rather than of the provisioned size, which for
+an external snapshot is what an inflate always charges.
+
+The existing public API does not cover this. spdk_blob_set_esnap_bs_dev() swaps
+the device in memory only: it goes through blob_set_back_bs_dev() with no
+parent_refs callback, so BLOB_EXTERNAL_SNAPSHOT_ID stays in the metadata and the
+next spdk_lvs_load_ext() asks for that external snapshot again. Handing it a
+zeroes device therefore does not end the dependency, it only hides it until the
+next load -- and for a consumer whose esnap_bs_dev_create callback resolves the
+identifier against something it also deleted, that load fails. This is the
+durable form of the same operation.
+
+IO is frozen for the duration, which is a metadata write rather than a copy.
+Refuses with -EINVAL if the blob is not an esnap clone and -EBUSY if another
+locked operation is in progress, in both cases before anything is modified.
+
+The whole implementation is new code following the shape of
+spdk_bs_blob_set_external_parent(), reusing its cleanup and close callbacks. No
+existing path is modified. blob_ut passes unchanged (500 tests).
+
+Signed-off-by: Changpeng Liu <changpeliu@tencent.com>
+Assisted-by: CodeBuddy
+---
+ include/spdk/blob.h    | 32 ++++++++++++++
+ lib/blob/blobstore.c   | 98 ++++++++++++++++++++++++++++++++++++++++++
+ lib/blob/spdk_blob.map |  1 +
+ 3 files changed, 131 insertions(+)
+
+diff --git a/include/spdk/blob.h b/include/spdk/blob.h
+index 1f146e6f4..b5f498031 100644
+--- a/include/spdk/blob.h
++++ b/include/spdk/blob.h
+@@ -926,6 +926,38 @@ void spdk_bs_blob_set_external_parent(struct spdk_blob_store *bs, spdk_blob_id b
+ 				      struct spdk_bs_dev *esnap_bs_dev, const void *esnap_id,
+ 				      uint32_t esnap_id_len, spdk_blob_op_complete cb_fn, void *cb_arg);
+ 
++/**
++ * Remove the external snapshot parent of a blob, leaving the blob thin
++ * provisioned.
++ *
++ * The blob stops being a clone: its external snapshot identifier is removed from
++ * its metadata and its unallocated clusters read as zeroes from then on. Anything
++ * it had not written is therefore lost, so this is for a caller that has already
++ * copied out whatever it wanted to keep -- see spdk_blob_materialize_cluster().
++ *
++ * The difference from spdk_bs_inflate_blob() is what is *not* done: no clusters
++ * are allocated and the blob remains thin provisioned. A caller that knows which
++ * of the parent's clusters hold data can therefore end the dependency at the cost
++ * of those clusters rather than of the whole provisioned size, which for an
++ * external snapshot is what an inflate always costs.
++ *
++ * The difference from spdk_blob_set_esnap_bs_dev() with a zeroes device is
++ * persistence: that call swaps the device in memory and leaves the identifier in
++ * the metadata, so the next load asks for that external snapshot again. This one
++ * is the durable form.
++ *
++ * IO is frozen for the duration, which is a metadata write rather than a copy.
++ * Fails with -EINVAL if the blob is not a clone of an external snapshot, and with
++ * -EBUSY if another locked operation is in progress on it.
++ *
++ * \param bs blobstore.
++ * \param blob_id The id of the blob.
++ * \param cb_fn Called when the operation is complete.
++ * \param cb_arg Argument passed to function cb_fn.
++ */
++void spdk_bs_blob_clear_external_parent(struct spdk_blob_store *bs, spdk_blob_id blob_id,
++					spdk_blob_op_complete cb_fn, void *cb_arg);
++
+ 
+ struct spdk_blob_open_opts {
+ 	enum blob_clear_method  clear_method;
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 5b27ced43..a548c61a1 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -8055,6 +8055,104 @@ spdk_bs_blob_set_external_parent(struct spdk_blob_store *bs, spdk_blob_id blob_i
+ }
+ /* END spdk_bs_blob_set_external_parent */
+ 
++/* START spdk_bs_blob_clear_external_parent */
++
++static int
++bs_clear_external_parent_refs(struct spdk_blob *blob, struct blob_parent *parent)
++{
++	/* The inverse of bs_set_external_parent_refs(), and deliberately not the
++	 * inverse of what bs_inflate_blob_done() does: SPDK_BLOB_THIN_PROV is left
++	 * alone. Dropping it as well is what makes an inflate produce a thick blob,
++	 * and the whole point here is to stop reading a parent without paying for
++	 * that.
++	 *
++	 * The blob leaves the clone list because it has no parent to be a clone of;
++	 * the caller's zeroes device serves the unallocated clusters from now on. */
++	bs_blob_list_remove(blob);
++	blob_remove_xattr(blob, BLOB_EXTERNAL_SNAPSHOT_ID, true);
++	blob->invalid_flags &= ~SPDK_BLOB_EXTERNAL_SNAPSHOT;
++	blob->parent_id = SPDK_BLOBID_INVALID;
++
++	return 0;
++}
++
++static void
++bs_clear_external_parent_unfrozen(void *cb_arg, int bserrno)
++{
++	struct set_parent_ctx *ctx = cb_arg;
++	struct spdk_blob *blob = ctx->blob;
++
++	if (bserrno != 0) {
++		SPDK_ERRLOG("error %d clearing back_bs_dev\n", bserrno);
++		ctx->bserrno = bserrno;
++		bs_set_external_parent_close_blob(ctx, bserrno);
++		return;
++	}
++
++	spdk_blob_sync_md(blob, bs_set_external_parent_close_blob, ctx);
++}
++
++static void
++bs_clear_external_parent_blob_open_cpl(void *cb_arg, struct spdk_blob *blob, int bserrno)
++{
++	struct set_parent_ctx *ctx = cb_arg;
++
++	if (bserrno != 0) {
++		SPDK_ERRLOG("blob open error %d\n", bserrno);
++		ctx->bserrno = bserrno;
++		bs_set_parent_cleanup_finish(ctx, 0);
++		return;
++	}
++
++	ctx->blob = blob;
++	ctx->blob_md_ro = blob->md_ro;
++
++	if (!blob_is_esnap_clone(blob)) {
++		SPDK_ERRLOG("blob is not a clone of an external snapshot\n");
++		ctx->bserrno = -EINVAL;
++		goto error;
++	}
++
++	if (blob->locked_operation_in_progress) {
++		SPDK_ERRLOG("cannot clear external parent of blob, another operation in progress\n");
++		ctx->bserrno = -EBUSY;
++		goto error;
++	}
++
++	blob->locked_operation_in_progress = true;
++
++	/* Temporarily override md_ro flag for MD modification */
++	blob->md_ro = false;
++
++	blob_set_back_bs_dev(blob, bs_create_zeroes_dev(), bs_clear_external_parent_refs,
++			     &ctx->parent, bs_clear_external_parent_unfrozen, ctx);
++	return;
++
++error:
++	spdk_blob_close(blob, bs_set_external_parent_cleanup_finish, ctx);
++}
++
++void
++spdk_bs_blob_clear_external_parent(struct spdk_blob_store *bs, spdk_blob_id blob_id,
++				   spdk_blob_op_complete cb_fn, void *cb_arg)
++{
++	struct set_parent_ctx *ctx;
++
++	ctx = calloc(1, sizeof(*ctx));
++	if (!ctx) {
++		cb_fn(cb_arg, -ENOMEM);
++		return;
++	}
++
++	ctx->bs = bs;
++	ctx->cb_fn = cb_fn;
++	ctx->cb_arg = cb_arg;
++	ctx->bserrno = 0;
++
++	spdk_bs_open_blob(bs, blob_id, bs_clear_external_parent_blob_open_cpl, ctx);
++}
++/* END spdk_bs_blob_clear_external_parent */
++
+ /* START spdk_blob_resize */
+ struct spdk_bs_resize_ctx {
+ 	spdk_blob_op_complete cb_fn;
+diff --git a/lib/blob/spdk_blob.map b/lib/blob/spdk_blob.map
+index 7cbb0fd74..6c92965fb 100644
+--- a/lib/blob/spdk_blob.map
++++ b/lib/blob/spdk_blob.map
+@@ -75,6 +75,7 @@
+ 	spdk_bs_set_bstype;
+ 	spdk_blob_get_esnap_bs_dev;
+ 	spdk_blob_set_esnap_bs_dev;
++	spdk_bs_blob_clear_external_parent;
+ 	spdk_blob_is_degraded;
+ 
+ 	local: *;
+-- 
+2.43.5
+

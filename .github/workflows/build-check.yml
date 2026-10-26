@@ -1,0 +1,291 @@
+name: Build Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CubeAPI/**'
+      - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
+      - 'CubeOps/**'
+      - 'pkgs/cubedb/**'
+      - 'pkgs/blobstore/**'
+      - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
+      - 'pkgs/sandboxrestart/**'
+      - 'Cubelet/**'
+      - 'CubeShim/**'
+      - 'agent/**'
+      - 'examples/volume/s3/**'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/build-builder-image.yml'
+      - '.github/workflows/build-check.yml'
+      - 'Makefile'
+  pull_request:
+    paths:
+      - 'CubeAPI/**'
+      - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
+      - 'CubeOps/**'
+      - 'pkgs/cubedb/**'
+      - 'pkgs/blobstore/**'
+      - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
+      - 'pkgs/sandboxrestart/**'
+      - 'Cubelet/**'
+      - 'CubeShim/**'
+      - 'agent/**'
+      - 'examples/volume/s3/**'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/build-builder-image.yml'
+      - '.github/workflows/build-check.yml'
+      - 'Makefile'
+  workflow_dispatch:
+
+concurrency:
+  group: build-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  BUILDER_IMAGE_REMOTE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+  BUILDER_IMAGE_LOCAL: cube-sandbox-builder:ci
+
+jobs:
+  build:
+    name: Build ${{ matrix.component }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Build every component on both amd64 and arm64. The two axes are
+        # crossed automatically; the per-arch `include` entries attach the
+        # runner label, and the per-component `include` entries attach the
+        # make target + expected binaries. Architecture coverage catches
+        # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
+        # hypervisor) that an amd64-only build would miss.
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - component: CubeAPI
+            make_target: cubeapi
+            expected_bins: |
+              _output/bin/cube-api
+          - component: CubeOps
+            make_target: cubeops
+            expected_bins: |
+              _output/bin/cubeops
+              _output/bin/cubeopscli
+          - component: CubeMaster
+            make_target: cubemaster
+            expected_bins: |
+              _output/bin/cubemaster
+              _output/bin/cubemastercli
+          - component: CubeTemplateCenter
+            make_target: cubetemplatecenter
+            expected_bins: |
+              _output/bin/templatecenter
+          - component: Cubelet
+            make_target: cubelet
+            expected_bins: |
+              _output/bin/cubelet
+              _output/bin/cubecli
+          - component: agent
+            make_target: agent
+            expected_bins: |
+              _output/bin/cube-agent
+          - component: CubeShim
+            make_target: shim
+            expected_bins: |
+              _output/bin/containerd-shim-cube-rs
+              _output/bin/cube-runtime
+          # S3 Volume plugin (examples/volume/s3): its own Go module, so it is
+          # not covered by any component build above.
+          - component: volume-s3
+            make_target: cube-volume-s3
+            expected_bins: |
+              _output/bin/cube-volume-s3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect builder changes
+        id: builder_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="${{ github.event.pull_request.base.sha }}"
+            head_ref="${{ github.event.pull_request.head.sha }}"
+          else
+            base_ref="${{ github.event.before }}"
+            head_ref="${GITHUB_SHA}"
+          fi
+
+          if [[ -z "${base_ref}" || "${base_ref}" == "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff-tree --no-commit-id --name-only -r "${head_ref}")"
+          else
+            changed_files="$(git diff --name-only "${base_ref}" "${head_ref}")"
+          fi
+
+          printf 'Changed files:\n%s\n' "${changed_files}"
+
+          builder_inputs_changed="false"
+          while IFS= read -r file; do
+            case "${file}" in
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+                builder_inputs_changed="true"
+                break
+                ;;
+            esac
+          done <<< "${changed_files}"
+
+          echo "changed=${builder_inputs_changed}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        id: ghcr_login
+        if: steps.builder_changes.outputs.changed != 'true'
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Warn about GHCR login failure
+        if: steps.ghcr_login.outcome == 'failure'
+        shell: bash
+        run: echo "::warning::GHCR login failed - will attempt pull as anonymous or build locally"
+
+      - name: Resolve builder image
+        id: builder_image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_local_builder_image() {
+            docker build \
+              -t "${BUILDER_IMAGE_LOCAL}" \
+              -f docker/Dockerfile.builder \
+              --build-arg GITHUB_ACTIONS=true \
+              --build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
+              --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
+              .
+          }
+
+          image="${BUILDER_IMAGE_REMOTE}"
+
+          if [[ "${{ steps.builder_changes.outputs.changed }}" == "true" ]]; then
+            echo "Builder inputs changed, building local builder image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          elif docker pull "${BUILDER_IMAGE_REMOTE}"; then
+            echo "Using published builder image ${BUILDER_IMAGE_REMOTE}"
+          else
+            echo "Failed to pull ${BUILDER_IMAGE_REMOTE}, building local fallback image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          fi
+
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build ${{ matrix.component }}
+        shell: bash
+        env:
+          MAKE_TARGET: ${{ matrix.make_target }}
+          EXPECTED_BINS: ${{ matrix.expected_bins }}
+        run: |
+          set -euo pipefail
+
+          echo "Component: ${{ matrix.component }}"
+          echo "Builder image: ${{ steps.builder_image.outputs.image }}"
+
+          make "${MAKE_TARGET}" \
+            BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}"
+
+          while IFS= read -r binary; do
+            [[ -n "${binary}" ]] || continue
+            if ! test -x "${binary}"; then
+              echo "::error::Expected binary not found or not executable: ${binary}"
+              exit 1
+            fi
+          done <<< "${EXPECTED_BINS}"
+
+  # Docker smoke build for release images that use repo-root context +
+  # adjacent Dockerfile.dockerignore (catches context/ignore regressions).
+  docker-smoke:
+    name: Docker Smoke Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CubeMaster image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeMaster/docker/Dockerfile
+          push: false
+          load: false
+
+      - name: Build cubemastercli image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeMaster/docker/Dockerfile.cubemastercli
+          push: false
+          load: false
+
+      - name: Build cube-templatecenter image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeTemplateCenter/docker/Dockerfile
+          push: false
+          load: false
+
+      - name: Build cubelet image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Cubelet/Dockerfile
+          push: false
+          load: false
+
+      - name: Build cube-shim image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeShim/Dockerfile
+          push: false
+          load: false
+
+      - name: Build CubeOps image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeOps/Dockerfile
+          push: false
+          load: false

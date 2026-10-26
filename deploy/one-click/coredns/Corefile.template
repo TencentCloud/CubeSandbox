@@ -1,0 +1,14 @@
+.:53 {
+    bind __COREDNS_BIND_ADDR__
+    template IN A cube.app {
+        answer "{{ .Name }} 60 IN A __CUBE_PROXY_DNS_ANSWER_IP__"
+        fallthrough
+    }
+    template IN A (.*)\.cube\.app {
+        answer "{{ .Name }} 60 IN A __CUBE_PROXY_DNS_ANSWER_IP__"
+        fallthrough
+    }
+    log
+    cache 300
+    forward . /etc/resolv.conf
+}

@@ -1,0 +1,2135 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+use std::collections::{HashMap, HashSet};
+use std::fs as stdfs;
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
+use containerd_shim::event::Event;
+use containerd_shim::protos::events::task::TaskOOM;
+use containerd_shim::protos::protobuf::MessageDyn;
+use containerd_shim::{Error, Result};
+use cube_hypervisor::config::RestoreConfig;
+use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, IvshmemConfig};
+use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
+use oci_spec::runtime::{LinuxResources, Process, Spec};
+use protoc::{agent, agent_ttrpc, health, health_ttrpc};
+use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
+use ttrpc::context::{self, Context};
+use ttrpc::r#async::Client;
+
+use super::config::{Fs, ANNO_VMM_FS, VIRTIO_FS_ID, VIRTIO_FS_TAG};
+use super::device;
+use super::disk::Disk;
+use super::pmem::Pmem;
+use crate::common::types::PropagationMount;
+use crate::common::utils::{self, AsyncUtils, CPath, Utils};
+use crate::common::{
+    CResult, ANNO_PROPAGATION_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR, CUBE_BIND_SHARE_TYPE,
+    GUEST_VIRTIOFS_MNT_PATH_DEPRECATED,
+};
+use crate::container::container_mgr::ContainerInfo;
+use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
+use crate::hypervisor::config::{HypConfig, VmConfig};
+use crate::hypervisor::cube_hypervisor as CH;
+use crate::hypervisor::snapshot::SnapshotInfo;
+use crate::log::{stat_defer, Log};
+use crate::sandbox::config;
+use crate::{debugf, errf, infof, warnf};
+
+//use tokio_uring::fs::UnixStream;
+
+const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
+const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
+const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
+
+/// Bounded reconnects for the restore-thaw window: a freshly restored guest
+/// transiently refuses or resets the first connections until its runtime
+/// settles. Both steps are safe to repeat (fresh channel; idempotent RPCs).
+const RECONNECT_ATTEMPTS: u32 = 5;
+const RECONNECT_BACKOFF_MS: u64 = 200;
+/// Overall deadline for the retry loop: bounds the sequence even when a
+/// single attempt parks (connect_agent has no internal timeout). With the
+/// 3 s RPC timeout, a hung agent gets ~3 attempts rather than all 5.
+/// Fast-failing attempts exhaust RECONNECT_ATTEMPTS in ~1 s; this deadline
+/// only binds when an attempt hangs.
+const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
+
+#[derive(PartialEq, Eq)]
+enum SandBoxState {
+    Normal,
+    Paused,
+    Exited,
+}
+
+enum SnapshotFreezeState {
+    Idle,
+    Frozen { id: String, deadline: Instant },
+    Expired { id: String },
+}
+
+impl SnapshotFreezeState {
+    fn resume_needed(&self, snapshot_id: &str) -> CResult<bool> {
+        match self {
+            Self::Idle => Ok(false),
+            Self::Frozen { id, .. } if id == snapshot_id => Ok(true),
+            Self::Expired { id } if id == snapshot_id => {
+                Err("snapshot freeze lease expired; VM was automatically resumed".into())
+            }
+            _ => Err("snapshot id does not match frozen VM".into()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SandBox {
+    id: String,
+    conn: Option<Arc<Mutex<Client>>>,
+    pub(super) client: Option<Arc<Mutex<agent_ttrpc::AgentServiceClient>>>,
+    spec: Spec,
+    conf: config::Config,
+    pub(super) ctx: Context,
+    ch: Option<Arc<Mutex<CH::CubeHypervisor>>>,
+    containers: Arc<Mutex<HashMap<String, Container>>>,
+    pub(super) log: Log,
+    inited: bool,
+    pid: u32,
+    tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
+    debug: bool,
+    state: Arc<Mutex<SandBoxState>>,
+    snapshot_frozen: Arc<Mutex<SnapshotFreezeState>>,
+    tx_monitor_exited: Option<Sender<()>>,
+    monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    /// Keeps the monitor's connection alive across stop_watchers' abort (the
+    /// task's clone would close it); the checks are disabled, so the point
+    /// is the port it keeps reserved.
+    monitor_conn: Option<Client>,
+    tx_oom_exited: Option<Sender<()>>,
+    oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+}
+
+impl SandBox {
+    pub fn new(
+        id: String,
+        log: Log,
+        debug: bool,
+        tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
+    ) -> Self {
+        let mut hyp_config = HypConfig {
+            debug,
+            log_level: log::LevelFilter::Info,
+            sandbox_id: id.clone(),
+            ch_http_api: Some(Utils::chapi_path(id.as_str())),
+        };
+
+        if debug {
+            hyp_config.log_level = log::LevelFilter::Debug;
+        }
+        let ch: CH::CubeHypervisor = CH::CubeHypervisor::new(hyp_config, log.clone());
+
+        SandBox {
+            id,
+            conn: None,
+            client: None,
+            spec: Spec::default(),
+            conf: config::Config::default(),
+            ctx: context::with_timeout(1000 * 1000 * 1000 * 3),
+            ch: Some(Arc::new(Mutex::new(ch))),
+            containers: Arc::new(Mutex::new(HashMap::new())),
+            log,
+            inited: false,
+            pid: std::process::id(),
+            tx_containerd,
+            debug,
+            state: Arc::new(Mutex::new(SandBoxState::Normal)),
+            snapshot_frozen: Arc::new(Mutex::new(SnapshotFreezeState::Idle)),
+            tx_monitor_exited: None,
+            monitor_handle: None,
+            monitor_conn: None,
+            tx_oom_exited: None,
+            oom_handle: None,
+        }
+    }
+
+    pub fn app_snapshot_create(&self) -> bool {
+        self.conf.app_snapshot_create
+    }
+
+    pub fn app_snapshot_restore(&self) -> bool {
+        self.conf.app_snapshot_restore
+    }
+
+    /// True when Cubelet recreates the same sandbox from a pause snapshot.
+    /// Guest mounts (virtiofs + binds) are already in restored memory.
+    pub fn pause_resume(&self) -> bool {
+        self.annotation_present(config::ANNO_PAUSE_SNAPSHOT_ID)
+    }
+
+    /// True when Cubelet creates a new sandbox from a runtime snapshot.
+    /// Guest mounts are already in restored memory, same as pause_resume.
+    pub fn from_snapshot(&self) -> bool {
+        self.annotation_present(config::ANNO_RUNTIME_SNAPSHOT_ID)
+    }
+
+    /// Pause resume or FromSnap: reconnect host virtiofs, do not remount guest.
+    pub fn guest_mount_restore(&self) -> bool {
+        self.pause_resume() || self.from_snapshot()
+    }
+
+    fn annotation_present(&self, key: &str) -> bool {
+        self.spec
+            .annotations()
+            .as_ref()
+            .and_then(|anno| anno.get(key))
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn normal_create(&self) -> bool {
+        !(self.conf.app_snapshot_create || self.conf.app_snapshot_restore)
+    }
+
+    pub fn inited(&self) -> bool {
+        self.inited
+    }
+
+    pub fn init(&mut self, spec: Spec) -> CResult<()> {
+        self.spec = spec;
+        let annotations = self.spec.annotations();
+        self.conf = config::Config::new(annotations)?;
+        if self.conf.app_snapshot_restore {
+            let snapshot_base = annotations
+                .as_ref()
+                .and_then(|anno| anno.get(config::ANNO_SNAPSHOT_BASE))
+                .map(|value| value.trim())
+                .unwrap_or("");
+            let snapshot_memory_vol_url = annotations
+                .as_ref()
+                .and_then(|anno| anno.get(config::ANNO_SNAPSHOT_MEMORY_VOL_URL))
+                .map(|value| value.trim())
+                .unwrap_or("");
+            if snapshot_memory_vol_url.is_empty() {
+                let mut annotation_keys = annotations
+                    .as_ref()
+                    .map(|anno| anno.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                annotation_keys.sort();
+                return Err(format!(
+                    "app snapshot restore requires fresh memory_vol_url annotation (cube.vm.snapshot.memory_vol_url); upstream must resolve the template memory volume for this start, snapshot_base:{}, annotation_keys:{:?}",
+                    snapshot_base, annotation_keys
+                ));
+            } else {
+                infof!(
+                    self.log,
+                    "snapshot restore init using snapshot_base:{}, memory_vol_url:{}",
+                    snapshot_base,
+                    snapshot_memory_vol_url
+                );
+            }
+        }
+        let mut vm_dir = PathBuf::from(utils::VM_PATH);
+        vm_dir.push(self.id.clone());
+        stdfs::create_dir_all(vm_dir).map_err(|e| format!("Mkdir vm run dir failed:{}", e))?;
+        self.inited = true;
+        Ok(())
+    }
+
+    pub fn deinit(&mut self, _spec: Spec) {
+        if let Err(e) = Utils::clean_sandbox_resource(&self.id) {
+            warnf!(self.log, "clean resource failed:{}", e)
+        }
+    }
+
+    fn new_create_stat(&self, callee_act: String) -> stat_defer::StatDefer {
+        stat_defer::StatDefer::new(
+            self.id.clone(),
+            stat_defer::CALLEE_AGENT.to_string(),
+            stat_defer::ACT_CREATE.to_string(),
+            callee_act,
+            self.log.clone(),
+        )
+    }
+
+    /// Connect + reset with bounded retries. Restores are retried because
+    /// the guest is thawed from a snapshot with its connections just RST and
+    /// transiently refuses or resets the first connections while its runtime
+    /// settles -- every restored guest, including an ordinary create from a
+    /// template snapshot. A VM booted from scratch (snapshot == false) gets
+    /// a single attempt: a booted guest has no carried connection state, so
+    /// a failure there is permanent. Every error class is retried: the
+    /// transient surfaces both at the connect handshake and at the first
+    /// RPC. What follows the first RPC is not retried: it is not idempotent,
+    /// and reset_guest passing is the signal that the guest can serve again.
+    /// A restored guest whose agent is dead pays the full 10 s deadline
+    /// before the create or resume fails.
+    async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
+        // One stat for the whole sequence: a failed attempt that a later one
+        // supersedes must not record an Err.
+        let mut stat =
+            restore.then(|| self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string()));
+        let mut last_err: Option<String> = None;
+        let retry = async {
+            let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                let res: CResult<()> = async {
+                    self.connect_agent().await?;
+                    if restore {
+                        self.reset_guest().await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                match res {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < max_attempts => {
+                        last_err = Some(e.clone());
+                        warnf!(
+                            self.log,
+                            "reconnect attempt {}/{} failed: {}, retrying",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        let res = match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
+            Ok(res) => res,
+            Err(_) => Err(format!(
+                "agent reconnect exceeded the deadline (last attempt: {})",
+                last_err.unwrap_or_else(|| "still in flight".to_string())
+            )),
+        };
+        if res.is_ok() {
+            if let Some(stat) = stat.as_mut() {
+                stat.set_ok();
+            }
+        }
+        res
+    }
+
+    async fn connect_agent(&mut self) -> CResult<()> {
+        let conn = AsyncUtils::connect_agent(&self.id).await?;
+        let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
+        self.conn = Some(Arc::new(Mutex::new(conn)));
+        self.client = Some(Arc::new(Mutex::new(client)));
+
+        Ok(())
+    }
+
+    async fn pause_vm_forbidding(&self) -> bool {
+        let containers = self.containers.lock().await;
+        for (_, c) in containers.iter() {
+            if c.pause_vm_forbidding().await {
+                return true;
+            }
+        }
+        false
+    }
+    async fn disconnect_agent(&mut self) -> CResult<()> {
+        self.stop_watchers().await;
+
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.unset_client().await;
+        }
+        self.client = None;
+        self.conn = None;
+        self.monitor_conn = None;
+        Ok(())
+    }
+
+    /// Pause-time teardown that leaves the agent channel and the fwd log conns
+    /// alive across the freeze (the guest learns of them via the restore-side
+    /// RST). A connection should not be closed here: a close that races the
+    /// freeze leaves a stale socket in the guest that collides with the first
+    /// reconnection after resume. The monitor's health connection is carried
+    /// too (monitor_conn holds it open through the abort); carried ports
+    /// stay reserved in the restored muxer. disconnect_agent remains for
+    /// rollback.
+    async fn quiesce_agent_for_pause(&mut self) {
+        self.stop_watchers().await;
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.quiesce_for_pause().await;
+        }
+    }
+
+    /// Stop the monitor / oom watcher tasks; shared by quiesce (pause) and
+    /// disconnect (rollback): whatever holds a clone of the agent client must
+    /// be stopped before the connection is dealt with.
+    async fn stop_watchers(&mut self) {
+        //stop monitor
+        if let Some(tx) = self.tx_monitor_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+        //stop watch oom event
+        if let Some(tx) = self.tx_oom_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.oom_handle.take() {
+            handle.abort();
+        }
+    }
+
+    /// Signal every container's init log forwarders to stop without waiting:
+    /// pause keeps them across the freeze, and once the VM is torn down their
+    /// reads fail -- without this they retry until the shim is reaped. Slot
+    /// reuse drains via start_log_forward.
+    async fn stop_log_forward_detached(&self) {
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.stop_log_forward_detached().await;
+        }
+    }
+
+    fn get_storages(&mut self) -> CResult<Vec<agent::Storage>> {
+        let mut storages = Vec::new();
+
+        if self.normal_create() {
+            //default config
+            if self.conf.fs.is_some() {
+                let virtiofs = agent::Storage {
+                    driver: "virtio-fs".to_string(),
+                    source: "cubeShared".to_string(),
+                    fstype: "virtiofs".to_string(),
+                    options: vec!["ro".to_string()].into(),
+                    mount_point: GUEST_VIRTIOFS_MNT_PATH_DEPRECATED.to_string(),
+                    ..Default::default()
+                };
+                storages.push(virtiofs);
+            }
+        }
+        // Pause / FromSnap: keep virtiofs devices (restore_virtiofs_configs)
+        // but do not ask the agent to remount — guest mountpoints are already live.
+        let skip_virtiofs_guest_mount = self.app_snapshot_restore() && self.guest_mount_restore();
+        if !self.app_snapshot_create() && !skip_virtiofs_guest_mount {
+            for fs in self.conf.virtiofs.iter() {
+                debugf!(self.log, "add virtiofs: {:?}", fs.id.clone());
+                let mut virtiofs = agent::Storage {
+                    driver: "virtio-fs".to_string(),
+                    source: fs.id.clone(),
+                    fstype: "virtiofs".to_string(),
+                    options: vec![].into(),
+                    ..Default::default()
+                };
+                if fs.propagation_mount_name.is_empty() {
+                    virtiofs.mount_point = Utils::virtiofs_guest_base(fs.id.clone());
+                } else {
+                    let mut cp = CPath::new(CUBE_BIND_SHARE_GUEST_BASE_DIR);
+                    cp.join(fs.propagation_mount_name.as_str());
+                    virtiofs.mount_point = cp.to_str().unwrap_or_default().to_string();
+                }
+                storages.push(virtiofs);
+            }
+        } else if skip_virtiofs_guest_mount {
+            infof!(
+                self.log,
+                "memory restore: skip virtio-fs storages for agent (guest mounts kept)"
+            );
+        }
+
+        let anno = self.spec.annotations().as_ref().unwrap();
+        if let Some(mounts_str) = anno.get(ANNO_PROPAGATION_MNTS) {
+            let mounts = Utils::anno_to_obj::<Vec<PropagationMount>>(mounts_str)?;
+            for mnt in mounts {
+                let mut mpath = CPath::new(CUBE_BIND_SHARE_GUEST_BASE_DIR);
+                mpath.join(mnt.name.as_str());
+                let s = agent::Storage {
+                    driver: CUBE_BIND_SHARE_TYPE.to_string(),
+                    mount_point: mpath.to_str().unwrap_or_default().to_string(),
+                    ..Default::default()
+                };
+                storages.push(s);
+            }
+        }
+
+        let shm = agent::Storage {
+            driver: "ephemeral".to_string(),
+            source: "shm".to_string(),
+            fstype: "tmpfs".to_string(),
+            options: vec![
+                "noexec".to_string(),
+                "nosuid".to_string(),
+                "nodev".to_string(),
+                "mode=1777".to_string(),
+                "size=67108864".to_string(),
+            ]
+            .into(),
+            mount_point: GUEST_DEV_SHM.to_string(),
+            ..Default::default()
+        };
+        storages.push(shm);
+
+        //pmem
+        for (i, p) in self.conf.pmem.iter().enumerate() {
+            if p.placeholder {
+                continue;
+            }
+            //let dev_path = p.guest_device_path(i);
+            //let g_mount_point = p.guest_mount_point(i);
+            let ps = agent::Storage {
+                driver: Pmem::driver(),
+                source: Pmem::guest_device_path(i as u32),
+                fstype: p.fs_type.clone(),
+                mount_point: Pmem::guest_mount_point(i as u32),
+                options: vec!["ro".to_string(), "dax".to_string()].into(),
+                ..Default::default()
+            };
+
+            infof!(self.log, "found pmem:{p:?}");
+            storages.push(ps.clone());
+        }
+
+        //disk
+        for (i, d) in self.conf.disk.iter().enumerate() {
+            let ds = agent::Storage {
+                driver: Disk::driver(),
+                source: Disk::guest_device_path(i as u32),
+                fstype: d.fs_type.clone(),
+                mount_point: Disk::guest_mount_point(i as u32),
+                options: d.opt().into(),
+                driver_options: d.driver_opt().into(),
+                ..Default::default()
+            };
+            storages.push(ds);
+        }
+
+        //vfio disk
+        for d in self.conf.vfio_disks.iter() {
+            if d.platform {
+                let ds = agent::Storage {
+                    driver: Disk::driver(),
+                    source: d.guest_pci.clone(),
+                    fstype: d.fs_type.clone(),
+                    mount_point: d.get_mount_point(),
+                    need_format: d.need_format,
+                    need_resize: d.need_resize,
+                    driver_options: d.driver_opt().into(),
+                    ..Default::default()
+                };
+                storages.push(ds);
+            }
+        }
+        Ok(storages)
+    }
+
+    fn get_dns(&self) -> CResult<Vec<String>> {
+        let anno = match self.spec.annotations().as_ref() {
+            Some(anno) => anno,
+            None => return Ok(Vec::new()),
+        };
+
+        let dns = match anno.get(ANNO_SANDBOX_DNS) {
+            Some(dns) => Utils::anno_to_obj::<Vec<String>>(dns)?,
+            None => Vec::new(),
+        };
+
+        dns.into_iter()
+            .map(|entry| normalize_dns_for_agent(&entry))
+            .collect()
+    }
+    async fn reset_guest(&mut self) -> CResult<()> {
+        if self.client.is_none() {
+            errf!(self.log, "client is None in reset_guest");
+            return Err(format!("client is None"));
+        }
+        let client = self.client.as_ref().unwrap().lock().await;
+        let tm = Utc::now();
+
+        let req = agent::SetGuestDateTimeRequest {
+            Sec: tm.timestamp(),
+            Usec: tm.timestamp_subsec_micros() as i64,
+            ..Default::default()
+        };
+
+        client
+            .set_guest_date_time(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| format!("reset guest time failed:{}", e))?;
+
+        let rng = Utils::get_rng()?;
+        let req = agent::ReseedRandomDevRequest {
+            data: rng,
+            ..Default::default()
+        };
+
+        client
+            .reseed_random_dev(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
+        Ok(())
+    }
+
+    pub async fn create_sandbox(&mut self) -> CResult<()> {
+        let snapshot = self.start_vm().await?;
+
+        //todo: app snapshot
+        if self.conf.notify_snapshot_ret {
+            if let Err(e) = AsyncUtils::notify_snapshot_ret(&self.id, snapshot).await {
+                warnf!(self.log, "notify restore ret to oss failed:{}", e);
+            }
+        }
+
+        self.connect_agent_with_retry(snapshot).await?;
+
+        infof!(self.log, "agent is ready");
+
+        //add vfio device
+        if !self.app_snapshot_restore() {
+            self.add_device().await?;
+        }
+
+        let storages = self.get_storages()?;
+        let dns = self.get_dns()?;
+        let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
+        let mut req = agent::CreateSandboxRequest {
+            //hostname: self.id.clone(),
+            hostname: self.id.chars().take(8).collect::<String>(),
+            dns: dns.into(),
+            storages: storages.into(),
+            sandbox_pidns: false,
+            sandbox_id: self.id.clone(),
+            interfaces: self.conf.net.get_pb_interfaces().into(),
+            routes: self.conf.net.get_pb_routes().into(),
+            ARPNeighbors: self.conf.net.get_pb_arps().into(),
+            cube_vip: self.conf.vips.clone(),
+            ..Default::default()
+        };
+
+        if snapshot {
+            req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
+        }
+
+        let mut ctx = self.ctx.clone();
+
+        ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
+        if self.app_snapshot_create() {
+            req.start_mode = protoc::agent::StartMode::SNAPSHOT;
+        }
+
+        if self.app_snapshot_restore() {
+            req.start_mode = protoc::agent::StartMode::RESTORE;
+        }
+
+        {
+            if self.client.is_none() {
+                errf!(self.log, "client is None in create_sandbox");
+                return Err(format!("client is None"));
+            }
+            let client = self.client.as_ref().unwrap().lock().await;
+
+            client
+                .create_sandbox(ctx, &req)
+                .await
+                .map_err(|e| format!("create sandbox failed:{}", e))?;
+        }
+
+        if !self.conf.app_snapshot_create {
+            //watch oom
+            let (sender, handle) = self.watch_oom().await?;
+            self.tx_oom_exited = Some(sender);
+            self.oom_handle = Some(Arc::new(handle));
+
+            //monitor guest
+            let (sender, handle) = self.monitor_vm(false).await?;
+            self.tx_monitor_exited = Some(sender);
+            self.monitor_handle = Some(Arc::new(handle));
+        }
+        stat.set_ok();
+        Ok(())
+    }
+
+    //this function must be called after CreateSandbox
+    async fn monitor_vm(
+        &mut self,
+        check_agent: bool,
+    ) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>)> {
+        let mut arc_ch: Option<Arc<Mutex<CH::CubeHypervisor>>> = self.ch.clone();
+        if arc_ch.is_none() {
+            panic!("BUG: ch is None");
+        }
+        let (tx, mut rx) = channel::<()>(1);
+        let arc_conainers = self.containers.clone();
+        let arc_state = self.state.clone();
+        let conn = AsyncUtils::connect_agent(&self.id).await?;
+        self.monitor_conn = Some(conn.clone());
+        let client = health_ttrpc::HealthClient::new(conn);
+        let log = self.log.clone();
+        let handle = tokio::spawn(async move {
+            let ctx = context::with_timeout(1000 * 1000 * 1000 * 5);
+            let mut aborted = false;
+            let interval = 60;
+            let mut counter = 0;
+            loop {
+                {
+                    counter += 1;
+                    let ch = arc_ch.as_mut().unwrap().lock().await;
+                    let req = health::CheckRequest {
+                        ..Default::default()
+                    };
+
+                    if let Ok(ev) = ch.try_wait_notify() {
+                        if ev != CH::NotifyEvent::VmShutdown {
+                            warnf!(log, "recv event:{:?}", ev);
+                        } else {
+                            aborted = true;
+                        }
+                    }
+
+                    //no event from ch and it's time to ping agent.
+                    if check_agent && counter > interval && !aborted {
+                        counter = 0;
+
+                        if let Err(e) = client.check(ctx.clone(), &req).await {
+                            infof!(log, "check agent failed:{}", e);
+                            aborted = true;
+                        }
+                    }
+
+                    if aborted {
+                        {
+                            let mut state = arc_state.lock().await;
+                            *state = SandBoxState::Exited;
+                        }
+
+                        let containers = arc_conainers.lock().await;
+                        for (_, container) in containers.iter() {
+                            container.notify_vm_shutdown().await;
+                        }
+                        break;
+                    }
+                }
+                if let Ok(_) = rx.try_recv() {
+                    return;
+                }
+                sleep(Duration::from_millis(1000)).await;
+            }
+        });
+
+        Ok((tx, handle))
+    }
+
+    pub async fn watch_oom(&self) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>)> {
+        if self.client.is_none() {
+            errf!(self.log, "client is None in watch_oom");
+            return Err(format!("client is None"));
+        }
+        let client = self.client.as_ref().unwrap().lock().await.clone();
+        let tx_containerd = self.tx_containerd.clone();
+        let log = self.log.clone();
+        let containers = self.containers.clone();
+        let (tx, mut rx) = channel::<()>(1);
+        let handle = tokio::spawn(async move {
+            let req = agent::GetOOMEventRequest::default();
+            loop {
+                tokio::select! {
+                    _ = rx.recv() => {
+                        return;
+                    }
+                    res = client.get_oom_event(context::Context::default(), &req) => {
+                        match res {
+                            Ok(rsp) => {
+                        let real_id = {
+                            let mut id = rsp.container_id.clone();
+                            let cs = containers.lock().await;
+                            for (real_id, c) in cs.iter() {
+                                if c.get_id() == rsp.container_id {
+                                    id = real_id.clone();
+                                    break;
+                                }
+                            }
+                            id
+                        };
+
+                                let event = TaskOOM {
+                                    container_id: real_id,
+                                    ..Default::default()
+                                };
+                                let topic = event.topic();
+                                let _ = tx_containerd.try_send((topic, Box::new(event)));
+                            }
+                            Err(e) => {
+                                errf!(log, "watch oom failed:{}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Ok((tx, handle))
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        let containers = self.containers.lock().await;
+        containers.is_empty()
+    }
+
+    pub async fn destroy_sandbox(&mut self) -> CResult<()> {
+        infof!(self.log, "destroy sandbox start");
+        let req = agent::DestroySandboxRequest {
+            ..Default::default()
+        };
+
+        if self.ch.is_none() {
+            infof!(self.log, "ch instance is None");
+            return Ok(());
+        }
+        let mut ch = self.ch.as_mut().unwrap().lock().await;
+        //In the context of this 'ch' lock, check whether the VmShutdown event has been received
+        {
+            let state = self.state.lock().await;
+            if *state == SandBoxState::Exited {
+                infof!(self.log, "vm has exited");
+                return Ok(());
+            }
+        }
+        if self.client.is_none() {
+            infof!(self.log, "client is None");
+            return Ok(());
+        }
+        let client = self.client.as_ref().unwrap().lock().await;
+
+        if let Err(e) = client
+            .destroy_sandbox(context::with_timeout(1000 * 1000 * 200), &req)
+            .await
+        {
+            //perhaps the VM has already shutdown.(eg:panic/cube-agent exited/...)
+            warnf!(self.log, "destroy sandbox failed:{}, but nothing to do", e)
+        }
+
+        infof!(self.log, "wait vm shutdown");
+
+        //wait for the vm shutdown gracefully
+        loop {
+            match ch.wait_notify(Duration::from_millis(1000)).await {
+                Ok(ev) => {
+                    if CH::NotifyEvent::VmShutdown != ev {
+                        warnf!(
+                            self.log,
+                            "Not an expected event, expected:{:?}, actual:{:?}",
+                            CH::NotifyEvent::VmShutdown,
+                            ev
+                        );
+                        continue;
+                    }
+                    break;
+                }
+
+                //we are in the process of destruction, so the results here are not important.
+                Err(e) => {
+                    warnf!(
+                        self.log,
+                        "wait vm shutdown event failed:{}, but nothing to do",
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+        infof!(self.log, "wait ch exit");
+        if let Err(e) = ch.join().await {
+            warnf!(self.log, "join ch failed:{}, but nothing to do", e);
+        }
+        infof!(self.log, "destroy sandbox finish");
+        Ok(())
+    }
+
+    pub async fn prepare_resource(&mut self) -> CResult<VmConfig> {
+        let mut vc = VmConfig::new(&self.conf.os_image_path, &self.conf.agent_path);
+        vc.set_kernel(self.conf.kernel.clone())
+            .set_vcpus(self.conf.vm_res.cpu)
+            .set_memory(self.conf.vm_res.memory, false)
+            .add_nets(&self.conf.net)?
+            .add_disks(&self.conf.disk)
+            .add_virtiofs(&self.conf.virtiofs)
+            .add_vsock(self.id.clone());
+
+        // Enable ivshmem device when the template build path sets the internal annotation.
+        if self.is_ivshmem_enabled() {
+            Self::enable_default_ivshmem(&mut vc, &self.id)
+                .map_err(|e| format!("failed to enable ivshmem: {}", e))?;
+        }
+
+        if let Some(fs) = self.conf.fs.as_ref() {
+            vc.add_fs(fs);
+        }
+        if self.conf.app_snapshot_create {
+            vc.set_memory(self.conf.vm_res.memory, true);
+        }
+
+        if self.debug {
+            vc.add_cmdline("agent.log=debug".to_string());
+        } else {
+            vc.add_cmdline("quiet".to_string());
+        }
+        vc.add_cmdline("highres=off".to_string());
+        vc.add_cmdline("clocksource=kvm-clock".to_string());
+        vc.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
+
+        // Add externally passed pmem
+        vc.add_pmems(&self.conf.pmem);
+
+        // Check if extra kernel parameters conflict with existing ones
+        if !self.conf.extra_kernel_params.is_empty() {
+            let conflicts = vc.check_cmdline_conflicts(&self.conf.extra_kernel_params);
+            if !conflicts.is_empty() {
+                return Err(format!(
+                    "kernel parameter conflicts detected, cannot create container: {}",
+                    conflicts.join("; ")
+                ));
+            }
+        }
+
+        for param in self.conf.extra_kernel_params.iter() {
+            vc.add_cmdline(param.clone());
+        }
+
+        Ok(vc)
+    }
+
+    pub async fn recycle_resource(&mut self) -> CResult<()> {
+        Ok(())
+    }
+
+    fn is_ivshmem_enabled(&self) -> bool {
+        self.spec
+            .annotations()
+            .as_ref()
+            .and_then(|anno| anno.get(ANNO_ENABLE_IVSHMEM))
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    }
+
+    /// Enable the default ivshmem backend at `/dev/shm/ivshmem-{sandbox_id}`.
+    fn enable_default_ivshmem(vc: &mut VmConfig, sandbox_id: &str) -> CResult<()> {
+        let path = Utils::ivshmem_path(sandbox_id)?;
+        Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)?;
+        vc.enable_ivshmem(path, IVSHMEM_DEFAULT_SIZE);
+        Ok(())
+    }
+
+    /// Build restore-time ivshmem config with the default backend path.
+    fn default_ivshmem_config(sandbox_id: &str) -> CResult<IvshmemConfig> {
+        let path = Utils::ivshmem_path(sandbox_id)?;
+        Ok(IvshmemConfig {
+            path,
+            size: IVSHMEM_DEFAULT_SIZE,
+        })
+    }
+
+    /// Ensure the default ivshmem backend file exists before restore.
+    fn ensure_ivshmem_file(sandbox_id: &str) -> CResult<()> {
+        let path = Utils::ivshmem_path(sandbox_id)?;
+        match stdfs::metadata(&path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)
+            }
+            Err(e) => Err(format!(
+                "failed to stat ivshmem file {}: {}",
+                path.display(),
+                e
+            )),
+        }
+    }
+
+    fn by_snapshot(&self) -> bool {
+        let anno = self.spec.annotations().as_ref().unwrap();
+        if anno.contains_key(config::ANNO_SNAPSHOT_DISABLE) {
+            return false;
+        }
+
+        if let Some(proc) = self.spec.process() {
+            if proc.selinux_label().is_some() && !proc.selinux_label().clone().unwrap().is_empty() {
+                return false;
+            }
+        }
+
+        !self.conf.app_snapshot_create
+    }
+    async fn start_vm(&mut self) -> CResult<bool> {
+        infof!(self.log, "start vm start");
+        {
+            let mut ch = self.ch.as_mut().unwrap().lock().await;
+            ch.launch_vmm().await?;
+        }
+        let mut snapshot = false;
+
+        if self.by_snapshot() {
+            match self.restore_vm().await {
+                Ok(_) => {
+                    snapshot = true;
+                    if self.conf.app_snapshot_restore {
+                        return Ok(snapshot);
+                    }
+                }
+                Err(e) => {
+                    errf!(self.log, "restore vm failed:{}", e);
+                    if self.conf.app_snapshot_restore {
+                        return Err(format!("app snapshot restore vm failed:{}", e));
+                    }
+                }
+            }
+        } else if self.conf.app_snapshot_restore {
+            return Err(
+                "app snapshot restore requested but snapshot is unavailable on this node \
+                 (cube.snapshot.disable set or selinux label set)"
+                    .to_string(),
+            );
+        }
+
+        if !snapshot {
+            self.boot_vm().await?;
+        }
+
+        {
+            let ch = self.ch.as_mut().unwrap().lock().await;
+            let start = Instant::now();
+            let ev = ch
+                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
+                .await?;
+
+            if CH::NotifyEvent::VsockServerReady != ev {
+                return Err(format!(
+                    "Not an expected event, expected:{:?}, actual:{:?}",
+                    CH::NotifyEvent::VsockServerReady,
+                    ev
+                ));
+            }
+            let duration = start.elapsed().as_millis();
+            infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
+        }
+        Ok(snapshot)
+    }
+
+    async fn boot_vm(&mut self) -> CResult<()> {
+        let config = self.prepare_resource().await?;
+        let mut ch = self.ch.as_mut().unwrap().lock().await;
+        ch.create_vm(&config).await?;
+        ch.boot_vm().await?;
+        Ok(())
+    }
+
+    async fn restore_vm(&mut self) -> CResult<()> {
+        // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
+        let enable_ivshmem = self.is_ivshmem_enabled();
+
+        if enable_ivshmem {
+            Self::ensure_ivshmem_file(&self.id)?;
+        }
+
+        let ss_file = SnapshotInfo::load(
+            self.conf.snapshot_base.as_str(),
+            self.conf.vm_res.cpu,
+            self.conf.vm_res.snap_memory,
+        )?;
+
+        let mut ss_req = SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
+        ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+        ss_req.set_agent_version(self.conf.agent_path.as_str())?;
+        ss_req.set_kernel_version(self.conf.kernel.as_str())?;
+        ss_req.set_disks(&self.conf.disk);
+
+        let align_pmem = ss_file.align_pmems(&self.conf.pmem);
+        ss_req.set_pmems(&align_pmem);
+
+        //ss_file must be treated as a self object.
+        ss_file
+            .eq(&ss_req)
+            .map_err(|e| format!("snapshot metadata not match:{}", e))?;
+
+        let snapshot = Utils::get_snapshot_dir(
+            self.conf.snapshot_base.as_str(),
+            self.conf.vm_res.cpu,
+            self.conf.vm_res.snap_memory,
+        );
+        infof!(self.log, "snapshot dir:{}", snapshot.clone());
+        let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
+        let mut fss = vec![];
+        if let Some(fs) = self.conf.fs.as_ref() {
+            let f = Utils::restore_fs_configs(fs);
+            fss.push(f);
+        }
+        fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
+        let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
+        let disks = Utils::restore_disks_config(&self.conf.disk);
+        // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
+        let mut pmems = VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
+        pmems.extend(Utils::restore_pmems_config(&self.conf.pmem));
+        let vsock = Utils::gen_vsock_config(&self.id);
+
+        let ch = self.ch.as_mut().unwrap().lock().await;
+        let config = RestoreConfig {
+            source_url: PathBuf::from(snapshot),
+            fs: Some(fss),
+            net: Some(nets),
+            disks: Some(disks),
+            pmem: Some(pmems),
+            vsock: Some(vsock),
+            memory_vol_url: restore_memory_vol_url,
+            ivshmem: if enable_ivshmem {
+                Some(Self::default_ivshmem_config(&self.id)?)
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+
+        ch.restore_vm(config).await?;
+        /*
+        let ev = ch
+            .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
+            .await?;
+        if CH::NotifyEvent::RestoreReady != ev {
+            return Err(format!(
+                "Not an expected event, expected:{:?}, actual:{:?}",
+                CH::NotifyEvent::RestoreReady,
+                ev
+            ));
+        }*/
+
+        //update pmem seq, must occur after successful restore
+        self.conf.pmem = align_pmem;
+        let mut pmem_path_map = HashMap::new();
+        for (i, p) in self.conf.pmem.iter().enumerate() {
+            pmem_path_map.insert(p.file.clone(), i as u32);
+        }
+        self.conf.pmem_path_map = pmem_path_map;
+        Ok(())
+    }
+
+    pub async fn create_container(
+        &mut self,
+        id: String,
+        spec: Spec,
+        info: ContainerInfo,
+    ) -> CResult<()> {
+        let mut containers = self.containers.lock().await;
+        if containers.contains_key(&id) {
+            return Err(format!("container {} already exists", id.clone()));
+        }
+        let client = self.client.as_ref().unwrap();
+        let mut c: Container = Container::new(
+            self.id.clone(),
+            id.clone(),
+            spec,
+            client.clone(),
+            self.log.clone(),
+            self.conf.clone(),
+            info,
+            self.tx_containerd.clone(),
+            self.app_snapshot_create(),
+        )?;
+        c.create_container().await?;
+        containers.insert(id, c);
+
+        Ok(())
+    }
+
+    pub async fn start_container(&mut self, id: &String) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        let container = match containers.get_mut(id) {
+            Some(c) => c,
+            None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+        };
+        container
+            .start_container()
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn kill_container(&self, id: &String, exec_id: &String, sig: u32) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        let container = containers.get_mut(id);
+        if container.is_none() {
+            return Err(Error::NotFoundError(format!("not found container:{}", id)));
+        }
+
+        container.unwrap().signal_container(exec_id, sig).await
+    }
+
+    pub async fn close_io(&self, id: &String, exec_id: &String) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        let container = containers.get_mut(id);
+        if container.is_none() {
+            return Err(Error::NotFoundError(format!("not found container:{}", id)));
+        }
+
+        container.unwrap().close_io(exec_id).await
+    }
+
+    pub async fn delete_container(&mut self, id: &String) -> Result<(u32, DateTime<Utc>)> {
+        let mut container = {
+            let mut containers = self.containers.lock().await;
+            match containers.get_mut(id) {
+                Some(c) => c.clone(),
+                None => {
+                    let should_clean = id == &self.id && !self.conf.app_snapshot_create;
+                    drop(containers);
+                    if should_clean {
+                        crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
+                    }
+                    // Keep NotFound: cubelet already treats it as success on
+                    // destroy. Changing the RPC contract is out of scope.
+                    return Err(Error::NotFoundError(format!("not found container:{}", id)));
+                }
+            }
+        };
+        let (code, tm) = container
+            .destroy_container()
+            .await
+            .map_err(|e| Error::Other(format!("{}", e)))?;
+
+        {
+            let mut containers = self.containers.lock().await;
+            if containers.remove(id).is_none() {
+                warnf!(self.log, "remove container:{} failed from map", id);
+            }
+        }
+        // Live Task.Delete. Crash leftover is cleaned by the delete subcommand
+        // (`clean_sandbox_resource`). Pause-to-snapshot returns before here.
+        if id == &self.id && !self.conf.app_snapshot_create {
+            crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
+        }
+        Ok((code, tm))
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub async fn get_container_info(&self, id: &String, exec_id: &String) -> Result<ContainerInfo> {
+        let containers = self.containers.lock().await;
+        let ci = match containers.get(id) {
+            Some(c) => c.get_container_info(exec_id).await,
+            None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+        };
+        ci
+    }
+
+    async fn guest_container_id(&self, id: &str) -> Result<String> {
+        let containers = self.containers.lock().await;
+        containers
+            .get(id)
+            .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))
+            .map(Container::get_id)
+    }
+
+    pub async fn stats_container(&self, id: &str) -> Result<agent::StatsContainerResponse> {
+        let guest_container_id = self.guest_container_id(id).await?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Other("guest agent is not connected".to_string()))?
+            .lock()
+            .await;
+        let req = agent::StatsContainerRequest {
+            container_id: guest_container_id,
+            ..Default::default()
+        };
+
+        client
+            .stats_container(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| Error::Other(format!("StatsContainer failed for {}: {}", id, e)))
+    }
+
+    pub async fn wait_container(&self, id: &String, exec_id: &str) -> Result<(u32, DateTime<Utc>)> {
+        let mut cid = exec_id.to_owned();
+        if cid.is_empty() {
+            cid = id.clone();
+        }
+        let mut container = {
+            let mut containers = self.containers.lock().await;
+            match containers.get_mut(id) {
+                Some(c) => c.clone(),
+                None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+            }
+        };
+        container.wait_container(&cid).await
+    }
+
+    pub async fn exec_container(
+        &self,
+        id: &String,
+        exec_id: &String,
+        tty: Tty,
+        proc: Process,
+    ) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        if let Some(c) = containers.get_mut(id) {
+            return c
+                .create_exec(exec_id, tty, proc)
+                .await
+                .map_err(|e| Error::Other(e.to_string()));
+        }
+        Err(Error::NotFoundError(format!("not found container:{}", id)))
+    }
+
+    pub async fn start_exec(&self, id: &String, exec_id: &String) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        if let Some(c) = containers.get_mut(id) {
+            return c.start_exec(exec_id).await;
+        }
+        Err(Error::NotFoundError(format!("not found container:{}", id)))
+    }
+
+    pub async fn delete_exec(
+        &mut self,
+        id: &String,
+        exec_id: &String,
+    ) -> Result<(u32, DateTime<Utc>)> {
+        let mut containers = self.containers.lock().await;
+        if let Some(c) = containers.get_mut(id) {
+            return c
+                .destroy_exec(exec_id)
+                .await
+                .map_err(|e| Error::Other(e.to_string()));
+        }
+        Err(Error::NotFoundError(format!("not found container:{}", id)))
+    }
+    pub async fn update_container(&mut self, id: &String, res: &LinuxResources) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        if let Some(c) = containers.get_mut(id) {
+            return c.update(res).await.map_err(|e| Error::Other(e.to_string()));
+        }
+        Err(Error::NotFoundError(format!("not found container:{}", id)))
+    }
+
+    pub async fn update_sandbox(&mut self, annotation: &HashMap<String, String>) -> CResult<()> {
+        let ch = self.ch.as_ref().unwrap().lock().await;
+
+        //set fs
+        let anno = annotation.get(ANNO_VMM_FS);
+        if let Some(anno) = anno {
+            let fs = Utils::anno_to_obj::<Fs>(anno)?;
+
+            let mut fs_config = FsConfig {
+                id: Some(VIRTIO_FS_ID.to_string()),
+                tag: VIRTIO_FS_TAG.to_string(),
+                backendfs_config: fs.backendfs_config.clone(),
+                ..Default::default()
+            };
+            //shit:merge the two allow dirs
+            //todo:test
+            if fs_config.backendfs_config.is_some()
+                && fs_config
+                    .backendfs_config
+                    .as_ref()
+                    .unwrap()
+                    .allowed_dirs
+                    .is_none()
+            {
+                let mut merge = HashSet::new();
+                merge.extend(
+                    fs_config
+                        .backendfs_config
+                        .as_ref()
+                        .unwrap()
+                        .allowed_dirs
+                        .clone()
+                        .unwrap(),
+                );
+                if self.conf.fs.is_some()
+                    && self.conf.fs.as_mut().unwrap().backendfs_config.is_some()
+                    && self
+                        .conf
+                        .fs
+                        .as_mut()
+                        .unwrap()
+                        .backendfs_config
+                        .as_ref()
+                        .unwrap()
+                        .allowed_dirs
+                        .is_some()
+                {
+                    merge.extend(
+                        self.conf
+                            .fs
+                            .as_mut()
+                            .unwrap()
+                            .backendfs_config
+                            .as_ref()
+                            .unwrap()
+                            .allowed_dirs
+                            .clone()
+                            .unwrap(),
+                    );
+                }
+                fs_config.backendfs_config.as_mut().unwrap().allowed_dirs =
+                    Some(merge.into_iter().collect());
+            }
+            ch.set_fs(fs_config).await?;
+        }
+
+        //add disk
+        if let Some(anno) = annotation.get(device::ANNO_VFIO_DISK) {
+            let devs = Utils::anno_to_obj::<Vec<device::Device>>(anno)?;
+            for dev in &devs {
+                let config = DeviceConfig {
+                    path: PathBuf::from(dev.sysfs_dev.clone()),
+                    id: Some(dev.id.clone()),
+                    ..Default::default()
+                };
+                ch.add_dev(config).await?;
+            }
+        }
+
+        //remove disk
+        if let Some(anno) = annotation.get(device::ANNO_VFIO_DISK_RM) {
+            let devs = Utils::anno_to_obj::<Vec<device::Device>>(anno)?;
+            for dev in &devs {
+                let config = VmRemoveDeviceData { id: dev.id.clone() };
+                ch.remove_dev(config).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn add_device(&mut self) -> CResult<()> {
+        let ch = self.ch.as_mut().unwrap().lock().await;
+
+        for dev in &self.conf.vfio_nets {
+            let config = DeviceConfig {
+                path: PathBuf::from(dev.sysfs_dev.clone()),
+                id: Some(dev.id.clone()),
+                ..Default::default()
+            };
+            ch.add_dev(config).await?;
+        }
+
+        for dev in &mut self.conf.vfio_disks {
+            let config = DeviceConfig {
+                path: PathBuf::from(dev.sysfs_dev.clone()),
+                id: Some(dev.id.clone()),
+                ..Default::default()
+            };
+            dev.guest_pci = ch.add_dev(config).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn create_snapshot(
+        &self,
+        snapshot_path: &str,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        ch.pause_vm().await?;
+        ch.snapshot_vm(format!("file://{}", snapshot_path).as_str(), snapshot_type)
+            .await?;
+        ch.resume_vm().await
+    }
+
+    /// Capture a reusable snapshot while leaving this MicroVM frozen for
+    /// Cubelet's rootfs CoW snapshot. The shim retains a bounded recovery path
+    /// if Cubelet exits before sending SnapshotResume.
+    pub async fn capture_snapshot_frozen(
+        &mut self,
+        snapshot_id: &str,
+        spec_dir: &str,
+        memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
+        if snapshot_id.is_empty() || !std::path::Path::new(spec_dir).is_absolute() {
+            return Err("snapshot id and absolute destination are required".into());
+        }
+        if !self.normal().await
+            || matches!(
+                &*self.snapshot_frozen.lock().await,
+                SnapshotFreezeState::Frozen { .. }
+            )
+        {
+            return Err("sandbox is not available for snapshot capture".into());
+        }
+
+        let ch = self.ch.as_ref().ok_or("hypervisor is unavailable")?.clone();
+        *self.snapshot_frozen.lock().await = SnapshotFreezeState::Frozen {
+            id: snapshot_id.to_string(),
+            deadline: Instant::now() + Duration::from_secs(300),
+        };
+        self.arm_snapshot_recovery(snapshot_id, ch.clone());
+        if let Err(error) = ch.lock().await.pause_vm().await {
+            *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
+            return Err(error);
+        }
+
+        let mut snapshot_dir = PathBuf::from(spec_dir);
+        snapshot_dir.push("snapshot");
+        let capture_result: CResult<()> = async {
+            stdfs::create_dir_all(&snapshot_dir).map_err(|e| e.to_string())?;
+            let hypervisor = ch.lock().await;
+            hypervisor
+                .snapshot_vm_with_memory(
+                    &format!("file://{}", snapshot_dir.display()),
+                    memory_vol_url,
+                    snapshot_type,
+                )
+                .await?;
+            // The memory dump can outlast the initial lease. Extend it before
+            // releasing the hypervisor lock for metadata I/O.
+            if let SnapshotFreezeState::Frozen { id, deadline } =
+                &mut *self.snapshot_frozen.lock().await
+            {
+                if id == snapshot_id {
+                    *deadline = Instant::now() + Duration::from_secs(300);
+                }
+            }
+            drop(hypervisor);
+            self.store_pause_snapshot_metadata(spec_dir).await
+        }
+        .await;
+
+        if let Err(capture_error) = capture_result {
+            let resume_result = ch.lock().await.resume_vm().await;
+            match resume_result {
+                Ok(()) => {
+                    *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
+                    return Err(capture_error);
+                }
+                Err(resume_error) => {
+                    return Err(format!(
+                        "snapshot capture failed: {capture_error}; resume failed: {resume_error}"
+                    )
+                    .into());
+                }
+            }
+        }
+        self.renew_snapshot_frozen(snapshot_id).await?;
+        Ok(())
+    }
+
+    pub async fn renew_snapshot_frozen(&self, snapshot_id: &str) -> CResult<()> {
+        let mut frozen = self.snapshot_frozen.lock().await;
+        match &mut *frozen {
+            SnapshotFreezeState::Frozen { id, deadline } if id == snapshot_id => {
+                *deadline = Instant::now() + Duration::from_secs(30);
+                Ok(())
+            }
+            SnapshotFreezeState::Expired { id } if id == snapshot_id => {
+                Err("snapshot freeze lease expired; VM was automatically resumed".into())
+            }
+            _ => Err("snapshot is no longer frozen".into()),
+        }
+    }
+
+    fn arm_snapshot_recovery(&self, snapshot_id: &str, ch: Arc<Mutex<CH::CubeHypervisor>>) {
+        let marker = self.snapshot_frozen.clone();
+        let snapshot_id = snapshot_id.to_string();
+        let log = self.log.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut frozen = marker.lock().await;
+                match &*frozen {
+                    SnapshotFreezeState::Frozen { id, deadline } if id == &snapshot_id => {
+                        if Instant::now() < *deadline {
+                            continue;
+                        }
+                    }
+                    _ => return,
+                }
+                let Ok(hypervisor) = ch.try_lock() else {
+                    continue;
+                };
+                match hypervisor.resume_vm().await {
+                    Ok(()) => {
+                        *frozen = SnapshotFreezeState::Expired {
+                            id: snapshot_id.clone(),
+                        };
+                        warnf!(
+                            log,
+                            "snapshot {} auto-resumed after Cubelet did not resume it",
+                            snapshot_id
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        warnf!(
+                            log,
+                            "snapshot {} auto-resume failed: {}",
+                            snapshot_id,
+                            error
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    pub async fn resume_snapshot_frozen(&mut self, snapshot_id: &str) -> CResult<()> {
+        let mut frozen = self.snapshot_frozen.lock().await;
+        if !frozen.resume_needed(snapshot_id)? {
+            return Ok(());
+        }
+        self.ch
+            .as_ref()
+            .ok_or("hypervisor is unavailable")?
+            .lock()
+            .await
+            .resume_vm()
+            .await?;
+        *frozen = SnapshotFreezeState::Idle;
+        Ok(())
+    }
+
+    pub async fn snapshot_is_frozen(&self) -> bool {
+        matches!(
+            &*self.snapshot_frozen.lock().await,
+            SnapshotFreezeState::Frozen { .. }
+        )
+    }
+
+    pub async fn paused(&self) -> bool {
+        let state = self.state.lock().await;
+        *state == SandBoxState::Paused
+    }
+
+    pub async fn normal(&self) -> bool {
+        let state = self.state.lock().await;
+        *state == SandBoxState::Normal
+    }
+
+    pub async fn pause_vm(&mut self) -> CResult<()> {
+        // Legacy pausevm path removed; Pause must use PauseToSnapshot
+        // (pause_vm_to_snapshot with Cubelet-provided destination + memory vol).
+        Err("legacy pausevm is removed; use PauseToSnapshot".into())
+    }
+
+    /// Pause the MicroVM into a snapshot at `destination_path`.
+    ///
+    /// * `destination_path` – host **spec dir** (`…/<snapID>/<N>C<M>M[.tmp]`).
+    ///   Hypervisor config/state go under `destination_path/snapshot/`;
+    ///   `metadata.json` is written beside it — same layout as CommitSandbox
+    ///   so Resume can use `get_snapshot_dir(base, cpu, mem)`.
+    /// * `memory_vol_url` – optional CubeCow (or device) URL for memory ranges.
+    /// * `snapshot_type` – same Full / Incremental / SoftDirty choice as
+    ///   CommitSandbox (`--snapshot-type`).
+    ///
+    /// On success the MicroVM is deleted (`pause2snapshot`) and state stays
+    /// `Paused`. Cubelet then reaps this shim via task Delete. On failure after
+    /// entering pause, state becomes `Exited` (not left as misleading `Paused`).
+    pub async fn pause_vm_to_snapshot(
+        &mut self,
+        destination_path: &str,
+        memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
+        {
+            let mut state = self.state.lock().await;
+            if *state != SandBoxState::Normal {
+                return Err(format!("sandbox not running").into());
+            };
+
+            if self.pause_vm_forbidding().await {
+                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
+            }
+            *state = SandBoxState::Paused;
+        }
+
+        if let Err(e) = self
+            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
+            .await
+        {
+            // A failed pause leaves the sandbox unusable (no resume will
+            // follow), so run the full teardown.
+            let _ = self.disconnect_agent().await;
+            let mut state = self.state.lock().await;
+            *state = SandBoxState::Exited;
+            return Err(e);
+        }
+        self.stop_log_forward_detached().await;
+        // The connections only had to survive the freeze; the VM is gone now,
+        // so disarming the dead client restores the fast "not connected" guards.
+        self.client = None;
+        self.conn = None;
+        self.monitor_conn = None;
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.clear_client();
+        }
+        Ok(())
+    }
+
+    async fn pause_vm_to_snapshot_inner(
+        &mut self,
+        destination_path: &str,
+        memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
+        self.quiesce_agent_for_pause().await;
+
+        let ch = self.ch.as_mut().unwrap().lock().await;
+
+        let spec_dir = destination_path
+            .strip_prefix("file://")
+            .unwrap_or(destination_path);
+        recreate_dir(spec_dir, "mkdir pause snapshot spec dir failed")?;
+
+        let mut snapshot_dir = PathBuf::from(spec_dir);
+        snapshot_dir.push("snapshot");
+        stdfs::create_dir_all(&snapshot_dir).map_err(|e| {
+            format!(
+                "mkdir pause snapshot dir failed:{}:{}",
+                snapshot_dir.display(),
+                e
+            )
+        })?;
+
+        let destination_url = format!("file://{}", snapshot_dir.display());
+        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
+            .await?;
+
+        // vmshutdown event after pause2snapshot deletes the MicroVM
+        let _ = ch
+            .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
+            .await?;
+        drop(ch);
+
+        // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
+        // Guest container id (often tpl-*_0) must be preserved so Resume create
+        // matches the restored agent process table.
+        self.store_pause_snapshot_metadata(spec_dir).await?;
+
+        Ok(())
+    }
+
+    async fn store_pause_snapshot_metadata(&self, spec_dir: &str) -> CResult<()> {
+        let mut snap_info = SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
+        snap_info.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+        snap_info.set_agent_version(self.conf.agent_path.as_str())?;
+        snap_info.set_kernel_version(self.conf.kernel.as_str())?;
+        snap_info.set_disks(&self.conf.disk);
+        snap_info.set_pmems(&self.conf.pmem);
+        {
+            let containers = self.containers.lock().await;
+            if let Some(c) = containers.values().next() {
+                let guest_id = c.get_id();
+                if !guest_id.is_empty() {
+                    snap_info.app_snapshot_container_id = Some(guest_id);
+                }
+            }
+        }
+
+        let mut metadata = PathBuf::from(spec_dir);
+        metadata.push("metadata.json");
+        snap_info.store(metadata.as_path())
+    }
+
+    pub async fn resume_vm(&mut self) -> CResult<()> {
+        // Legacy pausevm resume removed; CoW pause resume is Master Create
+        // from the pause snapshot (not Task::Resume).
+        Err("legacy pausevm resume is removed".into())
+    }
+
+    /// Rollback: delete the current VM, then resume from a caller-supplied
+    /// snapshot. Uses `VmDelete` instead of a temporary checkpoint snapshot,
+    /// which avoids the I/O cost of writing VM memory to disk.
+    ///
+    /// If the target restore fails the VM is left deleted and the error is
+    /// returned to the caller (no fallback is possible without a checkpoint).
+    ///
+    /// * `target_config` – `RestoreConfig` pointing to the desired snapshot.
+    ///   `source_url` is mandatory; `disks`, `memory_vol_url`, etc. carry the
+    ///   new backend-file descriptors.
+    pub async fn rollback_vm(&mut self, target_config: RestoreConfig) -> CResult<()> {
+        if target_config.source_url.as_os_str().is_empty() {
+            return Err(format!("rollback restore_config.source_url is empty").into());
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            if *state != SandBoxState::Normal {
+                return Err(format!("sandbox not running, cannot rollback").into());
+            }
+            if self.pause_vm_forbidding().await {
+                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
+            }
+            *state = SandBoxState::Paused;
+        }
+
+        // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
+        // before we delete the VM out from under them.
+        self.disconnect_agent().await?;
+
+        // Delete the current VM in place of a checkpoint snapshot.
+        // VmDelete shuts the VM down and destroys its object; the VMM process
+        // stays alive and can immediately host the restored VM.
+        if let Err(e) = self.delete_vm().await {
+            let mut state = self.state.lock().await;
+            *state = SandBoxState::Normal;
+            return Err(e);
+        }
+
+        // VmDelete pushes a VmShutdown event into the hypervisor's event
+        // queue. The fresh monitor_vm spawned by resume_vm_with_config
+        // would otherwise consume that stale event on its first iteration
+        // and treat the freshly-restored VM as crashed: aborted=true →
+        // SandBoxState::Exited → notify_vm_shutdown to all containers,
+        // poisoning the next pause/resume request with "sandbox not in
+        // normal state". Drain everything left in the queue here.
+        if let Some(ch_arc) = self.ch.as_ref() {
+            let ch = ch_arc.lock().await;
+            while let Ok(ev) = ch.try_wait_notify() {
+                infof!(
+                    self.log,
+                    "rollback: drained stale hypervisor event {:?}",
+                    ev
+                );
+            }
+        }
+
+        self.resume_vm_with_config(Some(target_config)).await
+    }
+
+    async fn delete_vm(&mut self) -> CResult<()> {
+        let ch = self.ch.as_mut().unwrap().lock().await;
+        ch.delete_vm().await
+    }
+
+    async fn resume_vm_with_config(&mut self, config: Option<RestoreConfig>) -> CResult<()> {
+        {
+            let state = self.state.lock().await;
+            if *state != SandBoxState::Paused {
+                return Err(format!("sandbox not paused").into());
+            };
+        }
+        //resume vm
+        {
+            let ch = self.ch.as_mut().unwrap().lock().await;
+            match config {
+                Some(restore_config) => {
+                    ch.resume_vm_cube_with_config(restore_config).await?;
+                }
+                None => {
+                    return Err("legacy pausevm resume is removed; restore_config required".into());
+                }
+            }
+        }
+
+        self.connect_agent_with_retry(true).await?;
+
+        let client = self.client.as_ref().ok_or("client is None")?;
+
+        {
+            let mut containers = self.containers.lock().await;
+            for (_, c) in containers.iter_mut() {
+                c.set_client(client.clone()).await?;
+            }
+        }
+
+        let (sender, handle) = self.watch_oom().await?;
+        self.tx_oom_exited = Some(sender);
+        self.oom_handle = Some(Arc::new(handle));
+
+        //monitor guest
+        let (sender, handle) = self.monitor_vm(false).await?;
+        self.tx_monitor_exited = Some(sender);
+        self.monitor_handle = Some(Arc::new(handle));
+
+        {
+            let mut state = self.state.lock().await;
+            *state = SandBoxState::Normal;
+        }
+
+        Ok(())
+    }
+}
+
+fn recreate_dir(path: &str, context: &str) -> CResult<()> {
+    let _ = std::fs::remove_dir_all(path);
+    if let Err(e) = std::fs::create_dir_all(path) {
+        return Err(format!("{}:{}", context, e).into());
+    }
+    Ok(())
+}
+
+fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() {
+        return Err("dns entry is empty".to_string());
+    }
+
+    if let Some(ip) = trimmed.strip_prefix("nameserver ") {
+        let ip = ip.trim();
+        ip.parse::<IpAddr>()
+            .map_err(|_| format!("invalid dns ip {}", entry))?;
+        return Ok(format!("nameserver {}", ip));
+    }
+
+    // Pass through resolv.conf search/options lines from followNodeDns.
+    if let Some(rest) = trimmed.strip_prefix("search ") {
+        let domains: Vec<&str> = rest.split_whitespace().collect();
+        if domains.is_empty() {
+            return Err(format!("invalid dns search entry {}", entry));
+        }
+        return Ok(format!("search {}", domains.join(" ")));
+    }
+    if let Some(rest) = trimmed.strip_prefix("options ") {
+        let opts: Vec<&str> = rest.split_whitespace().collect();
+        if opts.is_empty() {
+            return Err(format!("invalid dns options entry {}", entry));
+        }
+        return Ok(format!("options {}", opts.join(" ")));
+    }
+
+    let ip = trimmed
+        .parse::<IpAddr>()
+        .map_err(|_| format!("invalid dns ip {}", entry))?;
+    Ok(format!("nameserver {}", ip))
+}
+
+#[cfg(test)]
+mod tests {
+    use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
+    use oci_spec::runtime::SpecBuilder;
+    use protobuf::MessageDyn;
+    use std::collections::{HashMap, HashSet};
+    use std::os::fd::IntoRawFd;
+    use std::sync::Arc;
+    use tokio::sync::mpsc::channel;
+    use tokio::sync::Mutex;
+
+    use crate::common::PRODUCT_CUBEBOX;
+    use crate::container::container_mgr::ContainerInfo;
+    use crate::container::{Container, ANNO_APP_SNAPSHOT_CONTAINER_ID};
+
+    use super::agent;
+    use super::agent_ttrpc;
+    use super::config;
+    use super::normalize_dns_for_agent;
+    use super::Log;
+    use super::SandBox;
+    use super::SnapshotFreezeState;
+
+    #[tokio::test]
+    async fn expired_snapshot_freeze_rejects_resume_and_renew() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        *sb.snapshot_frozen.lock().await = SnapshotFreezeState::Expired {
+            id: "snap-1".to_string(),
+        };
+
+        assert!(!sb.snapshot_is_frozen().await);
+        assert!(sb
+            .renew_snapshot_frozen("snap-1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("lease expired"));
+        assert!(sb
+            .resume_snapshot_frozen("snap-1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("lease expired"));
+        assert!(sb.resume_snapshot_frozen("snap-2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_prepare_resource() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), log, false, tx);
+        sb.conf.kernel = "ut_kernel".to_string();
+        sb.conf.vm_res.cpu = 999;
+        sb.conf.vm_res.memory = 999;
+        sb.conf.product = PRODUCT_CUBEBOX.to_string();
+        sb.conf.extra_kernel_params = vec![
+            "custom.param=42".to_string(),
+            "another.param=foo".to_string(),
+        ];
+
+        let vmconfig = sb.prepare_resource().await;
+        assert!(vmconfig.is_ok());
+        let vm_config = vmconfig.unwrap();
+
+        assert_eq!(vm_config.vcpus, 999);
+        assert_eq!(vm_config.memory_size, 999);
+        assert_eq!(vm_config.kernel, "ut_kernel".to_string());
+        assert!(vm_config.to_vm_config().balloon.is_some());
+        assert!(vm_config.cmdlines.contains(&"custom.param=42".to_string()));
+        assert!(vm_config
+            .cmdlines
+            .contains(&"another.param=foo".to_string()));
+
+        let mut set_expect: HashSet<String> = vec![
+            "highres=off",
+            "clocksource=kvm-clock",
+            "agent.unified_cgroup_hierarchy=true",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let set_unexpect: HashSet<String> = vec!["clocksource=tsc", "tsc=reliable"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for cmd in vm_config.cmdlines.iter() {
+            assert!(!set_unexpect.contains(cmd), "unexpect {} in cmdlines", cmd);
+            if set_expect.contains(cmd) {
+                set_expect.remove(cmd);
+            }
+        }
+        assert!(
+            set_expect.is_empty(),
+            "missing expected cmdlines: {:?}",
+            set_expect
+        );
+    }
+
+    #[test]
+    fn test_normalize_dns_for_agent_accepts_raw_ip() {
+        let got = normalize_dns_for_agent(" 119.29.29.29 ").unwrap();
+        assert_eq!(got, "nameserver 119.29.29.29");
+    }
+
+    #[test]
+    fn test_normalize_dns_for_agent_accepts_prefixed_entry() {
+        let got = normalize_dns_for_agent(" nameserver 8.8.8.8 ").unwrap();
+        assert_eq!(got, "nameserver 8.8.8.8");
+    }
+
+    #[tokio::test]
+    async fn guest_container_id_uses_restored_container_identity() {
+        let (client_fd, _peer_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .unwrap();
+        let client = ttrpc::r#async::Client::new(client_fd.into_raw_fd());
+        let agent_client = Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(client)));
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let spec = SpecBuilder::default()
+            .annotations(HashMap::from([(
+                ANNO_APP_SNAPSHOT_CONTAINER_ID.to_string(),
+                "guest-container".to_string(),
+            )]))
+            .build()
+            .unwrap();
+        let container = Container::new(
+            "sandbox".to_string(),
+            "real-task".to_string(),
+            spec,
+            agent_client,
+            Log::default(),
+            config::Config::default(),
+            ContainerInfo::default(),
+            tx.clone(),
+            false,
+        )
+        .unwrap();
+        let sandbox = SandBox::new("sandbox".to_string(), Log::default(), false, tx);
+        sandbox
+            .containers
+            .lock()
+            .await
+            .insert("real-task".to_string(), container);
+
+        assert_eq!(
+            sandbox.guest_container_id("real-task").await.unwrap(),
+            "guest-container"
+        );
+    }
+
+    #[test]
+    fn test_normalize_dns_for_agent_accepts_search_and_options() {
+        let got =
+            normalize_dns_for_agent(" search  default.svc.cluster.local   svc.cluster.local ")
+                .unwrap();
+        assert_eq!(got, "search default.svc.cluster.local svc.cluster.local");
+
+        let got = normalize_dns_for_agent(" options  ndots:5  timeout:2 ").unwrap();
+        assert_eq!(got, "options ndots:5 timeout:2");
+    }
+
+    fn sandbox_with_restore_annos(annos: HashMap<String, String>) -> SandBox {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        sb.spec = SpecBuilder::default().annotations(annos).build().unwrap();
+        sb.conf.app_snapshot_restore = true;
+        sb.conf.virtiofs = vec![config::VirtioFs {
+            id: "virtio_rw".to_string(),
+            propagation_mount_name: "virtio_rw".to_string(),
+            ..Default::default()
+        }];
+        sb
+    }
+
+    fn virtiofs_sources(storages: &[agent::Storage]) -> Vec<String> {
+        storages
+            .iter()
+            .filter(|s| s.driver == "virtio-fs")
+            .map(|s| s.source.clone())
+            .collect()
+    }
+
+    #[test]
+    fn guest_mount_restore_matches_pause_and_fromsnap() {
+        let pause = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_PAUSE_SNAPSHOT_ID.to_string(),
+            "snap-pause1".to_string(),
+        )]));
+        assert!(pause.pause_resume());
+        assert!(pause.guest_mount_restore());
+
+        let from_snap = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_RUNTIME_SNAPSHOT_ID.to_string(),
+            "snap-runtime1".to_string(),
+        )]));
+        assert!(!from_snap.pause_resume());
+        assert!(from_snap.from_snapshot());
+        assert!(from_snap.guest_mount_restore());
+
+        let from_tpl = sandbox_with_restore_annos(HashMap::new());
+        assert!(!from_tpl.pause_resume());
+        assert!(!from_tpl.from_snapshot());
+        assert!(!from_tpl.guest_mount_restore());
+    }
+
+    #[test]
+    fn get_storages_skips_virtiofs_on_memory_restore() {
+        let mut pause = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_PAUSE_SNAPSHOT_ID.to_string(),
+            "snap-pause1".to_string(),
+        )]));
+        assert!(
+            !virtiofs_sources(&pause.get_storages().unwrap()).contains(&"virtio_rw".to_string())
+        );
+
+        let mut from_snap = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_RUNTIME_SNAPSHOT_ID.to_string(),
+            "snap-runtime1".to_string(),
+        )]));
+        assert!(!virtiofs_sources(&from_snap.get_storages().unwrap())
+            .contains(&"virtio_rw".to_string()));
+
+        let mut from_tpl = sandbox_with_restore_annos(HashMap::new());
+        assert!(
+            virtiofs_sources(&from_tpl.get_storages().unwrap()).contains(&"virtio_rw".to_string())
+        );
+    }
+}

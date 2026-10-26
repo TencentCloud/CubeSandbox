@@ -1,0 +1,190 @@
+/* Blog index layout — single column.
+   Sizing and padding are handled by the parent VPDoc container
+   (sidebar: false, aside: false), so we only add vertical rhythm here. */
+.blog-index {
+  width: 100%;
+  padding-bottom: 64px;
+}
+
+/* VPDoc wraps blog index content in .vp-doc which applies heading/paragraph/
+   link styles. Override them so blog card elements are not affected. */
+.vp-doc .blog-card-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: normal;
+  border-top: none;
+  padding-top: 0;
+}
+
+.vp-doc .blog-card-meta,
+.vp-doc .blog-card-excerpt {
+  margin: 0 0 10px;
+}
+
+.vp-doc .blog-card-title a {
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.vp-doc .blog-card-title a:hover {
+  text-decoration: underline;
+}
+
+.vp-doc .blog-card-more {
+  font-weight: 400;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.vp-doc .blog-card-more:hover {
+  text-decoration: underline;
+}
+
+/* Cards */
+.blog-card {
+  padding: 18px 0 22px;
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.blog-card:last-child {
+  border-bottom: none;
+}
+
+
+.blog-card-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.blog-card-title a {
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.blog-card-title a:hover {
+  text-decoration: underline;
+}
+
+.blog-card-meta {
+  margin: 0 0 10px;
+  color: var(--vp-c-text-3);
+  font-size: 13px;
+}
+
+.blog-card-author {
+  color: var(--vp-c-text-2);
+}
+
+.blog-card-excerpt {
+  margin: 0 0 10px;
+  color: var(--vp-c-text-2);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.blog-card-more {
+  color: var(--vp-c-brand-1);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.blog-card-more:hover {
+  text-decoration: underline;
+}
+
+.blog-empty {
+  color: var(--vp-c-text-3);
+  padding: 48px 0;
+  text-align: center;
+}
+
+/* Badges */
+.blog-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  border-radius: 10px;
+  letter-spacing: 0.3px;
+}
+
+.blog-badge-featured {
+  color: #b6892b;
+  background: rgba(255, 196, 0, 0.12);
+  border: 1px solid rgba(255, 196, 0, 0.35);
+}
+
+.dark .blog-badge-featured {
+  color: #f3c969;
+  background: rgba(255, 196, 0, 0.15);
+  border-color: rgba(255, 196, 0, 0.4);
+}
+
+/* Single post meta line */
+.blog-post-meta {
+  margin: -8px 0 24px;
+  color: var(--vp-c-text-3);
+  font-size: 14px;
+}
+
+.blog-post-meta-author {
+  color: var(--vp-c-text-2);
+}
+
+/* Contribution CTA at the bottom of each blog post */
+.blog-contribute {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 40px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--vp-c-divider);
+  border-radius: 0 0 8px 8px;
+  background: var(--vp-c-bg-soft);
+  font-size: 14px;
+}
+
+.blog-contribute-text {
+  color: var(--vp-c-text-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.blog-contribute-link {
+  color: var(--vp-c-brand-1);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.blog-contribute-link:hover {
+  text-decoration: underline;
+}
+
+/* "Blog" badge on local search result entries whose href contains /blog/posts/ */
+.VPLocalSearchBox a.result[href*="/blog/posts/"] .titles::after {
+  content: "Blog";
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  border-radius: 10px;
+  letter-spacing: 0.3px;
+  color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 35%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}

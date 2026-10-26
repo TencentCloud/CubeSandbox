@@ -1,0 +1,104 @@
+name: Cloud Hypervisor Quality Checks
+on: [pull_request, create]
+
+jobs:
+  build:
+    if: github.event_name == 'pull_request'
+    name: Quality (clippy, rustfmt)
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - stable
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+        experimental: [false]
+        include:
+          - rust: beta
+            target: x86_64-unknown-linux-gnu
+            experimental: true
+          - rust: beta
+            target: aarch64-unknown-linux-gnu
+            experimental: true
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (${{ matrix.rust }})
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+          override: true
+          components: rustfmt, clippy
+
+      - name: Debug Check (default features)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: |
+          set -e
+          commits=$(git rev-list origin/${{ github.base_ref }}..${{ github.sha }})
+          for commit in $commits; do git checkout $commit; cargo check --tests --all --target=${{ matrix.target }}; done
+          git checkout ${{ github.sha }}
+
+      - name: Formatting (rustfmt)
+        run: cargo fmt -- --check
+
+      - name: Clippy (kvm)
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --no-default-features --tests --features "kvm" -- -D warnings
+
+      - name: Clippy (default features)
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --tests -- -D warnings
+
+      - name: Clippy (default features + guest_debug)
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --tests --features "guest_debug" -- -D warnings
+
+      - name: Clippy (default features + tracing)
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --tests --features "tracing" -- -D warnings
+
+      - name: Clippy (mshv)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --no-default-features --tests --features "mshv" -- -D warnings
+
+      - name: Clippy (mshv + kvm)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --no-default-features --tests --features "mshv,kvm" -- -D warnings
+
+      - name: Clippy (kvm + tdx)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: clippy
+          args: --locked --all --all-targets --no-default-features --tests --features "tdx,kvm" -- -D warnings
+
+      - name: Check build did not modify any files
+        run: test -z "$(git status --porcelain)"

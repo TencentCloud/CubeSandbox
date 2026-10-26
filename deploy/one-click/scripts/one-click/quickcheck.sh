@@ -1,0 +1,504 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+# Readiness budget for the post-start quickcheck. quickcheck runs immediately
+# after the units are (re)started -- e.g. install.sh's `systemctl enable --now
+# <target>` -- but systemd considers a service "started" as soon as its
+# ExecStart is launched: cubelet still needs a brief moment to bind its unix
+# socket (/data/cubelet/cubelet.sock) and serve its HTTP endpoints.
+# Probing exactly once therefore loses a startup race and returns a
+# false-negative install failure even though the node comes up healthy seconds
+# later.
+#
+# To remove that whole class of flakes for every caller (install.sh, smoke.sh,
+# deploy-manual.sh, up.sh, up-compute.sh), the probes are retried until they
+# pass or a single, shared wall-clock budget (QUICKCHECK_DEADLINE) is exhausted.
+# The budget is shared across all probes in one run -- not reset per probe -- so
+# the whole script is bounded by roughly CUBE_QUICKCHECK_READY_TIMEOUT seconds
+# regardless of how many probes run, and callers must not wrap quickcheck in
+# their own retry loop (that would multiply the budget on a genuinely broken
+# node). Set CUBE_QUICKCHECK_READY_TIMEOUT=0 to restore strict fail-fast (probe
+# exactly once) behaviour.
+#
+# The default is intentionally generous: the cold-start callers (install.sh,
+# smoke.sh, deploy-manual.sh) invoke quickcheck right after (re)starting the
+# units with no prior readiness wait, so the budget must cover the cumulative
+# time for units to activate, sockets to bind, health endpoints to serve, and
+# (on compute) the node to register with a remote cubemaster.
+QUICKCHECK_READY_TIMEOUT_DEFAULT=120
+QUICKCHECK_READY_INTERVAL_DEFAULT=2
+# Upper clamp so a typo/overflow cannot turn the budget into an effectively
+# infinite wait.
+QUICKCHECK_READY_TIMEOUT_MAX=3600
+# Per-request curl bounds so a black-holed endpoint (host up, port dropping
+# SYNs) cannot block a probe far past the readiness budget.
+QUICKCHECK_CURL_CONNECT_TIMEOUT=5
+QUICKCHECK_CURL_MAX_TIME=10
+# Per-call bound for `docker inspect` so a wedged docker daemon cannot block a
+# container probe indefinitely. Unlike curl, `docker inspect` has no built-in
+# request timeout, and the shared deadline is only re-checked between iterations,
+# so an unbounded inspect call could hang the whole run past QUICKCHECK_DEADLINE.
+QUICKCHECK_DOCKER_TIMEOUT=10
+# Cap the buffered node-registration response (it is a small JSON document).
+QUICKCHECK_CURL_MAX_FILESIZE=1048576
+
+# Normalise CUBE_QUICKCHECK_READY_TIMEOUT / _INTERVAL into validated integers and
+# compute the single shared deadline. Numeric values are forced to base 10 so a
+# leading-zero value (e.g. "08") is not mis-parsed as octal and aborted under
+# `set -e`. Invalid values fall back to the defaults with a warning so an
+# operator typo is visible instead of silently ignored.
+quickcheck_init_budget() {
+  local raw_timeout="${CUBE_QUICKCHECK_READY_TIMEOUT:-${QUICKCHECK_READY_TIMEOUT_DEFAULT}}"
+  local raw_interval="${CUBE_QUICKCHECK_READY_INTERVAL:-${QUICKCHECK_READY_INTERVAL_DEFAULT}}"
+  local timeout interval
+
+  QUICKCHECK_READY_TIMEOUT="$(quickcheck_sanitize_seconds \
+    "${raw_timeout}" "CUBE_QUICKCHECK_READY_TIMEOUT" "${QUICKCHECK_READY_TIMEOUT_DEFAULT}" 0)"
+  QUICKCHECK_READY_INTERVAL="$(quickcheck_sanitize_seconds \
+    "${raw_interval}" "CUBE_QUICKCHECK_READY_INTERVAL" "${QUICKCHECK_READY_INTERVAL_DEFAULT}" 1)"
+  timeout="${QUICKCHECK_READY_TIMEOUT}"
+  interval="${QUICKCHECK_READY_INTERVAL}"
+
+  # Never sleep past the overall budget.
+  if (( timeout > 0 && interval > timeout )); then
+    QUICKCHECK_READY_INTERVAL="${timeout}"
+  fi
+
+  QUICKCHECK_DEADLINE=$(( $(date +%s) + QUICKCHECK_READY_TIMEOUT ))
+}
+
+# Normalise a seconds value from operator-controlled env into a validated base-10
+# integer in [min, QUICKCHECK_READY_TIMEOUT_MAX], falling back to a default with a
+# warning. The `^[0-9]{1,7}$` pattern rejects empty / non-numeric / overflowing
+# (>7 digit) input in one shot, which both prevents an octal abort under `set -e`
+# (leading zeros via $((10#...))) and keeps the conversion well within int64 so it
+# cannot wrap into a negative/garbage budget. Echoes the sanitized integer.
+quickcheck_sanitize_seconds() {
+  local raw="$1"
+  local name="$2"
+  local default="$3"
+  local min="$4"
+  local value
+
+  if [[ "${raw}" =~ ^[0-9]{1,7}$ ]]; then
+    value=$((10#${raw}))
+  else
+    log "ignoring invalid ${name}='${raw}'; using default ${default}s"
+    value="${default}"
+  fi
+  if (( value < min )); then
+    log "ignoring out-of-range ${name}='${raw}'; using default ${default}s"
+    value="${default}"
+  fi
+  if (( value > QUICKCHECK_READY_TIMEOUT_MAX )); then
+    log "clamping ${name}='${raw}' to ${QUICKCHECK_READY_TIMEOUT_MAX}s"
+    value="${QUICKCHECK_READY_TIMEOUT_MAX}"
+  fi
+  printf '%s\n' "${value}"
+}
+
+# Retry an arbitrary predicate command until it succeeds or the shared readiness
+# budget is exhausted, then die with a descriptive message. The predicate must
+# return a status (it must NOT call die itself), so transient failures can be
+# retried.
+wait_until() {
+  local desc="$1"
+  shift
+  while :; do
+    if "$@"; then
+      return 0
+    fi
+    if (( $(date +%s) >= QUICKCHECK_DEADLINE )); then
+      die "${desc} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
+    fi
+    # A sleep interrupted by a signal exits non-zero; tolerate it so `set -e`
+    # does not abort with a generic "sleep: interrupted" instead of the
+    # descriptive readiness failure the next deadline check would report.
+    sleep "${QUICKCHECK_READY_INTERVAL}" || true
+  done
+}
+
+# control.target only Wants= cube-proxy, so a failed child does not fail
+# `enable --now`. If the unit is already failed (e.g. admin-port bind), die
+# immediately instead of burning the readiness budget.
+check_unit_active() {
+  local unit="$1"
+  local state now remaining delay
+  while :; do
+    state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+    case "${state}" in
+      active|reloading)
+        return 0
+        ;;
+      failed)
+        systemctl status --no-pager --lines=0 "${unit}" >&2 || true
+        die "systemd unit failed: ${unit}"
+        ;;
+    esac
+    now="$(date +%s)"
+    if (( now >= QUICKCHECK_DEADLINE )); then
+      die "expected systemd unit not active: ${unit} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
+    fi
+    remaining=$((QUICKCHECK_DEADLINE - now))
+    delay="${QUICKCHECK_READY_INTERVAL}"
+    if (( delay > remaining )); then
+      delay="${remaining}"
+    fi
+    sleep "${delay}" || true
+  done
+}
+
+# s3lvol_recovery_verify_ok: the authoritative layout check for the s3lvol
+# data plane. rcow_recovery.sh --verify-only never starts or attaches
+# anything -- it only reports -- and exits non-zero when the target is not
+# running, a replay plan is pending, or the active registry does not match
+# the attached namespaces. Retried like every other probe so a unit that is
+# still settling after (re)start is not a false negative.
+s3lvol_recovery_verify_ok() {
+  "${TOOLBOX_ROOT}/CubeS3lvol/scripts/rcow_recovery.sh" --verify-only \
+    >/dev/null 2>&1
+}
+
+http_ok() {
+  curl -fsS \
+    --connect-timeout "${QUICKCHECK_CURL_CONNECT_TIMEOUT}" \
+    --max-time "${QUICKCHECK_CURL_MAX_TIME}" \
+    "$1" >/dev/null 2>&1
+}
+
+check_http() {
+  local url="$1"
+  wait_until "endpoint not healthy: ${url}" http_ok "${url}"
+}
+
+validate_http_url() {
+  local url="$1"
+  local name="$2"
+  [[ "${url}" =~ ^https?://[^[:space:]/?#]+(:[0-9]{1,5})?(/[^[:space:]]*)?$ ]] \
+    || die "${name} must be an http(s) URL without whitespace: ${url}"
+}
+
+check_socket() {
+  local path="$1"
+  wait_until "expected socket not ready: ${path}" test -S "${path}"
+}
+
+check_file() {
+  local path="$1"
+  local desc="${2:-expected file not ready: ${path}}"
+  wait_until "${desc}" test -f "${path}"
+}
+
+check_executable() {
+  local path="$1"
+  wait_until "expected executable not ready: ${path}" test -x "${path}"
+}
+
+# Read a container's effective status: its healthcheck status when a healthcheck
+# is defined, otherwise its lifecycle status. Bounded by QUICKCHECK_DOCKER_TIMEOUT
+# via `timeout` when available so a wedged docker daemon cannot hang the probe
+# past the shared deadline (which is only re-checked between iterations). Echoes
+# the status string (empty on any failure); never dies, so callers can retry.
+quickcheck_container_status() {
+  local container="$1"
+  local fmt='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'
+  # `timeout` can only bound an external binary, not a shell function, and
+  # functions are not inherited by this standalone script in production -- so a
+  # `docker` function only exists when the tests stub it. Skip the wrapper in
+  # that case so the stub is still invoked; in production docker is the external
+  # binary and gets the bound. `-k 5` forces SIGKILL if a wedged inspect ignores
+  # the initial SIGTERM. `--` stops a `-`-leading container-name override from
+  # being parsed as a docker option.
+  if ! declare -F docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    timeout -k 5 "${QUICKCHECK_DOCKER_TIMEOUT}" docker inspect --format "${fmt}" -- "${container}" 2>/dev/null || true
+  else
+    docker inspect --format "${fmt}" -- "${container}" 2>/dev/null || true
+  fi
+}
+
+check_container_ready() {
+  local container="$1"
+  # The per-container budget defaults to the overall readiness budget so a
+  # slow-but-healthy container (e.g. first-boot MySQL initialising its data dir)
+  # is not failed early just because the per-container default was lower than the
+  # generous overall budget. Set CUBE_QUICKCHECK_CONTAINER_TIMEOUT lower to fail a
+  # wedged container sooner; it is capped by the shared QUICKCHECK_DEADLINE below
+  # either way.
+  local container_timeout
+  container_timeout="$(quickcheck_sanitize_seconds \
+    "${CUBE_QUICKCHECK_CONTAINER_TIMEOUT:-${QUICKCHECK_READY_TIMEOUT}}" \
+    "CUBE_QUICKCHECK_CONTAINER_TIMEOUT" "${QUICKCHECK_READY_TIMEOUT}" 0)"
+  local start now status
+  # Measure the per-container budget as wall-clock elapsed (not a sleep-interval
+  # accumulator): each probe can spend up to QUICKCHECK_DOCKER_TIMEOUT inside
+  # `docker inspect`, so counting only the interval would let a slow daemon blow
+  # well past CUBE_QUICKCHECK_CONTAINER_TIMEOUT before it trips.
+  start="$(date +%s)"
+  while :; do
+    status="$(quickcheck_container_status "${container}")"
+    case "${status}" in
+      healthy|running)
+        return 0
+        ;;
+      # Transient startup states (including an empty status, when the container
+      # has been launched but not yet created): keep waiting until a budget is
+      # exhausted, like every other probe.
+      starting|created|restarting|"")
+        ;;
+      *)
+        die "container is not ready: ${container} (status=${status:-unknown})"
+        ;;
+    esac
+    # Bounded by the per-container budget AND the shared overall deadline, so a
+    # wedged container fails fast without letting container checks blow past the
+    # whole-run budget. Attribute the failure to whichever bound tripped.
+    now="$(date +%s)"
+    if (( now - start >= container_timeout )); then
+      die "container is not ready within ${container_timeout}s: ${container} (status=${status:-unknown})"
+    fi
+    if (( now >= QUICKCHECK_DEADLINE )); then
+      die "container is not ready within the ${QUICKCHECK_READY_TIMEOUT}s overall quickcheck budget: ${container} (status=${status:-unknown})"
+    fi
+    # Tolerate a signal-interrupted sleep so `set -e` does not abort here; the
+    # next iteration's deadline check reports the descriptive failure instead.
+    sleep "${QUICKCHECK_READY_INTERVAL}" || true
+  done
+}
+
+check_bind_mount_source_file() {
+  local path="$1"
+  check_file "${path}" "expected bind mount source file not ready: ${path}"
+}
+
+# Wait for the node to register with CubeOps. A dedicated loop (rather than
+# the generic wait_until) so the final failure preserves the distinction between
+# "could not reach CubeOps" and "registered but missing IP", which is
+# the difference between a connectivity problem and a cubelet/identity problem.
+# Once CubeOps has been reached at least once the more diagnostic
+# "missing IP" reason is kept sticky, so a momentary connectivity blip on
+# the final attempt does not mask the real (registration) problem.
+check_node_registration() {
+  local node_id="$1"
+  local ops_addr="$2"
+  local registration
+  local reached=0
+  local last_reason="failed to query CubeOps node registration for ${node_id}"
+  while :; do
+    if registration="$(curl -fsS \
+        --connect-timeout "${QUICKCHECK_CURL_CONNECT_TIMEOUT}" \
+        --max-time "${QUICKCHECK_CURL_MAX_TIME}" \
+        --max-filesize "${QUICKCHECK_CURL_MAX_FILESIZE}" \
+        "http://${ops_addr}/internal/v1/nodes/${node_id}" 2>/dev/null)"; then
+      if grep -Fq "\"IP\":\"${node_id}\"" <<<"${registration}"; then
+        return 0
+      fi
+      if grep -Fq '"IP":"' <<<"${registration}"; then
+        reached=1
+        last_reason="CubeOps node registration missing IP=${node_id}"
+      elif (( reached == 0 )); then
+        last_reason="CubeOps node registration response missing IP field for ${node_id}"
+      fi
+    elif (( reached == 0 )); then
+      last_reason="failed to query CubeOps node registration for ${node_id}"
+    fi
+    if (( $(date +%s) >= QUICKCHECK_DEADLINE )); then
+      die "${last_reason} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
+    fi
+    # Tolerate a signal-interrupted sleep so `set -e` does not abort here; the
+    # next iteration's deadline check reports the descriptive failure instead.
+    sleep "${QUICKCHECK_READY_INTERVAL}" || true
+  done
+}
+
+quickcheck_main() {
+  require_cmd systemctl
+  require_cmd curl
+  require_cmd grep
+
+  local MASTER_ADDR
+  MASTER_ADDR="$(resolve_control_plane_cubemaster_addr)"
+  local CUBELET_EGRESS_DUMP_URL="${CUBELET_EGRESS_DUMP_URL:-http://127.0.0.1:9998/v1/policies/dump}"
+  local CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
+  local CUBE_OPS_HEALTH_ADDR="${CUBE_OPS_HEALTH_ADDR:-127.0.0.1:3010}"
+  local ROLE
+  ROLE="$(one_click_deploy_role)"
+  local NODE_ID="${CUBE_SANDBOX_NODE_IP:-}"
+
+  # CubeOps address for node-registration check (compute role only). Control
+  # nodes hit the local cube-ops via CUBE_OPS_HEALTH_ADDR instead.
+  local OPS_ADDR=""
+  if [[ "${ROLE}" == "compute" ]]; then
+    OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
+  fi
+
+  # When external MySQL/PostgreSQL/Redis is configured the local container +
+  # systemd unit do not exist, so the corresponding checks must be skipped.
+  local EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+  local EXTERNAL_POSTGRES_HOST="${CUBE_EXTERNAL_POSTGRES_HOST:-}"
+  local EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+  local EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
+  local SKIP_LOCAL_MYSQL=0
+  if [[ -n "${EXTERNAL_MYSQL_HOST}" || -n "${EXTERNAL_POSTGRES_HOST}" ]]; then
+    SKIP_LOCAL_MYSQL=1
+  fi
+
+  # Validate the host:port / IP values before they are interpolated into curl
+  # URLs and grep patterns. resolve_control_plane_cubemaster_addr already
+  # validates the compute-role address, but the control-plane default and the
+  # health-endpoint overrides reach curl unchecked otherwise.
+  validate_host_port "${MASTER_ADDR}" "cubemaster address"
+  validate_http_url "${CUBELET_EGRESS_DUMP_URL}" "CUBELET_EGRESS_DUMP_URL"
+  if [[ "${ROLE}" == "compute" ]]; then
+    validate_host_port "${OPS_ADDR}" "cubeops address"
+  fi
+  if [[ "${ROLE}" != "compute" ]]; then
+    validate_host_port "${CUBE_API_HEALTH_ADDR}" "CUBE_API_HEALTH_ADDR"
+    validate_host_port "${CUBE_OPS_HEALTH_ADDR}" "CUBE_OPS_HEALTH_ADDR"
+  fi
+
+  quickcheck_init_budget
+
+  echo "[quickcheck] role=${ROLE}"
+  echo "[quickcheck] cubemaster=${MASTER_ADDR}"
+  echo "[quickcheck] cubelet-egress-dump=${CUBELET_EGRESS_DUMP_URL}"
+  if [[ "${ROLE}" == "compute" ]]; then
+    echo "[quickcheck] cubeops=${OPS_ADDR}"
+  fi
+  if [[ "${ROLE}" != "compute" ]]; then
+    echo "[quickcheck] cube-api-health=${CUBE_API_HEALTH_ADDR}"
+    echo "[quickcheck] cubeops-health=${CUBE_OPS_HEALTH_ADDR}"
+  fi
+
+  echo "[quickcheck] check systemd units"
+  check_unit_active cube-sandbox-cubelet.service
+  # CubeS3lvol (s3lvol) is role-agnostic: either deployment role may flip
+  # ONE_CLICK_ENABLE_S3LVOL=1. When enabled, the unit must be active AND
+  # the data-plane layout must be consistent (rcow_recovery.sh --verify-only
+  # is the authoritative check: target running + no pending replay + active
+  # registry matches attached namespaces).
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" \
+        && -x "${TOOLBOX_ROOT}/CubeS3lvol/scripts/rcow_recovery.sh" ]]; then
+    echo "[quickcheck] check cube-sandbox-s3lvol.service + data-plane layout"
+    check_unit_active cube-sandbox-s3lvol.service
+    wait_until "s3lvol data-plane layout mismatch (rcow_recovery.sh --verify-only failed)" \
+      s3lvol_recovery_verify_ok
+  fi
+  if [[ "${ROLE}" != "compute" ]]; then
+    if [[ "${SKIP_LOCAL_MYSQL}" -eq 1 ]]; then
+      if [[ -n "${EXTERNAL_POSTGRES_HOST}" ]]; then
+        echo "[quickcheck] external PostgreSQL (${EXTERNAL_POSTGRES_HOST}); skipping local mysql unit check"
+      else
+        echo "[quickcheck] external MySQL (${EXTERNAL_MYSQL_HOST}); skipping local mysql unit check"
+      fi
+    else
+      check_unit_active cube-sandbox-mysql.service
+    fi
+    if [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+      if [[ -n "${EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+        echo "[quickcheck] external Redis Sentinel (${EXTERNAL_REDIS_MASTER_NAME}); skipping local redis unit check"
+      else
+        echo "[quickcheck] external Redis (${EXTERNAL_REDIS_HOST}); skipping local redis unit check"
+      fi
+    else
+      check_unit_active cube-sandbox-redis.service
+    fi
+    if [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" != "1" ]]; then
+      echo "[quickcheck] bundled MinIO disabled (CUBE_SANDBOX_MINIO_ENABLED=${CUBE_SANDBOX_MINIO_ENABLED:-1}); skipping local minio unit check"
+    else
+      check_unit_active cube-sandbox-minio.service
+    fi
+    check_unit_active cube-sandbox-cubemaster.service
+    # CubeTemplateCenter is mandatory exactly like cubemaster: CubeMaster has
+    # no in-process build fallback, so an inactive/missing TC unit must fail
+    # the quickcheck here rather than surface later as builds dialing a dead
+    # :8090.
+    check_unit_active cube-sandbox-cube-templatecenter.service
+    check_unit_active cube-sandbox-cube-api.service
+    check_unit_active cube-sandbox-cubeops.service
+    check_unit_active cube-sandbox-cube-proxy.service
+    check_unit_active cube-sandbox-coredns.service
+    check_unit_active cube-sandbox-dns.service
+    if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
+      check_unit_active cube-sandbox-webui.service
+    fi
+  fi
+
+  if command -v docker >/dev/null 2>&1 && [[ "${ROLE}" != "compute" ]]; then
+    echo "[quickcheck] check container runtime state"
+    [[ "${SKIP_LOCAL_MYSQL}" -eq 1 ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
+    [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+    [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" == "1" ]] && check_container_ready "${CUBE_SANDBOX_MINIO_CONTAINER:-cube-sandbox-minio}"
+    check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
+    check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
+    if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
+      check_container_ready "${WEB_UI_CONTAINER_NAME:-cube-webui}"
+    fi
+  fi
+
+  echo "[quickcheck] 1/4 check Cubelet embedded network runtime egress dump"
+  check_http "${CUBELET_EGRESS_DUMP_URL}"
+
+  echo "[quickcheck] 2/4 check cubemaster /notify/health"
+  check_http "http://${MASTER_ADDR}/notify/health"
+
+  # TC's /health, probed exactly like cubemaster's above: every
+  # template-from-image build is forwarded to CUBE_TEMPLATE_CENTER_ADDR, so
+  # the endpoint the master dials must answer. Runs on the control plane only
+  # (the unit check above already covers the service state there).
+  if [[ "${ROLE}" != "compute" ]]; then
+    local TC_ADDR="${CUBE_TEMPLATE_CENTER_ADDR:-http://127.0.0.1:8090}"
+    validate_http_url "${TC_ADDR%/}/health" "CUBE_TEMPLATE_CENTER_ADDR"
+    echo "[quickcheck] check cube-templatecenter /health"
+    check_http "${TC_ADDR%/}/health"
+  fi
+
+  if [[ "${ROLE}" == "compute" ]]; then
+    [[ -n "${NODE_ID}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute quickcheck"
+    validate_ipv4_literal "${NODE_ID}" "CUBE_SANDBOX_NODE_IP"
+    echo "[quickcheck] 3/4 check CubeOps node registration"
+    check_node_registration "${NODE_ID}" "${OPS_ADDR}"
+
+    echo "[quickcheck] 4/4 check essential sockets and runtime assets"
+    check_socket "/data/cubelet/cubelet.sock"
+    check_file "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
+    check_file "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
+    check_file "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml"
+    check_file "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux"
+    check_file "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"
+    check_file "${TOOLBOX_ROOT}/cube-agent/cube-agent.ext4"
+  else
+    echo "[quickcheck] 3/5 check cube-api /health"
+    check_http "http://${CUBE_API_HEALTH_ADDR}/health"
+
+    echo "[quickcheck] 4/5 check cubeops /health"
+    check_http "http://${CUBE_OPS_HEALTH_ADDR}/health"
+
+    echo "[quickcheck] 5/5 check essential sockets and config"
+    check_socket "/data/cubelet/cubelet.sock"
+    check_executable "${TOOLBOX_ROOT}/CubeAPI/bin/cube-api"
+    check_executable "${TOOLBOX_ROOT}/CubeOps/bin/cubeops"
+    check_file "${TOOLBOX_ROOT}/CubeMaster/conf.yaml"
+    check_file "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
+    check_file "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
+    check_file "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml"
+    check_bind_mount_source_file "${TOOLBOX_ROOT}/cubeproxy/global.conf"
+    check_bind_mount_source_file "${TOOLBOX_ROOT}/cubeproxy/nginx.conf"
+    check_bind_mount_source_file "${TOOLBOX_ROOT}/coredns/Corefile"
+    check_bind_mount_source_file "${TOOLBOX_ROOT}/coredns/resolv.conf.upstream"
+    if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
+      check_bind_mount_source_file "${TOOLBOX_ROOT}/webui/nginx.generated.conf"
+    fi
+  fi
+
+  echo "[quickcheck] OK"
+}
+
+# Allow tests to source this file for its helper functions without executing the
+# probe sequence; only run when invoked directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  quickcheck_main "$@"
+fi

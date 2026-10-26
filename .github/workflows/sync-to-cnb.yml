@@ -1,0 +1,352 @@
+name: Sync to CNB.cool
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - '*'
+  release:
+    types: [published, edited]
+  workflow_run:
+    workflows:
+      - "Release One-Click Bundle"
+      - "Release Kernel Assets"
+      - "Release Guest Image"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag name to sync from GitHub Release to CNB Release
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  GH_REPO: ${{ github.repository }}
+  CNB_DOMAIN: cnb.cool
+  CNB_API_ENDPOINT: https://api.cnb.cool
+  CNB_WEB_ENDPOINT: https://cnb.cool
+  CNB_REPO_SLUG: CubeSandbox/CubeSandbox
+  CNB_GIT_TARGET_URL: https://cnb.cool/CubeSandbox/CubeSandbox.git
+
+jobs:
+  sync_repo:
+    if: github.repository == 'TencentCloud/CubeSandbox' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sync-to-cnb-repo-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync to CNB Repository
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:${{ github.workspace }} \
+            -w ${{ github.workspace }} \
+            -e PLUGIN_TARGET_URL="${{ env.CNB_GIT_TARGET_URL }}" \
+            -e PLUGIN_AUTH_TYPE="https" \
+            -e PLUGIN_USERNAME="cnb" \
+            -e PLUGIN_PASSWORD="${{ secrets.CNB_GIT_PASSWORD }}" \
+            -e PLUGIN_FORCE="true" \
+            -e PLUGIN_PUSH_TAGS="true" \
+            tencentcom/git-sync
+
+  resolve_release_context:
+    if: github.repository == 'TencentCloud/CubeSandbox' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      should_ensure_release: ${{ steps.resolve.outputs.should_ensure_release }}
+      should_sync_assets: ${{ steps.resolve.outputs.should_sync_assets }}
+    steps:
+      - name: Checkout repository for workflow_run tag resolution
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          set -euo pipefail
+
+          release_tag=""
+          should_ensure_release="false"
+          should_sync_assets="false"
+
+          case "${GITHUB_EVENT_NAME}" in
+            release)
+              release_tag="${RELEASE_EVENT_TAG}"
+              should_ensure_release="true"
+              should_sync_assets="true"
+              ;;
+            workflow_dispatch)
+              release_tag="${DISPATCH_TAG}"
+              should_ensure_release="true"
+              should_sync_assets="true"
+              ;;
+            workflow_run)
+              case "${WORKFLOW_RUN_NAME}" in
+                "Release One-Click Bundle"|"Release Kernel Assets"|"Release Guest Image")
+                  ;;
+                *)
+                  echo "Skipping unrelated workflow_run: ${WORKFLOW_RUN_NAME}"
+                  WORKFLOW_RUN_CONCLUSION="skipped"
+                  ;;
+              esac
+              if [[ "${WORKFLOW_RUN_CONCLUSION}" == "skipped" ]]; then
+                :
+              elif [[ "${WORKFLOW_RUN_CONCLUSION}" != "success" ]]; then
+                echo "Skipping unsuccessful workflow_run: ${WORKFLOW_RUN_CONCLUSION}"
+              else
+                if [[ -n "${WORKFLOW_RUN_HEAD_BRANCH}" ]] && git rev-parse -q --verify "refs/tags/${WORKFLOW_RUN_HEAD_BRANCH}" >/dev/null 2>&1; then
+                  release_tag="${WORKFLOW_RUN_HEAD_BRANCH}"
+                elif [[ -n "${WORKFLOW_RUN_HEAD_SHA}" ]]; then
+                  mapfile -t candidate_tags < <(git tag --points-at "${WORKFLOW_RUN_HEAD_SHA}")
+                  release_tags=()
+
+                  for candidate in "${candidate_tags[@]}"; do
+                    if gh release view "${candidate}" >/dev/null 2>&1; then
+                      release_tags+=("${candidate}")
+                    fi
+                  done
+
+                  if [[ "${#release_tags[@]}" -eq 1 ]]; then
+                    release_tag="${release_tags[0]}"
+                  elif [[ "${#candidate_tags[@]}" -eq 1 ]]; then
+                    release_tag="${candidate_tags[0]}"
+                  else
+                    echo "Unable to uniquely resolve the release tag for workflow_run head SHA ${WORKFLOW_RUN_HEAD_SHA}." >&2
+                    if [[ "${#candidate_tags[@]}" -gt 0 ]]; then
+                      printf 'Candidate tags: %s\n' "${candidate_tags[*]}" >&2
+                    else
+                      echo "No tags point at ${WORKFLOW_RUN_HEAD_SHA}." >&2
+                    fi
+                    exit 1
+                  fi
+                fi
+
+                if [[ -n "${release_tag}" ]]; then
+                  should_ensure_release="true"
+                  should_sync_assets="true"
+                fi
+              fi
+              ;;
+          esac
+
+          if [[ "${should_ensure_release}" == "true" ]] && [[ -z "${release_tag}" ]]; then
+            echo "Release tag is required for ${GITHUB_EVENT_NAME}." >&2
+            exit 1
+          fi
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "should_ensure_release=${should_ensure_release}"
+            echo "should_sync_assets=${should_sync_assets}"
+          } >> "${GITHUB_OUTPUT}"
+
+  ensure_cnb_release:
+    if: needs.resolve_release_context.outputs.should_ensure_release == 'true'
+    needs: resolve_release_context
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sync-to-cnb-release-${{ needs.resolve_release_context.outputs.release_tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Wait for tag to appear in CNB mirror
+        env:
+          RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..30}; do
+            if git ls-remote --exit-code --tags "${CNB_GIT_TARGET_URL}" "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+              echo "Resolved tag ${RELEASE_TAG} in CNB mirror."
+              exit 0
+            fi
+
+            echo "Waiting for tag ${RELEASE_TAG} to reach CNB mirror (${attempt}/30)..."
+            sleep 10
+          done
+
+          echo "Timed out waiting for tag ${RELEASE_TAG} to appear in CNB mirror." >&2
+          exit 1
+
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
+        run: gh release view "${RELEASE_TAG}" --json tagName,name,body,isDraft,isPrerelease >/dev/null
+
+      - name: Create CNB release if missing
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_GIT_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          : "${CNB_TOKEN:?CNB_TOKEN secret is required}"
+
+          release_json="$(gh release view "${RELEASE_TAG}" --json tagName,name,body,isDraft,isPrerelease)"
+          release_name="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("name") or data["tagName"])' <<<"${release_json}")"
+          release_body="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("body") or "", end="")' <<<"${release_json}")"
+          release_is_prerelease="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print("true" if data.get("isPrerelease") else "false")' <<<"${release_json}")"
+
+          if docker run --rm \
+            -e CNB_TOKEN="${CNB_TOKEN}" \
+            -e CNB_API_ENDPOINT="${CNB_API_ENDPOINT}" \
+            -e CNB_WEB_ENDPOINT="${CNB_WEB_ENDPOINT}" \
+            docker.cnb.cool/looc/git-cnb:latest \
+            git-cnb --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}" release get -t "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "CNB release ${RELEASE_TAG} already exists; keeping existing metadata."
+            exit 0
+          fi
+
+          cmd=(
+            docker run --rm
+            -e CNB_TOKEN="${CNB_TOKEN}"
+            -e CNB_API_ENDPOINT="${CNB_API_ENDPOINT}"
+            -e CNB_WEB_ENDPOINT="${CNB_WEB_ENDPOINT}"
+            docker.cnb.cool/looc/git-cnb:latest
+            git-cnb --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}"
+            release create
+            -t "${RELEASE_TAG}"
+            -n "${release_name}"
+          )
+
+          if [[ -n "${release_body}" ]]; then
+            cmd+=(-b "${release_body}")
+          fi
+
+          if [[ "${release_is_prerelease}" == "true" ]]; then
+            cmd+=(--prerelease)
+          fi
+
+          "${cmd[@]}"
+
+  sync_release_assets:
+    if: needs.resolve_release_context.outputs.should_sync_assets == 'true'
+    needs: [resolve_release_context, ensure_cnb_release]
+    # Run attachment transfers from China to avoid slow GitHub-hosted US -> CNB uploads.
+    # This ARC runner set requires a job container.
+    runs-on: arc-2c4g-ctd-gz
+    container:
+      image: ubuntu:24.04
+    # Job containers default to `sh` (dash); pipefail / [[ ]] / arrays need bash.
+    defaults:
+      run:
+        shell: bash
+    concurrency:
+      group: sync-to-cnb-release-${{ needs.resolve_release_context.outputs.release_tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # Official archive/security HTTP is currently unreachable; this job
+          # runs on a Tencent Cloud GZ runner, so use Tencent Cloud mirrors.
+          # Plain HTTP: the job container ships no CA bundle, so apt cannot
+          # verify the mirror's TLS certificate and cannot install
+          # ca-certificates to fix that.
+          mirror="http://mirrors.tencent.com"
+          shopt -s nullglob
+          for src in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            sed -i \
+              -e "s|http://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              -e "s|https://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              "${src}"
+          done
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gh python3
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Inspect GitHub release assets
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh release view "${RELEASE_TAG}" --json assets)"
+          asset_count="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(len(data.get("assets", [])))' <<<"${release_json}")"
+
+          echo "asset_count=${asset_count}" >> "${GITHUB_OUTPUT}"
+          if [[ "${asset_count}" == "0" ]]; then
+            echo "GitHub release ${RELEASE_TAG} has no assets yet; nothing to sync."
+          fi
+
+      - name: Install git-cnb
+        if: steps.assets.outputs.asset_count != '0'
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "${arch}" in
+            x86_64|amd64) git_cnb_arch=amd64 ;;
+            aarch64|arm64) git_cnb_arch=arm64 ;;
+            *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;;
+          esac
+
+          bin_dir="${RUNNER_TEMP}/git-cnb-bin"
+          mkdir -p "${bin_dir}"
+          curl -fsSL \
+            "https://cnb.cool/looc/git-cnb/-/releases/latest/download/git-cnb_linux_${git_cnb_arch}" \
+            -o "${bin_dir}/git-cnb"
+          chmod +x "${bin_dir}/git-cnb"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          # This job has no checkout; git-cnb auto-detects repo from cwd and
+          # fails with "repo is required" unless --repo is provided explicitly.
+          "${bin_dir}/git-cnb" --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}" version
+
+      - name: Download GitHub release assets
+        if: steps.assets.outputs.asset_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          rm -rf github-release-assets
+          mkdir -p github-release-assets
+          gh release download "${RELEASE_TAG}" --dir github-release-assets --pattern "*"
+
+      - name: Upload GitHub release assets to CNB
+        if: steps.assets.outputs.asset_count != '0'
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_GIT_PASSWORD }}
+          RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          : "${CNB_TOKEN:?CNB_TOKEN secret is required}"
+
+          shopt -s nullglob
+          files=(github-release-assets/*)
+
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "GitHub release ${RELEASE_TAG} reported assets, but none were downloaded." >&2
+            exit 1
+          fi
+
+          for file in "${files[@]}"; do
+            echo "Uploading $(basename "${file}") to CNB release ${RELEASE_TAG}..."
+            git-cnb --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}" \
+              release asset-upload -t "${RELEASE_TAG}" -f "${file}"
+          done

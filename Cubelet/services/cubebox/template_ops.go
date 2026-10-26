@@ -1,0 +1,961 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package cubebox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+)
+
+func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxRequest) (*cubebox.CommitSandboxResponse, error) {
+	rsp := &cubebox.CommitSandboxResponse{
+		RequestID:  req.GetRequestID(),
+		SandboxID:  req.GetSandboxID(),
+		TemplateID: strings.TrimSpace(req.GetTemplateID()),
+		Ret:        &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+	}
+	if rsp.TemplateID == "" {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = "templateID is required"
+		return rsp, nil
+	}
+	if err := pathutil.ValidateSafeID(rsp.TemplateID); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = fmt.Sprintf("invalid templateID: %v", err)
+		return rsp, nil
+	}
+	if rsp.SandboxID == "" {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = "sandboxID is required"
+		return rsp, nil
+	}
+	defer s.holdProbes(rsp.SandboxID)()
+
+	rt := &CubeLog.RequestTrace{
+		Action:       "CommitSandbox",
+		RequestID:    req.GetRequestID(),
+		Caller:       constants.CubeboxServiceID.ID(),
+		Callee:       s.engine.ID(),
+		CalleeAction: "CommitSandbox",
+	}
+	ctx = CubeLog.WithRequestTrace(ctx, rt)
+	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
+		"step":       "commitSandbox",
+		"templateID": rsp.TemplateID,
+		"sandboxID":  rsp.SandboxID,
+	})
+
+	defer recov.HandleCrash(func(panicError interface{}) {
+		stepLog.Fatalf("CommitSandbox panic info:%s, stack:%s", panicError, string(debug.Stack()))
+		rsp.Ret.RetMsg = string(debug.Stack())
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+	})
+
+	if !storage.IsCowBackend() {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = "CommitSandbox requires storage_backend=cubecow"
+		return rsp, nil
+	}
+	backend, err := resolveRequestStorageBackend(req.GetBackend())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
+
+	unlock := s.sandboxLifecycleLocks.Lock(rsp.SandboxID)
+	defer unlock()
+
+	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, rsp.SandboxID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("sandbox is not found: %v", err)
+		return rsp, nil
+	}
+	rootVolumeName, err := validateCommitSandboxTarget(cb)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+
+	spec, err := s.getCubeboxSnapshotSpec(ctx, rsp.SandboxID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to get cubebox spec: %v", err)
+		return rsp, nil
+	}
+
+	var resourceSpec ResourceSpec
+	if err := json.Unmarshal(spec.Resource, &resourceSpec); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to parse resource spec: %v", err)
+		return rsp, nil
+	}
+	if resourceSpec.CPU <= 0 || resourceSpec.Memory <= 0 {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = fmt.Sprintf("invalid resource spec: cpu=%d, memory=%d", resourceSpec.CPU, resourceSpec.Memory)
+		return rsp, nil
+	}
+
+	specDir := fmt.Sprintf("%dC%dM", resourceSpec.CPU, resourceSpec.Memory)
+	layout, err := prepareSnapshotWorkLayout(backend, storage.SnapshotKindNormal, rsp.TemplateID, req.GetSnapshotDir(), specDir)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshot path: %v", err)
+		return rsp, nil
+	}
+	snapshotPath := layout.Home
+	rsp.SnapshotPath = snapshotPath
+	tmpSnapshotPath := layout.TmpHome
+	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
+
+	sourceRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, rsp.SandboxID, rootVolumeName)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
+		return rsp, nil
+	}
+	// Reject existing packages before preparing writable memory or metadata.
+	if err := checkCommitSnapshotDestination(ctx, backend, rsp.TemplateID, storage.InspectObjectsFor); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		}
+		rsp.Ret.RetMsg = fmt.Sprintf("snapshot destination unavailable: %v", err)
+		return rsp, nil
+	}
+	var rootfsObject *storage.CowSnapshotObject
+	// Resolve / build the memory artifact:
+	//   - if the sandbox is bound to a previous snapshot whose memory blob
+	//     can be resolved, reflink-clone that blob and ask the shim for
+	//     a soft-dirty per-cycle delta;
+	//   - otherwise (lineage broken: missing/purged catalog or upstream
+	//     volume gone) create a fresh empty volume and fall back to a full
+	//     snapshot.
+	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend)
+	if err != nil {
+		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			rsp.Ret.RetMsg = fmt.Sprintf("template memory object already exists: %v", err)
+			return rsp, nil
+		}
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to prepare memory artifact for snapshot: %v", err)
+		return rsp, nil
+	}
+	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+
+	cleanupArtifacts := func() {
+		layout.releaseMetadata(ctx)
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
+	}
+
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
+		return rsp, nil
+	}
+	// CommitSandbox snapshots a running sandbox whose memory artifact has
+	// just been prepared above. snapshotTypeForCmd carries the right type
+	// for the path we took: soft-dirty when reflink-cloning a base, or full
+	// when degrading because no base could be resolved. AppSnapshot keeps
+	// using the default full type via its own call site.
+	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
+	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
+	defer frozenCancel()
+	var bindingErr error
+	var snapshotErr, rootfsErr, resumeErr error
+	shimCapability := resolveShimSnapshotCapability(cb)
+
+	// The legacy sequence: commit rootfs first, then capture memory, which is
+	// v0.7.1 behaviour for this entry point and deliberately differs from
+	// AppSnapshot's order. Used both as the ordinary path for a shim below the
+	// coordinated boundary and as the one-shot retry described below.
+	runLegacy := func() (snapshotErr, rootfsErr error) {
+		rootfsErr, snapshotErr = runLegacySnapshot(
+			func() (err error) {
+				rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+				return err
+			},
+			func() error {
+				return captureLegacyCommitMemory(cb, rsp.TemplateID, func() error {
+					// Legacy cube-runtime clears soft-dirty state as soon as
+					// memory capture succeeds. Durably invalidate the old
+					// baseline before starting so metadata-fixup failures
+					// force the next commit to take a full snapshot.
+					bindingErr = persistRuntimeSnapshotBinding(
+						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+					)
+					return bindingErr
+				}, func() error {
+					return s.captureLegacyMemory(
+						frozenCtx, cb, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd,
+					)
+				})
+			},
+		)
+		return snapshotErr, rootfsErr
+	}
+
+	if shimCapability.Coordinated {
+		captureStarted := false
+		var freezeLease *snapshotFreezeLease
+		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
+			// Invalidate only once memory capture is about to start.
+			previousLabels := copyCubeBoxLabels(cb)
+			bindingErr = persistRuntimeSnapshotBinding(
+				frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+			)
+			if bindingErr != nil {
+				return bindingErr
+			}
+			captureStarted = true
+			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, rsp.TemplateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd)
+			if shimSnapshotUnsupported(captureErr) {
+				captureStarted = false
+				// A mislabeled shim rejected the action before touching the VM,
+				// so its previous incremental baseline is still valid.
+				restoreCubeBoxLabels(cb, previousLabels)
+				if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
+					setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
+					return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+				}
+			}
+			if captureErr == nil {
+				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, rsp.TemplateID, frozenCancel)
+			}
+			return snapshotCaptureError(captureErr)
+		}, func() error {
+			rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+			if err != nil {
+				return err
+			}
+			return frozenCtx.Err()
+		}, func() error {
+			var leaseErr error
+			if freezeLease != nil {
+				leaseErr = freezeLease.Stop()
+			}
+			if !captureStarted {
+				return leaseErr
+			}
+			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+			defer cancel()
+			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, rsp.TemplateID))
+		})
+		// A shim whose recorded pin is at or above the boundary but which rejects
+		// the action means the version gate guessed wrong about it. The shim
+		// rejects an unknown action at update_route's match arm, before entering
+		// any handler (CubeShim/shim/src/service/update_ext.rs), so the VM was
+		// never frozen and no artifact was committed -- the whole transaction can
+		// safely be redone on the legacy path, which also preserves this entry
+		// point's rootfs-then-memory order. The legacy path never re-enters the
+		// coordinated one, so this retries at most once.
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+			logShimDegradedToLegacy(stepLog, shimCapability.Version)
+			snapshotErr, rootfsErr = runLegacy()
+		}
+	} else {
+		logSnapshotPathSelection(stepLog, shimCapability)
+		snapshotErr, rootfsErr = runLegacy()
+	}
+	if snapshotErr != nil {
+		if resumeErr != nil {
+			stepLog.Warnf("best-effort resume after snapshot failure failed: %v", resumeErr)
+		}
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		if errors.Is(snapshotErr, errSnapshotShimIncompatible) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		}
+		if bindingErr != nil {
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist runtime snapshot binding: %v", bindingErr)
+		} else {
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to capture sandbox snapshot: %v", snapshotErr)
+		}
+		return rsp, nil
+	}
+
+	if rootfsErr != nil {
+		cleanupArtifacts()
+		if errors.Is(rootfsErr, storage.ErrCowObjectAlreadyExists) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		} else {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		}
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create rootfs snapshot: %v", rootfsErr)
+		if resumeErr != nil {
+			rsp.Ret.RetMsg += fmt.Sprintf("; additionally failed to resume sandbox: %v", resumeErr)
+		}
+		return rsp, nil
+	}
+	if resumeErr != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to resume sandbox after snapshot: %v", resumeErr)
+		return rsp, nil
+	}
+	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
+	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
+		return rsp, nil
+	}
+	if layout.usesTmpRename() {
+		// NOCC:Path Traversal()
+		if err := os.RemoveAll(snapshotPath); err != nil {
+			stepLog.Warnf("failed to remove existing snapshot path: %v", err)
+		}
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+			cleanupArtifacts()
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+			return rsp, nil
+		}
+	}
+	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
+		cleanupArtifacts()
+		if layout.usesTmpRename() {
+			_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		}
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
+		return rsp, nil
+	}
+	rsp.RootfsVol = rootfsObject.Name
+	rsp.MemoryVol = memoryObject.Name
+	rsp.RootfsKind = rootfsObject.Kind
+	rsp.MemoryKind = memoryObject.Kind
+	rsp.RootfsDev = rootfsObject.DevPath
+	rsp.MemoryDev = memoryObject.DevPath
+	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
+	// Capture first so the Commit RPC response matches catalog ComponentVersions
+	// (pinned sandbox versions), not whatever is currently in the live toolbox.
+	CaptureForCubeBox(cb)
+	versions := guestEnvironmentVersionsFromCubeBox(cb)
+	rsp.GuestImageVersion = versions.GuestImage
+	rsp.AgentVersion = versions.Agent
+	rsp.KernelVersion = versions.Kernel
+	rsp.ShimVersion = versions.Shim
+	// The template's envd version is propagated on Create and retained in the
+	// CubeBox annotations. Reuse it here instead of synchronously entering the
+	// guest after every snapshot; legacy templates without the annotation keep
+	// the previous best-effort behavior of returning an empty version.
+	rsp.EnvdVersion = envdVersionFromCubeBox(cb)
+	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+		SnapshotID:        rsp.TemplateID,
+		InstanceType:      "cubebox",
+		SpecDir:           specDir,
+		SnapshotPath:      layout.Home,
+		MetaDir:           layout.MetaDir,
+		RootfsVol:         rootfsObject.Name,
+		RootfsKind:        rootfsObject.Kind,
+		MemoryVol:         memoryObject.Name,
+		MemoryKind:        memoryObject.Kind,
+		MetadataVol:       storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
+		MetadataKind:      storage.S3MetadataCatalogKind(backend),
+		RootfsSizeBytes:   rootfsObject.SizeBytes,
+		ComponentVersions: cloneStringMap(cb.ComponentVersions),
+		Kind:              storage.CatalogKindRuntimeSnapshot,
+		Backend:           backend,
+	}); err != nil {
+		// Catalog write failures do not invalidate the snapshot: master will
+		// still receive the physical references in the response and rollback
+		// path keeps the legacy fallback. Log loudly so operators notice
+		// drift between master and cubelet local view.
+		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
+	}
+	// S3: seal memory／metadata work volumes to RO snapshots, then Upload.
+	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, rsp.TemplateID); err != nil {
+		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
+	}
+	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
+		rsp.RemoteUuids = raw
+	}
+	// Publish the completed package and component versions together. On a
+	// sync failure the baseline remains invalid, so future commits degrade
+	// safely. The completed snapshot still succeeds and remains managed by
+	// Master; publishing the incremental baseline is only an optimization.
+	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+	defer publishCancel()
+	if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID, time.Now().UTC()); err != nil {
+		stepLog.Warnf("snapshot %s completed but baseline/component version sync failed; future commits will use a safe fallback: %v", rsp.TemplateID, err)
+	}
+	stepLog.Infof("CommitSandbox completed successfully: snapshotPath=%s", snapshotPath)
+	return rsp, nil
+}
+
+func validateCommitSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
+	return validateSnapshotSandboxTarget(cb, true /* validateHostDeps */)
+}
+
+// validatePauseSandboxTarget is the Pause/CoW gate: running + writable rootfs.
+// Unlike CommitSandbox, host-mount / host_dir / sandbox_path / plugin_volume
+// binds are allowed — Cubelet re-binds the same host path on Resume (same sandboxID).
+func validatePauseSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
+	return validateSnapshotSandboxTarget(cb, false /* validateHostDeps */)
+}
+
+func validateSnapshotSandboxTarget(cb *cubeboxstore.CubeBox, validateHostDeps bool) (string, error) {
+	if cb == nil {
+		return "", errors.New("sandbox is not found")
+	}
+	if cb.GetStatus() == nil || cb.GetStatus().Get().State() != cubebox.ContainerState_CONTAINER_RUNNING {
+		return "", fmt.Errorf("sandbox %s is not running", cb.ID)
+	}
+	if validateHostDeps {
+		rawHostMounts, err := declaredRawHostMounts(cb.Annotations)
+		if err != nil {
+			return "", err
+		}
+		// The main container is created from the sandbox request and must carry
+		// every declared host mount. Runtime-created auxiliary containers may
+		// omit them, but any host mounts they do carry are still validated below.
+		mainContainer := cb.FirstContainer()
+		for _, container := range cb.AllContainers() {
+			if container == nil {
+				continue
+			}
+			if err := validateRawHostPathVolumes(container.Config, rawHostMounts, container == mainContainer); err != nil {
+				return "", err
+			}
+		}
+		if err := validateCommitVolumeSources(cb, rawHostMounts); err != nil {
+			return "", err
+		}
+	}
+	rootVolumeName := ""
+	for _, container := range cb.AllContainers() {
+		if container == nil || container.Config == nil {
+			continue
+		}
+		for _, mount := range container.Config.GetVolumeMounts() {
+			if mount == nil || mount.GetContainerPath() != "/" {
+				continue
+			}
+			if rootVolumeName != "" && rootVolumeName != mount.GetName() {
+				return "", fmt.Errorf("multiple rootfs volume mounts found: %s and %s", rootVolumeName, mount.GetName())
+			}
+			rootVolumeName = mount.GetName()
+		}
+	}
+	if rootVolumeName == "" {
+		return "", fmt.Errorf("sandbox %s has no writable rootfs volume mount", cb.ID)
+	}
+	return rootVolumeName, nil
+}
+
+func validateCommitVolumeSources(cb *cubeboxstore.CubeBox, rawHostMounts map[string]rawHostMountDeclaration) error {
+	if cb == nil {
+		return nil
+	}
+	pluginVolumes, err := declaredPluginVolumes(cb.Annotations)
+	if err != nil {
+		return err
+	}
+	if err := validateDeclaredRawHostDirVolumes(cb.Volumes, rawHostMounts); err != nil {
+		return err
+	}
+	if len(cb.Volumes) == 0 {
+		for _, container := range cb.AllContainers() {
+			if container == nil || container.Config == nil {
+				continue
+			}
+			for _, mount := range container.Config.GetVolumeMounts() {
+				if mount != nil && mount.GetContainerPath() != "/" {
+					return fmt.Errorf("sandbox %s has volume mounts without persisted volume sources; CommitSandbox cannot verify host dependencies", cb.ID)
+				}
+			}
+		}
+		return nil
+	}
+	usedVolumes := map[string]struct{}{}
+	for _, container := range cb.AllContainers() {
+		if container == nil || container.Config == nil {
+			continue
+		}
+		for _, mount := range container.Config.GetVolumeMounts() {
+			if mount == nil || mount.GetName() == "" {
+				continue
+			}
+			usedVolumes[mount.GetName()] = struct{}{}
+		}
+	}
+	for _, volume := range cb.Volumes {
+		if volume == nil || volume.GetName() == "" {
+			continue
+		}
+		if _, ok := usedVolumes[volume.GetName()]; !ok {
+			continue
+		}
+		source := volume.GetVolumeSource()
+		if source == nil {
+			return fmt.Errorf("volume %s has no persisted source", volume.GetName())
+		}
+		if plugin := source.GetPluginVolume(); plugin != nil {
+			if strings.TrimSpace(plugin.GetDriver()) == "" {
+				return fmt.Errorf("plugin_volume %s has an empty driver", volume.GetName())
+			}
+			if declaredDriver, ok := pluginVolumes[volume.GetName()]; ok && declaredDriver != plugin.GetDriver() {
+				return fmt.Errorf("plugin_volume %s driver does not match runtime metadata", volume.GetName())
+			}
+			continue
+		}
+		if hostDirs := source.GetHostDirVolumes(); hostDirs != nil {
+			if _, ok := rawHostMounts[volume.GetName()]; ok {
+				continue
+			}
+			for _, hostDir := range hostDirs.GetVolumeSources() {
+				if hostDir != nil && hostDir.GetHostPath() != "" {
+					return fmt.Errorf("host_dir volume %s is not supported by CommitSandbox", volume.GetName())
+				}
+			}
+		}
+		if sandboxPath := source.GetSandboxPath(); sandboxPath != nil {
+			switch sandboxPath.GetType() {
+			case cubebox.SandboxPathType_Directory.String(), cubebox.SandboxPathType_SharedBindMount.String():
+				return fmt.Errorf("sandbox_path volume %s with type %s is not supported by CommitSandbox", volume.GetName(), sandboxPath.GetType())
+			}
+		}
+		if emptyVolumeSource(source) {
+			if _, ok := pluginVolumes[volume.GetName()]; !ok {
+				return fmt.Errorf("volume %s has an unknown empty source", volume.GetName())
+			}
+		}
+	}
+	volumeNames := make(map[string]int, len(cb.Volumes))
+	for _, volume := range cb.Volumes {
+		if volume != nil && volume.GetName() != "" {
+			volumeNames[volume.GetName()]++
+		}
+	}
+	for name := range pluginVolumes {
+		if _, ok := usedVolumes[name]; !ok {
+			return fmt.Errorf("plugin_volume %s is declared but not mounted", name)
+		}
+		if volumeNames[name] != 1 {
+			return fmt.Errorf("plugin_volume %s must have exactly one volume declaration", name)
+		}
+	}
+	return nil
+}
+
+func emptyVolumeSource(source *cubebox.VolumeSource) bool {
+	return source != nil &&
+		source.GetEmptyDir() == nil &&
+		source.GetSandboxPath() == nil &&
+		source.GetHostDirVolumes() == nil &&
+		source.GetImage() == nil &&
+		source.GetPluginVolume() == nil
+}
+
+func validateDeclaredRawHostDirVolumes(volumes []*cubebox.Volume, declarations map[string]rawHostMountDeclaration) error {
+	counts := make(map[string]int, len(declarations))
+	for _, volume := range volumes {
+		if volume == nil {
+			continue
+		}
+		declaration, ok := declarations[volume.GetName()]
+		if !ok {
+			continue
+		}
+		counts[volume.GetName()]++
+		if counts[volume.GetName()] > 1 {
+			return fmt.Errorf("raw host-mount volume %s is duplicated", volume.GetName())
+		}
+		hostDirs := volume.GetVolumeSource().GetHostDirVolumes()
+		sources := hostDirs.GetVolumeSources()
+		if len(sources) != 1 || sources[0] == nil ||
+			sources[0].GetName() != volume.GetName() ||
+			filepath.Clean(sources[0].GetHostPath()) != declaration.HostPath {
+			return fmt.Errorf("host_dir volume %s does not match raw host-mount metadata", volume.GetName())
+		}
+	}
+	for name := range declarations {
+		if counts[name] != 1 {
+			return fmt.Errorf("raw host-mount volume %s is missing", name)
+		}
+	}
+	return nil
+}
+
+func declaredPluginVolumes(annotations map[string]string) (map[string]string, error) {
+	result := make(map[string]string)
+	if annotations == nil {
+		return result, nil
+	}
+	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
+	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
+		return result, nil
+	}
+	var entries []struct {
+		Name   string `json:"name"`
+		Driver string `json:"driver"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("invalid plugin-volume-sources annotation: %w", err)
+	}
+	for i, entry := range entries {
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.Driver = strings.TrimSpace(entry.Driver)
+		if entry.Name == "" || entry.Driver == "" {
+			return nil, fmt.Errorf("plugin-volume-sources entry %d requires name and driver", i)
+		}
+		if _, ok := result[entry.Name]; ok {
+			return nil, fmt.Errorf("plugin_volume %s is duplicated in runtime metadata", entry.Name)
+		}
+		result[entry.Name] = entry.Driver
+	}
+	return result, nil
+}
+
+type rawHostMountDeclaration struct {
+	HostPath  string `json:"hostPath"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
+func declaredRawHostMounts(annotations map[string]string) (map[string]rawHostMountDeclaration, error) {
+	result := make(map[string]rawHostMountDeclaration)
+	raw := strings.TrimSpace(annotations["host-mount"])
+	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
+		return result, nil
+	}
+	var declarations []rawHostMountDeclaration
+	if err := json.Unmarshal([]byte(raw), &declarations); err != nil {
+		return nil, fmt.Errorf("invalid host-mount annotation: %w", err)
+	}
+	for i, declaration := range declarations {
+		declaration.HostPath = filepath.Clean(declaration.HostPath)
+		declaration.MountPath = filepath.Clean(declaration.MountPath)
+		if !filepath.IsAbs(declaration.HostPath) || !filepath.IsAbs(declaration.MountPath) {
+			return nil, fmt.Errorf("host-mount entry %d must use absolute hostPath and mountPath", i)
+		}
+		result[fmt.Sprintf("hostdir-%d", i)] = declaration
+	}
+	return result, nil
+}
+
+func validateRawHostPathVolumes(config *cubebox.ContainerConfig, declarations map[string]rawHostMountDeclaration, requireDeclared bool) error {
+	if config == nil {
+		if requireDeclared && len(declarations) != 0 {
+			return errors.New("container config is missing declared raw host-mount volume mounts")
+		}
+		return nil
+	}
+	counts := make(map[string]int, len(declarations))
+	for _, mount := range config.GetVolumeMounts() {
+		if mount == nil {
+			continue
+		}
+		declaration, ok := declarations[mount.GetName()]
+		if !ok {
+			if mount.GetHostPath() != "" {
+				return fmt.Errorf("hostPath volume mount %s is not declared by raw host-mount metadata", mount.GetName())
+			}
+			continue
+		}
+		counts[mount.GetName()]++
+		if counts[mount.GetName()] > 1 {
+			return fmt.Errorf("raw host-mount volume mount %s is duplicated", mount.GetName())
+		}
+		if mount.GetHostPath() == "" {
+			return fmt.Errorf("raw host-mount volume mount %s has no hostPath", mount.GetName())
+		}
+		if filepath.Clean(mount.GetHostPath()) != declaration.HostPath ||
+			filepath.Clean(mount.GetContainerPath()) != declaration.MountPath ||
+			mount.GetReadonly() != declaration.ReadOnly {
+			return fmt.Errorf("hostPath volume mount %s does not match raw host-mount metadata", mount.GetName())
+		}
+	}
+	// Only the main container must contain every declaration. Auxiliary
+	// containers are allowed to use none or a subset of the sandbox mounts.
+	if requireDeclared {
+		for name := range declarations {
+			if counts[name] != 1 {
+				return fmt.Errorf("raw host-mount volume mount %s is missing", name)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
+	return s.cleanupTemplate(ctx, req, true)
+}
+
+// Test hooks so cleanupTemplate keep vs delete can run without cubecow.
+var (
+	getLocalSnapshotForFn      = storage.GetLocalSnapshotFor
+	cleanupIsCowBackend        = storage.IsCowBackend
+	cleanupReleaseS3Metadata   = storage.ReleaseS3MetadataVolume
+	cleanupObjectsFor          = storage.CleanupObjectsFor
+	cleanupTemplateLocalDataFn = storage.CleanupTemplateLocalData
+)
+
+// cleanupTemplate removes a catalog package. honorLivePauseKeep is true for
+// the Master RPC: Resume still needs the pause catalog (XFS mmap, S3
+// Snapshot last-restore), so a Cleanup of that snap while a live sandbox
+// holds cube.master.pause.snapshot.id is a successful no-op. Cubelet's own
+// next-Pause / Destroy GC passes false.
+func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTemplateRequest, honorLivePauseKeep bool) (*cubebox.CleanupTemplateResponse, error) {
+	rsp := &cubebox.CleanupTemplateResponse{
+		RequestID:  req.GetRequestID(),
+		TemplateID: strings.TrimSpace(req.GetTemplateID()),
+		Ret:        &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+	}
+	if rsp.TemplateID == "" {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = "templateID is required"
+		return rsp, nil
+	}
+	if err := pathutil.ValidateSafeID(rsp.TemplateID); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = fmt.Sprintf("invalid templateID: %v", err)
+		return rsp, nil
+	}
+	// snapshot_path is deprecated as of v4: cubelet resolves it from local
+	// catalog. We still validate it for backward compatibility so old masters
+	// can keep talking to new cubelets during a coordinated upgrade.
+	if sp := req.GetSnapshotPath(); sp != "" {
+		if err := pathutil.ValidateNoTraversal(sp); err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshotPath: %v", err)
+			return rsp, nil
+		}
+	}
+	backend, err := resolveRequestStorageBackend(req.GetBackend())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	entry, catErr := getLocalSnapshotForFn(ctx, backend, rsp.TemplateID)
+	if errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
+		if other := otherCowBackend(backend); other != backend {
+			if alt, altErr := getLocalSnapshotForFn(ctx, other, rsp.TemplateID); altErr == nil {
+				backend = other
+				entry = alt
+			}
+		}
+	}
+	if shouldKeepLivePausePackage(honorLivePauseKeep, s.listCubeboxes(), rsp.TemplateID, catalogKindForKeep(entry)) {
+		log.G(ctx).Infof("CleanupTemplate %s: keeping pause package; a live sandbox still restores from it",
+			rsp.TemplateID)
+		return rsp, nil
+	}
+	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	// The on-disk package (S3 pause-snapshots/snapshots home) and its catalog
+	// are the only record of which cubecow objects are still out there, so
+	// they outlive a failed object sweep and a retry can pick up where this
+	// one stopped. Objects already gone count as cleaned, so a Resume that
+	// consumed the pause package still drops the dir here.
+	if cleanupIsCowBackend() {
+		if err := cleanupReleaseS3Metadata(ctx, backend, rsp.TemplateID); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: s3 metadata umount: %v", rsp.TemplateID, err)
+		}
+		if err := cleanupObjectsFor(ctx, backend, refs); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup, keeping package for retry: %v",
+				rsp.TemplateID, err)
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to cleanup cubecow objects: %v", err)
+			return rsp, nil
+		}
+	}
+	if err := cleanupTemplateLocalDataFn(ctx, rsp.TemplateID, snapshotPath); err != nil {
+		rerr, _ := ret.FromError(err)
+		if rerr == nil || rerr.Code() == 0 {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = err.Error()
+			return rsp, nil
+		}
+		rsp.Ret.RetCode = rerr.Code()
+		rsp.Ret.RetMsg = rerr.Message()
+	}
+	storage.DeleteSnapshotCatalogFor(backend, rsp.TemplateID)
+	return rsp, nil
+}
+
+// resolveCleanupRefs is the v4 catalog-first resolution for CleanupTemplate.
+// Priority:
+//  1. caller-supplied Objects (legacy master compatibility) -> parse as-is
+//  2. local snapshot catalog hit -> derive rootfs/memory/build_rootfs from
+//     entry; prefer entry.SnapshotPath over caller-supplied
+//  3. deterministic fallback (DefaultTemplateObjectRefs) with caller-supplied
+//     snapshot path; logs catalog miss for operability
+//
+// snapshotPath returned is what CleanupTemplateLocalData should remove on disk;
+// catalog entry SnapshotPath wins over caller-supplied path when both exist.
+func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects []*cubebox.CowObjectRef, callerSnapshotPath string) ([]storage.CowObjectRef, string, error) {
+	if len(objects) > 0 {
+		refs, err := parseCowObjectRefs(objects)
+		if err != nil {
+			return nil, "", err
+		}
+		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+	}
+	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
+	if err != nil || entry == nil {
+		if other := otherCowBackend(backend); other != backend {
+			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, templateID); altErr == nil && alt != nil {
+				entry, err, backend = alt, nil, other
+			}
+		}
+	}
+	if err == nil && entry != nil {
+		refs := cubecowRefsFromCatalogEntry(templateID, entry)
+		snapshotPath := strings.TrimSpace(entry.SnapshotPath)
+		if snapshotPath == "" {
+			snapshotPath = callerSnapshotPath
+		}
+		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, snapshotPath), nil
+	}
+	if err != nil && !errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
+		log.G(ctx).Warnf("CleanupTemplate %s: catalog lookup failed (%v); falling back to deterministic refs", templateID, err)
+	} else {
+		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
+	}
+	return finalizeCleanupRefs(backend, templateID, storage.DefaultTemplateObjectRefs(templateID)), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+}
+
+func finalizeCleanupRefs(backend, templateID string, refs []storage.CowObjectRef) []storage.CowObjectRef {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil || normalized != cow.BackendS3 {
+		return refs
+	}
+	return storage.AppendS3SealedPackageCleanupRefs(templateID, refs)
+}
+
+func otherCowBackend(backend string) string {
+	normalized, err := resolveRequestStorageBackend(backend)
+	if err == nil && normalized == cow.BackendS3 {
+		return cow.BackendXFS
+	}
+	return cow.BackendS3
+}
+
+func ensureSnapshotCleanupPath(ctx context.Context, backend, templateID, snapshotPath string) string {
+	if strings.TrimSpace(snapshotPath) != "" {
+		return snapshotPath
+	}
+	if err := pathutil.ValidateSafeID(templateID); err != nil {
+		log.G(ctx).Warnf("CleanupTemplate %s: cannot derive snapshot dir, unsafe templateID: %v", templateID, err)
+		return snapshotPath
+	}
+	for _, kind := range []string{storage.SnapshotKindPause, storage.SnapshotKindNormal} {
+		home := storage.SnapshotHome(backend, kind, templateID)
+		if home == "" {
+			continue
+		}
+		if _, err := os.Stat(home); err == nil {
+			log.G(ctx).Infof("CleanupTemplate %s: using existing snapshot dir %q", templateID, home)
+			return home
+		}
+	}
+	root := snapshotRootForBackend(backend)
+	guessed := filepath.Join(root, "cubebox", templateID)
+	if b, berr := resolveRequestStorageBackend(backend); berr == nil && b == cow.BackendS3 {
+		guessed = storage.SnapshotHome(backend, storage.SnapshotKindNormal, templateID)
+	}
+	if _, err := pathutil.ValidatePathUnderBase(root, guessed); err != nil {
+		log.G(ctx).Warnf("CleanupTemplate %s: derived snapshot dir %q rejected: %v", templateID, guessed, err)
+		return snapshotPath
+	}
+	log.G(ctx).Infof("CleanupTemplate %s: derived deterministic snapshot dir %q for cleanup", templateID, guessed)
+	return guessed
+}
+
+func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatalogEntry) []storage.CowObjectRef {
+	if entry == nil {
+		return storage.DefaultTemplateObjectRefs(templateID)
+	}
+	refs := make([]storage.CowObjectRef, 0, 3)
+	if name := strings.TrimSpace(entry.RootfsVol); name != "" {
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.RootfsKind, Role: "rootfs"})
+	}
+	if name := strings.TrimSpace(entry.MemoryVol); name != "" {
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.MemoryKind, Role: "memory"})
+	}
+	if name := strings.TrimSpace(entry.BuildRootfsVol); name != "" {
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.BuildRootfsKind, Role: "build_rootfs"})
+	}
+	if name := strings.TrimSpace(entry.MetadataVol); name != "" && !storage.IsS3MetadataBaseName(name) {
+		kind := strings.TrimSpace(entry.MetadataKind)
+		if kind == "" {
+			kind = storage.CowKindSnapshot
+		}
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
+	}
+	if len(refs) == 0 {
+		return storage.DefaultTemplateObjectRefs(templateID)
+	}
+	return refs
+}
+
+func parseCowObjectRefs(objects []*cubebox.CowObjectRef) ([]storage.CowObjectRef, error) {
+	refs := make([]storage.CowObjectRef, 0, len(objects))
+	for _, object := range objects {
+		if object == nil {
+			continue
+		}
+		name := strings.TrimSpace(object.GetName())
+		role := strings.TrimSpace(object.GetRole())
+		kind := strings.TrimSpace(object.GetKind())
+		if name == "" {
+			continue
+		}
+		if err := pathutil.ValidateSafeID(name); err != nil {
+			return nil, fmt.Errorf("invalid object name %q: %v", name, err)
+		}
+		if role == "" {
+			return nil, fmt.Errorf("object role is required for %q", name)
+		}
+		refs = append(refs, storage.CowObjectRef{
+			Name: name,
+			Kind: kind,
+			Role: role,
+		})
+	}
+	return refs, nil
+}

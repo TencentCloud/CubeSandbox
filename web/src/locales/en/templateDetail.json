@@ -1,0 +1,111 @@
+{
+  "title": "Template Detail",
+  "backToTemplates": "Back to Templates",
+  "notFound": "Template not found or has been deleted.",
+  "section": {
+    "info": "Basic Info",
+    "infoDesc": "Core properties and current status of the template.",
+    "network": "Network Policy",
+    "networkDesc": "Network type and outbound traffic rules for this template.",
+    "replicas": "Replicas",
+    "replicasDesc": "Snapshot replicas of this template across nodes.",
+    "compat": "Compatibility",
+    "compatDesc": "Whether this template can still create sandboxes after a node upgrade. If it needs a rebuild, click Rebuild Template.",
+    "danger": "Delete Template",
+    "dangerDesc": "This action cannot be undone. All replicas of this template will also be deleted."
+  },
+  "fields": {
+    "templateID": "Template ID",
+    "alias": "Alias",
+    "backend": "Storage Backend",
+    "status": "Status",
+    "instanceType": "Instance Type",
+    "version": "Version",
+    "spec": "Spec",
+    "node": "Node",
+    "phase": "Phase",
+    "compat": "Compatibility",
+    "artifactID": "Artifact ID",
+    "snapshotPath": "Snapshot Path",
+    "lastJob": "Last Job",
+    "lastError": "Last Error",
+    "env": "Environment Variables",
+    "networkType": "Network Type",
+    "internetAccess": "Internet Access",
+    "dns": "DNS Servers",
+    "allowOut": "Allow Out",
+    "denyOut": "Deny Out",
+    "memory": "Memory",
+    "writableLayerSize": "Writable Layer Size"
+  },
+  "status": {
+    "ready": "Ready",
+    "building": "Building",
+    "failed": "Failed",
+    "unknown": "Unknown"
+  },
+  "rebuild": {
+    "button": "Rebuild Template",
+    "confirm": "Confirm Rebuild",
+    "confirmDesc": "This will trigger a template rebuild. The template will be unavailable for creating new sandboxes during the process. Continue?",
+    "cancel": "Cancel",
+    "building": "Building…",
+    "success": "Rebuild triggered",
+    "progress": "Progress {{progress}}%",
+    "viewLogs": "View Build Logs",
+    "hideLogs": "Hide Logs"
+  },
+  "delete": {
+    "button": "Delete Template",
+    "confirm": "Confirm Delete",
+    "confirmDesc": "This action cannot be undone. All replicas of this template will also be deleted. Continue?",
+    "cancel": "Cancel",
+    "deleting": "Deleting…"
+  },
+  "empty": {
+    "replicas": "No replica info available.",
+    "noNetworkPolicy": "Using default network configuration"
+  },
+  "building": "Template is being built. Please refresh in a moment.",
+  "buildFailed": "Template build failed.",
+  "buildFailedDeleteHint": "This template failed to build and cannot be viewed, but you can delete it.",
+  "network": {
+    "allowed": "Allowed",
+    "blocked": "Blocked"
+  },
+  "compat": {
+    "staleTitle": "Rebuild this template",
+    "staleDesc": "{{count}} copies may fail to create sandboxes after the node upgrade. Click Rebuild Template to remake them on the current node.",
+    "driftTitle": "The node environment has been updated",
+    "driftDesc": "You can still create sandboxes. Click Rebuild Template only if you want the node's current environment.",
+    "loading": "Loading compatibility information…",
+    "empty": "No compatibility information available.",
+    "status": {
+      "OK": "Ready",
+      "STALE": "Ready",
+      "UNKNOWN": "Needs rebuild",
+      "MISSING": "Not on this node"
+    },
+    "components": {
+      "guestImage": "guest-image",
+      "agent": "cube-agent",
+      "kernel": "kernel"
+    }
+  },
+  "specs": "Specs",
+  "attributes": "Attributes",
+  "copy": "Copy",
+  "copied": "Copied",
+  "clickToCopy": "Click to copy: {{text}}",
+  "refresh": "Refresh",
+  "templateId": "Template ID",
+  "createdAt": "Created at",
+  "imageCopied": "Image URL copied",
+  "exposedPorts": "Exposed Ports",
+  "probePath": "Probe Path & Port",
+  "errors": {
+    "templateInUse": "This template has sandbox instances in use. Destroy all related sandboxes before deleting it.",
+    "buildInProgress": "This template is still building. Wait for the build to finish before deleting it.",
+    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator."
+  }
+}

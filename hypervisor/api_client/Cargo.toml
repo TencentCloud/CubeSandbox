@@ -1,0 +1,8 @@
+[package]
+name = "api_client"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+vmm-sys-util = "0.12.1"

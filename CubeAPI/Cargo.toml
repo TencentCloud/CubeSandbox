@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+
+[package]
+name = "cube-api"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "cube-api"
+path = "src/main.rs"
+
+[dependencies]
+# ── Web framework ──────────────────────────────────────────────────────────
+axum = { version = "0.7", features = ["macros", "ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = [
+    "cors",
+    "trace",
+    "timeout",
+    "request-id",
+    "compression-full",
+    "limit",                 # body size limit
+] }
+
+# ── Async runtime ─────────────────────────────────────────────────────────
+# multi_thread + all features: work-stealing scheduler, timers, I/O, signal
+tokio = { version = "1", features = ["full"] }
+# select!, join!, channel helpers
+futures = "0.3"
+
+# ── Serialization ─────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Time ──────────────────────────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde"] }
+
+# ── Error handling ────────────────────────────────────────────────────────
+thiserror = "1"
+anyhow = "1"
+
+# ── Logging / tracing ─────────────────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# OpenTelemetry integration (stub, wire up later)
+# tracing-opentelemetry = "0.22"
+# opentelemetry = "0.21"
+
+# ── Config ────────────────────────────────────────────────────────────────
+config = "0.13"
+dotenvy = "0.15"
+
+# ── UUID ──────────────────────────────────────────────────────────────────
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# ── High-concurrency in-memory state ──────────────────────────────────────
+# Lock-free concurrent HashMap: O(1) reads without global lock
+dashmap = "5"
+# Atomic counters / flags
+# (std::sync::atomic is sufficient for simple cases)
+
+# ── Connection pool / rate limiting ───────────────────────────────────────
+# Governor: token-bucket rate limiter, tower-compatible
+governor = { version = "0.6", features = ["dashmap"] }
+# Semaphore-based concurrency limiter already in Tower (ConcurrencyLimit)
+
+# ── HTTP client (orchestrator / backend calls) ────────────────────────────
+# connection pool built-in, rustls for TLS
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# ── Validation ────────────────────────────────────────────────────────────
+validator = { version = "0.16", features = ["derive"] }
+
+# ── Async trait support ───────────────────────────────────────────────────
+async-trait = "0.1"
+
+# ── CLI argument parsing ──────────────────────────────────────────────────
+clap = { version = "4", features = ["derive"] }
+utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
+
+# ── Graceful shutdown ─────────────────────────────────────────────────────
+# (tokio::signal + axum::serve().with_graceful_shutdown is sufficient)
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4" }
+axum-test = "14"
+
+[profile.release]
+# Maximize single-binary performance
+opt-level = 3
+lto = "fat"          # link-time optimization across crates
+codegen-units = 1    # single codegen unit → better inlining
+panic = "abort"      # remove unwinding overhead
+strip = "symbols"    # smaller binary

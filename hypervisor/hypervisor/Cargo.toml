@@ -1,0 +1,35 @@
+[package]
+name = "hypervisor"
+version = "0.1.0"
+authors = ["Microsoft Authors"]
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+
+[features]
+kvm = ["kvm-ioctls", "kvm-bindings"]
+mshv = ["mshv-ioctls", "mshv-bindings"]
+tdx = []
+
+[dependencies]
+anyhow = "1.0.86"
+byteorder = "1.4.3"
+thiserror = "1.0.37"
+libc = "0.2.137"
+log = "0.4.17"
+kvm-bindings = { version = "0.8.1", features = ["serde"], optional = true }
+kvm-ioctls = { version = "0.17.0", optional = true }
+mshv-bindings = { git = "https://github.com/rust-vmm/mshv", tag = "v0.2.0", features = ["with-serde", "fam-wrappers"], optional = true }
+mshv-ioctls = { git = "https://github.com/rust-vmm/mshv", tag = "v0.2.0", optional = true }
+serde = { version = "1.0.147", features = ["rc", "derive"] }
+serde_with = { version = "2.0.1", default-features = false, features = ["macros"] }
+vfio-ioctls = { git = "https://github.com/rust-vmm/vfio", rev = "64171f3", default-features = false }
+vm-memory = { version = "0.14.1", features = ["backend-mmap", "backend-atomic"] }
+vmm-sys-util = { version = "0.12.1", features = ["with-serde"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies.iced-x86]
+version = "1.17.0"
+default-features = false
+features = ["std", "decoder", "op_code_info", "instr_info", "fast_fmt"]
+
+[dev-dependencies]
+env_logger = "0.10.2"

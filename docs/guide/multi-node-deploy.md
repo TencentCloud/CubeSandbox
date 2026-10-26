@@ -1,0 +1,343 @@
+# Multi-Node Cluster Deployment
+
+This guide explains how to expand a single-node Cube Sandbox deployment into a multi-node cluster by adding **compute nodes**. Compute nodes run only the sandbox runtime components (`Cubelet` with the embedded network runtime, `CubeShim`) and register themselves to the control plane on the first machine.
+
+:::: warning Production Use
+If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
+::::
+
+:::: tip Prerequisite
+You must have a working control node deployed via the [Self-Build Deployment Guide](./self-build-deploy.md) before adding compute nodes.
+::::
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────┐
+│           Control Node                  │
+│  CubeMaster, CubeOps, cube-api,         │
+│  CubeProxy, CoreDNS, MySQL, Redis,      │
+│  Cubelet (network runtime)              │
+└──────────────────┬──────────────────────┘
+                   │  /internal/v1/node-agent API
+       ┌───────────┼───────────┐
+       ▼           ▼           ▼
+┌────────────┐┌────────────┐┌────────────┐
+│ Compute #1 ││ Compute #2 ││ Compute #N │
+│ Cubelet    ││ Cubelet    ││ Cubelet    │
+│ net runtime││ net runtime││ net runtime│
+└────────────┘└────────────┘└────────────┘
+```
+
+- The **control node** runs the full stack: orchestration (CubeMaster), node management (CubeOps), API gateway (cube-api), proxy (CubeProxy + CoreDNS), databases (MySQL + Redis), the bundled MinIO S3 volume store, and also acts as a compute node itself.
+- Each **compute node** runs only `Cubelet` with its embedded network runtime. It registers to the control-plane `CubeOps` and receives sandbox scheduling requests from `CubeMaster`.
+
+## Prerequisites
+
+Each compute node must meet the same hardware and software requirements as the control node:
+
+- **Physical machine or bare-metal server** (nested virtualization is not supported)
+- **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
+- **Docker** installed and running
+- **Network connectivity** to the control node (specifically to `CubeOps` on port `3010` for node registration, and to the S3 endpoint — port `9000` with the bundled MinIO)
+
+For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
+
+## Step 1: Prepare the Release Bundle
+
+Use the **same release bundle** that was built for the control node. Copy it to the compute node and extract:
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+```
+
+## Step 2: Configure Environment Variables
+
+```bash
+cp env.example .env
+```
+
+Edit `.env` and set the following variables:
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+CUBE_SANDBOX_NODE_IP=<current-node-ip>
+ONE_CLICK_CONTROL_PLANE_IP=<control-plane-ip>
+
+# CUBE_S3_*: optional but strongly recommended. If missing, install proceeds
+# with a warning and the S3 volume plugin stays disabled. See the tip below
+# for how to fetch the values. With the bundled MinIO this looks like:
+CUBE_S3_ENDPOINT=http://<control-plane-ip>:9000
+CUBE_S3_ACCESS_KEY_ID=<from control node>
+CUBE_S3_SECRET_ACCESS_KEY=<from control node>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
+
+| Variable | Description |
+|----------|-------------|
+| `ONE_CLICK_DEPLOY_ROLE` | Must be set to `compute` for compute-only nodes |
+| `CUBE_SANDBOX_NODE_IP` | This node's primary network interface IP |
+| `ONE_CLICK_CONTROL_PLANE_IP` | The control node's IP; automatically expanded to `<ip>:3010` for CubeOps node registration |
+| `CUBE_S3_*` | Optional but strongly recommended. The volume plugin depends on S3; if missing, install warns and the S3 volume plugin stays disabled. See the tip below for how to fetch these values. |
+
+::: tip Warns when missing
+`install-compute.sh` checks `CUBE_S3_ENDPOINT`; if it is missing the installer prints a prominent yellow warning and continues. The node deploys normally, but the **S3 volume plugin stays disabled** until you set `CUBE_S3_*` and re-run the installer.
+
+To fetch the `CUBE_S3_*` values backfilled on the control node:
+
+1. On the control node, run:
+   ```bash
+   grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+   ```
+   Empty output means the control node itself has no S3 backend configured.
+2. Paste the output into this node's `.env`.
+3. Re-run `sudo ./install-compute.sh`.
+
+With the bundled MinIO, also allow TCP 9000 from this node to the control node.
+:::
+
+You can also specify the CubeOps endpoint explicitly if it uses a non-default port:
+
+```bash
+ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=<control-plane-ip>:3010
+```
+
+`ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` when both are set.
+
+## Step 3: Install
+
+```bash
+sudo ./install-compute.sh
+```
+
+The compute-node install script will:
+
+1. Install only `Cubelet` with the embedded network runtime, `cube-shim`, `cube-image`, `cube-kernel-scf`, and the runtime scripts
+2. Start only the host process `cubelet`
+3. Automatically point `Cubelet`'s `meta_server_endpoint` to the control-plane `CubeOps`
+4. Register the node and report status through the control plane `/internal/v1/node-agent` API to CubeOps
+
+## Verifying the Deployment
+
+### Health Check
+
+```bash
+sudo ./smoke.sh
+```
+
+In compute-node mode, `quickcheck.sh` verifies:
+
+- Local `Cubelet` and embedded network runtime health
+- Reachability of the control-plane `CubeOps`
+- That the current node appears under `/internal/v1/nodes/{node_id}` on the control plane
+
+### Verify from the Control Node
+
+On the control node, you can confirm the compute node has registered:
+
+```bash
+curl http://127.0.0.1:3010/internal/v1/nodes
+```
+
+The response should include the compute node's IP and a healthy status.
+
+## Configure CubeMaster Scheduler Scoring
+
+For multi-node deployments, configure CubeMaster's `scheduler.score` on the control node. If scoring is omitted, CubeMaster filters eligible nodes and then selects from the filtered node order, which can concentrate new sandboxes on the first eligible node until resource filters push traffic elsewhere.
+
+Merge the following scheduler fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, and other scheduler settings.
+
+```yaml
+scheduler:
+  # Keep your existing filter, timeout, and other scheduler settings.
+  priority_select_num: 3
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 2
+      local_create_num: 3
+      quota_cpu_usage: 1
+      quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
+```
+
+For multi-node clusters, set `scheduler.priority_select_num` to a value greater than `1` so CubeMaster randomly selects from the top scored nodes. The shipped default config uses `priority_select_num: 1`, which means scoring only determines which single node receives the next sandbox. Use `3` as a starting point for small clusters and tune it based on your node count. `scheduler.least_select_name` defaults to `random`, so it usually does not need to be set explicitly.
+
+For the complete CubeMaster scheduler reference, including Cubelet node reports, quota / label / concurrency effects, and template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
+
+After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment procedure so the scheduler loads the new scoring configuration.
+
+## Connect Clients to the Cluster
+
+Client applications need the CubeAPI control-plane address and a route to sandbox services through CubeProxy. Choose the simplest data-plane access method that fits your client:
+
+| Method | Best for | Wildcard DNS | Extra component |
+| --- | --- | :---: | :---: |
+| CubeSandbox SDK with `CUBE_PROXY_NODE_IP` | Python, Go, and Node.js SDKs | No | No |
+| CubeProxy path mode | curl, backend services, generic HTTP clients | No | No |
+| E2B header mode | Official E2B SDK on a fixed address (no wildcard DNS) | No | No |
+| Wildcard DNS | Production, browsers, SPAs, official E2B SDK | Yes | No |
+| E2B dev sidecar | Official E2B SDK in local development without DNS | No | Yes |
+
+### CubeSandbox SDK: direct CubeProxy access
+
+The CubeSandbox SDKs can connect directly to a CubeProxy IP while preserving the virtual `Host` used to route requests to the correct sandbox. This avoids wildcard DNS:
+
+```bash
+export CUBE_API_URL="http://<control-plane-ip>:3000"
+export CUBE_PROXY_NODE_IP="<cubeproxy-node-ip>"
+export CUBE_PROXY_PORT_HTTP=80
+export CUBE_TEMPLATE_ID="<your-template-id-or-alias>"
+```
+
+Use the SDK normally after setting these variables. Control-plane requests go to CubeAPI; data-plane requests connect directly to CubeProxy.
+
+### Generic HTTP clients: path mode
+
+Any HTTP client can access a sandbox service through the CubeProxy path prefix:
+
+```text
+http://<cubeproxy-host>:<http-port>/sandbox/<sandbox-id>/<container-port>/<path>
+```
+
+For example:
+
+```bash
+curl http://10.0.0.5/sandbox/abc123/49999/health
+```
+
+Path mode requires no DNS or certificate setup and supports WebSocket upgrades. It is not suitable for SPAs that load assets from root-absolute paths such as `/static/app.js`; use wildcard DNS for those applications.
+
+### E2B SDKs on a fixed address: header mode
+
+When a request's Host carries no `<port>-<sandbox-id>.<domain>` routing attributes, CubeProxy falls back to the official E2B routing headers: `E2b-Sandbox-Id` (required) and `E2b-Sandbox-Port` (optional, defaults to the envd port `49983`). The official E2B SDKs read `E2B_SANDBOX_URL` as the data-plane gateway address and attach the `E2b-Sandbox-*` routing headers to sandbox data-plane requests, so they can target CubeProxy directly by IP:
+
+```bash
+export E2B_API_URL="http://<cubeapi-host>:<api-port>"
+export E2B_SANDBOX_URL="http://<cubeproxy-host>:<http-port>"
+export E2B_API_KEY="<your-api-key>"
+```
+
+Host-based routing keeps priority, so existing wildcard-domain traffic is unaffected. Like path mode, header mode exposes the whole data plane on the plaintext listener to anything that can reach CubeProxy — use it on trusted networks only.
+
+### Production and browser access: wildcard DNS
+
+Host-based routing uses sandbox domains in the form `<port>-<sandbox-id>.<domain>`. Configure a wildcard A record that points to CubeProxy:
+
+```text
+*.cube.example.com  →  <CubeProxy public or private IP>
+```
+
+Configure CubeAPI with the same base domain:
+
+```bash
+export CUBE_API_SANDBOX_DOMAIN=cube.example.com
+```
+
+The one-click deployment includes CoreDNS for local `*.cube.app` resolution. It is intended for local use; production and shared multi-machine environments should use managed DNS or an internal DNS service. `/etc/hosts` cannot provide wildcard records.
+
+See [HTTPS Certificates & Domain Resolution](./https-and-domain.md) for TLS and DNS configuration details.
+
+### Official E2B SDK without wildcard DNS: dev sidecar
+
+Only E2B SDK versions that read `E2B_SANDBOX_URL` can target a fixed address directly (see [header mode](#e2b-sdks-on-a-fixed-address-header-mode) above). For SDK versions without that knob, use the [E2B dev sidecar example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar):
+
+```bash
+cd examples/e2b-dev-sidecar
+pip install -r requirements.txt
+cp env.example .env
+```
+
+For a remote cluster, configure:
+
+```bash
+E2B_API_URL="http://<control-plane-ip>:3000"
+CUBE_REMOTE_PROXY_BASE="https://<cubeproxy-node-ip>:443"
+E2B_API_KEY="<api-key>"
+CUBE_TEMPLATE_ID="<your-template-id-or-alias>"
+```
+
+Then run:
+
+```bash
+python demo.py
+```
+
+`CUBE_REMOTE_PROXY_BASE` must point to CubeProxy, not to the sidecar's own listening address. When authentication is enabled, replace the placeholder API key with a valid key.
+
+## Common Operations
+
+### Stop Compute Node Services
+
+```bash
+sudo ./down.sh
+```
+
+In compute-node mode, this only stops `cubelet`. It does not affect the control plane or other compute nodes.
+
+### Reinstall
+
+To reinstall a compute node, simply run `install-compute.sh` again. The script automatically stops the existing deployment before installing.
+
+### View Logs
+
+| Component | Log Path |
+|-----------|----------|
+| Cubelet | `/data/log/Cubelet/` |
+| CubeShim | `/data/log/CubeShim/` |
+| Hypervisor (VMM) | `/data/log/CubeVmm/` |
+| Runtime PID files | `/var/run/cube-sandbox-one-click/` |
+| Process stdout/stderr | `/var/log/cube-sandbox-one-click/` |
+
+For control-node log paths, see [Self-Build Deployment — View Logs](./self-build-deploy.md#view-logs).
+
+## Configuration Reference
+
+Compute nodes use the same `.env` file format. The following variables are specific to or particularly relevant for compute-node deployments:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ONE_CLICK_DEPLOY_ROLE` | `control` | Must be set to `compute` |
+| `ONE_CLICK_CONTROL_PLANE_IP` | empty | Control-plane host IP; expanded to `<ip>:3010` by default |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | empty | Explicit CubeOps address; takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` |
+| `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **Required.** This node's primary network interface IP |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `config.toml`) | cubevs local network CIDR. Should match the control-plane value. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16–/24. Auto-detected for host network conflicts at install time. |
+| `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection (not recommended). |
+| `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
+| `CUBE_S3_*` | empty / filled by control MinIO | Optional but strongly recommended. The volume plugin depends on S3; if missing, install warns and the S3 volume plugin stays disabled. Copy from the control node's `/usr/local/services/cubetoolbox/.one-click.env` (fetch steps in Step 2 above); `ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` have no usable default. |
+
+For the full configuration reference (build-time options, database, proxy, etc.), see [Self-Build Deployment — Configuration Reference](./self-build-deploy.md#configuration-reference).
+
+## Troubleshooting
+
+### Compute Node Cannot Reach CubeOps
+
+Verify network connectivity:
+
+```bash
+curl http://<control-plane-ip>:3010/internal/v1/nodes
+```
+
+If this fails, check:
+- Firewall rules on the control node (port `3010` must be accessible)
+- The `ONE_CLICK_CONTROL_PLANE_IP` or `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` value in `.env`
+
+### Node Not Appearing in Control Plane
+
+If `smoke.sh` passes locally but the node does not appear on the control plane:
+
+1. Check Cubelet logs: `/data/log/Cubelet/`
+2. Verify `meta_server_endpoint` in the Cubelet config points to the correct CubeOps address
+3. Ensure `CUBE_SANDBOX_NODE_IP` is correctly set to a routable IP (not `127.0.0.1`)
+
+For general troubleshooting (Docker, KVM, DNS, etc.), see [Self-Build Deployment — Troubleshooting](./self-build-deploy.md#troubleshooting).

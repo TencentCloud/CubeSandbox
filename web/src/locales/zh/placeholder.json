@@ -1,0 +1,22 @@
+{
+  "newSandbox": {
+    "title": "新建沙箱",
+    "description": "选择模板与资源规格的向导。"
+  },
+  "templateDetail": {
+    "title": "模板详情",
+    "description": "构建历史、副本管理与重新部署。"
+  },
+  "network": {
+    "title": "网络",
+    "description": "网关、出口与限流策略。"
+  },
+  "observability": {
+    "title": "可观测性",
+    "description": "指标、追踪与审计日志。"
+  },
+  "settings": {
+    "title": "设置",
+    "description": "主题、快捷键与集群目标配置。"
+  }
+}

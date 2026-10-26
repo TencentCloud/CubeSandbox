@@ -1,0 +1,21 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+package cubelet.services.version.v1;
+
+import "google/protobuf/empty.proto";
+
+
+option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/version/v1;version";
+
+service Version {
+  rpc Version(google.protobuf.Empty) returns (VersionResponse);
+}
+
+message VersionResponse {
+  string version = 1;
+  string revision = 2;
+}

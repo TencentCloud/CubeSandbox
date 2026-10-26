@@ -1,0 +1,68 @@
+//
+// Copyright 2018 Intel Corporation.
+// Copyright (c) 2019-2020 Ant Group
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+option go_package = "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/pkg/agent/protocols";
+
+package types;
+
+enum IPFamily {
+	v4 = 0;
+	v6 = 1;
+}
+
+// FSGroupChangePolicy defines the policy for applying group id ownership change on a mounted volume.
+enum FSGroupChangePolicy {
+	// Always indicates that the volume ownership will always be changed.
+	Always = 0;
+	// OnRootMismatch indicates that the volume ownership will be changed only
+	// when the ownership of the root directory does not match with the expected group id for the volume.
+	OnRootMismatch = 1;
+}
+
+message IPAddress {
+	IPFamily family = 1;
+	string address = 2;
+	string mask = 3;
+}
+
+message Interface {
+	string device = 1;
+	string name = 2;
+	repeated IPAddress IPAddresses = 3;
+	uint64 mtu = 4;
+	string hwAddr = 5;
+
+	// PCI path for the device (see the pci::Path (Rust) or types.PciPath (Go) type for format details)
+	string pciPath = 6;
+
+	// Type defines the type of interface described by this structure.
+	// The expected values are the one that are defined by the netlink
+	// library, regarding each type of link. Here is a non exhaustive
+	// list: "veth", "macvtap", "vlan", "macvlan", "tap", ...
+	string type = 7;
+	uint32 raw_flags = 8;
+}
+
+message Route {
+	string dest = 1;
+	string gateway = 2;
+	string device = 3;
+	string source = 4;
+	uint32 scope = 5;
+	IPFamily family = 6;
+	bool onlink = 7;
+}
+
+message ARPNeighbor {
+	IPAddress toIPAddress = 1;
+	string device = 2;
+	string lladdr = 3;
+	int32 state = 4;
+	int32 flags = 5;
+}

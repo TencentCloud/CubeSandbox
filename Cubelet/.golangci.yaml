@@ -1,0 +1,98 @@
+linters:
+  enable-all: true
+  disable:
+    # Deprecated with replacement
+    - maligned
+    - varcheck
+    - golint
+    - exhaustivestruct
+    - structcheck
+    - nosnakecase
+    - deadcode
+    - scopelint
+    # Deprecated without replacement
+    - ifshort
+    - interfacer
+    # https://github.com/golangci/golangci-lint/issues/2649
+    - rowserrcheck
+    - sqlclosecheck
+    - wastedassign
+    # ignore on purpose
+    - gomoddirectives
+    - paralleltest
+    - testpackage
+    # FIXME
+    - typecheck
+    - dupl
+    - errcheck
+    - forbidigo
+    - funlen
+    - gci
+    - gochecknoinits
+    - gocognit
+    - goconst
+    - gocritic
+    - godot
+    - godox
+    - gofumpt
+    - goimports
+    - gosec
+    - lll
+    - misspell
+    - nestif
+    - revive
+    - unconvert
+    - unparam
+    - unused
+    - wsl
+    - containedctx
+    - contextcheck
+    - cyclop
+    - dupword
+    - errorlint
+    - exhaustive
+    - exhaustruct
+    - forcetypeassert
+    - gochecknoglobals
+    - goerr113
+    - gomnd
+    - gosimple
+    - ineffassign
+    - ireturn
+    - nilnil
+    - nlreturn
+    - noctx
+    - nonamedreturns
+    - predeclared
+    - staticcheck
+    - tagliatelle
+    - tenv
+    - varnamelen
+    - wrapcheck
+    - gocyclo
+    - whitespace
+    - errname
+    - stylecheck
+    - usestdlibvars
+    - nakedret
+    - tagalign
+    - gosmopolitan
+    - depguard
+    - errchkjson
+    - musttag
+    - prealloc
+    - govet
+    - nilerr
+
+linters-settings:
+  funlen:
+    lines: 80
+    statements: 80
+
+run:
+  skip-files:
+    - ".*_test.go$"
+    - "integration/*.go$"
+  skip-dirs:
+    - "vendor"
+    - "integration"

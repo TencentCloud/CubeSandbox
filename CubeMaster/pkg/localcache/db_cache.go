@@ -1,0 +1,262 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package localcache
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"gorm.io/gorm"
+)
+
+// Evict the cache only after this many consecutive empty responses,
+// absorbing transient jitter.
+const emptySyncEvictThreshold = 15
+
+func (l *local) DB() *gorm.DB {
+	if l.db.Error == nil || errors.Is(l.db.Error, gorm.ErrRecordNotFound) {
+		return l.db
+	}
+
+	if errors.Is(l.db.Error, mysql.ErrInvalidConn) {
+		pinger, ok := l.db.ConnPool.(interface{ Ping() error })
+		if ok {
+			go func() { _ = pinger.Ping() }()
+		}
+	}
+	return l.db
+}
+
+func (l *local) loadAllFromDB(ctx context.Context) error {
+	return l.syncAllFromDB(ctx, false)
+}
+
+func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
+	startTime := time.Now()
+	retCode := 200
+	defer func() {
+		log.TraceReport("", startTime, constants.MySQL, l.dbAddr, constants.ActionLoadDBAll, retCode)
+	}()
+
+	if externalNodeLoader != nil {
+		nodes, err := externalNodeLoader(ctx)
+		if err != nil {
+			retCode = 500
+			// A load failure is not a valid empty view; it must not count
+			// toward the empty-response streak or clear the cache.
+			l.emptySyncStreak.Store(0)
+			return err
+		}
+
+		log.G(ctx).Infof("syncAllFromDB: externalNodeLoader returned %d nodes", len(nodes))
+
+		allFromDb := make(map[string]struct{}, len(nodes))
+		for _, n := range nodes {
+			if n == nil {
+				continue
+			}
+			if update {
+				if err := l.updateNodeFromMetaData(n); err != nil {
+					l.addNodeCache(n)
+				}
+			} else {
+				l.addNodeCache(n)
+			}
+			if n.InsID != "" {
+				log.G(ctx).Debugf("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
+				l.syncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
+			}
+			allFromDb[n.InsID] = struct{}{}
+		}
+		if update {
+			if len(allFromDb) == 0 {
+				cur := l.emptySyncStreak.Add(1)
+				if cur < emptySyncEvictThreshold {
+					// Not yet actionable; DEBUG avoids spam on a transient or empty cluster.
+					log.G(ctx).Debugf("syncAllFromDB: CubeOps returned 0 nodes (streak=%d/%d), skip eviction",
+						cur, emptySyncEvictThreshold)
+					return nil
+				}
+				l.emptySyncStreak.Store(0)
+				if len(l.cache.Items()) > 0 {
+					// Expected eviction (threshold reached); WARN for visibility without alerting.
+					log.G(ctx).Warnf("syncAllFromDB: CubeOps returned 0 nodes for %d consecutive syncs, evicting cache",
+						cur)
+				} else {
+					log.G(ctx).Infof("syncAllFromDB: CubeOps returned 0 nodes for %d consecutive syncs, cache already empty",
+						cur)
+				}
+			} else {
+				l.emptySyncStreak.Store(0)
+			}
+			// quiet when the DB view is empty (expected wipe); else keep per-node ERRORs.
+			l.checkDirty(ctx, allFromDb, len(allFromDb) == 0)
+		}
+		return nil
+	}
+
+	all := make([]*models.HostInfo, 0)
+
+	if err := l.DB().Table(constants.MetadataTableName).Find(&all).Error; err != nil {
+		retCode = 500
+		return err
+	}
+
+	var results []*models.HostTypeInfo
+	if err := l.DB().Table(constants.HostTypeTableName).Select([]string{"instance_type",
+		"cpu_type"}).Find(&results).Error; err != nil {
+		retCode = 500
+		return err
+	}
+	instanceCpuType := make(map[string]*models.HostTypeInfo)
+	for _, v := range results {
+		instanceCpuType[v.InstanceType] = v
+	}
+
+	machineInfos := make([]*models.MachineInfo, 0)
+	if err := l.DB().Table(constants.HostSubInfoTableName).Find(&machineInfos).Error; err != nil {
+		log.G(context.Background()).Errorf("select HostSubInfoTableName error: %v", err)
+	}
+	machinesMap := make(map[string]*models.MachineInfo)
+	if len(machineInfos) > 0 {
+		for _, m := range machineInfos {
+			machinesMap[m.InsID] = m
+		}
+	}
+
+	allFromDb := make(map[string]struct{})
+	for _, elem := range all {
+		n := constructNode(elem)
+		if v, ok := instanceCpuType[elem.InstanceType]; ok {
+			n.CPUType = v.CPUType
+		}
+		if v, ok := machinesMap[n.InsID]; ok {
+			n.DeviceClass = v.DeviceClass
+			n.DedicatedClusterId = v.DedicatedClusterId
+			n.DeviceID = v.DeviceID
+			n.MachineHostIP = v.HostIP
+			n.InstanceFamily = v.InstanceFamily
+			if v.VirtualNodeQuota != "" {
+				err := utils.JSONTool.UnmarshalFromString(v.VirtualNodeQuota, &n.VirtualNodeQuotaArray)
+				if err != nil {
+					log.G(context.Background()).Errorf("VirtualNodeQuota error: %v", err)
+				}
+			}
+		}
+		if update {
+			if err := l.updateNodeFromMetaData(n); err != nil {
+
+				l.addNodeCache(n)
+			}
+		} else {
+			l.addNodeCache(n)
+		}
+		allFromDb[n.InsID] = struct{}{}
+	}
+
+	if update {
+		l.checkDirty(ctx, allFromDb, false)
+	}
+	return nil
+}
+
+func (l *local) loadFromDBByIDs(hostIDs []string) ([]*node.Node, error) {
+	startTime := time.Now()
+	retCode := 200
+	defer func() {
+		log.TraceReport("", startTime, constants.MySQL, l.dbAddr, constants.ActionLoadDBByIDs, retCode)
+	}()
+	if len(hostIDs) == 0 {
+		return nil, errors.New("empty HostIDs")
+	}
+	elems := make([]*models.HostInfo, 0)
+	if err := l.DB().Table(constants.MetadataTableName).Where("ins_id in ?", hostIDs).Scan(&elems).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("empty data found")
+		}
+		retCode = 500
+		return nil, err
+	}
+	var results []*models.HostTypeInfo
+	if err := l.DB().Table(constants.HostTypeTableName).Select([]string{"instance_type",
+		"cpu_type"}).Find(&results).Error; err != nil {
+		retCode = 500
+		return nil, err
+	}
+	instanceCpuType := make(map[string]*models.HostTypeInfo)
+	for _, v := range results {
+		instanceCpuType[v.InstanceType] = v
+	}
+
+	machineInfos := make([]*models.MachineInfo, 0)
+	if err := l.DB().Table(constants.HostSubInfoTableName).Find(&machineInfos).Error; err != nil {
+		log.G(context.Background()).Error("select HostSubInfoTableName error: %v", err)
+	}
+	machinesMap := make(map[string]*models.MachineInfo)
+	if len(machineInfos) > 0 {
+		for _, m := range machineInfos {
+			machinesMap[m.InsID] = m
+		}
+	}
+
+	nodes := make([]*node.Node, 0, len(elems))
+	for _, elem := range elems {
+		n := constructNode(elem)
+		if v, ok := instanceCpuType[elem.InstanceType]; ok {
+			n.CPUType = v.CPUType
+		}
+		if v, ok := machinesMap[n.InsID]; ok {
+			n.DeviceClass = v.DeviceClass
+			n.DedicatedClusterId = v.DedicatedClusterId
+			n.DeviceID = v.DeviceID
+			n.MachineHostIP = v.HostIP
+			n.InstanceFamily = v.InstanceFamily
+			if v.VirtualNodeQuota != "" {
+				err := utils.JSONTool.UnmarshalFromString(v.VirtualNodeQuota, &n.VirtualNodeQuotaArray)
+				if err != nil {
+					log.G(context.Background()).Errorf("VirtualNodeQuota error: %v", err)
+				}
+			}
+		} else {
+			log.G(context.Background()).Fatalf("HostSubInfo is empty: %v", n.InsID)
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, nil
+}
+
+func constructNode(elem *models.HostInfo) *node.Node {
+	n := &node.Node{
+		Index:               int(elem.ID),
+		InsID:               elem.InsID,
+		UUID:                elem.UUID,
+		IP:                  elem.IP,
+		CpuTotal:            elem.CpuTotal,
+		MemMBTotal:          elem.MemMBTotal,
+		SystemDiskSize:      elem.SysDiskGB,
+		DataDiskSize:        elem.DataDiskGB,
+		Zone:                elem.Zone,
+		Region:              elem.Region,
+		InstanceType:        elem.InstanceType,
+		HostStatus:          elem.HostStatus,
+		MetaDataUpdateAt:    time.Now(),
+		ReportedReady:       constants.HeartbeatHealth == elem.LiveStatus,
+		Healthy:             constants.HeartbeatHealth == elem.LiveStatus,
+		QuotaMem:            elem.QuotaMem,
+		QuotaCpu:            elem.QuotaCpu,
+		CreateConcurrentNum: elem.CreateConcurrentNum,
+		MaxMvmLimit:         elem.MaxMvmNum,
+		ClusterLabel:        elem.ClusterLabel,
+		OssClusterLabel:     elem.OssClusterLabel,
+	}
+	return n
+}

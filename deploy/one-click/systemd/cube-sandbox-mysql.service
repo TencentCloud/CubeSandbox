@@ -1,0 +1,26 @@
+[Unit]
+Description=Cube Sandbox MySQL container
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/mysql-prepare.sh
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/mysql-start.sh
+ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/mysql-postcheck.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/mysql-stop.sh
+Restart=on-failure
+RestartSec=2s
+# MySQL first-run init can take a while; graceful shutdown also needs room
+# (InnoDB checkpoint). Override short distro defaults explicitly.
+TimeoutStartSec=180s
+TimeoutStopSec=60s
+
+[Install]
+WantedBy=cube-sandbox-control.target

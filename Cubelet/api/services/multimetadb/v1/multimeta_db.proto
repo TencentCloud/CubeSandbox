@@ -1,0 +1,64 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+import "services/errorcode/v1/errorcode.proto";
+
+package cubelet.services.multimetadb.v1;
+option go_package="github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1;multimetadb";
+
+// Service for machine level operations.
+service MultiMetaDBServer {
+    rpc GetBucketDefines(CommonRequestHeader) returns (GetBucketDefinesResponse) {}
+
+    // 使用流式接口，批量查询db中的数据
+    rpc GetStreamData(GetDataRequest) returns (stream DbData){}
+}
+
+// bucket define for boltdb
+message BucketDefine {
+    // bucket 的名字
+    string name = 1;
+    bool is_namespace = 2;
+    // 当使用独立db时，需要指定db的名字。例如cgroup插件使用了独立db
+    string db_name = 3;
+    // 对该bucket的描述
+    string describe = 4;
+}
+
+message CommonRequestHeader {
+    string requestID = 1;
+}
+
+message CommonResponseHeader {
+    string requestID = 1;
+    cubelet.services.errorcode.v1.ErrorCode code = 2;
+    string Message = 3;
+}
+
+
+message GetBucketDefinesResponse {
+    CommonResponseHeader header = 1;
+    repeated BucketDefine bucket_defines = 2;
+}
+
+message GetDataRequest {
+    CommonRequestHeader header = 1;
+    // bucket 的定义，可能如 erofs {namespace} 这种二级定义
+    repeated string buckets = 2;
+    // 数据的key
+    string key = 3;
+    // 当使用独立db时，需要指定db的名字。例如cgroup插件使用了独立db
+    string db_name = 4;
+}
+
+message DbData {
+    // key of this data
+    string key = 1;
+    // bucket 的定义，可能如 erofs {namespace} 这种二级定义
+    repeated string buckets = 2;
+
+    // 数据的value
+    bytes value = 3;
+} 

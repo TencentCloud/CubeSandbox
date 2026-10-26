@@ -1,0 +1,41 @@
+[package]
+name = "virtiofsd"
+description = "A virtio-fs vhost-user device daemon"
+version = "1.11.0"
+authors = ["The Virtiofs Project Developers"]
+edition = "2018"
+homepage = "https://virtio-fs.gitlab.io/"
+repository = "https://gitlab.com/virtio-fs/virtiofsd"
+license = "Apache-2.0 AND BSD-3-Clause"
+readme = "README.md"
+autobins = false
+
+exclude = [".gitlab-ci.yml"]
+
+[features]
+# Enabling Xen support will _disable_ QEMU/KVM support!
+xen = ["vhost-user-backend/xen", "vhost/xen", "vm-memory/xen"]
+
+[dependencies]
+anyhow = "1.0.66"
+bitflags = "1.2"
+capng = "0.2.2"
+env_logger = "0.10.2"
+futures = { version = "0.3", features = ["thread-pool"] }
+libc = "0.2.155"
+log = "0.4"
+libseccomp-sys = "0.2"
+clap = { version = "4", features = ["derive"] }
+postcard = { version = "1.0", features = ["use-std"] }
+serde = { version = "1.0", features = ["derive"] }
+vhost-user-backend = "0.15.0"
+vhost = "0.11.0"
+virtio-bindings = "0.2.1"
+vm-memory = { version = "0.16.1", features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
+virtio-queue = "0.14.0"
+vmm-sys-util = "0.12.1"
+syslog = "6.1"
+rate_limiter = { path = "../rate_limiter" }
+
+[profile.release]
+lto = true

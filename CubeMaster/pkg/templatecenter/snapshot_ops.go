@@ -1,0 +1,1541 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package templatecenter
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
+	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"gorm.io/gorm"
+)
+
+const (
+	snapshotRequestLockPrefix  = "snapshot-request:"
+	snapshotSandboxLockPrefix  = "snapshot-sandbox:"
+	snapshotResourceLockPrefix = "snapshot-resource:"
+	snapshotIDPrefix           = "snap-"
+)
+
+func snapshotRequestLockKey(requestID string) string {
+	return snapshotRequestLockPrefix + strings.TrimSpace(requestID)
+}
+
+func snapshotSandboxLockKey(sandboxID string) string {
+	return snapshotSandboxLockPrefix + strings.TrimSpace(sandboxID)
+}
+
+func snapshotResourceLockKey(snapshotID string) string {
+	return snapshotResourceLockPrefix + strings.TrimSpace(snapshotID)
+}
+
+func withSnapshotWriteLocks(keys []string, fn func() error) error {
+	if len(keys) == 0 {
+		return fn()
+	}
+	key := strings.TrimSpace(keys[0])
+	if key == "" {
+		return withSnapshotWriteLocks(keys[1:], fn)
+	}
+	return withTemplateWriteLock(key, func() error {
+		return withSnapshotWriteLocks(keys[1:], fn)
+	})
+}
+
+// snapshotCreateJobRequest is the WAL payload for an in-flight snapshot-create
+// operation. Note: the canonical create-request is no longer carried inside the
+// job payload. It now lives in sandboxspec keyed by sandbox_id (Phase 1 of the
+// snapshot control-plane refactor) and is loaded on demand. We keep
+// SpecFingerprint so resume can detect if the spec has drifted between attempts.
+type snapshotCreateJobRequest struct {
+	RequestID       string `json:"request_id"`
+	SandboxID       string `json:"sandbox_id"`
+	SnapshotID      string `json:"snapshot_id"`
+	NodeID          string `json:"node_id"`
+	NodeIP          string `json:"node_ip"`
+	DisplayName     string `json:"display_name,omitempty"`
+	Backend         string `json:"backend,omitempty"`
+	SpecFingerprint string `json:"spec_fingerprint,omitempty"`
+}
+
+type snapshotRollbackJobRequest struct {
+	RequestID   string `json:"request_id"`
+	SandboxID   string `json:"sandbox_id"`
+	SnapshotID  string `json:"snapshot_id"`
+	NodeID      string `json:"node_id"`
+	NodeIP      string `json:"node_ip"`
+	NewGen      uint32 `json:"new_gen"`
+	DesiredSize uint64 `json:"desired_size"`
+	Backend     string `json:"backend,omitempty"`
+}
+
+type snapshotDeleteJobRequest struct {
+	RequestID  string `json:"request_id"`
+	SnapshotID string `json:"snapshot_id"`
+	NodeID     string `json:"node_id"`
+	NodeIP     string `json:"node_ip"`
+}
+
+type snapshotRollbackResult struct {
+	NewGen uint32 `json:"new_gen"`
+}
+
+// SubmitSandboxSnapshot snapshots an existing running sandbox.
+//
+// The caller only supplies identifiers (requestID/sandboxID/hostID/hostIP) and
+// an optional displayName. The canonical create-request is resolved internally
+// from sandboxspec (the create-time spec we persist for every sandbox), with a
+// best-effort fallback to GetTemplateRequest(SandboxData.TemplateID) when
+// specstore has no record (e.g. for sandboxes created before the spec store
+// existed). This removes the historical requirement that callers re-supply the
+// original CreateCubeSandboxReq, which was the original motivation for this
+// refactor.
+func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil, errors.New("requestID is required")
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil, errors.New("sandboxID is required")
+	}
+	nodeID := strings.TrimSpace(hostID)
+	nodeIP := strings.TrimSpace(hostIP)
+
+	originReq, err := loadSandboxCreateRequestFn(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	// Client-supplied backend is ignored. Ordinary snapshot follows the
+	// sandbox spec Master persisted at create (itself inherited from the
+	// template).
+	normalizedBackend, err := resolvePersistedCreateBackend(originReq)
+	if err != nil {
+		return nil, err
+	}
+	if client := strings.TrimSpace(backend); client != "" && !strings.EqualFold(client, normalizedBackend) {
+		log.G(ctx).Infof("snapshot create ignores client backend=%s; using persisted backend=%s sandbox=%s", client, normalizedBackend, sandboxID)
+	}
+	if originReq.Request == nil {
+		originReq.Request = &sandboxtypes.Request{RequestID: requestID}
+	} else {
+		originReq.Request.RequestID = requestID
+	}
+
+	var jobID string
+	reusedExistingJob := false
+	if err := withSnapshotWriteLocks([]string{
+		snapshotSandboxLockKey(sandboxID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
+		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
+			if existing.Operation != JobOperationSnapshotCreate {
+				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
+			}
+			_, storedReq, err := buildSnapshotRequests(originReq, existing.TemplateID)
+			if err != nil {
+				return err
+			}
+			storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
+			storedReq.Backend = normalizedBackend
+			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, storedReq) {
+				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
+			}
+			jobID = existing.JobID
+			reusedExistingJob = true
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		if _, err := getActiveSnapshotJobBySandboxID(ctx, sandboxID); err == nil {
+			return fmt.Errorf("%w: sandbox %s already has an active snapshot operation", ErrTemplateAttemptInProgress, sandboxID)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		if err := ensureSnapshotNodeWritable(ctx, nodeID, nodeIP, false); err != nil {
+			return err
+		}
+
+		snapshotID := generateSnapshotID()
+		createReq, storedReq, err := buildSnapshotRequests(originReq, snapshotID)
+		if err != nil {
+			return err
+		}
+		createReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
+		storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
+		createReq.Backend = normalizedBackend
+		storedReq.Backend = normalizedBackend
+		fingerprint := buildCommitTemplateSpecFingerprint(storedReq)
+		requestJSON, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
+			RequestID:       requestID,
+			SandboxID:       sandboxID,
+			SnapshotID:      snapshotID,
+			NodeID:          nodeID,
+			NodeIP:          nodeIP,
+			DisplayName:     displayName,
+			Backend:         normalizedBackend,
+			SpecFingerprint: fingerprint,
+		})
+		if err != nil {
+			return err
+		}
+		jobID = uuid.NewString()
+		record := &models.TemplateImageJob{
+			JobID:                   jobID,
+			TemplateID:              snapshotID,
+			RequestID:               requestID,
+			SandboxID:               sandboxID,
+			ResourceType:            JobResourceTypeSnapshot,
+			ResourceID:              snapshotID,
+			AttemptNo:               1,
+			Operation:               JobOperationSnapshotCreate,
+			NodeID:                  nodeID,
+			NodeIP:                  nodeIP,
+			TemplateSpecFingerprint: fingerprint,
+			InstanceType:            createReq.InstanceType,
+			NetworkType:             createReq.NetworkType,
+			Status:                  JobStatusPending,
+			Phase:                   JobPhaseSnapshotting,
+			Progress:                0,
+			RequestJSON:             requestJSON,
+			TemplateStatus:          StatusCreating,
+		}
+		snapRec := &models.SnapshotRecord{
+			OriginSandboxID:           sandboxID,
+			OriginNodeID:              nodeID,
+			OriginNodeIP:              nodeIP,
+			OriginHostFactsJSON:       originHostFactsJSON(ctx, nodeID),
+			DisplayName:               displayName,
+			Backend:                   normalizedBackend,
+			RemoteStatus:              constants.SnapshotRemoteStatus(normalizedBackend),
+			RootfsSizeBytesAtSnapshot: parseSystemDiskSizeBytes(storedReq),
+			Status:                    StatusCreating,
+		}
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := createSnapshotTx(ctx, tx, snapshotID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), snapRec); err != nil {
+				return err
+			}
+			return tx.Table(constants.TemplateImageJobTableName).Create(record).Error
+		})
+	}); err != nil {
+		return nil, err
+	}
+
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if reusedExistingJob {
+		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP)
+	}
+	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP)
+}
+
+// loadSandboxCreateRequestFn is the indirection point used by
+// SubmitSandboxSnapshot so tests can swap in a deterministic spec without
+// going through the sandboxspec table or sandbox info RPC. Production code
+// should not reassign it.
+var loadSandboxCreateRequestFn = loadSandboxCreateRequest
+
+// registerTemplateReplicaForSnapshot wraps localcache.RegisterTemplateReplica
+// so tests can patch the indirection (the one-liner wrapper in localcache is
+// inlined and therefore not safely monkey-patchable).
+//
+//go:noinline
+func registerTemplateReplicaForSnapshot(templateID, nodeID string, sizeBytes int64) {
+	localcache.RegisterTemplateReplica(templateID, nodeID, sizeBytes)
+}
+
+// loadSandboxCreateRequest is the authoritative way to get a sandbox's
+// create-time spec on master. It prefers the canonical sandboxspec record
+// (always present for sandboxes created after Phase 1 lands) and falls back to
+// reconstructing from the base template when the spec store has no entry
+// (legacy sandboxes; the base-template fallback can be lossy because user
+// overrides are not part of base templates).
+func loadSandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	req, err := sandboxspec.Get(ctx, sandboxID)
+	if err == nil {
+		return req, nil
+	}
+	if !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) {
+		return nil, fmt.Errorf("load sandbox spec: %w", err)
+	}
+	info, infoErr := getSandboxData(ctx, sandboxID, "")
+	if infoErr != nil {
+		return nil, fmt.Errorf("sandbox spec missing and sandbox info lookup failed: %w", infoErr)
+	}
+	templateID := strings.TrimSpace(info.TemplateID)
+	if templateID == "" {
+		return nil, fmt.Errorf("sandbox %s has no spec record and no base template id; cannot reconstruct create request", sandboxID)
+	}
+	tmplReq, tmplErr := GetTemplateRequest(ctx, templateID)
+	if tmplErr != nil {
+		return nil, fmt.Errorf("sandbox spec missing and base template %s lookup failed: %w", templateID, tmplErr)
+	}
+	log.G(ctx).Warnf("sandbox %s spec record missing; falling back to base template %s (overrides may be lost)", sandboxID, templateID)
+	return tmplReq, nil
+}
+
+func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+	success := false
+	defer func() {
+		recordSnapshotCommitResult(success)
+	}()
+	snapshotID := strings.TrimSpace(createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	logger := log.G(ctx).WithFields(map[string]any{
+		"job_id":      jobID,
+		"snapshot_id": snapshotID,
+		"sandbox_id":  sandboxID,
+		"node_id":     nodeID,
+	})
+	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		"status":   JobStatusRunning,
+		"phase":    JobPhaseSnapshotting,
+		"progress": 10,
+	})
+
+	commitBackend := storageBackendFromCreate(createReq)
+	if rec, recErr := getSnapshotRecord(ctx, snapshotID); recErr == nil && rec != nil && strings.TrimSpace(rec.Backend) != "" {
+		commitBackend = rec.Backend
+	}
+	commitRsp, err := cubelet.CommitSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
+		RequestID:   uuid.NewString(),
+		SandboxID:   sandboxID,
+		TemplateID:  snapshotID,
+		SnapshotDir: createReq.SnapshotDir,
+		Backend:     commitBackend,
+	})
+	if err != nil {
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil, err, commitBackend)
+	}
+	if commitRsp.GetRet() == nil || int(commitRsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
+		msg := "commit sandbox failed"
+		if commitRsp.GetRet() != nil && strings.TrimSpace(commitRsp.GetRet().GetRetMsg()) != "" {
+			msg = commitRsp.GetRet().GetRetMsg()
+		}
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp, errors.New(msg), commitBackend)
+	}
+
+	snapshotPath := commitRsp.GetSnapshotPath()
+	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		"phase":         JobPhaseRegistering,
+		"progress":      70,
+		"node_id":       nodeID,
+		"node_ip":       nodeIP,
+		"snapshot_path": snapshotPath,
+	})
+
+	// Snapshot replicas only carry control-plane state from this point onward.
+	// Physical references (rootfs/memory vol/dev, meta_dir, snapshot path) live
+	// in cubelet's local snapshot catalog and are looked up there by snapshot_id
+	// for rollback/cleanup. Master is intentionally kept thin.
+	replica := ReplicaStatus{
+		NodeID:       nodeID,
+		NodeIP:       nodeIP,
+		InstanceType: createReq.InstanceType,
+		Spec:         calculateRequestSpec(createReq),
+		Status:       ReplicaStatusReady,
+		Phase:        ReplicaPhaseReady,
+		LastJobID:    jobID,
+	}
+	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion(), commitRsp.GetShimVersion())
+	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		"phase":    JobPhaseRegistering,
+		"progress": 85,
+	})
+	if err := UpsertReplica(ctx, snapshotID, createReq.InstanceType, replica); err != nil {
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
+	}
+	setTemplateLocalityCache(snapshotID, []ReplicaStatus{replica})
+	registerTemplateReplicaForSnapshot(snapshotID, nodeID, 1)
+
+	if cacheErr := setTemplateRequestCache(snapshotID, storedReq); cacheErr != nil {
+		logger.Warnf("set snapshot request cache failed: %v", cacheErr)
+	}
+	snapUpdates := map[string]any{
+		"status":                        StatusReady,
+		"last_error":                    "",
+		"rootfs_size_bytes_at_snapshot": commitRsp.GetRootfsSizeBytes(),
+	}
+	if constants.IsS3Backend(commitBackend) {
+		raw := strings.TrimSpace(commitRsp.GetRemoteUuids())
+		if raw != "" {
+			snapUpdates["export_uuids"] = raw
+			snapUpdates["remote_status"] = constants.RemoteStatusInProgress
+		} else {
+			// Commit succeeded for the customer; export failed or returned
+			// empty — same-node restore still works, cross-node does not.
+			snapUpdates["export_uuids"] = ""
+			snapUpdates["remote_status"] = constants.RemoteStatusFailed
+		}
+	}
+	if err := updateSnapshotFields(ctx, snapshotID, snapUpdates); err != nil {
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
+	}
+	// Commit yields a single authoritative envd version; persist it (best-effort)
+	// to the snapshot definition annotation so created sandboxes inherit it.
+	if envdVersion := sanitizeEnvdVersion(commitRsp.GetEnvdVersion()); envdVersion != "" {
+		if err := persistTemplateEnvdVersion(ctx, snapshotID, envdVersion); err != nil {
+			logger.Warnf("persist snapshot envd version fail, snapshot=%s err=%v", snapshotID, err)
+		}
+	}
+	resultPayload, _ := json.Marshal(map[string]any{
+		"snapshot_path":     snapshotPath,
+		"rootfs_vol":        commitRsp.GetRootfsVol(),
+		"memory_vol":        commitRsp.GetMemoryVol(),
+		"rootfs_kind":       commitRsp.GetRootfsKind(),
+		"memory_kind":       commitRsp.GetMemoryKind(),
+		"rootfs_dev":        commitRsp.GetRootfsDev(),
+		"memory_dev":        commitRsp.GetMemoryDev(),
+		"rootfs_size_bytes": commitRsp.GetRootfsSizeBytes(),
+		"backend":           firstNonEmpty(strings.TrimSpace(createReq.Backend), constants.SnapshotBackendXFS),
+		"origin_sandbox_id": sandboxID,
+		"origin_node_id":    nodeID,
+		"display_name":      "",
+	})
+	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+		"status":          JobStatusReady,
+		"phase":           JobPhaseRegistering,
+		"progress":        100,
+		"template_status": StatusReady,
+		"result_json":     string(resultPayload),
+		"error_message":   "",
+	}); err != nil {
+		return err
+	}
+	success = true
+	logger.Infof("snapshot create finished successfully")
+	return nil
+}
+
+func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapshotID, instanceType, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return nil, errors.New("requestID is required")
+	}
+	var jobID string
+	reusedExistingJob := false
+	var existingRequest snapshotRollbackJobRequest
+	var newGen uint32
+	var desiredSize uint64
+	var replica ReplicaStatus
+	var nodeID string
+	var nodeIP string
+	if err := withSnapshotWriteLocks([]string{
+		snapshotSandboxLockKey(sandboxID),
+		snapshotResourceLockKey(snapshotID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
+		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
+			if existing.Operation != JobOperationSnapshotRollback {
+				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
+			}
+			if !snapshotRollbackRequestMatches(existing.RequestJSON, requestID, sandboxID, snapshotID) {
+				return fmt.Errorf("%w: request %s payload does not match existing snapshot rollback job", ErrTemplateAttemptInProgress, requestID)
+			}
+			jobID = existing.JobID
+			reusedExistingJob = true
+			if err := json.Unmarshal([]byte(existing.RequestJSON), &existingRequest); err != nil {
+				return err
+			}
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rec, err := getSnapshotRecord(ctx, snapshotID)
+		if err != nil {
+			if errors.Is(err, ErrSnapshotNotFound) {
+				return wrapSnapshotNotFound(snapshotID)
+			}
+			return err
+		}
+		if snapshotRejectsNewUse(rec.Status) {
+			return wrapSnapshotNotFound(snapshotID)
+		}
+		if !strings.EqualFold(rec.Status, StatusReady) {
+			return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, snapshotID, rec.Status)
+		}
+		if rec.OriginSandboxID != sandboxID {
+			return fmt.Errorf("%w: snapshot %s does not belong to sandbox %s", ErrTemplateAttemptInProgress, snapshotID, sandboxID)
+		}
+		sandboxInfo, err := getSandboxData(ctx, sandboxID, instanceType)
+		if err != nil {
+			return err
+		}
+		nodeID = strings.TrimSpace(sandboxInfo.HostID)
+		nodeIP = strings.TrimSpace(sandboxInfo.HostIP)
+		if rec.OriginNodeID != "" && nodeID != "" && rec.OriginNodeID != nodeID {
+			return fmt.Errorf("%w: snapshot %s is pinned to node %s, sandbox is on %s", ErrTemplateAttemptInProgress, snapshotID, rec.OriginNodeID, nodeID)
+		}
+		if _, err := getActiveSnapshotJobBySandboxID(ctx, sandboxID); err == nil {
+			return fmt.Errorf("%w: sandbox %s already has an active snapshot operation", ErrTemplateAttemptInProgress, sandboxID)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if _, err := getActiveSnapshotJobByResourceID(ctx, snapshotID); err == nil {
+			return fmt.Errorf("%w: snapshot %s already has an active snapshot operation", ErrTemplateAttemptInProgress, snapshotID)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err := ensureSnapshotNodeWritable(ctx, nodeID, nodeIP, false); err != nil {
+			return err
+		}
+		replica, err = getSnapshotReadyReplica(ctx, snapshotID, rec.OriginNodeID)
+		if err != nil {
+			return err
+		}
+		newGen, err = allocateNextRollbackGen(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		// Rollback derives the sandbox rootfs from a cubecow snapshot. Reflink
+		// snapshots are not resizable, so the restored rootfs must keep the
+		// committed snapshot size instead of expanding to the current spec size.
+		desiredSize = 0
+		// Client-supplied backend is ignored. Rollback follows the snapshot
+		// row, then the sandbox spec Master persisted at create.
+		clientBackend := strings.TrimSpace(backend)
+		backend = strings.TrimSpace(rec.Backend)
+		if backend == "" {
+			if createReq, loadErr := loadSandboxCreateRequest(ctx, sandboxID); loadErr == nil {
+				backend = strings.TrimSpace(storageBackendFromCreate(createReq))
+			}
+		}
+		if clientBackend != "" && !strings.EqualFold(clientBackend, backend) {
+			log.G(ctx).Infof("snapshot rollback ignores client backend=%s; using persisted backend=%s snapshot=%s", clientBackend, backend, snapshotID)
+		}
+		payload, err := marshalSnapshotRollbackRequest(requestID, sandboxID, snapshotID, nodeID, nodeIP, newGen, desiredSize, backend)
+		if err != nil {
+			return err
+		}
+		attemptNo, retryOfJobID, err := nextSnapshotAttempt(ctx, snapshotID)
+		if err != nil {
+			return err
+		}
+		jobID = uuid.NewString()
+		record := &models.TemplateImageJob{
+			JobID:        jobID,
+			TemplateID:   snapshotID,
+			RequestID:    requestID,
+			SandboxID:    sandboxID,
+			ResourceType: JobResourceTypeSnapshot,
+			ResourceID:   snapshotID,
+			AttemptNo:    attemptNo,
+			RetryOfJobID: retryOfJobID,
+			Operation:    JobOperationSnapshotRollback,
+			NodeID:       nodeID,
+			NodeIP:       nodeIP,
+			InstanceType: instanceType,
+			Status:       JobStatusPending,
+			Phase:        JobPhaseRollbackPreparing,
+			Progress:     0,
+			RequestJSON:  payload,
+		}
+		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
+	}); err != nil {
+		return nil, err
+	}
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if reusedExistingJob {
+		replica, err = getSnapshotReadyReplica(ctx, existingRequest.SnapshotID, existingRequest.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		return resumeSnapshotRollbackJob(ctx, info, existingRequest, replica)
+	}
+	return executeSnapshotRollbackJob(ctx, info, sandboxID, snapshotID, nodeID, nodeIP, replica, newGen, desiredSize, backend)
+}
+
+func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) error {
+	success := false
+	defer func() {
+		recordSnapshotRollbackResult(success)
+	}()
+	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		"status":   JobStatusRunning,
+		"phase":    JobPhaseRollbackDriving,
+		"progress": 25,
+	})
+	// Master no longer persists physical refs on snapshot replicas. Cubelet
+	// resolves rootfs_vol/memory_vol/meta_dir from its local catalog keyed by
+	// snapshot_id (the all-empty branch in resolveRollbackTargets).
+	rsp, err := cubelet.RollbackSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.RollbackSandboxRequest{
+		RequestID:   uuid.NewString(),
+		SandboxID:   sandboxID,
+		SnapshotID:  snapshotID,
+		NewGen:      newGen,
+		DesiredSize: desiredSize,
+		Backend:     backend,
+	})
+	if err != nil {
+		return failSnapshotRollbackJob(ctx, jobID, JobPhaseRollbackDriving, nil, err)
+	}
+	if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
+		msg := "rollback sandbox failed"
+		if rsp.GetRet() != nil && strings.TrimSpace(rsp.GetRet().GetRetMsg()) != "" {
+			msg = rsp.GetRet().GetRetMsg()
+		}
+		return failSnapshotRollbackJob(ctx, jobID, JobPhaseRollbackDriving, nil, errors.New(msg))
+	}
+	resultPayload, _ := json.Marshal(rsp)
+	// v5: replica rows no longer carry physical refs; the rollback RPC
+	// response (driven from cubelet's catalog) is the only source.
+	if err := AcquireSnapshotRuntimeRef(ctx, SnapshotRuntimeRefInfo{
+		SnapshotID: snapshotID,
+		SandboxID:  sandboxID,
+		NodeID:     nodeID,
+		NodeIP:     nodeIP,
+		MemoryVol:  strings.TrimSpace(rsp.GetMemoryVol()),
+		RootfsVol:  rsp.GetRootfsVol(),
+		SandboxGen: rsp.GetNewGen(),
+	}); err != nil {
+		return failSnapshotRollbackJob(ctx, jobID, JobPhaseRollbackRecovering, resultPayload, err)
+	}
+	message := ""
+	if rsp.GetRet() != nil {
+		message = rsp.GetRet().GetRetMsg()
+	}
+	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+		"status":        JobStatusReady,
+		"phase":         JobPhaseReady,
+		"progress":      100,
+		"result_json":   string(resultPayload),
+		"error_message": message,
+	}); err != nil {
+		return err
+	}
+	success = true
+	return nil
+}
+
+// DeleteSnapshot logically retires a snapshot immediately, then physically
+// removes it when it is safe to do so.
+//
+//   - CREATING / DELETING / another active job still conflict (true
+//     "operation in progress").
+//   - Active runtime refs no longer block the caller: the row is tombstoned
+//     (`DELETED`) and a synthetic READY job is returned. New creates and
+//     rollbacks are rejected. Physical cleanup waits for registered refs
+//     and for a late register that wins the snapshot write lock before
+//     cleanup starts. A create RPC that has not returned yet is not waited
+//     on (same window as the pre-tombstone synchronous delete).
+//   - When no runtime refs remain, the existing synchronous delete job runs
+//     (replica cleanup + metadata drop). A nil error then means the bytes
+//     are gone. Physical-delete failure returns the row to `DELETED` so GC
+//     / a later DELETE can retry — it is not marked `FAILED`.
+//
+// Duplicate requestIDs remain idempotent: a still-pending job is resumed,
+// a tombstone-only call is re-returned as READY. Repeat DELETE is
+// idempotent only while the row is still DELETED. DELETING still
+// conflicts as in-progress; after physical cleanup the row is gone and
+// DELETE returns not found.
+func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return nil, errors.New("requestID is required")
+	}
+	var jobID string
+	reusedExistingJob := false
+	tombstoned := false
+	var existingRequest snapshotDeleteJobRequest
+	if err := withSnapshotWriteLocks([]string{
+		snapshotResourceLockKey(snapshotID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
+		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
+			if existing.Operation != JobOperationSnapshotDelete {
+				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
+			}
+			if !snapshotDeleteRequestMatches(existing.RequestJSON, requestID, snapshotID) {
+				return fmt.Errorf("%w: request %s payload does not match existing snapshot delete job", ErrTemplateAttemptInProgress, requestID)
+			}
+			jobID = existing.JobID
+			reusedExistingJob = true
+			if err := json.Unmarshal([]byte(existing.RequestJSON), &existingRequest); err != nil {
+				return err
+			}
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rec, err := getSnapshotRecord(ctx, snapshotID)
+		if err != nil {
+			if errors.Is(err, ErrSnapshotNotFound) {
+				return wrapSnapshotNotFound(snapshotID)
+			}
+			return err
+		}
+		if strings.EqualFold(rec.Status, StatusCreating) {
+			return fmt.Errorf("%w: snapshot %s is still creating", ErrTemplateAttemptInProgress, snapshotID)
+		}
+		if strings.EqualFold(rec.Status, StatusDeleting) {
+			return fmt.Errorf("%w: snapshot %s is already deleting", ErrTemplateAttemptInProgress, snapshotID)
+		}
+		if _, err := getActiveSnapshotJobByResourceID(ctx, snapshotID); err == nil {
+			return fmt.Errorf("%w: snapshot %s already has an active snapshot operation", ErrTemplateAttemptInProgress, snapshotID)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		targets, err := discoverTemplateCleanupTargets(ctx, snapshotID, instanceType)
+		if err != nil {
+			return err
+		}
+		if _, err := snapshotDeleteLocators(targets); err != nil {
+			return err
+		}
+		if targets.shouldCheckInUse() {
+			if inUse, err := isTemplateInUse(ctx, snapshotID, targets.InstanceType); err != nil {
+				log.G(ctx).Warnf("snapshot %s in-use precheck failed (continuing with delete): %v", snapshotID, err)
+			} else if inUse {
+				log.G(ctx).Warnf("snapshot %s still has active sandbox(es) referencing it; proceeding with delete (rootfs is reflink/CoW-derived and memory vol remains accessible to running hypervisors)", snapshotID)
+			}
+		}
+		n, err := countActiveSnapshotRuntimeRefsFn(ctx, snapshotID)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			if !snapshotIsTombstoned(rec.Status) {
+				if err := tombstoneSnapshotRecord(ctx, snapshotID); err != nil {
+					return err
+				}
+			}
+			tombstoned = true
+			return nil
+		}
+		id, err := insertSnapshotDeleteJob(ctx, requestID, snapshotID, rec.OriginNodeID, instanceType)
+		if err != nil {
+			return err
+		}
+		jobID = id
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if tombstoned {
+		return syntheticTombstoneJobInfo(requestID, snapshotID), nil
+	}
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if reusedExistingJob {
+		return resumeSnapshotDeleteJob(ctx, info, existingRequest)
+	}
+	return executeSnapshotDeleteJob(ctx, info, snapshotID)
+}
+
+var runSnapshotReferenceCleanup = releaseSnapshotArtifactReferences
+
+func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
+	success := false
+	defer func() {
+		recordSnapshotDeleteResult(success)
+	}()
+	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		"status":   JobStatusRunning,
+		"phase":    JobPhaseDeleting,
+		"progress": 20,
+	})
+	targets, err := discoverTemplateCleanupTargets(ctx, snapshotID, "")
+	if err != nil {
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+	}
+	locators, err := snapshotDeleteLocators(targets)
+	if err != nil {
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+	}
+	if err := abortSnapshotDeleteIfRefsReappeared(ctx, jobID, snapshotID); err != nil {
+		return err
+	}
+	// A saved plan means replica cleanup and reference release already
+	// committed. Resume artifact cleanup without depending on those nodes
+	// still being reachable after an earlier failure or process restart.
+	if targets.Snapshot == nil || strings.TrimSpace(targets.Snapshot.CleanupArtifactIDsJSON) == "" {
+		if err := runReplicaCleanup(ctx, snapshotID, locators, cleanupBackendFromTargets(targets)); err != nil {
+			return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+		}
+		if err := runSnapshotReferenceCleanup(ctx, snapshotID, targets); err != nil {
+			return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+		}
+	}
+	if err := runArtifactCleanup(ctx, snapshotID, targets); err != nil {
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+	}
+	if err := runMetadataCleanup(ctx, snapshotID); err != nil {
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+	}
+	invalidateTemplateCaches(snapshotID)
+	// Mirror template delete: drop job rows so ListTemplates does not
+	// resurrect the snapshot from orphan job fallback entries.
+	if err := runTemplateJobCleanup(ctx, snapshotID); err != nil {
+		return err
+	}
+	success = true
+	return nil
+}
+
+// abortSnapshotDeleteIfRefsReappeared re-counts runtime refs under the
+// snapshot write lock immediately before physical cleanup. A late
+// in-flight create that registered after the row flipped to DELETING
+// must send the job back to DELETED instead of unlinking bytes.
+func abortSnapshotDeleteIfRefsReappeared(ctx context.Context, jobID, snapshotID string) error {
+	var n int64
+	if err := withSnapshotWriteLocks([]string{snapshotResourceLockKey(snapshotID)}, func() error {
+		count, err := countActiveSnapshotRuntimeRefsFn(ctx, snapshotID)
+		if err != nil {
+			return err
+		}
+		n = count
+		return nil
+	}); err != nil {
+		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+	}
+	if n <= 0 {
+		return nil
+	}
+	cause := fmt.Errorf("snapshot %s grew %d runtime ref(s) before physical cleanup", snapshotID, n)
+	if err := failSnapshotDeleteJob(ctx, jobID, snapshotID, cause); err != nil {
+		return err
+	}
+	return cause
+}
+
+func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snapshotPath string, commitRsp *cubeboxv1.CommitSandboxResponse, cause error, backend string) error {
+	// v4+: master no longer sends SnapshotPath/Objects to cubelet. The
+	// catalog entry written during CommitSandbox carries everything cubelet
+	// needs to clean up; the snapshotPath / commitRsp arguments are retained
+	// in this signature solely for logging/diagnostic continuity.
+	_ = snapshotPath
+	_ = commitRsp
+	if strings.TrimSpace(nodeIP) != "" && strings.TrimSpace(snapshotID) != "" {
+		_, _ = cubelet.CleanupTemplate(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
+			RequestID:  uuid.NewString(),
+			TemplateID: snapshotID,
+			Backend:    pinnedCleanupBackend(backend),
+		})
+	}
+	_ = deleteReplicasByTemplateID(ctx, snapshotID)
+	defErr := updateSnapshotFields(ctx, snapshotID, map[string]any{
+		"status":     StatusFailed,
+		"last_error": cause.Error(),
+	})
+	jobErr := updateTemplateImageJob(ctx, jobID, map[string]any{
+		"status":          JobStatusFailed,
+		"phase":           JobPhaseRegistering,
+		"progress":        100,
+		"template_status": StatusFailed,
+		"error_message":   cause.Error(),
+	})
+	invalidateTemplateCaches(snapshotID)
+	return errors.Join(defErr, jobErr)
+}
+
+var withStoreTx = func(ctx context.Context, fn func(*gorm.DB) error) error {
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	return store.db.WithContext(ctx).Transaction(fn)
+}
+
+func failSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string, cause error) error {
+	return withStoreTx(ctx, func(tx *gorm.DB) error {
+		if err := updateSnapshotFieldsTx(tx, snapshotID, map[string]any{
+			"status":     StatusDeleted,
+			"last_error": cause.Error(),
+		}); err != nil {
+			return err
+		}
+		return updateTemplateImageJobTx(tx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseDeleting,
+			"progress":      100,
+			"error_message": cause.Error(),
+		})
+	})
+}
+
+func failSnapshotRollbackJob(ctx context.Context, jobID, phase string, resultPayload []byte, cause error) error {
+	fields := map[string]any{
+		"status":        JobStatusFailed,
+		"phase":         phase,
+		"progress":      100,
+		"error_message": cause.Error(),
+	}
+	if len(resultPayload) > 0 {
+		fields["result_json"] = string(resultPayload)
+	}
+	return updateTemplateImageJob(ctx, jobID, fields)
+}
+
+func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID string) (*sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq, error) {
+	createReq, err := cloneCreateRequest(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if createReq.Request == nil || strings.TrimSpace(createReq.RequestID) == "" {
+		return nil, nil, errors.New("requestID is required")
+	}
+	if createReq.Annotations == nil {
+		createReq.Annotations = make(map[string]string)
+	}
+	if createReq.InstanceType == "" {
+		createReq.InstanceType = cubeboxv1.InstanceType_cubebox.String()
+	}
+	createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = snapshotID
+	if constants.GetAppSnapshotVersion(createReq.Annotations) == "" {
+		constants.SetAppSnapshotVersion(createReq.Annotations, DefaultTemplateVersion)
+	}
+	storedReq, err := normalizeStoredTemplateRequest(createReq)
+	if err != nil {
+		return nil, nil, err
+	}
+	return createReq, storedReq, nil
+}
+
+func marshalSnapshotCreateRequest(payload snapshotCreateJobRequest) (string, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func marshalSnapshotRollbackRequest(requestID, sandboxID, snapshotID, nodeID, nodeIP string, newGen uint32, desiredSize uint64, backend string) (string, error) {
+	payload, err := json.Marshal(snapshotRollbackJobRequest{
+		RequestID:   requestID,
+		SandboxID:   sandboxID,
+		SnapshotID:  snapshotID,
+		NodeID:      nodeID,
+		NodeIP:      nodeIP,
+		NewGen:      newGen,
+		DesiredSize: desiredSize,
+		Backend:     strings.TrimSpace(backend),
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func getSnapshotReadyReplica(ctx context.Context, snapshotID, preferredNodeID string) (ReplicaStatus, error) {
+	if rec, err := getSnapshotRecord(ctx, snapshotID); err == nil && rec != nil && snapshotRejectsNewUse(rec.Status) {
+		return ReplicaStatus{}, ErrTemplateHasNoReadyReplica
+	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrTemplateStoreNotInitialized) {
+		return ReplicaStatus{}, err
+	}
+	replicas, err := ListReplicas(ctx, snapshotID)
+	if err != nil {
+		return ReplicaStatus{}, err
+	}
+	var firstReady *ReplicaStatus
+	var firstErr error
+	for _, item := range replicas {
+		replica := replicaModelToStatus(item)
+		if !isReplicaSchedulable(replica) {
+			continue
+		}
+		if preferredNodeID != "" && replica.NodeID != preferredNodeID {
+			continue
+		}
+		if err := validateSnapshotReadyReplica(replica); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if preferredNodeID != "" {
+			return replica, nil
+		}
+		if firstReady == nil {
+			tmp := replica
+			firstReady = &tmp
+		}
+	}
+	if firstReady != nil {
+		return *firstReady, nil
+	}
+	if rec, recErr := getSnapshotRecord(ctx, snapshotID); recErr == nil && rec != nil {
+		synthesized := ReplicaStatus{
+			NodeID:       rec.OriginNodeID,
+			NodeIP:       rec.OriginNodeIP,
+			InstanceType: rec.InstanceType,
+			Status:       ReplicaStatusReady,
+			Phase:        ReplicaPhaseReady,
+		}
+		if preferredNodeID == "" || synthesized.NodeID == preferredNodeID {
+			if err := validateSnapshotReadyReplica(synthesized); err == nil {
+				return synthesized, nil
+			} else if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if firstErr != nil {
+		return ReplicaStatus{}, firstErr
+	}
+	return ReplicaStatus{}, ErrTemplateHasNoReadyReplica
+}
+
+// validateSnapshotReadyReplica makes sure the replica row has enough
+// control-plane state to address a node. Physical references (rootfs/memory
+// vol, meta_dir) are no longer required: cubelet looks them up locally from
+// the snapshot catalog at rollback/cleanup time. Legacy replica rows still
+// carry those fields but we no longer consult them here.
+func validateSnapshotReadyReplica(replica ReplicaStatus) error {
+	if strings.TrimSpace(replica.NodeID) == "" && strings.TrimSpace(replica.NodeIP) == "" {
+		return fmt.Errorf("%w: snapshot replica has no node identity", ErrSnapshotReplicaMetadataIncomplete)
+	}
+	return nil
+}
+
+// snapshotDeleteLocators builds the cleanup locators for snapshot deletion.
+// v4: master sends only (nodeID, nodeIP) to cubelet's CleanupTemplate;
+// cubelet resolves SnapshotPath + Objects from its local catalog (with
+// deterministic fallback). SnapshotPath was kept here in Phase 3 to make
+// rolling upgrades smoother, but in the v4 atomic cutover it is no longer
+// populated.
+func snapshotDeleteLocators(targets *templateCleanupTargets) ([]templateCleanupLocator, error) {
+	if targets == nil {
+		return nil, nil
+	}
+	locators := make([]templateCleanupLocator, 0, len(targets.Replicas))
+	for _, replica := range targets.Replicas {
+		locators = append(locators, templateCleanupLocator{
+			NodeID: replica.NodeID,
+			NodeIP: replica.NodeIP,
+		})
+	}
+	if len(locators) > 0 {
+		return locators, nil
+	}
+	for _, locator := range targets.Locators {
+		if strings.TrimSpace(locator.NodeID) != "" || strings.TrimSpace(locator.NodeIP) != "" {
+			locators = append(locators, templateCleanupLocator{
+				NodeID: locator.NodeID,
+				NodeIP: locator.NodeIP,
+			})
+		}
+	}
+	return locators, nil
+}
+
+func nextSnapshotAttempt(ctx context.Context, snapshotID string) (int32, string, error) {
+	latestJob, err := getLatestTemplateImageJobByTemplateID(ctx, snapshotID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 1, "", nil
+		}
+		return 0, "", err
+	}
+	attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
+	return attemptNo, latestJob.JobID, nil
+}
+
+func allocateNextRollbackGen(ctx context.Context, sandboxID string) (uint32, error) {
+	var maxGen uint32
+	if ref, err := GetActiveSnapshotRuntimeRefBySandbox(ctx, sandboxID); err == nil && ref != nil {
+		maxGen = maxUint32(maxGen, ref.SandboxGen)
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+
+	var records []models.TemplateImageJob
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("sandbox_id = ? AND operation = ?", sandboxID, JobOperationSnapshotRollback).
+		Order("id desc").
+		Limit(100).
+		Find(&records).Error
+	if err != nil {
+		return 0, err
+	}
+	for _, record := range records {
+		if gen, ok, err := rollbackGenFromJSON(record.ResultJSON); err != nil {
+			return 0, err
+		} else if ok {
+			maxGen = maxUint32(maxGen, gen)
+		}
+		if gen, ok, err := rollbackGenFromJSON(record.RequestJSON); err != nil {
+			return 0, err
+		} else if ok {
+			maxGen = maxUint32(maxGen, gen)
+		}
+	}
+	if maxGen == 0 {
+		return 1, nil
+	}
+	return maxGen + 1, nil
+}
+
+func rollbackGenFromJSON(raw string) (uint32, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 0, false, nil
+	}
+	var result snapshotRollbackResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return 0, false, err
+	}
+	if result.NewGen == 0 {
+		return 0, false, nil
+	}
+	return result.NewGen, true, nil
+}
+
+func maxUint32(a, b uint32) uint32 {
+	if a >= b {
+		return a
+	}
+	return b
+}
+
+func updateDefinitionFields(ctx context.Context, templateID string, values map[string]any) error {
+	values["updated_at"] = gorm.Expr("CURRENT_TIMESTAMP")
+	return store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
+		Where("template_id = ?", templateID).Updates(values).Error
+}
+
+func deleteReplicasByTemplateID(ctx context.Context, templateID string) error {
+	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ?", templateID).Delete(&models.TemplateReplica{}).Error
+}
+
+func deleteSnapshotMetadataOnly(ctx context.Context, snapshotID string) error {
+	return cleanupTemplateMetadata(ctx, snapshotID)
+}
+
+func rootfsArtifactIDFromCreateRequest(req *sandboxtypes.CreateCubeSandboxReq) string {
+	if req == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(req.Annotations[constants.CubeAnnotationRootfsArtifactID]); id != "" {
+		return id
+	}
+	for _, container := range req.Containers {
+		if container == nil || container.Image == nil {
+			continue
+		}
+		if id := strings.TrimSpace(container.Image.Annotations[constants.CubeAnnotationRootfsArtifactID]); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
+	payload, err := json.Marshal(storedReq)
+	if err != nil {
+		return err
+	}
+	kind := strings.TrimSpace(opts.Kind)
+	if kind == "" {
+		kind = TemplateKindTemplate
+	}
+	status := StatusPending
+	if kind == TemplateKindSnapshot {
+		status = StatusCreating
+	}
+	model := &models.TemplateDefinition{
+		TemplateID:                templateID,
+		InstanceType:              instanceType,
+		Version:                   version,
+		Status:                    status,
+		Kind:                      kind,
+		OriginSandboxID:           opts.OriginSandboxID,
+		OriginNodeID:              opts.OriginNodeID,
+		OriginHostFactsJSON:       opts.OriginHostFactsJSON,
+		DisplayName:               opts.DisplayName,
+		StorageBackend:            opts.StorageBackend,
+		RootfsSizeBytesAtSnapshot: opts.RootfsSizeBytesAtSnapshot,
+		RootfsArtifactID:          rootfsArtifactIDFromCreateRequest(storedReq),
+		RequestJSON:               string(payload),
+	}
+	if normalized, ok, err := constants.OptionalSnapshotBackend(model.StorageBackend); err == nil && ok {
+		model.StorageBackend = normalized
+	}
+	if err := tx.Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
+		if isDuplicateKeyError(err) {
+			return ErrDuplicateTemplate
+		}
+		return err
+	}
+	return nil
+}
+
+// originHostFactsJSON freezes the origin node's cpuid_hash and
+// host_kernel_release at snapshot-create time. Cross-node restore matching
+// uses only those two fields; richer host facts stay on the live heartbeat.
+//
+// Host facts are boot-static, so when the live node is momentarily unhealthy
+// (heartbeat expiry at exactly the async create moment) we fall back to the
+// node's last-persisted facts rather than freezing an empty string — otherwise
+// a transient blip would permanently degrade the snapshot to
+// origin_fingerprint_unknown with no backfill path. Returns "" only when no
+// facts are available from either source (older cubelet that never reported).
+func originHostFactsJSON(ctx context.Context, nodeID string) string {
+	facts, ok := nodemeta.GetNodeHostFacts(ctx, nodeID)
+	if !ok || facts == nil {
+		facts, ok = nodemeta.GetPersistedNodeHostFacts(ctx, nodeID)
+		if !ok || facts == nil {
+			return ""
+		}
+	}
+	return nodemeta.RestoreMatchFactsJSON(facts)
+}
+
+func getSandboxData(ctx context.Context, sandboxID, instanceType string) (*sandboxtypes.SandboxData, error) {
+	rsp := sandbox.SandboxInfo(ctx, &sandboxtypes.GetCubeSandboxReq{
+		RequestID:    uuid.NewString(),
+		SandboxID:    sandboxID,
+		InstanceType: instanceType,
+	})
+	if rsp == nil || rsp.Ret == nil {
+		return nil, errors.New("sandbox info returned empty response")
+	}
+	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
+		return nil, fmt.Errorf("get sandbox info failed: %s", rsp.Ret.RetMsg)
+	}
+	if len(rsp.Data) == 0 || rsp.Data[0] == nil {
+		return nil, ErrTemplateNotFound
+	}
+	return rsp.Data[0], nil
+}
+
+func resolveSandboxDesiredSizeBytes(ctx context.Context, sandboxInfo *sandboxtypes.SandboxData) (uint64, error) {
+	if sandboxInfo == nil {
+		return 0, nil
+	}
+	if size := parseSystemDiskSizeBytesFromAnnotations(sandboxInfo.Annotations); size > 0 {
+		return size, nil
+	}
+	templateID := strings.TrimSpace(sandboxInfo.TemplateID)
+	if templateID == "" {
+		return 0, nil
+	}
+	req, err := GetTemplateRequest(ctx, templateID)
+	if err != nil {
+		if errors.Is(err, ErrTemplateNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return parseSystemDiskSizeBytes(req), nil
+}
+
+func parseSystemDiskSizeBytes(req *sandboxtypes.CreateCubeSandboxReq) uint64 {
+	if req == nil {
+		return 0
+	}
+	return parseSystemDiskSizeBytesFromAnnotations(req.Annotations)
+}
+
+func parseSystemDiskSizeBytesFromAnnotations(annotations map[string]string) uint64 {
+	if annotations == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(annotations[constants.CubeAnnotationsSystemDiskSize])
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value << 30
+}
+
+func generateSnapshotID() string {
+	return snapshotIDPrefix + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
+}
+
+func isSnapshotDefinition(def *models.TemplateDefinition) bool {
+	if def == nil {
+		return false
+	}
+	kind := strings.TrimSpace(def.Kind)
+	if kind == "" {
+		return false
+	}
+	return strings.EqualFold(kind, TemplateKindSnapshot)
+}
+
+func maxUint64(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func resolveExistingSnapshotJob(info *sandboxtypes.TemplateImageJobInfo) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	switch strings.ToUpper(strings.TrimSpace(info.Status)) {
+	case JobStatusReady:
+		return info, nil
+	case JobStatusFailed:
+		return nil, snapshotJobFailedError(info)
+	case JobStatusPending, JobStatusRunning:
+		return nil, fmt.Errorf("%w: request %s is still bound to snapshot operation %s", ErrTemplateAttemptInProgress, info.RequestID, info.JobID)
+	default:
+		return nil, fmt.Errorf("snapshot job %s ended in unexpected status %s", info.JobID, info.Status)
+	}
+}
+
+func resumeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, req *sandboxtypes.CreateCubeSandboxReq, sandboxID, nodeID, nodeIP string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
+		return resolveExistingSnapshotJob(info)
+	}
+	return executeSnapshotCreateJob(ctx, info, req, sandboxID, nodeID, nodeIP)
+}
+
+func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, req *sandboxtypes.CreateCubeSandboxReq, sandboxID, nodeID, nodeIP string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
+		return finalizeSynchronousSnapshotJob(info)
+	}
+	claimed, err := claimSnapshotJobExecution(ctx, info.JobID, JobPhaseSnapshotting, 10)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return resolveExistingSnapshotJobByID(ctx, info.JobID)
+	}
+	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_create", map[string]any{
+		"job_id":      info.JobID,
+		"snapshot_id": info.TemplateID,
+		"sandbox_id":  sandboxID,
+		"node_id":     nodeID,
+		"node_ip":     nodeIP,
+	})
+	defer cancel()
+	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq); err != nil {
+		return nil, err
+	}
+	return finalizeSnapshotJobByID(ctx, info.JobID)
+}
+
+func resumeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, payload snapshotRollbackJobRequest, replica ReplicaStatus) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
+		return resolveExistingSnapshotJob(info)
+	}
+	return executeSnapshotRollbackJob(ctx, info, payload.SandboxID, payload.SnapshotID, payload.NodeID, payload.NodeIP, replica, payload.NewGen, payload.DesiredSize, payload.Backend)
+}
+
+func executeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
+		return finalizeSynchronousSnapshotJob(info)
+	}
+	claimed, err := claimSnapshotJobExecution(ctx, info.JobID, JobPhaseRollbackDriving, 25)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return resolveExistingSnapshotJobByID(ctx, info.JobID)
+	}
+	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_rollback", map[string]any{
+		"job_id":      info.JobID,
+		"snapshot_id": snapshotID,
+		"sandbox_id":  sandboxID,
+		"node_id":     nodeID,
+		"node_ip":     nodeIP,
+	})
+	defer cancel()
+	if err := runSnapshotRollbackJob(jobCtx, info.JobID, sandboxID, snapshotID, nodeID, nodeIP, replica, newGen, desiredSize, backend); err != nil {
+		return nil, err
+	}
+	return finalizeSnapshotJobByID(ctx, info.JobID)
+}
+
+func resumeSnapshotDeleteJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, payload snapshotDeleteJobRequest) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
+		return resolveExistingSnapshotJob(info)
+	}
+	return executeSnapshotDeleteJob(ctx, info, payload.SnapshotID)
+}
+
+func executeSnapshotDeleteJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, snapshotID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
+		return finalizeSynchronousSnapshotJob(info)
+	}
+	claimed, err := claimSnapshotJobExecution(ctx, info.JobID, JobPhaseDeleting, 20)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return resolveExistingSnapshotJobByID(ctx, info.JobID)
+	}
+	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_delete", map[string]any{
+		"job_id":      info.JobID,
+		"snapshot_id": snapshotID,
+	})
+	defer cancel()
+	if err := runSnapshotDeleteJob(jobCtx, info.JobID, snapshotID); err != nil {
+		return nil, err
+	}
+	// runSnapshotDeleteJob removes job rows on success; return a terminal
+	// READY view without re-querying the deleted job record.
+	result := cloneTemplateImageJobInfo(info)
+	result.Status = JobStatusReady
+	result.Phase = JobPhaseReady
+	result.Progress = 100
+	return result, nil
+}
+
+func resolveExistingSnapshotJobByID(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return resolveExistingSnapshotJob(info)
+}
+
+func synchronousSnapshotJobContext(ctx context.Context, name string, fields map[string]any) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(detachTemplateImageJobContext(ctx, name, fields), snapshotOperationTimeout)
+}
+
+func finalizeSnapshotJobByID(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return finalizeSynchronousSnapshotJob(info)
+}
+
+func finalizeSynchronousSnapshotJob(info *sandboxtypes.TemplateImageJobInfo) (*sandboxtypes.TemplateImageJobInfo, error) {
+	if info == nil {
+		return nil, errors.New("snapshot job info is nil")
+	}
+	switch strings.ToUpper(strings.TrimSpace(info.Status)) {
+	case JobStatusReady:
+		return info, nil
+	case JobStatusFailed:
+		return nil, snapshotJobFailedError(info)
+	default:
+		return nil, fmt.Errorf("snapshot job %s did not reach terminal status synchronously: %s", info.JobID, info.Status)
+	}
+}
+
+func claimSnapshotJobExecution(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
+	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ? AND status = ?", jobID, JobStatusPending).
+		Updates(map[string]any{
+			"status":     JobStatusRunning,
+			"phase":      phase,
+			"progress":   progress,
+			"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
+		})
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	return tx.RowsAffected > 0, nil
+}
+
+func snapshotJobFailedError(info *sandboxtypes.TemplateImageJobInfo) error {
+	if info == nil {
+		return errors.New("snapshot job failed")
+	}
+	message := strings.TrimSpace(info.ErrorMessage)
+	if message == "" {
+		message = fmt.Sprintf("snapshot operation %s failed", firstNonEmpty(info.Operation, info.JobID))
+	}
+	return errors.New(message)
+}
+
+// snapshotCreateRequestMatches verifies idempotency: a re-arrival of the same
+// request_id must target the same sandbox/host/displayName and the same
+// canonical spec fingerprint. Because the spec is now fetched from sandboxspec
+// on every call instead of being carried in the payload, we compare via
+// fingerprint rather than deep-equal.
+func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	var existing snapshotCreateJobRequest
+	if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+		return false
+	}
+	if existing.RequestID != requestID || existing.SandboxID != sandboxID || existing.NodeID != nodeID || existing.NodeIP != nodeIP || existing.DisplayName != displayName {
+		return false
+	}
+	if existing.Backend != "" && backend != "" && !strings.EqualFold(existing.Backend, backend) {
+		return false
+	}
+	if existing.SpecFingerprint == "" {
+		return true
+	}
+	return existing.SpecFingerprint == buildCommitTemplateSpecFingerprint(currentSpec)
+}
+
+func snapshotRollbackRequestMatches(raw, requestID, sandboxID, snapshotID string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	var existing snapshotRollbackJobRequest
+	if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+		return false
+	}
+	return existing.RequestID == requestID && existing.SandboxID == sandboxID && existing.SnapshotID == snapshotID
+}
+
+func snapshotDeleteRequestMatches(raw, requestID, snapshotID string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	var existing snapshotDeleteJobRequest
+	if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+		return false
+	}
+	return existing.RequestID == requestID && existing.SnapshotID == snapshotID
+}

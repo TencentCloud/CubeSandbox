@@ -1,0 +1,11 @@
+{{- if and .Values.cubeNode.enabled .Values.bootstrap.pvmHostKernel.enabled .Values.bootstrap.pvmHostKernel.startupGate.priorityClassCreate }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "cube.pvmPriorityClassName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+value: {{ .Values.bootstrap.pvmHostKernel.startupGate.priorityValue }}
+globalDefault: false
+description: "CubeSandbox PVM bootstrap must run while dependent workloads are gated."
+{{- end }}

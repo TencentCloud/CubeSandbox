@@ -1,0 +1,268 @@
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::arch::aarch64::gic::{Error, Result};
+use crate::device::HypervisorDeviceError;
+use crate::kvm::kvm_bindings::{
+    kvm_device_attr, KVM_DEV_ARM_VGIC_GRP_DIST_REGS, KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
+};
+use kvm_ioctls::DeviceFd;
+
+/*
+ Distributor registers as detailed at page 456 from
+ https://static.docs.arm.com/ihi0069/c/IHI0069C_gic_architecture_specification.pdf.
+ Address offsets are relative to the Distributor base address defined
+by the system memory map. Unless otherwise stated in the register description,
+all GIC registers are 32-bits wide.
+ */
+const GICD_CTLR: u32 = 0x0;
+const GICD_STATUSR: u32 = 0x0010;
+const GICD_IGROUPR: u32 = 0x0080;
+const GICD_ISENABLER: u32 = 0x0100;
+const GICD_ICENABLER: u32 = 0x0180;
+const GICD_ISPENDR: u32 = 0x0200;
+const GICD_ICPENDR: u32 = 0x0280;
+const GICD_ISACTIVER: u32 = 0x0300;
+const GICD_ICACTIVER: u32 = 0x0380;
+const GICD_IPRIORITYR: u32 = 0x0400;
+const GICD_ICFGR: u32 = 0x0C00;
+const GICD_IROUTER: u32 = 0x6000;
+
+/// This is how we represent the registers of the vgic's distributor.
+/// Some of the distributor register )(i.e GICD_STATUSR) are simple
+/// registers (i.e they are associated to a 32 bit value).
+/// However, there are other registers that have variable lengths since
+/// they dedicate some of the 32 bits to some specific interrupt. So, their length
+/// depends on the number of interrupts (i.e the ones that are represented as GICD_REG<n>)
+/// in the documentation mentioned above.
+struct DistReg {
+    /// Offset from distributor address.
+    base: u32,
+    /// Bits per interrupt.
+    /// Relevant for registers that DO share IRQs.
+    bpi: u8,
+    /// Length of the register.
+    /// Relevant for registers that DO NOT share IRQs.
+    length: u16,
+}
+
+// All or at least the registers we are interested in are 32 bit, so
+// we use a constant for size(u32).
+const REG_SIZE: u8 = 4;
+
+// Creates a vgic distributor register.
+macro_rules! VGIC_DIST_REG {
+    ($base:expr, $bpi:expr, $length:expr) => {
+        DistReg {
+            base: $base,
+            bpi: $bpi,
+            length: $length,
+        }
+    };
+}
+
+// List with relevant distributor registers that we will be restoring.
+// Order is taken from qemu.
+static VGIC_DIST_REGS: &[DistReg] = &[
+    VGIC_DIST_REG!(GICD_STATUSR, 0, 4),
+    VGIC_DIST_REG!(GICD_ICENABLER, 1, 0),
+    VGIC_DIST_REG!(GICD_ISENABLER, 1, 0),
+    VGIC_DIST_REG!(GICD_IGROUPR, 1, 0),
+    VGIC_DIST_REG!(GICD_IROUTER, 64, 0),
+    VGIC_DIST_REG!(GICD_ICFGR, 2, 0),
+    VGIC_DIST_REG!(GICD_ICPENDR, 1, 0),
+    VGIC_DIST_REG!(GICD_ISPENDR, 1, 0),
+    VGIC_DIST_REG!(GICD_ICACTIVER, 1, 0),
+    VGIC_DIST_REG!(GICD_ISACTIVER, 1, 0),
+    VGIC_DIST_REG!(GICD_IPRIORITYR, 8, 0),
+];
+
+/// Read a distributor register.
+///
+/// The destination buffer must be a local `mut` whose address is handed to
+/// KVM_GET_DEVICE_ATTR; going through a `&u32` would let LLVM treat the kernel
+/// write-back as a readonly-noalias violation and fold the result to 0.
+fn dist_attr_get(gic: &DeviceFd, offset: u32) -> Result<u32> {
+    let mut val: u32 = 0;
+    let mut gic_dist_attr = kvm_device_attr {
+        group: KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+        attr: offset as u64,
+        addr: &mut val as *mut u32 as u64,
+        flags: 0,
+    };
+    gic.get_device_attr(&mut gic_dist_attr).map_err(|e| {
+        Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+    })?;
+    Ok(val)
+}
+
+/// Write a distributor register.
+fn dist_attr_set(gic: &DeviceFd, offset: u32, val: u32) -> Result<()> {
+    let gic_dist_attr = kvm_device_attr {
+        group: KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+        attr: offset as u64,
+        addr: &val as *const u32 as u64,
+        flags: 0,
+    };
+    gic.set_device_attr(&gic_dist_attr)
+        .map_err(|e| Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into())))
+}
+
+/// Get the distributor control register.
+pub fn read_ctlr(gic: &DeviceFd) -> Result<u32> {
+    dist_attr_get(gic, GICD_CTLR)
+}
+
+/// Set the distributor control register.
+pub fn write_ctlr(gic: &DeviceFd, val: u32) -> Result<()> {
+    dist_attr_set(gic, GICD_CTLR, val)
+}
+
+fn get_interrupts_num(gic: &DeviceFd) -> Result<u32> {
+    let mut num_irq = 0;
+
+    let mut nr_irqs_attr = kvm_device_attr {
+        group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
+        attr: 0,
+        addr: &mut num_irq as *mut u32 as u64,
+        flags: 0,
+    };
+    gic.get_device_attr(&mut nr_irqs_attr).map_err(|e| {
+        Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+    })?;
+    Ok(num_irq)
+}
+
+fn compute_reg_len(gic: &DeviceFd, reg: &DistReg, base: u32) -> Result<u32> {
+    // FIXME:
+    // Redefine some GIC constants to avoid the dependency on `layout` crate.
+    // This is temporary solution, will be fixed in future refactoring.
+    const LAYOUT_IRQ_BASE: u32 = 32;
+
+    let mut end = base;
+    let num_irq = get_interrupts_num(gic)?;
+    if reg.length > 0 {
+        // This is the single type register (i.e one that is not DIST_X<n>) and for which
+        // the bpi is 0.
+        // Look in the kernel for REGISTER_DESC_WITH_LENGTH.
+        end = base + reg.length as u32;
+    }
+    if reg.bpi > 0 {
+        // This is the type of register that takes into account the number of interrupts
+        // that the model has. It is also the type of register where
+        // a register relates to multiple interrupts.
+        end = base + (reg.bpi as u32 * (num_irq - LAYOUT_IRQ_BASE) / 8);
+        if reg.bpi as u32 * (num_irq - LAYOUT_IRQ_BASE) % 8 > 0 {
+            end += REG_SIZE as u32;
+        }
+    }
+    Ok(end)
+}
+
+/// Distributor registers whose saved zero can be skipped on restore:
+/// I{S,C}* are W1S/W1C bitmaps (a zero write is an architectural no-op),
+/// IROUTER/IPRIORITYR are per-IRQ RAM zeroed by KVM's vgic init
+/// (arch/arm64/kvm/vgic/vgic-init.c); IGROUPR is excluded because KVM GICv3
+/// inits irq->group to 1, so it resets to all-ones.
+fn dist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICD_ISENABLER
+            | GICD_ICENABLER
+            | GICD_IROUTER
+            | GICD_ISPENDR
+            | GICD_ICPENDR
+            | GICD_ISACTIVER
+            | GICD_ICACTIVER
+            | GICD_IPRIORITYR
+    )
+}
+
+/// Set distributor registers of the GIC. Only valid on a freshly created
+/// vGIC: the zero-skip in `dist_reg_resets_to_zero` assumes the vGIC still
+/// holds its reset values.
+pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
+    let mut idx = 0;
+
+    for dreg in VGIC_DIST_REGS {
+        let mut base = dreg.base + REG_SIZE as u32 * dreg.bpi as u32;
+        let end = compute_reg_len(gic, dreg, base)?;
+        let skip_zero = dist_reg_resets_to_zero(dreg.base);
+
+        while base < end {
+            let val = state[idx];
+            if val != 0 || !skip_zero {
+                dist_attr_set(gic, base, val)?;
+            }
+            idx += 1;
+            base += REG_SIZE as u32;
+        }
+    }
+    Ok(())
+}
+/// Get distributor registers of the GIC.
+pub fn get_dist_regs(gic: &DeviceFd) -> Result<Vec<u32>> {
+    let mut state = Vec::new();
+
+    for dreg in VGIC_DIST_REGS {
+        let mut base = dreg.base + REG_SIZE as u32 * dreg.bpi as u32;
+        let end = compute_reg_len(gic, dreg, base)?;
+
+        while base < end {
+            state.push(dist_attr_get(gic, base)?);
+            base += REG_SIZE as u32;
+        }
+    }
+    Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::aarch64::gic::VgicConfig;
+    use crate::kvm::KvmGicV3Its;
+
+    fn test_vgic_config() -> VgicConfig {
+        VgicConfig {
+            vcpu_count: 1,
+            dist_addr: 0x0900_0000 - 0x01_0000,
+            dist_size: 0x01_0000,
+            redists_addr: 0x0900_0000 - 0x01_0000 - 0x02_0000,
+            redists_size: 0x02_0000,
+            msi_addr: 0x0900_0000 - 0x01_0000 - 0x02_0000 - 0x02_0000,
+            msi_size: 0x02_0000,
+            nr_irqs: 256,
+        }
+    }
+
+    // The zero-skip is reset-value-dependent only for the RAM classes
+    // (IROUTER/IPRIORITYR); the W1S/W1C bitmaps ignore a zero write
+    // whatever the current state. Pin the RAM banks against the running
+    // kernel.
+    #[test]
+    fn test_fresh_vgic_ram_skip_list_reads_zero() {
+        let hv = crate::new().unwrap();
+        let vm = hv.create_vm().unwrap();
+        vm.create_vcpu(0, None).unwrap();
+        let gic = KvmGicV3Its::new(&*vm, test_vgic_config()).expect("Cannot create gic");
+
+        let state = get_dist_regs(&gic.device).unwrap();
+        let mut idx = 0;
+        for dreg in VGIC_DIST_REGS {
+            let base = dreg.base + REG_SIZE as u32 * dreg.bpi as u32;
+            let end = compute_reg_len(&gic.device, dreg, base).unwrap();
+            let words = ((end - base) / REG_SIZE as u32) as usize;
+            if matches!(dreg.base, GICD_IROUTER | GICD_IPRIORITYR) {
+                for w in &state[idx..idx + words] {
+                    assert_eq!(
+                        *w, 0,
+                        "RAM skip-list register {:#06x} is non-zero on a fresh vGIC",
+                        dreg.base
+                    );
+                }
+            }
+            idx += words;
+        }
+        assert_eq!(idx, state.len());
+    }
+}

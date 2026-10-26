@@ -1,0 +1,16 @@
+[package]
+name = "qcow"
+version = "0.1.0"
+authors = ["The Chromium OS Authors"]
+edition = "2021"
+license = "BSD-3-Clause"
+
+[lib]
+path = "src/qcow.rs"
+
+[dependencies]
+byteorder = "1.4.3"
+libc = "0.2.137"
+log = "0.4.17"
+remain = "0.2.5"
+vmm-sys-util = "0.12.1"

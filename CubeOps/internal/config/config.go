@@ -1,0 +1,688 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+// Package config loads CubeOps configuration.
+//
+// Resolution order, highest priority first:
+//
+//  1. Environment variables (CUBE_OPS_*, DATABASE_URL, JWT_SECRET, ...).
+//     This keeps the existing deployment workflow working: systemd / k8s
+//     manifests keep using env vars without changes.
+//
+//  2. YAML file at the path in CUBE_OPS_CONFIG (or /etc/cube/ops.yaml if
+//     unset). One-click and Helm use environment variables; the YAML file is
+//     optional for manual installs. Nested keys map to CUBE_OPS_<SECTION>_<FIELD>
+//     (for example s3.endpoint → CUBE_OPS_S3_ENDPOINT).
+//
+//  3. Built-in defaults.
+//
+// The YAML schema groups related knobs under a section per component
+// (for example warehouse:). See config.example.yaml for a fully
+// commented example.
+package config
+
+import (
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/goccy/go-yaml"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+)
+
+// Config holds all CubeOps runtime configuration.
+type Config struct {
+	// Server
+	Bind        string `yaml:"bind"`
+	LogLevel    string `yaml:"log_level"`
+	LogDir      string `yaml:"log_dir"`
+	LogFileNum  int    `yaml:"log_file_num"`
+	LogFileSize int    `yaml:"log_file_size"`
+	JWTSecret   string `yaml:"jwt_secret"`
+
+	// Database — either a single URL or the individual fields below.
+	DatabaseURL   string `yaml:"database_url"`
+	MySQLHost     string `yaml:"mysql_host"`
+	MySQLPort     int    `yaml:"mysql_port"`
+	MySQLUser     string `yaml:"mysql_user"`
+	MySQLPassword string `yaml:"mysql_password"`
+	MySQLDB       string `yaml:"mysql_db"`
+
+	// JWT
+	AccessTTL  time.Duration `yaml:"access_ttl"`
+	RefreshTTL time.Duration `yaml:"refresh_ttl"`
+
+	// CubeMaster
+	CubeMasterAddr string `yaml:"cubemaster_addr"`
+
+	// CubeAPI (for SDK endpoint proxy)
+	CubeAPIURL string `yaml:"cubeapi_url"`
+
+	// Redis (optional): REDIS_URL is the complete source of truth when set.
+	// Otherwise, MasterName selects Sentinel; split HOST/PORT/DB/PASSWORD is the fallback.
+	RedisURL              string `yaml:"redis_url"`
+	RedisHost             string `yaml:"redis_host"`
+	RedisPort             int    `yaml:"redis_port"`
+	RedisDB               int    `yaml:"redis_db"`
+	RedisPassword         string `yaml:"redis_password"`
+	RedisMasterName       string `yaml:"redis_master_name"`
+	RedisSentinelNodes    string `yaml:"redis_sentinel_nodes"`
+	RedisSentinelPassword string `yaml:"redis_sentinel_password"`
+
+	// Sandbox domain exposed to SDK clients; matches SDK handler's
+	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
+	SandboxDomain string `yaml:"sandbox_domain"`
+
+	// SoftDeletePurge (issue #973) configures the scheduled hard-purge of
+	// soft-deleted (tombstoned) rows. All fields optional; defaults are enforced
+	// by CubeDB/tombstone (7-day retention, hourly). DISABLED by default — the
+	// purge is irreversible, so it must be opted into explicitly.
+	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
+
+	S3        S3Config        `yaml:"s3"`
+	Warehouse WarehouseConfig `yaml:"warehouse"`
+	Store     StoreConfig     `yaml:"store"`
+}
+
+// StoreConfig selects the warehouse blob backend. Default is s3.
+// FSBackend is used only when Backend is fs.
+type StoreConfig struct {
+	Backend   string               `yaml:"backend"`
+	FSBackend StoreFSBackendConfig `yaml:"fs_backend"`
+}
+
+// StoreFSBackendConfig is the local-directory warehouse store.
+type StoreFSBackendConfig struct {
+	Root       string `yaml:"root"`
+	PublicURL  string `yaml:"public_url"`
+	SigningKey string `yaml:"signing_key"`
+	Shared     bool   `yaml:"shared"`
+}
+
+const (
+	StoreBackendS3 = "s3"
+	StoreBackendFS = "fs"
+	DefaultFSRoot  = "/var/lib/cubeops/blobs"
+)
+
+// SoftDeletePurgeConf configures the CubeOps tombstone purger.
+type SoftDeletePurgeConf struct {
+	Enable    *bool         `yaml:"enable"` // nil -> default-off (irreversible; opt in)
+	DryRun    bool          `yaml:"dry_run"`
+	Retention time.Duration `yaml:"retention"` // <=0 -> 7d; (0,1h) clamped up to 1h
+	Interval  time.Duration `yaml:"interval"`  // <=0 -> 1h; (0,1m) clamped up to 1m
+}
+
+// WarehouseConfig is the component warehouse and its import sources.
+type WarehouseConfig struct {
+	WorkDir        string        `yaml:"work_dir"`
+	UploadTimeout  time.Duration `yaml:"upload_timeout"`
+	FetchTimeout   time.Duration `yaml:"fetch_timeout"`
+	UploadMaxBytes int64         `yaml:"upload_max_bytes"`
+	GitHubRepos    []string      `yaml:"github_repos"`
+	CNBRepos       []string      `yaml:"cnb_repos"`
+	GitHubToken    string        `yaml:"github_token"`
+	CNBToken       string        `yaml:"cnb_token"`
+	PresignTTL     time.Duration `yaml:"presign_ttl"`
+}
+
+// S3Config is the CubeOps object-store connection.
+type S3Config struct {
+	Endpoint        string `yaml:"endpoint"`
+	NodeEndpoint    string `yaml:"node_endpoint"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
+	Bucket          string `yaml:"bucket"`
+	Region          string `yaml:"region"`
+	PathStyle       *bool  `yaml:"path_style"`
+	CreateBucket    *bool  `yaml:"create_bucket"`
+}
+
+const DefaultS3Bucket = "cube-ops"
+
+// S3Configured reports whether the CubeOps object store is usable.
+func (c Config) S3Configured() bool {
+	return strings.TrimSpace(c.S3.Endpoint) != "" &&
+		strings.TrimSpace(c.S3.AccessKeyID) != "" &&
+		strings.TrimSpace(c.S3.SecretAccessKey) != ""
+}
+
+// UsePathStyle defaults to true (MinIO / path-style S3).
+func (c S3Config) UsePathStyle() bool {
+	return defaultTrue(c.PathStyle)
+}
+
+// ShouldCreateBucket defaults to true.
+func (c S3Config) ShouldCreateBucket() bool {
+	return defaultTrue(c.CreateBucket)
+}
+
+func defaultTrue(p *bool) bool {
+	return p == nil || *p
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// Load reads configuration from YAML + environment variables (env wins).
+func Load() (*Config, error) {
+	cfg, err := loadFromYAML()
+	if err != nil {
+		return nil, err
+	}
+
+	// Environment variable overrides take precedence.
+	overrideFromEnv(cfg)
+
+	// Default durations.
+	if cfg.AccessTTL == 0 {
+		cfg.AccessTTL = 15 * time.Minute
+	}
+	if cfg.RefreshTTL == 0 {
+		cfg.RefreshTTL = 168 * time.Hour
+	}
+	if cfg.Bind == "" {
+		cfg.Bind = "127.0.0.1:3010"
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	if cfg.LogDir == "" {
+		cfg.LogDir = "/data/log/CubeOps"
+	}
+	if cfg.LogFileNum == 0 {
+		cfg.LogFileNum = 10
+	}
+	if cfg.LogFileSize == 0 {
+		cfg.LogFileSize = 100
+	}
+	if cfg.CubeMasterAddr == "" {
+		cfg.CubeMasterAddr = "http://127.0.0.1:8089"
+	}
+	if cfg.CubeAPIURL == "" {
+		cfg.CubeAPIURL = "http://127.0.0.1:3000"
+	}
+	if cfg.SandboxDomain == "" {
+		cfg.SandboxDomain = "cube.app"
+	}
+	if cfg.Warehouse.WorkDir == "" {
+		cfg.Warehouse.WorkDir = "/var/tmp/cubeops-warehouse"
+	}
+	if cfg.Warehouse.UploadTimeout == 0 {
+		cfg.Warehouse.UploadTimeout = 30 * time.Minute
+	}
+	if cfg.Warehouse.FetchTimeout == 0 {
+		cfg.Warehouse.FetchTimeout = 30 * time.Minute
+	}
+	if cfg.Warehouse.UploadMaxBytes <= 0 {
+		cfg.Warehouse.UploadMaxBytes = 8 << 30
+	}
+	if cfg.S3.Bucket == "" {
+		cfg.S3.Bucket = DefaultS3Bucket
+	}
+	if cfg.S3.Region == "" {
+		cfg.S3.Region = "us-east-1"
+	}
+	if err := applyStoreDefaults(&cfg.Store); err != nil {
+		return nil, err
+	}
+	cfg.Warehouse.PresignTTL = clampPresignTTL(cfg.Warehouse.PresignTTL)
+	if len(cfg.Warehouse.GitHubRepos) == 0 {
+		cfg.Warehouse.GitHubRepos = []string{"TencentCloud/CubeSandbox"}
+	}
+	if len(cfg.Warehouse.CNBRepos) == 0 {
+		cfg.Warehouse.CNBRepos = []string{"CubeSandbox/CubeSandbox"}
+	}
+
+	// JWT_SECRET is optional — if not set, it will be auto-generated and
+	// persisted to the DB on first startup (see store.bootstrapJWTSecret).
+	return cfg, nil
+}
+
+// DaoConfig maps the config to a CubeDB dao.Config. DatabaseURL wins when
+// set (driver inferred from its scheme); otherwise the MySQL* fields are used
+// directly, so passwords never round-trip through a URL.
+func (c *Config) DaoConfig() (dao.Config, error) {
+	// Both DATABASE_URL and the split MySQL* fields are empty: point the
+	// operator at both knobs instead of a misleading per-field error.
+	if strings.TrimSpace(c.DatabaseURL) == "" &&
+		strings.TrimSpace(c.MySQLHost) == "" &&
+		strings.TrimSpace(c.MySQLUser) == "" &&
+		strings.TrimSpace(c.MySQLDB) == "" {
+		return dao.Config{}, fmt.Errorf("no database configured: set DATABASE_URL, or CUBE_SANDBOX_MYSQL_{HOST,USER,DB} (PASSWORD optional) via env or the YAML at %s", yamlConfigPath())
+	}
+	if strings.TrimSpace(c.DatabaseURL) == "" {
+		// Whitespace-only URL counts as unset: fall back to the split-field path.
+		return c.daoConfigFromFields()
+	}
+	return c.daoConfigFromURL()
+}
+
+// daoConfigFromFields builds a dao.Config directly from the MySQL* fields,
+// failing fast on a missing required field (host, user or database).
+func (c *Config) daoConfigFromFields() (dao.Config, error) {
+	raw := strings.TrimSpace(c.MySQLHost)
+	// Probe before Trim("[]"): otherwise "[2001:db8::1]:3306" becomes
+	// "2001:db8::1]:3306" and SplitHostPort no longer sees the port.
+	if hostHasNumericPort(raw) {
+		return dao.Config{}, fmt.Errorf("mysql_host %q must not include a port; set mysql_port instead", raw)
+	}
+	// JoinHostPort re-brackets IPv6, so drop brackets copied from a URL.
+	host := strings.Trim(raw, "[]")
+	if host == "" {
+		return dao.Config{}, fmt.Errorf("mysql_host is required (set CUBE_SANDBOX_MYSQL_HOST or mysql_host)")
+	}
+	user := strings.TrimSpace(c.MySQLUser)
+	if user == "" {
+		return dao.Config{}, fmt.Errorf("mysql_user is required (set CUBE_SANDBOX_MYSQL_USER or mysql_user)")
+	}
+	dbname := strings.TrimSpace(c.MySQLDB)
+	if dbname == "" {
+		return dao.Config{}, fmt.Errorf("mysql_db is required (set CUBE_SANDBOX_MYSQL_DB or mysql_db)")
+	}
+	port := c.MySQLPortOrDefault()
+	if port < 1 || port > 65535 {
+		return dao.Config{}, fmt.Errorf("mysql_port %d is out of range (1-65535)", port)
+	}
+	return newDAOConfig("mysql", user, c.MySQLPassword,
+		net.JoinHostPort(host, strconv.Itoa(port)), dbname, nil), nil
+}
+
+// hostHasNumericPort reports whether s is host:port or [host]:port with a
+// numeric port. Bare hosts, including bracketed IPv6, return false.
+func hostHasNumericPort(s string) bool {
+	_, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return false
+	}
+	_, err = strconv.Atoi(port)
+	return err == nil
+}
+
+// daoConfigFromURL parses DatabaseURL into a dao.Config, inferring the driver
+// from the scheme (mysql:// or postgres://). Malformed URLs fail fast instead
+// of silently falling back to localhost:3306.
+func (c *Config) daoConfigFromURL() (dao.Config, error) {
+	// Trim to match DaoConfig's whitespace-counts-as-unset rule: a stray
+	// leading space or trailing newline should parse, not fail.
+	u, err := url.Parse(strings.TrimSpace(c.DatabaseURL))
+	if err != nil {
+		// url.Parse errors can embed the password; keep the message generic.
+		return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
+	}
+	// Redact credentials for any error message that follows.
+	redacted := u.Redacted()
+
+	driver := "mysql"
+	port := 3306
+	// Keep in sync with dao.driverRegistry (pkgs/cubedb/dao/driver.go):
+	// adding an engine there requires a case here.
+	switch strings.ToLower(u.Scheme) {
+	case "postgres", "postgresql":
+		driver, port = "postgres", 5432
+	case "mysql", "":
+		// defaults above
+	default:
+		return dao.Config{}, fmt.Errorf("unsupported database_url scheme %q (want mysql:// or postgres://)", u.Scheme)
+	}
+
+	host := u.Hostname()
+	if host == "" {
+		// Opaque URLs (missing "//") hide credentials from Redacted().
+		if u.Opaque != "" {
+			return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
+		}
+		return dao.Config{}, fmt.Errorf("database_url %s has no host", redacted)
+	}
+	if h := u.Port(); h != "" {
+		// url.Parse rejects non-numeric ports; this fires on int overflow
+		// and out-of-range values (0, 65536+).
+		p, err := strconv.Atoi(h)
+		if err != nil || p < 1 || p > 65535 {
+			return dao.Config{}, fmt.Errorf("database_url %s has invalid port %q", redacted, h)
+		}
+		port = p
+	}
+
+	var user, pass string
+	if u.User != nil {
+		user = u.User.Username()
+		pass, _ = u.User.Password()
+	}
+	if user == "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has no user", redacted)
+	}
+
+	// Database name is the path without leading "/".
+	dbname := strings.TrimPrefix(u.Path, "/")
+	if dbname == "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has no database name", redacted)
+	}
+
+	// Query parameters must be consumed, not dropped: honor postgres sslmode
+	// (the driver only enables TLS via Extra["sslmode"]) and reject everything
+	// else so an ignored setting never fails silently at connect time.
+	var extra map[string]string
+	if q := u.Query(); len(q) > 0 {
+		if driver == "postgres" {
+			if v := q.Get("sslmode"); v != "" {
+				extra = map[string]string{"sslmode": v}
+			}
+			q.Del("sslmode")
+		}
+		if len(q) > 0 {
+			return dao.Config{}, fmt.Errorf("database_url %s has unsupported query parameter(s) %v (only postgres sslmode is honored)", redacted, sortedKeys(q))
+		}
+	}
+	if u.Fragment != "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has an unsupported fragment", redacted)
+	}
+
+	return newDAOConfig(driver, user, pass,
+		net.JoinHostPort(host, strconv.Itoa(port)), dbname, extra), nil
+}
+
+// sortedKeys lists a query map's keys; values may carry secrets, keys do not.
+func sortedKeys(v url.Values) []string {
+	keys := make([]string, 0, len(v))
+	for k := range v {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// newDAOConfig builds a dao.Config with the shared pool limits applied.
+func newDAOConfig(driver, user, pwd, addr, dbname string, extra map[string]string) dao.Config {
+	return dao.Config{
+		Driver:       driver,
+		User:         user,
+		Pwd:          pwd,
+		Addr:         addr,
+		DBName:       dbname,
+		Extra:        extra,
+		MaxIdleConns: 10,
+		MaxOpenConns: 100,
+	}
+}
+
+// MySQLPortOrDefault returns the configured MySQL port or 3306.
+func (c *Config) MySQLPortOrDefault() int {
+	if c.MySQLPort == 0 {
+		return 3306
+	}
+	return c.MySQLPort
+}
+
+func yamlConfigPath() string {
+	if p := os.Getenv("CUBE_OPS_CONFIG"); p != "" {
+		return p
+	}
+	return "/etc/cube/ops.yaml"
+}
+
+// loadFromYAML reads config from the YAML file. If the file does not exist,
+// the returned config is the zero value (env vars / defaults fill in).
+// An existing-but-malformed file is a hard error.
+func loadFromYAML() (*Config, error) {
+	cfg := &Config{}
+	path := yamlConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// overrideFromEnv fills in any zero-valued fields from environment
+// variables. Env vars are higher priority than the YAML file.
+func overrideFromEnv(cfg *Config) {
+	if v := os.Getenv("CUBE_OPS_BIND"); v != "" {
+		cfg.Bind = v
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_DIR"); v != "" {
+		cfg.LogDir = v
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_FILE_NUM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.LogFileNum = n
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_FILE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.LogFileSize = n
+		}
+	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		cfg.JWTSecret = v
+	}
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.DatabaseURL = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_HOST"); v != "" {
+		cfg.MySQLHost = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_PORT"); v != "" {
+		var p int
+		if _, err := fmt.Sscanf(v, "%d", &p); err == nil {
+			cfg.MySQLPort = p
+		}
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_USER"); v != "" {
+		cfg.MySQLUser = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_PASSWORD"); v != "" {
+		cfg.MySQLPassword = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_DB"); v != "" {
+		cfg.MySQLDB = v
+	}
+	if v := os.Getenv("CUBE_MASTER_ADDR"); v != "" {
+		cfg.CubeMasterAddr = v
+	}
+	if v := os.Getenv("CUBE_API_URL"); v != "" {
+		cfg.CubeAPIURL = v
+	}
+	if v := os.Getenv("REDIS_URL"); v != "" {
+		cfg.RedisURL = v
+	}
+	if v := os.Getenv("REDIS_HOST"); v != "" {
+		cfg.RedisHost = v
+	}
+	if v := os.Getenv("REDIS_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.RedisPort = p
+		}
+	}
+	if v := os.Getenv("REDIS_DB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.RedisDB = n
+		}
+	}
+	if v := os.Getenv("REDIS_PASSWORD"); v != "" {
+		cfg.RedisPassword = v
+	}
+	if v := os.Getenv("REDIS_MASTER_NAME"); v != "" {
+		cfg.RedisMasterName = v
+	}
+	if v := os.Getenv("REDIS_SENTINEL_NODES"); v != "" {
+		cfg.RedisSentinelNodes = v
+	}
+	if v := os.Getenv("REDIS_SENTINEL_PASSWORD"); v != "" {
+		cfg.RedisSentinelPassword = v
+	}
+	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
+		cfg.SandboxDomain = v
+	}
+	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.AccessTTL = d
+		}
+	}
+	if v := os.Getenv("JWT_REFRESH_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.RefreshTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_WORK_DIR"); v != "" {
+		cfg.Warehouse.WorkDir = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.UploadTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.FetchTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_TOKEN"); v != "" {
+		cfg.Warehouse.GitHubToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_TOKEN"); v != "" {
+		cfg.Warehouse.CNBToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_REPOS"); v != "" {
+		cfg.Warehouse.GitHubRepos = splitCSV(v)
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_REPOS"); v != "" {
+		cfg.Warehouse.CNBRepos = splitCSV(v)
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ENDPOINT"); v != "" {
+		cfg.S3.Endpoint = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_NODE_ENDPOINT"); v != "" {
+		cfg.S3.NodeEndpoint = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ACCESS_KEY_ID"); v != "" {
+		cfg.S3.AccessKeyID = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_SECRET_ACCESS_KEY"); v != "" {
+		cfg.S3.SecretAccessKey = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_BUCKET"); v != "" {
+		cfg.S3.Bucket = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_REGION"); v != "" {
+		cfg.S3.Region = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_PATH_STYLE"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.S3.PathStyle = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_S3_CREATE_BUCKET"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.S3.CreateBucket = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_PRESIGN_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.PresignTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_UPLOAD_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.Warehouse.UploadMaxBytes = n
+		}
+	}
+	overrideStoreFromEnv(&cfg.Store)
+}
+
+// CUBE_OPS_STORE_FS_* overlays the nested fs_backend fields.
+func overrideStoreFromEnv(s *StoreConfig) {
+	if v := os.Getenv("CUBE_OPS_STORE_BACKEND"); v != "" {
+		s.Backend = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_ROOT"); v != "" {
+		s.FSBackend.Root = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_PUBLIC_URL"); v != "" {
+		s.FSBackend.PublicURL = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_SIGNING_KEY"); v != "" {
+		s.FSBackend.SigningKey = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_SHARED"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			s.FSBackend.Shared = *p
+		}
+	}
+}
+
+func applyStoreDefaults(s *StoreConfig) error {
+	backend, err := normalizeStoreBackend(s.Backend)
+	if err != nil {
+		return err
+	}
+	s.Backend = backend
+	if s.FSBackend.Root == "" {
+		s.FSBackend.Root = DefaultFSRoot
+	}
+	return nil
+}
+
+func normalizeStoreBackend(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "", StoreBackendS3:
+		return StoreBackendS3, nil
+	case StoreBackendFS:
+		return StoreBackendFS, nil
+	default:
+		return "", fmt.Errorf("store.backend %q is not supported (want s3 or fs)", strings.TrimSpace(raw))
+	}
+}
+
+func parseEnvBool(v string) *bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return boolPtr(true)
+	case "0", "false", "no", "off":
+		return boolPtr(false)
+	default:
+		return nil
+	}
+}
+
+func clampPresignTTL(d time.Duration) time.Duration {
+	const minTTL = time.Minute
+	const maxTTL = 15 * time.Minute
+	const defTTL = 5 * time.Minute
+	if d <= 0 {
+		return defTTL
+	}
+	if d < minTTL {
+		return minTTL
+	}
+	if d > maxTTL {
+		return maxTTL
+	}
+	return d
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

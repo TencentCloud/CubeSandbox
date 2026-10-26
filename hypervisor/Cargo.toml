@@ -1,0 +1,117 @@
+[package]
+name = "cube-hypervisor"
+version = "28.0.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+default-run = "cube-hypervisor"
+build = "build.rs"
+license = "LICENSE-APACHE & LICENSE-BSD-3-Clause"
+description = "Open source Virtual Machine Monitor (VMM) that runs on top of KVM"
+homepage = "https://github.com/cloud-hypervisor/cloud-hypervisor"
+# Minimum buildable version:
+# Keep in sync with version in .github/workflows/build.yaml
+rust-version = "1.77.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+
+[dependencies]
+anyhow = "1.0.86"
+api_client = { path = "api_client" }
+arc-swap = "1.1"
+chrono = "0.4.0"
+clap = { version = "4.4.7", features = ["wrap_help", "cargo", "string"] }
+epoll = "4.3.1"
+event_monitor = { path = "event_monitor" }
+event_notifier = { path = "event_notifier" }
+hypervisor = { path = "hypervisor" }
+lazy_static = "1.2"
+libc = "0.2.137"
+log = { version = "0.4.17", features = ["std"] }
+log_json = { path = "log_json" }
+logging = { path = "logging" }
+option_parser = { path = "option_parser" }
+rlimit = "0.9.1"
+seccompiler = "0.3.0"
+serde = { workspace = true, features = ["rc", "derive"] }
+serde_json = "1.0.87"
+signal-hook = "0.3.14"
+slog = "2.7.0"
+slog-scope = "4.4.0"
+thiserror = "1.0.37"
+tpm = { path = "tpm" }
+tracer = { path = "tracer" }
+vmm = { path = "vmm" }
+vmm-sys-util = "0.12.1"
+
+[build-dependencies]
+clap = { version = "4.4.7", features = ["cargo"] }
+
+
+[dev-dependencies]
+dirs = "4.0.0"
+net_util = { path = "net_util" }
+once_cell = "1.16.0"
+serde_json = "1.0.87"
+test_infra = { path = "test_infra" }
+wait-timeout = "0.2.0"
+vm-migration = { path = "vm-migration" }
+
+[features]
+default = ["kvm"]
+guest_debug = ["vmm/guest_debug"]
+kvm = ["vmm/kvm"]
+lib_support = ["vmm/lib_support"]
+logger_debug = []
+mshv = ["vmm/mshv"]
+tdx = ["vmm/tdx"]
+tracing = ["vmm/tracing", "tracer/tracing"]
+
+[workspace]
+members = [
+	"api_client",
+    "arch",
+    "block_util",
+    "devices",
+    "event_monitor",
+    "event_notifier",
+    "hypervisor",
+    "logging",
+    "net_gen",
+    "net_util",
+    "option_parser",
+    "pci",
+    "performance-metrics",
+    "qcow",
+    "serial_buffer",
+    "test_infra",
+    "tracer",
+    "vfio_user",
+    "vhdx",
+    "vhost_user_block",
+    "vhost_user_net",
+    "virtio-devices",
+    "vm-allocator",
+    "vm-device",
+    "vm-migration",
+    "vm-virtio",
+    "vmm",
+    "rate_limiter",
+    "virtiofsd",
+]
+
+[workspace.dependencies]
+linux-loader = "0.13.0"
+seccompiler = "0.3.0"
+serde = "1.0.208"
+vfio-ioctls = { git = "https://github.com/rust-vmm/vfio", rev = "64171f3", default-features = false }
+vhost = { git = "https://github.com/rust-vmm/vhost", rev = "d983ae0" }
+vhost-user-backend = { git = "https://github.com/rust-vmm/vhost", rev = "d983ae0" }
+virtio-bindings = "0.1.0"
+virtio-queue = "0.14.0"
+virtiofsd = { path = "virtiofsd" }
+vm-fdt = { git = "https://github.com/rust-vmm/vm-fdt", branch = "main" }
+vm-memory = "0.16.1"
+vmm-sys-util = "0.12.1"

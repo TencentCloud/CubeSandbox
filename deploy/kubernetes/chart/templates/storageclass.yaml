@@ -1,0 +1,21 @@
+{{- if .Values.storageClass.create }}
+{{- if not .Values.storageClass.name -}}
+{{- fail "storageClass.create=true requires storageClass.name (the StorageClass metadata.name to create)" -}}
+{{- end -}}
+{{- if not .Values.storageClass.provisioner -}}
+{{- fail "storageClass.create=true requires storageClass.provisioner (e.g. com.tencent.cloud.csi.cbs for TKE, ebs.csi.aws.com for EKS, or the CSI provisioner of your cluster's default storage)" -}}
+{{- end -}}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name | quote }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+provisioner: {{ .Values.storageClass.provisioner | quote }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+{{- with .Values.storageClass.parameters }}
+parameters:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}

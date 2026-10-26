@@ -1,0 +1,237 @@
+oom_score = 0
+root = "/data/cubelet/root"
+# Dedicated space for metadata.
+#mount -t tmpfs -o size=1024m none /data/cubelet/state/
+state = "/data/cubelet/state"
+version = 3
+pid_file = "/run/cube-let.pid"
+dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml"
+
+[http]
+  address = ":9998"
+
+[timeouts]
+  "io.containerd.timeout.bolt.open" = "3s"
+  "io.containerd.timeout.task.state" = "2s"
+  "io.containerd.timeout.shim.shutdown" = "5m"
+  "io.containerd.timeout.shim.cleanup" = "5s"
+  "io.containerd.timeout.shim.load" = "5s"
+[grpc]
+  address = "/data/cubelet/cubelet.sock"
+  gid = 0
+  max_recv_message_size = 16777216
+  max_send_message_size = 16777216
+  tcp_address = ":9999"
+  uid = 0
+[cubetap]
+  address="/data/cubelet/cubetap.sock"
+  gid = 0
+  uid = 0
+[operation_server]
+  address="/data/cubelet/cubelet-operation.sock"
+  gid = 0
+  uid = 0
+  disable = true
+[debug]
+  address = ":9966"
+[cubelog]
+  path = "/data/log/Cubelet"
+  file_num = 10      # retained files (current + numbered backups)
+  file_size = "500m" # per-file roll size: 500m, 1g, 2g (binary MiB/GiB); unitless integer is MiB
+[plugins]
+  [plugins."io.cubelet.controller.config.v1.cubelet"]
+    # Static-only cadence for node status and resource reporting.
+    # Do not configure this in dynamicconf/conf.yaml.
+    node_status_update_frequency = "1s"
+    cubeops_addr = ""
+    cubeops_timeout = "10m"
+
+  [plugins."io.cubelet.internal.v1.volume"]
+  [plugins."io.cubelet.internal.v1.shimlog"]
+    # Dedicated space.
+    #mount -t tmpfs -o size=100m none /data/cubelet/shimlog
+    root_path = "/data/cubelet/shimlog"
+  [plugins."io.cubelet.internal.v1.cleanup"]
+    # Dedicated space.
+    #mount -t tmpfs -o size=100m none /data/cubelet/cleanup
+    root_path = "/data/cubelet/cleanup"
+  [plugins."io.cubelet.internal.v1.cgroup"]
+    pool_size = 3000
+    pool_workers = 1
+    pool_trigger_interval_in_ms = 1000
+    vm_cpu_overhead = "0"
+    vm_memory_overhead_base = "42Mi"
+    vm_memory_overhead_coefficient = 64
+    host_cpu_overhead = "0.3"
+    host_memory_overhead_base = "20Mi"
+    vm_snapshot_specs_config = "/usr/local/services/cubetoolbox/cube-snapshot/spec.json"
+    snapshot_disk_dir = "/data/snapshot_pack/disks"
+
+  [plugins."io.cubelet.internal.v1.resource-metrics"]
+    enabled = true
+    collection_interval = "5s"
+    request_timeout = "2s"
+    max_concurrent_requests = 8
+    stale_after = "15s"
+    export_scopes = ["host_sandbox"]
+
+  [plugins."io.cubelet.internal.v1.network"]
+    object_dir = "/usr/local/services/cubetoolbox/cube-vs/network"
+    eth_name = "eth0"
+    tap_init_num = 500
+    cidr = "192.168.0.0/18"
+    mvm_inner_ip = "169.254.68.6"
+    mvm_mac_addr = "20:90:6f:fc:fc:fc"
+    mvm_gw_mac_addr = "20:90:6f:cf:cf:cf"
+    mvm_gw_dest_ip = "169.254.68.5"
+    mvm_mtu = 1500
+    cube_egress_admin_url = "http://127.0.0.1:9091"
+    cube_egress_push_timeout = "2s"
+    cube_router_enable = false
+    cube_router_cidr = ""
+    cube_router_mac_addr = "22:90:6f:cf:cf:cf"
+    # metric
+    check_interval_in_sec = "5s"
+    report_stat_interval_in_sec = "60s"
+    # cubevs event from redis stream
+    watch_stream = false
+    redis_conf_path = "/data/cubelet/rainbow.toml"
+    stream_name_prefix = "gw_route:update:"
+    stream_key = "gw_key"
+    stream_block_time = "30s"
+  [plugins."io.cubelet.internal.v1.storage"]
+    # Default storage backend: cubecow (reflink-only copy-on-write).
+    storage_backend = "cubecow"
+
+    # Working directory for the cubelet storage plugin. cubecow reflink volumes land at
+    # <data_path>/xfs/objects, so the filesystem backing data_path must support
+    # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).
+    data_path = "/data/cubelet/storage"
+
+    # Parent directory for volume plugin host_path mounts (Attach --volume-base-dir).
+    volume_plugin_base_dir = "/data/cube-shared/volume"
+
+    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+      name        = "s3"
+      type        = "binary"
+      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3"
+
+    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+      name        = "cos"
+      type        = "binary"
+      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-cos"
+
+
+    [plugins."io.cubelet.internal.v1.storage".cow.log]
+    level = "info,h2=warn,hyper=warn,tower=warn"
+    format = "compact"
+    file = "/data/log/cubecow/cubecow.log"
+    rotation = "daily"
+
+    [plugins."io.cubelet.internal.v1.storage".cow.s3]
+    # CubeS3lvol opt-in. Default false: cubelet does not probe s3lvol.
+    # One-click flips this from ONE_CLICK_ENABLE_S3LVOL.
+    enable = false
+    socket_path = "/var/run/s3lvol.sock"
+
+    # Only needed when switching back to the legacy ext4 / raw / reflink-pool
+    # backend: change storage_backend to the corresponding value (e.g. "ext4")
+    # and uncomment the fields below as needed. Under cubecow these fields are ignored.
+    # pool_type = "copy_reflink"
+    # disksize = "400Gi"
+    # warningPercent = 200
+    # pool_default_format_size_list = ["1Gi"]
+    # base_disk_uuid = "ef5c2893-ddbd-4d6e-bef6-3853c31d5b94"
+    # pool_size = 3000
+    # pool_worker_num = 8
+    # pool_trigger_interval_in_ms = 800
+  [plugins."io.cubelet.internal.v1.images"]
+    runtime_type = "io.containerd.cube.v2"
+  [plugins."io.cubelet.internal.v1.cubebox"]
+    default_runtime_name = "cube"
+    [plugins."io.cubelet.internal.v1.cubebox".runtimes]
+      [plugins."io.cubelet.internal.v1.cubebox".runtimes.cube]
+        runtime_type = "io.containerd.cube.rs"
+        runtime_cfg_path = "/usr/local/services/cubetoolbox/cube-shim/conf/config-cube.toml"
+      [plugins."io.cubelet.internal.v1.cubebox".runtimes.runc]
+        runtime_type = "io.containerd.runc.v2"
+    #cube_host_shared_dir = "/run/cube-containers/shared/sandboxes/"
+  [plugins."io.cubelet.cubebox-service.v1.cubebox-service"]
+    destroy_dead_line = "60s"
+    dead_container_ttl = "1h"
+    # How long a recorded "a shim may have been spawned" intent may keep a
+    # sandbox's tap, IP and volumes allocated once no process can be found for
+    # it anywhere on the host (no recorded pid, no bundle pid file). Every
+    # other piece of evidence is consulted first, so this only ever decides a
+    # record that names no live holder at all. It exists because the intent is
+    # written before the shim starts: a crash or a handled failure in that
+    # window would otherwise make the sandbox permanently un-reclaimable.
+    # "0" disables the bound (fail closed forever).
+    shim_intent_ttl = "10m"
+  [plugins."io.cubelet.images-service.v1.images-service"]
+    [plugins."io.cubelet.images-service.v1.images-service".image_gc]
+      max_unused_time_interval = "1d"
+      detection_interval = "1m"
+      max_deletion_per_cycle = 10
+      free_disk_threshold_percent = 10
+  [plugins."io.cubelet.cubebox-service.v1.gc-service"]
+    cleanup_interval = "5s"
+    # Failed cleanups before a sandbox is quarantined: alerted once, and
+    # retried every 10m instead of every cleanup_interval. Quarantine frees
+    # nothing — the tap/IP and volumes stay held and pool capacity stays
+    # reduced until the holder is gone (see `cubecli diag tap-holders`).
+    # Set to 0 to keep retrying at full rate and never quarantine.
+    max_cleanup_attempts = 60
+    # Quarantined sandboxes are still retried so manual holder reclamation is
+    # sufficient to recover. Keep this much slower than cleanup_interval.
+    quarantine_retry_interval = "10m"
+
+  [plugins."io.cubelet.workflow.v1.workflow"]
+    [plugins."io.cubelet.workflow.v1.workflow".flows]
+      [plugins."io.cubelet.workflow.v1.workflow".flows.init]
+        actions = [["cleanup"],["cubebox"],["images","storage","cgroup","network","volume", "netfile", "cube-sandbox-store"]]
+      [plugins."io.cubelet.workflow.v1.workflow".flows.create]
+        concurrent = 100
+        actions = [["createid", "appsnapshot"],["images","volume","storage","network","netfile", "cube-sandbox-store"],["cgroup"],["cubebox"]]
+      [plugins."io.cubelet.workflow.v1.workflow".flows.destroy]
+        concurrent = 100
+        actions = [["cubebox"],["images","storage","cgroup","network","volume","netfile", "cube-sandbox-store"],["cleanup"]]
+      [plugins."io.cubelet.workflow.v1.workflow".flows.cleanup]
+        actions = [["cubebox"],["images","volume","storage","cgroup","network","netfile", "cube-sandbox-store"],["cleanup"]]
+  [plugins."io.containerd.gc.v1.scheduler"]
+    deletion_threshold = 0
+    mutation_threshold = 1000
+    pause_threshold = 0.0001
+    schedule_delay = "0s"
+    startup_delay = "5s"
+
+  [plugins."io.containerd.snapshotter.v1.overlayfs"]
+    # Dedicated space for metadata.
+    #mount -t tmpfs -o size=300m none /data/cubelet/state/
+    root_path = "/data/cubelet/state"
+    # Dedicated space for unpacked image and snapshot data.
+    data_path = "/data/cubelet/root"
+
+  [plugins."io.containerd.metadata.v1.bolt"]
+    # Dedicated space.
+    #mount -t tmpfs -o size=300m none /data/cubelet/state/
+    root_path = "/data/cubelet/state"
+    content_sharing_policy = "shared"
+    no_sync = true
+
+  # Keep containerd's generic container_* task metrics off /v1/metrics.
+  # Sandbox CPU and memory metrics are at /v1/metrics/resource.
+  [plugins."io.containerd.monitor.task.v1.cgroups"]
+    no_prometheus = true
+  [plugins."io.containerd.runtime.v2.task"]
+    # Declare both platforms so the same config runs on amd64 and arm64 hosts;
+    # containerd matches image manifests against the host's native platform.
+    platforms = ["linux/amd64", "linux/arm64"]
+  [plugins."io.cubelet.chi.v1.vsocket-manager"]
+    proxyPort = 1032
+  [plugins."io.containerd.cri.v1.images"]
+    max_concurrent_downloads = 10
+    stats_collect_period = 30
+    [plugins."io.containerd.cri.v1.images".registry.mirrors]
+      [plugins."io.containerd.cri.v1.images".registry.mirrors."docker.io"]
+        endpoint = ["https://mirror.ccs.tencentyun.com"]

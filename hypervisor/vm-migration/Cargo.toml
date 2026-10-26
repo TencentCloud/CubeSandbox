@@ -1,0 +1,12 @@
+[package]
+name = "vm-migration"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+thiserror = "1.0.37"
+serde = { workspace = true, features = ["rc", "derive"] }
+serde_json = "1.0.87"
+vm-memory = { workspace = true, features = ["backend-mmap", "backend-atomic"] }

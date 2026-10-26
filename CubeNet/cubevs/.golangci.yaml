@@ -1,0 +1,60 @@
+version: "2"
+linters:
+  default: all
+  disable:
+    - depguard
+    - exhaustruct
+    - gochecknoglobals
+    - gochecknoinits
+    - mnd
+    - nlreturn
+    - paralleltest
+    - testpackage
+    - varnamelen
+    - wsl
+    - wsl_v5
+  settings:
+    cyclop:
+      max-complexity: 20
+    funlen:
+      lines: 80
+      statements: 60
+    gosec:
+      excludes:
+        # G115: integer overflow conversion
+        - G115
+    tagliatelle:
+      case:
+        rules:
+          json: pascal
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - cyclop
+          - funlen
+        path: _test.go
+      - linters:
+          - dupl
+        path: reaper.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

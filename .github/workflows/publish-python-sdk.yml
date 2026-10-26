@@ -1,0 +1,107 @@
+name: Publish Python SDK to PyPI
+
+on:
+  push:
+    tags:
+      - 'python-sdk-v*'
+
+jobs:
+  build-and-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout (full history, blobless)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: 'blob:none'
+
+      - name: Verify tag version matches pyproject.toml and __init__.py
+        id: verify_version
+        working-directory: sdk/python
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          # Extract version from tag: python-sdk-v0.3.0 -> 0.3.0
+          TAG_VERSION="${CURRENT_TAG#python-sdk-v}"
+          echo "Tag version: $TAG_VERSION"
+
+          # Extract version from pyproject.toml
+          PYPROJECT_VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/version *= *"\(.*\)"/\1/')
+          echo "pyproject.toml version: $PYPROJECT_VERSION"
+
+          # Extract version from __init__.py
+          INIT_VERSION=$(grep -m1 '__version__' cubesandbox/__init__.py | sed 's/.*__version__ *= *"\(.*\)".*/\1/')
+          echo "__init__.py version: $INIT_VERSION"
+
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match pyproject.toml version ($PYPROJECT_VERSION)"
+            exit 1
+          fi
+
+          if [ "$TAG_VERSION" != "$INIT_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match __init__.py __version__ ($INIT_VERSION)"
+            exit 1
+          fi
+
+          echo "All versions match: $TAG_VERSION"
+
+      - name: Check if sdk/python/ changed since last tag
+        id: check_changes
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          echo "Current tag: $CURRENT_TAG"
+
+          PREV_TAG=$(git describe --tags --first-parent --match 'python-sdk-v*' --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || true)
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous python-sdk tag found -- first release, proceeding."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Comparing $PREV_TAG -> $CURRENT_TAG for sdk/python/ changes"
+            CHANGED=$(git diff --name-only "$PREV_TAG" "$CURRENT_TAG" -- sdk/python/)
+            if [ -n "$CHANGED" ]; then
+              echo "sdk/python/ has changes:"
+              echo "$CHANGED"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "No changes in sdk/python/ since $PREV_TAG -- skipping publish."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Set up Python
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        if: steps.check_changes.outputs.changed == 'true'
+        run: pip install build twine
+
+      - name: Run tests
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/python
+        run: |
+          pip install -e ".[dev]"
+          python -m pytest tests/ -v
+
+      - name: Build package
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/python
+        run: python -m build
+
+      - name: Validate distributions
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/python
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist/
+          password: ${{ secrets.CUBE_PYPI_TOKEN }}

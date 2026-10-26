@@ -1,0 +1,24 @@
+[package]
+name = "vhost_user_block"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+block_util = { path = "../block_util" }
+clap = { version = "4.4.7", features = ["wrap_help", "cargo"] }
+env_logger = "0.10.2"
+epoll = "4.3.1"
+libc = "0.2.137"
+log = "0.4.17"
+option_parser = { path = "../option_parser" }
+qcow = { path = "../qcow" }
+vhost = { workspace = true, features = ["vhost-user-backend"] }
+vhost-user-backend = { workspace = true }
+virtio-bindings = { workspace = true }
+virtio-queue = { workspace = true }
+vm-memory = { workspace = true }
+vmm-sys-util = { workspace = true }
+
+[build-dependencies]
+clap = { version = "4.4.7", features = ["cargo"] }

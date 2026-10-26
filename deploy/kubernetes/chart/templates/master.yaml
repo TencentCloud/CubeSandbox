@@ -1,0 +1,197 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.masterName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  replicas: {{ .Values.controlPlane.master.replicas }}
+  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" .Values.controlPlane.master.deploymentStrategy) | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: master
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: master
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-master
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.master "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.master.pullPolicy }}
+          {{- with .Values.controlPlane.master.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlane.master.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_MASTER_CONFIG_PATH
+              value: /usr/local/services/cubetoolbox/CubeMaster/conf.yaml
+            - name: CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR
+              value: /data/CubeMaster/storage
+            - name: CUBE_NODE_IPS
+              value: {{ join "," .Values.controlPlane.master.nodeIPs | quote }}
+            # CubeTemplateCenter's address, injected as an environment variable
+            # rather than rendered into conf.yaml: an address is a deployment
+            # fact, and this is the exact counterpart of CUBE_MASTER_ADDR on the
+            # TC side. Only present when TC is deployed; when it is absent the
+            # conf's templatecenter_enabled=false rejects template builds with a
+            # clear error (CubeMaster no longer supports in-process builds).
+            {{- $tcAddr := include "cube.templateCenterEndpoint" . }}
+            {{- if $tcAddr }}
+            - name: CUBE_TEMPLATE_CENTER_ADDR
+              value: {{ $tcAddr | quote }}
+            # Shared secret gating TC's build-status callbacks
+            # (/internal/template/jobs/:job_id/status); without it the handler
+            # only warns and accepts anything.
+            - name: CUBE_TEMPLATE_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-template-callback-token
+            {{- end }}
+            # Deployment-wide env (CUBE_S3_* among them). CubeMaster re-signs
+            # S3 artifact download URLs at the point of use
+            # (templatecenter.artifactDownloadURL), so it needs the same S3
+            # credentials TC / cubelet / s3lvol read; without them it can only
+            # hand out the stored presigned URL, which dies 7 days after the
+            # build.
+            # cube.artifactS3Env injects the s3Backed CUBE_S3_* set from
+            # volumeS3.* / builtin MinIO when global.env does not carry it;
+            # placed before global.env so an operator entry still wins.
+            {{- include "cube.artifactStoreEnv" . | nindent 12 }}
+            {{- include "cube.artifactS3Env" . | nindent 12 }}
+            {{- with .Values.global.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.controlPlane.master.skipMigrationFingerprintCheck }}
+            # Escape hatch for a database that was migrated by a DIFFERENT build
+            # line than this image: versions applied there are absent from this
+            # image's migrations tree, and the preflight refuses to start with
+            #   applied file "..." is missing from the migrations tree
+            #
+            # A database NEWER than the binary is the safe direction (the extra
+            # tables/indexes simply go unused), so this makes startup possible.
+            # It is off by default because CubeMaster is the schema owner and the
+            # check is exactly what catches an edited/reused migration.
+            #
+            # This does not reconcile the schemas -- prefer a clean db_name when
+            # the two build lines are not meant to share a database.
+            - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
+              value: "true"
+            {{- end }}
+            {{- with .Values.controlPlane.master.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: cubemaster
+              containerPort: {{ .Values.controlPlane.master.service.port }}
+          {{- if .Values.controlPlane.master.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.master.probes.readiness.path | quote }}
+              port: cubemaster
+            initialDelaySeconds: {{ .Values.controlPlane.master.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.master.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.master.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.controlPlane.master.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.master.probes.liveness.path | quote }}
+              port: cubemaster
+            initialDelaySeconds: {{ .Values.controlPlane.master.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.master.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.master.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: cube-master-config
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/conf.yaml
+              subPath: conf.yaml
+              readOnly: true
+          {{- if .Values.volumeCos.enabled }}
+            - name: volume-cos-conf
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf
+              subPath: volume-cos.conf
+              readOnly: true
+          {{- end }}
+          {{- if eq (include "cube.volumeS3Enabled" .) "true" }}
+            - name: volume-s3-conf
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf
+              subPath: volume-s3.conf
+              readOnly: true
+          {{- end }}
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+            - name: cube-master-log
+              mountPath: /data/log/CubeMaster
+            - name: cube-master-storage
+              mountPath: /data/CubeMaster/storage
+          {{- with .Values.controlPlane.master.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: cube-master-config
+          secret:
+            secretName: {{ include "cube.masterConfigSecretName" . }}
+      {{- if .Values.volumeCos.enabled }}
+        - name: volume-cos-conf
+          secret:
+            secretName: {{ include "cube.volumeCosSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
+      {{- if eq (include "cube.volumeS3Enabled" .) "true" }}
+        - name: volume-s3-conf
+          secret:
+            secretName: {{ include "cube.volumeS3SecretName" . }}
+            defaultMode: 0400
+      {{- end }}
+        - name: cube-egress-ca
+          secret:
+            secretName: {{ include "cube.egressCASecretName" . }}
+        - name: cube-master-log
+          emptyDir: {}
+        - name: cube-master-storage
+          {{- if and .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.controlPlane.master.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else if .Values.controlPlane.master.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.masterStoragePVCName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.masterName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  type: {{ .Values.controlPlane.master.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+  ports:
+    - name: cubemaster
+      port: {{ .Values.controlPlane.master.service.port }}
+      targetPort: cubemaster
+{{- end }}

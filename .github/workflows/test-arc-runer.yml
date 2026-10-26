@@ -1,0 +1,89 @@
+name: Actions Runner Controller Demo
+on:
+  workflow_dispatch:
+
+jobs:
+  Explore-GitHub-Actions:
+    # You need to use the INSTALLATION_NAME from the previous step
+    runs-on: arc-runner-set-8c16g
+    steps:
+    - run: |
+        echo "🎉 This job uses runner scale set runners!"
+        echo
+        echo "== lscpu =="
+        lscpu
+        echo
+        echo "== uname -r =="
+        uname -r
+        echo "== free -h =="
+        free -h
+        echo "== df -h =="
+        df -h
+        echo "== nproc =="
+        nproc
+    - run: |
+          grep CapEff /proc/self/status
+          python3 - <<'PY'
+          import re
+          capeff = int(re.search(r"CapEff:\s*([0-9a-fA-F]+)", open("/proc/self/status").read()).group(1), 16)
+          print("CAP_SYS_ADMIN:", bool(capeff & (1 << 21)))
+          PY
+
+          mkdir -p /tmp/mnt
+          if mount -t tmpfs tmpfs /tmp/mnt; then
+            echo "PRIVILEGED_OR_SYS_ADMIN=true"
+            umount /tmp/mnt
+          else
+            echo "PRIVILEGED_OR_SYS_ADMIN=false"
+          fi
+
+          mkdir -p /tmp/mnt-sudo
+          if command -v sudo >/dev/null 2>&1 && sudo -n mount -t tmpfs tmpfs /tmp/mnt-sudo; then
+            echo "SUDO_MOUNT=true"
+            sudo -n umount /tmp/mnt-sudo
+          else
+            echo "SUDO_MOUNT=false"
+          fi
+
+
+  Explore-GitHub-Actions-github-hosted:
+    runs-on: ubuntu-latest
+    steps:
+    - run: |
+        echo "🎉 This job uses github hosted runners!"
+        echo
+        echo "== lscpu =="
+        lscpu
+        echo
+        echo "== uname -r =="
+        uname -r
+        echo "== free -h =="
+        free -h
+        echo "== df -h =="
+        df -h
+        echo "== nproc =="
+        nproc
+    - run: |
+          grep CapEff /proc/self/status
+          python3 - <<'PY'
+          import re
+          capeff = int(re.search(r"CapEff:\s*([0-9a-fA-F]+)", open("/proc/self/status").read()).group(1), 16)
+          print("CAP_SYS_ADMIN:", bool(capeff & (1 << 21)))
+          PY
+
+          mkdir -p /tmp/mnt
+          if mount -t tmpfs tmpfs /tmp/mnt; then
+            echo "PRIVILEGED_OR_SYS_ADMIN=true"
+            umount /tmp/mnt
+          else
+            echo "PRIVILEGED_OR_SYS_ADMIN=false"
+          fi
+
+          mkdir -p /tmp/mnt-sudo
+          if command -v sudo >/dev/null 2>&1 && sudo -n mount -t tmpfs tmpfs /tmp/mnt-sudo; then
+            echo "SUDO_MOUNT=true"
+            sudo -n umount /tmp/mnt-sudo
+          else
+            echo "SUDO_MOUNT=false"
+          fi
+    

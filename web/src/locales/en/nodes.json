@@ -1,0 +1,8 @@
+{
+  "title": "Nodes",
+  "subtitle": "Host capacity, saturation and conditions across the fleet.",
+  "noNodes": "No nodes registered.",
+  "cpu": "CPU",
+  "memory": "Memory",
+  "isolated": "Isolated"
+}

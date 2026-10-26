@@ -1,0 +1,15 @@
+[package]
+name = "vhdx"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+byteorder = "1.4.3"
+crc32c = "0.6.3"
+libc = "0.2.137"
+log = "0.4.17"
+remain = "0.2.5"
+thiserror = "1.0.37"
+uuid = { version = "1.2.1", features = ["v4"] }

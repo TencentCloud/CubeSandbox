@@ -1,0 +1,81 @@
+{
+  "title": "Template Store",
+  "subtitle": "Install official preset images to quickly create sandbox templates.",
+  "searchPlaceholder": "Search images…",
+  "checkUpdates": "Check Updates",
+  "checking": "Checking…",
+  "noResults": "No matching images.",
+  "official": "Official",
+  "hasUpdate": "Update Available",
+  "install": "Install",
+  "installAndEnableAgentHub": "Install and Enable Assistant",
+  "installOnly": "Install Only",
+  "enableAgentHub": "Enable Assistant",
+  "installed": "Installed",
+  "installedCount": "Installed {{count}}",
+  "installAdditionalHint": "Install with different parameters",
+  "installModal": {
+    "subtitle": "Install as Cube Template",
+    "building": "Building template, please wait…",
+    "success": "Installation successful!",
+    "viewTemplate": "View template",
+    "close": "Close",
+    "cancel": "Cancel",
+    "confirm": "Confirm Install",
+    "installing": "Installing…",
+    "enablingAgentHub": "Enabling for Digital Assistant…",
+    "retry": "Retry",
+    "failed": "Installation failed, please retry.",
+    "buildFailed": "Build failed",
+    "timeout": "Timeout. Check template list for status."
+  },
+  "toast": {
+    "updatesFound": "Found {{count}} image(s) with new versions",
+    "upToDate": "All images are up to date",
+    "checkFailed": "Check updates failed, please retry",
+    "agentTemplateEnabled": "Enabled for Digital Assistant"
+  },
+  "categories": {
+    "all": "All",
+    "code": "Code Execution",
+    "browser": "Browser",
+    "ai": "AI · LLM",
+    "base": "Base Image"
+  },
+  "items": {
+    "sandbox-code": {
+      "name": "Code Execution Sandbox",
+      "description": "Official code execution environment, preinstalled with Python3 + Jupyter Kernel, compatible with the E2B SDK."
+    },
+    "sandbox-browser": {
+      "name": "Browser Sandbox",
+      "description": "Preinstalled Chromium, ready for web automation."
+    },
+    "openclaw-lite": {
+      "name": "OpenClaw · Lite",
+      "description": "Lightweight OpenClaw assistant image — faster to pull and smaller on disk, ideal for chat-first assistants without the full browser toolchain."
+    },
+    "openclaw-aio": {
+      "name": "OpenClaw · All-in-One",
+      "description": "Full OpenClaw AI Agent platform with browser automation, code execution, and multi-model access bundled in."
+    },
+    "cubesandbox-base": {
+      "name": "Base Image",
+      "description": "Minimal base image with envd only, ideal for custom builds."
+    }
+  },
+  "tagLabels": {
+    "python": "Python",
+    "jupyter": "Jupyter",
+    "official": "Official",
+    "browser": "Browser",
+    "chromium": "Chromium",
+    "agent": "AI Agent",
+    "openclaw": "OpenClaw",
+    "lite": "Lite",
+    "aio": "All-in-One",
+    "deepseek": "DeepSeek",
+    "base": "Base",
+    "envd": "envd"
+  }
+}

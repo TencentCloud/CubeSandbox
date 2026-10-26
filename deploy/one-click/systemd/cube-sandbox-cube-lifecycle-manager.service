@@ -1,0 +1,29 @@
+[Unit]
+Description=Cube Sandbox cube-lifecycle-manager container
+After=docker.service network-online.target cube-sandbox-redis.service
+Requires=docker.service
+Wants=network-online.target cube-sandbox-redis.service
+# CubeProxy consumes CLM's /_sidecar_resume upstream, so make sure CLM is
+# started before cube-proxy tries to route paused-sandbox traffic through it.
+# The Before= is soft (cube-proxy declares After= this unit indirectly via
+# the control target), and CLM cold-starts in <1s so ordering is safe.
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-lifecycle-manager-prepare.sh
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-lifecycle-manager-start.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-lifecycle-manager-stop.sh
+Restart=on-failure
+RestartSec=2s
+# Match the cube-proxy unit: first-run path builds the CLM image via compose,
+# so allow generous start-up time. Stop is fast (single container).
+TimeoutStartSec=180s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=cube-sandbox-control.target

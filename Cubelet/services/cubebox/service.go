@@ -1,0 +1,1368 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package cubebox
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"runtime/debug"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/events/exchange"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/plugin"
+	"github.com/containerd/plugin/registry"
+	jsoniter "github.com/json-iterator/go"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"k8s.io/utils/clock"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+)
+
+const (
+	maxListCubebox = 5000
+)
+
+var _ cubebox.CubeboxMgrServer = &service{}
+
+type ServicesConfig struct {
+	CreateDeadlineStr string `toml:"create_dead_line"`
+	createDeadline    time.Duration
+
+	DestroyDeadlineStr string `toml:"destroy_dead_line"`
+	destroyDeadline    time.Duration
+
+	DeadContainerTTLStr string `toml:"dead_container_ttl"`
+	deadContainerTTL    time.Duration
+
+	// ShimIntentTTLStr bounds how long the "a shim may have been spawned"
+	// record may keep a sandbox's tap, IP and volumes allocated when no
+	// process can be found for it anywhere on the host. Every other piece of
+	// evidence is consulted first, so this only ever decides a record that
+	// names no live holder at all. "0"/"0s" disables the bound, which is the
+	// fail-closed behaviour: such a sandbox then stays undeletable until an
+	// operator clears it by hand.
+	ShimIntentTTLStr string `toml:"shim_intent_ttl"`
+	shimIntentTTL    time.Duration
+}
+
+var (
+	defaultCreateDeadline   = 60 * time.Second
+	defaultDestroyDeadline  = 60 * time.Second
+	defaultDeadContainerTTL = 1 * time.Hour
+	cleanerHeartBeat        = 10 * time.Second
+
+	// defaultShimIntentTTL is deliberately far longer than a create can take
+	// (defaultCreateDeadline): it only has to outlast a crash between writing
+	// the spawn intent and recording the shim's pid, and it is the point at
+	// which we stop believing such a record can still describe a live shim.
+	defaultShimIntentTTL = 10 * time.Minute
+	// pauseCleanupConcurrency must exceed a pause burst or the overflow reaps
+	// synchronously; the destroy flow's own limiter (100) is the hard cap.
+	pauseCleanupConcurrency = 32
+
+	// createStuckThreshold bounds how long a sandbox may legitimately remain in
+	// the CONTAINER_CREATED transient before DeadGC is allowed to probe it. The
+	// create path saves the cubebox into the store (state CONTAINER_CREATED)
+	// BEFORE runContainer binds the containerd task and sets StartedAt; within
+	// that window RecoverContainer would find no task and wrongly stamp
+	// Unknown=true. A real create completes (or fails and cleans up) well within
+	// defaultCreateDeadline, so once CreatedAt is older than this the entry is
+	// genuinely stuck and safe to reap. It MUST stay comfortably larger than
+	// defaultCreateDeadline. Mirrors pausingStuckThreshold (update.go), which
+	// bounds the PAUSING transient the same "2x the deadline" way.
+	createStuckThreshold = 2 * defaultCreateDeadline
+)
+
+func defaultServiceConfig() *ServicesConfig {
+	return &ServicesConfig{}
+}
+
+// parseShimIntentTTL reads the shim-intent TTL. It accepts the bare "0"
+// spelling for "never age out" that time.ParseDuration rejects, and falls back
+// to the default rather than silently disabling the bound on a typo: an
+// unparsable value must not turn into the fail-closed setting by accident.
+func parseShimIntentTTL(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultShimIntentTTL
+	}
+	if raw == "0" {
+		return 0
+	}
+	t, err := time.ParseDuration(raw)
+	switch {
+	case err != nil || t < 0:
+		CubeLog.Warnf("invalid shim_intent_ttl %q, using %s", raw, defaultShimIntentTTL)
+		return defaultShimIntentTTL
+	case t == 0:
+		return 0 // "0s", "0m", ... all mean never age out
+	default:
+		return t
+	}
+}
+
+func init() {
+	registry.Register(&plugin.Registration{
+		Type:   constants.CubeboxServicePlugin,
+		ID:     constants.CubeboxServiceID.ID(),
+		Config: defaultServiceConfig(),
+		Requires: []plugin.Type{
+			constants.InternalPlugin,
+			constants.WorkflowPlugin,
+			plugins.EventPlugin,
+		},
+		InitFn: func(ic *plugin.InitContext) (_ interface{}, err error) {
+			defer func() {
+				if err != nil {
+					CubeLog.Fatalf("plugin %s init fail:%v", constants.CubeboxServiceID, err.Error())
+				}
+			}()
+
+			config := ic.Config.(*ServicesConfig)
+			t, err := time.ParseDuration(config.CreateDeadlineStr)
+			if err != nil || t == 0 {
+				config.createDeadline = defaultCreateDeadline
+			} else {
+				config.createDeadline = t
+			}
+
+			t, err = time.ParseDuration(config.DestroyDeadlineStr)
+			if err != nil || t == 0 {
+				config.destroyDeadline = defaultDestroyDeadline
+			} else {
+				config.destroyDeadline = t
+			}
+
+			t, err = time.ParseDuration(config.DeadContainerTTLStr)
+			if err != nil || t == 0 {
+				config.deadContainerTTL = defaultDeadContainerTTL
+			} else {
+				config.deadContainerTTL = t
+			}
+
+			config.shimIntentTTL = parseShimIntentTTL(config.ShimIntentTTLStr)
+
+			CubeLog.Infof("%v init config:%+v",
+				fmt.Sprintf("%v.%v", constants.CubeboxServicePlugin, constants.CubeboxServiceID), config)
+
+			ep, err := ic.GetByID(plugins.EventPlugin, "exchange")
+			if err != nil {
+				return nil, err
+			}
+
+			cp, err := ic.GetByID(constants.InternalPlugin, constants.CubeboxID.ID())
+			if err != nil {
+				return nil, err
+			}
+			cb, ok := cp.(*local)
+			if !ok {
+				return nil, fmt.Errorf("not a cubebox manager")
+			}
+
+			// The destroy path refuses to reclaim a sandbox while its spawn
+			// intent is unresolved, and lives in the cubebox plugin; this
+			// plugin owns the cleanup policy, so hand the bound across rather
+			// than duplicating the configuration surface.
+			cb.SetShimIntentTTL(config.shimIntentTTL)
+			// Records written before Endpoint.ShimSpawnedAt existed have no age,
+			// and an unresolvable age is the one thing the TTL cannot bound.
+			// Stamp them now, before any cleanup can run, so they get a full
+			// TTL instead of blocking forever.
+			cb.BackfillShimIntentTimestamps(ic.Context)
+			CubeLog.Infof("shim-spawn intent TTL is %s (0 means never age out)", config.shimIntentTTL)
+
+			p, err := ic.GetByID(constants.WorkflowPlugin, constants.WorkflowID.ID())
+			if err != nil {
+				return nil, err
+			}
+
+			e, ok := p.(*workflow.Engine)
+			if !ok {
+				return nil, fmt.Errorf("not a workflow engine")
+			}
+			restarts := newRestartMgr(cb.cubeboxManger)
+			s := &service{
+				engine:                e,
+				cubeboxMgr:            cb,
+				cleaner:               newDeadContainerCleaner(config.deadContainerTTL),
+				eventMonitor:          newEventMonitor(cb, restarts),
+				restarts:              restarts,
+				config:                config,
+				events:                ep.(*exchange.Exchange),
+				numaNodeIndex:         0,
+				sandboxLifecycleLocks: utils.NewResourceLocks(),
+				otherRuntime: &ociRuntime{
+					cubeboxMgr: cb,
+				},
+			}
+			s.pauseCleanup = newPauseCleanup(pauseCleanupConcurrency)
+
+			// Publish the cubebox manager as the authoritative source of
+			// allocated-resource metrics so the cubelet heartbeat loop can
+			// pick it up without taking a hard dependency on this package.
+			resourcesource.Set(cb)
+			restarts.bind(s)
+			restarts.Recover()
+			restarts.startStatusReporter()
+
+			go func() {
+				CubeLog.Info("Start subscribing containerd event")
+				s.eventMonitor.subscribe(s.events)
+				CubeLog.Info("Start event monitor")
+				eventMonitorErrch := s.eventMonitor.start()
+
+				eventMonitorErr := <-eventMonitorErrch
+
+				s.eventMonitor.stop()
+
+				if eventMonitorErr != nil {
+					CubeLog.Errorf("Event monitor exit: %v", eventMonitorErr)
+				}
+			}()
+
+			go s.destroyDeadContainers()
+
+			return s, nil
+		},
+	})
+}
+
+type service struct {
+	config       *ServicesConfig
+	cubeboxMgr   *local
+	cleaner      *deadContainerCleaner
+	eventMonitor *eventMonitor
+	engine       *workflow.Engine
+	events       *exchange.Exchange
+	cubebox.UnimplementedCubeboxMgrServer
+	numaNodeIndex         uint32
+	sandboxLifecycleLocks *utils.ResourceLocks
+	restarts              *restartMgr
+
+	// pauseCleanup reaps paused sandboxes after the Pause reply.
+	pauseCleanup *pauseCleanup
+
+	otherRuntime *ociRuntime
+}
+
+func (s *service) RegisterTCP(server *grpc.Server) error {
+	cubebox.RegisterCubeboxMgrServer(server, s)
+	return nil
+}
+
+func (s *service) Register(server *grpc.Server) error {
+	cubebox.RegisterCubeboxMgrServer(server, s)
+	return nil
+}
+
+func safePrint(req *cubebox.RunCubeSandboxRequest) string {
+	tmpReq := &cubebox.RunCubeSandboxRequest{}
+	body, _ := jsoniter.Marshal(req)
+	jsoniter.Unmarshal(body, tmpReq)
+	for _, c := range tmpReq.GetContainers() {
+		c.Envs = []*cubebox.KeyValue{
+			{
+				Key:   "__BRIEF_SUMMARY__",
+				Value: fmt.Sprintf("There are %d keys. Ignore the verbose envs here.", len(c.Envs)),
+			},
+		}
+	}
+	if tmpReq.Annotations != nil {
+		tmpReq.Annotations[constants.MasterAnnotationsBlkQos] = "*"
+		tmpReq.Annotations[constants.MasterAnnotationsNetWork] = "*"
+		tmpReq.Annotations[constants.MasterAnnotationsFSQos] = "*"
+		tmpReq.Annotations[constants.MasterAnnotationsUserData] = "*"
+	}
+
+	return utils.InterfaceToString(tmpReq)
+}
+
+// gatePausedReplace refuses to start a resume that would replace a PAUSED
+// sandbox whose previous runtime may still be running.
+//
+// Everything the replacement does deletes the old sandbox's records, and that
+// row is the only place its shim identity survives: once it is gone nothing on
+// the host can match a still-running shim back to the sandbox, and the new
+// attempt is handed a tap/IP that is still in use.
+//
+// The check runs here, at the entry point, rather than in the create flow's
+// cubebox step where it used to live. By that step the flow has already
+// allocated network and volume for the new attempt, so the only way to fail
+// without stranding those allocations was an error code the workflow engine
+// answers with a failover — and failover destroys the sandbox with this same
+// ID, which on this path is the PAUSED sandbox the user asked to resume. A
+// transient gate failure therefore destroyed the very state it existed to
+// protect. Running before any allocation removes the trade-off: the caller
+// gets a retryable PreConditionFailed, and nothing is allocated or destroyed.
+func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil
+	}
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
+	if err != nil || sb == nil || sb.SandboxID != desired {
+		// No local record to replace: an ordinary create that happens to
+		// carry the annotation.
+		return nil
+	}
+	st := sb.GetStatus()
+	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
+		// lifecycle lock and its cleanup, and a live sandbox must not be
+		// touched; the create step rejects both as already exists.
+		return nil
+	}
+	if err := s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb); err != nil {
+		return err
+	}
+	// waitReplacedSandboxGone only proves the runtime pids are gone; the reaper
+	// may still be dropping the volumes and the storage record this create reuses.
+	// The resume form of Create already holds this lock (see below); an
+	// ordinary create that only carries the desired id does not.
+	if resumeFromPauseSandboxID(req) == "" {
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, desired)
+		if lockErr != nil {
+			return fmt.Errorf("sandbox lifecycle operation is in progress; retry resume after 2 seconds")
+		}
+		defer unlock()
+	}
+	return s.ensurePauseCleanupFinished(ctx, desired, "resume")
+}
+
+func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
+	rsp := &cubebox.RunCubeSandboxResponse{
+		RequestID: req.RequestID,
+		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+		ExtInfo:   map[string][]byte{},
+	}
+
+	if b := strings.TrimSpace(req.GetBackend()); b != "" {
+		if req.Annotations == nil {
+			req.Annotations = map[string]string{}
+		}
+		if strings.TrimSpace(req.Annotations[constants.MasterAnnotationStorageBackend]) == "" {
+			req.Annotations[constants.MasterAnnotationStorageBackend] = b
+		}
+	}
+	// Cross-node restore: the disk describing what to run is not on this
+	// node yet, and the reads below expect it.
+	if err := prepareCrossNodeRestore(ctx, req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
+		return rsp, nil
+	}
+	// Pause Resume: Master sends a thin Create (ids only); expand containers /
+	// volumes / annotations from sandbox_spec.json packed in the pause snap.
+	if err := expandPauseSnapshotPackage(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, sid)
+		if lockErr != nil {
+			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		defer unlock()
+		// Pause returned before its keep_tombstone Destroy finished; that
+		// reaper releases the names this Create is about to reuse.
+		if err := s.ensurePauseCleanupFinished(ctx, sid, "resume"); err != nil {
+			rsp.Ret.RetMsg = err.Error()
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+	}
+	if err := checkParam(ctx, req); err != nil {
+		rerr, _ := ret.FromError(err)
+		rsp.Ret.RetMsg = rerr.Message()
+		rsp.Ret.RetCode = rerr.Code()
+		return rsp, nil
+	}
+	SetRunCubeSandboxRequestDefaultValue(req)
+	if err := restartpolicy.Apply(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+
+	start := time.Now()
+	createInfo := &workflow.CreateContext{
+		ReqInfo:  req,
+		Failover: true,
+	}
+	ctx = setDefaultContext(ctx, req, createInfo)
+
+	ctx = context.WithValue(ctx, workflow.KCreateContext, createInfo)
+
+	rt := &CubeLog.RequestTrace{
+		Action:       "Create",
+		RequestID:    req.RequestID,
+		Caller:       constants.CubeboxServiceID.ID(),
+		Callee:       s.engine.ID(),
+		CalleeAction: "Create",
+		FunctionType: createInfo.GetInstanceType(),
+		InstanceType: createInfo.GetInstanceType(),
+		AppID:        createInfo.GetAppID(),
+		Qualifier:    getUserAgent(ctx),
+	}
+	ctx = CubeLog.WithRequestTrace(ctx, rt)
+	if log.IsDebug() {
+		log.G(ctx).Debugf("RunCubeSandboxRequest:%s", utils.InterfaceToString(req))
+	} else {
+		log.G(ctx).Errorf("RunCubeSandboxRequest:%s", safePrint(req))
+	}
+
+	s.setRequestResource(createInfo, req)
+
+	defer func() {
+		cost := time.Since(start)
+		if !ret.IsSuccessCode(rsp.Ret.RetCode) {
+			log.G(ctx).WithFields(map[string]interface{}{
+				"RetCode": int64(rsp.Ret.RetCode),
+			}).Errorf("Create fail:%+v", rsp)
+			workflow.RecordCreateMetric(ctx, ret.Err(rsp.Ret.RetCode, rsp.Ret.RetMsg), constants.CubeboxServiceID.ID(), cost)
+		} else {
+			workflow.RecordCreateMetric(ctx, nil, constants.CubeboxServiceID.ID(), cost)
+		}
+		dealCreateInnerMetric(rsp, createInfo)
+
+		rt = CubeLog.GetTraceInfo(ctx)
+		rt.InstanceID = createInfo.SandboxID
+		go s.reportTrace(rt, createInfo.GetMetric())
+	}()
+
+	defer recov.HandleCrash(func(panicError interface{}) {
+		log.G(ctx).Fatalf("Create panic info:%s, stack:%s", panicError, string(debug.Stack()))
+		rsp.Ret.RetMsg = string(debug.Stack())
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+	})
+
+	defer func() {
+		rsp.SandboxID = createInfo.SandboxID
+		rsp.SandboxIP = getSandboxIp(createInfo)
+		rsp.PortMappings = getAllocatedPort(createInfo)
+
+		setCubeExtKey(rsp, createInfo)
+	}()
+
+	or, e := s.cubeboxMgr.getSandboxRuntime(req)
+	if e != nil {
+		log.G(ctx).Errorf("getSandboxRuntime fail:%s", e.Error())
+		rsp.Ret.RetMsg = e.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+	ctx = constants.WithRuntimeType(ctx, or.Type)
+	ns := req.Namespace
+	if ns == "" {
+		ns = namespaces.Default
+	}
+	rt.Namespace = ns
+	ctx = namespaces.WithNamespace(ctx, ns)
+	// The gate has to run before the create flow allocates anything, and it
+	// needs the same namespace the flow would have used to resolve the old
+	// sandbox's shim.
+	if err := s.gatePausedReplace(ctx, req); err != nil {
+		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		return rsp, nil
+	}
+	ctx = workflow.WithCreateContext(ctx, createInfo)
+	armedID := ""
+	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
+		id := ""
+		if req.GetAnnotations() != nil {
+			id = strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+		}
+		if id == "" && constants.IsCubeRuntime(ctx) {
+			id = utils.GenerateID()
+			if req.Annotations == nil {
+				req.Annotations = map[string]string{}
+			}
+			req.Annotations[constants.MasterAnnotationDesiredSandboxID] = id
+		}
+		if id != "" {
+			createInfo.SandboxID = id
+			s.restarts.armCreate(id, req)
+			armedID = id
+		}
+	}
+	var createErr error
+	if constants.IsCubeRuntime(ctx) {
+		createErr = s.engine.Create(ctx, createInfo)
+	} else {
+		if createInfo.SandboxID == "" {
+			createInfo.SandboxID = utils.GenerateID()
+		}
+		createErr = s.otherRuntime.Create(ctx, createInfo)
+	}
+
+	err, _ := ret.FromError(createErr)
+	rsp.Ret.RetMsg = err.Message()
+	rsp.Ret.RetCode = err.Code()
+	if strings.Contains(rsp.Ret.RetMsg, "no space left") ||
+		strings.Contains(rsp.Ret.RetMsg, "No space left") {
+		rsp.Ret.RetCode = errorcode.ErrorCode_NoSpaceLeftOnDevice
+	}
+
+	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
+		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	if s.restarts != nil {
+		if armedID != "" {
+			s.restarts.finishCreate(armedID, ret.IsSuccessCode(rsp.Ret.RetCode))
+		} else if ret.IsSuccessCode(rsp.Ret.RetCode) {
+			s.restarts.Start(createInfo.SandboxID, req)
+		}
+	}
+	return rsp, nil
+}
+
+func SetRunCubeSandboxRequestDefaultValue(req *cubebox.RunCubeSandboxRequest) {
+
+	req.InstanceType = constants.GetInstanceTypeWithDefault(req.InstanceType)
+
+	for i := range req.GetContainers() {
+		if req.Containers[i].Image == nil {
+			req.Containers[i].Image = &images.ImageSpec{
+				StorageMedia: images.ImageStorageMediaType_docker.String(),
+			}
+			continue
+		}
+		if req.Containers[i].Image.StorageMedia == "" {
+			req.Containers[i].Image.StorageMedia = images.ImageStorageMediaType_docker.String()
+		}
+	}
+
+	if req.NetworkType == "" {
+		req.NetworkType = cubebox.NetworkType_tap.String()
+	}
+}
+
+func setCubeExtKey(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
+	// Only report node-level volume ref-count transitions when the sandbox
+	// was created successfully. On failure the workflow rolls back (detach),
+	// so the net node transition is zero and nothing should be reported.
+	if !ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
+		return
+	}
+	if data := marshalVolumeRefEvents(createInfo.VolumeRefEvents); data != nil {
+		if rsp.ExtInfo == nil {
+			rsp.ExtInfo = map[string][]byte{}
+		}
+		rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = data
+	}
+}
+
+// setDestroyVolumeRefEvents reports node-level volume ref-count transitions
+// (1→0) observed during destroy into the response ext_info. Only successful
+// Detach calls populate VolumeRefEvents; plugin Detach failures roll back the
+// local ref-count and do not emit events.
+func setDestroyVolumeRefEvents(rsp *cubebox.DestroyCubeSandboxResponse, destroyInfo *workflow.DestroyContext) {
+	if destroyInfo == nil {
+		return
+	}
+	if data := marshalVolumeRefEvents(destroyInfo.VolumeRefEvents); data != nil {
+		if rsp.ExtInfo == nil {
+			rsp.ExtInfo = map[string][]byte{}
+		}
+		rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = data
+	}
+}
+
+// marshalVolumeRefEvents serialises volume ref-count transition events for the
+// response ext_info. Returns nil when there is nothing to report.
+func marshalVolumeRefEvents(events []workflow.VolumeRefEvent) []byte {
+	if len(events) == 0 {
+		return nil
+	}
+	data, err := jsoniter.Marshal(events)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func dealCreateInnerMetric(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
+
+	shimMetric := time.Duration(0)
+	cubeboxMetric := time.Duration(0)
+	probeMetric := time.Duration(0)
+	serviceMetric := time.Duration(0)
+	volumeMetric := time.Duration(0)
+	for _, m := range createInfo.GetMetric() {
+		if m != nil {
+			rsp.ExtInfo[m.ID()] = []byte(strconv.FormatInt(m.Duration().Milliseconds(), 10))
+			switch m.ID() {
+			case constants.CubeboxID.ID():
+				cubeboxMetric = m.Duration()
+			case constants.CubeboxServiceID.ID():
+				serviceMetric = m.Duration()
+			case constants.ImagesID.ID(), constants.VolumeSourceID.ID():
+				volumeMetric += m.Duration()
+			default:
+				if strings.HasPrefix(m.ID(), "sandbox") ||
+					strings.HasPrefix(m.ID(), "container") {
+					shimMetric += m.Duration()
+				}
+				if strings.Contains(m.ID(), constants.CubeProbeId) {
+					probeMetric += m.Duration()
+				}
+			}
+		}
+	}
+	service_inner := fmt.Sprintf("%s-inner", constants.CubeboxServiceID.ID())
+
+	serviceInnermetric := serviceMetric - probeMetric - volumeMetric
+	cuberInnerMetric := cubeboxMetric - shimMetric
+
+	rsp.ExtInfo[constants.CubeInnerId] = []byte(strconv.FormatInt(cuberInnerMetric.Milliseconds(), 10))
+	rsp.ExtInfo[service_inner] = []byte(strconv.FormatInt(serviceInnermetric.Milliseconds(), 10))
+	er := ret.Err(rsp.Ret.RetCode, rsp.Ret.RetMsg)
+	createInfo.AddMetric(er, constants.CubeInnerId, cuberInnerMetric)
+	createInfo.AddMetric(er, service_inner, serviceInnermetric)
+}
+
+func getProbeDuration(req *cubebox.RunCubeSandboxRequest) time.Duration {
+	t := time.Duration(0)
+	for _, c := range req.Containers {
+		if c.GetProbe() != nil {
+			t += time.Duration(c.GetProbe().TimeoutMs) * time.Millisecond
+			t += time.Duration(c.GetProbe().InitialDelayMs) * time.Millisecond
+		}
+	}
+	return t
+}
+
+func (s *service) reportTrace(rt *CubeLog.RequestTrace, metrics []*workflow.Metric) {
+	baseRt := rt.DeepCopy()
+	for _, m := range metrics {
+		if m != nil {
+			err, _ := ret.FromError(m.Error())
+			baseRt.Callee = m.ID()
+			baseRt.Cost = m.Duration()
+			baseRt.RetCode = int64(err.Code())
+			baseRt.ErrorCode = CubeLog.CodeSuccess
+			if m.Error() == nil && m.Duration() < 5*time.Millisecond {
+				continue
+			}
+			CubeLog.Trace(baseRt)
+		}
+	}
+}
+
+func getSandboxIp(createInfo *workflow.CreateContext) string {
+	if createInfo.NetworkInfo == nil {
+		return ""
+	}
+	return createInfo.NetworkInfo.SandboxIP()
+}
+
+func getAppID(annotation map[string]string) int64 {
+	return 0
+}
+
+func getUin(annotation map[string]string) string {
+	return ""
+}
+
+func getSubUin(annotation map[string]string) string {
+	return ""
+}
+
+func getAllocatedPort(createInfo *workflow.CreateContext) []*cubebox.PortMapping {
+	if createInfo.NetworkInfo == nil {
+		return nil
+	}
+	var res []*cubebox.PortMapping
+	for _, p := range createInfo.NetworkInfo.AllocatedPorts() {
+		res = append(res, &cubebox.PortMapping{
+			ContainerPort: int32(p.ContainerPort),
+			HostPort:      int32(p.HostPort),
+		})
+	}
+	return res
+}
+
+func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+	if s.restarts != nil {
+		s.restarts.Stop(req.GetSandboxID())
+	}
+	rsp := &cubebox.DestroyCubeSandboxResponse{
+		RequestID: req.RequestID,
+		SandboxID: req.SandboxID,
+		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+		ExtInfo:   map[string][]byte{},
+	}
+	start := time.Now()
+	destroyInfo := &workflow.DestroyContext{
+		DestroyInfo: req,
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{
+			SandboxID: req.SandboxID,
+		},
+	}
+	ctx = context.WithValue(ctx, workflow.KDestroyContext, destroyInfo)
+	ua := getUserAgent(ctx)
+
+	rt := &CubeLog.RequestTrace{
+		Action:       "Destroy",
+		RequestID:    req.RequestID,
+		Caller:       constants.CubeboxServiceID.ID(),
+		Callee:       s.engine.ID(),
+		CalleeAction: "Destroy",
+		InstanceID:   req.SandboxID,
+		FunctionType: destroyInfo.GetInstanceType(),
+		InstanceType: destroyInfo.GetInstanceType(),
+		AppID:        getAppID(req.Annotations),
+		Qualifier:    ua,
+	}
+	ctx = CubeLog.WithRequestTrace(ctx, rt)
+	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
+		"cubeboxID": req.SandboxID,
+		"step":      "cubeboxDestroy",
+	})
+	log.G(ctx).Errorf("DestroyCubeSandboxRequest:%+v", req)
+
+	defer func() {
+		if !ret.IsSuccessCode(rsp.Ret.RetCode) {
+			stepLog.WithFields(map[string]interface{}{
+				"RetCode": int64(rsp.Ret.RetCode),
+			}).Errorf("Destroy fail:%+v", rsp)
+			workflow.RecordDestroyMetric(ctx, ret.Err(rsp.Ret.RetCode, rsp.Ret.RetMsg),
+				constants.CubeboxServiceID.ID(), time.Since(start))
+		} else {
+			workflow.RecordDestroyMetric(ctx, nil, constants.CubeboxServiceID.ID(), time.Since(start))
+			stepLog.Infof("destroy cubebox success")
+		}
+		dealDestroyInnerMetric(rsp, destroyInfo)
+		setDestroyVolumeRefEvents(rsp, destroyInfo)
+
+		go s.reportTrace(CubeLog.GetTraceInfo(ctx), destroyInfo.GetMetric())
+	}()
+
+	defer recov.HandleCrash(func(panicError interface{}) {
+		stepLog.Fatalf("Destroy panic info:%s, stack:%s", panicError, string(debug.Stack()))
+		rsp.Ret.RetMsg = string(debug.Stack())
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+	})
+
+	if req.SandboxID == "" {
+		rsp.Ret.RetMsg = "container name not found in DestroyCubeSandboxRequest"
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+
+	ns := namespaces.Default
+	sb, getErr := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
+	if getErr == nil {
+		ns = sb.Namespace
+
+		if sb.RequestSource != "" {
+			ua := getUserAgent(ctx)
+			stepLog = stepLog.WithFields(CubeLog.Fields{"user-agent": ua})
+			if ua != sb.RequestSource {
+				log.G(ctx).Warnf("Illegal deletion: user agent %q is not equal to the user agent in cubebox %q", ua, sb.RequestSource)
+			}
+		}
+	}
+	ctx = namespaces.WithNamespace(ctx, ns)
+
+	if req.GetAnnotations() != nil {
+		if set := req.GetAnnotations()["cube.debug.shim_create_fail"]; set == "true" {
+			ctx = context.WithValue(ctx, "debug_create_fail", set)
+		}
+		if set := req.GetAnnotations()["cube.debug.destroy_forcibly"]; set == "true" {
+			ctx = context.WithValue(ctx, "destroy_forcibly", set)
+		}
+		if set := req.GetAnnotations()[constants.AnnotationCollectMemOnExit]; set == "true" {
+			ctx = constants.WithCollectMemory(ctx)
+		}
+		if set := req.GetAnnotations()["cube.debug.cleanup"]; set == "true" {
+			// Preserve the existing debug-cleanup contract: it marks the sandbox
+			// before the early return and is not subject to the normal destroy
+			// deadline or lifecycle lock.
+			if getErr == nil && sb.UserMarkDeletedTime == nil {
+				now := time.Now()
+				sb.UserMarkDeletedTime = &now
+				sb.DeleteRequestID = req.RequestID
+				s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+			}
+			cleanOpts := &workflow.CleanContext{
+				BaseWorkflowInfo: workflow.BaseWorkflowInfo{
+					SandboxID: req.SandboxID,
+				},
+			}
+			if err := s.engine.CleanUp(ctx, cleanOpts); err != nil {
+				log.G(ctx).Fatalf("CleanUp:%s", err)
+			}
+			return rsp, nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, s.config.destroyDeadline)
+	defer cancel()
+
+	// Preserve the existing destroy path's fresh state read after its deadline
+	// is established. Running deletes must not use the object observed before
+	// annotation handling and timeout setup.
+	destroyCtx := ctx
+	sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
+	ctx = log.WithLogger(ctx, stepLog)
+
+	if getErr == nil && constants.IsCubeRuntime(ctx) {
+		// Serialize Destroy with Pause/Resume. CoW Pause already exited the shim;
+		// Destroy never wakes a paused sandbox (no resume-before-delete).
+		lockDeadline, ok := deleteLifecycleLockDeadline(ctx, time.Now())
+		if !ok {
+			rsp.Ret.RetMsg = "cannot start delete: insufficient time remains for the Cubelet RPC response; retry DELETE after 5 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		lockCtx, lockCancel := context.WithDeadline(ctx, lockDeadline)
+		defer lockCancel()
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, req.SandboxID)
+		if lockErr != nil {
+			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry DELETE after 2 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		defer unlock()
+
+		// Deleting the volumes/metadata a reaper is still releasing would race,
+		// and a delete_tombstone only drops the row: surface it as retryable.
+		if err := s.ensurePauseCleanupFinished(ctx, req.SandboxID, "delete"); err != nil {
+			rsp.Ret.RetMsg = err.Error()
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+
+		sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
+		ctx = log.WithLogger(ctx, stepLog)
+	}
+
+	if getErr == nil {
+		// Marker-before-destroy for storage CDP hooks. Pause keep-tombstone
+		// clears it after wipe so the PAUSED row is not treated as user-deleted.
+		if sb.UserMarkDeletedTime == nil {
+			now := time.Now()
+			sb.UserMarkDeletedTime = &now
+			sb.DeleteRequestID = req.RequestID
+			s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+		}
+
+		if !constants.IsCubeRuntime(ctx) {
+			destroyErr := s.otherRuntime.cubeboxMgr.Destroy(ctx, destroyInfo)
+			if destroyErr != nil {
+				rsp.Ret.RetMsg = destroyErr.Error()
+				rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			} else {
+				rsp.Ret.RetMsg = "success"
+				rsp.Ret.RetCode = errorcode.ErrorCode_Success
+			}
+			return rsp, nil
+		}
+	}
+
+	// GC leftover / half-finished pause snaps on user Destroy. Never GC while
+	// Pause keep-tombstone / tombstone delete still owns the pause snap.
+	pauseSnapToGC := ""
+	if getErr == nil {
+		pauseSnapToGC = pauseSnapIDToGCOnDestroy(req, sb)
+	}
+
+	// Final delete of a paused sandbox: only drop the PAUSED CubeBox store row.
+	// Live runtime / volumes were already cleaned on Pause; snap GC is Master's job.
+	if isPauseDeleteTombstone(req) {
+		if getErr != nil {
+			if errors.Is(getErr, utils.ErrorKeyNotFound) {
+				rsp.Ret.RetCode = errorcode.ErrorCode_Success
+				rsp.Ret.RetMsg = "success"
+				return rsp, nil
+			}
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = getErr.Error()
+			return rsp, nil
+		}
+		_ = runc.Clean(ctx, req.SandboxID)
+		if delErr := s.cubeboxMgr.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: req.SandboxID}); delErr != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = delErr.Error()
+			return rsp, nil
+		}
+		rsp.Ret.RetCode = errorcode.ErrorCode_Success
+		rsp.Ret.RetMsg = "success"
+		return rsp, nil
+	}
+
+	err, _ := ret.FromError(s.engine.Destroy(ctx, destroyInfo))
+	rsp.Ret.RetMsg = err.Message()
+	rsp.Ret.RetCode = err.Code()
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && isPauseKeepTombstone(req) {
+		// Storage CDP required UserMarkDeletedTime during Destroy; clear it now so
+		// the PAUSED CubeBox tombstone is not treated as user-deleted by GC/List.
+		if sb2, get2 := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID); get2 == nil && sb2 != nil {
+			sb2.Lock()
+			sb2.UserMarkDeletedTime = nil
+			sb2.DeleteRequestID = ""
+			sb2.Unlock()
+			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+		}
+	}
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
+		backend, _ := storageBackendFromAnnotations(req.GetAnnotations())
+		if sb != nil {
+			if b := pauseCatalogBackend(sb); b != "" {
+				backend = b
+			}
+		}
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
+	}
+	return rsp, nil
+}
+
+func isPauseKeepTombstone(req *cubebox.DestroyCubeSandboxRequest) bool {
+	if req == nil || req.GetAnnotations() == nil {
+		return false
+	}
+	return req.GetAnnotations()[constants.AnnotationPauseKeepTombstone] == "true"
+}
+
+func isPauseDeleteTombstone(req *cubebox.DestroyCubeSandboxRequest) bool {
+	if req == nil || req.GetAnnotations() == nil {
+		return false
+	}
+	return req.GetAnnotations()[constants.AnnotationPauseDeleteTombstone] == "true"
+}
+
+func (s *service) loadDestroySandboxRuntime(ctx context.Context, sandboxID string) (*cubeboxstore.CubeBox, context.Context, error) {
+	ns := namespaces.Default
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		return nil, namespaces.WithNamespace(ctx, ns), err
+	}
+
+	ctx = namespaces.WithNamespace(ctx, sb.Namespace)
+	runtimeType := s.cubeboxMgr.config.DefaultRuntimeName
+	if sb.OciRuntime != nil {
+		runtimeType = sb.OciRuntime.Type
+	}
+	return sb, constants.WithRuntimeType(ctx, runtimeType), nil
+}
+
+func dealDestroyInnerMetric(rsp *cubebox.DestroyCubeSandboxResponse, destroyInfo *workflow.DestroyContext) {
+
+	shimMetric := time.Duration(0)
+	cubeboxMetric := time.Duration(0)
+	prestopMetric := time.Duration(0)
+	serviceMetric := time.Duration(0)
+	for _, m := range destroyInfo.GetMetric() {
+		if m != nil {
+			rsp.ExtInfo[m.ID()] = []byte(strconv.FormatInt(m.Duration().Milliseconds(), 10))
+			switch m.ID() {
+			case constants.CubeboxID.ID():
+				cubeboxMetric = m.Duration()
+			case constants.CubeboxServiceID.ID():
+				serviceMetric = m.Duration()
+			default:
+				if strings.HasPrefix(m.ID(), "sandbox") ||
+					strings.HasPrefix(m.ID(), "container") {
+					shimMetric += m.Duration()
+				}
+				if strings.Contains(m.ID(), constants.CubePrestopId) {
+					prestopMetric += m.Duration()
+				}
+			}
+		}
+	}
+	service_inner := fmt.Sprintf("%s-inner", constants.CubeboxServiceID.ID())
+	serverInnerMetric := serviceMetric - prestopMetric
+	rsp.ExtInfo[service_inner] = []byte(strconv.FormatInt(serverInnerMetric.Milliseconds(), 10))
+	rsp.ExtInfo[constants.CubeInnerId] = []byte(strconv.FormatInt((cubeboxMetric - shimMetric).Milliseconds(),
+		10))
+	er := ret.Err(rsp.Ret.RetCode, rsp.Ret.RetMsg)
+	destroyInfo.AddMetric(er, constants.CubeInnerId, cubeboxMetric-shimMetric)
+	destroyInfo.AddMetric(er, service_inner, serverInnerMetric)
+}
+
+func setDefaultContext(ctx context.Context, req *cubebox.RunCubeSandboxRequest,
+	createInfo *workflow.CreateContext) context.Context {
+	if req.GetAnnotations() != nil {
+		if set := req.GetAnnotations()["cube.debug.disable_failover"]; set == "true" {
+			createInfo.Failover = false
+		}
+		if set := req.GetAnnotations()[constants.MasterAnnotationsDisableVmCgroup]; set == "true" {
+			ctx = constants.WithDisableVMCgroup(ctx, true)
+		}
+		if set := req.GetAnnotations()[constants.MasterAnnotationsDisableHostCgroup]; set == "true" {
+			ctx = constants.WithDisableHostCgroup(ctx, true)
+		}
+	}
+	return ctx
+}
+
+func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest) (res *cubebox.ListCubeSandboxResponse, retErr error) {
+	defer recov.HandleCrash(func(panicError interface{}) {
+		log.G(ctx).Fatalf("List panic info:%s, stack:%s", panicError, string(debug.Stack()))
+		retErr = fmt.Errorf("internal error")
+	})
+	res = &cubebox.ListCubeSandboxResponse{}
+
+	cubeboxInStore := s.cubeboxMgr.cubeboxManger.List()
+	if len(cubeboxInStore) > maxListCubebox {
+
+		sort.Slice(cubeboxInStore, func(i, j int) bool {
+			if cubeboxInStore[i].Status.IsTerminated() {
+				return false
+			}
+			return cubeboxInStore[i].CreatedAt > cubeboxInStore[j].CreatedAt
+		})
+		cubeboxInStore = cubeboxInStore[:maxListCubebox]
+	}
+	var cbs []*cubebox.CubeSandbox
+	for _, cb := range cubeboxInStore {
+		cbs = append(cbs, toGRPCCubeBox(cb, req.GetOption()))
+	}
+
+	cbs = s.filterGRPCContainer(cbs, req)
+
+	return &cubebox.ListCubeSandboxResponse{Items: cbs}, nil
+}
+
+func toGRPCContainer(c *cubeboxstore.Container) *cubebox.Container {
+	cc := &cubebox.Container{
+		Id:         c.ID,
+		Image:      c.Config.GetImage().GetImage(),
+		Type:       constants.ContainerTypeContainer,
+		Resources:  c.Config.GetResources(),
+		State:      c.Status.Get().State(),
+		CreatedAt:  c.CreatedAt,
+		FinishedAt: c.Status.Get().FinishedAt,
+		Labels:     maps.Clone(c.Labels),
+	}
+
+	switch cc.State {
+	case cubebox.ContainerState_CONTAINER_PAUSING:
+		cc.PausedAt = c.Status.Status.PausingAt
+	case cubebox.ContainerState_CONTAINER_PAUSED:
+		cc.PausedAt = c.Status.Status.PausedAt
+	}
+
+	if mounts := c.Config.GetVolumeMounts(); len(mounts) > 0 {
+		cc.VolumeMounts = append(cc.VolumeMounts, mounts...)
+	}
+
+	if cc.Labels == nil {
+		cc.Labels = make(map[string]string)
+	}
+	if c.IsPod {
+		cc.Labels[constants.ContainerType] = constants.ContainerTypeSandBox
+		cc.Type = constants.ContainerTypeSandBox
+	} else {
+		cc.Labels[constants.ContainerType] = constants.ContainerTypeContainer
+	}
+	cc.Labels[constants.ContainerName] = c.Name
+
+	checkToImageSelfdefineType(cc, c.Config)
+
+	return cc
+}
+
+func deepCopyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	n := make(map[string]string)
+	for k, v := range m {
+		n[k] = v
+	}
+	return n
+}
+
+func (s *service) filterGRPCContainer(sbs []*cubebox.CubeSandbox, req *cubebox.ListCubeSandboxRequest) []*cubebox.CubeSandbox {
+	if req == nil {
+		return sbs
+	}
+
+	if req.GetId() != "" {
+		sb, err := s.cubeboxMgr.cubeboxManger.Get(context.Background(), req.GetId())
+		if err != nil {
+			return nil
+		}
+		return []*cubebox.CubeSandbox{toGRPCCubeBox(sb, req.GetOption())}
+	}
+
+	return applyCubeSandboxFilter(sbs, req.GetFilter())
+}
+
+func applyCubeSandboxFilter(sbs []*cubebox.CubeSandbox, filter *cubebox.CubeSandboxFilter) []*cubebox.CubeSandbox {
+	if filter == nil {
+		return sbs
+	}
+
+	var filterd []*cubebox.CubeSandbox
+	for _, sb := range sbs {
+		var matchedContainer []*cubebox.Container
+		for _, cntr := range sb.Containers {
+			if filter.GetState() != nil && filter.GetState().GetState() != cntr.State {
+				continue
+			}
+			if filter.GetLabelSelector() != nil {
+				match := true
+				for k, v := range filter.GetLabelSelector() {
+					got, ok := cntr.Labels[k]
+					if !ok || got != v {
+						match = false
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+			matchedContainer = append(matchedContainer, cntr)
+		}
+
+		if len(matchedContainer) == 0 {
+			continue
+		}
+
+		sb.Containers = matchedContainer
+		filterd = append(filterd, sb)
+	}
+
+	return filterd
+}
+
+func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption) *cubebox.CubeSandbox {
+	cb := &cubebox.CubeSandbox{
+		Id:           box.ID,
+		Namespace:    box.Namespace,
+		PortMappings: box.PortMappings,
+		CreatedAt:    box.CreatedAt,
+		Labels:       maps.Clone(box.Labels),
+		NumaNode:     box.NumaNode,
+	}
+
+	if box.GetStatus() != nil {
+		switch box.GetStatus().Get().State() {
+		case cubebox.ContainerState_CONTAINER_PAUSING:
+			cb.PausedAt = box.GetStatus().Get().PausingAt
+		case cubebox.ContainerState_CONTAINER_PAUSED:
+			cb.PausedAt = box.GetStatus().Get().PausedAt
+		}
+	}
+
+	for _, c := range box.AllContainers() {
+		cc := toGRPCContainer(c)
+		if c.IsPod {
+			for key, v := range cb.Labels {
+				cc.Labels[key] = v
+			}
+			if box.RestartState != "" || box.RestartCount > 0 || box.LastExitReason != "" {
+				cc.RestartStats = &cubebox.RestartStats{
+					RestartCount:            box.RestartCount,
+					LastSuccessfulRestartAt: box.LastSuccessfulRestartAt,
+					LastFailedRestartAt:     box.LastFailedRestartAt,
+					LastRestartAt:           box.LastRestartAt,
+					RestartState:            box.RestartState,
+					LastExitCode:            box.LastExitCode,
+					LastExitReason:          box.LastExitReason,
+					NextRestartAt:           box.NextRestartAt,
+				}
+			}
+		}
+		cb.Containers = append(cb.Containers, cc)
+	}
+	if opt != nil && opt.GetPrivateWithCubeboxStore() {
+		v, err := jsoniter.MarshalIndent(box, "", "    ")
+		if err != nil {
+			log.L.Errorf("marshal cubebox to json failed: %v", err)
+		}
+		cb.PrivateCubeboxStorageData = v
+	}
+
+	return cb
+}
+
+func checkToImageSelfdefineType(c *cubebox.Container, conf *cubebox.ContainerConfig) {
+	_ = c
+	_ = conf
+}
+
+type deadContainerCleaner struct {
+	clock clock.Clock
+
+	heartbeat clock.Ticker
+
+	TTL            time.Duration
+	systemCapacity int
+}
+
+func newDeadContainerCleaner(ttl time.Duration) *deadContainerCleaner {
+	clk := &clock.RealClock{}
+	return &deadContainerCleaner{
+		clock:          clk,
+		heartbeat:      clk.NewTicker(cleanerHeartBeat),
+		TTL:            ttl,
+		systemCapacity: 1000,
+	}
+}
+
+var deadContainerCount = 0
+
+func (s *service) destroyDeadContainers() {
+	defer utils.Recover()
+	rt := &CubeLog.RequestTrace{
+		Action: "DeadGC",
+		Caller: constants.CubeboxServiceID.ID(),
+		Callee: s.engine.ID(),
+	}
+
+	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
+	ctx = log.WithLogger(ctx, log.NewWrapperLogEntry(log.AuditLogger.WithContext(ctx)))
+	for range s.cleaner.heartbeat.C() {
+		dc := s.cubeboxMgr.cubeboxManger.List()
+		if len(dc) == 0 {
+			continue
+		}
+
+		scanDeadContainer(ctx, dc, s.cubeboxMgr.client, s.cleaner.TTL)
+	}
+}
+
+func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *containerd.Client, ttl time.Duration) {
+	now := time.Now()
+	var tmpDeadCount = 0
+	for _, cb := range dc {
+		stepLog := log.G(ctx).WithFields(CubeLog.Fields{
+			string(CubeLog.KeyInstanceId): cb.ID,
+		})
+		if cb.FirstContainer() == nil {
+			continue
+		}
+		// Cubelet itself initiated the pause and already tracks the in-progress
+		// state via PausingAt (CONTAINER_PAUSING) or PausedAt (CONTAINER_PAUSED).
+		// Calling RecoverContainer -> shim state() while pause_vm() holds the
+		// sandbox mutex causes a ttrpc timeout; RecoverContainer then sets
+		// Unknown=true, making the sandbox appear Terminated and triggering a
+		// spurious Destroy cascade.
+		//
+		// The same race exists for snapshot rollback: while updateTaskForRollback
+		// runs, the shim holds its sandbox mutex doing delete_vm +
+		// resume_vm_with_config and ttrpc state() either times out or returns
+		// task status=Unknown. RollbackSandbox sets RollingBack on every
+		// container's Status before invoking the shim and clears it via defer,
+		// so DeadGC must respect the flag for the same reason.
+		if status := cb.GetStatus(); status != nil {
+			st := status.Get()
+			if st.RollingBack {
+				continue
+			}
+			switch st.State() {
+			case cubebox.ContainerState_CONTAINER_CREATED:
+				// Sandbox create is in flight: createCubeboxContainer saves the
+				// cubebox into the store (state CONTAINER_CREATED, CreatedAt only)
+				// BEFORE runContainer binds the containerd container/task and sets
+				// StartedAt. In this window RecoverContainer -> loadStatus finds no
+				// task yet and stamps Unknown=true / FinishedAt=now, which State()
+				// ranks above StartedAt (see pkg/store/cubebox/status.go) -- so the
+				// sandbox reads as terminated forever even after the task starts
+				// RUNNING, breaking a follow-up pause with "sandbox is not running".
+				// Create owns this phase (and its own failover/cleanup on failure),
+				// so DeadGC skips it while create could still be running, exactly
+				// like the PAUSING/RollingBack races. Past createStuckThreshold the
+				// entry is genuinely stuck (task never bound) and safe to reap.
+				if st.CreatedAt == 0 ||
+					time.Since(time.Unix(0, st.CreatedAt)) < createStuckThreshold {
+					continue
+				}
+			case cubebox.ContainerState_CONTAINER_PAUSED:
+				// User-driven pause: a legitimate, possibly long-lived state.
+				// Nothing for DeadGC to do.
+				continue
+			case cubebox.ContainerState_CONTAINER_PAUSING:
+				// PAUSING is meant to be a short transient. While a pause is
+				// genuinely in flight the shim holds its sandbox mutex, so a
+				// state() query would time out and stamp Unknown=true (see
+				// above) -- within the safety window we still skip. Past
+				// pausingStuckThreshold the pause is no longer running (e.g. the
+				// cubelet restarted mid-pause and missed both the RPC and
+				// /tasks/paused reconcile windows); reconcile once against the
+				// shim's real status so the sandbox never stays stuck at PAUSING
+				// forever.
+				if st.PausingAt == 0 ||
+					time.Since(time.Unix(0, st.PausingAt)) < pausingStuckThreshold {
+					continue
+				}
+				reconcileStuckPausingSandbox(ctx, client, cb)
+				continue
+			}
+		}
+		ctx = namespaces.WithNamespace(ctx, cb.Namespace)
+		ctr, err := cubes.RecoverContainer(ctx, client, cb, cb.FirstContainer())
+		if err != nil {
+			stepLog.Errorf("recheck container status %s error: %v", cb.FirstContainer().ID, err)
+			continue
+		}
+		if ctr.Status.IsTerminated() {
+			if ctr.Status.Status.FinishedAt == 0 {
+				ctr.Status.Update(func(s cubeboxstore.Status) (cubeboxstore.Status, error) {
+					s.FinishedAt = now.UnixNano()
+					return s, nil
+				})
+			}
+			if time.Unix(0, ctr.Status.Status.FinishedAt).Add(ttl).Before(now) {
+				stepLog.Warnf("dead container %s is terminating and reach ttl time", ctr.ID)
+				tmpDeadCount++
+			}
+		}
+	}
+	if deadContainerCount != tmpDeadCount {
+		deadContainerCount = tmpDeadCount
+		log.G(ctx).Errorf("dead container num %d", deadContainerCount)
+	}
+}
+
+func getUserAgent(ctx context.Context) string {
+	userAgent := constants.UserAgentDefaultValue
+	md, ok := metadata.FromIncomingContext(ctx)
+	if ok {
+		for _, key := range md.Get(constants.UserAgentKey) {
+			if key != "" {
+				split := strings.Split(key, " ")
+				userAgent = split[0]
+				break
+			}
+		}
+	}
+	return userAgent
+}

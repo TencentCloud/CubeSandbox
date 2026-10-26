@@ -1,0 +1,10 @@
+[Unit]
+Description=Cube Sandbox compute-node stack
+After=network-online.target
+Wants=network-online.target
+Wants=cube-sandbox-cubelet.service
+Wants=cube-sandbox-cube-egress-net.service cube-sandbox-cube-egress.service
+AllowIsolate=no
+
+[Install]
+WantedBy=multi-user.target

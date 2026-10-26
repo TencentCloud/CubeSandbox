@@ -1,0 +1,22 @@
+[Unit]
+Description=Cube Sandbox Cube API
+After=network-online.target cube-sandbox-cubemaster.service
+Wants=network-online.target cube-sandbox-cubemaster.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-api-start.sh
+ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-api-postcheck.sh
+Restart=on-failure
+RestartSec=2s
+# Override short distro defaults explicitly.
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=cube-sandbox-control.target

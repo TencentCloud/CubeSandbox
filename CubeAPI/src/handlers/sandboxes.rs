@@ -1,0 +1,771 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
+    Json,
+};
+use validator::Validate;
+
+use crate::{
+    error::{AppError, AppResult},
+    logging::{LogEvent, LogLevel},
+    models::{
+        ApiError, ConnectSandbox, ConnectSandboxV2, ForkRequest, ForkResult, ListSandboxesQuery,
+        ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest, ResumedSandbox, Sandbox,
+        SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response,
+        SetTimeoutRequest, UpdateSandboxNetworkRequest,
+    },
+    state::AppState,
+};
+
+// ─── GET /sandboxes ───────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes",
+    params(ListSandboxesQuery),
+    responses(
+        (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox]),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn list_sandboxes(
+    State(state): State<AppState>,
+    Query(params): Query<ListSandboxesQuery>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "list_sandboxes")
+                .field("metadata_filter", params.metadata.as_deref().unwrap_or("")),
+        )
+        .await;
+
+    match state
+        .services
+        .sandboxes
+        .list(params.metadata.as_deref(), None, 200)
+        .await
+    {
+        Ok(list) => {
+            state
+                .logger
+                .log(
+                    LogEvent::new(LogLevel::Info, "api.response")
+                        .field("handler", "list_sandboxes")
+                        .field_value("count", list.len()),
+                )
+                .await;
+            Ok(Json(list))
+        }
+        Err(error) => {
+            let message = error.to_string();
+            tracing::error!(error = %message, "list_sandboxes: service error");
+            state
+                .logger
+                .log(
+                    LogEvent::new(LogLevel::Error, "api.error")
+                        .field("handler", "list_sandboxes")
+                        .field("error", &message),
+                )
+                .await;
+            Err(error)
+        }
+    }
+}
+
+// ─── GET /v2/sandboxes ────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/v2/sandboxes",
+    params(ListSandboxesV2Query),
+    responses(
+        (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox],
+            headers(
+                ("x-next-token", description = "Continuation cursor for the next page. Omitted on the last page.")
+            )
+        ),
+        (status = 400, description = "Malformed nextToken", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn list_sandboxes_v2(
+    State(state): State<AppState>,
+    Query(params): Query<ListSandboxesV2Query>,
+) -> AppResult<impl IntoResponse> {
+    params
+        .validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "list_sandboxes_v2")
+                .field("state_filter", params.state.as_deref().unwrap_or(""))
+                .field_value("limit", params.limit),
+        )
+        .await;
+
+    let page = state
+        .services
+        .sandboxes
+        .list_v2(
+            params.metadata.as_deref(),
+            params.state.as_deref(),
+            params.next_token.as_deref(),
+            params.limit,
+        )
+        .await?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "list_sandboxes_v2")
+                .field_value("count", page.items.len())
+                .field(
+                    "has_next_token",
+                    if page.next_token.is_some() {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
+        )
+        .await;
+
+    // The continuation cursor rides in a header, matching `GET /snapshots`, so
+    // the body stays a plain sandbox array. It is omitted on the last page
+    // rather than sent empty, which reads as "keep going" to some clients.
+    let mut headers = HeaderMap::new();
+    if let Some(next_token) = page.next_token {
+        if let Ok(value) = HeaderValue::from_str(&next_token) {
+            headers.insert("x-next-token", value);
+        }
+    }
+
+    Ok((StatusCode::OK, headers, Json(page.items)))
+}
+
+// ─── GET /sandboxes/:sandboxID ────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    responses(
+        (status = 200, description = "Sandbox detail", body = SandboxDetail),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn get_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "get_sandbox")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+
+    let detail = state.services.sandboxes.get_sandbox(&sandbox_id).await?;
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "get_sandbox")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+    Ok(Json(detail))
+}
+
+// ─── POST /sandboxes ──────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes",
+    request_body = NewSandbox,
+    responses(
+        (status = 201, description = "Sandbox created", body = Sandbox),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 404, description = "Template or snapshot not found (e.g. deleted/tombstoned)", body = ApiError),
+        (status = 409, description = "A referenced resource is in a conflicting state and cannot be used to create a sandbox", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn create_sandbox(
+    State(state): State<AppState>,
+    Json(body): Json<NewSandbox>,
+) -> AppResult<impl IntoResponse> {
+    let template_id = body.template_id.clone();
+    let timeout = body.timeout;
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "create_sandbox")
+                .field("template_id", &template_id)
+                .field_value("timeout", timeout),
+        )
+        .await;
+
+    let created = state.services.sandboxes.create_sandbox(body).await?;
+    let sandbox_id = created.sandbox_id.clone();
+
+    tracing::info!(sandbox_id = %sandbox_id, template_id = %template_id, "create_sandbox: success");
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.created")
+                .field("sandbox_id", &sandbox_id)
+                .field("template_id", &template_id),
+        )
+        .await;
+
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+// ─── POST /v2/sandboxes ────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/v2/sandboxes",
+    request_body = NewSandboxV2,
+    responses(
+        (status = 201, description = "Sandbox created", body = Sandbox),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn create_sandbox_v2(
+    State(state): State<AppState>,
+    Json(body): Json<NewSandboxV2>,
+) -> AppResult<impl IntoResponse> {
+    // E2B 2.51.0 sends this only on explicit keep_memory=false opt-out; omitted otherwise.
+    if body.auto_pause_memory == Some(false) {
+        return Err(AppError::BadRequest(
+            "autoPauseMemory=false is not accepted; CubeSandbox always keeps \
+             the full memory snapshot on pause"
+                .to_string(),
+        ));
+    }
+    create_sandbox(State(state), Json(body.base)).await
+}
+
+// ─── POST /sandboxes/:sandboxID/fork ─────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/fork",
+    params(
+        ("sandboxID" = String, Path, description = "Source sandbox identifier")
+    ),
+    request_body = ForkRequest,
+    responses(
+        (status = 201, description = "Fork results (array length == count; per-fork failures are error entries, still 201)", body = Vec<ForkResult>),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox state does not allow fork", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn fork_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<ForkRequest>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "fork_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("count", body.count),
+        )
+        .await;
+
+    let results = state.services.sandboxes.fork(&sandbox_id, body).await?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "fork_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value(
+                    "forked",
+                    results.iter().filter(|r| r.sandbox.is_some()).count(),
+                ),
+        )
+        .await;
+
+    Ok((StatusCode::CREATED, Json(results)))
+}
+
+// ─── DELETE /sandboxes/:sandboxID ─────────────────────────────────────────────
+
+#[utoipa::path(
+    delete,
+    path = "/sandboxes/{sandboxID}",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    responses(
+        (status = 204, description = "Sandbox deleted"),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 408, description = "The existing standard API request timeout expired before the synchronous delete completed"),
+        (status = 409, description = "Paused sandbox cannot be admitted for internal resume because node capacity or resource metadata is unavailable", body = ApiError),
+        (status = 503, description = "Sandbox is pausing, another lifecycle operation is in progress, the Cubelet RPC has too little remaining time, or its internal resume could not be completed", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying DELETE")
+            )
+        ),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn kill_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "kill_sandbox")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+
+    state.services.sandboxes.kill_sandbox(&sandbox_id).await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, "kill_sandbox: success");
+    state
+        .logger
+        .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", &sandbox_id))
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── POST /sandboxes/:sandboxID/pause ─────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/pause",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    responses(
+        (status = 204, description = "Sandbox paused"),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox cannot be paused", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn pause_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "pause_sandbox")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+    tracing::info!(sandbox_id = %sandbox_id, "pause sandbox request");
+    state.services.sandboxes.pause_sandbox(&sandbox_id).await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, "pause_sandbox: success");
+    state
+        .logger
+        .log(LogEvent::new(LogLevel::Info, "sandbox.paused").field("sandbox_id", &sandbox_id))
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── POST /sandboxes/:sandboxID/resume ────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/resume",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = ResumedSandbox,
+    responses(
+        (status = 201, description = "Sandbox resumed", body = Sandbox),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox is already running", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn resume_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<ResumedSandbox>,
+) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "resume_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("timeout", body.timeout),
+        )
+        .await;
+    tracing::info!(sandbox_id = %sandbox_id, "resume sandbox request");
+    let sandbox = state
+        .services
+        .sandboxes
+        .resume_sandbox(&sandbox_id, body.timeout)
+        .await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
+    state
+        .logger
+        .log(LogEvent::new(LogLevel::Info, "sandbox.resumed").field("sandbox_id", &sandbox_id))
+        .await;
+
+    Ok((StatusCode::CREATED, Json(sandbox)))
+}
+
+// ─── POST /sandboxes/:sandboxID/connect ───────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/connect",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = ConnectSandbox,
+    responses(
+        (status = 200, description = "Sandbox connection info", body = Sandbox),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn connect_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<ConnectSandbox>,
+) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "connect_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("timeout", body.timeout),
+        )
+        .await;
+    tracing::info!("connect request");
+    let sandbox = state
+        .services
+        .sandboxes
+        .connect_sandbox(&sandbox_id, body.timeout)
+        .await?;
+    Ok((StatusCode::OK, Json(sandbox)))
+}
+
+// ─── POST /v2/sandboxes/:sandboxID/connect ─────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/v2/sandboxes/{sandboxID}/connect",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = ConnectSandboxV2,
+    responses(
+        (status = 200, description = "Sandbox connection info", body = Sandbox),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Paused sandbox cannot be resumed during a conflicting lifecycle transition", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn connect_sandbox_v2(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<ConnectSandboxV2>,
+) -> AppResult<impl IntoResponse> {
+    // E2B 2.51.0 sends this only on explicit opt-out; omitted otherwise.
+    if body.memory == Some(false) {
+        return Err(AppError::BadRequest(
+            "memory=false is not accepted; CubeSandbox always resumes from \
+             the memory snapshot"
+                .to_string(),
+        ));
+    }
+    connect_sandbox(State(state), Path(sandbox_id), Json(body.base)).await
+}
+
+// ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/logs",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier"),
+        SandboxLogsQuery
+    ),
+    responses(
+        (status = 200, description = "Sandbox logs (legacy shape)", body = crate::models::SandboxLogs),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn get_sandbox_logs(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Query(params): Query<SandboxLogsQuery>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "get_sandbox_logs")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("limit", params.limit),
+        )
+        .await;
+
+    let logs = state
+        .services
+        .sandboxes
+        .get_logs(&sandbox_id, params.start, params.limit)
+        .await?;
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "get_sandbox_logs")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("count", logs.logs.len()),
+        )
+        .await;
+    Ok(Json(logs))
+}
+
+// ─── GET /v2/sandboxes/:sandboxID/logs ────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/v2/sandboxes/{sandboxID}/logs",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier"),
+        SandboxLogsV2Query
+    ),
+    responses(
+        (status = 200, description = "Structured sandbox logs", body = SandboxLogsV2Response),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn get_sandbox_logs_v2(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Query(params): Query<SandboxLogsV2Query>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "get_sandbox_logs_v2")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("limit", params.limit),
+        )
+        .await;
+
+    let logs = state
+        .services
+        .sandboxes
+        .get_logs_v2(&sandbox_id, params.cursor, params.limit)
+        .await?;
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "get_sandbox_logs_v2")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("count", logs.logs.len()),
+        )
+        .await;
+    Ok(Json(logs))
+}
+
+// ─── POST /sandboxes/:sandboxID/timeout ───────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/timeout",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = SetTimeoutRequest,
+    responses(
+        (status = 204, description = "Timeout updated"),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn set_sandbox_timeout(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<SetTimeoutRequest>,
+) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "set_sandbox_timeout")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("timeout", body.timeout),
+        )
+        .await;
+
+    state
+        .services
+        .sandboxes
+        .set_timeout(&sandbox_id, body.timeout)
+        .await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, timeout = body.timeout, "set_sandbox_timeout: success");
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.timeout.updated")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("timeout", body.timeout),
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── PUT /sandboxes/:sandboxID/network ────────────────────────────────────────
+
+#[utoipa::path(
+    put,
+    path = "/sandboxes/{sandboxID}/network",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = UpdateSandboxNetworkRequest,
+    responses(
+        (status = 204, description = "Network policy updated"),
+        (status = 400, description = "Invalid network policy", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox is not running", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn update_sandbox_network(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<UpdateSandboxNetworkRequest>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "update_sandbox_network")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+
+    let (allow_internet_access, network) = body.into_parts().map_err(AppError::BadRequest)?;
+
+    state
+        .services
+        .sandboxes
+        .update_network(&sandbox_id, allow_internet_access, network.as_ref())
+        .await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, "update_sandbox_network: success");
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.network.updated")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── POST /sandboxes/:sandboxID/refreshes ─────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/refreshes",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = RefreshRequest,
+    responses(
+        (status = 204, description = "Sandbox refreshed"),
+        (status = 400, description = "Invalid duration value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn refresh_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<RefreshRequest>,
+) -> AppResult<impl IntoResponse> {
+    let duration = body.duration.unwrap_or(0);
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "refresh_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("duration", duration),
+        )
+        .await;
+
+    state
+        .services
+        .sandboxes
+        .refresh(&sandbox_id, duration)
+        .await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, duration = duration, "refresh_sandbox: success");
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.refreshed")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("duration", duration),
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}

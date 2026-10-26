@@ -1,0 +1,65 @@
+[package]
+name = "vmm"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[features]
+default = []
+guest_debug = ["kvm", "gdbstub", "gdbstub_arch"]
+kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
+mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
+tdx = ["arch/tdx", "hypervisor/tdx"]
+tracing = ["tracer/tracing"]
+lib_support = ["devices/lib_support"]
+
+[dependencies]
+acpi_tables = { path = "../acpi_tables" }
+anyhow = "1.0.86"
+arc-swap = "1.5.1"
+async-trait = "0.1.88"
+arch = { path = "../arch" }
+bitflags = "2.6.0"
+block_util = { path = "../block_util" }
+chrono = "0.4.0"
+clap = "4.4.7"
+devices = { path = "../devices" }
+epoll = "4.3.1"
+event_monitor = { path = "../event_monitor" }
+event_notifier = { path = "../event_notifier" }
+gdbstub = { version = "0.6.3", optional = true }
+gdbstub_arch = { version = "0.2.4", optional = true }
+hypervisor = { path = "../hypervisor" }
+lazy_static = "1.2"
+libc = "0.2.137"
+linux-loader = { workspace = true, features = ["elf", "bzimage", "pe"] }
+logging = { path = "../logging" }
+log = "0.4.17"
+micro_http = { git = "https://github.com/firecracker-microvm/micro-http", branch = "main" }
+net_util = { path = "../net_util" }
+once_cell = "1.16.0"
+option_parser = { path = "../option_parser" }
+pci = { path = "../pci" }
+qcow = { path = "../qcow" }
+seccompiler = { workspace = true }
+serde = { workspace = true, features = ["rc", "derive"] }
+serde_json = "1.0.87"
+serial_buffer = { path = "../serial_buffer" }
+signal-hook = "0.3.14"
+thiserror = "1.0.37"
+tokio = { version = "=1.40.0", features = ["full"] }
+tracer = { path = "../tracer" }
+uuid = "1.2.1"
+vfio-ioctls = { git = "https://github.com/rust-vmm/vfio", rev = "64171f3", default-features = false }
+vfio_user = { path = "../vfio_user" }
+vhdx = { path = "../vhdx" }
+virtio-devices = { path = "../virtio-devices" }
+virtio-queue = "0.11.0"
+vm-allocator = { path = "../vm-allocator" }
+vm-device = { path = "../vm-device" }
+vm-memory = { workspace = true, features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
+vm-migration = { path = "../vm-migration" }
+vm-virtio = { path = "../vm-virtio" }
+vmm-sys-util = { version = "0.12.1", features = ["with-serde"] }
+virtiofsd = { workspace = true }
+zerocopy = "0.6.1"

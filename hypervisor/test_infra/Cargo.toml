@@ -1,0 +1,16 @@
+[package]
+name = "test_infra"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+dirs = "4.0.0"
+epoll = "4.3.1"
+libc = "0.2.137"
+once_cell = "1.16.0"
+serde = { workspace = true, features = ["rc", "derive"] }
+serde_json = "1.0.87"
+ssh2 = { version = "0.9.3", features = ["vendored-openssl"] }
+vmm-sys-util = "0.12.1"
+wait-timeout = "0.2.0"

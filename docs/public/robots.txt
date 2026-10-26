@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+Disallow: /404.html
+
+Sitemap: https://cubesandbox.com/sitemap.xml

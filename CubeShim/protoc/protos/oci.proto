@@ -1,0 +1,464 @@
+//
+// Copyright (c) 2017 Intel Corporation
+// Copyright (c) 2019-2020 Ant Group
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+option go_package = "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/pkg/agent/protocols/grpc";
+
+package grpc;
+import "gogo/protobuf/gogoproto/gogo.proto";
+
+option (gogoproto.equal_all) = true;
+option (gogoproto.populate_all) = true;
+option (gogoproto.testgen_all) = true;
+option (gogoproto.benchgen_all) = true;
+
+message Spec {
+	// Version of the Open Container Initiative Runtime Specification with which the bundle complies.
+	string version = 1;
+
+	// Process configures the container process.
+	Process process = 2;
+
+	// Root configures the container's root filesystem.
+	Root root = 3;
+
+	// Hostname configures the container's hostname.
+	string hostname = 4;
+
+	// Mounts configures additional mounts (on top of Root).
+	repeated Mount mounts = 5 [(gogoproto.nullable) = false];
+
+	// Hooks configures callbacks for container lifecycle events.
+	Hooks hooks = 6;
+
+	// Annotations contains arbitrary metadata for the container.
+	map<string, string> annotations = 7;
+
+	// Linux is platform-specific configuration for Linux based containers.
+	Linux linux = 8;
+
+	// Solaris is platform-specific configuration for Solaris based containers.
+	Solaris solaris = 9;
+	// Windows is platform-specific configuration for Windows based containers.
+	Windows windows = 10;
+}
+
+message Process {
+	// Terminal creates an interactive terminal for the container.
+	bool terminal = 1;
+
+	// ConsoleSize specifies the size of the console.
+	Box consoleSize = 2;
+
+	// User specifies user information for the process.
+	User user = 3 [(gogoproto.nullable) = false];
+
+	// Args specifies the binary and arguments for the application to execute.
+	repeated string args = 4;
+
+	// Env populates the process environment for the process.
+	repeated string env = 5;
+
+ 	// Cwd is the current working directory for the process and must be
+	// relative to the container's root.
+	string cwd = 6;
+
+	// Capabilities are Linux capabilities that are kept for the process.
+	LinuxCapabilities capabilities = 7;
+
+	// Rlimits specifies rlimit options to apply to the process.
+	repeated POSIXRlimit rlimits = 8 [(gogoproto.nullable) = false];
+
+	// NoNewPrivileges controls whether additional privileges could be gained by processes in the container.	
+	bool noNewPrivileges = 9;
+
+	// ApparmorProfile specifies the apparmor profile for the container.
+	string apparmorProfile = 10;
+
+	// Specify an oom_score_adj for the container.
+	int64 oomScoreAdj = 11;
+
+	// SelinuxLabel specifies the selinux context that the container process is run as.
+	string selinuxLabel = 12;
+}
+
+message Box {
+	// Height is the vertical dimension of a box.
+	uint32 height = 1;
+
+	// Width is the horizontal dimension of a box.	
+	uint32 width = 2;
+}
+
+message User {
+	// UID is the user id.
+	uint32 uid = 1;
+
+	// GID is the group id.
+	uint32 gid = 2;
+
+	// AdditionalGids are additional group ids set for the container's process.
+	repeated uint32 additionalGids = 3;
+
+	// Username is the user name.
+	string username = 4;
+}
+
+message LinuxCapabilities {
+	// Bounding is the set of capabilities checked by the kernel.
+	repeated string bounding = 1;
+
+	// Effective is the set of capabilities checked by the kernel.
+	repeated string effective = 2;
+
+	// Inheritable is the capabilities preserved across execve.
+	repeated string inheritable = 3;
+
+	// Permitted is the limiting superset for effective capabilities.
+	repeated string permitted = 4;
+
+	// Ambient is the ambient set of capabilities that are kept.
+	repeated string ambient = 5;
+}
+
+message POSIXRlimit {
+	// Type of the rlimit to set
+	string type = 1;
+
+	// Hard is the hard limit for the specified type
+	uint64 hard = 2;
+
+	// Soft is the soft limit for the specified type
+   	uint64 soft = 3;
+}
+
+message Mount {
+	// destination is the path inside the container expect when it starts with "tmp:/"
+	string destination = 1;
+
+	// source is the path inside the container expect when it starts with "vm:/dev/" or "tmp:/"
+	// the path which starts with "vm:/dev/" refers the guest vm's "/dev",
+	// especially, "vm:/dev/hostfs/" refers to the shared filesystem.
+	// "tmp:/" is a temporary directory which is used for temporary mounts.
+	string source = 2;
+	string type = 3;
+	repeated string options = 4;
+}
+
+message Root {
+	// Path is the absolute path to the container's root filesystem.
+	string path = 1;
+
+	// Readonly makes the root filesystem for the container readonly before the process is executed.
+	bool readonly = 2;
+}
+
+message Hooks {
+	// Prestart is a list of hooks to be run before the container process is executed.
+	repeated Hook prestart = 1  [(gogoproto.nullable) = false];
+
+	// Poststart is a list of hooks to be run after the container process is started.
+	repeated Hook poststart = 2  [(gogoproto.nullable) = false];
+
+	// Poststop is a list of hooks to be run after the container process exits.
+	repeated Hook poststop = 3  [(gogoproto.nullable) = false];
+}
+
+message Hook {
+	string path = 1;
+	repeated string args = 2;
+	repeated string env = 3;
+	int64 timeout = 4;
+}
+
+message Linux {
+	// UIDMapping specifies user mappings for supporting user namespaces.
+	repeated LinuxIDMapping uidMappings = 1  [(gogoproto.nullable) = false];
+
+	// GIDMapping specifies group mappings for supporting user namespaces.
+	repeated LinuxIDMapping gidMappings = 2  [(gogoproto.nullable) = false];
+
+	// Sysctl are a set of key value pairs that are set for the container on start
+	map<string, string> sysctl = 3;
+
+	// Resources contain cgroup information for handling resource constraints
+	// for the container
+	LinuxResources resources = 4;
+
+	// CgroupsPath specifies the path to cgroups that are created and/or joined by the container.
+	// The path is expected to be relative to the cgroups mountpoint.
+	// If resources are specified, the cgroups at CgroupsPath will be updated based on resources.
+	string cgroupsPath = 5;
+
+	// Namespaces contains the namespaces that are created and/or joined by the container
+	repeated LinuxNamespace namespaces = 6  [(gogoproto.nullable) = false];
+
+	// Devices are a list of device nodes that are created for the container
+	repeated LinuxDevice devices = 7  [(gogoproto.nullable) = false];
+
+	// Seccomp specifies the seccomp security settings for the container.
+	LinuxSeccomp seccomp = 8;
+
+	// RootfsPropagation is the rootfs mount propagation mode for the container.
+	string rootfsPropagation = 9;
+
+	// MaskedPaths masks over the provided paths inside the container.
+	repeated string maskedPaths = 10;
+
+	// ReadonlyPaths sets the provided paths as RO inside the container.
+	repeated string readonlyPaths = 11;
+
+	// MountLabel specifies the selinux context for the mounts in the container.
+	string mountLabel = 12;
+
+	// IntelRdt contains Intel Resource Director Technology (RDT) information
+	// for handling resource constraints (e.g., L3 cache) for the container
+	LinuxIntelRdt intelRdt = 13;
+}
+
+message Windows {
+	// Dummy string, never used.
+	string dummy = 1;
+}
+
+message Solaris {
+	// Dummy string, never used.
+	string dummy = 1;
+}
+
+message LinuxIDMapping {
+	// HostID is the starting UID/GID on the host to be mapped to 'ContainerID'
+	uint32 hostID = 1;
+
+	// ContainerID is the starting UID/GID in the container
+	uint32 containerID = 2;
+
+	// Size is the number of IDs to be mapped
+	uint32 size = 3;
+}
+
+message LinuxNamespace {
+	// Type is the type of namespace
+	string type = 1;
+
+	// Path is a path to an existing namespace persisted on disk that can be joined
+	// and is of the same type
+	string path = 2;
+}
+
+message LinuxDevice {
+	// Path to the device.
+	string path = 1;
+
+	// Device type, block, char, etc.
+	string type = 2;
+
+	// Major is the device's major number.
+	int64 major = 3;
+
+	// Minor is the device's minor number.
+	int64 minor = 4;
+
+	// FileMode permission bits for the device.
+	uint32 fileMode = 5;
+
+	// UID of the device.
+	uint32 uid = 6;
+
+	// Gid of the device.
+	uint32 gid = 7;
+}
+
+message LinuxResources {
+	// Devices configures the device whitelist.
+	repeated LinuxDeviceCgroup devices = 1  [(gogoproto.nullable) = false];
+
+	// Memory restriction configuration
+	LinuxMemory memory = 2;
+
+	// CPU resource restriction configuration
+	LinuxCPU cpu = 3;
+
+	// Task resource restriction configuration.
+	LinuxPids pids = 4;
+
+	// BlockIO restriction configuration
+	LinuxBlockIO blockIO = 5;
+
+	// Hugetlb limit (in bytes)
+	repeated LinuxHugepageLimit hugepageLimits = 6  [(gogoproto.nullable) = false];
+
+	// Network restriction configuration
+	LinuxNetwork network = 7;
+}
+
+message LinuxMemory {
+	// Memory limit (in bytes).
+	int64 limit = 1;
+
+	// Memory reservation or soft_limit (in bytes).
+	int64 reservation = 2;
+
+	// Total memory limit (memory + swap).
+	int64 swap = 3;
+
+	// Kernel memory limit (in bytes).
+	int64 kernel = 4;
+
+	// Kernel memory limit for tcp (in bytes)
+	int64 kernelTCP = 5;
+
+	// How aggressive the kernel will swap memory pages.
+	uint64 swappiness = 6;
+
+	// DisableOOMKiller disables the OOM killer for out of memory conditions
+	bool disableOOMKiller = 7;
+}
+
+message LinuxCPU {
+	// CPU shares (relative weight (ratio) vs. other cgroups with cpu shares).
+	uint64 shares = 1;
+
+	// CPU hardcap limit (in usecs). Allowed cpu time in a given period.
+	int64 quota = 2;
+
+	// CPU period to be used for hardcapping (in usecs).
+	uint64 period = 3;
+
+	// How much time realtime scheduling may use (in usecs).
+	int64 realtimeRuntime = 4;
+
+	// CPU period to be used for realtime scheduling (in usecs).
+	uint64 realtimePeriod = 5;
+
+	// CPUs to use within the cpuset. Default is to use any CPU available.
+	string cpus = 6;
+
+	// List of memory nodes in the cpuset. Default is to use any available memory node.
+	string mems = 7;
+}
+
+message LinuxWeightDevice {
+	// Major is the device's major number.
+	int64 major = 1;
+
+	// Minor is the device's minor number.
+	int64 minor = 2;
+
+	// Weight is the bandwidth rate for the device.
+	uint32 weight = 3;
+
+	// LeafWeight is the bandwidth rate for the device while competing with the cgroup's child cgroups, CFQ scheduler only
+	uint32 leafWeight = 4;
+}
+
+message LinuxThrottleDevice {
+	// Major is the device's major number.
+	int64 major = 1;
+
+	// Minor is the device's minor number.
+	int64 minor = 2;
+
+	// Rate is the IO rate limit per cgroup per device
+	uint64 rate = 3;
+}
+
+message LinuxBlockIO {
+	// Specifies per cgroup weight
+	uint32 weight = 1;
+
+	// Specifies tasks' weight in the given cgroup while competing with the cgroup's child cgroups, CFQ scheduler only
+	uint32 leafWeight = 2;
+
+	// Weight per cgroup per device, can override BlkioWeight
+	repeated LinuxWeightDevice weightDevice = 3  [(gogoproto.nullable) = false];
+
+	// IO read rate limit per cgroup per device, bytes per second
+	repeated LinuxThrottleDevice throttleReadBpsDevice = 4  [(gogoproto.nullable) = false];
+
+	// IO write rate limit per cgroup per device, bytes per second
+	repeated LinuxThrottleDevice throttleWriteBpsDevice = 5  [(gogoproto.nullable) = false];
+
+	// IO read rate limit per cgroup per device, IO per second
+	repeated LinuxThrottleDevice throttleReadIopsDevice = 6  [(gogoproto.nullable) = false];
+
+	// IO write rate limit per cgroup per device, IO per second
+	repeated LinuxThrottleDevice throttleWriteIopsDevice = 7  [(gogoproto.nullable) = false];
+}
+
+message LinuxPids {
+	// Maximum number of PIDs. Default is "no limit".
+	int64 limit = 1;
+}
+
+message LinuxDeviceCgroup {
+	// Allow or deny
+	bool allow = 1;
+
+	// Device type, block, char, etc.
+	string type = 2;
+
+	// Major is the device's major number.
+	int64 major = 3;
+
+	// Minor is the device's minor number.
+	int64 minor = 4;
+
+	// Cgroup access permissions format, rwm.
+	string access = 5;
+}
+
+message LinuxNetwork {
+	// Set class identifier for container's network packets
+	uint32 classID = 1;
+
+	// Set priority of network traffic for container
+	repeated LinuxInterfacePriority priorities = 2  [(gogoproto.nullable) = false];
+}
+
+message LinuxHugepageLimit {
+	// Pagesize is the hugepage size
+	string pagesize = 1;
+
+	// Limit is the limit of "hugepagesize" hugetlb usage
+	uint64 limit = 2;
+}
+
+message LinuxInterfacePriority {
+	// Name is the name of the network interface
+	string name = 1;
+
+	// Priority for the interface
+	uint32 priority = 2;
+}
+
+message LinuxSeccomp {
+	string defaultAction = 1;
+	repeated string architectures = 2;
+	repeated string flags = 3;
+	repeated LinuxSyscall syscalls = 4  [(gogoproto.nullable) = false];
+}
+
+message LinuxSeccompArg {
+	uint64 index = 1;
+	uint64 value = 2;
+	uint64 valueTwo = 3;
+	string op = 4;
+}
+
+message LinuxSyscall {
+	repeated string names = 1;
+	string action = 2;
+	uint32 errnoRet = 3;
+	repeated LinuxSeccompArg args = 4  [(gogoproto.nullable) = false];
+}
+
+message LinuxIntelRdt {
+	// The schema for L3 cache id and capacity bitmask (CBM)
+	// Format: "L3:<cache_id0>=<cbm0>;<cache_id1>=<cbm1>;..."
+	string l3CacheSchema = 1;
+}

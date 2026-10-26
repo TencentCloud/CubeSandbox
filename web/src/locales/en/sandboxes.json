@@ -1,0 +1,38 @@
+{
+  "title": "Sandboxes",
+  "subtitle": "Live view of all running micro-VMs. Manage lifecycle without leaving the keyboard.",
+  "newSandbox": "New sandbox",
+  "filterPlaceholder": "Filter by id, template, client…",
+  "status": "Status",
+  "filter": {
+    "all": "All",
+    "running": "Running",
+    "paused": "Paused"
+  },
+  "col": {
+    "state": "State",
+    "sandboxId": "Sandbox ID",
+    "template": "Template",
+    "cpu": "CPU",
+    "memory": "Memory",
+    "started": "Started",
+    "actions": "Actions",
+    "node": "Node"
+  },
+  "noMatch": "No sandboxes match your filter.",
+  "alias": "alias: {{alias}}",
+  "vcpu": "{{count}} vCPU",
+  "actions": {
+    "resume": "Resume",
+    "pause": "Pause",
+    "kill": "Kill"
+  },
+  "errors": {
+    "unknown": "Unknown error",
+    "actionFailed": "Action failed: {{message}}",
+    "conflict": "{{message}}",
+    "resumeCapacity": "Insufficient node capacity to resume this sandbox. Free capacity and retry.",
+    "resumeCapacityDetail": "Insufficient memory to resume (need {{need}}, used {{used}}, quota {{quota}})",
+    "resumeCapacityDetailCpu": "Insufficient CPU to resume (need {{need}}, used {{used}}, quota {{quota}})"
+  }
+}

@@ -1,0 +1,169 @@
+# SDK Compatibility E2E Case Authoring Guide
+
+## Select a domain
+
+Use an existing domain whenever possible:
+
+```text
+commands/      command output and exit behavior
+filesystem/    file API and shell interoperability
+lifecycle/     create, pause, resume, connect, and kill
+network/       create-time egress policy
+run_code/      interpreter output and kernel state
+volume/        Volume Plugin CRUD and sandbox volumeMounts bind/unbind
+```
+
+Create a new domain only when the behavior has a distinct API, capability
+boundary, or execution scope.
+
+## Use the shared adapter
+
+Do not import a concrete SDK in a shared case:
+
+```python
+def test_command_output(sdk_sandbox, sdk_e2e_config):
+    result = sdk_sandbox.run_command(
+        "printf hello",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    assert result.stdout == "hello"
+```
+
+Put backend-specific behavior in `adapters/` and expose unsupported behavior
+with `requires_capability`.
+
+## Configure and mark the case
+
+Typical module markers:
+
+```python
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.sdk_compat,
+    pytest.mark.p1,
+]
+```
+
+Pass create-time options through the marker:
+
+```python
+@pytest.mark.requires_capability(NETWORK_ALLOW_DENY)
+@pytest.mark.requires_internet
+@pytest.mark.sandbox_create_options(
+    network={
+        "allow_out": ["8.8.8.8/32"],
+        "deny_out": ["0.0.0.0/0"],
+    }
+)
+```
+
+Do not hard-code a template ID in a shared case. Use `CUBE_TEMPLATE_ID` or
+`--cube-template-id`.
+
+## Assertions and state
+
+Assert observable results and include useful output:
+
+```python
+assert_command_ok(result)
+assert result.stdout == "expected", (
+    f"stdout={result.stdout!r} stderr={result.stderr!r}"
+)
+```
+
+For lifecycle or kernel cases, seed state before the transition and verify it
+afterward:
+
+```python
+seed = sdk_sandbox.run_code("value = 41")
+assert_code_ok(seed)
+sdk_sandbox.write_file("/tmp/checkpoint", "before")
+
+# pause/resume or connect
+
+result = resumed.run_code("value + 1")
+assert_code_ok(result)
+assert result.text == "42"
+assert resumed.read_file("/tmp/checkpoint") == "before"
+```
+
+`state == "running"` is a control-plane result, not a data-plane readiness
+guarantee. Use `wait_until_running` and record the first data-plane operation
+separately when investigating a readiness race.
+
+## Network cases
+
+Use the protocol under test:
+
+- TCP: `socket.connect_ex`;
+- UDP/DNS: send a DNS query and wait for a matching response;
+- HTTP/HTTPS: assert status code and response output;
+- L7: verify host, path, method, SNI, rule order, and injection.
+
+For a strict domain allowlist, combine `allow_out` with
+`allow_internet_access=False` or `deny_out=["0.0.0.0/0"]`. A successful TCP
+connection alone does not prove an HTTP or L7 policy.
+
+Capabilities (Cube-only unless noted):
+
+| Capability | Coverage |
+| --- | --- |
+| `network_allow_deny` / `network_public_access` | IP allow/deny, `allow_internet_access`, restrict public traffic (also on E2B where applicable) |
+| `network_dns_allow` | Domain `allow_out` + DNS learning, `*.` wildcards |
+| `network_always_denied` | Built-in deny of link-local / private CIDRs |
+| `network_l7_egress` | CubeEgress inject / first-match / deny / TLS MITM / SNI·host |
+| `network_mask_request_host` | `mask_request_host` rewrite |
+| `network_template_merge` | Template `allow_out`/`deny_out` merged with create-time network |
+
+L7 echo / header observation uses the public service **httpbun.com**
+(`SDK_E2E_L7_ECHO_HOST` to override). Mark those cases `requires_internet`.
+Pass L7 `rules` as wire-shaped dicts in `sandbox_create_options` (no SDK
+import in shared cases). Inject secrets must be test-only placeholders —
+never commit real credentials.
+
+Domain / L7 cases need a working guest nameserver. If the template image
+default resolver is unreachable in your lab, rebuild the template with
+`dns=[...]` or set `SDK_E2E_GUEST_DNS` for module-provisioned templates
+(for example `test_template_network_merge.py`).
+
+## Lifecycle and cleanup
+
+Platform lifecycle cases normally use `slow` and `requires_cubeproxy`:
+
+```bash
+SDK_E2E_PLATFORM_LIFECYCLE=true \
+pytest --run-e2e --sdk-e2e-trace cases/lifecycle/test_auto_lifecycle.py
+```
+
+Volume Plugin cases use the `volume` marker and run with `--run-e2e` (default
+driver `s3`). Set `SDK_E2E_VOLUME_PLUGIN=false` to skip. Create the volume
+first, then pass dynamic `volumeMounts` through
+`create_adapter(..., create_options=...)` — do not hard-code a volume ID in
+`sandbox_create_options`. Default install wires the S3 plugin + MinIO:
+https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md
+(`cubesandbox` >= 0.6.0).
+
+```bash
+pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
+```
+
+Prefer lifecycle helpers over fixed sleeps. Let the fixture clean up the
+sandbox. If a test creates a resumed adapter, close it in `finally`:
+
+```python
+resumed = sdk_sandbox.resume_or_connect()
+try:
+    ...
+finally:
+    resumed.close()
+```
+
+## Review checklist
+
+- shared adapter and required capability markers are used;
+- assertions are deterministic and include failure context;
+- no fixed sandbox ID or cross-test dependency exists;
+- setup, call, skip, and cleanup paths are safe;
+- the intended backend combinations are collected;
+- `pytest --collect-only -q` and the narrowest live scope have been run.

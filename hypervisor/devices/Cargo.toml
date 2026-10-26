@@ -1,0 +1,35 @@
+[package]
+name = "devices"
+version = "0.1.0"
+authors = ["The Chromium OS Authors"]
+edition = "2021"
+
+[dependencies]
+acpi_tables = { path = "../acpi_tables" }
+anyhow = "1.0.86"
+arch = { path = "../arch" }
+bitflags = "2.6.0"
+byteorder = "1.4.3"
+event_monitor = { path = "../event_monitor" }
+event_notifier = { path = "../event_notifier" }
+hypervisor = { path = "../hypervisor" }
+libc = "0.2.137"
+log = "0.4.17"
+logging = { path = "../logging" }
+pci = { path = "../pci" }
+serde = { workspace = true, features = ["derive"] }
+phf = { version = "0.11", features = ["macros"] }
+thiserror = "1.0.30"
+tpm = { path = "../tpm" }
+vm-allocator = { path = "../vm-allocator" }
+vm-device = { path = "../vm-device" }
+vm-memory = { workspace = true }
+vm-migration = { path = "../vm-migration" }
+vmm-sys-util = "0.12.1"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+arch = { path = "../arch" }
+
+[features]
+default = []
+lib_support = []

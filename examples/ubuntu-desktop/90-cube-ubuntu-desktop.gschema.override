@@ -1,0 +1,20 @@
+# Only pin apps that this image actually ships. ubuntu-settings defaults
+# include Firefox snap / Thunderbird / LibreOffice / ubiquity, which show
+# up as broken dock icons.
+[org.gnome.shell]
+favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']
+enabled-extensions=['ubuntu-dock@ubuntu.com', 'ding@rastersoft.com']
+
+[org.gnome.desktop.interface]
+gtk-theme='Yaru'
+icon-theme='Yaru'
+cursor-theme='Yaru'
+font-name='Ubuntu 11'
+
+[org.gnome.shell.extensions.dash-to-dock]
+dock-position='LEFT'
+extend-height=true
+dock-fixed=true
+show-show-apps-button=true
+show-apps-at-top=false
+disable-overview-on-startup=true

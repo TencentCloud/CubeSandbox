@@ -1,0 +1,552 @@
+name: Unit Test Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CubeAPI/**'
+      - 'CubeOps/**'
+      - 'pkgs/cubedb/**'
+      - 'pkgs/blobstore/**'
+      - 'CubeProxy/**'
+      - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
+      - 'CubeShim/**'
+      - 'CubeNet/**'
+      - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
+      - 'pkgs/sandboxrestart/**'
+      - 'cube-lifecycle-manager/**'
+      - 'Cubelet/**'
+      - 'cubecow/**'
+      - 'agent/**'
+      - 'hypervisor/**'
+      - 'examples/volume/s3/**'
+      - 'tests/perf/**'
+      - 'tests/unittest/run.sh'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/build-builder-image.yml'
+      - '.github/workflows/unit-test-check.yml'
+      - 'Makefile'
+  pull_request:
+    paths:
+      - 'CubeAPI/**'
+      - 'CubeOps/**'
+      - 'pkgs/cubedb/**'
+      - 'pkgs/blobstore/**'
+      - 'CubeProxy/**'
+      - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
+      - 'CubeShim/**'
+      - 'CubeNet/**'
+      - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
+      - 'pkgs/sandboxrestart/**'
+      - 'cube-lifecycle-manager/**'
+      - 'Cubelet/**'
+      - 'cubecow/**'
+      - 'agent/**'
+      - 'hypervisor/**'
+      - 'examples/volume/s3/**'
+      - 'tests/perf/**'
+      - 'tests/unittest/run.sh'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/build-builder-image.yml'
+      - '.github/workflows/unit-test-check.yml'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to test'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - cubeapi
+          - cubeops
+          - cubeproxy
+          - cubemaster
+          - cubetemplatecenter
+          - cubeshim
+          - cubecow
+          - cubelog
+          - cubedb
+          - blobstore
+          - cube-lifecycle-manager
+          - cubelet
+          - agent
+          - hypervisor
+          - volume-s3
+          - volume-cos-rpc
+          - proto
+          - cubebench
+
+concurrency:
+  group: unit-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  BUILDER_IMAGE_REMOTE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+  BUILDER_IMAGE_LOCAL: cube-sandbox-builder:ci
+
+jobs:
+  detect-changes:
+    name: Prepare Test Targets
+    runs-on: ubuntu-latest
+    outputs:
+      has_work: ${{ steps.select.outputs.has_work }}
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate aggregate unit runner
+        run: |
+          bash -n tests/unittest/run.sh
+          tests/unittest/run.sh --list >/dev/null
+          tests/unittest/run.sh --help >/dev/null
+
+      - name: Select components
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A seen=()
+          components=()
+
+          add_component() {
+            local name="$1"
+            if [[ -z "${seen[$name]+x}" ]]; then
+              seen["$name"]=1
+              components+=("$name")
+            fi
+          }
+
+          add_all_components() {
+            add_component "CubeAPI"
+            add_component "CubeOps"
+            add_component "CubeProxy"
+            add_component "CubeMaster"
+            add_component "CubeTemplateCenter"
+            add_component "CubeShim"
+            add_component "cubecow"
+            add_component "cubelog"
+            add_component "cubedb"
+            add_component "blobstore"
+            add_component "cube-lifecycle-manager"
+            add_component "cubelet"
+            add_component "agent"
+            add_component "hypervisor"
+            add_component "volume-s3"
+            add_component "volume-cos-rpc"
+            add_component "proto"
+            add_component "cubebench"
+          }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            selected_component="${{ github.event.inputs.component || 'all' }}"
+            case "${selected_component}" in
+              all) add_all_components ;;
+              cubeapi) add_component "CubeAPI" ;;
+              cubeops) add_component "CubeOps" ;;
+              cubeproxy) add_component "CubeProxy" ;;
+              cubemaster) add_component "CubeMaster" ;;
+              cubetemplatecenter) add_component "CubeTemplateCenter" ;;
+              cubeshim) add_component "CubeShim" ;;
+              cubecow) add_component "cubecow" ;;
+              cubelog) add_component "cubelog" ;;
+              cubedb) add_component "cubedb" ;;
+              blobstore) add_component "blobstore" ;;
+              cube-lifecycle-manager) add_component "cube-lifecycle-manager" ;;
+              cubelet) add_component "cubelet" ;;
+              agent) add_component "agent" ;;
+              hypervisor) add_component "hypervisor" ;;
+              volume-s3) add_component "volume-s3" ;;
+              volume-cos-rpc) add_component "volume-cos-rpc" ;;
+              proto) add_component "proto" ;;
+              cubebench) add_component "cubebench" ;;
+              *)
+                echo "::error::unsupported component input: ${selected_component}"
+                exit 1
+                ;;
+            esac
+          else
+            if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+              base_ref="${{ github.event.pull_request.base.sha }}"
+              head_ref="${{ github.event.pull_request.head.sha }}"
+            else
+              base_ref="${{ github.event.before }}"
+              head_ref="${GITHUB_SHA}"
+            fi
+
+            if [[ -z "${base_ref}" || "${base_ref}" == "0000000000000000000000000000000000000000" ]]; then
+              changed_files="$(git diff-tree --no-commit-id --name-only -r "${head_ref}")"
+            else
+              changed_files="$(git diff --name-only "${base_ref}" "${head_ref}")"
+            fi
+
+            printf 'Changed files:\n%s\n' "${changed_files}"
+
+            while IFS= read -r file; do
+              [[ -n "${file}" ]] || continue
+              case "${file}" in
+                docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
+                  add_all_components
+                  ;;
+                tests/unittest/run.sh)
+                  # The aggregate runner has its own syntax/list/help validation
+                  # above; component source changes select their test lanes here.
+                  ;;
+                CubeAPI/*)
+                  add_component "CubeAPI"
+                  ;;
+                CubeOps/*)
+                  add_component "CubeOps"
+                  ;;
+                pkgs/cubedb/*)
+                  # cubedb is consumed locally by CubeOps, CubeMaster and
+                  # CubeTemplateCenter (replace => ../pkgs/cubedb), so its
+                  # changes must re-run their test sets too.
+                  add_component "cubedb"
+                  add_component "CubeOps"
+                  add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
+                  ;;
+                pkgs/blobstore/*)
+                  add_component "blobstore"
+                  add_component "CubeOps"
+                  add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
+                  ;;
+                CubeProxy/*)
+                  add_component "CubeProxy"
+                  ;;
+                CubeMaster/*)
+                  # CubeTemplateCenter imports CubeMaster's pkg/* via
+                  # replace => ../CubeMaster, so CubeMaster changes must
+                  # re-run the TC test set too.
+                  add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
+                  ;;
+                CubeTemplateCenter/*)
+                  add_component "CubeTemplateCenter"
+                  ;;
+                CubeShim/*)
+                  add_component "CubeShim"
+                  ;;
+                CubeNet/cubevs/*)
+                  # cubevs is its own Go module with its own unit tests; run
+                  # those, and keep cubelet (it embeds the cubevs runtime).
+                  add_component "cubevs"
+                  add_component "cubelet"
+                  ;;
+                CubeNet/*)
+                  # The embedded network runtime lives under
+                  # Cubelet/network/runtime and is exercised by cubelet-test,
+                  # so CubeNet eBPF helper changes re-run the cubelet test set.
+                  add_component "cubelet"
+                  ;;
+                pkgs/CubeLog/*)
+                  # Consumers import CubeLog via replace => ../pkgs/CubeLog, so
+                  # CubeLog changes must re-run those test sets too.
+                  add_component "cubelog"
+                  add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
+                  add_component "cubelet"
+                  add_component "CubeOps"
+                  ;;
+                pkgs/proto/*)
+                  # Shared proto module; consumers import via replace =>
+                  # ../pkgs/proto. Changes re-run the consumer test sets
+                  # (CubeMaster, cubelet), the cos/rpc example (the only
+                  # example consuming pkgs/proto), and the module's own
+                  # unit tests -- importer `go test` never runs a
+                  # dependency's _test.go files.
+                  add_component "proto"
+                  add_component "CubeMaster"
+                  add_component "cubelet"
+                  add_component "volume-cos-rpc"
+                  ;;
+                cube-lifecycle-manager/*)
+                  add_component "cube-lifecycle-manager"
+                  ;;
+                cubecow/*)
+                  add_component "cubecow"
+                  ;;
+                Cubelet/*)
+                  # Cubelet's Go bindings consume the cubecow crate
+                  # (Cubelet/pkg/cubecow), so Cubelet changes exercise both the
+                  # cubelet and cubecow test sets.
+                  add_component "cubelet"
+                  add_component "cubecow"
+                  ;;
+                agent/*)
+                  add_component "agent"
+                  ;;
+                hypervisor/*)
+                  add_component "hypervisor"
+                  ;;
+                examples/volume/s3/*)
+                  # Standalone Go module, not covered by any component above.
+                  add_component "volume-s3"
+                  ;;
+                examples/volume/cos/rpc/*)
+                  # Standalone Go module (the reference gRPC volume plugin and
+                  # the only example consuming pkgs/proto), not covered by any
+                  # component build above.
+                  add_component "volume-cos-rpc"
+                  ;;
+                tests/perf/*)
+                  add_component "cubebench"
+                  ;;
+              esac
+            done <<< "${changed_files}"
+          fi
+
+          if [[ ${#components[@]} -eq 0 ]]; then
+            echo "has_work=false" >> "${GITHUB_OUTPUT}"
+            echo "matrix=[]" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          matrix="$(
+            printf '%s\n' "${components[@]}" | jq -R -s -c '
+              split("\n")[:-1]
+              | map({
+                  component: .,
+                  display_name: (
+                    if . == "CubeAPI" then "CubeAPI"
+                    elif . == "CubeOps" then "CubeOps"
+                    elif . == "CubeProxy" then "CubeProxy"
+                    elif . == "CubeMaster" then "CubeMaster"
+                    elif . == "CubeTemplateCenter" then "CubeTemplateCenter"
+                    elif . == "CubeShim" then "CubeShim"
+                    elif . == "cubecow" then "CubeCow"
+                    elif . == "cubelog" then "CubeLog"
+                    elif . == "cubedb" then "CubeDB"
+                    elif . == "blobstore" then "Blobstore"
+                    elif . == "cube-lifecycle-manager" then "Cube Lifecycle Manager"
+                    elif . == "cubelet" then "Cubelet"
+                    elif . == "cubevs" then "CubeVS"
+                    elif . == "agent" then "Agent"
+                    elif . == "hypervisor" then "Hypervisor"
+                    elif . == "volume-s3" then "S3 Volume Plugin"
+                    elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
+                    elif . == "proto" then "Proto"
+                    elif . == "cubebench" then "CubeBench"
+                    else error("unsupported component: " + .)
+                    end
+                  ),
+                  make_target: (
+                    if . == "CubeAPI" then "cube-api-test"
+                    elif . == "CubeOps" then "cubeops-test"
+                    elif . == "CubeProxy" then "cube-proxy-test"
+                    elif . == "CubeMaster" then "cubemaster-test"
+                    elif . == "CubeTemplateCenter" then "cubetemplatecenter-test"
+                    elif . == "CubeShim" then "shim-test"
+                    elif . == "cubecow" then "cubecow-test-native"
+                    elif . == "cubelog" then "cubelog-test"
+                    elif . == "cubedb" then "cubedb-test"
+                    elif . == "blobstore" then "blobstore-test"
+                    elif . == "cube-lifecycle-manager" then "cube-lifecycle-manager-test"
+                    elif . == "cubelet" then "cubelet-test"
+                    elif . == "cubevs" then "cubevs-test"
+                    elif . == "agent" then "agent-test"
+                    elif . == "hypervisor" then "hypervisor-test"
+                    elif . == "volume-s3" then "cube-volume-s3-test"
+                    elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"
+                    elif . == "proto" then "proto-test"
+                    elif . == "cubebench" then "cubebench-test"
+                    else error("unsupported component: " + .)
+                    end
+                  ),
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "proto" and . != "cubebench"),
+                  run_mode: "root_make"
+                })
+              | [
+                  .[] as $component
+                  | if $component.component == "CubeMaster" then
+                      $component,
+                        ($component + {
+                          display_name: "CubeMaster Race",
+                          make_target: "test-race",
+                          run_mode: "cubemaster_builder"
+                        }),
+                        ($component + {
+                          display_name: "CubeMaster Docker",
+                          make_target: "test-docker",
+                          requires_builder: false,
+                          run_mode: "cubemaster_host"
+                        })
+                    elif $component.component == "cubelet" then
+                      $component,
+                        ($component + {
+                          display_name: "Cubelet Mount",
+                          make_target: "cubelet-mount-test"
+                        })
+                    else
+                      $component
+                    end
+                ]
+              | [
+                  .[] as $component
+                  | ["amd64", "arm64"][] as $arch
+                  | $component + {
+                        arch: $arch,
+                        runner: (if $arch == "amd64" then "ubuntu-latest" else "ubuntu-24.04-arm" end),
+                        display_name: ($component.display_name + " (" + $arch + ")")
+                      }
+                ]
+            '
+          )"
+
+          echo "Selected matrix: ${matrix}"
+          echo "has_work=true" >> "${GITHUB_OUTPUT}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: Test ${{ matrix.display_name }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_work == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        if: matrix.run_mode == 'cubemaster_host'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: CubeMaster/go.mod
+          cache-dependency-path: CubeMaster/go.sum
+
+      - name: Detect builder changes
+        id: builder_changes
+        if: matrix.requires_builder
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="${{ github.event.pull_request.base.sha }}"
+            head_ref="${{ github.event.pull_request.head.sha }}"
+          else
+            base_ref="${{ github.event.before }}"
+            head_ref="${GITHUB_SHA}"
+          fi
+
+          if [[ -z "${base_ref}" || "${base_ref}" == "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff-tree --no-commit-id --name-only -r "${head_ref}")"
+          else
+            changed_files="$(git diff --name-only "${base_ref}" "${head_ref}")"
+          fi
+
+          builder_inputs_changed="false"
+          while IFS= read -r file; do
+            case "${file}" in
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+                builder_inputs_changed="true"
+                break
+                ;;
+            esac
+          done <<< "${changed_files}"
+
+          echo "changed=${builder_inputs_changed}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        id: ghcr_login
+        if: matrix.requires_builder && steps.builder_changes.outputs.changed != 'true'
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Warn about GHCR login failure
+        if: matrix.requires_builder && steps.ghcr_login.outcome == 'failure'
+        shell: bash
+        run: echo "::warning::GHCR login failed - will attempt pull as anonymous or build locally"
+
+      - name: Resolve builder image
+        id: builder_image
+        if: matrix.requires_builder
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_local_builder_image() {
+            docker build \
+              -t "${BUILDER_IMAGE_LOCAL}" \
+              -f docker/Dockerfile.builder \
+              --build-arg GITHUB_ACTIONS=true \
+              --build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
+              --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
+              .
+          }
+
+          image="${BUILDER_IMAGE_REMOTE}"
+
+          if [[ "${{ steps.builder_changes.outputs.changed }}" == "true" ]]; then
+            echo "Builder inputs changed, building local builder image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          elif docker pull "${BUILDER_IMAGE_REMOTE}"; then
+            echo "Using published builder image ${BUILDER_IMAGE_REMOTE}"
+          else
+            echo "Failed to pull ${BUILDER_IMAGE_REMOTE}, building local fallback image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          fi
+
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run ${{ matrix.display_name }} unit tests
+        shell: bash
+        env:
+          MAKE_TARGET: ${{ matrix.make_target }}
+          REQUIRES_BUILDER: ${{ matrix.requires_builder }}
+          BUILDER_IMAGE: ${{ steps.builder_image.outputs.image }}
+          RUN_MODE: ${{ matrix.run_mode }}
+        run: |
+          set -euo pipefail
+
+          echo "Component: ${{ matrix.component }}"
+          case "${RUN_MODE}" in
+            root_make)
+              if [[ "${REQUIRES_BUILDER}" == "true" ]]; then
+                echo "Builder image: ${BUILDER_IMAGE}"
+                make "${MAKE_TARGET}" BUILDER_IMAGE="${BUILDER_IMAGE}"
+              else
+                make "${MAKE_TARGET}"
+              fi
+              ;;
+            cubemaster_builder)
+              echo "Builder image: ${BUILDER_IMAGE}"
+              make builder-run \
+                BUILDER_IMAGE="${BUILDER_IMAGE}" \
+                BUILDER_CMD="cd /workspace/CubeMaster && go mod download && make ${MAKE_TARGET}"
+              ;;
+            cubemaster_host)
+              make -C CubeMaster "${MAKE_TARGET}"
+              ;;
+            *)
+              echo "::error::unsupported run mode: ${RUN_MODE}"
+              exit 1
+              ;;
+          esac

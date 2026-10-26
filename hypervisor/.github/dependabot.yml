@@ -1,0 +1,18 @@
+version: 2
+updates:
+- package-ecosystem: cargo
+  directory: "/"
+  schedule:
+    interval: daily
+  open-pull-requests-limit: 1
+  allow:
+  - dependency-type: direct
+  - dependency-type: indirect
+- package-ecosystem: cargo
+  directory: "/fuzz"
+  schedule:
+    interval: daily
+  open-pull-requests-limit: 1
+  allow:
+  - dependency-type: direct
+  - dependency-type: indirect

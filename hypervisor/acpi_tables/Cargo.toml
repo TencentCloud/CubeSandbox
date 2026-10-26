@@ -1,0 +1,9 @@
+[package]
+name = "acpi_tables"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+vm-memory = { workspace = true }
+zerocopy = "0.6.1"

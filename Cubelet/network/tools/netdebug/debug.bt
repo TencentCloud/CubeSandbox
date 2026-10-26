@@ -1,0 +1,29 @@
+#!/bin/env bpftrace
+
+kretprobe:tc_new_tfilter /comm == "netdebug" && retval !=0/{
+	time("%H:%M:%S ");
+	printf("comm: %s, pid: %d, tc_new_tfilter returns %d\n", comm, pid, retval);
+	printf("stack: %s\n", kstack());
+}
+
+kretprobe:cls_bpf_change, kretprobe:tcf_exts_validate, kretprobe:bpf_prog_get_type_dev {
+	time("%H:%M:%S ");
+	printf("comm: %s, pid: %d, %s returns %d\n", comm, pid, probe, retval);
+	printf("stack: %s\n", kstack());
+}
+
+kprobe:__fget_light /comm == "netdebug"/ {
+	time("%H:%M:%S ");
+	printf("comm: %s, pid: %d, %s fd %d\n", comm, pid, probe, arg0);
+}
+
+kretprobe:__fget_light /comm == "netdebug"/ {
+	time("%H:%M:%S ");
+	printf("comm: %s, pid: %d, %s returns %lld\n", comm, pid, probe, (uint64)retval);
+	printf("stack: %s\n", kstack());
+}
+
+kprobe:bpf_prog_get_type_dev {
+	time("%H:%M:%S ");
+	printf("comm: %s, pid: %d, %s fd %d\n", comm, pid, probe, arg0);
+}

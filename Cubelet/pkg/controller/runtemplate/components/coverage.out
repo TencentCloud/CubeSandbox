@@ -1,0 +1,21 @@
+mode: set
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:27.46,33.2 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:39.76,45.2 3 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:48.134,60.15 5 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:60.15,61.17 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:61.17,64.4 2 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:64.9,67.4 2 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:69.2,69.26 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:69.26,72.3 2 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:73.2,76.9 4 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:76.9,77.35 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:77.35,80.10 3 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:80.10,83.5 2 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:85.3,85.17 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:85.17,87.4 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:88.3,88.9 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:92.2,93.8 2 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:97.43,99.41 2 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:99.41,101.3 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:102.2,102.11 1 1
+github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components/component_versioned_manager.go:112.84,120.2 1 1

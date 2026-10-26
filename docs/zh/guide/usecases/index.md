@@ -1,0 +1,62 @@
+# 应用案例
+
+::: warning 必须同时提交中英文
+本栏目所有投稿都必须同时包含 `docs/guide/usecases/` 下的英文文件和 `docs/zh/guide/usecases/` 下的中文文件。只更新单一语言的 PR 不会被合并。
+:::
+
+这里收录 Cube Sandbox 在真实业务中的落地方案、生产实践与经验总结。高质量案例应当说明业务背景、为什么选择 Cube Sandbox，以及最终带来了什么结果。
+
+## 适合收录的内容
+
+- 基于 Cube Sandbox 的真实业务场景
+- 面向生产部署的方案设计与架构经验
+- 从其他沙箱或代码执行平台迁移到 Cube 的故事
+- 内部工具、Agent 工作流与研发效能实践
+
+## 如何贡献
+
+1. 复制当前目录下的 `_template.md`，并改名为英文 kebab-case 文件名，例如 `browser-agent-in-production.md`。
+2. 同时创建这两个文件：
+   - `docs/guide/usecases/<slug>.md`
+   - `docs/zh/guide/usecases/<slug>.md`
+3. 中英文文件名必须保持一致，便于双语站点保持 URL 对应关系。
+4. 按要求填写 frontmatter，并用具体信息描述业务场景与方案。
+5. 在中英文两个索引页的文章列表中各追加一行。
+6. 发起 PR 时如有示例仓库、架构图或演示链接，请一并说明。
+
+## 命名与 frontmatter 规范
+
+- 文件名必须使用英文 kebab-case。
+- 不允许使用中文文件名。
+- 中英文目录必须使用相同 slug。
+- 两个语言版本的 frontmatter key 应保持一致。
+
+```md
+---
+title: 面向内部 QA 流程的 Browser Agent 方案
+author: your-github-id
+date: 2026-05-14
+tags:
+  - browser
+  - qa
+  - production
+lang: zh-CN
+---
+```
+
+## 已发布文章
+
+| 标题 | 作者         | 日期 | 标签 |
+| --- |------------| --- | --- |
+| [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
+| [Lexmount AI：把浏览器运行时搬进 Agent 沙箱](./lexmount-browser-agent.md) | 熊袖璋 | 2026-08-13 | agent, browser, browser-runtime, production |
+| [Hermes Agent：在 Cube Sandbox 中运行常驻 Agent 平台](./hermes-agent.md) | 陈金博 | 2026-08-20 | agent, persistence, skills, host-mount |
+| [Lenovo Cloud Agent：从 Daytona 到 CubeSandbox 的沙箱迁移](./lenovo-cloud-agent.md) | 李健 | 2026-08-20 | agent, migration, daytona, e2b-compat |
+| [Horizon Insights：金融投研 Agent 沙箱化实践](./horizon-insights.md) | 王正凯 | 2026-08-26 | agent, financial, host-mount, cubeegress |
+| [云知声：RL rollout 场景下的密度边界压测](./unisound-rl-rollout.md) | 云知声 Atlas 智算团队 | 2026-09-01 | agent, rl, rollout, density |
+| [广晟数科：多租户沙箱平台构建实践](./guangdong-rising.md) | 冯佳奇 | 2026-09-03 | agent, multi-tenant, sandbox-platform, lifecycle |
+| [WeKnora：基于 CubeSandbox 的 Agent 持久化运行环境](./weknora.md) | 陈洋、赵海龙 | 2026-09-17 | agent, snapshot, session-persistence, e2b-compat |
+| [花椒：沙箱是选项不是标配的 Agent 平台实践](./huajiao.md) | 王成龙、封冰清 | 2026-09-17 | agent, host-mount, go-sdk, execution-environment |
+| [openFuyao：Kubernetes 中运行 CubeSandbox 的落地实践](./openfuyao.md) | 王文涛、李爱华 | 2026-09-17 | kubernetes, deployment, ebpf, production |
+| [Alva：CubeSandbox 落地 GKE 的选型与排障实践](./galxe-alva.md) | RuiPeng Zhang | 2026-10-15 | agent, gke, kubernetes, security |
+| [LambChat：Agent 平台沙箱迁移到 CubeSandbox 的选型与实录](./lambchat.md) | Clivia | 2026-10-15 | agent, e2b-compat, pause-resume, multi-tenant |

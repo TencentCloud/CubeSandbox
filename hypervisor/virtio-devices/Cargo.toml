@@ -1,0 +1,40 @@
+[package]
+name = "virtio-devices"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[features]
+default = []
+
+[dependencies]
+anyhow = "1.0.86"
+arc-swap = "1.5.1"
+block_util = { path = "../block_util" }
+byteorder = "1.4.3"
+epoll = "4.3.1"
+event_monitor = { path = "../event_monitor" }
+io-uring = "0.5.8"
+libc = "0.2.137"
+log = "0.4.17"
+net_gen = { path = "../net_gen" }
+net_util = { path = "../net_util" }
+pci = { path = "../pci" }
+rate_limiter = { path = "../rate_limiter" }
+seccompiler = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0.87"
+sendfd = "0.4.3"
+serde_with = { version = "3.4.0", default-features = false, features = ["macros"] }
+serial_buffer = { path = "../serial_buffer" }
+thiserror = "1.0.37"
+vhost = { workspace = true, features = ["vhost-user-frontend", "vhost-user-backend", "vhost-kern", "vhost-vdpa"] }
+virtio-bindings = { version = "0.1.0", features = ["virtio-v5_0_0"] }
+virtio-queue = { workspace = true }
+vm-allocator = { path = "../vm-allocator" }
+vm-device = { path = "../vm-device" }
+vm-memory = { workspace = true, features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
+vm-migration = { path = "../vm-migration" }
+vm-virtio = { path = "../vm-virtio" }
+vmm-sys-util = "0.12.1"
+virtiofsd = { workspace = true }

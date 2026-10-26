@@ -1,0 +1,56 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+package cubelet.services.snapshot.v1;
+
+option go_package = "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1;snapshot";
+
+// Snapshot is Cubelet's snapshot control-plane service.
+// Status is the upload query CubeMaster polls for remote_status.
+// State comes from cubecow_get_volume_info export_status
+// (NONE→pending, INPROGRESS→running, DONE→ready).
+// BatchStatus is for ops tooling (e.g. cubemastercli --s3 list) to query
+// many snapshot packages on one node in a single RPC.
+service Snapshot {
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc BatchStatus(BatchStatusRequest) returns (BatchStatusResponse);
+}
+
+message StatusRequest {
+  string request_id = 1;
+  string snapshot_id = 2;
+  // xfs | s3; empty defaults to xfs.
+  string backend = 3;
+}
+
+message StatusResponse {
+  string request_id = 1;
+  string snapshot_id = 2;
+  string backend = 3;
+  // pending | running | ready | failed (upload state)
+  string state = 4;
+  // Human message; may include remote_uuids JSON when ready.
+  string message = 5;
+  bool remote_ready = 6;
+  // Rootfs snapshot cubecow deletable: "true" | "false" | "" (unknown / N/A).
+  string rootfs_deletable = 7;
+}
+
+message StatusQuery {
+  string snapshot_id = 1;
+  // xfs | s3; empty defaults to xfs.
+  string backend = 2;
+}
+
+message BatchStatusRequest {
+  string request_id = 1;
+  repeated StatusQuery items = 2;
+}
+
+message BatchStatusResponse {
+  string request_id = 1;
+  repeated StatusResponse items = 2;
+}

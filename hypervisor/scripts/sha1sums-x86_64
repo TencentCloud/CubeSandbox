@@ -1,0 +1,7 @@
+27f3b17962ace69b51f0ddc2012095e3109e6ed8 bionic-server-cloudimg-amd64.qcow2
+8db9cc58b01452ce2d06c313177e6e74d8582d93 bionic-server-cloudimg-amd64.raw
+d4a44acc6014d5f83dea1c625c43d677a95fa75f alpine-minirootfs-x86_64.tar.gz
+f1eccdc5e1b515dbad294426ab081b47ebfb97c0 focal-server-cloudimg-amd64-custom-20210609-0.qcow2
+7f5a8358243a96adf61f5c20139b29f308f2c0e3 focal-server-cloudimg-amd64-custom-20210609-0.raw
+272102ac243e544bc5c2303f383eeb217bd2e446 jammy-server-cloudimg-amd64-custom-20220329-0.qcow2
+0b5b4816a0976c458f8e8bab061e9d63ebc1b806 jammy-server-cloudimg-amd64-custom-20220329-0.raw

@@ -1,0 +1,12 @@
+[package]
+name = "vm-allocator"
+version = "0.1.0"
+authors = ["The Chromium OS Authors"]
+edition = "2021"
+
+[dependencies]
+libc = "0.2.137"
+vm-memory = { workspace = true }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+arch = { path = "../arch" }

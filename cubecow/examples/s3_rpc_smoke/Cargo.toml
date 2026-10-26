@@ -1,0 +1,27 @@
+[package]
+name = "s3-rpc-smoke"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone smoke test for the s3lvol / RCOW JSON-RPC server"
+license = "Apache-2.0"
+publish = false
+
+# Prevent Cargo from treating this crate as part of the parent `cubecow`
+# workspace. Building here does not need to compile the cubecow lib
+# (which currently only compiles cleanly against a glibc target), so we
+# stay isolated and let this example be cross-compiled to musl or any
+# other target on its own.
+[workspace]
+
+[[bin]]
+name = "s3_rpc_smoke"
+path = "main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

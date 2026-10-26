@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# run_vm.sh — Boot the OpenCloudOS 9 development VM via QEMU/KVM.
+#
+# Launches the qcow2 image created by create_vm.sh with nested KVM enabled and
+# user mode networking. Only SSH is forwarded by default:
+#   - host :10022 -> guest :22  (ssh, used by login.sh)
+#
+# Need to reach a service running inside the guest? Add forwards explicitly:
+#   EXTRA_FORWARDS="13000:3000 11443:443" ./run_vm.sh
+#
+# Run create_vm.sh first to produce the image. This script is the normal way to
+# start the VM for day-to-day development.
+#
+# Usage:
+#   ./run_vm.sh
+#
+# Common environment variables:
+#   WORK_DIR                   Working dir (default: dev-env/.workdir)
+#   IMAGE_URL                  Base qcow2 URL (used to derive IMAGE_NAME)
+#   IMAGE_PATH                 Full path to VM disk image (defaults to WORK_DIR/IMAGE_NAME)
+#   SSH_PORT                   Host port forwarded to guest 22 (default: 10022)
+#   EXTRA_FORWARDS             Space separated HOST_PORT:GUEST_PORT pairs to
+#                              forward in addition to SSH (default: empty)
+
+set -euo pipefail
+
+TARGET_ARCH="${TARGET_ARCH:-$(uname -m | sed 's/^arm64/aarch64/')}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/.workdir}"
+IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/${TARGET_ARCH}/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.${TARGET_ARCH}.qcow2}"
+IMAGE_NAME="$(basename "${IMAGE_URL}")"
+IMAGE_PATH="${IMAGE_PATH:-${WORK_DIR}/${IMAGE_NAME}}"
+
+VM_NAME="${VM_NAME:-opencloudos9-cubesandbox}"
+VM_MEMORY_MB="${VM_MEMORY_MB:-8192}"
+VM_CPUS="${VM_CPUS:-4}"
+SSH_PORT="${SSH_PORT:-10022}"
+EXTRA_FORWARDS="${EXTRA_FORWARDS:-}"
+REQUIRE_NESTED_KVM="${REQUIRE_NESTED_KVM:-1}"
+VM_BACKGROUND="${VM_BACKGROUND:-0}"
+QEMU_PIDFILE="${QEMU_PIDFILE:-${WORK_DIR}/qemu.pid}"
+QEMU_SERIAL_LOG="${QEMU_SERIAL_LOG:-${WORK_DIR}/qemu-serial.log}"
+
+LOG_TAG="run_vm"
+
+if [[ -t 1 && -t 2 ]]; then
+  LOG_COLOR_RESET=$'\033[0m'
+  LOG_COLOR_INFO=$'\033[0;36m'
+  LOG_COLOR_SUCCESS=$'\033[0;32m'
+  LOG_COLOR_WARN=$'\033[0;33m'
+  LOG_COLOR_ERROR=$'\033[0;31m'
+else
+  LOG_COLOR_RESET=""
+  LOG_COLOR_INFO=""
+  LOG_COLOR_SUCCESS=""
+  LOG_COLOR_WARN=""
+  LOG_COLOR_ERROR=""
+fi
+
+_log() {
+  local color="$1"
+  local level="$2"
+  shift 2
+  printf '%s[%s][%s]%s %s\n' \
+    "${color}" "${LOG_TAG}" "${level}" "${LOG_COLOR_RESET}" "$*"
+}
+
+log_info()    { _log "${LOG_COLOR_INFO}"    "INFO"  "$@"; }
+log_success() { _log "${LOG_COLOR_SUCCESS}" "OK"    "$@"; }
+log_warn()    { _log "${LOG_COLOR_WARN}"    "WARN"  "$@" >&2; }
+log_error()   { _log "${LOG_COLOR_ERROR}"   "ERROR" "$@" >&2; }
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    log_error "Missing required command: $1"
+    exit 1
+  fi
+}
+
+
+
+require_nested_kvm() {
+  local nested_value=""
+
+  if [[ -f /sys/module/kvm_intel/parameters/nested ]]; then
+    nested_value="$(tr '[:lower:]' '[:upper:]' </sys/module/kvm_intel/parameters/nested)"
+  elif [[ -f /sys/module/kvm_amd/parameters/nested ]]; then
+    nested_value="$(tr '[:lower:]' '[:upper:]' </sys/module/kvm_amd/parameters/nested)"
+  else
+    log_warn "Host KVM nested parameter not found; make sure nested virtualization is enabled."
+    return
+  fi
+
+  if [[ "${nested_value}" != "Y" && "${nested_value}" != "1" ]]; then
+    log_error "Host does not have nested KVM enabled; /dev/kvm will not be usable inside the guest."
+    log_error "Cube Sandbox needs nested KVM to run MicroVMs inside the guest."
+    log_error "To skip this check (boot only, no Cube Sandbox), set REQUIRE_NESTED_KVM=0."
+    exit 1
+  fi
+}
+
+# Resolve UEFI firmware path for aarch64 across different distros.
+# Returns the first valid path found, or exits with an error if none exist.
+find_aarch64_uefi_firmware() {
+  # Common firmware paths across distros:
+  # - Debian/Ubuntu:     /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+  # - Fedora/RHEL/OC9:   /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw or QEMU_EFI.fd
+  # - Arch:              /usr/share/edk2-armvirt/aarch64/QEMU_EFI.fd
+  # - openSUSE:          /usr/share/qemu/qemu-uefi-aarch64.bin
+  local candidates=(
+    "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd"
+    "/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw"
+    "/usr/share/edk2/aarch64/QEMU_EFI.fd"
+    "/usr/share/AAVMF/AAVMF_CODE.fd"
+    "/usr/share/edk2-armvirt/aarch64/QEMU_EFI.fd"
+    "/usr/share/qemu/qemu-uefi-aarch64.bin"
+  )
+
+  for path in "${candidates[@]}"; do
+    if [[ -f "${path}" ]]; then
+      printf '%s' "${path}"
+      return 0
+    fi
+  done
+
+  log_error "UEFI firmware for aarch64 not found."
+  log_error "Searched paths:"
+  for path in "${candidates[@]}"; do
+    log_error "  - ${path}"
+  done
+  log_error ""
+  log_error "Please install the appropriate UEFI firmware package:"
+  log_error "  Debian/Ubuntu:  apt-get install qemu-efi-aarch64"
+  log_error "  Fedora/RHEL/OC: dnf install edk2-aarch64"
+  log_error "  Arch:           pacman -S edk2-armvirt"
+  log_error "  openSUSE:       zypper install qemu-uefi-aarch64"
+  exit 1
+}
+
+need_cmd qemu-system-${TARGET_ARCH}
+
+# The SSH forward is always present; EXTRA_FORWARDS entries are appended to it.
+HOSTFWD_LIST="hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22"
+EXTRA_FORWARD_ENTRIES=()
+
+read -r -a _forward_args <<<"${EXTRA_FORWARDS}"
+for entry in "${_forward_args[@]}"; do
+  if [[ ! "${entry}" =~ ^[0-9]+:[0-9]+$ ]]; then
+    log_error "Invalid EXTRA_FORWARDS entry: '${entry}'"
+    log_error "Expected space separated HOST_PORT:GUEST_PORT pairs, for example:"
+    log_error "  EXTRA_FORWARDS=\"13000:3000 11443:443\" ./run_vm.sh"
+    exit 1
+  fi
+  EXTRA_FORWARD_ENTRIES+=("${entry}")
+  HOSTFWD_LIST="${HOSTFWD_LIST},hostfwd=tcp:127.0.0.1:${entry%%:*}-:${entry##*:}"
+done
+
+if [[ ! -e /dev/kvm ]]; then
+  log_error "Host has no /dev/kvm; KVM acceleration is unavailable."
+  exit 1
+fi
+
+if [[ ! -f "${IMAGE_PATH}" ]]; then
+  log_error "Image not found: ${IMAGE_PATH}"
+  log_error "Please run ./create_vm.sh first."
+  exit 1
+fi
+
+if [[ "${REQUIRE_NESTED_KVM}" == "1" ]]; then
+  require_nested_kvm
+fi
+
+log_info "Booting OpenCloudOS 9 VM"
+log_info "  Image      : ${IMAGE_PATH}"
+log_info "  Login user : opencloudos"
+log_info "  Password   : opencloudos"
+log_info "  SSH        : ssh -p ${SSH_PORT} opencloudos@127.0.0.1"
+for entry in "${EXTRA_FORWARD_ENTRIES[@]}"; do
+  log_info "  Extra fwd  : 127.0.0.1:${entry%%:*} -> guest:${entry##*:}"
+done
+if [[ "${VM_BACKGROUND}" == "1" ]]; then
+  log_info "Background mode:"
+  log_info "  PID file   : ${QEMU_PIDFILE}"
+  log_info "  Serial log : ${QEMU_SERIAL_LOG}"
+else
+  log_info "Clean shutdown: in another terminal run ./login.sh, then poweroff in the guest (do not Ctrl+a x — abrupt QEMU exit)"
+fi
+
+case "${TARGET_ARCH}" in
+  "x86_64")
+    VM_MACHINE='q35'
+    BIOS_PARAM=()
+    ;;
+  "aarch64")
+    VM_MACHINE=virt;
+    UEFI_FIRMWARE="$(find_aarch64_uefi_firmware)"
+    log_info "  UEFI       : ${UEFI_FIRMWARE}"
+    BIOS_PARAM=(-bios "${UEFI_FIRMWARE}")
+    ;;
+  *)
+    log_error "Unsupported architecture: ${TARGET_ARCH}"
+    exit 1
+    ;;
+esac
+
+QEMU_ARGS=(
+  -enable-kvm
+  -machine ${VM_MACHINE},accel=kvm
+  "${BIOS_PARAM[@]}"
+  -cpu host
+  -name "${VM_NAME}"
+  -m "${VM_MEMORY_MB}"
+  -smp "${VM_CPUS}"
+  -device virtio-rng-pci
+  -drive if=none,id=drive0,format=qcow2,file="${IMAGE_PATH}"
+  -device virtio-blk-pci,drive=drive0
+  -nic "user,model=virtio-net-pci,${HOSTFWD_LIST}"
+)
+
+if [[ "${VM_BACKGROUND}" == "1" ]]; then
+  mkdir -p "${WORK_DIR}"
+  exec qemu-system-${TARGET_ARCH} \
+    "${QEMU_ARGS[@]}" \
+    -daemonize \
+    -pidfile "${QEMU_PIDFILE}" \
+    -display none \
+    -serial "file:${QEMU_SERIAL_LOG}"
+fi
+
+exec qemu-system-${TARGET_ARCH} \
+  "${QEMU_ARGS[@]}" \
+  -nographic \
+  -serial mon:stdio

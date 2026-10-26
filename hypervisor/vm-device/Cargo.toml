@@ -1,0 +1,20 @@
+[package]
+name = "vm-device"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[features]
+default = []
+kvm = ["vfio-ioctls/kvm"]
+mshv = ["vfio-ioctls/mshv"]
+
+[dependencies]
+anyhow = "1.0.86"
+hypervisor = { path = "../hypervisor" }
+thiserror = "1.0.37"
+serde = { version = "1.0.147", features = ["rc", "derive"] }
+vfio-ioctls = { git = "https://github.com/rust-vmm/vfio", rev = "64171f3", default-features = false }
+vm-memory = { workspace = true, features = ["backend-mmap"] }
+vmm-sys-util = "0.12.1"
+

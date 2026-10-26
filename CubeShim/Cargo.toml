@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "shim",
+    "protoc",
+    "cube-runtime"
+]
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+
+[workspace.dependencies]
+clap = "=4.5.20"
+log = "=0.4.22"
+anyhow = "=1.0.89"
+tokio = "=1.40.0"
+home = "=0.5.9"

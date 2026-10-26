@@ -1,0 +1,522 @@
+# Service Management & Logs
+
+This page is for users who have **already installed CubeSandbox** and want to keep the stack healthy in day-to-day operation.
+
+After reading this page you will know:
+
+- Which systemd services run on the host and how they depend on each other
+- Which service to restart after editing a config file
+- How to debug a service that keeps failing
+- Where to find runtime logs, startup logs and in-container logs — and the boundaries between them
+- How to stop / restart the whole stack cleanly
+
+::: tip Scope
+This page targets the **systemd-managed** one-click installer. If your machine still uses the legacy `up-with-deps.sh` / `down-with-deps.sh` scripts as the daily entry point, that is the pre-systemd version — re-running the latest one-click installer will migrate it to systemd automatically (the installer detects and takes over the old layout).
+:::
+
+## TL;DR cheat-sheet
+
+```bash
+# 1. Are all cube-sandbox services still alive?
+sudo systemctl --no-legend list-units 'cube-sandbox-*'
+
+# 2. Edited a config -> restart the matching service
+sudo systemctl restart cube-sandbox-cube-api.service
+sudo systemctl restart cube-sandbox-cubemaster.service
+sudo systemctl restart cube-sandbox-cubelet.service
+
+# 3. Runtime logs (requests / stats / audit / VMM) live under /data/log/, NOT in journalctl
+sudo tail -F /data/log/Cubelet/Cubelet-req.log
+sudo tail -F /data/log/CubeMaster/cubemaster-req.log
+sudo tail -F /data/log/CubeAPI/cube-api-$(date +%F).log
+sudo tail -F /data/log/CubeVmm/vmm.log              # sandbox VMM lifecycle
+sudo tail -F /data/log/cube-proxy/error.log         # proxy errors
+
+# 4. Startup failures / process exit reasons -> journalctl
+sudo journalctl -u cube-sandbox-cube-api.service -n 200 --no-pager
+
+# 5. One-shot diagnostic bundle (tails of /data/log + configs + dmesg + process snapshot)
+sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh
+```
+
+::: warning Runtime logs are at `/data/log/`, NOT `journalctl`
+This is the most common pitfall for new operators: each component **only sends startup-time stdout/stderr to journal**. Request / scheduling / stat / audit / VMM creation logs are written **directly to `/data/log/<Module>/`**. To find "who created a sandbox in the last hour", look at `/data/log/`, not `journalctl`.
+:::
+
+## Service overview
+
+The one-click installer registers 14 systemd units under `/etc/systemd/system/` and aggregates them into two role-specific targets.
+
+### Role targets
+
+| Target | Purpose | Role |
+|---|---|---|
+| `cube-sandbox-control.target` | All control-plane services (default all-in-one) | `control` |
+| `cube-sandbox-compute.target` | Minimum subset for compute-only nodes | `compute` |
+
+::: tip How aggregation works
+The target lists its child services via `Wants=`; each service declares membership via `PartOf=`. So `systemctl stop cube-sandbox-control.target` stops every `PartOf=cube-sandbox-control.target` service in one shot — no need to spell out the long list of unit names.
+:::
+
+### Service catalog
+
+| Unit | Process form | Port / listen | Present on | Upstream deps |
+|---|---|---|---|---|
+| `cube-sandbox-mysql.service` | Docker container | `3306` | control | docker |
+| `cube-sandbox-redis.service` | Docker container | `6379` | control | docker |
+| `cube-sandbox-cubemaster.service` | Host process | `8089` | control | mysql, redis |
+| `cube-sandbox-cube-api.service` | Host process | `3000` (E2B-compatible API) | control | cubemaster |
+| `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC), HTTP diagnostics | control / compute | embedded network runtime + `/data/cubelet` (XFS) |
+| `cube-sandbox-coredns.service` | Docker container | `127.0.0.54:53` or `169.254.254.53:53` | control | docker |
+| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` / `9090` (gRPC) | control | docker, redis |
+| `cube-sandbox-dns.service` | oneshot (no daemon) | — | control | coredns (`BindsTo`) |
+| `cube-sandbox-webui.service` | Docker container | `12088` | control | docker, cube-api |
+
+### Startup dependency map (control node)
+
+```text
+docker.service
+   ├─ mysql.service ─┐
+   ├─ redis.service ─┼─ cubemaster.service ─ cube-api.service ─ webui.service
+   │                 └─ cube-proxy.service
+   └─ coredns.service ─ dns.service (oneshot, BindsTo coredns)
+
+network-online.target
+   └─ cubelet.service (embedded network runtime)
+```
+
+Dependencies only express **startup ordering** via `After=` / `Wants=`. If an upstream service crashes at runtime, downstreams are **not** automatically restarted — cubelet won't be cycled just because cube-api died, and vice versa.
+
+## Restarting services
+
+### Scenario A: edited a config and want it to take effect
+
+The two most common config entry points:
+
+- Top-level env: `/usr/local/services/cubetoolbox/.one-click.env`
+- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
+
+Restart the **service that consumes that config**:
+
+```bash
+# Cubelet config
+sudo systemctl restart cube-sandbox-cubelet.service
+
+# CubeMaster config
+sudo systemctl restart cube-sandbox-cubemaster.service
+
+# CUBE_API_* in .one-click.env
+sudo systemctl restart cube-sandbox-cube-api.service
+
+# cubeproxy/global.conf
+sudo systemctl restart cube-sandbox-cube-proxy.service
+
+# coredns/Corefile
+sudo systemctl restart cube-sandbox-coredns.service
+```
+
+::: warning Editing the systemd unit file itself
+If you change `/etc/systemd/system/cube-sandbox-*.service`, run `daemon-reload` so systemd picks up the new content:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart cube-sandbox-<service>.service
+```
+
+If you only edited the helper script (`/usr/local/services/cubetoolbox/scripts/systemd/*.sh`), `daemon-reload` is **not** needed — the next `restart` re-invokes the script.
+:::
+
+## Cubelet artifact paths {#cubelet-artifact-paths}
+
+Cubelet stores template rootfs artifacts as read-only ext4 files built from Docker/OCI images. Configure their location and the kernel source used for template runtime files in `Cubelet/config/config.toml`, under `[plugins."io.cubelet.internal.v1.images"]`:
+
+```toml
+[plugins."io.cubelet.internal.v1.images"]
+image_base_path = "/usr/local/services/cubetoolbox/cubebox_os_image"
+shared_kernel_path = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"
+```
+
+`image_base_path` is the final cache directory for cubebox template artifacts. Each artifact is stored below `<image_base_path>/<artifact-id>/<artifact-id>.ext4` (with the corresponding `.vm` file). `shared_kernel_path` is the source `vmlinux` used for template artifacts and sandboxes without a template. Both values must be absolute paths. When omitted, Cubelet keeps the historical toolbox paths; `cubetool_base_dir` remains a legacy fallback for older configurations. Once either new path is set, it takes precedence for that path and the legacy setting does not override it. If the legacy cbri `base_path` is customized, set `shared_kernel_path` explicitly to the matching kernel under that installation; `base_path` still controls the no-template guest and agent images, but no longer selects `vmlinux`. The configured kernel path must resolve to the same active bm/pvm variant and digest selected for the node; changing this path does not select a different kernel identity for node or template reporting.
+
+The image path and kernel path are independent. After changing either value, restart Cubelet. Cubelet does not move existing artifacts automatically; make the affected cache or kernel files available at the new paths before switching. Existing snapshots additionally require their historical artifact paths to remain resolvable (for example through a deployment-level softlink), or the snapshots must be recreated, because snapshot metadata stores absolute kernel and ext4 artifact paths. The legacy cbri plugin's `image_base_path` and `kernel_base_path` fields are ignored as artifact path sources; configure artifact paths under the images plugin instead. If those legacy fields contain custom values, copy the intended values to the images plugin before removing or updating the legacy entries.
+
+`cubelet config dump` and `cubelet config migrate` write the resolved artifact paths as explicit `image_base_path` and `shared_kernel_path` values. After using that output as a configuration file, edit those explicit fields when changing paths; changing only `cubetool_base_dir` will not override them.
+
+## CubeMaster settings {#cubemaster-settings}
+
+Path: `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (from `configs/single-node/cubemaster.yaml` in one-click bundles).
+
+Under `cubelet_conf`:
+
+| Key | Purpose |
+|-----|---------|
+| `default_timeout_insec` | Server default **sandbox idle TTL** (seconds) when the client omits `timeout`. **Unset or `<= 0` means no cluster-wide idle timeout** (sandboxes never time out from idle unless the client sets `timeout`). The repository ships `-1` for this “no default” behavior. Set a positive value (e.g. `300`) in production if you want automatic reclamation of sandboxes created without an explicit TTL. |
+| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `600` when unset. |
+| `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
+| `create_image_timeout_insec` | Timeout for CubeMaster to instruct a single compute node to **download an image**. It covers downloading, validating, and storing the rootfs artifact. Increase it for large images, low-bandwidth connections, or slow disks. The default is `300` seconds. |
+| `app_snapshot_timeout_insec` | Timeout for CubeMaster to instruct a single compute node to **create a template**. It covers starting the temporary VM, waiting for its readiness probe, saving memory and disk state, cleaning up the temporary VM, and returning the result. If unset or set to a non-positive value, it defaults to `300` seconds. Increase it when network conditions are poor or the template is large. |
+
+The image-download and template-creation timeouts are independent and each starts when its corresponding RPC begins. Example configuration:
+
+```yaml
+cubelet_conf:
+  create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: 600
+```
+
+After changing any of these CubeMaster settings, restart CubeMaster:
+
+```bash
+sudo systemctl restart cube-sandbox-cubemaster.service
+```
+
+For relevant details, see [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
+
+### Scenario B: a service is failing or restart-looping
+
+Every service has `Restart=on-failure`, so a single crash is auto-recovered. If the unit is restart-looping, find the root cause first.
+
+#### 1. Inspect current state
+
+```bash
+sudo systemctl status cube-sandbox-cube-proxy.service --no-pager
+```
+
+Watch for:
+
+- `Active: failed` / `Active: activating (start-post)` (still trying)
+- `Restart Counter` climbing rapidly (restart loop)
+- The last 10 journal lines printed at the bottom
+
+#### 2. Read startup logs
+
+```bash
+sudo journalctl -u cube-sandbox-cube-proxy.service -n 200 --no-pager
+```
+
+Best for: scripting bugs, ExecStart failures, `docker pull` errors, `apk` / `apt` network errors, ExecStartPost health-check timeouts.
+
+#### 3. Read runtime logs
+
+If the service starts but misbehaves, **runtime logs live under `/data/log/`, not in journal**:
+
+```bash
+sudo tail -200 /data/log/Cubelet/Cubelet-req.log
+sudo tail -200 /data/log/CubeMaster/cubemaster-req.log
+sudo tail -200 /data/log/CubeAPI/cube-api-$(date +%F).log
+```
+
+#### 4. Reset the failed counter and restart
+
+```bash
+sudo systemctl reset-failed cube-sandbox-cube-proxy.service
+sudo systemctl restart cube-sandbox-cube-proxy.service
+```
+
+### Scenario C: full restart / post-maintenance recovery
+
+```bash
+# Control node
+sudo systemctl restart cube-sandbox-control.target
+
+# Compute node
+sudo systemctl restart cube-sandbox-compute.target
+```
+
+Or from the release-bundle directory:
+
+```bash
+sudo ./down.sh
+sudo systemctl start cube-sandbox-control.target
+```
+
+::: tip Restarting the target = ordered restart of every PartOf service
+A target has no process of its own. Restarting it makes systemd cycle every `PartOf=cube-sandbox-control.target` service in dependency order — a shorthand for "restart everything".
+:::
+
+### Scenario D: full shutdown
+
+```bash
+# Recommended: use the bundled script (auto-detects role)
+sudo /root/cube-sandbox-one-click-<version>/down.sh
+
+# Equivalent
+sudo systemctl stop cube-sandbox-control.target   # control node
+sudo systemctl stop cube-sandbox-compute.target   # compute node
+```
+
+`down.sh` does **not** delete data: MySQL / Redis volumes, `/data/cubelet`, `/data/log/...` are all preserved and resumed on the next `start`.
+
+## Reading logs
+
+CubeSandbox has multiple log sources, including component-specific in-container logs. The two primary host-side entry points are:
+
+| Source | Contains | How to read |
+|---|---|---|
+| **Runtime logs (primary entry point)** | requests, scheduling decisions, stats, audit, VMM creation | **`/data/log/<Module>/`** |
+| Startup logs | systemd start / hooks / ExecStartPost / exit codes / container build output | `journalctl -u <unit>` |
+
+### `/data/log/` runtime logs (primary)
+
+> ⚠️ Cubelet / CubeMaster / CubeAPI / CubeShim / VMM all write **business request + stat + audit + VMM lifecycle** logs to `/data/log/`. They do **not** show up in `journalctl` — read the files directly.
+
+| Module | Directory | Main files |
+|---|---|---|
+| Cubelet | `/data/log/Cubelet/` | `Cubelet-req.log` (requests)<br>`Cubelet-stat.log` (metrics/stats) |
+| CubeMaster | `/data/log/CubeMaster/` | `cubemaster-req.log` |
+| CubeAPI | `/data/log/CubeAPI/` | `cube-api-YYYY-MM-DD.log` (daily-rotated) |
+| CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`, `cube-shim-stat.log` |
+| Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log` (one entry per sandbox creation) |
+| cube-proxy | `/data/log/cube-proxy/` | `error.log`, `access.log` (see below) |
+
+Common commands:
+
+```bash
+# Follow Cubelet requests
+sudo tail -F /data/log/Cubelet/Cubelet-req.log
+
+# Follow daily-rotated CubeAPI log (E2B-compatible layer)
+sudo tail -F /data/log/CubeAPI/cube-api-$(date +%F).log
+
+# Slow / failing sandbox start: check VMM log
+sudo tail -200 /data/log/CubeVmm/vmm.log
+```
+
+### Rotating CubeShim and VMM logs
+
+CubeShim and the VMM keep their log files open while they run. CubeShim
+reopens its files on an internal 30-minute rotation event. The VMM control
+thread owns a monotonic `timerfd` and emits the existing `LOG_CTRL_REOPEN`
+control record once per hour. Reopen is schedule-driven: an external
+`rename` + `create` is picked up at the next scheduled reopen rather than
+detected immediately on an arbitrary write. The timer is owned by the VMM
+control thread, not by deferred logger initialization or a vCPU/API thread.
+The host-side policy should run hourly and use `rename` + `create`; do not use
+`copytruncate`.
+
+One-click installs this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
+and enables an hourly `cube-sandbox-logrotate.timer`. The installer validates a
+new policy before replacing the live one; if validation fails, the live policy
+stays, a new timer is not enabled, and an existing timer keeps running the
+previous policy. The one-click file is installer-managed and
+is overwritten on every install or upgrade. An old
+`/etc/logrotate.d/cubesandbox` is moved to
+`/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>`.
+
+On Kubernetes / Helm hosts, save the example below as
+`/etc/logrotate.d/cubesandbox` and run `logrotate` hourly; a distro's default
+daily job rotates only once a day.
+
+```text
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
+    su root root
+    hourly
+    rotate 24
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}
+```
+
+With hourly invocation, `rotate 24` keeps about 24 hours of logs; adjust it for
+the retention period you need.
+`delaycompress` keeps the newest rotated file uncompressed for one cycle because
+a writer may still use the old descriptor until its next scheduled reopen.
+CubeShim's internal event runs every 30 minutes, while the VMM control thread
+sends a reopen control event every hour. No `postrotate` signal or service
+restart is required. This policy guarantees bounded retention on the host,
+but does not promise immediate handling of an arbitrary manual rotation; it
+does not support `copytruncate`.
+
+The example uses `root root` because the bundled one-click systemd services run as
+root. If CubeShim or the VMM run under another account, set both the `su`
+user/group and the `create` owner/group to that account; otherwise logrotate
+cannot switch identity and a newly-created file may not be reopenable.
+The `0640` mode in this example applies to files created by `logrotate`; the
+CubeShim and VMM writers themselves continue to use the process umask.
+
+### `journalctl` startup logs
+
+journalctl captures **stdout/stderr from when systemd starts the process until it stabilizes (or exits)**, useful for:
+
+- Startup failure exit codes / error messages
+- Output from `ExecStart` / `ExecStartPost` / `ExecStop` hooks
+- `docker pull` / `docker build` / `apk update` failures
+- Auto-restart counter and reasons
+
+```bash
+# Last 200 lines
+sudo journalctl -u cube-sandbox-cubelet.service -n 200 --no-pager
+
+# Live tail
+sudo journalctl -u cube-sandbox-cubemaster.service -f
+
+# Everything since the last boot
+sudo journalctl -u cube-sandbox-cube-api.service -b
+```
+
+::: warning No business request logs in journalctl
+Once a process is stable, its stdout/stderr volume is tiny because each component writes business logs straight to `/data/log/<Module>/`. To find "which sandboxes were created in the last hour", **journalctl is the wrong place** — go to `/data/log/CubeMaster/cubemaster-req.log` or `/data/log/Cubelet/Cubelet-req.log`.
+:::
+
+### `cube-proxy` host logs
+
+`cube-proxy` is an OpenResty/nginx container. The one-click deployment bind-mounts the host directory `/data/log/cube-proxy/` into the container at the same path, so the logs remain available across container restarts and can be read directly from the host:
+
+```bash
+sudo tail -200 /data/log/cube-proxy/error.log
+sudo tail -200 /data/log/cube-proxy/access.log
+```
+
+The same directory is mounted at `/data/log/cube-proxy/` inside the container; no image rebuild is required.
+
+### One-shot diagnostic bundle
+
+Use the bundled diagnostic collector when sharing logs with the community or filing issues:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh
+```
+
+It collects everything into `cube-diag-<timestamp>/`:
+
+- Tails of `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm/`
+- `/data/log/cube-proxy/` access/error logs
+- `dmesg` / process list / ports / mounts / cgroup / cpuinfo
+- Major config files (with secrets redacted)
+
+Pack and share:
+
+```bash
+tar czf cube-diag-<ts>.tar.gz cube-diag-<ts>/
+```
+
+Selective collection — e.g. only cubelet + dmesg:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh \
+  --module cubelet --module dmesg --lines 500
+```
+
+See `--help` for full options.
+
+## Operations cheat-sheet
+
+| Goal | Command |
+|---|---|
+| List all cube services on this node | `systemctl --no-legend list-units 'cube-sandbox-*'` |
+| Status of one service | `systemctl status cube-sandbox-<service>.service` |
+| Dependency tree of a target | `systemctl list-dependencies cube-sandbox-control.target` |
+| Start / stop / restart one service | `systemctl {start\|stop\|restart} cube-sandbox-<service>.service` |
+| Start / stop / restart the whole stack | `systemctl {start\|stop\|restart} cube-sandbox-{control,compute}.target` |
+| Why did the service fail | `journalctl -u cube-sandbox-<service>.service -n 200 --no-pager` |
+| Live tail startup output | `journalctl -u cube-sandbox-<service>.service -f` |
+| Reset failed counter | `systemctl reset-failed cube-sandbox-<service>.service` |
+| Run health check | `sudo /root/cube-sandbox-one-click-*/smoke.sh`<br>or `sudo /usr/local/services/cubetoolbox/scripts/one-click/quickcheck.sh` |
+| Full shutdown | `sudo /root/cube-sandbox-one-click-*/down.sh` |
+| Collect diagnostic bundle | `sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh` |
+
+## Typical troubleshooting flows
+
+### Sandbox creation fails / times out
+
+Walk through the layers in order:
+
+1. **Is the role target active?**
+
+   ```bash
+   sudo systemctl status cube-sandbox-control.target
+   ```
+
+2. **Run the health check**
+
+   ```bash
+   sudo /root/cube-sandbox-one-click-*/smoke.sh
+   ```
+
+3. **Did CubeAPI receive the request?**
+
+   ```bash
+   sudo tail -F /data/log/CubeAPI/cube-api-$(date +%F).log
+   ```
+
+4. **CubeMaster scheduling chain**
+
+   ```bash
+   sudo tail -F /data/log/CubeMaster/cubemaster-req.log
+   ```
+
+5. **Is the node (Cubelet) online and being scheduled?**
+
+   ```bash
+   curl http://127.0.0.1:3010/internal/v1/nodes
+   sudo tail -F /data/log/Cubelet/Cubelet-req.log
+   ```
+
+6. **VMM startup errors**
+
+   ```bash
+   sudo tail -200 /data/log/CubeVmm/vmm.log
+   ```
+
+### A service is stuck in `activating (start-post)`
+
+```bash
+sudo systemctl status cube-sandbox-<service>.service
+sudo journalctl -u cube-sandbox-<service>.service -n 200 --no-pager
+```
+
+Common root causes:
+
+- Container build needs the network (e.g. `cube-proxy`'s `apk update`) and the upstream mirror is flaky — see [Deployment Troubleshooting](./troubleshooting/deployment.md)
+- `ExecStartPost` health probe timeout (port already in use, upstream not yet ready)
+- For `cube-sandbox-cube-proxy.service`, `CUBE_PROXY_HTTP_PORT` and `CUBE_PROXY_GRPC_PORT` are the nginx listeners checked by the post-start TCP probe. `CUBE_PROXY_HOST_PORT` is deprecated and ignored; set `CUBE_PROXY_HTTP_PORT` instead if you need a non-default HTTP check port.
+- `/data/log` or `/data/cubelet` missing / wrong permissions / XFS not mounted
+
+### Dashboard / API unreachable
+
+```bash
+# WebUI container
+sudo systemctl status cube-sandbox-webui.service
+sudo ss -lntp 'sport = :12088'
+
+# CubeAPI listener
+sudo systemctl status cube-sandbox-cube-api.service
+sudo ss -lntp 'sport = :3000'
+```
+
+## Appendix
+
+### Path quick-reference
+
+| Use | Path |
+|---|---|
+| Install root | `/usr/local/services/cubetoolbox/` |
+| Runtime env file | `/usr/local/services/cubetoolbox/.one-click.env` |
+| systemd unit install dir | `/etc/systemd/system/cube-sandbox-*` |
+| systemd helper scripts | `/usr/local/services/cubetoolbox/scripts/systemd/*.sh` |
+| **Runtime logs (primary)** | **`/data/log/<Module>/`** |
+| Cubelet container layer (XFS) | `/data/cubelet/` |
+| Sandbox images / snapshots | `/data/cube-shim/disks/`, `/data/snapshot_pack/disks/` |
+| systemd PID files | `/run/cube-sandbox-systemd/` |
+
+### Role / service matrix
+
+| Service | `control` node | `compute` node |
+|---|:-:|:-:|
+| `mysql` / `redis` | ✅ | — |
+| `cubemaster` | ✅ | — |
+| `cube-api` | ✅ | — |
+| `webui` | ✅ | — |
+| `cube-proxy` / `coredns` / `dns` | ✅ | — |
+| `cubelet` | ✅ | ✅ |
+
+### See also
+
+- [Quick Start](./quickstart.md) — installation entry point
+- [Multi-Node Cluster](./multi-node-deploy.md) — service subset on compute nodes
+- [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md) — node selection, quota, labels, scoring, and template redo
+- [Deployment Troubleshooting](./troubleshooting/deployment.md) — XFS, CIDR conflicts, etc.
+- [Templates Troubleshooting](./troubleshooting/templates.md) — template-build issues

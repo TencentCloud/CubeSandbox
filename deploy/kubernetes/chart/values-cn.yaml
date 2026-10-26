@@ -1,0 +1,39 @@
+# TCR CN registry overrides for CubeSandbox chart.
+#
+# Merge on top of the default chart values with:
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -f deploy/kubernetes/chart/values-cn.yaml \
+#     -f runtime-values.yaml   # passwords / advertiseIP / TLS
+#
+# What this file does compared to values.yaml defaults:
+#   1. Sets global.imageRegistry to the cn host so cube.cubeImage
+#      repositories move int → cn.
+#   2. Points mysql / redis / minio / kubectl (cube.image, no registry rewrite) at the
+#      mirrored CN repositories under cube-sandbox/.
+#
+# Prerequisites: CN images already published, including
+#   cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/{mysql,redis,minio,alpine-k8s,...}
+
+global:
+  # Host only — path /cube-sandbox/<image> is preserved from values.yaml.
+  imageRegistry: cube-sandbox-cn.tencentcloudcr.com
+
+images:
+  kubectl:
+    repository: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/alpine-k8s
+    tag: "1.28.15"
+
+mysql:
+  image:
+    repository: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/mysql
+    tag: "8.0"
+
+redis:
+  image:
+    repository: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/redis
+    tag: "7-alpine"
+
+minio:
+  image:
+    repository: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/minio
+    tag: "RELEASE.2025-09-07T16-13-09Z"

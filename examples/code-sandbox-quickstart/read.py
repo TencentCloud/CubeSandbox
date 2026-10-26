@@ -1,0 +1,15 @@
+# Copyright (c) 2024 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+from e2b_code_interpreter import Sandbox
+from env_utils import ensure_dev_sidecar, load_local_dotenv
+
+load_local_dotenv()
+ensure_dev_sidecar()
+
+template_id = os.environ["CUBE_TEMPLATE_ID"]
+
+with Sandbox.create(template=template_id) as sandbox:
+    file_content = sandbox.files.read("/etc/hosts")
+    print(file_content)

@@ -1,0 +1,29 @@
+[package]
+name = "cubecow-api-smoke"
+version = "0.1.0"
+edition = "2021"
+description = "End-to-end smoke test that drives every cubecow-cli subcommand"
+license = "Apache-2.0"
+publish = false
+
+# Prevent Cargo from treating this crate as part of the parent `cubecow`
+# workspace. This keeps the smoke binary self-contained: we only depend
+# on `serde_json` for parsing the JSON that `cubecow-cli --json` prints
+# on stdout, not on the cubecow lib itself. The smoke test therefore
+# builds standalone with a very slim dependency tree and, if desired,
+# can be cross-compiled to musl for a "scp and run" workflow just like
+# `examples/s3_rpc_smoke`.
+[workspace]
+
+[[bin]]
+name = "cubecow_api_smoke"
+path = "main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

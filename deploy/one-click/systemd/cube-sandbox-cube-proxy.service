@@ -1,0 +1,29 @@
+[Unit]
+Description=Cube Sandbox cube-proxy container
+After=docker.service network-online.target cube-sandbox-redis.service cube-sandbox-dns.service cube-sandbox-cube-lifecycle-manager.service
+Requires=docker.service
+Wants=network-online.target cube-sandbox-redis.service cube-sandbox-dns.service cube-sandbox-cube-lifecycle-manager.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-prepare.sh
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-start.sh
+ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-postcheck.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-stop.sh
+Restart=on-failure
+RestartSec=2s
+# Override distro defaults explicitly: some distros (e.g. OpenCloudOS) ship
+# DefaultTimeoutStopUSec=5s, which is too tight for the graceful shutdown
+# path (compose down stops the container with the usual 10s grace) and would
+# leave orphan Exited containers behind. Keep start timeout high because the
+# first-run path also builds the cube-proxy image via compose.
+TimeoutStartSec=180s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=cube-sandbox-control.target

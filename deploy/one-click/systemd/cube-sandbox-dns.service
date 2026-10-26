@@ -1,0 +1,26 @@
+[Unit]
+Description=Cube Sandbox host DNS routing
+After=cube-sandbox-coredns.service
+Requires=cube-sandbox-coredns.service
+BindsTo=cube-sandbox-coredns.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-up.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-down.sh
+# The standalone-dnsmasq backend can chain several bounded waits (upstream
+# snapshot up to 20s + port-free retries + dnsmasq bind 30s + CoreDNS 20s),
+# whose worst case exceeds 60s. Give the whole start enough headroom so systemd
+# never SIGKILLs route-up mid-setup. The faster default paths finish well under
+# this ceiling.
+TimeoutStartSec=120s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=cube-sandbox-control.target

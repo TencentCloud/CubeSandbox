@@ -1,0 +1,19 @@
+[package]
+name = "vfio_user"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+libc = "0.2.137"
+log = "0.4.17"
+serde = { workspace = true, features = ["rc"] }
+serde_derive = "1.0.142"
+serde_json = "1.0.87"
+thiserror = "1.0.37"
+vm-memory = { version = "0.14.1", features = ["backend-mmap", "backend-atomic"] }
+vmm-sys-util = "0.12.1"
+
+[dependencies.vfio-bindings]
+version = "0.3.1"
+features = ["fam-wrappers"]

@@ -1,0 +1,137 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+package truncindex
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/tchap/go-patricia/v2/patricia"
+)
+
+var (
+	ErrEmptyPrefix = errors.New("prefix can't be empty")
+
+	ErrIllegalChar = errors.New("illegal character: ' '")
+
+	ErrNotExist = errors.New("ID does not exist")
+)
+
+type ErrAmbiguousPrefix struct {
+	prefix string
+}
+
+func (e ErrAmbiguousPrefix) Error() string {
+	return fmt.Sprintf("Multiple IDs found with provided prefix: %s", e.prefix)
+}
+
+type TruncIndex struct {
+	sync.RWMutex
+	trie *patricia.Trie
+	ids  map[string]struct{}
+}
+
+func NewTruncIndex(ids []string) (idx *TruncIndex) {
+	idx = &TruncIndex{
+		ids: make(map[string]struct{}),
+
+		trie: patricia.NewTrie(patricia.MaxPrefixPerNode(64)),
+	}
+	for _, id := range ids {
+		idx.addID(id)
+	}
+	return
+}
+
+func (idx *TruncIndex) addID(id string) error {
+	if strings.Contains(id, " ") {
+		return ErrIllegalChar
+	}
+	if id == "" {
+		return ErrEmptyPrefix
+	}
+	if _, exists := idx.ids[id]; exists {
+		return fmt.Errorf("id already exists: '%s'", id)
+	}
+	idx.ids[id] = struct{}{}
+	if inserted := idx.trie.Insert(patricia.Prefix(id), struct{}{}); !inserted {
+		return fmt.Errorf("failed to insert id: %s", id)
+	}
+	return nil
+}
+
+func (idx *TruncIndex) Add(id string) error {
+	idx.Lock()
+	defer idx.Unlock()
+	return idx.addID(id)
+}
+
+func (idx *TruncIndex) Delete(id string) error {
+	idx.Lock()
+	defer idx.Unlock()
+	if _, exists := idx.ids[id]; !exists || id == "" {
+		return fmt.Errorf("no such id: '%s'", id)
+	}
+	delete(idx.ids, id)
+	if deleted := idx.trie.Delete(patricia.Prefix(id)); !deleted {
+		return fmt.Errorf("no such id: '%s'", id)
+	}
+	return nil
+}
+
+func (idx *TruncIndex) Get(s string) (string, error) {
+	if s == "" {
+		return "", ErrEmptyPrefix
+	}
+	var (
+		id string
+	)
+	subTreeVisitFunc := func(prefix patricia.Prefix, item patricia.Item) error {
+		if id != "" {
+
+			id = ""
+			return ErrAmbiguousPrefix{prefix: s}
+		}
+		id = string(prefix)
+		return nil
+	}
+
+	idx.RLock()
+	defer idx.RUnlock()
+	if err := idx.trie.VisitSubtree(patricia.Prefix(s), subTreeVisitFunc); err != nil {
+		return "", err
+	}
+	if id != "" {
+		return id, nil
+	}
+	return "", ErrNotExist
+}
+
+func (idx *TruncIndex) Iterate(handler func(id string)) {
+	idx.Lock()
+	defer idx.Unlock()
+	idx.trie.Visit(func(prefix patricia.Prefix, item patricia.Item) error {
+		handler(string(prefix))
+		return nil
+	})
+}

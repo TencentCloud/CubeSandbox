@@ -1,0 +1,786 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package cubebox
+
+import (
+	"bytes"
+	"context"
+	stderrors "errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/containerd/containerd/api/services/tasks/v1"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
+	"github.com/containerd/errdefs/pkg/errgrpc"
+	"github.com/hashicorp/go-multierror"
+	"github.com/pkg/errors"
+	"github.com/prometheus/procfs"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rootfs"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+)
+
+func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err error) {
+	if opts == nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
+	}
+
+	sandBoxID := opts.SandboxID
+	keepPausedTombstone := shouldKeepPausedTombstone(opts)
+	keepCubebox := workflow.RetainFor(opts).CubeboxMeta
+	defer func() {
+		if err != nil {
+			return
+		}
+		if keepPausedTombstone {
+			if ferr := l.finalizePausedTombstone(ctx, sandBoxID); ferr != nil {
+				log.G(ctx).Warnf("finalize paused tombstone %s: %v", sandBoxID, ferr)
+			}
+			return
+		}
+		if keepCubebox {
+			return
+		}
+		err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
+			CubeboxID: sandBoxID,
+		})
+	}()
+	sb, err := l.cubeboxManger.Get(ctx, sandBoxID)
+	if err != nil {
+
+		if errors.Is(err, utils.ErrorKeyNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	sb.Lock()
+	defer sb.Unlock()
+
+	if opts.BaseWorkflowInfo.IsRollBack && !keepCubebox {
+		if sb.UserMarkDeletedTime == nil {
+			now := time.Now()
+			sb.UserMarkDeletedTime = &now
+			sb.DeleteRequestID = opts.DestroyInfo.RequestID
+			l.cubeboxManger.SyncByID(ctx, sandBoxID)
+		}
+	}
+
+	if !sandboxDeletable(sb, opts.DestroyInfo.GetFilter()) {
+		return ret.Err(errorcode.ErrorCode_PreConditionFailed, "unmatched filter")
+	}
+
+	if sb.Namespace != "" {
+		ctx = namespaces.WithNamespace(ctx, sb.Namespace)
+	} else {
+		ctx = namespaces.WithNamespace(ctx, namespaces.Default)
+	}
+
+	if !sandboxDeletable(sb, opts.DestroyInfo.GetFilter()) {
+		return ret.Err(errorcode.ErrorCode_PreConditionFailed, "unmatched filter")
+	}
+
+	sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+		status.Removing = true
+		return status, nil
+	})
+
+	if sb.GetStatus().IsTerminated() {
+		ctx = constants.WithTerminatingPod(ctx)
+	}
+
+	if constants.IsCollectMemory(ctx) {
+		l.collectSandboxMaxMemoryUsage(ctx, sb)
+	}
+	// Snapshot pids before Kill/DeleteTask. TaskExit and ttrpc close return
+	// while the shim process may still hold the guest disks; storage Destroy
+	// is the next workflow step and must not delete those volumes yet.
+	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, sb)
+	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)
+	if err != nil {
+		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())
+		return fmt.Errorf("faild to destroy cbri sandbox")
+	}
+
+	l.collectSandboxLifeTimeMetric(ctx, sb)
+
+	var (
+		result *multierror.Error
+	)
+
+	var containers []*cubeboxstore.Container
+	for _, ci := range sb.All() {
+		containers = append(containers, ci)
+	}
+	if sb.GetStatus().IsPaused() {
+
+		ctx = constants.WithSkipRuntimeAPI(ctx)
+		if _, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{
+			ContainerID: sb.ID,
+		}); err != nil {
+			// After PauseToSnapshot, Delete reaps the shim (shim may exit during
+			// / right after Delete). ttrpc closed / not found is then expected
+			// for keep_tombstone, delete_tombstone, or direct Destroy.
+			if pauseDestroyDeleteIgnorable(err) {
+				log.G(ctx).Warnf("paused sandbox delete task %s ignored: %v", sb.ID, err)
+			} else {
+				result = multierror.Append(result, fmt.Errorf("delete sandbox by binary failed: %w", err))
+			}
+		}
+		// Drop leftover containerd metadata so same-ID Resume Create does not
+		// hit "container already exists". Safe for final delete too (NotFound OK).
+		for _, id := range pausedTombstoneContainerIDs(sb) {
+			if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+				log.G(ctx).Warnf("paused sandbox delete containerd %s: %v", id, err)
+			}
+		}
+	} else {
+
+		containers = append(containers, sb.FirstContainer())
+
+		for i, cntr := range containers {
+			if cntr == nil {
+				continue
+			}
+			if cntr.DeletedTime != nil {
+				continue
+			}
+
+			tmpCtx := log.WithLogger(ctx, log.G(ctx).WithFields(map[string]interface{}{
+				"ContainerId": cntr.ID,
+			}))
+			tmpCtx = context.WithValue(tmpCtx, constants.KCubeIndexContext, fmt.Sprint(len(containers)-1-i))
+			tmpCtx = context.WithValue(tmpCtx, "sandboxID", sandBoxID)
+
+			cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+				status.Removing = true
+				return status, nil
+			})
+
+			if er := l.destroyContainer(tmpCtx, cntr); er != nil {
+				if strings.Contains(er.Error(), "closed") {
+					continue
+				}
+				log.G(tmpCtx).WithField("cubebox", log.WithJsonValue(sb)).Warnf("Destroy container [%s] fail: %s", cntr.ID, er)
+				result = multierror.Append(result, fmt.Errorf("destroy container [%s] fail: %w", cntr.ID, er))
+				continue
+			}
+			if er := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
+				CubeboxID:   sb.ID,
+				ContainerID: cntr.ID,
+			}); er != nil {
+				log.G(tmpCtx).Warnf("Delete container [%s] in cubestore fail: %v", cntr.ID, er)
+			}
+		}
+	}
+
+	if er := runc.Clean(ctx, opts.SandboxID); er != nil {
+		result = multierror.Append(result, fmt.Errorf("destroy runc files [%s] fail: %w", sandBoxID, er))
+	}
+	if er := waitSandboxRuntimeGone(ctx, sandBoxID, runtimeEvidence); er != nil {
+		result = multierror.Append(result, fmt.Errorf("wait sandbox runtime exit [%s] fail: %w", sandBoxID, er))
+	}
+	// Shim Wait often burns the whole deadline, so Delete runs on an already
+	// canceled context and fails even after the runtime pid is gone. Retry
+	// that delete with a live context; otherwise the cold start finds the
+	// old container still registered.
+	if opts.IsRestartDestroy && onlyDeadlineErrors(result.ErrorOrNil()) {
+		if er := l.releaseRestartRuntime(ctx, containers); er != nil {
+			result = multierror.Append(result, er)
+		} else {
+			result = nil
+		}
+	}
+	if er := result.ErrorOrNil(); er != nil {
+		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
+	}
+	return nil
+}
+
+// statusWithCause keeps a ret status message and the original error.
+// ret.Err stores only the text, so errors.Is would miss a deadline.
+type statusWithCause struct {
+	status error
+	cause  error
+}
+
+func (e *statusWithCause) Error() string {
+	if e == nil || e.status == nil {
+		if e != nil && e.cause != nil {
+			return e.cause.Error()
+		}
+		return ""
+	}
+	return e.status.Error()
+}
+
+func (e *statusWithCause) Unwrap() error { return e.cause }
+
+func statusErr(code errorcode.ErrorCode, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &statusWithCause{status: ret.Err(code, cause.Error()), cause: cause}
+}
+
+// onlyDeadlineErrors reports that every failure came from a canceled destroy
+// context. A real remove error must still fail the restart. The aggregate is
+// walked child by child: errors.Is on a multierror is true when any child matches.
+func onlyDeadlineErrors(err error) bool {
+	if err == nil {
+		return false
+	}
+	var multi *multierror.Error
+	if stderrors.As(err, &multi) && multi != nil {
+		if len(multi.Errors) == 0 {
+			return false
+		}
+		for _, child := range multi.Errors {
+			if !isDeadlineError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return isDeadlineError(err)
+}
+
+func isDeadlineError(err error) bool {
+	return err != nil && (stderrors.Is(err, context.DeadlineExceeded) || stderrors.Is(err, context.Canceled))
+}
+
+// releaseRestartRuntime deletes the task and containerd container after the
+// shim has been reaped. The caller's context is already done.
+func (l *local) releaseRestartRuntime(parent context.Context, containers []*cubeboxstore.Container) error {
+	if l == nil || l.localTask == nil {
+		return fmt.Errorf("restart runtime release has no task service")
+	}
+	ns := namespaces.Default
+	if got, ok := namespaces.Namespace(parent); ok && got != "" {
+		ns = got
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeReapWait+3*time.Second)
+	defer cancel()
+	ctx = namespaces.WithNamespace(ctx, ns)
+	var result *multierror.Error
+	seen := map[string]struct{}{}
+	for _, c := range containers {
+		if c == nil || c.ID == "" {
+			continue
+		}
+		if _, ok := seen[c.ID]; ok {
+			continue
+		}
+		seen[c.ID] = struct{}{}
+		_, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: c.ID})
+		if err != nil {
+			err = errgrpc.ToNative(err)
+			if !cubes.IsNotFoundContainerError(err) && !isTtrpcError(err) {
+				result = multierror.Append(result, fmt.Errorf("delete task %s: %w", c.ID, err))
+			}
+		}
+		if c.Container == nil {
+			continue
+		}
+		if err := deleteContainer(ctx, c.Container); err != nil && !cubes.IsNotFoundContainerError(err) && !isTtrpcError(err) {
+			result = multierror.Append(result, fmt.Errorf("delete container %s: %w", c.ID, err))
+		}
+	}
+	return result.ErrorOrNil()
+}
+
+// shouldKeepPausedTombstone is true for Pause post-cleanup Destroy: wipe leftover
+// live runtime but keep a PAUSED CubeBox in the local store so Master List/Info
+// (via Cubelet List) still sees the sandbox.
+func shouldKeepPausedTombstone(opts *workflow.DestroyContext) bool {
+	if opts == nil || opts.DestroyInfo == nil {
+		return false
+	}
+	ann := opts.DestroyInfo.GetAnnotations()
+	if ann == nil {
+		return false
+	}
+	if ann[constants.AnnotationPauseDeleteTombstone] == "true" {
+		return false
+	}
+	return ann[constants.AnnotationPauseKeepTombstone] == "true"
+}
+
+// pauseDestroyDeleteIgnorable is true when Delete races shim exit after a
+// successful PauseToSnapshot (shim Delete-while-paused exits the process).
+func pauseDestroyDeleteIgnorable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "ttrpc: closed") ||
+		strings.Contains(msg, "sandbox not in normal state") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no running task")
+}
+
+func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) error {
+	sb, err := l.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	sb.Lock()
+	defer sb.Unlock()
+
+	// Keep UserMarkDeletedTime until the full workflow Destroy (including storage
+	// CDP hooks) finishes; service.Destroy clears it after engine.Destroy succeeds.
+	now := time.Now().UnixNano()
+	for _, c := range sb.AllContainers() {
+		if c == nil || c.Status == nil {
+			continue
+		}
+		_ = c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.Removing = false
+			status.Pid = 0
+			status.FinishedAt = 0
+			status.Unknown = false
+			status.PausingAt = 0
+			if status.PausedAt == 0 {
+				status.PausedAt = now
+			}
+			return status, nil
+		})
+	}
+	if main := sb.FirstContainer(); main != nil && main.Status != nil {
+		_ = main.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.Removing = false
+			status.Pid = 0
+			status.FinishedAt = 0
+			status.Unknown = false
+			status.PausingAt = 0
+			if status.PausedAt == 0 {
+				status.PausedAt = now
+			}
+			return status, nil
+		})
+	}
+	return l.cubeboxManger.SyncByID(ctx, sandboxID)
+}
+
+func sandboxDeletable(sb *cubeboxstore.CubeBox, filter *cubebox.CubeSandboxFilter) bool {
+	if filter == nil || len(filter.GetLabelSelector()) == 0 {
+		return true
+	}
+
+	for k, v := range filter.GetLabelSelector() {
+
+		got, exist := sb.Labels[k]
+		if !exist {
+			return true
+		}
+		if got != v {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (l *local) destroyContainer(ctx context.Context, c *cubeboxstore.Container) error {
+	if c == nil {
+		return nil
+	}
+	ctx = constants.WithPreStopType(ctx, constants.PreStopTypeDestroy)
+	start := time.Now()
+	defer func() {
+		workflow.RecordDestroyMetric(ctx, nil, constants.DelContainer, time.Since(start))
+	}()
+	log.G(ctx).Debugf("destroyContainer %s", c.ID)
+	if !constants.IsFailoverOperation(ctx) && !constants.IsTerminatingPod(ctx) {
+		if constants.IsCollectMemory(ctx) {
+			collectContainerMaxMemoryUsage(ctx, c)
+		}
+		if config.GetCommon().EnableSandboxExecCmdBeforeExist {
+			doExecCmdBeforeExit(ctx, c)
+		}
+
+		doPreStop(ctx, c)
+		doPostStop(ctx, c)
+	} else {
+		log.G(ctx).Infof("skip preStop for failover operation")
+	}
+
+	err := l.cleanContainerdContainer(ctx, c.Container)
+
+	// The writable rootfs stays with the sandbox ID across a restart.
+	dc, _ := ctx.Value(workflow.KDestroyContext).(*workflow.DestroyContext)
+	if !workflow.RetainFor(dc).Storage {
+		if er := rootfs.CleanRootfs(ctx, c.ID); er != nil {
+			log.G(ctx).Warnf("clean rootfs failed.%s", er)
+		}
+	}
+	if er := taskio.Clean(ctx, c.ID); er != nil {
+		log.G(ctx).Warnf("clean fifo failed.%s", er)
+	}
+
+	return err
+}
+
+func (l *local) cleanContainerdContainer(ctx context.Context, container containerd.Container) error {
+
+	if container == nil {
+		return nil
+	}
+	id := container.ID()
+	err := l.stopTask(ctx, container)
+	if cubes.IsNotFoundContainerError(err) || isTtrpcError(err) {
+		log.G(ctx).Warnf("ignore stop task [%s] fail: %v", container.ID(), err)
+	} else if err != nil {
+
+		log.G(ctx).Warnf("stopTask %s error: %s", id, err)
+		return statusErr(errorcode.ErrorCode_DeleteTaskFailed, err)
+	}
+
+	err = deleteContainer(ctx, container)
+	if cubes.IsNotFoundContainerError(err) || isTtrpcError(err) {
+		log.G(ctx).Warnf("ignore delete container [%s] fail: %v", container.ID(), err)
+	} else if err != nil {
+		log.G(ctx).Errorf("deleteContainer %s error: %s", id, err)
+		return statusErr(errorcode.ErrorCode_DeleteContainerFromMetaDataFailed, err)
+	}
+	return nil
+}
+
+func (l *local) stopTask(ctx context.Context, container containerd.Container) (err error) {
+	start := time.Now()
+	defer func() {
+		workflow.RecordDestroyMetric(ctx, err, constants.CubeDeleteTaskId, time.Since(start))
+	}()
+	if container == nil {
+		return nil
+	}
+	id := container.ID()
+	log.G(ctx).Debugf("stopTask %s ", id)
+	if debugDestroy := ctx.Value("destroy_forcibly"); debugDestroy != nil {
+		s, ok := debugDestroy.(string)
+		if ok && s == "true" {
+			log.G(ctx).Debugf("forcibly delete task %s ", id)
+			_, err = l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: id})
+			err = errgrpc.ToNative(err)
+			if cubes.IsNotFoundContainerError(err) {
+				return nil
+			} else {
+				log.G(ctx).Warnf("forcibly delete task %s fail: %v", id, err)
+				return err
+			}
+		}
+	}
+	if !constants.IsTerminatingPod(ctx) {
+		// Task and Kill go to the shim. A crashed guest leaves that
+		// connection open and unread, so those RPCs wait until the caller
+		// context ends. That used up the whole destroy deadline, and Delete
+		// then ran with an expired context: the disconnect wait returned
+		// immediately and the bundle was still being removed during cold start.
+		reapCtx, reapCancel := shimWaitContext(ctx)
+		if _, taskErr := container.Task(reapCtx, nil); taskErr != nil {
+			log.G(ctx).Warnf("Get and State task %s ret: %v", id, taskErr)
+		}
+		_, killErr := l.localTask.Kill(reapCtx, &tasks.KillRequest{
+			ContainerID: id,
+			Signal:      uint32(syscall.SIGKILL),
+			All:         true,
+		})
+		reapCancel()
+		if killErr == nil {
+			// A Wait that hits its short bound must still reach Delete.
+			// Returning here leaves the shim up and the next restart blocks
+			// in Wait again. The bound is not the caller's destroy deadline.
+			_ = l.waitTask(ctx, id)
+		} else {
+			killErr = errgrpc.ToNative(killErr)
+			if !cubes.IsNotFoundContainerError(killErr) && !isTtrpcError(killErr) {
+				log.G(ctx).Warn(errors.Wrapf(killErr, "failed to send SIGKILL for container[%s]", id))
+			}
+			// The shim did not take the signal. Reap its host process so
+			// the disconnect callback starts, then Delete joins that callback.
+			l.reapShimProcess(ctx, id)
+		}
+	}
+
+	// tasks.Delete runs shim.Delete, which waits for the disconnect callback.
+	// That callback's bundle removal has to finish before this returns, or
+	// the next create's bundle is the directory it deletes.
+	_, err = l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: id})
+	if err != nil {
+		err = errgrpc.ToNative(err)
+		if cubes.IsNotFoundContainerError(err) || isTtrpcError(err) {
+			return nil
+		}
+		log.G(ctx).Warnf("forcibly delete task %s fail: %v", id, err)
+	}
+	return err
+}
+
+func (l *local) waitTask(ctx context.Context, id string) error {
+	waitCtx, cancel := shimWaitContext(ctx)
+	defer cancel()
+	_, err := l.localTask.Wait(waitCtx, &tasks.WaitRequest{ContainerID: id})
+	return err
+}
+
+func deleteContainer(ctx context.Context, container containerd.Container) (err error) {
+	start := time.Now()
+	defer func() {
+		workflow.RecordDestroyMetric(ctx, err, constants.CubeDelContainerId, time.Since(start))
+	}()
+	var delOpts []containerd.DeleteOpts
+	if _, err := container.Image(ctx); err == nil {
+		delOpts = append(delOpts, containerd.WithSnapshotCleanup)
+	}
+
+	return container.Delete(ctx, delOpts...)
+}
+
+func (l *local) collectSandboxMaxMemoryUsage(ctx context.Context, sandBox *cubeboxstore.CubeBox) {
+	if sandBox.CGroupPath == "" {
+		return
+	}
+	pid := sandBox.Endpoint.Pid
+	if pid == 0 {
+		return
+	}
+
+	shimVmHWM, _ := readVmHWM(int(pid))
+
+	total := (shimVmHWM) / 1024 / 1024
+
+	rt := &CubeLog.RequestTrace{
+		Action:     "SandboxMaxMemoryUsage",
+		Caller:     constants.CubeboxID.ID(),
+		Callee:     sandBox.ID,
+		InstanceID: sandBox.ID,
+		RetCode:    int64(total),
+	}
+	CubeLog.Trace(rt)
+}
+
+func readVmHWM(pid int) (uint64, error) {
+	p, err := procfs.NewProc(pid)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get procfs: %v", err)
+	}
+	stat, err := p.NewStatus()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get procfs stat: %v", err)
+	}
+	return stat.VmHWM, nil
+}
+
+func collectContainerMaxMemoryUsage(ctx context.Context, ci *cubeboxstore.Container) {
+	execCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+	cmd := []string{"cat", "/sys/fs/cgroup/memory/memory.max_usage_in_bytes"}
+	out, err := containerExecWithOutput(execCtx, ci, cmd)
+	if err != nil {
+		log.G(ctx).Errorf("collectContainerMaxMemoryUsage failed: exec command: %v", err)
+		return
+	}
+	if len(out) == 0 {
+		return
+	}
+
+	out = bytes.TrimSpace(out)
+	maxUsageInBytes, err := strconv.ParseInt(string(out), 10, 64)
+	if err != nil {
+		log.G(ctx).Errorf("collectContainerMaxMemoryUsage failed: parse max usage: %v", err)
+		return
+	}
+
+	rt := &CubeLog.RequestTrace{
+		Action:     "ContainerMaxMemoryUsage",
+		Caller:     constants.CubeboxID.ID(),
+		Callee:     ci.ID,
+		InstanceID: ci.SandboxID,
+		RetCode:    maxUsageInBytes / 1024 / 1024,
+	}
+
+	CubeLog.Trace(rt)
+}
+
+func doExecCmdBeforeExit(ctx context.Context, ci *cubeboxstore.Container) {
+	if len(config.GetCommon().SandboxExecCmdBeforeExist) == 0 {
+		return
+	}
+	if ci.Metadata.Labels != nil && ci.Metadata.Labels[constants.LabelHealthCheckPod] != "" {
+
+		return
+	}
+	execCtx, cancel := context.WithTimeout(ctx, config.GetCommon().SandboxExecCmdTimeOut)
+	defer cancel()
+
+	out, err := containerExecWithOutput(execCtx, ci, config.GetCommon().SandboxExecCmdBeforeExist)
+	if err != nil {
+		log.G(ctx).Errorf("doExecCmdBeforeExit failed: %v,%s",
+			utils.InterfaceToString(config.GetCommon().SandboxExecCmdBeforeExist), err.Error())
+		return
+	}
+	if len(out) == 0 {
+		return
+	}
+	logEntry := CubeLog.GetLogger("stdout").WithContext(ctx)
+	fields := CubeLog.Fields{"Module": "Stdout", "InstanceId": ci.SandboxID}
+	shimLog := logEntry.WithFields(fields)
+	maxLines := config.GetCommon().SandboxExecCmdOutMaxLines
+	trimOut := func(out []byte) string {
+		lines := strings.Split(string(out), "\r\n")
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+		}
+		return strings.Join(lines, "\r\n")
+	}
+	if config.GetCommon().SandboxExecCmdBeforeExistLogOut {
+		shimLog.Error(trimOut(out))
+	}
+	if config.GetCommon().SandboxExecCmdMatchLine == "" {
+		return
+	}
+
+	if strings.Contains(string(out), config.GetCommon().SandboxExecCmdMatchLine) {
+		log.G(ctx).Errorf("doExecCmdBeforeExit match: [%s]", config.GetCommon().SandboxExecCmdMatchLine)
+		execCtx, cancel := context.WithTimeout(ctx, config.GetCommon().SandboxExecCmdTimeOut)
+		defer cancel()
+
+		out, err := containerExecWithOutput(execCtx, ci, config.GetCommon().SandboxExecCmdAfterMatch)
+		if err != nil {
+			log.G(ctx).Errorf("doExecCmdBeforeExit failed: %v,%s",
+				utils.InterfaceToString(config.GetCommon().SandboxExecCmdAfterMatch), err.Error())
+			return
+		}
+		if len(out) == 0 {
+			return
+		}
+		if config.GetCommon().SandboxExecCmdAfterMatchLogOut {
+			if config.GetCommon().SandboxExecCmdBeforeExistLogOut {
+				shimLog.Errorf("[SandboxExecCmdAfterMatch]:%s", trimOut(out))
+			}
+		}
+	}
+}
+
+func containerExecWithOutput(ctx context.Context, ci *cubeboxstore.Container, cmd []string) ([]byte, error) {
+	if ci == nil || ci.Container == nil {
+		return nil, nil
+	}
+	task, err := ci.Container.Task(ctx, nil)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var stdout bytes.Buffer
+
+	cioOpts := []cio.Opt{
+		// A terminal merges stderr into stdout. Do not request a separate stderr
+		// FIFO because containerd does not create one for terminal IO.
+		cio.WithStreams(nil, &stdout, nil),
+		cio.WithTerminal, cio.WithFIFODir("/data/cubelet/fifo"),
+	}
+	ioCreator := cio.NewCreator(cioOpts...)
+
+	spec, err := ci.Container.Spec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pspec := spec.Process
+	pspec.CommandLine = ""
+	pspec.Args = cmd
+
+	process, err := task.Exec(ctx, "exec-"+utils.GenerateID(), pspec, ioCreator)
+	if err != nil {
+		return nil, err
+	}
+	defer process.Delete(ctx)
+
+	statusC, err := process.Wait(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := process.Start(ctx); err != nil {
+		return nil, err
+	}
+	status := <-statusC
+	process.IO().Wait()
+
+	code, _, err := status.Result()
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("exec failed with exit code %d,output:%s", code, stdout.String())
+	}
+
+	return stdout.Bytes(), nil
+}
+
+func (l *local) collectSandboxLifeTimeMetric(ctx context.Context, sb *cubeboxstore.CubeBox) {
+	if sb.GetStatus().Get().LifeTimeMetricReported {
+		return
+	}
+
+	sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+		status.LifeTimeMetricReported = true
+		return status, nil
+	})
+
+	rt := &CubeLog.RequestTrace{
+		Caller:       constants.CubeboxID.ID(),
+		Callee:       "lifetimemetric",
+		InstanceID:   sb.ID,
+		InstanceType: sb.InstanceType,
+	}
+	if hostcfg := config.GetHostConf(); hostcfg != nil {
+		rt.CalleeCluster = hostcfg.SchedulerLabel
+	}
+
+	if sb.ResourceWithOverHead != nil {
+		lifeTime := time.Now().UnixNano() - sb.CreatedAt
+		if sb.GetStatus().Get().FinishedAt != 0 {
+			lifeTime = sb.GetStatus().Get().FinishedAt - sb.CreatedAt
+		}
+
+		if lifeTime <= 0 {
+			return
+		}
+		lifeTime /= 1e9
+
+		rt.CalleeAction = "cpu"
+		rt.RetCode = sb.ResourceWithOverHead.VmCpuQ.Value() * lifeTime
+		CubeLog.Trace(rt)
+
+		rt.CalleeAction = "memory"
+		rt.RetCode = int64(float64(sb.ResourceWithOverHead.VmMemQ.Value()) / 1024 / 1024 / 1024 * float64(lifeTime))
+		CubeLog.Trace(rt)
+
+		rt.CalleeAction = "lifetime"
+		rt.RetCode = lifeTime
+		CubeLog.Trace(rt)
+	}
+}

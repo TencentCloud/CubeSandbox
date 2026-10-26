@@ -1,0 +1,77 @@
+version: "3"
+services:
+  mysql:
+    image: __MYSQL_IMAGE__
+    container_name: __MYSQL_CONTAINER__
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "__MYSQL_ROOT_PASSWORD__"
+      MYSQL_DATABASE: "__MYSQL_DB__"
+      MYSQL_USER: "__MYSQL_USER__"
+      MYSQL_PASSWORD: "__MYSQL_PASSWORD__"
+    ports:
+      - "127.0.0.1:__MYSQL_PORT__:3306"
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --skip-name-resolve
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u__MYSQL_USER__ -p__MYSQL_PASSWORD__ --silent",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - __MYSQL_VOLUME__:/var/lib/mysql
+
+  redis:
+    image: __REDIS_IMAGE__
+    container_name: __REDIS_CONTAINER__
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - "__REDIS_PASSWORD__"
+    ports:
+      - "127.0.0.1:__REDIS_PORT__:6379"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli -a \"__REDIS_PASSWORD__\" ping | grep -x PONG",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - __REDIS_VOLUME__:/data
+
+  minio:
+    image: __MINIO_IMAGE__
+    container_name: __MINIO_CONTAINER__
+    restart: unless-stopped
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+    environment:
+      MINIO_ROOT_USER: "__MINIO_ROOT_USER__"
+      MINIO_ROOT_PASSWORD: "__MINIO_ROOT_PASSWORD__"
+    ports:
+      - "__MINIO_API_BIND__:__MINIO_API_PORT__:9000"
+      - "127.0.0.1:__MINIO_CONSOLE_PORT__:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - __MINIO_VOLUME__:/data
+
+volumes:
+  __MYSQL_VOLUME__:
+  __REDIS_VOLUME__:
+  __MINIO_VOLUME__:

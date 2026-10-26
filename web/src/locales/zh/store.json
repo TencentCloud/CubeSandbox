@@ -1,0 +1,81 @@
+{
+  "title": "模板市场",
+  "subtitle": "一键安装官方预置镜像，快速制作沙箱模板。",
+  "searchPlaceholder": "搜索镜像…",
+  "checkUpdates": "检查更新",
+  "checking": "检查中…",
+  "noResults": "没有匹配的镜像。",
+  "official": "官方",
+  "hasUpdate": "有更新",
+  "install": "一键安装",
+  "installAndEnableAgentHub": "安装并启用到数字助手",
+  "installOnly": "仅安装模板",
+  "enableAgentHub": "启用到数字助手",
+  "installed": "已安装",
+  "installedCount": "已安装 {{count}} 个",
+  "installAdditionalHint": "使用不同参数再次安装",
+  "installModal": {
+    "subtitle": "安装为 Cube 模板",
+    "building": "正在制作模板，请稍候…",
+    "success": "安装成功！",
+    "viewTemplate": "查看模板",
+    "close": "关闭",
+    "cancel": "取消",
+    "confirm": "确认安装",
+    "installing": "安装中…",
+    "enablingAgentHub": "正在启用到数字助手…",
+    "retry": "重试",
+    "failed": "安装失败，请重试。",
+    "buildFailed": "制作失败",
+    "timeout": "等待超时，请在模板列表中查看状态。"
+  },
+  "toast": {
+    "updatesFound": "发现 {{count}} 个镜像有新版本",
+    "upToDate": "所有镜像已是最新",
+    "checkFailed": "检查更新失败，请重试",
+    "agentTemplateEnabled": "已启用到数字助手"
+  },
+  "categories": {
+    "all": "全部",
+    "code": "代码执行",
+    "browser": "浏览器",
+    "ai": "AI · LLM",
+    "base": "基础镜像"
+  },
+  "items": {
+    "sandbox-code": {
+      "name": "代码执行沙箱",
+      "description": "官方代码执行环境，预装 Python3 + Jupyter Kernel，兼容 E2B SDK。"
+    },
+    "sandbox-browser": {
+      "name": "浏览器沙箱",
+      "description": "预装 Chromium，支持网页自动化。"
+    },
+    "openclaw-lite": {
+      "name": "龙虾助手 · 轻量版",
+      "description": "轻量版 OpenClaw 助手镜像，拉取更快、占用磁盘更小；适合以对话为主、暂不需要完整浏览器工具链的助手。"
+    },
+    "openclaw-aio": {
+      "name": "龙虾助手 · All-in-One",
+      "description": "全功能 OpenClaw AI Agent 平台，内置浏览器自动化、代码执行与多模型接入。"
+    },
+    "cubesandbox-base": {
+      "name": "基础镜像",
+      "description": "最小化基础镜像，仅含 envd，适合自定义构建。"
+    }
+  },
+  "tagLabels": {
+    "python": "Python",
+    "jupyter": "Jupyter",
+    "official": "官方",
+    "browser": "浏览器",
+    "chromium": "Chromium",
+    "agent": "AI Agent",
+    "openclaw": "OpenClaw",
+    "lite": "轻量版",
+    "aio": "All-in-One",
+    "deepseek": "DeepSeek",
+    "base": "基础",
+    "envd": "envd"
+  }
+}

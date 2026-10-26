@@ -1,0 +1,10 @@
+[package]
+name = "event_monitor"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+edition = "2021"
+
+[dependencies]
+libc = "0.2.137"
+serde = { workspace = true, features = ["rc", "derive"] }
+serde_json = "1.0.87"

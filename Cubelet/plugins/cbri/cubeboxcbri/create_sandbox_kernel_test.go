@@ -1,0 +1,227 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package cubeboxcbri
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/stretchr/testify/require"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+)
+
+func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-1"
+	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeTestFile(t, targetKernelPath, bytes.Repeat([]byte("o"), 2048))
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Annotations: map[string]string{
+				constants.MasterAnnotationsAppSnapshotCreate:    "true",
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
+			},
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	specOpts, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.NoError(t, err)
+
+	gotKernel, err := os.ReadFile(targetKernelPath)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte("s"), 4096), gotKernel)
+	require.Equal(t, kernelVersionForContent(gotKernel), readKernelVersion(t, targetKernelPath))
+
+	spec := applySpecOpts(t, ctx, specOpts)
+	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-2"
+	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	oldKernel := bytes.Repeat([]byte("o"), 2048)
+	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeTestFile(t, targetKernelPath, oldKernel)
+	writeKernelVersion(t, targetKernelPath, oldKernel)
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-restore",
+				constants.MasterAnnotationAppSnapshotVersion:    "v2",
+			},
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+		LocalRunTemplate: &templatetypes.LocalRunTemplate{
+			Componts: map[string]templatetypes.LocalComponent{
+				templatetypes.CubeComponentCubeKernel: {
+					Component: templatetypes.MachineComponent{Path: "/template/kernel.vm"},
+				},
+				templatetypes.CubeComponentCubeImage: {
+					Component: templatetypes.MachineComponent{Path: "/template/image.ext4"},
+				},
+			},
+		},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	specOpts, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.NoError(t, err)
+
+	gotKernel, err := os.ReadFile(targetKernelPath)
+	require.NoError(t, err)
+	require.Equal(t, oldKernel, gotKernel)
+	require.Equal(t, kernelVersionForContent(oldKernel), readKernelVersion(t, targetKernelPath))
+
+	spec := applySpecOpts(t, ctx, specOpts)
+	require.Equal(t, "/template/kernel.vm", spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func TestCreateSandboxNormalStartDoesNotRefreshArtifactKernel(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-3"
+	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	oldKernel := bytes.Repeat([]byte("o"), 2048)
+	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeTestFile(t, targetKernelPath, oldKernel)
+	writeKernelVersion(t, targetKernelPath, oldKernel)
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	specOpts, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.NoError(t, err)
+
+	gotKernel, err := os.ReadFile(targetKernelPath)
+	require.NoError(t, err)
+	require.Equal(t, oldKernel, gotKernel)
+	require.Equal(t, kernelVersionForContent(oldKernel), readKernelVersion(t, targetKernelPath))
+
+	spec := applySpecOpts(t, ctx, specOpts)
+	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func newTestCubeboxPlugin(t *testing.T) *cubeboxInstancePlugin {
+	t.Helper()
+
+	basePath := t.TempDir()
+	paths, err := pmem.ResolvePaths(basePath, filepath.Join(t.TempDir(), "artifacts"), filepath.Join(t.TempDir(), "installed", "vmlinux"))
+	require.NoError(t, err)
+	return &cubeboxInstancePlugin{
+		artifactPaths: paths,
+		config: &cubeboxInstancePluginConfig{
+			BasePath:         basePath,
+			SnapShotBasePath: filepath.Join(basePath, "cube-snapshot"),
+			instanceType:     cubebox.InstanceType_cubebox.String(),
+		},
+	}
+}
+
+func writeTestFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, content, 0o644))
+}
+
+func writeKernelVersion(t *testing.T, kernelPath string, kernel []byte) {
+	t.Helper()
+	writeTestFile(t, filepath.Join(filepath.Dir(kernelPath), "version"), []byte(kernelVersionForContent(kernel)+"\n"))
+}
+
+func readKernelVersion(t *testing.T, kernelPath string) string {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(filepath.Dir(kernelPath), "version"))
+	require.NoError(t, err)
+	return strings.TrimSpace(string(got))
+}
+
+func kernelVersionForContent(content []byte) string {
+	sum := sha256.Sum256(content)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func applySpecOpts(t *testing.T, ctx context.Context, specOpts []oci.SpecOpts) *specs.Spec {
+	t.Helper()
+
+	spec := &specs.Spec{
+		Annotations: map[string]string{},
+		Linux:       &specs.Linux{},
+		Process:     &specs.Process{},
+	}
+	for _, specOpt := range specOpts {
+		require.NoError(t, specOpt(ctx, nil, &containers.Container{}, spec))
+	}
+	return spec
+}
+
+func TestCreateSandboxWithoutTemplateKeepsInstalledKernel(t *testing.T) {
+	t.Parallel()
+	plugin := newTestCubeboxPlugin(t)
+	flow := &workflow.CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"}}
+	opts, err := plugin.CreateSandbox(context.Background(), flow)
+	require.NoError(t, err)
+	spec := applySpecOpts(t, context.Background(), opts)
+	require.Equal(t, plugin.artifactPaths.SharedKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}

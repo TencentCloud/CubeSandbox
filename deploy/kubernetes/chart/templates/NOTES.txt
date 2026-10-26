@@ -1,0 +1,200 @@
+{{/* Helm TrimSpace strips leading whitespace from NOTES; keep a non-space first line. */ -}}
+CubeSandbox
+
+  ____      _          ____                  _ _
+ / ___|   _| |__   ___/ ___|  __ _ _ __   __| | |__   _____  __
+| |  | | | | '_ \ / _ \___ \ / _` | '_ \ / _` | '_ \ / _ \ \/ /
+| |__| |_| | |_) |  __/___) | (_| | | | | (_| | |_) | (_) >  <
+ \____\__,_|_.__/ \___|____/ \__,_|_| |_|\__,_|_.__/ \___/_/\_\
+
+CubeSandbox is installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Persistence (CubeMaster / MySQL / Redis / MinIO):
+{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath ((.Values.minio).persistence.hostPath) }}
+  mode: hostPath (at least one component)
+{{- else }}
+{{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) }}
+{{- if $sc }}
+  storageClassName: {{ $sc }} (explicit; component-level overrides top-level persistence.storageClassName)
+{{- else }}
+  storageClassName: <cluster default> (no chart-owned StorageClass unless storageClass.create=true / values-tke.yaml)
+{{- end }}
+{{- end }}
+
+{{- if .Values.controlPlane.enabled }}
+Control plane:
+  CubeMaster Service: {{ include "cube.masterName" . }}:{{ .Values.controlPlane.master.service.port }}
+{{- if .Values.controlPlane.api.enabled }}
+  CubeAPI Service:    {{ include "cube.apiName" . }}:{{ .Values.controlPlane.api.service.port }} (external E2B SDK)
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+  CubeOps Service:    {{ include "cube.opsName" . }}:{{ .Values.cubeOps.service.port }} (WebUI /opsapi + SDK)
+{{- end }}
+{{- if and .Values.webui.enabled (eq (include "cube.opsEnabled" .) "true") }}
+  WebUI Service:      {{ include "cube.webuiName" . }}:{{ .Values.webui.service.port }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- else if .Values.externalControlPlane.enabled }}
+External control plane:
+  CubeMaster Endpoint: {{ .Values.externalControlPlane.masterEndpoint }}
+{{- if .Values.externalControlPlane.apiEndpoint }}
+  CubeAPI Endpoint:    {{ .Values.externalControlPlane.apiEndpoint }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- end }}
+{{- if eq (include "cube.configureClusterDNS" .) "true" }}
+  Cluster DNS: *.{{ .Values.cubeProxy.domain }} -> {{ include "cube.proxyServiceFQDN" . }} (patched into kube-system/coredns)
+{{- end }}
+
+Cube Node DaemonSet:
+  {{ include "cube.nodeName" . }}
+{{- if .Values.cubeNode.hostNetwork }}
+  Network: host — sandbox taps stay across Big Pod recreation;
+    NetworkPolicy cannot govern sandbox traffic; cubelet / s3lvol / egress
+    bind on the host; node identity is the node IP.
+  Set cubeNode.hostNetwork=false for the Pod network.
+{{- else }}
+  Network: Pod (NetworkPolicy applies to sandbox traffic, but recreating this
+  Pod destroys the netns and breaks networking for every sandbox on the node)
+{{- end }}
+{{- if .Values.cubeNode.hostNetworkChangeAck }}
+  NOTE: cubeNode.hostNetworkChangeAck only gates the one-time network-mode change
+  (pre-install/pre-upgrade/pre-rollback Hook); remove it after that upgrade.
+{{- end }}
+{{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
+  Sandbox guest DNS: follow node / cluster DNS (nameservers + search + options)
+{{- else if .Values.cubeNode.dns.sandbox.nameservers }}
+  Sandbox guest DNS: explicit nameservers (follow-node search/options not applied)
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+
+Cube Proxy Deployment:
+  {{ include "cube.proxyName" . }}
+  Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}/{{ .Values.cubeProxy.ports.grpc.containerPort }} (http/https/grpc)
+{{- if .Values.cubeProxy.ingress.enabled }}
+  Ingress: {{ include "cube.proxyName" . }} (TLS passthrough → CubeProxy; point external DNS at the Ingress)
+{{- end }}
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+  Lifecycle Manager: {{ include "cube.lifecycleManagerName" . }}:{{ .Values.lifecycleManager.service.port }}
+{{- end }}
+{{- end }}
+
+{{- /* Status facts: past-tense / current config — not failure messages. */}}
+Status:
+{{- if .Values.cubeNode.enabled }}
+  Cubevs CIDR: {{ .Values.cubeNode.network.cidr | default "packaged Cubelet default" }} (preflight already ran this install/upgrade)
+{{- end }}
+{{- if eq (include "cube.minioBuiltinEnabled" .) "true" }}
+  MinIO: chart-managed {{ include "cube.minioName" . }}:{{ .Values.minio.port | default 9000 }}
+  S3 volume plugin: {{ include "cube.volumeS3EffectiveEndpoint" . }} (filled from MinIO)
+{{- else if eq (include "cube.volumeS3Enabled" .) "true" }}
+  S3 volume plugin: {{ include "cube.volumeS3EffectiveEndpoint" . | default "existing Secret" }}
+{{- end }}
+{{- if eq (include "cube.startupGateEnabled" .) "true" }}
+  PVM startup gate: on
+{{- end }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+
+WARNING (host change; helm rollback does NOT undo kernel/GRUB):
+  With bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel
+  and reboot nodes labeled allow-pvm-bootstrap (via cube-node-pvm).
+{{- end }}
+{{- /* Artifact-store HA warning: multi-replica master/TC without S3 and without
+a shared RWX volume runs on a node-local artifact store. Allowed (the runtime
+survives via foreign-artifact retries), but production HA should use s3Backed
+or RWX — warn loudly instead of failing the install. */}}
+{{- if .Values.controlPlane.enabled }}
+{{- $tcNotes := .Values.controlPlane.templateCenter -}}
+{{- $mpNotes := .Values.controlPlane.master.persistence | default dict -}}
+{{- $sharedStoreNotes := and $mpNotes.enabled (not $mpNotes.hostPath) (has "ReadWriteMany" ($mpNotes.accessModes | default list)) (not $tcNotes.persistence.existingClaim) -}}
+{{- $s3bNotes := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
+{{- $multiMasterNotes := gt (int .Values.controlPlane.master.replicas) 1 -}}
+{{- $multiTCNotes := gt (int ($tcNotes.replicas | default 1)) 1 -}}
+{{- if and (or $multiMasterNotes $multiTCNotes) (not $s3bNotes) (not $sharedStoreNotes) }}
+
+WARNING (template artifact store is node-local with multiple control-plane replicas):
+{{- if $multiMasterNotes }}
+  controlPlane.master.replicas={{ .Values.controlPlane.master.replicas }} without
+  controlPlane.artifactStore.s3Backed=true or a shared ReadWriteMany artifact volume:
+  a template artifact exists only on the master pod that registered it, so a
+  download routed to another replica fails (foreign artifact) until retried
+  against the right pod.
+{{- end }}
+{{- if $multiTCNotes }}
+  controlPlane.templateCenter.replicas={{ $tcNotes.replicas | default 1 }} without
+  controlPlane.artifactStore.s3Backed=true: TC replicas cannot read each other's
+  ext4 output, so duplicate builds of the same image spec run in parallel instead
+  of being deduplicated, and an interrupted build cannot be taken over by another
+  replica.
+{{- end }}
+  Acceptable for evaluation. For production HA use either
+  controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store) or a
+  genuinely shared artifact volume
+  (controlPlane.master.persistence.accessModes=[ReadWriteMany], e.g. CFS/NFS, with
+  TC mounting the same claim).
+  (Mounting the default ReadWriteOnce artifact PVC with several master replicas
+  is rejected at install time — it cannot attach on several nodes — so this
+  warning covers per-pod scratch / hostPath stores only.)
+{{- end }}
+{{- end }}
+
+{{- if and (eq (include "cube.opsEnabled" .) "true") (eq (include "cube.opsStoreBackend" .) "fs") }}
+
+NOTE (cubeOps fs signing key):
+  blobstore-signing-key must be hex (64 hex chars = 32 bytes). Override with
+  cubeOps.store.fs.signingKey when you need a fixed key across clusters.
+{{- end }}
+{{- if eq (include "cube.artifactStoreBackend" .) "fs" }}
+
+NOTE: switching controlPlane.artifactStore.backend to fs does not require deleting _state/selected_backend.
+{{- end }}
+Useful commands:
+  kubectl get pods -n {{ .Release.Namespace }} -o wide
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodePvmName" . }}
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+  kubectl get deploy -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
+{{- end }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
+{{- end }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -o wide
+  kubectl exec -n {{ .Release.Namespace }} <cube-node-pod> -- cubecli ls
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
+{{- end }}
+{{- if eq (include "cube.cubeopscliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubeopscli --help
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
+{{- end }}
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
+{{- if .Values.diagnostics.enabled }}
+  kubectl get configmap -n {{ .Release.Namespace }} {{ include "cube.fullname" . }}-diagnostics -o jsonpath='{.data.cube-diag-k8s\.sh}' > /tmp/cube-diag-k8s.sh
+  sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
+{{- end }}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled }}
+Trusted CA (trustedCACerts): private-CA registry trust via SSL_CERT_DIR.
+  Mounted entries: kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.templateCenterName" . }} -- \
+    sh -c 'ls /etc/cube/trusted-ca/'
+  Cert changes (including existingConfigMap edits) take effect after the pods restart:
+  kubectl rollout restart deploy/{{ include "cube.templateCenterName" . }} -n {{ .Release.Namespace }}
+{{- end }}
+
+Docs: https://cubesandbox.com/guide/kubernetes/ (Install · Architecture · Upgrade · FAQ)
+      https://cubesandbox.com/zh/guide/kubernetes/ (中文)

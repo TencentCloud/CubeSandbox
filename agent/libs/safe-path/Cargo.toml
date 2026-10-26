@@ -1,0 +1,18 @@
+[package]
+name = "safe-path"
+version = "0.1.0"
+description = "A library to safely handle file system paths for container runtimes"
+keywords = ["kata", "container", "path", "securejoin"]
+categories = ["parser-implementations", "filesystem"]
+authors = ["The Kata Containers community <kata-dev@lists.katacontainers.io>"]
+repository = "https://github.com/kata-containers/kata-containers.git"
+homepage = "https://katacontainers.io/"
+readme = "README.md"
+license = "Apache-2.0"
+edition = "2018"
+
+[dependencies]
+libc = "0.2.100"
+
+[dev-dependencies]
+tempfile = "3.2.0"

@@ -1,0 +1,4 @@
+mini-swe-agent[extra]>=2.2.8
+e2b-code-interpreter>=1.3.0
+litellm>=1.83.0
+python-dotenv>=1.0.0

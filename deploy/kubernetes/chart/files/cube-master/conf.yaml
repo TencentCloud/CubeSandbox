@@ -1,0 +1,112 @@
+common:
+  http_port: {{ .Values.controlPlane.master.service.port }}
+  http_readtimeout: 120
+  http_writetimeout: 360
+  http_idletimeout: 360
+  {{- if or .Values.cubeOps.enabled .Values.externalControlPlane.enabled }}
+  cube_ops_addr: "http://{{ include "cube.opsEndpoint" . }}"
+  {{- end }}
+  sync_meta_data_interval: 1s
+  sync_metric_data_interval: 1s
+  collect_metric_interval: 1s
+  default_headless_service_nodes_num: 1
+  enable_check_com_net_id_param: false
+  # Template build wiring: CubeMaster no longer has a templatecenter_enabled
+  # switch. Every template-from-image build is forwarded to CubeTemplateCenter.
+  #
+  # CubeTemplateCenter's address can be set here (persistent, per-deployment)
+  # or overridden by the CUBE_TEMPLATE_CENTER_ADDR environment variable
+  # (ad-hoc debugging). Env wins over yaml. Both empty means "not configured"
+  # and all template builds will fail.
+  {{- if .Values.controlPlane.enabled }}
+  template_center_addr: "{{ include "cube.templateCenterEndpoint" . }}"
+  {{- end }}
+
+log:
+  module: "cubemaster"
+  path: "/data/log/CubeMaster"
+  file_size: 100
+  file_num: 10
+  level: "info"
+
+cubelet_conf:
+  grpc:
+    grpc_port: 9999
+  common_timeout_insec: 30
+  create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: {{ .Values.controlPlane.master.appSnapshotTimeoutSeconds }}
+  create_timeout_insec: 600
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 100
+  enable_exposed_port: true
+  exposed_port_list:
+    - "80"
+  disable_redis_proxy_port: true
+
+auth:
+  enable: false
+
+# CubeProxy admin cache invalidation on sandbox resume. admin_token must match
+# the release Secret key cube-admin-token (what CubeProxy validates as
+# X-Cube-Admin-Token). Rendered from the chart helper; see cube.adminToken.
+# admin_port/heartbeat_ttl_ms fall back to defaults (8082 / 15000).
+cube_proxy_conf:
+  admin_token: {{ include "cube.adminToken" . | quote }}
+
+req_template_conf:
+  whitelist_req_tag:
+    WorkingDir: true
+    RLimit: true
+    DnsConfig: true
+    HostAliases: true
+    Poststop: true
+    Prestop: true
+  cube_box_req_template: >-
+    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cube_network_config":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
+
+instance_db_config:
+  driver: {{ include "cube.dbDriver" . | quote }}
+  addr: {{ printf "%s:%v" (include "cube.dbHost" .) (include "cube.dbPort" .) | quote }}
+  user: {{ include "cube.dbUser" . | quote }}
+  pwd: {{ include "cube.dbPassword" . | quote }}
+  db_name: {{ include "cube.dbName" . | quote }}
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  max_idle_conns: 5
+  max_open_conns: 20
+  max_conn_life_time_seconds: 300
+
+redis:
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: {{ include "cube.redisDB" . }}
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+scheduler:
+  priority_select_num: 1
+  metric_update_timeout: 300s
+  local_metric_update_timeout: 300s
+  filter:
+    enable_filters:
+      - "cpu"
+      - "mem"
+      - "template_locality"
+      - "realtime_create_num"
+
+# Volume plugin (S3 / COS binary). Credentials: Secret-mounted.
+# List order sets the default driver when Volume.create() omits `driver`;
+# S3 is first so the default install (bundled MinIO) works out of the box.
+volume_plugins:
+  - name: s3
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+  - name: cos
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos

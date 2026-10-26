@@ -1,0 +1,957 @@
+name: Release Docker Images
+
+# Reusable pipeline for building and pushing release component images.
+# GitHub-hosted runners build amd64 + arm64 and publish multi-arch manifests to
+# GHCR and TCR int. A self-hosted job then copies per-arch and multi-arch images
+# to TCR cn (avoids slow US→CN pushes). Add a component by extending the prepare
+# job's component table and publish_manifests matrix below.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to build and push (e.g. v0.5.0)'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to build from (branch or tag; defaults to the branch you run from)'
+        required: false
+        type: string
+        default: ''
+      components:
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        required: false
+        type: string
+        default: all
+      kernel_bm_amd64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-amd64 (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      kernel_bm_arm64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-arm64 (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      kernel_pvm_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-pvm + PVM host packages (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      guest_image_release_tag:
+        description: 'Dedicated guest-image-* tag for cube-guest-image assets (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      skip_version_check:
+        description: 'Skip bump-image.sh --check (manual/dev builds only; leave false for real releases)'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Image tag to build and push'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to build from (defaults to the caller ref)'
+        required: false
+        type: string
+        default: ''
+      components:
+        description: 'Comma-separated components to build, or "all"'
+        required: false
+        type: string
+        default: all
+      kernel_bm_amd64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-amd64 (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      kernel_bm_arm64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-arm64 (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      kernel_pvm_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-pvm + PVM host packages (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      guest_image_release_tag:
+        description: 'Dedicated guest-image-* tag (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
+      skip_version_check:
+        description: 'Skip bump-image.sh --check (manual/dev builds only)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-docker-images-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CHECKOUT_REF: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+  OPENRESTY_BASE_IMAGE: cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+
+jobs:
+  verify_versions:
+    name: Verify release image tags
+    runs-on: ubuntu-latest
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Check hard-coded image tags match the release tag
+        if: inputs.skip_version_check != true
+        run: scripts/bump-image.sh --check "${{ inputs.image_tag }}"
+
+  resolve_asset_tags:
+    name: Resolve kernel / guest-image Release tags
+    runs-on: ubuntu-latest
+    needs: verify_versions
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    outputs:
+      kernel_bm_amd64_release_tag: ${{ steps.resolve.outputs.kernel_bm_amd64_release_tag }}
+      kernel_bm_arm64_release_tag: ${{ steps.resolve.outputs.kernel_bm_arm64_release_tag }}
+      kernel_pvm_release_tag: ${{ steps.resolve.outputs.kernel_pvm_release_tag }}
+      guest_image_release_tag: ${{ steps.resolve.outputs.guest_image_release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Resolve dedicated asset Release tags
+        id: resolve
+        env:
+          INPUT_KERNEL_BM_AMD64_RELEASE_TAG: ${{ inputs.kernel_bm_amd64_release_tag }}
+          INPUT_KERNEL_BM_ARM64_RELEASE_TAG: ${{ inputs.kernel_bm_arm64_release_tag }}
+          INPUT_KERNEL_PVM_RELEASE_TAG: ${{ inputs.kernel_pvm_release_tag }}
+          INPUT_GUEST_IMAGE_RELEASE_TAG: ${{ inputs.guest_image_release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}" \
+             && -n "${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}" \
+             && -n "${INPUT_KERNEL_PVM_RELEASE_TAG}" \
+             && -n "${INPUT_GUEST_IMAGE_RELEASE_TAG}" ]]; then
+            KERNEL_BM_AMD64_RELEASE_TAG="${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}"
+            KERNEL_BM_ARM64_RELEASE_TAG="${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}"
+            KERNEL_PVM_RELEASE_TAG="${INPUT_KERNEL_PVM_RELEASE_TAG}"
+            GUEST_IMAGE_RELEASE_TAG="${INPUT_GUEST_IMAGE_RELEASE_TAG}"
+          else
+            eval "$(scripts/read-release-assets.sh)"
+            [[ -n "${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}" ]] && KERNEL_BM_AMD64_RELEASE_TAG="${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}"
+            [[ -n "${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}" ]] && KERNEL_BM_ARM64_RELEASE_TAG="${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}"
+            [[ -n "${INPUT_KERNEL_PVM_RELEASE_TAG}" ]] && KERNEL_PVM_RELEASE_TAG="${INPUT_KERNEL_PVM_RELEASE_TAG}"
+            [[ -n "${INPUT_GUEST_IMAGE_RELEASE_TAG}" ]] && GUEST_IMAGE_RELEASE_TAG="${INPUT_GUEST_IMAGE_RELEASE_TAG}"
+          fi
+          {
+            echo "kernel_bm_amd64_release_tag=${KERNEL_BM_AMD64_RELEASE_TAG}"
+            echo "kernel_bm_arm64_release_tag=${KERNEL_BM_ARM64_RELEASE_TAG}"
+            echo "kernel_pvm_release_tag=${KERNEL_PVM_RELEASE_TAG}"
+            echo "guest_image_release_tag=${GUEST_IMAGE_RELEASE_TAG}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "using BM amd64 Release ${KERNEL_BM_AMD64_RELEASE_TAG}"
+          echo "using BM arm64 Release ${KERNEL_BM_ARM64_RELEASE_TAG}"
+          echo "using PVM Release ${KERNEL_PVM_RELEASE_TAG}"
+          echo "using guest-image Release ${GUEST_IMAGE_RELEASE_TAG}"
+
+  prepare:
+    name: Resolve component matrix
+    runs-on: ubuntu-latest
+    needs:
+      - verify_versions
+      - resolve_asset_tags
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+      publish: ${{ steps.filter.outputs.publish }}
+    steps:
+      - name: Filter components
+        id: filter
+        env:
+          COMPONENTS: ${{ inputs.components }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ["COMPONENTS"].strip()
+          if raw == "all":
+              selected = None
+          else:
+              selected = {c.strip() for c in raw.split(",") if c.strip()}
+              if not selected:
+                  print("error: components is empty after parsing", file=sys.stderr)
+                  sys.exit(1)
+
+          known = {
+              "cube-egress",
+              "cube-egress-net",
+              "cube-s3lvol",
+              "cube-master",
+              "cubemastercli",
+              "cube-templatecenter",
+              "cubelet",
+              "cube-shim",
+              "cube-kernel",
+              "cube-guest",
+              "cube-agent",
+              "cube-pvm-host-bootstrap",
+              "cube-node-init",
+              "cube-wait-node-prep",
+              "cube-api",
+              "cube-ops",
+              "cube-proxy",
+              "webui",
+              "cube-lifecycle-manager",
+          }
+          if selected is not None:
+              unknown = sorted(selected - known)
+              if unknown:
+                  print(f"error: unknown component(s): {', '.join(unknown)}", file=sys.stderr)
+                  print(f"valid: {', '.join(sorted(known))}", file=sys.stderr)
+                  sys.exit(1)
+
+          def want(name: str) -> bool:
+              return selected is None or name in selected
+
+          defs = [
+              {
+                  "component": "cube-egress",
+                  "image": "cube-egress",
+                  "context": "CubeEgress",
+                  "dockerfile": "CubeEgress/Dockerfile",
+                  "cache_scope": "cube-egress",
+              },
+              {
+                  "component": "cube-egress-net",
+                  "image": "cube-egress-net",
+                  "context": "cube-egress-net-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-egress-net/Dockerfile",
+                  "cache_scope": "cube-egress-net",
+              },
+              {
+                  "component": "cube-s3lvol",
+                  "image": "cube-s3lvol",
+                  "context": ".",
+                  "dockerfile": "deploy/kubernetes/images/cube-s3lvol/Dockerfile",
+                  "cache_scope": "cube-s3lvol",
+                  "arches": ["amd64"],
+              },
+              {
+                  "component": "cube-master",
+                  "image": "cube-master",
+                  "context": ".",
+                  "dockerfile": "CubeMaster/docker/Dockerfile",
+                  "cache_scope": "cube-master",
+              },
+              {
+                  "component": "cubemastercli",
+                  "image": "cubemastercli",
+                  "context": ".",
+                  "dockerfile": "CubeMaster/docker/Dockerfile.cubemastercli",
+                  "cache_scope": "cubemastercli",
+              },
+              {
+                  "component": "cube-templatecenter",
+                  "image": "cube-templatecenter",
+                  "context": ".",
+                  "dockerfile": "CubeTemplateCenter/docker/Dockerfile",
+                  "cache_scope": "cube-templatecenter",
+              },
+              {
+                  "component": "cubelet",
+                  "image": "cubelet",
+                  "context": ".",
+                  "dockerfile": "Cubelet/Dockerfile",
+                  "cache_scope": "cubelet",
+              },
+              {
+                  "component": "cube-shim",
+                  "image": "cube-shim",
+                  "context": ".",
+                  "dockerfile": "CubeShim/Dockerfile",
+                  "cache_scope": "cube-shim",
+              },
+              {
+                  "component": "cube-kernel",
+                  "image": "cube-kernel",
+                  "context": "cube-kernel-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-kernel/Dockerfile",
+                  "cache_scope": "cube-kernel",
+              },
+              {
+                  "component": "cube-guest",
+                  "image": "cube-guest",
+                  "context": "cube-guest-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-guest/Dockerfile",
+                  "cache_scope": "cube-guest",
+              },
+              {
+                  "component": "cube-agent",
+                  "image": "cube-agent",
+                  "context": "cube-agent-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-agent/Dockerfile",
+                  "cache_scope": "cube-agent",
+              },
+              {
+                  "component": "cube-pvm-host-bootstrap",
+                  "image": "cube-pvm-host-bootstrap",
+                  "context": "cube-pvm-host-bootstrap-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-pvm-host-bootstrap/Dockerfile",
+                  "cache_scope": "cube-pvm-host-bootstrap",
+                  "arches": ["amd64"],
+              },
+              {
+                  "component": "cube-node-init",
+                  "image": "cube-node-init",
+                  "context": "cube-node-init-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-node-init/Dockerfile",
+                  "cache_scope": "cube-node-init",
+              },
+              {
+                  "component": "cube-wait-node-prep",
+                  "image": "cube-wait-node-prep",
+                  "context": "cube-wait-node-prep-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-wait-node-prep/Dockerfile",
+                  "cache_scope": "cube-wait-node-prep",
+              },
+              {
+                  "component": "cube-api",
+                  "image": "cube-api",
+                  "context": "CubeAPI",
+                  "dockerfile": "CubeAPI/Dockerfile",
+                  "cache_scope": "cube-api",
+              },
+              {
+                  "component": "cube-ops",
+                  "image": "cube-ops",
+                  "context": ".",
+                  "dockerfile": "CubeOps/Dockerfile",
+                  "cache_scope": "cube-ops",
+              },
+              {
+                  "component": "cube-proxy",
+                  "image": "cube-proxy",
+                  "context": "CubeProxy",
+                  "dockerfile": "CubeProxy/Dockerfile",
+                  "cache_scope": "cube-proxy",
+              },
+              {
+                  "component": "webui",
+                  # Registry repo name must match chart values.yaml (cube-webui).
+                  "image": "cube-webui",
+                  "context": ".",
+                  "dockerfile": "deploy/one-click/webui/Dockerfile",
+                  "cache_scope": "webui",
+              },
+              {
+                  "component": "cube-lifecycle-manager",
+                  "image": "cube-lifecycle-manager",
+                  "context": "cube-lifecycle-manager",
+                  "dockerfile": "cube-lifecycle-manager/Dockerfile",
+                  "cache_scope": "cube-lifecycle-manager",
+              },
+          ]
+          arches = [
+              {
+                  "arch": "amd64",
+                  "platform": "linux/amd64",
+                  "runner": "ubuntu-latest",
+              },
+              {
+                  "arch": "arm64",
+                  "platform": "linux/arm64",
+                  "runner": "ubuntu-24.04-arm",
+              },
+          ]
+          arch_by_name = {a["arch"]: a for a in arches}
+
+          build_include = []
+          publish_include = []
+          for item in defs:
+              if not want(item["component"]):
+                  continue
+              item_arches = item.get("arches") or [a["arch"] for a in arches]
+              publish_include.append(
+                  {
+                      "component": item["component"],
+                      "image": item["image"],
+                      "arches": " ".join(item_arches),
+                  }
+              )
+              build_item = {k: v for k, v in item.items() if k != "arches"}
+              for arch_name in item_arches:
+                  build_include.append({**build_item, **arch_by_name[arch_name]})
+
+          if not build_include:
+              print("error: no components selected for build", file=sys.stderr)
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"build={json.dumps({'include': build_include})}\n")
+              out.write(f"publish={json.dumps({'include': publish_include})}\n")
+          PY
+
+  build_images:
+    name: ${{ matrix.component }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: [verify_versions, resolve_asset_tags, prepare]
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.build) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent Cloud TCR (int)
+        uses: docker/login-action@v3
+        with:
+          registry: cube-sandbox-int.tencentcloudcr.com
+          username: ${{ secrets.TCR_INT_USERNAME }}
+          password: ${{ secrets.TCR_INT_PASSWORD }}
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage cube-kernel artifacts from Release
+        id: stage_kernel
+        if: matrix.component == 'cube-kernel'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+          KERNEL_BM_AMD64_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_bm_amd64_release_tag }}
+          KERNEL_BM_ARM64_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_bm_arm64_release_tag }}
+          KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_pvm_release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p cube-kernel-ctx/artifacts cube-kernel-ctx/scripts
+          rm -rf /tmp/cube-kernel-dl
+          mkdir -p /tmp/cube-kernel-dl
+
+          if [[ "${ARCH}" == "amd64" ]]; then
+            BM_RELEASE_TAG="${KERNEL_BM_AMD64_RELEASE_TAG}"
+          else
+            BM_RELEASE_TAG="${KERNEL_BM_ARM64_RELEASE_TAG}"
+          fi
+          PVM_RELEASE_TAG="${KERNEL_PVM_RELEASE_TAG}"
+
+          require_release() {
+            local tag="$1"
+            local label="$2"
+            if [[ -z "${tag}" ]]; then
+              echo "${label} release tag is empty" >&2
+              exit 1
+            fi
+            if ! gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "pinned ${label} Release not found: ${tag}" >&2
+              exit 1
+            fi
+            echo "using ${label} assets from dedicated Release ${tag}"
+          }
+
+          require_release "${BM_RELEASE_TAG}" "BM ${ARCH}"
+          require_release "${PVM_RELEASE_TAG}" "PVM"
+
+          mkdir -p /tmp/cube-kernel-dl/bm-meta /tmp/cube-kernel-dl/pvm-meta
+
+          gh release download "${BM_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-kernel-dl \
+            --pattern "vmlinux-${ARCH}"
+          test -f "/tmp/cube-kernel-dl/vmlinux-${ARCH}" \
+            || { echo "missing Release asset vmlinux-${ARCH} on ${BM_RELEASE_TAG}" >&2; exit 1; }
+          install -m 0644 "/tmp/cube-kernel-dl/vmlinux-${ARCH}" cube-kernel-ctx/artifacts/vmlinux-bm
+
+          gh release download "${BM_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-kernel-dl/bm-meta \
+            --pattern "kernel-metadata.json"
+          test -f /tmp/cube-kernel-dl/bm-meta/kernel-metadata.json \
+            || { echo "missing kernel-metadata.json on ${BM_RELEASE_TAG}" >&2; exit 1; }
+
+          # PVM guest kernel is amd64-only.
+          if [[ "${ARCH}" == "amd64" ]]; then
+            gh release download "${PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --dir /tmp/cube-kernel-dl \
+              --pattern "vmlinux-pvm-${ARCH}"
+            test -f "/tmp/cube-kernel-dl/vmlinux-pvm-${ARCH}" \
+              || { echo "missing Release asset vmlinux-pvm-${ARCH} on ${PVM_RELEASE_TAG}" >&2; exit 1; }
+            install -m 0644 "/tmp/cube-kernel-dl/vmlinux-pvm-${ARCH}" cube-kernel-ctx/artifacts/vmlinux-pvm
+          else
+            echo "no PVM guest kernel for ${ARCH}; building BM-only cube-kernel"
+          fi
+
+          if [[ "${PVM_RELEASE_TAG}" == "${BM_RELEASE_TAG}" ]]; then
+            cp /tmp/cube-kernel-dl/bm-meta/kernel-metadata.json \
+              /tmp/cube-kernel-dl/pvm-meta/kernel-metadata.json
+          else
+            gh release download "${PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --dir /tmp/cube-kernel-dl/pvm-meta \
+              --pattern "kernel-metadata.json"
+            test -f /tmp/cube-kernel-dl/pvm-meta/kernel-metadata.json \
+              || { echo "missing kernel-metadata.json on ${PVM_RELEASE_TAG}" >&2; exit 1; }
+          fi
+
+          eval "$(scripts/read-kernel-metadata.sh /tmp/cube-kernel-dl/bm-meta/kernel-metadata.json)"
+          BM_SOURCE_TAG="${KERNEL_BM_SOURCE_TAG}"
+          eval "$(scripts/read-kernel-metadata.sh /tmp/cube-kernel-dl/pvm-meta/kernel-metadata.json)"
+          PVM_SOURCE_TAG="${KERNEL_PVM_SOURCE_TAG}"
+
+          install -m 0755 \
+            deploy/kubernetes/images/scripts/component-entrypoint.sh \
+            cube-kernel-ctx/scripts/component-entrypoint.sh
+          echo "asset_tag_bm=${BM_SOURCE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "asset_tag_pvm=${PVM_SOURCE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "bm_source=${BM_SOURCE_TAG} pvm_source=${PVM_SOURCE_TAG} (releases bm=${BM_RELEASE_TAG} pvm=${PVM_RELEASE_TAG})"
+
+      - name: Stage cube-guest artifacts from Release
+        id: stage_guest
+        if: matrix.component == 'cube-guest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+          GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.guest_image_release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p cube-guest-ctx/package/cube-image cube-guest-ctx/scripts
+          rm -rf /tmp/cube-guest-dl
+          mkdir -p /tmp/cube-guest-dl
+
+          if [[ -z "${GUEST_IMAGE_RELEASE_TAG}" ]]; then
+            echo "guest_image_release_tag is empty" >&2
+            exit 1
+          fi
+          if ! gh release view "${GUEST_IMAGE_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "pinned guest-image Release not found: ${GUEST_IMAGE_RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+          gh release download "${GUEST_IMAGE_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-guest-dl \
+            --pattern "cube-guest-image-${ARCH}.tar.gz"
+          test -f "/tmp/cube-guest-dl/cube-guest-image-${ARCH}.tar.gz" \
+            || { echo "missing Release asset cube-guest-image-${ARCH}.tar.gz on ${GUEST_IMAGE_RELEASE_TAG}" >&2; exit 1; }
+
+          tar -xzf "/tmp/cube-guest-dl/cube-guest-image-${ARCH}.tar.gz" \
+            -C cube-guest-ctx/package/cube-image
+          echo "using guest assets from dedicated Release ${GUEST_IMAGE_RELEASE_TAG}"
+
+          test -f cube-guest-ctx/package/cube-image/cube-guest-image-cpu.img
+          test -f cube-guest-ctx/package/cube-image/version
+          test ! -f cube-guest-ctx/package/cube-image/agent-version \
+            || { echo "unexpected agent-version in guest assets (agent is separate)" >&2; exit 1; }
+          install -m 0755 \
+            deploy/kubernetes/images/scripts/component-entrypoint.sh \
+            cube-guest-ctx/scripts/component-entrypoint.sh
+          echo "asset_tag=${GUEST_IMAGE_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "guest_source=release-asset:${GUEST_IMAGE_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage cube-agent artifacts from Release
+        id: stage_agent
+        if: matrix.component == 'cube-agent'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p cube-agent-ctx/package/cube-agent cube-agent-ctx/scripts
+          rm -rf /tmp/cube-agent-dl
+          mkdir -p /tmp/cube-agent-dl
+
+          if ! gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "product Release not found for agent assets: ${IMAGE_TAG}" >&2
+            exit 1
+          fi
+          if ! gh release download "${IMAGE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-agent-dl \
+            --pattern "cube-agent-${ARCH}.tar.gz"; then
+            echo "missing Release asset cube-agent-${ARCH}.tar.gz on ${IMAGE_TAG}" >&2
+            exit 1
+          fi
+          tar -xzf "/tmp/cube-agent-dl/cube-agent-${ARCH}.tar.gz" \
+            -C cube-agent-ctx/package/cube-agent
+          echo "using agent assets from product Release ${IMAGE_TAG}"
+
+          test -f cube-agent-ctx/package/cube-agent/cube-agent.ext4
+          test -f cube-agent-ctx/package/cube-agent/version
+          install -m 0755 \
+            deploy/kubernetes/images/scripts/component-entrypoint.sh \
+            cube-agent-ctx/scripts/component-entrypoint.sh
+          echo "asset_tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "agent_source=release-asset:${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage cube-egress-net context
+        if: matrix.component == 'cube-egress-net'
+        run: |
+          set -euo pipefail
+          mkdir -p cube-egress-net-ctx/scripts
+          cp CubeEgress/scripts/cube-egress-iptables-init.sh \
+            cube-egress-net-ctx/scripts/cube-egress-iptables-init.sh
+          cp deploy/kubernetes/images/scripts/cube-egress-net-entrypoint.sh \
+            cube-egress-net-ctx/scripts/cube-egress-net-entrypoint.sh
+          chmod +x cube-egress-net-ctx/scripts/*.sh
+
+      - name: Stage cube-node-init context
+        if: matrix.component == 'cube-node-init'
+        run: |
+          set -euo pipefail
+          mkdir -p cube-node-init-ctx/scripts
+          for s in cube-node-init.sh wait-pvm-host.sh node-prep-lib.sh; do
+            install -m 0755 "deploy/kubernetes/images/scripts/${s}" \
+              "cube-node-init-ctx/scripts/${s}"
+          done
+
+      - name: Stage cube-wait-node-prep context
+        if: matrix.component == 'cube-wait-node-prep'
+        run: |
+          set -euo pipefail
+          mkdir -p cube-wait-node-prep-ctx/scripts
+          for s in node-prep-lib.sh wait-node-prep.sh write-node-prep-ready.sh; do
+            install -m 0755 "deploy/kubernetes/images/scripts/${s}" \
+              "cube-wait-node-prep-ctx/scripts/${s}"
+          done
+
+      - name: Stage cube-pvm-host-bootstrap context
+        id: stage_pvm_host
+        if: matrix.component == 'cube-pvm-host-bootstrap'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_pvm_release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p cube-pvm-host-bootstrap-ctx/scripts cube-pvm-host-bootstrap-ctx/artifacts
+          rm -rf /tmp/cube-pvm-host-dl
+          mkdir -p /tmp/cube-pvm-host-dl
+
+          scripts_src=deploy/kubernetes/images/scripts
+          for script in \
+            pvm-host-bootstrap.sh \
+            node-prep-lib.sh \
+            pvm-startup-gate-lib.sh \
+            pvm-startup-gate-reconcile.sh \
+            pvm-startup-gate-preflight.sh
+          do
+            install -m 0755 "${scripts_src}/${script}" \
+              "cube-pvm-host-bootstrap-ctx/scripts/${script}"
+          done
+
+          if [[ -z "${KERNEL_PVM_RELEASE_TAG}" ]]; then
+            echo "kernel_pvm_release_tag is empty" >&2
+            exit 1
+          fi
+          if ! gh release view "${KERNEL_PVM_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "pinned PVM Release not found: ${KERNEL_PVM_RELEASE_TAG}" >&2
+            exit 1
+          fi
+          echo "using PVM host packages from dedicated PVM Release ${KERNEL_PVM_RELEASE_TAG}"
+
+          gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-pvm-host-dl \
+            --pattern "*.rpm" || true
+          gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-pvm-host-dl \
+            --pattern "*.deb" || true
+
+          rpm_src=""
+          deb_src=""
+          shopt -s nullglob
+          for f in /tmp/cube-pvm-host-dl/*.rpm; do
+            base="$(basename "${f}")"
+            case "${base}" in
+              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
+                case "${base}" in
+                  *headers*) continue ;;
+                esac
+                rpm_src="${f}"
+                break
+                ;;
+            esac
+          done
+          for f in /tmp/cube-pvm-host-dl/*.deb; do
+            base="$(basename "${f}")"
+            case "${base}" in
+              linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb)
+                case "${base}" in
+                  *-dbg_*) continue ;;
+                esac
+                deb_src="${f}"
+                break
+                ;;
+            esac
+          done
+          shopt -u nullglob
+
+          [[ -n "${rpm_src}" ]] \
+            || { echo "missing main PVM host kernel RPM on ${KERNEL_PVM_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
+          [[ -n "${deb_src}" ]] \
+            || { echo "missing main PVM host kernel DEB on ${KERNEL_PVM_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
+
+          install -m 0644 "${rpm_src}" cube-pvm-host-bootstrap-ctx/artifacts/kernel-pvm-host.rpm
+          install -m 0644 "${deb_src}" cube-pvm-host-bootstrap-ctx/artifacts/linux-image-pvm-host.deb
+          echo "asset_tag=${KERNEL_PVM_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "staged rpm=$(basename "${rpm_src}") deb=$(basename "${deb_src}") from ${KERNEL_PVM_RELEASE_TAG}"
+
+      - name: Build and push per-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          # Push plain per-arch manifests (no provenance/SBOM attestations) so the
+          # publish_manifests step can combine them into a single clean multi-arch
+          # manifest list; attestations would add extra manifest entries that break
+          # `docker buildx imagetools create`.
+          provenance: false
+          build-args: |
+            CUBE_VERSION=${{ inputs.image_tag }}
+            CUBE_COMMIT=${{ steps.meta.outputs.commit }}
+            CUBE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CUBE_BUILDER_IMAGE=ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+            CUBE_PROXY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
+            OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
+            CUBE_KERNEL_BM_VERSION=${{ steps.stage_kernel.outputs.asset_tag_bm || inputs.image_tag }}
+            CUBE_KERNEL_PVM_VERSION=${{ steps.stage_kernel.outputs.asset_tag_pvm || inputs.image_tag }}
+          tags: |
+            ghcr.io/tencentcloud/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+            cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
+
+  publish_manifests:
+    name: ${{ matrix.component }} manifests
+    runs-on: ubuntu-latest
+    needs: [build_images, prepare]
+    if: >-
+      always() &&
+      needs.build_images.result == 'success' &&
+      github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent Cloud TCR (int)
+        uses: docker/login-action@v3
+        with:
+          registry: cube-sandbox-int.tencentcloudcr.com
+          username: ${{ secrets.TCR_INT_USERNAME }}
+          password: ${{ secrets.TCR_INT_PASSWORD }}
+
+      - name: Resolve manifest tags
+        id: tags
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          tags="${IMAGE_TAG}"
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="${tags} latest"
+          fi
+          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create multi-arch manifests
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHES: ${{ matrix.arches }}
+          # Bind step outputs to env vars instead of interpolating ${{ }} into the
+          # script body, so no expression value can ever be parsed as shell. The
+          # unquoted ${MANIFEST_TAGS} expansion below is deliberate word-splitting
+          # into individual tags.
+          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+        run: |
+          for image in \
+            "ghcr.io/tencentcloud/${IMAGE_NAME}" \
+            "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"; do
+            for tag in ${MANIFEST_TAGS}; do
+              sources=()
+              for arch in ${ARCHES}; do
+                sources+=("${image}:${IMAGE_TAG}-${arch}")
+              done
+              docker buildx imagetools create -t "${image}:${tag}" "${sources[@]}"
+            done
+          done
+
+  # Sync per-arch and multi-arch images from TCR int to TCR cn on a China-side
+  # self-hosted runner (crane pull then push; avoids streaming copy stalls).
+  # TCR int already receives the release images during the build, and using it
+  # here avoids pulling large layers from GHCR into China.
+  # This ARC runner set requires a job container.
+  sync_cn:
+    name: ${{ matrix.component }} sync to TCR CN
+    runs-on: arc-2c4g-ctd-gz
+    container:
+      image: ubuntu:24.04
+    needs: [publish_manifests, prepare]
+    if: >-
+      always() &&
+      needs.publish_manifests.result == 'success' &&
+      github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
+    # Job containers default to `sh` (dash); pipefail / [[ ]] need bash.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # Official archive/security HTTP is currently unreachable; this job
+          # runs on a Tencent Cloud GZ runner, so use Tencent Cloud mirrors.
+          mirror="http://mirrors.tencent.com"
+          shopt -s nullglob
+          for src in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            sed -i \
+              -e "s|http://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              -e "s|https://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              "${src}"
+          done
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install crane
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "${arch}" in
+            x86_64|amd64) crane_arch=x86_64 ;;
+            aarch64|arm64) crane_arch=arm64 ;;
+            *) echo "unsupported arch: ${arch}" >&2; exit 1 ;;
+          esac
+          bin_dir="${RUNNER_TEMP}/crane-bin"
+          mkdir -p "${bin_dir}"
+          curl -fsSL \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${crane_arch}.tar.gz" \
+            | tar -xz -C "${bin_dir}" crane
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/crane" version
+
+      - name: Log in to registries
+        env:
+          TCR_INT_USERNAME: ${{ secrets.TCR_INT_USERNAME }}
+          TCR_INT_PASSWORD: ${{ secrets.TCR_INT_PASSWORD }}
+          TCR_CN_USERNAME: ${{ secrets.TCR_CN_USERNAME }}
+          TCR_CN_PASSWORD: ${{ secrets.TCR_CN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "${TCR_INT_PASSWORD}" | crane auth login cube-sandbox-int.tencentcloudcr.com \
+            -u "${TCR_INT_USERNAME}" --password-stdin
+          echo "${TCR_CN_PASSWORD}" | crane auth login cube-sandbox-cn.tencentcloudcr.com \
+            -u "${TCR_CN_USERNAME}" --password-stdin
+
+      - name: Resolve manifest tags
+        id: tags
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          tags="${IMAGE_TAG}"
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="${tags} latest"
+          fi
+          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Sync images to TCR CN
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHES: ${{ matrix.arches }}
+          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+          CRANE_SYNC_ATTEMPTS: "3"
+          # Split pull/push instead of `crane copy` streaming: concurrent
+          # pull+push was getting rwnd-limited / unexpected EOF against TCR CN.
+          CRANE_PULL_TIMEOUT: 20m
+          CRANE_PUSH_TIMEOUT: 20m
+        run: |
+          set -euo pipefail
+          src="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          dst="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          work_dir="${RUNNER_TEMP:-/tmp}/crane-sync"
+          mkdir -p "${work_dir}"
+
+          sync_image() {
+            local from="$1"
+            local to="$2"
+            local attempt
+            local tarball="${work_dir}/image.tar"
+            for attempt in $(seq 1 "${CRANE_SYNC_ATTEMPTS}"); do
+              echo "Syncing ${from} -> ${to} (attempt ${attempt}/${CRANE_SYNC_ATTEMPTS})"
+              rm -f "${tarball}"
+              if timeout "${CRANE_PULL_TIMEOUT}" crane pull "${from}" "${tarball}" \
+                && timeout "${CRANE_PUSH_TIMEOUT}" crane push "${tarball}" "${to}"; then
+                rm -f "${tarball}"
+                return 0
+              fi
+              rm -f "${tarball}"
+              if [[ "${attempt}" == "${CRANE_SYNC_ATTEMPTS}" ]]; then
+                echo "Failed to sync ${from} -> ${to}" >&2
+                return 1
+              fi
+              sleep "$((attempt * 10))"
+            done
+          }
+
+          for arch in ${ARCHES}; do
+            sync_image "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
+          done
+          for tag in ${MANIFEST_TAGS}; do
+            sync_image "${src}:${tag}" "${dst}:${tag}"
+          done

@@ -1,0 +1,217 @@
+# HTTPS & Domain Resolution
+
+This guide explains how sandbox access domains work in Cube Sandbox and how to resolve common **HTTPS certificate** and **DNS resolution** issues.
+
+> **Note:** TLS configuration only affects how clients reach CubeProxy. `E2B_API_URL` always points to the **Cube API Server** (default port `3000`) — a separate component from CubeProxy.
+
+---
+
+## How Sandbox Domains Work
+
+When an E2B client accesses a sandbox, the domain name is **dynamically generated** using the following format:
+
+```
+<sandbox-service-port>-<sandboxId>.<domain>
+```
+
+For example:
+
+```
+49983-1aa1fae8fb364edaa8203a7481995b4d.cube.app
+```
+
+Where:
+- `sandbox-service-port`: the port your sandbox application listens on (e.g. `49999`)
+- `sandboxId`: the unique sandbox ID
+- `domain`: the base domain, defaults to `cube.app`, customizable via `--sandbox-domain`
+
+Because the `sandboxId` part changes dynamically for every sandbox, **the network environment where the E2B client runs must support wildcard DNS resolution** — i.e., `*.<domain>` must resolve to the IP of the machine running CubeProxy.
+
+### Built-in CoreDNS in One-Click Install (for Quick Start)
+
+The Cube one-click install script starts a **CoreDNS** service on the installation node that automatically handles wildcard resolution for `*.cube.app`. This lets you experience the full workflow on that machine without any extra DNS setup.
+
+> **Note:** The built-in CoreDNS is intended for local/quick-start use only — it is not suitable for production or multi-machine shared deployments.
+
+### Production: Custom Domain + Your Own DNS
+
+For production deployments, use your own domain and configure a wildcard DNS record:
+
+```
+*.your.domain.com  →  <IP of the node running CubeProxy>
+```
+
+Then tell the Cube API Server to use that domain at startup:
+
+```bash
+# CLI flag
+./cube-api --sandbox-domain your.domain.com
+
+# Or via environment variable
+export CUBE_API_SANDBOX_DOMAIN=your.domain.com
+./cube-api
+```
+
+With this in place, the `domain` field in API responses will return `your.domain.com`, allowing the E2B SDK to correctly construct sandbox access URLs.
+
+---
+
+## Path-Based Quick Access (No DNS / Cert)
+
+CubeProxy also accepts a **path-based** form that routes by URL path instead of `Host` header. It is intended for local demos, internal ad-hoc sharing, or any environment where wildcard DNS and TLS are inconvenient to set up.
+
+```
+http://<cube-proxy-host>:<http-port>/sandbox/<sandbox-id>/<container-port>/<rest>?<query>
+```
+
+For example, a sandbox `abc123` exposing port `49999` reachable through CubeProxy at `10.0.0.5:80`:
+
+```
+http://10.0.0.5/sandbox/abc123/49999/
+http://10.0.0.5/sandbox/abc123/49999/health
+http://10.0.0.5/sandbox/abc123/49999/api/v1/items?limit=10
+```
+
+CubeProxy strips the `/sandbox/<id>/<port>` prefix before forwarding the request, so the upstream sandbox application sees the URI it would normally see at the root. WebSocket upgrade is supported (the proxy preserves the `Upgrade` / `Connection` headers in this location).
+
+To help apps cooperate with the prefix, CubeProxy also:
+
+- Sets `X-Forwarded-Prefix: /sandbox/<id>/<port>` on the upstream request.
+- Rewrites root-relative `Location` headers in responses back under `/sandbox/<id>/<port>/...` (so server-side redirects to e.g. `/login` keep working).
+- Scopes upstream cookies sent with `Path=/` to `Path=/sandbox/<id>/<port>/` to avoid leaking across sandboxes that share the same CubeProxy host.
+
+When to use which:
+
+- **Host-based mode** (`<port>-<id>.<domain>`): preferred for SPAs and any frontend that loads assets via root-absolute paths (e.g. `/static/app.js`). CubeProxy does not rewrite HTML bodies, so those absolute paths would otherwise miss the prefix.
+- **Path-based mode** (`/sandbox/<id>/<port>/...`): preferred for HTTP APIs, simple HTML, quick previews, and one-off sharing where you do not want to manage DNS or certificates.
+
+Both modes coexist on every CubeProxy instance and share the same Redis-backed routing metadata; no additional configuration is required to enable the path form.
+
+## Header-Based Routing for E2B SDKs (No DNS)
+
+CubeProxy has a third, fallback routing source for the official E2B SDKs: when the `Host` header carries no `<port>-<sandbox-id>.<domain>` attributes, it reads the `E2b-Sandbox-Id` (required) and `E2b-Sandbox-Port` (optional, defaults to `49983`) request headers instead. E2B SDKs that read `E2B_SANDBOX_URL` send these headers on sandbox data-plane requests, so they can target a CubeProxy IP directly without wildcard DNS.
+
+Host-based routing keeps priority, so wildcard-domain traffic is unaffected. Like path mode, this exposes the whole data plane on the plaintext listener — trusted networks only. See [E2B SDKs on a fixed address: header mode](./multi-node-deploy.md#e2b-sdks-on-a-fixed-address-header-mode) for the client configuration.
+
+## Customizing the Host Seen by Sandbox Services
+
+Some web frameworks validate the HTTP `Host`, while Cube public URLs use
+`<port>-<sandbox-id>.<domain>` by default. Set the E2B-compatible
+`network.maskRequestHost` option at sandbox creation time to customize the Host
+CubeProxy forwards to user services:
+
+```python
+from cubesandbox import Sandbox
+
+sandbox = Sandbox.create(
+    network={
+        "mask_request_host": "localhost:${PORT}",
+    },
+)
+```
+
+`${PORT}` is expanded per request using the sandbox service port parsed from
+the public URL or path route:
+
+```text
+port 3000 -> Host: localhost:3000
+port 8080 -> Host: localhost:8080
+```
+
+The external URL, DNS, and TLS SNI remain unchanged. When masking is applied,
+CubeProxy preserves the original request Host in `X-Forwarded-Host`. The same
+behavior applies to host-based routes, path-based routes, and user-service
+WebSocket handshakes.
+
+`maskRequestHost` is a per-sandbox, create-only option. Envd port `49983` is
+exempt so commands, files, and PTY protocols keep their existing authority.
+Requests sent directly to a SandboxIP or node HostPort bypass CubeProxy and are
+not rewritten.
+
+---
+
+## gRPC Ingress (Plaintext HTTP/2)
+
+CubeProxy also exposes a dedicated listener for sandbox gRPC services. The default port is `9090` and can be changed via `CUBE_PROXY_GRPC_PORT` in one-click deployments.
+
+Clients dial the CubeProxy IP over plaintext HTTP/2 and identify the target sandbox with the gRPC `:authority` pseudo-header, using the same `<container-port>-<sandbox-id>` format as host-based HTTP routing:
+
+```
+<container-port>-<sandbox-id>
+```
+
+For example, to reach sandbox `abc123` on container port `49983` through CubeProxy at `10.0.0.5`:
+
+```
+dial: 10.0.0.5:9090
+:authority: 49983-abc123
+```
+
+This mode is intended for gRPC clients that cannot rely on wildcard DNS or TLS on CubeProxy. It reuses the same Redis-backed routing metadata as host-based HTTP routing.
+
+When a sandbox is created with `network.allow_public_traffic = false`, the same
+`e2b-traffic-access-token` / `cube-traffic-access-token` checks apply on this
+listener too. Pass the token as gRPC metadata (or the equivalent request header)
+on every call; see [Restrict Public Access](./restrict-public-access.md).
+
+---
+
+## HTTPS Certificate Configuration
+
+CubeProxy serves both **HTTPS (port 443) and HTTP (port 80)** out of the box. The E2B SDK uses HTTPS by default. The one-click install pre-installs a `cube.app` test certificate so you can try HTTPS immediately.
+
+To use a custom domain or production certificate, choose one of the options below:
+
+### Option A — mkcert (Local Dev Quick Setup)
+
+`mkcert` generates a locally-trusted certificate for a custom hostname in seconds:
+
+```bash
+mkcert -install
+mkcert <your-host-ip-or-domain>
+```
+
+Set `SSL_CERT_FILE` so the E2B SDK trusts the generated CA:
+
+```bash
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+```
+
+> mkcert certificates are only trusted on machines where `mkcert -install` has been run. Not suitable for production or shared deployments.
+
+### Option B — Your Own Certificate / Domain (Production)
+
+Edit CubeProxy's `nginx.conf` to use your certificate and private key:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name your.domain.com;
+
+    ssl_certificate     /path/to/your/cert.pem;
+    ssl_certificate_key /path/to/your/key.pem;
+}
+```
+
+Also pass `--sandbox-domain` to the Cube API Server to publish the correct domain in API responses (see the "Production: Custom Domain" section above).
+
+### Option C — HTTPS-Only (Disable HTTP)
+
+By default, CubeProxy listens on both HTTP and HTTPS. To disable the HTTP port entirely, remove the HTTP server block from CubeProxy's `nginx.conf` and drop the corresponding port mapping in `docker-compose.yaml`.
+
+> The E2B SDK only uses HTTPS, so disabling HTTP has no impact on SDK-based clients.
+
+---
+
+## Dev-Only Alternative: e2b-dev-sidecar
+
+If you are experimenting with Cube in a local development environment and want to skip both wildcard DNS setup and self-signed certificate trust issues, the **e2b-dev-sidecar** approach is the easiest option.
+
+It starts a lightweight local proxy that intercepts E2B SDK data-plane requests and rewrites the `Host` header before forwarding them to CubeProxy. This means:
+
+- **No wildcard DNS needed**: no `*.cube.app` record required on the developer machine
+- **No certificate trust needed**: the sidecar skips server certificate verification by default (`CUBE_REMOTE_PROXY_VERIFY_SSL=false`)
+
+See: [e2b-dev-sidecar example](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
+
+> **Note:** e2b-dev-sidecar is a minimal dev-only implementation and is not intended for production use.

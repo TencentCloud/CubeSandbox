@@ -1,0 +1,107 @@
+{
+  "title": "模板",
+  "subtitle": "可复用的快照，作为每个沙箱的启动基础。",
+  "noTemplates": "暂无模板。请使用 CLI 或 SDK 发布模板。",
+  "tabs": {
+    "list": "模板列表",
+    "compat": "兼容性"
+  },
+  "compat": {
+    "banner": "{{count}} 个模板需要重建。节点升级后，用它们新建沙箱可能失败。请打开模板，点击「重建模板」。",
+    "view": "去重建",
+    "openRebuild": "打开并重建",
+    "driftHint": "仍可直接创建沙箱。如果想用节点上的新环境，再点「重建模板」。",
+    "status": {
+      "OK": "可用",
+      "STALE": "可用",
+      "UNKNOWN": "需重建",
+      "MISSING": "此节点没有副本"
+    },
+    "kpi": {
+      "staleTemplates": "需重建的模板",
+      "staleReplicas": "需重建的副本",
+      "affectedNodes": "涉及节点",
+      "missingReplicas": "缺少副本",
+      "unknownReplicas": "需重建的副本",
+      "driftReplicas": "环境已更新（可选重建）"
+    }
+  },
+  "col": {
+    "instance": "实例类型",
+    "created": "创建时间",
+    "version": "版本",
+    "image": "镜像",
+    "jobID": "Job ID"
+  },
+  "instanceDefault": "标准",
+  "create": {
+    "button": "新建模板",
+    "title": "新建模板",
+    "templateID": "Template ID",
+    "required": "必填",
+    "image": "镜像",
+    "imageHint": "容器镜像地址，例如 registry.example.com/code:latest；明文 HTTP 仓库请加 http:// 前缀",
+    "alias": "别名",
+    "aliasHint": "模板的稳定可读别名（小写字母、数字、连字符，≤64 字符），沙箱可用别名引用而非生成的 Template ID。",
+    "instanceType": "实例类型",
+    "instanceTypeHint": "留空则使用默认值（标准）。",
+    "cancel": "取消",
+    "submit": "创建",
+    "creating": "创建中…",
+    "error": "创建失败，请重试。",
+    "writableLayerSize": "可写层大小",
+    "writableLayerSizeHint": "例如 1G、2G。必填。",
+    "exposedPorts": "暴露端口",
+    "exposedPortsHint": "多个端口以英文逗号分隔，例如 49983,9000。",
+    "exposedPortsError": "端口必须为 1-65535 之间的数字。",
+    "probePort": "健康探测端口",
+    "probePath": "健康探测路径",
+    "probePathHint": "",
+    "probeAutoSyncHint": "",
+    "cpu": "CPU",
+    "cpuHint": "毫核，例如 2000 表示 2 vCPU。",
+    "memory": "内存",
+    "memoryHint": "MiB，例如 2000。",
+    "env": "环境变量",
+    "envHint": "每行一条，格式为 KEY=VALUE。",
+    "forbidInternetAccess": "禁止公网访问",
+    "advanced": {
+      "show": "展开高级选项",
+      "hide": "收起高级选项"
+    },
+    "useS3Backend": "S3 存储后端",
+    "networkType": "网络模式",
+    "networkTypeHint": "例如 tap，留空使用集群默认值。",
+    "nodes": "分发节点",
+    "nodesHint": "限制仅分发到这些节点 ID 或主机 IP，逗号分隔。留空则由 CubeMaster 自动选择健康节点。",
+    "nodesPlaceholder": "node-1,10.0.0.5（留空自动选择）",
+    "command": "覆盖 ENTRYPOINT",
+    "commandHint": "覆盖容器 ENTRYPOINT，每行一个参数。",
+    "args": "覆盖 CMD 参数",
+    "argsHint": "覆盖容器 CMD 参数，每行一个参数。",
+    "dns": "DNS 服务器",
+    "dnsHint": "每行一个或以逗号分隔。",
+    "allowOut": "允许出站（CIDR）",
+    "allowOutHint": "出口策略允许的 CIDR，每行一个或以逗号分隔。",
+    "denyOut": "拒绝出站（CIDR）",
+    "denyOutHint": "出口策略拒绝的 CIDR，每行一个或以逗号分隔。",
+    "registry": "私有镜像仓库",
+    "registryUsername": "仓库用户名",
+    "registryPassword": "仓库密码",
+    "withCubeCa": "将 CubeEgress CA 写入 rootfs"
+  },
+  "delete": {
+    "button": "删除模板",
+    "title": "删除模板",
+    "confirmDesc": "确定要删除模板",
+    "confirmDescSuffix": "吗？此操作不可撤销。",
+    "cancel": "取消",
+    "confirm": "确认删除",
+    "deleting": "删除中…"
+  },
+  "errors": {
+    "templateInUse": "该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。",
+    "buildInProgress": "模板正在构建中，请等待构建完成后再删除。",
+    "cleanupMissing": "模板清理信息不完整，无法自动删除，请联系管理员。"
+  }
+}

@@ -1,0 +1,13 @@
+version: "3"
+services:
+  coredns:
+    image: __COREDNS_IMAGE__
+    container_name: __COREDNS_CONTAINER__
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -conf
+      - /etc/coredns/Corefile
+    volumes:
+      - __COREDNS_DIR__/Corefile:/etc/coredns/Corefile:ro
+      - __COREDNS_DIR__/resolv.conf.upstream:/etc/resolv.conf:ro

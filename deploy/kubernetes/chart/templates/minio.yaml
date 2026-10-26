@@ -1,0 +1,126 @@
+{{- if eq (include "cube.minioBuiltinEnabled" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.minioName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  clusterIP: None
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+  ports:
+    - name: minio
+      port: {{ .Values.minio.port | default 9000 }}
+      targetPort: minio
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cube.minioName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "cube.minioName" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: minio
+          image: {{ include "cube.image" .Values.minio.image | quote }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: minio-root-password
+          ports:
+            - name: minio
+              containerPort: 9000
+          startupProbe:
+            httpGet:
+              path: /minio/health/live
+              port: minio
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: minio
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: minio
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          {{- if .Values.minio.persistence.enabled }}
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          {{- end }}
+          {{- with .Values.minio.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if and .Values.minio.persistence.enabled (or .Values.minio.persistence.hostPath .Values.minio.persistence.existingClaim) }}
+      volumes:
+        - name: minio-data
+          {{- if .Values.minio.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.minio.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.minioPVCName" . }}
+          {{- end }}
+      {{- end }}
+  {{- if and .Values.minio.persistence.enabled (not .Values.minio.persistence.hostPath) (not .Values.minio.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: minio-data
+        labels:
+          app.kubernetes.io/name: {{ include "cube.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
+          app.kubernetes.io/component: minio
+      spec:
+        accessModes:
+          {{- toYaml .Values.minio.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size | quote }}
+        volumeMode: Filesystem
+        {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.minio.persistence) -}}
+        {{- if $sc }}
+        storageClassName: {{ $sc | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,105 @@
+# E2B Python SDK versions this suite has been validated against.
+#
+# Nothing in this repository parses this file — it is read by people, and the
+# lines are written as pip arguments only so they can be pasted straight into
+# `pip install` — with one exception, called out on the row itself: a pairing
+# that sits below `e2b-code-interpreter`'s declared floor needs a constraint
+# override, since plain pip refuses to resolve it. Each line names one package
+# set, validated unless the section it sits under says otherwise (see "Not yet
+# validated" below); pair
+# `e2b-code-interpreter` with `e2b` when the line should cover the `run_code`
+# cases, since those need the interpreter package (a line pinning only `e2b`
+# must deselect them: -m "(smoke or p0) and not requires_code_interpreter" —
+# and note the deselect only starts doing real work once the selection widens
+# past smoke/p0, where the p1 lifecycle cases live; see the README).
+#
+# Purpose: give consumers a stated compatibility range per CubeSandbox release
+# instead of leaving them to discover breakage in production. Install one line
+# into a fresh virtualenv, run the suite (see "E2B SDK Compatibility" in the
+# README), and record the outcome here when cutting a release.
+
+# --- Validated against CubeSandbox v0.5.1 (release, commit a164417) -----------
+# By a downstream consumer, 2026-07-22: commands.run, files.write, background +
+# wait, on_stdout streaming. The first row is that consumer's production pairing
+# and has carried real traffic since.
+#
+# NOTE: the pairing below is *not* plain-pip-installable — 2.21.0 is under the
+# interpreter package's declared floor of 2.26.0, so it resolves only under a
+# constraint override (see "The two E2B packages do not agree" below). It is
+# recorded because it runs in production, not as a command to copy blindly.
+e2b==2.21.0 e2b-code-interpreter==2.8.1
+#
+# The two rows below were validated by the same consumer in the same 2026-07-22
+# pass and over the same surface, with one difference worth stating: they pin
+# only the core SDK, so that pass ran with the interpreter-dependent cases
+# deselected (-m "... and not requires_code_interpreter") and says nothing about
+# run_code on those cores. 2.29.5 is the core that consumer moved its own pin to
+# on 2026-07-27 once the regression pass was clean; 2.26.0 is recorded because
+# it is the interpreter package's declared floor, which makes it the pairing
+# plain pip resolves and the one the README uses as its example.
+e2b==2.26.0
+e2b==2.29.5
+
+# --- Not yet validated by anyone --------------------------------------------
+# The highest candidate worth validating before the next release: 2.38.0 is
+# already known bad (see below) and 2.37.1 is the last core the current
+# interpreter package can pair with, so it is the ceiling, not 2.35.0.
+e2b==2.37.1
+
+# --- The two E2B packages do not agree with each other -----------------------
+# Worth stating before the individual pairings, because the packages' own
+# metadata does not describe the working set in either direction:
+#
+#   * `e2b-code-interpreter` 2.8.1 and 2.9.0 both declare `e2b>=2.26.0,<3.0.0`.
+#     The pairing validated against CubeSandbox v0.5.1 is 2.8.1 with e2b
+#     **2.21.0** — below its own floor. It is installable only by overriding the
+#     constraint (a downstream consumer runs it in production with
+#     `[tool.uv] override-dependencies`), and the run_code surface works.
+#     So the declared floor is stricter than reality.
+#   * In the other direction the declared range is too *loose*: 2.9.0 accepts
+#     any `e2b<3.0.0`, but calls `get_transport(config, http2=False)`, which
+#     e2b dropped in 2.38.0 — inside the range it claims to support (below).
+#
+# Net: resolving the two packages by their metadata alone can produce both a
+# combination that is rejected but works, and one that is accepted but crashes
+# at client construction. Pin the pair explicitly; do not let a resolver pick.
+
+# --- Known bad ---------------------------------------------------------------
+# Kept as a record rather than a target.
+#
+# 1) e2b 2.26 / 2.29 against CubeSandbox v0.5.1-rc5: commands.run hung silently
+#    and the SDK's own timeout did not fire. Fixed by the v0.5.1 release, with
+#    envd self-reporting 0.5.11 on BOTH builds — which is why compatibility has
+#    to be stated per CubeSandbox release and cannot be derived from envd's
+#    version string.
+#
+# 2) e2b >= 2.38.0 paired with e2b-code-interpreter 2.9.0:
+#       TypeError: get_transport() got an unexpected keyword argument 'http2'
+#    This is a break between the two E2B packages, not a CubeSandbox
+#    incompatibility. e2b 2.38.0 replaced the httpx transport with a pyqwest one
+#    and dropped the `http2` parameter (`e2b/api/client_sync/__init__.py`), while
+#    e2b-code-interpreter 2.9.0 still calls `get_transport(config, http2=False)`
+#    (`code_interpreter_sync.py:84`, `code_interpreter_async.py:89`). Verified
+#    signatures: 2.29.5 / 2.32.0 / 2.35.0 / 2.36.0 / 2.37.0 / 2.37.1 all accept
+#    `http2`; 2.38.0 does not. So the last interpreter-compatible core is 2.37.1.
+#
+#    Re-confirm when a new e2b minor ships — one clean virtualenv per version,
+#    no live backend needed, seconds per version:
+#
+#      for v in 2.37.1 2.38.0 <new>; do
+#        python3 -m venv "/tmp/e2b-$v" && "/tmp/e2b-$v/bin/pip" -q install "e2b==$v"
+#        printf '%s ' "$v"
+#        expr='import inspect, e2b.api.client_sync as c'
+#        expr="$expr; print(inspect.signature(c.get_transport))"
+#        "/tmp/e2b-$v/bin/python" -c "$expr"
+#      done
+#
+#    A signature still carrying `http2` means e2b-code-interpreter 2.9.0 works
+#    with that core; a signature without it means this break applies.
+#
+#    Worth checking separately when a compatible pair appears: the interpreter
+#    forced HTTP/1.1 on purpose — under HTTP/2 multiplexing a client disconnect
+#    from the streaming /execute endpoint may not reach the server, leaving
+#    long-running executions uncancellable. 2.38.0 lets ALPN pick the version,
+#    so that behaviour needs a look against CubeProxy/envd rather than being
+#    assumed harmless.

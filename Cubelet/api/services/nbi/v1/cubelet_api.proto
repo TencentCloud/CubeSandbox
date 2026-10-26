@@ -1,0 +1,27 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+import "services/errorcode/v1/errorcode.proto";
+
+package cubelet.services.cubebox.v1;
+option go_package="github.com/tencentcloud/CubeSandbox/Cubelet/api/services/nbi/v1;nbi";
+
+// Service for machine level operations.
+service CubeLet {
+    // Initialize the host, destroy all of the container and initialize metadata.
+    // This is a dangerous operation.
+    rpc InitHost(InitRequest) returns (InitResponse) {}
+}
+
+message InitRequest {
+    string requestID = 1;
+}
+
+message InitResponse {
+    string requestID = 1;
+    cubelet.services.errorcode.v1.ErrorCode code = 2;
+    string Message = 3;
+    map<string, bytes> ext_info = 4;
+}

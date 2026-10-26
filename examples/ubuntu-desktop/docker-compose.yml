@@ -1,0 +1,11 @@
+services:
+  desktop:
+    build: .
+    image: cube-ubuntu-desktop:local
+    container_name: cube-ubuntu-desktop
+    shm_size: 1gb
+    cap_add:
+      - SYS_TTY_CONFIG
+    ports:
+      - "6080:6080"
+      - "49983:49983"

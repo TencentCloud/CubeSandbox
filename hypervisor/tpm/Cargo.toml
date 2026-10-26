@@ -1,0 +1,14 @@
+[package]
+name = "tpm"
+edition = "2021"
+authors = ["Microsoft Authors"]
+license = "Apache-2.0"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1.0.86"
+byteorder = "1.4.3"
+libc = "0.2.133"
+log = "0.4.14"
+thiserror = "1.0.30"
+vmm-sys-util = "0.12.1"

@@ -1,0 +1,96 @@
+name: Terraform Deployer Validate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'deploy/one-click/terraform/**'
+      # The deployer also depends on the release-bundle builder and the
+      # component Dockerfile/package contexts it assembles. Changes there can
+      # break bundle layout or image builds, so validate them too (the
+      # package-layout dry run below covers the wiring).
+      - 'deploy/one-click/build-release-bundle.sh'
+      - 'deploy/one-click/build-release-bundle-builder.sh'
+      - 'deploy/one-click/lib/**'
+      - 'deploy/one-click/tests/**'
+      - 'deploy/one-click/CubeAPI/**'
+      - 'deploy/one-click/CubeMaster/**'
+      - 'deploy/scripts/docker-install-volume-deps.sh'
+      - 'deploy/one-click/webui/**'
+      - 'deploy/one-click/cubeproxy/**'
+      - 'CubeProxy/Dockerfile'
+      # bump-image.sh is the single source of truth for the hard-coded image
+      # tags this deployer bakes in; test_bump_image.sh guards it.
+      - 'scripts/bump-image.sh'
+      - '.github/workflows/terraform-validate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: fmt + validate + shellcheck (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          # Pin to the same version create.sh installs (ensure_terraform's
+          # TERRAFORM_VERSION) so `fmt -check` / `validate` in CI match what users
+          # actually run, instead of floating to the latest release.
+          terraform_version: 1.15.6
+          terraform_wrapper: false
+
+      - name: Install shellcheck
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Validate the Tencent Cloud deployer
+        shell: bash
+        working-directory: deploy/one-click/terraform/tencentcloud
+        # REQUIRE_TOOLS=1: terraform + shellcheck are installed above, so a
+        # missing tool here means a broken setup step and must fail the build
+        # rather than silently skip its checks.
+        run: REQUIRE_TOOLS=1 ./validate.sh
+
+      # Cloud-free one-click test suite (deploy/one-click/tests/test_*.sh).
+      # Every script is self-contained and needs no docker/cloud; terraform and
+      # shellcheck are installed above and python3 ships with the runner. Loop so
+      # new test_*.sh are picked up automatically instead of drifting out of CI.
+      - name: One-click deployer tests
+        shell: bash
+        run: |
+          shopt -s nullglob
+          status=0
+          tests=(deploy/one-click/tests/test_*.sh)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error::no deploy/one-click/tests/test_*.sh found"
+            exit 1
+          fi
+          for t in "${tests[@]}"; do
+            echo "::group::${t}"
+            if bash "${t}"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error file=${t}::${t} failed"
+              status=1
+            fi
+          done
+          exit "${status}"
