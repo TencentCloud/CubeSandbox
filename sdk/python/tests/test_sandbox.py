@@ -3018,6 +3018,7 @@ class TestTemplateAPI:
             Template.build(
                 image="registry.example.com/app:latest",
                 writable_layer_size="20Gi",
+                backend="s3",
                 network_type="tap",
                 nodes=["node-a", "10.0.0.12"],
                 registry_username="pull-user",
@@ -3036,6 +3037,7 @@ class TestTemplateAPI:
             json={
                 "image": "registry.example.com/app:latest",
                 "writableLayerSize": "20Gi",
+                "backend": "s3",
                 "networkType": "tap",
                 "nodes": ["node-a", "10.0.0.12"],
                 "registryUsername": "pull-user",
