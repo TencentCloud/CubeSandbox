@@ -1376,6 +1376,8 @@ func TestRunContainerPersistsShimIntentBeforeTheSpawn(t *testing.T) {
 	}
 	ci := sb.FirstContainer()
 	ci.IsPod = true
+	// No orphan shim on this host: keep the reap off the real /proc.
+	withFakeShimEnv(t, t.TempDir(), true)
 
 	mgr := &fakeCubeboxAPI{cb: sb}
 	spawnErr := errors.New("spawn refused by the test")
@@ -1411,6 +1413,67 @@ func TestRunContainerPersistsShimIntentBeforeTheSpawn(t *testing.T) {
 	assert.False(t, sb.Endpoint.ShimSpawned, "a handled failure must not leave a record that blocks cleanup")
 	assert.True(t, sb.Endpoint.ShimSpawnedAt.IsZero())
 	assert.Equal(t, 2, mgr.saveCalls)
+}
+
+// A failed NewTask leaves the shim containerd started running, because the
+// dead-shim cleanup cannot chdir into the bundle it has just removed. The
+// create step has to reap it: for the pod, and for a workload container too,
+// whose shim containerd starts with the container's own id.
+func TestRunContainerReapsOrphanShimOnFailedNewTask(t *testing.T) {
+	for _, isPod := range []bool{true, false} {
+		t.Run(map[bool]string{true: "pod", false: "workload container"}[isPod], func(t *testing.T) {
+			sb := newCubeboxWithStatusForTest("sb-reap", cubeboxstore.Status{StartedAt: 1})
+			ci := sb.FirstContainer()
+			ci.IsPod = isPod
+			if !isPod {
+				ci.ID = "ctr-reap"
+			}
+			root := t.TempDir()
+			writeFakeProc(t, root, 100001, testShimBin, shimServerArgv(ci.ID)...)
+			writeFakeProc(t, root, 100002, testShimBin, shimServerArgv("sb-other")...)
+			deletes, _ := withFakeShimEnv(t, root, true)
+
+			l := &local{
+				cubeboxManger: &fakeCubeboxAPI{cb: sb},
+				newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+					return fakeContainerdContainer{err: errors.New("create failed")}, nil
+				},
+			}
+			require.Error(t, l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{}))
+
+			require.Len(t, *deletes, 1, "the orphan shim of this container must be deleted")
+			assert.Contains(t, (*deletes)[0].Args, ci.ID)
+			_, err := os.Stat(filepath.Join(root, "100002"))
+			assert.NoError(t, err, "a shim of another id must be left alone")
+		})
+	}
+}
+
+// Once containerd has removed the bundle, withdrawShimIntent cannot see a
+// surviving shim through the pid files. The reap result is the only evidence,
+// and it must keep the intent so the destroy path does not release resources
+// the shim still holds.
+func TestRunContainerKeepsIntentWhenOrphanShimSurvives(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-reap-survivor", cubeboxstore.Status{StartedAt: 1})
+	ci := sb.FirstContainer()
+	ci.IsPod = true
+	root := t.TempDir()
+	writeFakeProc(t, root, 100001, testShimBin, shimServerArgv(ci.ID)...)
+	withFakeShimEnv(t, root, false)
+	killOrphanShim = func(utils.ProcessIdentity) error { return errors.New("EPERM") }
+
+	mgr := &fakeCubeboxAPI{cb: sb}
+	l := &local{
+		cubeboxManger: mgr,
+		newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+			return fakeContainerdContainer{err: errors.New("create failed")}, nil
+		},
+	}
+	require.Error(t, l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{}))
+
+	assert.True(t, sb.Endpoint.ShimSpawned, "a surviving shim must keep the intent")
+	assert.False(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Equal(t, 1, mgr.saveCalls, "only the intent itself may be saved")
 }
 
 func TestRunContainerFailsBeforeSpawnWhenIntentSaveFails(t *testing.T) {

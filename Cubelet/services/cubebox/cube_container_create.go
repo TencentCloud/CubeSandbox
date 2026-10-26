@@ -1472,8 +1472,21 @@ func (l *local) runContainer(
 	taskStart := time.Now()
 	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
 	if err != nil {
-		if ci.IsPod {
-			reapOrphanShims(ctx, ci.ID)
+		// Reap for every container, not only the pod. CubeShim answers
+		// "start" with a bare address, so containerd records the endpoint as
+		// version 2, and ShimManager.Start runs the shim binary again for any
+		// version < 3 even when the sandbox already exists. A workload
+		// container therefore gets its own shim server, started with
+		// -id <container id>, and that one leaks the same way when its
+		// create fails. Match ci.ID, never the sandbox id.
+		if survivors := reapOrphanShims(ctx, ci.ID); survivors > 0 && ci.IsPod {
+			// The bundle is already gone, so withdrawShimIntent cannot see
+			// these shims through the pid files. Keep the intent: it is what
+			// stops the destroy path from releasing the tap, IP and volumes
+			// a surviving shim may still hold.
+			log.G(ctx).Errorf("shim intent for %s kept: %d orphan shim(s) could not be reaped",
+				sandboxIdentity(cubebox), survivors)
+			withdrawIntent = func() {}
 		}
 		return transformError(err)
 	}
