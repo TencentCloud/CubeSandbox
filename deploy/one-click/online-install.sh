@@ -301,25 +301,43 @@ EOF
       fi
     fi
 
-    # DNS check (requires resolvectl or NetworkManager loaded status)
+    # DNS check (mirrors check_dns_preflight in install.sh, including the
+    # CUBE_PROXY_DNSMASQ_MODE=standalone fallback for hosts without
+    # resolvectl/NetworkManager).
     if ! command -v resolvectl >/dev/null 2>&1; then
-      if command -v systemctl >/dev/null 2>&1; then
-        local nm_load_state
-        nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
-        if [[ "${nm_load_state}" != "loaded" ]]; then
-          echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager." >&2
-          exit 3
-        fi
-      else
-        echo "[online-install] ERROR: DNS setup requires resolvectl or systemd/NetworkManager." >&2
-        exit 3
-      fi
+      # Keep this default in sync with ONE_CLICK_DNSMASQ_MODE_DEFAULT in
+      # lib/common.sh (not available yet at this bootstrap stage).
+      local dnsmasq_mode="${CUBE_PROXY_DNSMASQ_MODE:-networkmanager}"
+      case "${dnsmasq_mode}" in
+        networkmanager)
+          if command -v systemctl >/dev/null 2>&1; then
+            local nm_load_state
+            nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
+            if [[ "${nm_load_state}" != "loaded" ]]; then
+              echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager (or set CUBE_PROXY_DNSMASQ_MODE=standalone)." >&2
+              exit 3
+            fi
+          else
+            echo "[online-install] ERROR: DNS setup requires resolvectl or systemd/NetworkManager (or set CUBE_PROXY_DNSMASQ_MODE=standalone)." >&2
+            exit 3
+          fi
+          ;;
+        standalone)
+          # standalone mode manages dnsmasq itself and only uses
+          # NetworkManager opportunistically, so it does not require one to be
+          # loaded.
+          ;;
+        *)
+          echo "[online-install] ERROR: unsupported CUBE_PROXY_DNSMASQ_MODE: ${dnsmasq_mode} (expected networkmanager or standalone)." >&2
+          exit 1
+          ;;
+      esac
 
-      # Mirror check_dns_preflight: when resolvectl is absent and we fallback to NetworkManager,
-      # we require either dnsmasq to be already installed, or a supported package manager to install it.
+      # Mirror check_dns_preflight: the dnsmasq fallback needs dnsmasq already
+      # installed, or a supported package manager to install it.
       if ! command -v dnsmasq >/dev/null 2>&1; then
         if ! command -v dnf >/dev/null 2>&1 && ! command -v yum >/dev/null 2>&1 && ! command -v apt-get >/dev/null 2>&1; then
-          echo "[online-install] ERROR: resolvectl is absent and NetworkManager fallback is used, but dnsmasq is not installed and no supported package manager (dnf, yum, or apt-get) was found to install it." >&2
+          echo "[online-install] ERROR: resolvectl is absent and the dnsmasq fallback is used, but dnsmasq is not installed and no supported package manager (dnf, yum, or apt-get) was found to install it." >&2
           exit 2
         fi
       fi

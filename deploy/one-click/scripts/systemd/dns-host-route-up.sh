@@ -44,6 +44,8 @@ else
   #   standalone               -> this script launches and manages dnsmasq directly
   # Use standalone on hosts where NetworkManager initializes the dnsmasq plugin
   # but never spawns the child (e.g. bonded interfaces managed via ifcfg + assume).
+  # Keep the "networkmanager" default in sync with
+  # ONE_CLICK_DNSMASQ_MODE_DEFAULT in deploy/one-click/lib/common.sh.
   case "${CUBE_PROXY_DNSMASQ_MODE:-networkmanager}" in
     networkmanager) HOST_DNS_BACKEND="networkmanager-dnsmasq" ;;
     standalone) HOST_DNS_BACKEND="standalone-dnsmasq" ;;

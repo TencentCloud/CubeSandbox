@@ -517,19 +517,35 @@ load_env_file() {
 # Opting a key in gives it presence-implies-explicit semantics: a wholesale
 # `cp env.example .env` carried into an upgrade resets the key to the template
 # default (documented caveat in the one-click README).
+#
+# Exception: CUBE_PROXY_DNSMASQ_MODE's template line is commented out. While
+# the runtime holds a non-default mode, a .env value equal to the old template
+# default is treated as a stale full copy and ignored (see
+# capture_one_click_toggle_dotenv_values), so an old .env cannot silently undo
+# a preserved standalone.
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   CUBE_PVM_ENABLE
+  CUBE_PROXY_DNSMASQ_MODE
 )
+
+# Default for CUBE_PROXY_DNSMASQ_MODE when it is unset. Keep in sync with
+# deploy/one-click/scripts/systemd/dns-host-route-up.sh, which runs in a
+# separate process and cannot source this file.
+ONE_CLICK_DNSMASQ_MODE_DEFAULT="networkmanager"
 
 # snapshot_one_click_toggles: capture this-run operator intent for
 # ONE_CLICK_TOGGLE_KEYS from the process environment and the bundle .env.
-# Must run BEFORE any env file is sourced: the upgrade merge later sources the
-# merged old-runtime env, which would otherwise clobber both channels.
-#   ONE_CLICK_TOGGLE_ENV_SNAPSHOT     key -> value from the process environment
-#   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT  key -> value from the bundle .env
+# Must run BEFORE any env file is sourced, so the upgrade merge (which later
+# sources the merged old-runtime env) cannot clobber either channel.
+#   ONE_CLICK_TOGGLE_ENV_SNAPSHOT    key -> value from the process environment
+#   ONE_CLICK_TOGGLE_DOTENV_PRESENT  key -> 1 if an active KEY= line is in .env
 # (presence in .env is enough — a value equal to the env.example default still
 # counts, which is exactly what makes "flip back to default" expressible)
+# The .env value itself is captured later by
+# capture_one_click_toggle_dotenv_values(), after load_env_file has
+# shell-interpreted it (quotes/comments stripped); replaying the raw RHS broke
+# strictly validated keys such as CUBE_PROXY_DNSMASQ_MODE.
 snapshot_one_click_toggles() {
   local env_file="$1"
   local key
@@ -539,15 +555,54 @@ snapshot_one_click_toggles() {
   # mishandles `declare -gA VAR=()` by creating a function-local array.
   declare -gA ONE_CLICK_TOGGLE_ENV_SNAPSHOT
   declare -gA ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT
+  declare -gA ONE_CLICK_TOGGLE_DOTENV_PRESENT
   ONE_CLICK_TOGGLE_ENV_SNAPSHOT=()
   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT=()
+  ONE_CLICK_TOGGLE_DOTENV_PRESENT=()
   for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
     if [[ -n "${!key+x}" ]]; then
       ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
     fi
     if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
-      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="$(read_env_key "${env_file}" "${key}")"
+      ONE_CLICK_TOGGLE_DOTENV_PRESENT["${key}"]=1
     fi
+  done
+  return 0
+}
+
+# capture_one_click_toggle_dotenv_values: fill the .env channel of the toggle
+# snapshot from the live shell environment for keys marked present in .env.
+# Must run after load_env_file (+ CLI re-apply) so quoted values and trailing
+# inline comments are shell-interpreted, and before the upgrade merge
+# re-sources .one-click.env.
+capture_one_click_toggle_dotenv_values() {
+  local key value
+  # Previous runtime value drives the legacy-template guard below. Tests may
+  # redirect the path with ONE_CLICK_RUNTIME_ENV_FILE.
+  local runtime_env="${ONE_CLICK_RUNTIME_ENV_FILE:-${CUBE_SANDBOX_INSTALL_ROOT}/.one-click.env}"
+  local runtime_dnsmasq_mode=""
+  if [[ -f "${runtime_env}" ]]; then
+    runtime_dnsmasq_mode="$(read_env_key "${runtime_env}" "CUBE_PROXY_DNSMASQ_MODE")"
+  fi
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -z "${ONE_CLICK_TOGGLE_DOTENV_PRESENT[${key}]+x}" ]]; then
+      continue
+    fi
+    value="${!key-}"
+    # Migration guard (state-based): only when the previous runtime already
+    # holds a non-default mode can a .env value equal to the old template
+    # default (networkmanager) be a carried-forward full copy. Ignore it in
+    # that case so it cannot silently override the preserved standalone. On a
+    # fresh install (or a runtime already on the default) .env stays
+    # authoritative, so an explicit networkmanager still works there.
+    if [[ "${key}" == "CUBE_PROXY_DNSMASQ_MODE" \
+          && "${value}" == "${ONE_CLICK_DNSMASQ_MODE_DEFAULT}" \
+          && -n "${runtime_dnsmasq_mode}" \
+          && "${runtime_dnsmasq_mode}" != "${ONE_CLICK_DNSMASQ_MODE_DEFAULT}" ]]; then
+      log "toggle ${key}: ignoring legacy template default '${value}' from .env because the runtime holds '${runtime_dnsmasq_mode}'; set it via the process environment or .one-click.env to override"
+      continue
+    fi
+    ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${value}"
   done
   return 0
 }
@@ -563,6 +618,10 @@ apply_one_click_toggles() {
   local key
   for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
     if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      if [[ -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" \
+            && "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]}" != "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]}" ]]; then
+        log "toggle ${key}: .env value '${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]}' overrides process-environment value '${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]}'"
+      fi
       printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]}"
       log "toggle ${key}=${!key} (explicit in .env)"
     elif [[ -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" ]]; then

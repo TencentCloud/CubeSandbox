@@ -55,6 +55,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   apply_cli_overrides
   # Shell-interpret .env DB values (quotes stripped) into the dotenv snapshot.
   capture_one_click_database_dotenv_values
+  # Shell-interpret .env toggle values (quotes/comments stripped) into the
+  # toggle dotenv snapshot; the earlier snapshot only recorded presence.
+  capture_one_click_toggle_dotenv_values
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -408,7 +411,7 @@ check_dns_preflight() {
   # Without resolvectl the DNS scripts fall back to dnsmasq. CUBE_PROXY_DNSMASQ_MODE
   # picks who owns it (see dns-host-route-up.sh); mirror that check here so the
   # installer does not reject a host the runtime would actually support.
-  local dnsmasq_mode="${CUBE_PROXY_DNSMASQ_MODE:-networkmanager}"
+  local dnsmasq_mode="${CUBE_PROXY_DNSMASQ_MODE:-${ONE_CLICK_DNSMASQ_MODE_DEFAULT}}"
   case "${dnsmasq_mode}" in
     networkmanager)
       require_cmd systemctl
@@ -2076,6 +2079,13 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+# CUBE_PROXY_DNSMASQ_MODE is commented out of env.example on purpose, so the
+# merge treats it as an old-only "kept-extra" key: once persisted here it is
+# never default-updated by a future env.example change. That pinning is
+# intentional (the DNS backend must not move under an existing install);
+# ONE_CLICK_DNSMASQ_MODE_DEFAULT only applies when the key is absent, so an
+# explicit value is required to switch modes.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_DNSMASQ_MODE" "${CUBE_PROXY_DNSMASQ_MODE:-${ONE_CLICK_DNSMASQ_MODE_DEFAULT}}"
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;

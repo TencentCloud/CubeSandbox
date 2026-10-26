@@ -206,6 +206,7 @@ CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员�
   - 若替换后布局未能完整恢复，会**回滚**到上一版本；`install.sh` 仍会把其余部分装完，然后以非零退出。节点是完整的，但 s3lvol 仍是旧版本。
   - `wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。热升级的两个旋钮 `RCOW_HOT_FLUSH_MS`（默认 `0`，跳过 kill 前 flush）与 `RCOW_HOT_PREPARE_SUSPEND_MS`（默认 `60000`，单次 flusher hold 的上限）也会写入 `.one-click.env`，可直接按常规 `.env` 方式调整。
 - **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
+- **DNS dnsmasq 模式**：`CUBE_PROXY_DNSMASQ_MODE` 也是安装器开关，但它的 `env.example` 行**有意注释掉**：代码内默认值为 `networkmanager`，若模板里保持生效，整份 `cp env.example .env` 会把保留下来的 `standalone` 静默覆盖掉。需要时请在 `.env` 或进程环境中显式设置；拷贝模板不再改变该值。该值一旦写入 `.one-click.env`，后续升级会原样保留（修改代码默认值不会改写已有安装）——要切换模式请显式设置该 key。旧版 `.env` 中等于旧模板默认值（`networkmanager`）的行，仅在运行时已是非默认模式时才被忽略并记录日志，因此不会覆盖保留下来的 `standalone`；这种情况下要切回 `networkmanager`，请用进程环境变量或直接改 `.one-click.env`，而不是 `.env`。
 - **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
 
 控制节点安装完成后，可以打开 Dashboard：

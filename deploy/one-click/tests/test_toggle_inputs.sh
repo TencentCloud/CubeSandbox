@@ -8,6 +8,8 @@
 # or bundle .env, presence implying explicit intent even for the default
 # value) must survive the upgrade env merge, which otherwise preserves the
 # old runtime value for keys whose .env value equals the env.example default.
+# CUBE_PROXY_DNSMASQ_MODE additionally has a state-based stale-.env guard; see
+# capture_one_click_toggle_dotenv_values in lib/common.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +43,7 @@ assert_toggle_keys() {
 # Reset the toggle variables so leftovers from a previous scenario cannot
 # leak into the next snapshot as process-env intent.
 reset_toggle_vars() {
-  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_PROXY_DNSMASQ_MODE ONE_CLICK_RUNTIME_ENV_FILE
 }
 
 # Simulate what install.sh does around the upgrade merge for the toggle keys:
@@ -50,13 +52,23 @@ reset_toggle_vars() {
 run_toggle_roundtrip() {
   local dotenv="$1"
   snapshot_one_click_toggles "${dotenv}"
+  # Simulate load_env_file "${dotenv}": shell-interpret the values before the
+  # dotenv snapshot is captured (quotes and trailing comments stripped).
+  if [[ -f "${dotenv}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${dotenv}"
+    set +a
+  fi
+  capture_one_click_toggle_dotenv_values
   ONE_CLICK_ENABLE_S3LVOL="${MERGED_S3LVOL:-}"
   CUBE_PVM_ENABLE="${MERGED_PVM:-}"
+  CUBE_PROXY_DNSMASQ_MODE="${MERGED_DNSMASQ:-}"
   apply_one_click_toggles 2>/dev/null
 }
 
 test_toggle_keys_registry() {
-  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_PROXY_DNSMASQ_MODE
 }
 
 # Core regression: a .env value that equals the env.example default (0) must
@@ -139,11 +151,116 @@ EOF
     || fail "active .env CUBE_PVM_ENABLE=0 must count as intent"
 }
 
+# CUBE_PROXY_DNSMASQ_MODE must survive the upgrade merge through either
+# channel. Regression: without this key in the registry, an upgrade reset it
+# to the env.example default (networkmanager) and hosts without resolvectl /
+# NetworkManager failed the DNS preflight.
+test_dnsmasq_mode_roundtrip() {
+  local dotenv="${TMP_DIR}/dotenv-dnsmasq.env"
+  local runtime="${TMP_DIR}/runtime-dnsmasq.env"
+
+  # Fresh install (no previous runtime env): .env stays authoritative and wins
+  # over the process environment, matching the documented precedence.
+  echo "CUBE_PROXY_DNSMASQ_MODE=networkmanager" > "${dotenv}"
+  reset_toggle_vars
+  CUBE_PROXY_DNSMASQ_MODE=standalone
+  MERGED_DNSMASQ=standalone
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "networkmanager" ]] \
+    || fail "fresh install: .env networkmanager must win over process-env standalone"
+
+  # Process-environment value survives when .env has no active line.
+  reset_toggle_vars
+  CUBE_PROXY_DNSMASQ_MODE=standalone
+  MERGED_DNSMASQ=networkmanager
+  run_toggle_roundtrip "${TMP_DIR}/absent-dnsmasq.env"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "standalone" ]] \
+    || fail "expected process-env CUBE_PROXY_DNSMASQ_MODE=standalone to survive the merge"
+
+  # Upgrade where the runtime already holds standalone: a stale full-copy .env
+  # with the old template default must not override it.
+  echo "CUBE_PROXY_DNSMASQ_MODE=standalone" > "${runtime}"
+  reset_toggle_vars
+  export ONE_CLICK_RUNTIME_ENV_FILE="${runtime}"
+  CUBE_PROXY_DNSMASQ_MODE=standalone
+  MERGED_DNSMASQ=networkmanager
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "standalone" ]] \
+    || fail "stale .env default must not override process-env standalone on a standalone runtime"
+
+  reset_toggle_vars
+  export ONE_CLICK_RUNTIME_ENV_FILE="${runtime}"
+  MERGED_DNSMASQ=standalone
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "standalone" ]] \
+    || fail "stale .env default must not override a preserved standalone"
+
+  # Explicit networkmanager in .env still works when the runtime is not
+  # non-default (documented .env > process-env precedence is preserved).
+  echo "CUBE_PROXY_DNSMASQ_MODE=networkmanager" > "${runtime}"
+  reset_toggle_vars
+  export ONE_CLICK_RUNTIME_ENV_FILE="${runtime}"
+  CUBE_PROXY_DNSMASQ_MODE=standalone
+  MERGED_DNSMASQ=standalone
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "networkmanager" ]] \
+    || fail "explicit .env networkmanager must win on a default-mode runtime"
+
+  unset ONE_CLICK_RUNTIME_ENV_FILE
+}
+
+# A plain `cp env.example .env` must not count as intent: the template ships
+# CUBE_PROXY_DNSMASQ_MODE commented out (the code default is networkmanager),
+# so an old runtime `standalone` survives an upgrade.
+test_dnsmasq_mode_template_copy_is_not_intent() {
+  local dotenv="${TMP_DIR}/dotenv-dnsmasq-template.env"
+  printf '# CUBE_PROXY_DNSMASQ_MODE=networkmanager\n' > "${dotenv}"
+  reset_toggle_vars
+  MERGED_DNSMASQ=standalone
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "standalone" ]] \
+    || fail "commented template line must not override a preserved standalone"
+
+  reset_toggle_vars
+  MERGED_DNSMASQ=standalone
+  run_toggle_roundtrip "${TMP_DIR}/absent-dnsmasq2.env"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "standalone" ]] \
+    || fail "no-intent upgrade must keep the runtime CUBE_PROXY_DNSMASQ_MODE=standalone"
+}
+
+# .env values must be replayed shell-interpreted: load_env_file strips quotes
+# and trailing comments, and check_dns_preflight validates the mode strictly
+# (replaying the raw RHS would be rejected as an unsupported mode).
+test_dnsmasq_mode_dotenv_is_shell_interpreted() {
+  local dotenv="${TMP_DIR}/dotenv-dnsmasq-quoted.env"
+  printf 'CUBE_PROXY_DNSMASQ_MODE="standalone"  # no NetworkManager\n' > "${dotenv}"
+  reset_toggle_vars
+  MERGED_DNSMASQ=networkmanager
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${CUBE_PROXY_DNSMASQ_MODE}" == "standalone" ]] \
+    || fail "quoted/annotated .env CUBE_PROXY_DNSMASQ_MODE must be replayed shell-interpreted (got '${CUBE_PROXY_DNSMASQ_MODE}')"
+}
+
+# Keep the template line commented: an active default would make the common
+# `cp env.example .env` flow silently reset a preserved standalone mode.
+test_env_example_keeps_dnsmasq_mode_commented() {
+  local example="${ONE_CLICK_DIR}/env.example"
+  if grep -q '^CUBE_PROXY_DNSMASQ_MODE=' "${example}"; then
+    fail "env.example must keep CUBE_PROXY_DNSMASQ_MODE commented out"
+  fi
+  grep -q '^# CUBE_PROXY_DNSMASQ_MODE=' "${example}" \
+    || fail "env.example should document CUBE_PROXY_DNSMASQ_MODE as a commented example"
+}
+
 test_toggle_keys_registry
 test_dotenv_default_value_is_explicit
 test_process_env_is_explicit
 test_dotenv_beats_process_env
 test_no_intent_keeps_merged_value
 test_commented_dotenv_line_is_not_intent
+test_dnsmasq_mode_roundtrip
+test_dnsmasq_mode_dotenv_is_shell_interpreted
+test_dnsmasq_mode_template_copy_is_not_intent
+test_env_example_keeps_dnsmasq_mode_commented
 
 echo "test_toggle_inputs: all tests passed"

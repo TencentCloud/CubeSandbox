@@ -279,6 +279,19 @@ inherit one.
   `CUBE_PVM_ENABLE` follows the same rule: appearing in `.env` or the
   process environment always counts as an explicit choice (so a full
   `cp env.example .env` before an upgrade also resets it to `0`).
+- **DNS dnsmasq mode**: `CUBE_PROXY_DNSMASQ_MODE` is an installer toggle too,
+  but its `env.example` line is intentionally commented out: the code
+  defaults it to `networkmanager`, and an active default would make a full
+  `cp env.example .env` silently override a preserved `standalone`. Set it
+  explicitly in `.env` or the process environment when you need either mode;
+  copying the template no longer changes it. Once written to
+  `.one-click.env`, the value is kept as-is on later upgrades (a change to
+  the code default does not rewrite existing installs) — set the key
+  explicitly to switch modes. A carried-forward `.env` line equal to the old
+  template default (`networkmanager`) is ignored and logged only while the
+  runtime already holds a non-default mode, so it cannot override a preserved
+  `standalone`; on such a host, switch back to `networkmanager` via the
+  process environment or by editing `.one-click.env`, not `.env`.
 - **S3 backend**: when enabled, `install.sh` writes `/data/cubelet/s3.cfg`
   from `CUBE_S3_*` (bundled MinIO fill, or the operator's external store).
   s3lvol uses its own bucket (`CUBE_S3LVOL_BUCKET`, default `cube-s3lvol`)

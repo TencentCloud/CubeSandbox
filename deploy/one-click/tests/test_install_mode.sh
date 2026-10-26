@@ -565,6 +565,56 @@ test_run_with_timeout_if_available() {
   assert_contains "${direct_log}" "-h 127.0.0.1 -p 6389 ping"
 }
 
+# The load-bearing half of the DNS-mode fix: install.sh must write the resolved
+# mode into the runtime env, otherwise the next upgrade loses it again. Checked
+# structurally, in the same style as the other install.sh wiring assertions.
+test_install_sh_persists_dnsmasq_mode() {
+  local f="${ONE_CLICK_DIR}/install.sh"
+  assert_contains "${f}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_DNSMASQ_MODE"'
+  assert_contains "${f}" 'ONE_CLICK_DNSMASQ_MODE_DEFAULT'
+  # Behavioural guard: if lib/common.sh stops defining the constant,
+  # check_dns_preflight aborts under `set -u` on the unset path while the
+  # structural greps above would stay green.
+  [[ "${ONE_CLICK_DNSMASQ_MODE_DEFAULT:-}" == "networkmanager" ]] \
+    || fail "lib/common.sh must define ONE_CLICK_DNSMASQ_MODE_DEFAULT=networkmanager"
+  assert_contains "${f}" 'CUBE_PROXY_DNSMASQ_MODE:-${ONE_CLICK_DNSMASQ_MODE_DEFAULT}'
+}
+
+# The toggle .env capture is load-bearing after the snapshot split (the
+# snapshot no longer stores .env values): assert it is called, and that it runs
+# after load_env_file and before the merge/apply steps.
+test_install_sh_captures_toggle_dotenv_values() {
+  local f="${ONE_CLICK_DIR}/install.sh"
+  assert_contains "${f}" "capture_one_click_toggle_dotenv_values"
+  local load_line capture_line merge_line apply_line
+  load_line="$(grep -n 'load_env_file "${ENV_FILE}"' "${f}" | head -1 | cut -d: -f1)"
+  capture_line="$(grep -n 'capture_one_click_toggle_dotenv_values' "${f}" | head -1 | cut -d: -f1)"
+  merge_line="$(grep -n 'merge_env_three_way' "${f}" | head -1 | cut -d: -f1)"
+  apply_line="$(grep -n '^apply_one_click_toggles$' "${f}" | head -1 | cut -d: -f1)"
+  if [[ -z "${load_line}" || -z "${capture_line}" || -z "${merge_line}" || -z "${apply_line}" ]]; then
+    fail "missing toggle capture ordering anchors (load=${load_line:-?} capture=${capture_line:-?} merge=${merge_line:-?} apply=${apply_line:-?})"
+  fi
+  if (( capture_line <= load_line || capture_line >= merge_line || capture_line >= apply_line )); then
+    fail "capture_one_click_toggle_dotenv_values must run after load_env_file and before merge/apply"
+  fi
+}
+
+# The curl .../online-install.sh bootstrap path has its own early preflight
+# mirroring check_dns_preflight; it must honor CUBE_PROXY_DNSMASQ_MODE too.
+test_online_install_mirrors_dns_mode() {
+  local f="${ONE_CLICK_DIR}/online-install.sh"
+  assert_contains "${f}" 'dnsmasq_mode="${CUBE_PROXY_DNSMASQ_MODE:-networkmanager}"'
+  # Guard the behaviour, not the error hints: "standalone" also appears in the
+  # "or set CUBE_PROXY_DNSMASQ_MODE=standalone" messages. The behavioural arm
+  # is the standalone) case branch, which must exist and must not abort.
+  local arm
+  arm="$(awk '/^[[:space:]]*standalone\)/{inside=1} inside{print} inside&&/;;/{exit}' "${f}")"
+  [[ -n "${arm}" ]] || fail "online-install.sh lost the standalone) case arm"
+  if grep -q 'exit ' <<<"${arm}"; then
+    fail "online-install.sh standalone) case arm must not abort"
+  fi
+}
+
 test_install_sh_wires_upgrade_flow() {
   local f="${ONE_CLICK_DIR}/install.sh"
   assert_contains "${f}" "resolve_install_mode"
@@ -642,5 +692,8 @@ test_validation_library_fallback_die
 test_redis_cli_help_supports_flag
 test_run_with_timeout_if_available
 test_install_sh_wires_upgrade_flow
+test_install_sh_persists_dnsmasq_mode
+test_install_sh_captures_toggle_dotenv_values
+test_online_install_mirrors_dns_mode
 
 echo "install mode tests OK"
