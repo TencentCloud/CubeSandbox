@@ -24,6 +24,7 @@ type fakeCubeboxAPI struct {
 	getHook       func(call int)
 	syncIDs       []string
 	syncSnapshots []fakeCubeboxSyncSnapshot
+	getErr        error
 	syncErr       error
 	saveErr       error
 }
@@ -39,6 +40,9 @@ func (f *fakeCubeboxAPI) Init(ctx context.Context) error {
 }
 
 func (f *fakeCubeboxAPI) Get(ctx context.Context, id string) (*cubeboxstore.CubeBox, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	cb := f.cb
 	f.getCalls++
 	if f.getHook != nil {
