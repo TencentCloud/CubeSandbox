@@ -326,7 +326,11 @@ pub fn init_child() {
     }
 }
 
-#[allow(unused_assignments)]
+pub(crate) fn detail_timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CUBE_AGENT_DETAIL_TIMING").is_some())
+}
+
 fn do_init_child(cwfd: RawFd) -> Result<()> {
     lazy_static::initialize(&NAMESPACES);
     lazy_static::initialize(&DEFAULT_DEVICES);
@@ -337,12 +341,12 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let crfd = std::env::var(CRFD_FD)?.parse::<i32>().unwrap();
     let cfd_log = std::env::var(CLOG_FD)?.parse::<i32>().unwrap();
     let mut start = Instant::now();
-    let mut m_pidfork = 0u128;
-    let mut m_json = 0u128;
-    let mut m_ns = 0u128;
-    let mut m_canon = 0u128;
-    let mut m_rootfs = 0u128;
-    let mut m_hooks = 0u128;
+    let m_pidfork;
+    let m_json;
+    let m_ns;
+    let m_canon;
+    let m_rootfs;
+    let m_hooks;
     // get the pidns fd from parent, if parent had passed the pidns fd,
     // then get it and join in this pidns; otherwise, create a new pidns
     // by unshare from the parent pidns.
@@ -704,17 +708,19 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
         duration_env,
         duration_stat
     );
-    log_child!(
-        cfd_log,
-        "prestart_detail_us: pidns_fork={}, json={}, ns_cgroup={}, canon={}, rootfs={}, hooks={}, total={}",
-        m_pidfork,
-        m_json.saturating_sub(m_pidfork),
-        m_ns.saturating_sub(m_json),
-        m_canon.saturating_sub(m_ns),
-        m_rootfs.saturating_sub(m_canon),
-        m_hooks.saturating_sub(m_rootfs),
-        m_hooks
-    );
+    if detail_timing_enabled() {
+        log_child!(
+            cfd_log,
+            "prestart_detail_us: pidns_fork={}, json={}, ns_cgroup={}, canon={}, rootfs={}, hooks={}, total={}",
+            m_pidfork,
+            m_json.saturating_sub(m_pidfork),
+            m_ns.saturating_sub(m_json),
+            m_canon.saturating_sub(m_ns),
+            m_rootfs.saturating_sub(m_canon),
+            m_hooks.saturating_sub(m_rootfs),
+            m_hooks
+        );
+    }
     let _ = unistd::close(cfd_log);
     let _ = unistd::close(crfd);
     let _ = unistd::close(cwfd);

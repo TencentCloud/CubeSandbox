@@ -24,7 +24,7 @@ use path_absolutize::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use crate::container::DEFAULT_DEVICES;
+use crate::container::{detail_timing_enabled, DEFAULT_DEVICES};
 use crate::log_child;
 use crate::sync::write_count;
 use cube::rootfs;
@@ -158,7 +158,6 @@ pub fn umount2<P: ?Sized + NixPath>(
     Ok(())
 }
 
-#[allow(unused_assignments)]
 pub fn init_rootfs(
     cfd_log: RawFd,
     spec: &Spec,
@@ -171,10 +170,10 @@ pub fn init_rootfs(
     lazy_static::initialize(&PROPAGATION);
     lazy_static::initialize(&LINUXDEVICETYPE);
     let m_start = Instant::now();
-    let mut m_canon = 0u128;
-    let mut m_bind = 0u128;
-    let mut m_spec = 0u128;
-    let mut m_virt = 0u128;
+    let m_canon;
+    let m_bind;
+    let m_spec;
+    let m_virt;
 
     let linux = &spec
         .linux
@@ -324,16 +323,18 @@ pub fn init_rootfs(
     }
 
     unistd::chdir(&olddir)?;
-    log_child!(
-        cfd_log,
-        "rootfs_detail_us: canon={}, root_mounts={}, spec_mounts={}, virtiofs={}, symlinks_devices={}, total={}",
-        m_canon,
-        m_bind.saturating_sub(m_canon),
-        m_spec.saturating_sub(m_bind),
-        m_virt.saturating_sub(m_spec),
-        m_start.elapsed().as_micros().saturating_sub(m_virt),
-        m_start.elapsed().as_micros()
-    );
+    if detail_timing_enabled() {
+        log_child!(
+            cfd_log,
+            "rootfs_detail_us: canon={}, root_mounts={}, spec_mounts={}, virtiofs={}, symlinks_devices={}, total={}",
+            m_canon,
+            m_bind.saturating_sub(m_canon),
+            m_spec.saturating_sub(m_bind),
+            m_virt.saturating_sub(m_spec),
+            m_start.elapsed().as_micros().saturating_sub(m_virt),
+            m_start.elapsed().as_micros()
+        );
+    }
 
     Ok(())
 }
@@ -845,7 +846,16 @@ fn secure_join(rootfs: &str, unsafe_path: &str) -> String {
 fn ensure_dir(path: &Path) -> Result<()> {
     match fs::create_dir(path) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if path.is_dir() {
+                Ok(())
+            } else {
+                Err(anyhow!(format!(
+                    "create dest error, dest:{:?} err:{:?} (existing path is not a directory)",
+                    path, e
+                )))
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(path)
             .map_err(|e| anyhow!(format!("create dest error, dest:{:?} err{:?}", path, e))),
         Err(e) => Err(anyhow!(format!(
@@ -855,7 +865,26 @@ fn ensure_dir(path: &Path) -> Result<()> {
     }
 }
 
-#[allow(unused_assignments)]
+fn prepare_mount_destination(m: &Mount, dest: &str, src_is_dir: bool) -> Result<()> {
+    if m.r#type.as_str() == "bind" {
+        if src_is_dir {
+            ensure_dir(Path::new(dest))
+        } else {
+            if let Some(parent) = Path::new(dest).parent() {
+                ensure_dir(parent)?;
+            }
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(dest)
+                .map(|_| ())
+                .map_err(|e| anyhow!(format!("create bind target {:?} failed:{:?}", dest, e)))
+        }
+    } else {
+        ensure_dir(Path::new(dest))
+    }
+}
+
 fn mount_from(
     cfd_log: RawFd,
     m: &Mount,
@@ -907,18 +936,7 @@ fn mount_from(
             // path can cost milliseconds per component, while mount's own
             // lookup is dcache-backed. Only pay the creation cost when the
             // destination is genuinely missing.
-            if m.r#type.as_str() == "bind" {
-                if src_is_dir {
-                    ensure_dir(Path::new(&dest))?;
-                } else {
-                    if let Some(parent) = Path::new(&dest).parent() {
-                        ensure_dir(parent)?;
-                    }
-                    let _ = OpenOptions::new().create(true).write(true).open(&dest);
-                }
-            } else {
-                ensure_dir(Path::new(&dest))?;
-            }
+            prepare_mount_destination(m, &dest, src_is_dir)?;
             mounted = do_mount(&src);
         }
         mounted.map_err(|e| anyhow!(format!("mount error, dest:{:?} err{:?}", dest, e)))?;
@@ -946,7 +964,7 @@ fn mount_from(
         })?;
     }
     let mf_total = mf_start.elapsed().as_micros();
-    if mf_total >= 500 {
+    if mf_total >= 500 && detail_timing_enabled() {
         log_child!(
             cfd_log,
             "mount_from_us: dest={} type={} secure={} total={}",
@@ -1854,5 +1872,60 @@ mod tests {
         assert!(dev_rel_path("dev/foo").is_none());
         assert!(dev_rel_path("").is_none());
         assert!(dev_rel_path("/dev").is_none());
+    }
+
+    #[test]
+    fn ensure_dir_accepts_existing_directory() {
+        let dir = tempdir().unwrap();
+        assert!(ensure_dir(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn ensure_dir_creates_missing_nested_path() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        assert!(ensure_dir(&nested).is_ok());
+        assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn ensure_dir_rejects_existing_regular_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::File::create(&file).unwrap();
+        assert!(ensure_dir(&file).is_err());
+    }
+
+    fn test_mount(kind: &str) -> Mount {
+        Mount {
+            destination: "/dest".to_string(),
+            r#type: kind.to_string(),
+            source: String::new(),
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prepare_bind_dir_creates_missing_destination() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("bind-dir");
+        prepare_mount_destination(&test_mount("bind"), dest.to_str().unwrap(), true).unwrap();
+        assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn prepare_bind_file_creates_parent_and_file() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("parent").join("file");
+        prepare_mount_destination(&test_mount("bind"), dest.to_str().unwrap(), false).unwrap();
+        assert!(dest.is_file());
+    }
+
+    #[test]
+    fn prepare_regular_mount_creates_nested_destination() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("a").join("b");
+        prepare_mount_destination(&test_mount("tmpfs"), dest.to_str().unwrap(), true).unwrap();
+        assert!(dest.is_dir());
     }
 }
