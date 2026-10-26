@@ -114,3 +114,17 @@ func TestWaitForProcessIODrainsAfterStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(3), code)
 }
+
+func TestLocalConsoleSizeNilWhenStdinNotTTY(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	old := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() { os.Stdin = old })
+
+	assert.Nil(t, localConsoleSize())
+}

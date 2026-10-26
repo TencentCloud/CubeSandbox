@@ -154,6 +154,19 @@ impl ProcessOperations for Process {
     }
 }
 
+fn pty_winsize(ocip: &OCIProcess) -> Option<pty::Winsize> {
+    let size = ocip.console_size.as_ref()?;
+    if size.height == 0 || size.width == 0 {
+        return None;
+    }
+    Some(pty::Winsize {
+        ws_row: size.height as u16,
+        ws_col: size.width as u16,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    })
+}
+
 fn send_fd(socket_path: &str, fd: RawFd) -> result::Result<(), String> {
     // Connect to the Unix socket
     let stream = UnixStream::connect(socket_path)
@@ -223,7 +236,9 @@ impl Process {
     ) -> result::Result<(), String> {
         if self.tty {
             debug!(logger, "tty is true");
-            let pseudo = pty::openpty(None, None).map_err(|e| format!("openpty failed:{:?}", e))?;
+            let winsize = pty_winsize(&self.oci);
+            let pseudo = pty::openpty(winsize.as_ref(), None)
+                .map_err(|e| format!("openpty failed:{:?}", e))?;
             let _ = fcntl::fcntl(pseudo.master, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
                 .map_err(|e| format!("fnctl pseudo.master {:?}", e));
             let _ = fcntl::fcntl(pseudo.slave, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
@@ -780,6 +795,27 @@ mod tests {
             assert_eq!(process.stdout.unwrap(), std::io::stdout().as_raw_fd());
             assert_eq!(process.stderr.unwrap(), std::io::stderr().as_raw_fd());
         }
+    }
+
+    #[test]
+    fn test_pty_winsize_from_console_size() {
+        let mut ocip = OCIProcess::default();
+        ocip.console_size = Some(oci::Box {
+            height: 40,
+            width: 160,
+        });
+        let ws = pty_winsize(&ocip).expect("winsize");
+        assert_eq!(ws.ws_row, 40);
+        assert_eq!(ws.ws_col, 160);
+
+        ocip.console_size = None;
+        assert!(pty_winsize(&ocip).is_none());
+
+        ocip.console_size = Some(oci::Box {
+            height: 0,
+            width: 0,
+        });
+        assert!(pty_winsize(&ocip).is_none());
     }
 
     #[test]

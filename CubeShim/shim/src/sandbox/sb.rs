@@ -1176,6 +1176,22 @@ impl SandBox {
         container.unwrap().close_io(exec_id).await
     }
 
+    pub async fn resize_pty(
+        &self,
+        id: &String,
+        exec_id: &String,
+        height: u32,
+        width: u32,
+    ) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        let container = containers.get_mut(id);
+        if container.is_none() {
+            return Err(Error::NotFoundError(format!("not found container:{}", id)));
+        }
+
+        container.unwrap().resize_pty(exec_id, height, width).await
+    }
+
     pub async fn delete_container(&mut self, id: &String) -> Result<(u32, DateTime<Utc>)> {
         let mut container = {
             let mut containers = self.containers.lock().await;

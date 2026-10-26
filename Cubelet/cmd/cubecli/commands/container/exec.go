@@ -263,7 +263,27 @@ func generateExecProcessSpec(ctx gocontext.Context, context *cli.Context, args [
 	if context.String("workdir") != "" {
 		pspec.Cwd = context.String("workdir")
 	}
+	if context.Bool("tty") {
+		if size := localConsoleSize(); size != nil {
+			pspec.ConsoleSize = size
+		}
+	}
 	return pspec, nil
+}
+
+func localConsoleSize() *specs.Box {
+	con, err := console.ConsoleFromFile(os.Stdin)
+	if err != nil {
+		return nil
+	}
+	size, err := con.Size()
+	if err != nil || size.Width == 0 || size.Height == 0 {
+		return nil
+	}
+	return &specs.Box{
+		Height: uint(size.Height),
+		Width:  uint(size.Width),
+	}
 }
 
 type StdinCloser struct {
