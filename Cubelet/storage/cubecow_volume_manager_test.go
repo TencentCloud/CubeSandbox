@@ -26,6 +26,7 @@ type fakeCowEngine struct {
 	createSnapshotErr           error
 	createVolumeFromSnapshots   [][2]string
 	createVolumeFromSnapshotErr error
+	promotedVolumes             [][3]string
 	activatePaths               map[string]string
 	activatedVolumes            []string
 	deactivatedVolumes          []string
@@ -39,6 +40,7 @@ type fakeCowEngine struct {
 	deleteVolumeErr             error
 	deleteSnapshotErr           error
 	deleteErrByName             map[string]error
+	onDeleteVolume              func(name string)
 	resizeErr                   error
 	resizedVolumes              map[string]uint64
 	metrics                     map[string]uint64
@@ -135,6 +137,17 @@ func (f *fakeCowEngine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName stri
 	return path, nil
 }
 
+func (f *fakeCowEngine) PromoteVolumeToSnapshot(volumeName, snapshotName, originVolume string) (string, error) {
+	f.promotedVolumes = append(f.promotedVolumes, [3]string{volumeName, snapshotName, originVolume})
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	path := "/dev/mapper/" + snapshotName
+	f.volumeInfos[snapshotName] = &cubecow.Volume{DevicePath: path, SizeBytes: 8 << 20}
+	delete(f.volumeInfos, volumeName)
+	return path, nil
+}
+
 func (f *fakeCowEngine) ActivateVolume(name string) (string, error) {
 	f.activatedVolumes = append(f.activatedVolumes, name)
 	if f.activateErr != nil {
@@ -171,6 +184,9 @@ func (f *fakeCowEngine) DeactivateVolume(name string) error {
 
 func (f *fakeCowEngine) DeleteVolume(name string) error {
 	f.deletedVolumes = append(f.deletedVolumes, name)
+	if f.onDeleteVolume != nil {
+		f.onDeleteVolume(name)
+	}
 	if err, ok := f.deleteErrByName[name]; ok {
 		return err
 	}

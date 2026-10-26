@@ -108,6 +108,7 @@ Every API is invoked by the caller in the form "pass in a `name` plus parameters
 |---|---|---|---|
 | `create_snapshot_from_volume` | `source_name`, `snapshot_name`, `activate` | Newly created Snapshot | Takes a read-only snapshot from `source_name`. `source_name` may be a Volume or another Snapshot (the latter is flattened). When `activate=true`, the new Snapshot is initially "activated" and `device_path` is non-empty; when `activate=false`, only metadata is written. A `snapshot_name` conflict returns `AlreadyExists`. |
 | `delete_snapshot` | `snapshot_name` | None | Deletes a Snapshot. If it is currently activated, the device is torn down automatically first. Returns success for a non-existent name (idempotent). |
+| `promote_volume_to_snapshot` | `volume_name`, `snapshot_name`, `origin_volume` | Newly created Snapshot | Turns an existing Volume into a Snapshot of `origin_volume` in place: the file is renamed, no data is copied, and the Volume name leaves the namespace. A taken `snapshot_name` returns `AlreadyExists`; a Snapshot source returns `InvalidArg`; a missing origin directory fails the rename. Sibling files in the source directory survive. |
 | `list_snapshots` | `volume_name`, `page_size`, `page_token` | List of Snapshots + next-page token | Paginates all Snapshots under `volume_name` (filtered by the flattened `origin_volume`). |
 
 ### 3.3 Activation state

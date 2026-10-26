@@ -316,6 +316,34 @@ func (e *Engine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (st
 	return takeCString(cDevicePath), nil
 }
 
+// PromoteVolumeToSnapshot turns an existing volume into a snapshot of
+// originVolume in place: no data is copied and the volume name leaves the
+// namespace. Returns the snapshot file path.
+func (e *Engine) PromoteVolumeToSnapshot(volumeName, snapshotName, originVolume string) (string, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ptr, err := e.openHandle()
+	if err != nil {
+		return "", err
+	}
+	defer e.mu.RUnlock()
+
+	cVolume := C.CString(volumeName)
+	defer C.free(unsafe.Pointer(cVolume))
+	cSnapshot := C.CString(snapshotName)
+	defer C.free(unsafe.Pointer(cSnapshot))
+	cOrigin := C.CString(originVolume)
+	defer C.free(unsafe.Pointer(cOrigin))
+
+	var cDevicePath *C.char
+	rc := C.cubecow_promote_volume_to_snapshot(C.CubecowEngineHandle(ptr), cVolume, cSnapshot, cOrigin, &cDevicePath)
+	if rc != 0 {
+		return "", makeError(rc)
+	}
+	return takeCString(cDevicePath), nil
+}
+
 func (e *Engine) ActivateVolume(name string) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

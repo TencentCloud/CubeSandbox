@@ -70,6 +70,23 @@ func TestResourceLocks(t *testing.T) {
 	}
 }
 
+func TestResourceLockTryLockFailsWhileHeld(t *testing.T) {
+	locks := NewResourceLocks()
+	unlock := locks.Lock("a")
+	if _, ok := locks.TryLock("a"); ok {
+		t.Fatal("TryLock must fail while the resource is held")
+	}
+	unlock()
+	unlockAgain, ok := locks.TryLock("a")
+	if !ok {
+		t.Fatal("TryLock must succeed once the holder released")
+	}
+	unlockAgain()
+	if got := locks.Len(); got != 0 {
+		t.Fatalf("Len = %d, want 0", got)
+	}
+}
+
 func TestResourceLockContextTimeoutDoesNotLeakWaiter(t *testing.T) {
 	locks := NewResourceLocks()
 	unlock := locks.Lock("sandbox")

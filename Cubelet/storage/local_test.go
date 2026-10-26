@@ -369,6 +369,10 @@ func (m *fakeCowVolumeManager) CloneSandboxMemory(ctx context.Context, sandboxID
 	return &cowVolume{VolumeName: name, Kind: cowKindVolume, Gen: 0, FilePath: path}, nil
 }
 
+func (m *fakeCowVolumeManager) PromoteVolumeToSnapshot(context.Context, string, string, string) (*cowVolume, error) {
+	return nil, errors.New("promote is not exercised by the volume-manager fake")
+}
+
 func (m *fakeCowVolumeManager) DeleteByKind(ctx context.Context, name, kind string) error {
 	_ = ctx
 	m.mu.Lock()

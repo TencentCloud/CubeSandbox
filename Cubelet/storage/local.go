@@ -965,6 +965,14 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 			IsRollBack: true,
 		},
 	}
+	// Same serial as Destroy and the mint: this rollback releases the own
+	// volume and deletes the record, so it must not race a publishing clone.
+	// A busy clone only costs the volume delete; the deleted record is enough.
+	if unlock, lockErr := mintSerials.LockContext(ctx, result.SandboxID); lockErr != nil {
+		log.G(ctx).Warnf("cleanup create %s: mint serial: %v", result.SandboxID, lockErr)
+	} else {
+		defer unlock()
+	}
 	var errs error
 	if err := l.destroy(ctx, result, cleanupOpts); err != nil {
 		errs = errors.Join(errs, err)
@@ -1094,13 +1102,15 @@ func pauseResumeMemoryOwnerID(opts *workflow.CreateContext) string {
 	return strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID])
 }
 
-// releaseImportedMemoryVol deletes the memory disk this sandbox cloned or
-// imported. Driven by what Create recorded rather than by the naming
-// convention, so a restore that still reads a package snapshot (empty field)
-// is untouched.
+// releaseImportedMemoryVol deletes the memory disk this sandbox recorded, and
+// for XFS the conventionally named own volume the mint published (its marker
+// is the only evidence). Missing objects are no-ops.
 func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
 	name := strings.TrimSpace(info.ImportedMemoryVol)
 	if name == "" {
+		if isXFSCleanupBackend(backend) {
+			dropOwnMemory(ctx, backend, SandboxMemoryName(info.SandboxID))
+		}
 		return
 	}
 	store, err := l.storeForBackend(backend)
@@ -1547,6 +1557,24 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		log.G(ctx).Fatalf("readBackendFileInfo fail:%v", err)
 		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, err.Error())
 	}
+	// The mint publishes its marker only while the sandbox record exists, so
+	// the clone, the own-volume release and the record delete serialize on the
+	// same per-sandbox lock; this defer runs before unlock. A clone can take a
+	// while, so the wait is bounded by the caller's context.
+	if l.useCowStorage() && info != nil && isXFSCleanupBackend(destroyStorageBackend(info, opts)) {
+		// The mint publishes only while the record exists, so the clone, the
+		// own-volume release and the record delete share this serial. Wait on a
+		// bounded context that survives caller cancellation (the clone itself
+		// runs under WithoutCancel), then proceed without it rather than skip
+		// the teardown.
+		wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), mintSerialWait)
+		defer cancel()
+		if unlock, lockErr := mintSerials.LockContext(wait, info.SandboxID); lockErr != nil {
+			log.G(ctx).Warnf("destroy sandbox %s: mint serial not taken: %v", info.SandboxID, lockErr)
+		} else {
+			defer unlock()
+		}
+	}
 	defer func() {
 		if err == nil {
 
@@ -1742,9 +1770,13 @@ func (l *local) deleteBackendFileInfo(ctx context.Context, id string) error {
 	err := l.db.Delete(bucketName, id)
 	if err != nil {
 		log.G(ctx).Warnf("db delete id :%s,err:%s", id, err)
-		err = atomicDelete(filepath.Join(l.failoverDir(), id))
-		if err != nil {
-			log.G(ctx).Warnf("db delete failover id :%s,err:%s", id, err)
+	}
+	// Drop the failover copy even after a successful db delete: the raw reader
+	// falls back to it, so a leftover copy would resurrect a retired record.
+	if ferr := atomicDelete(filepath.Join(l.failoverDir(), id)); ferr != nil {
+		log.G(ctx).Warnf("db delete failover id :%s,err:%s", id, ferr)
+		if err == nil {
+			err = ferr
 		}
 	}
 	return err
@@ -1950,10 +1982,9 @@ type StorageInfo struct {
 
 	RestoreMemoryVolURL string `json:"-"`
 
-	// ImportedMemoryVol is the sandbox-private memory disk Create minted
-	// (cross-node import or same-node S3 pause-resume clone). Destroy
-	// deletes it. Empty means this restore still reads a package memory
-	// snapshot (XFS template / resume / FromSnap always leave this empty).
+	// ImportedMemoryVol is the sandbox-private memory disk Create minted.
+	// Destroy deletes it. The XFS pause-resume mint records nothing here; it
+	// names its own volume by convention and Destroy deletes that name too.
 	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
