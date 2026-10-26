@@ -290,6 +290,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Overview', link: '/guide/troubleshooting/' },
                 { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
+                { text: 'PVM Host Initramfs (Unsigned Modules)', link: '/guide/troubleshooting/pvm-host-boot-unsigned-modules' },
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
@@ -510,6 +511,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '排障概览', link: '/zh/guide/troubleshooting/' },
                 { text: '部署问题', link: '/zh/guide/troubleshooting/deployment' },
+                { text: 'PVM 宿主内核 initramfs（模块未签名）', link: '/zh/guide/troubleshooting/pvm-host-boot-unsigned-modules' },
                 { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
