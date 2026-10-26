@@ -12,3 +12,7 @@ pub const ENVD_VERSION_FALLBACK: &str = "0.2.0";
 /// Sandbox annotation key carrying the real envd version, collected at template
 /// creation time by CubeMaster/Cubelet and propagated to sandbox instances.
 pub const ENVD_VERSION_ANNOTATION: &str = "cube.master.components.envd.version";
+
+/// Sandbox annotation key carrying the template alias (display_name) or a named
+/// snapshot's name. Absent for unnamed snapshots and legacy sandboxes.
+pub const TEMPLATE_ALIAS_ANNOTATION: &str = "cube.master.appsnapshot.template.alias";

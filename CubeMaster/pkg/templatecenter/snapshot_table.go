@@ -175,12 +175,12 @@ func snapshotReplicasFromRecord(ctx context.Context, rec *models.SnapshotRecord)
 
 func requestFromSnapshotJSON(raw string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	req := &sandboxtypes.CreateCubeSandboxReq{}
-	if strings.TrimSpace(raw) == "" {
-		return req, nil
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), req); err != nil {
+			return nil, err
+		}
 	}
-	if err := json.Unmarshal([]byte(raw), req); err != nil {
-		return nil, err
-	}
+	// Always guarantee a non-nil map so every caller can write annotations safely.
 	if req.Annotations == nil {
 		req.Annotations = make(map[string]string)
 	}

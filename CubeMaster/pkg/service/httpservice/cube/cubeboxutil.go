@@ -274,6 +274,13 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 		}
 		reqOut.Labels[constants.CubeAnnotationComponentEnvdVersion] = v
 	}
+	// Mirror the alias onto labels so sandbox reads can promote it back.
+	if v := strings.TrimSpace(reqOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]); v != "" {
+		if reqOut.Labels == nil {
+			reqOut.Labels = make(map[string]string)
+		}
+		reqOut.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias] = v
+	}
 }
 
 func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
 use crate::{
-    constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
+    constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK, TEMPLATE_ALIAS_ANNOTATION},
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeHTTPGet,
@@ -322,9 +322,10 @@ impl SandboxService {
             .or(d.end_at);
 
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let alias = template_alias_from_annotations(&d.annotations);
         Ok(SandboxDetail {
             template_id: d.template_id,
-            alias: None,
+            alias,
             sandbox_id: d.sandbox_id,
             client_id: d.host_id,
             started_at,
@@ -494,12 +495,14 @@ impl SandboxService {
             .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
+        let alias = template_alias_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
             template_id,
             resp.sandbox_id,
             resp.request_id,
             envd_version,
             resp.traffic_access_token,
+            alias,
         ))
     }
 
@@ -561,6 +564,7 @@ impl SandboxService {
 
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let alias = template_alias_from_annotations(&d.annotations);
         // resume/connect paths reload the sandbox via fetch_sandbox_detail,
         // which does not surface the traffic_access_token. The token only
         // matters at create time (so the caller can persist it); afterward
@@ -571,6 +575,7 @@ impl SandboxService {
             d.host_id,
             envd_version,
             None,
+            alias,
         ))
     }
 
@@ -638,12 +643,14 @@ impl SandboxService {
         }
 
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let alias = template_alias_from_annotations(&d.annotations);
         Ok(self.sandbox_response(
             d.template_id,
             sandbox_id.to_string(),
             d.host_id,
             envd_version,
             None,
+            alias,
         ))
     }
 
@@ -664,6 +671,7 @@ impl SandboxService {
         // Source lookup seeds template/envd lineage and fails fast with 404.
         let source = self.fetch_sandbox_detail(sandbox_id).await?;
         let envd_version = envd_version_from_annotations(&source.annotations);
+        let alias = template_alias_from_annotations(&source.annotations);
 
         let req = ForkSandboxRequest {
             request_id: new_request_id(),
@@ -698,6 +706,7 @@ impl SandboxService {
                         fb.host_id,
                         envd_version.clone(),
                         fb.traffic_access_token,
+                        alias.clone(),
                     )),
                     error: None,
                 },
@@ -943,11 +952,12 @@ impl SandboxService {
         client_id: String,
         envd_version: String,
         traffic_access_token: Option<String>,
+        alias: Option<String>,
     ) -> Sandbox {
         Sandbox {
             template_id,
             sandbox_id,
-            alias: None,
+            alias,
             client_id,
             envd_version,
             envd_access_token: None,
@@ -1389,12 +1399,25 @@ pub(crate) fn envd_version_from_annotations(annotations: &HashMap<String, String
         .unwrap_or_else(|| ENVD_VERSION_FALLBACK.to_string())
 }
 
+/// Resolve the reported `alias` from a sandbox annotation map; `None` when the
+/// sandbox has no template alias (snapshots and legacy sandboxes).
+pub(crate) fn template_alias_from_annotations(
+    annotations: &HashMap<String, String>,
+) -> Option<String> {
+    annotations
+        .get(TEMPLATE_ALIAS_ANNOTATION)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
 pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandbox {
     use crate::models::ListedSandbox;
 
     let now = chrono::Utc::now();
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
     let envd_version = envd_version_from_annotations(&s.annotations);
+    let alias = template_alias_from_annotations(&s.annotations);
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
     let started_at = s
@@ -1404,7 +1427,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
 
     ListedSandbox {
         template_id,
-        alias: None,
+        alias,
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
         started_at,
@@ -1903,10 +1926,11 @@ mod tests {
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
         map_delete_cubemaster_err, map_volume_mounts, parse_state_filter, resolve_lifecycle_flags,
-        sandbox_state_from_status, sandbox_state_from_str, validate_mask_request_host,
-        SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
-        RET_CODE_TASK_STATE_INVALID,
+        sandbox_state_from_status, sandbox_state_from_str, template_alias_from_annotations,
+        validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
+        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
+    use crate::constants::TEMPLATE_ALIAS_ANNOTATION;
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
         ListSandboxResponse, SandboxInfo, SandboxStatus, SandboxUpdateRequest,
@@ -3599,6 +3623,55 @@ mod tests {
         assert_eq!(listed.cpu_milli, None);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn template_alias_from_annotations_reads_trimmed_value() {
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            TEMPLATE_ALIAS_ANNOTATION.to_string(),
+            "  python-runtime  ".to_string(),
+        );
+        assert_eq!(
+            template_alias_from_annotations(&annotations),
+            Some("python-runtime".to_string())
+        );
+    }
+
+    #[test]
+    fn template_alias_from_annotations_ignores_blank_and_absent() {
+        let mut blank = HashMap::new();
+        blank.insert(TEMPLATE_ALIAS_ANNOTATION.to_string(), "   ".to_string());
+        assert_eq!(template_alias_from_annotations(&blank), None);
+        assert_eq!(template_alias_from_annotations(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn listed_sandbox_surfaces_template_alias_annotation() {
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            TEMPLATE_ALIAS_ANNOTATION.to_string(),
+            "python-runtime".to_string(),
+        );
+        let listed = from_cubemaster_info(SandboxInfo {
+            sandbox_id: "sb-alias".to_string(),
+            host_id: "host-1".to_string(),
+            status: "running".to_string(),
+            started_at: None,
+            create_at: 0,
+            end_at: None,
+            cpu_count: 1,
+            memory_mb: 1024,
+            cpu_milli: 0,
+            memory_mib: 0,
+            template_id: "tpl-1".to_string(),
+            annotations,
+            labels: HashMap::new(),
+            volume_mounts: vec![],
+            restart_status: None,
+        });
+
+        assert_eq!(listed.alias.as_deref(), Some("python-runtime"));
     }
 
     #[test]

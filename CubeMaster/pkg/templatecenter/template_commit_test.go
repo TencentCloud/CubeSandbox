@@ -215,6 +215,41 @@ func TestPrepareTemplateCommitRequestUsesExplicitOverride(t *testing.T) {
 	}
 }
 
+// TestPrepareTemplateCommitRequestScrubsInheritedAlias verifies the commit
+// path strips the source template's alias annotation and label.
+func TestPrepareTemplateCommitRequestScrubsInheritedAlias(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+
+	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*types.CreateCubeSandboxReq, error) {
+		return &types.CreateCubeSandboxReq{
+			Request: &types.Request{RequestID: "old-request"},
+			Annotations: map[string]string{
+				constants.CubeAnnotationAppSnapshotTemplateID:    "tpl-old",
+				constants.CubeAnnotationAppSnapshotTemplateAlias: "source-alias",
+			},
+			Labels: map[string]string{
+				constants.CubeAnnotationAppSnapshotTemplateAlias: "source-alias",
+			},
+			InstanceType: "cubebox",
+		}, nil
+	}
+
+	got, err := prepareTemplateCommitRequest(context.Background(), "req-new", "sb-1", "tpl-new", nil)
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest: %v", err)
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("commit request must not carry the source alias annotation")
+	}
+	if _, ok := got.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("commit request must not carry the source alias label")
+	}
+	if got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "tpl-new" {
+		t.Fatalf("template annotation=%q", got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
+}
+
 func TestPrepareTemplateCommitRequestPropagatesResolverError(t *testing.T) {
 	origLoad := loadSandboxCreateRequestFn
 	defer func() { loadSandboxCreateRequestFn = origLoad }()

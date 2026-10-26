@@ -20,6 +20,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -44,6 +45,7 @@ const (
 var (
 	forkDealCubeboxCreateReqWithTemplateFn = dealCubeboxCreateReqWithTemplate
 	forkCreateSandboxRunFn                 = sandbox.CreateSandbox
+	resolveSourceAliasFn                   = resolveSourceSandboxAlias
 )
 
 func extendForkWriteDeadline(w http.ResponseWriter) {
@@ -71,6 +73,7 @@ func forkSandboxFromSnapshot(
 	count int,
 	timeout *int,
 	envVars map[string]string,
+	alias string,
 ) []*forkSandboxResult {
 	results := make([]*forkSandboxResult, count)
 	var wg sync.WaitGroup
@@ -96,7 +99,7 @@ func forkSandboxFromSnapshot(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			subCtx := withTemplateResolveResult(ctx, &templateResolveResult{})
-			sb, ret := singleForkDerive(subCtx, fmt.Sprintf("%s-%d", requestID, idx), snapshotID, timeout, envVars)
+			sb, ret := singleForkDerive(subCtx, fmt.Sprintf("%s-%d", requestID, idx), snapshotID, timeout, envVars, alias)
 			results[idx] = &forkSandboxResult{Sandbox: sb, Ret: ret}
 		}(i)
 	}
@@ -112,8 +115,9 @@ func singleForkDerive(
 	snapshotID string,
 	timeout *int,
 	envVars map[string]string,
+	alias string,
 ) (*types.CreateCubeSandboxRes, *types.Ret) {
-	req, err := buildForkCreateReq(requestID, snapshotID, timeout, envVars)
+	req, err := buildForkCreateReq(requestID, snapshotID, timeout, envVars, alias)
 	if err != nil {
 		return nil, forkRet(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
@@ -152,15 +156,21 @@ func buildForkCreateReq(
 	snapshotID string,
 	timeout *int,
 	envVars map[string]string,
+	alias string,
 ) (*types.CreateCubeSandboxReq, error) {
 	// Mark as v2 snapshot create to route via template-center, matching
 	// snapshot_ops.go's from-snapshot spawn (avoids the local-config path).
+	annotations := map[string]string{
+		constants.CubeAnnotationAppSnapshotTemplateID: snapshotID,
+		constants.CubeAnnotationAppSnapshotVersion:    templatecenter.DefaultTemplateVersion,
+	}
+	// Inherit the source alias so fork reads match the fork response.
+	if alias := strings.TrimSpace(alias); alias != "" {
+		annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = alias
+	}
 	payload := map[string]any{
-		"requestID": requestID,
-		"annotations": map[string]string{
-			constants.CubeAnnotationAppSnapshotTemplateID: snapshotID,
-			constants.CubeAnnotationAppSnapshotVersion:    templatecenter.DefaultTemplateVersion,
-		},
+		"requestID":   requestID,
+		"annotations": annotations,
 	}
 	if len(envVars) > 0 {
 		payload["create_time_env_vars"] = envVars
@@ -284,6 +294,7 @@ func forkSandboxFromSource(
 	if err != nil {
 		return err
 	}
+	alias := resolveSourceAliasFn(ctx, sandboxID)
 	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "")
 	if err != nil {
 		return err
@@ -295,7 +306,7 @@ func forkSandboxFromSource(
 
 	// Replay source env vars from the snapshot spec (template merge omits them).
 	envVars := inheritedForkEnvVars(ctx, snapshotID)
-	resp.Results = forkSandboxFromSnapshot(ctx, requestID, snapshotID, count, timeout, envVars)
+	resp.Results = forkSandboxFromSnapshot(ctx, requestID, snapshotID, count, timeout, envVars, alias)
 
 	// Reclaim off the response path: a synchronous delete could push the
 	// response past its write deadline.
@@ -314,6 +325,16 @@ func forkSandboxFromSource(
 		}
 	}()
 	return nil
+}
+
+// resolveSourceSandboxAlias returns the source sandbox's template alias from
+// its persisted create spec; empty when absent or unreadable.
+func resolveSourceSandboxAlias(ctx context.Context, sandboxID string) string {
+	spec, err := sandboxspec.Get(ctx, sandboxID)
+	if err != nil || spec == nil {
+		return ""
+	}
+	return strings.TrimSpace(spec.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias])
 }
 
 // inheritedForkEnvVars returns the source sandbox env vars stored in the

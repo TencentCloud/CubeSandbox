@@ -17,6 +17,7 @@ var runtimeSnapshotAnnotationKeys = []string{
 	constants.CubeAnnotationRuntimeSnapshotID,
 	constants.CubeAnnotationRuntimeSnapshotAttachedAt,
 	constants.CubeAnnotationComponentEnvdVersion,
+	constants.CubeAnnotationAppSnapshotTemplateAlias,
 }
 
 func cloneStringMap(in map[string]string) map[string]string {
