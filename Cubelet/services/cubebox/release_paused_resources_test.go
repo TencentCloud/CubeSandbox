@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
@@ -32,6 +33,18 @@ func sandboxWithResourceForTest(id string, status cubeboxstore.Status, cpu, mem 
 	}
 	cb.Queues = queues
 	return cb
+}
+
+func markBackendForTest(backend string, sbs ...*cubeboxstore.CubeBox) {
+	for _, sb := range sbs {
+		if sb == nil {
+			continue
+		}
+		if sb.Annotations == nil {
+			sb.Annotations = map[string]string{}
+		}
+		sb.Annotations[constants.MasterAnnotationStorageBackend] = backend
+	}
 }
 
 func TestAggregateSandboxResourcesRatioZeroCountsPausedQuota(t *testing.T) {
@@ -61,6 +74,7 @@ func TestAggregateSandboxResourcesRatioOneReleasesPausedCPUAndMem(t *testing.T) 
 		sandboxWithResourceForTest("run", cubeboxstore.Status{StartedAt: now}, "1000m", "2Gi", 4, 10, 20),
 		sandboxWithResourceForTest("paused", cubeboxstore.Status{PausedAt: now}, "2000m", "4Gi", 8, 30, 40),
 	}
+	markBackendForTest("s3", sbs...)
 
 	// releaseRatio 1 = release everything: paused sandbox no longer reserves
 	// CPU/RAM/NIC queues nor counts as running, freeing scheduling capacity...
@@ -84,6 +98,7 @@ func TestAggregateSandboxResourcesRatioOneAlsoReleasesPausingQuota(t *testing.T)
 		// the freed capacity is visible the moment the pause begins committing.
 		sandboxWithResourceForTest("pausing", cubeboxstore.Status{PausingAt: now}, "2000m", "4Gi", 8, 30, 40),
 	}
+	markBackendForTest("s3", sbs...)
 
 	got := aggregateSandboxResources(sbs, 1)
 
@@ -99,6 +114,7 @@ func TestAggregateSandboxResourcesPartialRelease(t *testing.T) {
 		sandboxWithResourceForTest("run", cubeboxstore.Status{StartedAt: now}, "1000m", "2Gi", 4, 10, 20),
 		sandboxWithResourceForTest("paused", cubeboxstore.Status{PausedAt: now}, "2000m", "4Gi", 8, 30, 40),
 	}
+	markBackendForTest("s3", sbs...)
 
 	// Release 50% of the paused sandbox's CPU/mem quota (reserve the other 50%).
 	got := aggregateSandboxResources(sbs, 0.5)
@@ -106,13 +122,48 @@ func TestAggregateSandboxResourcesPartialRelease(t *testing.T) {
 	// running 1000m/2Gi + reserved 50% of paused 2000m/4Gi = 2000m/4096MB.
 	assert.Equal(t, int64(2000), got.MilliCPU, "running + reserved half of paused CPU")
 	assert.Equal(t, int64(4096), got.MemoryMB, "running + reserved half of paused mem")
-	// Liveness is unaffected by the ratio: paused is still not running and
-	// holds no NIC queues; the object and its disk snapshot still count.
 	assert.Equal(t, int64(1), got.MvmRunningNum)
 	assert.Equal(t, int64(4), got.NicQueues)
 	assert.Equal(t, int64(2), got.MvmNum)
 	assert.Equal(t, int64(40), got.DataDiskMB)
 	assert.Equal(t, int64(60), got.StorageDiskMB)
+}
+
+func TestAggregateSandboxResourcesImmovablePausedKeepsQuota(t *testing.T) {
+	now := time.Now().UnixNano()
+	sbs := []*cubeboxstore.CubeBox{
+		sandboxWithResourceForTest("run", cubeboxstore.Status{StartedAt: now}, "1000m", "2Gi", 4, 10, 20),
+		sandboxWithResourceForTest("paused", cubeboxstore.Status{PausedAt: now}, "2000m", "4Gi", 8, 30, 40),
+	}
+	markBackendForTest("xfs", sbs...)
+
+	got := aggregateSandboxResources(sbs, 1)
+
+	assert.Equal(t, int64(3000), got.MilliCPU, "an XFS pause releases no CPU")
+	assert.Equal(t, int64(6144), got.MemoryMB, "an XFS pause releases no memory")
+	assert.Equal(t, int64(1), got.MvmRunningNum, "liveness is unaffected by the backend")
+	assert.Equal(t, int64(2), got.MvmNum)
+}
+
+func TestPausedReleaseRatioForBackend(t *testing.T) {
+	now := time.Now().UnixNano()
+	paused := func() *cubeboxstore.CubeBox {
+		return sandboxWithResourceForTest("paused", cubeboxstore.Status{PausedAt: now}, "1000m", "2Gi", 1, 0, 0)
+	}
+
+	s3 := paused()
+	markBackendForTest("s3", s3)
+	xfs := paused()
+	markBackendForTest("xfs", xfs)
+	cubecow := paused()
+	markBackendForTest("cubecow", cubecow)
+
+	assert.Equal(t, 1.0, pausedReleaseRatioFor(s3, 1.0), "S3 can be restored elsewhere, so it releases")
+	assert.Equal(t, 0.5, pausedReleaseRatioFor(s3, 0.5))
+	assert.Equal(t, 0.0, pausedReleaseRatioFor(xfs, 1.0), "XFS can only resume here, so it releases nothing")
+	assert.Equal(t, 0.0, pausedReleaseRatioFor(cubecow, 1.0), "cubecow is an XFS alias")
+	assert.Equal(t, 0.0, pausedReleaseRatioFor(paused(), 1.0), "no backend annotation defaults to XFS")
+	assert.Equal(t, 0.0, pausedReleaseRatioFor(s3, 0), "policy off releases nothing")
 }
 
 func TestClampRatio(t *testing.T) {
@@ -272,6 +323,7 @@ func TestAdmitResumeRejectsWhenCapacityExceeded(t *testing.T) {
 	sb := sandboxWithResourceForTest("sb-overcommit", cubeboxstore.Status{
 		PausedAt: time.Now().UnixNano(),
 	}, "4000m", "8Gi", 4, 0, 0)
+	markBackendForTest("s3", sb)
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
 
 	ret := s.admitResume(context.Background(), sb)
@@ -331,6 +383,7 @@ func TestResumeLockedRejectsWithoutSkipAdmissionUnderCapacityPressure(t *testing
 	sb := sandboxWithResourceForTest("sb-no-skip-admit", cubeboxstore.Status{
 		PausedAt: time.Now().UnixNano(),
 	}, "4000m", "8Gi", 4, 0, 0)
+	markBackendForTest("s3", sb)
 	task := &fakeResumeTask{}
 	sb.FirstContainer().Container = &fakeDestroyContainer{task: task}
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}

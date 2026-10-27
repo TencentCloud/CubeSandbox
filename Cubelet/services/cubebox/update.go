@@ -267,70 +267,118 @@ func (s *service) admitResume(
 	ctx context.Context,
 	sb *cubeboxstore.CubeBox,
 ) *errorcode.Ret {
-	// GetHostConf always returns a non-nil config (it falls back to defaults).
-	hostConf := config.GetHostConf()
-	releaseRatio := clampRatio(hostConf.Quota.PausedResourceReleaseRatio)
-	if releaseRatio <= 0 {
+	in, state := resumeAdmissionInputs(sb)
+	switch state {
+	case resumeAdmissionOff:
 		// Policy off: paused sandboxes kept their full quota, so resume is
 		// guaranteed and needs no admission check (legacy behaviour).
 		return nil
-	}
-	if sb.ResourceWithOverHead == nil {
+	case resumeAdmissionUnsizable:
 		// Policy active but we cannot size this sandbox's demand. Fail closed
 		// (reject) rather than silently admit and risk overcommit; this also
 		// surfaces any sandbox missing resource metadata instead of hiding it.
-		ret := &errorcode.Ret{
+		log.G(ctx).Warnf("admitResume reject sandbox=%s: missing resource metadata under paused_resource_release_ratio policy", sb.ID)
+		return &errorcode.Ret{
 			RetCode: errorcode.ErrorCode_Conflict,
 			RetMsg:  "resume rejected by paused_resource_release_ratio policy: missing resource metadata",
 		}
-		log.G(ctx).Warnf("admitResume reject sandbox=%s: missing resource metadata under paused_resource_release_ratio policy", sb.ID)
-		return ret
 	}
 
 	// Recomputed live (no cache) on purpose: admission must reflect the current
 	// allocation to avoid overcommit, and resume is far rarer than its VM-wake
 	// cost, so this O(n) scan is acceptable on this path.
 	alloc := s.cubeboxMgr.aggregateAllocated()
-	memQuotaMB := int64(0)
-	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
-		memQuotaMB = bytesToMB(memQuota.Value())
-	}
-	// Only the released fraction is the incremental demand of resuming.
-	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
 
 	if reason := resumeQuotaRejection(resumeQuotaCheck{
 		usedMemMB:     alloc.MemoryMB,
-		needMemMB:     needMemMB,
-		memQuotaMB:    memQuotaMB,
+		needMemMB:     in.needMemMB,
+		memQuotaMB:    in.memQuotaMB,
 		usedCPUMilli:  alloc.MilliCPU,
-		needCPUMilli:  needCPU,
-		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
+		needCPUMilli:  in.needCPUMilli,
+		cpuQuotaMilli: in.cpuQuotaMilli,
 	}); reason != "" {
-		ret := &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_Conflict,
-			RetMsg:  "resume rejected by paused_resource_release_ratio policy: " + reason,
-		}
 		// Conflict (not TaskResumeFailed) so the capacity rejection surfaces as
 		// HTTP 409 at the API edge: this is an expected, retriable state (free
 		// up capacity and retry), not a backend failure that should read as a
 		// 500. The descriptive RetMsg is carried through to the client.
-		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, ret.RetMsg)
-		return ret
+		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, reason)
+		return &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_Conflict,
+			RetMsg:  "resume rejected by paused_resource_release_ratio policy: " + reason,
+		}
 	}
 
 	return nil
 }
 
-// resumeDemand returns the incremental CPU/memory a resume re-adds to the node
-// under releaseRatio. While paused, the sandbox already contributes (1-ratio)
-// of its quota to aggregateAllocated, so resuming it (a full reservation) only
-// adds back the released `ratio` fraction. The memory side scales at byte
+// resumeAdmissionInputs is the shared input of both resume admission paths:
+// admitResume (explicit Resume) and admitAndReserveResume (Create-from-pause).
+// Both must size the demand and read the quota the same way or they drift.
+type resumeAdmission struct {
+	needMemMB     int64
+	needCPUMilli  int64
+	memQuotaMB    int64
+	cpuQuotaMilli int64
+	releaseRatio  float64
+}
+
+// resumeAdmissionState says whether the inputs can be compared at all.
+type resumeAdmissionState int
+
+const (
+	// resumeAdmissionCheck: the policy is on and the demand is known.
+	resumeAdmissionCheck resumeAdmissionState = iota
+	// resumeAdmissionOff: the policy is off, so a paused sandbox kept its full
+	// quota and resume is guaranteed — no check at all.
+	resumeAdmissionOff
+	// resumeAdmissionUnsizable: the policy is on but the demand cannot be
+	// sized. Callers fail closed rather than admit an unknown demand.
+	resumeAdmissionUnsizable
+)
+
+func resumeAdmissionInputs(sb *cubeboxstore.CubeBox) (resumeAdmission, resumeAdmissionState) {
+	// GetHostConf always returns a non-nil config (it falls back to defaults).
+	hostConf := config.GetHostConf()
+	releaseRatio := clampRatio(hostConf.Quota.PausedResourceReleaseRatio)
+	if releaseRatio <= 0 {
+		return resumeAdmission{}, resumeAdmissionOff
+	}
+	if sb == nil || sb.ResourceWithOverHead == nil {
+		return resumeAdmission{}, resumeAdmissionUnsizable
+	}
+	// Only what this sandbox actually released has to come back. A snapshot
+	// that cannot leave the node released nothing, so its quota never left the
+	// books and its resume fits by construction — no check at all.
+	released := pausedReleaseRatioFor(sb, releaseRatio)
+	if released <= 0 {
+		return resumeAdmission{}, resumeAdmissionOff
+	}
+	in := resumeAdmission{
+		releaseRatio:  releaseRatio,
+		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
+	}
+	// Only the released fraction is the incremental demand of resuming.
+	in.needMemMB, in.needCPUMilli = resumeDemand(sb.ResourceWithOverHead, released)
+	// An unparsable quota means "unbounded" for that dimension, matching how
+	// the rest of the cubelet treats an unset host quota.
+	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
+		in.memQuotaMB = bytesToMB(memQuota.Value())
+	}
+	return in, resumeAdmissionCheck
+}
+
+// resumeDemand returns the incremental CPU/memory a resume re-adds to the node:
+// while paused the sandbox already contributes (1-released) of its quota to
+// aggregateAllocated, so resuming it (a full reservation) only adds back the
+// released fraction. Callers must pass the fraction this sandbox released
+// (pausedReleaseRatioFor), not the node-wide ratio: a snapshot pinned to this
+// node released nothing and adds nothing. The memory side scales at byte
 // precision and truncates to MB only at the very end, identical to
 // aggregateSandboxResources, so the admission and accounting paths cannot
-// disagree by a sub-MB rounding gap. Callers must pass a clamped ratio.
-func resumeDemand(r *cubeboxstore.ResourceWithOverHead, releaseRatio float64) (needMemMB, needCPUMilli int64) {
-	needMemMB = bytesToMB(scaleInt64(r.HostMemQ.Value(), releaseRatio))
-	needCPUMilli = scaleInt64(r.HostCpuQ.MilliValue(), releaseRatio)
+// disagree by a sub-MB rounding gap.
+func resumeDemand(r *cubeboxstore.ResourceWithOverHead, released float64) (needMemMB, needCPUMilli int64) {
+	needMemMB = bytesToMB(scaleInt64(r.HostMemQ.Value(), released))
+	needCPUMilli = scaleInt64(r.HostCpuQ.MilliValue(), released)
 	return needMemMB, needCPUMilli
 }
 
