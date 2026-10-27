@@ -145,6 +145,63 @@ func (cb *CubeBox) ClearRuntimeBase() {
 	l.Runtime = nil
 }
 
+// legacyInvalidMemoryBaseID is a marker that older Cubelets wrote into the
+// restore-base label to mean "no usable base". Rows on disk still carry the
+// literal even though nothing writes it anymore. Backfilling it would only
+// cause one pointless catalog lookup and a warn on the next capture, so it is
+// skipped here.
+const legacyInvalidMemoryBaseID = "invalid-runtime-restore-base"
+
+// ReconcileRecoveredMemoryLineage turns a freshly loaded row's durable metadata
+// into the lineage this process will trust.
+//
+// legacyRestoreLabel is the pre-MemoryLineage restore binding, or "" when the
+// caller has none. The caller passes the value instead of this method reading
+// Labels so the "which metadata keys count as evidence" decision stays in the
+// recovery loop that also decides which keys Create strips.
+//
+// Must be called before the row is published to the store: it takes no MetaLock
+// because there is no concurrent writer yet.
+func (cb *CubeBox) ReconcileRecoveredMemoryLineage(legacyRestoreLabel string) {
+	if cb == nil {
+		return
+	}
+	// A rollback that reached "prepared" but never activated leaves the durable
+	// lineage pointing at the pre-rollback image while the guest may already be
+	// running the rollback target. The durable row cannot tell those cases
+	// apart, so the base is untrusted. Keeping Ancestor is safe: with Restore
+	// empty, launchAncestorIsLastRestore is always false, so neither capture
+	// path can treat it as an incremental base.
+	if cb.recoveredRollbackOutcomeUnknown() {
+		cb.ClearRuntimeLineage()
+		return
+	}
+	// A row that already carries a lineage was written by a build that knows
+	// this field; its bindings are authoritative.
+	if cb.MemoryLineage != nil {
+		return
+	}
+	// Legacy row: make "no base" explicit so nil never leaks past recovery.
+	cb.RestoreMemoryLineage(&MemoryLineage{})
+	if cb.LastRestartAt != 0 {
+		return // guest memory was replaced after the label was stamped
+	}
+	// Only Restore is backfilled. Runtime drives the soft-dirty path, whose
+	// bitmap state is unknowable after a Cubelet restart; leaving it empty
+	// routes the next capture to Tier 2 (pagemap_anon since last restore),
+	// which is exactly what Restore describes.
+	if id := strings.TrimSpace(legacyRestoreLabel); id != "" && id != legacyInvalidMemoryBaseID {
+		cb.BindRestoreBase(id)
+	}
+}
+
+func (cb *CubeBox) recoveredRollbackOutcomeUnknown() bool {
+	epoch := cb.GuestMetricsEpochCopy()
+	return epoch != nil &&
+		epoch.State == GuestMetricsEpochPrepared &&
+		epoch.Reason == GuestMetricsEpochRollback
+}
+
 // ClearRuntimeLineage drops the commit base and the last-restore base.
 // The launch ancestor is kept so Pause can still name the start image, but
 // with no restore base it must not incremental-overlay onto that image.

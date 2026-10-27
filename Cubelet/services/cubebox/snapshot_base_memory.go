@@ -126,20 +126,16 @@ func launchAncestorFromRequest(cb *cubeboxstore.CubeBox) string {
 // every page that landed in the pause image and stayed clean. The next
 // restore then comes up holey: agent health can still answer, then
 // set_guest_date_time/reseed hang on ttrpc.
-func launchAncestorIsLastRestore(cb *cubeboxstore.CubeBox, ancestorID string) bool {
+func launchAncestorIsLastRestore(restoreID, ancestorID string) bool {
 	ancestorID = strings.TrimSpace(ancestorID)
 	if ancestorID == "" {
 		return false
 	}
-	restoreID := strings.TrimSpace(resolveRestoreBaseSnapshotID(cb))
 	// No restore base means this VM's memory is not the ancestor image.
 	// Create-from-template stamps both together. Opaque resume and restart
 	// leave the restore base empty on purpose; treating that as "ancestor
 	// incremental is fine" would overlay fresh pages onto stale memory.
-	if restoreID == "" {
-		return false
-	}
-	return restoreID == ancestorID
+	return strings.TrimSpace(restoreID) == ancestorID
 }
 
 func isUsableLaunchAncestorID(id, pauseID string) bool {
@@ -220,6 +216,11 @@ func preparePauseMemoryArtifact(
 			sandboxID = strings.TrimSpace(cb.SandboxID)
 		}
 	}
+	// Resolve the lineage once for the decision below. Pause already holds the
+	// sandbox lifecycle lock, so this is about one decision reading one sample
+	// rather than bracing for concurrent writers.
+	ancestorID := resolveLaunchAncestorSnapshotID(cb)
+	restoreID := resolveRestoreBaseSnapshotID(cb)
 	if live, liveErr := getImportedSandboxMemoryFor(ctx, backend, sandboxID); liveErr != nil {
 		stepLog.Warnf("pause memory artifact: own volume lookup failed (%v); trying a catalog base", liveErr)
 	} else if live != nil {
@@ -230,7 +231,7 @@ func preparePauseMemoryArtifact(
 		// applies the same gate through importedMemoryIsCurrentRestore; Pause
 		// must not skip it.
 		switch {
-		case !importedMemoryWasLivePauseBase(cb, priorPauseID):
+		case !importedMemoryWasLivePauseBase(restoreID, priorPauseID, ancestorID, sandboxRolledBackSinceCreate(cb)):
 			stepLog.Warnf("pause memory artifact: own volume %s is not the live restore base for %s; skipping it", live.Name, sandboxID)
 		default:
 			memoryObject, cloneErr := commitMemoryFromBaseFor(ctx, backend, live, templateID, memorySizeBytes)
@@ -243,9 +244,7 @@ func preparePauseMemoryArtifact(
 		}
 	}
 
-	ancestorID := resolveLaunchAncestorSnapshotID(cb)
-	restoreID := resolveRestoreBaseSnapshotID(cb)
-	if launchAncestorIsLastRestore(cb, ancestorID) {
+	if launchAncestorIsLastRestore(restoreID, ancestorID) {
 		base, err := resolveMemoryObjectFromSnapshotID(ctx, backend, ancestorID)
 		if err == nil {
 			memoryObject, cloneErr := storage.CommitMemoryFromBaseFor(ctx, backend, base, templateID, memorySizeBytes)
@@ -439,11 +438,10 @@ func importedSandboxMemoryForCommit(
 
 // importedMemoryIsCurrentRestore is the Tier 2b gate. ImportedMemoryVol
 // is minted at Create/Resume (same-node clone or cross-node import).
-// Rollback restamps RuntimeRestoreSnapshotID onto the rollback target
-// and leaves the import pointing at the pre-rollback disk. Opaque
-// resume writes invalid-runtime-restore-base and also leaves the vol
-// stale. Incremental onto that disk would drop pages that landed in
-// the new restore image.
+// Rollback restamps the restore base onto the rollback target and
+// leaves the import pointing at the pre-rollback disk. Opaque resume
+// clears the restore base and also leaves the vol stale. Incremental
+// onto that disk would drop pages that landed in the new restore image.
 //
 // Require the Cubelet-stamped pause binding, and require
 // restore-base == pause id: that is the Resume path this fallback is for.
@@ -465,19 +463,60 @@ func importedMemoryIsCurrentRestore(cb *cubeboxstore.CubeBox) bool {
 
 // importedMemoryWasLivePauseBase is the Pause-side gate. Pause stamps the new
 // snapshot id before preparing the artifact, so comparing against the current
-// pause binding would always fail. Instead it compares the lineage's restore
-// base with the pause package that was live when this Pause started: only then
-// is the imported/cloned disk still the image the VM was restored from.
-func importedMemoryWasLivePauseBase(cb *cubeboxstore.CubeBox, priorPauseID string) bool {
-	if cb == nil {
+// pause binding would always fail. Instead it asks whether the imported/cloned
+// disk is still the image this VM was restored from.
+//
+// Two shapes mint that disk:
+//   - pause resume: the source is a pause package, and the live pause id is the
+//     restore base until this Pause replaces it;
+//   - cross-node FromSnap: the source is the customer snapshot itself and no
+//     pause package exists yet, so the disk is the live base only while the VM
+//     still sits on its launch ancestor (and has never been anywhere else).
+//
+// Restart and opaque resume leave the disk behind but replace guest memory;
+// both have an empty restoreID, so every arm rejects them.
+//
+// The FromSnap arm additionally requires that no rollback followed the create.
+// A rollback to the launch ancestor makes restoreID == ancestorID again, and
+// the stale import is only released best-effort (releaseImportedMemoryAfterRollback
+// returns nil on a metadata read error), so the ids alone cannot prove the disk
+// still describes this guest. Refusing costs one full capture; getting it wrong
+// would silently drop every page the rollback target brought in.
+//
+// Takes the ids the caller already resolved so the own-volume decision reads
+// the lineage once, next to the ancestor lookup that uses the same values.
+func importedMemoryWasLivePauseBase(restoreID, priorPauseID, ancestorID string, rolledBack bool) bool {
+	restoreID = strings.TrimSpace(restoreID)
+	if restoreID == "" {
 		return false
 	}
-	priorPauseID = strings.TrimSpace(priorPauseID)
-	restoreID := cb.RestoreBaseID()
-	if restoreID == "" || priorPauseID == "" {
+	// A rollback replaces guest memory from a different image, and the import is
+	// only released best-effort. Nothing about the ids proves the disk survived
+	// intact, so refuse both arms rather than reason about which one matched.
+	if rolledBack {
 		return false
 	}
-	return restoreID == priorPauseID
+	if priorPauseID = strings.TrimSpace(priorPauseID); priorPauseID != "" {
+		return restoreID == priorPauseID
+	}
+	return restoreID == strings.TrimSpace(ancestorID)
+}
+
+// sandboxRolledBackSinceCreate reports whether a rollback happened since this
+// VM's current incarnation was created.
+//
+// Scope matters here. The guest metrics epoch is reset to fresh_create by every
+// successful Create, and pause resume is a Create: it rebuilds the sandbox row
+// and re-mints the sandbox-private memory disk from the pause package
+// (prefetchRestoreMemoryVolURL -> CloneSandboxMemory), so the epoch's window and
+// the imported disk's lifetime start together. Within that window the reason
+// only ever moves away from rollback by another rollback.
+//
+// A missing epoch (non-cubecow, or a row predating the field) means "not known
+// to be rolled back", which matches master's behaviour for the same rows.
+func sandboxRolledBackSinceCreate(cb *cubeboxstore.CubeBox) bool {
+	epoch := cb.GuestMetricsEpochCopy()
+	return epoch != nil && epoch.Reason == cubeboxstore.GuestMetricsEpochRollback
 }
 
 // shouldUseImportedMemoryForCommit is the testable Tier 2b decision:

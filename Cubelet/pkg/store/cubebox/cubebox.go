@@ -261,9 +261,14 @@ type CubeBox struct {
 	guestMetricsEpochLock sync.RWMutex       `json:"-"`
 
 	// MemoryLineage is the incremental-snapshot ancestry of this sandbox.
-	// Nil means an upgraded row that has not been migrated yet. Non-nil,
-	// including an empty struct, means the bindings are authoritative and
-	// create-request annotations must not be consulted.
+	// Non-nil, including an empty struct, means the bindings are authoritative
+	// and create-request annotations must not be consulted.
+	//
+	// Nil means the row carries no lineage information: it was written before
+	// this field existed, or by a create path that does not record one. Recovery
+	// converges nil rows into an explicit empty lineage via
+	// ReconcileRecoveredMemoryLineage, so "no base" is explicit for every row
+	// recovery successfully adopts; a row it skips keeps its nil.
 	MemoryLineage     *MemoryLineage `json:"memory_lineage,omitempty"`
 	memoryLineageLock sync.RWMutex   `json:"-"`
 

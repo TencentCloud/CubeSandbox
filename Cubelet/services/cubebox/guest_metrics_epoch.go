@@ -109,7 +109,15 @@ func activateAndPersistRollbackGuestMetricsEpoch(
 		// lineage is stale either way. Do NOT put the pre-rollback base back:
 		// the next Commit would treat it as a valid soft-dirty/pagemap_anon
 		// base and drop pages written since the rollback. Clearing forces a
-		// correct full capture until a later Commit re-establishes a base.
+		// correct full capture.
+		//
+		// The clear is in-memory only and the durable row still holds the
+		// pre-rollback base. If this process dies before the next successful
+		// SyncByID, recovery reads the "prepared" epoch this rollback left
+		// behind and treats the lineage as untrusted (see
+		// ReconcileRecoveredMemoryLineage). That is what keeps the stale
+		// durable value from being reused; do not rely on the in-memory clear
+		// alone.
 		cb.RestoreGuestMetricsEpochIfCurrent(epoch.Generation, cubeboxstore.GuestMetricsEpochPending, previousEpoch)
 		cb.ClearRuntimeLineage()
 		return fmt.Errorf("persist activated guest metrics epoch for %s: %w", cb.ID, err)

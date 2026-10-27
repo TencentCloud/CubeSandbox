@@ -249,74 +249,6 @@ def _kill_retrying(adapter, config, *, cleanup_errors: list[str]) -> bool:
         api.close()
 
 
-def _free_node_capacity() -> tuple[int, int] | None:
-    """Return the node's free (cpu millicores/whole cores, MiB) from ``li``.
-
-    ``cubemastercli li`` prints a zone summary whose data row is two integers
-    (CPU, Memory in MiB). Returns None when the output cannot be parsed, so the
-    caller can fall back to plain capacity retries instead of failing here.
-    """
-    try:
-        proc = _cli("li", timeout=60)
-    except subprocess.TimeoutExpired:
-        return None
-    if proc.returncode != 0:
-        return None
-    for line in reversed((proc.stdout or "").splitlines()):
-        parts = line.split()
-        if len(parts) == 2 and all(part.isdigit() for part in parts):
-            return int(parts[0]), int(parts[1])
-    return None
-
-
-def _await_node_capacity(
-    *, cpu: int = 2, memory_mib: int = 2000, timeout: int = 300
-) -> bool:
-    """Wait until the node reports enough free capacity for one more sandbox.
-
-    A single-node lab cannot start the restored sandbox while the killed source
-    is still being torn down; the scheduler surfaces that window as
-    ``130597 no more resource``. The resource is genuinely released, only
-    slightly after DELETE returns, so waiting is correct rather than a workaround
-    for a product defect.
-
-    The comparison is strict on both axes because the scheduler rejects on
-    equality: ``cpuFilter`` skips a node when
-    ``quotaCpuFree <= cpuq.MilliValue()`` and ``memFilter`` does the same for
-    memory. A node that is left with exactly one sandbox's worth of quota is
-    therefore *not* schedulable, and a ``>=`` check here would return too early.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        free = _free_node_capacity()
-        if free is not None and free[0] > cpu and free[1] > memory_mib:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(3)
-
-
-def _release_before_restore(adapter, config, *, cleanup_errors: list[str]) -> bool:
-    """Kill the source sandbox before creating the restore target.
-
-    Snapshots outlive their source sandbox, and a small compute node cannot
-    always hold the source and the restored copy at the same time. Killing the
-    source first keeps the case runnable without weakening any assertion: the
-    snapshot is already committed. The wait afterwards covers the short window
-    between DELETE returning and the node reporting the resources as free.
-    """
-    released = _kill_retrying(adapter, config, cleanup_errors=cleanup_errors)
-    if released and not cleanup_errors:
-        # Block until the node can actually host the restore target; otherwise
-        # the create below is rejected by the scheduler before it ever reaches
-        # the template lookup this case is about.
-        assert _await_node_capacity(), (
-            "node never reported free capacity for the restore target: "
-            f"{_free_node_capacity()!r}"
-        )
-    return released
-
-
 def _restore_from(adapter, backend: str, config, snapshot_id: str, role: str):
     """Create a sandbox from a freshly committed template.
 
@@ -324,6 +256,15 @@ def _restore_from(adapter, backend: str, config, snapshot_id: str, role: str):
     becomes READY before the node/API view can restore from it, and the gap is
     observable as a transient not-found. Retry that specific error briefly;
     anything else must fail fast.
+
+    Capacity is the scheduler's call, so this module never polls for it: the
+    create below goes through ``create_adapter_with_capacity_retry``, which
+    retries exactly the ``130597 no more resource`` window that follows a
+    DELETE (``SDK_E2E_CREATE_CAPACITY_*``, 90s budget, scaled by the xdist
+    worker count in ``conftest._scale_capacity_retries_for_xdist``). Do not
+    reintroduce a CLI-derived capacity check here: ``cubemastercli li``
+    truncates free CPU to whole cores and sums every node of a zone+cpu-type
+    into one row, so it cannot answer "can this node host the create".
     """
     deadline = time.monotonic() + config.default_timeout
     last: Exception | None = None
@@ -399,9 +340,7 @@ def test_commit_after_restart_captures_post_restart_memory(
     try:
         _prepare_tmpfs(sdk_sandbox, timeout=config.command_timeout)
         seed_template = _seed_memory_template(sdk_sandbox, value=PRE_RESTART_VALUE)
-        source_released = _release_before_restore(
-            sdk_sandbox, config, cleanup_errors=cleanup_errors
-        )
+        source_released = _kill_retrying(sdk_sandbox, config, cleanup_errors=cleanup_errors)
 
         # This sandbox really restores memory from the seed template; if it did
         # not, the restart below would have no stale image to corrupt.
@@ -426,9 +365,7 @@ def test_commit_after_restart_captures_post_restart_memory(
         # to tmpfs here on purpose: the marker must stay absent in a correct
         # capture, and only a stale-base image can resurrect it.
         snapshot_id = _commit_to_template(target)
-        target_released = _release_before_restore(
-            target, config, cleanup_errors=cleanup_errors
-        )
+        target_released = _kill_retrying(target, config, cleanup_errors=cleanup_errors)
         restored = _restore_from(
             sdk_sandbox, sdk_backend, config, snapshot_id,
             role="restart_then_commit_restore",
@@ -483,9 +420,7 @@ def test_pause_after_restart_captures_post_restart_memory(
     try:
         _prepare_tmpfs(sdk_sandbox, timeout=config.command_timeout)
         seed_template = _seed_memory_template(sdk_sandbox, value=PRE_RESTART_VALUE)
-        source_released = _release_before_restore(
-            sdk_sandbox, config, cleanup_errors=cleanup_errors
-        )
+        source_released = _kill_retrying(sdk_sandbox, config, cleanup_errors=cleanup_errors)
 
         target = _restore_from(
             sdk_sandbox, sdk_backend, config, seed_template,
@@ -551,10 +486,11 @@ def test_pause_after_restart_captures_post_restart_memory(
 def test_second_commit_after_restart_returns_to_incremental_chain(
     sdk_sandbox, sdk_backend, sdk_e2e_config
 ):
-    """After the forced full capture, later commits must stay correct.
+    """Later commits after the forced full capture must stay correct.
 
-    The first post-restart Commit is expected to be a full capture. The second
-    must return to the incremental chain and still restore correct memory.
+    The first post-restart Commit is a full capture (there is no base). The
+    second must be a correct follow-up capture. This case does not, and cannot
+    from the public API, assert which snapshot type the backend chose.
     """
     config = sdk_e2e_config
     seed_template = None
@@ -568,9 +504,7 @@ def test_second_commit_after_restart_returns_to_incremental_chain(
     try:
         _prepare_tmpfs(sdk_sandbox, timeout=config.command_timeout)
         seed_template = _seed_memory_template(sdk_sandbox, value=PRE_RESTART_VALUE)
-        source_released = _release_before_restore(
-            sdk_sandbox, config, cleanup_errors=cleanup_errors
-        )
+        source_released = _kill_retrying(sdk_sandbox, config, cleanup_errors=cleanup_errors)
 
         target = _restore_from(
             sdk_sandbox, sdk_backend, config, seed_template,
@@ -597,9 +531,7 @@ def test_second_commit_after_restart_returns_to_incremental_chain(
         # Second capture runs on the re-established soft-dirty chain.
         _write_tmpfs(target, "second-commit-value", timeout=config.command_timeout)
         second_snapshot = _commit_to_template(target)
-        target_released = _release_before_restore(
-            target, config, cleanup_errors=cleanup_errors
-        )
+        target_released = _kill_retrying(target, config, cleanup_errors=cleanup_errors)
 
         restored = _restore_from(
             sdk_sandbox, sdk_backend, config, second_snapshot,

@@ -287,23 +287,23 @@ func TestLaunchAncestorIsLastRestore(t *testing.T) {
 			},
 		},
 	}
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"an annotation without a restore base is not a license to incremental-overlay")
 
 	setRuntimeRestoreBase(fromTpl, "tpl-T")
-	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	assert.True(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"Create-from-template stamps restore-base to the same ancestor")
 
 	setRuntimeRestoreBase(fromTpl, "snap-pause-1")
 	stampPauseSnapshotID(fromTpl, "snap-pause-1")
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"after Resume the restore-base is the pause package, not the template")
 
 	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl)
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"opaque restore must not incremental-overlay onto the ancestor")
 
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, ""),
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), ""),
 		"empty ancestor is never a valid incremental dest")
 }
 
