@@ -1363,6 +1363,8 @@ Bootstrap: host mutation mounts for pvm / node-init.
   value: {{ if kindIs "invalid" .Values.cubeNode.network.mtu }}"auto"{{ else }}{{ .Values.cubeNode.network.mtu | toString | quote }}{{ end }}
 - name: CUBE_EGRESS_ADMIN_PORT
   value: {{ .Values.cubeEgress.adminPort | quote }}
+- name: CUBE_SANDBOX_OPERATOR_ALLOW_OUT
+  value: {{ join "," .Values.cubeNode.operatorAllowOut | quote }}
 - name: CUBE_SANDBOX_DNS_SERVERS
   {{- if .Values.cubeNode.dns.sandbox.nameservers }}
   value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}

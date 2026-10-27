@@ -72,7 +72,7 @@ validate_runtime_commands() {
 patch_common_yaml_list() {
   local key="$1"
   local raw_values="$2"
-  [[ -n "${raw_values//[[:space:],;]/}" ]] || return 0
+  [[ "${key}" == "operator_allow_out" || -n "${raw_values//[[:space:],;]/}" ]] || return 0
 
   local tmp_file
   tmp_file="$(mktemp)"
@@ -87,7 +87,8 @@ patch_common_yaml_list() {
       }
     }
     function emit(indent,    i, item) {
-      print indent key ":"
+      if (key == "operator_allow_out" && value_count == 0) print indent key ": []"
+      else print indent key ":"
       for (i = 1; i <= value_count; i++) {
         item = values[i]
         gsub(/"/, "\\\"", item)
@@ -181,6 +182,7 @@ configure_sandbox_dns() {
       log "sandbox DNS follow-node options: ${CUBE_SANDBOX_DNS_OPTIONS:-<empty>}"
     fi
   fi
+  patch_common_yaml_list operator_allow_out "${CUBE_SANDBOX_OPERATOR_ALLOW_OUT:-}"
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
   patch_common_yaml_list default_dns_searches "${CUBE_SANDBOX_DNS_SEARCHES:-}"
   patch_common_yaml_list default_dns_options "${CUBE_SANDBOX_DNS_OPTIONS:-}"

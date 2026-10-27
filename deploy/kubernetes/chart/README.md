@@ -852,3 +852,28 @@ Prepare a separate host-kernel rollback runbook for production.
 - external DNS or load balancer records.
 
 Clean those items using the platform runbook for the target environment.
+
+### Operator-managed network allowlist
+
+`cubeNode.operatorAllowOut` is an administrator-owned list of IPv4 CIDRs.
+It defaults to `[]`, preserving existing sandbox policy behavior. For example:
+
+```yaml
+cubeNode:
+  operatorAllowOut:
+    - 10.204.0.10/32 # replace with your managed resolver address
+```
+
+The chart writes `common.operator_allow_out` through
+`CUBE_SANDBOX_OPERATOR_ALLOW_OUT`. Restart Cubelet after changing the list.
+Every CubeVS policy installation (create, update, and recovery) layers this
+list onto the sandbox-authored allow_out. Sandbox callers cannot change the
+operator list; replacing or clearing their policy does not remove platform grants.
+Platform grants are not persisted as caller policy, so removing a grant and
+restarting Cubelet does not resurrect it from sandbox state.
+
+This is a general network allowance, independent of guest DNS configuration.
+It admits all ports to the selected CIDRs; it is not a DNS-port-only exception.
+No resolver or Kubernetes Service CIDR is automatically included. Configure
+only the exact resolver /32 when that is the access required. Existing CubeVS
+allow/deny precedence and domain/L7 resolver admission remain unchanged.

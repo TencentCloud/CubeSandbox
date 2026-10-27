@@ -422,3 +422,21 @@ func cloneStringMap(in map[string]string) map[string]string {
 	}
 	return out
 }
+
+// withOperatorAllowOut composes deployment policy at installation time. Keep
+// platform grants out of persisted caller policy so a restart can revoke them.
+func withOperatorAllowOut(cfg *CubeNetworkConfig, cidrs []string) *CubeNetworkConfig {
+	if len(cidrs) == 0 {
+		return cfg
+	}
+	out := cloneCubeNetworkConfig(cfg)
+	if out == nil {
+		out = &CubeNetworkConfig{}
+	}
+	for _, cidr := range cidrs {
+		if !slices.Contains(out.AllowOut, cidr) {
+			out.AllowOut = append(out.AllowOut, cidr)
+		}
+	}
+	return out
+}

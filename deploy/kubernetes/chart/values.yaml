@@ -788,6 +788,9 @@ minio:
   resources: {}
 
 cubeNode:
+  # Operator-owned IPv4 CIDRs, all ports. Empty preserves existing policy.
+  # Restart Cubelet after changes; sandbox callers cannot modify this list.
+  operatorAllowOut: []
   enabled: true
   podAnnotations:
     # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
