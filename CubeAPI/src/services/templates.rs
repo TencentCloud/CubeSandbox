@@ -695,17 +695,17 @@ fn parse_template_user_id(raw: &str) -> AppResult<i64> {
 }
 
 fn validate_template_username(name: &str) -> AppResult<()> {
-    let count = name.chars().count();
-    if count == 0 || count > 32 {
+    // ASCII only, matching validateTemplateUsername in CubeMaster.
+    if name.is_empty() || name.len() > 32 {
         return Err(AppError::BadRequest(
             "username must be 1-32 characters".to_string(),
         ));
     }
     for (i, ch) in name.chars().enumerate() {
         let ok = if i == 0 {
-            ch.is_alphabetic() || ch == '_'
+            ch.is_ascii_alphabetic() || ch == '_'
         } else {
-            ch.is_alphabetic() || ch.is_ascii_digit() || matches!(ch, '_' | '.' | '-')
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')
         };
         if !ok {
             return Err(AppError::BadRequest(format!("invalid user {name:?}")));
@@ -996,6 +996,16 @@ mod tests {
             .expect("cube_network_config");
         assert_eq!(cfg.allow_internet_access, Some(false));
         assert_eq!(cfg.allow_out, vec!["api.example.com".to_string()]);
+    }
+
+    #[test]
+    fn validate_template_username_is_ascii_only() {
+        assert!(validate_template_username("_apt").is_ok());
+        assert!(validate_template_username(&"a".repeat(32)).is_ok());
+        assert!(validate_template_username(&"a".repeat(33)).is_err());
+        assert!(validate_template_username("josé").is_err());
+        assert!(validate_template_username("用户").is_err());
+        assert!(validate_template_username("a١").is_err());
     }
 
     #[test]

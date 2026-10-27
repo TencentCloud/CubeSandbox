@@ -95,6 +95,11 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if req.ContainerOverrides != nil && req.ContainerOverrides.SecurityContext != nil {
 		securityContext = req.ContainerOverrides.SecurityContext
 		securityContext.ReadonlyRootfs = false
+		// A custom user only changes the container process; the build itself
+		// must stay privileged so the guest can set up its devices.
+		if securityContext.RunAsUser != nil || securityContext.RunAsUsername != "" {
+			securityContext.Privileged = true
+		}
 	}
 	if req.ContainerOverrides != nil && req.ContainerOverrides.VolumeMounts != nil {
 		for _, mount := range req.ContainerOverrides.VolumeMounts {
