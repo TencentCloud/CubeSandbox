@@ -166,6 +166,13 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 						opts.RestartPrior = restartPriorFrom(sb)
 					}
 					opts.PriorWritableLayer = strings.TrimSpace(sb.RootfsWritableLayer)
+					// Snapshot the clean PAUSED row before the delete marker is
+					// written. The create flow deletes it below and only saves
+					// the replacement much later; if anything fails in between,
+					// rollback must put this row back or a retry would be
+					// mistaken for a cross-node restore (see
+					// restorePausedTombstone).
+					l.snapshotPausedTombstoneForReplace(desired, sb, opts)
 					// CDP user-delete hook requires UserMarkDeletedTime before store delete.
 					if sb.UserMarkDeletedTime == nil {
 						now := time.Now()
@@ -174,9 +181,15 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 					}
 					// Pause post-cleanup may leave containerd metadata; wipe before recreate.
 					_ = runc.Clean(ctx, desired)
-					for _, id := range pausedTombstoneContainerIDs(sb) {
-						if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
-							log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
+					// A nil client means the container service was never wired
+					// (plugin init not done, or a unit test driving this path
+					// with a store stub). There is no containerd metadata to
+					// wipe in that case, so skip instead of dereferencing it.
+					if l.client != nil {
+						for _, id := range pausedTombstoneContainerIDs(sb) {
+							if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+								log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
+							}
 						}
 					}
 					if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
@@ -665,7 +678,7 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 		}
 	}
 
-	if err := l.cubeboxManger.Save(ctx, sandBox, cubes.WithNoEvent); err != nil {
+	if err := l.saveCreateRow(ctx, flowOpts, sandBox); err != nil {
 		log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
 		return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
 	}

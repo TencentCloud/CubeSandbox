@@ -62,6 +62,7 @@ func gateOnlyService(sb *cubeboxstore.CubeBox, ttl time.Duration) *service {
 type fakeCreateFlow struct {
 	createCalls  int
 	destroyCalls int
+	createErr    error
 	onCreate     func(*workflow.CreateContext) error
 }
 
@@ -72,7 +73,7 @@ func (f *fakeCreateFlow) Create(_ context.Context, opts *workflow.CreateContext)
 	if f.onCreate != nil {
 		return f.onCreate(opts)
 	}
-	return nil
+	return f.createErr
 }
 func (f *fakeCreateFlow) Destroy(context.Context, *workflow.DestroyContext) error {
 	f.destroyCalls++
@@ -80,7 +81,7 @@ func (f *fakeCreateFlow) Destroy(context.Context, *workflow.DestroyContext) erro
 }
 func (f *fakeCreateFlow) CleanUp(context.Context, *workflow.CleanContext) error { return nil }
 
-func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl time.Duration) *service {
+func createServiceForTest(sb *cubeboxstore.CubeBox, flow workflow.Flow, ttl time.Duration) *service {
 	engine := &workflow.Engine{}
 	engine.AddFlow("create", &workflow.Workflow{
 		Name:    "create",

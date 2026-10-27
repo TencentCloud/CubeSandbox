@@ -48,7 +48,30 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	sandBoxID := opts.SandboxID
 	keepPausedTombstone := shouldKeepPausedTombstone(opts)
 	keepCubebox := workflow.RetainFor(opts).CubeboxMeta
+	rollback := opts.RestorePausedTombstone != nil && opts.BaseWorkflowInfo.IsRollBack
+	// A create failover runs outside the sandbox lifecycle lock held by a
+	// client retry, so it can arrive after that retry already stored a RUNNING
+	// row for the same ID. In that case neither the deferred restore nor any
+	// cleanup in this Destroy may touch the row.
+	staleRollback := false
 	defer func() {
+		// Create-from-pause rollback: put the PAUSED row back instead of
+		// deleting the partially created one. The create flow deletes it long
+		// before saving its replacement, so without this a retry sees no local
+		// record and is admitted as a cross-node restore. Run this before the
+		// err check too: a best-effort rollback that failed halfway must still
+		// leave a resumable tombstone. restorePausedTombstone itself refuses
+		// to overwrite a row owned by a newer attempt.
+		if rollback {
+			if staleRollback {
+				return
+			}
+			if ferr := l.restorePausedTombstone(ctx, opts.RestorePausedTombstone,
+				opts.PausedTombstoneGuard); ferr != nil {
+				log.G(ctx).Warnf("restore paused tombstone %s: %v", sandBoxID, ferr)
+			}
+			return
+		}
 		if err != nil {
 			return
 		}
@@ -64,14 +87,45 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
 			CubeboxID: sandBoxID,
 		})
+		if err == nil {
+			l.advancePausedTombstoneEpochIfTracked(sandBoxID)
+		}
 	}()
-	sb, err := l.cubeboxManger.Get(ctx, sandBoxID)
-	if err != nil {
 
-		if errors.Is(err, utils.ErrorKeyNotFound) {
+	var sb *cubeboxstore.CubeBox
+	if rollback {
+		// Decide under the tombstone lock and keep the exact partial row that
+		// was validated: re-reading the store afterwards could hand us a new
+		// retry's RUNNING row and destroy a live sandbox.
+		allowed, debrisRow, stateErr := l.pausedTombstoneRollbackRow(ctx, sandBoxID, opts.PausedTombstoneGuard)
+		if stateErr != nil {
+			staleRollback = true
+			opts.StalePausedTombstoneRollback = true
+			log.G(ctx).Warnf("paused tombstone rollback %s: cannot read sandbox state: %v; skipping cleanup", sandBoxID, stateErr)
 			return nil
 		}
-		return err
+		if !allowed {
+			staleRollback = true
+			opts.StalePausedTombstoneRollback = true
+			log.G(ctx).Infof("skip stale create rollback for %s: a newer operation owns the sandbox", sandBoxID)
+			return nil
+		}
+		if debrisRow == nil {
+			// Store row is already gone or is still this attempt's clean PAUSED
+			// tombstone; the deferred restore ensures the PAUSED row is saved,
+			// while subsequent destroy steps clean up partial allocations.
+			return nil
+		}
+		sb = debrisRow
+	} else {
+		var getErr error
+		sb, getErr = l.cubeboxManger.Get(ctx, sandBoxID)
+		if getErr != nil {
+			if errors.Is(getErr, utils.ErrorKeyNotFound) {
+				return nil
+			}
+			return getErr
+		}
 	}
 
 	sb.Lock()
