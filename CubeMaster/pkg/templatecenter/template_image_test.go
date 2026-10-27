@@ -651,6 +651,32 @@ func TestGenerateTemplateCreateRequestAppliesUser(t *testing.T) {
 	}
 }
 
+func TestGenerateTemplateCreateRequestKeepsUserBuildPrivileged(t *testing.T) {
+	for _, sc := range []*types.ContainerSecurityContext{
+		{RunAsUser: &types.Int64Value{Value: 1000}},
+		{RunAsUsername: "sandbox"},
+	} {
+		req := &types.CreateTemplateFromImageReq{
+			Request:            &types.Request{RequestID: "req-user-priv"},
+			SourceImageRef:     "docker.io/library/nginx:latest",
+			TemplateID:         "template-user-priv",
+			WritableLayerSize:  "20Gi",
+			InstanceType:       cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:        cubeboxv1.NetworkType_tap.String(),
+			ContainerOverrides: &types.ContainerOverrides{SecurityContext: sc},
+		}
+		got, err := generateTemplateCreateRequest(context.Background(), req, &models.RootfsArtifact{
+			ArtifactID: "artifact-user-priv",
+		}, DockerImageConfig{}, "http://master.example")
+		if err != nil {
+			t.Fatalf("generateTemplateCreateRequest: %v", err)
+		}
+		if !got.Containers[0].SecurityContext.Privileged {
+			t.Fatalf("a build with a custom user must stay privileged: %+v", got.Containers[0].SecurityContext)
+		}
+	}
+}
+
 func TestGenerateTemplateCreateRequestIgnoresImageUserWhenUnset(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-image-user"},

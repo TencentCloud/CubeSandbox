@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
@@ -118,14 +117,18 @@ func validateTemplateUserID(v int64) error {
 }
 
 func validateTemplateUsername(name string) error {
+	// ASCII only, so the byte length below equals the character count and
+	// CubeAPI applies exactly the same rule.
 	if name == "" || len(name) > 32 {
 		return fmt.Errorf("username must be 1-32 characters")
 	}
-	for i, r := range name {
-		if i == 0 && !unicode.IsLetter(r) && r != '_' {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if i == 0 && !letter && c != '_' {
 			return fmt.Errorf("username %q must start with a letter or underscore", name)
 		}
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '.' && r != '-' {
+		if !letter && !(c >= '0' && c <= '9') && c != '_' && c != '.' && c != '-' {
 			return fmt.Errorf("username %q has an unsupported character", name)
 		}
 	}

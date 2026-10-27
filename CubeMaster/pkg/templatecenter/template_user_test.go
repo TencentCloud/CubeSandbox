@@ -46,7 +46,7 @@ func TestParseTemplateUser(t *testing.T) {
 }
 
 func TestParseTemplateUserRejects(t *testing.T) {
-	for _, spec := range []string{"", "   ", ":1000", "1000:", "a:b:c", "1000:sandbox", "-1", "1user", "has space", "user/name"} {
+	for _, spec := range []string{"", "   ", ":1000", "1000:", "a:b:c", "1000:sandbox", "-1", "1user", "has space", "user/name", "jos\u00e9", "\u7528\u6237"} {
 		t.Run(spec, func(t *testing.T) {
 			if _, err := ParseTemplateUser(spec); err == nil {
 				t.Fatal("expected error")
