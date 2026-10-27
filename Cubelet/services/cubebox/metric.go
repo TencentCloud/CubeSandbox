@@ -200,13 +200,15 @@ func aggregateSandboxResources(sbs []*cubeboxstore.CubeBox, releaseRatio float64
 		if !isContainerInGoodState(state) {
 			continue
 		}
-		// A paused sandbox under the policy keeps only `factor` of its quota.
 		paused := policyActive &&
 			(state == cubebox.ContainerState_CONTAINER_PAUSED ||
 				state == cubebox.ContainerState_CONTAINER_PAUSING)
 
 		if sb.ResourceWithOverHead != nil {
 			if paused {
+				// A paused sandbox under the policy keeps only `factor` of its
+				// quota; the rest was handed back to the scheduler and has to
+				// be won again by the resume admission check.
 				cpuMilli += scaleInt64(sb.ResourceWithOverHead.HostCpuQ.MilliValue(), factor)
 				memBytes += scaleInt64(sb.ResourceWithOverHead.HostMemQ.Value(), factor)
 			} else {
