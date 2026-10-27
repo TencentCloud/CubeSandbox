@@ -117,7 +117,9 @@ func (a *App) Run() {
 	case serverC <- serverTmp:
 	}
 
-	done := handleSignals(ctx, signals, serverC, cancel)
+	done := handleSignals(ctx, signals, serverC, func() {
+		a.shutdownWebhooksAndCancel(cancel)
+	})
 
 	signal.Notify(signals, handledSignals...)
 
@@ -377,4 +379,13 @@ func (a *App) startWebhooks(ctx context.Context, cfg *config.Config) {
 	if err != nil {
 		CubeLog.Warnf("webhooks disabled: invalid startup configuration; values redacted")
 	}
+}
+
+// Complete the webhook's bounded drain before the existing cancellation path
+// can terminate the process. Other services retain their shutdown behavior.
+func (a *App) shutdownWebhooksAndCancel(cancel context.CancelFunc) {
+	if a.webhooks != nil {
+		a.webhooks.Shutdown(context.Background())
+	}
+	cancel()
 }

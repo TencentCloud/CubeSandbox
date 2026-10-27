@@ -66,7 +66,7 @@ func TestP5AppPublisherRealAsyncDelete(t *testing.T) {
 	p.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
-	p.ApplyFunc(pausesnap.TryDeletePausedWithEvidence, func(context.Context, string, string, string, *bool) (bool, error) { return false, nil })
+	p.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(context.Context, string, string, string, *bool) (bool, bool, error) { return false, false, nil })
 	p.ApplyFunc(localcache.DeleteSandboxProxyMap, func(context.Context, string) error { return nil })
 	p.ApplyFunc(cubelet.Destroy, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
 		return &cubebox.DestroyCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}}, nil
