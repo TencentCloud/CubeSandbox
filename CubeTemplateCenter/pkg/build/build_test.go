@@ -104,12 +104,23 @@ type fakeArtifactS3 struct {
 	objects map[string]bool
 }
 
-func (f *fakeArtifactS3) Stat(_ context.Context, artifactID string) (bool, error) {
-	return f.objects[artifactID], nil
+func (f *fakeArtifactS3) Stat(_ context.Context, artifactID, rootfsFormat string) (bool, error) {
+	return f.objects[artifactKeyFromFormatForTest(artifactID, rootfsFormat)], nil
 }
 
-func (f *fakeArtifactS3) PresignedGetURL(_ context.Context, artifactID string) (string, error) {
-	return "https://s3.example.com/bucket/" + artifactID + ".ext4?sig=x", nil
+func (f *fakeArtifactS3) PresignedGetURL(_ context.Context, artifactID, rootfsFormat string) (string, error) {
+	return "https://s3.example.com/bucket/" + artifactKeyFromFormatForTest(artifactID, rootfsFormat) + "?sig=x", nil
+}
+
+// artifactKeyFromFormatForTest mirrors s3store.artifactKeyFromFormat for the
+// fake (which cannot call the unexported method): it derives the single object
+// key from the format so the fake's Stat/PresignedGetURL agree with the real
+// client's key derivation.
+func artifactKeyFromFormatForTest(artifactID, rootfsFormat string) string {
+	if strings.EqualFold(strings.TrimSpace(rootfsFormat), "erofs") {
+		return artifactID + ".erofs"
+	}
+	return artifactID + ".ext4"
 }
 
 // Regression: reusing a legacy artifact that predates S3 (artifact_url empty,
@@ -119,24 +130,51 @@ func (f *fakeArtifactS3) PresignedGetURL(_ context.Context, artifactID string) (
 func TestArtifactPresignedURLSkipsObjectsMissingFromBucket(t *testing.T) {
 	s3 := &fakeArtifactS3{objects: map[string]bool{}}
 	logger := log.G(context.Background())
-	if got := artifactPresignedURL(context.Background(), true, s3, "rfs-legacy", logger); got != "" {
+	if got := artifactPresignedURL(context.Background(), true, s3, "rfs-legacy", "ext4", logger); got != "" {
 		t.Fatalf("expected empty URL for an object that was never uploaded, got %q", got)
 	}
 }
 
 func TestArtifactPresignedURLSignsExistingObject(t *testing.T) {
-	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-fresh": true}}
+	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-fresh.ext4": true}}
 	logger := log.G(context.Background())
-	got := artifactPresignedURL(context.Background(), true, s3, "rfs-fresh", logger)
+	got := artifactPresignedURL(context.Background(), true, s3, "rfs-fresh", "ext4", logger)
 	if !strings.Contains(got, "rfs-fresh.ext4") {
 		t.Fatalf("expected presigned URL for an existing object, got %q", got)
 	}
 }
 
-func TestArtifactPresignedURLDisabledWhenS3Off(t *testing.T) {
-	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-1": true}}
+// Regression for the S3 presign bug: an ext4 build must sign the <id>.ext4 key,
+// NOT <id>.erofs. The fake signs unconditionally once Stat passes (mirroring the
+// S3 driver, whose SignedGetURL does not verify the key exists), so the only
+// thing selecting the key is the rootfsFormat argument -- a missing/wrong format
+// here would surface as a .erofs URL for an ext4 artifact and 404 for cubelets.
+func TestArtifactPresignedURLSignsExt4KeyForExt4Build(t *testing.T) {
+	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-ext.ext4": true}}
 	logger := log.G(context.Background())
-	if got := artifactPresignedURL(context.Background(), false, s3, "rfs-1", logger); got != "" {
+	got := artifactPresignedURL(context.Background(), true, s3, "rfs-ext", "ext4", logger)
+	if !strings.Contains(got, "rfs-ext.ext4") {
+		t.Fatalf("ext4 build must sign the .ext4 key, got %q", got)
+	}
+	if strings.Contains(got, "rfs-ext.erofs") {
+		t.Fatalf("ext4 build must NOT sign the .erofs key, got %q", got)
+	}
+}
+
+// An erofs build signs the <id>.erofs key (the one Upload wrote under).
+func TestArtifactPresignedURLSignsErofsKeyForErofsBuild(t *testing.T) {
+	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-ero.erofs": true}}
+	logger := log.G(context.Background())
+	got := artifactPresignedURL(context.Background(), true, s3, "rfs-ero", "erofs", logger)
+	if !strings.Contains(got, "rfs-ero.erofs") {
+		t.Fatalf("erofs build must sign the .erofs key, got %q", got)
+	}
+}
+
+func TestArtifactPresignedURLDisabledWhenS3Off(t *testing.T) {
+	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-1.ext4": true}}
+	logger := log.G(context.Background())
+	if got := artifactPresignedURL(context.Background(), false, s3, "rfs-1", "ext4", logger); got != "" {
 		t.Fatalf("expected empty URL when S3 is disabled, got %q", got)
 	}
 }

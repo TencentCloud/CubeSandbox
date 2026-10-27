@@ -854,12 +854,16 @@ func TestOciLayoutImageRefUsesExplicitSourceTag(t *testing.T) {
 }
 
 func TestEnsureArtifactBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testing.T) {
+	// EnsureArtifactBuildPreflight now checks only the SHARED tools (export
+	// backend + truncate/cp). mkfs.ext4 is NOT required here — it moved to
+	// EnsureExt4BuildPreflight, so a dockerless host without mkfs.ext4 still
+	// passes the shared preflight (an erofs-only host is not rejected for the
+	// ext4 toolchain it never uses).
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir)
 	for _, cmd := range []string{"truncate", "cp", "skopeo", "umoci", "resize2fs", "e2fsck"} {
 		installFakeCommand(t, binDir, cmd, "exit 0")
 	}
-	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
 
 	if err := EnsureArtifactBuildPreflight(context.Background()); err != nil {
 		t.Fatalf("EnsureArtifactBuildPreflight failed: %v", err)
@@ -873,11 +877,44 @@ func TestEnsureArtifactBuildPreflightRequiresTarForDockerFallback(t *testing.T) 
 	for _, cmd := range []string{"docker", "truncate", "cp", "skopeo", "resize2fs", "e2fsck"} {
 		installFakeCommand(t, binDir, cmd, "exit 0")
 	}
-	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
 
 	err := EnsureArtifactBuildPreflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `required command "tar"`) {
 		t.Fatalf("unexpected preflight error: %v", err)
+	}
+}
+
+// TestEnsureExt4BuildPreflightAcceptsMkfsExt4WithDSupport verifies the ext4-
+// specific preflight passes when mkfs.ext4 is installed and supports -d. The
+// shared preflight no longer checks mkfs.ext4, so this guards the ext4-only
+// gate ensureBuildPreflight runs for ext4 builds.
+func TestEnsureExt4BuildPreflightAcceptsMkfsExt4WithDSupport(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
+	// EnsureExt4BuildPreflight also requires resize2fs and e2fsck (shrinkAndAlign
+	// repairs/shrinks/verifies on every ext4 build path, not only loop-mount), so
+	// fake them alongside mkfs.ext4 — otherwise the preflight bails on resize2fs
+	// before reaching the -d support probe this test exists to guard.
+	for _, cmd := range []string{"resize2fs", "e2fsck"} {
+		installFakeCommand(t, binDir, cmd, "exit 0")
+	}
+
+	if err := EnsureExt4BuildPreflight(context.Background()); err != nil {
+		t.Fatalf("EnsureExt4BuildPreflight failed: %v", err)
+	}
+}
+
+// TestEnsureExt4BuildPreflightRejectsMissingMkfsExt4 verifies an ext4 build is
+// rejected at preflight when mkfs.ext4 is absent (a pure-erofs host would hit
+// this only if it tried an ext4 build; an erofs build skips this gate entirely).
+func TestEnsureExt4BuildPreflightRejectsMissingMkfsExt4(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir) // empty PATH: no mkfs.ext4
+
+	err := EnsureExt4BuildPreflight(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `required command "mkfs.ext4"`) {
+		t.Fatalf("expected missing mkfs.ext4 error, got: %v", err)
 	}
 }
 

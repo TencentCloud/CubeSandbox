@@ -119,10 +119,18 @@ func runE2fsck(ctx context.Context, ext4Path string) error {
 	return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 }
 
-// EnsureArtifactBuildPreflight asserts that the host has all necessary tools
-// installed to build images before starting a long-running workflow.
+// EnsureArtifactBuildPreflight asserts that the host has the tools shared by
+// every rootfs build format (ext4 and erofs): the export backend's tools (used
+// to pull + unpack the source image into a rootfs tree, regardless of how that
+// tree is later packaged) and truncate/cp (cp copies during export; truncate
+// pads the artifact to its final aligned size in BOTH the ext4 streaming path
+// and createErofsImage's 2 MiB pmem alignment). Format-specific tools are
+// gated by the caller: ensureBuildPreflight runs ensureExt4BuildPreflight for
+// ext4 (mkfs.ext4 + loop-mount) and EnsureErofsBuildPreflight for erofs
+// (mkfs.erofs), so a host provisioned only for erofs is not rejected for the
+// ext4 toolchain it never uses.
 func EnsureArtifactBuildPreflight(ctx context.Context) error {
-	requiredCommands := []string{"mkfs.ext4", "truncate", "cp", "resize2fs", "e2fsck"}
+	requiredCommands := []string{"truncate", "cp"}
 	if !nativeRootfsExportEnabled() {
 		if hasDockerlessRootfsExportTools() {
 			requiredCommands = append(requiredCommands, "skopeo", "umoci")
@@ -130,10 +138,27 @@ func EnsureArtifactBuildPreflight(ctx context.Context) error {
 			requiredCommands = append(requiredCommands, "docker", "tar")
 		}
 	}
+
+	for _, cmd := range requiredCommands {
+		if _, err := executableLookPath(cmd); err != nil {
+			return fmt.Errorf("required command %q is not available: %w", cmd, err)
+		}
+	}
+	return nil
+}
+
+// EnsureExt4BuildPreflight asserts the ext4-specific build tools are present:
+// mkfs.ext4 (with -d support, probed via checkMkfsExt4DSupport), resize2fs and
+// e2fsck (used by shrinkAndAlign to repair, shrink, and verify the ext4
+// artifact on every build path, not only the loop-mount one), and, when the
+// loop-mount ext4 path is enabled, losetup/mount/umount. It is gated to ext4
+// builds by ensureBuildPreflight — erofs builds use mkfs.erofs and have no
+// loop-mount or resize2fs/e2fsck path, so they skip this entirely.
+func EnsureExt4BuildPreflight(ctx context.Context) error {
+	requiredCommands := []string{"mkfs.ext4", "resize2fs", "e2fsck"}
 	if loopMountExt4Enabled() {
 		requiredCommands = append(requiredCommands, "losetup", "mount", "umount")
 	}
-
 	for _, cmd := range requiredCommands {
 		if _, err := executableLookPath(cmd); err != nil {
 			return fmt.Errorf("required command %q is not available: %w", cmd, err)

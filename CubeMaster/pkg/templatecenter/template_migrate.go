@@ -42,13 +42,19 @@ type templateCenterUploadResult struct {
 func validateTCLocalArtifactPath(artifactID, path string) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
-		return fmt.Errorf("template center returned an empty ext4 path for artifact %s", artifactID)
+		return fmt.Errorf("template center returned an empty artifact path for artifact %s", artifactID)
 	}
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("template center returned non-absolute ext4 path %q for artifact %s", path, artifactID)
+		return fmt.Errorf("template center returned non-absolute artifact path %q for artifact %s", path, artifactID)
 	}
-	if filepath.Base(path) != artifactID+".ext4" || filepath.Base(filepath.Dir(path)) != artifactID {
-		return fmt.Errorf("template center returned ext4 path %q that does not match the artifact layout for %s", path, artifactID)
+	// The on-disk name is <id>.ext4 or <id>.erofs: TC preserves the uploaded
+	// file's suffix (see storedArtifactFileName) instead of forcing .ext4, so
+	// an erofs artifact is stored as <id>.erofs and still matches this layout
+	// guard. The parent directory must remain <id> so the artifact stays inside
+	// its own store slot.
+	base := filepath.Base(path)
+	if (base != artifactID+".ext4" && base != artifactID+".erofs") || filepath.Base(filepath.Dir(path)) != artifactID {
+		return fmt.Errorf("template center returned artifact path %q that does not match the <id>.ext4/<id>.erofs layout for %s", path, artifactID)
 	}
 	roots := []string{ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
@@ -64,11 +70,13 @@ func validateTCLocalArtifactPath(artifactID, path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("template center returned ext4 path %q outside the TC artifact store roots %v", path, roots)
+	return fmt.Errorf("template center returned artifact path %q outside the TC artifact store roots %v", path, roots)
 }
 
-// uploadArtifactFileToTC uploads one artifact ext4 file into CubeTemplateCenter's
-// own artifact store and returns the stored file metadata.
+// uploadArtifactFileToTC uploads one local rootfs artifact file (ext4 or erofs)
+// into CubeTemplateCenter's own artifact store and returns the stored file
+// metadata. TC preserves the uploaded file's suffix, so the returned path
+// ends in .erofs for an erofs artifact.
 var uploadArtifactFileToTC = func(ctx context.Context, artifactID, filePath string) (*templateCenterUploadResult, error) {
 	endpoint := ""
 	if cfg := config.GetConfig(); cfg != nil {
@@ -103,11 +111,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	result := &TemplateArtifactMigrationResult{TemplateID: templateID}
 
 	type artifactSnapshot struct {
-		artifactID  string
-		objectKey   string
-		status      string
-		artifactURL string
-		ext4Path    string
+		artifactID   string
+		objectKey    string
+		status       string
+		artifactURL  string
+		ext4Path     string
+		rootfsFormat string
 	}
 	snapshot := artifactSnapshot{}
 	if err := withTemplateWriteLock(templateID, func() error {
@@ -130,11 +139,12 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			return err
 		}
 		snapshot = artifactSnapshot{
-			artifactID:  artifactID,
-			objectKey:   strings.TrimSpace(artifact.ObjectKey),
-			status:      strings.TrimSpace(artifact.Status),
-			artifactURL: strings.TrimSpace(artifact.ArtifactURL),
-			ext4Path:    strings.TrimSpace(artifact.Ext4Path),
+			artifactID:   artifactID,
+			objectKey:    strings.TrimSpace(artifact.ObjectKey),
+			status:       strings.TrimSpace(artifact.Status),
+			artifactURL:  strings.TrimSpace(artifact.ArtifactURL),
+			ext4Path:     strings.TrimSpace(artifact.Ext4Path),
+			rootfsFormat: artifact.RootfsFormat,
 		}
 		return nil
 	}); err != nil {
@@ -208,10 +218,20 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	updates := map[string]any{}
 	uploadedToS3 := false
 	targetExt4Path := ext4Path
-	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path); err == nil {
+	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path, snapshot.rootfsFormat); err == nil {
+		// Derive the format-aware object key ONCE and use it for both the
+		// presigned URL and the persisted object_key column, so artifact_url
+		// and object_key come from the same source. Computing the key after
+		// presigning (the old order) passed the pre-migration snapshot.objectKey
+		// to presign -- empty for legacy rows, so artifactStoreKeyWithPrefix
+		// fell back to <id>.ext4 while the upload at line 211 wrote <id>.erofs,
+		// and the stored artifact_url pointed at an object that was never
+		// created. When re-signing later failed (split-tier without S3 creds),
+		// artifactDownloadURL fell back to that wrong stored URL and 404'd.
+		backend, objectKey := artifactStoreColumns(snapshot.artifactID, snapshot.rootfsFormat)
 		presignedURL, presignErr := presignArtifactGetURL(ctx, &models.RootfsArtifact{
 			ArtifactID: snapshot.artifactID,
-			ObjectKey:  snapshot.objectKey,
+			ObjectKey:  objectKey,
 		})
 		if presignErr != nil {
 			return nil, fmt.Errorf("presign migrated artifact %s: %w", snapshot.artifactID, presignErr)
@@ -222,7 +242,7 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			"status":       ArtifactStatusReady,
 			"last_error":   "",
 		}
-		if backend, objectKey := artifactStoreColumns(snapshot.artifactID); backend != "" {
+		if backend != "" {
 			updates["storage_backend"] = backend
 			updates["object_key"] = objectKey
 		}

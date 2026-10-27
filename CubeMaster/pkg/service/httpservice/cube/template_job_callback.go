@@ -262,6 +262,7 @@ func remoteBuildResultFromPayload(payload map[string]any) *templatecenter.Remote
 		CubeEgressCABaked:       payloadBool(payload, "cube_egress_ca_baked"),
 		CubeEgressCAFingerprint: payloadString(payload, "cube_egress_ca_fingerprint"),
 		CubeEgressCATargets:     int(payloadInt64(payload, "cube_egress_ca_targets_written")),
+		RootfsFormat:            payloadString(payload, "rootfs_format"),
 	}
 }
 

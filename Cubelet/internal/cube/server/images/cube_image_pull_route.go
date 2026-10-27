@@ -54,7 +54,7 @@ func (c *CubeImageService) EnsureImage(ctx context.Context, ref, username, passw
 	)
 
 	cubeSpec := constants.GetImageSpec(ctx)
-	if cubeSpec != nil && cubeSpec.GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
+	if cubeSpec != nil && ext4image.IsPmemRootfsMedia(cubeSpec.GetStorageMedia()) {
 		instanceType := resolveExt4InstanceType(ctx, cubeSpec)
 		if instanceType == "" {
 			return nil, fmt.Errorf("create req is nil")
@@ -157,14 +157,30 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 				if err != nil {
 					return "", fmt.Errorf("unmarshal cube image spec failed: %v", err)
 				}
-				constants.WithImageSpec(ctx, cubeSpec)
+				// Keep the returned context: WithImageSpec returns a NEW ctx
+				// (context.WithValue does not mutate the receiver). The CRI
+				// PullImage path recovers the spec from the sandbox annotation
+				// rather than the incoming ctx, so without reassigning ctx the
+				// downstream EnsurePmemRootfs sees no spec in ctx and falls back
+				// to the legacy <artifact>.ext4 path even when mediaType is
+				// erofs — the download target then does not match the
+				// <artifact>.erofs path the pmem device/shim expects.
+				ctx = constants.WithImageSpec(ctx, cubeSpec)
 			}
 		}
 	}
 	if cubeSpec != nil {
 		mediaType := cubeSpec.StorageMedia
-		switch mediaType {
-		case cubeimages.ImageStorageMediaType_ext4.String():
+		// nfs is explicitly unsupported in the open-source build; reject it up
+		// front. ext4/erofs are handled by the IsPmemRootfsMedia branch below;
+		// docker/empty fall through to PullRegistryImage.
+		if mediaType == "nfs" {
+			return "", fmt.Errorf("nfs images are not supported in the open source build")
+		}
+		// ext4 and erofs are both local-file rootfs artifacts: download them as
+		// a pmem backing file instead of pulling through containerd. docker/empty
+		// fall through to PullRegistryImage below.
+		if ext4image.IsPmemRootfsMedia(mediaType) {
 			instanceType := resolveExt4InstanceType(ctx, cubeSpec)
 			if instanceType == "" {
 				return "", fmt.Errorf("create req is nil")
@@ -174,9 +190,6 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 				return "", fmt.Errorf("ensure pmem file failed: %v", err)
 			}
 			return name, ErrSkip
-		case "nfs":
-			return "", fmt.Errorf("nfs images are not supported in the open source build")
-		default:
 		}
 	}
 

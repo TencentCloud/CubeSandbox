@@ -133,7 +133,7 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	// Delete the S3 object when the artifact was uploaded.
 	var dataErrs []error
 	if d.s3Client != nil && templatecenter.ArtifactUsesObjectStore(&artifact) {
-		if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
+		if err := d.s3Client.Delete(ctx, artifact.ArtifactID, artifact.RootfsFormat); err != nil {
 			logger.Warnf("delete s3 object fail: %v", err)
 			dataErrs = append(dataErrs, fmt.Errorf("delete s3 object: %w", err))
 		} else {

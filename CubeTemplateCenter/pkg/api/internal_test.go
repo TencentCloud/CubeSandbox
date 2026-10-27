@@ -6,8 +6,11 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -187,5 +190,140 @@ func TestInternalAPIOpenWithInsecureDevOptIn(t *testing.T) {
 
 	if w := doInternalDelete(t, ""); w.Code == http.StatusUnauthorized || w.Code == http.StatusServiceUnavailable {
 		t.Fatalf("dev opt-in must pass the gate: got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestStoredArtifactFileName verifies TC names an uploaded artifact from the
+// TC-controlled artifactID plus the uploaded file's suffix, so an erofs upload
+// lands as <id>.erofs (matching BuildErofs) instead of being forced to .ext4.
+// The base is always artifactID: a client filename can only change the suffix
+// label, never inject a path or alter the directory the file lands in.
+func TestStoredArtifactFileName(t *testing.T) {
+	cases := []struct {
+		artifactID string
+		uploaded   string
+		want       string
+	}{
+		{"rfs-1", "rfs-1.erofs", "rfs-1.erofs"},
+		{"rfs-1", "rfs-1.ext4", "rfs-1.ext4"},
+		{"rfs-1", "rfs-1.EROFS", "rfs-1.erofs"}, // suffix lowercased
+		{"rfs-1", "rfs-1", "rfs-1.ext4"},        // no suffix -> legacy default
+		{"rfs-1", "rfs-1.tar", "rfs-1.ext4"},    // unknown suffix -> legacy default
+		{"rfs-1", "", "rfs-1.ext4"},             // empty -> legacy default
+		// A path-like client filename can only contribute its suffix; the base
+		// stays the TC-controlled artifactID, never the client's name, so this
+		// can neither escape the store dir nor rename the file away from <id>.
+		{"rfs-1", "../../etc/passwd.erofs", "rfs-1.erofs"},
+		// An artifactID may contain dots (artifactIDShape allows them); the
+		// format suffix is still the final extension.
+		{"rfs.1", "rfs.1.erofs", "rfs.1.erofs"},
+	}
+	for _, c := range cases {
+		if got := storedArtifactFileName(c.artifactID, c.uploaded); got != c.want {
+			t.Fatalf("storedArtifactFileName(%q, %q) = %q, want %q", c.artifactID, c.uploaded, got, c.want)
+		}
+	}
+}
+
+// doArtifactUpload posts a multipart artifact upload to the bare handler
+// (bypassing the shared-token middleware, like doArtifactDelete) with the given
+// artifact_id and a single "file" part whose filename is filePartName. The store
+// root is pinned via CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR so the test does not
+// touch the real /data store.
+func doArtifactUpload(t *testing.T, storeRoot, artifactID, filePartName string, payload []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", storeRoot)
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	if err := mw.WriteField("artifact_id", artifactID); err != nil {
+		t.Fatalf("write artifact_id: %v", err)
+	}
+	part, err := mw.CreateFormFile("file", filePartName)
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := part.Write(payload); err != nil {
+		t.Fatalf("write file payload: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	r := setupRouter()
+	r.POST("/tc/api/v1/artifact/upload", handleArtifactUpload)
+	req := httptest.NewRequest(http.MethodPost, "/tc/api/v1/artifact/upload", body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// TestHandleArtifactUploadPreservesErofsSuffix is the regression guard for the
+// erofs mislabel: an erofs upload must land on disk as <id>.erofs (matching the
+// build path), not be forced to <id>.ext4. Before honoring the uploaded
+// suffix, handleArtifactUploadFilePart hard-coded .ext4, so an erofs artifact
+// migrated to TC was confusingly named <id>.ext4 on the TC node.
+func TestHandleArtifactUploadPreservesErofsSuffix(t *testing.T) {
+	storeRoot := t.TempDir()
+	artifactID := "rfs-upload-erofs"
+	w := doArtifactUpload(t, storeRoot, artifactID, artifactID+".erofs", []byte("erofs-bytes"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp ArtifactUploadResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	wantPath := filepath.Join(storeRoot, artifactID, artifactID+".erofs")
+	if resp.Ext4Path != wantPath {
+		t.Fatalf("ext4_path = %q, want %q (erofs suffix preserved, not forced to .ext4)", resp.Ext4Path, wantPath)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("erofs artifact not stored at %q: %v", wantPath, err)
+	}
+	// The suffix choice is exclusive: a legacy .ext4 file must NOT also exist.
+	if _, err := os.Stat(filepath.Join(storeRoot, artifactID, artifactID+".ext4")); !os.IsNotExist(err) {
+		t.Fatalf("legacy .ext4 file must not be created for an erofs upload, stat err=%v", err)
+	}
+}
+
+// TestHandleArtifactUploadPreservesExt4Suffix verifies the legacy ext4 path is
+// unchanged: an ext4 upload still lands as <id>.ext4 (backward compatible).
+func TestHandleArtifactUploadPreservesExt4Suffix(t *testing.T) {
+	storeRoot := t.TempDir()
+	artifactID := "rfs-upload-ext4"
+	w := doArtifactUpload(t, storeRoot, artifactID, artifactID+".ext4", []byte("ext4-bytes"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp ArtifactUploadResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	wantPath := filepath.Join(storeRoot, artifactID, artifactID+".ext4")
+	if resp.Ext4Path != wantPath {
+		t.Fatalf("ext4_path = %q, want %q", resp.Ext4Path, wantPath)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("ext4 artifact not stored at %q: %v", wantPath, err)
+	}
+}
+
+// TestHandleArtifactUploadUnknownSuffixDefaultsToExt4 verifies an unknown (or
+// missing) suffix falls back to the historical .ext4 storage name, so a legacy
+// or odd upload keeps landing where it always did.
+func TestHandleArtifactUploadUnknownSuffixDefaultsToExt4(t *testing.T) {
+	storeRoot := t.TempDir()
+	artifactID := "rfs-upload-unknown"
+	w := doArtifactUpload(t, storeRoot, artifactID, artifactID+".tar", []byte("tar-bytes"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp ArtifactUploadResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	wantPath := filepath.Join(storeRoot, artifactID, artifactID+".ext4")
+	if resp.Ext4Path != wantPath {
+		t.Fatalf("ext4_path = %q, want %q (unknown suffix falls back to .ext4)", resp.Ext4Path, wantPath)
 	}
 }

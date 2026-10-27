@@ -15,15 +15,19 @@ FROM ubuntu:24.04
 
 # skopeo + umoci are MANDATORY, not diagnostic conveniences: this process is
 # the one that actually pulls the source image and unpacks its layers before
-# mkfs. e2fsprogs provides mkfs.ext4, and mount/losetup (util-linux) back the
+# mkfs. e2fsprogs provides mkfs.ext4, erofs-utils provides mkfs.erofs (the erofs
+# rootfs format; installed unconditionally so an erofs build works out of the box
+# once template.rootfs_format=erofs), and mount/losetup (util-linux) back the
 # loop-device path. A missing tool surfaces late, as a failed build reported
 # over the status callback, so they are pinned in the image rather than
-# assumed. curl backs the HEALTHCHECK below.
+# assumed. curl backs the HEALTHCHECK below. The runtime toolset mirrors the
+# repo-root release image (CubeTemplateCenter/docker/Dockerfile).
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         e2fsprogs \
+        erofs-utils \
         file \
         gawk \
         iproute2 \

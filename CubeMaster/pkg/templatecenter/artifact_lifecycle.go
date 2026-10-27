@@ -134,8 +134,9 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 
 	// ── Phase 1 ──────────────────────────────────────────────────────────────
 	var (
-		proceed bool
-		nodes   []models.ArtifactNodePlacement
+		proceed      bool
+		nodes        []models.ArtifactNodePlacement
+		rootfsFormat string
 	)
 	if err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var artifact models.RootfsArtifact
@@ -148,6 +149,10 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		if err != nil {
 			return err
 		}
+		// Capture the format before the transaction commits so Phase 2 (no lock,
+		// runs after the row may have been marked CLEANUP_PENDING) can tell
+		// Cubelet which device path to destroy without re-reading the row.
+		rootfsFormat = artifact.RootfsFormat
 		if excludeTemplateID != "" {
 			// Rows with cleanup_required=true are kept: their cubelet-side
 			// cleanup failed earlier in the delete flow and the orphan-replica
@@ -205,7 +210,7 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			logger.Warnf("artifact cleanup: cannot resolve address for placement node %s", nodes[i].NodeID)
 			continue
 		}
-		inUse, err := destroyArtifactOnNode(ctx, artifactID, instanceType, target)
+		inUse, err := destroyArtifactOnNode(ctx, artifactID, instanceType, rootfsFormat, target)
 		if inUse {
 			allPhysicalOK = false
 			logger.Infof("artifact cleanup deferred: node %s still uses artifact, GC will retry", target.ID())

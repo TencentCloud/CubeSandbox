@@ -470,23 +470,24 @@ export E2B_API_KEY=e2b_000000
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `CubeMaster/conf.yaml` 设置 `template.rootfs_format: "erofs"`，且 CubeTemplateCenter 直接运行在宿主机（非容器镜像，容器镜像已自带 `erofs-utils`），宿主机还需 `mkfs.erofs`（`erofs-utils`）。仓库根目录与 one-click 的 CubeTemplateCenter 容器镜像本身已安装 `erofs-utils`，故此条仅适用于宿主机直装的 TC。
 - 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
   `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 剩余的共享库（`ldd`；OpenSSL 已静态链入），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
 
-推荐安装包（覆盖上述 `cubecow` 依赖）：
+推荐安装包（覆盖上述 `cubecow` 依赖，以及宿主机直装 TC 启用 erofs 时的 `mkfs.erofs`）：
 
-- Debian / Ubuntu：`e2fsprogs`、`util-linux`
-- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`、`erofs-utils`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`、`erofs-utils`
 可直接执行的安装示例：
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y e2fsprogs util-linux
+sudo apt-get install -y e2fsprogs util-linux erofs-utils
 
 # OpenCloudOS / RHEL / CentOS
-sudo dnf install -y e2fsprogs util-linux || \
-sudo yum install -y e2fsprogs util-linux
+sudo dnf install -y e2fsprogs util-linux erofs-utils || \
+sudo yum install -y e2fsprogs util-linux erofs-utils
 ```
 
 启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
@@ -528,23 +529,24 @@ sudo yum install -y python3 libaio libnuma libuuid
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `CubeMaster/conf.yaml` 设置 `template.rootfs_format: "erofs"`，且 CubeTemplateCenter 直接运行在宿主机（非容器镜像，容器镜像已自带 `erofs-utils`），宿主机还需 `mkfs.erofs`（`erofs-utils`）。仓库根目录与 one-click 的 CubeTemplateCenter 容器镜像本身已安装 `erofs-utils`，故此条仅适用于宿主机直装的 TC。
 - 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
   `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 剩余的共享库（`ldd`；OpenSSL 已静态链入），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
 
-推荐安装包（覆盖上述 `cubecow` 依赖）：
+推荐安装包（覆盖上述 `cubecow` 依赖，以及宿主机直装 TC 启用 erofs 时的 `mkfs.erofs`）：
 
-- Debian / Ubuntu：`e2fsprogs`、`util-linux`
-- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`、`erofs-utils`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`、`erofs-utils`
 可直接执行的安装示例：
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y e2fsprogs util-linux
+sudo apt-get install -y e2fsprogs util-linux erofs-utils
 
 # OpenCloudOS / RHEL / CentOS
-sudo dnf install -y e2fsprogs util-linux || \
-sudo yum install -y e2fsprogs util-linux
+sudo dnf install -y e2fsprogs util-linux erofs-utils || \
+sudo yum install -y e2fsprogs util-linux erofs-utils
 ```
 
 启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：

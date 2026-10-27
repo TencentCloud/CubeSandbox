@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,20 +106,78 @@ func openConfiguredStore(cfg Config) (blobstore.Store, error) {
 	}
 }
 
-// ObjectKey returns the user key (artifactID.ext4). The store prefix is applied by blobstore.
+// artifactKeySuffix picks the on-disk suffix for an artifact from the local
+// file's own name, so an erofs artifact is stored as <id>.erofs -- matching the
+// build path's naming (BuildErofs writes <id>.erofs) instead of being mislabeled
+// <id>.ext4, which is confusing when inspecting an erofs object in the bucket.
+// An unknown or missing suffix falls back to .ext4, the historical storage name,
+// so a legacy or oddly-named upload keeps landing where it always did.
+func artifactKeySuffix(localPath string) string {
+	suffix := strings.ToLower(filepath.Ext(localPath))
+	if suffix != ".erofs" && suffix != ".ext4" {
+		return ".ext4"
+	}
+	return suffix
+}
+
+// objectKeyWithSuffix returns the user key <artifactID><suffix> (prefix applied
+// by blobstore). suffix must be ".ext4" or ".erofs".
+func (c *Client) objectKeyWithSuffix(artifactID, suffix string) string {
+	return blobstore.JoinKey("", artifactID+suffix)
+}
+
+// fullKeyWithSuffix returns the on-backend key including the configured prefix.
+func (c *Client) fullKeyWithSuffix(artifactID, suffix string) string {
+	return blobstore.JoinKey(c.cfg.ArtifactPrefix, artifactID+suffix)
+}
+
+// artifactKeyFromFormat returns the single user key <artifactID><suffix> for
+// the given rootfs format, where suffix is derived from rootfsFormat the same
+// way Upload derives it from the local file's name (erofs -> .erofs, ext4 /
+// empty / unknown -> .ext4). Callers pass the format the artifact was BUILT in
+// (req.RootfsFormat on the build path, existing.RootfsFormat on the reuse
+// path), so the key read here is the exact key Upload wrote under -- there is
+// no probing. The store prefix is applied by blobstore.
+func (c *Client) artifactKeyFromFormat(artifactID, rootfsFormat string) string {
+	return c.objectKeyWithSuffix(artifactID, artifactSuffixForFormat(rootfsFormat))
+}
+
+// artifactSuffixForFormat maps a rootfs format string to the on-disk artifact
+// suffix, mirroring artifactKeySuffix (which reads the suffix off a local file
+// path). erofs -> ".erofs"; ext4, empty, or any unknown value -> ".ext4" (the
+// historical default, which also matches legacy rows whose RootfsFormat column
+// predates the erofs feature).
+func artifactSuffixForFormat(rootfsFormat string) string {
+	if strings.EqualFold(strings.TrimSpace(rootfsFormat), "erofs") {
+		return ".erofs"
+	}
+	return ".ext4"
+}
+
+// ObjectKey returns the legacy user key (artifactID.ext4). The store prefix is
+// applied by blobstore. Prefer Upload/FullObjectKey (which honor the uploaded
+// file's suffix) for writes; this remains for callers that only need a stable
+// legacy key and do not have a local path.
 func (c *Client) ObjectKey(artifactID string) string {
-	return blobstore.ArtifactExt4Key("", artifactID)
+	return c.objectKeyWithSuffix(artifactID, ".ext4")
 }
 
-// FullObjectKey is the on-backend key including the configured prefix.
-func (c *Client) FullObjectKey(artifactID string) string {
-	return blobstore.ArtifactExt4Key(c.cfg.ArtifactPrefix, artifactID)
+// FullObjectKey is the on-backend key including the configured prefix. It uses
+// the uploaded file's suffix so an erofs artifact's stored object_key matches
+// the key Upload actually wrote (the two MUST agree: Upload writes under this
+// key, CubeMaster persists it in rootfs_artifacts.object_key, and later reads
+// locate the object by that stored key).
+func (c *Client) FullObjectKey(artifactID, localPath string) string {
+	return c.fullKeyWithSuffix(artifactID, artifactKeySuffix(localPath))
 }
 
-// Upload uploads a local ext4 file and returns the object key.
-// sha256 is optional; when set it is written as UserMetadata on the original PUT.
+// Upload uploads a local rootfs artifact file (ext4 or erofs) and returns the
+// full object key. The object is stored under <artifactID><suffix> where suffix
+// is taken from localPath, so an erofs artifact becomes <id>.erofs in the
+// bucket. sha256 is optional; when set it is written as UserMetadata on the PUT.
 func (c *Client) Upload(ctx context.Context, artifactID, localPath, sha256 string) (string, error) {
-	key := c.ObjectKey(artifactID)
+	suffix := artifactKeySuffix(localPath)
+	key := c.objectKeyWithSuffix(artifactID, suffix)
 	f, err := os.Open(localPath)
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", localPath, err)
@@ -136,22 +195,45 @@ func (c *Client) Upload(ctx context.Context, artifactID, localPath, sha256 strin
 	if err != nil {
 		return "", fmt.Errorf("put object %s: %w", key, err)
 	}
-	return c.FullObjectKey(artifactID), nil
+	return c.fullKeyWithSuffix(artifactID, suffix), nil
 }
 
-// PresignedGetURL generates a download URL for the artifact.
-func (c *Client) PresignedGetURL(ctx context.Context, artifactID string) (string, error) {
-	return c.store.SignedGetURL(ctx, c.ObjectKey(artifactID), c.cfg.PresignExpiry)
+// PresignedGetURL generates a download URL for the artifact built in
+// rootfsFormat. The key is derived from rootfsFormat (not probed by artifactID),
+// so it is the exact key Upload wrote under -- this matters on the S3 backend,
+// whose SignedGetURL signs a key WITHOUT checking it exists: probing two
+// candidate keys would always return the first (.erofs) URL even for an ext4
+// artifact, handing cubelets a 404. Passing the known format yields one correct
+// key. Returns ErrUnsupported when the backend cannot sign.
+func (c *Client) PresignedGetURL(ctx context.Context, artifactID, rootfsFormat string) (string, error) {
+	key := c.artifactKeyFromFormat(artifactID, rootfsFormat)
+	url, err := c.store.SignedGetURL(ctx, key, c.cfg.PresignExpiry)
+	if err != nil {
+		return "", err
+	}
+	return url, nil
 }
 
-// Delete removes the artifact object.
-func (c *Client) Delete(ctx context.Context, artifactID string) error {
-	return c.store.Delete(ctx, c.ObjectKey(artifactID))
+// Delete removes the artifact object built in rootfsFormat. The key is derived
+// from rootfsFormat (the exact key Upload wrote), not probed. A missing key is
+// not an error.
+func (c *Client) Delete(ctx context.Context, artifactID, rootfsFormat string) error {
+	key := c.artifactKeyFromFormat(artifactID, rootfsFormat)
+	if err := c.store.Delete(ctx, key); err != nil && !blobstore.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
-// Stat checks whether the artifact object exists.
-func (c *Client) Stat(ctx context.Context, artifactID string) (bool, error) {
-	_, err := c.store.Stat(ctx, c.ObjectKey(artifactID))
+// Stat checks whether the artifact object built in rootfsFormat exists. The
+// key is derived from rootfsFormat (the exact key Upload wrote), not probed, so
+// the Stat guard and the PresignedGetURL that follows it target the SAME key
+// (the pre-fix code probed two keys in Stat but only one in the buggy
+// PresignedGetURL, so the guard could pass on .ext4 while the URL pointed at
+// .erofs).
+func (c *Client) Stat(ctx context.Context, artifactID, rootfsFormat string) (bool, error) {
+	key := c.artifactKeyFromFormat(artifactID, rootfsFormat)
+	_, err := c.store.Stat(ctx, key)
 	if err != nil {
 		if blobstore.IsNotExist(err) {
 			return false, nil

@@ -34,6 +34,9 @@ const (
 	ImageStorageMediaType_docker ImageStorageMediaType = 0
 	// image from local disk in ext4 format rootfs.
 	ImageStorageMediaType_ext4 ImageStorageMediaType = 1
+	// image from local disk in erofs format rootfs (read-only,
+	// virtio-pmem DAX mountable).
+	ImageStorageMediaType_erofs ImageStorageMediaType = 2
 )
 
 // Enum value maps for ImageStorageMediaType.
@@ -41,10 +44,12 @@ var (
 	ImageStorageMediaType_name = map[int32]string{
 		0: "docker",
 		1: "ext4",
+		2: "erofs",
 	}
 	ImageStorageMediaType_value = map[string]int32{
 		"docker": 0,
 		"ext4":   1,
+		"erofs":  2,
 	}
 )
 
@@ -777,11 +782,12 @@ const file_services_images_v1_images_proto_rawDesc = "" +
 	"\treference\x18\x01 \x01(\v2%.cubelet.services.images.v1.ImageSpecR\treference\x12F\n" +
 	"\n" +
 	"pullPolicy\x18\x02 \x01(\x0e2&.cubelet.services.images.v1.PullPolicyR\n" +
-	"pullPolicy*-\n" +
+	"pullPolicy*8\n" +
 	"\x15ImageStorageMediaType\x12\n" +
 	"\n" +
 	"\x06docker\x10\x00\x12\b\n" +
-	"\x04ext4\x10\x01*5\n" +
+	"\x04ext4\x10\x01\x12\t\n" +
+	"\x05erofs\x10\x02*5\n" +
 	"\n" +
 	"PullPolicy\x12\n" +
 	"\n" +

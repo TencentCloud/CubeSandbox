@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -113,6 +114,36 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 			return nil, err
 		}
 		cloned.Backend = backend
+	}
+	// RootfsFormat is client-optional. The client MAY select the packaging
+	// format ("ext4" / "erofs") per request; an empty value is filled from the
+	// operator's template.rootfs_format config, so the config acts as the
+	// DEFAULT, not the sole authority. A non-empty value is canonicalized
+	// (lowercased, trimmed) and validated; an invalid value is rejected loudly
+	// rather than silently building the wrong format. This mirrors how Backend
+	// is handled just above.
+	//
+	// This empty->config-default branch is correct for FRESH submissions (a
+	// client that omits rootfs_format gets the configured default). It must NOT
+	// re-stamp a REPLAYED pre-upgrade job's format: a snapshot that predates the
+	// rootfs_format field decodes empty, and filling it from the current config
+	// would override the ext4 format the build actually started under (an
+	// upgrade hazard when the operator has since set template.rootfs_format=
+	// erofs). The replay path (unmarshalTemplateImageJobRequest) therefore pins
+	// an empty snapshot field to ext4 BEFORE calling this function, so only
+	// post-upgrade snapshots (always non-empty) reach the normalize below, and
+	// fresh submissions (which do not go through unmarshalTemplateImageJobRequest)
+	// keep the config-default behavior.
+	if strings.TrimSpace(cloned.RootfsFormat) == "" {
+		cloned.RootfsFormat = config.GetConfig().RootfsFormat()
+	} else {
+		cloned.RootfsFormat = strings.ToLower(strings.TrimSpace(cloned.RootfsFormat))
+		switch cloned.RootfsFormat {
+		case config.RootfsFormatExt4, config.RootfsFormatErofs:
+		default:
+			return nil, fmt.Errorf("rootfs_format %q is invalid; must be %q or %q",
+				cloned.RootfsFormat, config.RootfsFormatExt4, config.RootfsFormatErofs)
+		}
 	}
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err

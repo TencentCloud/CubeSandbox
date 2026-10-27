@@ -55,6 +55,18 @@ req_template_conf:
   cube_box_req_template: >-
     {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cube_network_config":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
 
+# Template-build-wide settings.
+# rootfs_format is the DEFAULT packaging format CubeTemplateCenter produces
+# for newly built templates when the create-from-image request does not
+# specify one:
+#   ext4  : classic ext4 rootfs image (default, historical behavior)
+#   erofs : EROFS read-only rootfs image
+# A client MAY override the format per request by setting rootfs_format in the
+# create-from-image request body; an explicit invalid value fails to start.
+# An empty value here (or in the request) defaults to ext4.
+template:
+  rootfs_format: "ext4"
+
 instance_db_config:
   addr: "127.0.0.1:3306"
   user: "cube"
