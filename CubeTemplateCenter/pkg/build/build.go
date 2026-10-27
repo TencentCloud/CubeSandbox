@@ -305,15 +305,28 @@ func runBuildLocked(
 	// Step 7: Build ext4 (export rootfs, bake envd + CA, mkfs)
 	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
 	var caBakeResult cube_egress_ca.Result
+	var resolvedUser *templatecenter.ResolvedTemplateUser
 	opts := image.BuildOptions{ArtifactID: artifactID}
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
+		// Resolve --user against the image's own /etc/passwd before anything
+		// is baked in. Requests without a user skip this entirely.
+		user, err := templatecenter.ResolveTemplateUserFromRootfs(rootfsDir, req)
+		if err != nil {
+			return fmt.Errorf("%w: resolve template user: %w", image.ErrPostExportPermanent, err)
+		}
+		if user != nil {
+			if !user.InPasswd {
+				logger.Warnf("template user uid %d has no /etc/passwd entry in the image; running with gid %d and HOME=/", user.UID, user.GID)
+			}
+			logger.Infof("template user resolved: uid=%d gid=%d", user.UID, user.GID)
+		}
+		resolvedUser = user
 		if _, err := templatecenter.InjectEnvdPayloadIntoRootfs(ctx, rootfsDir, envdPayload); err != nil {
 			return err
 		}
 		if envdPayload != nil {
 			envdPayload.ReleaseData()
 		}
-		var err error
 		caBakeResult, err = ApplyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
 		return err
 	}
@@ -358,7 +371,7 @@ func runBuildLocked(
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", resolvedUser, logger); err != nil {
 		return err
 	}
 
@@ -397,7 +410,7 @@ func reportExistingArtifact(
 	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
-	}, artifactURL, inStore, s3Client, objectKey, logger)
+	}, artifactURL, inStore, s3Client, objectKey, nil, logger)
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -414,6 +427,7 @@ func reportArtifactBuilt(
 	inStore bool,
 	s3Client *s3store.Client,
 	objectKey string,
+	resolvedUser *templatecenter.ResolvedTemplateUser,
 	logger *cubelog.Entry,
 ) error {
 	// Two fields deserve explanation:
@@ -448,6 +462,9 @@ func reportArtifactBuilt(
 	}
 	if artifactURL != "" {
 		payload["artifact_url"] = artifactURL
+	}
+	if resolvedUser != nil {
+		payload["resolved_user"] = resolvedUser
 	}
 	// Only stamp backend/key after a successful upload (or reuse of an
 	// already-stored object). A configured client that failed Put must
