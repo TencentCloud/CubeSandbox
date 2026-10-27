@@ -24,6 +24,7 @@ import (
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/urfave/cli"
 )
@@ -900,6 +901,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "cmd", Usage: "override container ENTRYPOINT (command); repeat for multiple elements, e.g. --cmd /bin/sh --cmd -c"},
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs"},
+		cli.StringFlag{Name: "user", Usage: "container user for the template build and later sandboxes: uid, uid:gid, username, or username:gid (gid must be numeric). Omit to use the image USER when it is a uid or username; a named group stays root"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
 		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
@@ -1650,8 +1652,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
 	enableInjectEnvd := c.Bool("enable-inject-envd")
+	user := strings.TrimSpace(c.String("user"))
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" {
 		return nil, nil
 	}
 
@@ -1705,6 +1708,13 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			FailureThreshold: 60,
 			SuccessThreshold: 1,
 		}
+	}
+	if user != "" {
+		securityContext, err := templatecenter.ParseTemplateUser(user)
+		if err != nil {
+			return nil, err
+		}
+		overrides.SecurityContext = securityContext
 	}
 	if enableInjectEnvd {
 		if overrides.Annotations == nil {

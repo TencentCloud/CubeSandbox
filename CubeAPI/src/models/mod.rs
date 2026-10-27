@@ -1842,6 +1842,11 @@ pub struct CreateTemplateRequest {
     /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
     #[serde(rename = "backend", default)]
     pub backend: Option<String>,
+    /// Container user for the template build and later sandboxes.
+    /// `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+    /// Omitted uses the image `USER` when CubeMaster can apply it, otherwise root.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// Body for POST /templates/:id (rebuild).

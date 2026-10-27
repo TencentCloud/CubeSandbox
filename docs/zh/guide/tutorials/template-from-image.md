@@ -52,6 +52,16 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
+`--user` 指定模板构建进程、以及之后从该模板创建的沙箱的容器用户。写法是 `uid`、`uid:gid`、`用户名` 或 `用户名:gid`，组必须是数字。不传时，镜像里的 `USER` 如果是数字或用户名会被用上；带名字的组仍然以 root 运行。
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --user      1000:1000
+```
+
+`POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
 ## 第三步 — 监控进度
 

@@ -91,11 +91,7 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if req.ContainerOverrides != nil && req.ContainerOverrides.Resources != nil {
 		resources = req.ContainerOverrides.Resources
 	}
-	securityContext := &types.ContainerSecurityContext{Privileged: true, ReadonlyRootfs: false}
-	if req.ContainerOverrides != nil && req.ContainerOverrides.SecurityContext != nil {
-		securityContext = req.ContainerOverrides.SecurityContext
-		securityContext.ReadonlyRootfs = false
-	}
+	securityContext := templateSecurityContext(req, imageCfg)
 	if req.ContainerOverrides != nil && req.ContainerOverrides.VolumeMounts != nil {
 		for _, mount := range req.ContainerOverrides.VolumeMounts {
 			if mount != nil && mount.ContainerPath == "/" {
