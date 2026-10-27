@@ -573,6 +573,50 @@ func TestParseContainerOverridesEnableInjectEnvd(t *testing.T) {
 	}
 }
 
+func TestParseContainerOverridesUser(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--user", "1000:1000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.SecurityContext == nil {
+		t.Fatal("expected security context")
+	}
+	sc := overrides.SecurityContext
+	if !sc.Privileged || sc.ReadonlyRootfs {
+		t.Fatalf("privileged=%v readonly=%v", sc.Privileged, sc.ReadonlyRootfs)
+	}
+	if sc.RunAsUser == nil || sc.RunAsUser.Value != 1000 || sc.RunAsGroup == nil || sc.RunAsGroup.Value != 1000 {
+		t.Fatalf("user context = %+v", sc)
+	}
+	if sc.RunAsUsername != "" {
+		t.Fatalf("username=%q", sc.RunAsUsername)
+	}
+}
+
+func TestParseContainerOverridesUsername(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--user", "sandbox:1000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sc := overrides.SecurityContext
+	if sc == nil || sc.RunAsUsername != "sandbox" || sc.RunAsUser != nil || sc.RunAsGroup == nil || sc.RunAsGroup.Value != 1000 {
+		t.Fatalf("user context = %+v", sc)
+	}
+}
+
+func TestParseContainerOverridesRejectsUser(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--user", ":1000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if overrides != nil {
+		t.Fatalf("overrides=%+v", overrides)
+	}
+}
+
 func TestTemplateImageJobWatchPhaseLabel(t *testing.T) {
 	tests := []struct {
 		name string

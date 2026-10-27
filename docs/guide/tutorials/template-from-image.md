@@ -52,6 +52,17 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
+`--user` sets the container user for the template build and for sandboxes created from that template. The value is `uid`, `uid:gid`, `username`, or `username:gid`. The group must be a number. When `--user` is omitted, a numeric or username `USER` from the image is used; an image user with a named group still runs as root.
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --user      1000:1000
+```
+
+The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
+
 ## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.

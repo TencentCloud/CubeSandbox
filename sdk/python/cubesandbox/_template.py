@@ -243,6 +243,7 @@ class Template:
         deny_out: list[str] | None = None,
         enable_ivshmem: bool | None = None,
         backend: str | None = None,
+        user: str | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateBuild:
@@ -282,6 +283,10 @@ class Template:
             deny_out: Denied outbound CIDRs for CubeVS egress policy.
             enable_ivshmem: Whether the template build sandbox should boot with ivshmem enabled.
             backend: CoW backend for this template ("xfs" | "s3"). Omitted keeps xfs.
+            user: Container user for the template build and later sandboxes.
+                ``uid``, ``uid:gid``, ``username``, or ``username:gid``. The group
+                must be numeric. Omitted uses the image USER when the server can
+                apply it, otherwise root.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
@@ -349,6 +354,8 @@ class Template:
             payload["enableIvshmem"] = enable_ivshmem
         if backend is not None:
             payload["backend"] = backend
+        if user is not None:
+            payload["user"] = user
         payload.update(kwargs)
 
         s = requests.Session()
