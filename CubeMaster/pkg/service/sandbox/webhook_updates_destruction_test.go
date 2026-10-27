@@ -128,7 +128,7 @@ func p5Setup(t *testing.T) *p5Fixture {
 	p.ApplyFunc(sandboxspec.Put, func(context.Context, string, *types.CreateCubeSandboxReq, sandboxspec.PutOptions) error {
 		return f.specErr
 	})
-	p.ApplyFunc(pausesnap.TryDeletePausedWithEvidence, func(context.Context, string, string, string, *bool) (bool, error) { return false, nil })
+	p.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(context.Context, string, string, string, *bool) (bool, bool, error) { return false, false, nil })
 	p.ApplyFunc(localcache.DeleteSandboxProxyMap, func(context.Context, string) error { return f.proxyErr })
 	p.ApplyFunc(cubelet.Destroy, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
 		f.nodeCalls++
@@ -370,7 +370,7 @@ func TestP5DestroyCompletionBarrier(t *testing.T) {
 }
 
 func TestP5ProducerFailureBoundaries(t *testing.T) {
-	for _, scenario := range []string{"lock", "enqueue", "node-code", "paused-unproven", "paused-error", "paused-complete", "hook-warning", "pause-origin", "resume-origin"} {
+	for _, scenario := range []string{"lock", "enqueue", "node-code", "paused-unproven", "paused-error", "paused-binding-failed", "paused-complete", "hook-warning", "pause-origin", "resume-origin"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := p5Setup(t)
 			p := p4Buffer(t)
@@ -391,14 +391,14 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 				f.patches.ApplyFunc(cubelet.Update, func(context.Context, string, *cubebox.UpdateCubeSandboxRequest) (*cubebox.UpdateCubeSandboxResponse, error) {
 					return &cubebox.UpdateCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_TaskStateInvalid}}, nil
 				})
-			case "paused-unproven", "paused-error", "paused-complete":
-				f.patches.ApplyFunc(pausesnap.TryDeletePausedWithEvidence, func(_ context.Context, _, _, _ string, evidence *bool) (bool, error) {
+			case "paused-unproven", "paused-error", "paused-binding-failed", "paused-complete":
+				f.patches.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(_ context.Context, _, _, _ string, evidence *bool) (bool, bool, error) {
 					if scenario == "paused-error" {
 						*evidence = true
-						return true, errors.New("cleanup")
+						return true, false, errors.New("cleanup")
 					}
-					*evidence = scenario == "paused-complete"
-					return true, nil
+					*evidence = scenario == "paused-complete" || scenario == "paused-binding-failed"
+					return true, scenario != "paused-binding-failed", nil
 				})
 			case "hook-warning":
 				RegisterAfterDestroySandboxSuccessHook(func(context.Context, string) error { return errors.New("warn-only") })
@@ -413,6 +413,9 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 				require.Empty(t, p.Events())
 			}
 			rsp := DestroySandbox(ctx, &types.DeleteCubeSandboxReq{SandboxID: "sb-p5", InstanceType: "cubebox", Sync: scenario != "enqueue"})
+			if scenario == "paused-binding-failed" {
+				require.Equal(t, 200, rsp.Ret.RetCode, "binding cleanup remains warn-only")
+			}
 			if scenario == "paused-complete" || scenario == "hook-warning" {
 				require.Equal(t, 200, rsp.Ret.RetCode)
 				p5Read(t, p)
@@ -420,6 +423,22 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 			require.Empty(t, p.Events())
 		})
 	}
+}
+
+func TestP5AsyncPausedBindingFailureDoesNotPublishKilled(t *testing.T) {
+	f := p5Setup(t)
+	p := p4Buffer(t)
+	task.SetWebhookPublisher(p)
+	defer task.SetWebhookPublisher(nil)
+	f.patches.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(_ context.Context, _, _, _ string, evidence *bool) (bool, bool, error) {
+		*evidence = true
+		return true, false, nil
+	})
+	require.Equal(t, 200, DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "sb-p5", InstanceType: "cubebox"}).Ret.RetCode)
+	h := &task.DestroySandboxTaskHandler{}
+	require.NoError(t, h.HandleTask(f.pending.Ctx, f.pending))
+	require.True(t, f.pending.Destroyed)
+	require.Empty(t, p.Events())
 }
 func TestP5TaskRetryAfterRPCFailure(t *testing.T) {
 	f := p5Setup(t)

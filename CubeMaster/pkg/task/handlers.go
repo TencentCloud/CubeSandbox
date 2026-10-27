@@ -245,7 +245,7 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 		ctx = context.WithoutCancel(ctx)
 		hostIP := strings.Split(t.CallEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
-		handled, err := pausesnap.TryDeletePausedWithEvidence(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
+		handled, pauseComplete, err := pausesnap.TryDeletePausedWithCompletion(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
@@ -288,7 +288,7 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 				log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
 			}
 		}
-		if t.Destroyed && t.InsType() == cubebox.InstanceType_cubebox.String() {
+		if t.Destroyed && (!handled || pauseComplete) && t.InsType() == cubebox.InstanceType_cubebox.String() {
 			t.Destruction.Complete(&lifecyclePublisher)
 		}
 		return nil

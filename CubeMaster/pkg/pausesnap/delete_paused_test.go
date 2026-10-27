@@ -292,6 +292,28 @@ func TestTryDeletePausedRetriesDeleteFailedWithTombstone(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
+func TestPausedBindingDeleteFailureKeepsBusinessResultButIsNotComplete(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb-binding-fail", "snap-binding-fail", statusReady, "10.0.0.7")
+	mockCubeletOK(t)
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register("p6_binding_delete_failure", func(tx *gorm.DB) {
+		tx.AddError(errors.New("binding delete rejected"))
+	}))
+	evidence := false
+	handled, complete, err := TryDeletePausedWithCompletion(context.Background(), "request", "sb-binding-fail", "10.0.0.7", &evidence)
+	require.NoError(t, err, "retain historical warn-only business result")
+	require.True(t, handled)
+	require.True(t, evidence, "retain real node destruction evidence")
+	require.False(t, complete, "necessary Master cleanup did not finish")
+	_, err = GetBySandbox(context.Background(), "sb-binding-fail")
+	require.NoError(t, err)
+	require.NoError(t, db.Callback().Delete().Remove("p6_binding_delete_failure"))
+	handled, complete, err = TryDeletePausedWithCompletion(context.Background(), "request", "sb-binding-fail", "10.0.0.7", &evidence)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.True(t, complete)
+}
+
 func TestCheckDestroyRet(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, checkDestroyRet(nil, "sb", "destroy"))

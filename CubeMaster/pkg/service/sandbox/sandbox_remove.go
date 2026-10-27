@@ -205,7 +205,7 @@ func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCub
 		ctx = context.WithoutCancel(ctx)
 		hostIP := strings.Split(callEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
-		handled, err := pausesnap.TryDeletePausedWithEvidence(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
+		handled, pauseComplete, err := pausesnap.TryDeletePausedWithCompletion(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return err
@@ -245,7 +245,7 @@ func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCub
 			log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
 		}
 
-		if t.Destroyed {
+		if t.Destroyed && (!handled || pauseComplete) {
 			t.Destruction.Complete(&lifecyclePublisher)
 		}
 		return nil
