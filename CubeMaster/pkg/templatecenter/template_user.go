@@ -49,40 +49,6 @@ func ParseTemplateUser(spec string) (*types.ContainerSecurityContext, error) {
 	return sc, nil
 }
 
-// tryParseImageUser applies an image config USER when the caller did not pass
-// one. A spec the runtime cannot represent, such as a named group, is left
-// unset so an existing image keeps booting as root.
-func tryParseImageUser(spec string) *types.ContainerSecurityContext {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return nil
-	}
-	sc, err := ParseTemplateUser(spec)
-	if err != nil {
-		return nil
-	}
-	return sc
-}
-
-func templateSecurityContext(req *types.CreateTemplateFromImageReq, imageCfg DockerImageConfig) *types.ContainerSecurityContext {
-	if req != nil && req.ContainerOverrides != nil && req.ContainerOverrides.SecurityContext != nil {
-		sc := req.ContainerOverrides.SecurityContext
-		sc.ReadonlyRootfs = false
-		if templateUserSet(sc) {
-			sc.Privileged = true
-		}
-		return sc
-	}
-	if sc := tryParseImageUser(imageCfg.User); sc != nil {
-		return sc
-	}
-	return &types.ContainerSecurityContext{Privileged: true, ReadonlyRootfs: false}
-}
-
-func templateUserSet(sc *types.ContainerSecurityContext) bool {
-	return sc != nil && (sc.RunAsUser != nil || sc.RunAsGroup != nil || sc.RunAsUsername != "")
-}
-
 func validateTemplateContainerUser(overrides *types.ContainerOverrides) error {
 	if overrides == nil || overrides.SecurityContext == nil {
 		return nil
