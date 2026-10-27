@@ -2317,6 +2317,28 @@ pub struct CreateTemplateContainerOverrides {
     pub envs: Option<Vec<CreateTemplateEnv>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_config: Option<DnsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<TemplateSecurityContext>,
+}
+
+/// Numeric uid/gid wrapper expected by CubeMaster `Int64Value`.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct TemplateInt64Value {
+    pub value: i64,
+}
+
+/// User fields for a template container. Privileged stays on so the guest can
+/// still set up devices; only the process uid/gid changes.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct TemplateSecurityContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<TemplateInt64Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_group: Option<TemplateInt64Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_username: Option<String>,
 }
 
 /// CPU / memory resources for template container.

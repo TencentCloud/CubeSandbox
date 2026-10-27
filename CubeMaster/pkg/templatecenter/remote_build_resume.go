@@ -113,6 +113,10 @@ type RemoteBuildResult struct {
 	CubeEgressCABaked       bool
 	CubeEgressCAFingerprint string
 	CubeEgressCATargets     int
+	// ResolvedUser is the numeric identity TC resolved the template --user to
+	// against the exported rootfs. Nil when no user was requested or when an
+	// older TC did not report it; the request is then used unchanged.
+	ResolvedUser *ResolvedTemplateUser
 }
 
 // Validate checks the fields the downstream distribution guard requires.
@@ -595,7 +599,13 @@ func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, re
 		if cfg, derr := decodeImageConfigJSON(record.ImageConfigJSON); derr == nil {
 			imageCfg = cfg
 		}
-		generatedReq, err = generateTemplateCreateRequest(ctx, req, record, imageCfg, record.MasterNodeIP)
+		// The adopted row's ext4 is what the sandbox runs, so prefer the
+		// identity stored with it; same fingerprint implies the same user.
+		resolvedUser := resolvedTemplateUserFromArtifact(record)
+		if resolvedUser == nil {
+			resolvedUser = result.ResolvedUser
+		}
+		generatedReq, err = generateTemplateCreateRequest(ctx, withResolvedTemplateUser(req, resolvedUser), record, imageCfg, record.MasterNodeIP)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("generate template create request: %w", err)
 		}
@@ -633,7 +643,7 @@ func finalizeRemoteArtifact(
 	// Same base URL local mode uses (CubeMaster's own request base URL, echoed
 	// back by TC), so the generated request and the distribution annotations
 	// are byte-identical across build modes: Cubelet pulls from CubeMaster.
-	generatedReq, err := generateTemplateCreateRequest(ctx, req, record, imageCfg, record.MasterNodeIP)
+	generatedReq, err := generateTemplateCreateRequest(ctx, withResolvedTemplateUser(req, result.ResolvedUser), record, imageCfg, record.MasterNodeIP)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate template create request: %w", err)
 	}

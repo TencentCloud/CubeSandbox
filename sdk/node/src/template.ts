@@ -176,6 +176,8 @@ export interface TemplateBuildOptions {
   allowOut?: string[];
   denyOut?: string[];
   backend?: string;
+  /** Container user: uid, uid:gid, username, or username:gid. gid must be numeric. */
+  user?: string;
   config?: Config | ConfigOptions;
   extra?: Record<string, unknown>;
 }
@@ -262,6 +264,7 @@ export class Template {
     if (options.allowOut !== undefined) payload.allowOut = options.allowOut;
     if (options.denyOut !== undefined) payload.denyOut = options.denyOut;
     if (options.backend !== undefined) payload.backend = options.backend;
+    if (options.user !== undefined) payload.user = options.user;
     if (options.extra) Object.assign(payload, options.extra);
 
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates`, {

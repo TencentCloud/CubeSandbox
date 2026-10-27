@@ -1748,6 +1748,7 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 		AllowOut:            []string{"172.67.0.0/16"},
 		DenyOut:             []string{"10.0.0.0/8"},
 		Backend:             "s3",
+		User:                "1000:1000",
 	})
 	if err != nil {
 		t.Fatalf("BuildTemplate returned error: %v", err)
@@ -1757,6 +1758,7 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 	assertString(t, got, "writableLayerSize", "20Gi")
 	assertString(t, got, "networkType", "tap")
 	assertString(t, got, "backend", "s3")
+	assertString(t, got, "user", "1000:1000")
 	assertString(t, got, "registryUsername", "pull-user")
 	assertString(t, got, "registryPassword", "pull-pass")
 	assertString(t, got, "probePath", "/health")
@@ -1803,6 +1805,9 @@ func TestBuildTemplateOmitsBackendWhenBlank(t *testing.T) {
 	}
 	if _, ok := got["backend"]; ok {
 		t.Fatalf("blank backend must be omitted, got %#v", got["backend"])
+	}
+	if _, ok := got["user"]; ok {
+		t.Fatalf("empty user must be omitted, got %#v", got["user"])
 	}
 }
 

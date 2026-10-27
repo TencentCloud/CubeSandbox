@@ -618,6 +618,86 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 }
 
+func TestGenerateTemplateCreateRequestAppliesUser(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:            &types.Request{RequestID: "req-user"},
+		SourceImageRef:     "docker.io/library/nginx:latest",
+		TemplateID:         "template-user",
+		WritableLayerSize:  "20Gi",
+		InstanceType:       cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:        cubeboxv1.NetworkType_tap.String(),
+		ContainerOverrides: &types.ContainerOverrides{},
+	}
+	parsed, err := ParseTemplateUser("1000:1000")
+	if err != nil {
+		t.Fatalf("ParseTemplateUser: %v", err)
+	}
+	req.ContainerOverrides.SecurityContext = parsed
+	got, err := generateTemplateCreateRequest(context.Background(), req, &models.RootfsArtifact{
+		ArtifactID: "artifact-user",
+	}, DockerImageConfig{User: "nobody"}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest: %v", err)
+	}
+	sc := got.Containers[0].SecurityContext
+	if sc == nil || !sc.Privileged || sc.ReadonlyRootfs {
+		t.Fatalf("security context = %+v", sc)
+	}
+	if sc.RunAsUser == nil || sc.RunAsUser.Value != 1000 || sc.RunAsGroup == nil || sc.RunAsGroup.Value != 1000 {
+		t.Fatalf("explicit user did not win: %+v", sc)
+	}
+	if sc.RunAsUsername != "" {
+		t.Fatalf("username=%q", sc.RunAsUsername)
+	}
+}
+
+func TestGenerateTemplateCreateRequestKeepsUserBuildPrivileged(t *testing.T) {
+	for _, sc := range []*types.ContainerSecurityContext{
+		{RunAsUser: &types.Int64Value{Value: 1000}},
+		{RunAsUsername: "sandbox"},
+	} {
+		req := &types.CreateTemplateFromImageReq{
+			Request:            &types.Request{RequestID: "req-user-priv"},
+			SourceImageRef:     "docker.io/library/nginx:latest",
+			TemplateID:         "template-user-priv",
+			WritableLayerSize:  "20Gi",
+			InstanceType:       cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:        cubeboxv1.NetworkType_tap.String(),
+			ContainerOverrides: &types.ContainerOverrides{SecurityContext: sc},
+		}
+		got, err := generateTemplateCreateRequest(context.Background(), req, &models.RootfsArtifact{
+			ArtifactID: "artifact-user-priv",
+		}, DockerImageConfig{}, "http://master.example")
+		if err != nil {
+			t.Fatalf("generateTemplateCreateRequest: %v", err)
+		}
+		if !got.Containers[0].SecurityContext.Privileged {
+			t.Fatalf("a build with a custom user must stay privileged: %+v", got.Containers[0].SecurityContext)
+		}
+	}
+}
+
+func TestGenerateTemplateCreateRequestIgnoresImageUserWhenUnset(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-image-user"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-image-user",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	got, err := generateTemplateCreateRequest(context.Background(), req, &models.RootfsArtifact{
+		ArtifactID: "artifact-image-user",
+	}, DockerImageConfig{User: "sandbox:1000"}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest: %v", err)
+	}
+	sc := got.Containers[0].SecurityContext
+	if sc == nil || !sc.Privileged || sc.ReadonlyRootfs || sc.RunAsUsername != "" || sc.RunAsUser != nil || sc.RunAsGroup != nil {
+		t.Fatalf("omitted user must stay privileged root: %+v", sc)
+	}
+}
+
 func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-s3"},

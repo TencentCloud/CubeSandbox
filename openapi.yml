@@ -1598,6 +1598,14 @@ components:
           description: |-
             Deprecated and ignored. Template IDs are always generated server-side
             with the `tpl-` prefix; clients must use the returned `templateID`.
+        user:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Container user for the template build and later sandboxes.
+            `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+            Omitted keeps the default root user.
         with_cube_ca:
           type:
           - boolean
