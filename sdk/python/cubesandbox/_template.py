@@ -285,8 +285,7 @@ class Template:
             backend: CoW backend for this template ("xfs" | "s3"). Omitted keeps xfs.
             user: Container user for the template build and later sandboxes.
                 ``uid``, ``uid:gid``, ``username``, or ``username:gid``. The group
-                must be numeric. Omitted uses the image USER when the server can
-                apply it, otherwise root.
+                must be numeric. Omitted keeps the default root user.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 

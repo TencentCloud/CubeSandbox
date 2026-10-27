@@ -52,7 +52,7 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
-`--user` sets the container user for the template build and for sandboxes created from that template. The value is `uid`, `uid:gid`, `username`, or `username:gid`. The group must be a number. When `--user` is omitted, a numeric or username `USER` from the image is used; an image user with a named group still runs as root.
+`--user` sets the container user for the template build and for sandboxes created from that template. The value is `uid`, `uid:gid`, `username`, or `username:gid`. The group must be a number. Omit `--user` to keep the default root user.
 
 ```bash
 cubemastercli tpl create-from-image \

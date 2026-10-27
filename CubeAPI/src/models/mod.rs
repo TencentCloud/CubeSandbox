@@ -1844,7 +1844,7 @@ pub struct CreateTemplateRequest {
     pub backend: Option<String>,
     /// Container user for the template build and later sandboxes.
     /// `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
-    /// Omitted uses the image `USER` when CubeMaster can apply it, otherwise root.
+    /// Omitted keeps the default root user.
     #[serde(default)]
     pub user: Option<String>,
 }

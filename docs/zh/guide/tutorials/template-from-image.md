@@ -52,7 +52,7 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
-`--user` 指定模板构建进程、以及之后从该模板创建的沙箱的容器用户。写法是 `uid`、`uid:gid`、`用户名` 或 `用户名:gid`，组必须是数字。不传时，镜像里的 `USER` 如果是数字或用户名会被用上；带名字的组仍然以 root 运行。
+`--user` 指定模板构建进程、以及之后从该模板创建的沙箱的容器用户。写法是 `uid`、`uid:gid`、`用户名` 或 `用户名:gid`，组必须是数字。不传 `--user` 时仍然以 root 运行，和以前一样。
 
 ```bash
 cubemastercli tpl create-from-image \

@@ -55,16 +55,6 @@ func TestParseTemplateUserRejects(t *testing.T) {
 	}
 }
 
-func TestTryParseImageUserDropsNamedGroup(t *testing.T) {
-	if got := tryParseImageUser("nobody:nogroup"); got != nil {
-		t.Fatalf("named group should be ignored, got %+v", got)
-	}
-	got := tryParseImageUser("nobody")
-	if got == nil || got.RunAsUsername != "nobody" || !got.Privileged {
-		t.Fatalf("image username was not applied: %+v", got)
-	}
-}
-
 func TestValidateTemplateContainerUser(t *testing.T) {
 	err := validateTemplateContainerUser(&types.ContainerOverrides{
 		SecurityContext: &types.ContainerSecurityContext{
