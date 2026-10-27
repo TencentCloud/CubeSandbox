@@ -28,7 +28,7 @@ type Config struct {
 	CubeMsgMemoryOverhead            string `toml:"cubemsg_memory_overhead"`
 	VmCpuOverhead                    string `toml:"vm_cpu_overhead"`
 	HostCpuOverhead                  string `toml:"host_cpu_overhead"`
-	DisableCgroupReuse               bool   `toml:"disable_cgroup_reuse"`
+	PoolWorkers                      int    `toml:"pool_workers"`
 	VmSnapshotSpecsConfig            string `toml:"vm_snapshot_specs_config"`
 	dynamicDisableMemoryReparentFile bool   `toml:"-"`
 	SnapshotDiskDir                  string `toml:"snapshot_disk_dir"`
