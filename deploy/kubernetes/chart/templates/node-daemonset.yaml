@@ -65,6 +65,7 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            {{- include "cube.nodeQuotaEnv" . | nindent 12 }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

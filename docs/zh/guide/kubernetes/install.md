@@ -347,6 +347,38 @@ bootstrap:
 
 ---
 
+### 8.4 Cubelet 配额覆盖
+
+在 `runtime-values.yaml` 中设置 `cubeNode.quota`，可以在 Cubelet 重启或 Pod
+重建后保留 `host.quota` 配置：
+
+```yaml
+cubeNode:
+  quota:
+    mcpu_limit: 32000
+    mem_limit: "64Gi"
+    mvm_limit: 100
+    creation_concurrent_num: 4
+    paused_resource_release_ratio: 0.5
+```
+
+五个字段均可省略。未指定的字段沿用镜像默认值；显式的 `0` 和
+`mem_limit: ""` 会生效。CPU 单位为毫核，内存使用非负的 Kubernetes quantity
+字符串，三个整数字段必须非负。暂停资源释放比例必须在 `0` 到 `1` 之间：
+`0` 为恢复保留全部暂停沙箱的 CPU/内存配额，`1` 释放全部配额，中间值用于在
+恢复余量和容量之间取舍。
+
+Chart 将这些值传入 Cubelet 容器；入口脚本在**复制镜像自带的 dynamicconf
+之后**、启动 Cubelet 之前应用它们。需要同时使用本版 Chart 和包含
+`configure-cubelet-quota.sh` 的 Cubelet 镜像；旧镜像（包括 v0.7.3）不会读取
+这些变量。修改这些值会更新 DaemonSet 的 Pod 模板，应用到运行中的集群时请遵循
+[计算面升级流程](./upgrade.md)。删除某个覆盖项后，该字段将在下次启动时恢复为
+镜像默认值。
+
+不要将 ConfigMap 直接挂载到 `Cubelet/dynamicconf/conf.yaml`：入口脚本还会通过
+`sed -i` 修改其中的端点和 DNS，需要文件可写且可重命名。其他 dynamicconf
+字段继续由现有启动配置管理。
+
 ## 常见问题速查
 
 | 现象 | 怎么处理 |

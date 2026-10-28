@@ -348,6 +348,42 @@ For NetworkPolicy over sandbox traffic to in-cluster Services / Pods *while* sta
 
 ---
 
+### 8.4 Cubelet quota overrides
+
+Set `cubeNode.quota` in `runtime-values.yaml` to persist `host.quota` settings
+across Cubelet restarts and Pod recreation:
+
+```yaml
+cubeNode:
+  quota:
+    mcpu_limit: 32000
+    mem_limit: "64Gi"
+    mvm_limit: 100
+    creation_concurrent_num: 4
+    paused_resource_release_ratio: 0.5
+```
+
+All five fields are optional. Omitted fields retain the image defaults; explicit
+`0` values and `mem_limit: ""` are applied. CPU is measured in millicores, memory
+uses a non-negative Kubernetes quantity string, and the three integer fields must
+be non-negative. The paused-resource release ratio must be between `0` and `1`:
+`0` reserves all paused CPU/memory quota for resume, `1` releases all of it, and
+intermediate values trade resume headroom for capacity.
+
+The chart passes these values to the Cubelet container, whose entrypoint applies
+them **after staging** the bundled dynamicconf and before starting Cubelet. This
+requires both this chart and a Cubelet image containing
+`configure-cubelet-quota.sh`; older images (including v0.7.3) do not consume these
+variables. Changing these values updates the DaemonSet Pod template; follow the
+[compute-plane upgrade procedure](./upgrade.md) when applying them to a running
+cluster. Removing an override restores that field to the image default at the
+next start.
+
+Do not mount a ConfigMap directly over `Cubelet/dynamicconf/conf.yaml`: the
+entrypoint also patches endpoints and DNS there using `sed -i`, which needs a
+writable file that can be renamed. Keep the other dynamicconf fields managed by
+the existing startup configuration.
+
 ## FAQ quick reference
 
 | Symptom | What to do |

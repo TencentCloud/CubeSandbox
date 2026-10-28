@@ -998,6 +998,8 @@ run_cubelet() {
   fi
   configure_sandbox_dns
 
+  bash /usr/local/bin/configure-cubelet-quota.sh "${dyn}"
+
   if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then
     CUBE_SANDBOX_ETH_NAME="$(detect_primary_interface || true)"
   fi

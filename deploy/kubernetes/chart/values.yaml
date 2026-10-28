@@ -789,6 +789,16 @@ minio:
 
 cubeNode:
   enabled: true
+  # Overrides for Cubelet dynamicconf host.quota, applied after image staging on
+  # every start (including Pod recreation). Omitted fields keep image defaults.
+  # Requires a cubelet image with configure-cubelet-quota.sh support.
+  quota: {}
+  # quota:
+  #   mcpu_limit: 32000
+  #   mem_limit: "64Gi"
+  #   mvm_limit: 100
+  #   creation_concurrent_num: 4
+  #   paused_resource_release_ratio: 0.5
   podAnnotations:
     # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
     kubectl.kubernetes.io/default-container: cubelet

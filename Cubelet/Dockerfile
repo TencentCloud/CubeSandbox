@@ -129,6 +129,7 @@ COPY examples/volume/cos/binary/cube-volume-cos.sh ${IMAGE_ROOT}/Cubelet/plugin/
 COPY examples/volume/cos/volume-cos.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example
 COPY examples/volume/s3/volume-s3.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-s3.conf.example
 COPY deploy/kubernetes/images/scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
+COPY deploy/kubernetes/images/scripts/configure-cubelet-quota.sh /usr/local/bin/configure-cubelet-quota.sh
 
 RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecli":{"version":"%s"}}}\n' \
       "${CUBE_VERSION}" "${CUBE_VERSION}" > ${IMAGE_ROOT}/Cubelet/version.json \
