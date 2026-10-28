@@ -327,6 +327,9 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	cd "$(CUBES3LVOL_DIR)" && make -j"$$(nproc)"
 	cd "$(CUBES3LVOL_DIR)" && mkdir -p /tmp/s3lvol-dpdk && \
 		RTE_RUNTIME_DIR=/tmp/s3lvol-dpdk make check-offline
+	cd "$(CUBES3LVOL_DIR)" && rm -f test/integration/s3_dynamic_json_test && \
+		$(MAKE) -C test/integration S3LVOL_ASAN=1 s3_dynamic_json_test && \
+		ASAN_OPTIONS=detect_leaks=1 ./test/integration/s3_dynamic_json_test
 else
 	$(MAKE) builder-image
 	$(MAKE) builder-run \

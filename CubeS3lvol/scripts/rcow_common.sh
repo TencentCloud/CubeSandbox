@@ -170,6 +170,8 @@ export S3LVOL_WRITEBACK_TOTAL_MB
 RCOW_NUM_SUBSYS="${RCOW_NUM_SUBSYS:-32}"
 RCOW_NS_PER_SUBSYS="${RCOW_NS_PER_SUBSYS:-64}"
 RCOW_NQN_PREFIX="${RCOW_NQN_PREFIX:-nqn.2026-08.io.spdk:rcow-}"
+# Overridable only so offline readiness tests can provide a synthetic sysfs.
+RCOW_NVME_SYSFS_ROOT="${RCOW_NVME_SYSFS_ROOT:-/sys/class/nvme}"
 
 RCOW_LISTEN_ADDR="${RCOW_LISTEN_ADDR:-127.0.0.1}"
 RCOW_LISTEN_PORT="${RCOW_LISTEN_PORT:-4420}"
@@ -952,13 +954,39 @@ sys.exit(0 if any(st.get("lvs_name") == name for st in stores) else 1)
 ' "${RCOW_LVS_NAME}"
 }
 
-# Serving, as opposed to merely running: the process is up and its lvstore is
-# attached. Waiting on the process alone is what let an upgrade report success
-# for a replacement that was still attaching, and would go on to crash-loop.
+# Every controller in the fixed grid must have completed reconnect. A namespace
+# block node can survive a target restart while its controller is still
+# "connecting"; its presence therefore says nothing about whether I/O can flow.
+rcow_nvme_controllers_live()
+{
+	local d nqn state i
+	local -A live_nqns=()
+
+	for d in "${RCOW_NVME_SYSFS_ROOT}"/nvme*; do
+		[ -d "${d}" ] || continue
+		nqn="$(cat "${d}/subsysnqn" 2>/dev/null)" || continue
+		state="$(cat "${d}/state" 2>/dev/null || true)"
+		[ "${state}" = "live" ] && live_nqns["${nqn}"]=1
+	done
+
+	# Count identities, not controller directories. A reconnect can briefly
+	# leave two live controllers for one NQN; raw counts would let that duplicate
+	# hide another expected subsystem that is absent or still connecting.
+	for i in $(seq 0 $((RCOW_NUM_SUBSYS - 1))); do
+		nqn="$(rcow_nqn "${i}")"
+		[ "${live_nqns[${nqn}]+present}" = "present" ] || return 1
+	done
+	return 0
+}
+
+# Serving, as opposed to merely running: the process is up, its lvstore is
+# attached, and every fixed-grid NVMe controller is live. Waiting on the process
+# or a surviving block node alone can accept a replacement still reconnecting.
 rcow_target_ready()
 {
 	[ -n "$(rcow_target_instances)" ] || return 1
-	rcow_lvstore_attached
+	rcow_lvstore_attached || return 1
+	rcow_nvme_controllers_live
 }
 
 # The stronger question the orchestrator has to ask. rcow_target_ready becomes
@@ -1621,7 +1649,7 @@ now listen on ${RCOW_LISTEN_ADDR}:${RCOW_LISTEN_PORT}"
 rcow_connected_nqns()
 {
 	local f
-	for f in /sys/class/nvme/nvme*/subsysnqn; do
+	for f in "${RCOW_NVME_SYSFS_ROOT}"/nvme*/subsysnqn; do
 		[ -r "${f}" ] && cat "${f}"
 	done 2>/dev/null
 }
@@ -1860,9 +1888,10 @@ reconnect_delay=${delay}s, ctrl_loss_tmo=${tmo}s"
 # bstore.json
 # --------------------------------------------------------------------------
 
-# Echo "<namespace> <wal_bdev>" for an lvstore, or nothing when it is not
-# recorded. Nothing is what decides on create rather than attach, so it is read
-# from this file only.
+# Echo "<namespace> <wal_bdev>" for an lvstore.
+# Return 1 when the file is absent/empty, 2 when it is valid but the entry is
+# missing, and 3 when it is corrupt. Callers must not collapse corruption into
+# absence: doing so changes recovery into a destructive create attempt.
 rcow_bstore_entry()
 {
 	[ -s "${RCOW_BSTORE_FILE}" ] || return 1
@@ -1870,13 +1899,25 @@ rcow_bstore_entry()
 	python3 - "${RCOW_BSTORE_FILE}" "$1" <<'PY'
 import json, sys
 try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(1)
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception as e:
+    print("cannot parse %s: %s" % (sys.argv[1], e), file=sys.stderr)
+    sys.exit(3)
+if not isinstance(d, dict):
+    print("%s is not a JSON object" % sys.argv[1], file=sys.stderr)
+    sys.exit(3)
 e = d.get(sys.argv[2])
-if not isinstance(e, dict):
-    sys.exit(1)
-print("%s %s" % (e.get("ns_name", ""), e.get("wal_bdev", "")))
+if e is None:
+    sys.exit(2)
+if not isinstance(e, dict) or not isinstance(e.get("bs_name"), str):
+    print("entry %r in %s is corrupt" % (sys.argv[2], sys.argv[1]), file=sys.stderr)
+    sys.exit(3)
+ns, wal = e.get("ns_name", ""), e.get("wal_bdev", "")
+if not isinstance(ns, str) or not isinstance(wal, str):
+    print("entry %r in %s has invalid fields" % (sys.argv[2], sys.argv[1]), file=sys.stderr)
+    sys.exit(3)
+print("%s %s" % (ns, wal))
 PY
 }
 

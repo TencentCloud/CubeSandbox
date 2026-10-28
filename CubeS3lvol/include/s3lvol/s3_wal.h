@@ -232,7 +232,9 @@ void s3_wal_append_barrier(struct s3_wal *wal, uint64_t *out_seq,
  * Only *closed* batches are accepted: a batch is applied only if every one of
  * its entries verified and the last one carries S3_WAL_F_LAST_IN_BATCH. A
  * trailing unclosed batch is discarded whole, which is what gives W4. Payload
- * is NULL for entries that carry none.
+ * is NULL for entries that carry none. Invalid magic, lengths, or CRCs before
+ * the durable head are corruption and fail replay with -EILSEQ; only invalid
+ * bytes at the append tail are treated as a recoverable torn write.
  *
  * Also positions head and seq_next, so appends may start right afterwards.
  */

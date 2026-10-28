@@ -32,6 +32,8 @@ struct ckpt_ctx {
 
 	/* Load only. */
 	struct s3_chunk_map     *map;
+	struct spdk_uuid         expected_lvs_uuid;
+	bool                     check_lvs_uuid;
 	uint64_t                 obj_size;
 
 	s3_checkpoint_cb         cb;
@@ -150,6 +152,14 @@ s3_checkpoint_save(struct s3_client *client, const char *lvs_name,
 	}
 
 	allocated = s3_chunk_map_get_allocated(map);
+	if (allocated > (UINT64_MAX - sizeof(*hdr)) /
+			sizeof(struct s3_ckpt_entry)) {
+		SPDK_ERRLOG("Checkpoint for '%s' has too many entries to size "
+			    "safely\n", lvs_name);
+		free(ctx);
+		cb_fn(cb_arg, -EOVERFLOW);
+		return;
+	}
 	total = sizeof(*hdr) + allocated * sizeof(struct s3_ckpt_entry);
 	if (total > CKPT_MAX_BYTES) {
 		SPDK_ERRLOG("Checkpoint for '%s' would be %" PRIu64 " bytes, "
@@ -288,7 +298,24 @@ ckpt_get_done(void *cb_arg, uint64_t bytes_read, int status)
 		ckpt_load_finish(ctx, 0, 0, -EINVAL);
 		return;
 	}
+	/* Nil means the snapshot predates the lvstore UUID. A different
+	 * non-nil UUID belongs to another lvstore and must not be applied. */
+	if (ctx->check_lvs_uuid &&
+	    !spdk_uuid_is_null(&hdr->lvs_uuid) &&
+	    spdk_uuid_compare(&hdr->lvs_uuid, &ctx->expected_lvs_uuid) != 0) {
+		SPDK_ERRLOG("Checkpoint '%s' belongs to a different lvstore UUID; "
+			    "refusing to apply it\n", ctx->key);
+		ckpt_load_finish(ctx, 0, 0, -EINVAL);
+		return;
+	}
 
+	if (hdr->num_entries > (UINT64_MAX - sizeof(*hdr)) /
+			sizeof(struct s3_ckpt_entry)) {
+		SPDK_ERRLOG("Checkpoint '%s' entry count overflows its object "
+			    "length\n", ctx->key);
+		ckpt_load_finish(ctx, 0, 0, -EOVERFLOW);
+		return;
+	}
 	expect_bytes = sizeof(*hdr) +
 		       hdr->num_entries * sizeof(struct s3_ckpt_entry);
 	if (bytes_read != expect_bytes) {
@@ -393,6 +420,7 @@ ckpt_head_done(void *cb_arg, int status)
 
 void
 s3_checkpoint_load(struct s3_client *client, const char *lvs_name,
+		   const struct spdk_uuid *expected_lvs_uuid,
 		   struct s3_chunk_map *map,
 		   s3_checkpoint_load_cb cb_fn, void *cb_arg)
 {
@@ -415,6 +443,10 @@ s3_checkpoint_load(struct s3_client *client, const char *lvs_name,
 	ctx->map     = map;
 	ctx->load_cb = cb_fn;
 	ctx->cb_arg  = cb_arg;
+	if (expected_lvs_uuid && !spdk_uuid_is_null(expected_lvs_uuid)) {
+		spdk_uuid_copy(&ctx->expected_lvs_uuid, expected_lvs_uuid);
+		ctx->check_lvs_uuid = true;
+	}
 
 	rc = snprintf(ctx->key, sizeof(ctx->key), CKPT_KEY_FMT, lvs_name);
 	if (rc < 0 || (size_t)rc >= sizeof(ctx->key)) {

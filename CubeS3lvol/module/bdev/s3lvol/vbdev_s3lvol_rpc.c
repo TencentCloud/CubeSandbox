@@ -1777,6 +1777,16 @@ SPDK_RPC_REGISTER("rcow_resume_flushers",
  * Unlike rcow_resume_flushers this also lifts the namespace pause.
  * ========================================================================== */
 static void
+rpc_rcow_resume_subsystems_done(void *cb_arg, int status)
+{
+	struct spdk_jsonrpc_request *request = cb_arg;
+
+	rpc_lvol_write_response(
+		request, status == 0,
+		status == 0 ? "" : "one or more RCOW subsystems did not resume");
+}
+
+static void
 rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
 			   const struct spdk_json_val *params)
 {
@@ -1794,10 +1804,14 @@ rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
 	 * bool_value alone, and test/tools/s3lvol_rpc.py only unwraps a result that
 	 * carries *both* keys -- a bool-only reply would reach the script as a raw
 	 * result and exit 0, which is exactly the false success this is fixing. */
-	rc = s3lvol_resume_subsystems();
-	rpc_lvol_write_response(request, rc == 0,
-				rc == 0 ? "" : "a hot prepare is still in flight; "
-				"the subsystems were not resumed");
+	rc = s3lvol_resume_subsystems(rpc_rcow_resume_subsystems_done, request);
+	if (rc != 0) {
+		rpc_lvol_write_response(
+			request, false,
+			rc == -EBUSY ? "a hot prepare is still in flight; "
+				      "the subsystems were not resumed"
+				    : "the subsystem resume could not be submitted");
+	}
 }
 SPDK_RPC_REGISTER("rcow_resume_subsystems",
 		  rpc_rcow_resume_subsystems, SPDK_RPC_RUNTIME)

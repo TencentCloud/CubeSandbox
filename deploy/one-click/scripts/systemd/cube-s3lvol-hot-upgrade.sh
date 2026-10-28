@@ -50,6 +50,17 @@ SERVICE="cube-sandbox-s3lvol.service"
 log() { echo "[one-click] CubeS3lvol: $*"; }
 warn() { echo "[one-click] CubeS3lvol: WARNING: $*" >&2; }
 
+# Serialize every host-local upgrade and rollback transaction with installer
+# staging/switching. This is deliberately a host flock, not a distributed lock:
+# the owner marker still cannot provide cross-node exclusion because COS has no
+# compare-and-swap/conditional-delete primitive.
+mkdir -p "${INSTALL_PREFIX}"
+exec 9>"${INSTALL_PREFIX}/.s3lvol-lifecycle.lock"
+if ! flock -x 9; then
+  warn "could not acquire the host lifecycle lock"
+  exit 1
+fi
+
 NEW_VERSION="${1:-}"
 if [ -z "${NEW_VERSION}" ]; then
   warn "usage: $0 <new-version-directory-name> [old-version-directory]"
@@ -66,17 +77,23 @@ fi
 
 # The outgoing build. Passed in by install.sh, or resolved off the bare name
 # while it still points at it.
-OLD_DIR="${2:-}"
+OLD_DIR="$(readlink -f "${BARE}" 2>/dev/null || true)"
 if [ -z "${OLD_DIR}" ]; then
-  OLD_DIR="$(readlink -f "${BARE}" 2>/dev/null || true)"
+  OLD_DIR="${2:-}"
 fi
 
 switch_bare_to() {
   # Through a rename, so the bare name never points at nothing. The caller has
   # to see a failure: this script does not run under set -e, and a switch that
   # did not happen used to be logged as done.
-  ln -sfn "$1" "${INSTALL_PREFIX}/.CubeS3lvol.new" || return 1
-  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${BARE}" || return 1
+  local nonce
+  [ -d "${INSTALL_PREFIX}/$1" ] || return 1
+  nonce="$$-${RANDOM}-$(date +%s%N)"
+  ln -s "$1" "${INSTALL_PREFIX}/.CubeS3lvol.new.${nonce}" || return 1
+  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new.${nonce}" "${BARE}" || {
+    rm -f "${INSTALL_PREFIX}/.CubeS3lvol.new.${nonce}"
+    return 1
+  }
   [ "$(readlink "${BARE}" 2>/dev/null || true)" = "$1" ]
 }
 
@@ -143,7 +160,7 @@ stop_and_confirm() {
 # and checks the layout afterwards, and RCOW_HOT_START_TIMEOUT covers that
 # whole script rather than process startup.
 legacy_target_ready() {
-  local f nqn state live=0 live_json
+  local live_json
 
   rcow_target_ready || return 1
   if [ -s "${RCOW_ROLLBACK_EXPECT}" ]; then
@@ -177,23 +194,16 @@ PY
   else
     return 1
   fi
-  for f in /sys/class/nvme/nvme*/subsysnqn; do
-    [ -r "${f}" ] || continue
-    nqn="$(cat "${f}" 2>/dev/null || true)"
-    case "${nqn}" in
-    "${RCOW_NQN_PREFIX}"*)
-      state="$(cat "${f%/subsysnqn}/state" 2>/dev/null || true)"
-      [ "${state}" = "live" ] && live=$((live + 1))
-      ;;
-    esac
-  done
-  [ "${live}" -eq "${RCOW_NUM_SUBSYS}" ]
+  rcow_nvme_controllers_live
 }
 
 start_and_wait() {
   local legacy_ok="${1:-0}"
   systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
-  systemctl start "${SERVICE}" >/dev/null 2>&1 || return 1
+  # The replacement must not inherit the lifecycle lock through a systemctl
+  # shim or a non-systemd launcher. Real systemd starts it independently, but
+  # closing fd 9 here also makes that guarantee explicit on test/dev hosts.
+  systemctl start "${SERVICE}" 9>&- >/dev/null 2>&1 || return 1
   # rcow_target_ready is true once the lvstore is attached. rcow_start.sh is
   # still replaying volumes and checking the layout then, and declaring this
   # done there is what rolled a healthy slow start back. The ready file is
@@ -380,6 +390,17 @@ if [ "${MODE}" = "hot" ]; then
   fi
 
   if [ "${STOP_RC}" -ne 0 ]; then
+    if [ -z "$(rcow_target_instances)" ]; then
+      warn "the hot stop failed after the target exited; restoring the outgoing build"
+      if [ -n "${OLD_DIR}" ] &&
+         switch_bare_to "$(basename "${OLD_DIR}")" &&
+         start_and_wait legacy; then
+        warn "the outgoing build is running again; the upgrade did not happen"
+      else
+        warn "the outgoing build could not be restarted; recover by hand"
+      fi
+      exit 1
+    fi
     # Every failure before rcow_upgrade.sh's kill leaves the target running and
     # unsignalled -- fail_live says so -- so what is here is a healthy target
     # after a failed attempt, not a decision to interrupt one. Falling through
@@ -420,6 +441,9 @@ fi
 log "the bare name now points at ${NEW_VERSION}"
 if ! rm -f "${RCOW_START_ATTACHED}" "${RCOW_START_ATTACHED}.tmp"; then
   warn "could not clear the candidate attach marker ${RCOW_START_ATTACHED}"
+  if [ -n "${OLD_DIR}" ] && switch_bare_to "$(basename "${OLD_DIR}")"; then
+    start_and_wait legacy || warn "the outgoing build did not restart after marker cleanup failed"
+  fi
   exit 1
 fi
 

@@ -92,8 +92,7 @@ struct s3_ckpt_header {
 	 * chunk_size would silently reinterpret every chunk_index. */
 	uint32_t         chunk_size;
 
-	/* Which lvstore this snapshot belongs to. All-zero is tolerated: a create
-	 * that died before recording its uuid leaves that. */
+	/* Which lvstore this snapshot belongs to. */
 	struct spdk_uuid lvs_uuid;
 
 	/* The LSN this snapshot covers, i.e. the chunk map's applied_lsn at the
@@ -170,11 +169,18 @@ void s3_checkpoint_save(struct s3_client *client, const char *lvs_name,
  * which is the normal state of a young lvstore. The callback then reports
  * status 0 with lsn 0, and the caller replays the journal from the beginning.
  *
+ * \c expected_lvs_uuid identifies the lvstore whose map is being rebuilt.
+ * When it is non-NULL and non-zero, a checkpoint UUID that is also non-zero
+ * must match it. A nil checkpoint UUID is a snapshot taken before that
+ * identity was recorded and is still applied. Pass NULL when no trustworthy
+ * identity is available.
+ *
  * \c map should be empty. Entries are applied with
  * s3_chunk_map_apply_update(), so a non-empty map would be merged into rather
  * than replaced.
  */
 void s3_checkpoint_load(struct s3_client *client, const char *lvs_name,
+			const struct spdk_uuid *expected_lvs_uuid,
 			struct s3_chunk_map *map,
 			s3_checkpoint_load_cb cb_fn, void *cb_arg);
 

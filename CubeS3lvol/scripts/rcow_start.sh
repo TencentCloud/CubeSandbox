@@ -314,7 +314,14 @@ printf '%s\n' "${TGT_PID}" >"${RCOW_START_ATTACHED}.tmp" &&
 	mv -f "${RCOW_START_ATTACHED}.tmp" "${RCOW_START_ATTACHED}" ||
 	bail "could not record the create/attach attempt (${RCOW_START_ATTACHED})"
 
-if BSTORE_ENTRY="$(rcow_bstore_entry "${RCOW_LVS_NAME}")"; then
+BSTORE_STATUS=0
+BSTORE_ENTRY="$(rcow_bstore_entry "${RCOW_LVS_NAME}")" || BSTORE_STATUS=$?
+if [ "${BSTORE_STATUS}" -eq 3 ]; then
+	bail "${RCOW_BSTORE_FILE} is corrupt; refusing to guess whether \
+'${RCOW_LVS_NAME}' should be created or attached. Repair or restore the file"
+fi
+
+if [ "${BSTORE_STATUS}" -eq 0 ]; then
 	LVS_NS="${BSTORE_ENTRY%% *}"
 	LVS_WAL_RECORDED="${BSTORE_ENTRY##* }"
 

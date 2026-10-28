@@ -51,6 +51,13 @@
  * mutual exclusion: an interleaving of A writes, A reads back, B writes, B
  * reads back leaves both sides believing they hold it.
  *
+ * Release verifies the nonce and recorded identity, then writes an immutable
+ * nonce-specific release proof. The shared marker is deliberately retained:
+ * COS has no compare-and-delete primitive, so GET followed by DELETE could
+ * erase a force takeover that lands between the requests. A later acquire can
+ * validate the proof and take over without force. It re-reads the marker
+ * after the proof matches and aborts if that identity has already changed.
+ *
  * In other words: this guards against **misoperations that happen in sequence**
  * (another process still alive, or a marker left by a previous crash), not
  * against **concurrent scheduling**. True exclusion needs an external
@@ -101,11 +108,11 @@ struct s3_owner_info {
 };
 
 /**
- * \param holder  non-NULL only when status == -EBUSY and the other side's info
- *                parsed successfully
+ * \param owner   on success, the identity which must be retained and supplied
+ *                to release; on -EBUSY, the parsed holder when available
  */
 typedef void (*s3_owner_acquire_cb)(void *cb_arg,
-				    const struct s3_owner_info *holder,
+				    const struct s3_owner_info *owner,
 				    int status);
 
 typedef void (*s3_owner_cb)(void *cb_arg, int status);
@@ -132,14 +139,18 @@ void s3_owner_acquire(struct s3_client *client, const char *lvs_name,
 		      s3_owner_acquire_cb cb_fn, void *cb_arg);
 
 /**
- * Release ownership (delete the marker). Called on a clean unload so the next
- * attach does not need --force.
+ * Finish ownership release after verifying that the marker still belongs to
+ * \c expected_owner. Writes a nonce-specific release proof and retains the
+ * marker because S3 cannot delete it conditionally. A later acquire accepts a
+ * matching proof without force. A marker belonging to a later force takeover
+ * is left untouched and the callback receives -ESTALE.
  *
  * Failure **must not block the unload**: a leftover marker only means the next
  * attach needs --force, and the unload is already done -- failing it would buy
  * nothing.
  */
 void s3_owner_release(struct s3_client *client, const char *lvs_name,
+		      const struct s3_owner_info *expected_owner,
 		      s3_owner_cb cb_fn, void *cb_arg);
 
 /**

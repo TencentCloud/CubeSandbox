@@ -225,6 +225,21 @@ s3_owner_info_str(const struct s3_owner_info *info, char *out, size_t out_len)
 
 static void owner_do_put(struct owner_ctx *ctx);
 static void owner_do_read(struct owner_ctx *ctx, bool verifying);
+static bool owner_identity_equal(const struct s3_owner_info *a,
+				 const struct s3_owner_info *b);
+static void owner_takeover_recheck(struct owner_ctx *ctx);
+
+static int
+owner_release_key(const char *owner_key, const struct s3_owner_info *owner,
+		  char *out, size_t out_len)
+{
+	char nonce[SPDK_UUID_STRING_LEN];
+	int rc;
+
+	spdk_uuid_fmt_lower(nonce, sizeof(nonce), &owner->nonce);
+	rc = snprintf(out, out_len, "%s-released/%s", owner_key, nonce);
+	return rc < 0 || (size_t)rc >= out_len ? -ENAMETOOLONG : 0;
+}
 
 static void
 owner_acquire_finish(struct owner_ctx *ctx, int status)
@@ -232,6 +247,7 @@ owner_acquire_finish(struct owner_ctx *ctx, int status)
 	s3_owner_acquire_cb cb_fn = ctx->acq_cb;
 	void *cb_arg = ctx->cb_arg;
 	struct s3_owner_info holder = ctx->holder;
+	struct s3_owner_info self = ctx->self;
 	bool holder_valid = ctx->holder_valid;
 
 	free(ctx->buf);
@@ -239,8 +255,89 @@ owner_acquire_finish(struct owner_ctx *ctx, int status)
 	free(ctx);
 
 	if (cb_fn) {
-		cb_fn(cb_arg, (status == -EBUSY && holder_valid) ? &holder : NULL,
+		cb_fn(cb_arg,
+		      status == 0 ? &self :
+		      ((status == -EBUSY && holder_valid) ? &holder : NULL),
 		      status);
+	}
+}
+
+static void
+owner_release_proof_read_done(void *cb_arg, uint64_t bytes_read, int status)
+{
+	struct owner_ctx *ctx = cb_arg;
+	struct s3_owner_info released;
+
+	if (status == -ENOENT) {
+		char desc[256];
+
+		s3_owner_info_str(&ctx->holder, desc, sizeof(desc));
+		SPDK_ERRLOG("'%s' is already held by %s -- refusing to attach. "
+			    "If that owner is gone, confirm it and retry with "
+			    "force=true.\n", ctx->key, desc);
+		owner_acquire_finish(ctx, -EBUSY);
+		return;
+	}
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to read release proof for owner marker '%s': %d\n",
+			    ctx->key, status);
+		owner_acquire_finish(ctx, status);
+		return;
+	}
+	if (bytes_read == 0 || bytes_read > S3_OWNER_DOC_MAX ||
+	    owner_decode(ctx->buf, bytes_read, &released) != 0 ||
+	    !owner_identity_equal(&released, &ctx->holder)) {
+		SPDK_ERRLOG("Release proof for owner marker '%s' is invalid; "
+			    "refusing automatic takeover\n", ctx->key);
+		owner_acquire_finish(ctx, -EBUSY);
+		return;
+	}
+
+	SPDK_NOTICELOG("Owner marker '%s' has a matching clean-release proof; "
+		       "confirming the marker has not changed\n", ctx->key);
+	owner_takeover_recheck(ctx);
+}
+
+/* The proof is immutable, so a stalled acquire can observe it after a newer
+ * owner has already read its own marker back. Re-read immediately before the
+ * takeover PUT and abort if the holder changed. This does not close the
+ * write/read-back race documented above. */
+static void
+owner_takeover_recheck_done(void *cb_arg, uint64_t bytes_read, int status)
+{
+	struct owner_ctx *ctx = cb_arg;
+	struct s3_owner_info current;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to re-read owner marker '%s' before takeover: "
+			    "%d\n", ctx->key, status);
+		owner_acquire_finish(ctx, status);
+		return;
+	}
+	if (bytes_read == 0 || bytes_read > S3_OWNER_DOC_MAX ||
+	    owner_decode(ctx->buf, bytes_read, &current) != 0 ||
+	    !owner_identity_equal(&current, &ctx->holder)) {
+		SPDK_ERRLOG("Owner marker '%s' changed after its release proof was "
+			    "read; refusing automatic takeover\n", ctx->key);
+		owner_acquire_finish(ctx, -EBUSY);
+		return;
+	}
+
+	owner_do_put(ctx);
+}
+
+static void
+owner_takeover_recheck(struct owner_ctx *ctx)
+{
+	int rc;
+
+	memset(ctx->buf, 0, S3_OWNER_DOC_MAX);
+	rc = s3_get_range(ctx->client, ctx->key, 0, S3_OWNER_DOC_MAX, ctx->buf,
+			  owner_takeover_recheck_done, ctx);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to submit owner marker re-read for '%s': %d\n",
+			    ctx->key, rc);
+		owner_acquire_finish(ctx, rc);
 	}
 }
 
@@ -327,10 +424,23 @@ owner_read_done(void *cb_arg, uint64_t bytes_read, int status)
 	s3_owner_info_str(&got, desc, sizeof(desc));
 
 	if (!ctx->force) {
-		SPDK_ERRLOG("'%s' is already held by %s -- refusing to attach. "
-			    "If that owner is gone (a crash, say), confirm it and "
-			    "retry with force=true.\n", ctx->key, desc);
-		owner_acquire_finish(ctx, -EBUSY);
+		char release_key[OWNER_KEY_MAX];
+		int rc;
+
+		rc = owner_release_key(ctx->key, &got, release_key,
+				       sizeof(release_key));
+		if (rc != 0) {
+			owner_acquire_finish(ctx, rc);
+			return;
+		}
+		memset(ctx->buf, 0, S3_OWNER_DOC_MAX);
+		rc = s3_get_range(ctx->client, release_key, 0, S3_OWNER_DOC_MAX,
+				  ctx->buf, owner_release_proof_read_done, ctx);
+		if (rc != 0) {
+			SPDK_ERRLOG("Failed to submit release-proof read for '%s': "
+				    "%d\n", ctx->key, rc);
+			owner_acquire_finish(ctx, rc);
+		}
 		return;
 	}
 
@@ -466,37 +576,110 @@ s3_owner_acquire(struct s3_client *client, const char *lvs_name,
  * ========================================================================== */
 
 static void
-owner_delete_done(void *cb_arg, int status)
+owner_release_finish(struct owner_ctx *ctx, int status)
 {
-	struct owner_ctx *ctx = cb_arg;
 	s3_owner_cb cb_fn = ctx->cb;
 	void *user_arg = ctx->cb_arg;
-
-	if (status != 0 && status != -ENOENT) {
-		/* Worth a line, not worth failing over: a marker left behind only
-		 * means the next attach needs force=true. */
-		SPDK_WARNLOG("Failed to remove the owner marker '%s' (%d); the "
-			     "next attach will need force=true\n",
-			     ctx->key, status);
-	}
 
 	free(ctx->buf);
 	free(ctx->doc);
 	free(ctx);
-
 	if (cb_fn) {
-		cb_fn(user_arg, status == -ENOENT ? 0 : status);
+		cb_fn(user_arg, status);
+	}
+}
+
+static bool
+owner_identity_equal(const struct s3_owner_info *a,
+		     const struct s3_owner_info *b)
+{
+	return strcmp(a->node_id, b->node_id) == 0 &&
+	       a->pid == b->pid &&
+	       a->attach_ts == b->attach_ts &&
+	       spdk_uuid_compare(&a->lvs_uuid, &b->lvs_uuid) == 0 &&
+	       spdk_uuid_compare(&a->nonce, &b->nonce) == 0;
+}
+
+static void
+owner_release_proof_written(void *cb_arg, int status)
+{
+	struct owner_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_WARNLOG("Failed to persist clean-release proof for owner marker "
+			     "'%s' (%d)\n", ctx->key, status);
+	}
+	owner_release_finish(ctx, status);
+}
+
+static void
+owner_release_read_done(void *cb_arg, uint64_t bytes_read, int status)
+{
+	struct owner_ctx *ctx = cb_arg;
+	struct s3_owner_info current;
+	char release_key[OWNER_KEY_MAX];
+	char desc[256];
+	int len, rc;
+
+	if (status == -ENOENT) {
+		owner_release_finish(ctx, 0);
+		return;
+	}
+	if (status != 0) {
+		SPDK_WARNLOG("Failed to verify owner marker '%s' before release "
+			     "(%d); leaving it in place\n", ctx->key, status);
+		owner_release_finish(ctx, status);
+		return;
+	}
+	if (bytes_read == 0 || bytes_read > S3_OWNER_DOC_MAX ||
+	    owner_decode(ctx->buf, bytes_read, &current) != 0) {
+		SPDK_WARNLOG("Owner marker '%s' cannot be verified before release; "
+			     "leaving it in place\n", ctx->key);
+		owner_release_finish(ctx, -ESTALE);
+		return;
+	}
+	if (!owner_identity_equal(&current, &ctx->self)) {
+		s3_owner_info_str(&current, desc, sizeof(desc));
+		SPDK_WARNLOG("Refusing to release owner marker '%s': it now belongs "
+			     "to %s\n", ctx->key, desc);
+		owner_release_finish(ctx, -ESTALE);
+		return;
+	}
+
+	/* Write an immutable proof under this nonce instead of deleting or
+	 * overwriting the shared marker. A force takeover racing this callback has
+	 * a different nonce, so this late proof cannot release the new owner. */
+	rc = owner_release_key(ctx->key, &ctx->self, release_key,
+			       sizeof(release_key));
+	if (rc != 0) {
+		owner_release_finish(ctx, rc);
+		return;
+	}
+	len = owner_encode(&ctx->self, &ctx->doc);
+	if (len < 0) {
+		owner_release_finish(ctx, len);
+		return;
+	}
+	ctx->iov.iov_base = ctx->doc;
+	ctx->iov.iov_len = (size_t)len;
+	rc = s3_put(ctx->client, release_key, &ctx->iov, 1, false,
+		    owner_release_proof_written, ctx);
+	if (rc != 0) {
+		SPDK_WARNLOG("Failed to submit clean-release proof for owner marker "
+			     "'%s' (%d)\n", ctx->key, rc);
+		owner_release_finish(ctx, rc);
 	}
 }
 
 void
 s3_owner_release(struct s3_client *client, const char *lvs_name,
+		 const struct s3_owner_info *expected_owner,
 		 s3_owner_cb cb_fn, void *cb_arg)
 {
 	struct owner_ctx *ctx;
 	int rc;
 
-	if (!client || !lvs_name || lvs_name[0] == '\0') {
+	if (!client || !lvs_name || lvs_name[0] == '\0' || !expected_owner) {
 		if (cb_fn) {
 			cb_fn(cb_arg, -EINVAL);
 		}
@@ -513,6 +696,7 @@ s3_owner_release(struct s3_client *client, const char *lvs_name,
 	ctx->client = client;
 	ctx->cb     = cb_fn;
 	ctx->cb_arg = cb_arg;
+	ctx->self   = *expected_owner;
 
 	rc = snprintf(ctx->key, sizeof(ctx->key), OWNER_KEY_FMT, lvs_name);
 	if (rc < 0 || (size_t)rc >= sizeof(ctx->key)) {
@@ -523,13 +707,17 @@ s3_owner_release(struct s3_client *client, const char *lvs_name,
 		return;
 	}
 
-	rc = s3_delete(ctx->client, ctx->key, owner_delete_done, ctx);
+	ctx->buf = calloc(1, S3_OWNER_DOC_MAX);
+	if (!ctx->buf) {
+		owner_release_finish(ctx, -ENOMEM);
+		return;
+	}
+
+	rc = s3_get_range(ctx->client, ctx->key, 0, S3_OWNER_DOC_MAX, ctx->buf,
+			  owner_release_read_done, ctx);
 	if (rc != 0) {
-		SPDK_WARNLOG("Failed to submit the owner marker delete for '%s': "
+		SPDK_WARNLOG("Failed to submit the owner marker read for '%s': "
 			     "%d\n", ctx->key, rc);
-		free(ctx);
-		if (cb_fn) {
-			cb_fn(cb_arg, rc);
-		}
+		owner_release_finish(ctx, rc);
 	}
 }

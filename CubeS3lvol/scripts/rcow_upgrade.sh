@@ -267,7 +267,8 @@ if [ -z "${INSTANCES}" ]; then
 lvstore are left as they are"
 	hot_clear_residue
 	# The intent is spent: the target it names is not there to be restarted.
-	rm -f "${RCOW_HOT_MARKER}"
+	rm -f "${RCOW_HOT_MARKER}" ||
+		rcow_die "cannot clear spent lifecycle marker ${RCOW_HOT_MARKER}"
 	exit 0
 fi
 
@@ -519,12 +520,17 @@ PREPARED=0
 # The intent is spent: this is the moment it was recorded for. Clearing it here
 # rather than where the stop script read it is what leaves a refused attempt
 # looking like a hot one to the next stop, instead of a planned teardown.
-rm -f "${RCOW_HOT_MARKER}"
+rm -f "${RCOW_HOT_MARKER}" ||
+	rcow_die "target is gone but the spent lifecycle marker ${RCOW_HOT_MARKER} \
+could not be removed; refusing to continue so the orchestrator can restore the \
+outgoing build"
 
 # ==========================================================================
 rcow_step "cleaning up"
 
-hot_clear_residue
+hot_clear_residue ||
+	rcow_die "target is gone but its runtime residue could not be removed; \
+refusing to continue so the orchestrator can restore the outgoing build"
 
 rcow_log "hot stop complete. The layout is in ${RCOW_HOT_SNAPSHOT}; \
 ${RCOW_ACTIVE_FILE}, ${RCOW_BSTORE_FILE} and the WAL image were left untouched"

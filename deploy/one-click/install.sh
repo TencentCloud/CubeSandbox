@@ -1151,6 +1151,7 @@ check_install_preflight() {
   require_cmd tar
   require_cmd ss
   require_cmd systemctl
+  require_cmd flock
 
   # runtime common helpers used by up/down scripts.
   require_cmd bash
@@ -1465,11 +1466,17 @@ s3lvol_component_version() {
 #
 # Sets S3LVOL_STAGED_DIR to the directory it created.
 install_cubes3lvol_versioned() {
-  local src="$1" version prev
+  local src="$1" version prev prev_dir base stage nonce lock_fd
 
   version="$(s3lvol_component_version "${src}")"
   [[ -n "${version}" ]] || version="legacy-$(date +%Y%m%d-%H%M%S)"
-  S3LVOL_STAGED_DIR="CubeS3lvol-${version}"
+  base="CubeS3lvol-${version}"
+  nonce="$(date +%s%N)-$$-${RANDOM}"
+  stage="${INSTALL_PREFIX}/.CubeS3lvol.stage.${nonce}"
+
+  mkdir -p "${INSTALL_PREFIX}"
+  exec {lock_fd}>"${INSTALL_PREFIX}/.s3lvol-lifecycle.lock"
+  flock -x "${lock_fd}"
 
   # A bare real directory is the layout from before this. Keep it under its own
   # version, so the first upgrade of an old install can still roll back, and
@@ -1477,14 +1484,42 @@ install_cubes3lvol_versioned() {
   if [[ -d "${INSTALL_PREFIX}/CubeS3lvol" && ! -L "${INSTALL_PREFIX}/CubeS3lvol" ]]; then
     prev="$(s3lvol_component_version "${INSTALL_PREFIX}/CubeS3lvol")"
     [[ -n "${prev}" ]] || prev="legacy-$(date +%Y%m%d-%H%M%S)"
-    mv -f "${INSTALL_PREFIX}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol-${prev}"
-    switch_cubes3lvol_bare_to "CubeS3lvol-${prev}"
-    log "CubeS3lvol: kept the pre-versioning install as CubeS3lvol-${prev}"
+    prev_dir="CubeS3lvol-${prev}"
+    # Never let mv nest the live legacy tree inside a stale same-version
+    # directory. Keep both trees and publish the actual running one under a
+    # unique name, just as same-version staging does below.
+    if [[ -e "${INSTALL_PREFIX}/${prev_dir}" ]]; then
+      prev_dir="${prev_dir}.legacy-${nonce}"
+    fi
+    mv "${INSTALL_PREFIX}/CubeS3lvol" "${INSTALL_PREFIX}/${prev_dir}"
+    # The lifecycle lock is already held by this function. Tell the switch not
+    # to acquire the same flock again (which would deadlock the first migration
+    # from the legacy real-directory layout).
+    switch_cubes3lvol_bare_to "${prev_dir}" 1
+    log "CubeS3lvol: kept the pre-versioning install as ${prev_dir}"
   fi
 
-  rm -rf "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"
-  mkdir -p "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"
-  cp -a "${src}/." "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}/"
+  # Never replace a version directory in place. The currently running binary
+  # may come from it, including on a same-version reinstall. Build a unique
+  # hidden tree, validate it, then publish it with one same-filesystem rename.
+  S3LVOL_STAGED_DIR="${base}"
+  if [[ -e "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}" ]]; then
+    S3LVOL_STAGED_DIR="${base}.install-${nonce}"
+  fi
+  mkdir -p "${stage}"
+  if ! cp -a "${src}/." "${stage}/" ||
+     [[ ! -f "${stage}/scripts/rcow_common.sh" ]] ||
+     [[ ! -f "${stage}/VERSION" ]]; then
+    rm -rf "${stage}"
+    exec {lock_fd}>&-
+    die "CubeS3lvol: staged package validation failed"
+  fi
+  if ! mv -T "${stage}" "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"; then
+    rm -rf "${stage}"
+    exec {lock_fd}>&-
+    die "CubeS3lvol: could not publish staged package"
+  fi
+  exec {lock_fd}>&-
 
   log "CubeS3lvol: staged ${S3LVOL_STAGED_DIR}"
 }
@@ -1492,16 +1527,47 @@ install_cubes3lvol_versioned() {
 # Point the bare name at one of the version directories -- through a rename, so
 # it never points at nothing -- and keep the two newest for a rollback.
 switch_cubes3lvol_bare_to() {
-  local dir="$1"
+  local dir="$1" lock_held="${2:-0}" old="" nonce lock_fd="" candidate cleanup_failed=0
+  local -a versions=()
 
-  ln -sfn "${dir}" "${INSTALL_PREFIX}/.CubeS3lvol.new"
-  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${INSTALL_PREFIX}/CubeS3lvol"
+  [[ -d "${INSTALL_PREFIX}/${dir}" ]] ||
+    die "CubeS3lvol: refusing to switch to missing target ${dir}"
+  nonce="$(date +%s%N)-$$-${RANDOM}"
+  if [[ "${lock_held}" != "1" ]]; then
+    exec {lock_fd}>"${INSTALL_PREFIX}/.s3lvol-lifecycle.lock"
+    flock -x "${lock_fd}"
+  fi
+  old="$(readlink "${INSTALL_PREFIX}/CubeS3lvol" 2>/dev/null || true)"
+
+  ln -s "${dir}" "${INSTALL_PREFIX}/.CubeS3lvol.new.${nonce}" ||
+    { [[ -z "${lock_fd}" ]] || exec {lock_fd}>&-; return 1; }
+  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new.${nonce}" \
+    "${INSTALL_PREFIX}/CubeS3lvol" ||
+    { rm -f "${INSTALL_PREFIX}/.CubeS3lvol.new.${nonce}";
+      [[ -z "${lock_fd}" ]] || exec {lock_fd}>&-; return 1; }
 
   # Keep the build just replaced, which is the one a rollback needs, and drop
   # anything older.
-  find "${INSTALL_PREFIX}" -maxdepth 1 -name 'CubeS3lvol-*' -type d \
-    -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR>2 {print $2}' |
-    while read -r old; do rm -rf "${old}"; done
+  mapfile -t versions < <(find "${INSTALL_PREFIX}" -maxdepth 1 \
+    -name 'CubeS3lvol-*' -type d -printf '%T@ %p\n' 2>/dev/null |
+    sort -rn | awk 'NR>2 {sub(/^[^ ]+ /, ""); print}')
+  for candidate in "${versions[@]}"; do
+    [[ "$(basename "${candidate}")" == "${dir}" ]] && continue
+    [[ -n "${old}" && "$(basename "${candidate}")" == "$(basename "${old}")" ]] && continue
+    rm -rf "${candidate}" || cleanup_failed=1
+  done
+
+  if [[ "${cleanup_failed}" -ne 0 ]]; then
+    log "CubeS3lvol: cleanup failed; restoring the previous symlink"
+    if [[ -n "${old}" && -d "${INSTALL_PREFIX}/${old}" ]]; then
+      ln -s "${old}" "${INSTALL_PREFIX}/.CubeS3lvol.rollback.${nonce}" &&
+        mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.rollback.${nonce}" \
+          "${INSTALL_PREFIX}/CubeS3lvol"
+    fi
+    [[ -z "${lock_fd}" ]] || exec {lock_fd}>&-
+    return 1
+  fi
+  [[ -z "${lock_fd}" ]] || exec {lock_fd}>&-
 
   log "CubeS3lvol: installed as ${dir}; the bare name points at it"
 }
