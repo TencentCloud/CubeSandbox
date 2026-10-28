@@ -324,12 +324,14 @@ func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, requestID, sa
 		// Do not log the request, response body, or raw error: either endpoint
 		// may include user-supplied data. Keep every failed attempt, even when
 		// a later retry succeeds, so transient failures are observable.
+		elapsedMs := time.Since(started).Milliseconds()
 		log.G(ctx).WithFields(CubeLog.Fields{
 			"RequestId": requestID, "sandboxID": sandboxID, "sandboxIP": sandboxIP, "envdInitPort": port,
 			"attempt": attempt, "maxAttempts": envdInitMaxAttempts,
 			"phase": phase, "errorCategory": category, "httpStatus": status,
-			"elapsedMs": time.Since(started).Milliseconds(), "retryable": retryable,
-		}).Warnf("create_time_env_vars envd init attempt failed")
+			"elapsedMs": elapsedMs, "retryable": retryable,
+		}).Warnf("create_time_env_vars envd init attempt failed: sandboxID=%s sandboxIP=%s envdInitPort=%d attempt=%d maxAttempts=%d phase=%s errorCategory=%s httpStatus=%d elapsedMs=%d retryable=%t",
+			sandboxID, sandboxIP, port, attempt, envdInitMaxAttempts, phase, category, status, elapsedMs, retryable)
 		lastErr = err
 		if !retryable || attempt == envdInitMaxAttempts {
 			return newEnvdInitFailure("create_time_env_vars init failed after bounded retry", hasEnvdCapability, err)

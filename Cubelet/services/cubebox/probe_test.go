@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	neturl "net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +24,12 @@ import (
 	"github.com/stretchr/testify/require"
 	networktypes "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"k8s.io/utils/pointer"
@@ -332,6 +335,54 @@ func TestEnvdInitAttemptClassifiesTransportFailures(t *testing.T) {
 			assert.Equal(t, "request", phase)
 			assert.Equal(t, tc.category, category)
 			assert.Zero(t, status)
+		})
+	}
+}
+
+func TestEnvdInitRetryLogsEachFailureWithoutSensitiveData(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := CubeLog.GetLogger("envd-init-retry-test-" + format)
+			logger.SetOutput(&output)
+			if format == "text" {
+				logger.SetLogFormat(CubeLog.TextFormat)
+			} else {
+				logger.SetLogFormat(CubeLog.JSONFormat)
+			}
+			ctx := log.WithLogger(context.Background(), log.NewWrapperLogEntry(logger.WithContext(context.Background())))
+			attempts := 0
+			l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				attempts++
+				switch attempts {
+				case 1:
+					return nil, fmt.Errorf("connection reset by peer synthetic-secret")
+				case 2:
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString("synthetic-secret")), Request: r}, nil
+				default:
+					return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(nil)), Request: r}, nil
+				}
+			})}}
+			err := l.doCreateTimeEnvdInitWithRetry(ctx, "req-1", "sb-1", "127.0.0.1", 49983, true, []byte(`{"envVars":{"TOKEN":"synthetic-secret"}}`))
+			require.NoError(t, err)
+			require.Equal(t, 3, attempts)
+			lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+			require.Len(t, lines, 2)
+			assert.Contains(t, lines[0], "req-1")
+			assert.Contains(t, lines[0], "sb-1")
+			assert.Contains(t, lines[0], "127.0.0.1")
+			assert.Contains(t, lines[0], "connection_reset")
+			assert.Contains(t, lines[1], "http_status")
+			assert.Contains(t, lines[1], "503")
+			assert.NotContains(t, output.String(), "synthetic-secret")
+			if format == "json" {
+				var first, second map[string]any
+				require.NoError(t, json.Unmarshal([]byte(lines[0]), &first))
+				require.NoError(t, json.Unmarshal([]byte(lines[1]), &second))
+				assert.Equal(t, "connection_reset", first["errorCategory"])
+				assert.Equal(t, float64(2), second["attempt"])
+				assert.Equal(t, float64(503), second["httpStatus"])
+			}
 		})
 	}
 }
