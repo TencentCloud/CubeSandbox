@@ -276,7 +276,7 @@ func TestDoCreateTimeEnvdInitFailsOnHTTPError(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		http.Error(w, "envd refused init", http.StatusInternalServerError)
+		http.Error(w, "sensitive-response-content", http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
@@ -304,8 +304,36 @@ func TestDoCreateTimeEnvdInitFailsOnHTTPError(t *testing.T) {
 	}
 	errInfo, _ := ret.FromError(retErr)
 	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
-	assert.Contains(t, errInfo.Message(), "envd refused init")
+	assert.Contains(t, errInfo.Message(), "HTTP 500")
+	assert.NotContains(t, errInfo.Message(), "sensitive-response-content")
 	assert.Equal(t, 1, callCount)
+}
+
+func TestEnvdInitAttemptClassifiesTransportFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		category string
+	}{
+		{"deadline", context.DeadlineExceeded, "deadline_exceeded"},
+		{"canceled", context.Canceled, "canceled"},
+		{"reset", fmt.Errorf("read: connection reset by peer"), "connection_reset"},
+		{"refused", fmt.Errorf("dial: connection refused"), "connection_refused"},
+		{"pipe", fmt.Errorf("write: broken pipe"), "broken_pipe"},
+		{"eof", io.EOF, "eof"},
+		{"unknown", fmt.Errorf("sensitive-value"), "other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, tc.err
+			})}}
+			_, phase, category, status, err := l.doCreateTimeEnvdInitAttempt(context.Background(), "127.0.0.1", 49983, []byte(`{}`))
+			require.Error(t, err)
+			assert.Equal(t, "request", phase)
+			assert.Equal(t, tc.category, category)
+			assert.Zero(t, status)
+		})
+	}
 }
 
 func TestDoCreateTimeEnvdInitRetriesTransientHTTPError(t *testing.T) {

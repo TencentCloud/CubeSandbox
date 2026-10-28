@@ -6,6 +6,7 @@ pub mod container_mgr;
 pub mod exec;
 pub mod rootfs;
 use std::collections::HashMap;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -235,7 +236,12 @@ fn cleanup_sandbox_log_dir_at(
     std::fs::create_dir_all(&sandbox_archive)
         .map_err(|e| format!("create archive {}: {}", sandbox_archive.display(), e))?;
     let segment = sandbox_archive.join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir(&segment)
+    // Live files can be broadly readable on older deployments. Restrict the
+    // enclosing segment before moving them so archived output is not exposed
+    // to other local users by the archive itself.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&segment)
         .map_err(|e| format!("create archive segment {}: {}", segment.display(), e))?;
     let dest = segment.join("logs");
     match std::fs::rename(&dir, &dest) {
@@ -1662,6 +1668,7 @@ mod sandbox_log_path_tests {
 
     #[test]
     fn retention_preserves_each_session_and_open_writer() {
+        use std::os::unix::fs::PermissionsExt;
         let dirs = TestDirs::new();
         std::fs::write(dirs.path("retain"), "").unwrap();
         let mut writer = std::fs::File::create(dirs.path("live/sandbox/stdout")).unwrap();
@@ -1675,6 +1682,13 @@ mod sandbox_log_path_tests {
 
         let segments = archived_logs(&dirs.path("archive/sandbox"));
         assert_eq!(segments.len(), 2);
+        for logs in &segments {
+            let mode = std::fs::metadata(logs.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "archive segment must be private");
+        }
         let mut contents: Vec<_> = segments
             .iter()
             .map(|p| std::fs::read_to_string(p.join("stdout")).unwrap())

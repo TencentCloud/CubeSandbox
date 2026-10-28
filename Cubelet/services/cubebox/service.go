@@ -286,6 +286,9 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 		}
 	}
 	if tmpReq.Annotations != nil {
+		if _, ok := tmpReq.Annotations[constants.MasterAnnotationCreateTimeEnvVars]; ok {
+			tmpReq.Annotations[constants.MasterAnnotationCreateTimeEnvVars] = "[redacted]"
+		}
 		tmpReq.Annotations[constants.MasterAnnotationsBlkQos] = "*"
 		tmpReq.Annotations[constants.MasterAnnotationsNetWork] = "*"
 		tmpReq.Annotations[constants.MasterAnnotationsFSQos] = "*"
@@ -407,7 +410,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 	if log.IsDebug() {
-		log.G(ctx).Debugf("RunCubeSandboxRequest:%s", utils.InterfaceToString(req))
+		log.G(ctx).Debugf("RunCubeSandboxRequest:%s", safePrint(req))
 	} else {
 		log.G(ctx).Errorf("RunCubeSandboxRequest:%s", safePrint(req))
 	}

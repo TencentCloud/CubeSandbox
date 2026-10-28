@@ -477,11 +477,23 @@ impl SandboxService {
             liveness_probe: liveness_probe.as_ref().map(to_liveness_probe),
         };
 
-        let resp = self
-            .cubemaster
-            .create_sandbox(&req)
-            .await
-            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
+        // Log before awaiting so a caller-side timeout still leaves the ID
+        // needed to find the matching CubeMaster and Cubelet records.
+        tracing::info!(request_id = %req.request_id, template_id = %template_id, "sandbox create dispatched");
+        let started = std::time::Instant::now();
+        let resp = self.cubemaster.create_sandbox(&req).await.map_err(|e| {
+            let code = match &e {
+                CubeMasterError::Api { ret_code, .. } => Some(*ret_code),
+                _ => None,
+            };
+            tracing::warn!(request_id = %req.request_id, template_id = %template_id,
+                    ret_code = ?code, elapsed_ms = started.elapsed().as_millis() as u64,
+                    "sandbox create failed");
+            create_error_with_request_id(
+                map_create_cubemaster_err(e, &template_id),
+                &req.request_id,
+            )
+        })?;
 
         // Belt-and-suspenders: parse_response already flattens every non-success
         // ret_code into CubeMasterError::Api on the transport path above, so the
@@ -489,9 +501,12 @@ impl SandboxService {
         // It is kept only so the mapping stays correct if parse_response is ever
         // relaxed to pass a non-success envelope through; the functional 130404/409
         // mapping lives on the transport error above.
-        resp.ret
-            .into_result()
-            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
+        resp.ret.into_result().map_err(|e| {
+            create_error_with_request_id(
+                map_create_cubemaster_err(e, &template_id),
+                &req.request_id,
+            )
+        })?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
@@ -1228,6 +1243,17 @@ fn map_create_cubemaster_err(e: CubeMasterError, template_id: &str) -> AppError 
             AppError::Conflict(detail)
         }
         other => params_error_or_internal(other),
+    }
+}
+
+fn create_error_with_request_id(err: AppError, request_id: &str) -> AppError {
+    let suffix = format!(" (CubeMaster request ID: {request_id})");
+    match err {
+        AppError::Internal(e) => AppError::Internal(anyhow::anyhow!("{e}{suffix}")),
+        AppError::BadRequest(message) => AppError::BadRequest(format!("{message}{suffix}")),
+        AppError::NotFound(message) => AppError::NotFound(format!("{message}{suffix}")),
+        AppError::Conflict(message) => AppError::Conflict(format!("{message}{suffix}")),
+        other => other,
     }
 }
 
@@ -2764,6 +2790,36 @@ mod tests {
                 matches!(err, AppError::Internal(_)),
                 "ret_code {ret_code} must stay 5xx, got {err:?}"
             );
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_failure_exposes_the_dispatched_request_id() {
+        for ret_code in [-1, 130497] {
+            let captured = Arc::new(Mutex::new(String::new()));
+            let sink = captured.clone();
+            let service = spawn_fake_cubemaster(Router::new().route(
+                "/cube/sandbox",
+                post(move |Json(body): Json<Value>| {
+                    let sink = sink.clone();
+                    async move {
+                        *sink.lock().await = body["RequestID"].as_str().unwrap().to_string();
+                        ret_envelope(ret_code, "backend failure")
+                    }
+                }),
+            ))
+            .await;
+
+            let err = service.create_sandbox(probe_sandbox()).await.unwrap_err();
+            let request_id = captured.lock().await.clone();
+            assert!(!request_id.is_empty());
+            assert!(matches!(&err, AppError::Internal(_)));
+            assert!(err.to_string().contains(&request_id));
+            assert!(err.to_string().contains(&ret_code.to_string()));
             assert_eq!(
                 err.into_response().status(),
                 StatusCode::INTERNAL_SERVER_ERROR

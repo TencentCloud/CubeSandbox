@@ -6,7 +6,26 @@ import (
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
+
+func TestSafePrintCreateRedactsCreateTimeEnvValues(t *testing.T) {
+	const secret = "example-sensitive-value"
+	req := &types.CreateCubeSandboxReq{
+		CreateTimeEnvVars: map[string]string{"TOKEN": secret},
+		Annotations:       map[string]string{constants.CubeAnnotationCreateTimeEnvVars: secret},
+		Containers:        []*types.Container{{Envs: []*types.KeyValue{{Key: "TOKEN", Value: secret}}}},
+	}
+	if strings.Contains(safePrintCreateCubeSandboxReq(req), secret) {
+		t.Fatal("create-time environment value appeared in request log")
+	}
+	if req.CreateTimeEnvVars["TOKEN"] != secret {
+		t.Fatal("logging must not change the original request")
+	}
+	if req.Containers[0].Envs[0].Value != secret || req.Annotations[constants.CubeAnnotationCreateTimeEnvVars] != secret {
+		t.Fatal("logging must not change container envs or annotations")
+	}
+}
 
 func TestSetCreateTimeEnvVarsAnnotation(t *testing.T) {
 	out := map[string]string{}
