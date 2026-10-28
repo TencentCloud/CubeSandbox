@@ -125,9 +125,19 @@ func TestRedisProcessAndServiceRecovery(t *testing.T) {
 	} else {
 		// Explicit opt-in only: never discover/restart a business Redis container.
 		require.True(t, strings.HasPrefix(container, "webhook-1903-p2-"))
-		out, err := exec.Command("docker", "restart", container).CombinedOutput()
-		require.NoError(t, err, string(out))
-		t.Logf("normal same-volume restart: %s", out)
+		mode := os.Getenv("WEBHOOK_REDIS_RESTART_MODE")
+		if mode == "kill" {
+			out, err := exec.Command("docker", "kill", "--signal=KILL", container).CombinedOutput()
+			require.NoError(t, err, string(out))
+			out, err = exec.Command("docker", "start", container).CombinedOutput()
+			require.NoError(t, err, string(out))
+			t.Logf("SIGKILL then same-volume start (not host power loss): %s", out)
+		} else {
+			require.True(t, mode == "" || mode == "normal", "restart mode must be normal or kill")
+			out, err := exec.Command("docker", "restart", container).CombinedOutput()
+			require.NoError(t, err, string(out))
+			t.Logf("normal same-volume restart: %s", out)
+		}
 		// docker restart returns before Redis finishes loading its AOF. Wait only
 		// for readiness here; the new child still verifies all persisted states.
 		conf := realConf(t)

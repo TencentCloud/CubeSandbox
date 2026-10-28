@@ -1,4 +1,9 @@
-# P5 validation — supported updates and completed destruction
+# Update and completed-destruction webhook validation — 2026-10-23
+
+> Historical execution record: machine paths and resource names below identify
+> that run, not required installation locations. For current portable setup and
+> commands, use the [test runbook](../../../tests/e2e/webhook/README.md).
+
 
 Date: 2026-10-22 (Asia/Shanghai). Workspace base: c771b279 on
 feat/E2B-compatible-sandbox-lifecycle-webhooks. No commit, branch change, push,

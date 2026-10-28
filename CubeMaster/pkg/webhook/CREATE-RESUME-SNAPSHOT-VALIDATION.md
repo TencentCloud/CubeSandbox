@@ -1,4 +1,9 @@
-# P4 validation and handoff — 2026-10-22
+# Create, resume and snapshot webhook validation — 2026-10-22
+
+> Historical execution record: machine paths and resource names below identify
+> that run, not required installation locations. For current portable setup and
+> commands, use the [test runbook](../../../tests/e2e/webhook/README.md).
+
 
 Starting branch: `feat/E2B-compatible-sandbox-lifecycle-webhooks`; HEAD:
 `b5e9fe0e899b165bd5fa31bca5d2f67ece496179`. Tracked files were clean at entry;

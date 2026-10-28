@@ -124,7 +124,7 @@ volume_plugins:
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
 
 # Static cluster-wide webhooks; changes take effect after all Masters restart.
-# P3 provides delivery infrastructure; real lifecycle producers follow in P4/P5.
+# All six lifecycle producers use this pipeline; see CubeMaster/pkg/webhook/README.md.
 webhooks:
   enabled: false
   ingress_capacity: 1024

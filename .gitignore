@@ -93,3 +93,9 @@ web/tsconfig.tsbuildinfo
 
 # Local Helm runtime values (passwords / advertiseIP / TLS). Example is tracked.
 runtime-values.yaml
+
+# Webhook platform receiver and runbook (evidence belongs outside the checkout).
+!/tests/e2e/webhook/
+!/tests/e2e/webhook/*.py
+!/tests/e2e/webhook/*.md
+!/tests/e2e/webhook/env.example
