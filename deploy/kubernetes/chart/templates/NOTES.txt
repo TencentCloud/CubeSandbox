@@ -100,7 +100,7 @@ Status:
 {{- if eq (include "cube.startupGateEnabled" .) "true" }}
   PVM startup gate: on
 {{- end }}
-{{- if and .Values.cubeNode.enabled .Values.cubeNode.quota }}
+{{- if and .Values.cubeNode.enabled (include "cube.nodeQuotaEnv" . | trim) }}
 
 WARNING (cubeNode.quota requires Cubelet image support):
   Configured Cubelet image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubelet "context" $) }}

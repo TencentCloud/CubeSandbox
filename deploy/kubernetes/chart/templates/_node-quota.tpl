@@ -13,6 +13,8 @@
 {{- if not (has $key $keys) -}}
 {{- fail (printf "unknown cubeNode.quota field: %s" $key) -}}
 {{- end -}}
+{{/* A null field keeps the image default, just like an omitted field. */}}
+{{- if not (kindIs "invalid" $value) -}}
 {{- $text := toString $value -}}
 {{- if eq $key "mem_limit" -}}
 {{- if not (regexMatch "^$|^[+]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+|[numkMGTP]|[KMGTPE]i|E)?$" $text) -}}
@@ -36,5 +38,6 @@
 {{- end }}
 - name: CUBELET_QUOTA_{{ $key | upper }}
   value: {{ $text | quote }}
+{{- end -}}
 {{- end -}}
 {{- end -}}

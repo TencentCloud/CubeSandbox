@@ -29,6 +29,19 @@ cp -R "$CHART_DIR" "$TMP_DIR/legacy-chart"
 sed '/^  quota: {}$/d' "$CHART_DIR/values.yaml" > "$TMP_DIR/legacy-chart/values.yaml"
 render_chart "$TMP_DIR/legacy-chart" > "$TMP_DIR/absent.yaml"
 render --set-json 'cubeNode.quota=null' > "$TMP_DIR/null.yaml"
+cat > "$TMP_DIR/null-fields-values.yaml" <<'YAML'
+cubeNode:
+  quota:
+    mcpu_limit:
+    mem_limit: null
+    mvm_limit: null
+    creation_concurrent_num: null
+    paused_resource_release_ratio: null
+YAML
+render -f "$TMP_DIR/null-fields-values.yaml" > "$TMP_DIR/null-fields.yaml"
+render -f "$TMP_DIR/null-fields-values.yaml" \
+  --set cubeNode.quota.mcpu_limit=0 --set-string cubeNode.quota.mem_limit= \
+  > "$TMP_DIR/mixed-null.yaml"
 render --set cubeNode.quota.mem_limit=1024 > "$TMP_DIR/memory-bytes.yaml"
 render --set cubeNode.quota.mem_limit=0 > "$TMP_DIR/memory-zero.yaml"
 cat > "$TMP_DIR/large-values.yaml" <<'YAML'
@@ -94,6 +107,8 @@ def apply(env, ok=True):
 assert rendered_env("default.yaml") == {}
 assert rendered_env("absent.yaml") == {}
 assert rendered_env("null.yaml") == {}
+assert rendered_env("null-fields.yaml") == {}
+assert rendered_env("mixed-null.yaml") == {prefix + "MCPU_LIMIT": "0", prefix + "MEM_LIMIT": ""}
 assert rendered_env("memory-bytes.yaml") == {prefix + "MEM_LIMIT": "1024"}
 assert rendered_env("memory-zero.yaml") == {prefix + "MEM_LIMIT": "0"}
 assert rendered_env("large.yaml") == rendered_env("large-set.yaml") == {
@@ -206,6 +221,11 @@ notes() {
 }
 
 warning='WARNING (cubeNode.quota requires Cubelet image support):'
+notes -f "$TMP_DIR/null-fields-values.yaml" > "$TMP_DIR/null-notes.txt"
+if grep -Fq "$warning" "$TMP_DIR/null-notes.txt"; then
+  echo 'FAIL: null fields do not override quota and must not emit a warning' >&2
+  exit 1
+fi
 notes > "$TMP_DIR/default-notes.txt"
 if grep -Fq "$warning" "$TMP_DIR/default-notes.txt"; then
   echo 'FAIL: no quota warning expected without overrides' >&2

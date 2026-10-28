@@ -372,6 +372,8 @@ The paused-resource release ratio must be between `0` and `1`:
 `0` reserves all paused CPU/memory quota for resume, `1` releases all of it, and
 intermediate values trade resume headroom for capacity.
 
+A field set to YAML `null` keeps the image default, just like an omitted field.
+
 Quota overrides are trusted operator input. The chart and startup helper check
 the value syntax and release-ratio range, but do not enforce every limit of
 Cubelet's configuration parser. On supported 64-bit platforms, the three integer
