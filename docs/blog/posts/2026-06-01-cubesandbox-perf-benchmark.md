@@ -20,6 +20,8 @@ Every section includes the exact commands needed to reproduce the results on you
 
 **Important: all benchmark numbers are highly dependent on the test environment and workload.** Contributing factors include (but are not limited to) host CPU, memory, IO performance, and sandbox internal workload (e.g. the more complex the program running inside the sandbox and the more dirty pages generated, the longer snapshot creation takes). Please evaluate against your own hardware and workload when planning deployments.
 
+For the latest CubeBench performance results, see the [CubeBench v0.7.3 benchmark report](./2026-10-28-cubebench-073.md).
+
 ---
 
 ## 2. Test Environment
@@ -81,6 +83,54 @@ cubemastercli tpl list
 | **per** | Amortized per-operation time (wall ÷ number of operations in the batch); used in concurrency scenarios |
 
 All times are in **milliseconds (ms)**. A **warm-up** round is run before each scenario (results discarded) to eliminate page-cache cold-read noise. Concurrent test rounds run serially — no cross-round concurrency — to avoid mutual interference.
+
+### 2.4 Run the Automated Benchmark Script
+
+The repository provides [`tests/perf/cubebench.sh`](https://github.com/TencentCloud/CubeSandbox/blob/master/tests/perf/cubebench.sh), which automates all the scenarios in sections 3.2–4.6 and writes the results to a Markdown report. Run it from a CubeSandbox checkout on a machine that has `cubemastercli`, `cubeopscli`, `jq`, and Python 3 and can reach CubeMaster, CubeAPI, and CubeProxy. The 3.x tests also require `make` and Go; the 4.x tests require `python3-venv` and access to the configured Python package index.
+
+> **Destructive operation:** each measurement deletes **all existing sandboxes on every node** in the target cluster. Use a dedicated benchmark deployment. The script asks you to type `yes` before starting; use `-y` only when this cleanup has already been explicitly authorized. It does not delete existing templates, and templates or snapshots created during the run may remain for manual cleanup.
+
+Before testing, raise `host.quota` in the Cubelet dynamic configuration on **every Cubelet node** so the scheduler quota does not become the measured limit. For example:
+
+```yaml
+host:
+  quota:
+    mcpu_limit: 1000000
+    mem_limit: "4096Gi"
+    mvm_limit: 2000
+    creation_concurrent_num: 0
+```
+
+Apply the change on each node with `systemctl restart cube-sandbox-cubelet.service`. These values allow the benchmark to overcommit the host, so monitor available memory carefully, especially during the 3.3 density test.
+
+Run the script from the repository root:
+
+```bash
+# Show the available sections and detailed options
+bash tests/perf/cubebench.sh sections
+bash tests/perf/cubebench.sh help
+
+# Run every section; the report is written to /tmp/cubebench_<timestamp>.md
+bash tests/perf/cubebench.sh
+
+# Run one section or all 4.x sections
+bash tests/perf/cubebench.sh run 4.3
+bash tests/perf/cubebench.sh run 4
+
+# Choose the report path
+OUTPUT_MD=/tmp/cubebench.md bash tests/perf/cubebench.sh run 3.2 4.1
+```
+
+The defaults target a single-host deployment at `127.0.0.1`. For a cluster, specify the reachable service addresses and omit section 3.3, whose local `free(1)` measurement is meaningful only on a single-node deployment:
+
+```bash
+CUBE_MASTER_IP=10.0.0.5 \
+CUBE_API_URL=http://10.0.0.5:3000 \
+CUBE_PROXY_NODE_IP=10.0.0.6 \
+bash tests/perf/cubebench.sh run 3.2 4
+```
+
+Set `CUBE_MASTER_PORT`, `CUBE_OPS_IP`, `CUBE_OPS_PORT`, or `CUBE_PROXY_PORT_HTTP` as well when those services do not use their defaults. To use the international image registry, set `CUBE_TEMPLATE_IMAGE=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`. The script creates the test template and the Python virtual environment automatically.
 
 ---
 
