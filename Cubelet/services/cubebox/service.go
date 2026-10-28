@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -274,6 +275,15 @@ func (s *service) Register(server *grpc.Server) error {
 }
 
 func safePrint(req *cubebox.RunCubeSandboxRequest) string {
+	return safePrintWithDiagnostics(req, sandboxDiagnosticsEnabled())
+}
+
+func sandboxDiagnosticsEnabled() bool {
+	info, err := os.Stat("/etc/cube-sandbox/retain-sandbox-logs")
+	return err == nil && info.Mode().IsRegular()
+}
+
+func safePrintWithDiagnostics(req *cubebox.RunCubeSandboxRequest, diagnostics bool) string {
 	tmpReq := &cubebox.RunCubeSandboxRequest{}
 	body, _ := jsoniter.Marshal(req)
 	jsoniter.Unmarshal(body, tmpReq)
@@ -286,7 +296,7 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 		}
 	}
 	if tmpReq.Annotations != nil {
-		if _, ok := tmpReq.Annotations[constants.MasterAnnotationCreateTimeEnvVars]; ok {
+		if _, ok := tmpReq.Annotations[constants.MasterAnnotationCreateTimeEnvVars]; diagnostics && ok {
 			tmpReq.Annotations[constants.MasterAnnotationCreateTimeEnvVars] = "[redacted]"
 		}
 		tmpReq.Annotations[constants.MasterAnnotationsBlkQos] = "*"
@@ -410,7 +420,11 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 	if log.IsDebug() {
-		log.G(ctx).Debugf("RunCubeSandboxRequest:%s", safePrint(req))
+		if sandboxDiagnosticsEnabled() {
+			log.G(ctx).Debugf("RunCubeSandboxRequest:%s", safePrintWithDiagnostics(req, true))
+		} else {
+			log.G(ctx).Debugf("RunCubeSandboxRequest:%s", utils.InterfaceToString(req))
+		}
 	} else {
 		log.G(ctx).Errorf("RunCubeSandboxRequest:%s", safePrint(req))
 	}

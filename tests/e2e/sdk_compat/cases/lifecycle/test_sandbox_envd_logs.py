@@ -187,14 +187,17 @@ def test_archive_failure_does_not_block_sandbox_deletion(
         assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
 
         def cubelet_removed_sandbox() -> bool:
-            result = subprocess.run(
-                [cubecli, "--address", address, "cubebox", "list", "--all", "--quiet",
-                 "--sandbox", sandbox_id],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-            )
+            try:
+                result = subprocess.run(
+                    [cubecli, "--address", address, "cubebox", "list", "--all", "--quiet",
+                     "--sandbox", sandbox_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return False
             return sandbox_id not in result.stdout.splitlines()
 
         wait_until(

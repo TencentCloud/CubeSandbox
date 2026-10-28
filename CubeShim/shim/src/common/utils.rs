@@ -343,13 +343,15 @@ impl Utils {
 
         // Task.Delete on a live shim is not enough: after a crash containerd
         // reaps via the delete subcommand. Template logs use a different path.
-        if let Err(e) = crate::container::cleanup_sandbox_log_dir_sync(sandbox_id) {
-            // Log retention is best effort. In particular, a full disk or a
-            // separate archive mount must not prevent containerd from reaping
-            // the shim after pause or sandbox deletion. The original log dir
-            // is left in place if archiving fails.
-            eprintln!("cleanup sandbox log dir for {} failed: {}", sandbox_id, e);
-        }
+        let ret_logdir = match crate::container::cleanup_sandbox_log_dir_sync(sandbox_id) {
+            Err(crate::container::LogCleanupError::Retention(e)) => {
+                // Retention is best effort; leave the original logs in place.
+                eprintln!("retain sandbox log dir for {} failed: {}", sandbox_id, e);
+                Ok(())
+            }
+            Err(crate::container::LogCleanupError::Delete(e)) => Err(e),
+            Ok(()) => Ok(()),
+        };
 
         let mut err_msg = String::new();
         if let Err(e) = ret_vmdir {
@@ -361,6 +363,10 @@ impl Utils {
         }
 
         if let Err(e) = ret_ivshmem {
+            err_msg = err_msg + e.as_str();
+        }
+
+        if let Err(e) = ret_logdir {
             err_msg = err_msg + e.as_str();
         }
 

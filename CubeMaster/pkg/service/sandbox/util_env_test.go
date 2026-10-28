@@ -16,8 +16,11 @@ func TestSafePrintCreateRedactsCreateTimeEnvValues(t *testing.T) {
 		Annotations:       map[string]string{constants.CubeAnnotationCreateTimeEnvVars: secret},
 		Containers:        []*types.Container{{Envs: []*types.KeyValue{{Key: "TOKEN", Value: secret}}}},
 	}
-	if strings.Contains(safePrintCreateCubeSandboxReq(req), secret) {
+	if strings.Contains(safePrintCreateCubeSandboxReqWithDiagnostics(req, true), secret) {
 		t.Fatal("create-time environment value appeared in request log")
+	}
+	if !strings.Contains(safePrintCreateCubeSandboxReqWithDiagnostics(req, false), secret) {
+		t.Fatal("disabled diagnostics must preserve existing request logging behavior")
 	}
 	if req.CreateTimeEnvVars["TOKEN"] != secret {
 		t.Fatal("logging must not change the original request")

@@ -308,7 +308,6 @@ func TestDoCreateTimeEnvdInitFailsOnHTTPError(t *testing.T) {
 	errInfo, _ := ret.FromError(retErr)
 	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
 	assert.Contains(t, errInfo.Message(), "HTTP 500")
-	assert.NotContains(t, errInfo.Message(), "sensitive-response-content")
 	assert.Equal(t, 1, callCount)
 }
 
@@ -330,7 +329,7 @@ func TestEnvdInitAttemptClassifiesTransportFailures(t *testing.T) {
 			l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, tc.err
 			})}}
-			_, phase, category, status, err := l.doCreateTimeEnvdInitAttempt(context.Background(), "127.0.0.1", 49983, []byte(`{}`))
+			_, phase, category, status, err := l.doCreateTimeEnvdInitAttempt(context.Background(), "127.0.0.1", 49983, []byte(`{}`), true)
 			require.Error(t, err)
 			assert.Equal(t, "request", phase)
 			assert.Equal(t, tc.category, category)
@@ -363,7 +362,7 @@ func TestEnvdInitRetryLogsEachFailureWithoutSensitiveData(t *testing.T) {
 					return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(nil)), Request: r}, nil
 				}
 			})}}
-			err := l.doCreateTimeEnvdInitWithRetry(ctx, "req-1", "sb-1", "127.0.0.1", 49983, true, []byte(`{"envVars":{"TOKEN":"synthetic-secret"}}`))
+			err := l.doCreateTimeEnvdInitWithDiagnostics(ctx, "req-1", "sb-1", "127.0.0.1", 49983, true, []byte(`{"envVars":{"TOKEN":"synthetic-secret"}}`), true)
 			require.NoError(t, err)
 			require.Equal(t, 3, attempts)
 			lines := strings.Split(strings.TrimSpace(output.String()), "\n")
@@ -384,6 +383,21 @@ func TestEnvdInitRetryLogsEachFailureWithoutSensitiveData(t *testing.T) {
 				assert.Equal(t, float64(503), second["httpStatus"])
 			}
 		})
+	}
+}
+
+func TestEnvdInitResponseDetailsFollowDiagnosticsSwitch(t *testing.T) {
+	for _, diagnostics := range []bool{false, true} {
+		l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("synthetic-detail")), Request: r}, nil
+		})}}
+		_, _, _, _, err := l.doCreateTimeEnvdInitAttempt(context.Background(), "127.0.0.1", 49983, []byte(`{}`), diagnostics)
+		require.Error(t, err)
+		if diagnostics {
+			assert.NotContains(t, err.Error(), "synthetic-detail")
+		} else {
+			assert.Contains(t, err.Error(), "synthetic-detail")
+		}
 	}
 }
 

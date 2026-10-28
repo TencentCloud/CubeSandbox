@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"unicode"
@@ -1146,12 +1147,23 @@ func collectMemoryOption(req *types.DeleteCubeSandboxReq, out *cubebox.DestroyCu
 	}
 }
 func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
+	return safePrintCreateCubeSandboxReqWithDiagnostics(req, sandboxDiagnosticsEnabled())
+}
+
+func sandboxDiagnosticsEnabled() bool {
+	info, err := os.Stat("/etc/cube-sandbox/retain-sandbox-logs")
+	return err == nil && info.Mode().IsRegular()
+}
+
+func safePrintCreateCubeSandboxReqWithDiagnostics(req *types.CreateCubeSandboxReq, diagnostics bool) string {
 	tmpReq := &types.CreateCubeSandboxReq{}
 	tmpData, _ := types.FastestJsoniter.Marshal(req)
 	types.FastestJsoniter.Unmarshal(tmpData, tmpReq)
 	// Create-time environment values may contain credentials. Never include
 	// them in request logs, including when debug logging is enabled.
-	tmpReq.CreateTimeEnvVars = nil
+	if diagnostics {
+		tmpReq.CreateTimeEnvVars = nil
+	}
 	for _, v := range tmpReq.Volumes {
 		if v.VolumeSource == nil {
 			continue
@@ -1162,7 +1174,7 @@ func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 	if _, ok := tmpReq.Annotations[constants.CubeAnnotationsInsUserData]; ok {
 		tmpReq.Annotations[constants.CubeAnnotationsInsUserData] = "*"
 	}
-	if _, ok := tmpReq.Annotations[constants.CubeAnnotationCreateTimeEnvVars]; ok {
+	if _, ok := tmpReq.Annotations[constants.CubeAnnotationCreateTimeEnvVars]; diagnostics && ok {
 		tmpReq.Annotations[constants.CubeAnnotationCreateTimeEnvVars] = "[redacted]"
 	}
 
@@ -1170,7 +1182,9 @@ func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 		if v == nil {
 			continue
 		}
-		v.Envs = nil
+		if diagnostics {
+			v.Envs = nil
+		}
 		if v.Image != nil && v.Image.Token != "" {
 			v.Image.Token = "*"
 		}

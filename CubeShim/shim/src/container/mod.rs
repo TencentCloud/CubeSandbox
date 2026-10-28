@@ -188,7 +188,21 @@ pub async fn create_sandbox_log_paths(sandbox_id: &str) -> CResult<(String, Stri
 /// Clean up on both live Task.Delete and the shim `delete` subcommand.
 /// A node-local marker opts into retention without depending on environment
 /// variables inherited by either the live shim or the separate delete process.
-pub fn cleanup_sandbox_log_dir_sync(sandbox_id: &str) -> CResult<()> {
+#[derive(Debug)]
+pub enum LogCleanupError {
+    Delete(String),
+    Retention(String),
+}
+
+impl std::fmt::Display for LogCleanupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Delete(message) | Self::Retention(message) => f.write_str(message),
+        }
+    }
+}
+
+pub fn cleanup_sandbox_log_dir_sync(sandbox_id: &str) -> std::result::Result<(), LogCleanupError> {
     cleanup_sandbox_log_dir_at(
         sandbox_id,
         Path::new(SANDBOX_LOG_ROOT),
@@ -202,39 +216,61 @@ fn cleanup_sandbox_log_dir_at(
     log_root: &Path,
     archive_root: &Path,
     marker: &Path,
-) -> CResult<()> {
-    validate_log_path_component(sandbox_id)?;
+) -> std::result::Result<(), LogCleanupError> {
+    validate_log_path_component(sandbox_id).map_err(LogCleanupError::Delete)?;
     let dir = log_root.join(sandbox_id);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(_) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("stat {}: {}", dir.display(), e)),
-    }
     let retain = match std::fs::metadata(marker) {
         Ok(metadata) if metadata.is_file() => true,
         Ok(_) => {
-            return Err(format!(
+            return Err(LogCleanupError::Retention(format!(
                 "retention marker {} is not a file",
                 marker.display()
-            ))
+            )))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(format!("read retention marker {}: {}", marker.display(), e)),
+        Err(e) => {
+            return Err(LogCleanupError::Retention(format!(
+                "read retention marker {}: {}",
+                marker.display(),
+                e
+            )))
+        }
     };
     if !retain {
         return match std::fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("del {} failed:{}", dir.display(), e)),
+            Err(e) => Err(LogCleanupError::Delete(format!(
+                "del {} failed:{}",
+                dir.display(),
+                e
+            ))),
         };
+    }
+
+    match std::fs::symlink_metadata(&dir) {
+        Ok(_) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(LogCleanupError::Retention(format!(
+                "stat {}: {}",
+                dir.display(),
+                e
+            )))
+        }
     }
 
     // Each teardown gets its own directory: pause/resume can reuse the same
     // sandbox ID. Rename keeps open writer FDs attached to the archived files.
     // Keep the original on any failure; never fall back to deleting it.
     let sandbox_archive = archive_root.join(sandbox_id);
-    std::fs::create_dir_all(&sandbox_archive)
-        .map_err(|e| format!("create archive {}: {}", sandbox_archive.display(), e))?;
+    std::fs::create_dir_all(&sandbox_archive).map_err(|e| {
+        LogCleanupError::Retention(format!(
+            "create archive {}: {}",
+            sandbox_archive.display(),
+            e
+        ))
+    })?;
     let segment = sandbox_archive.join(uuid::Uuid::new_v4().to_string());
     // Live files can be broadly readable on older deployments. Restrict the
     // enclosing segment before moving them so archived output is not exposed
@@ -242,7 +278,13 @@ fn cleanup_sandbox_log_dir_at(
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&segment)
-        .map_err(|e| format!("create archive segment {}: {}", segment.display(), e))?;
+        .map_err(|e| {
+            LogCleanupError::Retention(format!(
+                "create archive segment {}: {}",
+                segment.display(),
+                e
+            ))
+        })?;
     let dest = segment.join("logs");
     match std::fs::rename(&dir, &dest) {
         Ok(()) => Ok(()),
@@ -253,12 +295,12 @@ fn cleanup_sandbox_log_dir_at(
             {
                 return Ok(());
             }
-            Err(format!(
+            Err(LogCleanupError::Retention(format!(
                 "archive {} to {}: {}",
                 dir.display(),
                 dest.display(),
                 e
-            ))
+            )))
         }
     }
 }
@@ -1608,7 +1650,7 @@ mod sandbox_log_path_tests {
             self.0.join(path)
         }
 
-        fn cleanup(&self) -> Result<(), String> {
+        fn cleanup(&self) -> std::result::Result<(), super::LogCleanupError> {
             super::cleanup_sandbox_log_dir_at(
                 "sandbox",
                 &self.path("live"),
@@ -1667,6 +1709,17 @@ mod sandbox_log_path_tests {
     }
 
     #[test]
+    fn cleanup_without_marker_reports_deletion_failure() {
+        let dirs = TestDirs::new();
+        std::fs::remove_dir(dirs.path("live/sandbox")).unwrap();
+        std::fs::write(dirs.path("live/sandbox"), "not a directory").unwrap();
+        assert!(matches!(
+            dirs.cleanup(),
+            Err(super::LogCleanupError::Delete(_))
+        ));
+    }
+
+    #[test]
     fn retention_preserves_each_session_and_open_writer() {
         use std::os::unix::fs::PermissionsExt;
         let dirs = TestDirs::new();
@@ -1703,7 +1756,10 @@ mod sandbox_log_path_tests {
         std::fs::write(dirs.path("retain"), "").unwrap();
         std::fs::write(dirs.path("live/sandbox/stderr"), "diagnostic").unwrap();
         std::fs::write(dirs.path("archive"), "not a directory").unwrap();
-        assert!(dirs.cleanup().is_err());
+        assert!(matches!(
+            dirs.cleanup(),
+            Err(super::LogCleanupError::Retention(_))
+        ));
         assert_eq!(
             std::fs::read_to_string(dirs.path("live/sandbox/stderr")).unwrap(),
             "diagnostic"
@@ -1714,7 +1770,10 @@ mod sandbox_log_path_tests {
     fn invalid_marker_keeps_original_logs() {
         let dirs = TestDirs::new();
         std::fs::create_dir(dirs.path("retain")).unwrap();
-        assert!(dirs.cleanup().is_err());
+        assert!(matches!(
+            dirs.cleanup(),
+            Err(super::LogCleanupError::Retention(_))
+        ));
         assert!(dirs.path("live/sandbox").exists());
     }
 }

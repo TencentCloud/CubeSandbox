@@ -39,6 +39,10 @@ const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 const FORK_ROUTE_TIMEOUT: Duration = Duration::from_secs(1560);
 
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_diagnostics(state, crate::constants::sandbox_diagnostics_enabled())
+}
+
+fn build_router_with_diagnostics(state: AppState, diagnostics: bool) -> Router {
     let auth_configured = state
         .config
         .auth_callback_url
@@ -53,18 +57,22 @@ pub fn build_router(state: AppState) -> Router {
     let standard_router = apply_http_layers(
         Router::new().merge(build_e2b_router(&state, auth_configured)),
         DEFAULT_ROUTE_TIMEOUT,
+        diagnostics,
     );
     let pause_resume_router = apply_http_layers(
         Router::new().merge(build_e2b_pause_resume_router(&state, auth_configured)),
         PAUSE_RESUME_ROUTE_TIMEOUT,
+        diagnostics,
     );
     let snapshot_long_router = apply_http_layers(
         Router::new().merge(build_e2b_snapshot_long_router(&state, auth_configured)),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
+        diagnostics,
     );
     let fork_router = apply_http_layers(
         Router::new().merge(build_fork_routes(&state, auth_configured)),
         FORK_ROUTE_TIMEOUT,
+        diagnostics,
     );
 
     Router::new()
@@ -254,7 +262,21 @@ fn with_auth_and_rate_limit(
     }
 }
 
-fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppState> {
+fn apply_http_layers(
+    router: Router<AppState>,
+    timeout: Duration,
+    diagnostics: bool,
+) -> Router<AppState> {
+    if !diagnostics {
+        return router.layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+                .layer(TraceLayer::new_for_http())
+                .layer(TimeoutLayer::new(timeout))
+                .layer(CompressionLayer::new())
+                .layer(CorsLayer::permissive()),
+        );
+    }
     router.layer(
         ServiceBuilder::new()
             .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -276,7 +298,7 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_http_layers, build_router};
+    use super::{apply_http_layers, build_router, build_router_with_diagnostics};
     use crate::{
         config::ServerConfig,
         logging::{arc, noop::NoopLogger},
@@ -304,7 +326,8 @@ mod tests {
         let mut config = ServerConfig::default();
         config.cube_api_key = Some("example-key".to_string());
         let state = AppState::new(config, arc(NoopLogger)).await;
-        let server = TestServer::new(build_router(state)).expect("router should build");
+        let server = TestServer::new(build_router_with_diagnostics(state, true))
+            .expect("router should build");
 
         let response = server.get("/sandboxes").await;
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
@@ -324,6 +347,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_diagnostics_keeps_response_headers_unchanged() {
+        let mut config = ServerConfig::default();
+        config.cube_api_key = Some("example-key".to_string());
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router_with_diagnostics(state, false)).unwrap();
+        let response = server.get("/sandboxes").await;
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+        assert!(!response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
     async fn callback_rejection_carries_request_id() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -338,7 +372,8 @@ mod tests {
         let mut config = ServerConfig::default();
         config.auth_callback_url = Some(format!("http://{address}/"));
         let state = AppState::new(config, arc(NoopLogger)).await;
-        let server = TestServer::new(build_router(state)).expect("router should build");
+        let server = TestServer::new(build_router_with_diagnostics(state, true))
+            .expect("router should build");
         let id = "f5edc033-9f22-4f84-8b94-23a57381c78b";
         let response = server
             .get("/sandboxes")
@@ -366,7 +401,7 @@ mod tests {
             }),
         );
         let server = TestServer::new(
-            apply_http_layers(route, std::time::Duration::from_millis(1)).with_state(state),
+            apply_http_layers(route, std::time::Duration::from_millis(1), true).with_state(state),
         )
         .expect("router should build");
         let id = "f5edc033-9f22-4f84-8b94-23a57381c78b";

@@ -79,7 +79,7 @@ cubecli logs --tpl --all --stderr <template-id>
 
 ## 销毁后保留日志
 
-默认情况下，沙箱清理时会删除日志。需要保留时，请在复现问题前，**在每个计算节点**创建空标记文件：
+本节的新增诊断和日志保留默认关闭。开启完整功能时，请在复现前创建以下空标记文件，并确保每个已更新的 CubeAPI、CubeMaster、Cubelet 和 CubeShim 进程都能看到它；容器化部署可能需要将所在目录挂载到各组件的文件系统，单独挂载文件在删除标记后可能仍保留旧挂载。CubeAPI 在启动时读取标记，开启或关闭后需要重启 CubeAPI；CubeMaster、Cubelet 和 CubeShim 在运行中检查标记。请在所有相关节点配置：
 
 ```bash
 sudo install -d -m 0755 /etc/cube-sandbox
@@ -88,13 +88,17 @@ sudo touch /etc/cube-sandbox/retain-sandbox-logs
 
 清理时，CubeShim 会把日志目录移动到 `/data/cubelet/log-archive/<sandbox-id>/<segment-id>/logs/`。每次清理（包括暂停和恢复）使用独立分段，避免覆盖以前的输出；shim 异常后由独立删除进程清理时也使用同一标记。如果归档失败，原目录会保留并记录错误，但沙箱清理仍会继续。归档目录和原目录必须在同一文件系统中，才能通过重命名移动。`cubecli logs` 读取运行中的路径，归档后的 `stdout` 和 `stderr` 请直接在节点上查看。
 
+运行中的 shim 将归档错误写入自身日志；独立的 shim 删除进程将错误写入 stderr，需要从 containerd 日志或相应的采集渠道查看。标记格式错误或无法读取时，原日志会保留，不会被删除。
+
 新建归档分段仅允许 shim 运行用户访问（权限 0700）。这不会改变运行中日志或已有归档的权限；转发敏感输出前，请检查这些路径和日志采集器的访问控制。归档失败时，原目录仍使用原有权限。
 
 归档没有自动过期或大小限制。归档写满 `/data/cubelet` 可能导致沙箱无法创建并影响节点其他操作。请配置磁盘告警，将运行中及归档日志发送到独立存储，再管理节点和远端的保留期限。删除标记只会恢复之后清理操作的默认删除行为，不会删除已有归档。归档属于尽力保留：尚未从 guest 转发出的内容以及节点磁盘损坏时的内容无法保证保留。
 
+关闭诊断时，请求日志和错误信息沿用原有行为，可能包含环境变量值或 envd 响应文本。请保护这些日志并限制 debug 日志的使用。
+
 这里仅保留默认 RPC 转发路径下容器 init 的 stdout/stderr。可选的 passfd I/O 使用不同的输出路径，不在本归档功能范围内。若使用 `cube-entrypoint.sh`，请在 envd 启动前于镜像或模板设置 `ENVD_LOG_FILE=-`，以便包含 envd 输出。自动注入 envd 的包装脚本则写入 guest 内的 `/var/log/envd.log`，需要另行配置或采集。envd 输出可能含命令参数等敏感数据，启用转发前应评估脱敏和访问控制。exec 子任务的输出仍需通过 SDK 单独采集。
 
-对到达 CubeMaster 的创建失败，CubeAPI 错误中会包含 CubeMaster 请求 ID，可用它检索 CubeAPI、CubeMaster 和 Cubelet 日志。Cubelet 会记录每次失败的 envd 初始化尝试，包括沙箱 ID、地址、耗时、错误类别和 HTTP 状态，不记录请求体或响应体。CubeAPI 响应也会带有 `x-request-id`，包括鉴权拒绝的响应；HTTP 跟踪日志会记录有效的 UUID 请求 ID。客户端可以在请求前自行生成并记录 UUID，通过该请求头发送，即使客户端超时、收不到响应也能用于检索；否则需要结合客户端和 API 的请求时间关联。这些改动需要更新相关组件，单独创建标记文件不能让 0.7.3 获得新功能。
+开启后，对到达 CubeMaster 的服务端创建错误，CubeAPI 错误中会包含 CubeMaster 请求 ID，4xx 错误信息保持原样。可用该 ID 检索 CubeAPI、CubeMaster 和 Cubelet 日志。Cubelet 会记录每次失败的 envd 初始化尝试，包括沙箱 ID、地址、耗时、错误类别和 HTTP 状态，不记录请求体或响应体。CubeAPI 对已匹配的路由也会返回 `x-request-id`，包括鉴权拒绝的响应；HTTP 跟踪日志会记录有效的 UUID 请求 ID。客户端可以在请求前自行生成并记录 UUID，通过该请求头发送，即使客户端超时、收不到响应也能用于检索；否则需要结合客户端和 API 的请求时间关联。这些改动需要更新相关组件，单独创建标记文件不能让 0.7.3 获得新功能。
 
 该标记不会保留服务自身的日志。还应分别采集并保护 CubeMaster、Cubelet 的请求日志以及 `/data/log/CubeShim/cube-shim-req.log`，包括轮转后的文件。上述 CubeAPI 跟踪事件需要启用 info 级别 tracing，并写入进程 tracing 输出：systemd 部署可查看 `journalctl -u cube-sandbox-cube-api.service`，其他部署可能重定向到文件。`/data/log/CubeAPI/` 下单独的事件文件并不包含全部 tracing 事件。请分别检查每种日志的轮转、转存、访问控制和脱敏。
 

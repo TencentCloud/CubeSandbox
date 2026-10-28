@@ -312,11 +312,15 @@ func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSa
 }
 
 func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, requestID, sandboxID, sandboxIP string, port int, hasEnvdCapability bool, body []byte) error {
+	return l.doCreateTimeEnvdInitWithDiagnostics(ctx, requestID, sandboxID, sandboxIP, port, hasEnvdCapability, body, sandboxDiagnosticsEnabled())
+}
+
+func (l *local) doCreateTimeEnvdInitWithDiagnostics(ctx context.Context, requestID, sandboxID, sandboxIP string, port int, hasEnvdCapability bool, body []byte, diagnostics bool) error {
 	var lastErr error
 	for attempt := 1; attempt <= envdInitMaxAttempts; attempt++ {
 		started := time.Now()
 		innerCtx, cancel := context.WithTimeout(ctx, envdInitAttemptTimeout)
-		retryable, phase, category, status, err := l.doCreateTimeEnvdInitAttempt(innerCtx, sandboxIP, port, body)
+		retryable, phase, category, status, err := l.doCreateTimeEnvdInitAttempt(innerCtx, sandboxIP, port, body, diagnostics)
 		cancel()
 		if err == nil {
 			return nil
@@ -324,14 +328,16 @@ func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, requestID, sa
 		// Do not log the request, response body, or raw error: either endpoint
 		// may include user-supplied data. Keep every failed attempt, even when
 		// a later retry succeeds, so transient failures are observable.
-		elapsedMs := time.Since(started).Milliseconds()
-		log.G(ctx).WithFields(CubeLog.Fields{
-			"RequestId": requestID, "sandboxID": sandboxID, "sandboxIP": sandboxIP, "envdInitPort": port,
-			"attempt": attempt, "maxAttempts": envdInitMaxAttempts,
-			"phase": phase, "errorCategory": category, "httpStatus": status,
-			"elapsedMs": elapsedMs, "retryable": retryable,
-		}).Warnf("create_time_env_vars envd init attempt failed: sandboxID=%s sandboxIP=%s envdInitPort=%d attempt=%d maxAttempts=%d phase=%s errorCategory=%s httpStatus=%d elapsedMs=%d retryable=%t",
-			sandboxID, sandboxIP, port, attempt, envdInitMaxAttempts, phase, category, status, elapsedMs, retryable)
+		if diagnostics {
+			elapsedMs := time.Since(started).Milliseconds()
+			log.G(ctx).WithFields(CubeLog.Fields{
+				"RequestId": requestID, "sandboxID": sandboxID, "sandboxIP": sandboxIP, "envdInitPort": port,
+				"attempt": attempt, "maxAttempts": envdInitMaxAttempts,
+				"phase": phase, "errorCategory": category, "httpStatus": status,
+				"elapsedMs": elapsedMs, "retryable": retryable,
+			}).Warnf("create_time_env_vars envd init attempt failed: sandboxID=%s sandboxIP=%s envdInitPort=%d attempt=%d maxAttempts=%d phase=%s errorCategory=%s httpStatus=%d elapsedMs=%d retryable=%t",
+				sandboxID, sandboxIP, port, attempt, envdInitMaxAttempts, phase, category, status, elapsedMs, retryable)
+		}
 		lastErr = err
 		if !retryable || attempt == envdInitMaxAttempts {
 			return newEnvdInitFailure("create_time_env_vars init failed after bounded retry", hasEnvdCapability, err)
@@ -345,7 +351,7 @@ func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, requestID, sa
 	return newEnvdInitFailure("create_time_env_vars init failed after bounded retry", hasEnvdCapability, lastErr)
 }
 
-func (l *local) doCreateTimeEnvdInitAttempt(ctx context.Context, sandboxIP string, port int, body []byte) (bool, string, string, int, error) {
+func (l *local) doCreateTimeEnvdInitAttempt(ctx context.Context, sandboxIP string, port int, body []byte, diagnostics bool) (bool, string, string, int, error) {
 	reqURL := formatURL("http", sandboxIP, port, envdInitPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL.String(), bytes.NewReader(body))
 	if err != nil {
@@ -359,11 +365,20 @@ func (l *local) doCreateTimeEnvdInitAttempt(ctx context.Context, sandboxIP strin
 	}
 	defer resp.Body.Close()
 
-	_, err = io.Copy(io.Discard, resp.Body)
+	var respBody []byte
+	if diagnostics {
+		_, err = io.Copy(io.Discard, resp.Body)
+	} else {
+		respBody, err = io.ReadAll(resp.Body)
+	}
 	if err != nil {
 		return false, "read_response", classifyEnvdInitError(err), resp.StatusCode, ret.Errorf(errorcode.ErrorCode_ExecCommandInSandboxFailed, "read envd init response body failed: %v", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if !diagnostics {
+			return isRetryableEnvdInitStatusCode(resp.StatusCode), "response", "http_status", resp.StatusCode, ret.Errorf(
+				errorcode.ErrorCode_ExecCommandInSandboxFailed, "envd init request returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
 		return isRetryableEnvdInitStatusCode(resp.StatusCode), "response", "http_status", resp.StatusCode, ret.Errorf(
 			errorcode.ErrorCode_ExecCommandInSandboxFailed,
 			"envd init request returned HTTP %d",

@@ -4,6 +4,13 @@
 
 //! API-facing constants shared across sandbox responses.
 
+/// This node-local marker enables the opt-in sandbox diagnostics bundle.
+pub fn sandbox_diagnostics_enabled() -> bool {
+    std::fs::metadata("/etc/cube-sandbox/retain-sandbox-logs")
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
 /// Conservative fallback `envdVersion` used when a sandbox carries no collected
 /// version annotation (e.g. legacy templates). Kept at the historical value so
 /// e2b SDK feature gating degrades safely.

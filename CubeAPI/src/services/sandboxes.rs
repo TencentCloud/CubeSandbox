@@ -77,6 +77,7 @@ pub struct SandboxService {
     cubemaster: CubeMasterClient,
     instance_type: String,
     sandbox_domain: String,
+    diagnostics_enabled: bool,
 }
 
 impl SandboxService {
@@ -89,6 +90,7 @@ impl SandboxService {
             cubemaster,
             instance_type,
             sandbox_domain,
+            diagnostics_enabled: crate::constants::sandbox_diagnostics_enabled(),
         }
     }
 
@@ -479,20 +481,26 @@ impl SandboxService {
 
         // Log before awaiting so a caller-side timeout still leaves the ID
         // needed to find the matching CubeMaster and Cubelet records.
-        tracing::info!(request_id = %req.request_id, template_id = %template_id, "sandbox create dispatched");
+        if self.diagnostics_enabled {
+            tracing::info!(request_id = %req.request_id, template_id = %template_id, "sandbox create dispatched");
+        }
         let started = std::time::Instant::now();
         let resp = self.cubemaster.create_sandbox(&req).await.map_err(|e| {
             let code = match &e {
                 CubeMasterError::Api { ret_code, .. } => Some(*ret_code),
                 _ => None,
             };
-            tracing::warn!(request_id = %req.request_id, template_id = %template_id,
+            if self.diagnostics_enabled {
+                tracing::warn!(request_id = %req.request_id, template_id = %template_id,
                     ret_code = ?code, elapsed_ms = started.elapsed().as_millis() as u64,
                     "sandbox create failed");
-            create_error_with_request_id(
-                map_create_cubemaster_err(e, &template_id),
-                &req.request_id,
-            )
+            }
+            let mapped = map_create_cubemaster_err(e, &template_id);
+            if self.diagnostics_enabled {
+                create_error_with_request_id(mapped, &req.request_id)
+            } else {
+                mapped
+            }
         })?;
 
         // Belt-and-suspenders: parse_response already flattens every non-success
@@ -502,10 +510,12 @@ impl SandboxService {
         // relaxed to pass a non-success envelope through; the functional 130404/409
         // mapping lives on the transport error above.
         resp.ret.into_result().map_err(|e| {
-            create_error_with_request_id(
-                map_create_cubemaster_err(e, &template_id),
-                &req.request_id,
-            )
+            let mapped = map_create_cubemaster_err(e, &template_id);
+            if self.diagnostics_enabled {
+                create_error_with_request_id(mapped, &req.request_id)
+            } else {
+                mapped
+            }
         })?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
@@ -1250,9 +1260,6 @@ fn create_error_with_request_id(err: AppError, request_id: &str) -> AppError {
     let suffix = format!(" (CubeMaster request ID: {request_id})");
     match err {
         AppError::Internal(e) => AppError::Internal(anyhow::anyhow!("{e}{suffix}")),
-        AppError::BadRequest(message) => AppError::BadRequest(format!("{message}{suffix}")),
-        AppError::NotFound(message) => AppError::NotFound(format!("{message}{suffix}")),
-        AppError::Conflict(message) => AppError::Conflict(format!("{message}{suffix}")),
         other => other,
     }
 }
@@ -2799,10 +2806,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_failure_exposes_the_dispatched_request_id() {
-        for ret_code in [-1, 130497] {
+        for (ret_code, diagnostics_enabled) in [(-1, true), (130497, true), (130497, false)] {
             let captured = Arc::new(Mutex::new(String::new()));
             let sink = captured.clone();
-            let service = spawn_fake_cubemaster(Router::new().route(
+            let mut service = spawn_fake_cubemaster(Router::new().route(
                 "/cube/sandbox",
                 post(move |Json(body): Json<Value>| {
                     let sink = sink.clone();
@@ -2813,12 +2820,13 @@ mod tests {
                 }),
             ))
             .await;
+            service.diagnostics_enabled = diagnostics_enabled;
 
             let err = service.create_sandbox(probe_sandbox()).await.unwrap_err();
             let request_id = captured.lock().await.clone();
             assert!(!request_id.is_empty());
             assert!(matches!(&err, AppError::Internal(_)));
-            assert!(err.to_string().contains(&request_id));
+            assert_eq!(err.to_string().contains(&request_id), diagnostics_enabled);
             assert!(err.to_string().contains(&ret_code.to_string()));
             assert_eq!(
                 err.into_response().status(),
