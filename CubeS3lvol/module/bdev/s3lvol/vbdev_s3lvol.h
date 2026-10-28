@@ -204,10 +204,15 @@ void s3lvol_resume_flushers(void);
  * and the SIGKILL (an unreadable target binary, or a kill that does not land),
  * where the target would otherwise keep running with a frozen data plane.
  *
- * \return 0 on success, -EBUSY while a prepare is still in flight (the call was
- *         a no-op, so the caller must not report the node as released).
+ * Completion is asynchronous; cb_fn runs only after every subsystem has
+ * completed its resume (or an earlier one failed). A target with no RCOW
+ * subsystems completes successfully.
+ *
+ * \return 0 when completion will be delivered, or a negative errno when the
+ *         operation could not be submitted (including -EBUSY while a prepare
+ *         is still in flight). No callback is made on submission failure.
  */
-int s3lvol_resume_subsystems(void);
+int s3lvol_resume_subsystems(spdk_lvs_op_complete cb_fn, void *cb_arg);
 
 /**
  * Snapshot the write-path counters (WAL, overlay, flusher).
@@ -1465,6 +1470,7 @@ void s3lvol_export_get(const struct s3lvol_export *exp,
  */
 int s3lvol_export_registry_save(struct s3lvol_lvstore *lvs,
 				spdk_lvs_op_complete cb_fn, void *cb_arg);
+bool s3lvol_export_registry_persist_pending(const struct s3lvol_lvstore *lvs);
 
 /**
  * Read the registry at attach. A missing object means nothing was ever exported.

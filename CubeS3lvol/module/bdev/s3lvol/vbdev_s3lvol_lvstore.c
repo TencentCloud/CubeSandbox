@@ -84,12 +84,13 @@ struct s3lvol_lvstore {
 	struct s3_journal       *journal;
 	struct s3_wal           *wal;
 
-	/* True once<name>/meta/owner in S3 says this process owns the lvstore.
-	 *
-	 * Tracked rather than assumed because the marker must only be deleted by
-	 * whoever actually wrote it. Releasing one we never acquired would clear
-	 * another process's claim -- the exact thing this is meant to prevent. */
+	/* True once <name>/meta/owner in S3 says this process owns the lvstore.
+	 * Tracked so release can verify the exact claim and publish its
+	 * nonce-specific clean-release proof before completing teardown. */
 	bool                    owner_held;
+	/* Exact document confirmed by acquire. Release must present this identity
+	 * so a late cleanup can detect a later force takeover. */
+	struct s3_owner_info    owner_identity;
 	/* Admission closes before the asynchronous drain starts. Without this,
 	 * an export/import/derive/decouple can enter after unload's pending-work
 	 * checks and retain raw lvstore pointers past s3lvol_lvstore_free(). */
@@ -163,6 +164,9 @@ struct lvs_setup_ctx {
 	/* Re-entry guard while the process-shared ring is replayed before
 	 * blobstore is allowed to issue reads. */
 	bool                     writeback_recovered;
+	/* Create only: recovery metadata was committed before blobstore init and
+	 * must be removed if a later setup stage fails. */
+	bool                     bstore_recorded;
 	/* Take the lvstore over even if S3 says somebody else holds it. */
 	bool                     force;
 	/* Journal LSN to replay from, i.e. what the last checkpoint covered. */
@@ -852,18 +856,28 @@ lvs_setup_report(struct lvs_setup_ctx *ctx)
 	int status = ctx->status;
 	bool ctx_attaching = ctx->attaching;
 
-	/* Claimed the lvstore in S3 but could not bring it up. Give the claim back
-	 * before unwinding: leaving it behind would make the next attach demand
-	 * force=true for no reason, and force=true is supposed to mean "I have
-	 * checked that the other owner is really gone".
+	/* Claimed the lvstore in S3 but could not bring it up. Publish the guarded
+	 * clean-release proof before unwinding so a retry can take over without
+	 * force, while a concurrent force takeover remains protected by its nonce.
 	 *
 	 * Clearing owner_held first is what stops this from recursing: the release
 	 * completion comes back here and takes the normal path. */
 	if (status != 0 && lvs->owner_held) {
 		lvs->owner_held = false;
-		s3_owner_release(lvs->client, lvs->name,
+		s3_owner_release(lvs->client, lvs->name, &lvs->owner_identity,
 				 lvs_setup_owner_released, ctx);
 		return;
+	}
+
+	if (status != 0 && ctx->bstore_recorded) {
+		int rc = bstore_remove_entry(lvs->name);
+
+		if (rc != 0) {
+			SPDK_ERRLOG("lvstore '%s': setup failed and its provisional "
+				    "recovery entry could not be removed: %s\n",
+				    lvs->name, spdk_strerror(-rc));
+		}
+		ctx->bstore_recorded = false;
 	}
 
 	lvs_setup_ctx_free(ctx);
@@ -1018,12 +1032,6 @@ s3lvol_lvs_init_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	 * the unload path registers its own. */
 	s3_bs_dev_set_destroy_cb(lvs->bs_dev, NULL, NULL);
 
-	/* Record the auto-generated blobstore name in /data/cubelet/rcow/bstore.json, so a
-	 * recovery script can find it later. A failure here is logged but not
-	 * fatal: the lvstore is up. */
-	bstore_save_entry(lvs->name, lvs->bs_name, lvs->ns_name,
-			  ctx->wal_bdev_name);
-
 	if (lvs->local_dev) {
 		/* Only knowable now: blobstore generates the uuid and refuses to
 		 * take one from outside, so the disk was formatted with zeroes
@@ -1149,6 +1157,21 @@ init_blobstore:
 	}
 	snprintf(lvs_opts.name, sizeof(lvs_opts.name), "%s", generated);
 
+	/* Commit the recovery pointer before creating persistent blobstore state.
+	 * If this write fails, setup stops without leaving an unrecorded lvstore.
+	 * Any later setup failure removes this provisional entry in
+	 * lvs_setup_report(). */
+	/* Cleanup is required even when save reports failure: the rename may have
+	 * published the file before the following directory fsync failed. */
+	ctx->bstore_recorded = true;
+	rc = bstore_save_entry(lvs->name, lvs->bs_name, lvs->ns_name,
+			       ctx->wal_bdev_name);
+	if (rc != 0) {
+		SPDK_ERRLOG("lvstore '%s': could not persist recovery metadata: %s\n",
+			    lvs->name, spdk_strerror(-rc));
+		lvs_setup_fail(ctx, rc);
+		return;
+	}
 	/* Registered on the create path too, not only on load. A brand new lvstore
 	 * has no esnap clones, but it can acquire one the moment an import runs
 	 * against it, and blobstore asks this callback for the parent while creating
@@ -1456,7 +1479,7 @@ lvs_create_prefix_check(struct lvs_setup_ctx *ctx)
  * Shared by both chains, which is why it dispatches on ctx->attaching: the check
  * itself and its failure handling are identical, only what comes next differs. */
 static void
-lvs_setup_owner_acquired(void *cb_arg, const struct s3_owner_info *holder,
+lvs_setup_owner_acquired(void *cb_arg, const struct s3_owner_info *owner,
 			 int status)
 {
 	struct lvs_setup_ctx *ctx = cb_arg;
@@ -1464,11 +1487,13 @@ lvs_setup_owner_acquired(void *cb_arg, const struct s3_owner_info *holder,
 	if (status != 0) {
 		/* s3_owner_acquire() has already logged who holds it and what to
 		 * do about it, in more detail than is available here. */
-		(void)holder;
+		(void)owner;
 		lvs_setup_fail(ctx, status);
 		return;
 	}
 
+	assert(owner != NULL);
+	ctx->lvs->owner_identity = *owner;
 	ctx->lvs->owner_held = true;
 
 	if (ctx->attaching) {
@@ -2013,10 +2038,6 @@ s3lvol_lvs_load_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 		return;
 	}
 
-	/* The create context is about to go away, so drop its destroy callback;
-	 * the unload path registers its own. */
-	s3_bs_dev_set_destroy_cb(lvs->bs_dev, NULL, NULL);
-
 	/* Recover the generated blobstore name from blobstore's own metadata: an
 	 * attach never generated one, and spdk_lvs_load_ext() has just read it
 	 * back from the super block. Without this lvs->bs_name stays NULL for the
@@ -2032,8 +2053,22 @@ s3lvol_lvs_load_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	 * entry holds -- so writing it here makes the file self-healing if it was
 	 * lost, and refreshes wal_bdev when an attach uses a different one from
 	 * the create. */
-	bstore_save_entry(lvs->name, lvs->bs_name, lvs->ns_name,
-			  ctx->wal_bdev_name);
+	rc = bstore_save_entry(lvs->name, lvs->bs_name, lvs->ns_name,
+			       ctx->wal_bdev_name);
+	if (rc != 0) {
+		SPDK_ERRLOG("lvstore '%s': could not persist recovery metadata: %s\n",
+			    lvs->name, spdk_strerror(-rc));
+		lvs->lvs = NULL;
+		ctx->status = rc;
+		if (spdk_lvs_unload(lvol_store, lvs_unload_ignored, NULL) != 0) {
+			lvs_setup_fail(ctx, rc);
+		}
+		return;
+	}
+
+	/* The setup context is about to go away, so drop its destroy callback;
+	 * the normal unload path registers its own. */
+	s3_bs_dev_set_destroy_cb(lvs->bs_dev, NULL, NULL);
 
 	/* Opening the lvols is asynchronous, so the rest of the attach continues
 	 * from lvs_attach_lvols_done(). */
@@ -2276,7 +2311,7 @@ lvs_attach_wal_opened(void *cb_arg, struct s3_wal *wal, int status)
 	 * snapshot. Replaying the journal alone would come up with a table missing
 	 * everything older than the last checkpoint, and every S3 object behind
 	 * those mappings would be unreachable. */
-	s3_checkpoint_load(lvs->client, lvs->name,
+	s3_checkpoint_load(lvs->client, lvs->name, &ctx->expect_uuid,
 			   s3_bs_dev_get_chunk_map(lvs->bs_dev),
 			   lvs_attach_checkpoint_loaded, ctx);
 }
@@ -2531,7 +2566,7 @@ lvs_unload_maybe_finish(struct lvs_unload_ctx *ctx)
 	 * Clearing owner_held first is what stops this from recursing. */
 	if (lvs->owner_held) {
 		lvs->owner_held = false;
-		s3_owner_release(lvs->client, lvs->name,
+		s3_owner_release(lvs->client, lvs->name, &lvs->owner_identity,
 				 lvs_unload_owner_released, ctx);
 		return;
 	}
@@ -3065,19 +3100,42 @@ s3lvol_resume_flushers(void)
 	}
 }
 
+struct lvs_resume_ctx {
+	spdk_lvs_op_complete cb_fn;
+	void *cb_arg;
+};
+
 static void
 lvs_resume_subsystems_done(void *cb_arg, int status)
 {
+	struct lvs_resume_ctx *ctx = cb_arg;
+	spdk_lvs_op_complete cb_fn = ctx->cb_fn;
+	void *user_arg = ctx->cb_arg;
+
 	if (status != 0) {
+		/* Flushers are still suspended. Leave the sticky flag set so a
+		 * later prepare does not report success over a running flusher. */
 		SPDK_ERRLOG("could not resume every RCOW subsystem: %s\n",
 			    spdk_strerror(-status));
+	} else {
+		struct s3lvol_lvstore *lvs;
+
+		TAILQ_FOREACH(lvs, &g_lvstores, link) {
+			s3_bs_dev_resume_flusher(lvs->bs_dev);
+		}
+		g_hot_prepare_done = false;
+	}
+	free(ctx);
+
+	if (cb_fn) {
+		cb_fn(user_arg, status);
 	}
 }
 
 int
-s3lvol_resume_subsystems(void)
+s3lvol_resume_subsystems(spdk_lvs_op_complete cb_fn, void *cb_arg)
 {
-	struct s3lvol_lvstore *lvs;
+	struct lvs_resume_ctx *ctx;
 	int rc;
 
 	/* The escape hatch for a hot prepare that succeeded but was never
@@ -3103,18 +3161,25 @@ s3lvol_resume_subsystems(void)
 			     "subsystems under it\n");
 		return -EBUSY;
 	}
-	g_hot_prepare_done = false;
 
-	TAILQ_FOREACH(lvs, &g_lvstores, link) {
-		s3_bs_dev_resume_flusher(lvs->bs_dev);
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		return -ENOMEM;
 	}
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
 
-	/* Safe on a subsystem that was never paused: spdk_nvmf_subsystem_resume()
-	 * only undoes a pause, and reports success otherwise. */
-	rc = s3lvol_nvmf_resume_all(lvs_resume_subsystems_done, NULL);
+	/* Flushers stay suspended until every subsystem resume has succeeded.
+	 * Releasing them first would leave uploads running while a failed resume
+	 * keeps g_hot_prepare_done set, and the next prepare would then report
+	 * the node quiesced. spdk_nvmf_subsystem_resume() is safe on a subsystem
+	 * that was never paused: it only undoes a pause, and reports success
+	 * otherwise. */
+	rc = s3lvol_nvmf_resume_all(lvs_resume_subsystems_done, ctx);
 	if (rc != 0) {
 		SPDK_ERRLOG("could not resume RCOW subsystems: %s\n",
 			    spdk_strerror(-rc));
+		free(ctx);
 		return rc;
 	}
 

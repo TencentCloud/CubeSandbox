@@ -1049,10 +1049,10 @@ wal_create_super_written(void *cb_arg, int status)
 		return;
 	}
 
-	/* Zero the first block of segment 0 so a scan sees a zero magic and
-	 * concludes "empty" rather than reading stale bytes. Only one block is
-	 * cleared: recovery stops at the first unreadable entry, so there is no
-	 * need to erase gigabytes at format time. */
+	/* Zero the first block of segment 0. A zero header ends the log, so
+	 * stale bytes further on are not replayed and do not need to be
+	 * erased. A non-zero damaged header is still corruption when a later
+	 * entry from this same epoch is present. */
 	memset(wal->batch_buf, 0, S3_WAL_BLOCK_SIZE);
 
 	rc = spdk_bdev_write(wal->desc, wal->ch, wal->batch_buf, wal->ring_offset,
@@ -1359,12 +1359,23 @@ struct wal_replay_ctx {
 	uint32_t                 batch_count;
 	uint32_t                 batch_cap;
 	uint64_t                 batch_id;
+	uint64_t                 batch_start;
+	/* Highest seq belonging to a closed batch. An open tail must not advance
+	 * the durable cursor past this. */
+	uint64_t                 sealed_seq;
 
 	uint64_t            applied;
 	uint64_t            dropped;
 
 	int                 status;
 	bool                stop;
+	/* The bytes that stopped the scan are not a zero header, and this log has
+	 * already produced a same-epoch entry. The next segment's first header is
+	 * checked before those bytes are accepted as a torn tail. */
+	bool                confirm_tail;
+	bool                tail_check;
+	/* scan_pos is moved to the next segment only for the confirmation read. */
+	uint64_t            tail_pos;
 };
 
 static void wal_replay_read_segment(struct wal_replay_ctx *rctx);
@@ -1374,6 +1385,7 @@ wal_replay_reset_batch(struct wal_replay_ctx *rctx)
 {
 	rctx->batch_count = 0;
 	rctx->batch_id = 0;
+	rctx->batch_start = 0;
 }
 
 static void
@@ -1385,29 +1397,47 @@ wal_replay_done(struct wal_replay_ctx *rctx, int status)
 
 	uint64_t next_local;
 
-	/* An unclosed trailing batch is discarded, which is exactly W4. */
-	if (rctx->batch_count > 0) {
+	/* A crash may leave only the final, not-yet-committed batch open. An open
+	 * batch that starts before the super block's durable head is corruption:
+	 * that region was already committed when the super was written. */
+	if (status == 0 && rctx->batch_count > 0 &&
+	    rctx->batch_start < wal->head) {
+		SPDK_ERRLOG("WAL replay found an unclosed batch inside the "
+			    "committed region at %" PRIu64 "\n",
+			    rctx->batch_start);
+		status = -EILSEQ;
+	}
+	if (status == 0 && rctx->batch_count > 0) {
 		SPDK_NOTICELOG("WAL replay dropping an unclosed trailing batch of "
 			       "%u entries\n", rctx->batch_count);
 		rctx->dropped++;
+		/* scan_pos has moved past the complete entries of this batch. Those
+		 * entries are not durable: leaving head there makes the next open
+		 * treat the same bytes as committed corruption. */
+		rctx->scan_pos = rctx->batch_start;
+		rctx->max_seq = rctx->sealed_seq;
 	}
 
-	wal->head     = rctx->scan_pos;
-	next_local    = (rctx->max_seq & 0xFFFFFFFFFFFFULL) + 1;
-	if (next_local > wal->seq_next) {
-		wal->seq_next = next_local;
+	if (status == 0) {
+		wal->head     = rctx->scan_pos;
+		next_local    = (rctx->max_seq & 0xFFFFFFFFFFFFULL) + 1;
+		if (next_local > wal->seq_next) {
+			wal->seq_next = next_local;
+		}
+		/* Seal the on-disk high water before any memory-only seq is handed
+		 * out. Replay of an older volume stops here; everything above it
+		 * lives in shm and must not be checkpointed as if the log had it. */
+		wal->disk_seq_limit = rctx->max_seq + 1;
+
+		wal->stats.replayed_entries += rctx->applied;
+		wal->stats.dropped_batches  += rctx->dropped;
+
+		SPDK_NOTICELOG("WAL replay done: %" PRIu64 " entries applied, %"
+			       PRIu64 " batches dropped, head=%" PRIu64
+			       ", seq_next=%" PRIu64 "\n",
+			       rctx->applied, rctx->dropped, wal->head,
+			       wal->seq_next);
 	}
-	/* Seal the on-disk high water before any memory-only seq is handed
-	 * out.  Replay of an older volume stops here; everything above it
-	 * lives in shm and must not be checkpointed as if the log had it. */
-	wal->disk_seq_limit = rctx->max_seq + 1;
-
-	wal->stats.replayed_entries += rctx->applied;
-	wal->stats.dropped_batches  += rctx->dropped;
-
-	SPDK_NOTICELOG("WAL replay done: %" PRIu64 " entries applied, %" PRIu64
-		       " batches dropped, head=%" PRIu64 ", seq_next=%" PRIu64 "\n",
-		       rctx->applied, rctx->dropped, wal->head, wal->seq_next);
 
 	free(rctx->batch_hdrs);
 	free(rctx->batch_payloads);
@@ -1494,6 +1524,9 @@ wal_replay_flush_batch(struct wal_replay_ctx *rctx)
 	if (rc == 0 && batch_max_seq > rctx->wal->replay_durable_seq) {
 		rctx->wal->replay_durable_seq = batch_max_seq;
 	}
+	if (rc == 0 && batch_max_seq > rctx->sealed_seq) {
+		rctx->sealed_seq = batch_max_seq;
+	}
 	if (rc == 0) {
 		rc = wal_record_replay_range(rctx->wal, batch_first_seq,
 					     batch_max_seq);
@@ -1534,6 +1567,66 @@ wal_replay_stash(struct wal_replay_ctx *rctx, const struct s3_wal_entry_hdr *hdr
 	return 0;
 }
 
+/* Records written before this open belong to the previous epoch: open() bumps
+ * the epoch before replay. A checkpoint seq, when present, names that epoch
+ * directly and wins over the bump. */
+static uint64_t
+wal_replay_entry_epoch(const struct wal_replay_ctx *rctx)
+{
+	if (rctx->max_seq != 0) {
+		return rctx->max_seq >> 48;
+	}
+	return rctx->wal->epoch > 0 ? rctx->wal->epoch - 1 : 0;
+}
+
+static bool
+wal_replay_entry_continues(const struct wal_replay_ctx *rctx,
+			   const struct s3_wal_entry_hdr *hdr)
+{
+	uint64_t epoch = wal_replay_entry_epoch(rctx);
+
+	return epoch != 0 &&
+	       hdr->magic == S3_WAL_ENTRY_MAGIC &&
+	       hdr->hdr_len == sizeof(*hdr) &&
+	       wal_hdr_crc(hdr) == hdr->crc_hdr &&
+	       hdr->batch_id != 0 &&
+	       hdr->seq > rctx->max_seq &&
+	       (hdr->seq >> 48) == epoch;
+}
+
+/* A batch always starts on a block boundary. A later header counts only when it
+ * belongs to this log's write epoch. Format clears one block and leaves the
+ * rest of a dirty device untouched, so an older epoch must not turn a torn tail
+ * into -EILSEQ. A zero header is not passed here: it is the end of the log. */
+static bool
+wal_replay_has_later_entry(const struct wal_replay_ctx *rctx,
+			   const uint8_t *base, uint64_t off_in_seg)
+{
+	uint64_t probe = SPDK_ALIGN_CEIL(off_in_seg + 1, S3_WAL_BLOCK_SIZE);
+
+	for (; probe + sizeof(struct s3_wal_entry_hdr) <= rctx->wal->seg_size;
+	     probe += S3_WAL_BLOCK_SIZE) {
+		const struct s3_wal_entry_hdr *hdr =
+			(const struct s3_wal_entry_hdr *)(base + probe);
+
+		if (wal_replay_entry_continues(rctx, hdr)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+wal_replay_note_tail(struct wal_replay_ctx *rctx,
+		     const struct s3_wal_entry_hdr *hdr)
+{
+	rctx->stop = true;
+	/* Confirm a non-zero tear against the next segment only after this log
+	 * has produced an entry. An empty log's later segments are pre-format
+	 * bytes; a zero header is the format end and is not confirmed. */
+	rctx->confirm_tail = hdr->magic != 0 && rctx->max_seq != 0;
+}
+
 static void
 wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
@@ -1554,6 +1647,24 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 	seg_start = rctx->scan_pos - (rctx->scan_pos % wal->seg_size);
 	off_in_seg = rctx->scan_pos - seg_start;
 
+	if (rctx->tail_check) {
+		const struct s3_wal_entry_hdr *next =
+			(const struct s3_wal_entry_hdr *)base;
+
+		/* Only the first header. A continuation after END starts there;
+		 * scanning the rest of an unused segment would read pre-format
+		 * bytes left behind because format does not wipe the ring. */
+		if (wal_replay_entry_continues(rctx, next)) {
+			SPDK_ERRLOG("WAL torn bytes are followed by a later entry "
+				    "at the next segment\n");
+			wal_replay_done(rctx, -EILSEQ);
+			return;
+		}
+		rctx->scan_pos = rctx->tail_pos;
+		wal_replay_done(rctx, 0);
+		return;
+	}
+
 	while (off_in_seg + sizeof(struct s3_wal_entry_hdr) <= wal->seg_size) {
 		struct s3_wal_entry_hdr *hdr =
 			(struct s3_wal_entry_hdr *)(base + off_in_seg);
@@ -1561,18 +1672,57 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 		uint64_t total;
 
 		if (hdr->magic != S3_WAL_ENTRY_MAGIC) {
-			/* Zero or garbage: this is the end of the log. */
-			rctx->stop = true;
+			/* A zero header is the format end. Format clears one block
+			 * and leaves any older bytes in place, so those bytes are
+			 * not evidence that this header is middle corruption. */
+			if (rctx->scan_pos < wal->head ||
+			    (hdr->magic != 0 &&
+			     wal_replay_has_later_entry(rctx, base, off_in_seg))) {
+				SPDK_ERRLOG("WAL magic corruption inside the committed/"
+					    "live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			wal_replay_note_tail(rctx, hdr);
 			break;
 		}
 		if (wal_hdr_crc(hdr) != hdr->crc_hdr) {
-			SPDK_NOTICELOG("WAL replay stopping at a bad header CRC "
-				       "(seq %" PRIu64 ")\n", hdr->seq);
-			rctx->stop = true;
+			if (rctx->scan_pos < wal->head ||
+			    wal_replay_has_later_entry(rctx, base, off_in_seg)) {
+				SPDK_ERRLOG("WAL header CRC corruption inside the "
+					    "committed/live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			SPDK_NOTICELOG("WAL replay reached a torn tail with a bad "
+				       "header CRC\n");
+			wal_replay_note_tail(rctx, hdr);
+			break;
+		}
+		if (hdr->hdr_len != sizeof(*hdr)) {
+			if (rctx->scan_pos < wal->head ||
+			    wal_replay_has_later_entry(rctx, base, off_in_seg)) {
+				SPDK_ERRLOG("WAL header length corruption inside the "
+					    "committed/live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			wal_replay_note_tail(rctx, hdr);
 			break;
 		}
 
 		if (hdr->type == S3_WAL_END) {
+			if (hdr->payload_len != 0 ||
+			    !(hdr->flags & S3_WAL_F_LAST_IN_BATCH) ||
+			    rctx->batch_count > 0) {
+				SPDK_ERRLOG("Malformed WAL END sentinel at %" PRIu64
+					    "\n", rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
 			/* Segment closed early: jump to the next one. */
 			rctx->scan_pos = seg_start + wal->seg_size;
 			rctx->scanned_bytes += wal->seg_size - off_in_seg;
@@ -1586,11 +1736,17 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 
 		total = sizeof(*hdr) + hdr->payload_len;
 		if (off_in_seg + total > wal->seg_size) {
-			/* Header claims a payload that runs past the segment,
-			 * which can only be corruption. */
-			SPDK_NOTICELOG("WAL replay stopping: entry at %" PRIu64
-				       " overruns its segment\n", rctx->scan_pos);
-			rctx->stop = true;
+			if (rctx->scan_pos < wal->head ||
+			    wal_replay_has_later_entry(rctx, base, off_in_seg)) {
+				SPDK_ERRLOG("WAL length corruption inside the committed/"
+					    "live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			SPDK_NOTICELOG("WAL replay reached a torn tail whose entry "
+				       "overruns its segment\n");
+			wal_replay_note_tail(rctx, hdr);
 			break;
 		}
 
@@ -1598,19 +1754,32 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 			payload = base + off_in_seg + sizeof(*hdr);
 			if (spdk_crc32c_update(payload, hdr->payload_len, ~0u) !=
 			    hdr->crc_payload) {
-				SPDK_NOTICELOG("WAL replay stopping at a bad payload "
-					       "CRC (seq %" PRIu64 ")\n", hdr->seq);
-				rctx->stop = true;
+				if (rctx->scan_pos < wal->head ||
+				    wal_replay_has_later_entry(rctx, base,
+							       off_in_seg)) {
+					SPDK_ERRLOG("WAL payload CRC corruption inside "
+						    "the committed/live region at %"
+						    PRIu64 "\n", rctx->scan_pos);
+					wal_replay_done(rctx, -EILSEQ);
+					return;
+				}
+				SPDK_NOTICELOG("WAL replay reached a torn tail with a "
+					       "bad payload CRC\n");
+				wal_replay_note_tail(rctx, hdr);
 				break;
 			}
 		}
 
-		/* A new batch_id means the previous batch never closed. */
+		/* Only the final crash batch may be unclosed. Seeing another batch
+		 * after it proves the hole is in the middle of the live log. */
 		if (rctx->batch_count > 0 && hdr->batch_id != rctx->batch_id) {
-			SPDK_NOTICELOG("WAL replay dropping an unclosed batch %" PRIu64
-				       "\n", rctx->batch_id);
-			rctx->dropped++;
-			wal_replay_reset_batch(rctx);
+			SPDK_ERRLOG("WAL batch %" PRIu64 " is unclosed before batch %"
+				    PRIu64 "\n", rctx->batch_id, hdr->batch_id);
+			wal_replay_done(rctx, -EILSEQ);
+			return;
+		}
+		if (rctx->batch_count == 0) {
+			rctx->batch_start = rctx->scan_pos;
 		}
 		rctx->batch_id = hdr->batch_id;
 
@@ -1646,6 +1815,16 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 
 	if (rctx->stop || off_in_seg >= wal->seg_size) {
 		if (rctx->stop) {
+			if (rctx->confirm_tail &&
+			    seg_start + wal->seg_size < wal_capacity(wal)) {
+				rctx->confirm_tail = false;
+				rctx->tail_check = true;
+				rctx->stop = false;
+				rctx->tail_pos = rctx->scan_pos;
+				rctx->scan_pos = seg_start + wal->seg_size;
+				wal_replay_read_segment(rctx);
+				return;
+			}
 			wal_replay_done(rctx, 0);
 			return;
 		}
@@ -1721,8 +1900,9 @@ s3_wal_replay(struct s3_wal *wal, s3_wal_replay_cb apply_fn, void *apply_arg,
 	rctx->apply_arg = apply_arg;
 	rctx->done_fn   = done_fn;
 	rctx->done_arg  = done_arg;
-	rctx->scan_pos  = wal->ckpt_head;
-	rctx->max_seq   = wal->ckpt_seq;
+	rctx->scan_pos   = wal->ckpt_head;
+	rctx->max_seq    = wal->ckpt_seq;
+	rctx->sealed_seq = wal->ckpt_seq;
 	wal->replay_durable_seq = wal->ckpt_seq;
 	free(wal->replay_ranges);
 	wal->replay_ranges = NULL;

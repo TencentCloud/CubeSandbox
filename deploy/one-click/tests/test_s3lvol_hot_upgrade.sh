@@ -202,8 +202,20 @@ test_the_layout_guard_reads_what_it_sources() {
 # stubbed: a target process is there in every case, and only the answer to
 # rcow_get_lvstores changes. Prints "ready" or "not-ready".
 probe_ready() {
-  local stores="$1" rc_stub="${2:-0}"
+  local stores="$1" rc_stub="${2:-0}" ctrl_state="${3:-live}"
+  local expected="${4:-1}" second_nqn="${5:-}"
+  rm -rf "${TMP_DIR}/sysfs"
+  mkdir -p "${TMP_DIR}/sysfs/nvme0"
+  printf '%s\n' 'nqn.2026-08.io.spdk:rcow-00' >"${TMP_DIR}/sysfs/nvme0/subsysnqn"
+  printf '%s\n' "${ctrl_state}" >"${TMP_DIR}/sysfs/nvme0/state"
+  if [[ -n "${second_nqn}" ]]; then
+    mkdir -p "${TMP_DIR}/sysfs/nvme1"
+    printf '%s\n' "${second_nqn}" >"${TMP_DIR}/sysfs/nvme1/subsysnqn"
+    printf '%s\n' live >"${TMP_DIR}/sysfs/nvme1/state"
+  fi
   RCOW_LVS_NAME=rcow-test \
+  RCOW_NUM_SUBSYS="${expected}" \
+  RCOW_NVME_SYSFS_ROOT="${TMP_DIR}/sysfs" \
   RCOW_RUN_DIR="${TMP_DIR}/run" \
   RCOW_ACTIVE_FILE="${TMP_DIR}/run/active_lvols" \
   RCOW_BSTORE_FILE="${TMP_DIR}/run/bstore.json" \
@@ -238,6 +250,14 @@ test_readiness_is_the_attach_not_the_process() {
     fail "an unparseable answer must not read as ready"
   [[ "$(probe_ready '' 1)" == not-ready ]] ||
     fail "an RPC that fails must not read as ready"
+  [[ "$(probe_ready '[{"lvs_name":"rcow-test"}]' 0 connecting)" == not-ready ]] ||
+    fail "an attached lvstore with a reconnecting NVMe controller must not be ready"
+  [[ "$(probe_ready '[{"lvs_name":"rcow-test"}]' 0 live 2 \
+      nqn.2026-08.io.spdk:rcow-00)" == not-ready ]] ||
+    fail "duplicate live controllers for one NQN must not hide a missing expected NQN"
+  [[ "$(probe_ready '[{"lvs_name":"rcow-test"}]' 0 live 2 \
+      nqn.2026-08.io.spdk:rcow-01)" == ready ]] ||
+    fail "one live controller for every expected NQN must be ready"
 }
 
 test_the_start_wait_gates_on_readiness() {
@@ -316,8 +336,13 @@ test_an_existing_s3_cfg_survives_a_failed_hot_upgrade() {
 # rcow_target_start_ready is rcow_target_ready plus the pid rcow_start.sh writes
 # after the replay. Prints "ready" or "not-ready".
 probe_start_ready() {
-  local stores="$1" ready_pid="$2"
+  local stores="$1" ready_pid="$2" ctrl_state="${3:-live}"
+  mkdir -p "${TMP_DIR}/sysfs/nvme0"
+  printf '%s\n' 'nqn.2026-08.io.spdk:rcow-00' >"${TMP_DIR}/sysfs/nvme0/subsysnqn"
+  printf '%s\n' "${ctrl_state}" >"${TMP_DIR}/sysfs/nvme0/state"
   RCOW_LVS_NAME=rcow-test \
+  RCOW_NUM_SUBSYS=1 \
+  RCOW_NVME_SYSFS_ROOT="${TMP_DIR}/sysfs" \
   RCOW_RUN_DIR="${TMP_DIR}/run" \
   RCOW_ACTIVE_FILE="${TMP_DIR}/run/active_lvols" \
   RCOW_BSTORE_FILE="${TMP_DIR}/run/bstore.json" \
@@ -348,6 +373,8 @@ test_start_ready_is_the_finished_start_not_the_attach() {
     fail "a ready file naming a dead pid must not be ready"
   [[ "$(probe_start_ready '[]' 4242)" == not-ready ]] ||
     fail "a finished-start file does not make a missing lvstore ready"
+  [[ "$(probe_start_ready '[{"lvs_name":"rcow-test"}]' 4242 connecting)" == not-ready ]] ||
+    fail "a finished start with a reconnecting controller must not be ready"
 }
 
 # Run rcow_hot_marker_consume out of the real rcow_common.sh against a marker
@@ -455,6 +482,148 @@ test_the_install_root_is_checked_before_anything_is_touched() {
     fail "install.sh must check the install prefix first (assert=${assert_line}, stage=${stage_line}, stop=${stop_line})"
 }
 
+load_install_lifecycle_functions() {
+  eval "$(awk '
+    /^s3lvol_component_version\(\)/ { copy = 1 }
+    copy { print }
+    /^stop_existing_systemd_deployment\(\)/ { exit }
+  ' "${INSTALL_SH}" | sed '$d')"
+}
+
+test_same_version_reinstall_keeps_running_directory() {
+  local prefix="${TMP_DIR}/same-version" src="${TMP_DIR}/same-version-src"
+  mkdir -p "${prefix}/CubeS3lvol-2.0/scripts" "${src}/scripts"
+  printf 'old\n' >"${prefix}/CubeS3lvol-2.0/running"
+  printf 'version: 2.0\n' >"${prefix}/CubeS3lvol-2.0/VERSION"
+  printf 'version: 2.0\n' >"${src}/VERSION"
+  printf 'new\n' >"${src}/payload"
+  : >"${src}/scripts/rcow_common.sh"
+  ln -s CubeS3lvol-2.0 "${prefix}/CubeS3lvol"
+
+  (
+    load_install_lifecycle_functions
+    INSTALL_PREFIX="${prefix}"
+    log() { :; }
+    die() { echo "$*" >&2; return 1; }
+    install_cubes3lvol_versioned "${src}"
+    [[ "${S3LVOL_STAGED_DIR}" == CubeS3lvol-2.0.install-* ]] ||
+      fail "same-version reinstall must publish a unique directory"
+    [[ -f "${prefix}/${S3LVOL_STAGED_DIR}/payload" ]] ||
+      fail "the unique staged directory was not published"
+  ) || fail "same-version staging failed"
+
+  [[ "$(cat "${prefix}/CubeS3lvol-2.0/running")" == old ]] ||
+    fail "same-version staging modified the running directory"
+  [[ "$(readlink "${prefix}/CubeS3lvol")" == CubeS3lvol-2.0 ]] ||
+    fail "staging moved the live symlink before validation/switch"
+}
+
+test_legacy_directory_migration_does_not_relock() {
+  local prefix="${TMP_DIR}/legacy-layout" src="${TMP_DIR}/legacy-layout-src"
+  local pid i live_target
+  mkdir -p "${prefix}/CubeS3lvol/scripts" \
+    "${prefix}/CubeS3lvol-1.0" "${src}/scripts"
+  printf 'version: 1.0\n' >"${prefix}/CubeS3lvol/VERSION"
+  printf 'old\n' >"${prefix}/CubeS3lvol/running"
+  printf 'stale\n' >"${prefix}/CubeS3lvol-1.0/running"
+  printf 'version: 2.0\n' >"${src}/VERSION"
+  printf 'new\n' >"${src}/payload"
+  : >"${src}/scripts/rcow_common.sh"
+
+  (
+    load_install_lifecycle_functions
+    INSTALL_PREFIX="${prefix}"
+    log() { :; }
+    die() { echo "$*" >&2; return 1; }
+    install_cubes3lvol_versioned "${src}"
+  ) &
+  pid=$!
+  for i in $(seq 1 100); do
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 0.02
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+    fail "legacy directory migration deadlocked while reacquiring its own lock"
+  fi
+  wait "${pid}" || fail "legacy directory migration failed"
+
+  [[ -L "${prefix}/CubeS3lvol" ]] ||
+    fail "legacy real directory was not converted to a symlink"
+  live_target="$(readlink "${prefix}/CubeS3lvol")"
+  [[ "${live_target}" == CubeS3lvol-1.0.legacy-* ]] ||
+    fail "legacy migration did not choose a unique name over a stale version tree"
+  [[ "$(cat "${prefix}/${live_target}/running")" == old ]] ||
+    fail "legacy migration did not preserve the previous install"
+  [[ "$(cat "${prefix}/CubeS3lvol-1.0/running")" == stale ]] ||
+    fail "legacy migration overwrote or nested into the stale version tree"
+}
+
+test_cleanup_failure_rolls_the_symlink_back() {
+  local prefix="${TMP_DIR}/cleanup-failure"
+  mkdir -p "${prefix}/CubeS3lvol-old" "${prefix}/CubeS3lvol-new" \
+    "${prefix}/CubeS3lvol-obsolete"
+  ln -s CubeS3lvol-old "${prefix}/CubeS3lvol"
+  touch -d '3 minutes ago' "${prefix}/CubeS3lvol-obsolete"
+
+  if (
+    load_install_lifecycle_functions
+    INSTALL_PREFIX="${prefix}"
+    log() { :; }
+    die() { echo "$*" >&2; return 1; }
+    rm() {
+      [[ "$*" == *CubeS3lvol-obsolete* ]] && return 1
+      command rm "$@"
+    }
+    switch_cubes3lvol_bare_to CubeS3lvol-new
+  ); then
+    fail "a cleanup failure must fail the switch transaction"
+  fi
+  [[ "$(readlink "${prefix}/CubeS3lvol")" == CubeS3lvol-old ]] ||
+    fail "cleanup failure must restore the previous symlink"
+  [[ -d "${prefix}/CubeS3lvol-new" ]] ||
+    fail "cleanup failure must not leave a symlink whose target was removed"
+}
+
+test_lifecycle_operations_share_an_exclusive_flock() {
+  assert_contains "${INSTALL_SH}" '.s3lvol-lifecycle.lock'
+  assert_contains "${INSTALL_SH}" 'flock -x "${lock_fd}"'
+  assert_contains "${HOT_UPGRADE}" '.s3lvol-lifecycle.lock'
+  assert_contains "${HOT_UPGRADE}" 'flock -x 9'
+  assert_contains "${HOT_UPGRADE}" 'systemctl start "${SERVICE}" 9>&-'
+}
+
+test_concurrent_upgrade_waits_for_the_host_lock() {
+  build_trees
+  local out="${TMP_DIR}/concurrent-upgrade.out" pid lock_fd
+
+  exec {lock_fd}>"${TMP_DIR}/prefix/.s3lvol-lifecycle.lock"
+  flock -x "${lock_fd}"
+  run_orchestrator "${TMP_DIR}/prefix" >"${out}" 2>&1 &
+  pid=$!
+  sleep 0.2
+  kill -0 "${pid}" 2>/dev/null ||
+    fail "a concurrent upgrade did not wait for the held lifecycle lock"
+  flock -u "${lock_fd}"
+  exec {lock_fd}>&-
+  wait "${pid}" ||
+    fail "the waiting upgrade did not complete after the lifecycle lock was released"
+  [[ "$(bare_points_at)" == "${NEW_VERSION}" ]] ||
+    fail "the serialized upgrade did not switch to the staged target"
+}
+
+test_owner_release_is_guarded_by_acquired_identity() {
+  local owner_c="${REPO_ROOT}/CubeS3lvol/lib/s3bsdev/s3_owner.c"
+  local owner_h="${REPO_ROOT}/CubeS3lvol/include/s3lvol/s3_owner.h"
+  local lvstore_c="${REPO_ROOT}/CubeS3lvol/module/bdev/s3lvol/vbdev_s3lvol_lvstore.c"
+  assert_contains "${owner_c}" 'owner_identity_equal(&current, &ctx->self)'
+  assert_contains "${owner_c}" 'owner_release_finish(ctx, -ESTALE)'
+  assert_contains "${owner_h}" 'const struct s3_owner_info *expected_owner'
+  assert_contains "${lvstore_c}" 'struct s3_owner_info    owner_identity'
+  assert_contains "${lvstore_c}" '&lvs->owner_identity'
+}
+
 test_the_prefix_travels_with_the_invocation
 test_without_the_prefix_it_refuses
 test_install_sh_hands_over_the_prefix
@@ -473,5 +642,11 @@ test_the_marker_is_spent_by_the_upgrade_not_by_the_read
 test_a_failed_hot_stop_refuses_rather_than_tearing_down
 test_the_marker_is_spent_after_the_kill
 test_the_install_root_is_checked_before_anything_is_touched
+test_same_version_reinstall_keeps_running_directory
+test_legacy_directory_migration_does_not_relock
+test_cleanup_failure_rolls_the_symlink_back
+test_lifecycle_operations_share_an_exclusive_flock
+test_concurrent_upgrade_waits_for_the_host_lock
+test_owner_release_is_guarded_by_acquired_identity
 
 echo "CubeS3lvol hot upgrade tests OK"

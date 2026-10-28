@@ -253,7 +253,7 @@ mv() {
 		local a src=""
 		for a in "$@"; do
 			case "${a}" in
-			*.CubeS3lvol.new) src="${a}" ;;
+			*.CubeS3lvol.new.*) src="${a}" ;;
 			esac
 		done
 		if [ -n "${src}" ] && [ "$(readlink "${src}" 2>/dev/null || true)" = "CubeS3lvol-badswitch" ]; then

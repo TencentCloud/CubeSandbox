@@ -51,11 +51,8 @@
 #include "s3lvol/s3_client.h"
 
 #include "vbdev_s3lvol.h"
-
-/* Imports are held in memory and in one S3 object per lvstore. The cap exists
- * because that object is read into a fixed decoder table; it is far above what
- * a node would plausibly have esnap clones of, and it fails loudly. */
-#define S3LVOL_MAX_IMPORTS 64
+#include "vbdev_s3lvol_imports_json.h"
+#include "registry_persist_ctl.h"
 /* Reserved name of the hidden snapshot that is the single esnap root for one
  * export on one lvstore. The suffix is the export uuid. */
 #define S3LVOL_IMPORT_TEMPLATE_PREFIX "__rcow_tpl_"
@@ -575,49 +572,6 @@ imports_serialize(struct s3lvol_lvstore *lvs, char **out, size_t *out_len)
 	return 0;
 }
 
-struct import_entry_json {
-	bool  path_style;
-	bool  verify_tls;
-	char *manifest;
-};
-
-static const struct spdk_json_object_decoder import_entry_decoders[] = {
-	{"path_style", offsetof(struct import_entry_json, path_style), spdk_json_decode_bool,   true},
-	{"verify_tls", offsetof(struct import_entry_json, verify_tls), spdk_json_decode_bool,   true},
-	{"manifest",   offsetof(struct import_entry_json, manifest),   spdk_json_decode_string, false},
-};
-
-struct entries_holder {
-	struct import_entry_json e[S3LVOL_MAX_IMPORTS];
-	size_t                   n;
-};
-
-struct imports_json {
-	uint32_t              version;
-	struct entries_holder entries;
-};
-
-static int
-decode_import_entry(const struct spdk_json_val *val, void *out)
-{
-	return spdk_json_decode_object(val, import_entry_decoders,
-				       SPDK_COUNTOF(import_entry_decoders), out);
-}
-
-static int
-decode_import_entries(const struct spdk_json_val *val, void *out)
-{
-	struct entries_holder *h = out;
-
-	return spdk_json_decode_array(val, decode_import_entry, h->e,
-				      S3LVOL_MAX_IMPORTS, &h->n, sizeof(h->e[0]));
-}
-
-static const struct spdk_json_object_decoder imports_decoders[] = {
-	{"version", offsetof(struct imports_json, version), spdk_json_decode_uint32, false},
-	{"imports", offsetof(struct imports_json, entries), decode_import_entries,false},
-};
-
 static int
 imports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 {
@@ -664,11 +618,17 @@ imports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		rc = -EINVAL;
 		goto out;
 	}
-	if (spdk_json_decode_object(values, imports_decoders,
-				    SPDK_COUNTOF(imports_decoders), &j) != 0) {
+	if (spdk_json_decode_object(values, s3lvol_imports_decoders,
+				    SPDK_COUNTOF(s3lvol_imports_decoders), &j) != 0) {
 		SPDK_ERRLOG("imports registry of '%s' could not be decoded\n",
 			    s3lvol_lvstore_get_name(lvs));
-		rc = -EINVAL;
+		rc = j.entries.status != 0 ? j.entries.status : -EINVAL;
+		goto out;
+	}
+	rc = s3lvol_imports_json_validate(&j);
+	if (rc != 0) {
+		SPDK_ERRLOG("imports registry of '%s' has unsupported version %" PRIu32 "\n",
+			    s3lvol_lvstore_get_name(lvs), j.version);
 		goto out;
 	}
 
@@ -699,9 +659,7 @@ imports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 	SPDK_NOTICELOG("lvstore '%s': %zu imported export(s) in the registry\n",
 		       s3lvol_lvstore_get_name(lvs), j.entries.n);
 out:
-	for (i = 0; i < j.entries.n; i++) {
-		free(j.entries.e[i].manifest);
-	}
+	s3lvol_imports_json_free(&j);
 	free(values);
 	free(copy);
 	return rc;
@@ -820,65 +778,204 @@ s3lvol_xfer_imports_load(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
 
 /* ---- save ---- */
 
-struct imports_save_ctx {
+struct imports_save_waiter {
+	uint64_t             seq;
 	spdk_lvs_op_complete cb_fn;
 	void                *cb_arg;
-	char                *json;
-	struct iovec         iov;
-	char                 key[S3_EXPORT_KEY_MAX];
+	TAILQ_ENTRY(imports_save_waiter) link;
 };
+
+struct imports_persist {
+	struct s3lvol_lvstore       *lvs;
+	struct registry_persist_ctl  ctl;
+	TAILQ_HEAD(, imports_save_waiter) waiters;
+	unsigned                    dispatch_depth;
+	TAILQ_ENTRY(imports_persist) link;
+};
+
+static TAILQ_HEAD(, imports_persist) g_imports_persists =
+	TAILQ_HEAD_INITIALIZER(g_imports_persists);
+
+struct imports_save_ctx {
+	struct imports_persist *persist;
+	char                   *json;
+	struct iovec            iov;
+	char                    key[S3_EXPORT_KEY_MAX];
+};
+
+static struct imports_persist *
+imports_persist_find(const struct s3lvol_lvstore *lvs)
+{
+	struct imports_persist *persist;
+
+	TAILQ_FOREACH(persist, &g_imports_persists, link) {
+		if (persist->lvs == lvs) {
+			return persist;
+		}
+	}
+	return NULL;
+}
+
+static struct imports_persist *
+imports_persist_get(struct s3lvol_lvstore *lvs)
+{
+	struct imports_persist *persist = imports_persist_find(lvs);
+
+	if (persist) {
+		return persist;
+	}
+	persist = calloc(1, sizeof(*persist));
+	if (!persist) {
+		return NULL;
+	}
+	persist->lvs = lvs;
+	TAILQ_INIT(&persist->waiters);
+	TAILQ_INSERT_TAIL(&g_imports_persists, persist, link);
+	return persist;
+}
+
+static void
+imports_persist_maybe_drop(struct imports_persist *persist)
+{
+	if (persist->dispatch_depth == 0 && !persist->ctl.in_flight &&
+	    !registry_persist_pending(&persist->ctl) &&
+	    TAILQ_EMPTY(&persist->waiters)) {
+		TAILQ_REMOVE(&g_imports_persists, persist, link);
+		free(persist);
+	}
+}
+
+static int imports_persist_submit(struct imports_persist *persist);
+
+static void
+imports_persist_complete(struct imports_persist *persist, int status,
+			 const char *key)
+{
+	struct imports_save_waiter *waiter, *tmp;
+	uint64_t boundary;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to write '%s': %s. The esnap clones of this "
+			    "lvstore may not be openable after a restart.\n",
+			    key, spdk_strerror(-status));
+	}
+
+	boundary = registry_persist_complete(&persist->ctl);
+	persist->dispatch_depth++;
+	TAILQ_FOREACH_SAFE(waiter, &persist->waiters, link, tmp) {
+		spdk_lvs_op_complete cb_fn;
+		void *cb_arg;
+
+		if (waiter->seq > boundary) {
+			continue;
+		}
+		TAILQ_REMOVE(&persist->waiters, waiter, link);
+		cb_fn = waiter->cb_fn;
+		cb_arg = waiter->cb_arg;
+		free(waiter);
+		cb_fn(cb_arg, status);
+	}
+	persist->dispatch_depth--;
+
+	/* Let failure callbacks roll back before serialising the coalesced
+	 * follow-up, so that snapshot contains both the rollback and every newer
+	 * mutation. */
+	if (!persist->ctl.in_flight && registry_persist_pending(&persist->ctl)) {
+		persist->dispatch_depth++;
+		(void)imports_persist_submit(persist);
+		persist->dispatch_depth--;
+	}
+	imports_persist_maybe_drop(persist);
+}
 
 static void
 imports_save_done(void *cb_arg, int status)
 {
 	struct imports_save_ctx *ctx = cb_arg;
-	spdk_lvs_op_complete cb_fn = ctx->cb_fn;
-	void *user_arg = ctx->cb_arg;
+	struct imports_persist *persist = ctx->persist;
+	char key[S3_EXPORT_KEY_MAX];
 
-	if (status != 0) {
-		SPDK_ERRLOG("Failed to write '%s': %s. The esnap clones of this "
-			    "lvstore may not be openable after a restart.\n",
-			    ctx->key, spdk_strerror(-status));
-	}
-
+	snprintf(key, sizeof(key), "%s", ctx->key);
 	free(ctx->json);
 	free(ctx);
-
-	if (cb_fn) {
-		cb_fn(user_arg, status);
-	}
+	imports_persist_complete(persist, status, key);
 }
 
 static int
-imports_save(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn, void *cb_arg)
+imports_persist_submit(struct imports_persist *persist)
 {
 	struct imports_save_ctx *ctx;
 	size_t len;
 	int rc;
 
+	if (!registry_persist_start(&persist->ctl)) {
+		return 0;
+	}
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
+		imports_persist_complete(persist, -ENOMEM,
+					 s3lvol_lvstore_get_name(persist->lvs));
 		return -ENOMEM;
 	}
-	ctx->cb_fn  = cb_fn;
-	ctx->cb_arg = cb_arg;
-	imports_registry_key(s3lvol_lvstore_get_name(lvs), ctx->key, sizeof(ctx->key));
+	ctx->persist = persist;
+	imports_registry_key(s3lvol_lvstore_get_name(persist->lvs), ctx->key,
+			     sizeof(ctx->key));
 
-	rc = imports_serialize(lvs, &ctx->json, &len);
+	rc = imports_serialize(persist->lvs, &ctx->json, &len);
 	if (rc != 0) {
+		char key[S3_EXPORT_KEY_MAX];
+
+		snprintf(key, sizeof(key), "%s", ctx->key);
 		free(ctx);
+		imports_persist_complete(persist, rc, key);
 		return rc;
 	}
 	ctx->iov.iov_base = ctx->json;
 	ctx->iov.iov_len = len;
 
-	rc = s3_put(s3lvol_lvstore_get_client(lvs), ctx->key, &ctx->iov, 1, false,
-		    imports_save_done, ctx);
+	rc = s3_put(s3lvol_lvstore_get_client(persist->lvs), ctx->key, &ctx->iov,
+		    1, false, imports_save_done, ctx);
 	if (rc != 0) {
+		char key[S3_EXPORT_KEY_MAX];
+
+		snprintf(key, sizeof(key), "%s", ctx->key);
 		free(ctx->json);
 		free(ctx);
+		imports_persist_complete(persist, rc, key);
 	}
 	return rc;
+}
+
+static int
+imports_save(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn, void *cb_arg)
+{
+	struct imports_save_waiter *waiter = NULL;
+	struct imports_persist *persist;
+	uint64_t seq;
+	int rc;
+
+	if (cb_fn) {
+		waiter = calloc(1, sizeof(*waiter));
+		if (!waiter) {
+			return -ENOMEM;
+		}
+		waiter->cb_fn = cb_fn;
+		waiter->cb_arg = cb_arg;
+	}
+	persist = imports_persist_get(lvs);
+	if (!persist) {
+		free(waiter);
+		return -ENOMEM;
+	}
+
+	seq = registry_persist_mutate(&persist->ctl);
+	if (waiter) {
+		waiter->seq = seq;
+		TAILQ_INSERT_TAIL(&persist->waiters, waiter, link);
+	}
+
+	rc = imports_persist_submit(persist);
+	return cb_fn ? 0 : rc;
 }
 
 /* ==========================================================================
@@ -1307,6 +1404,8 @@ export_recorded(void *cb_arg, int status)
 	struct export_ctx *ctx = cb_arg;
 
 	if (status != 0) {
+		struct s3lvol_export *exp;
+
 		/* The manifest is up, but this node has no durable record that it owes
 		 * the snapshot to anybody. Reported as a failed export, because the
 		 * alternative is telling the caller it worked and then deleting that
@@ -1314,6 +1413,13 @@ export_recorded(void *cb_arg, int status)
 		 * orphan for GC/operator cleanup. */
 		SPDK_ERRLOG("Export %s is published but could not be recorded; treating "
 			    "the export as failed\n", ctx->info.export_uuid);
+		exp = s3lvol_export_find(ctx->lvs, ctx->info.export_uuid);
+		if (exp) {
+			s3lvol_export_forget(exp);
+			/* If a newer registry mutation was already waiting, its
+			 * coalesced snapshot must observe this rollback too. */
+			(void)s3lvol_export_registry_save(ctx->lvs, NULL, NULL);
+		}
 	}
 	export_report(ctx, status);
 }
@@ -2718,6 +2824,10 @@ s3lvol_xfer_pending(const struct s3lvol_lvstore *lvs)
 
 	if (!lvs) {
 		return false;
+	}
+	if (imports_persist_find(lvs) ||
+	    s3lvol_export_registry_persist_pending(lvs)) {
+		return true;
 	}
 	TAILQ_FOREACH(inf, &g_inflight, link) {
 		if (inf->lvs == lvs) {

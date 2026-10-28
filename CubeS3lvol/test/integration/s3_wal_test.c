@@ -374,10 +374,26 @@ fixture_add_entry(uint8_t *cursor, uint8_t type, uint64_t seq,
 	return cursor + sizeof(hdr) + hdr.payload_len;
 }
 
+enum fixture_damage {
+	FIXTURE_OK,
+	FIXTURE_TORN_TAIL,
+	FIXTURE_BAD_MAGIC,
+	FIXTURE_BAD_HEADER_CRC,
+	FIXTURE_BAD_PAYLOAD_CRC,
+	FIXTURE_BAD_LENGTH,
+	FIXTURE_BAD_FIRST_AFTER_CKPT,
+	FIXTURE_BAD_COMMITTED_TAIL,
+	FIXTURE_TORN_OPEN_BATCH,
+	FIXTURE_YOUNG_FIRST,
+	FIXTURE_FORMAT_STALE,
+	FIXTURE_NEXT_SEGMENT,
+	FIXTURE_NEXT_SEGMENT_OTHER_EPOCH,
+};
+
 /* Install bytes produced by the pre-shm WAL format without retaining its
  * obsolete append API in the production library. */
 static int
-install_legacy_fixture(struct s3_local_dev *local_dev)
+install_legacy_fixture(struct s3_local_dev *local_dev, enum fixture_damage damage)
 {
 	const struct s3_region *region =
 		s3_local_dev_get_region(local_dev, S3_REGION_WAL);
@@ -395,7 +411,23 @@ install_legacy_fixture(struct s3_local_dev *local_dev)
 		SPDK_ALIGN_CEIL(3 * sizeof(struct legacy_wal_entry_hdr),
 				S3_WAL_BLOCK_SIZE);
 	const size_t ring_len = first_batch_len + second_batch_len;
-	uint8_t *ring = spdk_dma_zmalloc(ring_len, S3_WAL_BLOCK_SIZE, NULL);
+	const size_t write_len =
+		damage == FIXTURE_NEXT_SEGMENT ||
+		damage == FIXTURE_NEXT_SEGMENT_OTHER_EPOCH ?
+		TEST_SEG_SIZE + S3_WAL_BLOCK_SIZE :
+		damage == FIXTURE_TORN_OPEN_BATCH ?
+		SPDK_ALIGN_CEIL(ring_len + sizeof(struct legacy_wal_entry_hdr) +
+				S3_WAL_BLOCK_SIZE, S3_WAL_BLOCK_SIZE) :
+		ring_len + (damage == FIXTURE_TORN_TAIL ? S3_WAL_BLOCK_SIZE : 0);
+	/* Corruption fixtures deliberately leave the persisted head stale. A
+	 * valid later batch still proves the damaged bytes are in the live log.
+	 * An open torn batch starts at ring_len, which must stay outside head. */
+	const uint64_t super_head =
+		damage == FIXTURE_TORN_OPEN_BATCH ? ring_len :
+		damage == FIXTURE_BAD_COMMITTED_TAIL ? ring_len :
+		(damage >= FIXTURE_BAD_MAGIC &&
+		 damage != FIXTURE_TORN_OPEN_BATCH ? 0 : ring_len);
+	uint8_t *ring = spdk_dma_zmalloc(write_len, S3_WAL_BLOCK_SIZE, NULL);
 	uint8_t *supers = spdk_dma_zmalloc(S3_WAL_SUPER_SIZE,
 					   S3_WAL_BLOCK_SIZE, NULL);
 	uint8_t *cursor;
@@ -414,6 +446,34 @@ install_legacy_fixture(struct s3_local_dev *local_dev)
 		(uint32_t)((region->size - S3_WAL_SUPER_SIZE) / TEST_SEG_SIZE) - 2;
 
 	cursor = ring;
+	if (damage == FIXTURE_YOUNG_FIRST || damage == FIXTURE_FORMAT_STALE ||
+	    damage == FIXTURE_NEXT_SEGMENT ||
+	    damage == FIXTURE_NEXT_SEGMENT_OTHER_EPOCH) {
+		if (damage == FIXTURE_YOUNG_FIRST) {
+			(void)fixture_add_entry(ring, LEGACY_WAL_WRITE, seq++, 1,
+						0, 1, 0, true);
+			((struct legacy_wal_entry_hdr *)ring)->magic ^= 1;
+			(void)fixture_add_entry(ring + 2 * S3_WAL_BLOCK_SIZE,
+						LEGACY_WAL_BARRIER, seq++, 2,
+						0, 0, 0, true);
+		} else if (damage != FIXTURE_FORMAT_STALE) {
+			(void)fixture_add_entry(ring, LEGACY_WAL_BARRIER, seq++, 1,
+						0, 0, 0, true);
+			((struct legacy_wal_entry_hdr *)(ring +
+							 S3_WAL_BLOCK_SIZE))->magic =
+				0x11111111;
+			(void)fixture_add_entry(
+				ring + TEST_SEG_SIZE, LEGACY_WAL_BARRIER,
+				damage == FIXTURE_NEXT_SEGMENT_OTHER_EPOCH ?
+				(UINT64_C(3) << 48) | 2 : seq++,
+				2, 0, 0, 0, true);
+		} else {
+			(void)fixture_add_entry(ring + S3_WAL_BLOCK_SIZE,
+						LEGACY_WAL_BARRIER,
+						(UINT64_C(1) << 48) | 5, 1,
+						0, 0, 0, true);
+		}
+	} else {
 	for (uint64_t i = 0; i < NUM_WRITES; i++) {
 		cursor = fixture_add_entry(cursor, LEGACY_WAL_WRITE, seq++, 1,
 					   i, 1,
@@ -426,6 +486,95 @@ install_legacy_fixture(struct s3_local_dev *local_dev)
 				   2000, 4, 2000 / 256, false);
 	(void)fixture_add_entry(cursor, LEGACY_WAL_BARRIER, seq++, 2,
 				0, 0, 0, true);
+	}
+
+	if (damage >= FIXTURE_BAD_MAGIC && damage < FIXTURE_TORN_OPEN_BATCH) {
+		const size_t entry_len =
+			sizeof(struct legacy_wal_entry_hdr) + S3_WAL_BLOCK_SIZE;
+		size_t bad_off = entry_len;
+		struct legacy_wal_entry_hdr *bad;
+
+		if (damage == FIXTURE_BAD_FIRST_AFTER_CKPT) {
+			bad_off = 0;
+		} else if (damage == FIXTURE_BAD_COMMITTED_TAIL) {
+			bad_off = first_batch_len +
+				  2 * sizeof(struct legacy_wal_entry_hdr);
+		}
+		bad = (struct legacy_wal_entry_hdr *)(ring + bad_off);
+
+		switch (damage) {
+		case FIXTURE_BAD_MAGIC:
+			bad->magic ^= 1;
+			break;
+		case FIXTURE_BAD_HEADER_CRC:
+			bad->crc_hdr ^= 1;
+			break;
+		case FIXTURE_BAD_PAYLOAD_CRC:
+			ring[entry_len + sizeof(*bad)] ^= 1;
+			break;
+		case FIXTURE_BAD_LENGTH:
+			bad->payload_len = TEST_SEG_SIZE;
+			bad->crc_hdr = fixture_hdr_crc(bad);
+			break;
+		case FIXTURE_BAD_FIRST_AFTER_CKPT:
+		case FIXTURE_BAD_COMMITTED_TAIL:
+			bad->magic ^= 1;
+			break;
+		case FIXTURE_OK:
+		case FIXTURE_TORN_TAIL:
+		case FIXTURE_TORN_OPEN_BATCH:
+		case FIXTURE_YOUNG_FIRST:
+		case FIXTURE_FORMAT_STALE:
+		case FIXTURE_NEXT_SEGMENT:
+		case FIXTURE_NEXT_SEGMENT_OTHER_EPOCH:
+			break;
+		}
+	}
+
+	if (damage == FIXTURE_TORN_TAIL) {
+		struct legacy_wal_entry_hdr torn = {
+			.magic = LEGACY_WAL_ENTRY_MAGIC,
+			.type = LEGACY_WAL_WRITE,
+			.hdr_len = sizeof(torn),
+			.seq = seq,
+			.batch_id = 3,
+			.lba = 3000,
+			.nblocks = 1,
+			.payload_len = S3_WAL_BLOCK_SIZE,
+			.chunk_index = 3000 / 256,
+			/* Deliberately not the CRC of the partial payload below. */
+			.crc_payload = 0x12345678,
+		};
+
+		torn.crc_hdr = fixture_hdr_crc(&torn);
+		memcpy(ring + ring_len, &torn, sizeof(torn));
+		fill_payload(ring + ring_len + sizeof(torn), torn.lba,
+			     S3_WAL_BLOCK_SIZE - sizeof(torn));
+	}
+
+	if (damage == FIXTURE_TORN_OPEN_BATCH) {
+		struct legacy_wal_entry_hdr torn = {
+			.magic = LEGACY_WAL_ENTRY_MAGIC,
+			.type = LEGACY_WAL_WRITE,
+			.hdr_len = sizeof(torn),
+			.seq = seq + 1,
+			.batch_id = 3,
+			.lba = 3000,
+			.nblocks = 1,
+			.payload_len = S3_WAL_BLOCK_SIZE,
+			.chunk_index = 3000 / 256,
+			.crc_payload = 0x12345678,
+		};
+		uint8_t *open_entry;
+
+		open_entry = fixture_add_entry(ring + ring_len,
+					       LEGACY_WAL_WRITE_ZEROES, seq, 3,
+					       4000, 1, 4000 / 256, false);
+		torn.crc_hdr = fixture_hdr_crc(&torn);
+		memcpy(open_entry, &torn, sizeof(torn));
+		fill_payload(open_entry + sizeof(torn), torn.lba,
+			     S3_WAL_BLOCK_SIZE - sizeof(torn));
+	}
 
 	for (uint32_t slot = 0; slot < 2; slot++) {
 		struct legacy_wal_super sb = {
@@ -434,10 +583,11 @@ install_legacy_fixture(struct s3_local_dev *local_dev)
 			.seg_size = TEST_SEG_SIZE,
 			.seg_count = seg_count,
 			.epoch = 1,
-			.head = ring_len,
+			.head = super_head,
 			.tail = 0,
 			.ckpt_head = 0,
-			.ckpt_seq = 0,
+			.ckpt_seq = damage == FIXTURE_BAD_FIRST_AFTER_CKPT ?
+				    (UINT64_C(1) << 48) : 0,
 			.seq_next = 1 + NUM_WRITES + 3,
 			.slot_gen = 10 + slot,
 		};
@@ -447,7 +597,7 @@ install_legacy_fixture(struct s3_local_dev *local_dev)
 	}
 
 	rc = sync_bdev_write(desc, ch, ring,
-			     region->offset + S3_WAL_SUPER_SIZE, ring_len);
+			     region->offset + S3_WAL_SUPER_SIZE, write_len);
 	if (rc == 0) {
 		rc = sync_bdev_write(desc, ch, supers, region->offset,
 				     S3_WAL_SUPER_SIZE);
@@ -718,7 +868,7 @@ main(int argc, char **argv)
 	wal = NULL;
 	check("close the freshly formatted WAL", rc, 0);
 	if (rc == 0) {
-		rc = install_legacy_fixture(local_dev);
+		rc = install_legacy_fixture(local_dev, FIXTURE_OK);
 	}
 	check("install old WRITE/ZEROES/UNMAP records", rc, 0);
 
@@ -886,6 +1036,176 @@ main(int argc, char **argv)
 		/* Ignore the status here: teardown, not a check. */
 		sync_close(wal);
 		wal = NULL;
+	}
+
+	printf("\n[10] accepting a torn tail but rejecting middle corruption\n");
+	{
+		static const struct {
+			enum fixture_damage damage;
+			const char *name;
+		} cases[] = {
+			{FIXTURE_BAD_MAGIC, "middle magic corruption"},
+			{FIXTURE_BAD_HEADER_CRC, "middle header CRC corruption"},
+			{FIXTURE_BAD_PAYLOAD_CRC, "middle payload CRC corruption"},
+			{FIXTURE_BAD_LENGTH, "middle length corruption"},
+			{FIXTURE_BAD_FIRST_AFTER_CKPT,
+			 "first post-checkpoint corruption with a later valid entry"},
+			{FIXTURE_BAD_COMMITTED_TAIL,
+			 "final corruption below the durable head"},
+		};
+		struct open_wal_ctx wctx = {0};
+		struct replay_state st = {0};
+
+		rc = install_legacy_fixture(local_dev, FIXTURE_TORN_TAIL);
+		check("install fixture with torn tail", rc, 0);
+		if (rc == 0) {
+			s3_wal_open(local_dev, wal_open_cb, &wctx);
+			poll_until(&wctx.done);
+			check("open fixture with torn tail", wctx.status, 0);
+			wal = wctx.wal;
+		}
+		if (wal) {
+			rc = sync_replay(wal, &st);
+			check("torn tail is recoverable", rc, 0);
+			check_true("committed batches before torn tail survived",
+				   st.writes == NUM_WRITES && st.zeroes == 1 &&
+				   st.unmaps == 1 && st.barriers == 1, NULL);
+			sync_close(wal);
+			wal = NULL;
+		}
+
+		for (size_t i = 0; i < SPDK_COUNTOF(cases); i++) {
+			memset(&wctx, 0, sizeof(wctx));
+			memset(&st, 0, sizeof(st));
+			rc = install_legacy_fixture(local_dev, cases[i].damage);
+			check("install middle-corruption fixture", rc, 0);
+			if (rc != 0) {
+				continue;
+			}
+			s3_wal_open(local_dev, wal_open_cb, &wctx);
+			poll_until(&wctx.done);
+			check("open middle-corruption fixture", wctx.status, 0);
+			if (wctx.status != 0) {
+				continue;
+			}
+			wal = wctx.wal;
+			rc = sync_replay(wal, &st);
+			check(cases[i].name, rc, -EILSEQ);
+			sync_close(wal);
+			wal = NULL;
+		}
+	}
+
+	printf("\n[11] torn open batches stay recoverable across super sync\n");
+	{
+		struct open_wal_ctx wctx = {0};
+		struct replay_state st = {0};
+
+		rc = install_legacy_fixture(local_dev, FIXTURE_TORN_OPEN_BATCH);
+		check("install open torn batch", rc, 0);
+		if (rc == 0) {
+			s3_wal_open(local_dev, wal_open_cb, &wctx);
+			poll_until(&wctx.done);
+			check("open open torn batch", wctx.status, 0);
+			wal = wctx.wal;
+		}
+		if (wal) {
+			rc = sync_replay(wal, &st);
+			check("first replay drops the open batch", rc, 0);
+			check_true("open batch was not applied",
+				   st.writes == NUM_WRITES && st.zeroes == 1 &&
+				   st.unmaps == 1 && st.barriers == 1, NULL);
+			rc = sync_close(wal);
+			check("sync head behind the dropped batch", rc, 0);
+			wal = NULL;
+			memset(&wctx, 0, sizeof(wctx));
+			memset(&st, 0, sizeof(st));
+			s3_wal_open(local_dev, wal_open_cb, &wctx);
+			poll_until(&wctx.done);
+			check("reopen after the dropped batch", wctx.status, 0);
+			wal = wctx.wal;
+			if (wal) {
+				rc = sync_replay(wal, &st);
+				check("second replay still accepts the torn batch",
+				      rc, 0);
+				check_true("second replay still drops the open batch",
+					   st.writes == NUM_WRITES && st.zeroes == 1,
+					   NULL);
+				sync_close(wal);
+				wal = NULL;
+			}
+		}
+	}
+
+	printf("\n[12] later entries and format leftovers\n");
+	{
+		static const struct {
+			enum fixture_damage damage;
+			const char *name;
+			int want;
+			uint64_t barriers;
+		} cases[] = {
+			{FIXTURE_YOUNG_FIRST,
+			 "corrupt first entry with a later same-epoch entry",
+			 -EILSEQ, 0},
+			{FIXTURE_FORMAT_STALE,
+			 "zero header ignores a later same-epoch leftover",
+			 0, 0},
+			{FIXTURE_NEXT_SEGMENT,
+			 "torn tail followed by the next segment",
+			 -EILSEQ, 0},
+			{FIXTURE_NEXT_SEGMENT_OTHER_EPOCH,
+			 "next segment from another epoch is not corruption",
+			 0, 1},
+		};
+
+		for (size_t i = 0; i < SPDK_COUNTOF(cases); i++) {
+			struct open_wal_ctx wctx = {0};
+			struct replay_state st = {0};
+
+			rc = install_legacy_fixture(local_dev, cases[i].damage);
+			check("install probe fixture", rc, 0);
+			if (rc != 0) {
+				continue;
+			}
+			s3_wal_open(local_dev, wal_open_cb, &wctx);
+			poll_until(&wctx.done);
+			check("open probe fixture", wctx.status, 0);
+			if (wctx.status != 0) {
+				continue;
+			}
+			wal = wctx.wal;
+			rc = sync_replay(wal, &st);
+			check(cases[i].name, rc, cases[i].want);
+			if (cases[i].want == 0) {
+				check_true("probe fixture applied only the committed prefix",
+					   st.barriers == cases[i].barriers, NULL);
+			}
+			if (cases[i].damage == FIXTURE_NEXT_SEGMENT_OTHER_EPOCH &&
+			    rc == 0) {
+				rc = sync_close(wal);
+				check("sync after a foreign next segment", rc, 0);
+				wal = NULL;
+				memset(&wctx, 0, sizeof(wctx));
+				memset(&st, 0, sizeof(st));
+				s3_wal_open(local_dev, wal_open_cb, &wctx);
+				poll_until(&wctx.done);
+				check("reopen after a foreign next segment",
+				      wctx.status, 0);
+				wal = wctx.wal;
+				if (wal) {
+					rc = sync_replay(wal, &st);
+					check("foreign next segment stays a torn tail",
+					      rc, 0);
+					check_true("the committed prefix is still there",
+						   st.barriers == 1, NULL);
+				}
+			}
+			if (wal) {
+				sync_close(wal);
+				wal = NULL;
+			}
+		}
 	}
 out_local:
 	if (local_dev) {
