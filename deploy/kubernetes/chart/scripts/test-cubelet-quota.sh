@@ -31,6 +31,17 @@ render_chart "$TMP_DIR/legacy-chart" > "$TMP_DIR/absent.yaml"
 render --set-json 'cubeNode.quota=null' > "$TMP_DIR/null.yaml"
 render --set cubeNode.quota.mem_limit=1024 > "$TMP_DIR/memory-bytes.yaml"
 render --set cubeNode.quota.mem_limit=0 > "$TMP_DIR/memory-zero.yaml"
+cat > "$TMP_DIR/large-values.yaml" <<'YAML'
+cubeNode:
+  quota:
+    mcpu_limit: 1000000
+    mvm_limit: 2000000
+    creation_concurrent_num: 3000000
+YAML
+render -f "$TMP_DIR/large-values.yaml" > "$TMP_DIR/large.yaml"
+render --set cubeNode.quota.mcpu_limit=1000000 \
+  --set cubeNode.quota.mvm_limit=2000000 \
+  --set cubeNode.quota.creation_concurrent_num=3000000 > "$TMP_DIR/large-set.yaml"
 render --set cubeNode.quota.mcpu_limit=32000 \
   --set-string cubeNode.quota.mem_limit=64Gi \
   --set cubeNode.quota.mvm_limit=100 \
@@ -85,6 +96,10 @@ assert rendered_env("absent.yaml") == {}
 assert rendered_env("null.yaml") == {}
 assert rendered_env("memory-bytes.yaml") == {prefix + "MEM_LIMIT": "1024"}
 assert rendered_env("memory-zero.yaml") == {prefix + "MEM_LIMIT": "0"}
+assert rendered_env("large.yaml") == rendered_env("large-set.yaml") == {
+    prefix + "MCPU_LIMIT": "1000000", prefix + "MVM_LIMIT": "2000000",
+    prefix + "CREATION_CONCURRENT_NUM": "3000000",
+}
 overrides = rendered_env("overrides.yaml")
 assert overrides == {prefix + k.upper(): v for k, v in {
     "mcpu_limit": "32000", "mem_limit": "64Gi", "mvm_limit": "100",
@@ -156,6 +171,16 @@ for setting in 'cubeNode.quota=invalid' 'cubeNode.quota.typo=1' \
   grep -q 'cubeNode.quota' "$TMP_DIR/error"
 done
 echo 'PASS: Helm rejects invalid quota overrides'
+for key in mcpu_limit mvm_limit creation_concurrent_num; do
+  for value in 1.5 1000000.5 -1 abc; do
+    printf 'cubeNode:\n  quota:\n    %s: %s\n' "$key" "$value" > "$TMP_DIR/invalid-values.yaml"
+    if render -f "$TMP_DIR/invalid-values.yaml" > /dev/null 2> "$TMP_DIR/error"; then
+      echo "FAIL: Helm accepted $key: $value from a values file" >&2
+      exit 1
+    fi
+    grep -q 'must be a non-negative integer' "$TMP_DIR/error"
+  done
+done
 
 # Helm template omits NOTES. Render the actual notes as a ConfigMap value in a
 # disposable chart so these checks stay cluster-free (including on Helm 3).
@@ -188,7 +213,7 @@ if grep -Fq "$warning" "$TMP_DIR/default-notes.txt"; then
 fi
 notes --set cubeNode.quota.paused_resource_release_ratio=0 > "$TMP_DIR/quota-notes.txt"
 grep -Fq "$warning" "$TMP_DIR/quota-notes.txt"
-grep -Fq 'v0.7.3 ignores these settings' "$TMP_DIR/quota-notes.txt"
+grep -Fq 'Older Cubelet images without quota override support ignore these settings' "$TMP_DIR/quota-notes.txt"
 grep -Fq 'configure-cubelet-quota.sh' "$TMP_DIR/quota-notes.txt"
 
 # A custom tag cannot prove the helper exists, so keep the capability reminder.

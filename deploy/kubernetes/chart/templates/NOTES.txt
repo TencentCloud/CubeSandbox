@@ -104,7 +104,7 @@ Status:
 
 WARNING (cubeNode.quota requires Cubelet image support):
   Configured Cubelet image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubelet "context" $) }}
-  The released Cubelet image v0.7.3 ignores these settings, even after Pod recreation.
+  Older Cubelet images without quota override support ignore these settings.
   Use an image containing configure-cubelet-quota.sh and its startup integration.
   Helm cannot verify image contents; a custom tag alone does not prove support.
   Changing cubeNode.quota recreates cube-node Pods; follow the compute-plane

@@ -23,6 +23,13 @@
 {{- fail "cubeNode.quota.paused_resource_release_ratio must be a number between 0 and 1" -}}
 {{- end -}}
 {{- else -}}
+{{/* Values files may decode integers as floats; format without exponent notation. */}}
+{{- if kindIs "float64" $value -}}
+{{- if ne $value (floor $value) -}}
+{{- fail (printf "cubeNode.quota.%s must be a non-negative integer" $key) -}}
+{{- end -}}
+{{- $text = printf "%.0f" $value -}}
+{{- end -}}
 {{- if not (regexMatch "^(0|[1-9][0-9]*)$" $text) -}}
 {{- fail (printf "cubeNode.quota.%s must be a non-negative integer" $key) -}}
 {{- end -}}
