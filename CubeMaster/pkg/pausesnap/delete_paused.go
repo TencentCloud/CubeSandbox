@@ -91,30 +91,25 @@ func isShimGonePauseSnapshot(status string) bool {
 	return strings.EqualFold(status, statusReady) || strings.EqualFold(status, statusDeleteFailed)
 }
 
-// DropOriginTombstone removes origin leftovers after a cross-node Resume:
-// the PAUSED CubeBox row, then the pause package. Same-node Resume must not
-// call this — Create already replaced the tombstone; it uses
-// CleanupPauseSnapshot instead.
+// DropPausedTombstone removes the PAUSED CubeBox row origin still holds after
+// a cross-node Resume. Same-node Resume must not call this — Create already
+// replaced the tombstone. The pause package is CleanupPauseSnapshot's job.
 //
 // This talks to Cubelet directly rather than going through Master's
 // DestroySandbox, which would publish a lifecycle delete event and make the
 // CLM stop managing a sandbox that is very much alive on the target node.
-func DropOriginTombstone(ctx context.Context, requestID, sandboxID, originIP, snapshotID, backend string) error {
+func DropPausedTombstone(ctx context.Context, requestID, sandboxID, originIP string) error {
 	sandboxID = strings.TrimSpace(sandboxID)
 	originIP = strings.TrimSpace(originIP)
 	if sandboxID == "" || originIP == "" {
 		return nil
 	}
-	addr := cubeletAddr(originIP)
-	tombErr := destroyPausedTombstone(ctx, addr, requestID, sandboxID, originIP)
-	packErr := CleanupPauseSnapshot(ctx, requestID, originIP, snapshotID, backend)
-	return errors.Join(tombErr, packErr)
+	return destroyPausedTombstone(ctx, cubeletAddr(originIP), requestID, sandboxID, originIP)
 }
 
 // CleanupPauseSnapshot removes a pause package from nodeIP. Resume calls this
 // after the sandbox has its own disks: same-node on the resume host, cross-node
-// on origin (via DropOriginTombstone). Missing objects are Cubelet's problem
-// to treat as cleaned.
+// on origin. Missing objects are Cubelet's problem to treat as cleaned.
 func CleanupPauseSnapshot(ctx context.Context, requestID, nodeIP, snapshotID, backend string) error {
 	nodeIP = strings.TrimSpace(nodeIP)
 	snapshotID = strings.TrimSpace(snapshotID)

@@ -30,7 +30,11 @@ type StatusRequest struct {
 	RequestId  string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	SnapshotId string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
 	// xfs | s3; empty defaults to xfs.
-	Backend       string `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
+	Backend string `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
+	// When > 0, hold the reply until the upload state is ready or failed, or
+	// this many milliseconds pass, so the caller learns of it at once instead
+	// of polling. A Cubelet without this field answers immediately.
+	WaitReadyMs   int32 `protobuf:"varint,4,opt,name=wait_ready_ms,json=waitReadyMs,proto3" json:"wait_ready_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -84,6 +88,13 @@ func (x *StatusRequest) GetBackend() string {
 		return x.Backend
 	}
 	return ""
+}
+
+func (x *StatusRequest) GetWaitReadyMs() int32 {
+	if x != nil {
+		return x.WaitReadyMs
+	}
+	return 0
 }
 
 type StatusResponse struct {
@@ -342,13 +353,14 @@ var File_services_snapshot_v1_snapshot_proto protoreflect.FileDescriptor
 
 const file_services_snapshot_v1_snapshot_proto_rawDesc = "" +
 	"\n" +
-	"#services/snapshot/v1/snapshot.proto\x12\x1ccubelet.services.snapshot.v1\"i\n" +
+	"#services/snapshot/v1/snapshot.proto\x12\x1ccubelet.services.snapshot.v1\"\x8d\x01\n" +
 	"\rStatusRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
 	"snapshotId\x12\x18\n" +
-	"\abackend\x18\x03 \x01(\tR\abackend\"\xe8\x01\n" +
+	"\abackend\x18\x03 \x01(\tR\abackend\x12\"\n" +
+	"\rwait_ready_ms\x18\x04 \x01(\x05R\vwaitReadyMs\"\xe8\x01\n" +
 	"\x0eStatusResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +

@@ -622,9 +622,10 @@ func TransformCreateTemplateRequest(body map[string]interface{}) map[string]inte
 				},
 			},
 			"timeout_ms":        30000,
-			"period_ms":         500,
+			"period_ms":         100,
 			"success_threshold": 1,
-			"failure_threshold": 60,
+			"failure_threshold": 300,
+			"probe_timeout_ms":  300,
 		}
 		overrides["probe"] = probe
 		hasOverrides = true

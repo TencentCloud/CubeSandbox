@@ -91,9 +91,9 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 		}
 	}
 
-	lrt, err := l.runtemplateManager.EnsureCubeRunTemplate(ctx, templateID)
+	lrt, err := l.runtemplateManager.EnsureCubeRunTemplate(ctx, templateID, ann[constants.MasterAnnotationStorageBackend])
 	if err != nil && fallbackID != "" && fallbackID != templateID {
-		fallback, fallbackErr := l.runtemplateManager.EnsureCubeRunTemplate(ctx, fallbackID)
+		fallback, fallbackErr := l.runtemplateManager.EnsureCubeRunTemplate(ctx, fallbackID, ann[constants.MasterAnnotationStorageBackend])
 		if fallbackErr == nil {
 			log.G(ctx).Infof("run template %s is not on this node; restoring from %s instead",
 				templateID, fallbackID)

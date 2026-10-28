@@ -466,7 +466,14 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 	constants.NormalizeAppSnapshotAnnotations(templateReq.Annotations)
 	stageStart = time.Now()
-	if !skipTemplateLocalityReady(ctx, templateID) {
+	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
+	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
+	if err != nil {
+		return fmt.Errorf("failed to resolve template kind: %w", err)
+	}
+	shared := sharedJFSTemplate(templateReq, templateKind)
+	stageStart = time.Now()
+	if !shared && !skipTemplateLocalityReady(ctx, templateID) {
 		err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType)
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
 		if err != nil {
@@ -474,12 +481,6 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		}
 	} else {
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
-	}
-	stageStart = time.Now()
-	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
-	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
-	if err != nil {
-		return fmt.Errorf("failed to resolve template kind: %w", err)
 	}
 	// Pause-produced snaps (Kind=pause_snapshot) are internal Resume artifacts:
 	// invisible on Snapshot List/Info and not usable to create a new sandbox.
@@ -514,7 +515,7 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		return err
 	}
 	if !strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
-		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut); err != nil {
+		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut, shared); err != nil {
 			return err
 		}
 	}
@@ -785,7 +786,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 	if b := strings.TrimSpace(src.Backend); b != "" {
 		reqInOut.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	if constants.IsS3Backend(src.Backend) {
+	if constants.IsRemoteTrackedBackend(src.Backend) {
 		if raw := strings.TrimSpace(src.ExportUUIDs); raw != "" {
 			reqInOut.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
@@ -862,8 +863,15 @@ func bindSnapshotCreateReplicaLocal(ctx context.Context, snapshotID string, reqI
 // cubelet resolves memory_vol/memory_kind/rootfs_vol from its local catalog
 // keyed by CubeAnnotationAppSnapshotTemplateID. v5: the legacy physical
 // memory_vol/memory_kind annotation keys no longer exist as constants.
-func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) error {
+//
+// A shared jfs template has one replica, the node that built it. Any node
+// can create from it, so the replica only supplies component versions and
+// the scheduler may place the sandbox on a node without a local copy.
+func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq, shared bool) error {
 	preferredNodeID := preferredDistributionNodeID(reqInOut)
+	if shared {
+		preferredNodeID = ""
+	}
 	replica, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID)
 	if err != nil {
 		return fmt.Errorf("template %s has no bindable ready replica: %w", templateID, err)
@@ -871,8 +879,25 @@ func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqI
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}
 	}
+	if shared {
+		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
+	}
 	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
 	return nil
+}
+
+// sharedJFSTemplate reports whether templateReq is an AppSnapshot template
+// stored on jfs: built once on the volume every node mounts. User snapshots
+// keep their own cross-node rules.
+func sharedJFSTemplate(templateReq *types.CreateCubeSandboxReq, kind string) bool {
+	if templateReq == nil || strings.EqualFold(kind, templatecenter.TemplateKindSnapshot) {
+		return false
+	}
+	backend := templateReq.Backend
+	if strings.TrimSpace(backend) == "" && templateReq.Annotations != nil {
+		backend = templateReq.Annotations[constants.CubeAnnotationStorageBackend]
+	}
+	return constants.IsJFSBackend(backend)
 }
 
 func injectReplicaComponentVersionAnnotations(annotations map[string]string, replica templatecenter.ReplicaStatus) {

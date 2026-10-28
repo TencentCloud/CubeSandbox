@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
@@ -43,8 +44,17 @@ func CleanupTemplateLocalData(ctx context.Context, templateID, snapshotPath stri
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("refusing to remove unsafe path %q: %w", target, err))
 			return
 		}
-		// NOCC:Path Traversal()
-		if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// The run template recovery scan relinks a home's spec dir while its
+		// metadata is still there, so RemoveAll can find the home refilled
+		// and fail with ENOTEMPTY; by the retry the metadata is gone.
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			// NOCC:Path Traversal()
+			if err = os.RemoveAll(target); !errors.Is(err, syscall.ENOTEMPTY) {
+				break
+			}
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}

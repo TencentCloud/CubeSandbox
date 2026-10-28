@@ -177,6 +177,6 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 
 ## Reference
 
-- [Cross-Node Snapshots](./cross-node-snapshot.md) — S3 backend, `remote_status=ready`, and scheduler rules for Resume / FromSnap on another node
+- [Cross-Node Migration](./cross-node-snapshot/requirements.md) — shared backends, `remote_status=ready`, and scheduler rules for Resume / FromSnap on another node
 - Example code: [`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)
 - SDK source: [`sdk/python/`](https://github.com/TencentCloud/CubeSandbox/tree/master/sdk/python)

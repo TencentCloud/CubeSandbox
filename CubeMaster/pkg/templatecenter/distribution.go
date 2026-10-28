@@ -147,6 +147,11 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
+	backend := req.Backend
+	if strings.TrimSpace(backend) == "" {
+		backend = storageBackendFromCreate(generatedReq)
+	}
+	targets = templateBuildTargets(backend, targets)
 	return distributeRootfsArtifactToNodes(ctx, req, generatedReq, artifact, templateID, jobID, targets)
 }
 

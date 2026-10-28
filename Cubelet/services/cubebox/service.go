@@ -350,7 +350,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	// Cross-node restore: the disk describing what to run is not on this
 	// node yet, and the reads below expect it.
-	if err := prepareCrossNodeRestore(ctx, req); err != nil {
+	preparedCtx, prepareErr := prepareCrossNodeRestore(ctx, req)
+	if prepareErr != nil {
+		rsp.Ret.RetMsg = prepareErr.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
+		return rsp, nil
+	}
+	ctx = preparedCtx
+	if err := prepareSharedTemplate(ctx, req); err != nil {
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
 		return rsp, nil

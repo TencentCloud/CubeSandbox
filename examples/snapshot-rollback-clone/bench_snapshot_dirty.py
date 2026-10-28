@@ -4,7 +4,7 @@
 bench_snapshot_dirty.py — Snapshot latency vs dirty-page size benchmark (single size).
 
 For one write size (`-d` MB):
-  1. Create a sandbox, write `-d` MB to /dev/shm (tmpfs → pure RAM dirty pages)
+  1. Create a sandbox, fill and retain `-d` MB of anonymous process memory
   2. Create a snapshot, measure wall time
   3. Warm up one sandbox from the snapshot (discard, eliminates cache-miss spike)
   4. Create a second sandbox from the snapshot, measure wall time
@@ -89,8 +89,33 @@ def run_round(size_mb: int) -> dict:
     try:
         sb = Sandbox.create(template=TEMPLATE_ID)
         sid = sb.sandbox_id
-        if size_mb > 0:
-            sb.run_code(f"open('/dev/shm/dirty','wb').write(b'x' * {size_mb * 1024 * 1024})")
+        # Keep incompressible anonymous memory alive in the notebook kernel
+        # through snapshot creation. Fill in chunks so generating the data does
+        # not temporarily allocate a second size_mb buffer.
+        execution = sb.run_code(f"""
+import hashlib
+import os
+
+_cubebench_dirty_size = {size_mb * 1024 * 1024}
+_cubebench_dirty_buf = bytearray(_cubebench_dirty_size)
+_cubebench_dirty_view = memoryview(_cubebench_dirty_buf)
+_cubebench_dirty_chunk = 1024 * 1024
+for _cubebench_dirty_offset in range(0, _cubebench_dirty_size, _cubebench_dirty_chunk):
+    _cubebench_dirty_length = min(
+        _cubebench_dirty_chunk,
+        _cubebench_dirty_size - _cubebench_dirty_offset,
+    )
+    _cubebench_dirty_view[
+        _cubebench_dirty_offset:_cubebench_dirty_offset + _cubebench_dirty_length
+    ] = os.urandom(_cubebench_dirty_length)
+assert len(_cubebench_dirty_buf) == _cubebench_dirty_size
+_cubebench_dirty_sha256 = hashlib.sha256(_cubebench_dirty_view).hexdigest()
+""")
+        if execution.error is not None:
+            raise RuntimeError(
+                f"failed to allocate {size_mb} MB anonymous memory: "
+                f"{execution.error.name}: {execution.error.value}"
+            )
 
         t0 = time.monotonic()
         snap = sb.create_snapshot()

@@ -59,7 +59,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, warn};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, CloneMethod};
 use crate::engine::Engine;
 use crate::pkg::errors::{CubecowError, CubecowResult};
 use crate::pkg::metrics::{
@@ -117,6 +117,8 @@ pub struct ReflinkEngine {
     /// `<root_dir>/volumes/`. The engine never touches anything outside
     /// this subtree.
     volumes_dir: PathBuf,
+    /// Clone primitive for snapshots and volumes derived from them.
+    clone_method: CloneMethod,
     /// Global volume + snapshot name index. Rebuilt from disk during
     /// `initialize`; mutated under a single writer lock thereafter.
     /// Read paths take a shared lock for `O(1)` lookups.
@@ -157,6 +159,7 @@ impl ReflinkEngine {
             .map_err(|e| anyhow::anyhow!("invalid config for reflink backend: {e}"))?;
 
         let root_dir = config.backend.reflink.root_dir.clone();
+        let clone_method = config.backend.reflink.clone_method;
         let volumes_dir = root_dir.join("volumes");
 
         std::fs::create_dir_all(&volumes_dir).map_err(|e| {
@@ -166,11 +169,12 @@ impl ReflinkEngine {
             )
         })?;
 
-        probe_reflink_support(&volumes_dir).map_err(|e| {
+        probe_clone_support(clone_method, &volumes_dir).map_err(|e| {
             anyhow::anyhow!(
-                "filesystem under '{}' does not support FICLONE: {e}; \
+                "filesystem under '{}' does not support {clone_method:?} clones: {e}; \
                  mount an xfs filesystem with `-m reflink=1` (or any other \
-                 FICLONE-capable filesystem) at this path",
+                 FICLONE-capable filesystem) at this path, or JuiceFS with \
+                 clone_method = \"copy_file_range\"",
                 volumes_dir.display()
             )
         })?;
@@ -198,6 +202,7 @@ impl ReflinkEngine {
 
         info!(
             volumes_dir = %volumes_dir.display(),
+            ?clone_method,
             volume_count,
             snapshot_count,
             "reflink engine initialized"
@@ -205,6 +210,7 @@ impl ReflinkEngine {
 
         Ok(Self {
             volumes_dir,
+            clone_method,
             name_index: RwLock::new(name_index),
             metrics,
         })
@@ -336,6 +342,72 @@ impl ReflinkEngine {
     // -----------------------------------------------------------------------
     // Filesystem stats for the underlying volumes_dir
     // -----------------------------------------------------------------------
+
+    /// Reserve `volume_name` and clone `source_path` into its main file,
+    /// rolling the reservation back on failure.
+    fn clone_into_new_volume(&self, volume_name: &str, source_path: &Path) -> CubecowResult<()> {
+        {
+            let mut idx = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            if idx.contains_key(volume_name) {
+                return Err(CubecowError::AlreadyExists(format!(
+                    "name '{volume_name}' already exists in reflink namespace"
+                )));
+            }
+            idx.insert(volume_name.to_string(), NameKind::Volume);
+        }
+
+        let result = (|| -> CubecowResult<()> {
+            let dir = self.vol_dir(volume_name);
+            let main = self.vol_main_file(volume_name);
+
+            std::fs::create_dir_all(&dir).map_err(CubecowError::IoError)?;
+
+            let src_file = File::open(source_path).map_err(|e| {
+                if e.kind() == ErrorKind::NotFound {
+                    CubecowError::NotFound(format!(
+                        "source file '{}' missing",
+                        source_path.display()
+                    ))
+                } else {
+                    CubecowError::IoError(e)
+                }
+            })?;
+
+            clone_file(self.clone_method, &src_file, &main).map_err(|errno| {
+                let reason = describe_ficlone_errno(errno);
+                CubecowError::PreconditionFailed(format!(
+                    "{:?} clone failed for volume '{volume_name}' from '{}': {reason}",
+                    self.clone_method,
+                    source_path.display()
+                ))
+            })?;
+
+            // Persist directory entries.
+            let _ = fsync_dir(&dir);
+            let _ = fsync_dir(&self.volumes_dir);
+
+            self.metrics.inc(METRIC_VOLUME_COUNT);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            // Roll back the name reservation and best-effort clean up
+            // any partially-created files. `ficlone()` removes the dst
+            // on FICLONE failure, but the empty directory (and the
+            // dst file on non-FICLONE errors) may still be around.
+            let mut idx = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            idx.remove(volume_name);
+            let _ = std::fs::remove_file(self.vol_main_file(volume_name));
+            let _ = std::fs::remove_dir(self.vol_dir(volume_name));
+        }
+        result
+    }
 
     fn volumes_dir_stats(&self) -> (u64, u64) {
         match statvfs_total_used(&self.volumes_dir) {
@@ -712,10 +784,11 @@ impl Engine for ReflinkEngine {
                 }
             })?;
 
-            ficlone(&src_file, &dst).map_err(|errno| {
+            clone_file(self.clone_method, &src_file, &dst).map_err(|errno| {
                 let reason = describe_ficlone_errno(errno);
                 CubecowError::PreconditionFailed(format!(
-                    "FICLONE failed for snapshot '{snapshot_name}' from '{}': {reason}",
+                    "{:?} clone failed for snapshot '{snapshot_name}' from '{}': {reason}",
+                    self.clone_method,
                     source_path.display()
                 ))
             })?;
@@ -774,72 +847,12 @@ impl Engine for ReflinkEngine {
                 }
             }
         };
-
-        // Reserve the target volume name atomically.
-        {
-            let mut idx = self
-                .name_index
-                .write()
-                .expect("reflink name_index lock poisoned");
-            if idx.contains_key(volume_name) {
-                return Err(CubecowError::AlreadyExists(format!(
-                    "name '{volume_name}' already exists in reflink namespace"
-                )));
-            }
-            idx.insert(volume_name.to_string(), NameKind::Volume);
-        }
-
-        let result = (|| -> CubecowResult<Volume> {
-            let dir = self.vol_dir(volume_name);
-            let main = self.vol_main_file(volume_name);
-
-            std::fs::create_dir_all(&dir).map_err(CubecowError::IoError)?;
-
-            let src_file = File::open(&source_path).map_err(|e| {
-                if e.kind() == ErrorKind::NotFound {
-                    CubecowError::NotFound(format!(
-                        "source snapshot file '{}' missing",
-                        source_path.display()
-                    ))
-                } else {
-                    CubecowError::IoError(e)
-                }
-            })?;
-
-            ficlone(&src_file, &main).map_err(|errno| {
-                let reason = describe_ficlone_errno(errno);
-                CubecowError::PreconditionFailed(format!(
-                    "FICLONE failed for volume '{volume_name}' from '{}': {reason}",
-                    source_path.display()
-                ))
-            })?;
-
-            // Persist directory entries.
-            let _ = fsync_dir(&dir);
-            let _ = fsync_dir(&self.volumes_dir);
-
-            self.metrics.inc(METRIC_VOLUME_COUNT);
-            info!(
-                volume = volume_name,
-                source_snapshot, "reflink writable volume derived from snapshot"
-            );
-            self.project_volume(volume_name)
-        })();
-
-        if result.is_err() {
-            // Roll back the name reservation and best-effort clean up
-            // any partially-created files. `ficlone()` removes the dst
-            // on FICLONE failure, but the empty directory (and the
-            // dst file on non-FICLONE errors) may still be around.
-            let mut idx = self
-                .name_index
-                .write()
-                .expect("reflink name_index lock poisoned");
-            idx.remove(volume_name);
-            let _ = std::fs::remove_file(self.vol_main_file(volume_name));
-            let _ = std::fs::remove_dir(self.vol_dir(volume_name));
-        }
-        result
+        self.clone_into_new_volume(volume_name, &source_path)?;
+        info!(
+            volume = volume_name,
+            source_snapshot, "reflink writable volume derived from snapshot"
+        );
+        self.project_volume(volume_name)
     }
 
     fn delete_snapshot(&self, snapshot_name: &str) -> CubecowResult<()> {
@@ -1062,6 +1075,40 @@ impl Engine for ReflinkEngine {
         Ok(())
     }
 
+    /// Clone a file from another node's tree on the same shared file system
+    /// into a new volume. `export_uuid` is the absolute path of the source
+    /// file: the reflink backend has no export step, so a path is all
+    /// another node needs to hand over.
+    fn import_lvol(&self, lvol_name: &str, export_uuid: &str) -> CubecowResult<Volume> {
+        Self::validate_name(lvol_name, "volume")?;
+        let source_path = PathBuf::from(export_uuid.trim());
+        if !source_path.is_absolute() {
+            return Err(CubecowError::InvalidArg(format!(
+                "import source '{export_uuid}' must be an absolute path"
+            )));
+        }
+        let meta = std::fs::metadata(&source_path).map_err(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                CubecowError::NotFound(format!("import source '{}'", source_path.display()))
+            } else {
+                CubecowError::IoError(e)
+            }
+        })?;
+        if !meta.is_file() {
+            return Err(CubecowError::InvalidArg(format!(
+                "import source '{}' is not a regular file",
+                source_path.display()
+            )));
+        }
+        self.clone_into_new_volume(lvol_name, &source_path)?;
+        info!(
+            volume = lvol_name,
+            source = %source_path.display(),
+            "reflink volume imported"
+        );
+        self.project_volume(lvol_name)
+    }
+
     fn metrics(&self) -> HashMap<String, u64> {
         // Refresh the size counters so callers see live filesystem
         // utilisation without a separate health-check entry point.
@@ -1075,6 +1122,73 @@ impl Engine for ReflinkEngine {
 // ---------------------------------------------------------------------------
 // Filesystem helpers
 // ---------------------------------------------------------------------------
+
+/// Clone `src` into a freshly-created `dst_path` with `method`.
+fn clone_file(method: CloneMethod, src: &File, dst_path: &Path) -> Result<(), i32> {
+    match method {
+        CloneMethod::Ficlone => ficlone(src, dst_path),
+        CloneMethod::CopyFileRange => copy_file_range_clone(src, dst_path),
+    }
+}
+
+/// Copy all of `src` into `dst_path` with `copy_file_range(2)`.
+///
+/// The copy lands in a dot-prefixed sibling first and is renamed into
+/// place only once complete, so a crash mid-copy leaves a dotfile the
+/// layout scanner ignores rather than a short volume or snapshot.
+fn copy_file_range_clone(src: &File, dst_path: &Path) -> Result<(), i32> {
+    let errno_of = |e: std::io::Error| e.raw_os_error().unwrap_or(libc::EIO);
+    if dst_path.exists() {
+        return Err(libc::EEXIST);
+    }
+    let file_name = dst_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(libc::EINVAL)?;
+    let tmp_path = dst_path.with_file_name(format!(".{file_name}.clone-tmp"));
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let result = (|| -> Result<(), i32> {
+        let size = src.metadata().map_err(errno_of)?.len();
+        let dst = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(errno_of)?;
+        let mut off_in: libc::loff_t = 0;
+        let mut off_out: libc::loff_t = 0;
+        while (off_in as u64) < size {
+            let chunk = std::cmp::min(size - off_in as u64, 1 << 30) as usize;
+            // SAFETY: both fds stay open for the call; the offsets are
+            // plain integers owned by this frame.
+            let n = unsafe {
+                libc::copy_file_range(
+                    src.as_raw_fd(),
+                    &mut off_in,
+                    dst.as_raw_fd(),
+                    &mut off_out,
+                    chunk,
+                    0,
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO));
+            }
+            if n == 0 {
+                return Err(libc::EIO);
+            }
+        }
+        dst.sync_all().map_err(errno_of)?;
+        drop(dst);
+        std::fs::rename(&tmp_path, dst_path).map_err(errno_of)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
 
 /// Issue a `FICLONE` ioctl from `src` into a freshly-created `dst_path`.
 ///
@@ -1104,7 +1218,12 @@ fn ficlone(src: &File, dst_path: &Path) -> Result<(), i32> {
 ///
 /// Returns `Ok(())` only if the kernel/filesystem accepts FICLONE on
 /// this directory; otherwise returns a human-readable explanation.
+#[cfg(test)]
 fn probe_reflink_support(dir: &Path) -> Result<(), String> {
+    probe_clone_support(CloneMethod::Ficlone, dir)
+}
+
+fn probe_clone_support(method: CloneMethod, dir: &Path) -> Result<(), String> {
     let pid = std::process::id();
     let src_path = dir.join(format!(".cubecow-reflink-probe-src-{pid}"));
     let dst_path = dir.join(format!(".cubecow-reflink-probe-dst-{pid}"));
@@ -1118,7 +1237,7 @@ fn probe_reflink_support(dir: &Path) -> Result<(), String> {
         let _ = f.sync_all();
     }
     let src = File::open(&src_path).map_err(|e| format!("open probe src: {e}"))?;
-    let result = ficlone(&src, &dst_path);
+    let result = clone_file(method, &src, &dst_path);
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&dst_path);
 
@@ -1378,9 +1497,94 @@ mod tests {
         std::fs::create_dir_all(&volumes_dir).unwrap();
         ReflinkEngine {
             volumes_dir,
+            clone_method: CloneMethod::Ficlone,
             name_index: RwLock::new(HashMap::new()),
             metrics: Arc::new(MetricsCollector::new()),
         }
+    }
+
+    #[test]
+    fn copy_file_range_engine_clones_volume_and_snapshot() {
+        // copy_file_range works on any local filesystem (as a data copy
+        // where it is not a metadata clone), so this needs no FICLONE.
+        let root = unique_root("cfr");
+        let mut engine = make_engine(&root);
+        engine.clone_method = CloneMethod::CopyFileRange;
+
+        let vol = engine.create_volume("v1", 3 * 4096).unwrap();
+        {
+            use std::os::unix::fs::FileExt;
+            let f = OpenOptions::new()
+                .write(true)
+                .open(&vol.device_path)
+                .unwrap();
+            f.write_all_at(b"cube-cfr", 4096).unwrap();
+        }
+        let snap = engine
+            .create_snapshot_from_volume("v1", "s1", true)
+            .unwrap();
+        let derived = engine.create_volume_from_snapshot("s1", "v2").unwrap();
+        for path in [&snap.device_path, &derived.device_path] {
+            let data = std::fs::read(path).unwrap();
+            assert_eq!(data.len(), 3 * 4096);
+            assert_eq!(&data[4096..4104], b"cube-cfr");
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("volumes/v1"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+        assert!(matches!(
+            engine.create_snapshot_from_volume("v1", "s1", true),
+            Err(CubecowError::AlreadyExists(_))
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn import_lvol_clones_a_foreign_file_into_a_volume() {
+        let root = unique_root("import");
+        let mut engine = make_engine(&root);
+        engine.clone_method = CloneMethod::CopyFileRange;
+
+        let foreign = root.join("other-node-snapshot");
+        {
+            use std::os::unix::fs::FileExt;
+            let f = File::create(&foreign).unwrap();
+            f.set_len(2 * 4096).unwrap();
+            f.write_all_at(b"from-a", 4096).unwrap();
+        }
+        let vol = engine
+            .import_lvol("sb-x-rootfs-gen0", foreign.to_str().unwrap())
+            .unwrap();
+        let data = std::fs::read(&vol.device_path).unwrap();
+        assert_eq!(data.len(), 2 * 4096);
+        assert_eq!(&data[4096..4102], b"from-a");
+        assert!(engine.get_volume_info("sb-x-rootfs-gen0").is_ok());
+        assert!(matches!(
+            engine.import_lvol("sb-x-rootfs-gen0", foreign.to_str().unwrap()),
+            Err(CubecowError::AlreadyExists(_))
+        ));
+        assert!(matches!(
+            engine.import_lvol("sb-y", "relative/path"),
+            Err(CubecowError::InvalidArg(_))
+        ));
+        assert!(matches!(
+            engine.import_lvol("sb-z", root.join("missing").to_str().unwrap()),
+            Err(CubecowError::NotFound(_))
+        ));
+        assert!(engine.get_volume_info("sb-z").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clone_method_parses_from_json() {
+        let cfg = AppConfig::from_json_str(
+            r#"{"log":{},"backend":{"kind":"reflink","reflink":{"root_dir":"/tmp/x","clone_method":"copy_file_range"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.reflink.clone_method, CloneMethod::CopyFileRange);
     }
 
     #[test]

@@ -566,9 +566,9 @@ fn build_template_probe(body: &CreateTemplateRequest) -> Option<Probe> {
                 exec: None,
             },
             timeout_ms: Some(30000),
-            period_ms: Some(500),
+            period_ms: Some(100),
             success_threshold: Some(1),
-            failure_threshold: Some(60),
+            failure_threshold: Some(300),
         })
 }
 

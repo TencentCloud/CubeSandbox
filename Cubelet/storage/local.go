@@ -72,6 +72,11 @@ type local struct {
 	cowManager           cowVolumeManager // XFS / xfscow Store (reflink handle)
 	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
 	s3InitCancel         context.CancelFunc
+	jfsInitMu            sync.Mutex // serializes jfs handle initialization and close
+	jfsStateMu           sync.RWMutex
+	jfsCowEngine         *cubecow.Engine
+	jfsCowManager        cowVolumeManager // jfs Store (reflink handle on JuiceFS)
+	jfsInitCancel        context.CancelFunc
 
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
@@ -188,6 +193,12 @@ func (l *local) resetCowNodeStorage() error {
 	if l.s3CowEngine != nil {
 		if err := cowResetNodeStorage(l.s3CowEngine); err != nil {
 			return fmt.Errorf("reset cubecow s3 storage: %w", err)
+		}
+	}
+	jfsEngine, _ := l.loadJFSCowState()
+	if jfsEngine != nil {
+		if err := cowResetNodeStorage(jfsEngine); err != nil {
+			return fmt.Errorf("reset cubecow jfs storage: %w", err)
 		}
 	}
 	l.Close()
@@ -312,6 +323,13 @@ func (l *local) RecoverStorageState(ctx context.Context) error {
 			// coming up.
 			if errors.Is(err, ErrS3NotReady) {
 				CubeLog.Warnf("storage recover: skipping id=%s while s3 storage is initializing: %v", id, err)
+				continue
+			}
+			// A jfs file path is stable across restarts, so a sandbox
+			// recorded before the JuiceFS mount came back keeps a valid
+			// one; only the refresh is skipped.
+			if errors.Is(err, ErrJFSNotReady) || errors.Is(err, ErrJFSNotConfigured) {
+				CubeLog.Warnf("storage recover: skipping id=%s while jfs storage is unavailable: %v", id, err)
 				continue
 			}
 			return err
@@ -455,6 +473,7 @@ func (l *local) Close() error {
 		l.cowEngine = nil
 	}
 	l.clearS3Cow()
+	l.closeJFSCow()
 	l.cowManager = nil
 	return nil
 }
@@ -1009,6 +1028,19 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	// package NVMe cannot yank the live disk; the package catalog is
 	// still kept for Snapshot last-restore, like XFS.
 	if imp := CrossNodeSandboxImport(annotations); imp != nil {
+		if imp.SharedJFSRuntimeSnapshot {
+			devPath, err := imp.SharedJFSMemoryPath(ctx)
+			if err != nil {
+				return "", "", err
+			}
+			if devPath == "" {
+				return "", "", nil
+			}
+			// The runtime maps this immutable package image MAP_PRIVATE.
+			// Empty imported name is intentional: sandbox destroy must never
+			// delete the globally shared source.
+			return cowFileURLFromPath(devPath), "", nil
+		}
 		name, devPath, err := imp.Memory(ctx)
 		if err != nil {
 			return "", "", err
@@ -1064,11 +1096,11 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 
 // pauseResumeClonesLiveMemory is true when same-node pause resume must
 // copy package memory onto a sandbox-private volume before Create
-// returns. XFS is false: the original snapshot file is the restore
+// returns. XFS and jfs are false: the original snapshot file is the restore
 // image. S3 is true because the live disk is an NVMe lvol.
 func pauseResumeClonesLiveMemory(backend string) bool {
 	normalized, err := cow.NormalizeBackend(backend)
-	return err == nil && normalized != cow.BackendXFS
+	return err == nil && !cow.IsReflinkBackend(normalized)
 }
 
 // pauseResumeMemoryOwnerID is the sandbox that must own a private copy of the
@@ -1311,6 +1343,15 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 			return nil, ErrS3NotConfigured
 		}
 		return nil, ErrS3NotReady
+	case cow.BackendJFS:
+		_, manager := l.loadJFSCowState()
+		if manager != nil {
+			return manager, nil
+		}
+		if !l.config.jfsConfigured() {
+			return nil, ErrJFSNotConfigured
+		}
+		return nil, ErrJFSNotReady
 	default:
 		if l.cowManager != nil {
 			return l.cowManager, nil

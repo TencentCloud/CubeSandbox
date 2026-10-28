@@ -307,20 +307,20 @@ func TestCheckDestroyRet(t *testing.T) {
 	}, "sb", "destroy"))
 }
 
-func TestDropOriginTombstoneCleansPausePackage(t *testing.T) {
+func TestDropPausedTombstoneLeavesPausePackage(t *testing.T) {
 	setupPauseDeleteTest(t)
 	destroys, cleans := mockCubeletOK(t)
 
-	err := DropOriginTombstone(context.Background(), "req-x", "sb-x", "10.0.0.8",
-		"snap-x000000000000000000000001", constants.SnapshotBackendS3)
-	require.NoError(t, err)
+	require.NoError(t, DropPausedTombstone(context.Background(), "req-x", "sb-x", "10.0.0.8"))
 	require.Len(t, *destroys, 1)
 	require.Equal(t, "10.0.0.8:50051", (*destroys)[0].addr)
+	require.Equal(t, "sb-x", (*destroys)[0].req.SandboxID)
 	require.Equal(t, "true", (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone])
-	require.Len(t, *cleans, 1)
-	require.Equal(t, "10.0.0.8:50051", (*cleans)[0].addr)
-	require.Equal(t, "snap-x000000000000000000000001", (*cleans)[0].req.TemplateID)
-	require.Equal(t, constants.SnapshotBackendS3, (*cleans)[0].req.Backend)
+	require.Empty(t, *cleans)
+
+	require.NoError(t, DropPausedTombstone(context.Background(), "req-x", "", "10.0.0.8"))
+	require.NoError(t, DropPausedTombstone(context.Background(), "req-x", "sb-x", " "))
+	require.Len(t, *destroys, 1)
 }
 
 func TestCleanupPauseSnapshot(t *testing.T) {
@@ -340,28 +340,12 @@ func TestCleanupPauseSnapshot(t *testing.T) {
 	require.Len(t, *cleans, 1)
 }
 
-func TestDropOriginTombstoneSkipsCleanupWithoutSnapshotID(t *testing.T) {
-	setupPauseDeleteTest(t)
-	destroys, cleans := mockCubeletOK(t)
-
-	err := DropOriginTombstone(context.Background(), "req-x", "sb-x", "10.0.0.8", "", "")
-	require.NoError(t, err)
-	require.Len(t, *destroys, 1)
-	require.Empty(t, *cleans)
-}
-
-func TestDropOriginTombstoneJoinsTombstoneAndCleanupErrors(t *testing.T) {
+func TestDropPausedTombstoneReturnsRPCError(t *testing.T) {
 	setupPauseDeleteTest(t)
 	destroyOnCubelet = func(_ context.Context, _ string, _ *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
 		return nil, errors.New("tombstone rpc failed")
 	}
-	cleanupTemplateOnCubelet = func(_ context.Context, _ string, _ *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
-		return nil, errors.New("cleanup rpc failed")
-	}
 
-	err := DropOriginTombstone(context.Background(), "req-x", "sb-x", "10.0.0.8",
-		"snap-x000000000000000000000001", constants.SnapshotBackendS3)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "tombstone rpc failed")
-	require.Contains(t, err.Error(), "cleanup rpc failed")
+	err := DropPausedTombstone(context.Background(), "req-x", "sb-x", "10.0.0.8")
+	require.ErrorContains(t, err, "tombstone rpc failed")
 }

@@ -561,7 +561,7 @@ This produces **external-reference** behavior:
 - A plugin Volume does not pin an otherwise cross-node-capable VM snapshot to its origin. For an S3 VM snapshot with `remote_status=ready`, the target Cubelet attempts to attach the Volume before starting the VM.
 - The scheduler currently checks VM compatibility, not Volume portability, topology, multi-attach support, or target driver availability. A missing Volume, unregistered target driver, or `Attach` error fails sandbox creation. Configure every eligible node with the same driver and access to the intended backend.
 
-The Volume backend and VM snapshot backend are independent. The VM snapshot package must use the S3 backend for cross-node restore; the plugin Volume may use any backend that its target-side driver can attach. Raw host mounts are different and remain pinned to their origin node.
+The Volume backend and VM snapshot backend are independent. The VM snapshot package must use the `jfs` or `s3` backend for cross-node restore; the plugin Volume may use any backend that its target-side driver can attach. Raw host mounts remain pinned to their origin node.
 
 ### Common SDK Errors
 

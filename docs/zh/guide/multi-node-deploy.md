@@ -284,6 +284,25 @@ sudo ./down.sh
 
 计算节点模式下，该命令只会停止 `cubelet`，不影响控制面或其他计算节点。
 
+### 卸载
+
+集群中的控制节点和计算节点需要分别执行卸载。卸载会删除当前节点上的 CubeSandbox 服务、容器、数据卷、网络配置、运行数据和日志；卸载控制节点还会删除集群中的模板、沙箱及快照数据。执行前请先备份需要保留的数据，并按[节点相关操作](./node-operations.md)先隔离和清理待移除的计算节点。
+
+在每个需要卸载的节点执行：
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+确认检查通过且不再需要卸载脚本和安装包后，最后手动删除保留的工具目录：
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> 该卸载脚本不会删除 Cube 相关的 Docker 镜像，如果需要删除，可以根据脚本提示手动删除。
+
 ### 重新安装
 
 直接再次运行 `install-compute.sh` 即可。安装脚本会自动停止已有部署再进行安装。

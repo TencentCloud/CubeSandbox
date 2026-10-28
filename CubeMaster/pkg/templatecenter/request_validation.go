@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"regexp"
 	"sort"
@@ -65,6 +66,25 @@ func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, er
 		return nil, ErrNoTemplateNodes
 	}
 	return selected, nil
+}
+
+// templateBuildTargets narrows the nodes a template is built on. A jfs
+// template lives on the JuiceFS volume every node mounts, so it is built on
+// one schedulable node and the others adopt that package on first use.
+func templateBuildTargets(backend string, nodes []*node.Node) []*node.Node {
+	if !constants.IsJFSBackend(backend) || len(nodes) <= 1 {
+		return nodes
+	}
+	candidates := make([]*node.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil && n.SchedulingAllowed() {
+			candidates = append(candidates, n)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = nodes
+	}
+	return []*node.Node{candidates[rand.Intn(len(candidates))]}
 }
 
 func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*types.CreateTemplateFromImageReq, error) {

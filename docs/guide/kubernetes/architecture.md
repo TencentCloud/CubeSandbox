@@ -140,7 +140,7 @@ All four compute lines (Big Pod / installer / bootstrap / PVM) are native `apps/
 | `wait-node-prep` (init) | `images.waitNodePrep` | Read-only hostPath `node-prep-ready` self-describing fingerprint; exits when matched so run containers can start |
 | `cubelet` | `images.cubelet` | Starts after self-stage; includes embedded network runtime and CubeVS tools |
 | `cube-egress` / `cube-egress-net` | matching images | Transparent egress proxy and host TPROXY rules |
-| `cube-s3lvol` | `images.cubeS3lvol` | Optional; SPDK NVMe/TCP target for S3 CoW / cross-node snapshots |
+| `cube-s3lvol` | `images.cubeS3lvol` | Optional; SPDK NVMe/TCP target for S3 CoW / cross-node migration |
 
 **Container names / volumeMount / securityContext / imagePullPolicy changes also recreate**.
 

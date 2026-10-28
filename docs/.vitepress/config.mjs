@@ -207,7 +207,15 @@ export default withMermaid(defineConfig({
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
-                { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
+                {
+                  text: 'Cross-Node Migration',
+                  collapsed: true,
+                  items: [
+                    { text: 'Requirements', link: '/guide/cross-node-snapshot/requirements' },
+                    { text: 'JuiceFS Service', link: '/guide/cross-node-snapshot/juicefs' },
+                    { text: 'CubeS3lvol Service', link: '/guide/cross-node-snapshot/cubes3lvol' }
+                  ]
+                }
               ]
             },
             {
@@ -345,6 +353,7 @@ export default withMermaid(defineConfig({
               text: 'System Design',
               items: [
                 { text: 'Architecture Overview', link: '/architecture/overview' },
+                { text: 'JuiceFS Storage Architecture', link: '/architecture/juicefs-storage' },
                 { text: 'CubeVS Network Model', link: '/architecture/network' }
               ]
             }
@@ -427,7 +436,15 @@ export default withMermaid(defineConfig({
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
-                { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }
+                {
+                  text: '跨机迁移',
+                  collapsed: true,
+                  items: [
+                    { text: '跨机条件', link: '/zh/guide/cross-node-snapshot/requirements' },
+                    { text: 'JuiceFS 服务配置', link: '/zh/guide/cross-node-snapshot/juicefs' },
+                    { text: 'CubeS3lvol 服务配置', link: '/zh/guide/cross-node-snapshot/cubes3lvol' }
+                  ]
+                }
               ]
             },
             {
@@ -565,6 +582,7 @@ export default withMermaid(defineConfig({
               text: '系统设计',
               items: [
                 { text: '架构概览 (Overview)', link: '/zh/architecture/overview' },
+                { text: 'JuiceFS 跨机存储架构', link: '/zh/architecture/juicefs-storage' },
                 { text: 'CubeVS 网络模型', link: '/zh/architecture/network' }
               ]
             }

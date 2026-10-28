@@ -170,6 +170,48 @@ test_coredns_direct_outputs_prepare_file_path() {
   assert_not_contains "${ONE_CLICK_DIR}/scripts/systemd/common.sh" "require_cmd rg"
 }
 
+test_cube_jfs_mount_waits_for_fuse_propagation() {
+  local path="${ONE_CLICK_DIR}/scripts/cube-jfs/mount.sh"
+
+  assert_contains "${path}" 'CUBE_JFS_MOUNT_WAIT_SECONDS'
+  assert_contains "${path}" 'wait_for_juicefs_mount'
+  assert_contains "${path}" '[[ "${fs_type}" == "fuse.juicefs" ]]'
+  assert_not_contains "${path}" "findmnt -rn -T \"\${mount_path}\" -o FSTYPE | grep -q"
+}
+
+test_cube_jfs_metadata_password_is_separate_from_url() {
+  local install_sh="${ONE_CLICK_DIR}/install.sh"
+  local env_example="${ONE_CLICK_DIR}/env.example"
+  local init_sh="${ONE_CLICK_DIR}/scripts/cube-jfs/init.sh"
+  local check_sh="${ONE_CLICK_DIR}/scripts/cube-jfs/check.sh"
+  local service_sh="${ONE_CLICK_DIR}/scripts/systemd/cube-jfs-mount.sh"
+
+  assert_contains "${env_example}" 'CUBE_JFS_META_URL="redis://external-redis.example.com:6379/0"'
+  assert_contains "${env_example}" 'CUBE_JFS_META_PASSWORD="cube_jfs_redis_pass"'
+  assert_contains "${install_sh}" 'CUBE_JFS_META_URL="redis://${ONE_CLICK_CONTROL_PLANE_IP}:6380/0"'
+  assert_contains "${install_sh}" 'CUBE_JFS_META_URL="redis://${CUBE_SANDBOX_NODE_IP}:6380/0"'
+  assert_contains "${install_sh}" 'CUBE_JFS_BUCKET="${CUBE_S3_ENDPOINT%/}/cube-jfs"'
+  assert_contains "${install_sh}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_META_PASSWORD"'
+  assert_contains "${init_sh}" 'meta_env_args+=(--env META_PASSWORD)'
+  assert_contains "${check_sh}" 'meta_env_args+=(--env META_PASSWORD)'
+  assert_contains "${service_sh}" 'meta_env_args+=(--env META_PASSWORD)'
+}
+
+test_uninstall_preserves_container_images() {
+  local path="${ONE_CLICK_DIR}/scripts/one-click/uninstall.sh"
+  local docker_cleanup podman_cleanup
+
+  docker_cleanup="$(sed -n '/^remove_docker_objects()/,/^}/p' "${path}")"
+  podman_cleanup="$(sed -n '/^remove_podman_objects()/,/^}/p' "${path}")"
+  [[ "${docker_cleanup}" != *'docker image rm'* ]] \
+    || fail "uninstall Docker cleanup must preserve images"
+  [[ "${podman_cleanup}" != *'podman image rm'* ]] \
+    || fail "uninstall Podman cleanup must preserve images"
+  assert_contains "${path}" 'PRESERVED'
+  assert_contains "${path}" 'print_image_cleanup_hint'
+  assert_contains "${path}" 'docker image rm -f'
+}
+
 test_unit_dependency_order() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "After=docker.service network-online.target cube-sandbox-redis.service cube-sandbox-dns.service cube-sandbox-cube-lifecycle-manager.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cubemaster.service" "After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service"
@@ -1119,6 +1161,9 @@ test_unit_prepare_hooks_are_wired
 test_support_compose_render_is_locked_and_atomic
 test_compose_wrappers_reject_directories
 test_coredns_direct_outputs_prepare_file_path
+test_cube_jfs_mount_waits_for_fuse_propagation
+test_cube_jfs_metadata_password_is_separate_from_url
+test_uninstall_preserves_container_images
 test_unit_dependency_order
 test_detect_glibc_version_consumes_full_ldd_output
 test_online_install_glibc_detection_avoids_head_pipe

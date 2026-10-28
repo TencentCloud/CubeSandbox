@@ -673,7 +673,7 @@ func mountRestoreMetadata(ctx context.Context, flowOpts *workflow.CreateContext,
 
 func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {
 	seen := map[string]struct{}{}
-	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3} {
+	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3, cow.BackendJFS} {
 		backend = strings.TrimSpace(backend)
 		if backend == "" {
 			continue

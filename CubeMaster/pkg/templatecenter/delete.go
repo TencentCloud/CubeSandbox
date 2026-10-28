@@ -43,6 +43,9 @@ var (
 	// node is registered, which would mask the in-use guard entirely).
 	runInUseCheck     = isTemplateInUse
 	runFailActiveWork = failActiveTemplateWork
+	// sharedTemplateNodes lists the nodes that may hold a reference to a
+	// shared jfs template.
+	sharedTemplateNodes = healthyTemplateNodes
 )
 
 // templateCleanupLocator identifies a single cubelet that may hold artifacts
@@ -179,7 +182,17 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 			return err
 		}
 	}
-	if err := runReplicaCleanup(ctx, templateID, targets.Locators, cleanupBackendFromTargets(targets)); err != nil {
+	backend := cleanupBackendFromTargets(targets)
+	if constants.IsJFSBackend(backend) && targets.Snapshot == nil {
+		// Nodes that adopted the shared package hold their own references
+		// to it, and no replica row names them.
+		for _, n := range sharedTemplateNodes(targets.InstanceType) {
+			if n != nil {
+				targets.addLocator(templateCleanupLocator{NodeID: n.ID(), NodeIP: n.HostIP()})
+			}
+		}
+	}
+	if err := runReplicaCleanup(ctx, templateID, targets.Locators, backend); err != nil {
 		return err
 	}
 	if err := runArtifactCleanup(ctx, templateID, targets); err != nil {

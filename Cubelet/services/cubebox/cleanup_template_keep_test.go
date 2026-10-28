@@ -96,3 +96,31 @@ func TestCleanupTemplateForgedPauseLabelDoesNotKeep(t *testing.T) {
 	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode(), rsp.GetRet().GetRetMsg())
 	require.Equal(t, 1, deleted, "forged pause-id Label must not block origin GC of another sandbox's package")
 }
+
+func TestCleanupTemplateJFSOnNodeWithoutJFSIsANoop(t *testing.T) {
+	installCleanupTemplateTestHooks(t)
+	origJFS := cleanupJFSConfigured
+	t.Cleanup(func() { cleanupJFSConfigured = origJFS })
+	getLocalSnapshotForFn = func(context.Context, string, string) (*storage.SnapshotCatalogEntry, error) {
+		return nil, storage.ErrSnapshotCatalogNotFound
+	}
+	cleanupIsCowBackend = func() bool { return true }
+	swept := 0
+	cleanupObjectsFor = func(context.Context, string, []storage.CowObjectRef) error {
+		swept++
+		return storage.ErrJFSNotConfigured
+	}
+	req := &cubebox.CleanupTemplateRequest{TemplateID: "tpl-shared-0000000000001", Backend: "jfs"}
+
+	cleanupJFSConfigured = func() bool { return false }
+	rsp, err := (&service{}).cleanupTemplate(context.Background(), req, true)
+	require.NoError(t, err)
+	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode(), rsp.GetRet().GetRetMsg())
+	require.Zero(t, swept)
+
+	cleanupJFSConfigured = func() bool { return true }
+	rsp, err = (&service{}).cleanupTemplate(context.Background(), req, true)
+	require.NoError(t, err)
+	require.NotEqual(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
+	require.Equal(t, 1, swept)
+}

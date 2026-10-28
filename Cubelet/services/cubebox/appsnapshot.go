@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -495,7 +496,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	snapshotSuccess = true
 	rsp.RootfsVol = rootfsObject.Name
 	rsp.MemoryVol = memoryObject.Name
 	rsp.RootfsKind = rootfsObject.Kind
@@ -535,6 +535,11 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		ComponentVersions: frozenVersions,
 		Kind:              storage.CatalogKindTemplate,
 	}); err != nil {
+		if backend == cow.BackendJFS {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", err)
+			return rsp, nil
+		}
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and the
 		// deterministic-name cleanup fallback keeps working. Log loudly so
@@ -545,8 +550,14 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
 	}
 
-	// Template disks stay node-local. Pause / CommitSandbox export the
-	// sandbox snapshot package, not the template.
+	// JFS templates become eligible for cross-node use when this call succeeds.
+	// The builder must drain its writeback cache before Master publishes READY.
+	if err := waitJFSTemplateUpload(ctx, backend, templateID); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("jfs template is not shared-ready: %v", err)
+		return rsp, nil
+	}
+	snapshotSuccess = true
 
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"

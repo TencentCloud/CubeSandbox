@@ -1825,6 +1825,52 @@ case "${ONE_CLICK_ENABLE_S3LVOL}" in
   0|1) ;;
   *) die "ONE_CLICK_ENABLE_S3LVOL must be 0 or 1 (got: '${ONE_CLICK_ENABLE_S3LVOL}')" ;;
 esac
+# JuiceFS is configured after installation with the public init/mount scripts.
+# Persisting the switch and client settings here makes the same .env usable for
+# control and compute installations without enabling the mount prematurely.
+ONE_CLICK_ENABLE_JFS="${ONE_CLICK_ENABLE_JFS:-0}"
+case "${ONE_CLICK_ENABLE_JFS}" in
+  0|1) ;;
+  *) die "ONE_CLICK_ENABLE_JFS must be 0 or 1 (got: '${ONE_CLICK_ENABLE_JFS}')" ;;
+esac
+CUBE_JFS_META_URL="${CUBE_JFS_META_URL:-}"
+CUBE_JFS_META_PASSWORD="${CUBE_JFS_META_PASSWORD:-}"
+CUBE_JFS_VOLUME_NAME="${CUBE_JFS_VOLUME_NAME:-cube}"
+CUBE_JFS_STORAGE="${CUBE_JFS_STORAGE:-s3}"
+CUBE_JFS_BUCKET="${CUBE_JFS_BUCKET:-}"
+CUBE_JFS_ACCESS_KEY="${CUBE_JFS_ACCESS_KEY:-}"
+CUBE_JFS_SECRET_KEY="${CUBE_JFS_SECRET_KEY:-}"
+CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE:-juicedata/mount:ce-v1.4.1}"
+CUBE_JFS_CONTAINER_NAME="${CUBE_JFS_CONTAINER_NAME:-cube-sandbox-jfs}"
+CUBE_JFS_MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
+CUBE_JFS_ROOT="${CUBE_JFS_ROOT:-cube}"
+CUBE_JFS_CACHE_DIR="${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
+CUBE_JFS_CACHE_SIZE_MB="${CUBE_JFS_CACHE_SIZE_MB:-102400}"
+CUBE_JFS_MOUNT_OPTS="${CUBE_JFS_MOUNT_OPTS:---writeback}"
+if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && -z "${CUBE_JFS_META_URL}" ]]; then
+  if [[ "${DEPLOY_ROLE}" == "compute" && -n "${ONE_CLICK_CONTROL_PLANE_IP:-}" ]]; then
+    CUBE_JFS_META_URL="redis://${ONE_CLICK_CONTROL_PLANE_IP}:6380/0"
+    log "derived CUBE_JFS_META_URL from ONE_CLICK_CONTROL_PLANE_IP"
+  elif [[ "${DEPLOY_ROLE}" != "compute" && -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
+    CUBE_JFS_META_URL="redis://${CUBE_SANDBOX_NODE_IP}:6380/0"
+    log "derived CUBE_JFS_META_URL from CUBE_SANDBOX_NODE_IP"
+  fi
+fi
+if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && -z "${CUBE_JFS_BUCKET}" && "${DEPLOY_ROLE}" != "compute" \
+    && "${CUBE_SANDBOX_MINIO_ENABLED:-0}" == "1" && -n "${CUBE_S3_ENDPOINT:-}" ]]; then
+  CUBE_JFS_BUCKET="${CUBE_S3_ENDPOINT%/}/cube-jfs"
+  log "derived CUBE_JFS_BUCKET from bundled MinIO endpoint"
+fi
+if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && -z "${CUBE_JFS_META_URL}" ]]; then
+  die "CUBE_JFS_META_URL is required when JuiceFS is enabled and no node/control-plane IP is available"
+fi
+if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && -n "${CUBE_JFS_META_PASSWORD}" \
+    && "${CUBE_JFS_META_URL}" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*:[^/@]+@ ]]; then
+  die "do not set both CUBE_JFS_META_PASSWORD and a password in CUBE_JFS_META_URL"
+fi
+if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && "${DEPLOY_ROLE}" != "compute" && -z "${CUBE_JFS_BUCKET}" ]]; then
+  die "CUBE_JFS_BUCKET is required when JuiceFS is enabled"
+fi
 RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
 RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
 # Chunk cache region on the WAL image. The image is created once, its total
@@ -2177,6 +2223,21 @@ fi
 # rcow_common.sh) so the systemd unit picks them up via EnvironmentFile
 # without re-deriving them, and so `down.sh` / upgrade knows the intent.
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_JFS" "${ONE_CLICK_ENABLE_JFS}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_META_URL" "${CUBE_JFS_META_URL}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_META_PASSWORD" "${CUBE_JFS_META_PASSWORD}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_VOLUME_NAME" "${CUBE_JFS_VOLUME_NAME}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_STORAGE" "${CUBE_JFS_STORAGE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_BUCKET" "${CUBE_JFS_BUCKET}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_ACCESS_KEY" "${CUBE_JFS_ACCESS_KEY}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_SECRET_KEY" "${CUBE_JFS_SECRET_KEY}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_IMAGE" "${CUBE_JFS_IMAGE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_CONTAINER_NAME" "${CUBE_JFS_CONTAINER_NAME}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_MOUNT_PATH" "${CUBE_JFS_MOUNT_PATH}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_ROOT" "${CUBE_JFS_ROOT}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_CACHE_DIR" "${CUBE_JFS_CACHE_DIR}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_CACHE_SIZE_MB" "${CUBE_JFS_CACHE_SIZE_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_MOUNT_OPTS" "${CUBE_JFS_MOUNT_OPTS}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_STORE_BACKEND" "${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
@@ -2248,6 +2309,12 @@ else
   rm -f /usr/local/bin/cubemastercli
   rm -f /usr/local/bin/cubeopscli
 fi
+# Remove entrypoints shipped by the earlier JuiceFS setup layout. Operator
+# scripts now live together under ${INSTALL_PREFIX}/scripts/cube-jfs/.
+rm -f /usr/local/bin/cube-jfs-setup.sh \
+  /usr/local/bin/cube-jfs-init.sh \
+  /usr/local/bin/cube-jfs-mount.sh \
+  /usr/local/bin/cube-jfs-check.sh
 
 restore_selinux_contexts
 # Persist the L7 skb->mark config before the units that consume it start.

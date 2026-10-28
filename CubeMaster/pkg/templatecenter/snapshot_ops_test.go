@@ -821,6 +821,33 @@ func TestDeleteSnapshotWithZeroRefsStartsPhysicalDelete(t *testing.T) {
 	}
 }
 
+func TestGlobalSnapshotDeleteAbortsWhenCrossNodeRuntimeRefReappears(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	origCount := countActiveSnapshotRuntimeRefsFn
+	t.Cleanup(func() { countActiveSnapshotRuntimeRefsFn = origCount })
+	countActiveSnapshotRuntimeRefsFn = func(ctx context.Context, snapshotID string) (int64, error) {
+		if snapshotID != "snap-global" {
+			t.Fatalf("snapshotID = %q, want snap-global", snapshotID)
+		}
+		return 1, nil
+	}
+
+	sentinel := errors.New("delete returned to tombstone")
+	origTx := withStoreTx
+	t.Cleanup(func() { withStoreTx = origTx })
+	withStoreTx = func(ctx context.Context, fn func(*gorm.DB) error) error {
+		return sentinel
+	}
+
+	err := abortSnapshotDeleteIfRefsReappeared(context.Background(), "job-delete", "snap-global")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("abortSnapshotDeleteIfRefsReappeared error = %v, want %v", err, sentinel)
+	}
+}
+
 func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 	origReplicaCleanup := runReplicaCleanup
 	origMetadataCleanup := runMetadataCleanup

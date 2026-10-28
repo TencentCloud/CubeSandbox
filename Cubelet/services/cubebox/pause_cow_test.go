@@ -6,9 +6,12 @@ package cubebox
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -69,6 +72,30 @@ func TestStampPauseSnapshotID(t *testing.T) {
 	}
 	if got := stampedPauseSnapshotID(sb); got != "snap-abc123def456abc123def456" {
 		t.Fatalf("stampedPauseSnapshotID=%q", got)
+	}
+}
+
+func TestMarkPauseDestroyPending(t *testing.T) {
+	t.Parallel()
+	if markPauseDestroyPending(nil, "request-1") {
+		t.Fatal("nil sandbox must not be marked")
+	}
+
+	sb := newCubeboxWithStatusForTest("sb-pause-destroy", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	})
+	if !markPauseDestroyPending(sb, "request-1") {
+		t.Fatal("first mark must report a state change")
+	}
+	if sb.UserMarkDeletedTime == nil || sb.DeleteRequestID != "request-1" {
+		t.Fatalf("delete marker not populated: time=%v request=%q", sb.UserMarkDeletedTime, sb.DeleteRequestID)
+	}
+	first := sb.UserMarkDeletedTime
+	if markPauseDestroyPending(sb, "request-2") {
+		t.Fatal("second mark must not request another store sync")
+	}
+	if sb.UserMarkDeletedTime != first || sb.DeleteRequestID != "request-1" {
+		t.Fatal("idempotent mark changed the original delete marker")
 	}
 }
 
@@ -277,6 +304,26 @@ func TestStripUserCubeMasterLabels(t *testing.T) {
 	if got["app"] != "ok" {
 		t.Fatalf("ordinary labels must pass through, got %#v", got)
 	}
+}
+
+func TestPersistPauseStageTimings(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := &pauseStageTimings{
+		SnapshotID:          "snap-timing000000000000000001",
+		SandboxID:           "sandbox-timing",
+		Backend:             "jfs",
+		MemoryCloneMS:       12.5,
+		VMMPauseWriteSyncMS: 34.75,
+		CubeletTotalMS:      56.25,
+		RecordedAt:          time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	require.NoError(t, persistPauseStageTimings(dir, want))
+	body, err := os.ReadFile(filepath.Join(dir, want.SnapshotID+".json"))
+	require.NoError(t, err)
+	var got pauseStageTimings
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, *want, got)
 }
 
 func TestShouldKeepLivePausePackageHonorLive(t *testing.T) {

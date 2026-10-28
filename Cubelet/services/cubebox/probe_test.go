@@ -725,7 +725,7 @@ func TestProbeTimeoutMsDefault(t *testing.T) {
 			assert.Equal(t, errorcode.ErrorCode_Success, e.Code())
 
 			if tt.expectDefault {
-				assert.Equal(t, int32(100), cnt.Probe.ProbeTimeoutMs, "ProbeTimeoutMs应该被设置为默认值100")
+				assert.Equal(t, int32(defaultProbeAttemptTimeoutMs), cnt.Probe.ProbeTimeoutMs, "ProbeTimeoutMs should fall back to the default")
 			} else {
 				assert.Equal(t, tt.probeTimeoutMs, cnt.Probe.ProbeTimeoutMs, "ProbeTimeoutMs应该保持原值")
 			}
@@ -868,7 +868,7 @@ func TestProbeTimeoutMsWithPing(t *testing.T) {
 			assert.Equal(t, errorcode.ErrorCode_Success, e.Code())
 
 			if tt.expectDefault {
-				assert.Equal(t, int32(100), cnt.Probe.ProbeTimeoutMs, "ProbeTimeoutMs应该被设置为默认值100")
+				assert.Equal(t, int32(defaultProbeAttemptTimeoutMs), cnt.Probe.ProbeTimeoutMs, "ProbeTimeoutMs should fall back to the default")
 			} else {
 				assert.Equal(t, tt.probeTimeoutMs, cnt.Probe.ProbeTimeoutMs, "ProbeTimeoutMs应该保持原值")
 			}

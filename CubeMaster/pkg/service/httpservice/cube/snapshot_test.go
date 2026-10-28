@@ -707,8 +707,32 @@ func TestBindAppSnapshotTemplateReplicaRequiresReadyReplica(t *testing.T) {
 	}
 
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
-	err := bindAppSnapshotTemplateReplica(context.Background(), "tpl-missing", req)
+	err := bindAppSnapshotTemplateReplica(context.Background(), "tpl-missing", req, false)
 	assert.Error(t, err)
+}
+
+// A shared jfs template has one replica, on whichever node built it; the
+// create may land on any node, scoped or not.
+func TestBindAppSnapshotTemplateReplicaSharedTemplateIgnoresReplicaNode(t *testing.T) {
+	origResolveTemplateReadyReplicaFn := resolveTemplateReadyReplicaFn
+	t.Cleanup(func() {
+		resolveTemplateReadyReplicaFn = origResolveTemplateReadyReplicaFn
+	})
+	var preferred []string
+	resolveTemplateReadyReplicaFn = func(ctx context.Context, templateID, preferredNodeID string) (templatecenter.ReplicaStatus, error) {
+		preferred = append(preferred, preferredNodeID)
+		return templatecenter.ReplicaStatus{NodeID: "builder", AgentVersion: "v1"}, nil
+	}
+
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}, DistributionScope: []string{"node-c"}}
+	assert.NoError(t, bindAppSnapshotTemplateReplica(context.Background(), "tpl-1", req, true))
+	assert.Equal(t, []string{""}, preferred)
+	assert.Equal(t, "true", req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
+	assert.Equal(t, "v1", req.Annotations[constants.CubeAnnotationComponentCubeAgentVersion])
+
+	assert.True(t, sharedJFSTemplate(&types.CreateCubeSandboxReq{Backend: "jfs"}, templatecenter.TemplateKindTemplate))
+	assert.False(t, sharedJFSTemplate(&types.CreateCubeSandboxReq{Backend: "jfs"}, templatecenter.TemplateKindSnapshot))
+	assert.False(t, sharedJFSTemplate(&types.CreateCubeSandboxReq{Backend: "xfs"}, templatecenter.TemplateKindTemplate))
 }
 
 func TestCompatibleNodesBySnapshot(t *testing.T) {

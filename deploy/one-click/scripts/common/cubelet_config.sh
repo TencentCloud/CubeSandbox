@@ -178,3 +178,65 @@ write_cubelet_s3lvol_enable() {
   mv -f "${tmp}" "${config_path}"
   log "updated cubelet cow.s3 enable=${enable_toml}"
 }
+
+# write_cubelet_jfs_config CONFIG_PATH MOUNT_PATH ROOT CACHE_DIR [0|1]
+# Enable the shared JuiceFS backend and keep its paths aligned with the mount
+# service. The section is part of current Cubelet configs; refusing a missing
+# section avoids silently appending it under the wrong TOML parent.
+write_cubelet_jfs_config() {
+  local config_path="${1:-}"
+  local mount_path="${2:-}"
+  local root="${3:-}"
+  local cache_dir="${4:-}"
+  local flag="${5:-1}"
+  local enable_toml
+  local header='[plugins."io.cubelet.internal.v1.storage".cow.jfs]'
+  local tmp
+  [[ -f "${config_path}" ]] || die "required file not found: ${config_path}"
+  [[ -n "${mount_path}" && -n "${root}" && -n "${cache_dir}" ]] \
+    || die "write_cubelet_jfs_config requires mount_path, root and cache_dir"
+  case "${flag}" in
+    0) enable_toml=false ;;
+    1) enable_toml=true ;;
+    *) die "write_cubelet_jfs_config enable must be 0 or 1" ;;
+  esac
+  for value in "${mount_path}" "${root}" "${cache_dir}"; do
+    [[ "${value}" != *$'\n'* && "${value}" != *'"'* ]] \
+      || die "invalid newline or quote in JuiceFS path/root"
+  done
+  grep -Fq "${header}" "${config_path}" \
+    || die "Cubelet config is missing ${header}"
+  tmp="$(mktemp "${config_path}.XXXXXX")"
+  awk -v header="${header}" -v enable_toml="${enable_toml}" -v mount_path="${mount_path}" \
+      -v root="${root}" -v cache_dir="${cache_dir}" '
+    function is_table(line, name, t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return t == name
+    }
+    function emit_missing() {
+      if (!seen_enable) print "    enable = " enable_toml
+      if (!seen_mount) print "    mount_path = \"" mount_path "\""
+      if (!seen_root) print "    root = \"" root "\""
+      if (!seen_cache) print "    cache_dir = \"" cache_dir "\""
+    }
+    is_table($0, header) { in_jfs = 1; print; next }
+    in_jfs && /^[[:space:]]*\[/ { emit_missing(); in_jfs = 0 }
+    in_jfs && /^[[:space:]]*enable[[:space:]]*=/ {
+      print "    enable = " enable_toml; seen_enable = 1; next
+    }
+    in_jfs && /^[[:space:]]*mount_path[[:space:]]*=/ {
+      print "    mount_path = \"" mount_path "\""; seen_mount = 1; next
+    }
+    in_jfs && /^[[:space:]]*root[[:space:]]*=/ {
+      print "    root = \"" root "\""; seen_root = 1; next
+    }
+    in_jfs && /^[[:space:]]*#?[[:space:]]*cache_dir[[:space:]]*=/ {
+      print "    cache_dir = \"" cache_dir "\""; seen_cache = 1; next
+    }
+    { print }
+    END { if (in_jfs) emit_missing() }
+  ' "${config_path}" > "${tmp}"
+  mv -f "${tmp}" "${config_path}"
+  log "updated Cubelet cow.jfs enable=${enable_toml} at ${mount_path}"
+}

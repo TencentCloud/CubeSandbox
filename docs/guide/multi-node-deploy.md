@@ -285,6 +285,25 @@ sudo ./down.sh
 
 In compute-node mode, this only stops `cubelet`. It does not affect the control plane or other compute nodes.
 
+### Uninstall
+
+Run the uninstall separately on every control and compute node being removed. It deletes CubeSandbox services, containers, volumes, network configuration, runtime data, and logs from the current node. Uninstalling the control node also removes the cluster's templates, sandboxes, and snapshots. Back up anything you need, and follow [Node Operations](./node-operations.md) to isolate and clean a compute node before removing it.
+
+Run these commands on every node to uninstall:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+Once the check passes and you no longer need the uninstall script or installed bundle, remove the preserved toolbox directory manually:
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> The uninstall script does not delete Cube-related Docker images. To remove them as well, follow the command printed by the script.
+
 ### Reinstall
 
 To reinstall a compute node, simply run `install-compute.sh` again. The script automatically stops the existing deployment before installing.

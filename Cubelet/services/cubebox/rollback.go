@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -125,11 +127,15 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	// snap into a disk this sandbox owns and read the config from there. XFS
 	// is a no-op and keeps the catalog MetaDir.
 	// Same-node only: catalog miss (no local package) already failed above.
-	rollbackMetaDir, err := storage.MountRollbackSnapshotMetadata(ctx, backend, req.GetSnapshotID(), req.GetSandboxID())
-	if err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
-		return rsp, nil
+	globalJFS := memoryKind == globalJFSRollbackMemoryKind
+	rollbackMetaDir := ""
+	if !globalJFS {
+		rollbackMetaDir, err = storage.MountRollbackSnapshotMetadata(ctx, backend, req.GetSnapshotID(), req.GetSandboxID())
+		if err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
+			return rsp, nil
+		}
 	}
 	if rollbackMetaDir != "" {
 		metaDir = rollbackMetaDir
@@ -156,16 +162,39 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 	rsp.OldRootfsVol = currentRootfs.Name
 
-	refs, err := storage.ResolveRollbackRefsFor(ctx, backend, rootfsVol, memoryVol, memoryKind)
-	if err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
-		return rsp, nil
+	var refs *storage.CowRollbackSnapshotRefs
+	if globalJFS {
+		refs = &storage.CowRollbackSnapshotRefs{
+			Rootfs: &storage.CowSnapshotObject{
+				Name:         filepath.Base(rootfsVol),
+				Kind:         storage.CowKindSnapshot,
+				DevPath:      rootfsVol,
+				SharedSource: true,
+			},
+			Memory: &storage.CowSnapshotObject{
+				Name:         filepath.Base(memoryVol),
+				Kind:         storage.CowKindSnapshot,
+				DevPath:      memoryVol,
+				SharedSource: true,
+			},
+		}
+	} else {
+		refs, err = storage.ResolveRollbackRefsFor(ctx, backend, rootfsVol, memoryVol, memoryKind)
+		if err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
+			return rsp, nil
+		}
 	}
 	restored := false
 	defer func() { deactivateRollbackPackageObjects(ctx, backend, refs, restored) }()
 
-	newRootfs, err := storage.DeriveRollbackRootfsFor(ctx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
+	var newRootfs *storage.CowSnapshotObject
+	if globalJFS {
+		newRootfs, err = storage.DeriveRollbackRootfsFromSharedJFS(ctx, req.GetSandboxID(), refs.Rootfs.DevPath, req.GetNewGen(), req.GetDesiredSize())
+	} else {
+		newRootfs, err = storage.DeriveRollbackRootfsFor(ctx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
+	}
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to derive rollback rootfs: %v", err)
@@ -342,10 +371,23 @@ func resolveRollbackTargets(ctx context.Context, backend string, req *cubebox.Ro
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, req.GetSnapshotID())
 	if err != nil {
+		if backend == cow.BackendJFS && errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
+			global, globalErr := storage.FindJFSGlobalRuntimeSnapshot(req.GetSnapshotID())
+			if globalErr == nil {
+				if strings.TrimSpace(global.MemoryPath) == "" {
+					return "", "", "", "", fmt.Errorf("rollback: global snapshot %s has no memory image", req.GetSnapshotID())
+				}
+				return global.RootfsPath, global.MemoryPath, globalJFSRollbackMemoryKind,
+					filepath.Join(global.Home, storage.SnapshotMetadataDir), nil
+			}
+			err = globalErr
+		}
 		return "", "", "", "", fmt.Errorf("rollback: local snapshot catalog lookup for %s failed: %w", req.GetSnapshotID(), err)
 	}
 	return entry.RootfsVol, entry.MemoryVol, entry.MemoryKind, entry.MetaDir, nil
 }
+
+const globalJFSRollbackMemoryKind = "global_jfs"
 
 // bumpRollbackNetworkGeneration bumps the sandbox's network generation so the
 // dataplane resets now-stale TCP sessions after a rollback. Best effort; the
@@ -456,10 +498,10 @@ func deactivateRollbackPackageObjects(ctx context.Context, backend string, refs 
 		return
 	}
 	keepMemoryAttached := restored && storage.IsS3Backend(backend)
-	if !keepMemoryAttached && refs.Memory != nil && refs.Memory.Name != "" {
+	if !keepMemoryAttached && refs.Memory != nil && refs.Memory.Name != "" && !refs.Memory.SharedSource {
 		_ = deactivateRollbackObject(ctx, backend, refs.Memory.Name, refs.Memory.Kind)
 	}
-	if refs.Rootfs != nil && refs.Rootfs.Name != "" {
+	if refs.Rootfs != nil && refs.Rootfs.Name != "" && !refs.Rootfs.SharedSource {
 		_ = deactivateRollbackObject(ctx, backend, refs.Rootfs.Name, refs.Rootfs.Kind)
 	}
 }

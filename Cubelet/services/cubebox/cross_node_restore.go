@@ -46,13 +46,13 @@ func isCrossNodeRestore(ann map[string]string) bool {
 // The rootfs and memory are left to the storage plugin, which imports them
 // under the same sandbox-private naming once the create is under way, so a
 // create that dies halfway leaves only disks destroy already knows about.
-func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (context.Context, error) {
 	if req == nil {
-		return nil
+		return ctx, nil
 	}
 	ann := req.GetAnnotations()
 	if !isCrossNodeRestore(ann) {
-		return nil
+		return ctx, nil
 	}
 	// Everything below is rejection rather than fallback: Master already
 	// said the package is not on this node, so anything missing here makes
@@ -60,28 +60,34 @@ func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxReq
 	// later on what would look like a corrupt catalog.
 	backend, err := storageBackendFromAnnotations(ann)
 	if err != nil {
-		return fmt.Errorf("cross-node restore backend: %w", err)
+		return ctx, fmt.Errorf("cross-node restore backend: %w", err)
 	}
-	if backend != cow.BackendS3 {
-		return fmt.Errorf("cross-node restore needs the s3 backend, got %s", backend)
+	if !storage.CrossNodeImportBackend(backend) {
+		return ctx, fmt.Errorf("cross-node restore needs the s3 or jfs backend, got %s", backend)
 	}
 	if cow.ParseRemoteUUIDs(ann[constants.MasterAnnotationSnapshotRemoteUUIDs]).Empty() {
-		return fmt.Errorf("cross-node restore carries no remote_uuids")
+		return ctx, fmt.Errorf("cross-node restore carries no remote_uuids")
 	}
 	sandboxID, err := ensureCrossNodeSandboxID(req)
 	if err != nil {
-		return err
+		return ctx, err
 	}
 	imp := storage.CrossNodeSandboxImport(req.GetAnnotations())
 	if imp == nil {
-		return fmt.Errorf("cross-node restore of %s is incomplete", sandboxID)
+		return ctx, fmt.Errorf("cross-node restore of %s is incomplete", sandboxID)
+	}
+	if imp.SharedJFSRuntimeSnapshot {
+		ctx, err = storage.WithRegisteredSharedJFSRuntimeSnapshot(ctx, imp)
+		if err != nil {
+			return ctx, fmt.Errorf("load registered shared jfs snapshot for cross-node restore of %s: %w", sandboxID, err)
+		}
 	}
 	dir, err := imp.EnsureMetadata(ctx)
 	if err != nil {
-		return fmt.Errorf("import metadata for cross-node restore of %s: %w", sandboxID, err)
+		return ctx, fmt.Errorf("import metadata for cross-node restore of %s: %w", sandboxID, err)
 	}
 	log.G(ctx).Infof("cross-node restore %s: imported metadata at %s", sandboxID, dir)
-	return nil
+	return ctx, nil
 }
 
 // ensureCrossNodeSandboxID pins the id this restore will run under, minting

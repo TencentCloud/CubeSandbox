@@ -140,7 +140,7 @@ flowchart TB
 | `wait-node-prep`（init） | `images.waitNodePrep` | 只读 hostPath `node-prep-ready` 自描述指纹；匹配后退出，主容器才启动 |
 | `cubelet` | `images.cubelet` | self-stage 后启动；包含内嵌 network runtime 和 CubeVS 工具 |
 | `cube-egress` / `cube-egress-net` | 对应镜像 | 透明出站代理与主机 TPROXY 规则 |
-| `cube-s3lvol` | `images.cubeS3lvol` | 可选；SPDK NVMe/TCP target，用于 S3 CoW / 跨机快照 |
+| `cube-s3lvol` | `images.cubeS3lvol` | 可选；SPDK NVMe/TCP target，用于 S3 CoW / 跨机迁移 |
 
 **容器名 / volumeMount / securityContext / imagePullPolicy 变更同样 recreate**。
 

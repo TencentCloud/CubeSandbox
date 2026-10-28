@@ -56,6 +56,7 @@ func TestPauseResumeClonesLiveMemory(t *testing.T) {
 	require.False(t, pauseResumeClonesLiveMemory(""))
 	require.False(t, pauseResumeClonesLiveMemory(cow.BackendXFS))
 	require.False(t, pauseResumeClonesLiveMemory("cubecow"))
+	require.False(t, pauseResumeClonesLiveMemory(cow.BackendJFS))
 	require.True(t, pauseResumeClonesLiveMemory(cow.BackendS3))
 }
 

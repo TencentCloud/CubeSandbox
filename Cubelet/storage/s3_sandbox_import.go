@@ -36,7 +36,18 @@ import (
 // byte copy of the package's own, and the description travels on it.
 type SandboxImport struct {
 	SandboxID string
-	UUIDs     *cow.RemoteUUIDs
+	// Backend is s3 (UUIDs are s3lvol exports) or jfs (UUIDs are paths in
+	// the origin node's tree on the shared JuiceFS volume).
+	Backend string
+	UUIDs   *cow.RemoteUUIDs
+	// SnapshotID identifies the immutable runtime snapshot whose paths came
+	// from Master's READY registration.
+	SnapshotID string
+	// SharedJFSRuntimeSnapshot means this import restores an immutable
+	// user-created runtime snapshot. Its metadata and memory remain owned by
+	// the origin package and are safe to read directly from the shared
+	// JuiceFS namespace. Rootfs is still imported under the sandbox name.
+	SharedJFSRuntimeSnapshot bool
 }
 
 // CrossNodeSandboxImport reports the imports a create owes, or nil when this
@@ -64,7 +75,8 @@ func CrossNodeSandboxImport(ann map[string]string) *SandboxImport {
 	if raw == "" {
 		return nil
 	}
-	if backend, err := cow.NormalizeBackend(raw); err != nil || backend != cow.BackendS3 {
+	backend, err := cow.NormalizeBackend(raw)
+	if err != nil || !CrossNodeImportBackend(backend) {
 		return nil
 	}
 	id := strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID])
@@ -75,7 +87,22 @@ func CrossNodeSandboxImport(ann map[string]string) *SandboxImport {
 	if uuids.Empty() {
 		return nil
 	}
-	return &SandboxImport{SandboxID: id, UUIDs: uuids}
+	sharedRuntime := backend == cow.BackendJFS &&
+		strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID]) != "" &&
+		strings.TrimSpace(ann[constants.MasterAnnotationPauseSnapshotID]) == ""
+	return &SandboxImport{
+		SandboxID:                id,
+		Backend:                  backend,
+		UUIDs:                    uuids,
+		SnapshotID:               strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID]),
+		SharedJFSRuntimeSnapshot: sharedRuntime,
+	}
+}
+
+// CrossNodeImportBackend reports whether a package of backend can be
+// restored on a node other than the one that made it.
+func CrossNodeImportBackend(backend string) bool {
+	return backend == cow.BackendS3 || backend == cow.BackendJFS
 }
 
 // SandboxObjectNamePrefix is what every disk minted for a sandbox is named
@@ -102,7 +129,14 @@ func SandboxMemoryName(sandboxID string) string {
 // the directory the restore reads its description from, which is why it is
 // laid out like a package home even though no package lives on this node.
 func (s *SandboxImport) MetadataDir() string {
-	return SnapshotMetaDir(cow.BackendS3, SnapshotKindNormal, s.SandboxID)
+	return SnapshotMetaDir(s.backend(), SnapshotKindNormal, s.SandboxID)
+}
+
+func (s *SandboxImport) backend() string {
+	if s.Backend == cow.BackendJFS {
+		return cow.BackendJFS
+	}
+	return cow.BackendS3
 }
 
 // EnsureMetadata imports the metadata disk under the sandbox's own name and
@@ -121,6 +155,12 @@ func (s *SandboxImport) EnsureMetadata(ctx context.Context) (string, error) {
 		// have no other carrier.
 		return "", fmt.Errorf("cross-node restore of sandbox %s carries no metadata export", s.SandboxID)
 	}
+	if s.backend() == cow.BackendJFS {
+		if s.SharedJFSRuntimeSnapshot {
+			return s.sharedJFSMetadataDir(ctx)
+		}
+		return s.ensureJFSMetadata()
+	}
 	if _, err := s.importOne(ctx, S3MetadataVolumeName(s.SandboxID), "metadata", uuid); err != nil {
 		return "", err
 	}
@@ -131,12 +171,37 @@ func (s *SandboxImport) EnsureMetadata(ctx context.Context) (string, error) {
 	return dir, nil
 }
 
+// SharedJFSMemoryPath returns the immutable origin memory file for a global
+// runtime snapshot. An empty path is a valid rootfs-only snapshot.
+func (s *SandboxImport) SharedJFSMemoryPath(ctx context.Context) (string, error) {
+	if s == nil || !s.SharedJFSRuntimeSnapshot {
+		return "", fmt.Errorf("sandbox import is not a shared jfs runtime snapshot")
+	}
+	registered, err := s.registeredJFSRuntimeSnapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	return registered.memoryPath, nil
+}
+
 // Rootfs imports the package rootfs as this sandbox's disk, returning the
 // cubecow name it landed under and its device path.
 func (s *SandboxImport) Rootfs(ctx context.Context, gen uint32) (string, string, error) {
 	uuid := strings.TrimSpace(s.UUIDs.Rootfs)
 	if uuid == "" {
 		return "", "", fmt.Errorf("cross-node restore of sandbox %s carries no rootfs export", s.SandboxID)
+	}
+	if s.SharedJFSRuntimeSnapshot {
+		registered, err := s.registeredJFSRuntimeSnapshot(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		name := SandboxRootfsName(s.SandboxID, gen)
+		dev, err := importRegisteredJFSVolume(ctx, name, "rootfs", registered.rootfsPath)
+		if err != nil {
+			return "", "", err
+		}
+		return name, dev, nil
 	}
 	name := SandboxRootfsName(s.SandboxID, gen)
 	dev, err := s.importOne(ctx, name, "rootfs", uuid)
@@ -173,6 +238,9 @@ func (s *SandboxImport) Memory(ctx context.Context) (string, string, error) {
 // empty shell s3lvol leaves behind, and mounting it reports a corrupt
 // filesystem several steps later.
 func (s *SandboxImport) importOne(ctx context.Context, name, role, uuid string) (string, error) {
+	if s.backend() == cow.BackendJFS {
+		return importJFSVolume(ctx, name, role, uuid)
+	}
 	if IsS3MetadataBaseName(name) {
 		return "", fmt.Errorf("refusing to import %s onto the node-local s3 metadata base", role)
 	}

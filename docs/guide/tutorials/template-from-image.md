@@ -37,7 +37,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-> Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot.md). Omit the flag to keep the historical `xfs` path.
+> Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot/requirements.md). Omit the flag to keep the historical `xfs` path.
 
 Template creation can expose multiple ports, use a custom probe path, and pass environment variables:
 

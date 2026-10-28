@@ -136,6 +136,24 @@ type CowInlineConfig struct {
 	Log     CowLogConfig     `toml:"log"`
 	Backend CowBackendConfig `toml:"-"`
 	S3      CowS3UserConfig  `toml:"s3"`
+	JFS     CowJFSUserConfig `toml:"jfs"`
+}
+
+// CowJFSUserConfig is the operator-facing `[cow.jfs]` block. backend=jfs
+// runs the reflink Store on a JuiceFS mount: objects and packages live under
+// <mount_path>/<root>/nodes/<node_name>/ and are cloned with copy_file_range.
+type CowJFSUserConfig struct {
+	Enable    bool   `toml:"enable"`
+	MountPath string `toml:"mount_path"`
+	Root      string `toml:"root"`
+	// NodeName names this node's directory on the shared volume. Defaults
+	// to the hostname; it must be unique per node and stable across
+	// restarts.
+	NodeName string `toml:"node_name"`
+	// CacheDir is the juicefs mount --cache-dir. A package counts as
+	// uploaded, and so restorable on another node, once none of its blocks
+	// is left in the writeback staging area under it.
+	CacheDir string `toml:"cache_dir"`
 }
 
 // CowS3UserConfig is the operator-facing `[cow.s3]` block.
@@ -178,7 +196,8 @@ type CowS3BackendConfig struct {
 // live on the same FICLONE-capable filesystem as the rest of
 // cubelet's state.
 type CowReflinkBackendConfig struct {
-	RootDir *string `toml:"-"`
+	RootDir     *string `toml:"-"`
+	CloneMethod *string `toml:"-"`
 }
 
 func (c *Config) BuildCowInitJSON() ([]byte, error) {
@@ -371,6 +390,7 @@ func (c CowS3BackendConfig) toMap() map[string]any {
 func (c CowReflinkBackendConfig) toMap() map[string]any {
 	m := map[string]any{}
 	setIfNotNil(m, "root_dir", c.RootDir)
+	setIfNotNil(m, "clone_method", c.CloneMethod)
 	return m
 }
 
@@ -445,6 +465,10 @@ func init() {
 			// would silently find none with the roots still unset.
 			SetSnapshotCatalogRootsFor(cow.BackendXFS, catalogKindRoots(cow.BackendXFS)...)
 			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
+			if localStorage.config.jfsConfigured() {
+				SetSnapshotCatalogRootsFor(cow.BackendJFS, catalogKindRoots(cow.BackendJFS)...)
+			}
+			localStorage.initJFSCow(ic.Context)
 
 			if err := localStorage.init(ic); err != nil {
 				CubeLog.Errorf("plugin %s init fail:%v", constants.StorageID, err)

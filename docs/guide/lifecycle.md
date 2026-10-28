@@ -167,7 +167,7 @@ The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 | `N > 0` | start a new N-second window from resume |
 | `N < -1` | reject the request with HTTP 400 |
 
-See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
+See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (`jfs` or `s3`, with `remote_status=ready`) is documented in [Cross-Node Migration](./cross-node-snapshot/requirements.md).
 
 ### CubeProxy cache after Resume
 
@@ -288,7 +288,7 @@ The rejection travels through the following chain to reach the client: `Cubelet 
 - Disk and MvmNum are **not affected** by the ratio — pause snapshots still consume storage and the sandbox object still exists.
 - `ratio=0` is the zero-value-safe default: if this setting is never configured, behavior is identical to previous versions. Upgrades won't cause surprises.
 - This is a **node-level setting** — different nodes can use different ratios to accommodate heterogeneous hardware or tiered pools.
-- When a large batch of sandboxes on a single node wakes up simultaneously and exceeds node capacity, the control plane returns 409 with precise quota numbers. For sandboxes on the S3 backend, the scheduler can fall back to another compatible node instead — see [Cross-Node Snapshots](./cross-node-snapshot.md) for the conditions and scheduler rules.
+- When a large batch of sandboxes on a single node wakes up simultaneously and exceeds node capacity, the control plane returns 409 with precise quota numbers. For sandboxes on a shared backend, the scheduler can fall back to another compatible node — see [Cross-Node Migration](./cross-node-snapshot/requirements.md).
 
 ## Restart after exit
 

@@ -36,7 +36,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-> 加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
+> 加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot/requirements.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
 
 
 构建模板的过程可以暴露多个端口以及自定义探针路径，也可以传入环境变量

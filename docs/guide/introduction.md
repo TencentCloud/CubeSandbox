@@ -40,7 +40,7 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 | **Deployment Density** | High | Low | **Extreme (Thousands per node)** |
 | **Agent Hosting** | Manual setup | Manual setup | **✅ Native (AgentHub)** |
 | **Auto-Pause / Resume** | / | / | **✅ Platform-managed (100ms resume)** |
-| **Cross-Node Pause / Resume** | / | / | **✅ S3 backend (preview)** |
+| **Cross-Node Pause / Resume** | / | / | **✅ JFS / S3 backend (preview)** |
 | **Snapshot / Clone / Rollback** | / | / | **✅ Sub-second** |
 | **E2B SDK Compatible** | / | / | **✅ Drop-in** |
 
@@ -48,7 +48,7 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 
 * [Quick Start](./quickstart.md) — the fastest path from zero to a running sandbox.
 * [Sandbox Lifecycle](./lifecycle.md) — state model, auto-pause, auto-resume.
-* [Cross-Node Snapshots](./cross-node-snapshot.md) — resume a paused sandbox, or create one from a snapshot, on any node in the cluster (S3 backend).
+* [Cross-Node Migration](./cross-node-snapshot/requirements.md) — resume a paused sandbox, or create one from a snapshot, on another compatible node.
 * [Digital Assistant (AgentHub)](./digital-assistant.md) — host and manage AI Agent instances.
 * [Self-Build Deployment](./self-build-deploy.md) — single-machine deployment reference.
 * [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale beyond a single machine.

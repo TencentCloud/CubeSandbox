@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 // Test hooks so prepareCommitMemoryArtifact's ladder can be driven without cubecow.
@@ -165,6 +166,24 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID 
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapshotID)
 	if err != nil {
+		if backend == cow.BackendJFS && errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
+			global, globalErr := storage.FindJFSGlobalRuntimeSnapshot(snapshotID)
+			if globalErr == nil && global != nil && strings.TrimSpace(global.MemoryPath) != "" {
+				memoryKind := strings.TrimSpace(global.Entry.MemoryKind)
+				if memoryKind == "" {
+					memoryKind = storage.CowKindVolume
+				}
+				return &storage.CowSnapshotObject{
+					Name:         global.Entry.MemoryVol,
+					Kind:         memoryKind,
+					DevPath:      global.MemoryPath,
+					SharedSource: true,
+				}, nil
+			}
+			if globalErr != nil {
+				err = globalErr
+			}
+		}
 		return nil, fmt.Errorf("%w: catalog lookup for %s: %v", ErrNoBaseMemoryForIncremental, snapshotID, err)
 	}
 	memoryVol := strings.TrimSpace(entry.MemoryVol)

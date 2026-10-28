@@ -202,7 +202,7 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
 		First(&existing).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	if constants.IsS3Backend(existing.Backend) {
+	if constants.IsRemoteTrackedBackend(existing.Backend) {
 		if raw := strings.TrimSpace(exportUUIDs); raw != "" {
 			updates["export_uuids"] = raw
 			updates["remote_status"] = constants.RemoteStatusInProgress

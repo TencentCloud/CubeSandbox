@@ -389,7 +389,7 @@ This is a **shared-readable, writer-scoped** model. “Writer-scoped” means on
 - `readOnly` applies to each mount independently, but normal Linux UID, GID, mode, and ACL checks still apply. A read-write child can still return `Permission denied` if its host permissions reject the sandbox user.
 - Prefer one read-only parent and explicit read-write children. Avoid duplicate destinations and overlapping writable mounts, because ownership and the visible result become difficult to reason about.
 - Use canonical absolute `mountPath` values without `.` or `..` segments. Do not rely on input order to resolve overlapping destinations.
-- Host mounts are node-local and remain outside the sandbox snapshot. Snapshot FromSnap and Pause/Resume with a raw host mount are pinned to the origin node; an identical path on another node is not treated as the same storage. For portable cross-node snapshot restore, use a plugin Volume backed by storage that every eligible node can attach.
+- Host mounts are node-local and remain outside the sandbox snapshot. Snapshot FromSnap and Pause/Resume with a raw host mount are pinned to the origin node; an identical path on another node is not treated as the same storage. For cross-node migration, use a plugin Volume backed by storage that every eligible node can attach.
 
 ::: warning Authorization boundary
 The platform calling `Sandbox.create()` must derive `hostPath` from the authenticated sandbox owner and the applicable group boundary, such as a tenant, team, or project. Do not accept an arbitrary host path from the user, and do not mount a global root such as `/data/shared/tenants/` into a tenant sandbox: a read-only mount prevents writes but does not prevent the sandbox from reading other tenants' data.

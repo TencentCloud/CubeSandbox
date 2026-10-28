@@ -43,6 +43,10 @@ const (
 	envdInitRetryDelay                 = 25 * time.Millisecond
 	defaultEnvdInitPort                = 49983
 	missingEnvdSupportAnnotationDetail = "template does not carry envd support annotation"
+	// A just-restored guest answers its first probe only after faulting in
+	// the pages the handler touches, which can take 50-100 ms on FUSE-backed
+	// memory. Abandoning it at 100 ms costs a full probe period.
+	defaultProbeAttemptTimeoutMs = 300
 )
 
 func newEnvdInitFailure(msg string, hasEnvdCapability bool, err error) error {
@@ -98,7 +102,7 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 			c.Probe.PeriodMs = 2
 		}
 		if c.GetProbe().GetProbeTimeoutMs() <= 5 {
-			c.Probe.ProbeTimeoutMs = 100
+			c.Probe.ProbeTimeoutMs = defaultProbeAttemptTimeoutMs
 		}
 		cfg := &telnet.ProbeConfig{
 			Addr:             ci.IP,

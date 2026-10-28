@@ -167,7 +167,7 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 | `N > 0` | 从恢复时刻起重新开 N 秒窗口 |
 | `N < -1` | 拒绝请求并返回 HTTP 400 |
 
-可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（S3 后端且 `remote_status=ready`）见 [跨机快照](./cross-node-snapshot.md)。
+可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（`jfs` 或 `s3`，且 `remote_status=ready`）见[跨机迁移](./cross-node-snapshot/requirements.md)。
 
 ### Resume 后的 CubeProxy 缓存
 
@@ -288,7 +288,7 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 - 磁盘和 MvmNum **不受 ratio 影响**——暂停快照始终占用存储空间，沙箱对象始终存在。
 - `ratio=0` 是零值安全的默认值：如果从未配置过此项，行为与旧版本完全一致，升级不会产生意外。
 - 此项为**节点级配置**，不同节点可以设置不同的比值，灵活应对异构硬件或分池部署的需求。
-- 当节点上一大批沙箱同时被唤醒、单节点无法承载时，控制面会返回 409 并给出具体配额数字。对使用 S3 后端的沙箱，调度器可以回退到其它兼容节点恢复——跨机条件与调度规则见[跨机快照](./cross-node-snapshot.md)。
+- 当节点上一大批沙箱同时被唤醒、单节点无法承载时，控制面会返回 409 并给出具体配额数字。使用共享后端时，调度器可以回退到其他兼容节点——具体条件见[跨机迁移](./cross-node-snapshot/requirements.md)。
 
 ## 进程退出后的重启
 

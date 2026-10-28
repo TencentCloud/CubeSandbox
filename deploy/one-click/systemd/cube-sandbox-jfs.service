@@ -1,0 +1,26 @@
+[Unit]
+Description=Cube Sandbox JuiceFS mount container (backend=jfs storage)
+After=network-online.target
+Wants=network-online.target
+After=docker.service
+Requires=docker.service
+Before=cube-sandbox-cubelet.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+RequiresMountsFor=/data/cubelet
+# Shipped but not enabled by default: `systemctl enable --now` it and set
+# [cow.jfs] enable = true in the Cubelet config. Cubelet does not Require=
+# this unit; while the mount is down jfs requests fail and xfs/s3 keep working.
+
+[Service]
+Type=simple
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-jfs-mount.sh start
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-jfs-mount.sh stop
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=120s
+TimeoutStopSec=60s
+
+[Install]
+WantedBy=cube-sandbox-control.target
+WantedBy=cube-sandbox-compute.target

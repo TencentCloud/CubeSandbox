@@ -237,6 +237,28 @@ lsmod | grep kvm_pvm
 
 PVM 环境就绪后，后续流程与标准部署完全一致。请参阅快速开始中的[第三步：制作模板](./quickstart.md#第三步制作模板)，完成模板创建并运行你的第一个沙箱。
 
+## 卸载
+
+one-click 安装提供完整卸载脚本。卸载会停止并删除 CubeSandbox 服务、容器、数据卷、网络配置、运行数据和日志，已有模板、沙箱及快照数据也会被删除。执行前请先备份需要保留的数据。
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+```
+
+卸载完成后，可以检查是否仍有 CubeSandbox 残留：
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+确认检查通过且不再需要卸载脚本和安装包后，最后手动删除保留的工具目录：
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> 该卸载脚本不会卸载 PVM 宿主机内核，也不会删除 Cube 相关的 Docker 镜像。如果需要删除镜像，可以根据脚本提示手动删除。
+
 ## 常见问题
 
 **Q1：安装日志显示 `using ordinary guest kernel`，而非 PVM guest kernel**

@@ -404,7 +404,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, rsp.TemplateID); err != nil {
 		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
 	}
-	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
+	if raw := uploadRemoteUUIDs(ctx, backend, rsp.TemplateID); raw != "" {
 		rsp.RemoteUuids = raw
 	}
 	// Publish the completed package and component versions together. On a
@@ -726,6 +726,7 @@ var (
 	cleanupReleaseS3Metadata   = storage.ReleaseS3MetadataVolume
 	cleanupObjectsFor          = storage.CleanupObjectsFor
 	cleanupTemplateLocalDataFn = storage.CleanupTemplateLocalData
+	cleanupJFSConfigured       = storage.JFSConfigured
 )
 
 // cleanupTemplate removes a catalog package. honorLivePauseKeep is true for
@@ -773,6 +774,11 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 				entry = alt
 			}
 		}
+	}
+	// Master asks every node to drop a shared jfs template, and a node
+	// without jfs never held one.
+	if entry == nil && backend == cow.BackendJFS && !cleanupJFSConfigured() {
+		return rsp, nil
 	}
 	if shouldKeepLivePausePackage(honorLivePauseKeep, s.listCubeboxes(), rsp.TemplateID, catalogKindForKeep(entry)) {
 		log.G(ctx).Infof("CleanupTemplate %s: keeping pause package; a live sandbox still restores from it",
