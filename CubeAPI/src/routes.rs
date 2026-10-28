@@ -266,7 +266,7 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
                     .and_then(|value| value.to_str().ok())
                     .filter(|value| uuid::Uuid::parse_str(value).is_ok())
                     .unwrap_or("unavailable");
-                tracing::info_span!("http_request", method = %request.method(), request_id = %id)
+                tracing::info_span!("http_request", method = %request.method(), path = %request.uri().path(), request_id = %id)
             }))
             .layer(TimeoutLayer::new(timeout))
             .layer(CompressionLayer::new())
