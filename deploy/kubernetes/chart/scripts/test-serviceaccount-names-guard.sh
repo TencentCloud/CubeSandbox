@@ -93,6 +93,28 @@ out.write_text("")  # not found -> empty file
 PY
 }
 
+# proxy_hostusers <rendered.yaml>
+# Prints the hostUsers value from the cube-proxy Deployment pod spec, or ""
+# when the field is absent from that Deployment.
+proxy_hostusers() {
+  python3 - "$1" <<'PY'
+import pathlib, re, sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+for doc in text.split("\n---\n"):
+    body = f"\n{doc}\n"
+    if "\nkind: Deployment\n" not in body:
+        continue
+    if "\n    app.kubernetes.io/component: cube-proxy\n" not in body:
+        continue
+    m = re.search(r"(?m)^ {6}hostUsers:\s*(\S+)\s*$", doc)
+    sys.stdout.write((m.group(1) if m else "") + "\n")
+    sys.exit(0)
+
+raise SystemExit("no cube-proxy Deployment found")
+PY
+}
+
 # ===========================================================================
 # cube-node  (top-level serviceAccount)
 # ===========================================================================
@@ -292,23 +314,33 @@ ok "master disabled -> SA not rendered (create=true ignored)"
 # cubeProxy.hostUsers
 # ===========================================================================
 
-# hostUsers=null (default) -> field absent
+# hostUsers=null (default) -> field absent from the proxy Deployment
 render "$TMP_DIR/hu-default.yaml"
-if grep -q 'hostUsers:' "$TMP_DIR/hu-default.yaml"; then
-  fail "hostUsers must be absent when cubeProxy.hostUsers=null (default)"
-fi
+val="$(proxy_hostusers "$TMP_DIR/hu-default.yaml")"
+[ -z "$val" ] \
+  || fail "hostUsers must be absent when cubeProxy.hostUsers=null (default), got '$val'"
 ok "proxy hostUsers=null (default) -> field absent"
 
 # hostUsers=false -> field present and false
 render "$TMP_DIR/hu-false.yaml" --set cubeProxy.hostUsers=false
-grep -q 'hostUsers: false' "$TMP_DIR/hu-false.yaml" \
-  || fail "expected 'hostUsers: false' in proxy Deployment"
+val="$(proxy_hostusers "$TMP_DIR/hu-false.yaml")"
+[ "$val" = "false" ] \
+  || fail "expected 'hostUsers: false' in proxy Deployment, got '$val'"
 ok "proxy hostUsers=false -> hostUsers: false"
 
 # hostUsers=true -> field present and true
 render "$TMP_DIR/hu-true.yaml" --set cubeProxy.hostUsers=true
-grep -q 'hostUsers: true' "$TMP_DIR/hu-true.yaml" \
-  || fail "expected 'hostUsers: true' in proxy Deployment"
+val="$(proxy_hostusers "$TMP_DIR/hu-true.yaml")"
+[ "$val" = "true" ] \
+  || fail "expected 'hostUsers: true' in proxy Deployment, got '$val'"
 ok "proxy hostUsers=true -> hostUsers: true"
+
+# hostUsers=<non-bool> -> render-time failure
+if render "$TMP_DIR/hu-bad.yaml" --set-string cubeProxy.hostUsers=disabled 2> "$TMP_DIR/hu-bad.err"; then
+  fail "cubeProxy.hostUsers=disabled must fail to render"
+fi
+grep -q 'cubeProxy.hostUsers must be true, false, or null' "$TMP_DIR/hu-bad.err" \
+  || fail "unexpected error for invalid hostUsers: $(cat "$TMP_DIR/hu-bad.err")"
+ok "proxy hostUsers=<non-bool> -> render fails with validation error"
 
 echo "ServiceAccount name guard passed"

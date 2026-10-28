@@ -178,19 +178,32 @@ tolerations:
 {{- end -}}
 {{- end -}}
 
+{{/* Whether the chart creates the CubeProxy ServiceAccount ("true"/"false").
+Single source of truth shared by serviceaccount.yaml and the name helper. */}}
+{{- define "cube.proxyServiceAccountCreate" -}}
+{{- $sa := default dict .Values.cubeProxy.serviceAccount -}}
+{{- if and (eq (include "cube.proxyEnabled" .) "true") (dig "create" false $sa) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
 {{- define "cube.proxyServiceAccountName" -}}
 {{- $sa := default dict .Values.cubeProxy.serviceAccount -}}
-{{- if dig "create" false $sa -}}
-{{- default (printf "%s-proxy" (include "cube.fullname" .)) ($sa.name) -}}
+{{- if eq (include "cube.proxyServiceAccountCreate" .) "true" -}}
+{{- default (include "cube.proxyName" .) $sa.name -}}
 {{- else -}}
 {{- $sa.name | default "" -}}
 {{- end -}}
 {{- end -}}
 
+{{/* Whether the chart creates the CubeMaster ServiceAccount ("true"/"false"). */}}
+{{- define "cube.masterServiceAccountCreate" -}}
+{{- $sa := default dict ((.Values.controlPlane).master).serviceAccount -}}
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.enabled (dig "create" false $sa) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
 {{- define "cube.masterServiceAccountName" -}}
 {{- $sa := default dict ((.Values.controlPlane).master).serviceAccount -}}
-{{- if dig "create" false $sa -}}
-{{- default (printf "%s-master" (include "cube.fullname" .)) ($sa.name) -}}
+{{- if eq (include "cube.masterServiceAccountCreate" .) "true" -}}
+{{- default (include "cube.masterName" .) $sa.name -}}
 {{- else -}}
 {{- $sa.name | default "" -}}
 {{- end -}}

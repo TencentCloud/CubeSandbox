@@ -993,16 +993,22 @@ cubeProxy:
   enabled: true
   # Per-component ServiceAccount for CubeProxy. When create=true a dedicated
   # ServiceAccount is created for the proxy Deployment; set name to use an
-  # existing one and set create=false. Annotations are forwarded to the SA
-  # (useful for IAM role-based access on EKS/GKE).
+  # existing one and set create=false. Annotations are forwarded to the SA.
   serviceAccount:
     create: false
     name: ""
     annotations: {}
   # hostUsers controls whether CubeProxy uses the host user namespace.
-  # Set to false to run the pod in a separate user namespace where supported
-  # by the cluster/runtime. Leave null to omit the field and use the cluster
-  # default.
+  # Must be true, false, or null (anything else fails at render time).
+  # - null (default): omit the field and use the cluster default.
+  # - false: run the pod in a separate user namespace, so the container's UID 0
+  #   maps to an unprivileged UID on the node. Requires a cluster with the
+  #   UserNamespacesSupport feature gate and a runtime that supports user
+  #   namespaces. The pod writes to the cubeProxy.logs.hostPath volume
+  #   (created root:root by kubelet); unless the runtime idmaps that mount,
+  #   the entrypoint's mkdir/log writes fail and the pod CrashLoops.
+  # - true: share the host user namespace, i.e. the container's root is the
+  #   node's root (with a hostPath mount), forgoing the isolation of false.
   hostUsers: null
   # Public sandbox domain (also used for TLS CN/SAN, wildcard DNS, and Ingress
   # hosts). Keep controlPlane.api.sandboxDomain consistent with this value.
@@ -1451,8 +1457,13 @@ volumeS3:
 # cubeProxy.serviceAccount.
 serviceAccount:
   create: true
-  # When empty and create=true, the name defaults to <release>-node.
-  # When create=false, set name to the existing ServiceAccount to use.
+  # When empty and create=true, the name defaults to <release>-node. When
+  # create=true and name is set, the chart creates (and owns) a ServiceAccount
+  # with that name; this changes the identity of the node DaemonSets for
+  # releases that previously set both (see the upgrade guide).
+  # To use an existing ServiceAccount, set create=false and name to it;
+  # otherwise helm install fails with "already exists", or helm upgrade adopts
+  # the foreign ServiceAccount and helm uninstall deletes it.
   name: ""
   annotations: {}
 

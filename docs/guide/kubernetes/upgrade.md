@@ -147,6 +147,8 @@ Any of the following **recreates** the Big Pod → the Pod UID changes; on the P
 
 Also: `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, and `global.timezone` also change the Pod template — **not silent day-to-day upgrade items**.
 
+Also: the top-level `serviceAccount.name` is now honoured when `serviceAccount.create=true`. If an existing release sets both, the node DaemonSets switch from `<release>-node` to that name on upgrade (a Big Pod rollout) and the old `<release>-node` ServiceAccount is removed from the release. Before upgrading, either clear `serviceAccount.name` to keep `<release>-node`, or plan the upgrade as a maintenance window. To use a pre-existing ServiceAccount, set `serviceAccount.create=false`.
+
 ---
 
 ## Special cases
