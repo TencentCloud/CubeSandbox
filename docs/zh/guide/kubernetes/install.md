@@ -370,6 +370,12 @@ cubeNode:
 `0` 为恢复保留全部暂停沙箱的 CPU/内存配额，`1` 释放全部配额，中间值用于在
 恢复余量和容量之间取舍。
 
+配额覆盖值属于可信运维人员输入。Chart 和启动辅助脚本检查值的格式及释放比例范围，
+但不会检查 Cubelet 配置解析器的所有限制。在支持的 64 位平台上，三个整数字段
+不能超过 `9223372036854775807`；内存值还必须能被 Kubernetes 的
+`resource.ParseQuantity` 解析。请根据节点容量设置合理的值。超出范围的值可能
+通过 Chart 检查，却导致 Cubelet 无法启动，此时 `helm --wait` 可能超时。
+
 Chart 将这些值传入 Cubelet 容器；入口脚本在**复制镜像自带的 dynamicconf
 之后**、启动 Cubelet 之前应用它们。需要同时使用本版 Chart 和包含
 `configure-cubelet-quota.sh` 的 Cubelet 镜像；旧镜像（包括 v0.7.3）不会读取
@@ -378,8 +384,9 @@ Chart 将这些值传入 Cubelet 容器；入口脚本在**复制镜像自带的
 镜像默认值。
 
 不要将 ConfigMap 直接挂载到 `Cubelet/dynamicconf/conf.yaml`：入口脚本还会通过
-`sed -i` 修改其中的端点和 DNS，需要文件可写且可重命名。其他 dynamicconf
-字段继续由现有启动配置管理。
+`sed -i` 修改其中的端点，通过 `awk` 和 `mv -f` 修改 DNS 列表。这两种方式
+都需要文件可写，且所在目录允许通过重命名替换文件。其他 dynamicconf 字段继续
+由现有启动配置管理。
 
 ## 常见问题速查
 

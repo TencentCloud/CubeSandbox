@@ -372,6 +372,14 @@ The paused-resource release ratio must be between `0` and `1`:
 `0` reserves all paused CPU/memory quota for resume, `1` releases all of it, and
 intermediate values trade resume headroom for capacity.
 
+Quota overrides are trusted operator input. The chart and startup helper check
+the value syntax and release-ratio range, but do not enforce every limit of
+Cubelet's configuration parser. On supported 64-bit platforms, the three integer
+fields must not exceed `9223372036854775807`; memory must also be accepted by
+Kubernetes `resource.ParseQuantity`. Use values appropriate for the node's
+capacity. An out-of-range value can pass the chart checks and still prevent
+Cubelet from starting; `helm --wait` may then time out.
+
 The chart passes these values to the Cubelet container, whose entrypoint applies
 them **after staging** the bundled dynamicconf and before starting Cubelet. This
 requires both this chart and a Cubelet image containing
@@ -382,9 +390,10 @@ cluster. Removing an override restores that field to the image default at the
 next start.
 
 Do not mount a ConfigMap directly over `Cubelet/dynamicconf/conf.yaml`: the
-entrypoint also patches endpoints and DNS there using `sed -i`, which needs a
-writable file that can be renamed. Keep the other dynamicconf fields managed by
-the existing startup configuration.
+entrypoint patches endpoints using `sed -i` and DNS lists using `awk` followed
+by `mv -f`. Both need a writable file and a directory that permits replacement
+by rename. Keep the other dynamicconf fields managed by the existing startup
+configuration.
 
 ## FAQ quick reference
 
