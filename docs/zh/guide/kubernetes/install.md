@@ -385,6 +385,10 @@ Chart 将这些值传入 Cubelet 容器；入口脚本在**复制镜像自带的
 [计算面升级流程](./upgrade.md)。删除某个覆盖项后，该字段将在下次启动时恢复为
 镜像默认值。
 
+辅助脚本成功更新暂存配置文件后，会输出 `cubelet quota overrides applied:`，
+仅列出已提供的字段和值。可在 Cubelet 容器日志中确认覆盖值已写入；该日志不代表
+Cubelet 已完成启动。
+
 不要将 ConfigMap 直接挂载到 `Cubelet/dynamicconf/conf.yaml`：入口脚本还会通过
 `sed -i` 修改其中的端点，通过 `awk` 和 `mv -f` 修改 DNS 列表。这两种方式
 都需要文件可写，且所在目录允许通过重命名替换文件。其他 dynamicconf 字段继续

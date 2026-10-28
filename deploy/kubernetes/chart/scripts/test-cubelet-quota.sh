@@ -103,6 +103,15 @@ def apply(env, ok=True):
     result = subprocess.run(["bash", str(script), str(target)],
                             env={**clean_env, **env}, capture_output=True, text=True)
     assert (result.returncode == 0) == ok, result.stderr
+    marker = "cubelet quota overrides applied: "
+    if ok and env:
+        keys = ["MCPU_LIMIT", "MEM_LIMIT", "MVM_LIMIT", "CREATION_CONCURRENT_NUM",
+                "PAUSED_RESOURCE_RELEASE_RATIO"]
+        expected_log = " ".join(f'{key.lower()}="{env[prefix + key]}"'
+                                for key in keys if prefix + key in env)
+        assert result.stderr == marker + expected_log + "\n", result.stderr
+    else:
+        assert marker not in result.stderr, "no success log for no-op or failed updates"
 
 assert rendered_env("default.yaml") == {}
 assert rendered_env("absent.yaml") == {}

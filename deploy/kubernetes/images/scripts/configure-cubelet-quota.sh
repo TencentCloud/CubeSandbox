@@ -9,6 +9,7 @@ set -euo pipefail
 config="${1:?usage: configure-cubelet-quota.sh DYNAMICCONF}"
 keys=(mcpu_limit mem_limit mvm_limit creation_concurrent_num paused_resource_release_ratio)
 present=false
+applied=()
 for key in "${keys[@]}"; do
   name="CUBELET_QUOTA_${key^^}"
   [[ -v "$name" ]] || continue
@@ -29,6 +30,7 @@ for key in "${keys[@]}"; do
     echo "invalid $name" >&2
     exit 1
   fi
+  applied+=("$key=\"$value\"")
 done
 "$present" || exit 0
 
@@ -82,3 +84,4 @@ awk '
 ' "$config" > "$tmp"
 chmod --reference="$config" "$tmp"
 mv -f -- "$tmp" "$config"
+printf 'cubelet quota overrides applied: %s\n' "${applied[*]}" >&2

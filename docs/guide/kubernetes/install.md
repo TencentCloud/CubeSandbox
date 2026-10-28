@@ -391,6 +391,11 @@ variables. Changing these values updates the DaemonSet Pod template; follow the
 cluster. Removing an override restores that field to the image default at the
 next start.
 
+After successfully updating the staged file, the helper logs
+`cubelet quota overrides applied:` followed by only the supplied fields and
+their values. Check the Cubelet container logs to confirm the overrides were
+written; this message does not indicate that Cubelet has finished starting.
+
 Do not mount a ConfigMap directly over `Cubelet/dynamicconf/conf.yaml`: the
 entrypoint patches endpoints using `sed -i` and DNS lists using `awk` followed
 by `mv -f`. Both need a writable file and a directory that permits replacement
