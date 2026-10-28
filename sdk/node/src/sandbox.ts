@@ -593,7 +593,11 @@ export class Sandbox {
   }
 
   /**
-   * GET /v2/sandboxes — list all running sandboxes (v2).
+   * GET /v2/sandboxes — list sandboxes in the E2B view (v2).
+   *
+   * Returns running and paused sandboxes; `unknown` (exited, still creating)
+   * is omitted unless the server is asked for it, which this method does not
+   * do. Use `list()` for the Cube-native view that includes `unknown`.
    *
    * The endpoint answers one page at a time (`limit`, 100 by default) and
    * reports the next page's position in the `x-next-token` response header.

@@ -219,10 +219,14 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
   autoPause: false,
 };
 
+// Ask for every state so exited (`unknown`) sandboxes stay cleanable and a pausing one keeps its label.
+const ALL_SANDBOX_STATES = 'running,paused,pausing,unknown';
+
 export const sandboxApi = {
   list: async (params?: {
     metadata?: string;
-    state?: RunningSandbox['state'];
+    /** Comma-separated states; defaults to every state so exited sandboxes stay visible. */
+    state?: string;
     nextToken?: string;
     limit?: number;
   }) => {
@@ -234,7 +238,7 @@ export const sandboxApi = {
     let nextToken = params?.nextToken;
     for (;;) {
       const { data, headers } = await apiWithHeaders<ListedSandboxDto[]>('/v2/sandboxes', {
-        params: { ...params, nextToken },
+        params: { state: ALL_SANDBOX_STATES, ...params, nextToken },
       });
       items.push(...data);
       const token = headers.get('x-next-token');
