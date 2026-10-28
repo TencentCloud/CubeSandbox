@@ -540,6 +540,33 @@ class E2BAdapter(SandboxAdapter):
             return _list_sandboxes_via_cubeapi(config)
 
 
+def list_sandboxes_by_state(
+    config: SdkE2EConfig,
+    states: list[str] | None = None,
+    *,
+    metadata: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """E2B ``Sandbox.list`` with a ``SandboxQuery``, without the REST fallback.
+
+    A response the SDK cannot parse must fail the caller, not be papered over.
+    """
+    from e2b import SandboxQuery, SandboxState  # type: ignore
+
+    query = SandboxQuery(
+        metadata=metadata,
+        state=[SandboxState(state) for state in states] if states else None,
+    )
+    listing = _import_e2b_sandbox().list(query=query, **_e2b_api_params(config))
+    if not hasattr(listing, "next_items"):
+        return [_sandbox_entry_to_dict(entry) for entry in listing or []]
+    entries: list[Any] = []
+    for _ in range(MAX_LIST_PAGES):
+        if not listing.has_next:
+            return [_sandbox_entry_to_dict(entry) for entry in entries]
+        entries.extend(listing.next_items())
+    raise RuntimeError(f"E2B sandbox listing exceeded {MAX_LIST_PAGES} pages")
+
+
 def _e2b_api_params(config: SdkE2EConfig) -> dict[str, Any]:
     api_key = os.environ.get("E2B_API_KEY")
     if not api_key:

@@ -107,6 +107,9 @@ impl SandboxService {
             filter: None,
         };
 
+        let state_filter = parse_state_filter(state_filter)?;
+        let metadata_filter = parse_metadata_filter(metadata_filter)?;
+
         let resp = self
             .cubemaster
             .list_sandboxes(&req)
@@ -115,13 +118,20 @@ impl SandboxService {
 
         ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
 
-        let state_filter = parse_state_filter(state_filter);
         Ok(resp
             .sandboxes
             .into_iter()
             .map(from_cubemaster_info)
-            .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
-            .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state))
+            .filter(|sb| {
+                metadata_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.matches(sb.metadata.as_ref()))
+            })
+            .filter(|sb| {
+                state_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.matches(&sb.state))
+            })
             .collect())
     }
 
@@ -158,7 +168,10 @@ impl SandboxService {
         limit: i32,
     ) -> AppResult<SandboxListPage> {
         let after_id = parse_sandbox_list_cursor(next_token)?;
-        let state_filter = parse_state_filter(state_filter);
+        // Parsed before the node walk so a bad `state` or `metadata` costs no cluster sweep.
+        let state_filter =
+            parse_state_filter(state_filter)?.unwrap_or_else(StateFilter::listed_by_default);
+        let metadata_filter = parse_metadata_filter(metadata_filter)?;
 
         let mut matching: Vec<crate::models::ListedSandbox> = Vec::new();
         // CubeMaster's own all-pages walker dedups by `sandbox_id`
@@ -209,9 +222,14 @@ impl SandboxService {
                 resp.sandboxes
                     .into_iter()
                     .map(from_cubemaster_info)
-                    .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
-                    .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state))
-                    .filter(|sb| seen_ids.insert(sb.sandbox_id.clone())),
+                    .filter(|sb| {
+                        metadata_filter
+                            .as_ref()
+                            .is_none_or(|filter| filter.matches(sb.metadata.as_ref()))
+                    })
+                    .filter(|sb| state_filter.matches(&sb.state))
+                    .filter(|sb| seen_ids.insert(sb.sandbox_id.clone()))
+                    .map(report_pausing_as_paused),
             );
 
             // Advance on the backend's own cursor, not on the window size.
@@ -1530,45 +1548,136 @@ pub(crate) fn parse_sandbox_list_cursor(token: Option<&str>) -> AppResult<Option
     }
 }
 
-pub(crate) fn filter_by_metadata(
-    metadata: Option<&HashMap<String, String>>,
-    query: Option<&str>,
-) -> bool {
-    let Some(query) = query else {
-        return true;
-    };
-    let Some(metadata) = metadata else {
-        return false;
-    };
+/// Sandboxes selected by a `metadata` query, under every reading the value allows.
+#[derive(Debug)]
+struct MetadataFilter(Vec<HashMap<String, String>>);
 
-    for pair in query.split('&') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if metadata.get(key).is_none_or(|existing| existing != value) {
-                return false;
-            }
-        }
+impl MetadataFilter {
+    fn matches(&self, metadata: Option<&HashMap<String, String>>) -> bool {
+        let Some(metadata) = metadata else {
+            return false;
+        };
+        self.0.iter().any(|terms| {
+            terms
+                .iter()
+                .all(|(key, value)| metadata.get(key) == Some(value))
+        })
     }
-
-    true
 }
 
-fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
-    match value.map(str::to_lowercase).as_deref() {
-        Some("running") => Some(SandboxState::Running),
-        Some("paused") => Some(SandboxState::Paused),
-        Some("pausing") => Some(SandboxState::Pausing),
-        // `unknown` is the public spelling. `stopped` is the label the list
-        // path emits for an exited container and the one the connect 409
-        // quotes; `error` never comes from a container code and only reaches
-        // the list path as a raw status text, which lands in the same bucket.
-        // Accept both as aliases rather than falling through to the legacy
-        // no-filter branch, which silently returns every sandbox instead of
-        // the narrowed set the caller asked for. The alias resolves to the
-        // whole `unknown` bucket, so it also matches the creating and
-        // unreadable sandboxes that bucket holds.
-        Some("unknown" | "stopped" | "error") => Some(SandboxState::Unknown),
-        _ => None,
+/// How a key or value may have been encoded: as written, once (`urlencode`, `+` is a space),
+/// or twice (E2B's SDKs). Each yields one reading of the whole filter.
+const METADATA_DECODERS: [fn(&str) -> String; 3] = [as_written, form_decode, percent_decode_twice];
+
+/// Parse `metadata` into `key=value` terms and read it under every encoding it may use.
+/// Any reading may match, so literal `%XX` values keep working; no `key=value` shape is a 400.
+fn parse_metadata_filter(value: Option<&str>) -> AppResult<Option<MetadataFilter>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    // Split before decoding, so an encoded `&` or `=` can never separate terms.
+    let Some(pairs) = value
+        .split('&')
+        .map(|pair| pair.split_once('='))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Err(AppError::BadRequest(
+            "metadata must be key=value pairs joined by '&'".to_string(),
+        ));
+    };
+
+    let mut readings: Vec<HashMap<String, String>> = Vec::new();
+    for decode in METADATA_DECODERS {
+        let reading = pairs
+            .iter()
+            .map(|(key, value)| (decode(key), decode(value)))
+            .collect();
+        if !readings.contains(&reading) {
+            readings.push(reading);
+        }
     }
+    Ok(Some(MetadataFilter(readings)))
+}
+
+fn as_written(text: &str) -> String {
+    text.to_string()
+}
+
+/// Form-style decoding: `+` is a space, and `%2B` is a literal `+`.
+fn form_decode(text: &str) -> String {
+    percent_decode(&text.replace('+', " "))
+}
+
+fn percent_decode_twice(text: &str) -> String {
+    percent_decode(&percent_decode(text))
+}
+
+/// Percent-decoding only; a malformed escape is kept as written.
+fn percent_decode(text: &str) -> String {
+    percent_encoding::percent_decode_str(text)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Longest part of a rejected `state` token echoed back in the 400 message.
+const STATE_TOKEN_ECHO_MAX: usize = 32;
+
+/// Backend states selected by a `state` query value.
+#[derive(Debug, PartialEq, Eq)]
+struct StateFilter(Vec<SandboxState>);
+
+impl StateFilter {
+    /// What a list without `state` returns: the E2B pair, with `pausing` counted as paused.
+    fn listed_by_default() -> Self {
+        Self(vec![
+            SandboxState::Running,
+            SandboxState::Paused,
+            SandboxState::Pausing,
+        ])
+    }
+
+    fn matches(&self, state: &SandboxState) -> bool {
+        self.0.contains(state)
+    }
+}
+
+/// E2B has no `pausing` state, so a pausing sandbox is reported as paused.
+fn report_pausing_as_paused(
+    mut sandbox: crate::models::ListedSandbox,
+) -> crate::models::ListedSandbox {
+    if sandbox.state == SandboxState::Pausing {
+        sandbox.state = SandboxState::Paused;
+    }
+    sandbox
+}
+
+/// Parse the comma-separated `state` query; any invalid token rejects the whole request.
+fn parse_state_filter(value: Option<&str>) -> AppResult<Option<StateFilter>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let mut states = Vec::new();
+    for token in value.split(',') {
+        let token = token.trim().to_lowercase();
+        let selected: &[SandboxState] = match token.as_str() {
+            "running" => &[SandboxState::Running],
+            // E2B's `paused` also covers a sandbox that is still pausing.
+            "paused" => &[SandboxState::Paused, SandboxState::Pausing],
+            "pausing" => &[SandboxState::Pausing],
+            // `stopped`/`error` alias the whole `unknown` bucket, which also holds creating sandboxes.
+            "unknown" | "stopped" | "error" => &[SandboxState::Unknown],
+            _ => {
+                let shown: String = token.chars().take(STATE_TOKEN_ECHO_MAX).collect();
+                return Err(AppError::BadRequest(format!(
+                    "invalid state {shown:?}; allowed values: running, paused, pausing, unknown, stopped, error"
+                )));
+            }
+        };
+        states.extend_from_slice(selected);
+    }
+    Ok(Some(StateFilter(states)))
 }
 
 fn is_success_ret_code(ret_code: i32) -> bool {
@@ -1901,8 +2010,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, map_volume_mounts, parse_state_filter, resolve_lifecycle_flags,
+        build_cube_network_config, from_cubemaster_info, map_delete_cubemaster_err,
+        map_volume_mounts, parse_metadata_filter, parse_state_filter, resolve_lifecycle_flags,
         sandbox_state_from_status, sandbox_state_from_str, validate_mask_request_host,
         SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
         RET_CODE_TASK_STATE_INVALID,
@@ -2043,36 +2152,64 @@ mod tests {
 
     #[test]
     fn parse_state_filter_accepts_every_exposed_state() {
+        let states = |value: &str| {
+            parse_state_filter(Some(value))
+                .expect("valid state")
+                .expect("a filter")
+                .0
+        };
+
+        assert_eq!(states("running"), vec![SandboxState::Running]);
         assert_eq!(
-            parse_state_filter(Some("running")),
-            Some(SandboxState::Running)
+            states("paused"),
+            vec![SandboxState::Paused, SandboxState::Pausing]
         );
-        assert_eq!(
-            parse_state_filter(Some("paused")),
-            Some(SandboxState::Paused)
-        );
-        assert_eq!(
-            parse_state_filter(Some("pausing")),
-            Some(SandboxState::Pausing)
-        );
-        assert_eq!(
-            parse_state_filter(Some("unknown")),
-            Some(SandboxState::Unknown)
-        );
-        // The connect 409 quotes the backend label and the list path folds the
-        // same labels into `unknown`, so the filter accepts them as aliases
-        // instead of silently returning every sandbox.
-        assert_eq!(
-            parse_state_filter(Some("stopped")),
-            Some(SandboxState::Unknown)
-        );
-        assert_eq!(
-            parse_state_filter(Some("Error")),
-            Some(SandboxState::Unknown)
-        );
-        // An unrecognised filter keeps the legacy "no filter" behaviour.
-        assert_eq!(parse_state_filter(Some("bogus")), None);
-        assert_eq!(parse_state_filter(None), None);
+        assert_eq!(states("pausing"), vec![SandboxState::Pausing]);
+        assert_eq!(states("unknown"), vec![SandboxState::Unknown]);
+        // The connect 409 quotes the backend label, so both stay as aliases of `unknown`.
+        assert_eq!(states("stopped"), vec![SandboxState::Unknown]);
+        assert_eq!(states("Error"), vec![SandboxState::Unknown]);
+        assert!(parse_state_filter(None).expect("no state").is_none());
+    }
+
+    #[test]
+    fn parse_state_filter_accepts_comma_separated_values() {
+        let filter = parse_state_filter(Some(" Running, paused "))
+            .expect("valid state")
+            .expect("a filter");
+        assert!(filter.matches(&SandboxState::Running));
+        assert!(filter.matches(&SandboxState::Paused));
+        assert!(filter.matches(&SandboxState::Pausing));
+        assert!(!filter.matches(&SandboxState::Unknown));
+    }
+
+    #[test]
+    fn parse_state_filter_rejects_the_whole_value_on_any_bad_token() {
+        // One valid token must not rescue the request: E2B answers 400 for the whole value.
+        for value in [
+            "running,pause",
+            "bogus",
+            "",
+            "running,",
+            ",running",
+            "running,,paused",
+        ] {
+            match parse_state_filter(Some(value)) {
+                Err(AppError::BadRequest(message)) => {
+                    assert!(message.contains("allowed values"), "got: {message}")
+                }
+                other => panic!("state={value:?} should be a bad request, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_state_filter_truncates_the_echoed_token() {
+        let long = "x".repeat(500);
+        match parse_state_filter(Some(&long)) {
+            Err(AppError::BadRequest(message)) => assert!(message.len() < 200, "got: {message}"),
+            other => panic!("expected a bad request, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3204,20 +3341,128 @@ mod tests {
         assert!(mapped[0].read_only);
     }
 
+    /// Whether `sandbox_metadata` is selected by the raw `metadata` query value.
+    fn metadata_selects(query: &str, sandbox_metadata: &[(&str, &str)]) -> bool {
+        let stored: HashMap<String, String> = sandbox_metadata
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        parse_metadata_filter(Some(query))
+            .expect("valid metadata")
+            .expect("a filter")
+            .matches(Some(&stored))
+    }
+
     #[test]
     fn metadata_filter_matches_all_pairs() {
-        let metadata = HashMap::from([
-            ("user".to_string(), "alice".to_string()),
-            ("app".to_string(), "prod".to_string()),
-        ]);
+        let stored = [("user", "alice"), ("app", "prod")];
 
-        assert!(filter_by_metadata(Some(&metadata), Some("user=alice")));
-        assert!(filter_by_metadata(
-            Some(&metadata),
-            Some("user=alice&app=prod")
+        assert!(metadata_selects("user=alice", &stored));
+        assert!(metadata_selects("user=alice&app=prod", &stored));
+        assert!(!metadata_selects("user=bob", &stored));
+        assert!(!metadata_selects("user=alice&app=dev", &stored));
+        assert!(!metadata_selects("missing=x", &stored));
+
+        let filter = parse_metadata_filter(Some("user=alice"))
+            .expect("valid metadata")
+            .expect("a filter");
+        assert!(!filter.matches(None));
+        assert!(parse_metadata_filter(None).expect("no metadata").is_none());
+    }
+
+    #[test]
+    fn metadata_filter_reads_what_the_e2b_sdks_send() {
+        // Strings captured from e2b's Python and JS SDKs, as the server sees them after HTTP decoding.
+        for (query, key, value) in [
+            ("k=a%2520b%2Fc", "k", "a b/c"),
+            ("k=a%2520b%252Fc", "k", "a b/c"),
+            ("k=%25E4%25B8%25AD%25E6%2596%2587", "k", "中文"),
+            ("k=x%253Dy", "k", "x=y"),
+            ("k=a%2526b", "k", "a&b"),
+            ("k=50%2525", "k", "50%"),
+            ("k=a%252Bb", "k", "a+b"),
+            ("k=http%25253A%25252F%25252Fx", "k", "http%3A%2F%2Fx"),
+            ("ke%2520y=va%2520l", "ke y", "va l"),
+        ] {
+            assert!(metadata_selects(query, &[(key, value)]), "{query}");
+            assert!(!metadata_selects(query, &[(key, "other")]), "{query}");
+        }
+        assert!(metadata_selects(
+            "a=1&b=two%2520words",
+            &[("a", "1"), ("b", "two words")]
         ));
-        assert!(!filter_by_metadata(Some(&metadata), Some("user=bob")));
-        assert!(!filter_by_metadata(None, Some("user=alice")));
+    }
+
+    #[test]
+    fn metadata_filter_keeps_single_layer_callers_working() {
+        // Older callers send the value once-encoded, so what arrives is the value itself.
+        for (query, key, value) in [
+            ("k=a b/c", "k", "a b/c"),
+            ("k=中文", "k", "中文"),
+            ("k=x=y", "k", "x=y"),
+            ("k=50%", "k", "50%"),
+            ("k=a+b", "k", "a+b"),
+            ("k=%zz", "k", "%zz"),
+            ("k=100%25", "k", "100%25"),
+            ("k=http%3A%2F%2Fx", "k", "http%3A%2F%2Fx"),
+        ] {
+            assert!(metadata_selects(query, &[(key, value)]), "{query}");
+        }
+    }
+
+    #[test]
+    fn metadata_filter_splits_before_decoding_so_an_encoded_separator_stays_in_the_value() {
+        // Callers that encode once (`urlencode`, `encodeURIComponent`) escape `&` and `=` in a value.
+        for (query, value) in [
+            ("note=a%26b", "a&b"),
+            ("note=a%26b%3Dc", "a&b=c"),
+            ("note=a%2526b", "a&b"),
+            ("note=a%2526b%253Dc", "a&b=c"),
+        ] {
+            assert!(metadata_selects(query, &[("note", value)]), "{query}");
+            assert!(!metadata_selects(query, &[("note", "a")]), "{query}");
+        }
+        // The encoded `=` must not turn the value into a second term.
+        for query in ["note=a%26b%3Dc", "note=a%2526b%253Dc"] {
+            assert!(
+                !metadata_selects(query, &[("note", "a"), ("b", "c")]),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_filter_reads_plus_as_a_space_when_form_encoded() {
+        // `urlencode({"note": "a b/c"})` sends `a+b%2Fc`, and `%2B` is still a literal plus.
+        assert!(metadata_selects("note=a+b%2Fc", &[("note", "a b/c")]));
+        assert!(metadata_selects("note=a%2Bb", &[("note", "a+b")]));
+        assert!(!metadata_selects("note=a%2Bb", &[("note", "a b")]));
+        // A literal `+` sent as written still matches itself.
+        assert!(metadata_selects("note=a+b", &[("note", "a+b")]));
+    }
+
+    #[test]
+    fn metadata_filter_accepts_every_reading_of_an_ambiguous_value() {
+        // `a%2520b` is `a b` for E2B, `a%20b` for a once-encoded caller, and itself as written.
+        for value in ["a b", "a%20b", "a%2520b"] {
+            assert!(
+                metadata_selects("note=a%2520b", &[("note", value)]),
+                "{value}"
+            );
+        }
+        assert!(!metadata_selects("note=a%2520b", &[("note", "a  b")]));
+    }
+
+    #[test]
+    fn metadata_filter_rejects_a_value_that_is_not_key_value_pairs() {
+        for query in ["", "foo", "env=prod&foo", "a=1&&b=2", "a=1&", "&"] {
+            match parse_metadata_filter(Some(query)) {
+                Err(AppError::BadRequest(message)) => {
+                    assert!(message.contains("key=value"), "got: {message}")
+                }
+                other => panic!("metadata={query:?} should be a bad request, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -5382,6 +5627,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_v2_metadata_filter_accepts_the_e2b_sdk_encoding() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-list",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
+                    "data": [
+                        { "sandbox_id": "sb-special", "host_id": "h", "status": 1, "template_id": "t",
+                          "labels": { "owner": "a b/c" } },
+                        { "sandbox_id": "sb-plain", "host_id": "h", "status": 1, "template_id": "t",
+                          "labels": { "owner": "other" } }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+
+        for query in ["owner=a%2520b%2Fc", "owner=a b/c"] {
+            let page = service
+                .list_v2(Some(query), None, None, 10)
+                .await
+                .expect("filtered page");
+            let ids: Vec<_> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+            assert_eq!(ids, ["sb-special"], "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_v2_rejects_bad_metadata_before_asking_cubemaster() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { ret_envelope(0, "ok") }
+            }),
+        ))
+        .await;
+
+        match service.list_v2(Some("env"), None, None, 10).await {
+            Err(AppError::BadRequest(message)) => assert!(message.contains("key=value")),
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn list_v2_state_filter_paginates_over_matching_items_only() {
         let service = spawn_fake_cubemaster(Router::new().route(
             "/cube/sandbox/list",
@@ -5421,5 +5716,136 @@ mod tests {
             second.next_token.is_none(),
             "both paused sandboxes are listed"
         );
+    }
+
+    /// One sandbox per CubeMaster status: 1 running, 2 exited, 3 unknown, 4 pausing, 5 paused.
+    async fn spawn_every_status_cubemaster() -> SandboxService {
+        spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-list",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
+                    "data": [
+                        { "sandbox_id": "sb-1-running", "host_id": "h", "status": 1, "template_id": "t" },
+                        { "sandbox_id": "sb-2-exited", "host_id": "h", "status": 2, "template_id": "t" },
+                        { "sandbox_id": "sb-3-unknown", "host_id": "h", "status": 3, "template_id": "t" },
+                        { "sandbox_id": "sb-4-pausing", "host_id": "h", "status": 4, "template_id": "t" },
+                        { "sandbox_id": "sb-5-paused", "host_id": "h", "status": 5, "template_id": "t" }
+                    ]
+                }))
+            }),
+        ))
+        .await
+    }
+
+    async fn list_v2_ids_and_states(
+        service: &SandboxService,
+        state: Option<&str>,
+    ) -> Vec<(String, SandboxState)> {
+        service
+            .list_v2(None, state, None, 100)
+            .await
+            .expect("list_v2")
+            .items
+            .into_iter()
+            .map(|sb| (sb.sandbox_id, sb.state))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_keeps_every_backend_state_as_the_detail_endpoint_reports_it() {
+        let service = spawn_every_status_cubemaster().await;
+
+        let listed: Vec<_> = service
+            .list(None, None, 100)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|sb| (sb.sandbox_id, sb.state))
+            .collect();
+
+        // v1 is the Cube-native view the Cube SDKs read: `pausing` and `unknown` stay visible.
+        assert_eq!(
+            listed,
+            vec![
+                ("sb-1-running".to_string(), SandboxState::Running),
+                ("sb-2-exited".to_string(), SandboxState::Unknown),
+                ("sb-3-unknown".to_string(), SandboxState::Unknown),
+                ("sb-4-pausing".to_string(), SandboxState::Pausing),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_without_state_returns_only_states_an_e2b_client_can_parse() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, None).await,
+            vec![
+                ("sb-1-running".to_string(), SandboxState::Running),
+                ("sb-4-pausing".to_string(), SandboxState::Paused),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_paused_filter_includes_pausing_and_reports_it_as_paused() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("paused")).await,
+            vec![
+                ("sb-4-pausing".to_string(), SandboxState::Paused),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_accepts_several_states_in_one_filter() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("running,paused")).await,
+            list_v2_ids_and_states(&service, None).await
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_unknown_filter_still_reaches_sandboxes_outside_the_default_set() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("unknown")).await,
+            vec![
+                ("sb-2-exited".to_string(), SandboxState::Unknown),
+                ("sb-3-unknown".to_string(), SandboxState::Unknown),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_rejects_a_bad_state_before_asking_cubemaster() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { ret_envelope(0, "ok") }
+            }),
+        ))
+        .await;
+
+        match service.list_v2(None, Some("running,pause"), None, 10).await {
+            Err(AppError::BadRequest(message)) => assert!(message.contains("pause")),
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
