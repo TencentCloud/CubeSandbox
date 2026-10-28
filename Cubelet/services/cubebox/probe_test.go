@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -276,39 +278,55 @@ func TestDoCreateTimeEnvdInitPostsEnvVars(t *testing.T) {
 }
 
 func TestDoCreateTimeEnvdInitFailsOnHTTPError(t *testing.T) {
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		http.Error(w, "sensitive-response-content", http.StatusInternalServerError)
-	}))
-	defer server.Close()
+	for _, markerState := range []string{"absent", "file", "directory"} {
+		t.Run(markerState, func(t *testing.T) {
+			markerPath := filepath.Join(t.TempDir(), "marker")
+			if markerState == "file" {
+				require.NoError(t, os.WriteFile(markerPath, nil, 0600))
+			}
+			if markerState == "directory" {
+				require.NoError(t, os.Mkdir(markerPath, 0700))
+			}
+			callCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				http.Error(w, "sensitive-response-content", http.StatusInternalServerError)
+			}))
+			defer server.Close()
 
-	u, err := neturl.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil {
-		t.Fatalf("parse server port: %v", err)
-	}
+			u, err := neturl.Parse(server.URL)
+			if err != nil {
+				t.Fatalf("parse server URL: %v", err)
+			}
+			port, err := strconv.Atoi(u.Port())
+			if err != nil {
+				t.Fatalf("parse server port: %v", err)
+			}
 
-	req := &cubebox.RunCubeSandboxRequest{
-		Annotations: map[string]string{
-			constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
-			constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
-		},
-	}
-	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+			req := &cubebox.RunCubeSandboxRequest{
+				Annotations: map[string]string{
+					constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
+					constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
+				},
+			}
+			sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
 
-	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
-	retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
-	if retErr == nil {
-		t.Fatal("expected init failure")
+			l := &local{envdHTTPClient: server.Client(), envdInitPort: port, diagnosticsMarkerPath: markerPath}
+			retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
+			if retErr == nil {
+				t.Fatal("expected init failure")
+			}
+			errInfo, _ := ret.FromError(retErr)
+			assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
+			assert.Contains(t, errInfo.Message(), "HTTP 500")
+			if markerState == "absent" {
+				assert.Contains(t, errInfo.Message(), "sensitive-response-content")
+			} else {
+				assert.NotContains(t, errInfo.Message(), "sensitive-response-content")
+			}
+			assert.Equal(t, 1, callCount)
+		})
 	}
-	errInfo, _ := ret.FromError(retErr)
-	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
-	assert.Contains(t, errInfo.Message(), "HTTP 500")
-	assert.Equal(t, 1, callCount)
 }
 
 func TestEnvdInitAttemptClassifiesTransportFailures(t *testing.T) {

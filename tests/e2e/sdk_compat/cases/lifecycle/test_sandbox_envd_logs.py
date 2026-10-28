@@ -13,6 +13,8 @@ only see the local Cubelet's files.
 from __future__ import annotations
 
 import subprocess
+import shutil
+import re
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,16 @@ pytestmark = [
 def _require_cubesandbox(sdk_backend: str) -> None:
     if sdk_backend != "cubesandbox":
         pytest.skip("cubecli envd-log checks only apply to the cubesandbox backend")
+
+
+def _test_archive_dir(sandbox_id: str) -> Path:
+    # Only target the unique sandbox created by this test, never a parent path.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", sandbox_id):
+        raise ValueError("invalid test sandbox ID")
+    path = Path("/data/cubelet/log-archive") / sandbox_id
+    if path.exists():
+        raise RuntimeError("test archive already exists; refusing to remove it")
+    return path
 
 
 @pytest.fixture
@@ -136,9 +148,12 @@ def test_create_envd_rpc_visible_in_cubecli_logs(
     )
     assert contains_envd_access_log(logs)
     sandbox_id = sdk_sandbox.sandbox_id
+    archive = _test_archive_dir(sandbox_id)
     cleanup_errors = safe_kill(sdk_sandbox, sdk_e2e_config)
     assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
     wait_host_logs_absent(sandbox_id, timeout=sdk_e2e_config.default_timeout)
+    if archive.is_dir():
+        shutil.rmtree(archive)
 
 
 @pytest.mark.requires_capability(COMMANDS)
@@ -152,6 +167,7 @@ def test_deleted_sandbox_log_retained(
         pytest.skip("enable node-local sandbox log retention before this test")
 
     sandbox_id = sdk_sandbox.sandbox_id
+    archive = _test_archive_dir(sandbox_id)
     marker = trigger_envd(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
     _wait_for_live_marker(sandbox_id, marker, timeout=sdk_e2e_config.command_timeout)
 
@@ -160,6 +176,7 @@ def test_deleted_sandbox_log_retained(
     wait_host_logs_absent(sandbox_id, timeout=sdk_e2e_config.default_timeout)
 
     _wait_for_archived_marker(sandbox_id, marker, sdk_e2e_config.default_timeout)
+    shutil.rmtree(archive)
 
 
 @pytest.mark.requires_capability(COMMANDS)
@@ -177,11 +194,12 @@ def test_archive_failure_does_not_block_sandbox_deletion(
     _wait_for_live_marker(sandbox_id, marker, timeout=sdk_e2e_config.command_timeout)
     archive_root = Path("/data/cubelet/log-archive")
     archive_root.mkdir(parents=True, exist_ok=True)
-    blocker = archive_root / sandbox_id
+    blocker = _test_archive_dir(sandbox_id)
     # An exclusive file at the per-sandbox archive path forces mkdir to fail
     # without changing the policy or interfering with other sandboxes.
     with blocker.open("x", encoding="utf-8"):
         pass
+    sandbox_removed = False
     try:
         cleanup_errors = safe_kill(sdk_sandbox, sdk_e2e_config)
         assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
@@ -207,8 +225,13 @@ def test_archive_failure_does_not_block_sandbox_deletion(
             description=f"Cubelet to remove sandbox {sandbox_id} despite archive failure",
         )
         _wait_for_live_marker(sandbox_id, marker, timeout=sdk_e2e_config.command_timeout)
+        sandbox_removed = True
     finally:
         blocker.unlink()
+        # The original log was deliberately retained by the failure test.
+        # Remove it only after confirming this test sandbox is gone.
+        if sandbox_removed:
+            shutil.rmtree(host_log_dir(sandbox_id))
 
 
 @pytest.mark.requires_capability(COMMANDS)
@@ -222,6 +245,7 @@ def test_retention_preserves_logs_across_pause_resume(
         pytest.skip("enable node-local sandbox log retention before this test")
 
     sandbox_id = sdk_sandbox.sandbox_id
+    archive = _test_archive_dir(sandbox_id)
     first = trigger_envd(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
     _wait_for_live_marker(sandbox_id, first, timeout=sdk_e2e_config.command_timeout)
     sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
@@ -245,6 +269,7 @@ def test_retention_preserves_logs_across_pause_resume(
         first_log = _wait_for_archived_marker(sandbox_id, first, sdk_e2e_config.default_timeout)
         second_log = _wait_for_archived_marker(sandbox_id, second, sdk_e2e_config.default_timeout)
         assert first_log != second_log, "pause/resume logs should be archived separately"
+        shutil.rmtree(archive)
     finally:
         resumed.close()
 

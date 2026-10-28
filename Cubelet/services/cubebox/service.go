@@ -279,8 +279,12 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 }
 
 func sandboxDiagnosticsEnabled() bool {
-	info, err := os.Stat("/etc/cube-sandbox/retain-sandbox-logs")
-	return err == nil && info.Mode().IsRegular()
+	return sandboxDiagnosticsEnabledAt("/etc/cube-sandbox/retain-sandbox-logs")
+}
+
+func sandboxDiagnosticsEnabledAt(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func safePrintWithDiagnostics(req *cubebox.RunCubeSandboxRequest, diagnostics bool) string {

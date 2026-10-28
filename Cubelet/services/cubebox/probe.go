@@ -312,7 +312,11 @@ func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSa
 }
 
 func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, requestID, sandboxID, sandboxIP string, port int, hasEnvdCapability bool, body []byte) error {
-	return l.doCreateTimeEnvdInitWithDiagnostics(ctx, requestID, sandboxID, sandboxIP, port, hasEnvdCapability, body, sandboxDiagnosticsEnabled())
+	diagnostics := sandboxDiagnosticsEnabled()
+	if l.diagnosticsMarkerPath != "" {
+		diagnostics = sandboxDiagnosticsEnabledAt(l.diagnosticsMarkerPath)
+	}
+	return l.doCreateTimeEnvdInitWithDiagnostics(ctx, requestID, sandboxID, sandboxIP, port, hasEnvdCapability, body, diagnostics)
 }
 
 func (l *local) doCreateTimeEnvdInitWithDiagnostics(ctx context.Context, requestID, sandboxID, sandboxIP string, port int, hasEnvdCapability bool, body []byte, diagnostics bool) error {

@@ -90,6 +90,8 @@ On cleanup, CubeShim moves the live directory to `/data/cubelet/log-archive/<san
 
 The live shim writes archive failures to its logger; the separate shim delete process writes them to stderr, which requires containerd's logs or equivalent collection. A malformed or unreadable marker preserves the original logs rather than deleting them.
 
+If the marker exists but is not a regular file, or its metadata cannot be read for a reason other than absence, all components fail closed: diagnostics are enabled, and CubeShim reports the marker error while preserving the live log directory. Correct the marker promptly to avoid uncontrolled disk growth. An absent marker disables the bundle.
+
 Each new archive segment is private to the shim's user (mode 0700). This does not change access to live logs or to existing archives; review their permissions and the access controls of any log collector before forwarding sensitive output. If archiving fails, the live directory retains its existing permissions.
 
 Retention has no automatic expiry or size limit. An archive that fills `/data/cubelet` can prevent sandbox creation and affect other node operations. Configure disk alerts and ship both live and archived logs to independent storage, then manage retention there and on the node. Removing the marker restores deletion for future cleanups; it does not remove existing archives. Archiving is best effort: it cannot recover output that was never forwarded from the guest, or survive loss of the node's disk.

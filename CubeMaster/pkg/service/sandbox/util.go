@@ -1151,16 +1151,20 @@ func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 }
 
 func sandboxDiagnosticsEnabled() bool {
-	info, err := os.Stat("/etc/cube-sandbox/retain-sandbox-logs")
-	return err == nil && info.Mode().IsRegular()
+	return sandboxDiagnosticsEnabledAt("/etc/cube-sandbox/retain-sandbox-logs")
+}
+
+func sandboxDiagnosticsEnabledAt(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func safePrintCreateCubeSandboxReqWithDiagnostics(req *types.CreateCubeSandboxReq, diagnostics bool) string {
 	tmpReq := &types.CreateCubeSandboxReq{}
 	tmpData, _ := types.FastestJsoniter.Marshal(req)
 	types.FastestJsoniter.Unmarshal(tmpData, tmpReq)
-	// Create-time environment values may contain credentials. Never include
-	// them in request logs, including when debug logging is enabled.
+	// With diagnostics enabled, omit environment values from request logs,
+	// including debug logs; they may contain credentials.
 	if diagnostics {
 		tmpReq.CreateTimeEnvVars = nil
 	}
