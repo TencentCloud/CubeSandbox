@@ -33,7 +33,7 @@ REPO=$(pwd)
 python3 -m venv /tmp/webhook-test-venv
 source /tmp/webhook-test-venv/bin/activate
 python -m pip install -e "$REPO/sdk/python"
-python -m pip install -r "$REPO/tests/e2e/sdk_compat/requirements.txt" PyYAML boto3
+python -m pip install -r "$REPO/tests/e2e/sdk_compat/requirements.txt" boto3
 python -m unittest discover -s tests/e2e/webhook -p 'test_*.py' -v
 (cd tests/e2e/sdk_compat && python -m pytest --confcutdir=. cases/framework/test_webhook.py -v)
 ```
