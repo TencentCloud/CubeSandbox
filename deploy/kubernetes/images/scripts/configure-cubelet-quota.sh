@@ -58,7 +58,15 @@ awk '
   }
   {
     if (in_quota && /^[^#[:space:]]|^  [^#[:space:]]/) finish_quota()
+    if (in_quota && !/^[[:space:]]*(#.*)?$/ && !/^    [a-z_]+:/) {
+      print "unsupported host.quota layout: expected four-space field indentation" > "/dev/stderr"
+      exit 1
+    }
     if (/^[^#[:space:]]/) in_host = ($0 ~ /^host:[[:space:]]*(#.*)?$/)
+    if (in_host && /^  quota:/ && !/^  quota:[[:space:]]*(#.*)?$/) {
+      print "unsupported host.quota layout: expected a block mapping" > "/dev/stderr"
+      exit 1
+    }
     if (in_host && /^  quota:[[:space:]]*(#.*)?$/) {
       in_quota = 1
       found++

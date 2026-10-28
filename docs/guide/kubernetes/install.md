@@ -374,6 +374,10 @@ intermediate values trade resume headroom for capacity.
 
 A field set to YAML `null` keeps the image default, just like an omitted field.
 
+Custom dynamicconf files must keep the bundled block layout: `host:` at column
+zero, `quota:` indented by two spaces, and its scalar fields by four spaces.
+Flow mappings and other field indentation are rejected without replacing the file.
+
 Quota overrides are trusted operator input. The chart and startup helper check
 the value syntax and release-ratio range, but do not enforce every limit of
 Cubelet's configuration parser. On supported 64-bit platforms, the three integer

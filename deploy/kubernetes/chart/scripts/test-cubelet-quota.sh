@@ -178,6 +178,18 @@ for key, value in [("MCPU_LIMIT", "-1"), ("MVM_LIMIT", "1.5"),
 target.write_text("host:\n  gc: {}\n")
 apply(overrides, ok=False)
 assert target.read_text() == "host:\n  gc: {}\n"
+for config in ["host:\n  quota: {mcpu_limit: 32000}\n",
+               "host:\n  quota:\n      mcpu_limit: 32000\n",
+               "host:\n  quota:\n   mcpu_limit: 32000\n"]:
+    target.write_text(config)
+    target.chmod(0o640)
+    apply(overrides, ok=False)
+    assert target.read_text() == config, "unsupported layouts must remain untouched"
+    assert target.stat().st_mode & 0o777 == 0o640
+# Blank lines and comments remain valid within the supported block layout.
+target.write_text("host:\n  quota: # overrides\n\n    # CPU quota\n    mcpu_limit: 0\n")
+apply({prefix + "MCPU_LIMIT": "32000"})
+assert "    mcpu_limit: 32000\n" in target.read_text()
 print("PASS: quota rendering, startup re-staging, zero/empty values and validation")
 PY
 
