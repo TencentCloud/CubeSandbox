@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - 'Cubelet/Dockerfile'
+      - 'Cubelet/dynamicconf/**'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'
@@ -12,6 +13,7 @@ on:
   pull_request:
     paths:
       - 'Cubelet/Dockerfile'
+      - 'Cubelet/dynamicconf/**'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'

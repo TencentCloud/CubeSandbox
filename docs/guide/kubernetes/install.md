@@ -365,8 +365,10 @@ cubeNode:
 
 All five fields are optional. Omitted fields retain the image defaults; explicit
 `0` values and `mem_limit: ""` are applied. CPU is measured in millicores, memory
-uses a non-negative Kubernetes quantity string, and the three integer fields must
-be non-negative. The paused-resource release ratio must be between `0` and `1`:
+uses a non-negative Kubernetes quantity (for example `"64Gi"`, or a bare number
+of bytes such as `1073741824`), and the three integer fields must be non-negative.
+Numeric memory values, including `0`, are serialized as strings for Cubelet.
+The paused-resource release ratio must be between `0` and `1`:
 `0` reserves all paused CPU/memory quota for resume, `1` releases all of it, and
 intermediate values trade resume headroom for capacity.
 

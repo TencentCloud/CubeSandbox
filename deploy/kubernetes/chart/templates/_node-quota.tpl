@@ -1,6 +1,10 @@
 {{/* Only supplied quota fields become env vars; preserve explicit zero/empty values. */}}
 {{- define "cube.nodeQuotaEnv" -}}
 {{- $quota := .Values.cubeNode.quota -}}
+{{/* Old releases upgraded with --reuse-values may not have the new key. */}}
+{{- if kindIs "invalid" $quota -}}
+{{- $quota = dict -}}
+{{- end -}}
 {{- if not (kindIs "map" $quota) -}}
 {{- fail "cubeNode.quota must be a map" -}}
 {{- end -}}
@@ -11,8 +15,8 @@
 {{- end -}}
 {{- $text := toString $value -}}
 {{- if eq $key "mem_limit" -}}
-{{- if or (not (kindIs "string" $value)) (not (regexMatch "^$|^[+]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+|[numkMGTP]|[KMGTPE]i|E)?$" $text)) -}}
-{{- fail "cubeNode.quota.mem_limit must be a non-negative Kubernetes memory quantity string or empty" -}}
+{{- if not (regexMatch "^$|^[+]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+|[numkMGTP]|[KMGTPE]i|E)?$" $text) -}}
+{{- fail "cubeNode.quota.mem_limit must be a non-negative Kubernetes memory quantity or empty" -}}
 {{- end -}}
 {{- else if eq $key "paused_resource_release_ratio" -}}
 {{- if or (not (regexMatch "^[+]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+)?$" $text)) (lt (float64 $value) 0.0) (gt (float64 $value) 1.0) -}}

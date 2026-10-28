@@ -145,7 +145,7 @@ Any of the following **recreates** the Big Pod → the Pod UID changes; on the P
 | Manually delete the Big Pod | Equivalent to rebuilding the data plane |
 | Stuff artifact installs into the Big Pod | Breaks the split of duties; artifacts must go through Installer |
 
-Also: `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, and `global.timezone` also change the Pod template — **not silent day-to-day upgrade items**.
+Also: `cubeNode.quota`, `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, and `global.timezone` also change the Pod template — **not silent day-to-day upgrade items**.
 
 ---
 

@@ -141,7 +141,7 @@ kubectl rollout status deploy/cube-master -n cube-system
 | 手动删 Big Pod | 等于重建数据面 |
 | 把产物安装塞进 Big Pod | 破坏分工；产物应走 Installer |
 
-另外：`cubeNode.env`、`cubeNode.podAnnotations`、网络相关 env、`global.timezone` 也会改 Pod template——**不是日常无感升级项**。
+另外：`cubeNode.quota`、`cubeNode.env`、`cubeNode.podAnnotations`、网络相关 env、`global.timezone` 也会改 Pod template——**不是日常无感升级项**。
 
 ---
 
