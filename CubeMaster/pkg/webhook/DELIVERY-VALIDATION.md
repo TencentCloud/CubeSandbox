@@ -1,4 +1,9 @@
-# P3 validation — 2026-10-21
+# Persistent webhook delivery validation — 2026-10-21
+
+> Historical execution record: machine paths and resource names below identify
+> that run, not required installation locations. For current portable setup and
+> commands, use the [test runbook](../../../tests/e2e/webhook/README.md).
+
 
 This is a record of this run, not a frozen baseline or benchmark gate. P3 only:
 no lifecycle producers, signatures, dynamic subscription API, proto, Cubelet,

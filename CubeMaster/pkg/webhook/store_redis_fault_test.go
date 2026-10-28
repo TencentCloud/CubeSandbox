@@ -32,7 +32,8 @@ func respWrite(w io.Writer, v interface{}) {
 	case error:
 		fmt.Fprint(w, "-ERR proxy upstream\r\n")
 	case string:
-		fmt.Fprintf(w, "$%d\r\n%s\r\n", len(x), x)
+		// redigo status strings and bulk []byte replies have distinct RESP types.
+		fmt.Fprintf(w, "+%s\r\n", x)
 	case []byte:
 		fmt.Fprintf(w, "$%d\r\n", len(x))
 		w.Write(x)

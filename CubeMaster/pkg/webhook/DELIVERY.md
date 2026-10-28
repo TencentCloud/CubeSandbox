@@ -1,4 +1,7 @@
-# Configurable persistent lifecycle delivery (P3–P5)
+# Persistent lifecycle delivery
+
+For setup and feature status, start with [README.md](README.md) /
+[中文使用说明](README_zh.md). This document covers detailed runtime and operational semantics.
 
 CubeMaster publishes created, resumed, paused, checkpointed, supported updated
 and completed killed events through the same P3 persistent pipeline.
@@ -204,7 +207,7 @@ proto field or Master ordinary-delete call. P5 PublishContext checks the trusted
 origin; deletion captures it before queueing and preserves it independently of
 later logging/context wrappers.
 
-See [P4-VALIDATION.md](P4-VALIDATION.md) for this run's commands, evidence,
+See [CREATE-RESUME-SNAPSHOT-VALIDATION.md](CREATE-RESUME-SNAPSHOT-VALIDATION.md) for this run's commands, evidence,
 measurements, skips and P5/P6 handoff. Signature, API, backend, retry, loss and
 ordering limitations above remain unchanged.
 
@@ -295,7 +298,173 @@ alongside existing identity/metadata budgets, not policy truncation. Any excess
 drops only the notification and increments existing low-cardinality capture
 observations. No partial network policy is sent.
 
-See [P5-VALIDATION.md](P5-VALIDATION.md) for current commands, real Redis/HTTP
+See [UPDATE-DESTRUCTION-VALIDATION.md](UPDATE-DESTRUCTION-VALIDATION.md) for P5 commands, real Redis/HTTP
 component evidence, failure isolation and measurement. P6 retains full deployed
-Master/XFS/S3/multinode/restart/power-loss acceptance. Signature, dynamic API,
+Master/XFS/S3/multinode/restart acceptance; hardware power-loss experiments are optional infrastructure diagnostics. Signature, dynamic API,
 pre-persistence loss and possible post-persistence duplicates remain unchanged.
+
+
+## Deployment and incident operations (P6)
+
+For executed coverage and its limitations, see
+[END-TO-END-VALIDATION.md](END-TO-END-VALIDATION.md) and the
+[platform runbook](../../../tests/e2e/webhook/README.md) for the receiver, existing
+SDK entrypoints and isolated fault procedures. No deployment is implicitly
+certified by passing component tests.
+
+A minimal enabled private test receiver configuration is below. Keep both
+`enabled` values false for the default-off deployment. Replace the test endpoint
+and password; `store.redis` is a complete override, including DB and credentials.
+Public receivers should use HTTPS; private HTTPS still needs an allowlisted CIDR.
+
+```yaml
+webhooks:
+  enabled: true
+  allow_http: true
+  allowed_cidrs: ["127.0.0.0/8"]
+  store:
+    backend: redis
+    redis:
+      nodes: "127.0.0.1:16406"
+      password: "p6-isolated-test"
+      db_no: 7
+  subscriptions:
+    - id: p6-xfs
+      enabled: true
+      url: http://127.0.0.1:18096/events
+      events:
+        - sandbox.lifecycle.created
+        - sandbox.lifecycle.resumed
+        - sandbox.lifecycle.paused
+        - sandbox.lifecycle.checkpointed
+        - sandbox.lifecycle.updated
+        - sandbox.lifecycle.killed
+```
+
+Before enabling, inspect the **actual** Redis persistence, mounts, fsync policy,
+free disk, maxmemory/noeviction and authentication/access control. Deployment
+volumes alone do not enable AOF. Count capacity includes retained terminal tasks;
+size Redis for body/index overhead and recovery traffic, not just max_records.
+The 2026-10-24 P6 run exercised real three-Sentinel election with replicated
+store tasks and actual SDK tasks delivered by a full Master after failover. This
+is a same-host topology result, not a physical failure-domain HA guarantee.
+Cluster routing is unsupported. Separate webhook Redis
+physically when fault isolation from business Redis is required; separate DBs or
+pools alone do not isolate outages, OOM or shared CPU/disk contention.
+
+Apply the same startup snapshot to every Master. For sensitive revocation:
+
+1. Stop all old delivery instances, or deploy global `enabled: false` to **all**
+   Masters and verify the rollout has finished. Allow the bounded shutdown to
+   finish; already accepted HTTP cannot be undone. SIGKILL provides no flush.
+2. Change subscriptions/URL/event filters. Global disable leaves backlog and
+   terminal retention untouched. Do not clear keys to revoke a destination.
+3. Enable the new configuration on all instances. Enabled with no valid active
+   subscriptions still consumes and cancels old tasks. Changed URL tasks are
+   cancelled rather than redirected. A mixed old/new rollout can still send
+   through the old snapshot; a file watcher is not a revocation mechanism.
+4. Check cancellation/claim/HTTP counters and receiver evidence. Reusing the
+   same ID and URL may continue unfinished old tasks; use a new subscription ID
+   for a new identity. New subscriptions do not replay historical events.
+
+Receivers should commit their own idempotent work and return promptly. Deduplicate
+by payload event ID; define subscription scope explicitly if multiple destinations
+share a downstream business processor. Delivery ID identifies an attempt, not
+an idempotency key. Handle unordered and duplicate requests. After finite budget
+exhaustion, restoring a receiver does not replay terminal failures. There is no
+history API, operator replay endpoint or automatic backend migration.
+
+| Symptom | Evidence and action |
+| --- | --- |
+| No event | Check global/subscription startup switches, exact filters and the real final business boundary; accepted task enqueue is not killed completion. Inspect capture/ingress categories. |
+| Event not saved | Inspect capture size/invalid, ingress full/stopped, event unmatched/encoding and Put outcomes. `persist/abandoned` means no confirmation; `persist/unconfirmed` can include a server write whose reply was lost. Neither local counter is a durable audit. |
+| Backlog grows | Check Redis reachability/persistence/disk, Worker errors, lease headroom and receiver timeout/status/security policy. Claim counts include lost replies/crashes and are not HTTP counts. Do not replenish budgets manually. |
+| Terminal failed | Check bounded HTTP status/security summaries and attempts. Strong-signature receivers and strict missing-field decoders need adaptation; do not weaken TLS/address checks to force delivery. |
+| Stale queue metrics | `sample_available=0` invalidates cached depth/delay. Due delay is scheduling delay, not oldest-event age. Do not sum shared backlog gauges across Masters. |
+| Corruption/OOM/uncertain result | Preserve dedicated evidence and actual Redis state; stop scheduling via global disable while diagnosing. Lua execution is not rollback. Do not delete/rebuild queues or switch backend to hide the fault. |
+| Shutdown/restart loss | Separate buffered-but-unsaved loss from persisted recovery, expired attempts and HTTP-success/confirmation-loss duplicates. Re-enabling resumes only eligible saved tasks. |
+
+The P4/P5 compatibility details above remain operative: completed killed, local
+snapshot success rather than remote durability, no infinite-timeout-only update,
+no complete L7-only coverage, null empty network categories, no invented DNS,
+execution/team/build identity or start time, unknown legacy metadata, no extra
+spec read for timeout or pre-stamped-backend deletion, and task-local rather than
+global producer deduplication. No signatures, query/history/statistics APIs or
+zero-loss/exactly-once guarantee are added by P6.
+
+
+2026-10-24 deployment evidence includes real XFS/S3 lifecycle operations and
+conditional recovery on an independent logical node; see END-TO-END-VALIDATION.md for
+remaining negative paths. S3 descriptors/VM configuration may retain endpoint and
+shared-dir paths: source layout availability is a compatibility condition, not
+remote durability. Target nodes must not borrow the source snapshot/data mounts.
+
+The webhook Runtime completes its existing bounded drain before the App's
+existing signal cancellation path runs. This is webhook ownership wiring; the
+App/debug listener's error handling, exit code and other service-stop ordering
+are unchanged. Validate saved webhook progress and takeover rather than requiring
+the whole App to exit zero. SIGKILL may bypass that drain and never promises
+zero loss.
+
+The 2026-10-25 follow-up also exercises two complete Masters during a mixed
+configuration rollout and coordinated revocation. An old enabled instance can
+still send after another instance is disabled. Stop all old consumers before
+sensitive changes; an already accepted request cannot be recalled.
+
+Paused deletion retains its historical warn-only business response if the final
+Master binding removal fails. That response is not completion evidence: the P5
+producer now withholds killed until necessary Master cleanup is confirmed, while
+preserving explicit node destruction evidence and the existing API behavior.
+
+S3 upload status is an observation of the existing storage implementation,
+not a webhook success condition. Local valid pause/checkpoint and final business
+state determine notification success even when remote status remains unknown or
+inconsistent. Do not change native storage error classification or upload logic
+to pass notification tests. Retain S3 state discrepancies as separate dependency
+diagnostics; require actual failed export HTTP traffic and check notification
+identity/count and a positive publication barrier independently.
+
+Real HTTPS acceptance with a dedicated CA succeeds; an untrusted CA or wrong
+certificate host fails before the HTTP handler and exhausts the finite budget.
+These tests preserve certificate checks. The fixture CA is scoped to the
+dedicated Master process, not installed into the host trust store.
+
+On Redis OOM the runtime may conservatively report ErrStoreCorrupt because Lua
+is not rollback. Restoring maxmemory alone does not restart scheduling. Preserve
+records and due/terminal indexes, audit consistency read-only, and explicitly
+restart only after diagnosis supports it. Do not clear queues or replenish
+attempt budgets. The actual deployment OOM test followed that sequence.
+
+Redis acceptance verifies this module's saved records, immutable body/target,
+Receipt ownership, consumed attempts, same-volume Redis restart/process crash,
+Master recovery and applicable Sentinel topology. The tests inspect actual AOF,
+fsync, mounts and memory policy. They do not certify Redis internals, hypervisor
+hard-reset behavior, disk caches or physical power-loss durability. Unavailable
+hard-reset/power-off experiments remain explicitly unrun optional infrastructure
+diagnostics and do not block the Issue #1903 webhook verdict. Never call SIGKILL
+physical power loss or infer zero loss from a Redis acknowledgement.
+
+## P6 S3 notification-boundary follow-up (2026-10-25)
+
+The six outstanding notification cases now have actual full-Master/S3 evidence:
+pause/checkpoint crossed with rejected/empty export establishment, plus healthy
+object storage and post-local-success service outage/recovery. Final result:
+6 passed, 0 failed, 0 skipped. No production/storage behavior changed to obtain
+this result. Exact commands, failed attempts and evidence are in
+[END-TO-END-VALIDATION.md](END-TO-END-VALIDATION.md).
+
+The outage scenario first establishes genuine local success with manifest
+publication held, then stops only dedicated MinIO. Native data/manifest PUT
+502 proves actual unavailability; restoring the same service and a subsequent
+real SDK update verify continued delivery without a new checkpoint identity.
+Stopping object storage before local capture may legitimately break that
+business operation and is not a reason to change storage or fabricate a success
+notification. Actual remote status is retained as dependency evidence, with no
+forced terminal classification or remote durability guarantee. The six final
+saved delivery records were read back as succeeded, with bytes matching the
+receiver. The ordinary/race prerequisite each recorded 1776 pass and 3 existing
+or independently opted-in skips; platform itself had zero skips.
+
+These close the previously identified first-release merge acceptance gaps.
+Optional hard reset/power-off and unbounded deployment-combination certification
+remain outside this conclusion; no new functionality or acceptance gate is added.

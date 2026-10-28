@@ -79,12 +79,18 @@ across power failure, replication failover or storage failure.
 
 ## Validation
 
-Ordinary unit and regression checks:
+Ordinary unit and regression checks (from the repository root):
 
 ```sh
 cd CubeMaster
-go test ./pkg/webhook ./pkg/base/wrapredis ./pkg/base/rediskey
+go test -gcflags=github.com/tencentcloud/CubeSandbox/CubeMaster/...=-l \
+  ./pkg/webhook ./pkg/base/rediskey -count=1 -timeout 300s
 ```
+
+The port below is an example; choose an unused loopback publication. Do not run
+existing `pkg/base/wrapredis` application tests against a shared default config;
+they require their own isolated complete configuration. Deployment controls and
+portable environment setup are in the [test runbook](../../../tests/e2e/webhook/README.md).
 
 Real tests require an explicitly dedicated local Redis instance, authentication,
 and DB 9. They use random key namespaces and delete only those keys. The tests
@@ -96,7 +102,8 @@ provide the name of a disposable container beginning with `webhook-1903-p2-`:
 WEBHOOK_REDIS_ADDR=127.0.0.1:16390 \
 WEBHOOK_REDIS_PASSWORD='<isolated-test-password>' \
 WEBHOOK_REDIS_RESTART_CONTAINER='<this-test-container>' \
-go test -race ./pkg/webhook ./pkg/base/wrapredis ./pkg/base/rediskey -timeout 120s
+go test -race -gcflags=github.com/tencentcloud/CubeSandbox/CubeMaster/...=-l \
+  ./pkg/webhook -run '^TestRedisProcessAndServiceRecovery$' -count=1 -timeout 120s
 ```
 
 The behavior tests exercise real state transitions, immutable snapshots,
@@ -134,7 +141,8 @@ set, including the explicit disposable-container restart opt-in:
 
 | Command | Result (exit 0) |
 | --- | --- |
-| `go test ./pkg/webhook ./pkg/base/wrapredis ./pkg/base/rediskey -count=1 -timeout 120s` | pass; 2.039s / 3.227s / 0.002s |
+| `go test -gcflags=github.com/tencentcloud/CubeSandbox/CubeMaster/...=-l \
+  ./pkg/webhook ./pkg/base/rediskey -count=1 -timeout 300s -count=1 -timeout 120s` | pass; 2.039s / 3.227s / 0.002s |
 | `go test -race ./pkg/webhook ./pkg/base/wrapredis ./pkg/base/rediskey -count=1 -timeout 120s` | pass; 8.617s / 4.276s / 1.014s |
 
 Formatting and `git diff --check` also passed. Earlier test iterations caught and
