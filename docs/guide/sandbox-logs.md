@@ -20,7 +20,7 @@ This page covers the **sandbox-level log** only. For `envd` sub-task logs, refer
 
 ## Prerequisites
 
-`cubecli` is built alongside Cubelet and installed as part of the standard one-click deployment. The `logs` sub-command accesses log files that live inside the **Cubelet mount namespace**, so it must be run **directly on the compute node** — it cannot be executed remotely via the API or from a non-node host.
+`cubecli` is built alongside Cubelet and installed as part of the standard one-click deployment. Run it **directly on the compute node**. It reads current sandbox logs from the host and enters the Cubelet mount namespace only when falling back to the legacy bundle path.
 
 ## Reading sandbox logs
 
@@ -70,21 +70,34 @@ cubecli logs --tpl --all --stderr <template-id>
 
 | Context | Path |
 |---|---|
-| Sandbox stdout | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stdout` (inside Cubelet mount namespace) |
-| Sandbox stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stderr` (inside Cubelet mount namespace) |
+| Sandbox stdout | `/data/cubelet/log/<sandbox-id>/stdout` (host filesystem) |
+| Sandbox stderr | `/data/cubelet/log/<sandbox-id>/stderr` (host filesystem) |
 | Template stdout | `/data/log/template/<template-id>_0/stdout` (host filesystem) |
 | Template stderr | `/data/log/template/<template-id>_0/stderr` (host filesystem) |
 
-::: tip Why the mount namespace?
-Sandbox log files are written by CubeShim into the bundle directory which is only visible inside Cubelet's private mount namespace. `cubecli logs` automatically re-execs itself into that namespace before reading — you do not need to do anything special beyond running the command on the node.
-:::
+Older sandboxes may use the bundle path under `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/` in the Cubelet mount namespace. `cubecli` falls back to that path automatically.
+
+## Retaining logs after teardown
+
+Sandbox logs are deleted on teardown by default. To opt in to node-local retention, create the following empty marker file on **each compute node** before reproducing the issue:
+
+```bash
+sudo install -d -m 0755 /etc/cube-sandbox
+sudo touch /etc/cube-sandbox/retain-sandbox-logs
+```
+
+On cleanup, CubeShim moves the live directory to `/data/cubelet/log-archive/<sandbox-id>/<segment-id>/logs/`. A new segment is created on each teardown, including pause and resume, so earlier output is not overwritten. A separate shim delete process uses the same marker after a crash. If archiving fails, the original directory is left in place and cleanup reports the error. The archive and live directory must be on the same filesystem for the rename to work. `cubecli logs` reads the live path; inspect archived `stdout` and `stderr` directly on the node.
+
+Retention has no automatic expiry or size limit. Configure disk alerts and ship both live and archived logs to independent storage, then manage retention there and on the node. Removing the marker restores deletion for future cleanups; it does not remove existing archives. Archiving is best effort: it cannot recover output that was never forwarded from the guest, or survive loss of the node's disk.
+
+Only the container's init stdout/stderr is forwarded here using the default RPC forwarding path. The opt-in passfd I/O path uses different output paths and is not covered by this archive. If using `cube-entrypoint.sh`, configure `ENVD_LOG_FILE=-` in the image or template before envd starts to include its output. The injected-envd wrapper instead writes `/var/log/envd.log` inside the guest and needs separate configuration or collection. Collect exec-task output separately through the SDK. Avoid logging secrets from environment variables or request bodies.
 
 ## Scope and limitations
 
 - These logs capture only the **init process** (PID 1 inside the container). Output from processes spawned via `exec` calls is captured through the E2B SDK's `on_stdout` / `on_stderr` callbacks — refer to the [E2B SDK documentation](https://e2b.dev/docs) for details.
 - Log forwarding must be enabled on the running CubeShim version (available since v0.4.0). On older deployments the log file will be missing.
 - Logs are not streamed in real time — there is no `--follow` flag yet. Re-run the command to see new output.
-- Log files are removed when the sandbox is deleted.
+- By default, log files are removed when the sandbox is deleted; node-local retention is opt-in as described above.
 
 ## Related
 

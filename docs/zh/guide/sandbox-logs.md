@@ -20,7 +20,7 @@ CubeSandbox 提供两个互补的日志层：
 
 ## 前置条件
 
-`cubecli` 随 Cubelet 一同构建，并在一键部署时自动安装。`logs` 子命令访问的日志文件位于 **Cubelet 挂载命名空间**内，因此必须**直接在计算节点上执行**，无法通过 API 或非节点主机远程调用。
+`cubecli` 随 Cubelet 一同构建，并在一键部署时自动安装。请**直接在计算节点上执行**；它优先读取宿主机日志，仅在回退到旧版 bundle 路径时进入 Cubelet 挂载命名空间。
 
 ## 读取沙箱日志
 
@@ -70,21 +70,34 @@ cubecli logs --tpl --all --stderr <template-id>
 
 | 场景 | 路径 |
 |---|---|
-| 沙箱 stdout | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stdout`（Cubelet 挂载命名空间内） |
-| 沙箱 stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stderr`（Cubelet 挂载命名空间内） |
+| 沙箱 stdout | `/data/cubelet/log/<sandbox-id>/stdout`（宿主机文件系统） |
+| 沙箱 stderr | `/data/cubelet/log/<sandbox-id>/stderr`（宿主机文件系统） |
 | 模板 stdout | `/data/log/template/<template-id>_0/stdout`（宿主机文件系统） |
 | 模板 stderr | `/data/log/template/<template-id>_0/stderr`（宿主机文件系统） |
 
-::: tip 为什么需要挂载命名空间？
-沙箱日志文件由 CubeShim 写入 bundle 目录，该目录仅在 Cubelet 的私有挂载命名空间内可见。`cubecli logs` 会在读取前自动重新进入该命名空间——你无需任何额外操作，只需在节点上直接运行该命令即可。
-:::
+旧版沙箱可能将日志保存在 Cubelet 挂载命名空间内的 `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/` bundle 路径；`cubecli` 会自动回退到该路径。
+
+## 销毁后保留日志
+
+默认情况下，沙箱清理时会删除日志。需要保留时，请在复现问题前，**在每个计算节点**创建空标记文件：
+
+```bash
+sudo install -d -m 0755 /etc/cube-sandbox
+sudo touch /etc/cube-sandbox/retain-sandbox-logs
+```
+
+清理时，CubeShim 会把日志目录移动到 `/data/cubelet/log-archive/<sandbox-id>/<segment-id>/logs/`。每次清理（包括暂停和恢复）使用独立分段，避免覆盖以前的输出；shim 异常后由独立删除进程清理时也使用同一标记。如果归档失败，原目录会保留并报告错误。归档目录和原目录必须在同一文件系统中，才能通过重命名移动。`cubecli logs` 读取运行中的路径，归档后的 `stdout` 和 `stderr` 请直接在节点上查看。
+
+归档没有自动过期或大小限制。请配置磁盘告警，将运行中及归档日志发送到独立存储，再管理节点和远端的保留期限。删除标记只会恢复之后清理操作的默认删除行为，不会删除已有归档。归档属于尽力保留：尚未从 guest 转发出的内容以及节点磁盘损坏时的内容无法保证保留。
+
+这里仅保留默认 RPC 转发路径下容器 init 的 stdout/stderr。可选的 passfd I/O 使用不同的输出路径，不在本归档功能范围内。若使用 `cube-entrypoint.sh`，请在 envd 启动前于镜像或模板设置 `ENVD_LOG_FILE=-`，以便包含 envd 输出。自动注入 envd 的包装脚本则写入 guest 内的 `/var/log/envd.log`，需要另行配置或采集。exec 子任务的输出仍需通过 SDK 单独采集。避免记录环境变量值、请求体等敏感信息。
 
 ## 范围与限制
 
 - 这些日志仅记录 **init 进程**（容器内 PID 1）的输出。通过 `exec` 接口启动的进程输出需通过 E2B SDK 的 `on_stdout` / `on_stderr` 回调获取，详见 [E2B SDK 文档](https://e2b.dev/docs)。
 - 日志转发需要 v0.4.0 及以上版本的 CubeShim。在更旧的部署上，日志文件将不存在。
 - 日志目前不支持实时流式读取，暂无 `--follow` 标志。如需查看最新输出，请重新执行命令。
-- 沙箱删除后，对应的日志文件会一并清除。
+- 默认在沙箱删除时清除日志；如上所述，可选择启用节点本地保留。
 
 ## 相关文档
 
