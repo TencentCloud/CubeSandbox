@@ -195,7 +195,15 @@ func testSnapshotReferenceReleaseRollback(t *testing.T, db *gorm.DB) {
 	const snapshotID = "snapshot-release-rollback"
 	const artifactID = "rfs-release-rollback"
 	require.NoError(t, db.Create(&models.SnapshotRecord{SnapshotID: snapshotID, RootfsArtifactID: artifactID, Status: StatusDeleting}).Error)
-	require.NoError(t, db.Create(&models.TemplateReplica{TemplateID: snapshotID, NodeID: "rollback-node", ArtifactID: artifactID}).Error)
+	require.NoError(t, db.Create(&[]models.TemplateReplica{
+		{TemplateID: snapshotID, NodeID: "rollback-node", ArtifactID: artifactID},
+		{
+			TemplateID:      snapshotID,
+			NodeID:          "retry-node",
+			ArtifactID:      artifactID,
+			CleanupRequired: true,
+		},
+	}).Error)
 	const callbackName = "test:snapshot-release-failure"
 	injected := errors.New("replica metadata database error")
 	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(callbackName, func(tx *gorm.DB) {
@@ -213,13 +221,17 @@ func testSnapshotReferenceReleaseRollback(t *testing.T, db *gorm.DB) {
 	require.Empty(t, rec.CleanupArtifactIDsJSON)
 	var remaining int64
 	require.NoError(t, db.Model(&models.TemplateReplica{}).Where("template_id = ?", snapshotID).Count(&remaining).Error)
-	require.EqualValues(t, 1, remaining)
-	// Retry atomically saves the target while removing both reference sources.
+	require.EqualValues(t, 2, remaining)
+	// Retry atomically saves the target and removes released references while
+	// retaining the durable cubelet-cleanup tombstone.
 	require.NoError(t, releaseSnapshotArtifactReferences(ctx, snapshotID, targets))
 	rec, err = getSnapshotRecord(ctx, snapshotID)
 	require.NoError(t, err)
 	require.Empty(t, rec.RootfsArtifactID)
 	require.JSONEq(t, `["rfs-release-rollback"]`, rec.CleanupArtifactIDsJSON)
 	require.NoError(t, db.Model(&models.TemplateReplica{}).Where("template_id = ?", snapshotID).Count(&remaining).Error)
-	require.Zero(t, remaining)
+	require.EqualValues(t, 1, remaining)
+	var retry models.TemplateReplica
+	require.NoError(t, db.Where("template_id = ? AND node_id = ?", snapshotID, "retry-node").First(&retry).Error)
+	require.True(t, retry.CleanupRequired)
 }
