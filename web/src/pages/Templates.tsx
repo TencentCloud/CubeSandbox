@@ -690,15 +690,16 @@ export default function TemplatesPage() {
       {tab === 'list' && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {data?.map((tpl) => (
-            <div key={tpl.templateID} className="relative group">
+            <div key={tpl.templateID} className="relative group min-w-0">
               <Link to={`/templates/${tpl.templateID}`} className="block">
                 <Card className="panel-hover h-full">
-                  <CardHeader>
-                    <div className="flex items-center gap-3">
-                      <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
+                  {/* Keep pr-7 in sync with Card's p-5 and the right-2.5/w-7 delete action below. */}
+                  <CardHeader className="flex-wrap justify-end pr-7">
+                    <div className="flex min-w-0 flex-[1_1_10rem] items-center gap-3">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
                         <Package size={18} />
                       </span>
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <CardTitle
                           className="text-base truncate"
                           title={tpl.displayName || tpl.templateID}
@@ -714,9 +715,12 @@ export default function TemplatesPage() {
                       </div>
                     </div>
                     {compatByTemplate.get(tpl.templateID)?.overall === 'UNKNOWN' ? (
-                      <Badge tone="err">{t('compat.status.UNKNOWN')}</Badge>
+                      <Badge tone="err" className="shrink-0">
+                        {t('compat.status.UNKNOWN')}
+                      </Badge>
                     ) : (
                       <Badge
+                        className="shrink-0"
                         tone={
                           tpl.status.toLowerCase() === 'ready'
                             ? 'ok'
@@ -769,7 +773,7 @@ export default function TemplatesPage() {
                   'transition-opacity duration-150',
                   tpl.status.toLowerCase() === 'failed'
                     ? 'opacity-100'
-                    : 'opacity-0 group-hover:opacity-100',
+                    : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
                 ].join(' ')}
                 title={t('delete.button')}
                 onClick={(e) => {
