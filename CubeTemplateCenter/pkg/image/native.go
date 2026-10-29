@@ -4,6 +4,7 @@
 package image
 
 import (
+	"archive/tar"
 	"bufio"
 	"context"
 	"errors"
@@ -391,7 +392,11 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 			}
 			// WithNoSameOwner,it squashes all uid/gid to the
 			// unpacking user (root), breaking images with non-root-owned files.
-			_, applyErr := archive.Apply(egCtx, destDir, decompressed)
+			stripped := stripSelinuxXattrs(decompressed)
+			_, applyErr := archive.Apply(egCtx, destDir, stripped)
+			// Close unblocks the filter goroutine when Apply stopped reading
+			// before EOF (apply error or cancelled context); a no-op otherwise.
+			_ = stripped.Close()
 			_ = decompressed.Close()
 			_ = f.Close() // safe to double close, ensures FD is freed immediately
 
@@ -407,6 +412,73 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 	})
 
 	return eg.Wait()
+}
+
+// stripSelinuxXattrs streams the layer tar through a pipe that removes
+// security.selinux PAX records. Images built on SELinux-enabled hosts carry
+// build-host security contexts that are invalid (EINVAL on setxattr) on the
+// importing node; the guest manages its own security labels, so the build
+// environment's selinux xattrs must not be applied.
+//
+// The caller must Close the returned reader when done; closing it before EOF
+// unblocks the filter goroutine, so a consumer that stops reading early
+// (archive.Apply failing mid-layer, a cancelled context) cannot leak it.
+func stripSelinuxXattrs(r io.Reader) *io.PipeReader {
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		// Buffer the pipe so the tar writer hands off ~1 MiB chunks instead
+		// of io.Copy's 32 KiB default, matching the buffer size the rest of
+		// this export path already uses.
+		bw := bufio.NewWriterSize(pw, 1<<20)
+		tr := tar.NewReader(r)
+		tw := tar.NewWriter(bw)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			if hdr.PAXRecords != nil {
+				for k := range hdr.PAXRecords {
+					if strings.HasPrefix(k, "SCHILY.xattr.security.selinux") {
+						delete(hdr.PAXRecords, k)
+					}
+				}
+				if len(hdr.PAXRecords) == 0 {
+					hdr.PAXRecords = nil
+				}
+			}
+			if hdr.Xattrs != nil {
+				delete(hdr.Xattrs, "security.selinux")
+				if len(hdr.Xattrs) == 0 {
+					hdr.Xattrs = nil
+				}
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			if _, err := io.Copy(tw, tr); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
+		// Close (not Flush) so the two zero-block tar trailer is written;
+		// Go's tar.Reader tolerates its absence, but other consumers may not.
+		if err := tw.Close(); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if err := bw.Flush(); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+	}()
+	return pr
 }
 
 func nativeImageForSource(ctx context.Context, source *PreparedSource) (v1.Image, error) {
