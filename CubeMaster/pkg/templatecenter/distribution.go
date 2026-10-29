@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -190,6 +191,20 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 	return verifyArtifactServability(ctx, artifact)
 }
 
+// Injectable getter keeps config wiring testable without initializing global config.
+var distributionConfig = config.GetConfig
+
+// distributionWorkerCount returns the configured artifact distribution
+// concurrency (common.distribution_workers), falling back to the built-in
+// default when no config is loaded (e.g. unit tests). The knob sizes only the
+// artifact-push fan-out; replica creation keeps its own fixed concurrency.
+func distributionWorkerCount() int {
+	if cfg := distributionConfig(); cfg != nil && cfg.Common != nil && cfg.Common.DistributionWorkers > 0 {
+		return cfg.Common.DistributionWorkers
+	}
+	return defaultDistributionWorkers
+}
+
 // distributeRootfsArtifactToNodes is distributeRootfsArtifact with an
 // explicit target set, so the replica-backfill sweep can push an artifact to
 // exactly the nodes that lack a READY replica instead of re-resolving the
@@ -218,7 +233,7 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 	failed := int32(0)
 	var firstErr error
 	var lock sync.Mutex
-	sem := make(chan struct{}, defaultDistributionWorkers)
+	sem := make(chan struct{}, distributionWorkerCount())
 	var wg sync.WaitGroup
 	readyTargets := make([]*node.Node, 0, len(targets))
 	for _, target := range targets {

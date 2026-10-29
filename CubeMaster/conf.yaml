@@ -16,6 +16,11 @@ common:
   # CUBE_TEMPLATE_CENTER_ADDR env (env wins). Uncomment and adjust for your
   # deployment; one-click defaults to http://127.0.0.1:8090.
   # template_center_addr: "http://127.0.0.1:8090"
+  # Max concurrency for distributing a template rootfs artifact to nodes
+  # (the artifact-push phase of template creation, redo, and the periodic
+  # replica-backfill sweep). Replica creation after the push is not affected
+  # by this knob. Default 4.
+  # distribution_workers: 4
 
 log:
   module: "cubemaster"
