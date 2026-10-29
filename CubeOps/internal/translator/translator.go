@@ -570,6 +570,12 @@ func TransformCreateTemplateRequest(body map[string]interface{}) map[string]inte
 	if v, ok := body["with_cube_ca"]; ok {
 		cmReq["with_cube_ca"] = v
 	}
+	if v, ok := body["with_cube_ca_env"]; ok {
+		cmReq["with_cube_ca_env"] = v
+	}
+	if v, ok := body["cube_ca_env_vars"]; ok {
+		cmReq["cube_ca_env_vars"] = v
+	}
 
 	// Build container_overrides from cpu, memory, command, args, dns, probe, env.
 	overrides := map[string]interface{}{}
