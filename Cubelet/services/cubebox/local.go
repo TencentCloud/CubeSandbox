@@ -661,6 +661,9 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 		return er
 	}
 
+	// CleanUp is also used by GC and failed-destroy recovery. Only publish the
+	// marker after the runtime is gone and all resource cleanup has succeeded.
+	l.markSandboxLogs(ctx, sandBoxID, ns)
 	err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
 		CubeboxID: sandBoxID,
 	})

@@ -94,6 +94,8 @@ Cubelet starts the retention period only after it confirms the sandbox runtime h
 
 The feature only retains init stdout/stderr that CubeShim forwards to the host; it does not collect files written solely inside the guest. Retained logs are node-local and can consume disk space: monitor usage and export them elsewhere if longer retention or node-loss protection is needed.
 
+Directories without a valid cleanup marker and namespace, including logs left before this feature was enabled or by older marker formats, are never automatically removed. Inspect them before any manual cleanup.
+
 ## Scope and limitations
 
 - These logs capture only the **init process** (PID 1 inside the container). Output from processes spawned via `exec` calls is captured through the E2B SDK's `on_stdout` / `on_stderr` callbacks — refer to the [E2B SDK documentation](https://e2b.dev/docs) for details.

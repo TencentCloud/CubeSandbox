@@ -164,7 +164,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     runtime_type = "io.containerd.cube.v2"
   [plugins."io.cubelet.internal.v1.cubebox"]
     default_runtime_name = "cube"
-    # Optional delayed cleanup of exited sandbox init logs.
+    # Optional delayed cleanup of exited sandbox init logs. Restart Cubelet to
+    # apply changes; already-running shims keep their startup setting.
     sandbox_log_cleanup_enabled = false
     sandbox_log_retention = "24h"
     sandbox_log_cleanup_interval = "1m"

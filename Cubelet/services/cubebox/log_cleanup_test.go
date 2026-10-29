@@ -7,12 +7,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/logcleanup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -47,6 +50,104 @@ func TestDelayedLogCleanupConfiguration(t *testing.T) {
 		if _, err := positiveDuration(raw, "retention"); err == nil {
 			t.Fatalf("accepted invalid duration %q", raw)
 		}
+	}
+}
+
+func TestLookupMarkedShimUsesSandboxNamespace(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "sandbox"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := logcleanup.Mark(root, "sandbox", "nondefault"); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	err := lookupMarkedShim(context.Background(), root, "sandbox", func(ctx context.Context, id string) error {
+		called = true
+		if ns, _ := namespaces.Namespace(ctx); ns != "nondefault" || id != "sandbox" {
+			t.Fatalf("namespace=%q id=%q", ns, id)
+		}
+		return nil // a live shim prevents cleanup
+	})
+	if err != nil || !called {
+		t.Fatalf("called=%v error=%v", called, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sandbox", ".delayed-cleanup"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	called = false
+	err = lookupMarkedShim(context.Background(), root, "sandbox", func(context.Context, string) error { called = true; return errdefs.ErrNotFound })
+	if err == nil || called {
+		t.Fatalf("unknown namespace must retain logs: called=%v error=%v", called, err)
+	}
+}
+
+func TestScanKeepsRegisteredShimInNondefaultNamespace(t *testing.T) {
+	root := t.TempDir()
+	id := "sandbox"
+	if err := os.Mkdir(filepath.Join(root, id), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := logcleanup.Mark(root, id, "nondefault"); err != nil {
+		t.Fatal(err)
+	}
+	shimExists := true
+	guard := func(ctx context.Context, id string, remove func() error) error {
+		safe, err := logCleanupEligible(utils.ErrorKeyNotFound, func() error {
+			return lookupMarkedShim(ctx, root, id, func(ctx context.Context, _ string) error {
+				ns, _ := namespaces.Namespace(ctx)
+				if ns == "nondefault" && shimExists {
+					return nil
+				}
+				return errdefs.ErrNotFound
+			})
+		})
+		if err != nil || !safe {
+			return err
+		}
+		return remove()
+	}
+	now := time.Now().Add(time.Hour)
+	if err := logcleanup.Scan(context.Background(), root, time.Second, now, guard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, id)); err != nil {
+		t.Fatalf("live shim logs removed: %v", err)
+	}
+	shimExists = false
+	if err := logcleanup.Scan(context.Background(), root, time.Second, now, guard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stopped shim logs not removed: %v", err)
+	}
+}
+
+func TestLockedSandboxDoesNotBlockOtherLogCleanup(t *testing.T) {
+	root := t.TempDir()
+	for _, id := range []string{"a-locked", "b-ready"} {
+		if err := os.Mkdir(filepath.Join(root, id), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := logcleanup.Mark(root, id, "default"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	locks := utils.NewResourceLocks()
+	unlock := locks.Lock("a-locked")
+	defer unlock()
+	err := logcleanup.Scan(context.Background(), root, time.Second, time.Now().Add(time.Hour),
+		func(ctx context.Context, id string, remove func() error) error {
+			return withLogCleanupLock(ctx, locks, id, remove)
+		})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected timeout: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a-locked")); err != nil {
+		t.Fatalf("locked logs removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "b-ready")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ready logs not removed: %v", err)
 	}
 }
 

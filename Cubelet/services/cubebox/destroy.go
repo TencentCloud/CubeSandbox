@@ -29,7 +29,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rootfs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/logcleanup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
@@ -215,12 +214,10 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	if er := result.ErrorOrNil(); er != nil {
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
-	if l.config != nil && l.config.SandboxLogCleanupEnabled && !keepCubebox {
+	if !keepCubebox {
 		// Only mark after waitSandboxRuntimeGone has verified the runtime exit.
 		// A marking failure leaves the logs in place for manual inspection.
-		if markErr := logcleanup.Mark(logcleanup.Root, sandBoxID); markErr != nil {
-			log.G(ctx).Warnf("mark sandbox logs for delayed cleanup %s: %v", sandBoxID, markErr)
-		}
+		l.markSandboxLogs(ctx, sandBoxID, sb.Namespace)
 	}
 	return nil
 }

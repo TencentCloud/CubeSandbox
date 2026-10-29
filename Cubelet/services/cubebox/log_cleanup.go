@@ -17,7 +17,22 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
-const delayedShimLogCleanupEnv = "CUBELET_DELAY_SANDBOX_LOG_CLEANUP"
+const (
+	delayedShimLogCleanupEnv = "CUBELET_DELAY_SANDBOX_LOG_CLEANUP"
+	logCleanupLockTimeout    = 250 * time.Millisecond
+)
+
+func (l *local) markSandboxLogs(ctx context.Context, id, namespace string) {
+	if l.config == nil || !l.config.SandboxLogCleanupEnabled {
+		return
+	}
+	if namespace == "" {
+		namespace = namespaces.Default
+	}
+	if err := logcleanup.Mark(logcleanup.Root, id, namespace); err != nil {
+		CubeLog.WithContext(ctx).Warnf("mark sandbox logs for delayed cleanup %s: %v", id, err)
+	}
+}
 
 func (c *CubeConfig) configureLogCleanup() error {
 	if !c.SandboxLogCleanupEnabled {
@@ -61,26 +76,41 @@ func (s *service) runDelayedLogCleanup(ctx context.Context) {
 }
 
 func (s *service) guardDelayedLogCleanup(ctx context.Context, id string, remove func() error) error {
-	unlock, err := s.sandboxLifecycleLocks.LockContext(ctx, id)
+	return withLogCleanupLock(ctx, s.sandboxLifecycleLocks, id, func() error {
+		_, sandboxErr := s.cubeboxMgr.cubeboxManger.Get(ctx, id)
+		safe, err := logCleanupEligible(sandboxErr, func() error {
+			if s.cubeboxMgr.shims == nil {
+				return errors.New("shim manager unavailable")
+			}
+			return lookupMarkedShim(ctx, logcleanup.Root, id, func(ctx context.Context, id string) error {
+				_, err := s.cubeboxMgr.shims.Get(ctx, id)
+				return err
+			})
+		})
+		if err != nil || !safe {
+			return err
+		}
+		return remove()
+	})
+}
+
+func lookupMarkedShim(ctx context.Context, root, id string, lookup func(context.Context, string) error) error {
+	namespace, err := logcleanup.Namespace(root, id)
+	if err != nil {
+		return fmt.Errorf("read cleanup marker namespace: %w", err)
+	}
+	return lookup(namespaces.WithNamespace(ctx, namespace), id)
+}
+
+func withLogCleanupLock(ctx context.Context, locks *utils.ResourceLocks, id string, fn func() error) error {
+	lockCtx, cancel := context.WithTimeout(ctx, logCleanupLockTimeout)
+	defer cancel()
+	unlock, err := locks.LockContext(lockCtx, id)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	// A record includes paused sandboxes and any in-progress teardown. Keep
-	// their logs until the record is gone; unknown state also fails closed.
-	_, sandboxErr := s.cubeboxMgr.cubeboxManger.Get(ctx, id)
-	safe, err := logCleanupEligible(sandboxErr, func() error {
-		if s.cubeboxMgr.shims == nil {
-			return errors.New("shim manager unavailable")
-		}
-		_, shimErr := s.cubeboxMgr.shims.Get(namespaces.WithNamespace(ctx, namespaces.Default), id)
-		return shimErr
-	})
-	if err != nil || !safe {
-		return err
-	}
-	return remove()
+	return fn()
 }
 
 func logCleanupEligible(sandboxErr error, lookupShim func() error) (bool, error) {
