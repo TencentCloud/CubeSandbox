@@ -147,6 +147,10 @@ Any of the following **recreates** the Big Pod → the Pod UID changes; on the P
 
 Also: `cubeNode.quota`, `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, and `global.timezone` also change the Pod template — **not silent day-to-day upgrade items**.
 
+When enabling `cubeNode.quota`, also upgrade to a Cubelet image containing
+`configure-cubelet-quota.sh` and its startup integration; older images ignore
+these overrides. See [Cubelet quota overrides](./install.md#_8-4-cubelet-quota-overrides).
+
 ---
 
 ## Special cases

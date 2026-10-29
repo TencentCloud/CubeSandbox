@@ -143,6 +143,9 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 另外：`cubeNode.quota`、`cubeNode.env`、`cubeNode.podAnnotations`、网络相关 env、`global.timezone` 也会改 Pod template——**不是日常无感升级项**。
 
+启用 `cubeNode.quota` 时，还需升级到包含 `configure-cubelet-quota.sh` 及其启动调用的
+Cubelet 镜像；旧镜像会忽略这些覆盖值。详见[Cubelet 配额覆盖](./install.md#_8-4-cubelet-配额覆盖)。
+
 ---
 
 ## 特殊场景

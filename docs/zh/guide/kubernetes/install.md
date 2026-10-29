@@ -345,8 +345,6 @@ bootstrap:
 :::
 
 
----
-
 ### 8.4 Cubelet 配额覆盖
 
 在 `runtime-values.yaml` 中设置 `cubeNode.quota`，可以在 Cubelet 重启或 Pod
@@ -382,6 +380,9 @@ cubeNode:
 `resource.ParseQuantity` 解析。请根据节点容量设置合理的值。超出范围的值可能
 通过 Chart 检查，却导致 Cubelet 无法启动，此时 `helm --wait` 可能超时。
 
+在 values 文件中，超过 `9007199254740991` 的整数应加引号（例如
+`mcpu_limit: "9223372036854775807"`），以避免 Helm 浮点数转换造成精度损失。
+
 Chart 将这些值传入 Cubelet 容器；入口脚本在**复制镜像自带的 dynamicconf
 之后**、启动 Cubelet 之前应用它们。需要同时使用本版 Chart 和包含
 `configure-cubelet-quota.sh` 的 Cubelet 镜像；旧镜像（包括 v0.7.3）不会读取
@@ -397,6 +398,8 @@ Cubelet 已完成启动。
 `sed -i` 修改其中的端点，通过 `awk` 和 `mv -f` 修改 DNS 列表。这两种方式
 都需要文件可写，且所在目录允许通过重命名替换文件。其他 dynamicconf 字段继续
 由现有启动配置管理。
+
+---
 
 ## 常见问题速查
 

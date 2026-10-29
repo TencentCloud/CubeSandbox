@@ -346,8 +346,6 @@ For NetworkPolicy over sandbox traffic to in-cluster Services / Pods *while* sta
 :::
 
 
----
-
 ### 8.4 Cubelet quota overrides
 
 Set `cubeNode.quota` in `runtime-values.yaml` to persist `host.quota` settings
@@ -386,6 +384,9 @@ Kubernetes `resource.ParseQuantity`. Use values appropriate for the node's
 capacity. An out-of-range value can pass the chart checks and still prevent
 Cubelet from starting; `helm --wait` may then time out.
 
+Quote integer values above `9007199254740991` in values files (for example,
+`mcpu_limit: "9223372036854775807"`) to avoid Helm's floating-point rounding.
+
 The chart passes these values to the Cubelet container, whose entrypoint applies
 them **after staging** the bundled dynamicconf and before starting Cubelet. This
 requires both this chart and a Cubelet image containing
@@ -405,6 +406,8 @@ entrypoint patches endpoints using `sed -i` and DNS lists using `awk` followed
 by `mv -f`. Both need a writable file and a directory that permits replacement
 by rename. Keep the other dynamicconf fields managed by the existing startup
 configuration.
+
+---
 
 ## FAQ quick reference
 
