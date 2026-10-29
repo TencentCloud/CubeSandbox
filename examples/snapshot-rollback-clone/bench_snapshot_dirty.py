@@ -86,6 +86,8 @@ def percentile(data: list, p: float) -> float:
 def run_round(size_mb: int) -> dict:
     snap_id = None
     sb = None
+    sa = None
+    sb2 = None
     try:
         sb = Sandbox.create(template=TEMPLATE_ID)
         sid = sb.sandbox_id
@@ -104,24 +106,21 @@ def run_round(size_mb: int) -> dict:
         # warm-up: first restore (discard)
         sa = Sandbox.create(template=snap_id)
         sa.kill()
+        sa = None
 
         # timed restore (cache warm)
         t1 = time.monotonic()
         sb2 = Sandbox.create(template=snap_id)
         create_ms = (time.monotonic() - t1) * 1000
         sb2.kill()
+        sb2 = None
         return {"snap_ms": snap_ms, "create_ms": create_ms, "dirty_bytes": dirty_bytes}
     finally:
-        if sb is not None:
-            try:
-                sb.kill()
-            except Exception:
-                pass
+        for s in (sb, sa, sb2):
+            if s is not None:
+                s.kill()
         if snap_id is not None:
-            try:
-                Sandbox.delete_snapshot(snap_id)
-            except Exception:
-                pass
+            Sandbox.delete_snapshot(snap_id)
 
 
 def main():
