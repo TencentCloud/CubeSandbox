@@ -96,6 +96,8 @@ The feature only retains init stdout/stderr that CubeShim forwards to the host; 
 
 Directories without a valid cleanup marker and namespace, including logs left before this feature was enabled or by older marker formats, are never automatically removed. Inspect them before any manual cleanup.
 
+An informational `sandbox log directory missing` message means there was no directory to mark. The sandbox may have failed before it produced init logs, or an older shim may have removed them; check the deployed shim version and the sandbox lifecycle logs. With delayed cleanup enabled, explicitly requested sandbox IDs must be valid and have no surrounding whitespace. Concurrent same-ID operations can cause Create to wait or return a retryable state error if its deadline expires.
+
 ## Scope and limitations
 
 - These logs capture only the **init process** (PID 1 inside the container). Output from processes spawned via `exec` calls is captured through the E2B SDK's `on_stdout` / `on_stderr` callbacks — refer to the [E2B SDK documentation](https://e2b.dev/docs) for details.

@@ -91,6 +91,13 @@ func TestMarkRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestMarkReportsMissingDirectory(t *testing.T) {
+	err := Mark(t.TempDir(), "sandbox", "default")
+	if !errors.Is(err, ErrLogDirNotFound) {
+		t.Fatalf("expected missing log directory, got %v", err)
+	}
+}
+
 func TestScanKeepsLogsWhenSafetyCheckFails(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "sandbox")

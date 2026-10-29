@@ -23,13 +23,19 @@ const (
 )
 
 func (l *local) markSandboxLogs(ctx context.Context, id, namespace string) {
+	l.markSandboxLogsAt(ctx, logcleanup.Root, id, namespace)
+}
+
+func (l *local) markSandboxLogsAt(ctx context.Context, root, id, namespace string) {
 	if l.config == nil || !l.config.SandboxLogCleanupEnabled {
 		return
 	}
 	if namespace == "" {
 		namespace = namespaces.Default
 	}
-	if err := logcleanup.Mark(logcleanup.Root, id, namespace); err != nil {
+	if err := logcleanup.Mark(root, id, namespace); errors.Is(err, logcleanup.ErrLogDirNotFound) {
+		CubeLog.WithContext(ctx).Infof("sandbox log directory missing; no logs to retain for %s", id)
+	} else if err != nil {
 		CubeLog.WithContext(ctx).Warnf("mark sandbox logs for delayed cleanup %s: %v", id, err)
 	}
 }
@@ -107,6 +113,11 @@ func withLogCleanupLock(ctx context.Context, locks *utils.ResourceLocks, id stri
 	defer cancel()
 	unlock, err := locks.LockContext(lockCtx, id)
 	if err != nil {
+		// A busy sandbox can be checked on the next scan. Preserve caller
+		// cancellation, which is different from our per-entry wait timeout.
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil
+		}
 		return err
 	}
 	defer unlock()

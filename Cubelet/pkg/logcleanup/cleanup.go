@@ -25,6 +25,9 @@ const Root = sandboxlog.Dir
 
 const markerName = ".delayed-cleanup"
 
+// ErrLogDirNotFound means there was no sandbox log directory to retain.
+var ErrLogDirNotFound = errors.New("sandbox log directory not found")
+
 // Mark starts the retention period after Cubelet has confirmed runtime exit.
 // Failure to mark is safe: an unmarked directory is never removed by Scan.
 func Mark(root, id, namespace string) error {
@@ -37,7 +40,7 @@ func Mark(root, id, namespace string) error {
 	dir := filepath.Join(root, id)
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return ErrLogDirNotFound
 	}
 	if err != nil {
 		return err

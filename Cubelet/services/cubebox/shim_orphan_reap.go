@@ -164,10 +164,9 @@ func deleteOrphanShim(ctx context.Context, id string, s orphanShim) error {
 }
 
 // shimDeleteEnv is the environment of the delete invocation: the variables
-// containerd's shim.Command adds, PATH, and the two the shim reads for its
-// logging. Nothing else from Cubelet is passed on; the delete path reads no
-// other variable. TTRPC_ADDRESS is not used by the delete itself, but the shim
-// bootstrap refuses to start without it.
+// containerd's shim.Command adds, PATH, the shim logging variables, and the
+// delayed log cleanup policy flag. TTRPC_ADDRESS is not used by the delete
+// itself, but the shim bootstrap refuses to start without it.
 func shimDeleteEnv(s orphanShim) []string {
 	path := os.Getenv("PATH")
 	if path == "" {

@@ -53,6 +53,25 @@ func TestDelayedLogCleanupConfiguration(t *testing.T) {
 	}
 }
 
+func TestMarkSandboxLogsHonorsFeatureFlag(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sandbox")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	l := &local{config: &CubeConfig{}}
+	l.markSandboxLogsAt(context.Background(), root, "sandbox", "")
+	if _, err := os.Stat(filepath.Join(dir, ".delayed-cleanup")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disabled cleanup wrote a marker: %v", err)
+	}
+	l.config.SandboxLogCleanupEnabled = true
+	l.markSandboxLogsAt(context.Background(), root, "sandbox", "")
+	ns, err := logcleanup.Namespace(root, "sandbox")
+	if err != nil || ns != namespaces.Default {
+		t.Fatalf("enabled cleanup marker namespace=%q error=%v", ns, err)
+	}
+}
+
 func TestLookupMarkedShimUsesSandboxNamespace(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "sandbox"), 0700); err != nil {
@@ -140,14 +159,35 @@ func TestLockedSandboxDoesNotBlockOtherLogCleanup(t *testing.T) {
 		func(ctx context.Context, id string, remove func() error) error {
 			return withLogCleanupLock(ctx, locks, id, remove)
 		})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected timeout: %v", err)
+	if err != nil {
+		t.Fatalf("busy sandbox must be skipped without an error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "a-locked")); err != nil {
 		t.Fatalf("locked logs removed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "b-ready")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ready logs not removed: %v", err)
+	}
+}
+
+func TestLogCleanupLockPreservesCancellationAndCallbackErrors(t *testing.T) {
+	locks := utils.NewResourceLocks()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := withLogCleanupLock(ctx, locks, "sandbox", func() error { t.Fatal("callback ran"); return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	unlock := locks.Lock("sandbox")
+	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := withLogCleanupLock(deadlineCtx, locks, "sandbox", func() error { t.Fatal("callback ran"); return nil })
+	deadlineCancel()
+	unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected caller deadline, got %v", err)
+	}
+	want := errors.New("cleanup failed")
+	if err := withLogCleanupLock(context.Background(), locks, "sandbox", func() error { return want }); !errors.Is(err, want) {
+		t.Fatalf("expected callback error, got %v", err)
 	}
 }
 
@@ -170,6 +210,62 @@ func TestDelayedCleanupSerializesCreateWithReusedID(t *testing.T) {
 	}
 	if !strings.Contains(rsp.Ret.RetMsg, "retry Create") {
 		t.Fatalf("wrong retry message: %s", rsp.Ret.RetMsg)
+	}
+}
+
+func TestDelayedCleanupScanBlocksCreateWithReusedID(t *testing.T) {
+	locks := utils.NewResourceLocks()
+	s := &service{
+		cubeboxMgr:            &local{config: &CubeConfig{SandboxLogCleanupEnabled: true}},
+		sandboxLifecycleLocks: locks,
+	}
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	defer func() {
+		close(release)
+		if err := <-done; err != nil {
+			t.Errorf("cleanup lock: %v", err)
+		}
+	}()
+	go func() {
+		done <- withLogCleanupLock(context.Background(), locks, "sandbox-id", func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-held:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not acquire the lock")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	rsp, err := s.Create(ctx, &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationDesiredSandboxID: "sandbox-id"},
+	})
+	if err != nil || rsp.Ret.RetCode != errorcode.ErrorCode_TaskStateInvalid {
+		t.Fatalf("expected Create to wait for cleanup: response=%v error=%v", rsp, err)
+	}
+}
+
+func TestDelayedCleanupRejectsUnsafeDesiredIDsBeforeLocking(t *testing.T) {
+	locks := utils.NewResourceLocks()
+	s := &service{
+		cubeboxMgr:            &local{config: &CubeConfig{SandboxLogCleanupEnabled: true}},
+		sandboxLifecycleLocks: locks,
+	}
+	for _, id := range []string{" sandbox", "sandbox ", " ", ".", "../sandbox", "bad\x00id"} {
+		rsp, err := s.Create(context.Background(), &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{constants.MasterAnnotationDesiredSandboxID: id},
+		})
+		if err != nil || rsp.Ret.RetCode != errorcode.ErrorCode_InvalidParamFormat {
+			t.Fatalf("ID %q: response=%v error=%v", id, rsp, err)
+		}
+		if locks.Len() != 0 {
+			t.Fatalf("ID %q unexpectedly took a lifecycle lock", id)
+		}
 	}
 }
 
