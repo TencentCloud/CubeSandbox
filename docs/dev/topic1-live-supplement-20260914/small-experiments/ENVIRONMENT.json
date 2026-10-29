@@ -1,0 +1,26 @@
+{
+  "run_id": "topic1-small-experiments-20260913-210144",
+  "time": "2026-09-13T21:13:34+0800",
+  "binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "conf_sha": "a0ac521bda69c1f1cfe0f849403caa0365514d90ab8919d145a35c201b9159d8",
+  "nodes": [
+    "node-a",
+    "node-b",
+    "node-c",
+    "node-d"
+  ],
+  "healthy_four": true,
+  "sandbox_count": 0,
+  "templates": {
+    "cpu_heavy": "tpl-redacted-cpu-heavy",
+    "mem_heavy": "tpl-redacted-mem-heavy",
+    "small": "tpl-redacted-small",
+    "large": "tpl-redacted-large",
+    "burst_unit": "tpl-redacted-burst-unit",
+    "shape_unit": "tpl-redacted-shape-unit",
+    "locality_contrast": "tpl-redacted-locality-contrast"
+  },
+  "staged_sha": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "stock_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "note": "supplement_only_does_not_override_VALID_NO_IMPROVEMENT; nodes/templates redacted for public docs (stable labels only); arms_not_rerun_on_pr_head=true; stock binary edf40cb9… predates/diverges from this PR's cube_scheduler_* metrics"
+}
