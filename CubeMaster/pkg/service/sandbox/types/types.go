@@ -629,6 +629,7 @@ type SandboxData struct {
 	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
 	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
 	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
+	CreateAt               int64              `json:"create_at,omitempty"`
 	EndAt                  int64              `json:"end_at,omitempty"`
 	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus          *RestartStatus     `json:"restart_status,omitempty"`

@@ -303,23 +303,11 @@ impl SandboxService {
 
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        // Keep the raw list time so its `now` fallback cannot hide the info time.
-        let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;
-        let started_at = summary
-            .as_ref()
-            .and_then(|s| {
-                s.started_at
-                    .or_else(|| datetime_from_unix_nanos(s.create_at))
-            })
-            .or(d.started_at)
-            .unwrap_or_else(chrono::Utc::now);
+        let started_at = d.started_at.unwrap_or_else(chrono::Utc::now);
         // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
         // no end instant) instead of collapsing it onto started_at, which
         // would read as "already expired".
-        let end_at = summary
-            .as_ref()
-            .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at);
+        let end_at = d.end_at;
 
         let envd_version = envd_version_from_annotations(&d.annotations);
         Ok(SandboxDetail {
@@ -902,38 +890,6 @@ impl SandboxService {
 
         resp.into_first_sandbox(&self.instance_type)
             .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
-    }
-
-    async fn fetch_sandbox_summary(
-        &self,
-        sandbox_id: &str,
-        host_id: &str,
-    ) -> AppResult<Option<SandboxInfo>> {
-        if host_id.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let req = ListSandboxRequest {
-            request_id: new_request_id(),
-            instance_type: self.instance_type.clone(),
-            start_idx: None,
-            size: None,
-            host_id: Some(host_id.to_string()),
-            filter: None,
-        };
-
-        let resp = self
-            .cubemaster
-            .list_sandboxes(&req)
-            .await
-            .map_err(internal_error)?;
-
-        resp.ret.into_result().map_err(internal_error)?;
-
-        Ok(resp
-            .sandboxes
-            .into_iter()
-            .find(|sandbox| sandbox.sandbox_id == sandbox_id))
     }
 
     fn sandbox_response(
@@ -2419,7 +2375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paused_sandbox_detail_uses_list_start_time_fallback() {
+    async fn paused_sandbox_detail_uses_info_create_at() {
         async fn info_handler() -> Json<Value> {
             Json(serde_json::json!({
                 "requestID": "req-info",
@@ -2428,6 +2384,7 @@ mod tests {
                     "sandbox_id": "sb-paused",
                     "host_id": "host-1",
                     "status": 5,
+                    "create_at": 1_700_000_000_000_000_000i64,
                     "containers": [{
                         "container_id": "sb-paused",
                         "type": "sandbox",
@@ -2437,42 +2394,21 @@ mod tests {
             }))
         }
 
-        async fn list_handler() -> Json<Value> {
-            Json(serde_json::json!({
-                "requestID": "req-list",
-                "ret": { "ret_code": 0, "ret_msg": "ok" },
-                "data": [{
-                    "sandbox_id": "sb-paused",
-                    "host_id": "host-1",
-                    "status": 5,
-                    "create_at": 1_700_000_000_000_000_000i64
-                }]
-            }))
-        }
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
 
-        let service = spawn_fake_cubemaster(
-            Router::new()
-                .route("/cube/sandbox/info", get(info_handler))
-                .route("/cube/sandbox/list", post(list_handler)),
-        )
-        .await;
-
-        let listed = service
-            .list(None, None, 10)
-            .await
-            .expect("list should succeed");
         let detail = service
             .get_sandbox("sb-paused")
             .await
             .expect("detail should succeed");
         let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
             .expect("valid sandbox creation time");
-        assert_eq!(listed[0].started_at, expected);
-        assert_eq!(detail.started_at, listed[0].started_at);
+        assert_eq!(detail.started_at, expected);
     }
 
     #[tokio::test]
-    async fn paused_sandbox_detail_uses_info_time_when_list_time_missing() {
+    async fn paused_sandbox_detail_falls_back_to_container_create_at() {
         async fn info_handler() -> Json<Value> {
             Json(serde_json::json!({
                 "requestID": "req-info",
@@ -2490,24 +2426,9 @@ mod tests {
             }))
         }
 
-        async fn list_handler() -> Json<Value> {
-            Json(serde_json::json!({
-                "requestID": "req-list",
-                "ret": { "ret_code": 0, "ret_msg": "ok" },
-                "data": [{
-                    "sandbox_id": "sb-paused",
-                    "host_id": "host-1",
-                    "status": 5
-                }]
-            }))
-        }
-
-        let service = spawn_fake_cubemaster(
-            Router::new()
-                .route("/cube/sandbox/info", get(info_handler))
-                .route("/cube/sandbox/list", post(list_handler)),
-        )
-        .await;
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
 
         let detail = service
             .get_sandbox("sb-paused")

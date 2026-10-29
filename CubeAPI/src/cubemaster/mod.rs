@@ -1298,6 +1298,8 @@ pub struct GetSandboxDataItem {
     pub containers: Vec<GetSandboxContainerItem>,
     #[serde(default)]
     pub namespace: String,
+    #[serde(default)]
+    pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -1578,7 +1580,8 @@ impl GetSandboxResponse {
             instance_type: instance_type.to_string(),
             status,
             template_id,
-            started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
+            started_at: datetime_from_unix_nanos(item.create_at)
+                .or_else(|| primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at))),
             end_at: item.end_at,
             cpu_count: cpu_milli / 1000,
             cpu_milli,

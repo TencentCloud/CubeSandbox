@@ -18,6 +18,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -27,6 +28,11 @@ import (
 )
 
 var (
+	// createdAtCache memoizes the immutable sandbox creation time. It is
+	// populated on first insert (and lazily on a cold read); the DB remains
+	// the source of truth for Master restarts and backfilled records.
+	createdAtCache sync.Map
+
 	// ErrSandboxSpecNotFound is returned when no spec is registered for the sandbox.
 	ErrSandboxSpecNotFound = errors.New("sandbox spec not found")
 	// ErrSandboxSpecStoreNotReady is returned when Init has not been called.
@@ -139,7 +145,7 @@ func doPut(ctx context.Context, sandboxID string, req *sandboxtypes.CreateCubeSa
 	//   - id is preserved on conflict (UNIQUE-key-only conflict path),
 	//   - created_at is preserved on conflict (only set on first insert),
 	//   - updated_at is automatically refreshed by gorm via UpdateTime hook.
-	return client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+	res := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "sandbox_id"}},
 			DoUpdates: clause.AssignmentColumns([]string{
@@ -154,7 +160,17 @@ func doPut(ctx context.Context, sandboxID string, req *sandboxtypes.CreateCubeSa
 				"updated_at",
 			}),
 		}).
-		Create(rec).Error
+		Create(rec)
+	if res.Error != nil {
+		return res.Error
+	}
+	// MySQL reports 1 inserted / 2 updated for ON DUPLICATE KEY UPDATE. Only
+	// the insert carries the durable created_at; a conflict preserves the
+	// original DB value, so leave the cache alone there.
+	if res.RowsAffected == 1 && !rec.CreatedAt.IsZero() {
+		createdAtCache.Store(sandboxID, rec.CreatedAt.Truncate(time.Second))
+	}
+	return nil
 }
 
 // persistFailureReason classifies a Put error into a low-cardinality metric
@@ -194,6 +210,38 @@ func Get(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandbox
 		return nil, err
 	}
 	return decodeSpec(&rec)
+}
+
+// GetCreatedAt returns the durable creation time of the sandbox spec. The
+// timestamp is set on first insert and preserved on later upserts, so it
+// matches the sandbox creation time for normally-created sandboxes. For
+// backfilled specs it is the backfill time.
+func GetCreatedAt(ctx context.Context, sandboxID string) (time.Time, error) {
+	client := getDB()
+	if client == nil {
+		return time.Time{}, ErrSandboxSpecStoreNotReady
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return time.Time{}, errors.New("sandboxspec.GetCreatedAt: sandbox_id is required")
+	}
+	if v, ok := createdAtCache.Load(sandboxID); ok {
+		if ts, ok := v.(time.Time); ok && !ts.IsZero() {
+			return ts, nil
+		}
+	}
+	var rec models.SandboxSpec
+	if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+		Select("created_at").Where("sandbox_id = ?", sandboxID).First(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return time.Time{}, ErrSandboxSpecNotFound
+		}
+		return time.Time{}, err
+	}
+	if !rec.CreatedAt.IsZero() {
+		createdAtCache.Store(sandboxID, rec.CreatedAt)
+	}
+	return rec.CreatedAt, nil
 }
 
 // getManyBatchSize bounds one IN list. Tests lower it to exercise batching.
@@ -282,9 +330,13 @@ func Delete(ctx context.Context, sandboxID string) error {
 	if sandboxID == "" {
 		return errors.New("sandboxspec.Delete: sandbox_id is required")
 	}
-	return client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+	err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
 		Where("sandbox_id = ?", sandboxID).
 		Delete(&models.SandboxSpec{}).Error
+	if err == nil {
+		createdAtCache.Delete(sandboxID)
+	}
+	return err
 }
 
 // CanonicalizeRequest strips transient fields that are not part of the
