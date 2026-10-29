@@ -950,9 +950,11 @@ func createDefinition(ctx context.Context, templateID string, storedReq *sandbox
 
 // ensureTemplateDefinitionWithOptions checks whether a definition already exists
 // and creates one if missing, threading alias metadata (DisplayName) via opts.
+// An existing definition is pointed at storedReq's rootfs artifact when it
+// differs (see syncTemplateDefinitionArtifact).
 func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
 	if _, err := GetDefinition(ctx, templateID); err == nil {
-		return false, nil
+		return false, syncTemplateDefinitionArtifact(ctx, templateID, storedReq)
 	} else if !errors.Is(err, ErrTemplateNotFound) {
 		return false, err
 	}
@@ -965,6 +967,51 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 	// A new definition changes the aggregate list and the per-template info.
 	invalidateTemplateCaches(templateID)
 	return true, nil
+}
+
+// syncTemplateDefinitionArtifact stores storedReq on an existing definition when
+// it was built on a different rootfs artifact than the definition records.
+//
+// A redo that has to rebuild produces a new artifact and recreates the replicas
+// on it, but the definition written by the original (failed) create still
+// carries the old artifact id and sha256 in request_json. Sandboxes created from
+// the READY template would then fetch an artifact that may already be reclaimed
+// and fail with "artifact sha256 mismatch". A build that reuses the recorded
+// artifact leaves the definition untouched.
+func syncTemplateDefinitionArtifact(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+	artifactID := rootfsArtifactIDFromCreateRequest(storedReq)
+	if templateID == "" || artifactID == "" {
+		return nil
+	}
+	return withTemplateWriteLock(templateID, func() error {
+		def, err := GetDefinition(ctx, templateID)
+		if err != nil {
+			return err
+		}
+		current := strings.TrimSpace(def.RootfsArtifactID)
+		if current == "" {
+			stored := &sandboxtypes.CreateCubeSandboxReq{}
+			if err := json.Unmarshal([]byte(def.RequestJSON), stored); err == nil {
+				current = rootfsArtifactIDFromCreateRequest(stored)
+			}
+		}
+		if current == artifactID {
+			return nil
+		}
+		payload, err := json.Marshal(storedReq)
+		if err != nil {
+			return err
+		}
+		if err := updateDefinitionFields(ctx, templateID, map[string]any{
+			"request_json":       string(payload),
+			"rootfs_artifact_id": artifactID,
+		}); err != nil {
+			return err
+		}
+		log.G(ctx).Infof("template %s definition moved from rootfs artifact %q to %q", templateID, current, artifactID)
+		invalidateTemplateCaches(templateID)
+		return nil
+	})
 }
 
 // finalizeTemplateReplicas publishes the aggregate template status computed from
