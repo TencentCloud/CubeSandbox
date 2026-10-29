@@ -317,6 +317,74 @@ write. The audit log records only the rule name and the fact that
 inject ran; the secret itself never leaves the lua VM in clear.
 :::
 
+## Application runtime trust
+
+New image templates built with CA baking enabled also receive default
+`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+`CURL_CA_BUNDLE`, and `CARGO_HTTP_CAINFO` environment variables. Each points to an actual PEM bundle
+containing the CubeEgress root inside the image. The builder uses the first
+available bundle in this order: `/etc/ssl/certs/ca-certificates.crt`,
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, then
+`/etc/pki/tls/certs/ca-bundle.crt`. Images without a usable bundle receive a
+seeded `/etc/ssl/certs/ca-certificates.crt`. Existing bundle certificates are
+retained.
+
+The application entrypoint receives these defaults in its container environment;
+they do not depend on a login shell or `/etc/profile`. For templates with
+injected or detected envd, CubeMaster also sends the defaults through envd's
+`/init` endpoint so SDK commands receive them. Images without envd do not gain
+an envd dependency. Explicit image ENV values override these defaults, and
+template `--env` overrides image ENV, including explicitly empty values.
+Sandbox creation `envs` override the defaults sent to envd, and per-command
+SDK environment overrides take precedence over those initialized values.
+
+Use `cubemastercli template create-from-image --with-cube-ca-env=false ...`
+to keep CA baking while disabling these automatic variables. The corresponding
+CubeAPI `POST /templates` option is `"with_cube_ca_env": false`.
+`--with-cube-ca=false` (API: `"with_cube_ca": false`) disables both CA baking
+and automatic runtime CA variables. Both options default to true.
+
+To support another runtime without changing CubeSandbox code, replace the list
+using repeatable `--cube-ca-env-var NAME` flags or `cube_ca_env_vars` in
+CubeAPI `POST /templates` (also forwarded by CubeOps). For example:
+
+```json
+{
+  "image": "registry.example.com/my-runtime:latest",
+  "cube_ca_env_vars": ["CARGO_HTTP_CAINFO", "CUSTOM_CA_FILE"]
+}
+```
+
+This selects only the two named variables; to extend the defaults, include
+the five default names in the list as well. Omitted or `null` selects defaults;
+`[]` selects none while retaining CA baking. Either `with_cube_ca_env: false`
+or `with_cube_ca: false` takes precedence over the list. Names must match
+`[A-Za-z_][A-Za-z0-9_]*`; duplicates and order do not change the selection.
+Choose variables whose values are PEM bundle **file paths** (for example
+[Cargo's `CARGO_HTTP_CAINFO`](https://doc.rust-lang.org/cargo/reference/config.html#httpcainfo)),
+not directory, boolean, or Java keystore options. The selected list drives both
+application environment and envd initialization, with the same explicit-value
+precedence described above. It is saved with the build request for reuse/redo;
+changing an enabled selection changes the template spec fingerprint.
+
+The SDK template builders can pass the same field through their existing
+extension options: Python `Template.build(..., cube_ca_env_vars=[...])`,
+Node `Template.build({image, extra: {cube_ca_env_vars: [...]}})`, and Go
+`BuildTemplateOptions{Image: image, Extra: map[string]any{"cube_ca_env_vars": []string{...}}}`.
+Use an empty list (not an omitted option) to select no automatic variables.
+
+The change applies to newly built templates. Existing templates and running
+sandboxes are not modified. Upgrade CubeTemplateCenter and CubeMaster together:
+the builder records the verified bundle path in artifact metadata, and the
+master uses it when generating the template configuration. New builds with
+runtime defaults enabled use a separate artifact fingerprint so old cached
+rootfs images without that metadata are not reused. Reuse and redo retain the
+recorded path.
+
+TLS certificate-chain and hostname verification remain enabled. Custom TLS
+contexts, certificate pinning, clients that ignore these environment variables,
+and Java truststores may still require application-specific configuration.
+
 ## When the proxy isn't in the path
 
 A few edge cases skip CubeEgress entirely; they're worth knowing
