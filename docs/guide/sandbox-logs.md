@@ -70,21 +70,36 @@ cubecli logs --tpl --all --stderr <template-id>
 
 | Context | Path |
 |---|---|
-| Sandbox stdout | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stdout` (inside Cubelet mount namespace) |
-| Sandbox stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stderr` (inside Cubelet mount namespace) |
+| Sandbox stdout | `/data/cubelet/log/<sandbox-id>/stdout` |
+| Sandbox stderr | `/data/cubelet/log/<sandbox-id>/stderr` |
 | Template stdout | `/data/log/template/<template-id>_0/stdout` (host filesystem) |
 | Template stderr | `/data/log/template/<template-id>_0/stderr` (host filesystem) |
 
-::: tip Why the mount namespace?
-Sandbox log files are written by CubeShim into the bundle directory which is only visible inside Cubelet's private mount namespace. `cubecli logs` automatically re-execs itself into that namespace before reading — you do not need to do anything special beyond running the command on the node.
-:::
+Older deployments may keep sandbox logs inside Cubelet's bundle mount namespace; `cubecli logs` can also read those files.
+
+## Delayed cleanup of sandbox logs
+
+Delayed cleanup is disabled by default. To enable it, deploy the updated Cubelet and CubeShim and set the following in Cubelet's `config.toml`:
+
+```toml
+[plugins."io.cubelet.internal.v1.cubebox"]
+  sandbox_log_cleanup_enabled = true
+  sandbox_log_retention = "24h"
+  sandbox_log_cleanup_interval = "1m"
+```
+
+Both durations must be positive. Restart Cubelet after changing the configuration. The setting is inherited by newly started shims; already running shims retain the setting they started with. When disabling the feature, logs from previously enabled shims may remain and require operator cleanup.
+
+Cubelet starts the retention period only after it confirms the sandbox runtime has exited. Its background scan removes marked log directories after that period, once sandbox metadata and the shim are gone. Paused sandboxes, unmarked logs and logs whose runtime state is uncertain are retained. A Cubelet restart preserves the cleanup deadline in the log directory. Without the option, no scan is started and shim deletion follows its existing behavior.
+
+The feature only retains init stdout/stderr that CubeShim forwards to the host; it does not collect files written solely inside the guest. Retained logs are node-local and can consume disk space: monitor usage and export them elsewhere if longer retention or node-loss protection is needed.
 
 ## Scope and limitations
 
 - These logs capture only the **init process** (PID 1 inside the container). Output from processes spawned via `exec` calls is captured through the E2B SDK's `on_stdout` / `on_stderr` callbacks — refer to the [E2B SDK documentation](https://e2b.dev/docs) for details.
 - Log forwarding must be enabled on the running CubeShim version (available since v0.4.0). On older deployments the log file will be missing.
 - Logs are not streamed in real time — there is no `--follow` flag yet. Re-run the command to see new output.
-- Log files are removed when the sandbox is deleted.
+- By default log files are removed when the sandbox is deleted; delayed cleanup is opt-in.
 
 ## Related
 

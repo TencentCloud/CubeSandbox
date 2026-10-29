@@ -70,21 +70,36 @@ cubecli logs --tpl --all --stderr <template-id>
 
 | 场景 | 路径 |
 |---|---|
-| 沙箱 stdout | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stdout`（Cubelet 挂载命名空间内） |
-| 沙箱 stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/stderr`（Cubelet 挂载命名空间内） |
+| 沙箱 stdout | `/data/cubelet/log/<sandbox-id>/stdout` |
+| 沙箱 stderr | `/data/cubelet/log/<sandbox-id>/stderr` |
 | 模板 stdout | `/data/log/template/<template-id>_0/stdout`（宿主机文件系统） |
 | 模板 stderr | `/data/log/template/<template-id>_0/stderr`（宿主机文件系统） |
 
-::: tip 为什么需要挂载命名空间？
-沙箱日志文件由 CubeShim 写入 bundle 目录，该目录仅在 Cubelet 的私有挂载命名空间内可见。`cubecli logs` 会在读取前自动重新进入该命名空间——你无需任何额外操作，只需在节点上直接运行该命令即可。
-:::
+旧版本可能将沙箱日志保存在 Cubelet 的 bundle 挂载命名空间中；`cubecli logs` 也支持读取这些文件。
+
+## 延迟清理沙箱日志
+
+延迟清理默认关闭。部署更新后的 Cubelet 和 CubeShim，并在 Cubelet 的 `config.toml` 中配置：
+
+```toml
+[plugins."io.cubelet.internal.v1.cubebox"]
+  sandbox_log_cleanup_enabled = true
+  sandbox_log_retention = "24h"
+  sandbox_log_cleanup_interval = "1m"
+```
+
+两个时间参数必须为正数。修改配置后需重启 Cubelet。配置由新启动的 shim 继承，已经运行的 shim 继续使用启动时的配置；关闭功能后，之前开启时启动的 shim 产生的日志可能保留，需要运维人员处理。
+
+Cubelet 确认沙箱运行进程退出后开始计算保留时间。后台扫描在保留期结束且沙箱元数据和 shim 均已消失时清理标记过的日志目录。暂停的沙箱、未标记的日志以及运行状态无法确认的日志会保留。Cubelet 重启后，保留期限仍由日志目录中的标记记录。关闭功能时不会启动扫描，shim 保持原有删除行为。
+
+该功能只保留 CubeShim 转发到宿主机的 init stdout/stderr，不采集仅写在沙箱内部的文件。日志保存在节点本地，会占用磁盘；如需更长时间保存或防止节点损坏导致丢失，请监控磁盘并将日志转存到其他位置。
 
 ## 范围与限制
 
 - 这些日志仅记录 **init 进程**（容器内 PID 1）的输出。通过 `exec` 接口启动的进程输出需通过 E2B SDK 的 `on_stdout` / `on_stderr` 回调获取，详见 [E2B SDK 文档](https://e2b.dev/docs)。
 - 日志转发需要 v0.4.0 及以上版本的 CubeShim。在更旧的部署上，日志文件将不存在。
 - 日志目前不支持实时流式读取，暂无 `--follow` 标志。如需查看最新输出，请重新执行命令。
-- 沙箱删除后，对应的日志文件会一并清除。
+- 默认在沙箱删除后清除日志文件；延迟清理需要主动开启。
 
 ## 相关文档
 

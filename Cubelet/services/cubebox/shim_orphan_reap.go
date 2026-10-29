@@ -179,7 +179,7 @@ func shimDeleteEnv(s orphanShim) []string {
 		"GRPC_ADDRESS=" + s.address,
 		"NAMESPACE=" + s.namespace,
 	}
-	for _, k := range []string{"RUST_LOG", "FUNCTION_TYPE"} {
+	for _, k := range []string{"RUST_LOG", "FUNCTION_TYPE", delayedShimLogCleanupEnv} {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}

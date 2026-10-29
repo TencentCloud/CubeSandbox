@@ -187,7 +187,18 @@ pub async fn create_sandbox_log_paths(sandbox_id: &str) -> CResult<(String, Stri
 /// reaps the leftover task.
 pub fn remove_sandbox_log_dir_sync(sandbox_id: &str) -> CResult<()> {
     let dir = sandbox_log_dir(sandbox_id)?;
-    match std::fs::remove_dir_all(&dir) {
+    // Cubelet owns delayed cleanup when explicitly enabled. The flag is
+    // inherited by both the live shim and containerd's delete invocation.
+    let delayed = std::env::var_os("CUBELET_DELAY_SANDBOX_LOG_CLEANUP").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
+    remove_sandbox_log_dir_at(&dir, delayed)
+}
+
+fn remove_sandbox_log_dir_at(dir: &std::path::Path, delayed: bool) -> CResult<()> {
+    if delayed {
+        return Ok(());
+    }
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("del {} failed:{}", dir.display(), e)),
@@ -1545,5 +1556,21 @@ mod sandbox_log_path_tests {
         assert!(super::remove_sandbox_log_dir_sync("../etc").is_err());
         assert!(super::remove_sandbox_log_dir_sync("a/b").is_err());
         assert!(super::remove_sandbox_log_dir_sync("").is_err());
+    }
+
+    #[test]
+    fn delayed_cleanup_keeps_logs_and_disabled_cleanup_removes_them() {
+        let dir = std::env::temp_dir().join(format!("cube-logs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("stdout"), b"sandbox output").unwrap();
+
+        super::remove_sandbox_log_dir_at(&dir, true).unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("stdout")).unwrap(),
+            b"sandbox output"
+        );
+        super::remove_sandbox_log_dir_at(&dir, false).unwrap();
+        assert!(!dir.exists());
+        super::remove_sandbox_log_dir_at(&dir, false).unwrap();
     }
 }

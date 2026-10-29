@@ -74,6 +74,14 @@ type CubeConfig struct {
 	Runtimes map[string]cubeconfig.Runtime `toml:"runtimes"`
 
 	CubeboxGc CubeboxGc `toml:"cubebox_gc"`
+
+	// Disabled by default. When enabled, CubeShim keeps init logs and Cubelet
+	// removes them after the runtime has exited and the retention period passes.
+	SandboxLogCleanupEnabled  bool   `toml:"sandbox_log_cleanup_enabled"`
+	SandboxLogRetention       string `toml:"sandbox_log_retention"`
+	SandboxLogCleanupInterval string `toml:"sandbox_log_cleanup_interval"`
+	logRetention              time.Duration
+	logCleanupInterval        time.Duration
 }
 
 type CubeboxGc struct {
@@ -99,6 +107,9 @@ func init() {
 		Config: defaultConfig(),
 		InitFn: func(ic *plugin.InitContext) (_ interface{}, err error) {
 			config := ic.Config.(*CubeConfig)
+			if err := config.configureLogCleanup(); err != nil {
+				return nil, err
+			}
 			if config.RootPath == "" {
 				config.RootPath = ic.Properties[plugins.PropertyRootDir]
 			}
@@ -242,9 +253,11 @@ func init() {
 
 func defaultConfig() *CubeConfig {
 	return &CubeConfig{
-		CubeHostSharedDir:  defaultCubeHostSharedDir,
-		CubeHyperVisorPath: defaultChPath,
-		CubeShimPath:       defaultShimPath,
+		CubeHostSharedDir:         defaultCubeHostSharedDir,
+		CubeHyperVisorPath:        defaultChPath,
+		CubeShimPath:              defaultShimPath,
+		SandboxLogRetention:       "24h",
+		SandboxLogCleanupInterval: "1m",
 		CubeboxGc: CubeboxGc{
 			GcInterval: 10 * time.Minute,
 			GcTimeout:  10 * time.Minute,
