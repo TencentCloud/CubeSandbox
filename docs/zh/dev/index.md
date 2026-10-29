@@ -11,6 +11,8 @@
 ## 服务设计
 
 - [CubeTemplateCenter 设计](./templatecenter-design)——独立模板构建服务：管控面/数据面拆分、路由规则、回调认证、artifact 生命周期、部署接线与已知限制。
+- [External HTTP Score](./external-http-score)——可选 Score 阶段 sidecar 插件：线协议、`failure_policy`、熔断器与 Prometheus outcomes。
+- [Topic1 Enhancement Ablation（熔断，2026-09-14）](../../dev/topic1-enhancement-ablation-20260914/)——在线 R011/R012 结论包（`fail_open` 下超时短路；无原始 ledger）。
 
 ## 适合放在这里的内容
 
