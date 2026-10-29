@@ -27,12 +27,14 @@ export function ToastProvider() {
   const addToast = useCallback((message: string, type: ToastType = 'success') => {
     const id = ++_id;
     setToasts((prev) => [...prev, { id, message, type, visible: true }]);
+    // Warnings carry actionable detail and need more reading time.
+    const [fade, remove] = type === 'warn' ? [4800, 5100] : [1400, 1700];
     setTimeout(() => {
       setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, visible: false } : t)));
-    }, 1400);
+    }, fade);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 1700);
+    }, remove);
   }, []);
 
   useEffect(() => {
@@ -52,16 +54,16 @@ export function ToastProvider() {
         <div
           key={t.id}
           className={cn(
-            'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium shadow-lg',
+            'flex items-start gap-2 px-4 py-2 text-sm font-medium shadow-lg',
             'transition-all duration-300',
             t.type === 'warn'
-              ? 'bg-amber-500 text-white'
-              : 'bg-[hsl(var(--foreground))] text-[hsl(var(--background))]',
+              ? 'bg-amber-500 text-white rounded-lg max-w-[36rem] break-all text-left'
+              : 'bg-[hsl(var(--foreground))] text-[hsl(var(--background))] rounded-full',
             t.visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2',
           )}
         >
           {t.type === 'warn' ? (
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           ) : (
             <Check className="h-3.5 w-3.5 shrink-0" />
           )}

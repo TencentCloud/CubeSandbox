@@ -155,6 +155,7 @@ if helm template extcp "$CHART_DIR" $COMMON_SETS \
      --set controlPlane.enabled=false --set externalControlPlane.enabled=true \
      --set externalControlPlane.masterEndpoint=http://external:8089 \
      --set externalControlPlane.opsEndpoint=http://external:3010 \
+     --set-string opsAgent.tokenSecret.name=compute-only-token \
      >"$TMP_DIR/extcp.yaml" 2>"$TMP_DIR/extcp.err"; then
   if grep -qE 'trusted-ca|SSL_CERT_DIR' "$TMP_DIR/extcp.yaml"; then
     bad "external control plane render leaks trusted-ca artifacts"
