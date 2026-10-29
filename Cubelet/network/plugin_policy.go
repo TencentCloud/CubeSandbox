@@ -218,14 +218,18 @@ func hasL7DomainRuleTarget(rules []*networkruntime.EgressRule) bool {
 		if rule == nil || rule.Match == nil {
 			continue
 		}
-		if rule.Match.SNI != nil && isL7DomainTarget(*rule.Match.SNI) {
+		if rule.Match.SNI != nil && (isCatchAllMatchToken(*rule.Match.SNI) || isL7DomainTarget(*rule.Match.SNI)) {
 			return true
 		}
-		if rule.Match.Host != nil && isL7HostDomainTarget(*rule.Match.Host) {
+		if rule.Match.Host != nil && (isCatchAllMatchToken(*rule.Match.Host) || isL7HostDomainTarget(*rule.Match.Host)) {
 			return true
 		}
 	}
 	return false
+}
+
+func isCatchAllMatchToken(raw string) bool {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), ".")) == "*"
 }
 
 func isL7HostDomainTarget(raw string) bool {

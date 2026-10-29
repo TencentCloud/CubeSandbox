@@ -154,6 +154,15 @@ local function validate_match_tuples(match, rule_index, identities)
     return true
 end
 
+local function catch_all_token(value)
+    if type(value) ~= "string" then return false end
+    value = string.lower(value)
+    if string.sub(value, -1) == "." then
+        value = string.sub(value, 1, -2)
+    end
+    return value == "*"
+end
+
 -- Validate policy structure. Returns (true, nil) or (false, err_string).
 -- Strict on required fields; permissive on unrelated optional fields.
 local function validate_policy(p)
@@ -196,6 +205,13 @@ local function validate_policy(p)
             return false, "rules[" .. i .. "].action.allow required (boolean)"
         end
         -- inject is optional; if present must be array of {header, secret, format}.
+        -- "*" matches every destination, so a secret on that rule would be
+        -- sent wherever the sandbox asks. Reject it here as well as at the API.
+        if (catch_all_token(r.match.host) or catch_all_token(r.match.sni))
+            and r.action.inject ~= nil and #r.action.inject > 0 then
+            return false, string.format(
+                "rules[%d] catch-all match \"*\" cannot be combined with action.inject", i)
+        end
         if r.action.inject ~= nil then
             if type(r.action.inject) ~= "table" then
                 return false, "rules[" .. i .. "].action.inject must be array"

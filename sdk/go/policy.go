@@ -147,6 +147,9 @@ func buildNetworkPayload(opts NetworkOptions, internetAccessDisabled bool) (map[
 			if err := rule.Match.validate(); err != nil {
 				return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
 			}
+			if err := validateCatchAllRule(i, rule); err != nil {
+				return nil, err
+			}
 			for j, inj := range rule.Action.Inject {
 				if err := inj.validate(); err != nil {
 					return nil, fmt.Errorf("network.rules[%d] %q: inject[%d]: %w", i, rule.Name, j, err)
@@ -158,6 +161,31 @@ func buildNetworkPayload(opts NetworkOptions, internetAccessDisabled bool) (map[
 		network["rules"] = rules
 	}
 	return network, nil
+}
+
+func matchToken(value string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+}
+
+func isCatchAllToken(value string) bool {
+	return matchToken(value) == "*"
+}
+
+func validateCatchAllRule(index int, rule Rule) error {
+	if !isCatchAllToken(rule.Match.Host) && !isCatchAllToken(rule.Match.SNI) {
+		return nil
+	}
+	if len(rule.Action.Inject) > 0 {
+		return fmt.Errorf("network.rules[%d] %q: catch-all match \"*\" cannot be combined with action.inject", index, rule.Name)
+	}
+	if rule.Match.Port == 0 {
+		return nil
+	}
+	scheme := matchToken(rule.Match.Scheme)
+	if rule.Match.Port == 80 && scheme == "http" || rule.Match.Port == 443 && scheme == "https" {
+		return nil
+	}
+	return fmt.Errorf("network.rules[%d] %q: catch-all match \"*\" only allows port 80/http or 443/https", index, rule.Name)
 }
 
 func validateAllowOutDomainsRequireDenyAll(allowOut, denyOut []string, defaultDenyAll bool) error {

@@ -214,6 +214,7 @@ rules = [
   `${SECRET}` 占位符的模板。
 - inject 仅在 `action.allow=true` 时生效；deny 规则带
   `inject=[…]` 是配置错误，会被忽略。
+- `host="*"` 和 `sni="*"` 不能带 `inject`。这个匹配是任意目的地，API 会直接拒绝这条规则，不会把密钥装进代理。
 
 inject 路径的核心价值在于"密钥留在运维侧"：它存在于规则列表里、
 沙箱创建时被推到 CubeEgress、永远不会暴露给沙箱的环境变量、文件

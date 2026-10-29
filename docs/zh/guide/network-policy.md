@@ -138,8 +138,8 @@ network={
 
 - `name`：规则名，用于审计和模板合并。
 - `match.scheme`：`http` 或 `https`。
-- `match.sni`：TLS SNI。支持普通域名和 `*.` 通配域名。
-- `match.host`：HTTP Host。支持域名、`host:port`、IPv4、IPv4 CIDR 和 `*.` 通配域名。
+- `match.sni`：TLS SNI。支持普通域名、`*.` 通配域名，以及单独的 `*`。
+- `match.host`：HTTP Host。支持域名、`host:port`、IPv4、IPv4 CIDR、`*.` 通配域名，以及单独的 `*`。
 - `match.method`：HTTP 方法列表，方法之间是 OR。
 - `match.path`：默认精确匹配；尾部 `*` 表示前缀匹配，例如 `/v1/*`。
 - `action.allow`：`true` 放行，`false` 拒绝。
@@ -153,6 +153,14 @@ CubeVS 只会从 `rules[].match.sni` 和 `rules[].match.host` 抽取网络可达
 
 因此，当 `allow_internet_access=false` 时，每条需要真正访问外部 HTTP/HTTPS 服务的 L7 规则都应该包含 `host` 或 `sni`。只写 `method` 和 `path` 的规则可能永远到不了 CubeEgress，因为网络层不知道该允许哪个目的 IP。
 :::
+
+### 通配 `*`
+
+`host="*"` 或 `sni="*"` 匹配所有域名。它和 `*.example.com` 不同，后者仍然只匹配子域。
+
+把它和 `allow_internet_access=false` 一起用。沙箱通过 DNS A 查询解析出的每个名字都会被学习，这些地址上只放行 TCP/80 和 TCP/443，并送进 CubeEgress。其它端口仍然拒绝。没有发出 DNS 查询的连接不会放行，包括沙箱里已经缓存的地址和直接填写的公网 IP。
+
+`*` 不能带凭证注入。除了 80（配 `http`）和 443（配 `https`），其它端口会被拒绝。精确域名和 `*.example.com` 仍然优先于 `*`。
 
 ## 控制面合并与下发流程
 

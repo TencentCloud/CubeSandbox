@@ -144,4 +144,43 @@ ok = validate({
 })
 assert_false(ok, "case/dot DNS scheme conflict unexpectedly valid")
 
+-- Catch-all "*" matches any non-empty host or SNI, including an IP literal,
+-- and does not match an empty identity. "*.example.com" still skips the apex.
+local function catch_all_matches(field, pattern, value)
+    local match = {[field] = pattern}
+    local ctx = {
+        host = "", sni = "", method = "GET", path = "/",
+        dst_port = 443, scheme = "https",
+    }
+    ctx[field] = value
+    return access._rule_matches(match, ctx, true)
+end
+assert_true(catch_all_matches("host", "*", "api.example.com"))
+assert_true(catch_all_matches("host", "*", "1.2.3.4"))
+assert_false(catch_all_matches("host", "*", ""))
+assert_true(catch_all_matches("sni", "*", "API.Example.COM"))
+assert_false(catch_all_matches("sni", "*", nil))
+assert_false(catch_all_matches("host", "*.example.com", "example.com"))
+assert_true(catch_all_matches("host", "*.example.com", "api.example.com"))
+
+ok, err = policy.validate_policy({
+    policy_id = "sandbox-1",
+    rules = {{
+        id = "star-inject",
+        match = {host = "*"},
+        action = {allow = true, inject = {{header = "Authorization", secret = "sek"}}},
+    }},
+})
+assert_false(ok, "catch-all inject unexpectedly valid")
+assert_true(string.find(err, "cannot be combined with action.inject", 1, true) ~= nil)
+ok = policy.validate_policy({
+    policy_id = "sandbox-1",
+    rules = {{
+        id = "star-audit",
+        match = {sni = "*"},
+        action = {allow = true},
+    }},
+})
+assert_true(ok, "catch-all without inject should be valid")
+
 print("port_scheme_test: PASS")

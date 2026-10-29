@@ -126,6 +126,15 @@ pytest --run-e2e -m "lifecycle and slow"
   不是 network runtime 的 state file；
 - 反复更新可收敛，守住增量 map diff 不漏删、不重复删。
 
+`cases/network/test_l7_catch_all.py` 覆盖 `"*"` L7 规则
+（`network_l7_egress` + `network_dns_allow`，仅 CubeSandbox）：
+
+- 沙箱里解析出的名字可以访问 80 和 443，HTTPS 响应由 catch-all 放行；
+- 该名字上另一个本来开放的端口仍然不通；
+- 没有做过 DNS 查询的公网 IP 不通；
+- 针对单个名字的规则先于 catch-all 生效；
+- 创建带凭证注入的 catch-all 规则会被拒绝。
+
 存量连接相关用例使用 `framework/network_probe.py` 里的 guest 侧 holder，它会
 刻意持续向对端发包：被撤销的流是在 guest 下一次发包时才被重判的，光挂着一个
 空闲 socket 观察不到任何现象。

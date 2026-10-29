@@ -197,6 +197,63 @@ func TestAppendDenyOutPolicyEntriesDeduplicatesExisting(t *testing.T) {
 	}
 }
 
+func TestBuildNetPolicyPlanCatchAllIsShortestDNSRule(t *testing.T) {
+	l7AllowOut := []L7Target{{Host: "api.example.com"}}
+	plan, err := buildNetPolicyPlan(MVMOptions{
+		L7AllowOut:  &l7AllowOut,
+		DNSCatchAll: &DNSCatchAll{},
+	})
+	if err != nil {
+		t.Fatalf("buildNetPolicyPlan: %v", err)
+	}
+	if got, want := plan.dnsPolicyFlags, uint8(dnsPolicyFlagLearningEnabled); got != want {
+		t.Fatalf("dnsPolicyFlags=%d, want learning enabled", got)
+	}
+	var catchAll, specific *dnsAllowRule
+	for i := range plan.dnsAllowRules {
+		switch plan.dnsAllowRules[i].domain {
+		case "*":
+			catchAll = &plan.dnsAllowRules[i]
+		case "api.example.com":
+			specific = &plan.dnsAllowRules[i]
+		}
+	}
+	if catchAll == nil || specific == nil {
+		t.Fatalf("rules=%+v, want both * and api.example.com", plan.dnsAllowRules)
+	}
+	if catchAll.key.Prefixlen != 0 || catchAll.value.NameLen != 1 {
+		t.Fatalf("catch-all key=%+v value=%+v, want prefixlen 0 name_len 1", catchAll.key, catchAll.value)
+	}
+	if catchAll.value.Flags != uint8(netPolicyFlagL7Required) || catchAll.value.PortCount != 0 {
+		t.Fatalf("catch-all flags=%d port_count=%d, want L7 and default ports", catchAll.value.Flags, catchAll.value.PortCount)
+	}
+	if catchAll.value.Flags&uint8(netPolicyFlagL3Allowed) != 0 {
+		t.Fatalf("catch-all must not open every port")
+	}
+	if specific.key.Prefixlen <= catchAll.key.Prefixlen {
+		t.Fatalf("specific prefixlen=%d, want longer than catch-all", specific.key.Prefixlen)
+	}
+}
+
+func TestBuildNetPolicyPlanCatchAllSinglePort(t *testing.T) {
+	plan, err := buildNetPolicyPlan(MVMOptions{
+		DNSCatchAll: &DNSCatchAll{Port: 443, Scheme: L7SchemeHTTPS},
+	})
+	if err != nil {
+		t.Fatalf("buildNetPolicyPlan: %v", err)
+	}
+	if len(plan.dnsAllowRules) != 1 || plan.dnsAllowRules[0].value.PortCount != 1 {
+		t.Fatalf("rules=%+v, want one rule with a single port", plan.dnsAllowRules)
+	}
+	got := plan.dnsAllowRules[0].value.Ports[0]
+	if ntohsPort(got.Port) != 443 || got.Scheme != L7SchemeHTTPS {
+		t.Fatalf("port entry=%+v, want 443/https", got)
+	}
+	if plan.dnsPolicyFlags&uint8(dnsPolicyFlagLearningEnabled) == 0 {
+		t.Fatalf("dnsPolicyFlags=%d, want learning enabled", plan.dnsPolicyFlags)
+	}
+}
+
 func TestBuildNetPolicyPlanDeduplicatesAndMergesFlags(t *testing.T) {
 	allowOut := []string{"api.example.com", "198.51.100.1"}
 	l7AllowOut := []L7Target{

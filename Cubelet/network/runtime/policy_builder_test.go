@@ -192,6 +192,63 @@ func TestExtractL7PortScheme(t *testing.T) {
 	}
 }
 
+func TestCubeVSTapRegistrationCatchAllSkipsNameExtraction(t *testing.T) {
+	star := "*"
+	specific := "api.example.com"
+	httpScheme := "http"
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{
+			{Name: "all-http", Match: &EgressRuleMatch{Host: &star, Scheme: &httpScheme}},
+			{Name: "all-https", Match: &EgressRuleMatch{SNI: &star, Host: &specific}},
+			{Name: "exact", Match: &EgressRuleMatch{Host: &specific}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || opts.DNSCatchAll.Port != 0 {
+		t.Fatalf("DNSCatchAll=%+v, want default port set", opts.DNSCatchAll)
+	}
+	if opts.L7AllowOut == nil || len(*opts.L7AllowOut) != 1 || (*opts.L7AllowOut)[0].Host != specific {
+		t.Fatalf("L7AllowOut=%v, want only %s", opts.L7AllowOut, specific)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllHTTPOnly(t *testing.T) {
+	star := "*"
+	httpScheme := "http"
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{{
+			Name:  "all-http",
+			Match: &EgressRuleMatch{Host: &star, Scheme: &httpScheme},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || opts.DNSCatchAll.Port != 80 || opts.DNSCatchAll.Scheme != cubevs.L7SchemeHTTP {
+		t.Fatalf("DNSCatchAll=%+v, want port 80/http", opts.DNSCatchAll)
+	}
+	if opts.L7AllowOut != nil {
+		t.Fatalf("L7AllowOut=%v, want none", opts.L7AllowOut)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllRejectsCustomPort(t *testing.T) {
+	star := "*"
+	https := "https"
+	port := 8443
+	_, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{{
+			Name:  "wide",
+			Match: &EgressRuleMatch{Host: &star, Scheme: &https, Port: &port},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only allows port 80/http or 443/https") {
+		t.Fatalf("error=%v, want catch-all port rejection", err)
+	}
+}
+
 func TestCubeVSTapRegistrationRejectsEntireInvalidL7Policy(t *testing.T) {
 	host := "api.example.com"
 	https := "https"

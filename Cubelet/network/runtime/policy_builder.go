@@ -155,6 +155,13 @@ func needsDNSResolution(cfg *CubeNetworkConfig) bool {
 	if slices.ContainsFunc(cfg.AllowOut, cubevs.IsAllowOutDomainTarget) {
 		return true
 	}
+	catchAll, err := catchAllFromRules(cfg.Rules)
+	if err != nil || catchAll != nil {
+		// A catch-all rule learns every name, so the resolver must stay reachable.
+		// Malformed rules are rejected later; assume DNS is needed so a bad
+		// request cannot silently strip that access.
+		return true
+	}
 	targets, err := extractL7AllowOutTargetsFromRules(cfg.Rules)
 	if err != nil {
 		// Malformed rules are rejected later with a precise error. Assume DNS is
@@ -190,6 +197,11 @@ func cubeVSTapRegistration(cfg *CubeNetworkConfig) (cubevs.MVMOptions, error) {
 	if len(l7AllowOut) > 0 {
 		opts.L7AllowOut = &l7AllowOut
 	}
+	catchAll, err := catchAllFromRules(cfg.Rules)
+	if err != nil {
+		return cubevs.MVMOptions{}, err
+	}
+	opts.DNSCatchAll = catchAll
 	if len(cfg.DenyOut) > 0 {
 		denyOut := append([]string(nil), cfg.DenyOut...)
 		opts.DenyOut = &denyOut
@@ -236,6 +248,11 @@ func extractL7AllowOutTargetsFromRules(rules []*EgressRule) ([]cubevs.L7Target, 
 		if err != nil {
 			return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
 		}
+		// A "*" host or SNI is one dns_allow catch-all, not a per-name target.
+		// The other field on the same rule is not extracted either.
+		if matchIsCatchAll(rule.Match) {
+			continue
+		}
 		// A rule carrying both SNI and Host projects BOTH as L7 targets (SNI
 		// first, then Host), not Host alone.
 		if rule.Match.SNI != nil {
@@ -248,6 +265,71 @@ func extractL7AllowOutTargetsFromRules(rules []*EgressRule) ([]cubevs.L7Target, 
 		}
 	}
 	return targets, nil
+}
+
+func matchIsCatchAll(match *EgressRuleMatch) bool {
+	if match == nil {
+		return false
+	}
+	if match.SNI != nil && cubevs.IsDNSCatchAll(*match.SNI) {
+		return true
+	}
+	return match.Host != nil && cubevs.IsDNSCatchAll(*match.Host)
+}
+
+// catchAllFromRules folds every "*" rule into one DNS catch-all. Nil means
+// the policy has none. The default port set (port 0) is used when the rules
+// together cover both 80/http and 443/https. A single default port is returned
+// as that port. Any other port is rejected.
+func catchAllFromRules(rules []*EgressRule) (*cubevs.DNSCatchAll, error) {
+	ports := map[uint16]uint8{}
+	var order []uint16
+	found := false
+	add := func(index int, name string, port uint16, scheme uint8) error {
+		if port != 80 && port != 443 {
+			return fmt.Errorf("network.rules[%d] %q: catch-all match \"*\" only allows port 80/http or 443/https", index, name)
+		}
+		if (port == 80 && scheme != cubevs.L7SchemeHTTP) || (port == 443 && scheme != cubevs.L7SchemeHTTPS) {
+			return fmt.Errorf("network.rules[%d] %q: catch-all match \"*\" only allows port 80/http or 443/https", index, name)
+		}
+		if existing, ok := ports[port]; ok && existing != scheme {
+			return fmt.Errorf("network.rules[%d] %q: catch-all port %d scheme conflict", index, name, port)
+		}
+		if _, ok := ports[port]; !ok {
+			order = append(order, port)
+		}
+		ports[port] = scheme
+		return nil
+	}
+	for i, rule := range rules {
+		if rule == nil || rule.Match == nil || !matchIsCatchAll(rule.Match) {
+			continue
+		}
+		found = true
+		port, scheme, err := extractL7PortScheme(rule.Match)
+		if err != nil {
+			return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
+		}
+		if port == 0 && scheme == cubevs.L7SchemeNone {
+			if err := add(i, rule.Name, 80, cubevs.L7SchemeHTTP); err != nil {
+				return nil, err
+			}
+			if err := add(i, rule.Name, 443, cubevs.L7SchemeHTTPS); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err := add(i, rule.Name, port, scheme); err != nil {
+			return nil, err
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	if len(ports) >= 2 {
+		return &cubevs.DNSCatchAll{}, nil
+	}
+	return &cubevs.DNSCatchAll{Port: order[0], Scheme: ports[order[0]]}, nil
 }
 
 // extractL7PortScheme reads Match.Port + Match.Scheme and normalises them into
