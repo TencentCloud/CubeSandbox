@@ -11,6 +11,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -19,7 +20,71 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+type updateStages struct {
+	root     context.Context
+	prepare  string
+	runtime  string
+	finalize string
+	active   trace.Span
+	cur      context.Context
+}
+
+type updateStagesKey struct{}
+
+func startUpdateStages(ctx context.Context, action string, attrs ...attribute.KeyValue) (*updateStages, context.Context) {
+	s := &updateStages{root: ctx, cur: ctx}
+	switch action {
+	case "pause":
+		s.prepare, s.runtime, s.finalize = telemetry.SpanSandboxPausePrepare,
+			telemetry.SpanSandboxPauseRuntime, telemetry.SpanSandboxPauseFinalize
+	case "resume":
+		s.prepare, s.runtime, s.finalize = telemetry.SpanSandboxResumePrepare,
+			telemetry.SpanSandboxResumeRuntime, telemetry.SpanSandboxResumeFinalize
+	}
+	return s, s.enter(ctx, s.prepare, attrs...)
+}
+
+func (s *updateStages) enter(base context.Context, name string, attrs ...attribute.KeyValue) context.Context {
+	if s.active != nil {
+		telemetry.EndWithCode(s.active, telemetry.SuccessCode)
+	}
+	stageCtx, span := telemetry.StartIfTraced(telemetry.DetachTrace(base, s.root), name,
+		trace.WithAttributes(attrs...))
+	s.active = span
+	s.cur = stageCtx
+	return context.WithValue(stageCtx, updateStagesKey{}, s)
+}
+
+func (s *updateStages) end(code int) {
+	if s == nil || s.active == nil {
+		return
+	}
+	telemetry.EndWithCode(s.active, code)
+	s.active = nil
+}
+
+func (s *updateStages) annotate(attrs ...attribute.KeyValue) {
+	if s == nil {
+		return
+	}
+	trace.SpanFromContext(s.root).SetAttributes(attrs...)
+}
+
+func updateStagesFrom(ctx context.Context) *updateStages {
+	s, _ := ctx.Value(updateStagesKey{}).(*updateStages)
+	return s
+}
+
+func currentStageCtx(ctx context.Context) context.Context {
+	if s := updateStagesFrom(ctx); s != nil && s.cur != nil {
+		return s.cur
+	}
+	return ctx
+}
 
 func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	rsp = &types.Res{
@@ -27,6 +92,20 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
+	}
+	if req.Action == "pause" || req.Action == "resume" {
+		stages, sctx := startUpdateStages(ctx, req.Action,
+			attribute.String(telemetry.AttrSandboxID, req.SandboxID),
+			attribute.String(telemetry.AttrRequestID, req.RequestID))
+		ctx = sctx
+		trace.SpanFromContext(stages.root).SetAttributes(attribute.String(telemetry.AttrAction, req.Action))
+		defer func() {
+			if r := recover(); r != nil {
+				stages.end(int(errorcode.ErrorCode_MasterInternalError))
+				panic(r)
+			}
+			stages.end(int(rsp.Ret.RetCode))
+		}()
 	}
 	defer func() {
 		logger := log.G(ctx).WithFields(map[string]interface{}{
@@ -97,7 +176,7 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		case "resume":
 			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
 			if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
-				publishUpdateTimeout(ctx, req)
+				publishUpdateTimeout(currentStageCtx(ctx), req)
 			}
 		}
 		return nil

@@ -14,6 +14,7 @@ mod openapi;
 mod routes;
 mod services;
 mod state;
+mod telemetry;
 
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -226,6 +227,8 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
         "structured event logger started"
     );
 
+    let telemetry_guard = telemetry::init();
+
     // ── App state ─────────────────────────────────────────────────────────
     let state = state::AppState::new(cfg.clone(), logger.clone()).await;
 
@@ -240,6 +243,8 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    telemetry_guard.shutdown();
 
     logging::Logger::flush(&*logger).await;
     tracing::info!("cube-api shut down gracefully");

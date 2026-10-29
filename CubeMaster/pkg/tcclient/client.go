@@ -21,6 +21,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -98,6 +99,7 @@ func (c *Client) SubmitBuildJob(ctx context.Context, jobID string, req *types.Cr
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	setSharedTokenHeader(httpReq)
+	telemetry.InjectHTTP(ctx, httpReq.Header)
 
 	log.G(ctx).Infof("submit build job to TC: job_id=%s url=%s", jobID, url)
 

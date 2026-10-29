@@ -10,10 +10,14 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/patrickmn/go-cache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
@@ -112,11 +116,14 @@ func withTemplateWriteLock(templateID string, fn func() error) error {
 	return fn()
 }
 
-func (g *templateFetchGroup) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
+func (g *templateFetchGroup) Do(ctx context.Context, key string, fn func() (interface{}, error)) (interface{}, error) {
 	g.mu.Lock()
 	if call, ok := g.calls[key]; ok {
 		g.mu.Unlock()
+		_, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateWait,
+			trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, key)))
 		<-call.done
+		span.End()
 		return call.val, call.err
 	}
 	call := &templateFetchCall{done: make(chan struct{})}

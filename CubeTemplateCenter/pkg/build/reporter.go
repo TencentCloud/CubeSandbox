@@ -17,7 +17,10 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -72,7 +75,8 @@ func NewReporter() *Reporter {
 // (pkg/reconcile) times it out.
 func (r *Reporter) Report(ctx context.Context, jobID string, fields map[string]any) error {
 	attempts := reportMaxAttempts
-	if isTerminalReport(fields) {
+	terminal := isTerminalReport(fields)
+	if terminal {
 		attempts = terminalReportMaxAttempts
 	}
 
@@ -87,13 +91,25 @@ func (r *Reporter) Report(ctx context.Context, jobID string, fields map[string]a
 	backoff := reportBaseBackoff
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		retryable, err := r.postOnce(ctx, url, body)
+		attemptCtx := ctx
+		var attemptSpan trace.Span
+		if terminal {
+			attemptCtx, attemptSpan = telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactReportAttempt,
+				trace.WithSpanKind(trace.SpanKindClient),
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrJobID, jobID),
+					attribute.Int(telemetry.AttrAttempt, attempt),
+				))
+		}
+		retryable, err := r.postOnce(attemptCtx, url, body)
 		if err == nil {
+			telemetry.End(attemptSpan, nil)
 			if attempt > 1 {
 				log.G(ctx).Infof("report status succeeded on attempt %d: job_id=%s", attempt, jobID)
 			}
 			return nil
 		}
+		telemetry.End(attemptSpan, err)
 		lastErr = err
 		if !retryable {
 			return err
@@ -106,12 +122,24 @@ func (r *Reporter) Report(ctx context.Context, jobID string, fields map[string]a
 
 		// Use a timer rather than time.Sleep so a canceled context aborts
 		// the wait immediately.
+		waitCtx := ctx
+		var backoffSpan trace.Span
+		if terminal {
+			waitCtx, backoffSpan = telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactReportBackoff,
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrJobID, jobID),
+					attribute.Int(telemetry.AttrAttempt, attempt),
+					attribute.Int64(telemetry.AttrWaitMS, backoff.Milliseconds()),
+				))
+		}
 		timer := time.NewTimer(backoff)
 		select {
-		case <-ctx.Done():
+		case <-waitCtx.Done():
 			timer.Stop()
-			return fmt.Errorf("report status aborted: %w (last error: %v)", ctx.Err(), lastErr)
+			telemetry.End(backoffSpan, waitCtx.Err())
+			return fmt.Errorf("report status aborted: %w (last error: %v)", waitCtx.Err(), lastErr)
 		case <-timer.C:
+			telemetry.End(backoffSpan, nil)
 		}
 		if backoff = backoff * 2; backoff > reportMaxBackoff {
 			backoff = reportMaxBackoff
@@ -132,6 +160,7 @@ func (r *Reporter) postOnce(ctx context.Context, url string, body []byte) (retry
 	if r.token != "" {
 		req.Header.Set(constants.TemplateCallbackTokenHeader, r.token)
 	}
+	telemetry.InjectHTTP(ctx, req.Header)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {

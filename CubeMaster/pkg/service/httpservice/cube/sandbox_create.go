@@ -10,8 +10,12 @@ import (
 	"net/http"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
@@ -20,6 +24,22 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
+
+const AttrCreateMode = "cube.create.mode"
+
+func createMode(req *types.CreateCubeSandboxReq) string {
+	ann := req.Annotations
+	switch {
+	case ann[constants.CubeAnnotationPauseSnapshotID] != "":
+		return "pause_resume"
+	case ann[constants.CubeAnnotationRuntimeSnapshotID] != "":
+		return "snapshot"
+	case ann[constants.CubeAnnotationAppSnapshotTemplateID] != "":
+		return "template"
+	default:
+		return "local_config"
+	}
+}
 
 var (
 	createSandboxDealCubeboxCreateReqWithTemplateFn = dealCubeboxCreateReqWithTemplate
@@ -55,6 +75,19 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	resolveResult := &templateResolveResult{}
 	ctx = withTemplateResolveResult(ctx, resolveResult)
 
+	ctx, span := telemetry.Start(ctx, telemetry.SpanCreate, trace.WithAttributes(
+		attribute.String(telemetry.AttrRequestID, req.RequestID),
+		attribute.String(telemetry.AttrInstanceType, req.InstanceType),
+	))
+
+	defer func() {
+		span.SetAttributes(
+			attribute.String(telemetry.AttrTemplateID, req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]),
+			attribute.String(AttrCreateMode, createMode(req)),
+		)
+		telemetry.EndWithCode(span, int(rt.RetCode))
+	}()
+
 	if err := createSandboxDealCubeboxCreateReqWithTemplateFn(ctx, req); err != nil {
 		retCode := errorcode.ErrorCode_MasterParamsError
 		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
@@ -77,6 +110,10 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}
 	ret := createSandboxRunFn(ctx, req)
 	if ret != nil && ret.Ret != nil && ret.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+		span.SetAttributes(
+			attribute.String(telemetry.AttrSandboxID, ret.SandboxID),
+			attribute.String(telemetry.AttrNodeID, ret.HostID),
+		)
 		if err := registerCreatedSandboxRuntimeRef(ctx, req, ret); err != nil {
 			log.G(ctx).Warnf("register snapshot runtime ref after create failed: %v", err)
 		}
@@ -94,7 +131,7 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	return ret
 }
 
-func registerCreatedSandboxRuntimeRef(ctx context.Context, req *types.CreateCubeSandboxReq, ret *types.CreateCubeSandboxRes) error {
+func registerCreatedSandboxRuntimeRef(ctx context.Context, req *types.CreateCubeSandboxReq, ret *types.CreateCubeSandboxRes) (err error) {
 	if req == nil || ret == nil {
 		return nil
 	}
@@ -112,15 +149,20 @@ func registerCreatedSandboxRuntimeRef(ctx context.Context, req *types.CreateCube
 		kind = resolved.Kind
 	}
 	if kind == "" {
-		var err error
-		kind, err = createSandboxGetTemplateKindFn(ctx, templateID)
-		if err != nil {
-			return err
+		var kindErr error
+		kind, kindErr = createSandboxGetTemplateKindFn(ctx, templateID)
+		if kindErr != nil {
+			return kindErr
 		}
 	}
 	if !strings.EqualFold(strings.TrimSpace(kind), templatecenter.TemplateKindSnapshot) {
 		return nil
 	}
+	ctx, span := telemetry.Start(ctx, telemetry.SpanRegisterRef,
+		trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
+	defer func() {
+		telemetry.End(span, err)
+	}()
 	if resolved != nil && resolved.HasChosenReplica &&
 		strings.EqualFold(strings.TrimSpace(resolved.TemplateID), templateID) {
 		return createSandboxRegisterRuntimeRefWithReplicaFn(

@@ -161,6 +161,10 @@ Cube 会在宿主机 `/data/cubelet`下写入数据，且该路径必须是 **XF
 宿主机网络默认值是新增行为，尚未在所有 CNI / admission 配置下验证。`hostNetwork` Pod 绕过 CNI IPAM、不被 NetworkPolicy 选中；eBPF 型 CNI（如 Cilium）自身的 eBPF 程序可能与宿主机网卡上的 cubevs 钩子冲突；集群若强制 `restricted` Pod Security Admission，会拒绝 `hostNetwork` Pod。**请先在测试集群验证此默认值**，再用于生产；集群不允许 `hostNetwork` 时设 `cubeNode.hostNetwork: false`（见 [8.3](#_8-3-cube-node-网络与-pod-重建)）。
 :::
 
+**链路追踪（可选）**
+
+如需将沙箱生命周期 span 导出到外部 OTLP/gRPC 接收端，请在各组件的 `env` 数组中添加 `OTEL_EXPORTER_OTLP_ENDPOINT`——见 [8.4 链路追踪配置](#_8-4-链路追踪配置)。
+
 
 ## 5. Helm 安装
 
@@ -343,6 +347,56 @@ bootstrap:
 
 - 仅将发往集群 CIDR 的流量经节点本地 **EgressProxy Pod** 转发，并 SNAT 为 Proxy Pod IP，使其受您自定义的 NetworkPolicy 管控；其余流量仍走正常路由。
 :::
+
+
+### 8.4 链路追踪配置
+
+链路追踪默认关闭，chart 也不会安装任何接收端。如需导出沙箱生命周期 span，请在**安装前**
+为 `runtime-values.yaml` 中各组件的 `env` 数组添加 `OTEL_EXPORTER_OTLP_ENDPOINT`。
+
+接收端为外部自备的 OTLP/**gRPC** 接收端——OpenTelemetry Collector 或 Tempo
+的 OTLP/gRPC 接收端均可。该值的格式为 `http://<receiver-host>:<OTLP-gRPC-port>`
+（明文），其中 `receiver-host` 为接收端实际的 IP 或 DNS 名称，`OTLP-gRPC-port`
+为其 gRPC 监听端口。请填接收端的 OTLP/gRPC 地址，而不是 Grafana/Tempo 的查询地址。
+例如：
+
+```yaml
+controlPlane:
+  api:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://10.0.0.5:4317
+  master:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://10.0.0.5:4317
+  templateCenter:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://10.0.0.5:4317
+cubeNode:
+  env:
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://10.0.0.5:4317
+```
+
+这些就是普通的 Helm values：该 overlay 由与第 5 节相同的 `helm upgrade --install` 命令合并，因此全新安装与升级都适用。组件的 `env` 数组会**整体替换** chart 默认值，请保留 chart 已为该组件设置的条目，而不是直接覆盖整个列表。
+
+如需再次关闭链路追踪，请为各组件把端点设为显式空字符串（`value: ""`），并用与第 5 节相同的 `helm upgrade --install` 命令重新应用——空值即关闭导出。
+
+`cubeNode.env` 同时作用于 Cubelet **和** 它启动的 CubeShim。Helm 会把更新后的 env 应用到计算节点 Pod（无需额外手动滚动重建），因此 Pod 生效后，现有沙箱的 CubeMaster/Cubelet 请求 span 即可正常产出。
+
+CubeShim 是由 Cubelet 内嵌的 containerd shim manager 单独新起的进程：已在运行的 shim 会保留原有设置，只有新起的 shim 才继承更新后的 env，因此仅 CubeShim 的 span 取决于是否新建了 shim 进程。
+
+各服务以各自的名字上报（`cube-api`、`cubemaster`、`cubetemplatecenter`、`cubelet`、`cube-shim`），因此**不要**设置全局共享的 `OTEL_SERVICE_NAME`。CubeOps 与 lifecycle manager 目前不上报 span。
+
+可按 trace ID 在后端查询，或用 TraceQL，例如：
+
+```traceql
+{ resource.service.name = "cubelet" && name = "cubelet.sandbox.pause" }
+```
+
+被追踪的工作流、可供检索的 span 属性以及如何解读各阶段耗时，见 [分布式链路追踪](../tracing.md)。
 
 
 ---

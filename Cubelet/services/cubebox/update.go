@@ -23,17 +23,34 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest) (*cubebox.UpdateCubeSandboxResponse, error) {
 	rsp := &cubebox.UpdateCubeSandboxResponse{
 		RequestID: req.RequestID,
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+	}
+	ctx = telemetry.ExtractGRPC(ctx)
+	action := req.GetAnnotations()[constants.MasterAnnotationsUpdateAction]
+	var pauseRoot trace.Span
+	if action == constants.UpdateActionPause {
+		ctx, pauseRoot = telemetry.Start(ctx, telemetry.SpanPause,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrRequestID, req.GetRequestID()),
+				attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()),
+				attribute.String(telemetry.AttrAction, action),
+			))
+		// Registered before the logging defer so it ends last, once rsp is final.
+		defer func() { telemetry.EndWithCode(pauseRoot, int(rsp.GetRet().GetRetCode())) }()
 	}
 	rt := &CubeLog.RequestTrace{
 		Action:       "Update",
@@ -69,7 +86,6 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 		return rsp, nil
 	}
 
-	action := req.Annotations[constants.MasterAnnotationsUpdateAction]
 	if action == "" {
 		rsp.Ret.RetMsg = "must provide update action"
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
@@ -77,7 +93,15 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 	}
 	rt.CalleeAction = action
 
+	var pauseLockSpan trace.Span
+	if pauseRoot != nil {
+		_, pauseLockSpan = telemetry.StartIfTraced(ctx, telemetry.SpanPauseLock,
+			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, req.SandboxID)))
+	}
 	unlock := s.sandboxLifecycleLocks.Lock(req.SandboxID)
+	if pauseLockSpan != nil {
+		pauseLockSpan.End()
+	}
 	defer unlock()
 	defer recov.HandleCrash(func(panicError interface{}) {
 		log.G(ctx).Fatalf("Update panic info:%s, stack:%s", panicError, string(debug.Stack()))
@@ -109,7 +133,10 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 			return rsp, nil
 		}
-		return s.updateWithPauseCow(ctx, req, sb)
+		// Rebind rsp so the deferred root span and logging see the real code.
+		res, err := s.updateWithPauseCow(ctx, req, sb)
+		rsp = res
+		return res, err
 	case constants.UpdateActionNetwork:
 		return s.updateNetworkPolicy(ctx, req, sb, rsp)
 	case constants.UpdateActionResume:
