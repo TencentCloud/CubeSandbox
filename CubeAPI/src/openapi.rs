@@ -165,6 +165,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_ca_option_matches_checked_in_contract() {
+        let generated = serde_json::to_value(build_openapi()).expect("serialize OpenAPI document");
+        let checked_in: serde_json::Value =
+            serde_norway::from_str(include_str!("../../openapi.yml"))
+                .expect("parse checked-in spec");
+        let pointer = "/components/schemas/CreateTemplateRequest/properties/with_cube_ca_env";
+        let option = generated
+            .pointer(pointer)
+            .expect("runtime CA option schema");
+        assert_eq!(option["type"], serde_json::json!(["boolean", "null"]));
+        assert_eq!(checked_in.pointer(pointer), Some(option));
+        let names = "/components/schemas/CreateTemplateRequest/properties/cube_ca_env_vars";
+        let names_schema = generated.pointer(names).expect("CA variable list schema");
+        assert_eq!(names_schema["type"], serde_json::json!(["array", "null"]));
+        assert_eq!(checked_in.pointer(names), Some(names_schema));
+    }
+
+    #[test]
     fn network_rules_schema_documents_native_and_e2b_shapes() {
         let document = serde_json::to_value(build_openapi()).expect("serialize OpenAPI document");
         let rules =

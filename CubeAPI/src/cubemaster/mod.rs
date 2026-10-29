@@ -2297,6 +2297,12 @@ pub struct CreateTemplateFromImageReq {
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
+    /// Configure application CA environment defaults (server default: true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_cube_ca_env: Option<bool>,
+    /// Replace CA variable names; preserve an explicit empty list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cube_ca_env_vars: Option<Vec<String>>,
     /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,

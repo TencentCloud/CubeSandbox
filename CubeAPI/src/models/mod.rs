@@ -1838,6 +1838,15 @@ pub struct CreateTemplateRequest {
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
+    /// Configure application CA environment defaults when CA baking is enabled.
+    /// False keeps CA baking without automatic runtime environment variables.
+    #[serde(rename = "with_cube_ca_env", default)]
+    pub with_cube_ca_env: Option<bool>,
+    /// Replace the default CA bundle environment variable names. Omitted or null
+    /// uses defaults; an empty list disables automatic variables. Names must
+    /// match [A-Za-z_][A-Za-z0-9_]* and accept a PEM bundle file path as their value.
+    #[serde(default)]
+    pub cube_ca_env_vars: Option<Vec<String>>,
     /// CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
     /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
     #[serde(rename = "backend", default)]
