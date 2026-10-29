@@ -12,6 +12,7 @@ lang: zh-CN
 | 调整沙箱网段时的 CIDR 冲突（残留 cube-dev） | 停服后 `cube-dev` 网卡和 `z*` TAP 设备会残留；调整 `CUBE_SANDBOX_NETWORK_CIDR` 时若新网段与残留 `cube-dev` 重叠，预检会拦截并提示确定性清理（仅 reboot 不够）。相同网段重装会自动复用，不受影响。 | [指南](./local-network-cidr-conflict.md#调整沙箱网段时的-cidr-冲突残留-cube-dev) |
 | Ubuntu 上 cgroup v2 没启用 `cpu` controller，cubelet CPU quota 不生效 | Ubuntu / Debian 云镜像默认不会把 cgroup v2 的 `cpu` controller 委托到子 cgroup，且 `multipathd` 的 RT 线程会让 `+cpu` 写入返回 `Invalid argument`。详细复现和修复见 issue。 | [#366](https://github.com/TencentCloud/CubeSandbox/issues/366) |
 | bpffs 未挂载 | Cubelet 内嵌网络运行时会在 `/sys/fs/bpf` 下固定 eBPF 程序和 map；因此该目录不是 `bpf` 文件系统时，安装器会在修改系统前退出。 | [指南](#bpffs-未挂载) |
+| `module.sig_enforce=1` 导致 PVM 宿主内核启动掉进 initramfs | 社区发布内核的模块没有签名，而 grub 配置脚本启用了签名校验——内核拒绝加载所有模块，启动掉进 initramfs。已在 [#2053](https://github.com/TencentCloud/CubeSandbox/pull/2053) 修复：pvm-host 内核配置改为给所有模块签名，grub 脚本继续使用 `module.sig_enforce=1`。 | [指南](./pvm-host-boot-unsigned-modules.md)、[#1949](https://github.com/TencentCloud/CubeSandbox/issues/1949) |
 
 ## bpffs 未挂载
 
