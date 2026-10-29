@@ -7,10 +7,13 @@ pub mod snapshots;
 pub mod templates;
 pub mod volumes;
 
+use std::sync::Arc;
+
 use crate::{
     config::ServerConfig,
     cubemaster::CubeMasterClient,
     error::{AppError, AppResult},
+    metrics::BusinessMetrics,
 };
 
 const DENY_ALL_IPV4_CIDR: &str = "0.0.0.0/0";
@@ -89,12 +92,17 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
+    pub fn new(
+        config: &ServerConfig,
+        cubemaster: CubeMasterClient,
+        business_metrics: Arc<BusinessMetrics>,
+    ) -> Self {
         Self {
-            sandboxes: sandboxes::SandboxService::new(
+            sandboxes: sandboxes::SandboxService::new_with_metrics(
                 cubemaster.clone(),
                 config.instance_type.clone(),
                 config.sandbox_domain.clone(),
+                business_metrics,
             ),
             snapshots: snapshots::SnapshotService::new(
                 cubemaster.clone(),

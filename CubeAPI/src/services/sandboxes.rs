@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
@@ -18,6 +21,7 @@ use crate::{
         SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
+    metrics::{record_business_call, BusinessMetrics, BusinessOperation},
     models::{
         EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse, ForkResult,
         LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff, RestartStatus,
@@ -77,6 +81,7 @@ pub struct SandboxService {
     cubemaster: CubeMasterClient,
     instance_type: String,
     sandbox_domain: String,
+    business_metrics: Arc<BusinessMetrics>,
 }
 
 impl SandboxService {
@@ -85,10 +90,25 @@ impl SandboxService {
         instance_type: String,
         sandbox_domain: String,
     ) -> Self {
+        Self::new_with_metrics(
+            cubemaster,
+            instance_type,
+            sandbox_domain,
+            Arc::new(BusinessMetrics::new().expect("business metrics should build")),
+        )
+    }
+
+    pub fn new_with_metrics(
+        cubemaster: CubeMasterClient,
+        instance_type: String,
+        sandbox_domain: String,
+        business_metrics: Arc<BusinessMetrics>,
+    ) -> Self {
         Self {
             cubemaster,
             instance_type,
             sandbox_domain,
+            business_metrics,
         }
     }
 
@@ -344,6 +364,15 @@ impl SandboxService {
     }
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
+        record_business_call(
+            self.business_metrics.clone(),
+            BusinessOperation::SandboxCreate,
+            self.create_sandbox_inner(body),
+        )
+        .await
+    }
+
+    async fn create_sandbox_inner(&self, body: NewSandbox) -> AppResult<Sandbox> {
         let NewSandbox {
             template_id,
             timeout,
@@ -504,6 +533,15 @@ impl SandboxService {
     }
 
     pub async fn kill_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
+        record_business_call(
+            self.business_metrics.clone(),
+            BusinessOperation::SandboxDestroy,
+            self.kill_sandbox_inner(sandbox_id),
+        )
+        .await
+    }
+
+    async fn kill_sandbox_inner(&self, sandbox_id: &str) -> AppResult<()> {
         let req = DeleteSandboxRequest {
             request_id: new_request_id(),
             sandbox_id: sandbox_id.to_string(),

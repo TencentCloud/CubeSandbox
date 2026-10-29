@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{health, sandboxes, snapshots, templates, volumes},
+    handlers::{health, metrics, sandboxes, snapshots, templates, volumes},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -78,6 +78,7 @@ pub fn build_router(state: AppState) -> Router {
 fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
     Router::new()
         .route("/health", get(health::health))
+        .route("/metrics", get(metrics::metrics))
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_volume_routes(state, auth_configured))
@@ -523,6 +524,12 @@ mod tests {
                 "path={path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn build_router_exposes_metrics() {
+        let server = test_server().await;
+        server.get("/metrics").await.assert_status_ok();
     }
 
     #[tokio::test]
