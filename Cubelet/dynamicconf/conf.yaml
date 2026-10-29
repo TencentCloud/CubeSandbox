@@ -44,6 +44,11 @@ host:
   gc:
     code_expiration_time: "72h"
     image_expiration_time: "24h"
+  # KVM dirty-page logging for pause snapshots: sandboxes restored from a
+  # snapshot run with the guest RAM dirty log armed, so the next pause only
+  # writes pages touched since that restore. Off by default.
+  memory:
+    dirty_log: false
 
 meta_server_config:
   # Endpoints are injected by the installer (one-click / prepare-compute-role)

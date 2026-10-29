@@ -36,9 +36,17 @@ type Config struct {
 }
 
 type HostConf struct {
-	Quota          HostConfigQuota `yaml:"quota"`
-	GC             HostConfigGC    `yaml:"gc"`
-	SchedulerLabel string          `yaml:"scheduler_label"`
+	Quota          HostConfigQuota  `yaml:"quota"`
+	GC             HostConfigGC     `yaml:"gc"`
+	SchedulerLabel string           `yaml:"scheduler_label"`
+	Memory         HostConfigMemory `yaml:"memory"`
+}
+
+type HostConfigMemory struct {
+	// DirtyLog arms KVM dirty-page logging on the guest RAM of sandboxes this
+	// host restores from a snapshot, so a later pause only writes the pages
+	// touched since that restore. Off by default.
+	DirtyLog bool `yaml:"dirty_log"`
 }
 
 type HostConfigQuota struct {
