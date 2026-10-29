@@ -39,9 +39,14 @@ Each compute node must meet the same hardware and software requirements as the c
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
 - **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
+- **Time synchronization** enabled on every cluster node, including the control node and all compute nodes, using `chrony`, `ntpd`, `systemd-timesyncd`, PTP, or another suitable time synchronization solution
 - **Network connectivity** to the control node (specifically to `CubeOps` on port `3010` for node registration, and to the S3 endpoint — port `9000` with the bundled MinIO)
 
-For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
+For the control node prerequisites, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
+
+:::: warning Keep node clocks synchronized
+If a compute node's clock lags behind the control node, its heartbeat can appear older than the 15-second expiry window, causing the node to be reported as unhealthy and preventing templates from being distributed to it. After time synchronization is restored, CubeMaster normally backfills missing template replicas automatically; run [template redo](./cubemaster-scheduler-config.md#template-redo-after-adding-compute-nodes) to trigger redistribution immediately.
+::::
 
 ## Step 1: Prepare the Release Bundle
 
