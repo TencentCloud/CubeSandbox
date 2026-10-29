@@ -42,6 +42,11 @@ func deleteSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"InstanceId":   req.SandboxID,
 		"InstanceType": req.InstanceType,
 	}))
+	// This HTTP endpoint is an explicit delete request; internal callers keep
+	// their original empty reason (unknown for webhook purposes).
+	if req.KillReason == "" {
+		req.KillReason = "request"
+	}
 	ret := sandbox.DestroySandbox(ctx, req)
 	rt.RetCode = int64(ret.Ret.RetCode)
 	return ret

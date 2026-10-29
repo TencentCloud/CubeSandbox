@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 	"sync"
@@ -2261,6 +2262,13 @@ func cloneCreateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.C
 	out := &sandboxtypes.CreateCubeSandboxReq{}
 	if err = json.Unmarshal(payload, out); err != nil {
 		return nil, err
+	}
+	// API JSON deliberately excludes this trusted provenance. Internal clones
+	// (including the create-success spec hook) must retain an independent copy.
+	if req != nil && req.WebhookMetadata != nil {
+		metadata := *req.WebhookMetadata
+		metadata.Values = maps.Clone(req.WebhookMetadata.Values)
+		out.WebhookMetadata = &metadata
 	}
 	return out, nil
 }

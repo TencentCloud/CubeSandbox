@@ -130,11 +130,11 @@ type mockTimeoutProvider struct {
 	lastLookupIDs      []string
 }
 
-func (m *mockTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
+func (m *mockTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, bool, error) {
 	m.called = true
 	m.lastSandboxID = sandboxID
 	m.lastTimeoutSeconds = timeoutSeconds
-	return m.returnEndAt, m.returnErr
+	return m.returnEndAt, m.returnErr == nil, m.returnErr
 }
 
 func (m *mockTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string) (int64, error) {

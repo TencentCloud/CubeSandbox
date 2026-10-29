@@ -23,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"gorm.io/gorm"
 )
@@ -298,7 +299,7 @@ func loadSandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxty
 	return tmplReq, nil
 }
 
-func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq, captured snapshotWebhook) error {
 	success := false
 	defer func() {
 		recordSnapshotCommitResult(success)
@@ -426,6 +427,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return err
 	}
 	success = true
+	lifecyclePublisher.Publish(webhook.TypeCheckpointed, sandboxID, captured.template, captured.fields)
 	logger.Infof("snapshot create finished successfully")
 	return nil
 }
@@ -1344,11 +1346,12 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 		"node_ip":     nodeIP,
 	})
 	defer cancel()
+	template, fields := webhook.PrepareLifecycle(req)
 	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID)
 	if err != nil {
 		return nil, err
 	}
-	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq); err != nil {
+	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq, snapshotWebhook{template, fields}); err != nil {
 		return nil, err
 	}
 	return finalizeSnapshotJobByID(ctx, info.JobID)
