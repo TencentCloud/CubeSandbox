@@ -13,17 +13,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-type multiFactorWeightedAverageScore struct {
-	weight float64
-}
+type multiFactorWeightedAverageScore struct{}
 
 func NewMultiFactorWeightedAverageScore() *multiFactorWeightedAverageScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.AsyncMultiFactor is nil")
 	}
-	return &multiFactorWeightedAverageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Weight,
-	}
+	return &multiFactorWeightedAverageScore{}
 }
 
 func (l *multiFactorWeightedAverageScore) ID() string {
@@ -35,11 +31,16 @@ func (l *multiFactorWeightedAverageScore) String() string {
 }
 
 func (l *multiFactorWeightedAverageScore) Weight() float64 {
-	return l.weight
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
+	if cfg == nil || cfg.Disable || cfg.Weight == 0 {
+		return 0
+	}
+	return cfg.Weight
 }
 
 func (l *multiFactorWeightedAverageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Disable
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
+	return cfg == nil || cfg.Disable || cfg.Weight == 0
 }
 
 func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
