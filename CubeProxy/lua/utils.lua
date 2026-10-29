@@ -1,3 +1,4 @@
+local metrics = require "metrics"
 local ok, new_tab = pcall(require, "table.new")
 if not ok or type(new_tab) ~= "function" then
     new_tab = function(narr, nrec)
@@ -58,6 +59,8 @@ end
         - body:   response body string (JSON); ignored on the gRPC path
 --]]
 function _M.respond_with(self, status, body)
+    metrics.finish_current_request(status)
+
     if self:is_grpc_request() then
         local gs = GRPC_STATUS[status] or 2 -- UNKNOWN
         local msg = GRPC_MESSAGE[status] or "unknown"

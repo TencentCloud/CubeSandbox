@@ -96,6 +96,10 @@ CUBE_SIDECAR_NGX_ADDR="${CUBE_SIDECAR_NGX_ADDR:-${CUBE_LCM_HOST}:${CUBE_LCM_PORT
 # value gates loopback-bypass abuse; leave empty for single-host dev.
 CUBE_ADMIN_TOKEN="${CUBE_ADMIN_TOKEN:-}"
 
+# CubeProxy Prometheus request metrics (opt-in).
+CUBE_PROXY_METRICS_ENABLE="${CUBE_PROXY_METRICS_ENABLE:-0}"
+CUBE_PROXY_METRICS_LISTEN="${CUBE_PROXY_METRICS_LISTEN:-127.0.0.1:18082}"
+
 # ── CubeProxy service registration for cube-lifecycle-manager discovery ──
 # Enabled by default now that CLM owns lifecycle coordination.
 CUBE_PROXY_REGISTRY_ENABLE="${CUBE_PROXY_REGISTRY_ENABLE:-1}"
@@ -231,6 +235,8 @@ render_template_atomic \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}" '#')#g" \
   -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}" '#')#g" \
   -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}" '#')#g" \
+  -e "s#__CUBE_PROXY_METRICS_ENABLE__#$(escape_sed "${CUBE_PROXY_METRICS_ENABLE}" '#')#g" \
+  -e "s#__CUBE_PROXY_METRICS_LISTEN__#$(escape_sed "${CUBE_PROXY_METRICS_LISTEN}" '#')#g" \
   -e "s#__CUBE_PROXY_REGISTRY_ENABLE__#$(escape_sed "${CUBE_PROXY_REGISTRY_ENABLE}" '#')#g" \
   -e "s#__CUBE_PROXY_ID__#$(escape_sed "${CUBE_PROXY_ID}" '#')#g" \
   -e "s#__CUBE_PROXY_ADMIN_URL__#$(escape_sed "${CUBE_PROXY_ADMIN_URL}" '#')#g" \

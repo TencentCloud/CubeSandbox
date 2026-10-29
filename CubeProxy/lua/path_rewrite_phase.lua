@@ -4,6 +4,7 @@
 -- then resolves the same Redis-backed backend metadata used by host-mode
 -- routing in rewrite_phase.lua.
 
+local metrics = require "metrics"
 local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
@@ -17,6 +18,8 @@ if not ins_id or not container_port then
             ngx.var.http_x_cube_request_id, uri))
     utils:respond_bad_request()
 end
+
+metrics.start_current_request()
 
 if rest == nil or rest == "" then
     rest = "/"

@@ -6,6 +6,9 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
+      # Prometheus request metrics (opt-in; LISTEN honored only when enabled).
+      CUBE_PROXY_METRICS_ENABLE: "__CUBE_PROXY_METRICS_ENABLE__"
+      CUBE_PROXY_METRICS_LISTEN: "__CUBE_PROXY_METRICS_LISTEN__"
       # ── Service registration (consumed by lua/proxy_registry.lua) ────────
       # These let this replica announce itself to Redis so
       # cube-lifecycle-manager can discover it and route pause/resume

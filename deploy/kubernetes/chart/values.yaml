@@ -1098,6 +1098,12 @@ cubeProxy:
   # rewrites this so cube-lifecycle-manager can reach /admin/* from other Pods.
   adminListen: "0.0.0.0"
   adminPort: 8082
+  # Prometheus request metrics (opt-in). Serves GET /metrics when enabled.
+  metrics:
+    enabled: false
+    # Listener bind address. Default loopback is Pod-local; set a Prometheus-
+    # reachable address (e.g. "0.0.0.0:18082"). Ignored when enabled is false.
+    listen: "127.0.0.1:18082"
   # Redis registry so cube-lifecycle-manager can discover each proxy replica.
   registry:
     enabled: true

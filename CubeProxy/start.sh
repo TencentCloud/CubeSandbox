@@ -9,6 +9,7 @@ set -u
 
 GLOBAL_CONF_PATH="${CUBE_PROXY_GLOBAL_CONF_PATH:-/usr/local/openresty/nginx/conf/global/global.conf}"
 RESOLVER_INCLUDE_PATH="${CUBE_PROXY_RESOLVER_INCLUDE_PATH:-/usr/local/openresty/nginx/conf/includes/resolver.inc}"
+METRICS_INCLUDE_PATH="${CUBE_PROXY_METRICS_INCLUDE_PATH:-/usr/local/openresty/nginx/conf/includes/metrics_server.inc}"
 
 die() {
   echo "$(date -Iseconds) FATAL: $*" >&2
@@ -65,6 +66,99 @@ ipv6_literal_is_valid() {
   else
     (( groups == 8 ))
   fi
+}
+
+metrics_enabled() {
+  # Opt-in (truthy: 1/on/true/yes). Keep in sync with metrics.lua's _M.enabled().
+  local raw="${CUBE_PROXY_METRICS_ENABLE:-}"
+  case "$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')" in
+    1|on|true|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+build_cube_proxy_metrics_include() {
+  if ! metrics_enabled; then
+    printf '# cube_proxy metrics disabled (CUBE_PROXY_METRICS_ENABLE)\n'
+    return 0
+  fi
+
+  local listen="${CUBE_PROXY_METRICS_LISTEN:-127.0.0.1:18082}"
+  validate_metrics_listen "${listen}" || return 1
+
+  cat <<EOF
+server {
+    listen ${listen};
+    server_name _;
+
+    location = /metrics {
+        content_by_lua_block {
+            local metrics = require "metrics"
+            ngx.status = ngx.HTTP_OK
+            ngx.header["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
+            ngx.print(metrics.render_prometheus())
+            return ngx.exit(ngx.HTTP_OK)
+        }
+    }
+
+    location / {
+        return 404;
+    }
+}
+EOF
+}
+
+validate_metrics_listen() {
+  local listen="${1:-}"
+  local host port
+
+  if [[ -z "${listen}" || "${listen}" =~ [[:space:]] || "${listen}" == *[\;\{\}\$\`\"\\]* ]]; then
+    die "invalid CUBE_PROXY_METRICS_LISTEN: ${listen}"
+    return 1
+  fi
+
+  if [[ "${listen}" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+    ipv6_literal_is_valid "${host}" || {
+      die "invalid CUBE_PROXY_METRICS_LISTEN: ${listen}"
+      return 1
+    }
+  elif [[ "${listen}" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+    if ! ipv4_literal_is_valid "${host}" && [[ ! "${host}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+      die "invalid CUBE_PROXY_METRICS_LISTEN: ${listen}"
+      return 1
+    fi
+  else
+    die "invalid CUBE_PROXY_METRICS_LISTEN: ${listen}"
+    return 1
+  fi
+
+  (( 10#${port} >= 1 && 10#${port} <= 65535 )) || {
+    die "invalid CUBE_PROXY_METRICS_LISTEN: ${listen}"
+    return 1
+  }
+}
+
+render_metrics_include() {
+  local tmp="${METRICS_INCLUDE_PATH}.tmp"
+
+  mkdir -p "$(dirname "${METRICS_INCLUDE_PATH}")" || {
+    die "failed to create metrics include directory: $(dirname "${METRICS_INCLUDE_PATH}")"
+    return 1
+  }
+  if ! build_cube_proxy_metrics_include > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to render metrics include: ${METRICS_INCLUDE_PATH}"
+    return 1
+  fi
+  mv -f "${tmp}" "${METRICS_INCLUDE_PATH}" || {
+    rm -f "${tmp}"
+    die "failed to install metrics include: ${METRICS_INCLUDE_PATH}"
+    return 1
+  }
 }
 
 is_ip_literal() {
@@ -229,6 +323,7 @@ prepare_resolver_include() {
 
 main() {
   prepare_resolver_include || exit 1
+  render_metrics_include || exit 1
 
   /usr/sbin/crond
   exec /usr/local/openresty/nginx/sbin/nginx
