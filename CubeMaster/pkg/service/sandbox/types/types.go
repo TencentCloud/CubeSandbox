@@ -616,22 +616,25 @@ type GetCubeSandboxRes struct {
 }
 
 type SandboxData struct {
-	SandboxID              string             `json:"sandbox_id,omitempty"`
-	Status                 int32              `json:"status,omitempty"`
-	HostID                 string             `json:"host_id,omitempty"`
-	HostIP                 string             `json:"host_ip,omitempty"`
-	SandboxIP              string             `json:"sandbox_ip,omitempty"`
-	TemplateID             string             `json:"template_id,omitempty"`
-	Annotations            map[string]string  `json:"annotations,omitempty"`
-	Labels                 map[string]string  `json:"labels,omitempty"`
-	Containers             []*ContainerInfo   `json:"containers,omitempty"`
-	NameSpace              string             `json:"namespace,omitempty"`
-	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
-	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
-	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
-	EndAt                  int64              `json:"end_at,omitempty"`
-	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
-	RestartStatus          *RestartStatus     `json:"restart_status,omitempty"`
+	SandboxID              string            `json:"sandbox_id,omitempty"`
+	Status                 int32             `json:"status,omitempty"`
+	HostID                 string            `json:"host_id,omitempty"`
+	HostIP                 string            `json:"host_ip,omitempty"`
+	SandboxIP              string            `json:"sandbox_ip,omitempty"`
+	TemplateID             string            `json:"template_id,omitempty"`
+	Annotations            map[string]string `json:"annotations,omitempty"`
+	Labels                 map[string]string `json:"labels,omitempty"`
+	Containers             []*ContainerInfo  `json:"containers,omitempty"`
+	NameSpace              string            `json:"namespace,omitempty"`
+	ExposedPortEndpoint    string            `json:"exposed_port_endpoint,omitempty"`
+	ExposedPortMode        string            `json:"exposed_port_mode,omitempty"`
+	RequestedContainerPort int32             `json:"requested_container_port,omitempty"`
+	// ExposedPortHostPort is the node-level host port when ExposedPortMode is
+	// host_port, so callers do not have to parse ExposedPortEndpoint.
+	ExposedPortHostPort int32              `json:"exposed_port_host_port,omitempty"`
+	EndAt               int64              `json:"end_at,omitempty"`
+	VolumeMounts        []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	RestartStatus       *RestartStatus     `json:"restart_status,omitempty"`
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is

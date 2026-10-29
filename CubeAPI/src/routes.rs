@@ -98,6 +98,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
         .route("/v2/sandboxes", post(sandboxes::create_sandbox_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
+        .route(
+            "/sandboxes/:sandboxID/exposed-ports/:containerPort",
+            get(sandboxes::get_sandbox_exposed_port),
+        )
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
             "/sandboxes/:sandboxID/logs",

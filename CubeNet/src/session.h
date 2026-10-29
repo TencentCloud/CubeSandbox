@@ -16,6 +16,14 @@ enum packet_class {
 	 * aged (reaped) connection misses and is rebuilt while a stale (rolled-back)
 	 * one is found and reset. */
 	PORT_MAPPING_PACKET,
+	/* HAIRPIN_PACKET marks sessions for same-host port-mapping access
+	 * (sandbox -> its own node's nodeIP:hostPort). The flow takes the
+	 * ordinary SNAT path, but from_cube loops every packet back into the
+	 * primary NIC ingress (TCP_HAIRPIN_OK) so from_world can apply the
+	 * port-mapping DNAT. Flagged once at session creation: the destination
+	 * port's remote_port_mapping entry may churn mid-connection, but the
+	 * flow's treatment must not flip with it. */
+	HAIRPIN_PACKET,
 };
 
 /* Lazy refresh threshold: 1 second in nanoseconds */

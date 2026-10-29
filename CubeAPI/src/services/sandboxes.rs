@@ -343,6 +343,56 @@ impl SandboxService {
         })
     }
 
+    /// Resolve the exposed-port endpoint for one container port.
+    ///
+    /// CubeMaster decides the mode by comparing caller_host_ip with the
+    /// sandbox's node IP: same node → tap_ip (sandboxIP:containerPort),
+    /// otherwise → host_port (hostIP:hostPort). Callers that want the host
+    /// port form regardless can pass any address outside the node.
+    pub async fn get_exposed_port_endpoint(
+        &self,
+        sandbox_id: &str,
+        container_port: i32,
+        caller_host_ip: Option<&str>,
+    ) -> AppResult<crate::models::ExposedPortEndpoint> {
+        if container_port <= 0 {
+            return Err(AppError::BadRequest(format!(
+                "containerPort {} is invalid",
+                container_port
+            )));
+        }
+        let resp = self
+            .cubemaster
+            .get_sandbox_exposed_port(sandbox_id, container_port, caller_host_ip)
+            .await
+            .map_err(map_exposed_port_err(sandbox_id, container_port))?;
+        let item = resp
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))?;
+        if item.exposed_port_endpoint.is_empty() {
+            return Err(AppError::NotFound(format!(
+                "sandbox {} has no exposed-port mapping for container port {}",
+                sandbox_id, container_port
+            )));
+        }
+        let is_host_port = item.exposed_port_mode == "host_port";
+        Ok(crate::models::ExposedPortEndpoint {
+            sandbox_id: sandbox_id.to_string(),
+            container_port,
+            mode: item.exposed_port_mode,
+            endpoint: item.exposed_port_endpoint,
+            host_ip: is_host_port
+                .then_some(item.host_ip)
+                .filter(|s| !s.is_empty()),
+            host_port: is_host_port
+                .then_some(item.exposed_port_host_port)
+                .filter(|p| *p > 0),
+            sandbox_ip: (!item.sandbox_ip.is_empty()).then_some(item.sandbox_ip),
+        })
+    }
+
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
         let NewSandbox {
             template_id,
@@ -1162,6 +1212,32 @@ fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResul
         }
     }
     Ok(())
+}
+
+// ResolveExposedPortEndpoint failures all describe the same client-visible
+// condition — this (sandbox, port) pair has no usable endpoint: the port was
+// not declared via the template's expose-port list, or the sandbox has no
+// proxy metadata at all. Surface them as 404, not a retryable-looking 500.
+// A bare 130404 ("sandbox id not found") is 404 regardless of the message.
+fn map_exposed_port_err(
+    sandbox_id: &str,
+    container_port: i32,
+) -> impl Fn(CubeMasterError) -> AppError {
+    let sandbox_id = sandbox_id.to_string();
+    move |e| match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_msg, .. }
+            if ret_msg.contains("container port") || ret_msg.contains("proxy metadata") =>
+        {
+            AppError::NotFound(format!(
+                "sandbox {} container port {} is not exposed: {}",
+                sandbox_id, container_port, ret_msg
+            ))
+        }
+        other => internal_error(other),
+    }
 }
 
 fn internal_error(error: impl std::fmt::Display) -> AppError {

@@ -273,6 +273,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.RequestedContainerPort = endpoint.ContainerPort
 		item.ExposedPortEndpoint = endpoint.Address
 		item.ExposedPortMode = endpoint.Mode
+		item.ExposedPortHostPort = endpoint.HostPort
 	}
 	return nil
 }

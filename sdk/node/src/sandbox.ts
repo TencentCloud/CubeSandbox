@@ -92,6 +92,22 @@ export interface UpdateNetworkOptions extends NetworkOptions {
   allowInternetAccess?: boolean;
 }
 
+/**
+ * Endpoint of a template-declared exposed port. `mode` selects the address
+ * family of `endpoint`: "host_port" (`endpoint` is `hostIP:hostPort`, usable
+ * from any caller) or "tap_ip" (`endpoint` is `sandboxIP:containerPort`, only
+ * meaningful for callers on the sandbox's own node).
+ */
+export interface ExposedPortEndpoint {
+  sandboxID: string;
+  containerPort: number;
+  mode: string;
+  endpoint: string;
+  hostIP?: string;
+  hostPort?: number;
+  sandboxIP?: string;
+}
+
 export interface CreateOptions {
   template?: string;
   /** Alias for {@link CreateOptions.template}, matching the Issue #760 / E2B shape. */
@@ -716,6 +732,22 @@ export class Sandbox {
     const resp = await controlFetch(this.config, `${this.config.apiUrl}/sandboxes/${this.sandboxId}`);
     await checkControlResponse(resp);
     return (await resp.json()) as Record<string, any>;
+  }
+
+  /**
+   * GET /sandboxes/:id/exposed-ports/:port — resolve the endpoint of a
+   * template-declared exposed port. CubeMaster picks the mode by comparing
+   * the caller's address with the sandbox's node IP; pass callerHostIP to
+   * override that detection (any out-of-node address forces host_port).
+   */
+  async getExposedPortEndpoint(port: number, callerHostIP?: string): Promise<ExposedPortEndpoint> {
+    const query = callerHostIP ? `?callerHostIP=${encodeURIComponent(callerHostIP)}` : "";
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/exposed-ports/${port}${query}`,
+    );
+    await checkControlResponse(resp);
+    return (await resp.json()) as ExposedPortEndpoint;
   }
 
   /** POST /sandboxes/:id/pause — pause a sandbox (preserves memory snapshot). */
