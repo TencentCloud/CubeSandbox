@@ -60,6 +60,7 @@ pub struct VmConfig {
     pub vcpus: u32,
     pub memory_size: u64,
     pub dirty_log: bool,
+    pub mergeable: bool,
     pub cmdlines: Vec<String>,
     pub kernel: String,
     pub disks: Option<Vec<DiskConfig>>,
@@ -130,6 +131,7 @@ impl VmConfig {
             vcpus: 0,
             memory_size: 0,
             dirty_log: false,
+            mergeable: false,
             cmdlines: params,
             kernel: String::default(),
             disks: Some(Vec::new()),
@@ -170,6 +172,7 @@ impl VmConfig {
 
         vc.memory.size = self.memory_size * MI_B;
         vc.memory.dirty_log = self.dirty_log;
+        vc.memory.mergeable = self.mergeable;
         vc.balloon = Some(BalloonConfig {
             size: 0,
             deflate_on_oom: false,
