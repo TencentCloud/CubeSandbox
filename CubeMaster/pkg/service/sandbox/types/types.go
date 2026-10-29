@@ -726,6 +726,15 @@ type CreateTemplateFromImageReq struct {
 	// See design/cube-egress-ca-bake.md.
 	WithCubeCA *bool `json:"with_cube_ca,omitempty"`
 
+	// WithCubeCAEnv defaults to true when CA baking is enabled. False keeps
+	// the baked CA but disables automatic application runtime trust variables.
+	WithCubeCAEnv *bool `json:"with_cube_ca_env,omitempty"`
+
+	// CubeCAEnvVars replaces the default list of variables pointing to the
+	// baked PEM bundle. nil selects defaults; an empty list selects none.
+	// Do not omit empty slices: persisted jobs must retain that distinction.
+	CubeCAEnvVars []string `json:"cube_ca_env_vars"`
+
 	// EnableIvshmem controls whether the template build sandbox should boot
 	// with ivshmem enabled so the captured snapshot already contains the
 	// device topology.

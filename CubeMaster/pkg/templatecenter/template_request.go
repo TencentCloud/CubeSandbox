@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -80,8 +81,32 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		}
 	}
 	envs := envListToKeyValues(imageCfg.Env)
+	withRuntimeCA := runtimeCAEnvEnabled(req) && artifact.CubeEgressCABaked && imageCfg.CubeEgressCABundlePath != ""
+	if withRuntimeCA {
+		// Image ENV and explicit template overrides both win over defaults.
+		envs = mergeEnvOverrides(runtimeCAEnvDefaults(req, imageCfg.CubeEgressCABundlePath), envs)
+	}
 	if req.ContainerOverrides != nil {
 		envs = mergeEnvOverrides(envs, req.ContainerOverrides.Envs)
+	}
+	if withRuntimeCA {
+		// envd does not inherit the container environment for commands. Carry
+		// just these defaults through the template for its /init request too.
+		selected := make(map[string]bool)
+		for _, name := range runtimeCAEnvNames(req) {
+			selected[name] = true
+		}
+		caEnvs := make(map[string]string, len(selected))
+		for _, kv := range envs {
+			if selected[kv.Key] {
+				caEnvs[kv.Key] = kv.Value
+			}
+		}
+		payload, err := json.Marshal(caEnvs)
+		if err != nil {
+			return nil, fmt.Errorf("marshal runtime CA environment: %w", err)
+		}
+		annotations[constants.CubeAnnotationRuntimeCAEnv] = string(payload)
 	}
 	workingDir := imageCfg.WorkingDir
 	if req.ContainerOverrides != nil && req.ContainerOverrides.WorkingDir != "" {
