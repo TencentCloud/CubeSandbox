@@ -659,11 +659,7 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 		}
 	}
 
-	if err := l.cubeboxManger.Save(ctx, sandBox, cubes.WithNoEvent); err != nil {
-		log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
-		return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
-	}
-	return nil
+	return l.admitAndSave(ctx, sandBox, flowOpts.IsRestart)
 }
 
 func (l *local) generateContainerID(ctx context.Context, flowOpts *workflow.CreateContext, index int) (context.Context, string) {

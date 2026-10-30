@@ -115,6 +115,7 @@ func (l *local) collectOSSMetrics() map[string]any {
 // what is "allocated" on this node.
 type aggregatedSandboxView struct {
 	MilliCPU      int64
+	MemoryBytes   int64
 	MemoryMB      int64
 	MvmNum        int64
 	MvmRunningNum int64
@@ -227,6 +228,7 @@ func aggregateSandboxResources(sbs []*cubeboxstore.CubeBox, releaseRatio float64
 	}
 	return aggregatedSandboxView{
 		MilliCPU:      cpuMilli,
+		MemoryBytes:   memBytes,
 		MemoryMB:      bytesToMB(memBytes),
 		MvmNum:        int64(len(sbs)),
 		MvmRunningNum: runningBox,
