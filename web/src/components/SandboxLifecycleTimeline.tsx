@@ -75,7 +75,7 @@ export function SandboxLifecycleTimeline({
   });
   const events = history.data?.events ?? [];
 
-  if (hideWhenEmpty && (history.isLoading || history.isError || events.length === 0)) {
+  if (hideWhenEmpty && events.length === 0) {
     return null;
   }
 
@@ -100,7 +100,7 @@ export function SandboxLifecycleTimeline({
       </CardHeader>
       {history.isLoading ? (
         <p className="text-sm text-muted-foreground">{t('lifecycle.loading')}</p>
-      ) : history.isError ? (
+      ) : history.isError && events.length === 0 ? (
         <p className="text-sm text-muted-foreground">{t('lifecycle.error')}</p>
       ) : events.length === 0 ? (
         <p className="text-sm text-muted-foreground">{t('lifecycle.empty')}</p>
