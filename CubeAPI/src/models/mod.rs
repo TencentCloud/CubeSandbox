@@ -1076,7 +1076,9 @@ pub struct SandboxLifecycleEvent {
 }
 
 /// Lifecycle history of a sandbox, oldest first. Also served after the
-/// sandbox is deleted; an unknown ID yields no events.
+/// sandbox is deleted; an unknown ID yields no events. Paging is best effort:
+/// with several CubeMaster replicas an event can be missed by a page that was
+/// read just before it was written.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SandboxEvents {
     pub events: Vec<SandboxLifecycleEvent>,

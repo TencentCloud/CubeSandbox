@@ -471,7 +471,7 @@ export interface components {
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
         };
-        /** @description Lifecycle history of a sandbox, oldest first. Also served after the sandbox is deleted; an unknown ID yields no events. */
+        /** @description Lifecycle history of a sandbox, oldest first. Also served after the sandbox is deleted; an unknown ID yields no events. Paging is best effort: with several CubeMaster replicas an event can be missed by a page that was read just before it was written. */
         SandboxEvents: {
             events: components["schemas"]["SandboxLifecycleEvent"][];
             hasMore: boolean;
