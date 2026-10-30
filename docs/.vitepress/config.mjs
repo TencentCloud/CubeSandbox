@@ -301,6 +301,7 @@ export default withMermaid(defineConfig({
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
+                { text: 'Rolling the cube-node DS Kills All Sandboxes', link: '/guide/troubleshooting/daemonset-rolling-update-kills-all-sandboxes' },
                 { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' }
               ]
             },
