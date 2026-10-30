@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -242,6 +243,9 @@ func init() {
 			}()
 
 			go s.destroyDeadContainers()
+			if cb.config.SandboxLogCleanupEnabled {
+				go s.runDelayedLogCleanup(ic.Context)
+			}
 
 			return s, nil
 		},
@@ -369,11 +373,28 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	}
-	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
+	// A configured ID must also serialize with delayed log removal: a new
+	// sandbox may reuse the ID of an already-destroyed sandbox.
+	sid := resumeFromPauseSandboxID(req)
+	if s.cubeboxMgr != nil && s.cubeboxMgr.config != nil && s.cubeboxMgr.config.SandboxLogCleanupEnabled {
+		desired := req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]
+		if desired != "" {
+			// The lock key must match the exact ID used by the create workflow.
+			if desired != strings.TrimSpace(desired) || desired == "." || strings.ContainsRune(desired, '\x00') || pathutil.ValidateSafeID(desired) != nil {
+				rsp.Ret.RetMsg = "invalid desired sandbox ID"
+				rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+				return rsp, nil
+			}
+			sid = desired
+		}
+	}
+	if sid != "" {
 		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, sid)
 		if lockErr != nil {
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
+			if resumeFromPauseSandboxID(req) == "" {
+				rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Create after 2 seconds"
+			}
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 			return rsp, nil
 		}

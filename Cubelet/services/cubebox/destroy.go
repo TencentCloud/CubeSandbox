@@ -214,6 +214,11 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	if er := result.ErrorOrNil(); er != nil {
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
+	if !keepCubebox {
+		// Only mark after waitSandboxRuntimeGone has verified the runtime exit.
+		// A marking failure leaves the logs in place for manual inspection.
+		l.markSandboxLogs(ctx, sandBoxID, sb.Namespace)
+	}
 	return nil
 }
 
