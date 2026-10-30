@@ -821,6 +821,43 @@ The same files are also embedded inside `assets/package/sandbox-package.tar.gz`
 (consumed by the jumpserver-side `build_images.sh`); the top-level copy simply
 makes the deployer reachable without first extracting the inner package.
 
+### Private-CA registry trust (trusted CA certificates)
+
+If the image registries the TemplateCenter pod pulls from sit behind a private
+CA, pass the certificates as Terraform variables. They are **not** read from or
+written to `.env`, so export them (or put them in a `terraform.tfvars` file)
+before every `create.sh` run:
+
+```bash
+export TF_VAR_templatecenter_trusted_ca_certs='["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"]'
+./terraform/tencentcloud/create.sh
+```
+
+- The value must be supplied on every `create.sh` run (via `TF_VAR_`, or via a
+  `terraform.tfvars` next to `variables.tf`, which persists across runs); a
+  rerun without it drops the mount and `SSL_CERT_DIR`, so the trust stops
+  working. The ConfigMap object itself stays until `destroy.sh` or a full
+  (non-targeted) apply.
+- Each entry may hold one or several certificates (a chain); entries are
+  rendered as keys of a terraform-managed ConfigMap mounted at
+  `/etc/cube/trusted-ca` and exposed through `SSL_CERT_DIR`, which Go reads
+  **in addition to** the system bundle — publicly-trusted registries keep
+  working. Certificate blocks only: a pasted private key fails the plan, and
+  lines are whitespace-trimmed when written, so blocks copied out of YAML
+  manifests work.
+- Alternative: `templatecenter_trusted_ca_existing_config_map` names a
+  ConfigMap you own in the `cubesandbox` namespace. That namespace is
+  created by the same addons apply, so on a **first** deployment this path
+  only becomes usable on a rerun: let the first apply fail waiting for the
+  rollout, create the ConfigMap, then run `create.sh` again. The name
+  `cube-templatecenter-trusted-ca` is reserved for the inline path and
+  rejected by plan. Its keys must hold standard column-0 PEM, which Go
+  parses strictly -- indented blocks are ignored. Mutually exclusive with
+  the certs variable.
+- Certificate changes roll the pod (checksum annotation on the inline path);
+  changes to an operator-owned ConfigMap need a manual
+  `kubectl -n cubesandbox rollout restart deploy/cube-templatecenter`.
+
 ### Environment requirements & how Terraform is used
 
 `create.sh` drives Terraform from your local machine; you do not need a
