@@ -12,9 +12,11 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime/systemnet"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/runtimeprocess"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -85,6 +87,7 @@ type TapDeviceAdapter interface {
 	// Restore reconciles link state, MTU, and ARP. It does not attach the filter.
 	Restore(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error)
 	Open(name string) (*os.File, error)
+	CheckUnused(name string) error
 	Close(file *os.File)
 	List() (map[string]*tapDevice, error)
 	GetByName(name string) (*tapDevice, error)
@@ -118,6 +121,21 @@ func (realTapDeviceAdapter) Restore(tap *tapDevice, mtu int, mvmMacAddr string, 
 
 func (realTapDeviceAdapter) Open(name string) (*os.File, error) {
 	return openTapFdByName(name)
+}
+
+// CheckUnused is independent of containerd's task list. A retained Cubelet fd
+// is not evidence that all previous shim/VMM handoff duplicates were closed.
+func (realTapDeviceAdapter) CheckUnused(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	owners, err := runtimeprocess.TAPOwners(ctx, "/proc", name, os.Getpid())
+	if err != nil {
+		return fmt.Errorf("verify tap %s runtime ownership: %w", name, err)
+	}
+	if len(owners) != 0 {
+		return fmt.Errorf("tap %s is still held by runtime pids %v", name, owners)
+	}
+	return nil
 }
 
 func (realTapDeviceAdapter) Close(file *os.File) {

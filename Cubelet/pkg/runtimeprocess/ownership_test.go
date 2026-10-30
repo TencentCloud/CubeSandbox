@@ -1,0 +1,64 @@
+package runtimeprocess
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
+
+func fakeRuntime(t *testing.T, root, pid, exe string, args ...string) string {
+	t.Helper()
+	base := filepath.Join(root, pid)
+	if err := os.MkdirAll(filepath.Join(base, "fdinfo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(exe, filepath.Join(base, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	var body []byte
+	for _, arg := range args {
+		body = append(body, []byte(arg)...)
+		body = append(body, 0)
+	}
+	if err := os.WriteFile(filepath.Join(base, "cmdline"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
+
+func TestTAPOwnersRejectsForeignRuntimeEvenWithDuplicatedFD(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct{ pid, exe, tap string }{
+		{"31", "/bin/containerd-shim-cube-rs", "192.168.0.140"},
+		{"32", "/bin/cube-hypervisor", "192.168.0.140"},
+		{"33", "/bin/containerd-shim-cube-rs", "192.168.0.14"},
+		{"34", "/bin/containerd-shim-cube-rs", "192.168.0.140"},
+		{"35", "/bin/custom-runtime", "192.168.0.140"},
+	} {
+		base := fakeRuntime(t, root, tc.pid, tc.exe)
+		for _, fd := range []string{"74", "75"} {
+			if err := os.WriteFile(filepath.Join(base, "fdinfo", fd), []byte("pos:\t0\niff:\t"+tc.tap+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, err := TAPOwners(context.Background(), root, "192.168.0.140", 34)
+	if err != nil || !reflect.DeepEqual(got, []int{31, 32, 35}) {
+		t.Fatalf("owners=%v err=%v", got, err)
+	}
+}
+
+func TestOwnershipScanFailsClosed(t *testing.T) {
+	if _, err := TAPOwners(context.Background(), filepath.Join(t.TempDir(), "missing"), "tap", 0); err == nil {
+		t.Fatal("missing procfs must not mean no live shim")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	root := t.TempDir()
+	fakeRuntime(t, root, "42", "/bin/containerd-shim-cube-rs")
+	if _, err := TAPOwners(ctx, root, "tap", 0); err == nil {
+		t.Fatal("cancelled ownership check must not report an unused TAP")
+	}
+}

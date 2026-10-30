@@ -818,6 +818,12 @@ func (s *NetworkController) cleanupCreateFailure(ctx context.Context, state *man
 func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry, error) {
 	entry, err := s.tapPool.Acquire(owner)
 	if err == nil {
+		// Includes legacy Ready entries recovered from before ownership checks
+		// were enforced. Quarantine rather than hand an old VM's queue to a new VM.
+		if err := s.checkTapUnused(entry.TapName); err != nil {
+			quarantineErr := s.tapPool.QuarantineReservation(entry, owner)
+			return nil, nil, errors.Join(err, quarantineErr)
+		}
 		tap, err := tapDeviceFromEntry(entry)
 		if err != nil {
 			return nil, nil, err

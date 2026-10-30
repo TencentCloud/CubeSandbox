@@ -155,16 +155,27 @@ func (s *NetworkController) resetTapRuntimeFieldsForPool(tap *tapDevice) {
 	s.poolTapFD(tap.Name, file)
 }
 
-// verifyTapReusableFD checks that an idle TAP can be reopened before it is
-// returned to Ready. With fd retention the common case needs no probe: a
-// retained fd is by definition attached and duplicable. Only a TAP without a
-// retained fd (e.g. recovered after restart) is probed, and the successfully
-// opened fd is then retained for future handoffs.
+// checkTapUnused is a separate ownership check: duplicability of a Cubelet fd
+// says nothing about old shim processes sharing that very same open TAP queue.
+func (s *NetworkController) checkTapUnused(name string) error {
+	if s.tapAdapter == nil {
+		return errors.New("TAP ownership adapter is unavailable")
+	}
+	return s.tapAdapter.CheckUnused(name)
+}
+
+// verifyTapReusableFD verifies physical ownership even on the retained-fd path.
 func (s *NetworkController) verifyTapReusableFD(tap *tapDevice) error {
 	if tap == nil || tap.Name == "" {
 		return nil
 	}
-	if s.hasPooledTapFD(tap.Name) {
+	if err := s.checkTapUnused(tap.Name); err != nil {
+		return err
+	}
+	if file := s.takePooledTapFD(tap.Name); file != nil {
+		// Ownership can disappear after a previous cleanup deferred draining.
+		drainTapFD(file)
+		s.poolTapFD(tap.Name, file)
 		return nil
 	}
 	file, err := s.tapAdapter.Open(tap.Name)
