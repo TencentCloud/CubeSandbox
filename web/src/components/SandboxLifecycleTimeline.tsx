@@ -17,10 +17,12 @@ const EVENT_TONE: Record<string, 'ok' | 'warn' | 'err' | 'info'> = {
   killed: 'err',
 };
 
-// One page holds 500 events; one fetch reads at most this many pages so a
-// very long history cannot keep the page busy. The next fetch continues from
-// where this one stopped.
-const MAX_PAGES = 10;
+// One page holds 500 events; one fetch reads at most this many pages so the
+// first paint stays quick. The next fetch continues from where this one
+// stopped.
+const MAX_PAGES = 2;
+// Only the newest events are kept, so a very long history stays bounded.
+const MAX_EVENTS = 2000;
 
 interface History {
   events: SandboxLifecycleEventDto[];
@@ -28,6 +30,8 @@ interface History {
   cursor?: number;
   /** More events exist than were read so far. */
   hasMore: boolean;
+  /** Older events were dropped to stay within MAX_EVENTS. */
+  trimmed: boolean;
 }
 
 async function fetchNewEvents(sandboxID: string, previous?: History): Promise<History> {
@@ -44,7 +48,8 @@ async function fetchNewEvents(sandboxID: string, previous?: History): Promise<Hi
   // Rows from different CubeMaster replicas can be inserted slightly out of
   // order; the recorded time is authoritative.
   events.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.id - b.id);
-  return { events, cursor, hasMore };
+  const trimmed = (previous?.trimmed ?? false) || events.length > MAX_EVENTS;
+  return { events: events.slice(-MAX_EVENTS), cursor, hasMore, trimmed };
 }
 
 /**
@@ -125,6 +130,11 @@ export function SandboxLifecycleTimeline({
           ))}
         </ol>
       )}
+      {history.data?.trimmed ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          {t('lifecycle.trimmed', { count: MAX_EVENTS })}
+        </p>
+      ) : null}
       {history.data?.hasMore ? (
         <p className="mt-2 text-xs text-muted-foreground">{t('lifecycle.loadingMore')}</p>
       ) : null}
