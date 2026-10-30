@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/logcleanup"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
@@ -69,14 +71,29 @@ func positiveDuration(raw, name string) (time.Duration, error) {
 func (s *service) runDelayedLogCleanup(ctx context.Context) {
 	ticker := time.NewTicker(s.cubeboxMgr.config.logCleanupInterval)
 	defer ticker.Stop()
+	runDelayedLogCleanupLoop(ctx, ticker.C, func(now time.Time) error {
+		return logcleanup.Scan(ctx, logcleanup.Root, s.cubeboxMgr.config.logRetention, now, s.guardDelayedLogCleanup)
+	})
+}
+
+// Recover each scan separately so a panic does not terminate Cubelet or stop
+// subsequent cleanup ticks. Unremoved logs remain for the next scan.
+func runDelayedLogCleanupLoop(ctx context.Context, ticks <-chan time.Time, scan func(time.Time) error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
-			if err := logcleanup.Scan(ctx, logcleanup.Root, s.cubeboxMgr.config.logRetention, now, s.guardDelayedLogCleanup); err != nil {
-				CubeLog.Warnf("delayed sandbox log cleanup: %v", err)
+		case now, ok := <-ticks:
+			if !ok {
+				return
 			}
+			recov.WithRecover(func() {
+				if err := scan(now); err != nil {
+					CubeLog.Warnf("delayed sandbox log cleanup: %v", err)
+				}
+			}, func(panicError interface{}) {
+				CubeLog.Errorf("delayed sandbox log cleanup panic: %v\n%s", panicError, debug.Stack())
+			})
 		}
 	}
 }

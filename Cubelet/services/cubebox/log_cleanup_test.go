@@ -53,6 +53,33 @@ func TestDelayedLogCleanupConfiguration(t *testing.T) {
 	}
 }
 
+func TestDelayedLogCleanupContinuesAfterScanPanic(t *testing.T) {
+	ticks := make(chan time.Time, 2)
+	ticks <- time.Now()
+	ticks <- time.Now()
+	close(ticks)
+	done := make(chan struct{})
+	calls := 0
+	go func() {
+		defer close(done)
+		runDelayedLogCleanupLoop(context.Background(), ticks, func(time.Time) error {
+			calls++
+			if calls == 1 {
+				panic("simulated cleanup panic")
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+		if calls != 2 {
+			t.Fatalf("expected a later scan after panic, got %d calls", calls)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup loop did not finish")
+	}
+}
+
 func TestMarkSandboxLogsHonorsFeatureFlag(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "sandbox")
