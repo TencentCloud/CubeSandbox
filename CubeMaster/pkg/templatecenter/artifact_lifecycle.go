@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -92,17 +93,19 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 
 	// Keep tombstones and failed/deleting snapshots referenced until their
 	// physical cleanup finishes and metadata is removed. Tombstones can
-	// still have live runtime bindings. A locking read also avoids a stale
-	// MySQL repeatable-read snapshot when a creator committed while we waited
-	// for the artifact row lock.
-	var snapshots []struct{ SnapshotID string }
+	// still have live runtime bindings. The caller holds the artifact row lock
+	// under READ COMMITTED, so creators cannot add owners and the read sees any
+	// creator that committed before that lock was acquired. Do not lock child
+	// rows: reference release updates their primary and rootfs secondary indexes
+	// in the opposite order to an artifact-index locking scan. A concurrent
+	// removal can only cause a conservative overcount until the next GC pass.
+	var snapshotCount int64
 	sq := tx.Table(constants.SnapshotTableName).
-		Select("snapshot_id").Where("rootfs_artifact_id = ? AND deleted_at IS NULL", artifactID).
-		Clauses(clause.Locking{Strength: "UPDATE"})
-	if err := sq.Find(&snapshots).Error; err != nil {
+		Where("rootfs_artifact_id = ? AND deleted_at IS NULL", artifactID)
+	if err := sq.Count(&snapshotCount).Error; err != nil {
 		return 0, err
 	}
-	return replicaCount + jobCount + defCount + int64(len(snapshots)), nil
+	return replicaCount + jobCount + defCount + snapshotCount, nil
 }
 
 // cleanupArtifactFully implements the three-phase last-owner-cleanup for one
@@ -187,7 +190,7 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		}
 		proceed = true
 		return nil
-	}); err != nil {
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted}); err != nil {
 		return err
 	}
 	if !proceed {
@@ -267,7 +270,7 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		}
 		finalized = true
 		return nil
-	}); err != nil {
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted}); err != nil {
 		return err
 	}
 	if !finalized {
