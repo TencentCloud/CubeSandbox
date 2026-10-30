@@ -1023,3 +1023,19 @@ func TestSDK_GetSandboxEvents_OtherNotFoundStillErrors(t *testing.T) {
 		t.Fatalf("a non-gin 404 must not become an empty history; body=%s", w.Body.String())
 	}
 }
+
+func TestSDK_GetSandboxEvents_RejectsBadPaging(t *testing.T) {
+	cm := &fakeCM{
+		getSandboxEvents: func(context.Context, map[string]string) (json.RawMessage, error) {
+			t.Fatal("bad paging must not reach CubeMaster")
+			return nil, nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+	for _, q := range []string{"?cursor=abc", "?limit=-1"} {
+		w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/events"+q)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", q, w.Code)
+		}
+	}
+}

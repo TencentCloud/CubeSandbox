@@ -494,15 +494,23 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 // unknown ID is an empty list rather than a 404.
 func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
 	params := map[string]string{"sandbox_id": c.Param("id")}
+	// Reject bad paging input like CubeAPI does; a dropped cursor would
+	// silently restart paging at the first event.
 	if v := c.Query("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			params["limit"] = strconv.Itoa(n)
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			httputil.WriteError(c, http.StatusBadRequest, "limit must be a non-negative integer")
+			return
 		}
+		params["limit"] = strconv.FormatUint(n, 10)
 	}
 	if v := c.Query("cursor"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
-			params["cursor"] = strconv.FormatUint(n, 10)
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			httputil.WriteError(c, http.StatusBadRequest, "cursor must be a non-negative integer")
+			return
 		}
+		params["cursor"] = strconv.FormatUint(n, 10)
 	}
 	raw, err := h.cm.GetSandboxEvents(c.Request.Context(), params)
 	if err != nil {
