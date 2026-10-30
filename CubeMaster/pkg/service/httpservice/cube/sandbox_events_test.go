@@ -84,6 +84,14 @@ func TestSandboxEventsAction(t *testing.T) {
 	}
 	short := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-g", nil))
 	assert.Len(t, short.Events, 3)
+	// Later pages of the same short ID reuse the resolved ID.
+	resolveSandboxIDFn = func(context.Context, string) (string, error) {
+		t.Fatal("short ID resolved again")
+		return "", nil
+	}
+	next := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-g&limit=1&cursor="+jsonUint(short.Events[0].ID), nil))
+	require.Len(t, next.Events, 1)
+	assert.Equal(t, "paused", next.Events[0].Event)
 	// A full ID with no history is never resolved (that would scan the cluster).
 	resolveCalls := 0
 	resolveSandboxIDFn = func(context.Context, string) (string, error) {
@@ -107,4 +115,17 @@ func TestSandboxEventsAction(t *testing.T) {
 func jsonUint(v uint64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func TestSandboxEventsActionWithHistoryDisabled(t *testing.T) {
+	// No sandboxevent.Init in this process state: the store reports not ready.
+	sandboxevent.ResetForTest()
+	engine := gin.New()
+	engine.GET("/cube"+SandboxEventsAction, handleSandboxEventsAction)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-1", nil))
+	var res SandboxEventsRes
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	assert.Equal(t, 0, res.Ret.RetCode)
+	assert.Empty(t, res.Events)
 }

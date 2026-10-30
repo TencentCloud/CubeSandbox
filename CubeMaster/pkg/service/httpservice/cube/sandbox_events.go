@@ -5,7 +5,10 @@
 package cube
 
 import (
+	"context"
+	"errors"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +24,32 @@ import (
 
 // resolveSandboxIDFn is a seam for tests; resolution may scan the cluster.
 var resolveSandboxIDFn = sandbox.ResolveSandboxID
+
+// A short ID maps to the same full ID on every page of a listing, so the
+// mapping is remembered briefly instead of being resolved for each page.
+const eventIDCacheTTL = 5 * time.Minute
+
+var eventIDCache sync.Map // short ID -> resolvedEventID
+
+type resolvedEventID struct {
+	fullID  string
+	expires time.Time
+}
+
+func resolveEventSandboxID(ctx context.Context, shortID string) string {
+	if v, ok := eventIDCache.Load(shortID); ok {
+		if r := v.(resolvedEventID); time.Now().Before(r.expires) {
+			return r.fullID
+		}
+		eventIDCache.Delete(shortID)
+	}
+	fullID, err := resolveSandboxIDFn(ctx, shortID)
+	if err != nil || fullID == "" {
+		return ""
+	}
+	eventIDCache.Store(shortID, resolvedEventID{fullID: fullID, expires: time.Now().Add(eventIDCacheTTL)})
+	return fullID
+}
 
 // SandboxEventsReq is the request for GET/POST /cube/sandbox/events.
 type SandboxEventsReq struct {
@@ -89,9 +118,14 @@ func handleSandboxEventsAction(c *gin.Context) {
 	// A full ID never needs resolving, and resolving a missing one would scan
 	// every node on each poll; only short IDs fall back.
 	if err == nil && len(rows) == 0 && !sandboxid.IsFullID(req.SandboxID) {
-		if resolved, resolveErr := resolveSandboxIDFn(ctx, req.SandboxID); resolveErr == nil && resolved != "" && resolved != req.SandboxID {
+		if resolved := resolveEventSandboxID(ctx, req.SandboxID); resolved != "" && resolved != req.SandboxID {
 			rows, hasMore, err = sandboxevent.List(ctx, resolved, req.Cursor, req.Limit)
 		}
+	}
+	// With the history disabled (store not initialised) there is simply no
+	// history, like an older CubeMaster without this endpoint.
+	if errors.Is(err, sandboxevent.ErrNotReady) {
+		rows, hasMore, err = nil, false, nil
 	}
 	if err != nil {
 		CubeLog.Errorf("sandboxevent.List sandboxID=%s err=%v", req.SandboxID, err)

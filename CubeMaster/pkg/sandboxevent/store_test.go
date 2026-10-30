@@ -112,6 +112,13 @@ func TestListWithoutInitIsNotReady(t *testing.T) {
 	Record(context.Background(), "sb", EventCreated, "", "")
 }
 
+func TestInitRejectsMissingTable(t *testing.T) {
+	client, err := gorm.Open(sqlite.Open("file:no_event_table?mode=memory&cache=shared"),
+		&gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	assert.Error(t, Init(client))
+}
+
 func TestKillReasonRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	assert.Equal(t, "", KillReason(ctx))

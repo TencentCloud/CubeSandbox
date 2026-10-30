@@ -49,10 +49,15 @@ var (
 )
 
 // Init attaches the shared gorm handle and starts the writer. The table is
-// created by cubedb migrations. Calling Init again only swaps the handle.
+// created by cubedb migrations; when it is missing (CUBE_AUTO_MIGRATION=false
+// with the DDL not applied yet) Init fails and the history stays disabled
+// until the next restart. Calling Init again only swaps the handle.
 func Init(client *gorm.DB) error {
 	if client == nil {
 		return errors.New("sandboxevent.Init: nil db")
+	}
+	if !client.Migrator().HasTable(&models.SandboxEvent{}) {
+		return errors.New("sandboxevent.Init: table t_cube_sandbox_event does not exist")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -147,6 +152,13 @@ func List(ctx context.Context, sandboxID string, cursor uint64, limit int) ([]mo
 		rows = rows[:limit]
 	}
 	return rows, hasMore, nil
+}
+
+// ResetForTest detaches the store so List reports ErrNotReady. Test-only.
+func ResetForTest() {
+	mu.Lock()
+	db = nil
+	mu.Unlock()
 }
 
 type killReasonKey struct{}
