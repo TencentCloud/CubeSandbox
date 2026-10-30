@@ -44,6 +44,13 @@ echo "hello from host" | sudo tee /data/shared/ro/greeting.txt
 sudo chown -R 1000:1000 /data/shared/rw
 ```
 
+在 Kubernetes 部署中，应在节点上配置的 `hostPaths.dataShared` 下创建这些目录。
+Chart 将该目录树挂载到 Big Pod 内的 `/data/shared`，因此无论宿主机目录如何配置，
+请求路径和 CubeMaster 的 `allowed_host_mount_prefixes` 都应使用 `/data/shared/...`。
+例如，配置 `hostPaths.dataShared: /mnt/shared` 时，宿主机上的 `/mnt/shared/rw`
+应在请求中写为 `/data/shared/rw`。如果现有部署曾在请求中使用自定义宿主机路径前缀，
+请先阅读[存储路径升级说明](./kubernetes/upgrade.md#修改宿主机存储路径)。
+
 ### 创建带 Host Mount 的沙箱
 
 Host Mount 通过 `Sandbox.create()` 的 `metadata` 字段中的 `host-mount` 键来指定。值为 **JSON 编码的数组**，每个元素是一个挂载描述符，支持同时指定多个挂载：

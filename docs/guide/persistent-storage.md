@@ -43,6 +43,14 @@ echo "hello from host" | sudo tee /data/shared/ro/greeting.txt
 sudo chown -R 1000:1000 /data/shared/rw
 ```
 
+For Kubernetes, create these directories under the configured
+`hostPaths.dataShared` on the node. The chart exposes that tree inside the Big Pod
+at `/data/shared`, so requests and CubeMaster's `allowed_host_mount_prefixes` must
+use `/data/shared/...` regardless of the host directory. For example, host
+`/mnt/shared/rw` with `hostPaths.dataShared: /mnt/shared` is requested as
+`/data/shared/rw`. See [storage upgrade notes](./kubernetes/upgrade.md#changing-host-storage-paths)
+when upgrading a deployment that previously used its custom host prefix in requests.
+
 ### Create a Sandbox with Host Mounts
 
 Specify Host Mount through the `host-mount` key in the `metadata` argument to `Sandbox.create()`. Its value is a **JSON-encoded array** in which each item is a mount descriptor, so one sandbox can request multiple mounts.

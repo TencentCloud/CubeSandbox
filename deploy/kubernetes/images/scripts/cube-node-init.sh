@@ -10,7 +10,6 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
-DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
 REQUIRE_KVM="${REQUIRE_KVM:-true}"
 REQUIRE_XFS="${REQUIRE_XFS:-true}"
 CHMOD_KVM="${CHMOD_KVM:-true}"
@@ -32,7 +31,6 @@ CUBE_NODE_HOST_NETWORK="${CUBE_NODE_HOST_NETWORK:-false}"
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
 CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK="${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}"
 LOOPBACK_ENABLED="${LOOPBACK_ENABLED:-false}"
-LOOPBACK_IMAGE_PATH="${LOOPBACK_IMAGE_PATH:-/data/cubelet-xfs.img}"
 LOOPBACK_SIZE="${LOOPBACK_SIZE:-25G}"
 # When bootstrap Pod restarts and fingerprint already matches, skip
 # (avoids blocking artifact-unrelated paths on Master/preflight). Default true
@@ -77,6 +75,9 @@ host_chroot_sh() {
 host_mount_sh() {
   # Enter the host mount namespace when creating or mounting host filesystems.
   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c "$*"
+}
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 version_ge() {
@@ -248,6 +249,63 @@ cidr_ip() {
   fi
 }
 
+# Recognize only the gateway identity created by Cubelet's packaged config and
+# systemnet.GetOrCreateCubeDev. A name/CIDR match alone is not ownership: a real
+# bridge, a different MAC, or extra addresses must still fail the overlap check.
+# This is deliberately read-only; never delete a live network to rerun node prep.
+# Keep this MAC aligned with Cubelet/config/config.toml and runtime/config.go.
+cube_dev_is_owned() {
+  [ "$CUBE_NODE_HOST_NETWORK" = "true" ] || return 1
+  cube_dev_link="$(cidr_ip -d -o link show dev cube-dev type dummy 2>&1)" || return 1
+  printf '%s\n' "$cube_dev_link" | awk '
+    NF && $2 != "cube-dev:" { invalid = 1 }
+    $2 == "cube-dev:" {
+      for (i = 3; i < NF; i++)
+        if ($i == "link/ether" && tolower($(i + 1)) == "20:90:6f:cf:cf:cf") found++;
+    }
+    END { exit found == 1 && !invalid ? 0 : 1 }
+  ' || return 1
+  printf '%s\n' "$existing_addrs" | awk -v gateway="$cube_dev_gateway_cidr" '
+    $2 == "cube-dev" { count++; if ($3 == "inet" && $4 == gateway) matched++ }
+    END { exit count == 1 && matched == 1 ? 0 : 1 }
+  '
+}
+
+# Exempt only routes actually generated for the verified gateway. In particular
+# do not hide a more-specific route, a route via another gateway, an alternate
+# routing table, or an arbitrary route just because its device is cube-dev.
+cube_dev_owns_route() {
+  printf '%s\n' "$1" | awk -v network="$CUBE_SANDBOX_NETWORK_CIDR" \
+    -v gateway="$cube_dev_gateway" -v first="$cube_dev_first" -v last="$cube_dev_last" '
+    {
+      type = "unicast"; dest = $1; begin = 2;
+      if ($1 == "local" || $1 == "broadcast") {
+        type = $1; dest = $2; begin = 3;
+      }
+      for (i = begin; i <= NF; i++) {
+        key = $i;
+        if (key == "linkdown") continue;
+        if (key !~ /^(dev|proto|scope|src|table)$/ || i == NF || seen[key]++) exit 1;
+        value[key] = $(++i);
+      }
+      if (value["dev"] != "cube-dev") exit 1;
+      if (type == "unicast") {
+        if (dest != network || value["scope"] != "link") exit 1;
+        if (value["table"] != "" && value["table"] != "main" && value["table"] != "254") exit 1;
+        if (value["proto"] == "kernel" && value["src"] == gateway) exit 0;
+        if (value["proto"] == "static" && value["src"] == "") exit 0;
+        exit 1;
+      }
+      if (value["table"] != "local" && value["table"] != "255") exit 1;
+      if (value["proto"] != "kernel" || value["src"] != gateway) exit 1;
+      sub(/\/32$/, "", dest);
+      if (type == "local" && dest == gateway && value["scope"] == "host") exit 0;
+      if (type == "broadcast" && (dest == first || dest == last) && value["scope"] == "link") exit 0;
+      exit 1;
+    }
+  '
+}
+
 check_cidr_conflict() {
   [ "$CHECK_CIDR" = "true" ] || return 0
   [ -n "$CUBE_SANDBOX_NETWORK_CIDR" ] || return 0
@@ -257,14 +315,60 @@ check_cidr_conflict() {
     return 0
   fi
 
+  # Capture each probe separately so a failed ip/nsenter cannot turn into an
+  # empty (apparently conflict-free) inventory through a successful awk pipe.
+  # Some iproute2 versions report an interrupted address dump on stderr but
+  # return success. Such a partial inventory is not proof of no conflict.
+  inventory_error="$(mktemp)"
+  if ! existing_addrs="$(cidr_ip -o -4 addr show 2>"$inventory_error")" || [ -s "$inventory_error" ]; then
+    cat "$inventory_error" >&2
+    rm -f "$inventory_error"
+    fail "unable to list IPv4 addresses for CIDR conflict check"
+  fi
+  if ! existing_routes="$(cidr_ip -o -4 route show table all 2>"$inventory_error")" || [ -s "$inventory_error" ]; then
+    cat "$inventory_error" >&2
+    rm -f "$inventory_error"
+    fail "unable to list IPv4 routes for CIDR conflict check"
+  fi
+  rm -f "$inventory_error"
+  cube_dev_range="$(cidr_range "$CUBE_SANDBOX_NETWORK_CIDR")"
+  # shellcheck disable=SC2086
+  set -- $cube_dev_range
+  cube_dev_first="$(int_to_ip "$1")"
+  cube_dev_last="$(int_to_ip "$2")"
+  cube_dev_gateway="$(int_to_ip "$(($1 + 1))")"
+  cube_dev_gateway_cidr="${cube_dev_gateway}/${CUBE_SANDBOX_NETWORK_CIDR#*/}"
+  cube_dev_owned=0
+  if cube_dev_is_owned; then
+    cube_dev_owned=1
+    log "reusing verified cube-dev gateway: ${cube_dev_gateway_cidr}"
+  fi
+
   conflicts_file="$(mktemp)"
   {
-    cidr_ip -o -4 addr show 2>/dev/null | awk '{print $4 " addr " $2}'
-    cidr_ip -o -4 route show 2>/dev/null | awk '{print $1 " route " $0}'
+    printf '%s\n' "$existing_addrs" | awk '{print $4 " addr " $2}'
+    # Include non-main tables and typed routes: e.g. an overlapping blackhole
+    # route must not disappear because its first token is not an IPv4 prefix.
+    printf '%s\n' "$existing_routes" | awk '
+      NF {
+        dest = $1;
+        if ($1 ~ /^(local|broadcast|unicast|throw|unreachable|blackhole|prohibit|nat|multicast)$/) dest = $2;
+        print dest " route " $0;
+      }
+    '
   } | while read -r candidate kind detail; do
     existing="$(normalize_existing_cidr "$candidate" || true)"
     [ -n "$existing" ] || continue
     if cidr_overlaps "$CUBE_SANDBOX_NETWORK_CIDR" "$existing"; then
+      if [ "$cube_dev_owned" = "1" ]; then
+        if [ "$kind" = "addr" ] && [ "$detail" = "cube-dev" ] \
+          && [ "$existing" = "$cube_dev_gateway_cidr" ]; then
+          continue
+        fi
+        if [ "$kind" = "route" ] && cube_dev_owns_route "$detail"; then
+          continue
+        fi
+      fi
       printf -- '- %s %s %s\n' "$kind" "$existing" "$detail" >> "$conflicts_file"
     fi
   done
@@ -379,20 +483,33 @@ fi
 if [ "$CREATE_HOST_DIRS" = "true" ]; then
   log "creating host directories"
   mkdir -p \
-    "$(host_path /data/cubelet)" \
-    "$(host_path /data/log)" \
-    "$(host_path /data/cube-shim)" \
-    "$(host_path /data/snapshot_pack)" \
-    "$(host_path /data/cube-shared)" \
-    "$(host_path /data/cube-shared/volume)" \
-    "$(host_path /data/shared)" \
-    "$(host_path /tmp/cube)"
+    "$(host_path "$DATA_CUBELET")" \
+    "$(host_path "$DATA_LOG")" \
+    "$(host_path "$DATA_CUBE_SHIM")" \
+    "$(host_path "$DATA_SNAPSHOT_PACK")" \
+    "$(host_path "$DATA_CUBE_SHARED")" \
+    "$(host_path "$DATA_CUBE_SHARED/volume")" \
+    "$(host_path "$DATA_SHARED")" \
+    "$(host_path "$TMP_CUBE")"
 fi
 
 if ! xfs_info "$DATA_CUBELET" >/dev/null 2>&1; then
   if [ "$LOOPBACK_ENABLED" = "true" ]; then
     log "initializing loopback XFS at ${LOOPBACK_IMAGE_PATH} size=${LOOPBACK_SIZE}"
-    host_mount_sh "mkdir -p ${DATA_CUBELET}; if [ ! -f ${LOOPBACK_IMAGE_PATH} ]; then truncate -s ${LOOPBACK_SIZE} ${LOOPBACK_IMAGE_PATH}; mkfs.xfs -f -m reflink=1 ${LOOPBACK_IMAGE_PATH}; fi; mountpoint -q ${DATA_CUBELET} || mount -o loop,pquota ${LOOPBACK_IMAGE_PATH} ${DATA_CUBELET}; grep -q '${LOOPBACK_IMAGE_PATH} ${DATA_CUBELET}' /etc/fstab || echo '${LOOPBACK_IMAGE_PATH} ${DATA_CUBELET} xfs loop,pquota 0 0' >> /etc/fstab"
+    # The image may live outside DATA_CUBELET, including under a missing /data
+    # when all storage paths are customized. Stop before writing fstab if any
+    # preparation step fails, and quote paths passed through the host shell.
+    image="$(shell_quote "$LOOPBACK_IMAGE_PATH")"
+    target="$(shell_quote "$DATA_CUBELET")"
+    entry="$(shell_quote "$LOOPBACK_IMAGE_PATH $DATA_CUBELET xfs loop,pquota 0 0")"
+    host_mount_sh "set -e
+      mkdir -p $(shell_quote "$(dirname "$LOOPBACK_IMAGE_PATH")") ${target}
+      if [ ! -f ${image} ]; then
+        truncate -s $(shell_quote "$LOOPBACK_SIZE") ${image}
+        mkfs.xfs -f -m reflink=1 ${image}
+      fi
+      mountpoint -q ${target} || mount -o loop,pquota ${image} ${target}
+      grep -Fq -- $(shell_quote "$LOOPBACK_IMAGE_PATH $DATA_CUBELET") /etc/fstab || printf '%s\\n' ${entry} >> /etc/fstab"
   fi
 fi
 
