@@ -9,6 +9,7 @@ type ClusterOverviewDto = components['schemas']['ClusterOverview'];
 type ListedSandboxDto = components['schemas']['ListedSandbox'];
 type SandboxDetailDto = components['schemas']['SandboxDetail'];
 type SandboxLogsDto = components['schemas']['SandboxLogsV2Response'];
+type SandboxLifecycleEventDto = components['schemas']['SandboxLifecycleEvent'];
 type SandboxSessionDto = components['schemas']['Sandbox'];
 type TemplateDetailDto = components['schemas']['TemplateDetail'];
 type TemplateSummaryDto = components['schemas']['TemplateSummary'];
@@ -238,6 +239,7 @@ export function resetMockState() {
   sandboxes = buildSandboxes();
   templates = buildTemplates();
   nodes = buildNodes();
+  sandboxEvents.clear();
   resetWarehouseState();
 }
 
@@ -283,16 +285,44 @@ export function getSandboxSession(sandboxID: string): SandboxSessionDto | undefi
   };
 }
 
+// Lifecycle history recorded by the mock actions; it outlives the sandbox.
+const sandboxEvents = new Map<string, SandboxLifecycleEventDto[]>();
+let nextSandboxEventID = 1;
+
+function recordSandboxEvent(
+  sandboxID: string,
+  event: string,
+  extra: Partial<SandboxLifecycleEventDto> = {},
+) {
+  const history = sandboxEvents.get(sandboxID) ?? [];
+  history.push({ id: nextSandboxEventID++, event, timestamp: new Date().toISOString(), ...extra });
+  sandboxEvents.set(sandboxID, history);
+}
+
+export function getSandboxEvents(sandboxID: string) {
+  const recorded = sandboxEvents.get(sandboxID) ?? [];
+  const sandbox = sandboxes.find((item) => item.sandboxID === sandboxID);
+  // Seeded sandboxes have no recorded creation; synthesize it from their start time.
+  const created: SandboxLifecycleEventDto[] =
+    sandbox && !recorded.some((e) => e.event === 'created')
+      ? [{ id: 0, event: 'created', timestamp: sandbox.startedAt, templateID: sandbox.templateID }]
+      : [];
+  return { events: [...created, ...recorded], hasMore: false };
+}
+
 export function deleteSandbox(sandboxID: string) {
   const before = sandboxes.length;
   sandboxes = sandboxes.filter((sandbox) => sandbox.sandboxID !== sandboxID);
-  return sandboxes.length !== before;
+  const deleted = sandboxes.length !== before;
+  if (deleted) recordSandboxEvent(sandboxID, 'killed', { reason: 'request' });
+  return deleted;
 }
 
 export function pauseSandbox(sandboxID: string) {
   const sandbox = sandboxes.find((item) => item.sandboxID === sandboxID);
   if (!sandbox) return undefined;
   sandbox.state = 'paused';
+  recordSandboxEvent(sandboxID, 'paused');
   return clone(sandbox);
 }
 
@@ -300,6 +330,7 @@ export function resumeSandbox(sandboxID: string) {
   const sandbox = sandboxes.find((item) => item.sandboxID === sandboxID);
   if (!sandbox) return undefined;
   sandbox.state = 'running';
+  recordSandboxEvent(sandboxID, 'resumed');
   sandbox.endAt = later(1800);
   return getSandboxSession(sandboxID);
 }
@@ -610,6 +641,7 @@ export function createSandbox(body: {
     envdVersion: '0.1.7',
   };
   sandboxes.push(newSandbox);
+  recordSandboxEvent(sandboxID, 'created', { templateID: body.templateID });
   return {
     templateID: newSandbox.templateID,
     sandboxID: newSandbox.sandboxID,

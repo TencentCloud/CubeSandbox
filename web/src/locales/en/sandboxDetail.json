@@ -52,5 +52,23 @@
     "resumeCapacity": "Insufficient node capacity to resume this sandbox. Free capacity and retry.",
     "resumeCapacityDetail": "Insufficient memory to resume (need {{need}}, used {{used}}, quota {{quota}})",
     "resumeCapacityDetailCpu": "Insufficient CPU to resume (need {{need}}, used {{used}}, quota {{quota}})"
+  },
+  "lifecycle": {
+    "title": "Lifecycle history",
+    "description": "Create, pause, resume and kill events. Kept after the sandbox ends.",
+    "loading": "Loading…",
+    "empty": "No lifecycle events recorded.",
+    "error": "Failed to load the lifecycle history. Try again later.",
+    "template": "from template {{id}}",
+    "events": {
+      "created": "Created",
+      "paused": "Paused",
+      "resumed": "Resumed",
+      "killed": "Killed"
+    },
+    "reasons": {
+      "request": "killed on request",
+      "timeout": "timed out"
+    }
   }
 }

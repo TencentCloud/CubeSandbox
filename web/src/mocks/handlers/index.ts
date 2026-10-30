@@ -9,6 +9,7 @@ import {
   getNode,
   getVersionMatrix,
   getSandboxDetail,
+  getSandboxEvents,
   getSandboxLogs,
   getTemplate,
   getTemplateCompat,
@@ -127,6 +128,11 @@ export const handlers = [
     return sandbox
       ? HttpResponse.json(sandbox, { status: 201 })
       : notFound(`sandbox ${params.sandboxID} not found`);
+  }),
+
+  http.get('/cubeapi/v1/sandboxes/:sandboxID/events', async ({ params }) => {
+    await mockDelay();
+    return HttpResponse.json(getSandboxEvents(String(params.sandboxID)));
   }),
 
   http.get('/cubeapi/v1/v2/sandboxes/:sandboxID/logs', async ({ params }) => {
