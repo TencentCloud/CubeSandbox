@@ -25,6 +25,7 @@ ENVD_ENVS_URL = f"http://127.0.0.1:{os.getenv('ENVD_PORT', '49983')}/envs"
 ENVD_TIMEOUT = float(os.getenv("ENVD_TIMEOUT", "2"))
 WORKDIR = Path(os.getenv("CODE_INTERPRETER_WORKDIR", "/workspace")).resolve()
 DEFAULT_LANGUAGE = "python"
+CONTEXT_CREATE_TIMEOUT = float(os.getenv("CODE_INTERPRETER_CONTEXT_CREATE_TIMEOUT", "60"))
 PING_TIMEOUT = 30
 
 logging.basicConfig(level=os.getenv("CODE_INTERPRETER_LOG_LEVEL", "INFO"))
@@ -156,13 +157,14 @@ class KernelContext:
         ws_logger.setLevel(logging.ERROR)
         self.ws = await connect(
             self.ws_url,
+            open_timeout=CONTEXT_CREATE_TIMEOUT,
             ping_timeout=PING_TIMEOUT,
             max_size=None,
             max_queue=None,
             logger=ws_logger,
         )
         self.receive_task = asyncio.create_task(self._receive_messages())
-        await self._run_background(f"%cd {self.cwd}")
+        await asyncio.wait_for(self._run_background(f"%cd {self.cwd}"), timeout=CONTEXT_CREATE_TIMEOUT)
 
     async def _run_background(self, code: str) -> None:
         if self.ws is None:
@@ -439,6 +441,21 @@ async def _wait_for_jupyter() -> None:
     raise RuntimeError("Jupyter Server did not become ready")
 
 
+async def _wait_for_envd(http_client: httpx.AsyncClient) -> None:
+    async def ready():
+        while True:
+            try:
+                await _fetch_sandbox_envs(http_client)
+                return
+            except HTTPException:
+                await asyncio.sleep(0.1)
+
+    try:
+        await asyncio.wait_for(ready(), timeout=CONTEXT_CREATE_TIMEOUT)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("envd did not become ready") from exc
+
+
 contexts: dict[str, KernelContext] = {}
 default_context_id: str | None = None
 client: httpx.AsyncClient | None = None
@@ -451,6 +468,7 @@ async def create_context(language: str | None = None, cwd: str | None = None) ->
 
     response = await client.post(
         f"{JUPYTER_BASE_URL}/api/sessions",
+        timeout=CONTEXT_CREATE_TIMEOUT,
         json={
             "path": str(uuid.uuid4()),
             "kernel": {"name": "python3"},
@@ -464,7 +482,20 @@ async def create_context(language: str | None = None, cwd: str | None = None) ->
     session = response.json()
     context_id = session["kernel"]["id"]
     kernel = KernelContext(context_id, session["id"], resolved_cwd)
-    await kernel.connect()
+    try:
+        await kernel.connect()
+    except BaseException:
+        # The session ID is known here, so cleanup is safe without replaying
+        # creation. Keep the original handshake/initialization exception.
+        try:
+            await kernel.close()
+        except BaseException as cleanup_error:
+            logger.warning("failed context connection cleanup: %s", cleanup_error)
+        try:
+            await client.delete(f"{JUPYTER_BASE_URL}/api/sessions/{session['id']}")
+        except BaseException as cleanup_error:
+            logger.warning("failed context session cleanup: %s", cleanup_error)
+        raise
     contexts[context_id] = kernel
     return Context(id=context_id, language=DEFAULT_LANGUAGE, cwd=resolved_cwd)
 
@@ -474,14 +505,18 @@ async def lifespan(app: FastAPI):
     global client, default_context_id
     await _wait_for_jupyter()
     client = httpx.AsyncClient()
-    default = await create_context(DEFAULT_LANGUAGE, str(WORKDIR))
-    default_context_id = default.id
     try:
+        await _wait_for_envd(client)
+        # Kernel startup competes with other guests during a cold-start burst.
+        # Do not replay POST /sessions on timeout: its result can be unknown.
+        default = await create_context(DEFAULT_LANGUAGE, str(WORKDIR))
+        default_context_id = default.id
         yield
     finally:
         for context in list(contexts.values()):
             await context.close()
         contexts.clear()
+        default_context_id = None
         if client is not None:
             await client.aclose()
 
