@@ -170,7 +170,7 @@ cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec --json --include-request
 cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 ```
 
-如果你更关心“应该看什么、如何一步步预览最终请求”，可继续阅读[模板检查与请求预览](../template-inspection-and-preview.md)。
+关于镜像 `ENV`、模板 `--env` 以及 Sandbox 运行时环境变量的作用域和覆盖规则，见[环境变量](../environment-variables.md)。
 
 ## 第五步 — （可选）把历史本地 artifact 迁入 TC 存储
 
