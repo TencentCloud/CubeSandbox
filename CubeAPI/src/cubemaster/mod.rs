@@ -12,6 +12,7 @@
 /// Implemented on CubeMaster (see pkg/service/sandbox/types):
 ///   - GET    /cube/sandbox/info       get single sandbox detail (query: sandbox_id, instance_type)
 ///   - POST   /cube/sandbox/update     update sandbox (action: "pause" | "resume")
+///   - GET    /cube/sandbox/events     lifecycle history (query: sandbox_id, cursor, limit)
 /// Implemented on CubeMaster (snapshot APIs):
 ///   - POST   /cube/snapshot                          create runtime snapshot (synchronous terminal result)
 ///   - GET    /cube/snapshot                          list snapshots (paginated)
@@ -203,6 +204,32 @@ impl CubeMasterClient {
             .inner
             .post(&url)
             .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/sandbox/events — sandbox lifecycle history, oldest first.
+    /// Served for deleted sandboxes too; an unknown ID returns no events.
+    pub async fn get_sandbox_events(
+        &self,
+        sandbox_id: &str,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Result<SandboxEventsResponse, CubeMasterError> {
+        let url = format!("{}/cube/sandbox/events", self.base_url);
+        let mut query = vec![
+            ("sandbox_id", sandbox_id.to_string()),
+            ("limit", limit.to_string()),
+        ];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor.to_string()));
+        }
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&query)
             .send()
             .await
             .map_err(CubeMasterError::Http)?;
@@ -1712,6 +1739,31 @@ pub struct SandboxLogLine {
     pub message: String,
     #[serde(default)]
     pub level: String,
+}
+
+// ─── Sandbox lifecycle events ──────────────────────────────────────────────
+// ✅ Implemented: GET /cube/sandbox/events
+
+#[derive(Debug, Deserialize)]
+pub struct SandboxEventsResponse {
+    pub ret: RetCode,
+    #[serde(default)]
+    pub events: Vec<SandboxEventLine>,
+    #[serde(default, rename = "nextCursor")]
+    pub next_cursor: Option<u64>,
+    #[serde(default, rename = "hasMore")]
+    pub has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SandboxEventLine {
+    pub id: u64,
+    pub event: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(default, rename = "templateID")]
+    pub template_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 // ─── Snapshot APIs ─────────────────────────────────────────────────────

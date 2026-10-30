@@ -21,9 +21,9 @@ use crate::{
     models::{
         EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse, ForkResult,
         LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff, RestartStatus,
-        Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
-        SandboxOnTimeout, SandboxState, SandboxVolumeMount,
+        Sandbox, SandboxAutoResume, SandboxDetail, SandboxEvents, SandboxLifecycleConfig,
+        SandboxLifecycleEvent, SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response,
+        SandboxNetworkConfig, SandboxOnTimeout, SandboxState, SandboxVolumeMount,
     },
 };
 
@@ -758,6 +758,48 @@ impl SandboxService {
             Err(e) if e.is_not_found() => {
                 Err(AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
             }
+            Err(e) => Err(params_error_or_internal(e)),
+        }
+    }
+
+    /// Lifecycle history of a sandbox, oldest first. It is kept after the
+    /// sandbox is deleted, so an unknown ID is an empty history, not a 404.
+    pub async fn get_events(
+        &self,
+        sandbox_id: &str,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> AppResult<SandboxEvents> {
+        let limit = limit.clamp(1, 500);
+        match self
+            .cubemaster
+            .get_sandbox_events(sandbox_id, cursor, limit)
+            .await
+        {
+            Ok(resp) => {
+                resp.ret.into_result().map_err(params_error_or_internal)?;
+                Ok(SandboxEvents {
+                    events: resp
+                        .events
+                        .into_iter()
+                        .map(|e| SandboxLifecycleEvent {
+                            id: e.id,
+                            event: e.event,
+                            timestamp: e.timestamp,
+                            template_id: e.template_id.filter(|v| !v.is_empty()),
+                            reason: e.reason.filter(|v| !v.is_empty()),
+                        })
+                        .collect(),
+                    next_cursor: resp.next_cursor.filter(|_| resp.has_more),
+                    has_more: resp.has_more,
+                })
+            }
+            // An older CubeMaster has no history to serve.
+            Err(e) if e.is_endpoint_missing() => Ok(SandboxEvents {
+                events: vec![],
+                next_cursor: None,
+                has_more: false,
+            }),
             Err(e) => Err(params_error_or_internal(e)),
         }
     }
@@ -2547,6 +2589,86 @@ mod tests {
             .get_logs("sbx-1", None, i32::MAX)
             .await
             .expect_err("rejected logs request should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn get_events_maps_cubemaster_history_and_forwards_paging() {
+        let seen = Arc::new(Mutex::new(None::<HashMap<String, String>>));
+        let recorder = Arc::clone(&seen);
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/events",
+            get(
+                move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+                    let recorder = Arc::clone(&recorder);
+                    async move {
+                        *recorder.lock().await = Some(q);
+                        Json(serde_json::json!({
+                            "ret": { "ret_code": 0, "ret_msg": "" },
+                            "events": [
+                                { "id": 7, "event": "created", "timestamp": "2026-10-29T08:00:00Z",
+                                  "templateID": "tpl-1" },
+                                { "id": 9, "event": "killed", "timestamp": "2026-10-29T08:05:00.5Z",
+                                  "reason": "timeout" }
+                            ],
+                            "nextCursor": 9,
+                            "hasMore": true
+                        }))
+                    }
+                },
+            ),
+        ))
+        .await;
+
+        let events = service
+            .get_events("sbx-gone", Some(3), 1000)
+            .await
+            .expect("history should load");
+        assert_eq!(events.events.len(), 2);
+        assert_eq!(events.events[0].event, "created");
+        assert_eq!(events.events[0].template_id.as_deref(), Some("tpl-1"));
+        assert_eq!(events.events[1].reason.as_deref(), Some("timeout"));
+        assert_eq!(events.events[1].template_id, None);
+        assert_eq!(events.next_cursor, Some(9));
+        assert!(events.has_more);
+
+        let query = seen.lock().await.clone().expect("cubemaster called");
+        assert_eq!(
+            query.get("sandbox_id").map(String::as_str),
+            Some("sbx-gone")
+        );
+        assert_eq!(query.get("cursor").map(String::as_str), Some("3"));
+        assert_eq!(
+            query.get("limit").map(String::as_str),
+            Some("500"),
+            "limit is capped"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_events_is_empty_when_cubemaster_lacks_the_endpoint() {
+        let service = spawn_fake_cubemaster(Router::new()).await;
+        let events = service
+            .get_events("sbx-1", None, 100)
+            .await
+            .expect("older CubeMaster should yield empty history");
+        assert!(events.events.is_empty());
+        assert!(!events.has_more);
+        assert_eq!(events.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn get_events_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "sandboxID is required";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/events",
+            get(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+        let err = service
+            .get_events("sbx-1", None, 100)
+            .await
+            .expect_err("rejected events request should not succeed");
         assert_bad_request(err, reason);
     }
 

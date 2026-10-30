@@ -1059,6 +1059,48 @@ fn default_log_limit() -> i32 {
     1000
 }
 
+/// One sandbox lifecycle event.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SandboxLifecycleEvent {
+    /// Event ID, usable as the `cursor` of the next page.
+    pub id: u64,
+    /// `created`, `paused`, `resumed` or `killed`.
+    pub event: String,
+    pub timestamp: DateTime<Utc>,
+    /// Template the sandbox was created from (on `created` events).
+    #[serde(rename = "templateID", skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<String>,
+    /// Why the sandbox was killed, e.g. `request` or `timeout` (on `killed` events).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Lifecycle history of a sandbox, oldest first. Also served after the
+/// sandbox is deleted; an unknown ID yields no events.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SandboxEvents {
+    pub events: Vec<SandboxLifecycleEvent>,
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    #[serde(rename = "hasMore")]
+    pub has_more: bool,
+}
+
+/// Query params for sandbox lifecycle events.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct SandboxEventsQuery {
+    /// ID of the last event already read.
+    pub cursor: Option<u64>,
+    /// Page size, 1 to 500.
+    #[serde(default = "default_event_limit")]
+    pub limit: u32,
+}
+
+fn default_event_limit() -> u32 {
+    100
+}
+
 // ─── Sandbox — network policy ─────────────────────────────────────────────
 
 /// Request body for PUT /sandboxes/{id}/network.
