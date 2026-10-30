@@ -29,6 +29,7 @@ use super::config::{Fs, ANNO_VMM_FS, VIRTIO_FS_ID, VIRTIO_FS_TAG};
 use super::device;
 use super::disk::Disk;
 use super::pmem::Pmem;
+use crate::common::shutdown::ShutdownDeadline;
 use crate::common::types::PropagationMount;
 use crate::common::utils::{self, AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -782,6 +783,14 @@ impl SandBox {
     }
 
     pub async fn destroy_sandbox(&mut self) -> CResult<()> {
+        self.destroy_sandbox_with_timeout(Duration::from_secs(30)).await
+    }
+
+    pub async fn destroy_sandbox_after_failed_create(&mut self) -> CResult<()> {
+        self.destroy_sandbox_with_timeout(Duration::from_secs(3)).await
+    }
+
+    async fn destroy_sandbox_with_timeout(&mut self, timeout: Duration) -> CResult<()> {
         infof!(self.log, "destroy sandbox start");
         let req = agent::DestroySandboxRequest {
             ..Default::default()
@@ -791,62 +800,49 @@ impl SandBox {
             infof!(self.log, "ch instance is None");
             return Ok(());
         }
+        // Failed-Create cleanup has a short budget. Ordinary shutdown gets a
+        // longer grace period for guest unmounts and persistent-volume writes.
+        let started = Instant::now();
+        let deadline = ShutdownDeadline::arm(timeout);
         let mut ch = self.ch.as_mut().unwrap().lock().await;
-        //In the context of this 'ch' lock, check whether the VmShutdown event has been received
-        {
-            let state = self.state.lock().await;
-            if *state == SandBoxState::Exited {
-                infof!(self.log, "vm has exited");
-                return Ok(());
-            }
-        }
-        if self.client.is_none() {
-            infof!(self.log, "client is None");
-            return Ok(());
-        }
-        let client = self.client.as_ref().unwrap().lock().await;
-
-        if let Err(e) = client
-            .destroy_sandbox(context::with_timeout(1000 * 1000 * 200), &req)
-            .await
-        {
-            //perhaps the VM has already shutdown.(eg:panic/cube-agent exited/...)
-            warnf!(self.log, "destroy sandbox failed:{}, but nothing to do", e)
-        }
-
-        infof!(self.log, "wait vm shutdown");
-
-        //wait for the vm shutdown gracefully
-        loop {
-            match ch.wait_notify(Duration::from_millis(1000)).await {
-                Ok(ev) => {
-                    if CH::NotifyEvent::VmShutdown != ev {
-                        warnf!(
-                            self.log,
-                            "Not an expected event, expected:{:?}, actual:{:?}",
-                            CH::NotifyEvent::VmShutdown,
-                            ev
-                        );
-                        continue;
+        if *self.state.lock().await != SandBoxState::Exited {
+            if let Some(client) = self.client.as_ref() {
+                let graceful = async {
+                    client
+                        .lock()
+                        .await
+                        .destroy_sandbox(context::with_timeout(200_000_000), &req)
+                        .await
+                };
+                match tokio::time::timeout(Duration::from_millis(200), graceful).await {
+                    Ok(Ok(_)) => {
+                        let remaining = timeout
+                            .saturating_sub(started.elapsed())
+                            .saturating_sub(Duration::from_secs(1));
+                        let graceful_exit = async {
+                            while *self.state.lock().await != SandBoxState::Exited {
+                                match ch.wait_notify(Duration::from_secs(1)).await {
+                                    Ok(CH::NotifyEvent::VmShutdown) => break,
+                                    Ok(_) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                        };
+                        let _ = tokio::time::timeout(remaining, graceful_exit).await;
                     }
-                    break;
-                }
-
-                //we are in the process of destruction, so the results here are not important.
-                Err(e) => {
-                    warnf!(
-                        self.log,
-                        "wait vm shutdown event failed:{}, but nothing to do",
-                        e
-                    );
-                    break;
+                    Ok(Err(e)) => warnf!(self.log, "guest destroy failed; shutting down VMM:{}", e),
+                    Err(_) => warnf!(self.log, "guest destroy timed out; shutting down VMM"),
                 }
             }
         }
-        infof!(self.log, "wait ch exit");
-        if let Err(e) = ch.join().await {
-            warnf!(self.log, "join ch failed:{}, but nothing to do", e);
-        }
+        // Even Exited / missing-agent sandboxes can retain a live VMM. Do not
+        // skip physical teardown based on guest state or a missing RPC client.
+        let result = ch.shutdown_and_join().await;
+        // A completed join can report a VMM error after releasing its handles.
+        // Return that error through the caller instead of triggering hard exit.
+        deadline.complete();
+        result?;
+        *self.state.lock().await = SandBoxState::Exited;
         infof!(self.log, "destroy sandbox finish");
         Ok(())
     }

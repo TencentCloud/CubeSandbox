@@ -353,7 +353,8 @@ impl Task for TaskService {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
         }
-        if !sb.inited() {
+        let created_vm = !sb.inited();
+        if created_vm {
             stat.set_callee_act(stat_defer::CALLEE_ACT_CREATE_POD_SANDBOX.to_string());
             infof!(self.log, "shim pid {}", std::process::id());
             if let Err(e) = Utils::record_pid() {
@@ -365,10 +366,16 @@ impl Task for TaskService {
                 Error::Other(format!("Init sandbox config failed:{}", e))
             })?;
 
-            sb.create_sandbox().await.map_err(|e| {
-                errf!(self.log, "Create sandbox failed:{}", e.clone());
-                Error::Other(format!("Create sandbox failed:{}", e))
-            })?;
+            if let Err(e) = sb.create_sandbox().await {
+                errf!(self.log, "Create sandbox failed:{}", e);
+                // Task.Create has not installed a container yet. Dispose of
+                // any partly restored VM BEFORE returning the error; afterward
+                // containerd may remove this shim's registration and bundle.
+                if let Err(cleanup) = sb.destroy_sandbox_after_failed_create().await {
+                    errf!(self.log, "failed Create VM cleanup:{}", cleanup);
+                }
+                return Err(Error::Other(format!("Create sandbox failed:{}", e)).into());
+            }
         }
 
         infof!(
@@ -385,12 +392,17 @@ impl Task for TaskService {
             terminal: req.terminal,
             ..Default::default()
         };
-        sb.create_container(req.id.clone(), spec, info)
-            .await
-            .map_err(|e| {
-                errf!(self.log, "Create container failed:{}", e.clone());
-                Error::Other(format!("Create container failed:{}", e))
-            })?;
+        if let Err(e) = sb.create_container(req.id.clone(), spec, info).await {
+            errf!(self.log, "Create container failed:{}", e);
+            // Only this request's newly created VM is disposable. A failed
+            // secondary container must not terminate an existing shared VM.
+            if created_vm {
+                if let Err(cleanup) = sb.destroy_sandbox_after_failed_create().await {
+                    errf!(self.log, "failed first-container VM cleanup:{}", cleanup);
+                }
+            }
+            return Err(Error::Other(format!("Create container failed:{}", e)).into());
+        }
         infof!(
             self.log,
             "start container finish at:{}",

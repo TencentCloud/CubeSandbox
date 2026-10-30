@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+pub mod shutdown;
 pub mod types;
 pub mod utils;
 pub type CResult<T> = Result<T, String>;
