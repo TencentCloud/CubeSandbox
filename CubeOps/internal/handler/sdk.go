@@ -513,6 +513,9 @@ func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
 		var httpErr *cubemaster.HTTPError
 		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound &&
 			strings.TrimSpace(httpErr.Body) == "404 page not found" {
+			// A CubeOps base URL with a wrong path prefix gives the same answer,
+			// so make the fallback visible in the logs.
+			logging.G(c.Request.Context()).Warnf("sdk: cubemaster has no /cube/sandbox/events route; returning empty history")
 			httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage(`{"events":[],"hasMore":false}`))
 			return
 		}
