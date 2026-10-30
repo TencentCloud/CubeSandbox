@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.7
+# Build from the repository root (repeat with --platform linux/arm64):
+# docker build --platform linux/amd64 -f docker/Dockerfile.cube-base-rust \
+#   --build-arg CUBE_ENVD_COMMIT="$(git rev-parse HEAD)" -t cubesandbox-base:rust-local .
+
+ARG UBUNTU_VERSION=22.04
+
+# Build scripts and protoc run on the builder architecture. Rust's musl targets
+# and bundled linker produce a static binary for the selected runtime platform.
+FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS envd-builder
+ARG TARGETARCH
+ARG CUBE_ENVD_COMMIT
+WORKDIR /src
+COPY rust-toolchain.toml ./
+RUN case "$TARGETARCH" in \
+        amd64) target=x86_64-unknown-linux-musl ;; \
+        arm64) target=aarch64-unknown-linux-musl ;; \
+        *) echo "Unsupported cube-envd architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && rustup target add "$target"
+RUN --mount=type=bind,source=cube-envd,target=/src/cube-envd \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/target,id=cube-envd-target,sharing=locked \
+    case "$TARGETARCH" in \
+        amd64) target=x86_64-unknown-linux-musl ;; \
+        arm64) target=aarch64-unknown-linux-musl ;; \
+    esac \
+    && CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+       CARGO_TARGET_DIR=/target \
+       cargo build --manifest-path cube-envd/Cargo.toml --locked --release --target "$target" \
+    && install -D -m 0755 "/target/$target/release/cube-envd" /out/envd
+
+# Export the same static executable for existing ENVD_LOCAL_PATH package inputs.
+FROM scratch AS binary
+COPY --from=envd-builder /out/envd /envd
+
+FROM ubuntu:${UBUNTU_VERSION}
+ARG CUBE_ENVD_COMMIT
+ARG DEBIAN_FRONTEND=noninteractive
+ENV ENVD_PORT=49983 LANG=C.UTF-8 LC_ALL=C.UTF-8
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl socat sudo tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Preserve the default SDK user and the existing template account convention.
+RUN useradd --create-home --uid 1000 --shell /bin/bash user \
+    && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
+    && chmod 0440 /etc/sudoers.d/user
+COPY --from=envd-builder --chmod=0755 /out/envd /usr/bin/envd
+COPY --chmod=0755 docker/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+RUN mkdir -p /var/log
+
+LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandbox" \
+      org.opencontainers.image.title="cubesandbox-base" \
+      org.opencontainers.image.description="CubeSandbox base image with repository-built Rust cube-envd" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.revision="${CUBE_ENVD_COMMIT}" \
+      io.cubesandbox.envd.provider="cube"
+EXPOSE 49983
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD test "$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:${ENVD_PORT}/health)" = 204
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-entrypoint.sh"]
+CMD []

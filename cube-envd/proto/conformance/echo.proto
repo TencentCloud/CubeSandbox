@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package conformance.echo;
+
+// Internal service used only by Connect feasibility tests.
+service Echo {
+  rpc Unary(EchoRequest) returns (EchoResponse);
+  rpc ServerStream(EchoRequest) returns (stream EchoStreamItem);
+  rpc ClientStream(stream EchoClientItem) returns (EchoResponse);
+}
+
+message EchoRequest {
+  string message = 1;
+  optional int64 big_number = 2;
+  EchoEnum kind = 3;
+  bytes payload = 4;
+  oneof selector {
+    string name = 5;
+    uint32 id = 6;
+  }
+}
+
+enum EchoEnum {
+  ECHO_ENUM_UNSPECIFIED = 0;
+  ECHO_ENUM_ALPHA = 1;
+  ECHO_ENUM_BETA = 2;
+}
+
+message EchoResponse {
+  string message = 1;
+  EchoEnum kind = 2;
+  optional int64 big_number = 3;
+  bytes payload = 4;
+  string selected_name = 5;
+}
+
+message EchoStreamItem {
+  oneof event {
+    StreamStart start = 1;
+    StreamData data = 2;
+    StreamEnd end = 3;
+  }
+
+  message StreamStart {}
+  message StreamData {
+    bytes payload = 1;
+  }
+  message StreamEnd {
+    bool ok = 1;
+  }
+}
+
+message EchoClientItem {
+  bytes chunk = 1;
+  repeated string elements = 2;
+}
