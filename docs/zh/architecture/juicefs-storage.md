@@ -4,65 +4,40 @@ aside: false
 
 # Cube + JuiceFS 跨机存储架构
 
-本文将 `jfs-data.html` 中的 JuiceFS 方案架构和主要流程整理为文档内可直接渲染的图。部署步骤见 [JuiceFS 服务配置](../guide/cross-node-snapshot/juicefs.md)，调度门禁见[跨机恢复条件](../guide/cross-node-snapshot/requirements.md)。
+本文介绍 CubeSandbox 的基于 JuiceFS 的跨机存储方案架构和主要流程。
+
+> 相关部署步骤见 [JuiceFS 服务配置](../guide/cross-node-snapshot/juicefs.md)
+>
+> 性能测试数据见 [JuiceFS 性能测试](/zh/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark)
 
 ## 设计目标
 
-默认 `xfs` 后端依靠本机 reflink 实现快速克隆，但模板、暂停包和快照只能在源节点使用。JuiceFS 方案希望保留同样的文件操作模型，并增加以下能力：
+目前 Cube 的核心存储方案基于 xfs 文件系统实现，xfs 采用元数据和数据分离的设计，这使得克隆操作只需要复制 inode 和数据块引用，不需要实际复制数据块，从而实现快速克隆。
 
-- 模板、沙箱 rootfs、内存镜像和快照位于一个共享 POSIX 文件系统；
-- 克隆继续使用 `copy_file_range`，只复制 JuiceFS slice 引用；
-- 持久 block 存入对象存储，元数据和引用计数存入 Redis；
-- 每个节点使用本地读缓存和 writeback staging；
-- 数据上传完成后，暂停包或快照才进入 `remote_status=ready`，允许跨机调度。
+JuiceFS 方案希望保留同样的文件操作模型，即整体流程上和 xfs 方案一致，同时增加跨机的能力。这得益于 JuiceFS 本身提供的能力：
+
+- **POSIX 兼容的分布式文件系统**，这意味着 JuiceFS 提供 POSIX 文件操作的接口。
+- **分布式设计**：支持在多个节点上挂载相同的卷，强一致性保证各节点看到的文件视图相同。
+- **元数据和数据分离**：支持类似 xfs 的快速 reflink 克隆。
+
+> 关于 JuiceFS 的详细介绍，可以参考 [JuiceFS 官方文档](https://juicefs.com/docs/zh/community/introduction/)。
 
 ## 架构图
 
 <JuiceFSArchitecture mode="architecture" />
 
-Cubelet、VMM 和 JuiceFS 客户端运行在每个计算节点。所有节点挂载同一个 JuiceFS 卷，通过 Redis 共享目录、inode、slice 和引用计数，通过 MinIO、S3 或 COS 持久化实际 block。每个节点的 `raw` 读缓存和 `rawstaging` 写缓存位于本机，不随沙箱迁移。
+Cube 的 JuiceFS 方案架构图如上所示，其中元数据引擎 Redis 和对象存储 MinIO 位于控制节点（也可以调整配置指向其他机器），JuiceFS 客户端运行在所有节点，并在所有节点挂载同一个 JuiceFS 卷。所有节点在 JuiceFS 卷上看到的文件视图相同，即节点 A 在 `/data/cubelet/jfs` 下创建的文件，节点 B 在 `/data/cubelet/jfs` 下也能看到。
 
-CubeMaster 负责模板任务、调度和远端就绪状态，TemplateCenter 负责拉取 OCI 镜像并生成 ext4 artifact。它们只参与控制流程，不转发 rootfs 或内存数据。
+每个节点单独设置的 `raw` 读缓存和 `rawstaging` 写缓存以优化性能，读写缓存的目录的后端可以是任何文件系统，只有 `/data/cubelet/jfs` 目录的后端是 JuiceFS 卷(JuiceFS 文件系统)。
 
 ## 方案流程
 
 <JuiceFSArchitecture mode="flows" />
 
-流程图分别展示模板制作、沙箱启动和暂停恢复。选择步骤可查看当前参与的组件、文件和数据流；沙箱启动与暂停恢复还可以切换本机和跨机场景。
+> 上面的流程图分别展示了模板制作、沙箱启动和暂停恢复的流程。选择步骤可查看当前参与的组件、文件和数据流；
+>
+> 沙箱启动与暂停恢复还可以切换本机和跨机场景。
 
-模板和派生文件可以引用相同的对象 block。`copy_file_range` 主要复制 slice 引用，只有修改区域生成新 slice 和 block。暂停包始终包含完整的 rootfs、memory 和 metadata 文件，不创建 Cube 管理的 `.delta` 文件。
+得益于 JuiceFS 元数据和数据分离的设计，JuiceFS 可以使用 `copy_file_range` 快速克隆 rootfs 和 memory 文件。
 
-跨机恢复前，CubeMaster 等待暂停包相关 staging block 上传完成并进入 `remote_status=ready`。目标节点随后克隆共享文件、以 `MAP_PRIVATE` 映射内存，并在本地缓存未命中时按需从对象存储读取。
-
-## 内存脏页写入粒度
-
-JuiceFS 将文件按 64 MiB chunk 组织；连续写入形成 slice，slice 再切成不超过 4 MiB 的对象 block。若 VMM 按 4 KiB 脏页逐次写入，会产生大量 slice 和 Redis 事务，并触发 compaction。`jfs-data.html` 中约 38 MiB 脏页的测试如下：
-
-| 写法 | 暂停耗时 | 写入量 | 新 slice | Redis 事务 | compaction 重写 |
-|---|---:|---:|---:|---:|---:|
-| 4 KiB 逐页写 | 15.0 s | 20.6 MB | 2588 | 2739 | 1416 MB |
-| 4 MiB 窗口 | 1.4–2.5 s | 约 750 MB | 53–88 | — | 0 |
-| 1 MiB 窗口 | 1.33 s | 241 MB | 48 | 151 | 0 |
-
-当前 VMM 将 FUSE 目标上的脏区间扩展到 1 MiB 对齐窗口，并合并相邻窗口后写入。它用可控的写放大换取更少的 slice、Redis 往返和 compaction；XFS 路径仍保持页粒度写入。
-
-## 一致性与生命周期
-
-- **共享可见性**：各节点通过同一元数据引擎看到相同文件树。
-- **数据就绪**：`remote_status=ready` 表示包依赖的 writeback block 已离开源节点 staging。
-- **本机优先**：源节点可调度时优先本机恢复，可继续利用页缓存、读缓存和 staging。
-- **私有导入**：跨机恢复时，目标节点为 rootfs 和 memory 创建自己的克隆文件，避免直接把运行实例绑定到源包路径。
-- **节点隔离**：本地 cache 不参与共享，也不能作为持久副本；丢失某个节点的 cache 不影响已上传的数据。
-- **兼容性门禁**：存储共享不能替代 VM 兼容检查，目标节点仍需满足 CPU、kernel 和 KVM 条件。
-
-## 主要取舍
-
-| 优势 | 代价或限制 |
-|---|---|
-| 共享 POSIX 文件视图，Cube 改造集中在存储后端 | FUSE、Redis 和对象存储都会进入 I/O 路径 |
-| `copy_file_range` 元数据克隆，模板和快照只存一份 | 随机小写会增加 slice，需要控制写入粒度 |
-| 本机缓存加速常用模板和恢复 | 跨机冷读仍受对象存储延迟和带宽影响 |
-| writeback 缩短前台写入路径 | 跨机必须等待 staging 上传并进入 `ready` |
-| 容量和持久性由对象存储提供 | 元数据引擎成为高频克隆、写入时的重要性能依赖 |
-
-JuiceFS 自身机制可参考官方的[技术架构](https://juicefs.com/docs/zh/community/architecture/)、[克隆语义](https://juicefs.com/docs/zh/community/guide/clone/)和[缓存说明](https://juicefs.com/docs/zh/community/guide/cache/)。
+得益于 JuiceFS 的分布式设计，在 A 节点创建的文件，在 B 节点也能看到，这使得跨机恢复时，B 机器可以像操作本地文件一样进行克隆操作。

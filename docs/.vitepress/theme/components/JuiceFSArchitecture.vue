@@ -13,19 +13,24 @@ const props = defineProps({
   },
 })
 const scenario = ref(0)
+const backend = ref('cubefs')
 const place = ref('local')
 const step = ref(0)
 const diagram = ref(null)
 
 const copy = computed(() => isZh.value ? {
   scenarios: ['制作模板', '启动沙箱', '暂停恢复'],
+  backends: { xfs: 'XFS', cubefs: 'JuiceFS' },
   local: '本机', cross: '跨机', previous: '上一步', next: '下一步', switch: '切换', step: '第', suffix: '步',
 } : {
   scenarios: ['Build template', 'Start sandbox', 'Pause and restore'],
+  backends: { xfs: 'XFS', cubefs: 'JuiceFS' },
   local: 'Local', cross: 'Cross-node', previous: 'Previous', next: 'Next', switch: 'navigate', step: 'Step', suffix: '',
 })
 
-const flowKey = computed(() => `cubefs-${scenario.value === 0 ? 'local' : place.value}`)
+const flowKey = computed(() => backend.value === 'xfs'
+  ? 'xfs'
+  : `cubefs-${scenario.value === 0 ? 'local' : place.value}`)
 const flow = computed(() => FLOWS[flowKey.value][scenario.value])
 const current = computed(() => flow.value.steps[step.value])
 const svg = computed(() => props.mode === 'architecture'
@@ -34,10 +39,15 @@ const svg = computed(() => props.mode === 'architecture'
       no: `${step.value + 1} / ${flow.value.steps.length}`,
       k: current.value.k,
       time: current.value.time,
-    }, { files: current.value.files || [] }))
+    }, { xfs: backend.value === 'xfs', files: current.value.files || [] }))
 
 function chooseScenario(index) {
   scenario.value = index
+  place.value = 'local'
+  step.value = 0
+}
+function chooseBackend(value) {
+  backend.value = value
   place.value = 'local'
   step.value = 0
 }
@@ -70,7 +80,10 @@ watch(svg, async () => {
           <div class="tabs">
             <button v-for="(name, index) in copy.scenarios" :key="name" :class="{ on: scenario === index }" @click="chooseScenario(index)">{{ name }}</button>
           </div>
-          <div v-if="scenario !== 0" class="tabs">
+          <div class="tabs">
+            <button v-for="(name, key) in copy.backends" :key="key" :class="{ on: backend === key }" @click="chooseBackend(key)">{{ name }}</button>
+          </div>
+          <div v-if="backend === 'cubefs' && scenario !== 0" class="tabs">
             <button :class="{ on: place === 'local' }" @click="choosePlace('local')">{{ copy.local }}</button>
             <button :class="{ on: place === 'cross' }" @click="choosePlace('cross')">{{ copy.cross }}</button>
           </div>
@@ -110,7 +123,9 @@ watch(svg, async () => {
 button { border: 1px solid var(--border); border-radius: 7px; padding: 6px 11px; color: var(--muted); background: var(--bg); font: inherit; font-size: 12px; cursor: pointer; }
 .tabs button { border: 0; padding: 5px 10px; background: transparent; }
 button:hover:not(:disabled) { color: var(--fg); }
-button.on { color: var(--bg); background: var(--fg); }
+/* Keep the selected control legible when the pointer is over it. */
+button.on,
+button.on:hover:not(:disabled) { color: #fff; background: rgb(9, 9, 11); }
 button:disabled { opacity: .35; cursor: default; }
 .controls { display: flex; align-items: center; gap: 7px; }
 .keyboard { color: var(--muted); font-size: 12px; }
@@ -121,7 +136,7 @@ button:disabled { opacity: .35; cursor: default; }
 .body { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 15px; min-height: 0; }
 .body.architecture { display: block; }
 .svgbox { min-width: 0; overflow-x: auto; }
-.svgbox :deep(svg) { display: block; min-width: 690px; width: 100%; height: auto; }
+.svgbox :deep(svg) { display: block; min-width: 650px; width: 94%; height: auto; margin: 0 auto; }
 .svgbox :deep(text) { font-family: inherit; fill: var(--fg); }
 .svgbox :deep(.t-sub) { fill: var(--muted); font-size: 11.5px; }
 .svgbox :deep(.t-title) { font-size: 14.5px; font-weight: 600; }
