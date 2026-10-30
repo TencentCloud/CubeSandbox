@@ -12,6 +12,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -51,8 +52,8 @@ type SandboxEventsRes struct {
 // handleSandboxEventsAction lists a sandbox's lifecycle history oldest first.
 // Events are stored under the full sandbox ID. The ID is first matched as
 // given, which keeps the history of a deleted sandbox readable; only when that
-// finds nothing is it resolved like the other read paths, so a short ID of a
-// live sandbox works too. An unknown ID returns an empty list.
+// finds nothing, and the ID is not a full ID, is it resolved like the other
+// read paths, so a short ID of a live sandbox works too. An unknown ID returns an empty list.
 func handleSandboxEventsAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	setRetCode := func(code int64) {
@@ -85,7 +86,9 @@ func handleSandboxEventsAction(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	rows, hasMore, err := sandboxevent.List(ctx, req.SandboxID, req.Cursor, req.Limit)
-	if err == nil && len(rows) == 0 {
+	// A full ID never needs resolving, and resolving a missing one would scan
+	// every node on each poll; only short IDs fall back.
+	if err == nil && len(rows) == 0 && !sandboxid.IsFullID(req.SandboxID) {
 		if resolved, resolveErr := resolveSandboxIDFn(ctx, req.SandboxID); resolveErr == nil && resolved != "" && resolved != req.SandboxID {
 			rows, hasMore, err = sandboxevent.List(ctx, resolved, req.Cursor, req.Limit)
 		}

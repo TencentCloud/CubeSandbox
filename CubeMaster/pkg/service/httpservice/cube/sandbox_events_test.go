@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -82,6 +84,18 @@ func TestSandboxEventsAction(t *testing.T) {
 	}
 	short := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-g", nil))
 	assert.Len(t, short.Events, 3)
+	// A full ID with no history is never resolved (that would scan the cluster).
+	resolveCalls := 0
+	resolveSandboxIDFn = func(context.Context, string) (string, error) {
+		resolveCalls++
+		return "", errors.New("not found")
+	}
+	fullID := strings.Repeat("a", 32)
+	require.True(t, sandboxid.IsFullID(fullID))
+	full := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id="+fullID, nil))
+	assert.Empty(t, full.Events)
+	assert.Equal(t, 0, resolveCalls)
+
 	unknown := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-none", nil))
 	assert.Equal(t, 0, unknown.Ret.RetCode)
 	assert.Empty(t, unknown.Events)
