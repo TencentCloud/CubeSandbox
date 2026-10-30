@@ -22,8 +22,15 @@ import (
 )
 
 // Init attaches the event store and registers the hooks. A failure only
-// disables the history; it never stops CubeMaster.
+// disables the history; it never stops CubeMaster. db.Init panics when the
+// shared handle was never opened, so that is recovered here instead of
+// relying on the call order in main.
 func Init(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.G(ctx).Warnf("sandboxevent: history disabled: %v", r)
+		}
+	}()
 	if err := sandboxevent.Init(db.Init(config.GetDbConfig())); err != nil {
 		log.G(ctx).Warnf("sandboxevent: history disabled: %v", err)
 		return

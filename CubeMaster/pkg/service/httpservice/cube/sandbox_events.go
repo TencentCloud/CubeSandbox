@@ -13,9 +13,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
+
+// resolveSandboxIDFn is a seam for tests; resolution may scan the cluster.
+var resolveSandboxIDFn = sandbox.ResolveSandboxID
 
 // SandboxEventsReq is the request for GET/POST /cube/sandbox/events.
 type SandboxEventsReq struct {
@@ -45,9 +49,10 @@ type SandboxEventsRes struct {
 }
 
 // handleSandboxEventsAction lists a sandbox's lifecycle history oldest first.
-// The ID is matched as given and not resolved against live sandboxes, so the
-// history of a deleted sandbox stays readable. An unknown ID returns an empty
-// list.
+// Events are stored under the full sandbox ID. The ID is first matched as
+// given, which keeps the history of a deleted sandbox readable; only when that
+// finds nothing is it resolved like the other read paths, so a short ID of a
+// live sandbox works too. An unknown ID returns an empty list.
 func handleSandboxEventsAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	setRetCode := func(code int64) {
@@ -78,7 +83,13 @@ func handleSandboxEventsAction(c *gin.Context) {
 		return
 	}
 
-	rows, hasMore, err := sandboxevent.List(c.Request.Context(), req.SandboxID, req.Cursor, req.Limit)
+	ctx := c.Request.Context()
+	rows, hasMore, err := sandboxevent.List(ctx, req.SandboxID, req.Cursor, req.Limit)
+	if err == nil && len(rows) == 0 {
+		if resolved, resolveErr := resolveSandboxIDFn(ctx, req.SandboxID); resolveErr == nil && resolved != "" && resolved != req.SandboxID {
+			rows, hasMore, err = sandboxevent.List(ctx, resolved, req.Cursor, req.Limit)
+		}
+	}
 	if err != nil {
 		CubeLog.Errorf("sandboxevent.List sandboxID=%s err=%v", req.SandboxID, err)
 		setRetCode(int64(errorcode.ErrorCode_DBError))

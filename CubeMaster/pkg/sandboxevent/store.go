@@ -96,7 +96,12 @@ func Record(ctx context.Context, sandboxID, event, templateID, reason string) {
 	}
 }
 
-// One worker keeps the row order equal to the order events were recorded.
+// One worker keeps the row order equal to the order events were recorded by
+// this process. With several CubeMaster replicas, events of one sandbox
+// recorded on different replicas can be inserted slightly out of order (only
+// the enqueue-to-insert lag can invert them, since the sandbox lock serializes
+// the operations), so readers that need a strict order should sort by
+// CreatedAt, which is stamped when the event is recorded.
 func writeLoop(q <-chan *models.SandboxEvent) {
 	for ev := range q {
 		write(context.Background(), ev)

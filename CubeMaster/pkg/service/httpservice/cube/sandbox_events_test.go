@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,6 +70,21 @@ func TestSandboxEventsAction(t *testing.T) {
 	assert.Equal(t, "killed", rest.Events[0].Event)
 	assert.Equal(t, "request", rest.Events[0].Reason)
 	assert.False(t, rest.HasMore)
+
+	// A short ID of a live sandbox resolves to the full ID the events are stored under.
+	orig := resolveSandboxIDFn
+	t.Cleanup(func() { resolveSandboxIDFn = orig })
+	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) {
+		if id == "sb-g" {
+			return "sb-gone", nil
+		}
+		return "", errors.New("not found")
+	}
+	short := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-g", nil))
+	assert.Len(t, short.Events, 3)
+	unknown := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-none", nil))
+	assert.Equal(t, 0, unknown.Ret.RetCode)
+	assert.Empty(t, unknown.Events)
 
 	missing := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events", nil))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), missing.Ret.RetCode)
