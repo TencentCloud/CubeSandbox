@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
 	sandboxeventhook "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent/hook"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/server"
@@ -277,6 +278,8 @@ func graceFullStop() {
 
 		task.Stop(ctx)
 		scheduler.Stop(ctx)
+		// After the tasks, so in-flight destroys have recorded their kills.
+		sandboxevent.Stop(ctx)
 		close(done)
 	}()
 

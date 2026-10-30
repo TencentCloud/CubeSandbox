@@ -135,3 +135,28 @@ func TestRecordTruncatesOverlongFields(t *testing.T) {
 	assert.LessOrEqual(t, len(rows[0].Reason), maxReasonLen)
 	assert.True(t, utf8.ValidString(rows[0].Reason))
 }
+
+func TestIDsMatchCaseInsensitively(t *testing.T) {
+	newTestDB(t)
+	Record(context.Background(), "ABCDEF01", EventCreated, "", "")
+	waitForEvents(t, "abcdef01", 1)
+	rows, _, err := List(context.Background(), "AbCdEf01", 0, 0)
+	require.NoError(t, err)
+	assert.Len(t, rows, 1)
+}
+
+func TestStopDrainsQueuedEvents(t *testing.T) {
+	newTestDB(t)
+	for i := 0; i < 50; i++ {
+		Record(context.Background(), "sb-drain", EventPaused, "", "")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	Stop(ctx)
+	rows, _, err := List(context.Background(), "sb-drain", 0, 0)
+	require.NoError(t, err)
+	assert.Len(t, rows, 50)
+	// After Stop, recording is a no-op, and Init starts a fresh writer.
+	Record(context.Background(), "sb-drain", EventKilled, "", "")
+	require.NoError(t, Init(getDB()))
+}

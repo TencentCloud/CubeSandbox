@@ -31,7 +31,7 @@ var retryInterval = 30 * time.Second
 // it is retried in the background until it succeeds.
 func Init(ctx context.Context) {
 	Register()
-	if attach(ctx) {
+	if attach(ctx, true) {
 		return
 	}
 	go func() {
@@ -42,7 +42,7 @@ func Init(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if attach(ctx) {
+				if attach(ctx, false) {
 					log.G(ctx).Infof("sandboxevent: history enabled")
 					return
 				}
@@ -53,16 +53,24 @@ func Init(ctx context.Context) {
 
 // attach tries to set up the store once. db.Init panics when the shared
 // handle was never opened, so that is recovered instead of relying on the
-// call order in main.
-func attach(ctx context.Context) (ok bool) {
+// call order in main. Only the first failure is a warning; a table managed
+// elsewhere may stay missing for a long time.
+func attach(ctx context.Context, first bool) (ok bool) {
+	report := func(err any) {
+		if first {
+			log.G(ctx).Warnf("sandboxevent: history disabled, retrying every %s: %v", retryInterval, err)
+		} else {
+			log.G(ctx).Debugf("sandboxevent: history still disabled: %v", err)
+		}
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			log.G(ctx).Warnf("sandboxevent: history disabled, retrying in %s: %v", retryInterval, r)
+			report(r)
 			ok = false
 		}
 	}()
 	if err := sandboxevent.Init(db.Init(config.GetDbConfig())); err != nil {
-		log.G(ctx).Warnf("sandboxevent: history disabled, retrying in %s: %v", retryInterval, err)
+		report(err)
 		return false
 	}
 	return true

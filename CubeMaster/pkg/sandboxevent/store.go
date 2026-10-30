@@ -44,15 +44,16 @@ const (
 var ErrNotReady = errors.New("sandbox event store is not initialized")
 
 var (
-	mu    sync.RWMutex
-	db    *gorm.DB
-	queue chan *models.SandboxEvent
+	mu         sync.RWMutex
+	db         *gorm.DB
+	queue      chan *models.SandboxEvent
+	writerDone chan struct{}
 )
 
 // Init attaches the shared gorm handle and starts the writer. The table is
 // created by cubedb migrations; when it is missing (CUBE_AUTO_MIGRATION=false
-// with the DDL not applied yet) Init fails and the history stays disabled
-// until the next restart. Calling Init again only swaps the handle.
+// with the DDL not applied yet) Init fails and the caller may retry. Calling
+// Init again only swaps the handle.
 func Init(client *gorm.DB) error {
 	if client == nil {
 		return errors.New("sandboxevent.Init: nil db")
@@ -65,7 +66,8 @@ func Init(client *gorm.DB) error {
 	db = client
 	if queue == nil {
 		queue = make(chan *models.SandboxEvent, queueSize)
-		go writeLoop(queue)
+		writerDone = make(chan struct{})
+		go writeLoop(queue, writerDone)
 	}
 	return nil
 }
@@ -78,13 +80,15 @@ func getDB() *gorm.DB {
 
 // Record queues one event without blocking the caller.
 func Record(ctx context.Context, sandboxID, event, templateID, reason string) {
-	sandboxID = strings.TrimSpace(sandboxID)
+	sandboxID = normalizeID(sandboxID)
 	if sandboxID == "" || event == "" {
 		return
 	}
+	// The read lock is held across the send so Stop cannot close the queue
+	// under it.
 	mu.RLock()
+	defer mu.RUnlock()
 	q := queue
-	mu.RUnlock()
 	if q == nil {
 		return
 	}
@@ -126,10 +130,36 @@ func truncate(s string, n int) string {
 // the enqueue-to-insert lag can invert them, since the sandbox lock serializes
 // the operations), so readers that need a strict order should sort by
 // CreatedAt, which is stamped when the event is recorded.
-func writeLoop(q <-chan *models.SandboxEvent) {
+func writeLoop(q <-chan *models.SandboxEvent, done chan<- struct{}) {
+	defer close(done)
 	for ev := range q {
 		write(context.Background(), ev)
 	}
+}
+
+// Stop stops accepting events and waits, until ctx is done, for the queued
+// ones to be written. Call it on shutdown after in-flight sandbox operations
+// have finished, so their events (notably kills) are not lost.
+func Stop(ctx context.Context) {
+	mu.Lock()
+	q, done := queue, writerDone
+	queue, writerDone = nil, nil
+	mu.Unlock()
+	if q == nil {
+		return
+	}
+	close(q)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		log.G(ctx).Warnf("sandboxevent: stopped before %d queued events were written", len(q))
+	}
+}
+
+// Sandbox IDs are lowercase hex; matching is case-insensitive, which
+// PostgreSQL varchar comparison is not.
+func normalizeID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
 }
 
 func write(ctx context.Context, ev *models.SandboxEvent) {
@@ -163,7 +193,7 @@ func List(ctx context.Context, sandboxID string, cursor uint64, limit int) ([]mo
 	}
 	var rows []models.SandboxEvent
 	err := client.WithContext(ctx).
-		Where("sandbox_id = ? AND id > ?", strings.TrimSpace(sandboxID), cursor).
+		Where("sandbox_id = ? AND id > ?", normalizeID(sandboxID), cursor).
 		Order("id ASC").
 		Limit(limit + 1).
 		Find(&rows).Error

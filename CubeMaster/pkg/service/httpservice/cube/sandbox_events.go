@@ -214,6 +214,8 @@ func handleSandboxEventsAction(c *gin.Context) {
 		return
 	}
 
+	// IDs are stored lowercase; accept any case like the other read paths.
+	req.SandboxID = strings.ToLower(strings.TrimSpace(req.SandboxID))
 	if req.SandboxID == "" {
 		setRetCode(int64(errorcode.ErrorCode_MasterParamsError))
 		common.WriteAPI(c, &SandboxEventsRes{Res: &types.Res{Ret: &types.Ret{
