@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -103,9 +104,15 @@ func EnsureCubeBoxComponents(ctx context.Context, cb *cubeboxstore.CubeBox) erro
 }
 
 // seedCubeBoxComponentVersionsFromRequest fills ComponentVersions before Ensure.
-func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts *workflow.CreateContext) {
+func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts *workflow.CreateContext) error {
 	if cb == nil {
-		return
+		return nil
+	}
+	if flowOpts != nil && flowOpts.ReqInfo != nil {
+		raw := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationComponentCubeShimVersion])
+		if raw != "" && templatetypes.InventoryVersionKey(raw) == "" {
+			return fmt.Errorf("invalid explicit shim version %q", raw)
+		}
 	}
 	out := make(map[string]string)
 	for k, v := range cb.ComponentVersions {
@@ -116,6 +123,13 @@ func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts 
 	seedVersionsFromTemplate(out, cb.LocalRunTemplate)
 	if flowOpts != nil && flowOpts.ReqInfo != nil {
 		for name, ver := range componentVersionsFromAnnotations(flowOpts.ReqInfo.GetAnnotations()) {
+			// The master's selected replica can explicitly migrate the shim
+			// without rewriting a sealed snapshot's catalog. Keep guest, agent
+			// and kernel pins immutable; only the host runtime binding changes.
+			if name == templatetypes.CubeComponentCubeShim {
+				out[name] = ver
+				continue
+			}
 			if _, exists := out[name]; exists {
 				continue
 			}
@@ -123,7 +137,7 @@ func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts 
 		}
 	}
 	if len(out) == 0 {
-		return
+		return nil
 	}
 	cb.ComponentVersions = out
 	if cb.LocalRunTemplate == nil {
@@ -132,6 +146,7 @@ func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts 
 		}
 	}
 	templatetypes.ApplyVersionMap(cb.LocalRunTemplate, out)
+	return nil
 }
 
 func componentVersionsFromAnnotations(annotations map[string]string) map[string]string {
