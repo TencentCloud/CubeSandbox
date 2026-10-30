@@ -146,14 +146,20 @@ type SandboxEventsRes struct {
 	HasMore    bool                    `json:"hasMore"`
 }
 
+// maxEventsReqBody bounds the request body read; a valid one is a few dozen bytes.
+const maxEventsReqBody = 4 << 10
+
 // parseSandboxEventsReq reads the JSON body when there is one, then fills any
 // field the body left unset from the query string.
 func parseSandboxEventsReq(c *gin.Context) (*SandboxEventsReq, error) {
 	req := &SandboxEventsReq{}
 	if c.Request.Body != nil {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxEventsReqBody+1))
 		if err != nil {
 			return nil, errors.New("failed to read request body")
+		}
+		if len(body) > maxEventsReqBody {
+			return nil, errors.New("request body too large")
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
 			if err := utils.DecodeHttpBody(io.NopCloser(bytes.NewReader(body)), req); err != nil {
