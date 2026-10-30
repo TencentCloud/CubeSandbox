@@ -506,7 +506,7 @@ cubelet-test: builder-image
 # cleanup or a later unprivileged builder may require ownership repair.
 .PHONY: cubelet-mount-test
 cubelet-mount-test: builder-image
-	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox'
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && make proto && CUBELET_REQUIRE_MOUNT_TESTS=1 CI=true go test -count=1 ./cmd/cubelet -run TestRootSharedMountSymlinkRestartDoesNotStack\|TestStateTmpfsSymlinkRestartPreservesState'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
