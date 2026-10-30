@@ -817,8 +817,13 @@ test_flusher(void)
 
 		fill_pattern(blk, 1, 3 * BLOCKS_PER_CHUNK, 0x91);
 		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, 1, blk, 500);
+		s3_flusher_kick(fl);
+		fake_complete_all(&fake, -EIO);
+		uint64_t before_drain = fake.started;
 
 		s3_flusher_drain(fl, 0, drain_cb, &probe);
+		check_u64("drain probes immediately despite an existing cooldown",
+			  fake.started, before_drain + 1);
 
 		check_true("drain does not complete while work is outstanding",
 			   !probe.done, NULL);
