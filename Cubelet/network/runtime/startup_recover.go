@@ -440,8 +440,8 @@ func (s *NetworkController) recoverLiveTap(tap *tapDevice, record *StateRecord, 
 
 func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 	// During smooth upgrades a no-state TAP may still carry old CubeVS port maps,
-	// TAP policy, metadata, or CubeEgress rules. Quarantine it before serving
-	// requests, but defer cleanup to maintenance: CubeEgress bootstraps from this
+	// TAP policy, metadata, or CubeEgress rules. Clear local mappings before serving
+	// requests, but defer remote cleanup to maintenance: CubeEgress bootstraps from this
 	// controller's HTTP listener, which is not started until recovery returns.
 	// Synchronously cleaning a large idle pool here both repeats ownership scans
 	// and waits on a service that cannot finish starting yet.
@@ -454,6 +454,14 @@ func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 		File:  tap.File,
 	}
 	if err := s.beginTapCleanup(cleaningTap, owner); err != nil {
+		return err
+	}
+	// Local port maps must agree with the empty startup PortBinder before
+	// requests arrive. These operations do not depend on CubeEgress readiness.
+	if err := s.cubevsAdapter.DeletePortMappingsByIfindex(uint32(tap.Index)); err != nil {
+		return err
+	}
+	if err := s.cleanupCubeVSTapState(tap.Index, tap.IP.To4()); err != nil {
 		return err
 	}
 	// Retain the descriptor without draining its queue during startup. Normal

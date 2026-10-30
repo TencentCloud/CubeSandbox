@@ -107,8 +107,8 @@ func TestStartupRecoverStagesNoStateTapForCleanupBeforeReady(t *testing.T) {
 	if !ok || poolState != TapPoolCleaning || owner == "" {
 		t.Fatalf("orphan tap state=%s owner=%s ok=%v before maintenance, want Cleaning", poolState, owner, ok)
 	}
-	if adapter.restoreCount != 0 || len(controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappings) != 0 {
-		t.Fatal("no-state cleanup blocked startup before the network HTTP listener could serve bootstrap")
+	if adapter.restoreCount != 0 || len(controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappings) != 1 {
+		t.Fatal("startup must release local port maps while deferring TAP restore and egress cleanup")
 	}
 	controller.handleCleaningEntries()
 	poolState, owner, ok = controller.tapPool.StateByName(orphan.Name)
