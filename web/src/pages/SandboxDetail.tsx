@@ -16,6 +16,7 @@ import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
 import { cn, formatBytes, formatCpu, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { SandboxLifecycleTimeline } from '@/components/SandboxLifecycleTimeline';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -57,8 +58,9 @@ export default function SandboxDetailPage() {
   useEffect(() => {
     if (isUnavailable) {
       void qc.invalidateQueries({ queryKey: ['sandboxes'] });
+      void qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     }
-  }, [isUnavailable, qc]);
+  }, [isUnavailable, qc, sandboxID]);
 
   // ── Logs ────────────────────────────────────────────────────────────────
   const logs = useQuery({
@@ -98,6 +100,7 @@ export default function SandboxDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
+      qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     },
   });
   const resume = useMutation({
@@ -107,6 +110,7 @@ export default function SandboxDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
+      qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     },
   });
 
@@ -133,6 +137,8 @@ export default function SandboxDetailPage() {
               </Button>
             </div>
           </Card>
+          {/* A deleted sandbox keeps its lifecycle history. */}
+          <SandboxLifecycleTimeline sandboxID={sandboxID} live={false} hideWhenEmpty />
         </div>
       );
     }
@@ -167,6 +173,8 @@ export default function SandboxDetailPage() {
             <Field label={t('fields.ends')} value={formatDateTime(data.endAt)} />
           </dl>
         </Card>
+
+        <SandboxLifecycleTimeline sandboxID={sandboxID} live={false} />
 
         <div className="flex justify-center">
           <Button variant="outline" asChild>
@@ -308,6 +316,8 @@ export default function SandboxDetailPage() {
           </dl>
         </Card>
       </div>
+
+      <SandboxLifecycleTimeline sandboxID={sandboxID} live />
 
       {/* ── Logs ── */}
       <Card>

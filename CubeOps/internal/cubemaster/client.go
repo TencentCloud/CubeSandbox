@@ -240,6 +240,12 @@ func (c *Client) GetSandboxLogs(ctx context.Context, body interface{}) (json.Raw
 	return c.post(ctx, "/cube/sandbox/logs", body)
 }
 
+// GetSandboxEvents fetches a sandbox's lifecycle history, oldest first.
+// Deleted sandboxes keep their history; an unknown ID returns no events.
+func (c *Client) GetSandboxEvents(ctx context.Context, params map[string]string) (json.RawMessage, error) {
+	return c.getWithQuery(ctx, "/cube/sandbox/events", params)
+}
+
 // ConnectSandboxWithBody resumes a paused sandbox with a custom request body.
 func (c *Client) ConnectSandboxWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	return c.post(ctx, "/cube/sandbox/connect", body)

@@ -81,6 +81,7 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 	r.GET("/sandboxes/:id", h.GetSandbox)
 	r.DELETE("/sandboxes/:id", h.DeleteSandbox)
 	r.GET("/sandboxes/:id/logs", h.GetSandboxLogs)
+	r.GET("/sandboxes/:id/events", h.GetSandboxEvents)
 	r.POST("/sandboxes/:id/timeout", h.SetSandboxTimeout)
 	r.POST("/sandboxes/:id/refreshes", h.RefreshSandbox)
 	r.POST("/sandboxes/:id/pause", h.PauseSandbox)
@@ -480,6 +481,52 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 	}
 	raw, err := h.cm.GetSandboxLogs(c.Request.Context(), body)
 	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// GetSandboxEvents — GET /api/v1/sdk/sandboxes/{id}/events
+//
+// Lifecycle history (created / paused / resumed / killed), oldest first, paged
+// by the event-ID cursor. The history outlives the sandbox, so a deleted or
+// unknown ID is an empty list rather than a 404.
+func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
+	params := map[string]string{"sandbox_id": c.Param("id")}
+	// Reject bad paging input like CubeAPI does; a dropped cursor would
+	// silently restart paging at the first event.
+	if v := c.Query("limit"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			httputil.WriteError(c, http.StatusBadRequest, "limit must be a non-negative integer")
+			return
+		}
+		params["limit"] = strconv.FormatUint(n, 10)
+	}
+	if v := c.Query("cursor"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			httputil.WriteError(c, http.StatusBadRequest, "cursor must be a non-negative integer")
+			return
+		}
+		params["cursor"] = strconv.FormatUint(n, 10)
+	}
+	raw, err := h.cm.GetSandboxEvents(c.Request.Context(), params)
+	if err != nil {
+		// An older CubeMaster has no history endpoint and gin answers with its
+		// own "404 page not found": an empty history rather than an error on
+		// every timeline poll. Any other 404 (wrong base URL, a proxy) still
+		// surfaces as an error.
+		var httpErr *cubemaster.HTTPError
+		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound &&
+			strings.TrimSpace(httpErr.Body) == "404 page not found" {
+			// A CubeOps base URL with a wrong path prefix gives the same answer,
+			// so make the fallback visible in the logs.
+			logging.G(c.Request.Context()).Warnf("sdk: cubemaster has no /cube/sandbox/events route; returning empty history")
+			httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage(`{"events":[],"hasMore":false}`))
+			return
+		}
 		writeCMError(c, err)
 		return
 	}

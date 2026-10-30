@@ -30,6 +30,7 @@ type fakeCM struct {
 	setSandboxTimeout           func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	refreshSandbox              func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	getSandboxLogs              func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	getSandboxEvents            func(ctx context.Context, params map[string]string) (json.RawMessage, error)
 	listSandboxesWithBody       func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	createSnapshot              func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	listSnapshots               func(ctx context.Context, params map[string]string) (json.RawMessage, error)
@@ -105,6 +106,12 @@ func (f *fakeCM) GetSandboxLogs(ctx context.Context, body interface{}) (json.Raw
 		return nil, errFakeNotConfigured
 	}
 	return f.getSandboxLogs(ctx, body)
+}
+func (f *fakeCM) GetSandboxEvents(ctx context.Context, params map[string]string) (json.RawMessage, error) {
+	if f.getSandboxEvents == nil {
+		return nil, errFakeNotConfigured
+	}
+	return f.getSandboxEvents(ctx, params)
 }
 func (f *fakeCM) ListSandboxesWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	cubemaster.EnsureRequestID(ctx, body)

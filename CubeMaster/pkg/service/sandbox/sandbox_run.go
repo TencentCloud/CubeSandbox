@@ -375,6 +375,10 @@ func (c *createSandboxContext) persistSandboxSpec() {
 	}
 }
 
+// KillReasonCreateFailed marks the cleanup of a sandbox whose create failed
+// after Cubelet had allocated it.
+const KillReasonCreateFailed = "create_failed"
+
 func (c *createSandboxContext) failover() {
 
 	if c.masterRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) && c.masterRsp.SandboxID != "" {
@@ -395,6 +399,8 @@ func (c *createSandboxContext) failover() {
 				Filter: &cubebox.CubeSandboxFilter{
 					InstanceType: c.cubeletReq.GetInstanceType(),
 				},
+				// Distinguishes this cleanup from a user kill in the lifecycle history.
+				Annotations: map[string]string{constants.CubeAnnotationsKillReason: KillReasonCreateFailed},
 			},
 			TaskType: task.DestroySandbox,
 			CallEp:   rt.CalleeEndpoint,

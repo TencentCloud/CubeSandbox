@@ -70,6 +70,9 @@ func (f *fakeCMHandler) GetSandboxLogs(ctx context.Context, body interface{}) (j
 	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("GetSandboxLogs")
 }
+func (f *fakeCMHandler) GetSandboxEvents(ctx context.Context, params map[string]string) (json.RawMessage, error) {
+	return nil, errMethodNotConfigured("GetSandboxEvents")
+}
 func (f *fakeCMHandler) ListSandboxesWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("ListSandboxesWithBody")

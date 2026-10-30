@@ -38,6 +38,8 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.GET(SandboxInventoryAction, handleInventoryAction)
 	g.GET(SandboxLogsAction, handleSandboxLogsAction)
 	g.POST(SandboxLogsAction, handleSandboxLogsAction)
+	g.GET(SandboxEventsAction, handleSandboxEventsAction)
+	g.POST(SandboxEventsAction, handleSandboxEventsAction)
 
 	// Image
 	g.POST(ImageAction, createImageGinHandler)

@@ -16,8 +16,8 @@ use crate::{
     models::{
         ApiError, ConnectSandbox, ConnectSandboxV2, ForkRequest, ForkResult, ListSandboxesQuery,
         ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest, ResumedSandbox, Sandbox,
-        SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response,
-        SetTimeoutRequest, UpdateSandboxNetworkRequest,
+        SandboxDetail, SandboxEventsQuery, SandboxLogsQuery, SandboxLogsV2Query,
+        SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
@@ -569,6 +569,53 @@ pub async fn get_sandbox_logs(
         )
         .await;
     Ok(Json(logs))
+}
+
+// ─── GET /sandboxes/:sandboxID/events ─────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/events",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier"),
+        SandboxEventsQuery
+    ),
+    responses(
+        (status = 200, description = "Sandbox lifecycle history, oldest first; kept after the sandbox is deleted", body = crate::models::SandboxEvents),
+        (status = 400, description = "Invalid parameters", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn get_sandbox_events(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Query(params): Query<SandboxEventsQuery>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "get_sandbox_events")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("limit", params.limit),
+        )
+        .await;
+
+    let events = state
+        .services
+        .sandboxes
+        .get_events(&sandbox_id, params.cursor, params.limit)
+        .await?;
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "get_sandbox_events")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("count", events.events.len()),
+        )
+        .await;
+    Ok(Json(events))
 }
 
 // ─── GET /v2/sandboxes/:sandboxID/logs ────────────────────────────────────────

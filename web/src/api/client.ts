@@ -10,6 +10,8 @@ export type SandboxDetailDto = components['schemas']['SandboxDetail'];
 export type SandboxSessionDto = components['schemas']['Sandbox'];
 export type SandboxLogsDto = components['schemas']['SandboxLogsV2Response'];
 export type SandboxLogEntry = components['schemas']['SandboxLogEntry'];
+export type SandboxEventsDto = components['schemas']['SandboxEvents'];
+export type SandboxLifecycleEventDto = components['schemas']['SandboxLifecycleEvent'];
 export type SandboxResumeRequest = components['schemas']['ResumedSandbox'];
 export type TemplateSummaryDto = components['schemas']['TemplateSummary'];
 export type TemplateDetailDto = components['schemas']['TemplateDetail'];
@@ -258,6 +260,8 @@ export const sandboxApi = {
     }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  events: (id: string, params?: { cursor?: number; limit?: number }) =>
+    api<SandboxEventsDto>(`/sandboxes/${id}/events`, { params }),
   create: (body: { templateID: string; timeout?: number; metadata?: Record<string, string> }) =>
     api<SandboxSessionDto>('/sandboxes', {
       method: 'POST',

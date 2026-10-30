@@ -52,5 +52,26 @@
     "resumeCapacity": "节点资源不足, 无法恢复该沙箱, 请先释放其他实例容量",
     "resumeCapacityDetail": "节点内存不足, 无法恢复 (还需 {{need}}, 已用 {{used}}, 配额 {{quota}})",
     "resumeCapacityDetailCpu": "节点 CPU 不足, 无法恢复 (还需 {{need}}, 已用 {{used}}, 配额 {{quota}})"
+  },
+  "lifecycle": {
+    "title": "生命周期记录",
+    "description": "创建、暂停、恢复、销毁事件，沙箱结束后仍保留。",
+    "loading": "加载中…",
+    "empty": "暂无生命周期记录。",
+    "error": "生命周期记录加载失败，请稍后重试。",
+    "template": "来自模板 {{id}}",
+    "events": {
+      "created": "创建",
+      "paused": "暂停",
+      "resumed": "恢复",
+      "killed": "销毁"
+    },
+    "reasons": {
+      "request": "主动销毁",
+      "timeout": "超时销毁",
+      "create_failed": "创建失败后清理"
+    },
+    "loadingMore": "已加载较早的记录，较新的事件仍在加载…",
+    "trimmed": "仅显示最新的 {{count}} 条事件，更早的未显示。"
   }
 }

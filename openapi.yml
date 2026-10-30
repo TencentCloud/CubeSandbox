@@ -271,6 +271,54 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/events:
+    get:
+      tags:
+      - handlers::sandboxes
+      operationId: get_sandbox_events
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        description: ID of the last event already read.
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        description: Page size, 1 to 500; 0 or absent means 100.
+        required: false
+        schema:
+          type: integer
+          format: int32
+          maximum: 500
+          minimum: 0
+      responses:
+        '200':
+          description: Sandbox lifecycle history, oldest first; kept after the sandbox is deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxEvents'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /sandboxes/{sandboxID}/logs:
     get:
       tags:
@@ -2395,6 +2443,25 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+    SandboxEvents:
+      type: object
+      description: 'Lifecycle history of a sandbox, oldest first. Also served after the sandbox is deleted; an unknown ID yields no events. Paging is best effort: with several CubeMaster replicas an event can be missed by a page that was read just before it was written.'
+      required:
+      - events
+      - hasMore
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxLifecycleEvent'
+        hasMore:
+          type: boolean
+        nextCursor:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
     SandboxLifecycleConfig:
       type: object
       description: |-
@@ -2415,6 +2482,35 @@ components:
         onTimeout:
           $ref: '#/components/schemas/SandboxOnTimeout'
           description: '"kill" (default) | "pause".'
+    SandboxLifecycleEvent:
+      type: object
+      description: One sandbox lifecycle event.
+      required:
+      - id
+      - event
+      - timestamp
+      properties:
+        event:
+          type: string
+          description: '`created`, `paused`, `resumed` or `killed`.'
+        id:
+          type: integer
+          format: int64
+          description: Event ID, usable as the `cursor` of the next page.
+          minimum: 0
+        reason:
+          type:
+          - string
+          - 'null'
+          description: Why the sandbox was killed, e.g. `request` or `timeout` (on `killed` events).
+        templateID:
+          type:
+          - string
+          - 'null'
+          description: Template the sandbox was created from (on `created` events).
+        timestamp:
+          type: string
+          format: date-time
     SandboxLog:
       type: object
       description: Single raw log line — matches E2B SandboxLog schema (timestamp + line).

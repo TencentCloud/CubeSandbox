@@ -28,6 +28,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
+	sandboxeventhook "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent/hook"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/server"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
@@ -219,6 +221,9 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
 	}
 
+	// Lifecycle history is best effort; a missing table only disables it.
+	sandboxeventhook.Init(ctx)
+
 	scheduler.InitScheduler(ctx)
 
 	if err := sandbox.Init(ctx, cfg); err != nil {
@@ -273,6 +278,8 @@ func graceFullStop() {
 
 		task.Stop(ctx)
 		scheduler.Stop(ctx)
+		// After the tasks, so in-flight destroys have recorded their kills.
+		sandboxevent.Stop(ctx)
 		close(done)
 	}()
 
