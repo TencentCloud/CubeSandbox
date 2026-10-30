@@ -28,6 +28,14 @@
 struct spdk_lvol;
 struct s3lvol_lvstore;
 
+struct s3lvol_lvol_open_failure {
+	char name[SPDK_LVOL_NAME_MAX];
+	char uuid[SPDK_UUID_STRING_LEN];
+	int status;
+	uint32_t attempts;
+	TAILQ_ENTRY(s3lvol_lvol_open_failure) link;
+};
+
 /**
  * Get this vbdev module's handle, needed when registering bdevs.
  */
@@ -196,10 +204,15 @@ void s3lvol_resume_flushers(void);
  * and the SIGKILL (an unreadable target binary, or a kill that does not land),
  * where the target would otherwise keep running with a frozen data plane.
  *
- * \return 0 on success, -EBUSY while a prepare is still in flight (the call was
- *         a no-op, so the caller must not report the node as released).
+ * Completion is asynchronous; cb_fn runs only after every subsystem has
+ * completed its resume (or an earlier one failed). A target with no RCOW
+ * subsystems completes successfully.
+ *
+ * \return 0 when completion will be delivered, or a negative errno when the
+ *         operation could not be submitted (including -EBUSY while a prepare
+ *         is still in flight). No callback is made on submission failure.
  */
-int s3lvol_resume_subsystems(void);
+int s3lvol_resume_subsystems(spdk_lvs_op_complete cb_fn, void *cb_arg);
 
 /**
  * Snapshot the write-path counters (WAL, overlay, flusher).
@@ -237,6 +250,14 @@ struct s3lvol_lvstore *s3lvol_lvstore_find_by_lvs(struct spdk_lvol_store *store)
 
 struct spdk_lvol_store *s3lvol_lvstore_get_lvs(struct s3lvol_lvstore *lvs);
 const char             *s3lvol_lvstore_get_name(struct s3lvol_lvstore *lvs);
+bool                    s3lvol_lvstore_is_unloading(
+				const struct s3lvol_lvstore *lvs);
+const struct s3lvol_lvol_open_failure *
+s3lvol_lvstore_open_failure_first(const struct s3lvol_lvstore *lvs);
+const struct s3lvol_lvol_open_failure *
+s3lvol_lvstore_open_failure_next(
+	const struct s3lvol_lvol_open_failure *failure);
+bool s3lvol_lvstore_has_open_failures(const struct s3lvol_lvstore *lvs);
 
 /**
  * The S3 client this lvstore reads and writes through. Its bucket and prefix are
@@ -434,10 +455,11 @@ bool s3lvol_nvmf_udev_settled(void);
  * to get queue depth.
  *
  * This is the baseline rather than the complete policy: an imported manifest
- * with at least 50% of its chunks present is promoted to 4 MiB. The
- * operator-facing RCOW_READ_AHEAD_KB in scripts/rcow_common.sh can override
- * that policy -- including setting it back to the kernel default for a purely
- * random workload, where reading ahead whole chunks is waste.
+ * with at least S3LVOL_DENSE_IMPORT_MIN_PCT percent of its chunks present is
+ * promoted to 4 MiB. The operator-facing RCOW_READ_AHEAD_KB in
+ * scripts/rcow_common.sh can override that policy -- including setting it back
+ * to the kernel default for a purely random workload, where reading ahead
+ * whole chunks is waste.
  */
 #define RCOW_DEFAULT_READ_AHEAD_KB 1024
 
@@ -445,6 +467,11 @@ bool s3lvol_nvmf_udev_settled(void);
  * gives a single fault enough outstanding work to hide S3 latency while the
  * transport still keeps every NVMe command at one chunk. */
 #define S3LVOL_DENSE_IMPORT_READ_AHEAD_KB 4096
+
+/* Share of an import's chunks, in percent, that must be present for it to count
+ * as dense. Memory snapshots are read back nearly sequentially even when only a
+ * fraction of guest memory was ever touched, so the bar is kept low. */
+#define S3LVOL_DENSE_IMPORT_MIN_PCT 20
 
 /* The kernel's own default, which is what "nobody has touched this device" looks
  * like. Used to tell an untuned device from one somebody set deliberately; see
@@ -657,6 +684,11 @@ int s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
  * asynchronous even before the snapshot itself starts; \p out_cancelled_decouple,
  * when not NULL, is set synchronously to say whether that happened, so a caller
  * can report that the volume it asked to be decoupled no longer will be.
+ *
+ * Blobstore allows one metadata operation on a blob at a time and answers
+ * -EBUSY for a second. Concurrent snapshots of \p lvol are queued here and the
+ * callback runs when that snapshot has been created, rather than failing the
+ * caller with EBUSY.
  */
 int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 				const char *snapshot_name,
@@ -674,6 +706,10 @@ int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lv
  * **Only read-only lvols can be cloned**, or `-EINVAL` is returned: a
  * simultaneously writable parent and clone means either side can modify a
  * shared cluster, and neither's data is defined any more.
+ *
+ * Concurrent clones of the same snapshot are queued. Blobstore holds the
+ * parent blob for the duration of one clone and returns -EBUSY for the next;
+ * the callback runs once this clone has been created.
  */
 int s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 			     const char *clone_name,
@@ -687,6 +723,12 @@ int s3lvol_lvol_create_clone(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
  */
 int s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 			spdk_lvol_op_complete cb_fn, void *cb_arg);
+
+/* Destroy a volume whose action_in_progress the caller already holds.
+ * The public destroy refuses that flag; the import-template reap is the caller
+ * that holds it across the clone-count check. */
+int s3lvol_lvol_destroy_locked(struct spdk_lvol *lvol,
+			       spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 /**
  * Find an lvol by name within an lvstore.
@@ -904,6 +946,7 @@ enum s3lvol_pending_reason {
 	S3LVOL_PENDING_EXPORT_INFLIGHT,	/* an export is publishing right now */
 	S3LVOL_PENDING_CLONE_COUNT,	/* more than one clone */
 	S3LVOL_PENDING_DECOUPLE,	/* a decouple is running on it */
+	S3LVOL_PENDING_DESTROY_BUSY,	/* another destroy owns this lvstore */
 	S3LVOL_PENDING_FAILED,		/* the destroy failed asynchronously */
 };
 
@@ -1024,6 +1067,11 @@ void s3lvol_snapshot_pending_clear_lvs(const struct spdk_uuid *lvs_uuid);
 bool s3lvol_export_inflight_pinning(struct s3lvol_lvstore *lvs,
 				    const char *snapshot_name);
 
+/* True while an export/import operation still retains raw pointers into this
+ * lvstore. Persistent export/import registry entries do not count: only work
+ * whose completion would dereference the lvstore blocks unload. */
+bool s3lvol_xfer_pending(const struct s3lvol_lvstore *lvs);
+
 /* The two ends of the lease clock, together because they are one decision.
  *
  * An importer renews every RENEW_MIN seconds; the source treats a lease as fresh
@@ -1062,10 +1110,10 @@ struct s3lvol_import_opts {
 	 * It is a copy of everything the export holds, and it runs whenever it runs;
 	 * the volume is usable either way.
 	 *
-	 * No effect when the import degenerates into a local clone: there is no
-	 * export to decouple from. Logged and ignored, not an error -- a caller that
-	 * always sets it is asking for independence from the export, and a local
-	 * clone already has that. */
+	 * No effect when the import degenerates into a clone of a snapshot this
+	 * lvstore already holds: that snapshot is not a hidden import template.
+	 * Logged and ignored. On the shared-template path it targets the template,
+	 * not the user volume just created. */
 	bool        decouple;
 };
 
@@ -1077,34 +1125,44 @@ struct s3lvol_import_opts {
  *
  * 1. The export names a snapshot *this* lvstore still holds, unchanged --
  *    matching endpoint, bucket, prefix, name, and blob id. Then this is a plain
- *    local clone of that snapshot. No import registry entry, no dependency on the
- *    export, nothing read from S3 beyond the manifest that established the fact.
- *    Exporting and re-importing inside one lvstore is a normal way to get a
- *    writable copy of a snapshot, and it should not cost more than a clone.
+ *    local clone of that snapshot. No import registry entry is written for this
+ *    export, and nothing is read from S3 beyond the manifest that established
+ *    the fact. Exporting and re-importing inside one lvstore is a normal way to
+ *    get a writable copy of a snapshot, and it should not cost more than a clone.
+ *    If that snapshot is itself an esnap clone, the new volume still reads the
+ *    older export through it. Decouple names the snapshot, not this clone.
  *
  *    Worth knowing: it is *safer*, not just cheaper. An esnap clone's parent is
  *    protected by a distributed lease, while a local clone's parent is pinned
  *    directly by blobstore.
  *
  * 2. Anything else -- another node's export, another bucket, or a snapshot that
- *    is gone or has been replaced -- is an esnap clone of that export. Each
- *    import is its own clone. Metadata only: nothing is transferred before the
- *    import answers. `opts->decouple` copies that clone's clusters out of the
- *    export; a later import of the same export does the same for itself.
+ *    is gone or has been replaced -- is one hidden read-only template per
+ *    (lvstore, export uuid). The template blob is created as the esnap clone and
+ *    then frozen in place; the esnap identity is not moved onto a later
+ *    snapshot. Every user lvol of that export on this lvstore, including the
+ *    first, is a local clone of that template, so they share one chain and one
+ *    later decouple. Metadata only: nothing is transferred before the import
+ *    answers. The template is named `__rcow_tpl_<uuid>` and is omitted from
+ *    listing, lookup, derive, export and activate. It is removed when its last
+ *    clone goes away.
  *
  * In case 2 the manifest is recorded in this lvstore's own registry in S3
  * *before* the clone exists, because the reverse order can leave a clone that no
  * later attach can open. One entry per (lvstore, export uuid) covers every
  * clone of that export. Case 1 writes no registry entry at all.
  *
- * `opts->decouple` applies to case 2 only and targets the clone just created.
- * In case 1 there is no export to decouple from, and it is logged and ignored
- * rather than failed.
+ * `opts->decouple` applies to case 2 only and targets the hidden template. A
+ * later import while that decouple is still copying waits, then clones the
+ * template. In case 1 it is logged and ignored.
  *
- * The rcow_import_lvol RPC reports which happened in a `mode` field
- * ("local_clone" or "esnap"), read back off the resulting blob. A caller tracking
- * what depends on what needs it: only case 2 appears in rcow_get_imports and only
- * case 2 holds up rcow_release_export.
+ * The rcow_import_lvol RPC reports `mode` from the parent chain, not from this
+ * blob alone. "esnap" means this volume, or a snapshot it was cloned from, still
+ * reads an export. "local_clone" means the chain does not. rcow_decouple_lvol
+ * on a user lvol whose chain reaches a hidden import template decouples that
+ * template. A local clone of a user-visible esnap snapshot is still decoupled
+ * by naming that snapshot. Only case 2 writes an import registry entry; case 1
+ * does not hold up rcow_release_export for the export it just imported.
  *
  * Nothing about export_snapshot changes. Whether a manifest will be consumed here
  * or on another node cannot be known when it is written, so the choice belongs to
@@ -1245,6 +1303,19 @@ void s3lvol_decouple_queued_get(const struct decouple_queued *q,
  * A no-op when something still reads the export, so it is always safe to call.
  */
 void s3lvol_imports_recheck(struct s3lvol_lvstore *lvs, const char *export_uuid);
+
+/* True for the hidden snapshot that anchors every import of one export on one
+ * lvstore. Identified by its reserved name and by being read-only. */
+bool s3lvol_lvol_is_import_template(const struct spdk_lvol *lvol);
+
+/* Drop the hidden template of \c export_uuid when it has no clones left, then
+ * recheck the imports registry. A template that still has clones, or one whose
+ * decouple is still running, is left in place and only the registry is rechecked.
+ * When \p cb_fn is non-NULL, it runs once the reap and recheck have finished. */
+void s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
+					   const char *export_uuid,
+					   spdk_lvol_op_complete cb_fn,
+					   void *cb_arg);
 
 /**
  * Delete an export's objects.
@@ -1399,6 +1470,7 @@ void s3lvol_export_get(const struct s3lvol_export *exp,
  */
 int s3lvol_export_registry_save(struct s3lvol_lvstore *lvs,
 				spdk_lvs_op_complete cb_fn, void *cb_arg);
+bool s3lvol_export_registry_persist_pending(const struct s3lvol_lvstore *lvs);
 
 /**
  * Read the registry at attach. A missing object means nothing was ever exported.
@@ -1452,13 +1524,19 @@ bool s3lvol_lvol_reads_import(struct spdk_lvol *lvol);
 int s3lvol_lvol_import_uuid(struct spdk_lvol *lvol, char *uuid_out,
 			    size_t uuid_out_len);
 
+/* Export uuid encoded in a hidden template on this chain, including one that
+ * decouple has already made local. Empty when the chain has no such template.
+ * This does not mean the volume still reads the export. */
+int s3lvol_lvol_template_export_uuid(struct spdk_lvol *lvol, char *uuid_out,
+				     size_t uuid_out_len);
+
 /**
  * Select host readahead for an lvol which may ultimately read from an import.
  *
  * The parent chain is followed to its external snapshot. When that import has
- * at least half of its chunks present, the ordinary one-chunk default is
- * promoted to four chunks. An operator override (including 0 or 128 KiB) is
- * returned unchanged.
+ * at least S3LVOL_DENSE_IMPORT_MIN_PCT percent of its chunks present, the
+ * ordinary one-chunk default is promoted to four chunks. An operator override
+ * (including 0 or 128 KiB) is returned unchanged.
  */
 uint32_t s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb);
 

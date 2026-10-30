@@ -39,20 +39,20 @@ enum s3_wal_state {
 	S3_WAL_FAILED,
 };
 
-/* One queued append. The payload is copied into the batch buffer when the batch
- * is assembled, so the caller's buffer does not have to outlive this call. */
+/* One queued durability barrier. Payload-bearing records are replay-only:
+ * current write data lives in the process-shared write-back ring. */
 struct s3_wal_op {
 	struct s3_wal_entry_hdr      hdr;
-
-	/* Copy of the caller's data, or NULL for metadata-only entries. Owned
-	 * here because callers are explicitly not required to keep theirs. */
-	void                        *payload;
-	uint32_t                     payload_len;
 
 	s3_wal_cb                    cb_fn;
 	void                        *cb_arg;
 
 	STAILQ_ENTRY(s3_wal_op)      link;
+};
+
+struct s3_wal_replay_range {
+	uint64_t first;
+	uint64_t last;
 };
 
 struct s3_wal {
@@ -87,9 +87,19 @@ struct s3_wal {
 
 	uint64_t                     seq_next;
 	uint64_t                     epoch;
+	/* First sequence that was never written to the log.  Memory-only
+	 * write-back seqs start here, and a checkpoint must not claim them:
+	 * an older binary replaying this super would skip real WAL entries
+	 * if ckpt_seq ran past the bytes on disk. */
+	uint64_t                     disk_seq_limit;
+	bool                         memory_only_started;
 
 	uint64_t                     ckpt_head;
 	uint64_t                     ckpt_seq;
+	uint64_t                     replay_durable_seq;
+	struct s3_wal_replay_range  *replay_ranges;
+	uint32_t                     replay_range_count;
+	uint32_t                     replay_range_capacity;
 
 	uint64_t                     batch_id_next;
 
@@ -102,11 +112,13 @@ struct s3_wal {
 	STAILQ_HEAD(, s3_wal_op)     writing;
 
 	uint32_t                     pending_ops;
-	uint64_t                     pending_bytes;
+	/* Worst-case block-padded bytes reserved by queued operations. */
+	uint64_t                     pending_reserved_bytes;
 	uint64_t                     pending_since_tsc;
 
 	/* 4 KiB aligned, DMA safe, allocated once (I5). */
 	void                        *batch_buf;
+	uint32_t                     batch_buf_size;
 
 	/* Length of the batch in flight, needed to advance head on completion. */
 	uint64_t                     batch_len;
@@ -284,9 +296,6 @@ wal_complete_ops(struct s3_wal_op *first, int status)
 		if (op->cb_fn) {
 			op->cb_fn(op->cb_arg, status);
 		}
-		if (op->payload) {
-			free(op->payload);
-		}
 		free(op);
 
 		op = next;
@@ -300,7 +309,7 @@ wal_fail_pending(struct s3_wal *wal, int status)
 
 	STAILQ_INIT(&wal->pending);
 	wal->pending_ops = 0;
-	wal->pending_bytes = 0;
+	wal->pending_reserved_bytes = 0;
 
 	wal_complete_ops(first, status);
 }
@@ -392,7 +401,7 @@ wal_emit_end_sentinel(struct s3_wal *wal, uint64_t remaining)
 	struct s3_wal_entry_hdr *hdr = wal->batch_buf;
 
 	assert(remaining >= sizeof(*hdr));
-	assert(remaining <= S3_WAL_BATCH_BUF_SIZE);
+	assert(remaining <= wal->batch_buf_size);
 
 	memset(wal->batch_buf, 0, remaining);
 
@@ -433,8 +442,10 @@ wal_kick(struct s3_wal *wal)
 {
 	uint64_t seg_left;
 	uint64_t used = 0;
+	uint64_t batch_id;
 	uint8_t *cursor;
 	struct s3_wal_op *op;
+	uint32_t batch_ops = 0;
 	int rc;
 
 	if (wal->batch_in_flight || wal->busy) {
@@ -453,7 +464,7 @@ wal_kick(struct s3_wal *wal)
 	/* Does the first op even fit in what is left of this segment? If not,
 	 * close the segment out and let the next kick start the new one. */
 	op = STAILQ_FIRST(&wal->pending);
-	if (sizeof(op->hdr) + op->payload_len > seg_left) {
+	if (sizeof(op->hdr) > seg_left) {
 		if (seg_left < sizeof(struct s3_wal_entry_hdr)) {
 			/* Not even room for a sentinel. Skip the remainder;
 			 * recovery stops on the unreadable bytes and moves on
@@ -489,9 +500,11 @@ wal_kick(struct s3_wal *wal)
 
 	cursor = wal->batch_buf;
 	wal->batch_max_seq = 0;
+	batch_id = wal->batch_id_next++;
 
-	while ((op = STAILQ_FIRST(&wal->pending)) != NULL) {
-		uint64_t need = sizeof(op->hdr) + op->payload_len;
+	while (batch_ops < S3_WAL_BATCH_MAX_OPS &&
+	       (op = STAILQ_FIRST(&wal->pending)) != NULL) {
+		uint64_t need = sizeof(op->hdr);
 
 		/* Stop at the batch buffer limit, the segment boundary, or the
 		 * op-count trigger. Whatever is left stays queued for the next
@@ -502,24 +515,24 @@ wal_kick(struct s3_wal *wal)
 		 * the unpadded length would let the padding run off the end of
 		 * the buffer. */
 		if (SPDK_ALIGN_CEIL(used + need, S3_WAL_BLOCK_SIZE) >
-		    S3_WAL_BATCH_BUF_SIZE ||
+		    wal->batch_buf_size ||
 		    used + need > seg_left) {
 			break;
 		}
 
 		STAILQ_REMOVE_HEAD(&wal->pending, link);
 		wal->pending_ops--;
-		wal->pending_bytes -= op->payload_len;
+		assert(wal->pending_reserved_bytes >=
+		       SPDK_ALIGN_CEIL(need, S3_WAL_BLOCK_SIZE));
+		wal->pending_reserved_bytes -=
+			SPDK_ALIGN_CEIL(need, S3_WAL_BLOCK_SIZE);
 
-		op->hdr.crc_payload = op->payload_len ?
-			spdk_crc32c_update(op->payload, op->payload_len, ~0u) : 0;
+		op->hdr.batch_id = batch_id;
+		op->hdr.crc_payload = 0;
 		op->hdr.flags &= (uint8_t)~S3_WAL_F_LAST_IN_BATCH;
 		op->hdr.crc_hdr = wal_hdr_crc(&op->hdr);
 
 		memcpy(cursor, &op->hdr, sizeof(op->hdr));
-		if (op->payload_len) {
-			memcpy(cursor + sizeof(op->hdr), op->payload, op->payload_len);
-		}
 
 		cursor += need;
 		used += need;
@@ -529,6 +542,7 @@ wal_kick(struct s3_wal *wal)
 		}
 
 		STAILQ_INSERT_TAIL(&wal->writing, op, link);
+		batch_ops++;
 	}
 
 	if (used == 0) {
@@ -554,8 +568,7 @@ wal_kick(struct s3_wal *wal)
 
 	/* The copy already in the buffer has the old flags, so patch it
 	 * in place rather than reassembling. */
-	memcpy(cursor - (sizeof(last->hdr) + last->payload_len),
-		   &last->hdr, sizeof(last->hdr));
+	memcpy(cursor - sizeof(last->hdr), &last->hdr, sizeof(last->hdr));
 
 	/* Pad up to a 4 KiB boundary (I4). The tail is zeroed so recovery reads
 	 * a zero magic and stops there. */
@@ -565,6 +578,9 @@ wal_kick(struct s3_wal *wal)
 		memset((uint8_t *)wal->batch_buf + used, 0, padded - used);
 	}
 	used = padded;
+	if (batch_ops > wal->stats.max_batch_ops) {
+		wal->stats.max_batch_ops = batch_ops;
+	}
 
 	wal->batch_len = used;
 	wal->batch_in_flight = true;
@@ -622,83 +638,79 @@ wal_batch_poller(void *arg)
 }
 
 /* Queue an op and trigger a batch when any threshold is met. */
-static void
-wal_submit(struct s3_wal *wal, enum s3_wal_entry_type type, uint64_t lba,
-	   uint32_t nblocks, const void *payload, uint32_t payload_len,
-	   uint64_t chunk_index, uint64_t *out_seq, s3_wal_cb cb_fn, void *cb_arg)
+static int
+wal_submit_barrier(struct s3_wal *wal, uint64_t *out_seq,
+		   s3_wal_cb cb_fn, void *cb_arg)
 {
 	struct s3_wal_op *op;
+	int status;
+
+	/* Once shm owns post-replay payloads, there is no disk-WAL write for a
+	 * barrier to fence. Giving it a new sequence would put a disk record above
+	 * the deliberately fixed disk_seq_limit, where it can never be truncated.
+	 * Complete as a no-op instead. */
+	if (wal->memory_only_started) {
+		if (out_seq) {
+			*out_seq = 0;
+		}
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return 0;
+	}
 
 	if (wal->busy) {
 		SPDK_ERRLOG("WAL is busy (formatting or replaying); append rejected\n");
-		if (cb_fn) {
-			cb_fn(cb_arg, -EBUSY);
-		}
-		return;
+		status = -EBUSY;
+		goto reject;
 	}
 	if (wal->state == S3_WAL_FAILED) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -EIO);
-		}
-		return;
+		status = -EIO;
+		goto reject;
 	}
 	if (wal->state == S3_WAL_CLOSING) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -ESHUTDOWN);
-		}
-		return;
+		status = -ESHUTDOWN;
+		goto reject;
 	}
 	/* Backpressure is a retry signal, not a failure: blobstore will queue
 	 * and resubmit. */
 	if (wal->state == S3_WAL_BACKPRESSURE) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -EAGAIN);
-		}
-		return;
+		status = -EAGAIN;
+		goto reject;
 	}
-	if (payload_len > S3_WAL_MAX_PAYLOAD) {
-		SPDK_ERRLOG("WAL op too large: %u bytes of payload, limit is %d "
-			    "(the caller has to split)\n",
-			    payload_len, S3_WAL_MAX_PAYLOAD);
-		if (cb_fn) {
-			cb_fn(cb_arg, -EINVAL);
+	/* Reserve ring space at enqueue time, including one segment of wrap
+	 * headroom, so a later wal_kick() cannot discover ENOSPC after accepting
+	 * the durability fence. */
+	{
+		uint64_t reserve = SPDK_ALIGN_CEIL(
+			sizeof(struct s3_wal_entry_hdr), S3_WAL_BLOCK_SIZE);
+		uint64_t committed = wal_used(wal) + wal->batch_len;
+		uint64_t limit = wal_capacity(wal) *
+				 S3_WAL_BACKPRESSURE_ON_PCT / 100;
+
+		if (committed + wal->pending_reserved_bytes + reserve +
+		    wal->seg_size >= limit) {
+			status = -EAGAIN;
+			goto reject;
 		}
-		return;
 	}
 
 	op = calloc(1, sizeof(*op));
 	if (!op) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -ENOMEM);
-		}
-		return;
+		status = -ENOMEM;
+		goto reject;
 	}
 
-	if (payload_len) {
-		/* Copied because the caller is explicitly allowed to reuse its
-		 * buffer as soon as this returns. */
-		op->payload = malloc(payload_len);
-		if (!op->payload) {
-			free(op);
-			if (cb_fn) {
-				cb_fn(cb_arg, -ENOMEM);
-			}
-			return;
-		}
-		memcpy(op->payload, payload, payload_len);
-	}
-	op->payload_len = payload_len;
 	op->cb_fn       = cb_fn;
 	op->cb_arg      = cb_arg;
 
 	op->hdr.magic       = S3_WAL_ENTRY_MAGIC;
-	op->hdr.type        = (uint8_t)type;
+	op->hdr.type        = S3_WAL_BARRIER;
 	op->hdr.hdr_len     = (uint16_t)sizeof(op->hdr);
 	op->hdr.seq         = wal_make_seq(wal, wal->seq_next++);
-	op->hdr.lba         = lba;
-	op->hdr.nblocks     = nblocks;
-	op->hdr.payload_len = payload_len;
-	op->hdr.chunk_index = chunk_index;
+	/* No memory-only gap exists yet, so every sequence below this new limit
+	 * has a corresponding disk record (or predates this process). */
+	wal->disk_seq_limit = wal_make_seq(wal, wal->seq_next);
 
 	if (out_seq) {
 		*out_seq = op->hdr.seq;
@@ -709,62 +721,33 @@ wal_submit(struct s3_wal *wal, enum s3_wal_entry_type type, uint64_t lba,
 	}
 	STAILQ_INSERT_TAIL(&wal->pending, op, link);
 	wal->pending_ops++;
-	wal->pending_bytes += payload_len;
+	wal->pending_reserved_bytes += SPDK_ALIGN_CEIL(
+		sizeof(struct s3_wal_entry_hdr), S3_WAL_BLOCK_SIZE);
 	wal->stats.appends++;
 
-	if (wal->pending_bytes >= S3_WAL_BATCH_TARGET_BYTES ||
-	    wal->pending_ops >= S3_WAL_BATCH_MAX_OPS) {
+	if (wal->pending_ops >= S3_WAL_BATCH_MAX_OPS) {
 		wal_kick(wal);
 	}
+	return 0;
+
+reject:
+	if (cb_fn) {
+		cb_fn(cb_arg, status);
+	}
+	return status;
 }
 
 void
-s3_wal_append_write(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
-		    const void *payload, uint64_t chunk_index,
-		    uint64_t *out_seq, s3_wal_cb cb_fn, void *cb_arg)
+s3_wal_append_barrier(struct s3_wal *wal, uint64_t *out_seq,
+		      s3_wal_cb cb_fn, void *cb_arg)
 {
-	if (!wal || !payload || nblocks == 0) {
+	if (!wal) {
 		if (cb_fn) {
 			cb_fn(cb_arg, -EINVAL);
 		}
 		return;
 	}
-
-	wal_submit(wal, S3_WAL_WRITE, lba, nblocks, payload,
-		   nblocks * S3_WAL_BLOCK_SIZE, chunk_index, out_seq,
-		   cb_fn, cb_arg);
-}
-
-void
-s3_wal_append_zeroes(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
-		     uint64_t chunk_index, uint64_t *out_seq,
-		     s3_wal_cb cb_fn, void *cb_arg)
-{
-	if (!wal || nblocks == 0) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -EINVAL);
-		}
-		return;
-	}
-
-	wal_submit(wal, S3_WAL_WRITE_ZEROES, lba, nblocks, NULL, 0, chunk_index,
-		   out_seq, cb_fn, cb_arg);
-}
-
-void
-s3_wal_append_unmap(struct s3_wal *wal, uint64_t lba, uint32_t nblocks,
-		    uint64_t chunk_index, uint64_t *out_seq,
-		    s3_wal_cb cb_fn, void *cb_arg)
-{
-	if (!wal || nblocks == 0) {
-		if (cb_fn) {
-			cb_fn(cb_arg, -EINVAL);
-		}
-		return;
-	}
-
-	wal_submit(wal, S3_WAL_UNMAP, lba, nblocks, NULL, 0, chunk_index,
-		   out_seq, cb_fn, cb_arg);
+	(void)wal_submit_barrier(wal, out_seq, cb_fn, cb_arg);
 }
 
 /* ==========================================================================
@@ -892,12 +875,6 @@ wal_setup_geometry(struct s3_wal *wal, uint32_t seg_size)
 			    seg_size, S3_WAL_BLOCK_SIZE);
 		return -EINVAL;
 	}
-	if (seg_size < S3_WAL_BATCH_BUF_SIZE) {
-		SPDK_ERRLOG("WAL seg_size %u is smaller than the batch buffer %d\n",
-			    seg_size, S3_WAL_BATCH_BUF_SIZE);
-		return -EINVAL;
-	}
-
 	ring_bytes = wal->region_size - S3_WAL_SUPER_SIZE;
 
 	/* Reserve two segments of slack so a batch never straddles the end. */
@@ -909,6 +886,8 @@ wal_setup_geometry(struct s3_wal *wal, uint32_t seg_size)
 
 	wal->seg_size  = seg_size;
 	wal->seg_count = (uint32_t)(ring_bytes / seg_size) - 2;
+	wal->batch_buf_size = spdk_min(seg_size,
+				       (uint32_t)S3_WAL_BATCH_BUF_SIZE);
 
 	/* Sized here rather than in wal_alloc() because seg_count is only known
 	 * now. open() calls this twice (default first, then the on-disk value),
@@ -991,6 +970,7 @@ wal_free(struct s3_wal *wal)
 		spdk_dma_free(wal->super_buf);
 	}
 	free(wal->seg_max_seq);
+	free(wal->replay_ranges);
 	free(wal);
 }
 
@@ -1069,10 +1049,10 @@ wal_create_super_written(void *cb_arg, int status)
 		return;
 	}
 
-	/* Zero the first block of segment 0 so a scan sees a zero magic and
-	 * concludes "empty" rather than reading stale bytes. Only one block is
-	 * cleared: recovery stops at the first unreadable entry, so there is no
-	 * need to erase gigabytes at format time. */
+	/* Zero the first block of segment 0. A zero header ends the log, so
+	 * stale bytes further on are not replayed and do not need to be
+	 * erased. A non-zero damaged header is still corruption when a later
+	 * entry from this same epoch is present. */
 	memset(wal->batch_buf, 0, S3_WAL_BLOCK_SIZE);
 
 	rc = spdk_bdev_write(wal->desc, wal->ch, wal->batch_buf, wal->ring_offset,
@@ -1116,6 +1096,7 @@ s3_wal_create(struct s3_local_dev *local_dev, const struct s3_wal_opts *opts,
 	 * zero, which is indistinguishable from an unwritten entry. */
 	wal->epoch         = 1;
 	wal->seq_next      = 1;
+	wal->disk_seq_limit = wal_make_seq(wal, wal->seq_next);
 	wal->batch_id_next = 1;
 	wal->head          = 0;
 	wal->tail          = 0;
@@ -1378,12 +1359,23 @@ struct wal_replay_ctx {
 	uint32_t                 batch_count;
 	uint32_t                 batch_cap;
 	uint64_t                 batch_id;
+	uint64_t                 batch_start;
+	/* Highest seq belonging to a closed batch. An open tail must not advance
+	 * the durable cursor past this. */
+	uint64_t                 sealed_seq;
 
 	uint64_t            applied;
 	uint64_t            dropped;
 
 	int                 status;
 	bool                stop;
+	/* The bytes that stopped the scan are not a zero header, and this log has
+	 * already produced a same-epoch entry. The next segment's first header is
+	 * checked before those bytes are accepted as a torn tail. */
+	bool                confirm_tail;
+	bool                tail_check;
+	/* scan_pos is moved to the next segment only for the confirmation read. */
+	uint64_t            tail_pos;
 };
 
 static void wal_replay_read_segment(struct wal_replay_ctx *rctx);
@@ -1393,6 +1385,7 @@ wal_replay_reset_batch(struct wal_replay_ctx *rctx)
 {
 	rctx->batch_count = 0;
 	rctx->batch_id = 0;
+	rctx->batch_start = 0;
 }
 
 static void
@@ -1402,22 +1395,49 @@ wal_replay_done(struct wal_replay_ctx *rctx, int status)
 	s3_wal_cb done_fn = rctx->done_fn;
 	void *done_arg = rctx->done_arg;
 
-	/* An unclosed trailing batch is discarded, which is exactly W4. */
-	if (rctx->batch_count > 0) {
+	uint64_t next_local;
+
+	/* A crash may leave only the final, not-yet-committed batch open. An open
+	 * batch that starts before the super block's durable head is corruption:
+	 * that region was already committed when the super was written. */
+	if (status == 0 && rctx->batch_count > 0 &&
+	    rctx->batch_start < wal->head) {
+		SPDK_ERRLOG("WAL replay found an unclosed batch inside the "
+			    "committed region at %" PRIu64 "\n",
+			    rctx->batch_start);
+		status = -EILSEQ;
+	}
+	if (status == 0 && rctx->batch_count > 0) {
 		SPDK_NOTICELOG("WAL replay dropping an unclosed trailing batch of "
 			       "%u entries\n", rctx->batch_count);
 		rctx->dropped++;
+		/* scan_pos has moved past the complete entries of this batch. Those
+		 * entries are not durable: leaving head there makes the next open
+		 * treat the same bytes as committed corruption. */
+		rctx->scan_pos = rctx->batch_start;
+		rctx->max_seq = rctx->sealed_seq;
 	}
 
-	wal->head     = rctx->scan_pos;
-	wal->seq_next = (rctx->max_seq & 0xFFFFFFFFFFFFULL) + 1;
+	if (status == 0) {
+		wal->head     = rctx->scan_pos;
+		next_local    = (rctx->max_seq & 0xFFFFFFFFFFFFULL) + 1;
+		if (next_local > wal->seq_next) {
+			wal->seq_next = next_local;
+		}
+		/* Seal the on-disk high water before any memory-only seq is handed
+		 * out. Replay of an older volume stops here; everything above it
+		 * lives in shm and must not be checkpointed as if the log had it. */
+		wal->disk_seq_limit = rctx->max_seq + 1;
 
-	wal->stats.replayed_entries += rctx->applied;
-	wal->stats.dropped_batches  += rctx->dropped;
+		wal->stats.replayed_entries += rctx->applied;
+		wal->stats.dropped_batches  += rctx->dropped;
 
-	SPDK_NOTICELOG("WAL replay done: %" PRIu64 " entries applied, %" PRIu64
-		       " batches dropped, head=%" PRIu64 ", seq_next=%" PRIu64 "\n",
-		       rctx->applied, rctx->dropped, wal->head, wal->seq_next);
+		SPDK_NOTICELOG("WAL replay done: %" PRIu64 " entries applied, %"
+			       PRIu64 " batches dropped, head=%" PRIu64
+			       ", seq_next=%" PRIu64 "\n",
+			       rctx->applied, rctx->dropped, wal->head,
+			       wal->seq_next);
+	}
 
 	free(rctx->batch_hdrs);
 	free(rctx->batch_payloads);
@@ -1432,13 +1452,66 @@ wal_replay_done(struct wal_replay_ctx *rctx, int status)
 	}
 }
 
+static int
+wal_record_replay_range(struct s3_wal *wal, uint64_t first, uint64_t last)
+{
+	struct s3_wal_replay_range *ranges;
+	uint32_t capacity;
+
+	if (first == 0 || last < first) {
+		return -EINVAL;
+	}
+	if (wal->replay_range_count != 0) {
+		struct s3_wal_replay_range *prev =
+			&wal->replay_ranges[wal->replay_range_count - 1];
+
+		if (first <= prev->last ||
+		    (prev->last != UINT64_MAX && first == prev->last + 1)) {
+			if (last > prev->last) {
+				prev->last = last;
+			}
+			return 0;
+		}
+	}
+	if (wal->replay_range_count == wal->replay_range_capacity) {
+		capacity = wal->replay_range_capacity ?
+			   wal->replay_range_capacity * 2 : 16;
+		ranges = realloc(wal->replay_ranges,
+				 (size_t)capacity * sizeof(*ranges));
+		if (!ranges) {
+			return -ENOMEM;
+		}
+		wal->replay_ranges = ranges;
+		wal->replay_range_capacity = capacity;
+	}
+	wal->replay_ranges[wal->replay_range_count++] =
+		(struct s3_wal_replay_range){.first = first, .last = last};
+	return 0;
+}
+
 /* Apply a closed batch in seq order. */
 static int
 wal_replay_flush_batch(struct wal_replay_ctx *rctx)
 {
 	int rc = 0;
+	uint64_t batch_max_seq = 0;
+	uint64_t batch_first_seq;
+
+	if (rctx->batch_count == 0) {
+		return 0;
+	}
+	batch_first_seq = rctx->batch_hdrs[0].seq;
 
 	for (uint32_t i = 0; i < rctx->batch_count; i++) {
+		if (rctx->batch_hdrs[i].seq > batch_max_seq) {
+			batch_max_seq = rctx->batch_hdrs[i].seq;
+		}
+		/* Already uploaded on a previous run. Applying it again puts the
+		 * same bytes back in the overlay, and the flusher publishes a new
+		 * object and deletes the one an export manifest still names. */
+		if (rctx->batch_hdrs[i].seq <= rctx->wal->ckpt_seq) {
+			continue;
+		}
 		rc = rctx->apply_fn(rctx->apply_arg, &rctx->batch_hdrs[i],
 				    rctx->batch_payloads[i]);
 		if (rc != 0) {
@@ -1447,6 +1520,16 @@ wal_replay_flush_batch(struct wal_replay_ctx *rctx)
 			break;
 		}
 		rctx->applied++;
+	}
+	if (rc == 0 && batch_max_seq > rctx->wal->replay_durable_seq) {
+		rctx->wal->replay_durable_seq = batch_max_seq;
+	}
+	if (rc == 0 && batch_max_seq > rctx->sealed_seq) {
+		rctx->sealed_seq = batch_max_seq;
+	}
+	if (rc == 0) {
+		rc = wal_record_replay_range(rctx->wal, batch_first_seq,
+					     batch_max_seq);
 	}
 
 	wal_replay_reset_batch(rctx);
@@ -1484,6 +1567,66 @@ wal_replay_stash(struct wal_replay_ctx *rctx, const struct s3_wal_entry_hdr *hdr
 	return 0;
 }
 
+/* Records written before this open belong to the previous epoch: open() bumps
+ * the epoch before replay. A checkpoint seq, when present, names that epoch
+ * directly and wins over the bump. */
+static uint64_t
+wal_replay_entry_epoch(const struct wal_replay_ctx *rctx)
+{
+	if (rctx->max_seq != 0) {
+		return rctx->max_seq >> 48;
+	}
+	return rctx->wal->epoch > 0 ? rctx->wal->epoch - 1 : 0;
+}
+
+static bool
+wal_replay_entry_continues(const struct wal_replay_ctx *rctx,
+			   const struct s3_wal_entry_hdr *hdr)
+{
+	uint64_t epoch = wal_replay_entry_epoch(rctx);
+
+	return epoch != 0 &&
+	       hdr->magic == S3_WAL_ENTRY_MAGIC &&
+	       hdr->hdr_len == sizeof(*hdr) &&
+	       wal_hdr_crc(hdr) == hdr->crc_hdr &&
+	       hdr->batch_id != 0 &&
+	       hdr->seq > rctx->max_seq &&
+	       (hdr->seq >> 48) == epoch;
+}
+
+/* A batch always starts on a block boundary. A later header counts only when it
+ * belongs to this log's write epoch. Format clears one block and leaves the
+ * rest of a dirty device untouched, so an older epoch must not turn a torn tail
+ * into -EILSEQ. A zero header is not passed here: it is the end of the log. */
+static bool
+wal_replay_has_later_entry(const struct wal_replay_ctx *rctx,
+			   const uint8_t *base, uint64_t off_in_seg)
+{
+	uint64_t probe = SPDK_ALIGN_CEIL(off_in_seg + 1, S3_WAL_BLOCK_SIZE);
+
+	for (; probe + sizeof(struct s3_wal_entry_hdr) <= rctx->wal->seg_size;
+	     probe += S3_WAL_BLOCK_SIZE) {
+		const struct s3_wal_entry_hdr *hdr =
+			(const struct s3_wal_entry_hdr *)(base + probe);
+
+		if (wal_replay_entry_continues(rctx, hdr)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+wal_replay_note_tail(struct wal_replay_ctx *rctx,
+		     const struct s3_wal_entry_hdr *hdr)
+{
+	rctx->stop = true;
+	/* Confirm a non-zero tear against the next segment only after this log
+	 * has produced an entry. An empty log's later segments are pre-format
+	 * bytes; a zero header is the format end and is not confirmed. */
+	rctx->confirm_tail = hdr->magic != 0 && rctx->max_seq != 0;
+}
+
 static void
 wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
@@ -1504,6 +1647,24 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 	seg_start = rctx->scan_pos - (rctx->scan_pos % wal->seg_size);
 	off_in_seg = rctx->scan_pos - seg_start;
 
+	if (rctx->tail_check) {
+		const struct s3_wal_entry_hdr *next =
+			(const struct s3_wal_entry_hdr *)base;
+
+		/* Only the first header. A continuation after END starts there;
+		 * scanning the rest of an unused segment would read pre-format
+		 * bytes left behind because format does not wipe the ring. */
+		if (wal_replay_entry_continues(rctx, next)) {
+			SPDK_ERRLOG("WAL torn bytes are followed by a later entry "
+				    "at the next segment\n");
+			wal_replay_done(rctx, -EILSEQ);
+			return;
+		}
+		rctx->scan_pos = rctx->tail_pos;
+		wal_replay_done(rctx, 0);
+		return;
+	}
+
 	while (off_in_seg + sizeof(struct s3_wal_entry_hdr) <= wal->seg_size) {
 		struct s3_wal_entry_hdr *hdr =
 			(struct s3_wal_entry_hdr *)(base + off_in_seg);
@@ -1511,18 +1672,57 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 		uint64_t total;
 
 		if (hdr->magic != S3_WAL_ENTRY_MAGIC) {
-			/* Zero or garbage: this is the end of the log. */
-			rctx->stop = true;
+			/* A zero header is the format end. Format clears one block
+			 * and leaves any older bytes in place, so those bytes are
+			 * not evidence that this header is middle corruption. */
+			if (rctx->scan_pos < wal->head ||
+			    (hdr->magic != 0 &&
+			     wal_replay_has_later_entry(rctx, base, off_in_seg))) {
+				SPDK_ERRLOG("WAL magic corruption inside the committed/"
+					    "live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			wal_replay_note_tail(rctx, hdr);
 			break;
 		}
 		if (wal_hdr_crc(hdr) != hdr->crc_hdr) {
-			SPDK_NOTICELOG("WAL replay stopping at a bad header CRC "
-				       "(seq %" PRIu64 ")\n", hdr->seq);
-			rctx->stop = true;
+			if (rctx->scan_pos < wal->head ||
+			    wal_replay_has_later_entry(rctx, base, off_in_seg)) {
+				SPDK_ERRLOG("WAL header CRC corruption inside the "
+					    "committed/live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			SPDK_NOTICELOG("WAL replay reached a torn tail with a bad "
+				       "header CRC\n");
+			wal_replay_note_tail(rctx, hdr);
+			break;
+		}
+		if (hdr->hdr_len != sizeof(*hdr)) {
+			if (rctx->scan_pos < wal->head ||
+			    wal_replay_has_later_entry(rctx, base, off_in_seg)) {
+				SPDK_ERRLOG("WAL header length corruption inside the "
+					    "committed/live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			wal_replay_note_tail(rctx, hdr);
 			break;
 		}
 
 		if (hdr->type == S3_WAL_END) {
+			if (hdr->payload_len != 0 ||
+			    !(hdr->flags & S3_WAL_F_LAST_IN_BATCH) ||
+			    rctx->batch_count > 0) {
+				SPDK_ERRLOG("Malformed WAL END sentinel at %" PRIu64
+					    "\n", rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
 			/* Segment closed early: jump to the next one. */
 			rctx->scan_pos = seg_start + wal->seg_size;
 			rctx->scanned_bytes += wal->seg_size - off_in_seg;
@@ -1536,11 +1736,17 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 
 		total = sizeof(*hdr) + hdr->payload_len;
 		if (off_in_seg + total > wal->seg_size) {
-			/* Header claims a payload that runs past the segment,
-			 * which can only be corruption. */
-			SPDK_NOTICELOG("WAL replay stopping: entry at %" PRIu64
-				       " overruns its segment\n", rctx->scan_pos);
-			rctx->stop = true;
+			if (rctx->scan_pos < wal->head ||
+			    wal_replay_has_later_entry(rctx, base, off_in_seg)) {
+				SPDK_ERRLOG("WAL length corruption inside the committed/"
+					    "live region at %" PRIu64 "\n",
+					    rctx->scan_pos);
+				wal_replay_done(rctx, -EILSEQ);
+				return;
+			}
+			SPDK_NOTICELOG("WAL replay reached a torn tail whose entry "
+				       "overruns its segment\n");
+			wal_replay_note_tail(rctx, hdr);
 			break;
 		}
 
@@ -1548,19 +1754,32 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 			payload = base + off_in_seg + sizeof(*hdr);
 			if (spdk_crc32c_update(payload, hdr->payload_len, ~0u) !=
 			    hdr->crc_payload) {
-				SPDK_NOTICELOG("WAL replay stopping at a bad payload "
-					       "CRC (seq %" PRIu64 ")\n", hdr->seq);
-				rctx->stop = true;
+				if (rctx->scan_pos < wal->head ||
+				    wal_replay_has_later_entry(rctx, base,
+							       off_in_seg)) {
+					SPDK_ERRLOG("WAL payload CRC corruption inside "
+						    "the committed/live region at %"
+						    PRIu64 "\n", rctx->scan_pos);
+					wal_replay_done(rctx, -EILSEQ);
+					return;
+				}
+				SPDK_NOTICELOG("WAL replay reached a torn tail with a "
+					       "bad payload CRC\n");
+				wal_replay_note_tail(rctx, hdr);
 				break;
 			}
 		}
 
-		/* A new batch_id means the previous batch never closed. */
+		/* Only the final crash batch may be unclosed. Seeing another batch
+		 * after it proves the hole is in the middle of the live log. */
 		if (rctx->batch_count > 0 && hdr->batch_id != rctx->batch_id) {
-			SPDK_NOTICELOG("WAL replay dropping an unclosed batch %" PRIu64
-				       "\n", rctx->batch_id);
-			rctx->dropped++;
-			wal_replay_reset_batch(rctx);
+			SPDK_ERRLOG("WAL batch %" PRIu64 " is unclosed before batch %"
+				    PRIu64 "\n", rctx->batch_id, hdr->batch_id);
+			wal_replay_done(rctx, -EILSEQ);
+			return;
+		}
+		if (rctx->batch_count == 0) {
+			rctx->batch_start = rctx->scan_pos;
 		}
 		rctx->batch_id = hdr->batch_id;
 
@@ -1596,6 +1815,16 @@ wal_replay_segment_read(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg
 
 	if (rctx->stop || off_in_seg >= wal->seg_size) {
 		if (rctx->stop) {
+			if (rctx->confirm_tail &&
+			    seg_start + wal->seg_size < wal_capacity(wal)) {
+				rctx->confirm_tail = false;
+				rctx->tail_check = true;
+				rctx->stop = false;
+				rctx->tail_pos = rctx->scan_pos;
+				rctx->scan_pos = seg_start + wal->seg_size;
+				wal_replay_read_segment(rctx);
+				return;
+			}
 			wal_replay_done(rctx, 0);
 			return;
 		}
@@ -1671,8 +1900,14 @@ s3_wal_replay(struct s3_wal *wal, s3_wal_replay_cb apply_fn, void *apply_arg,
 	rctx->apply_arg = apply_arg;
 	rctx->done_fn   = done_fn;
 	rctx->done_arg  = done_arg;
-	rctx->scan_pos  = wal->ckpt_head;
-	rctx->max_seq   = wal->ckpt_seq;
+	rctx->scan_pos   = wal->ckpt_head;
+	rctx->max_seq    = wal->ckpt_seq;
+	rctx->sealed_seq = wal->ckpt_seq;
+	wal->replay_durable_seq = wal->ckpt_seq;
+	free(wal->replay_ranges);
+	wal->replay_ranges = NULL;
+	wal->replay_range_count = 0;
+	wal->replay_range_capacity = 0;
 
 	/* No appends while head and the scan cursor are both moving. */
 	wal->busy = true;
@@ -1760,6 +1995,15 @@ s3_wal_truncate_to_seq(struct s3_wal *wal, uint64_t safe_seq)
 	return true;
 }
 
+bool
+s3_wal_ckpt_behind(const struct s3_wal *wal, uint64_t safe_seq)
+{
+	if (!wal || wal->busy || safe_seq == 0) {
+		return false;
+	}
+	return safe_seq > wal->ckpt_seq;
+}
+
 /* ==========================================================================
  * Accessors
  * ========================================================================== */
@@ -1768,6 +2012,69 @@ uint64_t
 s3_wal_get_next_seq(const struct s3_wal *wal)
 {
 	return wal ? wal_make_seq(wal, wal->seq_next) : 0;
+}
+
+uint64_t
+s3_wal_disk_seq_limit(const struct s3_wal *wal)
+{
+	return wal ? wal->disk_seq_limit : 0;
+}
+
+uint64_t
+s3_wal_alloc_mem_seq(struct s3_wal *wal)
+{
+	uint64_t seq;
+
+	if (!wal) {
+		return 0;
+	}
+	seq = wal_make_seq(wal, wal->seq_next++);
+	wal->memory_only_started = true;
+	if (wal->disk_seq_limit == 0) {
+		wal->disk_seq_limit = seq;
+	}
+	return seq;
+}
+
+void
+s3_wal_note_mem_seq(struct s3_wal *wal, uint64_t seq)
+{
+	uint64_t local;
+
+	if (!wal || seq == 0) {
+		return;
+	}
+	wal->memory_only_started = true;
+	local = seq & 0xFFFFFFFFFFFFULL;
+	if (local >= wal->seq_next) {
+		wal->seq_next = local + 1;
+	}
+}
+
+bool
+s3_wal_seq_recovered(const struct s3_wal *wal, uint64_t seq)
+{
+	if (!wal || seq == 0) {
+		return false;
+	}
+	if (seq <= wal->ckpt_seq) {
+		return true;
+	}
+	for (uint32_t i = 0; i < wal->replay_range_count; i++) {
+		if (seq < wal->replay_ranges[i].first) {
+			return false;
+		}
+		if (seq <= wal->replay_ranges[i].last) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
+s3_wal_seq_checkpointed(const struct s3_wal *wal, uint64_t seq)
+{
+	return wal && seq != 0 && seq <= wal->ckpt_seq;
 }
 
 void

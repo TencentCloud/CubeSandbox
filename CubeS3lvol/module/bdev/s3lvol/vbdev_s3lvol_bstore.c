@@ -22,11 +22,14 @@
  */
 
 #include "spdk/stdinc.h"
+#include "spdk/json.h"
 #include "spdk/log.h"
 #include "spdk/string.h"
+#include "spdk/util.h"
 #include "spdk/uuid.h"
 
 #include "vbdev_s3lvol.h"
+#include "vbdev_s3lvol_json.h"
 
 SPDK_LOG_REGISTER_COMPONENT(s3lvol_bstore)
 
@@ -58,10 +61,55 @@ bstore_generate_bs_name(char *out, size_t out_size)
  * lives in one place -- rcow_active_lvols has the same requirement.
  * -------------------------------------------------------------------------- */
 
-static char *
-bstore_read_file(void)
+static int
+bstore_read_file(char **out)
 {
-	return s3lvol_statefile_read(BSTORE_PATH);
+	struct stat st;
+	char *buf;
+	size_t off = 0;
+	ssize_t n;
+	int fd, rc = 0;
+
+	*out = NULL;
+	fd = open(BSTORE_PATH, O_RDONLY | O_NOFOLLOW);
+	if (fd < 0) {
+		return errno == ENOENT ? 0 : -errno;
+	}
+	if (fstat(fd, &st) != 0) {
+		rc = -errno;
+		goto done;
+	}
+	if (st.st_size < 0 || (uint64_t)st.st_size > SIZE_MAX - 1) {
+		rc = -EOVERFLOW;
+		goto done;
+	}
+	buf = calloc(1, (size_t)st.st_size + 1);
+	if (!buf) {
+		rc = -ENOMEM;
+		goto done;
+	}
+	while (off < (size_t)st.st_size) {
+		n = read(fd, buf + off, (size_t)st.st_size - off);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			rc = -errno;
+			free(buf);
+			goto done;
+		}
+		if (n == 0) {
+			rc = -EIO;
+			free(buf);
+			goto done;
+		}
+		off += (size_t)n;
+	}
+	*out = buf;
+
+done:
+	close(fd);
+	return rc;
 }
 
 static int
@@ -70,162 +118,233 @@ bstore_write_file(const char *s)
 	return s3lvol_statefile_write(BSTORE_PATH, s);
 }
 
-/* --------------------------------------------------------------------------
- * Rewrite the file, replacing or inserting one top-level entry.
- *
- * If `bs_name` is NULL the entry is removed; otherwise it is written or
- * updated.
- *
- * Parsing is intentionally minimal: each top-level key is a quoted string
- * followed by `:{` ... `}`. That is the entirety of the format.
- * -------------------------------------------------------------------------- */
+struct bstore_entry {
+	char *lvs_name;
+	char *bs_name;
+	char *ns_name;
+	char *wal_bdev;
+};
+
+static const struct spdk_json_object_decoder bstore_entry_decoders[] = {
+	{"bs_name", offsetof(struct bstore_entry, bs_name), spdk_json_decode_string, false},
+	{"ns_name", offsetof(struct bstore_entry, ns_name), spdk_json_decode_string, true},
+	{"wal_bdev", offsetof(struct bstore_entry, wal_bdev), spdk_json_decode_string, true},
+};
+
+static void
+bstore_entries_free(struct bstore_entry *entries, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++) {
+		free(entries[i].lvs_name);
+		free(entries[i].bs_name);
+		free(entries[i].ns_name);
+		free(entries[i].wal_bdev);
+	}
+	free(entries);
+}
+
+static int
+bstore_parse(char *text, struct bstore_entry **entries_out, size_t *count_out)
+{
+	struct spdk_json_val *values = NULL, *it, *end;
+	struct bstore_entry *entries = NULL;
+	ssize_t num_values, rc;
+	size_t count = 0;
+	int status = 0;
+
+	*entries_out = NULL;
+	*count_out = 0;
+	if (!text) {
+		return 0;
+	}
+
+	num_values = spdk_json_parse(text, strlen(text), NULL, 0, NULL, 0);
+	if (num_values <= 0) {
+		return -EINVAL;
+	}
+	values = calloc((size_t)num_values, sizeof(*values));
+	if (!values) {
+		return -ENOMEM;
+	}
+	rc = spdk_json_parse(text, strlen(text), values, (size_t)num_values, NULL,
+			     SPDK_JSON_PARSE_FLAG_DECODE_IN_PLACE);
+	if (rc != num_values || values[0].type != SPDK_JSON_VAL_OBJECT_BEGIN) {
+		status = -EINVAL;
+		goto out;
+	}
+
+	end = values + num_values;
+	it = &values[1];
+	while (it != NULL && it < end && it->type == SPDK_JSON_VAL_NAME) {
+		struct bstore_entry *grown;
+		struct spdk_json_val *obj = it + 1;
+
+		grown = realloc(entries, (count + 1) * sizeof(*entries));
+		if (!grown) {
+			status = -ENOMEM;
+			goto out;
+		}
+		entries = grown;
+		memset(&entries[count], 0, sizeof(entries[count]));
+		count++;
+		entries[count - 1].lvs_name = strndup(it->start, it->len);
+		if (!entries[count - 1].lvs_name) {
+			status = -ENOMEM;
+			goto out;
+		}
+		if (spdk_json_decode_object(obj, bstore_entry_decoders,
+					    SPDK_COUNTOF(bstore_entry_decoders),
+					    &entries[count - 1]) != 0) {
+			status = -EINVAL;
+			goto out;
+		}
+		it = spdk_json_next(obj);
+	}
+	if ((it != NULL && (it >= end || it->type != SPDK_JSON_VAL_OBJECT_END)) ||
+	    values[num_values - 1].type != SPDK_JSON_VAL_OBJECT_END) {
+		status = -EINVAL;
+	}
+
+out:
+	free(values);
+	if (status != 0) {
+		bstore_entries_free(entries, count);
+		return status;
+	}
+	*entries_out = entries;
+	*count_out = count;
+	return 0;
+}
+
+static int
+bstore_serialize(const struct bstore_entry *entries, size_t count, char **out)
+{
+	struct s3lvol_json_buf buf = {0};
+	struct spdk_json_write_ctx *w;
+	size_t i;
+	int rc;
+
+	w = spdk_json_write_begin(s3lvol_json_buf_append, &buf, 0);
+	if (!w) {
+		return -ENOMEM;
+	}
+	spdk_json_write_object_begin(w);
+	for (i = 0; i < count; i++) {
+		spdk_json_write_named_object_begin(w, entries[i].lvs_name);
+		spdk_json_write_named_string(w, "bs_name", entries[i].bs_name);
+		if (entries[i].ns_name) {
+			spdk_json_write_named_string(w, "ns_name", entries[i].ns_name);
+		}
+		if (entries[i].wal_bdev) {
+			spdk_json_write_named_string(w, "wal_bdev", entries[i].wal_bdev);
+		}
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_object_end(w);
+	rc = spdk_json_write_end(w);
+	if (rc != 0 || !buf.data) {
+		free(buf.data);
+		return rc != 0 ? rc : -ENOMEM;
+	}
+	*out = buf.data;
+	return 0;
+}
 
 static int
 bstore_rewrite(const char *lvs_name, const char *bs_name,
 	       const char *ns_name, const char *wal_bdev)
 {
-	char *old = bstore_read_file();
-	char *out, *p;
-	const char *rp, *end;
-	int own_entry = (bs_name != NULL) ? 1 : 0;
-	int found = 0;
-	size_t out_size, avail;
-	int rc;
+	char *old = NULL;
+	struct bstore_entry *entries = NULL;
+	char *out = NULL;
+	size_t count = 0, i;
+	bool found = false;
+	int rc = bstore_read_file(&old);
 
-	/* Sized from the actual strings rather than a round number: the entry is
-	 * "  \"<lvs>\": {\"bs_name\":\"<bs>\",\"ns_name\":\"<ns>\",\"wal_bdev\":\"<wal>\"}"
-	 * and each of those four names can be up to 63 characters, which together
-	 * with the punctuation overruns any fixed slack that looks big enough. A
-	 * snprintf() would then truncate mid-string and leave a file that does not
-	 * parse -- silently, and only noticed by whoever tries to recover from it.
-	 * The 128 covers the field names, braces, quotes and separators. */
-	out_size = (old ? strlen(old) : 0)
-		   + strlen(lvs_name)
-		   + (bs_name  ? strlen(bs_name)  : 0)
-		   + (ns_name  ? strlen(ns_name)  : 0)
-		   + (wal_bdev ? strlen(wal_bdev) : 0)
-		   + 128;
-
-	out = calloc(1, out_size);
-	if (!out) {
-		free(old);
-		return -ENOMEM;
+	if (rc != 0) {
+		SPDK_ERRLOG("bstore: cannot read %s: %s\n", BSTORE_PATH,
+			    spdk_strerror(-rc));
+		goto out;
 	}
+	rc = bstore_parse(old, &entries, &count);
+	if (rc != 0) {
+		SPDK_ERRLOG("bstore: %s is corrupt; refusing to rewrite it\n",
+			    BSTORE_PATH);
+		goto out;
+	}
+	for (i = 0; i < count; i++) {
+		if (strcmp(entries[i].lvs_name, lvs_name) != 0) {
+			continue;
+		}
+		found = true;
+		if (!bs_name) {
+			free(entries[i].lvs_name);
+			free(entries[i].bs_name);
+			free(entries[i].ns_name);
+			free(entries[i].wal_bdev);
+			memmove(&entries[i], &entries[i + 1],
+				(count - i - 1) * sizeof(entries[0]));
+			count--;
+		} else {
+			char *new_bs = strdup(bs_name);
+			char *new_ns = ns_name ? strdup(ns_name) : NULL;
+			char *new_wal = wal_bdev ? strdup(wal_bdev) : NULL;
 
-#define BSTORE_AVAIL() (out_size - (size_t)(p - out))
-
-	p = out;
-	p += snprintf(p, BSTORE_AVAIL(), "{\n");
-
-	if (old) {
-		rp = old;
-		end = old + strlen(old);
-
-		/* Skip past the opening '{'. */
-		while (rp < end && *rp != '{') { rp++; }
-		if (rp < end && *rp == '{') { rp++; }
-
-		while (rp < end) {
-			const char *k0, *k1;
-			const char *v0, *v1;
-			int depth;
-
-			/* Skip whitespace, commas and '}'. */
-			while (rp < end && (*rp == ' ' || *rp == '\n' ||
-				    *rp == '\r' || *rp == '\t' ||
-				    *rp == ',' || *rp == '}')) {
-				rp++;
+			if (!new_bs || (ns_name && !new_ns) || (wal_bdev && !new_wal)) {
+				free(new_bs);
+				free(new_ns);
+				free(new_wal);
+				rc = -ENOMEM;
+				goto out;
 			}
-			if (rp >= end) { break; }
+			free(entries[i].bs_name);
+			free(entries[i].ns_name);
+			free(entries[i].wal_bdev);
+			entries[i].bs_name = new_bs;
+			entries[i].ns_name = new_ns;
+			entries[i].wal_bdev = new_wal;
+		}
+		break;
+	}
+	if (bs_name && !found) {
+		struct bstore_entry *grown = realloc(entries, (count + 1) * sizeof(*entries));
 
-			/* Key: "…" */
-			k0 = rp + 1;
-			k1 = k0;
-			while (k1 < end && *k1 != '"') { k1++; }
-			if (k1 >= end) { break; }
-			rp = k1 + 1;
-
-			/* Skip to '{' of the value. */
-			while (rp < end && *rp != '{') { rp++; }
-			if (rp >= end) { break; }
-
-			/* Count braces to find the matching '}'. */
-			v0 = rp;
-			depth = 0;
-			while (rp < end) {
-				if (*rp == '{') { depth++; }
-				if (*rp == '}') { depth--; }
-				rp++;
-				if (depth == 0) { break; }
-			}
-			v1 = rp;
-
-			if ((size_t)(k1 - k0) == strlen(lvs_name) &&
-			    strncmp(k0, lvs_name, k1 - k0) == 0) {
-				found = 1;
-				if (!own_entry) {
-					/* Removal: just skip this one. */
-					continue;
-				}
-				/* Replace: write our own below, skip the old. */
-			} else {
-				/* Carry this entry forward unchanged. */
-				if (p > out + 2) {
-					p += snprintf(p, BSTORE_AVAIL(), ",\n");
-				}
-				p += snprintf(p, BSTORE_AVAIL(),
-					"  \"%.*s\": %.*s",
-					(int)(k1 - k0), k0,
-					(int)(v1 - v0), v0);
-			}
+		if (!grown) {
+			rc = -ENOMEM;
+			goto out;
+		}
+		entries = grown;
+		memset(&entries[count], 0, sizeof(entries[count]));
+		count++;
+		entries[count - 1].lvs_name = strdup(lvs_name);
+		entries[count - 1].bs_name = strdup(bs_name);
+		entries[count - 1].ns_name = ns_name ? strdup(ns_name) : NULL;
+		entries[count - 1].wal_bdev = wal_bdev ? strdup(wal_bdev) : NULL;
+		if (!entries[count - 1].lvs_name || !entries[count - 1].bs_name ||
+		    (ns_name && !entries[count - 1].ns_name) ||
+		    (wal_bdev && !entries[count - 1].wal_bdev)) {
+			rc = -ENOMEM;
+			goto out;
 		}
 	}
 
-	/* Write our entry (if not removing). */
-	if (own_entry) {
-		if (p > out + 2) {
-			p += snprintf(p, BSTORE_AVAIL(), ",\n");
-		}
-		p += snprintf(p, BSTORE_AVAIL(),
-			      "  \"%s\": {\"bs_name\":\"%s\"",
-			      lvs_name, bs_name);
-		if (ns_name) {
-			p += snprintf(p, BSTORE_AVAIL(),
-				      ",\"ns_name\":\"%s\"", ns_name);
-		}
-		if (wal_bdev) {
-			p += snprintf(p, BSTORE_AVAIL(),
-				      ",\"wal_bdev\":\"%s\"", wal_bdev);
-		}
-		p += snprintf(p, BSTORE_AVAIL(), "}");
+	rc = bstore_serialize(entries, count, &out);
+	if (rc != 0) {
+		goto out;
 	}
-
-	p += snprintf(p, BSTORE_AVAIL(), "\n}\n");
-
-	/* Sanity check on the sizing above: a truncated write means the file no
-	 * longer parses, and the only thing that reads it is recovery. */
-	avail = BSTORE_AVAIL();
-	if (avail == 0) {
-		SPDK_ERRLOG("bstore: entry for '%s' did not fit; refusing to write "
-			    "a truncated file\n", lvs_name);
-		free(out);
-		free(old);
-		return -ENAMETOOLONG;
-	}
-
-#undef BSTORE_AVAIL
-
-	/* Report what the write actually did. Returning 0 on a failed write would
-	 * tell the caller the entry is on disk when it is not. */
 	rc = bstore_write_file(out);
 	if (rc == 0) {
 		SPDK_NOTICELOG("bstore: %s entry for '%s'\n",
-			       own_entry ? (found ? "updated" : "saved") : "removed",
+			       bs_name ? (found ? "updated" : "saved") : "removed",
 			       lvs_name);
 	}
 
+out:
 	free(out);
 	free(old);
+	bstore_entries_free(entries, count);
 	return rc;
 }
 

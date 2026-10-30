@@ -58,6 +58,14 @@
 
 SPDK_LOG_REGISTER_COMPONENT(s3lvol_rpc)
 
+/* The hidden import template is an internal snapshot. Callers address the user
+ * lvol that was cloned from it. */
+static bool
+rpc_hides_lvol(const struct spdk_lvol *lvol)
+{
+	return s3lvol_lvol_is_import_template(lvol);
+}
+
 /* Sizes that name a volume or store capacity are taken in GiB, and the parameter
  * always says so: capacity_gib, size_gib. Both convert with << 30.
  *
@@ -317,6 +325,7 @@ struct rpc_create_lvstore {
 	uint32_t    journal_size_mb;
 	uint32_t    wal_size_mb;
 	uint32_t    cache_hot_bufs;
+	uint32_t    writeback_size_mb;
 
 	/* Seconds between automatic checkpoints; 0 takes the default. Bounds how
 	 * much journal a crash has to replay. */
@@ -343,6 +352,7 @@ static const struct spdk_json_object_decoder rpc_create_lvstore_decoders[] = {
 	{"journal_size_mb", offsetof(struct rpc_create_lvstore, journal_size_mb), spdk_json_decode_uint32, true},
 	{"wal_size_mb",  offsetof(struct rpc_create_lvstore, wal_size_mb),  spdk_json_decode_uint32, true},
 	{"cache_hot_bufs", offsetof(struct rpc_create_lvstore, cache_hot_bufs), spdk_json_decode_uint32, true},
+	{"writeback_size_mb", offsetof(struct rpc_create_lvstore, writeback_size_mb), spdk_json_decode_uint32, true},
 	{"force",        offsetof(struct rpc_create_lvstore, force),        spdk_json_decode_bool,   true},
 	{"checkpoint_interval_sec", offsetof(struct rpc_create_lvstore, checkpoint_interval_sec), spdk_json_decode_uint32, true},
 };
@@ -399,6 +409,13 @@ rpc_rcow_create_lvstore(struct spdk_jsonrpc_request *request,
 			request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 			"cache_hot_bufs must be at most %u",
 			S3_CACHE_HOT_BUFS_MAX);
+		goto cleanup;
+	}
+	if (req.writeback_size_mb != 0 &&
+	    (req.writeback_size_mb < 64 || req.writeback_size_mb > 4096)) {
+		spdk_jsonrpc_send_error_response(request,
+			SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+			"writeback_size_mb must be between 64 and 4096");
 		goto cleanup;
 	}
 
@@ -472,6 +489,7 @@ rpc_rcow_create_lvstore(struct spdk_jsonrpc_request *request,
 	opts.journal_size_mb = req.journal_size_mb;
 	opts.wal_size_mb     = req.wal_size_mb;
 	opts.cache_hot_bufs  = req.cache_hot_bufs;
+	opts.writeback_size_mb = req.writeback_size_mb;
 	opts.checkpoint_interval_sec = req.checkpoint_interval_sec;
 
 	rc = s3lvol_lvstore_create(&opts, rpc_create_lvstore_cb, request);
@@ -510,6 +528,7 @@ struct rpc_attach_lvstore {
 	char *cache_bdev;
 	bool  force;
 	uint32_t cache_hot_bufs;
+	uint32_t writeback_size_mb;
 
 	/* Not read back from the local device on purpose: the interval is a policy
 	 * of this process, not a property of the lvstore, so an attach may
@@ -534,7 +553,30 @@ static const struct spdk_json_object_decoder rpc_attach_lvstore_decoders[] = {
 	{"force",      offsetof(struct rpc_attach_lvstore, force),      spdk_json_decode_bool,   true},
 	{"checkpoint_interval_sec", offsetof(struct rpc_attach_lvstore, checkpoint_interval_sec), spdk_json_decode_uint32, true},
 	{"cache_hot_bufs", offsetof(struct rpc_attach_lvstore, cache_hot_bufs), spdk_json_decode_uint32, true},
+	{"writeback_size_mb", offsetof(struct rpc_attach_lvstore, writeback_size_mb), spdk_json_decode_uint32, true},
 };
+
+static void
+rpc_write_lvol_open_failures(struct spdk_json_write_ctx *w,
+			      struct s3lvol_lvstore *lvs)
+{
+	const struct s3lvol_lvol_open_failure *failure;
+
+	spdk_json_write_named_bool(w, "lvol_open_failures_complete", true);
+	spdk_json_write_named_array_begin(w, "lvol_open_failures");
+	for (failure = s3lvol_lvstore_open_failure_first(lvs); failure;
+	     failure = s3lvol_lvstore_open_failure_next(failure)) {
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_string(w, "name", failure->name);
+		spdk_json_write_named_string(w, "uuid", failure->uuid);
+		spdk_json_write_named_int32(w, "errno", failure->status);
+		spdk_json_write_named_string(w, "error",
+					     spdk_strerror(-failure->status));
+		spdk_json_write_named_uint32(w, "attempts", failure->attempts);
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_array_end(w);
+}
 
 static void
 rpc_attach_lvstore_cb(void *cb_arg, struct s3lvol_lvstore *lvs, int lvserrno)
@@ -565,6 +607,9 @@ rpc_attach_lvstore_cb(void *cb_arg, struct s3lvol_lvstore *lvs, int lvserrno)
 				     spdk_bs_free_cluster_count(store->blobstore));
 	spdk_json_write_named_array_begin(w, "lvols");
 	TAILQ_FOREACH(lvol, &store->lvols, link) {
+		if (rpc_hides_lvol(lvol)) {
+			continue;
+		}
 		spdk_json_write_object_begin(w);
 		spdk_json_write_named_string(w, "name", lvol->name);
 		if (lvol->bdev) {
@@ -576,6 +621,7 @@ rpc_attach_lvstore_cb(void *cb_arg, struct s3lvol_lvstore *lvs, int lvserrno)
 		spdk_json_write_object_end(w);
 	}
 	spdk_json_write_array_end(w);
+	rpc_write_lvol_open_failures(w, lvs);
 	spdk_json_write_object_end(w);
 	spdk_jsonrpc_end_result(request, w);
 }
@@ -605,6 +651,13 @@ rpc_rcow_attach_lvstore(struct spdk_jsonrpc_request *request,
 			S3_CACHE_HOT_BUFS_MAX);
 		goto cleanup;
 	}
+	if (req.writeback_size_mb != 0 &&
+	    (req.writeback_size_mb < 64 || req.writeback_size_mb > 4096)) {
+		spdk_jsonrpc_send_error_response(request,
+			SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+			"writeback_size_mb must be between 64 and 4096");
+		goto cleanup;
+	}
 
 	tgt = rcow_namespace_to_target(req.ns_name);
 	if (!tgt) {
@@ -622,6 +675,7 @@ rpc_rcow_attach_lvstore(struct spdk_jsonrpc_request *request,
 	opts.cache_bdev_name = req.cache_bdev;
 	opts.force           = req.force;
 	opts.cache_hot_bufs  = req.cache_hot_bufs;
+	opts.writeback_size_mb = req.writeback_size_mb;
 	opts.checkpoint_interval_sec = req.checkpoint_interval_sec;
 
 	rc = s3lvol_lvstore_attach(&opts, rpc_attach_lvstore_cb, request);
@@ -892,7 +946,7 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 	}
 
 	lvol = s3lvol_lvol_find_any(req.lvol_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		SPDK_WARNLOG("%s: lvol '%s' not found in any lvstore\n",
 			     snapshot ? "rcow_create_snapshot" : "rcow_create_clone",
 			     req.lvol_name);
@@ -1087,7 +1141,7 @@ rpc_lookup_lvol(struct spdk_jsonrpc_request *request,
 		}
 
 		lvol = s3lvol_lvol_find(lvs, req->lvol_name);
-		if (!lvol) {
+		if (!lvol || rpc_hides_lvol(lvol)) {
 			rpc_lvol_respond_errf(request, "lvstore '%s' has no lvol '%s'",
 					      req->lvs_name, req->lvol_name);
 			return NULL;
@@ -1097,7 +1151,7 @@ rpc_lookup_lvol(struct spdk_jsonrpc_request *request,
 
 	/* No lvs_name -- find the lvol by scanning all lvstores. */
 	lvol = s3lvol_lvol_find_any(req->lvol_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		rpc_lvol_respond_errf(request, "lvol '%s' not found in any lvstore",
 				      req->lvol_name);
 		return NULL;
@@ -1495,11 +1549,15 @@ rpc_rcow_delete_lvstore(struct spdk_jsonrpc_request *request,
 
 	lvs = s3lvol_lvstore_find(req.lvs_name);
 	if (!lvs) {
-		/* Not loaded here, so there is nothing to delete objects from -- but
-		 * a stale entry may still name it, and leaving that behind would send
-		 * a recovery script after an lvstore that is not coming back. */
-		bstore_remove_entry(req.lvs_name);
-		spdk_jsonrpc_send_bool_response(request, true);
+		/* A name alone cannot identify the ring incarnation safely, and an
+		 * unloaded lvstore is also the only state in which its final chunk
+		 * map is unavailable for deleting S3 objects. Removing just the
+		 * registry entry would falsely report a complete destroy and could
+		 * orphan both a non-empty recovery ring and its objects. */
+		spdk_jsonrpc_send_error_response_fmt(
+			request, -ENODEV,
+			"lvstore '%s' is not loaded; attach it before deleting",
+			req.lvs_name);
 		goto cleanup;
 	}
 
@@ -1719,6 +1777,16 @@ SPDK_RPC_REGISTER("rcow_resume_flushers",
  * Unlike rcow_resume_flushers this also lifts the namespace pause.
  * ========================================================================== */
 static void
+rpc_rcow_resume_subsystems_done(void *cb_arg, int status)
+{
+	struct spdk_jsonrpc_request *request = cb_arg;
+
+	rpc_lvol_write_response(
+		request, status == 0,
+		status == 0 ? "" : "one or more RCOW subsystems did not resume");
+}
+
+static void
 rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
 			   const struct spdk_json_val *params)
 {
@@ -1736,10 +1804,14 @@ rpc_rcow_resume_subsystems(struct spdk_jsonrpc_request *request,
 	 * bool_value alone, and test/tools/s3lvol_rpc.py only unwraps a result that
 	 * carries *both* keys -- a bool-only reply would reach the script as a raw
 	 * result and exit 0, which is exactly the false success this is fixing. */
-	rc = s3lvol_resume_subsystems();
-	rpc_lvol_write_response(request, rc == 0,
-				rc == 0 ? "" : "a hot prepare is still in flight; "
-				"the subsystems were not resumed");
+	rc = s3lvol_resume_subsystems(rpc_rcow_resume_subsystems_done, request);
+	if (rc != 0) {
+		rpc_lvol_write_response(
+			request, false,
+			rc == -EBUSY ? "a hot prepare is still in flight; "
+				      "the subsystems were not resumed"
+				    : "the subsystem resume could not be submitted");
+	}
 }
 SPDK_RPC_REGISTER("rcow_resume_subsystems",
 		  rpc_rcow_resume_subsystems, SPDK_RPC_RUNTIME)
@@ -1879,12 +1951,34 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		spdk_json_write_named_bool(w, "wal_attached", stats.wal_attached);
 		spdk_json_write_named_uint64(w, "wal_writes", stats.wal_writes);
 		spdk_json_write_named_uint64(w, "wal_retries", stats.wal_retries);
+		spdk_json_write_named_uint64(w, "wal_appends", stats.wal_appends);
+		spdk_json_write_named_uint64(w, "wal_batches", stats.wal_batches);
+		spdk_json_write_named_uint64(w, "wal_bytes_written",
+					     stats.wal_bytes_written);
+		spdk_json_write_named_uint64(w, "writeback_capacity_bytes",
+					     stats.writeback_capacity_bytes);
+		spdk_json_write_named_uint64(w, "writeback_occupied_bytes",
+					     stats.writeback_occupied_bytes);
+		spdk_json_write_named_uint64(w, "writeback_pending_records",
+					     stats.writeback_pending_records);
+		spdk_json_write_named_uint64(w, "writeback_publishes",
+					     stats.writeback_publishes);
+		spdk_json_write_named_uint64(w, "writeback_full_events",
+					     stats.writeback_full_events);
+		spdk_json_write_named_uint64(w, "writeback_global_reserved_bytes",
+					     stats.writeback_global_reserved_bytes);
+		spdk_json_write_named_uint64(w, "writeback_global_limit_bytes",
+					     stats.writeback_global_limit_bytes);
+		spdk_json_write_named_uint32(w, "writeback_global_active_rings",
+					     stats.writeback_global_active_rings);
 		spdk_json_write_named_uint64(w, "overlay_hits", stats.overlay_hits);
 		spdk_json_write_named_uint64(w, "overlay_bytes", stats.overlay_bytes);
 		spdk_json_write_named_uint64(w, "overlay_chunks",
 					     stats.overlay_live_chunks);
 		spdk_json_write_named_uint64(w, "chunks_flushed", stats.chunks_flushed);
 		spdk_json_write_named_uint64(w, "flush_failures", stats.flush_failures);
+		spdk_json_write_named_uint32(w, "flush_in_flight",
+					     stats.flush_in_flight);
 		spdk_json_write_named_uint64(w, "rmw_count", stats.rmw_count);
 		spdk_json_write_named_uint64(w, "allocated_chunks",
 					     stats.allocated_chunks);
@@ -1928,6 +2022,15 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 					     stats.overlay_flushed_aged);
 		spdk_json_write_named_uint64(w, "flushed_forced",
 					     stats.overlay_flushed_forced);
+		spdk_json_write_named_uint64(w, "flushed_ring_head",
+					     stats.overlay_flushed_ring_head);
+		spdk_json_write_named_uint64(w, "flushes_partial",
+					     stats.overlay_flushes_partial);
+		spdk_json_write_named_uint64(w, "flushes_repeated",
+					     stats.overlay_flushes_repeated);
+		spdk_json_write_named_uint64(
+			w, "flushes_repeated_partial",
+			stats.overlay_flushes_repeated_partial);
 
 		/* Local read cache. hits vs misses is the number that matters: a
 		 * hit is a read that cost a local round trip instead of an S3 one.
@@ -1953,6 +2056,10 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 						     stats.cache_populates);
 			spdk_json_write_named_uint64(w, "cache_populates_dropped",
 						     stats.cache_populates_dropped);
+			spdk_json_write_named_uint64(w, "cache_populates_failed",
+						     stats.cache_populates_failed);
+			spdk_json_write_named_uint64(w, "cache_populates_skipped",
+						     stats.cache_populates_skipped);
 			spdk_json_write_named_uint64(w, "cache_evictions",
 						     stats.cache_evictions);
 			spdk_json_write_named_uint64(w, "cache_bytes_served",
@@ -2013,8 +2120,12 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		}
 		spdk_json_write_object_end(w);
 
+		rpc_write_lvol_open_failures(w, lvs);
 		spdk_json_write_named_array_begin(w, "lvols");
 		TAILQ_FOREACH(lvol, &store->lvols, link) {
+			if (rpc_hides_lvol(lvol)) {
+				continue;
+			}
 			spdk_json_write_object_begin(w);
 			spdk_json_write_named_string(w, "name", lvol->name);
 			if (lvol->bdev) {
@@ -2219,7 +2330,7 @@ rpc_rcow_export_snapshot(struct spdk_jsonrpc_request *request,
 	}
 
 	lvol = s3lvol_lvol_find_any(req.snapshot_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		SPDK_WARNLOG("rcow_export_snapshot '%s' refused: snapshot not found\n",
 			     req.snapshot_name);
 		rpc_lvol_respond_errf(request,
@@ -2481,30 +2592,35 @@ rpc_import_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	const char *mode;
 
 	if (lvolerrno != 0) {
-		SPDK_ERRLOG("rcow_import_lvol '%s' from export %s failed: %s\n",
-			    ctx->lvol_name, ctx->export_uuid,
-			    spdk_strerror(-lvolerrno));
-		rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		if (lvolerrno == -ETIMEDOUT) {
+			rpc_lvol_respond_err(ctx->request, lvolerrno,
+					     "timed out waiting for the shared template "
+					     "to finish decoupling");
+		} else {
+			SPDK_ERRLOG("rcow_import_lvol '%s' from export %s failed: %s\n",
+				    ctx->lvol_name, ctx->export_uuid,
+				    spdk_strerror(-lvolerrno));
+			rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		}
 		free(ctx);
 		return;
 	}
 
 	/* The one reply in this file with a third field, and the reason is that an
-	 * import no longer has one implementation. When the export turns out to
-	 * name a snapshot this lvstore still holds, it degenerates into a local
-	 * clone: no import registry entry, nothing for rcow_release_export to be
-	 * held up by, and no dependency on the export surviving. That is a
-	 * different object with different obligations, so a caller keeping track of
-	 * what depends on what has to be able to tell -- and the alternative,
-	 * inferring it from whether the volume later shows up in rcow_get_imports,
-	 * is a question nobody should have to ask.
+	 * import no longer has one implementation. A local clone of a snapshot this
+	 * lvstore still holds writes no registry entry for the export just
+	 * imported, so that export is not what rcow_release_export waits on. The
+	 * chain may still read an older export through that snapshot. Callers
+	 * tracking dependencies should not have to infer this from
+	 * rcow_get_imports.
 	 *
 	 * Additive, so anything reading bool_value/string_value is unaffected.
 	 *
-	 * Taken from the parent chain, not from the flag the caller passed.
-	 * "esnap" means this volume, or a snapshot it was cloned from, still
-	 * reads the export. A local clone of a snapshot that does not is
-	 * "local_clone". */
+	 * Taken from the parent chain, not from this blob and not from the flag
+	 * the caller passed. "esnap" means this volume, or a snapshot it was
+	 * cloned from, still reads an export. rcow_decouple_lvol applies to the
+	 * lvol whose own blob is that esnap clone, which may be the snapshot
+	 * rather than this volume. "local_clone" means the chain does not. */
 	mode = s3lvol_lvol_reads_import(lvol) ? "esnap" : "local_clone";
 
 	SPDK_NOTICELOG("rcow_import_lvol '%s' from export %s completed (%s)\n",
@@ -2600,7 +2716,7 @@ rpc_rcow_decouple_lvol(struct spdk_jsonrpc_request *request,
 	}
 
 	lvol = s3lvol_lvol_find_any(req.lvol_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		rpc_lvol_respond_errf(request, "lvol '%s' not found in any lvstore",
 				      req.lvol_name);
 		goto cleanup;
@@ -3425,7 +3541,7 @@ active_bdev_attach(const char *device_name, uint32_t want_subsys,
 	snprintf(out.name, sizeof(out.name), "%s", device_name);
 
 	lvol = s3lvol_lvol_find_any(device_name);
-	if (!lvol) {
+	if (!lvol || rpc_hides_lvol(lvol)) {
 		SPDK_WARNLOG("could not activate '%s': no such lvol or snapshot\n",
 			     device_name);
 		out.failed = true;

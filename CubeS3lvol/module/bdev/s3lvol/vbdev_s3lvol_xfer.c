@@ -51,11 +51,11 @@
 #include "s3lvol/s3_client.h"
 
 #include "vbdev_s3lvol.h"
-
-/* Imports are held in memory and in one S3 object per lvstore. The cap exists
- * because that object is read into a fixed decoder table; it is far above what
- * a node would plausibly have esnap clones of, and it fails loudly. */
-#define S3LVOL_MAX_IMPORTS 64
+#include "vbdev_s3lvol_imports_json.h"
+#include "registry_persist_ctl.h"
+/* Reserved name of the hidden snapshot that is the single esnap root for one
+ * export on one lvstore. The suffix is the export uuid. */
+#define S3LVOL_IMPORT_TEMPLATE_PREFIX "__rcow_tpl_"
 
 struct s3lvol_import {
 	struct s3lvol_lvstore      *lvs;
@@ -66,6 +66,10 @@ struct s3lvol_import {
 	 * this node talks to it. */
 	bool                        path_style;
 	bool                        verify_tls;
+	/* Object-cache walk for this process. The cache index is memory only,
+	 * so the next process may start another walk when the template's
+	 * esnap device is created again. */
+	bool                        preheat_started;
 
 	/* Liveness lease.
 	 *
@@ -101,6 +105,17 @@ struct s3lvol_import {
 };
 
 static TAILQ_HEAD(, s3lvol_import) g_imports = TAILQ_HEAD_INITIALIZER(g_imports);
+
+bool
+s3lvol_lvol_is_import_template(const struct spdk_lvol *lvol)
+{
+	size_t prefix = sizeof(S3LVOL_IMPORT_TEMPLATE_PREFIX) - 1;
+
+	return lvol && lvol->name && lvol->blob &&
+	       spdk_blob_is_read_only(lvol->blob) &&
+	       strncmp(lvol->name, S3LVOL_IMPORT_TEMPLATE_PREFIX, prefix) == 0 &&
+	       strlen(lvol->name) == prefix + SPDK_UUID_STRING_LEN - 1;
+}
 
 /* Lease machinery. Declared here because import_add() starts the lease,
  * while the implementations live further down next to import_build_target(),
@@ -557,49 +572,6 @@ imports_serialize(struct s3lvol_lvstore *lvs, char **out, size_t *out_len)
 	return 0;
 }
 
-struct import_entry_json {
-	bool  path_style;
-	bool  verify_tls;
-	char *manifest;
-};
-
-static const struct spdk_json_object_decoder import_entry_decoders[] = {
-	{"path_style", offsetof(struct import_entry_json, path_style), spdk_json_decode_bool,   true},
-	{"verify_tls", offsetof(struct import_entry_json, verify_tls), spdk_json_decode_bool,   true},
-	{"manifest",   offsetof(struct import_entry_json, manifest),   spdk_json_decode_string, false},
-};
-
-struct entries_holder {
-	struct import_entry_json e[S3LVOL_MAX_IMPORTS];
-	size_t                   n;
-};
-
-struct imports_json {
-	uint32_t              version;
-	struct entries_holder entries;
-};
-
-static int
-decode_import_entry(const struct spdk_json_val *val, void *out)
-{
-	return spdk_json_decode_object(val, import_entry_decoders,
-				       SPDK_COUNTOF(import_entry_decoders), out);
-}
-
-static int
-decode_import_entries(const struct spdk_json_val *val, void *out)
-{
-	struct entries_holder *h = out;
-
-	return spdk_json_decode_array(val, decode_import_entry, h->e,
-				      S3LVOL_MAX_IMPORTS, &h->n, sizeof(h->e[0]));
-}
-
-static const struct spdk_json_object_decoder imports_decoders[] = {
-	{"version", offsetof(struct imports_json, version), spdk_json_decode_uint32, false},
-	{"imports", offsetof(struct imports_json, entries), decode_import_entries,false},
-};
-
 static int
 imports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 {
@@ -646,11 +618,17 @@ imports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		rc = -EINVAL;
 		goto out;
 	}
-	if (spdk_json_decode_object(values, imports_decoders,
-				    SPDK_COUNTOF(imports_decoders), &j) != 0) {
+	if (spdk_json_decode_object(values, s3lvol_imports_decoders,
+				    SPDK_COUNTOF(s3lvol_imports_decoders), &j) != 0) {
 		SPDK_ERRLOG("imports registry of '%s' could not be decoded\n",
 			    s3lvol_lvstore_get_name(lvs));
-		rc = -EINVAL;
+		rc = j.entries.status != 0 ? j.entries.status : -EINVAL;
+		goto out;
+	}
+	rc = s3lvol_imports_json_validate(&j);
+	if (rc != 0) {
+		SPDK_ERRLOG("imports registry of '%s' has unsupported version %" PRIu32 "\n",
+			    s3lvol_lvstore_get_name(lvs), j.version);
 		goto out;
 	}
 
@@ -681,9 +659,7 @@ imports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 	SPDK_NOTICELOG("lvstore '%s': %zu imported export(s) in the registry\n",
 		       s3lvol_lvstore_get_name(lvs), j.entries.n);
 out:
-	for (i = 0; i < j.entries.n; i++) {
-		free(j.entries.e[i].manifest);
-	}
+	s3lvol_imports_json_free(&j);
 	free(values);
 	free(copy);
 	return rc;
@@ -802,65 +778,204 @@ s3lvol_xfer_imports_load(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
 
 /* ---- save ---- */
 
-struct imports_save_ctx {
+struct imports_save_waiter {
+	uint64_t             seq;
 	spdk_lvs_op_complete cb_fn;
 	void                *cb_arg;
-	char                *json;
-	struct iovec         iov;
-	char                 key[S3_EXPORT_KEY_MAX];
+	TAILQ_ENTRY(imports_save_waiter) link;
 };
+
+struct imports_persist {
+	struct s3lvol_lvstore       *lvs;
+	struct registry_persist_ctl  ctl;
+	TAILQ_HEAD(, imports_save_waiter) waiters;
+	unsigned                    dispatch_depth;
+	TAILQ_ENTRY(imports_persist) link;
+};
+
+static TAILQ_HEAD(, imports_persist) g_imports_persists =
+	TAILQ_HEAD_INITIALIZER(g_imports_persists);
+
+struct imports_save_ctx {
+	struct imports_persist *persist;
+	char                   *json;
+	struct iovec            iov;
+	char                    key[S3_EXPORT_KEY_MAX];
+};
+
+static struct imports_persist *
+imports_persist_find(const struct s3lvol_lvstore *lvs)
+{
+	struct imports_persist *persist;
+
+	TAILQ_FOREACH(persist, &g_imports_persists, link) {
+		if (persist->lvs == lvs) {
+			return persist;
+		}
+	}
+	return NULL;
+}
+
+static struct imports_persist *
+imports_persist_get(struct s3lvol_lvstore *lvs)
+{
+	struct imports_persist *persist = imports_persist_find(lvs);
+
+	if (persist) {
+		return persist;
+	}
+	persist = calloc(1, sizeof(*persist));
+	if (!persist) {
+		return NULL;
+	}
+	persist->lvs = lvs;
+	TAILQ_INIT(&persist->waiters);
+	TAILQ_INSERT_TAIL(&g_imports_persists, persist, link);
+	return persist;
+}
+
+static void
+imports_persist_maybe_drop(struct imports_persist *persist)
+{
+	if (persist->dispatch_depth == 0 && !persist->ctl.in_flight &&
+	    !registry_persist_pending(&persist->ctl) &&
+	    TAILQ_EMPTY(&persist->waiters)) {
+		TAILQ_REMOVE(&g_imports_persists, persist, link);
+		free(persist);
+	}
+}
+
+static int imports_persist_submit(struct imports_persist *persist);
+
+static void
+imports_persist_complete(struct imports_persist *persist, int status,
+			 const char *key)
+{
+	struct imports_save_waiter *waiter, *tmp;
+	uint64_t boundary;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to write '%s': %s. The esnap clones of this "
+			    "lvstore may not be openable after a restart.\n",
+			    key, spdk_strerror(-status));
+	}
+
+	boundary = registry_persist_complete(&persist->ctl);
+	persist->dispatch_depth++;
+	TAILQ_FOREACH_SAFE(waiter, &persist->waiters, link, tmp) {
+		spdk_lvs_op_complete cb_fn;
+		void *cb_arg;
+
+		if (waiter->seq > boundary) {
+			continue;
+		}
+		TAILQ_REMOVE(&persist->waiters, waiter, link);
+		cb_fn = waiter->cb_fn;
+		cb_arg = waiter->cb_arg;
+		free(waiter);
+		cb_fn(cb_arg, status);
+	}
+	persist->dispatch_depth--;
+
+	/* Let failure callbacks roll back before serialising the coalesced
+	 * follow-up, so that snapshot contains both the rollback and every newer
+	 * mutation. */
+	if (!persist->ctl.in_flight && registry_persist_pending(&persist->ctl)) {
+		persist->dispatch_depth++;
+		(void)imports_persist_submit(persist);
+		persist->dispatch_depth--;
+	}
+	imports_persist_maybe_drop(persist);
+}
 
 static void
 imports_save_done(void *cb_arg, int status)
 {
 	struct imports_save_ctx *ctx = cb_arg;
-	spdk_lvs_op_complete cb_fn = ctx->cb_fn;
-	void *user_arg = ctx->cb_arg;
+	struct imports_persist *persist = ctx->persist;
+	char key[S3_EXPORT_KEY_MAX];
 
-	if (status != 0) {
-		SPDK_ERRLOG("Failed to write '%s': %s. The esnap clones of this "
-			    "lvstore may not be openable after a restart.\n",
-			    ctx->key, spdk_strerror(-status));
-	}
-
+	snprintf(key, sizeof(key), "%s", ctx->key);
 	free(ctx->json);
 	free(ctx);
-
-	if (cb_fn) {
-		cb_fn(user_arg, status);
-	}
+	imports_persist_complete(persist, status, key);
 }
 
 static int
-imports_save(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn, void *cb_arg)
+imports_persist_submit(struct imports_persist *persist)
 {
 	struct imports_save_ctx *ctx;
 	size_t len;
 	int rc;
 
+	if (!registry_persist_start(&persist->ctl)) {
+		return 0;
+	}
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
+		imports_persist_complete(persist, -ENOMEM,
+					 s3lvol_lvstore_get_name(persist->lvs));
 		return -ENOMEM;
 	}
-	ctx->cb_fn  = cb_fn;
-	ctx->cb_arg = cb_arg;
-	imports_registry_key(s3lvol_lvstore_get_name(lvs), ctx->key, sizeof(ctx->key));
+	ctx->persist = persist;
+	imports_registry_key(s3lvol_lvstore_get_name(persist->lvs), ctx->key,
+			     sizeof(ctx->key));
 
-	rc = imports_serialize(lvs, &ctx->json, &len);
+	rc = imports_serialize(persist->lvs, &ctx->json, &len);
 	if (rc != 0) {
+		char key[S3_EXPORT_KEY_MAX];
+
+		snprintf(key, sizeof(key), "%s", ctx->key);
 		free(ctx);
+		imports_persist_complete(persist, rc, key);
 		return rc;
 	}
 	ctx->iov.iov_base = ctx->json;
 	ctx->iov.iov_len = len;
 
-	rc = s3_put(s3lvol_lvstore_get_client(lvs), ctx->key, &ctx->iov, 1, false,
-		    imports_save_done, ctx);
+	rc = s3_put(s3lvol_lvstore_get_client(persist->lvs), ctx->key, &ctx->iov,
+		    1, false, imports_save_done, ctx);
 	if (rc != 0) {
+		char key[S3_EXPORT_KEY_MAX];
+
+		snprintf(key, sizeof(key), "%s", ctx->key);
 		free(ctx->json);
 		free(ctx);
+		imports_persist_complete(persist, rc, key);
 	}
 	return rc;
+}
+
+static int
+imports_save(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn, void *cb_arg)
+{
+	struct imports_save_waiter *waiter = NULL;
+	struct imports_persist *persist;
+	uint64_t seq;
+	int rc;
+
+	if (cb_fn) {
+		waiter = calloc(1, sizeof(*waiter));
+		if (!waiter) {
+			return -ENOMEM;
+		}
+		waiter->cb_fn = cb_fn;
+		waiter->cb_arg = cb_arg;
+	}
+	persist = imports_persist_get(lvs);
+	if (!persist) {
+		free(waiter);
+		return -ENOMEM;
+	}
+
+	seq = registry_persist_mutate(&persist->ctl);
+	if (waiter) {
+		waiter->seq = seq;
+		TAILQ_INSERT_TAIL(&persist->waiters, waiter, link);
+	}
+
+	rc = imports_persist_submit(persist);
+	return cb_fn ? 0 : rc;
 }
 
 /* ==========================================================================
@@ -915,6 +1030,10 @@ import_on_swap(void *arg, struct s3_export_manifest *m)
 	}
 }
 
+static bool import_template_preheat_waits(const struct s3lvol_import *imp);
+static void import_start_template_preheat(struct s3lvol_lvstore *lvs,
+					  const char *uuid_str);
+
 int
 s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 			const void *esnap_id, uint32_t id_len,
@@ -965,7 +1084,11 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	}
 
 	/* Ownership of the client reference moves into the bs_dev, which releases
-	 * it from destroy(). */
+	 * it from destroy(). During lvstore load the blobstore is not associated
+	 * yet, so the import record is what names the destination cache. */
+	if (!lvs) {
+		lvs = imp->lvs;
+	}
 	if (lvs && imp->lvs == lvs) {
 		shared_cache =
 			s3_bs_dev_get_cache(s3lvol_lvstore_get_bs_dev(lvs));
@@ -974,6 +1097,11 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	if (rc != 0) {
 		s3_client_put(client);
 		return rc;
+	}
+	if (shared_cache && !imp->preheat_started &&
+	    !import_template_preheat_waits(imp) &&
+	    s3_export_bs_dev_preheat(*bs_dev) == 0) {
+		imp->preheat_started = true;
 	}
 	/* A 404 refetch swaps the device's manifest first. Without this the
 	 * import registry, derived exports, and same-bucket decouple would keep
@@ -1084,6 +1212,7 @@ export_inflight_remove(const char *uuid)
  * another replacement, and a new export reusing the uuid must not race its
  * final PUT or DELETE. */
 struct export_rewrite {
+	struct s3lvol_lvstore       *lvs;
 	char                         uuid_str[SPDK_UUID_STRING_LEN];
 	TAILQ_ENTRY(export_rewrite)  link;
 };
@@ -1105,7 +1234,7 @@ export_rewrite_find(const char *uuid)
 }
 
 static struct export_rewrite *
-export_rewrite_add(const char *uuid)
+export_rewrite_add(struct s3lvol_lvstore *lvs, const char *uuid)
 {
 	struct export_rewrite *rw;
 
@@ -1116,6 +1245,7 @@ export_rewrite_add(const char *uuid)
 	if (!rw) {
 		return NULL;
 	}
+	rw->lvs = lvs;
 	snprintf(rw->uuid_str, sizeof(rw->uuid_str), "%s", uuid);
 	TAILQ_INSERT_TAIL(&g_export_rewrites, rw, link);
 	return rw;
@@ -1274,6 +1404,8 @@ export_recorded(void *cb_arg, int status)
 	struct export_ctx *ctx = cb_arg;
 
 	if (status != 0) {
+		struct s3lvol_export *exp;
+
 		/* The manifest is up, but this node has no durable record that it owes
 		 * the snapshot to anybody. Reported as a failed export, because the
 		 * alternative is telling the caller it worked and then deleting that
@@ -1281,6 +1413,13 @@ export_recorded(void *cb_arg, int status)
 		 * orphan for GC/operator cleanup. */
 		SPDK_ERRLOG("Export %s is published but could not be recorded; treating "
 			    "the export as failed\n", ctx->info.export_uuid);
+		exp = s3lvol_export_find(ctx->lvs, ctx->info.export_uuid);
+		if (exp) {
+			s3lvol_export_forget(exp);
+			/* If a newer registry mutation was already waiting, its
+			 * coalesced snapshot must observe this rollback too. */
+			(void)s3lvol_export_registry_save(ctx->lvs, NULL, NULL);
+		}
 	}
 	export_report(ctx, status);
 }
@@ -1445,6 +1584,62 @@ s3lvol_lvol_import_uuid(struct spdk_lvol *lvol, char *uuid_out,
 	return -ENOENT;
 }
 
+int
+s3lvol_lvol_template_export_uuid(struct spdk_lvol *lvol, char *uuid_out,
+				 size_t uuid_out_len)
+{
+	struct s3lvol_lvstore *lvs;
+	struct spdk_lvol_store *store;
+	struct spdk_lvol *cur;
+	size_t prefix = sizeof(S3LVOL_IMPORT_TEMPLATE_PREFIX) - 1;
+
+	if (!lvol || !uuid_out || uuid_out_len == 0) {
+		return -EINVAL;
+	}
+	uuid_out[0] = '\0';
+	lvs = s3lvol_lvstore_of_lvol(lvol);
+	store = lvs ? s3lvol_lvstore_get_lvs(lvs) : NULL;
+	if (!store) {
+		return -ENODEV;
+	}
+
+	cur = lvol;
+	while (cur) {
+		spdk_blob_id parent_id;
+		struct spdk_lvol *parent = NULL;
+		const char *uuid;
+		size_t n;
+
+		if (s3lvol_lvol_is_import_template(cur)) {
+			uuid = cur->name + prefix;
+			n = strlen(uuid);
+			if (n == 0 || n >= uuid_out_len) {
+				return -ENAMETOOLONG;
+			}
+			memcpy(uuid_out, uuid, n + 1);
+			return 0;
+		}
+		if (!cur->blob) {
+			break;
+		}
+		parent_id = spdk_blob_get_parent_snapshot(store->blobstore,
+							  spdk_blob_get_id(cur->blob));
+		if (parent_id == SPDK_BLOBID_INVALID) {
+			break;
+		}
+		TAILQ_FOREACH(parent, &store->lvols, link) {
+			if (parent->blob_id == parent_id) {
+				break;
+			}
+		}
+		if (!parent) {
+			break;
+		}
+		cur = parent;
+	}
+	return -ENOENT;
+}
+
 bool
 s3lvol_lvol_reads_import(struct spdk_lvol *lvol)
 {
@@ -1508,7 +1703,7 @@ s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb)
 			char uuid_str[SPDK_UUID_STRING_LEN];
 			struct s3lvol_import *imp;
 			const struct s3_export_manifest *m;
-			uint64_t half;
+			uint64_t need;
 
 			if (spdk_blob_get_esnap_id(cur, &id, &id_len) != 0 ||
 			    id_len == 0 || id_len >= sizeof(uuid_str)) {
@@ -1525,11 +1720,12 @@ s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb)
 			if (m->num_chunks == 0) {
 				return base_kb;
 			}
-			/* ceil(num_chunks / 2), written without num_chunks + 1
-			 * so even a theoretical UINT64_MAX-sized manifest cannot
-			 * overflow the density calculation. */
-			half = m->num_chunks / 2 + m->num_chunks % 2;
-			return m->present_chunks >= half ?
+			/* ceil(num_chunks * pct / 100), split at 100 so even a
+			 * theoretical UINT64_MAX-sized manifest cannot overflow
+			 * the density calculation. */
+			need = m->num_chunks / 100 * S3LVOL_DENSE_IMPORT_MIN_PCT +
+			       (m->num_chunks % 100 * S3LVOL_DENSE_IMPORT_MIN_PCT + 99) / 100;
+			return m->present_chunks >= need ?
 			       S3LVOL_DENSE_IMPORT_READ_AHEAD_KB : base_kb;
 		}
 
@@ -1963,6 +2159,9 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 	if (!lvs || !snapshot || !snapshot->blob) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 	if (snapshot->lvol_store != s3lvol_lvstore_get_lvs(lvs)) {
 		SPDK_ERRLOG("lvol '%s' does not belong to lvstore '%s'\n",
 			    snapshot->name, s3lvol_lvstore_get_name(lvs));
@@ -2249,6 +2448,9 @@ s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	if (!lvs || !export_uuid) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 
 	exp = s3lvol_export_find(lvs, export_uuid);
 	if (!exp) {
@@ -2317,7 +2519,7 @@ s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	ctx->cb_arg = cb_arg;
 	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", export_uuid);
 	snprintf(ctx->snapshot, sizeof(ctx->snapshot), "%s", entry.snapshot);
-	ctx->rewrite = export_rewrite_add(export_uuid);
+	ctx->rewrite = export_rewrite_add(lvs, export_uuid);
 	if (!ctx->rewrite) {
 		free(ctx);
 		return -ENOMEM;
@@ -2589,21 +2791,81 @@ struct import_ctx {
 	struct s3_export_manifest *m;
 	struct s3lvol_import      *imp;
 	bool                       decouple;
+	struct spdk_poller        *template_wait_poller;
+	uint32_t                   clone_retries;
+	/* Waiting out a template decouple that is already running. */
+	uint32_t                   decouple_waits;
+	/* Linked into the per-template clone queue. */
+	TAILQ_ENTRY(import_ctx)    clone_link;
+	bool                       clone_queued;
+	/* This clone is part of the batch that must finish before the template
+	 * is decoupled. Later arrivals are not, and wait for that decouple. */
+	bool                       holds_decouple_gate;
+	/* The lane starts the template decouple once, after the gate. This
+	 * clone's own completion must not start another. */
+	bool                       decouple_from_lane;
+	/* Original import error reported after an orphan template is removed. */
+	int                        orphan_status;
 
 	s3lvol_lvol_op_cb          cb_fn;
 	void                      *cb_arg;
+	TAILQ_ENTRY(import_ctx)    inflight_link;
 };
+
+static TAILQ_HEAD(, import_ctx) g_import_inflight =
+	TAILQ_HEAD_INITIALIZER(g_import_inflight);
+
+bool
+s3lvol_xfer_pending(const struct s3lvol_lvstore *lvs)
+{
+	struct export_inflight *inf;
+	struct export_rewrite *rw;
+	struct import_ctx *ctx;
+
+	if (!lvs) {
+		return false;
+	}
+	if (imports_persist_find(lvs) ||
+	    s3lvol_export_registry_persist_pending(lvs)) {
+		return true;
+	}
+	TAILQ_FOREACH(inf, &g_inflight, link) {
+		if (inf->lvs == lvs) {
+			return true;
+		}
+	}
+	TAILQ_FOREACH(rw, &g_export_rewrites, link) {
+		if (rw->lvs == lvs) {
+			return true;
+		}
+	}
+	TAILQ_FOREACH(ctx, &g_import_inflight, inflight_link) {
+		if (ctx->lvs == lvs) {
+			return true;
+		}
+	}
+	return false;
+}
 
 static void import_registry_saved(void *cb_arg, int status);
 static bool export_decouple_finalizing(struct s3lvol_lvstore *lvs, const char *uuid);
 static void import_local_clone_done(void *cb_arg, struct spdk_lvol *lvol,
 				    int lvolerrno);
+static struct spdk_lvol *export_reader_find(struct s3lvol_lvstore *lvs,
+					    const char *uuid_str);
+static void import_clone_lane_abandon(struct import_ctx *ctx);
 
 static void
 import_report(struct import_ctx *ctx, struct spdk_lvol *lvol, int status)
 {
 	s3lvol_lvol_op_cb cb_fn = ctx->cb_fn;
 	void *cb_arg = ctx->cb_arg;
+
+	/* Before the poller is dropped: a clone that held the lane has to
+	 * release it, or the next waiter stays queued and a requested decouple
+	 * never starts. */
+	import_clone_lane_abandon(ctx);
+	spdk_poller_unregister(&ctx->template_wait_poller);
 
 	if (status != 0 && ctx->imp) {
 		/* Undo the registry entry. Leaving it would be harmless at runtime --
@@ -2624,6 +2886,7 @@ import_report(struct import_ctx *ctx, struct spdk_lvol *lvol, int status)
 	}
 	s3_export_manifest_unref(ctx->m);
 	free(ctx->body);
+	TAILQ_REMOVE(&g_import_inflight, ctx, inflight_link);
 	free(ctx);
 
 	if (cb_fn) {
@@ -2631,73 +2894,972 @@ import_report(struct import_ctx *ctx, struct spdk_lvol *lvol, int status)
 	}
 }
 
+/* One in-flight construction of the hidden template for an export. Later
+ * imports of the same uuid wait here instead of creating a second esnap clone. */
+struct import_template_waiter {
+	struct import_ctx                  *ctx;
+	TAILQ_ENTRY(import_template_waiter) link;
+};
+
+struct import_template_build {
+	struct s3lvol_lvstore                 *lvs;
+	char                                   uuid_str[SPDK_UUID_STRING_LEN];
+	TAILQ_HEAD(, import_template_waiter)   waiters;
+	TAILQ_ENTRY(import_template_build)     link;
+};
+
+static TAILQ_HEAD(, import_template_build) g_import_template_builds =
+	TAILQ_HEAD_INITIALIZER(g_import_template_builds);
+
+static bool
+import_template_name(const char *uuid_str, char *out, size_t out_len)
+{
+	int n = snprintf(out, out_len, "%s%s", S3LVOL_IMPORT_TEMPLATE_PREFIX,
+			 uuid_str);
+
+	return n > 0 && (size_t)n < out_len;
+}
+
+static struct spdk_lvol *
+import_template_find(struct s3lvol_lvstore *lvs, const char *uuid_str)
+{
+	char name[SPDK_LVOL_NAME_MAX];
+	struct spdk_lvol *lvol;
+
+	if (!import_template_name(uuid_str, name, sizeof(name))) {
+		return NULL;
+	}
+	lvol = s3lvol_lvol_find(lvs, name);
+	return s3lvol_lvol_is_import_template(lvol) ? lvol : NULL;
+}
+
+static struct import_template_build *
+import_template_build_find(struct s3lvol_lvstore *lvs, const char *uuid_str)
+{
+	struct import_template_build *build;
+
+	TAILQ_FOREACH(build, &g_import_template_builds, link) {
+		if (build->lvs == lvs && strcmp(build->uuid_str, uuid_str) == 0) {
+			return build;
+		}
+	}
+	return NULL;
+}
+
+static void import_template_follow(struct import_ctx *ctx,
+				   struct spdk_lvol *template);
+static void import_shared_clone_done(void *cb_arg, struct spdk_lvol *lvol,
+				     int lvolerrno);
+
+/* The esnap blob of this chain: the lvol itself, or the ancestor that still
+ * holds the external snapshot. */
+static struct spdk_lvol *
+import_chain_esnap(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol)
+{
+	struct spdk_lvol_store *store;
+	struct spdk_blob *cur;
+
+	if (!lvol || !lvol->blob) {
+		return NULL;
+	}
+	if (spdk_blob_is_esnap_clone(lvol->blob)) {
+		return lvol;
+	}
+	store = s3lvol_lvstore_get_lvs(lvs);
+	if (!store) {
+		return NULL;
+	}
+	cur = lvol->blob;
+	while (cur) {
+		spdk_blob_id parent_id;
+		struct spdk_lvol *parent = NULL;
+
+		parent_id = spdk_blob_get_parent_snapshot(store->blobstore,
+							  spdk_blob_get_id(cur));
+		if (parent_id == SPDK_BLOBID_INVALID) {
+			return NULL;
+		}
+		TAILQ_FOREACH(parent, &store->lvols, link) {
+			if (parent->blob_id == parent_id) {
+				break;
+			}
+		}
+		if (!parent || !parent->blob) {
+			return NULL;
+		}
+		if (spdk_blob_is_esnap_clone(parent->blob)) {
+			return parent;
+		}
+		cur = parent->blob;
+	}
+	return NULL;
+}
+
 static void
-import_esnap_ready(struct import_ctx *ctx, struct spdk_lvol *lvol)
+import_start_shared_decouple(struct import_ctx *ctx, struct spdk_lvol *hint)
+{
+	struct spdk_lvol *template;
+	int rc;
+
+	if (!ctx->decouple) {
+		return;
+	}
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (!template) {
+		template = import_chain_esnap(ctx->lvs, hint);
+	}
+	if (!template || !template->blob ||
+	    !spdk_blob_is_esnap_clone(template->blob) ||
+	    s3lvol_lvol_decouple_pending(template)) {
+		return;
+	}
+	rc = s3lvol_lvol_decouple(ctx->lvs, template, NULL, NULL);
+	if (rc != 0 && rc != -EBUSY) {
+		SPDK_WARNLOG("Imported '%s' but could not start decoupling the "
+			     "shared template of %s: %s. The volume works; it "
+			     "still reads through to the export.\n",
+			     ctx->lvol_name, ctx->uuid_str, spdk_strerror(-rc));
+	}
+}
+
+/* The template already reads the export. Dropping the registry here would let
+ * release_export run while that blob is still an esnap clone. */
+static void
+import_report_clone_failed(struct import_ctx *ctx, int status)
+{
+	if (import_template_find(ctx->lvs, ctx->uuid_str)) {
+		ctx->imp = NULL;
+	}
+	import_report(ctx, NULL, status);
+}
+
+static int
+import_clone_of(struct import_ctx *ctx, struct spdk_lvol *parent);
+
+/* Blobstore locks the parent for the duration of one clone and answers EBUSY
+ * for a second. The lane below queues clones of one template so a burst does
+ * not depend on that. A requested decouple starts only after the clones that
+ * were already waiting have been created. An import that arrives once that
+ * decouple is running waits for it, for at most an hour, and then clones the
+ * local template. */
+#define IMPORT_CLONE_RETRY_US     (10 * 1000)
+#define IMPORT_CLONE_RETRY_MAX    200
+#define IMPORT_DECOUPLE_WAIT_MAX  7200
+
+struct import_clone_lane {
+	struct s3lvol_lvstore          *lvs;
+	char                            uuid_str[SPDK_UUID_STRING_LEN];
+	TAILQ_HEAD(, import_ctx)        queue;
+	struct import_ctx              *inflight;
+	bool                            kicking;
+	bool                            defer_decouple;
+	uint32_t                        gate;
+	TAILQ_ENTRY(import_clone_lane)  link;
+};
+
+static TAILQ_HEAD(, import_clone_lane) g_import_clone_lanes =
+	TAILQ_HEAD_INITIALIZER(g_import_clone_lanes);
+
+static void import_clone_lane_kick(struct import_clone_lane *lane);
+static void import_clone_issue(struct import_ctx *ctx);
+static void import_wait_decouple(struct import_ctx *ctx);
+static void import_clone_submit(struct import_ctx *ctx);
+static int import_clone_retry_poll(void *arg);
+static void import_template_build_finish(struct import_template_build *build,
+					 struct spdk_lvol *template, int status);
+
+static struct import_clone_lane *
+import_clone_lane_find(struct s3lvol_lvstore *lvs, const char *uuid_str)
+{
+	struct import_clone_lane *lane;
+
+	TAILQ_FOREACH(lane, &g_import_clone_lanes, link) {
+		if (lane->lvs == lvs && strcmp(lane->uuid_str, uuid_str) == 0) {
+			return lane;
+		}
+	}
+	return NULL;
+}
+
+static struct import_clone_lane *
+import_clone_lane_ensure(struct s3lvol_lvstore *lvs, const char *uuid_str)
+{
+	struct import_clone_lane *lane;
+
+	lane = import_clone_lane_find(lvs, uuid_str);
+	if (lane) {
+		return lane;
+	}
+	lane = calloc(1, sizeof(*lane));
+	if (!lane) {
+		return NULL;
+	}
+	lane->lvs = lvs;
+	snprintf(lane->uuid_str, sizeof(lane->uuid_str), "%s", uuid_str);
+	TAILQ_INIT(&lane->queue);
+	TAILQ_INSERT_TAIL(&g_import_clone_lanes, lane, link);
+	return lane;
+}
+
+/* True while this import must not start a template preheat: the creating
+ * batch has not decided whether it will decouple, or a decouple is already
+ * copying the same objects. */
+static bool
+import_template_preheat_waits(const struct s3lvol_import *imp)
+{
+	struct spdk_lvol *template;
+	struct import_clone_lane *lane;
+
+	if (!imp || !imp->lvs || !imp->m) {
+		return true;
+	}
+	if (import_template_build_find(imp->lvs, imp->m->uuid_str)) {
+		return true;
+	}
+	if (export_decouple_finalizing(imp->lvs, imp->m->uuid_str)) {
+		return true;
+	}
+	template = import_template_find(imp->lvs, imp->m->uuid_str);
+	if (template && s3lvol_lvol_decouple_pending(template)) {
+		return true;
+	}
+	lane = import_clone_lane_find(imp->lvs, imp->m->uuid_str);
+	return lane != NULL && lane->defer_decouple;
+}
+
+static void
+import_start_template_preheat(struct s3lvol_lvstore *lvs, const char *uuid_str)
+{
+	struct s3lvol_import *imp;
+	struct spdk_lvol *template;
+	struct spdk_bs_dev *esnap;
+
+	imp = import_find(lvs, uuid_str);
+	if (!imp || imp->preheat_started || import_template_preheat_waits(imp)) {
+		return;
+	}
+	template = import_template_find(lvs, uuid_str);
+	if (!template || !template->blob) {
+		return;
+	}
+	esnap = spdk_blob_get_esnap_bs_dev(template->blob);
+	if (!esnap) {
+		return;
+	}
+	if (s3_export_bs_dev_preheat(esnap) == 0) {
+		imp->preheat_started = true;
+	}
+}
+
+static void
+import_clone_lane_release(struct import_clone_lane *lane)
+{
+	if (!lane || lane->inflight || !TAILQ_EMPTY(&lane->queue) ||
+	    lane->gate > 0 || lane->defer_decouple) {
+		return;
+	}
+	TAILQ_REMOVE(&g_import_clone_lanes, lane, link);
+	free(lane);
+}
+
+static bool
+import_template_copy_busy(struct import_ctx *ctx, struct spdk_lvol *template)
+{
+	if (template && (s3lvol_lvol_decouple_pending(template) ||
+			 export_decouple_finalizing(ctx->lvs, ctx->uuid_str))) {
+		return true;
+	}
+	return false;
+}
+
+/* True when this import must not clone yet. A decouple that is already
+ * running is one case. The other is a batch that has not finished cloning
+ * and is going to decouple: a late import waits for that copy instead of
+ * joining the batch and pushing the copy back. */
+static bool
+import_decouple_blocks_clone(struct import_ctx *ctx, struct spdk_lvol *template)
+{
+	struct import_clone_lane *lane;
+
+	if (import_template_copy_busy(ctx, template)) {
+		return true;
+	}
+	if (ctx->decouple) {
+		return false;
+	}
+	lane = import_clone_lane_find(ctx->lvs, ctx->uuid_str);
+	return lane && lane->defer_decouple && lane->gate > 0;
+}
+
+static void
+import_lane_start_decouple(struct import_clone_lane *lane)
+{
+	struct spdk_lvol *template;
+	int rc;
+
+	template = import_template_find(lane->lvs, lane->uuid_str);
+	lane->defer_decouple = false;
+	if (!template || !template->blob ||
+	    !spdk_blob_is_esnap_clone(template->blob) ||
+	    s3lvol_lvol_decouple_pending(template)) {
+		return;
+	}
+	rc = s3lvol_lvol_decouple(lane->lvs, template, NULL, NULL);
+	if (rc != 0 && rc != -EBUSY) {
+		SPDK_WARNLOG("Could not start decoupling the shared template of "
+			     "%s: %s. Clones of it still read through to the "
+			     "export.\n", lane->uuid_str, spdk_strerror(-rc));
+		import_start_template_preheat(lane->lvs, lane->uuid_str);
+	}
+}
+
+static void
+import_clone_lane_kick(struct import_clone_lane *lane)
+{
+	struct import_ctx *ctx;
+	struct spdk_lvol *template;
+
+	if (!lane || lane->kicking) {
+		return;
+	}
+	/* issue() can complete before it returns. A nested kick would see a
+	 * half-updated lane and either skip the rest of the queue or free it
+	 * while this loop still holds it. */
+	lane->kicking = true;
+	for (;;) {
+		if (lane->inflight) {
+			break;
+		}
+		if (lane->gate == 0 && lane->defer_decouple) {
+			import_lane_start_decouple(lane);
+		}
+
+		template = import_template_find(lane->lvs, lane->uuid_str);
+		if (template &&
+		    (s3lvol_lvol_decouple_pending(template) ||
+		     export_decouple_finalizing(lane->lvs, lane->uuid_str))) {
+			while ((ctx = TAILQ_FIRST(&lane->queue)) != NULL) {
+				TAILQ_REMOVE(&lane->queue, ctx, clone_link);
+				ctx->clone_queued = false;
+				if (ctx->holds_decouple_gate && lane->gate > 0) {
+					lane->gate--;
+				}
+				ctx->holds_decouple_gate = false;
+				import_wait_decouple(ctx);
+			}
+			break;
+		}
+
+		ctx = TAILQ_FIRST(&lane->queue);
+		if (!ctx) {
+			break;
+		}
+		TAILQ_REMOVE(&lane->queue, ctx, clone_link);
+		ctx->clone_queued = false;
+		lane->inflight = ctx;
+		import_clone_issue(ctx);
+	}
+	lane->kicking = false;
+	import_clone_lane_release(lane);
+}
+
+static void
+import_clone_lane_abandon(struct import_ctx *ctx)
+{
+	struct import_clone_lane *lane;
+	bool changed = false;
+
+	if (!ctx) {
+		return;
+	}
+	lane = import_clone_lane_find(ctx->lvs, ctx->uuid_str);
+	if (!lane) {
+		return;
+	}
+	if (lane->inflight == ctx) {
+		lane->inflight = NULL;
+		changed = true;
+	} else if (ctx->clone_queued) {
+		TAILQ_REMOVE(&lane->queue, ctx, clone_link);
+		ctx->clone_queued = false;
+		changed = true;
+	}
+	if (ctx->holds_decouple_gate) {
+		if (lane->gate > 0) {
+			lane->gate--;
+		}
+		ctx->holds_decouple_gate = false;
+		changed = true;
+	}
+	if (changed) {
+		import_clone_lane_kick(lane);
+	}
+}
+
+static int
+import_template_wait_poll(void *arg)
+{
+	struct import_ctx *ctx = arg;
+	struct spdk_lvol *template;
+	uint32_t waited_ms;
+
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (!template) {
+		spdk_poller_unregister(&ctx->template_wait_poller);
+		import_report(ctx, NULL, -ENOENT);
+		return SPDK_POLLER_BUSY;
+	}
+	if (import_decouple_blocks_clone(ctx, template)) {
+		ctx->decouple_waits++;
+		if (ctx->decouple_waits >= IMPORT_DECOUPLE_WAIT_MAX) {
+			waited_ms = ctx->decouple_waits *
+				    (EXPORT_DRAIN_RETRY_US / 1000);
+			spdk_poller_unregister(&ctx->template_wait_poller);
+			SPDK_ERRLOG("import '%s' of export %s timed out after %u s "
+				    "waiting for the shared template to finish "
+				    "decoupling\n", ctx->lvol_name, ctx->uuid_str,
+				    waited_ms / 1000);
+			import_report_clone_failed(ctx, -ETIMEDOUT);
+			return SPDK_POLLER_BUSY;
+		}
+		return SPDK_POLLER_IDLE;
+	}
+	spdk_poller_unregister(&ctx->template_wait_poller);
+	import_clone_submit(ctx);
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+import_wait_decouple(struct import_ctx *ctx)
+{
+	if (ctx->template_wait_poller) {
+		return;
+	}
+	ctx->decouple_waits = 0;
+	SPDK_NOTICELOG("import '%s' of export %s is waiting for the shared "
+		       "template to finish decoupling\n",
+		       ctx->lvol_name, ctx->uuid_str);
+	ctx->template_wait_poller =
+		SPDK_POLLER_REGISTER(import_template_wait_poll, ctx,
+				     EXPORT_DRAIN_RETRY_US);
+	if (!ctx->template_wait_poller) {
+		import_report(ctx, NULL, -ENOMEM);
+	}
+}
+
+/* Blobstore still answers EBUSY if something else holds the parent. That is
+ * no longer how a burst of imports queues, but a snapshot or another clone
+ * can take the same lock. Give it the same short retry as before. */
+static bool
+import_clone_retry(struct import_ctx *ctx)
+{
+	if (ctx->clone_retries >= IMPORT_CLONE_RETRY_MAX) {
+		return false;
+	}
+	ctx->clone_retries++;
+	ctx->template_wait_poller = SPDK_POLLER_REGISTER(import_clone_retry_poll,
+							 ctx, IMPORT_CLONE_RETRY_US);
+	if (!ctx->template_wait_poller) {
+		return false;
+	}
+	return true;
+}
+
+static int
+import_clone_retry_poll(void *arg)
+{
+	struct import_ctx *ctx = arg;
+	struct import_clone_lane *lane;
+	struct spdk_lvol *template;
+
+	spdk_poller_unregister(&ctx->template_wait_poller);
+	lane = import_clone_lane_find(ctx->lvs, ctx->uuid_str);
+	if (lane && lane->inflight == ctx) {
+		import_clone_issue(ctx);
+		return SPDK_POLLER_BUSY;
+	}
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (!template) {
+		import_report(ctx, NULL, -ENOENT);
+		return SPDK_POLLER_BUSY;
+	}
+	import_clone_of(ctx, template);
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+import_clone_issue(struct import_ctx *ctx)
+{
+	struct spdk_lvol *template;
+	int rc;
+
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (!template) {
+		import_report(ctx, NULL, -ENOENT);
+		return;
+	}
+	if (import_template_copy_busy(ctx, template)) {
+		import_clone_lane_abandon(ctx);
+		import_wait_decouple(ctx);
+		return;
+	}
+	rc = s3lvol_lvol_create_clone(ctx->lvs, template, ctx->lvol_name,
+				      import_shared_clone_done, ctx);
+	if (rc == -EBUSY && import_clone_retry(ctx)) {
+		return;
+	}
+	if (rc != 0) {
+		import_report_clone_failed(ctx, rc);
+	}
+}
+
+static int
+import_clone_of(struct import_ctx *ctx, struct spdk_lvol *parent)
 {
 	int rc;
 
-	rc = vbdev_s3lvol_bdev_register(lvol, s3lvol_lvstore_get_name(ctx->lvs));
-	/* The decouple quiesce set is waiting on this count. Drop it only once
-	 * the bdev is registered, or once registration has failed and there is
-	 * no bdev to include. */
-	s3lvol_lvstore_import_clone_end(ctx->lvs);
+	rc = s3lvol_lvol_create_clone(ctx->lvs, parent, ctx->lvol_name,
+				      import_shared_clone_done, ctx);
+	if (rc == -EBUSY && import_clone_retry(ctx)) {
+		return 0;
+	}
 	if (rc != 0) {
-		SPDK_ERRLOG("Imported lvol '%s' exists but its bdev could not be "
-			    "registered (%d). The clone is intact -- re-attach the "
-			    "lvstore to expose it.\n", lvol->name, rc);
-		/* Deliberately does not remove the registry entry: the clone is real
-		 * and its blob metadata now names this export, so the manifest has to
-		 * stay reachable or the next attach fails. */
-		ctx->imp = NULL;
-		import_report(ctx, NULL, rc);
+		import_report_clone_failed(ctx, rc);
+	}
+	return rc;
+}
+
+static void
+import_clone_lane_push(struct import_clone_lane *lane, struct import_ctx *ctx,
+		       bool gate)
+{
+	ctx->decouple_from_lane = true;
+	if (gate) {
+		ctx->holds_decouple_gate = true;
+		lane->gate++;
+		if (ctx->decouple) {
+			lane->defer_decouple = true;
+		}
+	}
+	TAILQ_INSERT_TAIL(&lane->queue, ctx, clone_link);
+	ctx->clone_queued = true;
+}
+
+static void
+import_clone_submit(struct import_ctx *ctx)
+{
+	struct spdk_lvol *template;
+	struct import_clone_lane *lane;
+
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (!template) {
+		import_report(ctx, NULL, -ENOENT);
+		return;
+	}
+	if (import_decouple_blocks_clone(ctx, template)) {
+		import_wait_decouple(ctx);
+		return;
+	}
+	lane = import_clone_lane_ensure(ctx->lvs, ctx->uuid_str);
+	if (!lane) {
+		import_report(ctx, NULL, -ENOMEM);
+		return;
+	}
+	import_clone_lane_push(lane, ctx,
+			       ctx->decouple && template->blob &&
+			       spdk_blob_is_esnap_clone(template->blob));
+	import_clone_lane_kick(lane);
+}
+
+/* The imports already waiting when the template becomes clonable, plus the
+ * import that built it. They clone one at a time. Decouple, if any of them
+ * asked for it, starts after the last of them and not before. */
+static void
+import_clone_closed_batch(struct import_ctx *builder)
+{
+	struct import_template_build *build;
+	struct import_clone_lane *lane;
+	struct import_template_waiter *waiter;
+
+	lane = import_clone_lane_ensure(builder->lvs, builder->uuid_str);
+	build = import_template_build_find(builder->lvs, builder->uuid_str);
+	if (!lane) {
+		if (build) {
+			import_template_build_finish(build, NULL, -ENOMEM);
+		}
+		import_report(builder, NULL, -ENOMEM);
+		return;
+	}
+	if (build) {
+		TAILQ_REMOVE(&g_import_template_builds, build, link);
+		while ((waiter = TAILQ_FIRST(&build->waiters)) != NULL) {
+			TAILQ_REMOVE(&build->waiters, waiter, link);
+			import_clone_lane_push(lane, waiter->ctx, true);
+			free(waiter);
+		}
+		free(build);
+	}
+	import_clone_lane_push(lane, builder, true);
+	import_clone_lane_kick(lane);
+	import_start_template_preheat(builder->lvs, builder->uuid_str);
+}
+
+static void
+import_template_follow(struct import_ctx *ctx, struct spdk_lvol *template)
+{
+	if (!template) {
+		import_report(ctx, NULL, -ENOENT);
+		return;
+	}
+	if (import_decouple_blocks_clone(ctx, template)) {
+		import_wait_decouple(ctx);
+		return;
+	}
+	import_clone_submit(ctx);
+}
+
+static void
+import_shared_clone_done(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
+{
+	struct import_ctx *ctx = cb_arg;
+
+	if (lvolerrno == -EBUSY && import_clone_retry(ctx)) {
+		return;
+	}
+	if (lvolerrno != 0) {
+		SPDK_ERRLOG("cloning the shared template of export %s failed: %s\n",
+			    ctx->uuid_str, spdk_strerror(-lvolerrno));
+		import_report_clone_failed(ctx, lvolerrno);
 		return;
 	}
 
-	SPDK_NOTICELOG("Imported export %s as lvol '%s': %" PRIu64 " bytes, "
-		       "%" PRIu64 " of %" PRIu64 " chunk(s) present\n",
-		       ctx->uuid_str, lvol->name, ctx->m->size_bytes,
-		       ctx->m->present_chunks, ctx->m->num_chunks);
-
-	/* Started before answering, so that a caller who asked for it cannot see the
-	 * import succeed and then find no decouple in the list. Not waited for: the
-	 * volume is usable now, and the decouple is about the export rather than about
-	 * availability. Its outcome goes to the log -- an import that reported success
-	 * did succeed, whatever becomes of the copying afterwards. */
-	if (ctx->decouple) {
-		int drc = s3lvol_lvol_decouple(ctx->lvs, lvol, NULL, NULL);
-
-		if (drc != 0) {
-			SPDK_WARNLOG("Imported '%s' but could not start decoupling it from "
-				     "%s: %s. The volume works; it still reads through to "
-				     "the export.\n", lvol->name, ctx->uuid_str,
-				     spdk_strerror(-drc));
-		}
+	/* A lane member's decouple waits until the rest of its batch has
+	 * cloned. import_report() releases the lane, and that is what starts
+	 * it. A clone that did not come through the lane still starts here. */
+	if (!ctx->decouple_from_lane) {
+		import_start_shared_decouple(ctx, lvol);
 	}
-
+	SPDK_NOTICELOG("Imported export %s as lvol '%s': clone of the shared "
+		       "template\n", ctx->uuid_str, lvol->name);
 	import_report(ctx, lvol, 0);
 }
 
 static void
-import_clone_done(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
+import_template_build_finish(struct import_template_build *build,
+			     struct spdk_lvol *template, int status)
+{
+	struct import_template_waiter *waiter;
+
+	TAILQ_REMOVE(&g_import_template_builds, build, link);
+	while ((waiter = TAILQ_FIRST(&build->waiters)) != NULL) {
+		struct import_ctx *ctx = waiter->ctx;
+
+		TAILQ_REMOVE(&build->waiters, waiter, link);
+		free(waiter);
+		if (status == 0 && template) {
+			import_template_follow(ctx, template);
+		} else {
+			import_report(ctx, NULL, status != 0 ? status : -EIO);
+		}
+	}
+	free(build);
+}
+
+static int
+import_template_enqueue(struct import_template_build *build,
+			struct import_ctx *ctx)
+{
+	struct import_template_waiter *waiter;
+
+	waiter = calloc(1, sizeof(*waiter));
+	if (!waiter) {
+		import_report(ctx, NULL, -ENOMEM);
+		return -ENOMEM;
+	}
+	waiter->ctx = ctx;
+	TAILQ_INSERT_TAIL(&build->waiters, waiter, link);
+	return 0;
+}
+
+static void import_template_snap_done(void *cb_arg, struct spdk_lvol *template,
+				      int lvolerrno);
+static void import_template_sealed(void *cb_arg, int bserrno);
+
+static void
+import_orphan_destroyed(void *cb_arg, int status)
 {
 	struct import_ctx *ctx = cb_arg;
+	struct import_template_build *build;
+	struct spdk_lvol *orphan;
 
-	if (lvolerrno != 0) {
-		SPDK_ERRLOG("Failed to create an esnap clone of '%s': %s\n",
-			    ctx->uuid_str, spdk_strerror(-lvolerrno));
-		s3lvol_lvstore_import_clone_end(ctx->lvs);
-		import_report(ctx, NULL, lvolerrno);
+	if (status != 0) {
+		SPDK_WARNLOG("could not remove an import template that was not "
+			     "sealed: %s\n", spdk_strerror(-status));
+		orphan = import_template_find(ctx->lvs, ctx->uuid_str);
+		if (orphan) {
+			orphan->action_in_progress = false;
+			s3lvol_decouple_kick_queue();
+		}
+	}
+	build = import_template_build_find(ctx->lvs, ctx->uuid_str);
+	if (build) {
+		import_template_build_finish(build, NULL, ctx->orphan_status);
+	}
+	import_report(ctx, NULL, ctx->orphan_status);
+}
+
+/* The esnap blob exists under the template name but could not be frozen.
+ * Destroy it: a writable lvol of that name is not a template, and the next
+ * import would refuse to snapshot it onto its own name. */
+static void
+import_template_abort(struct import_ctx *ctx, struct spdk_lvol *lvol, int status)
+{
+	struct import_template_build *build;
+
+	s3lvol_lvstore_import_clone_end(ctx->lvs);
+	build = import_template_build_find(ctx->lvs, ctx->uuid_str);
+	if (lvol) {
+		int rc;
+
+		ctx->orphan_status = status;
+		lvol->action_in_progress = true;
+		rc = s3lvol_lvol_destroy_locked(lvol, import_orphan_destroyed,
+						ctx);
+		if (rc == 0) {
+			return;
+		}
+		lvol->action_in_progress = false;
+		SPDK_WARNLOG("could not schedule removal of an import template "
+			     "that was not sealed: %s\n", spdk_strerror(-rc));
+	}
+	if (build) {
+		import_template_build_finish(build, NULL, status);
+	}
+	import_report(ctx, NULL, status);
+}
+
+static void
+import_template_created(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
+{
+	struct import_ctx *ctx = cb_arg;
+	int rc;
+
+	if (lvolerrno != 0 || !lvol || !lvol->blob) {
+		SPDK_ERRLOG("Failed to create the shared template of '%s': %s\n",
+			    ctx->uuid_str, spdk_strerror(lvolerrno ? -lvolerrno : EIO));
+		import_template_abort(ctx, NULL,
+				      lvolerrno != 0 ? lvolerrno : -EIO);
 		return;
 	}
 
-	import_esnap_ready(ctx, lvol);
+	/* Freeze this blob. create_snapshot() would move the esnap identity onto
+	 * a new blob and leave the template name on a writable clone. */
+	rc = spdk_blob_set_read_only(lvol->blob);
+	if (rc != 0) {
+		SPDK_ERRLOG("Could not freeze shared template '%s': %s\n",
+			    lvol->name, spdk_strerror(-rc));
+		import_template_abort(ctx, lvol, rc);
+		return;
+	}
+	spdk_blob_sync_md(lvol->blob, import_template_sealed, ctx);
+	/* sync_md can run the callback before returning. ctx may be freed. */
+}
+
+static void
+import_template_sealed(void *cb_arg, int bserrno)
+{
+	struct import_ctx *ctx = cb_arg;
+	struct spdk_lvol *template;
+	const char *lvs_name = s3lvol_lvstore_get_name(ctx->lvs);
+	int rc;
+
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (bserrno != 0 || !template) {
+		struct spdk_lvol *lvol = NULL;
+		char name[SPDK_LVOL_NAME_MAX];
+
+		SPDK_ERRLOG("Could not persist the shared template of %s: %s\n",
+			    ctx->uuid_str, spdk_strerror(bserrno ? -bserrno : EIO));
+		if (import_template_name(ctx->uuid_str, name, sizeof(name))) {
+			lvol = s3lvol_lvol_find(ctx->lvs, name);
+		}
+		import_template_abort(ctx, lvol, bserrno != 0 ? bserrno : -EIO);
+		return;
+	}
+
+	s3lvol_lvstore_import_clone_end(ctx->lvs);
+	rc = vbdev_s3lvol_bdev_register(template, lvs_name);
+	if (rc != 0) {
+		SPDK_WARNLOG("shared template '%s' exists but its bdev could not "
+			     "be registered (%d); a re-attach will expose it\n",
+			     template->name, rc);
+	}
+
+	SPDK_NOTICELOG("Sealed shared template '%s' for export %s: %" PRIu64
+		       " bytes, %" PRIu64 " of %" PRIu64 " chunk(s) present\n",
+		       template->name, ctx->uuid_str, ctx->m->size_bytes,
+		       ctx->m->present_chunks, ctx->m->num_chunks);
+
+	/* The batch already waiting clones first. Decouple starts when that
+	 * batch has cloned, so the first completion cannot refuse the rest. */
+	import_clone_closed_batch(ctx);
+}
+
+static void
+import_template_snap_done(void *cb_arg, struct spdk_lvol *template, int lvolerrno)
+{
+	struct import_ctx *ctx = cb_arg;
+	struct import_template_build *build;
+	const char *lvs_name = s3lvol_lvstore_get_name(ctx->lvs);
+	int rc;
+
+	build = import_template_build_find(ctx->lvs, ctx->uuid_str);
+	if (lvolerrno != 0 || !template) {
+		SPDK_ERRLOG("Could not snapshot import '%s' of %s into a shared "
+			    "template: %s\n", ctx->lvol_name, ctx->uuid_str,
+			    spdk_strerror(lvolerrno ? -lvolerrno : EIO));
+		if (build) {
+			import_template_build_finish(build, NULL,
+						     lvolerrno != 0 ? lvolerrno : -EIO);
+		}
+		import_report(ctx, NULL, lvolerrno != 0 ? lvolerrno : -EIO);
+		return;
+	}
+
+	rc = vbdev_s3lvol_bdev_register(template, lvs_name);
+	if (rc != 0) {
+		SPDK_WARNLOG("shared template '%s' exists but its bdev could not "
+			     "be registered (%d); a re-attach will expose it\n",
+			     template->name, rc);
+	}
+
+	/* Same batch as a freshly sealed template: every import already waiting
+	 * clones before a decouple requested by one of them can start. */
+	import_clone_closed_batch(ctx);
+}
+
+static int
+import_template_begin(struct import_ctx *ctx)
+{
+	struct import_template_build *build;
+	char template_name[SPDK_LVOL_NAME_MAX];
+	int rc;
+
+	if (export_decouple_finalizing(ctx->lvs, ctx->uuid_str)) {
+		SPDK_WARNLOG("export %s is detaching in this lvstore; refusing "
+			     "import '%s'\n", ctx->uuid_str, ctx->lvol_name);
+		import_report(ctx, NULL, -EBUSY);
+		return -EBUSY;
+	}
+
+	build = calloc(1, sizeof(*build));
+	if (!build) {
+		import_report(ctx, NULL, -ENOMEM);
+		return -ENOMEM;
+	}
+	build->lvs = ctx->lvs;
+	snprintf(build->uuid_str, sizeof(build->uuid_str), "%s", ctx->uuid_str);
+	TAILQ_INIT(&build->waiters);
+	TAILQ_INSERT_TAIL(&g_import_template_builds, build, link);
+
+	/* The registry is already durable. The esnap blob may exist only after
+	 * that, or the next attach cannot resolve its id. It is created under
+	 * the template name and frozen read-only before any user lvol exists. */
+	if (!import_template_name(ctx->uuid_str, template_name,
+				  sizeof(template_name))) {
+		import_template_build_finish(build, NULL, -ENAMETOOLONG);
+		import_report(ctx, NULL, -ENAMETOOLONG);
+		return -ENAMETOOLONG;
+	}
+	s3lvol_lvstore_import_clone_begin(ctx->lvs);
+	rc = spdk_lvol_create_esnap_clone(ctx->uuid_str,
+					 (uint32_t)strlen(ctx->uuid_str),
+					 ctx->m->size_bytes,
+					 s3lvol_lvstore_get_lvs(ctx->lvs),
+					 template_name, import_template_created, ctx);
+	if (rc != 0) {
+		s3lvol_lvstore_import_clone_end(ctx->lvs);
+		import_template_build_finish(build, NULL, rc);
+		SPDK_ERRLOG("spdk_lvol_create_esnap_clone failed for '%s': %s\n",
+			    template_name, spdk_strerror(-rc));
+		import_report(ctx, NULL, rc);
+	}
+	return rc;
+}
+
+/* An earlier import of this uuid is still a writable esnap clone, from before
+ * templates existed or because its snapshot into a template has not happened.
+ * Snapshotting it moves the esnap onto the hidden template and makes that
+ * volume a clone of it, so this import and that one share the chain. */
+static int
+import_template_adopt(struct import_ctx *ctx, struct spdk_lvol *reader)
+{
+	struct import_template_build *build;
+	char template_name[SPDK_LVOL_NAME_MAX];
+
+	if (s3lvol_lvol_decouple_pending(reader) ||
+	    export_decouple_finalizing(ctx->lvs, ctx->uuid_str)) {
+		SPDK_WARNLOG("export %s is still being decoupled; refusing "
+			     "import '%s' until that finishes\n",
+			     ctx->uuid_str, ctx->lvol_name);
+		import_report(ctx, NULL, -EBUSY);
+		return -EBUSY;
+	}
+	if (!import_template_name(ctx->uuid_str, template_name,
+				  sizeof(template_name))) {
+		import_report(ctx, NULL, -ENAMETOOLONG);
+		return -ENAMETOOLONG;
+	}
+	build = calloc(1, sizeof(*build));
+	if (!build) {
+		import_report(ctx, NULL, -ENOMEM);
+		return -ENOMEM;
+	}
+	build->lvs = ctx->lvs;
+	snprintf(build->uuid_str, sizeof(build->uuid_str), "%s", ctx->uuid_str);
+	TAILQ_INIT(&build->waiters);
+	TAILQ_INSERT_TAIL(&g_import_template_builds, build, link);
+	spdk_lvol_create_snapshot(reader, template_name, import_template_snap_done,
+				  ctx);
+	return 0;
+}
+
+static void
+import_template_join(struct import_ctx *ctx)
+{
+	struct import_template_build *build;
+	struct spdk_lvol *template;
+	struct spdk_lvol *reader;
+
+	build = import_template_build_find(ctx->lvs, ctx->uuid_str);
+	if (build) {
+		import_template_enqueue(build, ctx);
+		return;
+	}
+	template = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (template) {
+		import_template_follow(ctx, template);
+		return;
+	}
+
+	reader = export_reader_find(ctx->lvs, ctx->uuid_str);
+	if (reader && reader->blob && spdk_blob_is_esnap_clone(reader->blob)) {
+		if (!spdk_blob_is_read_only(reader->blob)) {
+			import_template_adopt(ctx, reader);
+			return;
+		}
+		/* A user snapshot already holds the esnap. Cloning it puts this
+		 * import on that chain without inventing a second root. */
+		import_clone_of(ctx, reader);
+		return;
+	}
+	import_template_begin(ctx);
 }
 
 static void
 import_registry_saved(void *cb_arg, int status)
 {
 	struct import_ctx *ctx = cb_arg;
-	int rc;
 
 	if (status != 0) {
 		import_report(ctx, NULL, status);
@@ -2709,40 +3871,13 @@ import_registry_saved(void *cb_arg, int status)
 		import_report(ctx, NULL, -EBUSY);
 		return;
 	}
-	/* The rewrite registry is filled only after the parent is cleared, so it
-	 * does not cover the quiesce window. finalizing does: it is set before
-	 * that set is built. An import admitted here would register a bdev the
-	 * set never contains, then read an esnap channel that clear_external_parent
-	 * is about to destroy. */
-	if (export_decouple_finalizing(ctx->lvs, ctx->uuid_str)) {
-		SPDK_WARNLOG("export %s is detaching in this lvstore; refusing "
-			     "import '%s'\n", ctx->uuid_str, ctx->lvol_name);
-		import_report(ctx, NULL, -EBUSY);
-		return;
-	}
-
-	/* Only now: the registry has to be durable *before* a blob exists that
-	 * refers to this export. The other order leaves a clone that no attach can
-	 * open, because the esnap id in its metadata resolves to nothing. */
-	s3lvol_lvstore_import_clone_begin(ctx->lvs);
-	rc = spdk_lvol_create_esnap_clone(ctx->uuid_str,
-					 (uint32_t)strlen(ctx->uuid_str),
-					 ctx->m->size_bytes,
-					 s3lvol_lvstore_get_lvs(ctx->lvs),
-					 ctx->lvol_name, import_clone_done, ctx);
-	if (rc != 0) {
-		/* Non-zero means the callback will not run. */
-		s3lvol_lvstore_import_clone_end(ctx->lvs);
-		SPDK_ERRLOG("spdk_lvol_create_esnap_clone failed for '%s': %s\n",
-			    ctx->lvol_name, spdk_strerror(-rc));
-		import_report(ctx, NULL, rc);
-	}
+	import_template_join(ctx);
 }
 
-/* The local-clone path's completion. Separate from import_clone_done() because
- * almost everything that one does does not apply: there is no manifest-derived
- * chunk count to report, no import registry entry to roll back, and no decouple to
- * kick off. What remains is reporting. */
+/* The local-clone path's completion. Separate from import_shared_clone_done()
+ * because almost everything that one does does not apply: there is no
+ * manifest-derived chunk count to report, no import registry entry to roll
+ * back, and no decouple to kick off. What remains is reporting. */
 static void
 import_local_clone_done(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
@@ -2891,6 +4026,7 @@ import_got_manifest(void *cb_arg, uint64_t bytes_read, int status)
 	struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(ctx->lvs);
 	uint64_t cluster_size = spdk_bs_get_cluster_size(store->blobstore);
 	struct spdk_lvol *parent;
+	struct spdk_lvol *settled;
 	int rc;
 
 	if (status != 0) {
@@ -2947,14 +4083,14 @@ import_got_manifest(void *cb_arg, uint64_t bytes_read, int status)
 			       "export\n", ctx->uuid_str, ctx->m->src.snapshot);
 
 		if (ctx->decouple) {
-			/* Not an error, and not silently ignored either. There is no
-			 * export to decouple from: the clone's parent is a local
-			 * snapshot, and breaking that link is what
-			 * rcow_decouple_lvol does not do -- it copies out what an
-			 * export holds. A local clone is already independent of S3
-			 * in the sense the caller cares about. */
-			SPDK_NOTICELOG("ignoring decouple for '%s': a local clone "
-				       "has no export to decouple from\n",
+			/* Not an error. rcow_decouple_lvol accepts only a blob that
+			 * is itself an esnap clone, and this one is a clone of a
+			 * local snapshot. If that snapshot still reads an export,
+			 * decouple names the snapshot; this volume's mode is then
+			 * "esnap" for that reason, not because decouple applies here. */
+			SPDK_NOTICELOG("ignoring decouple for '%s': the new volume is "
+				       "a local clone; decouple the snapshot if that "
+				       "snapshot still reads an export\n",
 				       ctx->lvol_name);
 		}
 
@@ -2965,6 +4101,23 @@ import_got_manifest(void *cb_arg, uint64_t bytes_read, int status)
 				    ctx->m->src.snapshot, spdk_strerror(-rc));
 			import_report(ctx, NULL, rc);
 		}
+		return;
+	}
+
+	/* Decouple leaves the hidden template in place as a local read-only blob.
+	 * Cloning it does not read the export, so recording one would renew the
+	 * source lease for a snapshot this node no longer needs. Drop a leftover
+	 * entry first: attach would otherwise load it and start the lease again. */
+	settled = import_template_find(ctx->lvs, ctx->uuid_str);
+	if (settled && settled->blob && !spdk_blob_is_esnap_clone(settled->blob)) {
+		SPDK_NOTICELOG("lvstore '%s' already holds a local template for "
+			       "export %s; importing '%s' without recording a "
+			       "dependency\n",
+			       s3lvol_lvstore_get_name(ctx->lvs), ctx->uuid_str,
+			       ctx->lvol_name);
+		s3lvol_imports_recheck(ctx->lvs, ctx->uuid_str);
+		ctx->imp = NULL;
+		import_registry_saved(ctx, 0);
 		return;
 	}
 
@@ -3049,8 +4202,17 @@ s3lvol_lvol_import(struct s3lvol_lvstore *lvs, const struct s3lvol_import_opts *
 	if (!lvs || !opts || !opts->lvol_name || !opts->export_uuid) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 	if (spdk_uuid_parse(&uuid, opts->export_uuid) != 0) {
 		SPDK_ERRLOG("export_uuid '%s' is not a uuid\n", opts->export_uuid);
+		return -EINVAL;
+	}
+	if (strncmp(opts->lvol_name, S3LVOL_IMPORT_TEMPLATE_PREFIX,
+		    sizeof(S3LVOL_IMPORT_TEMPLATE_PREFIX) - 1) == 0) {
+		SPDK_ERRLOG("lvol name '%s' is reserved for an import template\n",
+			    opts->lvol_name);
 		return -EINVAL;
 	}
 	if (export_rewrite_find(opts->export_uuid)) {
@@ -3119,8 +4281,12 @@ s3lvol_lvol_import(struct s3lvol_lvstore *lvs, const struct s3lvol_import_opts *
 
 	s3_export_manifest_key(ctx->uuid_str, ctx->key, sizeof(ctx->key));
 
+	/* Every completion from here retains ctx->lvs. Make that lifetime visible
+	 * before submission, which may complete inline on an error path. */
+	TAILQ_INSERT_TAIL(&g_import_inflight, ctx, inflight_link);
 	rc = s3_head(ctx->client, ctx->key, &ctx->size, import_head_done, ctx);
 	if (rc != 0) {
+		TAILQ_REMOVE(&g_import_inflight, ctx, inflight_link);
 		s3_client_put(ctx->client);
 		free(ctx);
 	}
@@ -3607,7 +4773,8 @@ decouple_rewrite_exports(struct s3lvol_decouple *d)
 			 "%s", info.snapshot);
 		ctx->entries[i].expires_at = info.expires_at;
 		ctx->entries[i].generation = info.generation;
-		ctx->entries[i].rewrite = export_rewrite_add(info.export_uuid);
+		ctx->entries[i].rewrite = export_rewrite_add(d->lvs,
+							     info.export_uuid);
 		if (!ctx->entries[i].rewrite) {
 			ctx->first_error = export_rewrite_find(info.export_uuid) ?
 					   -EBUSY : -ENOMEM;
@@ -4622,6 +5789,47 @@ s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
 	return 1;
 }
 
+/* The hidden template on this chain, or NULL when the esnap root is a
+ * user-visible snapshot. Only the template is resolved implicitly: a caller
+ * who imported a local snapshot still names that snapshot. */
+static struct spdk_lvol *
+import_template_of_chain(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol)
+{
+	struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(lvs);
+	struct spdk_blob *cur;
+
+	if (!store || !lvol || !lvol->blob) {
+		return NULL;
+	}
+	if (s3lvol_lvol_is_import_template(lvol)) {
+		return lvol;
+	}
+	cur = lvol->blob;
+	while (cur) {
+		spdk_blob_id parent_id;
+		struct spdk_lvol *parent = NULL;
+
+		parent_id = spdk_blob_get_parent_snapshot(store->blobstore,
+							  spdk_blob_get_id(cur));
+		if (parent_id == SPDK_BLOBID_INVALID) {
+			return NULL;
+		}
+		TAILQ_FOREACH(parent, &store->lvols, link) {
+			if (parent->blob_id == parent_id) {
+				break;
+			}
+		}
+		if (!parent || !parent->blob) {
+			return NULL;
+		}
+		if (s3lvol_lvol_is_import_template(parent)) {
+			return parent;
+		}
+		cur = parent->blob;
+	}
+	return NULL;
+}
+
 int
 s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		   spdk_lvol_op_complete cb_fn, void *cb_arg)
@@ -4636,12 +5844,25 @@ s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	if (!lvs || !lvol || !lvol->blob) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 
 	snprintf(display_name, sizeof(display_name), "%s", lvol->name);
 	if (!spdk_blob_is_esnap_clone(lvol->blob)) {
-		SPDK_ERRLOG("lvol '%s' does not read through to an export; there "
-			    "is nothing to decouple from\n", lvol->name);
-		return -EINVAL;
+		struct spdk_lvol *template = import_template_of_chain(lvs, lvol);
+
+		if (!template || !template->blob ||
+		    !spdk_blob_is_esnap_clone(template->blob)) {
+			SPDK_ERRLOG("lvol '%s' does not read through to an export; there "
+				    "is nothing to decouple from\n", lvol->name);
+			return -EINVAL;
+		}
+		SPDK_NOTICELOG("lvol '%s' reads export through hidden template "
+			       "'%s'; decoupling the template\n",
+			       lvol->name, template->name);
+		lvol = template;
+		snprintf(display_name, sizeof(display_name), "%s", lvol->name);
 	}
 
 	/* Read-only is allowed, and is the case that matters.
@@ -4943,6 +6164,97 @@ s3lvol_imports_recheck(struct s3lvol_lvstore *lvs, const char *uuid_str)
 	if (imports_save(lvs, NULL, NULL) != 0) {
 		SPDK_WARNLOG("Could not rewrite the imports registry of '%s'\n",
 			     s3lvol_lvstore_get_name(lvs));
+	}
+}
+
+struct import_template_reap_ctx {
+	struct s3lvol_lvstore *lvs;
+	struct spdk_lvol      *template;
+	char                   uuid_str[SPDK_UUID_STRING_LEN];
+	spdk_lvol_op_complete  cb_fn;
+	void                  *cb_arg;
+};
+
+static void
+import_template_reaped(void *cb_arg, int lvolerrno)
+{
+	struct import_template_reap_ctx *ctx = cb_arg;
+	spdk_lvol_op_complete cb_fn = ctx->cb_fn;
+	void *user_arg = ctx->cb_arg;
+
+	if (lvolerrno != 0 && ctx->template) {
+		ctx->template->action_in_progress = false;
+		SPDK_WARNLOG("Could not remove the unused import template for %s: %s\n",
+			     ctx->uuid_str, spdk_strerror(-lvolerrno));
+	} else if (lvolerrno == 0) {
+		SPDK_NOTICELOG("Removed unused import template for export %s\n",
+			       ctx->uuid_str);
+	}
+	/* A local template is not an esnap, so destroying it does not itself
+	 * discover an export id. Recheck from the uuid this reap was given.
+	 * An esnap template that is still present keeps its registry entry. */
+	s3lvol_imports_recheck(ctx->lvs, ctx->uuid_str);
+	free(ctx);
+	if (cb_fn) {
+		cb_fn(user_arg, 0);
+	}
+}
+
+void
+s3lvol_import_template_reap_if_unused(struct s3lvol_lvstore *lvs,
+				      const char *uuid_str,
+				      spdk_lvol_op_complete cb_fn,
+				      void *cb_arg)
+{
+	struct import_template_reap_ctx *ctx;
+	struct spdk_lvol *template;
+	size_t clone_count = 0;
+	int rc;
+
+	if (!lvs || !uuid_str || uuid_str[0] == '\0') {
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+	template = import_template_find(lvs, uuid_str);
+	if (!template || template->action_in_progress ||
+	    s3lvol_lvol_decouple_pending(template)) {
+		s3lvol_imports_recheck(lvs, uuid_str);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+
+	rc = spdk_blob_get_clones(s3lvol_lvstore_get_lvs(lvs)->blobstore,
+				  template->blob_id, NULL, &clone_count);
+	if ((rc != 0 && rc != -ENOMEM) || clone_count != 0) {
+		s3lvol_imports_recheck(lvs, uuid_str);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+
+	template->action_in_progress = true;
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		template->action_in_progress = false;
+		s3lvol_imports_recheck(lvs, uuid_str);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+	ctx->lvs = lvs;
+	ctx->template = template;
+	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", uuid_str);
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+	rc = s3lvol_lvol_destroy_locked(template, import_template_reaped, ctx);
+	if (rc != 0) {
+		import_template_reaped(ctx, rc);
 	}
 }
 
@@ -5249,6 +6561,9 @@ export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	if (!lvs || !export_uuid) {
 		return -EINVAL;
 	}
+	if (s3lvol_lvstore_is_unloading(lvs)) {
+		return -EBUSY;
+	}
 	if (export_rewrite_find(export_uuid)) {
 		SPDK_ERRLOG("export %s is being rewritten; release it after that "
 			    "finishes\n", export_uuid);
@@ -5324,7 +6639,7 @@ export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	ctx->cb_fn  = cb_fn;
 	ctx->cb_arg = cb_arg;
 	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", export_uuid);
-	ctx->rewrite = export_rewrite_add(export_uuid);
+	ctx->rewrite = export_rewrite_add(lvs, export_uuid);
 	if (!ctx->rewrite) {
 		free(ctx);
 		return -ENOMEM;

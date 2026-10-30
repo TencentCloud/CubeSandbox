@@ -91,11 +91,19 @@ main(void)
 		pass("add vol-a at nsid 1");
 	}
 
+	setenv("S3LVOL_TEST_STATEFILE_DIR_FSYNC_ERRNO", "5", 1);
+	rc = s3lvol_active_remove("vol-a");
+	if (rc == -EIO && s3lvol_active_find("vol-a") != NULL) {
+		pass("failed persistence keeps vol-a in memory for retry");
+	} else {
+		fail("failed persistence keeps vol-a in memory for retry");
+	}
+
 	rc = s3lvol_active_remove("vol-a");
 	if (rc != 0) {
-		fail("remove vol-a");
+		fail("retry remove vol-a");
 	} else {
-		pass("remove vol-a");
+		pass("retry remove vol-a");
 	}
 
 	nsid = s3lvol_active_alloc_nsid(0);

@@ -55,6 +55,9 @@ struct cache_slot {
 	 * from a range still on its way. Fills of a *different* uuid are a
 	 * different matter and stand aside (see s3_cache_populate). */
 	uint32_t         fills;
+	/* Whole-object preheats admitted before their S3 GET starts. A reserved
+	 * slot is kept off both LRUs until its GET is cancelled or lands. */
+	uint32_t         reservations;
 
 	enum cache_slot_kind kind;
 	bool             resident;
@@ -115,6 +118,19 @@ struct cache_fill {
 	uint32_t                 write_len;
 	uint64_t                 device_offset;
 	bool                     object_fill;
+	s3_cache_populate_cb     cb_fn;
+	void                    *cb_arg;
+};
+
+struct s3_cache_object_reservation {
+	/* First so cache_fill_done() can free this allocation through &fill. */
+	struct cache_fill fill;
+	uint32_t          object_valid_bytes;
+	/* Valid until the disk fill copies it. The caller keeps the bytes until
+	 * its completion callback, which runs only after that copy. */
+	const void       *pending_buf;
+	bool              queued;
+	TAILQ_ENTRY(s3_cache_object_reservation) link;
 };
 
 /* One in-flight read. */
@@ -171,6 +187,9 @@ struct s3_cache {
 	uint32_t                 object_hash_buckets;
 	uint64_t                 object_resident;
 	uint32_t                 object_fills_in_flight;
+	uint32_t                 object_reservations;
+	/* GETs that have completed and are waiting for an object-fill position. */
+	TAILQ_HEAD(, s3_cache_object_reservation) preheat_ready;
 	bool                     object_io_stopped;
 	struct cache_alias     **alias_hash;
 	uint32_t                 alias_hash_buckets;
@@ -437,7 +456,8 @@ static void
 slot_lru_touch(struct s3_cache *cache, struct cache_slot *slot)
 {
 	slot_lru_remove(cache, slot);
-	if (slot->resident && slot->fills == 0 && slot->pins == 0) {
+	if (slot->resident && slot->fills == 0 && slot->pins == 0 &&
+	    slot->reservations == 0) {
 		if (slot->kind == CACHE_SLOT_OBJECT) {
 			TAILQ_INSERT_TAIL(&cache->object_lru, slot, link);
 		} else {
@@ -540,6 +560,7 @@ slot_release(struct s3_cache *cache, struct cache_slot *slot)
 {
 	assert(slot->pins == 0);
 	assert(slot->fills == 0);
+	assert(slot->reservations == 0);
 
 	slot_lru_remove(cache, slot);
 	if (slot->hot) {
@@ -586,6 +607,7 @@ slot_release(struct s3_cache *cache, struct cache_slot *slot)
 	 * must not be able to serve them as its own. */
 	bitmap_clear_all(slot->bitmap, cache->bitmap_words);
 	slot->filled_blocks = 0;
+	slot->reservations = 0;
 
 	spdk_uuid_set_null(&slot->uuid);
 	slot->valid_bytes = 0;
@@ -735,6 +757,7 @@ s3_cache_create(const struct s3_cache_opts *opts, struct s3_cache **out)
 	TAILQ_INIT(&cache->hot_lru);
 	TAILQ_INIT(&cache->hot_free);
 	TAILQ_INIT(&cache->staging_free);
+	TAILQ_INIT(&cache->preheat_ready);
 
 	cache->slots = calloc(n_slots, sizeof(*cache->slots));
 	cache->bitmaps = calloc(n_slots, (size_t)cache->bitmap_words *
@@ -865,6 +888,7 @@ s3_cache_destroy(struct s3_cache *cache)
 	 * only after the flusher and the read path are quiesced. */
 	assert(cache->fills_in_flight == 0);
 	assert(cache->reads_in_flight == 0);
+	assert(cache->object_reservations == 0);
 	for (uint32_t i = 0; i < cache->hot_count; i++) {
 		assert(cache->hot[i].pins == 0);
 	}
@@ -1329,6 +1353,9 @@ s3_cache_object_read_on_channel(struct s3_cache *cache,
  * Populate
  * ========================================================================== */
 
+static void object_preheat_drain(struct s3_cache *cache);
+static void object_preheat_fail_ready(struct s3_cache *cache, int status);
+
 static void
 cache_fill_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
@@ -1371,7 +1398,8 @@ cache_fill_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 		 * half-written blocks are already unreadable. Only a slot that
 		 * ended up holding nothing at all is worth reclaiming -- keeping
 		 * it would occupy a slot that can never produce a hit. */
-		if (slot->fills == 0 && slot->pins == 0 && !slot->hot &&
+		if (slot->fills == 0 && slot->pins == 0 &&
+		    slot->reservations == 0 && !slot->hot &&
 		    slot->filled_blocks == 0) {
 			slot_release(cache, slot);
 		} else {
@@ -1387,6 +1415,10 @@ cache_fill_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 	}
 	pthread_mutex_unlock(&cache->lock);
 
+	object_preheat_drain(cache);
+	if (fill->cb_fn) {
+		fill->cb_fn(fill->cb_arg, success ? 0 : -EIO);
+	}
 	free(fill);
 }
 
@@ -1406,20 +1438,24 @@ cache_disk_fill_abort(struct cache_fill *fill)
 		cache->object_fills_in_flight--;
 	}
 	slot->fills--;
-	if (slot->fills == 0 && slot->pins == 0 && !slot->hot &&
-	    slot->filled_blocks == 0) {
+	if (slot->fills == 0 && slot->pins == 0 && slot->reservations == 0 &&
+	    !slot->hot && slot->filled_blocks == 0) {
 		slot_release(cache, slot);
 	} else {
 		slot_lru_touch(cache, slot);
 	}
 	TAILQ_INSERT_HEAD(&cache->staging_free, fill->staging, link);
-	free(fill);
 	if (object_fill) {
 		cache->stats.object_populates_dropped++;
 	} else {
 		cache->stats.populates_dropped++;
 	}
 	pthread_mutex_unlock(&cache->lock);
+	object_preheat_drain(cache);
+	if (fill->cb_fn) {
+		fill->cb_fn(fill->cb_arg, -EAGAIN);
+	}
+	free(fill);
 }
 
 static void
@@ -1683,11 +1719,344 @@ s3_cache_populate(struct s3_cache *cache, uint64_t chunk_index,
 	}
 }
 
+static bool
+object_range_resident_locked(const struct s3_cache *cache,
+			     const struct cache_slot *slot,
+			     uint32_t object_valid_bytes)
+{
+	uint32_t blocks;
+
+	if (!slot || slot->valid_bytes != object_valid_bytes ||
+	    object_valid_bytes == 0) {
+		return false;
+	}
+	blocks = (object_valid_bytes + cache->block_size - 1) / cache->block_size;
+	return bitmap_test_range(slot->bitmap, 0, blocks);
+}
+
+static int
+object_populate_drop(struct s3_cache *cache, struct cache_slot *slot, int status)
+{
+	cache->stats.object_populates_dropped++;
+	/* A preheat reservation still owns this slot. Releasing it here would
+	 * free the slot under that reservation. */
+	if (slot && slot->fills == 0 && slot->pins == 0 &&
+	    slot->reservations == 0 && slot->filled_blocks == 0) {
+		slot_release(cache, slot);
+	}
+	pthread_mutex_unlock(&cache->lock);
+	return status;
+}
+
+static bool
+object_fill_window_open_locked(const struct s3_cache *cache)
+{
+	return cache->object_fills_in_flight < S3_CACHE_OBJECT_FILLS_MAX &&
+	       TAILQ_FIRST(&cache->staging_free) != NULL;
+}
+
+static void
+object_reservation_release_locked(struct s3_cache_object_reservation *reservation)
+{
+	struct cache_fill *fill = &reservation->fill;
+	struct s3_cache *cache = fill->cache;
+	struct cache_slot *slot = fill->slot;
+
+	assert(cache->object_reservations > 0);
+	assert(slot->reservations > 0);
+	if (reservation->queued) {
+		TAILQ_REMOVE(&cache->preheat_ready, reservation, link);
+		reservation->queued = false;
+	}
+	cache->object_reservations--;
+	slot->reservations--;
+	/* A reservation owns a slot, not a staging buffer. The buffer is taken
+	 * only when the GET's bytes start their disk fill. */
+	if (slot->fills == 0 && slot->pins == 0 && !slot->hot &&
+	    slot->filled_blocks == 0 && slot->reservations == 0) {
+		slot_release(cache, slot);
+	} else {
+		slot_lru_touch(cache, slot);
+	}
+}
+
+static void
+object_reservation_begin_fill_locked(
+	struct s3_cache_object_reservation *reservation)
+{
+	struct cache_fill *fill = &reservation->fill;
+	struct s3_cache *cache = fill->cache;
+	struct cache_slot *slot = fill->slot;
+	struct cache_staging *staging = TAILQ_FIRST(&cache->staging_free);
+
+	assert(reservation->pending_buf != NULL);
+	assert(object_fill_window_open_locked(cache));
+	assert(cache->object_reservations > 0);
+	assert(slot->reservations > 0);
+	TAILQ_REMOVE(&cache->staging_free, staging, link);
+	cache->object_reservations--;
+	slot->reservations--;
+	fill->staging = staging;
+	fill->first_block = 0;
+	fill->n_blocks = (reservation->object_valid_bytes + cache->block_size -
+			  1) / cache->block_size;
+	fill->bytes = reservation->object_valid_bytes;
+	fill->write_len = fill->n_blocks * cache->block_size;
+	fill->device_offset = slot_offset(cache, slot);
+	fill->object_fill = true;
+	slot->fills++;
+	cache->fills_in_flight++;
+	cache->object_fills_in_flight++;
+}
+
+static void
+object_fill_copy_and_submit(struct cache_fill *fill, const void *buf,
+			    uint32_t length)
+{
+	struct s3_cache *cache = fill->cache;
+	uint32_t write_len = fill->write_len;
+	int rc;
+
+	memcpy(fill->staging->buf, buf, length);
+	if (write_len > length) {
+		memset((uint8_t *)fill->staging->buf + length, 0,
+		       write_len - length);
+	}
+	if (cache->owner_thread == NULL ||
+	    cache->owner_thread == spdk_get_thread()) {
+		cache_submit_disk_fill(fill);
+	} else {
+		rc = spdk_thread_send_msg(cache->owner_thread,
+					  cache_submit_disk_fill, fill);
+		if (rc != 0) {
+			cache_disk_fill_abort(fill);
+		}
+	}
+}
+
+static void
+object_preheat_drain(struct s3_cache *cache)
+{
+	if (!cache) {
+		return;
+	}
+	for (;;) {
+		struct s3_cache_object_reservation *reservation;
+		const void *buf;
+		uint32_t length;
+		bool stopped;
+
+		pthread_mutex_lock(&cache->lock);
+		reservation = TAILQ_FIRST(&cache->preheat_ready);
+		stopped = cache->object_io_stopped;
+		if (!reservation || stopped ||
+		    !object_fill_window_open_locked(cache)) {
+			pthread_mutex_unlock(&cache->lock);
+			if (stopped) {
+				object_preheat_fail_ready(cache, -ESHUTDOWN);
+			}
+			return;
+		}
+		TAILQ_REMOVE(&cache->preheat_ready, reservation, link);
+		reservation->queued = false;
+		buf = reservation->pending_buf;
+		length = reservation->object_valid_bytes;
+		object_reservation_begin_fill_locked(reservation);
+		pthread_mutex_unlock(&cache->lock);
+		object_fill_copy_and_submit(&reservation->fill, buf, length);
+	}
+}
+
+static void
+object_preheat_fail_ready(struct s3_cache *cache, int status)
+{
+	struct s3_cache_object_reservation *reservation;
+	TAILQ_HEAD(, s3_cache_object_reservation) failed =
+		TAILQ_HEAD_INITIALIZER(failed);
+
+	pthread_mutex_lock(&cache->lock);
+	while ((reservation = TAILQ_FIRST(&cache->preheat_ready)) != NULL) {
+		s3_cache_populate_cb cb_fn;
+		void *cb_arg;
+
+		TAILQ_REMOVE(&cache->preheat_ready, reservation, link);
+		reservation->queued = false;
+		cb_fn = reservation->fill.cb_fn;
+		cb_arg = reservation->fill.cb_arg;
+		object_reservation_release_locked(reservation);
+		reservation->fill.cb_fn = cb_fn;
+		reservation->fill.cb_arg = cb_arg;
+		TAILQ_INSERT_TAIL(&failed, reservation, link);
+	}
+	pthread_mutex_unlock(&cache->lock);
+
+	while ((reservation = TAILQ_FIRST(&failed)) != NULL) {
+		TAILQ_REMOVE(&failed, reservation, link);
+		if (reservation->fill.cb_fn) {
+			reservation->fill.cb_fn(reservation->fill.cb_arg, status);
+		}
+		free(reservation);
+	}
+}
+
+int
+s3_cache_object_reserve(struct s3_cache *cache,
+			const struct s3_cache_object_id *id,
+			uint32_t object_valid_bytes,
+			struct s3_cache_object_reservation **out)
+{
+	struct s3_cache_object_reservation *reservation;
+	struct cache_slot *slot;
+	uint64_t hash;
+	int rc = 0;
+
+	if (!cache || !object_id_valid(id) || object_valid_bytes == 0 ||
+	    object_valid_bytes > cache->chunk_size || !out) {
+		return -EINVAL;
+	}
+	if (cache->object_hash_buckets == 0) {
+		return -ENOTSUP;
+	}
+	*out = NULL;
+	reservation = calloc(1, sizeof(*reservation));
+	if (!reservation) {
+		return -ENOMEM;
+	}
+	hash = object_id_hash(id);
+
+	pthread_mutex_lock(&cache->lock);
+	if (cache->object_io_stopped) {
+		rc = -ESHUTDOWN;
+		goto out_unlock;
+	}
+	slot = object_find_locked(cache, id, hash);
+	if (object_range_resident_locked(cache, slot, object_valid_bytes)) {
+		rc = 1;
+		goto out_unlock;
+	}
+	if (slot && slot->valid_bytes != object_valid_bytes) {
+		rc = -EINVAL;
+		goto out_unlock;
+	}
+	if (slot && slot->reservations > 0) {
+		rc = -EALREADY;
+		goto out_unlock;
+	}
+	if ((slot && slot->fills > 0) ||
+	    cache->object_reservations >= S3_CACHE_PREHEAT_MAX) {
+		rc = -EAGAIN;
+		goto out_unlock;
+	}
+	if (!slot) {
+		char *endpoint;
+		char *bucket;
+		char *key;
+
+		slot = TAILQ_FIRST(&cache->free_slots);
+		if (!slot) {
+			rc = -ENOSPC;
+			goto out_unlock;
+		}
+		endpoint = strdup(id->endpoint);
+		bucket = strdup(id->bucket);
+		key = strdup(id->key);
+		if (!endpoint || !bucket || !key) {
+			free(endpoint);
+			free(bucket);
+			free(key);
+			rc = -ENOMEM;
+			goto out_unlock;
+		}
+		TAILQ_REMOVE(&cache->free_slots, slot, link);
+		slot->kind = CACHE_SLOT_OBJECT;
+		slot->resident = true;
+		slot->valid_bytes = object_valid_bytes;
+		slot->object_hash = hash;
+		slot->object_endpoint = endpoint;
+		slot->object_bucket = bucket;
+		slot->object_key = key;
+		object_index_insert_locked(cache, slot);
+		cache->resident++;
+		cache->object_resident++;
+	}
+
+	slot_lru_remove(cache, slot);
+	slot->reservations++;
+	cache->object_reservations++;
+	reservation->fill.cache = cache;
+	reservation->fill.slot = slot;
+	reservation->fill.object_fill = true;
+	reservation->object_valid_bytes = object_valid_bytes;
+	*out = reservation;
+
+out_unlock:
+	pthread_mutex_unlock(&cache->lock);
+	if (rc != 0) {
+		free(reservation);
+	}
+	return rc;
+}
+
 void
-s3_cache_object_populate(struct s3_cache *cache,
-			 const struct s3_cache_object_id *id,
-			 uint32_t offset_in_object, const void *buf,
-			 uint32_t length, uint32_t object_valid_bytes)
+s3_cache_object_reservation_cancel(
+	struct s3_cache_object_reservation *reservation)
+{
+	struct s3_cache *cache;
+
+	if (!reservation) {
+		return;
+	}
+	cache = reservation->fill.cache;
+	pthread_mutex_lock(&cache->lock);
+	object_reservation_release_locked(reservation);
+	pthread_mutex_unlock(&cache->lock);
+	free(reservation);
+}
+
+int
+s3_cache_object_populate_reserved_notify(
+	struct s3_cache_object_reservation *reservation, const void *buf,
+	uint32_t length, s3_cache_populate_cb cb_fn, void *cb_arg)
+{
+	struct cache_fill *fill;
+	struct s3_cache *cache;
+
+	if (!reservation || !buf ||
+	    length != reservation->object_valid_bytes) {
+		s3_cache_object_reservation_cancel(reservation);
+		return -EINVAL;
+	}
+	fill = &reservation->fill;
+	cache = fill->cache;
+
+	pthread_mutex_lock(&cache->lock);
+	if (cache->object_io_stopped) {
+		object_reservation_release_locked(reservation);
+		pthread_mutex_unlock(&cache->lock);
+		free(reservation);
+		return -ESHUTDOWN;
+	}
+	fill->cb_fn = cb_fn;
+	fill->cb_arg = cb_arg;
+	reservation->pending_buf = buf;
+	if (!object_fill_window_open_locked(cache)) {
+		reservation->queued = true;
+		TAILQ_INSERT_TAIL(&cache->preheat_ready, reservation, link);
+		pthread_mutex_unlock(&cache->lock);
+		return 0;
+	}
+	object_reservation_begin_fill_locked(reservation);
+	pthread_mutex_unlock(&cache->lock);
+	object_fill_copy_and_submit(fill, buf, length);
+	return 0;
+}
+
+static int
+s3_cache_object_populate_notify(struct s3_cache *cache,
+				const struct s3_cache_object_id *id,
+				uint32_t offset_in_object, const void *buf,
+				uint32_t length, uint32_t object_valid_bytes,
+				s3_cache_populate_cb cb_fn, void *cb_arg)
 {
 	struct cache_slot *slot;
 	struct cache_staging *staging;
@@ -1701,7 +2070,7 @@ s3_cache_object_populate(struct s3_cache *cache,
 	    offset_in_object % cache->block_size != 0 ||
 	    offset_in_object >= object_valid_bytes ||
 	    cache->object_hash_buckets == 0) {
-		return;
+		return -EINVAL;
 	}
 
 	end_byte = offset_in_object +
@@ -1711,32 +2080,38 @@ s3_cache_object_populate(struct s3_cache *cache,
 		last_block = (object_valid_bytes - 1) / cache->block_size;
 	} else {
 		if (end_byte < cache->block_size + offset_in_object) {
-			return;
+			return -EINVAL;
 		}
 		last_block = end_byte / cache->block_size - 1;
 	}
 	if (last_block < first_block) {
-		return;
+		return -EINVAL;
 	}
 	n_blocks = last_block - first_block + 1;
 	hash = object_id_hash(id);
 
 	pthread_mutex_lock(&cache->lock);
 	if (cache->object_io_stopped) {
-		cache->stats.object_populates_dropped++;
-		pthread_mutex_unlock(&cache->lock);
-		return;
+		return object_populate_drop(cache, NULL, -ESHUTDOWN);
 	}
 	slot = object_find_locked(cache, id, hash);
 	if (slot) {
 		if (slot->valid_bytes != object_valid_bytes) {
-			cache->stats.object_populates_dropped++;
-			pthread_mutex_unlock(&cache->lock);
-			return;
+			return object_populate_drop(cache, NULL, -EINVAL);
 		}
 		if (bitmap_test_range(slot->bitmap, first_block, n_blocks)) {
 			pthread_mutex_unlock(&cache->lock);
-			return;
+			if (cb_fn) {
+				cb_fn(cb_arg, 0);
+			}
+			return 0;
+		}
+		/* A preheat reservation already owns this slot and will write it
+		 * when its GET lands. Starting another fill here can fail and
+		 * release the slot under that reservation. */
+		if (slot->reservations > 0) {
+			pthread_mutex_unlock(&cache->lock);
+			return -EAGAIN;
 		}
 	} else {
 		char *endpoint = strdup(id->endpoint);
@@ -1747,18 +2122,14 @@ s3_cache_object_populate(struct s3_cache *cache,
 			free(endpoint);
 			free(bucket);
 			free(key);
-			cache->stats.object_populates_dropped++;
-			pthread_mutex_unlock(&cache->lock);
-			return;
+			return object_populate_drop(cache, NULL, -ENOMEM);
 		}
 		slot = slot_acquire_object(cache);
 		if (!slot) {
 			free(endpoint);
 			free(bucket);
 			free(key);
-			cache->stats.object_populates_dropped++;
-			pthread_mutex_unlock(&cache->lock);
-			return;
+			return object_populate_drop(cache, NULL, -ENOSPC);
 		}
 		slot->kind = CACHE_SLOT_OBJECT;
 		slot->resident = true;
@@ -1773,26 +2144,14 @@ s3_cache_object_populate(struct s3_cache *cache,
 	}
 
 	if (cache->object_fills_in_flight >= S3_CACHE_OBJECT_FILLS_MAX) {
-		cache->stats.object_populates_dropped++;
-		if (slot->fills == 0 && slot->pins == 0 &&
-		    slot->filled_blocks == 0) {
-			slot_release(cache, slot);
-		}
-		pthread_mutex_unlock(&cache->lock);
-		return;
+		return object_populate_drop(cache, slot, -EAGAIN);
 	}
 
 	staging = TAILQ_FIRST(&cache->staging_free);
 	fill = staging ? calloc(1, sizeof(*fill)) : NULL;
 	if (!staging || !fill) {
 		free(fill);
-		cache->stats.object_populates_dropped++;
-		if (slot->fills == 0 && slot->pins == 0 &&
-		    slot->filled_blocks == 0) {
-			slot_release(cache, slot);
-		}
-		pthread_mutex_unlock(&cache->lock);
-		return;
+		return object_populate_drop(cache, slot, -EAGAIN);
 	}
 
 	TAILQ_REMOVE(&cache->staging_free, staging, link);
@@ -1806,6 +2165,8 @@ s3_cache_object_populate(struct s3_cache *cache,
 	fill->device_offset = slot_offset(cache, slot) +
 			      (uint64_t)first_block * cache->block_size;
 	fill->object_fill = true;
+	fill->cb_fn = cb_fn;
+	fill->cb_arg = cb_arg;
 	slot->fills++;
 	slot_lru_remove(cache, slot);
 	cache->fills_in_flight++;
@@ -1828,6 +2189,18 @@ s3_cache_object_populate(struct s3_cache *cache,
 			cache_disk_fill_abort(fill);
 		}
 	}
+	return 0;
+}
+
+void
+s3_cache_object_populate(struct s3_cache *cache,
+			 const struct s3_cache_object_id *id,
+			 uint32_t offset_in_object, const void *buf,
+			 uint32_t length, uint32_t object_valid_bytes)
+{
+	(void)s3_cache_object_populate_notify(cache, id, offset_in_object, buf,
+					      length, object_valid_bytes,
+					      NULL, NULL);
 }
 
 void
@@ -1910,6 +2283,7 @@ s3_cache_stop_object_io(struct s3_cache *cache)
 	pthread_mutex_lock(&cache->lock);
 	cache->object_io_stopped = true;
 	pthread_mutex_unlock(&cache->lock);
+	object_preheat_fail_ready(cache, -ESHUTDOWN);
 }
 
 void
@@ -1953,8 +2327,13 @@ s3_cache_is_quiesced(const struct s3_cache *cache)
 	}
 
 	pthread_mutex_lock((pthread_mutex_t *)&cache->lock);
+	/* A preheat reservation owns a slot from before its GET returns until
+	 * the bytes are accepted or the GET is cancelled. That slot pointer
+	 * dies with the cache, and the reservation is not a disk fill yet, so
+	 * fills_in_flight alone would let teardown free it underneath the GET. */
 	bool quiesced = cache->fills_in_flight == 0 &&
-			 cache->reads_in_flight == 0;
+			 cache->reads_in_flight == 0 &&
+			 cache->object_reservations == 0;
 	pthread_mutex_unlock((pthread_mutex_t *)&cache->lock);
 	return quiesced;
 }

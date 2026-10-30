@@ -287,6 +287,11 @@ inherit one.
   tool — no awscli. A hand-written `s3.cfg` without the one-click sentinel
   is left alone. There is **no fallback** from the old `/data/cubelet/cos.cfg`;
   rename it and switch to the new field names.
+- **Shared-memory sizing**: `RCOW_WRITEBACK_MB` controls the payload ring
+  reserved in `/dev/shm` for the lvstore (default 4096 MiB, range 64–4096).
+  `S3LVOL_WRITEBACK_TOTAL_MB` is the target-wide cap (default 8192 MiB).
+  The installer persists both values and startup refuses before launching the
+  target when tmpfs cannot reserve the requested ring.
 
 ### Digital Assistant Environment Variables
 

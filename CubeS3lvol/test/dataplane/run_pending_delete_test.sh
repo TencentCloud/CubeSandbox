@@ -87,6 +87,9 @@ export RCOW_ACTIVE_FILE=/var/tmp/rcow_pendel/active_lvols
 export RCOW_BSTORE_FILE=/var/tmp/rcow_pendel/bstore.json
 export RCOW_S3_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
 
+PEER_LVS=pendelpeer
+PEER_WAL_IMG=/data/s3lvol_pendel_peer_wal.img
+PEER_WAL_BDEV=pendel_peer_wal0
 VOL=v
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  [PASS] $*"; }
@@ -223,9 +226,11 @@ except Exception:
 				"$(printf '{"device_name":"%s"}' "$n")" >/dev/null 2>&1
 		done
 		if [ "${FAIL}" -eq 0 ] && [ -z "${S3LVOL_KEEP_S3:-}" ]; then
-			rpc rcow_delete_lvstore \
-				"$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" \
-				>/dev/null 2>&1 || info "delete_lvstore failed"
+			for lvs in "${PEER_LVS}" "${RCOW_LVS_NAME}"; do
+				rpc rcow_delete_lvstore \
+					"$(printf '{"lvs_name":"%s"}' "${lvs}")" \
+					>/dev/null 2>&1 || true
+			done
 		fi
 	fi
 	[ "${STARTED}" -eq 1 ] && "${SCRIPTS}/rcow_stop.sh" --force >/dev/null 2>&1
@@ -234,6 +239,8 @@ except Exception:
 		rcow_load_credentials
 		python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
 			-r "$(rcow_cfg_get region)" -p "${RCOW_LVS_NAME}/" 2>&1 | tail -1
+		python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
+			-r "$(rcow_cfg_get region)" -p "${PEER_LVS}/" 2>&1 | tail -1
 		# Manifests live at the bucket root (exports/<uuid>.json), outside
 		# this lvstore's prefix, so the sweep above does not reach them. The
 		# reaper deletes the ones whose snapshot went; anything a failed
@@ -243,7 +250,7 @@ except Exception:
 				-b "${BUCKET}" -r "$(rcow_cfg_get region)" \
 				-p "exports/${u}" >/dev/null 2>&1
 		done
-		rm -f "${RCOW_WAL_IMG}"
+		rm -f "${RCOW_WAL_IMG}" "${PEER_WAL_IMG}"
 		rm -rf "${RCOW_RUN_DIR}" "${WORKDIR}"
 	elif [ -n "${WORKDIR}" ]; then
 		info "state kept: ${RCOW_WAL_IMG}, ${RCOW_RUN_DIR}, ${WORKDIR}"
@@ -272,6 +279,18 @@ rm -f "${RCOW_WAL_IMG}"; truncate -s 1G "${RCOW_WAL_IMG}"
 "${SCRIPTS}/rcow_start.sh" >"${WORKDIR}/start.log" 2>&1 && STARTED=1 || {
 	fail "rcow_start.sh failed"; tail -20 "${WORKDIR}/start.log"; exit 1; }
 pass "data plane up, lvstore ${RCOW_LVS_NAME}"
+if rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+name = sys.argv[1]
+stores = [s for s in json.load(sys.stdin) if s.get("lvs_name") == name]
+assert len(stores) == 1
+assert stores[0].get("lvol_open_failures_complete") is True
+assert stores[0].get("lvol_open_failures") == []
+' "${RCOW_LVS_NAME}"; then
+	pass "lvol open-failure inventory is complete and empty"
+else
+	fail "lvol open-failure inventory is missing or incomplete"
+fi
 
 # ==========================================================================
 echo ""
@@ -1500,3 +1519,150 @@ if rpc rcow_get_snapshot_status \
 else
 	pass "the registry entry was dropped on the missing manifest"
 fi
+
+# ==========================================================================
+echo ""
+echo "=== [15] same-chain pending deletes are serialized"
+#
+# Three adjacent snapshots are each given a second clone so their first delete
+# records a pending intent. A fourth intent is prepared in another lvstore.
+# Removing the extra clones makes all four eligible on the same poll tick. The
+# three related destroys must serialize, while the independent lvstore may
+# advance. Older code submitted the related SPDK snapshot merges at once and
+# could hit delete_snapshot_sync_snapshot_cpl's clone_entry assertion.
+
+rpc rcow_create_lvol '{"lvol_name":"racebase","size_gib":1}' >/dev/null &&
+	pass "racebase created" || fail "could not create racebase"
+for i in 0 1 2; do
+	rpc rcow_create_snapshot \
+		"$(printf '{"lvol_name":"racebase","snapshot_name":"race-s%s"}' "${i}")" \
+		>/dev/null || fail "could not create race-s${i}"
+	rpc rcow_create_clone \
+		"$(printf '{"snapshot_name":"race-s%s","clone_name":"race-extra%s"}' \
+		   "${i}" "${i}")" >/dev/null || fail "could not create race-extra${i}"
+done
+
+for i in 0 1 2; do
+	rpc rcow_delete_lvol \
+		"$(printf '{"lvol_name":"race-s%s"}' "${i}")" >/dev/null 2>&1
+	[ "$(lvol_field "race-s${i}" delete_pending)" = "true" ] ||
+		fail "race-s${i} did not record a pending delete"
+done
+
+# Prepare the independent pending intent while it is the sole loaded lvstore;
+# rcow_create_lvol intentionally has no lvs_name and therefore requires that.
+pendel_unload >/dev/null || { fail "could not unload the primary lvstore"; exit 1; }
+rm -f "${PEER_WAL_IMG}"
+truncate -s 1G "${PEER_WAL_IMG}"
+rcow_srpc bdev_aio_create "${PEER_WAL_IMG}" "${PEER_WAL_BDEV}" 4096 \
+	>/dev/null || { fail "could not create the peer WAL bdev"; exit 1; }
+rpc rcow_create_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":4,"wal_bdev":"%s","journal_size_mb":64,"wal_size_mb":256}' \
+	   "${PEER_LVS}" "${BUCKET}" "${PEER_WAL_BDEV}")" >/dev/null ||
+	{ fail "could not create the peer lvstore"; exit 1; }
+rpc rcow_create_lvol '{"lvol_name":"peerbase","size_gib":1}' >/dev/null ||
+	fail "could not create peerbase"
+rpc rcow_create_snapshot \
+	'{"lvol_name":"peerbase","snapshot_name":"peer-s"}' >/dev/null ||
+	fail "could not create peer-s"
+rpc rcow_create_clone \
+	'{"snapshot_name":"peer-s","clone_name":"peer-extra"}' >/dev/null ||
+	fail "could not create peer-extra"
+rpc rcow_delete_lvol '{"lvol_name":"peer-s"}' >/dev/null 2>&1
+[ "$(lvol_field peer-s delete_pending)" = "true" ] ||
+	fail "peer-s did not record a pending delete"
+rpc rcow_unload_lvstore \
+	"$(printf '{"lvs_name":"%s"}' "${PEER_LVS}")" >/dev/null ||
+	{ fail "could not unload the peer lvstore"; exit 1; }
+
+pendel_attach >/dev/null || { fail "could not reattach the primary lvstore"; exit 1; }
+rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+	   "${PEER_LVS}" "${BUCKET}" "${PEER_WAL_BDEV}")" >/dev/null ||
+	{ fail "could not reattach the peer lvstore"; exit 1; }
+
+for i in 0 1 2; do
+	rpc rcow_delete_lvol \
+		"$(printf '{"lvol_name":"race-extra%s"}' "${i}")" >/dev/null 2>&1 ||
+		fail "could not remove race-extra${i}"
+done
+rpc rcow_delete_lvol '{"lvol_name":"peer-extra"}' >/dev/null 2>&1 ||
+	fail "could not remove peer-extra"
+
+# The automatic poller is the path that used to batch related raw lvol
+# pointers. Wait for its next tick and require at least one operation to move;
+# the operator retry then drains entries that were correctly left pending by
+# the per-lvstore reservation.
+MOVED=0
+for _ in $(seq 75); do
+	LEFT=0
+	for i in 0 1 2; do
+		lvol_exists "race-s${i}" && LEFT=$((LEFT + 1))
+	done
+	if [ "${LEFT}" -lt 3 ]; then
+		MOVED=1
+		break
+	fi
+	sleep 1
+done
+BUSY_REASONS="$(rpc rcow_get_pending_deletes 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(sum(1 for e in json.load(sys.stdin)
+              if e.get("lvol_name", "").startswith("race-s")
+              and e.get("reason") == "destroy_busy"))
+except Exception:
+    print(-1)
+')"
+if [ "${MOVED}" -eq 1 ] && [ "${LEFT:-3}" -eq 2 ] &&
+   [ "${BUSY_REASONS}" -eq 2 ]; then
+	pass "one same-chain destroy ran; two were retained as destroy_busy"
+else
+	fail "pending batch was not serialized (left=${LEFT:-3}, destroy_busy=${BUSY_REASONS})"
+fi
+for _ in $(seq 5); do
+	lvol_exists peer-s || break
+	sleep 1
+done
+if ! lvol_exists peer-s; then
+	pass "an independent lvstore advanced on the same pending-delete poll"
+else
+	fail "the per-lvstore reservation unnecessarily blocked peer-s"
+fi
+
+python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --retry-pending \
+	>"${WORKDIR}/retry-chain.log" 2>&1 || true
+for _ in $(seq 30); do
+	LEFT=0
+	for i in 0 1 2; do
+		lvol_exists "race-s${i}" && LEFT=$((LEFT + 1))
+	done
+	[ "${LEFT}" -eq 0 ] && break
+	sleep 1
+done
+if [ "${LEFT:-3}" -eq 0 ] && rcow_target_alive &&
+   ! grep -qiE 'assertion|assert|SIGSEGV|segmentation fault' \
+		"${RCOW_LOG}" 2>/dev/null; then
+	pass "same-chain pending deletes completed without assertion"
+else
+	fail "same-chain pending deletes did not complete safely"
+fi
+
+METADATA_OK=1
+for lvs in "${RCOW_LVS_NAME}" "${PEER_LVS}"; do
+	rpc rcow_checkpoint_lvstore \
+		"$(printf '{"lvs_name":"%s"}' "${lvs}")" >/dev/null 2>&1 ||
+		METADATA_OK=0
+	rpc rcow_get_exports \
+		"$(printf '{"lvs_name":"%s"}' "${lvs}")" 2>/dev/null |
+		python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' ||
+		METADATA_OK=0
+done
+[ "${METADATA_OK}" -eq 1 ] &&
+	pass "checkpoint and exports registries remain readable after delete pressure" ||
+	fail "metadata was not readable after delete pressure"
+
+rpc rcow_delete_lvol '{"lvol_name":"racebase"}' >/dev/null 2>&1 || true
+rpc rcow_delete_lvol '{"lvol_name":"peerbase"}' >/dev/null 2>&1 || true
+rpc rcow_delete_lvstore \
+	"$(printf '{"lvs_name":"%s"}' "${PEER_LVS}")" >/dev/null 2>&1 || true

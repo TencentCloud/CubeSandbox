@@ -93,6 +93,7 @@ static const uint8_t *g_obj;         /* the object bytes get_range returns */
 static size_t         g_obj_len;     /* how many of them actually exist */
 static uint64_t       g_head_size;   /* what s3_head reports */
 static int            g_head_status; /* what s3_head reports as status */
+static struct spdk_uuid g_expected_lvs_uuid;
 
 int
 s3_head(struct s3_client *client, const char *key, uint64_t *out_size,
@@ -195,7 +196,7 @@ build_ckpt(struct ckpt_blob *b)
 	b->hdr.magic          = S3_CKPT_MAGIC;
 	b->hdr.version        = S3_CKPT_VERSION;
 	b->hdr.chunk_size     = TEST_CHUNK_SIZE;
-	/* lvs_uuid stays all-zero, which the loader tolerates. */
+	spdk_uuid_copy(&b->hdr.lvs_uuid, &g_expected_lvs_uuid);
 	b->hdr.checkpoint_lsn = 42;
 	b->hdr.gen            = 7;
 	b->hdr.num_entries    = 3;
@@ -245,7 +246,8 @@ run_load(const struct ckpt_blob *blob, size_t blob_len, struct s3_chunk_map *map
 	g_head_size = blob_len;
 	g_head_status = 0;
 
-	s3_checkpoint_load((struct s3_client *)0x1, "ckpt_test", map, load_cb, &r);
+	s3_checkpoint_load((struct s3_client *)0x1, "ckpt_test",
+			   &g_expected_lvs_uuid, map, load_cb, &r);
 	return r;
 }
 
@@ -262,6 +264,7 @@ main(void)
 
 	printf("=== checkpoint validation check ===\n\n");
 
+	make_uuid(&g_expected_lvs_uuid, 0xCAFE);
 	build_ckpt(&blob);
 
 	rc = s3_chunk_map_create(TEST_TOTAL_BLOCKS, 4096, TEST_CHUNK_SIZE, &map);
@@ -300,8 +303,8 @@ main(void)
 	{
 		struct load_result r2 = {0};
 
-		s3_checkpoint_load((struct s3_client *)0x1, "ckpt_test", map,
-				   load_cb, &r2);
+		s3_checkpoint_load((struct s3_client *)0x1, "ckpt_test",
+				   &g_expected_lvs_uuid, map, load_cb, &r2);
 		check_int("status is success", r2.status, 0);
 		check_u64("with LSN 0", r2.lsn, 0);
 	}
@@ -348,7 +351,32 @@ main(void)
 		r = run_load(&b, sizeof(b), map);
 		check_int("a chunk_size mismatch is -EINVAL", r.status, -EINVAL);
 
-		/* (g) size mismatch -- the header claims three entries but only two
+		/* (g) a checkpoint from another lvstore must not be merged into
+		 * this map, even when every CRC is otherwise valid. */
+		memcpy(&b, &blob, sizeof(b));
+		make_uuid(&b.hdr.lvs_uuid, 0xBAD);
+		b.hdr.crc = ckpt_hdr_crc(&b.hdr);
+		r = run_load(&b, sizeof(b), map);
+		check_int("a cross-lvstore UUID is -EINVAL", r.status, -EINVAL);
+
+		/* A nil UUID is the snapshot written before the lvstore identity
+		 * was recorded. It must still load; only a different present
+		 * UUID is another lvstore. */
+		memcpy(&b, &blob, sizeof(b));
+		memset(&b.hdr.lvs_uuid, 0, sizeof(b.hdr.lvs_uuid));
+		b.hdr.crc = ckpt_hdr_crc(&b.hdr);
+		r = run_load(&b, sizeof(b), map);
+		check_int("a nil checkpoint UUID is accepted", r.status, 0);
+
+		/* (h) num_entries must not wrap the object-length calculation. */
+		memcpy(&b, &blob, sizeof(b));
+		b.hdr.num_entries = UINT64_MAX;
+		b.hdr.crc = ckpt_hdr_crc(&b.hdr);
+		r = run_load(&b, sizeof(b), map);
+		check_int("an overflowing entry count is -EOVERFLOW",
+			  r.status, -EOVERFLOW);
+
+		/* (i) size mismatch -- the header claims three entries but only two
 		 * arrive. */
 		memcpy(&b, &blob, sizeof(b));
 		r = run_load(&b, sizeof(b.hdr) + 2 * sizeof(struct s3_ckpt_entry),
@@ -356,7 +384,7 @@ main(void)
 		check_int("fewer bytes than the entry count promises is -EILSEQ",
 			  r.status, -EILSEQ);
 
-		/* (h) entry CRC mismatch -- the header is fine, one entry is
+		/* (j) entry CRC mismatch -- the header is fine, one entry is
 		 * corrupted. */
 		memcpy(&b, &blob, sizeof(b));
 		b.entries[1].valid_bytes ^= 0x1;

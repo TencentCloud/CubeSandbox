@@ -356,6 +356,8 @@ spec:
               readOnly: true
             - name: s3lvol-rpc
               mountPath: /var/run/s3lvol
+            - name: s3lvol-shm
+              mountPath: /dev/shm
             - name: s3lvol-cfg
               mountPath: /etc/s3lvol
               readOnly: true
@@ -453,6 +455,10 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        - name: s3lvol-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.cubeS3lvol.writebackShmSize }}
         - name: s3lvol-cfg
           secret:
             secretName: {{ include "cube.s3lvolSecretName" . }}

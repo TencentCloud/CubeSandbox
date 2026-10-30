@@ -188,7 +188,7 @@ fi
 # consume, and any stop that was going to consume it has already finished by the
 # time a start runs.
 rm -f "${RCOW_RPC_SOCK}" "${RCOW_RPC_SOCK}.lock" "/var/tmp/spdk_cpu_lock_"* \
-	"${RCOW_PIDFILE}" "${RCOW_HOT_MARKER}"
+	"${RCOW_PIDFILE}" "${RCOW_HOT_MARKER}" "${RCOW_START_READY}"
 
 rcow_load_credentials ||
 	rcow_die "could not read access_key_id/secret_access_key from ${RCOW_S3_CFG}"
@@ -204,6 +204,8 @@ S3_BUCKETS="$(rcow_s3_buckets)"
 rcow_log "endpoint ${S3_ENDPOINT}, region ${S3_REGION}"
 rcow_log "buckets: $(printf '%s ' ${S3_BUCKETS})"
 rcow_log "lvstore '${RCOW_LVS_NAME}', WAL image ${RCOW_WAL_IMG}"
+rcow_preflight_writeback_shm ||
+	rcow_die "shared-memory write-back capacity preflight failed"
 
 # ==========================================================================
 rcow_step "starting the target"
@@ -308,7 +310,18 @@ done
 # ==========================================================================
 rcow_step "lvstore '${RCOW_LVS_NAME}'"
 
-if BSTORE_ENTRY="$(rcow_bstore_entry "${RCOW_LVS_NAME}")"; then
+printf '%s\n' "${TGT_PID}" >"${RCOW_START_ATTACHED}.tmp" &&
+	mv -f "${RCOW_START_ATTACHED}.tmp" "${RCOW_START_ATTACHED}" ||
+	bail "could not record the create/attach attempt (${RCOW_START_ATTACHED})"
+
+BSTORE_STATUS=0
+BSTORE_ENTRY="$(rcow_bstore_entry "${RCOW_LVS_NAME}")" || BSTORE_STATUS=$?
+if [ "${BSTORE_STATUS}" -eq 3 ]; then
+	bail "${RCOW_BSTORE_FILE} is corrupt; refusing to guess whether \
+'${RCOW_LVS_NAME}' should be created or attached. Repair or restore the file"
+fi
+
+if [ "${BSTORE_STATUS}" -eq 0 ]; then
 	LVS_NS="${BSTORE_ENTRY%% *}"
 	LVS_WAL_RECORDED="${BSTORE_ENTRY##* }"
 
@@ -337,9 +350,10 @@ somewhere else, stop and check which image it meant"
 	rcow_log "found in ${RCOW_BSTORE_FILE} (namespace ${LVS_NS}): attaching, \
 which replays the journal and the WAL"
 
-	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
+	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s,"cache_hot_bufs":%s,"writeback_size_mb":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_WAL_BDEV}" \
-		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}" \
+		"${RCOW_WRITEBACK_MB}")"
 
 	LOG_MARK="$(rcow_log_size)"
 	if ! ATTACH_OUT="$(rcow_rpc rcow_attach_lvstore \
@@ -392,10 +406,11 @@ ${RCOW_BSTORE_FILE}"
 
 	# RCOW_CAPACITY_GB goes straight through: capacity_gib is in GiB, which is
 	# the unit this script always had. It used to multiply out to bytes here.
-	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
+	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s,"cache_hot_bufs":%s,"writeback_size_mb":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_CAPACITY_GB}" \
 		"${RCOW_WAL_BDEV}" "${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}" \
-		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}" \
+		"${RCOW_WRITEBACK_MB}")"
 
 	# A create can hit the same marker: an earlier create that died after
 	# writing it left no bstore.json entry, so this path is reached again.
@@ -498,4 +513,12 @@ if [ "${REPLAY_RC}" -ne 0 ]; then
 restored; see the warnings above"
 	exit 1
 fi
+
+# The orchestrator waits on this, not on the process existing or the lvstore
+# being attached: both of those are true before the replay and the layout check
+# above. A start that exits 1 must not leave the previous run's file behind;
+# it was removed before this process was spawned.
+printf '%s\n' "${TGT_PID}" >"${RCOW_START_READY}.tmp" &&
+	mv -f "${RCOW_START_READY}.tmp" "${RCOW_START_READY}" ||
+	bail "could not record that the start finished (${RCOW_START_READY})"
 exit 0
