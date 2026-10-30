@@ -293,11 +293,12 @@ paths:
           minimum: 0
       - name: limit
         in: query
-        description: Page size, 1 to 500.
+        description: Page size, 1 to 500; 0 or absent means 100.
         required: false
         schema:
           type: integer
           format: int32
+          maximum: 500
           minimum: 0
       responses:
         '200':

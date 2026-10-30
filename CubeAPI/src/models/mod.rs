@@ -1092,8 +1092,9 @@ pub struct SandboxEvents {
 pub struct SandboxEventsQuery {
     /// ID of the last event already read.
     pub cursor: Option<u64>,
-    /// Page size, 1 to 500.
+    /// Page size, 1 to 500; 0 or absent means 100.
     #[serde(default = "default_event_limit")]
+    #[param(minimum = 0, maximum = 500)]
     pub limit: u32,
 }
 

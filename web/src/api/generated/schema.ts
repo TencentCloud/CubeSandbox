@@ -689,7 +689,7 @@ export interface operations {
             query?: {
                 /** @description ID of the last event already read. */
                 cursor?: number;
-                /** @description Page size, 1 to 500. */
+                /** @description Page size, 1 to 500; 0 or absent means 100. */
                 limit?: number;
             };
             header?: never;

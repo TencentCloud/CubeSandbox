@@ -770,7 +770,8 @@ impl SandboxService {
         cursor: Option<u64>,
         limit: u32,
     ) -> AppResult<SandboxEvents> {
-        let limit = limit.clamp(1, 500);
+        // 0 means the default, as in CubeMaster.
+        let limit = if limit == 0 { 100 } else { limit.clamp(1, 500) };
         match self
             .cubemaster
             .get_sandbox_events(sandbox_id, cursor, limit)
@@ -2643,6 +2644,31 @@ mod tests {
             Some("500"),
             "limit is capped"
         );
+    }
+
+    #[tokio::test]
+    async fn get_events_treats_zero_limit_as_default() {
+        let seen = Arc::new(Mutex::new(None::<HashMap<String, String>>));
+        let recorder = Arc::clone(&seen);
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/events",
+            get(
+                move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+                    let recorder = Arc::clone(&recorder);
+                    async move {
+                        *recorder.lock().await = Some(q);
+                        ret_envelope(0, "")
+                    }
+                },
+            ),
+        ))
+        .await;
+        service
+            .get_events("sbx-1", None, 0)
+            .await
+            .expect("history should load");
+        let query = seen.lock().await.clone().expect("cubemaster called");
+        assert_eq!(query.get("limit").map(String::as_str), Some("100"));
     }
 
     #[tokio::test]
