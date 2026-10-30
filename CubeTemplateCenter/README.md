@@ -60,6 +60,12 @@ artifact store is shared. The chart refuses these on `helm install`:
   its own storage). The installer only models control + compute, never
   two controls. Migrate to Helm + `s3Backed=true` first.
 
+## Local artifact cleanup on multiple replicas
+
+Deleting shared metadata and S3 objects on one replica does not remove build caches from other replicas' private disks. When reconciliation is enabled, each TemplateCenter sweeps its local artifact directories at startup and during periodic reconciliation, outside the shared reconciliation lock. Without S3 configured, only replica-local work directories are swept; potentially shared artifact-store paths are retained.
+
+Each pass removes at most 200 directories. A directory must be older than ten minutes, have no active build marker in either the work or store roots, and have neither an artifact row nor an active database reference. Existing artifact rows, including deletion tombstones, protect local files. A failed database lookup stops the sweep; local cleanup does not infer that uncertain artifacts are unused.
+
 ## Migrating legacy local artifacts (`tpl merge`)
 
 `tpl merge` migrates a legacy READY template artifact from CubeMaster local disk into TC-managed storage. Keep the wording consistent in runbooks: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.**

@@ -141,6 +141,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
+	// Local disks are replica-private even when metadata/S3 are shared. Run
+	// this outside the cross-replica lock, including once after startup.
+	r.cleanupLocalArtifacts(ctx)
 
 	for {
 		select {
@@ -148,9 +151,18 @@ func (r *Reconciler) Run(ctx context.Context) {
 			log.G(ctx).Infof("templatecenter reconciler stopped")
 			return
 		case <-ticker.C:
+			r.cleanupLocalArtifacts(ctx)
 			if err := r.SweepOnce(ctx); err != nil {
 				log.G(ctx).Errorf("reconciler sweep fail: %v", err)
 			}
+		}
+	}
+}
+
+func (r *Reconciler) cleanupLocalArtifacts(ctx context.Context) {
+	if cleaner, ok := r.deleter.(interface{ CleanupLocalOrphans(context.Context) error }); ok {
+		if err := cleaner.CleanupLocalOrphans(ctx); err != nil {
+			log.G(ctx).Errorf("local artifact cache cleanup failed: %v", err)
 		}
 	}
 }

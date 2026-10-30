@@ -159,6 +159,25 @@ type fakeDeleter struct {
 	err     error
 }
 
+type fakeLocalCleaner struct {
+	fakeDeleter
+	calls int
+}
+
+func (f *fakeLocalCleaner) CleanupLocalOrphans(context.Context) error { f.calls++; return nil }
+func TestLocalCleanupDoesNotRequireGlobalSweepLock(t *testing.T) {
+	// A local cleanup must run independently on each replica, even without a
+	// DB session capable of winning the global metadata sweep lock.
+	for i := 0; i < 3; i++ {
+		f := &fakeLocalCleaner{}
+		r := &Reconciler{deleter: f}
+		r.cleanupLocalArtifacts(t.Context())
+		if f.calls != 1 {
+			t.Fatalf("replica %d: calls=%d", i, f.calls)
+		}
+	}
+}
+
 func (f *fakeDeleter) Delete(_ context.Context, artifactID string) error {
 	f.deleted = append(f.deleted, artifactID)
 	return f.err
