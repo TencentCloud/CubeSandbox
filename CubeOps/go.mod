@@ -3,6 +3,7 @@ module github.com/tencentcloud/CubeSandbox/CubeOps
 go 1.25.7
 
 require (
+	github.com/tencentcloud/CubeSandbox/pkgs/redisx v0.0.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.2.2
@@ -74,6 +75,7 @@ require (
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/minio-go/v7 v7.3.0 // indirect
+	github.com/mna/redisc v1.4.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/moby/api v1.54.2 // indirect
 	github.com/moby/moby/client v0.4.1 // indirect
@@ -122,3 +124,5 @@ require (
 )
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/redisx => ../pkgs/redisx
