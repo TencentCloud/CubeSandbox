@@ -6,6 +6,26 @@ import server
 
 
 class ContextStartupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_envd_unsupported_endpoint_fails_without_readiness_retries(self):
+        calls = []
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(404)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with self.assertRaisesRegex(RuntimeError, '404'):
+                await server._wait_for_envd(client)
+        self.assertEqual(len(calls), 1)
+
+    async def test_envd_invalid_payload_fails_without_readiness_retries(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[]))) as client:
+            with self.assertRaisesRegex(RuntimeError, 'invalid environment payload'):
+                await server._wait_for_envd(client)
+
+    async def test_envd_transient_failure_can_become_ready(self):
+        responses = iter([httpx.Response(503), httpx.Response(200, json={})])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: next(responses))) as client:
+            await server._wait_for_envd(client)
+
     async def test_failed_connection_cleanup_still_deletes_known_session(self):
         client = AsyncMock()
         client.post.return_value = httpx.Response(200, json={"kernel": {"id": "kernel"}, "id": "session"})

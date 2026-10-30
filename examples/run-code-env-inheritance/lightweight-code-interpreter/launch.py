@@ -68,6 +68,9 @@ def main():
         with ExitStack() as stack:
             envd_name = os.getenv("ENVD_LOG_FILE", "/var/log/envd.log")
             jupyter_name = os.getenv("JUPYTER_LOG_FILE", "/var/log/jupyter.log")
+            for name in (envd_name, jupyter_name):
+                if name != "-":
+                    Path(name).parent.mkdir(parents=True, exist_ok=True)
             envd_log = None if envd_name == "-" else stack.enter_context(open(envd_name, "ab"))
             jupyter_log = None if jupyter_name == "-" else stack.enter_context(open(jupyter_name, "ab"))
             previous_term = signal.signal(signal.SIGTERM, exit_on_signal)
