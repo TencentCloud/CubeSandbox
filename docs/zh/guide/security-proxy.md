@@ -286,6 +286,62 @@ inject 的 `secret` 值在写入任何日志路径前都会被剥除。审计日
 仅记录规则名和 inject 已运行的事实；密钥本身从不离开 lua VM。
 :::
 
+## 应用运行时的 CA 信任
+
+新构建的镜像模板在开启 CA 烘焙时，还会默认设置 `NODE_EXTRA_CA_CERTS`、
+`SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE` 和 `CARGO_HTTP_CAINFO`。这些变量指向镜像内
+实际包含 CubeEgress 根证书的 PEM bundle。构建器按顺序选择已存在的
+`/etc/ssl/certs/ca-certificates.crt`、
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`、
+`/etc/pki/tls/certs/ca-bundle.crt`；没有可用 bundle 时创建第一个路径。
+已有 bundle 中的证书会保留。
+
+应用入口通过容器环境获取这些默认值，不依赖登录 shell 或 `/etc/profile`。
+对于注入或检测到 envd 的模板，CubeMaster 还会通过 envd 的 `/init` 接口传递
+默认值，让 SDK 命令也能使用；没有 envd 的镜像不会因此新增 envd 依赖。
+镜像显式 ENV 优先于自动默认值，模板 `--env` 又优先于镜像 ENV，显式空值也会
+保留。沙箱创建时的 `envs` 优先于传给 envd 的默认值，SDK 单条命令的环境覆盖
+则优先于这些初始化值。
+
+使用 `cubemastercli template create-from-image --with-cube-ca-env=false ...`
+可保留 CA 烘焙、关闭自动环境变量；CubeAPI `POST /templates` 对应参数为
+`"with_cube_ca_env": false`。`--with-cube-ca=false`（API 参数
+`"with_cube_ca": false`）同时关闭 CA 烘焙和自动运行时变量。两个选项均默认开启。
+
+要支持新的运行时而不修改 CubeSandbox 代码，可重复传入 `--cube-ca-env-var NAME`
+来替换变量清单，或使用 CubeAPI `POST /templates` 的 `cube_ca_env_vars`（CubeOps 也会转发）：
+
+```json
+{
+  "image": "registry.example.com/my-runtime:latest",
+  "cube_ca_env_vars": ["CARGO_HTTP_CAINFO", "CUSTOM_CA_FILE"]
+}
+```
+
+此例只设置列出的两个变量；如需扩展默认清单，请同时列出上面的五个默认名称。
+省略或 `null` 使用默认清单，`[]` 不设置自动变量但保留 CA 烘焙。
+`with_cube_ca_env: false` 或 `with_cube_ca: false` 均优先于清单。
+变量名须符合 `[A-Za-z_][A-Za-z0-9_]*`；重复名称及顺序不影响选择结果。
+只应选择接收 PEM bundle **文件路径**的变量，例如
+[Cargo 的 `CARGO_HTTP_CAINFO`](https://doc.rust-lang.org/cargo/reference/config.html#httpcainfo)，
+不适用于目录、布尔开关或 Java keystore 选项。应用环境和 envd 初始化共用该清单，
+显式值的覆盖优先级保持不变。清单随构建请求持久化，复用和 redo 时保留；
+修改已启用的清单会改变模板规格指纹。
+
+SDK 的模板构建入口也可通过已有扩展参数传递此字段：Python 使用
+`Template.build(..., cube_ca_env_vars=[...])`，Node 使用
+`Template.build({image, extra: {cube_ca_env_vars: [...]}})`，Go 使用
+`BuildTemplateOptions{Image: image, Extra: map[string]any{"cube_ca_env_vars": []string{...}}}`。
+要选择不设置任何自动变量，请传空列表，而非省略参数。
+
+已有模板和正在运行的沙箱不会被修改。CubeTemplateCenter 与 CubeMaster 应一起升级：
+构建器记录验证过的 bundle 路径，主控生成模板配置时使用该路径。开启自动变量的新构建
+使用独立的制品指纹，避免复用缺少路径元数据的旧 rootfs 缓存；后续复用和 redo
+保留已记录的路径。
+
+证书链及主机名校验保持开启。自定义 TLS 上下文、证书固定、不读取这些变量的客户端
+以及 Java truststore 仍可能需要应用专属配置。
+
 ## 不经过代理的路径
 
 少数情形不走 CubeEgress，需要清楚边界：

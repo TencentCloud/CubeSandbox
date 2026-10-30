@@ -390,11 +390,17 @@ func reportExistingArtifact(
 		}
 	}
 	artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
+	// Reuse the build-time metadata (including the verified CA bundle path),
+	// not a fresh registry config which knows nothing about the baked rootfs.
+	reusedSource := *source
+	if existing.ImageConfigJSON != "" {
+		reusedSource.ConfigJSON = existing.ImageConfigJSON
+	}
 	return reportArtifactBuilt(ctx, jobID, &image.BuildResult{
 		Ext4Path:  existing.Ext4Path,
 		SHA256:    existing.Ext4SHA256,
 		SizeBytes: existing.Ext4SizeBytes,
-	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
+	}, existing.ArtifactID, fingerprint, &reusedSource, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
 	}, artifactURL, inStore, s3Client, objectKey, logger)
@@ -429,6 +435,10 @@ func reportArtifactBuilt(
 	// keeps the data plane identical to local mode: Cubelet pulls the ext4
 	// from CubeMaster, not from TC. distributeRootfsArtifact rejects an
 	// empty value, so it must be reported.
+	configJSON, err := imageConfigWithCABundle(source.ConfigJSON, caResult.BundlePath)
+	if err != nil {
+		return err
+	}
 	payload := map[string]any{
 		"status":                         templatecenter.JobStatusBuilt,
 		"phase":                          templatecenter.JobPhaseReady,
@@ -440,9 +450,9 @@ func reportArtifactBuilt(
 		"ext4_path":                      result.Ext4Path,
 		"ext4_sha256":                    result.SHA256,
 		"ext4_size_bytes":                result.SizeBytes,
-		"image_config_json":              source.ConfigJSON,
+		"image_config_json":              configJSON,
 		"master_node_ip":                 source.MasterNodeIP,
-		"cube_egress_ca_baked":           caResult.Baked,
+		"cube_egress_ca_baked":           caResult.Baked || caResult.BundlePath != "",
 		"cube_egress_ca_fingerprint":     caResult.Fingerprint,
 		"cube_egress_ca_targets_written": caResult.TargetsWritten,
 	}

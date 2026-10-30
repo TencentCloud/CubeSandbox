@@ -301,13 +301,16 @@ func ValidateImageRef(imageRef string) error {
 //
 // TC reports this in the BUILT callback; Master stores it on the artifact row.
 type DockerImageConfig struct {
-	User         string              `json:"User,omitempty"`
-	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
-	Env          []string            `json:"Env,omitempty"`
-	Entrypoint   []string            `json:"Entrypoint,omitempty"`
-	Cmd          []string            `json:"Cmd,omitempty"`
-	WorkingDir   string              `json:"WorkingDir,omitempty"`
-	Labels       map[string]string   `json:"Labels,omitempty"`
+	// CubeEgressCABundlePath is build metadata added by CubeTemplateCenter,
+	// persisted with the image config so artifact reuse/redo retain it.
+	CubeEgressCABundlePath string              `json:"_cube_egress_ca_bundle_path,omitempty"`
+	User                   string              `json:"User,omitempty"`
+	ExposedPorts           map[string]struct{} `json:"ExposedPorts,omitempty"`
+	Env                    []string            `json:"Env,omitempty"`
+	Entrypoint             []string            `json:"Entrypoint,omitempty"`
+	Cmd                    []string            `json:"Cmd,omitempty"`
+	WorkingDir             string              `json:"WorkingDir,omitempty"`
+	Labels                 map[string]string   `json:"Labels,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -293,6 +293,8 @@ export const templateApi = {
     allowOut?: string[];
     denyOut?: string[];
     with_cube_ca?: boolean;
+    with_cube_ca_env?: boolean;
+    cube_ca_env_vars?: string[];
   }) => api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
   rebuild: (id: string) =>
     api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),

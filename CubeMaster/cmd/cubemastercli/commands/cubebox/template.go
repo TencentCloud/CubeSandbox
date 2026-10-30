@@ -906,6 +906,8 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
+		cli.BoolTFlag{Name: "with-cube-ca-env", Usage: "configure application runtime CA defaults when baking the CA; false keeps CA baking without injecting environment variables (default: true)"},
+		cli.StringSliceFlag{Name: "cube-ca-env-var", Usage: "replace the default CA variable list with these PEM bundle variable names (repeatable); use --with-cube-ca-env=false to disable"},
 		cli.BoolFlag{Name: "enable-inject-envd", Usage: "enable cubesandbox-envd injection for this template build"},
 		cli.StringFlag{Name: "envd-path", Usage: "local envd binary path to upload when --enable-inject-envd is set; defaults to the CLI-embedded envd if available"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
@@ -953,6 +955,11 @@ var TemplateCreateFromImageCommand = cli.Command{
 		// SDKs) can still rely on `nil = server-side default`.
 		withCubeCA := c.BoolT("with-cube-ca")
 		req.WithCubeCA = &withCubeCA
+		withCubeCAEnv := c.BoolT("with-cube-ca-env")
+		req.WithCubeCAEnv = &withCubeCAEnv
+		if c.IsSet("cube-ca-env-var") {
+			req.CubeCAEnvVars = c.StringSlice("cube-ca-env-var")
+		}
 		applyCreateFromImageIvshmemFlag(c, req)
 		req.CubeNetworkConfig, err = mergeCreateFromImageCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 		if err != nil {
