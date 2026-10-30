@@ -69,6 +69,7 @@
     "reasons": {
       "request": "主动销毁",
       "timeout": "超时销毁"
-    }
+    },
+    "loadingMore": "已加载较早的记录，较新的事件仍在加载…"
   }
 }

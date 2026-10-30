@@ -299,7 +299,7 @@ function recordSandboxEvent(
   sandboxEvents.set(sandboxID, history);
 }
 
-export function getSandboxEvents(sandboxID: string) {
+export function getSandboxEvents(sandboxID: string, cursor = -1) {
   const recorded = sandboxEvents.get(sandboxID) ?? [];
   const sandbox = sandboxes.find((item) => item.sandboxID === sandboxID);
   // Seeded sandboxes have no recorded creation; synthesize it from their start time.
@@ -307,7 +307,7 @@ export function getSandboxEvents(sandboxID: string) {
     sandbox && !recorded.some((e) => e.event === 'created')
       ? [{ id: 0, event: 'created', timestamp: sandbox.startedAt, templateID: sandbox.templateID }]
       : [];
-  return { events: [...created, ...recorded], hasMore: false };
+  return { events: [...created, ...recorded].filter((e) => e.id > cursor), hasMore: false };
 }
 
 export function deleteSandbox(sandboxID: string) {

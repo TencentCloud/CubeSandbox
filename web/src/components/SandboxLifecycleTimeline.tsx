@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { RefreshCw } from 'lucide-react';
 import { sandboxApi, type SandboxLifecycleEventDto } from '@/api/client';
@@ -17,20 +17,34 @@ const EVENT_TONE: Record<string, 'ok' | 'warn' | 'err' | 'info'> = {
   killed: 'err',
 };
 
-// One page holds 500 events; stop after this many pages so a runaway history
-// cannot keep the page busy.
+// One page holds 500 events; one fetch reads at most this many pages so a
+// very long history cannot keep the page busy. The next fetch continues from
+// where this one stopped.
 const MAX_PAGES = 10;
 
-async function fetchAllEvents(sandboxID: string): Promise<SandboxLifecycleEventDto[]> {
-  const events: SandboxLifecycleEventDto[] = [];
-  let cursor: number | undefined;
+interface History {
+  events: SandboxLifecycleEventDto[];
+  /** ID of the last event read; the next fetch only asks for newer ones. */
+  cursor?: number;
+  /** More events exist than were read so far. */
+  hasMore: boolean;
+}
+
+async function fetchNewEvents(sandboxID: string, previous?: History): Promise<History> {
+  const events = [...(previous?.events ?? [])];
+  let cursor = previous?.cursor;
+  let hasMore = false;
   for (let page = 0; page < MAX_PAGES; page++) {
     const res = await sandboxApi.events(sandboxID, { cursor, limit: 500 });
     events.push(...res.events);
-    if (!res.hasMore || res.nextCursor == null) break;
-    cursor = res.nextCursor;
+    if (res.events.length > 0) cursor = res.events[res.events.length - 1].id;
+    hasMore = res.hasMore;
+    if (!res.hasMore) break;
   }
-  return events;
+  // Rows from different CubeMaster replicas can be inserted slightly out of
+  // order; the recorded time is authoritative.
+  events.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.id - b.id);
+  return { events, cursor, hasMore };
 }
 
 /**
@@ -49,14 +63,17 @@ export function SandboxLifecycleTimeline({
   hideWhenEmpty?: boolean;
 }) {
   const { t } = useTranslation('sandboxDetail');
+  const qc = useQueryClient();
+  const queryKey = ['sandbox-events', sandboxID];
   const history = useQuery({
-    queryKey: ['sandbox-events', sandboxID],
-    queryFn: () => fetchAllEvents(sandboxID),
+    queryKey,
+    queryFn: () => fetchNewEvents(sandboxID, qc.getQueryData<History>(queryKey)),
     enabled: !!sandboxID,
     retry: 1,
-    refetchInterval: live ? 10_000 : false,
+    // Keep reading while a long history is still being caught up.
+    refetchInterval: (query) => (live || query.state.data?.hasMore ? 10_000 : false),
   });
-  const events = history.data ?? [];
+  const events = history.data?.events ?? [];
 
   if (hideWhenEmpty && (history.isLoading || history.isError || events.length === 0)) {
     return null;
@@ -108,6 +125,9 @@ export function SandboxLifecycleTimeline({
           ))}
         </ol>
       )}
+      {history.data?.hasMore ? (
+        <p className="mt-2 text-xs text-muted-foreground">{t('lifecycle.loadingMore')}</p>
+      ) : null}
     </Card>
   );
 }

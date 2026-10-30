@@ -130,9 +130,12 @@ export const handlers = [
       : notFound(`sandbox ${params.sandboxID} not found`);
   }),
 
-  http.get('/cubeapi/v1/sandboxes/:sandboxID/events', async ({ params }) => {
+  http.get('/cubeapi/v1/sandboxes/:sandboxID/events', async ({ params, request }) => {
     await mockDelay();
-    return HttpResponse.json(getSandboxEvents(String(params.sandboxID)));
+    const cursor = new URL(request.url).searchParams.get('cursor');
+    return HttpResponse.json(
+      getSandboxEvents(String(params.sandboxID), cursor == null ? -1 : Number(cursor)),
+    );
   }),
 
   http.get('/cubeapi/v1/v2/sandboxes/:sandboxID/logs', async ({ params }) => {

@@ -69,6 +69,7 @@
     "reasons": {
       "request": "killed on request",
       "timeout": "timed out"
-    }
+    },
+    "loadingMore": "Older history loaded; newer events are still loading…"
   }
 }
