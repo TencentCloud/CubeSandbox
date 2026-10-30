@@ -209,8 +209,12 @@ pub async fn get_sandbox(
 )]
 pub async fn create_sandbox(
     State(state): State<AppState>,
-    Json(body): Json<NewSandbox>,
+    Json(mut body): Json<NewSandbox>,
 ) -> AppResult<impl IntoResponse> {
+    body.template_id = state
+        .services
+        .resolve_snapshot_template_target(&body.template_id)
+        .await?;
     let template_id = body.template_id.clone();
     let timeout = body.timeout;
     state

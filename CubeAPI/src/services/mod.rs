@@ -137,6 +137,28 @@ impl AppServices {
         }
         Ok(ids.pop())
     }
+
+    /// Resolve a public snapshot name to the immutable ID expected by sandbox
+    /// creation. A template alias and snapshot name must not silently select
+    /// different resources, so the ambiguous case is rejected.
+    pub async fn resolve_snapshot_template_target(&self, id: &str) -> AppResult<String> {
+        let id = id.trim();
+        if id.is_empty() || id.starts_with("tpl-") || snapshots::is_snapshot_identity(id) {
+            return Ok(id.to_string());
+        }
+        let mut ids = self.snapshots.ids_by_name(id).await?;
+        if ids.is_empty() {
+            return Ok(id.to_string());
+        }
+        match self.templates.get_template(id).await {
+            Ok(_) => Err(AppError::Conflict(format!(
+                "{id:?} matches both a template alias and a snapshot name; use a tpl- or snap- id"
+            ))),
+            Err(AppError::NotFound(_)) if ids.len() == 1 => Ok(ids.remove(0)),
+            Err(AppError::NotFound(_)) => Err(snapshots::ambiguous_name_conflict(id)),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +336,25 @@ mod tests {
             Err(AppError::Internal(_)) => {}
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn template_target_snapshot_name_resolves_to_snapshot_id() {
+        let (svc, counters) = spawn_master(vec!["snap-x"], None).await;
+        assert_eq!(
+            svc.resolve_snapshot_template_target("prod").await.unwrap(),
+            "snap-x"
+        );
+        assert_eq!(calls(&counters), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn template_target_name_shared_with_template_is_conflict() {
+        let (svc, _) = spawn_master(vec!["snap-x"], existing_template()).await;
+        assert!(matches!(
+            svc.resolve_snapshot_template_target("prod").await,
+            Err(AppError::Conflict(_))
+        ));
     }
 
     #[test]
