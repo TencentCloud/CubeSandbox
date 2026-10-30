@@ -111,6 +111,15 @@ func TestSandboxEventsAction(t *testing.T) {
 
 	badCursor := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-gone&cursor=abc", nil))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), badCursor.Ret.RetCode)
+	badBody := call(httptest.NewRequest(http.MethodPost, "/cube/sandbox/events",
+		bytes.NewReader([]byte(`{"sandboxID":"sb-gone","cursor":-1}`))))
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), badBody.Ret.RetCode)
+	assert.Contains(t, badBody.Ret.RetMsg, "invalid request body")
+	// An empty JSON body still takes the sandbox from the query string.
+	emptyBody := call(httptest.NewRequest(http.MethodPost, "/cube/sandbox/events?sandbox_id=sb-gone",
+		bytes.NewReader([]byte(`{}`))))
+	assert.Equal(t, 0, emptyBody.Ret.RetCode)
+	assert.Len(t, emptyBody.Events, 3)
 
 	missing := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events", nil))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), missing.Ret.RetCode)

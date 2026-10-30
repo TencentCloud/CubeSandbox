@@ -5,8 +5,11 @@
 package cube
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -143,6 +146,44 @@ type SandboxEventsRes struct {
 	HasMore    bool                    `json:"hasMore"`
 }
 
+// parseSandboxEventsReq reads the JSON body when there is one, then fills any
+// field the body left unset from the query string.
+func parseSandboxEventsReq(c *gin.Context) (*SandboxEventsReq, error) {
+	req := &SandboxEventsReq{}
+	if c.Request.Body != nil {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			return nil, errors.New("failed to read request body")
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			if err := utils.DecodeHttpBody(io.NopCloser(bytes.NewReader(body)), req); err != nil {
+				return nil, fmt.Errorf("invalid request body: %v", err)
+			}
+		}
+	}
+	if req.SandboxID == "" {
+		req.SandboxID = c.Query("sandbox_id")
+		if req.SandboxID == "" {
+			req.SandboxID = c.Query("sandboxID")
+		}
+	}
+	if cursor := c.Query("cursor"); cursor != "" && req.Cursor == 0 {
+		v, err := strconv.ParseUint(cursor, 10, 64)
+		if err != nil {
+			return nil, errors.New("cursor must be a non-negative integer")
+		}
+		req.Cursor = v
+	}
+	if limit := c.Query("limit"); limit != "" && req.Limit == 0 {
+		v, err := strconv.Atoi(limit)
+		if err != nil {
+			return nil, errors.New("limit must be an integer")
+		}
+		req.Limit = v
+	}
+	return req, nil
+}
+
 // handleSandboxEventsAction lists a sandbox's lifecycle history oldest first.
 // Events are stored under the full sandbox ID. The ID is first matched as
 // given, which keeps the history of a deleted sandbox readable; only when that
@@ -155,32 +196,16 @@ func handleSandboxEventsAction(c *gin.Context) {
 			rt.RetCode = code
 		}
 	}
-	req := &SandboxEventsReq{}
-	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
-		req.SandboxID = c.Query("sandbox_id")
-		if req.SandboxID == "" {
-			req.SandboxID = c.Query("sandboxID")
-		}
-		var parseErr error
-		if cursor := c.Query("cursor"); cursor != "" {
-			if req.Cursor, parseErr = strconv.ParseUint(cursor, 10, 64); parseErr != nil {
-				parseErr = errors.New("cursor must be a non-negative integer")
-			}
-		}
-		if l := c.Query("limit"); l != "" && parseErr == nil {
-			if req.Limit, parseErr = strconv.Atoi(l); parseErr != nil {
-				parseErr = errors.New("limit must be an integer")
-			}
-		}
-		// Ignoring a bad cursor would silently restart paging at the first event.
-		if parseErr != nil {
-			setRetCode(int64(errorcode.ErrorCode_MasterParamsError))
-			common.WriteAPI(c, &SandboxEventsRes{Res: &types.Res{Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  parseErr.Error(),
-			}}})
-			return
-		}
+	req, parseErr := parseSandboxEventsReq(c)
+	// A bad body or paging value is reported, not ignored: a dropped cursor
+	// would silently restart paging at the first event.
+	if parseErr != nil {
+		setRetCode(int64(errorcode.ErrorCode_MasterParamsError))
+		common.WriteAPI(c, &SandboxEventsRes{Res: &types.Res{Ret: &types.Ret{
+			RetCode: int(errorcode.ErrorCode_MasterParamsError),
+			RetMsg:  parseErr.Error(),
+		}}})
+		return
 	}
 
 	if req.SandboxID == "" {
