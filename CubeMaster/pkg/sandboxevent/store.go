@@ -128,6 +128,10 @@ func write(ctx context.Context, ev *models.SandboxEvent) {
 
 // List returns the sandbox's events oldest first, starting after the event
 // whose ID is cursor (0 for the beginning), and whether more follow.
+//
+// Paging is best effort: with several replicas an insert that got a lower ID
+// can commit after a reader already moved its cursor past a higher one, and
+// that event is then not returned by later pages.
 func List(ctx context.Context, sandboxID string, cursor uint64, limit int) ([]models.SandboxEvent, bool, error) {
 	client := getDB()
 	if client == nil {

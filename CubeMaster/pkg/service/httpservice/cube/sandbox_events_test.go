@@ -78,19 +78,19 @@ func TestSandboxEventsAction(t *testing.T) {
 	orig := resolveSandboxIDFn
 	t.Cleanup(func() { resolveSandboxIDFn = orig })
 	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) {
-		if id == "sb-g" {
+		if id == "abc1" {
 			return "sb-gone", nil
 		}
 		return "", errors.New("not found")
 	}
-	short := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-g", nil))
+	short := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=abc1", nil))
 	assert.Len(t, short.Events, 3)
 	// Later pages of the same short ID reuse the resolved ID.
 	resolveSandboxIDFn = func(context.Context, string) (string, error) {
 		t.Fatal("short ID resolved again")
 		return "", nil
 	}
-	next := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-g&limit=1&cursor="+jsonUint(short.Events[0].ID), nil))
+	next := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=abc1&limit=1&cursor="+jsonUint(short.Events[0].ID), nil))
 	require.Len(t, next.Events, 1)
 	assert.Equal(t, "paused", next.Events[0].Event)
 	// A full ID with no history is never resolved (that would scan the cluster).
@@ -136,7 +136,7 @@ func TestEventIDCacheIsBounded(t *testing.T) {
 	t.Cleanup(func() { resolveSandboxIDFn = orig })
 	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) { return id + "-full", nil }
 	for i := 0; i < 3*eventIDCacheMax; i++ {
-		resolveEventSandboxID(context.Background(), "sb"+strconv.Itoa(i))
+		resolveEventSandboxID(context.Background(), strconv.FormatInt(int64(i), 16))
 	}
 	eventIDCacheMu.Lock()
 	defer eventIDCacheMu.Unlock()
@@ -152,7 +152,42 @@ func TestEventIDCacheRemembersMisses(t *testing.T) {
 		return "", errors.New("not found")
 	}
 	for i := 0; i < 3; i++ {
-		assert.Equal(t, "", resolveEventSandboxID(context.Background(), "sb-miss-once"))
+		assert.Equal(t, "", resolveEventSandboxID(context.Background(), "deadbeef"))
 	}
 	assert.Equal(t, 1, calls)
+}
+
+func TestEventIDResolutionSkipsNonPrefixInput(t *testing.T) {
+	orig := resolveSandboxIDFn
+	t.Cleanup(func() { resolveSandboxIDFn = orig })
+	resolveSandboxIDFn = func(context.Context, string) (string, error) {
+		t.Fatal("non-hex input must not be resolved")
+		return "", nil
+	}
+	assert.Equal(t, "", resolveEventSandboxID(context.Background(), "not-an-id"))
+}
+
+func TestEventIDCacheEvictsOneEntryWhenFull(t *testing.T) {
+	orig := resolveSandboxIDFn
+	t.Cleanup(func() { resolveSandboxIDFn = orig })
+	eventIDCacheMu.Lock()
+	clear(eventIDCache)
+	eventIDCacheMu.Unlock()
+	calls := map[string]int{}
+	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) {
+		calls[id]++
+		return id + "-full", nil
+	}
+	for i := 0; i < eventIDCacheMax; i++ {
+		resolveEventSandboxID(context.Background(), "a"+strconv.FormatInt(int64(i), 16))
+	}
+	// One more ID evicts a single entry instead of flushing the cache.
+	resolveEventSandboxID(context.Background(), "b1")
+	eventIDCacheMu.Lock()
+	size := len(eventIDCache)
+	eventIDCacheMu.Unlock()
+	assert.Equal(t, eventIDCacheMax, size)
+	last := "a" + strconv.FormatInt(int64(eventIDCacheMax-1), 16)
+	resolveEventSandboxID(context.Background(), last)
+	assert.Equal(t, 1, calls[last], "recent entries survive")
 }
