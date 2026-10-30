@@ -68,7 +68,8 @@
     },
     "reasons": {
       "request": "主动销毁",
-      "timeout": "超时销毁"
+      "timeout": "超时销毁",
+      "create_failed": "创建失败后清理"
     },
     "loadingMore": "已加载较早的记录，较新的事件仍在加载…",
     "trimmed": "仅显示最新的 {{count}} 条事件，更早的未显示。"

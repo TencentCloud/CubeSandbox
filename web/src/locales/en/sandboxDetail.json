@@ -68,7 +68,8 @@
     },
     "reasons": {
       "request": "killed on request",
-      "timeout": "timed out"
+      "timeout": "timed out",
+      "create_failed": "create failed"
     },
     "loadingMore": "Older history loaded; newer events are still loading…",
     "trimmed": "Showing the newest {{count}} events; older ones are not shown."
