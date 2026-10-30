@@ -21,6 +21,8 @@ const EVENT_TONE: Record<string, 'ok' | 'warn' | 'err' | 'info'> = {
 // first paint stays quick. The next fetch continues from where this one
 // stopped.
 const MAX_PAGES = 2;
+// How many 5s polls an ended page waits for the kill to be recorded.
+const KILL_WAIT_POLLS = 6;
 // Only the newest events are kept, so a very long history stays bounded.
 const MAX_EVENTS = 2000;
 
@@ -75,8 +77,15 @@ export function SandboxLifecycleTimeline({
     queryFn: () => fetchNewEvents(sandboxID, qc.getQueryData<History>(queryKey)),
     enabled: !!sandboxID,
     retry: 1,
-    // Keep reading while a long history is still being caught up.
-    refetchInterval: (query) => (live || query.state.data?.hasMore ? 10_000 : false),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      // Keep reading while a long history is still being caught up.
+      if (live || data?.hasMore) return 10_000;
+      // The kill is recorded just after the sandbox disappears; poll briefly
+      // so an ended page that loaded first still gets it.
+      const ended = data?.events.some((e) => e.event === 'killed');
+      return !ended && query.state.dataUpdateCount < KILL_WAIT_POLLS ? 5_000 : false;
+    },
   });
   const events = history.data?.events ?? [];
 

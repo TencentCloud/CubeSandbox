@@ -58,8 +58,9 @@ export default function SandboxDetailPage() {
   useEffect(() => {
     if (isUnavailable) {
       void qc.invalidateQueries({ queryKey: ['sandboxes'] });
+      void qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     }
-  }, [isUnavailable, qc]);
+  }, [isUnavailable, qc, sandboxID]);
 
   // ── Logs ────────────────────────────────────────────────────────────────
   const logs = useQuery({
