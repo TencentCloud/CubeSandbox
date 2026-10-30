@@ -7,8 +7,9 @@
 //
 // Recording never affects the sandbox operation that produced the event:
 // events are queued and written by one background worker, and are dropped
-// (with a warning) when the store is not initialised, the queue is full or
-// the write fails.
+// with a warning when the queue is full or the write fails. Before Init has
+// succeeded nothing is recorded; the hooks that call Record are only
+// registered after it.
 package sandboxevent
 
 import (

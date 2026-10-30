@@ -31,6 +31,9 @@ var resolveSandboxIDFn = sandbox.ResolveSandboxID
 // holds eventIDCacheMax entries it is cleared and refills from new lookups.
 const (
 	eventIDCacheTTL = 5 * time.Minute
+	// A short ID that does not resolve is remembered briefly too, so polling it
+	// does not scan the cluster on every request.
+	eventIDMissTTL  = 30 * time.Second
 	eventIDCacheMax = 1024
 )
 
@@ -56,14 +59,15 @@ func resolveEventSandboxID(ctx context.Context, shortID string) string {
 		return r.fullID
 	}
 	fullID, err := resolveSandboxIDFn(ctx, shortID)
+	ttl := eventIDCacheTTL
 	if err != nil || fullID == "" {
-		return ""
+		fullID, ttl = "", eventIDMissTTL
 	}
 	eventIDCacheMu.Lock()
 	if len(eventIDCache) >= eventIDCacheMax {
 		clear(eventIDCache)
 	}
-	eventIDCache[shortID] = resolvedEventID{fullID: fullID, expires: time.Now().Add(eventIDCacheTTL)}
+	eventIDCache[shortID] = resolvedEventID{fullID: fullID, expires: time.Now().Add(ttl)}
 	eventIDCacheMu.Unlock()
 	return fullID
 }

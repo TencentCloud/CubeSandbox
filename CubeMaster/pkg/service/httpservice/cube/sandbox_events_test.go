@@ -142,3 +142,17 @@ func TestEventIDCacheIsBounded(t *testing.T) {
 	defer eventIDCacheMu.Unlock()
 	assert.LessOrEqual(t, len(eventIDCache), eventIDCacheMax)
 }
+
+func TestEventIDCacheRemembersMisses(t *testing.T) {
+	orig := resolveSandboxIDFn
+	t.Cleanup(func() { resolveSandboxIDFn = orig })
+	calls := 0
+	resolveSandboxIDFn = func(context.Context, string) (string, error) {
+		calls++
+		return "", errors.New("not found")
+	}
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, "", resolveEventSandboxID(context.Background(), "sb-miss-once"))
+	}
+	assert.Equal(t, 1, calls)
+}
