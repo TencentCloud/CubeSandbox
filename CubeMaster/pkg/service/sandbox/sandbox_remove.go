@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -227,6 +228,7 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "DeleteSandboxProxyMap failed: %s", err.Error())
 		}
 		localcache.DeleteSandboxCache(req.GetSandboxID())
+		ctx = sandboxevent.WithKillReason(ctx, req.GetAnnotations()[constants.CubeAnnotationsKillReason])
 		if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID()); err != nil {
 			log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
 		}

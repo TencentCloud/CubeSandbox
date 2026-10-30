@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	sandboxeventhook "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent/hook"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/server"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
@@ -218,6 +219,9 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 	if err := lifecycle.Init(ctx); err != nil {
 		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
 	}
+
+	// Lifecycle history is best effort; a missing table only disables it.
+	sandboxeventhook.Init(ctx)
 
 	scheduler.InitScheduler(ctx)
 

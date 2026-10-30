@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/instancecache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -281,6 +282,7 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 				return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "DeleteSandboxProxyMap failed: %s", err.Error())
 			}
 			localcache.DeleteSandboxCache(req.GetSandboxID())
+			ctx = sandboxevent.WithKillReason(ctx, req.GetAnnotations()[constants.CubeAnnotationsKillReason])
 			if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
 				log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
 			}
