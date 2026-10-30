@@ -506,6 +506,13 @@ func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
 	}
 	raw, err := h.cm.GetSandboxEvents(c.Request.Context(), params)
 	if err != nil {
+		// An older CubeMaster has no history endpoint: an empty history, as
+		// CubeAPI reports it, rather than an error on every timeline poll.
+		var httpErr *cubemaster.HTTPError
+		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
+			httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage(`{"events":[],"hasMore":false}`))
+			return
+		}
 		writeCMError(c, err)
 		return
 	}

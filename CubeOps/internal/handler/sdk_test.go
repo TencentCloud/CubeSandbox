@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 )
 
 // ── ListSandboxes ─────────────────────────────────────────────────────────
@@ -991,5 +992,21 @@ func TestSDK_GetSandboxEvents_ForwardsPagingAndKeepsShape(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), `"ret"`) {
 		t.Errorf("ret envelope leaked: %s", w.Body.String())
+	}
+}
+
+func TestSDK_GetSandboxEvents_OlderCubeMasterIsEmptyHistory(t *testing.T) {
+	cm := &fakeCM{
+		getSandboxEvents: func(context.Context, map[string]string) (json.RawMessage, error) {
+			return nil, &cubemaster.HTTPError{Status: http.StatusNotFound, Body: "404 page not found"}
+		},
+	}
+	r := newSDKRouter(t, cm)
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/events")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if strings.TrimSpace(w.Body.String()) != `{"events":[],"hasMore":false}` {
+		t.Errorf("body = %s", w.Body.String())
 	}
 }
