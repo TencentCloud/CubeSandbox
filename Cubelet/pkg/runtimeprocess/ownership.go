@@ -20,7 +20,7 @@ import (
 // Multiple duplicated descriptors in one process count as one owner.
 func TAPOwners(ctx context.Context, procRoot, tapName string, selfPID int) ([]int, error) {
 	var found []int
-	err := walkRuntimes(ctx, procRoot, func(pid int, base, _ string) error {
+	err := walkProcesses(ctx, procRoot, func(pid int, base string) error {
 		if pid == selfPID {
 			return nil
 		}
@@ -56,7 +56,7 @@ func TAPOwners(ctx context.Context, procRoot, tapName string, selfPID int) ([]in
 	return found, err
 }
 
-func walkRuntimes(ctx context.Context, procRoot string, visit func(int, string, string) error) error {
+func walkProcesses(ctx context.Context, procRoot string, visit func(int, string) error) error {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return fmt.Errorf("scan runtime processes: %w", err)
@@ -70,7 +70,7 @@ func walkRuntimes(ctx context.Context, procRoot string, visit func(int, string, 
 			continue
 		}
 		base := filepath.Join(procRoot, entry.Name())
-		if err := visit(pid, base, ""); err != nil {
+		if err := visit(pid, base); err != nil {
 			return fmt.Errorf("inspect runtime pid %d: %w", pid, err)
 		}
 	}

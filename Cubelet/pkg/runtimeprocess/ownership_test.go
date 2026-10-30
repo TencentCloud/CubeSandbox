@@ -62,3 +62,16 @@ func TestOwnershipScanFailsClosed(t *testing.T) {
 		t.Fatal("cancelled ownership check must not report an unused TAP")
 	}
 }
+
+func TestOwnershipScanRejectsPartialDescriptorInspection(t *testing.T) {
+	root := t.TempDir()
+	base := fakeRuntime(t, root, "42", "/bin/custom-runtime")
+	// A directory in place of fdinfo deterministically causes a read error,
+	// including when this fixture is run as root.
+	if err := os.Mkdir(filepath.Join(base, "fdinfo", "74"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TAPOwners(context.Background(), root, "tap", 0); err == nil {
+		t.Fatal("partial process inspection must not certify a TAP as unused")
+	}
+}

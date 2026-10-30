@@ -125,6 +125,8 @@ func (realTapDeviceAdapter) Open(name string) (*os.File, error) {
 
 // CheckUnused is independent of containerd's task list. A retained Cubelet fd
 // is not evidence that all previous shim/VMM handoff duplicates were closed.
+var errTapOwned = errors.New("TAP has a foreign descriptor owner")
+
 func (realTapDeviceAdapter) CheckUnused(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -133,7 +135,7 @@ func (realTapDeviceAdapter) CheckUnused(name string) error {
 		return fmt.Errorf("verify tap %s runtime ownership: %w", name, err)
 	}
 	if len(owners) != 0 {
-		return fmt.Errorf("tap %s is still held by runtime pids %v", name, owners)
+		return fmt.Errorf("%w: tap %s runtime pids %v", errTapOwned, name, owners)
 	}
 	return nil
 }

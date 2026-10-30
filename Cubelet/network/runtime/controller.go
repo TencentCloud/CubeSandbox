@@ -816,13 +816,29 @@ func (s *NetworkController) cleanupCreateFailure(ctx context.Context, state *man
 // remains Ready but owner-reserved until success is committed; Active is only
 // published after creating -> success.
 func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry, error) {
-	entry, err := s.tapPool.Acquire(owner)
-	if err == nil {
+	var entry *TapPoolEntry
+	var err error
+	for {
+		entry, err = s.tapPool.Acquire(owner)
+		if err != nil {
+			break
+		}
 		// Includes legacy Ready entries recovered from before ownership checks
 		// were enforced. Quarantine rather than hand an old VM's queue to a new VM.
-		if err := s.checkTapUnused(entry.TapName); err != nil {
-			quarantineErr := s.tapPool.QuarantineReservation(entry, owner)
-			return nil, nil, errors.Join(err, quarantineErr)
+		if entry.State == TapPoolReady {
+			if err := s.checkTapUnused(entry.TapName); err != nil {
+				if !errors.Is(err, errTapOwned) {
+					// Inspection uncertainty must fail closed without draining the
+					// Ready inventory into quarantine on a host-wide procfs error.
+					return nil, nil, errors.Join(err, s.tapPool.ReleaseReservation(entry, owner))
+				}
+				if quarantineErr := s.tapPool.QuarantineReservation(entry, owner); quarantineErr != nil {
+					return nil, nil, errors.Join(err, quarantineErr)
+				}
+				// A stale queue must not prevent another Ready or fresh TAP
+				// from serving this request.
+				continue
+			}
 		}
 		tap, err := tapDeviceFromEntry(entry)
 		if err != nil {
