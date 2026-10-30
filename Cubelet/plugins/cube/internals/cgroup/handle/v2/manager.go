@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/containerd/cgroups/v3/cgroup2"
-	cgroup2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"github.com/hashicorp/go-multierror"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -379,15 +378,26 @@ func (h *handler) GetAllocatedMem(group string) int64 {
 	return int64(mem)
 }
 
+// UsageSnapshot reads only the files the snapshot consumes; reading cpu.stat
+// also flushes this cgroup's pending rstat accounting.
 func (h *handler) UsageSnapshot(ctx context.Context, group string) (handle.UsageSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return handle.UsageSnapshot{}, err
 	}
-	m, err := cgroup2.Load(group, cgroup2.WithMountpoint(h.root))
+	dir := path.Join(h.root, group)
+	cpuKV, err := handle.ReadKVFile(dir, "cpu.stat")
 	if err != nil {
-		return handle.UsageSnapshot{}, fmt.Errorf("load cgroup v2 %q: %w", group, err)
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v2 usage for %q: %w", group, err)
 	}
-	metrics, err := m.Stat()
+	eventsKV, err := handle.ReadKVFile(dir, "memory.events")
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v2 usage for %q: %w", group, err)
+	}
+	memCurrent, err := handle.ReadUintFile(dir, "memory.current")
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v2 usage for %q: %w", group, err)
+	}
+	memMax, err := handle.ReadUintFile(dir, "memory.max")
 	if err != nil {
 		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v2 usage for %q: %w", group, err)
 	}
@@ -398,7 +408,7 @@ func (h *handler) UsageSnapshot(ctx context.Context, group string) (handle.Usage
 	if err := ctx.Err(); err != nil {
 		return handle.UsageSnapshot{}, err
 	}
-	return usageSnapshotFromMetrics(metrics, cpuLimit)
+	return usageSnapshotFromRaw(cpuKV, eventsKV, memCurrent, memMax, cpuLimit)
 }
 
 func (h *handler) readCPULimit(group string) (handle.CPULimit, error) {
@@ -424,48 +434,39 @@ func (h *handler) readCPULimit(group string) (handle.CPULimit, error) {
 	return handle.CPULimit{QuotaUS: quota, PeriodUS: period}, nil
 }
 
-func usageSnapshotFromMetrics(metrics *cgroup2stats.Metrics, cpuLimit handle.CPULimit) (handle.UsageSnapshot, error) {
-	if metrics == nil || metrics.GetCPU() == nil {
-		return handle.UsageSnapshot{}, fmt.Errorf("cgroup v2 CPU usage is incomplete")
-	}
-	if metrics.GetMemory() == nil {
-		return handle.UsageSnapshot{}, fmt.Errorf("cgroup v2 memory usage is incomplete")
-	}
-	cpu := metrics.GetCPU()
-	usage, err := microsecondsToNanoseconds(cpu.GetUsageUsec())
+func usageSnapshotFromRaw(cpuKV, eventsKV map[string]uint64, memCurrent, memMax uint64, cpuLimit handle.CPULimit) (handle.UsageSnapshot, error) {
+	usage, err := microsecondsToNanoseconds(cpuKV["usage_usec"])
 	if err != nil {
 		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU usage: %w", err)
 	}
-	user, err := microsecondsToNanoseconds(cpu.GetUserUsec())
+	user, err := microsecondsToNanoseconds(cpuKV["user_usec"])
 	if err != nil {
 		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU user usage: %w", err)
 	}
-	system, err := microsecondsToNanoseconds(cpu.GetSystemUsec())
+	system, err := microsecondsToNanoseconds(cpuKV["system_usec"])
 	if err != nil {
 		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU system usage: %w", err)
 	}
-	throttled, err := microsecondsToNanoseconds(cpu.GetThrottledUsec())
+	throttled, err := microsecondsToNanoseconds(cpuKV["throttled_usec"])
 	if err != nil {
 		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU throttled time: %w", err)
 	}
-	memory := metrics.GetMemory()
-	limit := handle.ResourceLimit{Value: memory.GetUsageLimit()}
+	limit := handle.ResourceLimit{Value: memMax}
 	if limit.Value == math.MaxUint64 {
 		limit.Value = 0
 		limit.Unlimited = true
 	}
-	events := metrics.GetMemoryEvents()
 	return handle.UsageSnapshot{
 		CPUUsageTotalNS:          usage,
 		CPUUserTotalNS:           user,
 		CPUSystemTotalNS:         system,
 		CPUThrottledTotalNS:      throttled,
-		CPUPeriodsTotal:          cpu.GetNrPeriods(),
-		CPUThrottledPeriodsTotal: cpu.GetNrThrottled(),
+		CPUPeriodsTotal:          cpuKV["nr_periods"],
+		CPUThrottledPeriodsTotal: cpuKV["nr_throttled"],
 		CPULimit:                 cpuLimit,
-		MemoryCurrentBytes:       memory.GetUsage(),
+		MemoryCurrentBytes:       memCurrent,
 		MemoryLimit:              limit,
-		MemoryFailuresTotal:      events.GetMax(),
+		MemoryFailuresTotal:      eventsKV["max"],
 	}, nil
 }
 
