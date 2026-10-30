@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
+import { useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { RefreshCw } from 'lucide-react';
@@ -72,9 +73,18 @@ export function SandboxLifecycleTimeline({
   const { t } = useTranslation('sandboxDetail');
   const qc = useQueryClient();
   const queryKey = ['sandbox-events', sandboxID];
+  // Fetches made since the sandbox ended; the wait for the kill event is
+  // counted from there, not over the whole time the page was open.
+  const endedFetches = useRef(0);
+  useEffect(() => {
+    if (!live) endedFetches.current = 0;
+  }, [live]);
   const history = useQuery({
     queryKey,
-    queryFn: () => fetchNewEvents(sandboxID, qc.getQueryData<History>(queryKey)),
+    queryFn: () => {
+      if (!live) endedFetches.current += 1;
+      return fetchNewEvents(sandboxID, qc.getQueryData<History>(queryKey));
+    },
     enabled: !!sandboxID,
     retry: 1,
     refetchInterval: (query) => {
@@ -84,7 +94,7 @@ export function SandboxLifecycleTimeline({
       // The kill is recorded just after the sandbox disappears; poll briefly
       // so an ended page that loaded first still gets it.
       const ended = data?.events.some((e) => e.event === 'killed');
-      return !ended && query.state.dataUpdateCount < KILL_WAIT_POLLS ? 5_000 : false;
+      return !ended && endedFetches.current < KILL_WAIT_POLLS ? 5_000 : false;
     },
   });
   const events = history.data?.events ?? [];
