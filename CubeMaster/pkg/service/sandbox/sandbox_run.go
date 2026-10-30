@@ -430,6 +430,18 @@ func (c *createSandboxContext) errorCodeRetry() (retry bool) {
 	if c.cubeletRsp.GetRet().GetRetCode() == cubeleterrorcode.ErrorCode_Success {
 		return false
 	}
+	if c.cubeletRsp.GetRet().GetRetCode() == cubeleterrorcode.ErrorCode_HostResourcesNotEnough {
+		// The node is authoritative: a stale heartbeat must never bypass its
+		// admission fence. Pinned restores cannot move to a different node.
+		c.loopRetry = false
+		c.reschedule = !c.directHost
+		if !c.directHost && c.retryTimes <= l.CreateRetryConf.MaxRetry() {
+			c.selctx.AddLastBadNode(c.selectHost)
+			return true
+		}
+		c.setMasterRsp(int(errorcode.ErrorCode_SelectNodesNoRes), c.cubeletRsp.GetRet().GetRetMsg())
+		return false
+	}
 	defer func() {
 		if retry {
 			log.G(c.ctx).Errorf("retries:%d,reschedule:%v,LoopRetry:%v,errorCodeRetry:%v,host:%s", c.retryTimes,
