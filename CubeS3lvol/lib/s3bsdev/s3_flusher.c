@@ -51,6 +51,13 @@ struct s3_flusher {
 
 	uint32_t                    max_concurrent;
 	uint32_t                    in_flight;
+	/* A failed upload must not immediately re-enter the dirty queue in a
+	 * tight loop. Keep acknowledged data dirty, but bound retry pressure even
+	 * when the client fails synchronously or the endpoint refuses connections. */
+	uint64_t                    retry_after;
+	uint64_t                    retry_delay_us;
+	uint64_t                    failures_since_success;
+	uint64_t                    last_failure_log;
 
 	struct spdk_poller *poller;
 
@@ -208,10 +215,38 @@ flusher_upload_done(void *cb_arg, int status)
 	if (status == 0) {
 		f->stats.chunks_flushed++;
 		f->stats.blocks_flushed += req->view.nblocks;
+		if (f->failures_since_success) {
+			SPDK_NOTICELOG("S3 upload succeeded after %" PRIu64
+				       " failed uploads; dirty data retained for retry\n",
+				       f->failures_since_success);
+		}
+		/* An unrelated in-flight success must not cancel a failure cooldown. */
+		if (!f->retry_after || spdk_get_ticks() >= f->retry_after) {
+			f->retry_after = 0;
+			f->retry_delay_us = 0;
+		}
+		f->failures_since_success = 0;
 	} else {
+		uint64_t now = spdk_get_ticks();
+		uint64_t hz = spdk_get_ticks_hz();
+
 		f->stats.failures++;
-		SPDK_ERRLOG("Failed to flush chunk %" PRIu64 " to S3: %d "
-			    "(kept dirty, will retry)\n", chunk_index, status);
+		f->failures_since_success++;
+		/* Advance once per retry window, rather than once per failed upload
+		 * in the same concurrent round. */
+		if (!f->retry_after || now >= f->retry_after) {
+			f->retry_delay_us = f->retry_delay_us ?
+				spdk_min(f->retry_delay_us * 2, 30000000ULL) : 100000;
+			f->retry_after = now + f->retry_delay_us * hz / 1000000;
+		}
+		if (!f->last_failure_log || now - f->last_failure_log >= 30 * hz) {
+			SPDK_ERRLOG("Failed to flush chunk %" PRIu64 " to S3: %d "
+				    "(%" PRIu64 " failures since success, kept dirty; "
+				    "retry backoff %" PRIu64 " us)\n",
+				    chunk_index, status, f->failures_since_success,
+				    f->retry_delay_us);
+			f->last_failure_log = now;
+		}
 	}
 
 	/* Releases the claimed blocks on success, or re-dirties and re-queues
@@ -272,6 +307,12 @@ s3_flusher_kick(struct s3_flusher *f)
 	if (!f) {
 		return;
 	}
+	/* Drain deadlines are still checked by the poller. Neither a drain nor
+	 * WAL pressure may bypass failure backoff and recreate the retry storm. */
+	if (f->retry_after && spdk_get_ticks() < f->retry_after) {
+		flusher_check_drain(f);
+		return;
+	}
 
 	/* Two reasons to set the overlay's hold-back policy aside.
 	 *
@@ -293,6 +334,12 @@ s3_flusher_kick(struct s3_flusher *f)
 	while (!f->stopping && !f->suspended && !f->drain_expired &&
 	       f->in_flight < f->max_concurrent) {
 		uint64_t chunk_index;
+
+		/* upload_fn may finish synchronously and arm backoff before the
+		 * current scheduling loop resumes. Recheck on every iteration. */
+		if (f->retry_after && spdk_get_ticks() < f->retry_after) {
+			break;
+		}
 
 		if (s3_overlay_next_dirty(f->overlay, force, &chunk_index) != 0) {
 			/* -ENOENT nothing dirty, -EAGAIN dirty but held back. The

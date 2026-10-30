@@ -778,17 +778,33 @@ test_flusher(void)
 
 	fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0x81);
 	s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 400);
+	/* The original retry storm completes inside upload_fn itself. */
+	fake.auto_complete = true;
+	fake.forced_status = -EIO;
 	s3_flusher_kick(fl);
-	fake_complete_all(&fake, -EIO);
+	fake.auto_complete = false;
+	fake.forced_status = 0;
 
-	/* The completion path kicks the flusher, so the retry is already running by
-	 * the time we get here -- the chunk is in flight again rather than queued. */
-	check_u64("a new round started right away", fake.started, 2);
+	check_u64("failure does not immediately start another upload", fake.started, 1);
+	for (unsigned i = 0; i < 1000; i++) {
+		s3_flusher_kick(fl);
+	}
+	check_u64("repeated kicks respect retry backoff", fake.started, 1);
+	check_true("failed data stays dirty during backoff", s3_overlay_has_dirty(ov), NULL);
+	usleep(110000);
+	s3_flusher_kick(fl);
+	check_u64("retry starts after the initial backoff", fake.started, 2);
 	s3_flusher_get_stats(fl, &fstats);
 	check_u64("failure counted", fstats.failures, 1);
+	fake_complete_all(&fake, -EIO);
+	s3_flusher_kick(fl);
+	check_u64("second failure increases the backoff", fake.started, 2);
+	usleep(210000);
+	s3_flusher_kick(fl);
+	check_u64("second retry starts after doubled backoff", fake.started, 3);
 
 	fake_complete_all(&fake, 0);
-	check_u64("retried once", fake.rounds[2], 2);
+	check_u64("retried twice", fake.rounds[2], 3);
 	check_true("and it is clean now", !s3_overlay_has_dirty(ov), NULL);
 	check_true("the retried upload still had the data",
 		   check_pattern(fake.image[2], 1, 2 * BLOCKS_PER_CHUNK, 0x81),
