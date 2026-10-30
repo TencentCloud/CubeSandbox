@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync/atomic"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/errdefs"
@@ -30,7 +31,8 @@ type local struct {
 
 	listeners []CubeboxEventListener
 
-	eventChan chan *CubeboxEvent
+	eventChan          chan *CubeboxEvent
+	cacheRecoveryReady atomic.Bool
 }
 
 var (
@@ -63,6 +65,7 @@ func (l *local) initDb() error {
 }
 
 func (l *local) Init(ctx context.Context) error {
+	l.cacheRecoveryReady.Store(false)
 	_ = l.db.Close()
 
 	l.initDb()
@@ -70,6 +73,9 @@ func (l *local) Init(ctx context.Context) error {
 
 	return nil
 }
+
+// A missing runtime-index entry must never permit cache eviction.
+func (l *local) ArtifactCacheReady() bool { return l.cacheRecoveryReady.Load() }
 
 func (l *local) Delete(ctx context.Context, opt *DeleteOption) error {
 	if opt == nil {

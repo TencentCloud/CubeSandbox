@@ -245,6 +245,7 @@ const (
 	MasterAnnotationRootfsArtifactToken     = "cube.master.rootfs.artifact.token"
 	MasterAnnotationRootfsArtifactSHA256    = "cube.master.rootfs.artifact.sha256"
 	MasterAnnotationRootfsArtifactSizeBytes = "cube.master.rootfs.artifact.size_bytes"
+	MasterAnnotationRootfsArtifactCacheable = "cube.master.rootfs.artifact.cacheable"
 	MasterAnnotationWritableLayerSize       = "cube.master.rootfs.writable_layer_size"
 	MasterAnnotationTemplateSpecFingerprint = "cube.master.template.spec_fingerprint"
 	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"

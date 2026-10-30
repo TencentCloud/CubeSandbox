@@ -472,10 +472,11 @@ func (ctr *Container) GetContainerImageIDs() []string {
 		if id, ok := ctr.Labels[constants.LabelContainerImageCosType]; ok {
 			imageIDs = append(imageIDs, id)
 		}
-	} else {
-		if ctr.Config != nil && ctr.Config.Image != nil {
-			imageIDs = append(imageIDs, ctr.Config.Image.Image)
-		}
+	}
+	// Ordinary labels are present on ext4 containers too. Their existence must
+	// not suppress the configured artifact reference used by cache GC.
+	if ctr.Config != nil && ctr.Config.Image != nil {
+		imageIDs = append(imageIDs, ctr.Config.Image.Image)
 	}
 
 	return imageIDs
