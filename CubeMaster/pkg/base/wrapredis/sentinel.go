@@ -34,6 +34,9 @@ func redisDisplayAddr(conf *config.RedisConf) string {
 	if conf == nil {
 		return ""
 	}
+	if conf.ClusterNodes != "" {
+		return "cluster:" + conf.ClusterNodes
+	}
 	if conf.MasterName == "" {
 		return conf.Nodes
 	}

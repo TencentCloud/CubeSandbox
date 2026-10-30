@@ -5,6 +5,7 @@ go 1.25.7
 // toolchain go1.22.9
 
 require (
+	github.com/tencentcloud/CubeSandbox/pkgs/redisx v0.0.0
 	github.com/agiledragon/gomonkey/v2 v2.9.0
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/charmbracelet/bubbles v1.0.0
@@ -113,6 +114,7 @@ require (
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/minio-go/v7 v7.3.0 // indirect
+	github.com/mna/redisc v1.4.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/moby/api v1.54.2 // indirect
 	github.com/moby/moby/client v0.4.1 // indirect
@@ -191,3 +193,4 @@ replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb
 replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart => ../pkgs/sandboxrestart
+replace github.com/tencentcloud/CubeSandbox/pkgs/redisx => ../pkgs/redisx
