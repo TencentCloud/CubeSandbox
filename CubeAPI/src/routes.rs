@@ -1232,6 +1232,128 @@ mod tests {
         }
     }
 
+    /// An E2B client sends `state=running,paused`; a typo anywhere in the value rejects the
+    /// whole request, as E2B's request validator does, instead of listing a subset.
+    #[tokio::test]
+    async fn list_sandboxes_v2_filters_by_state_and_rejects_a_bad_state() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-run", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-exited", "host_id": "h", "status": 2, "template_id": "t" },
+                    { "sandbox_id": "sb-pausing", "host_id": "h", "status": 4, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        let ok = server
+            .get("/v2/sandboxes")
+            .add_query_param("state", "running,paused")
+            .await;
+        assert_eq!(ok.status_code(), StatusCode::OK);
+        let body: Vec<Value> = ok.json();
+        let listed: Vec<(&str, &str)> = body
+            .iter()
+            .map(|sb| {
+                (
+                    sb["sandboxID"].as_str().unwrap_or_default(),
+                    sb["state"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(listed, [("sb-pausing", "paused"), ("sb-run", "running")]);
+
+        for state in ["running,pause", "pause", "", "running,"] {
+            let response = server
+                .get("/v2/sandboxes")
+                .add_query_param("state", state)
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "state={state:?} must be rejected rather than ignored"
+            );
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 400);
+        }
+    }
+
+    /// E2B's SDKs percent-encode `metadata` twice, so `a b/c` arrives as `a%2520b%2Fc`; both list
+    /// routes must still select it, and a value that is not key=value pairs is a 400, not "everything".
+    #[tokio::test]
+    async fn list_sandboxes_filter_metadata_as_e2b_sdks_send_it_and_reject_bad_values() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-special", "host_id": "h", "status": 1, "template_id": "t",
+                      "labels": { "owner": "a b/c" } },
+                    { "sandbox_id": "sb-other", "host_id": "h", "status": 1, "template_id": "t",
+                      "labels": { "owner": "x" } }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        for path in ["/sandboxes", "/v2/sandboxes"] {
+            for metadata in ["owner=a%2520b%2Fc", "owner=a b/c"] {
+                let response = server.get(path).add_query_param("metadata", metadata).await;
+                assert_eq!(response.status_code(), StatusCode::OK, "{path} {metadata}");
+                let body: Vec<Value> = response.json();
+                let ids: Vec<_> = body
+                    .iter()
+                    .filter_map(|sb| sb["sandboxID"].as_str())
+                    .collect();
+                assert_eq!(ids, ["sb-special"], "{path} {metadata}");
+            }
+
+            for metadata in ["", "owner", "owner=x&oops"] {
+                let response = server.get(path).add_query_param("metadata", metadata).await;
+                assert_eq!(
+                    response.status_code(),
+                    StatusCode::BAD_REQUEST,
+                    "{path} metadata={metadata:?} must be rejected rather than ignored"
+                );
+                let error: crate::models::ApiError = response.json();
+                assert_eq!(error.code, 400);
+            }
+        }
+    }
+
+    /// v2 is the E2B view, whose `SandboxState` has no `pausing`, so it reports `paused`; v1 is
+    /// the Cube-native view the Cube SDKs read and keeps `pausing`, like `GET /sandboxes/{id}`.
+    #[tokio::test]
+    async fn list_routes_report_a_pausing_sandbox_per_their_contract() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-pausing", "host_id": "h", "status": 4, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        for (path, expected) in [("/sandboxes", "pausing"), ("/v2/sandboxes", "paused")] {
+            let response = server.get(path).await;
+            assert_eq!(response.status_code(), StatusCode::OK, "{path}");
+            let body: Vec<Value> = response.json();
+            let states: Vec<_> = body.iter().filter_map(|sb| sb["state"].as_str()).collect();
+            assert_eq!(states, [expected], "{path}");
+        }
+    }
+
     async fn sandbox_list_server<F, Fut>(list_handler: F) -> TestServer
     where
         F: Fn(Json<Value>) -> Fut + Clone + Send + 'static,

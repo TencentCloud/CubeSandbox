@@ -10,6 +10,8 @@ import requests
 from framework.config import SdkE2EConfig
 from framework.volume_hints import volume_plugin_misconfigured_hint
 
+MAX_V2_LIST_PAGES = 100
+
 
 class ApiClient:
     """Small REST client used for cleanup and diagnostics, not as a primary user path."""
@@ -57,14 +59,46 @@ class ApiClient:
         resp.raise_for_status()
         return resp.json()
 
-    def list_sandboxes(self) -> list[dict]:
+    def list_sandboxes(self, metadata: str | None = None) -> list[dict]:
         resp = self._session.get(
             f"{self._config.cube_api_url}/sandboxes",
+            params={"metadata": metadata} if metadata is not None else None,
             timeout=self._config.api_timeout,
         )
         resp.raise_for_status()
         payload = resp.json()
         return payload if isinstance(payload, list) else []
+
+    def list_sandboxes_raw(self, metadata: str) -> requests.Response:
+        """One ``GET /sandboxes`` response, unparsed, so tests can assert on 4xx."""
+        return self._session.get(
+            f"{self._config.cube_api_url}/sandboxes",
+            params={"metadata": metadata},
+            timeout=self._config.api_timeout,
+        )
+
+    def list_sandboxes_v2_raw(self, params: dict[str, str] | None = None) -> requests.Response:
+        """One ``GET /v2/sandboxes`` page, unparsed, so tests can assert on 4xx."""
+        return self._session.get(
+            f"{self._config.cube_api_url}/v2/sandboxes",
+            params=params,
+            timeout=self._config.api_timeout,
+        )
+
+    def list_sandboxes_v2(self, params: dict[str, str] | None = None) -> list[dict]:
+        """Every ``GET /v2/sandboxes`` page, following ``x-next-token``."""
+        query = {"limit": "1000", **(params or {})}
+        entries: list[dict] = []
+        for _ in range(MAX_V2_LIST_PAGES):
+            resp = self.list_sandboxes_v2_raw(query)
+            resp.raise_for_status()
+            payload = resp.json()
+            entries.extend(payload if isinstance(payload, list) else [])
+            token = resp.headers.get("x-next-token")
+            if not token:
+                return entries
+            query["nextToken"] = token
+        raise RuntimeError(f"GET /v2/sandboxes exceeded {MAX_V2_LIST_PAGES} pages")
 
     def create_volume(self, name: str = "", *, driver: str | None = None) -> dict:
         payload: dict = {"name": name}

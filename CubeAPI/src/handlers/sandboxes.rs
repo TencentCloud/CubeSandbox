@@ -24,12 +24,14 @@ use crate::{
 
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 
+/// List sandboxes in every state, `pausing` and `unknown` included; GET /v2/sandboxes is the E2B view.
 #[utoipa::path(
     get,
     path = "/sandboxes",
     params(ListSandboxesQuery),
     responses(
         (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox]),
+        (status = 400, description = "Invalid metadata", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
@@ -91,7 +93,7 @@ pub async fn list_sandboxes(
                 ("x-next-token", description = "Continuation cursor for the next page. Omitted on the last page.")
             )
         ),
-        (status = 400, description = "Malformed nextToken", body = ApiError),
+        (status = 400, description = "Malformed nextToken, invalid state or invalid metadata", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]

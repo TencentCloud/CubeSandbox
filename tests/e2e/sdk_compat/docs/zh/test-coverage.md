@@ -36,6 +36,8 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_rollback_clone.py` | rollback 异常/文件系统/kernel 状态，以及默认/并发 clone 和临时快照清理 | `rollback_clone`（仅 CubeSandbox），部分依赖 Code Interpreter | P1 |
 | `cases/lifecycle/test_negative_and_timeout.py` | create/connect 目标不存在、删除后 pause、在线更新 timeout | `lifecycle`、`pause_resume`、`set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | kill 后不可连接、列表移除、重复 kill 终态语义 | `lifecycle` | P1 |
+| `cases/lifecycle/test_list_metadata_filter.py` | 沙箱列表 `metadata` 过滤：E2B SDK 双重百分号编码的取值（空格、`/`、非 ASCII、`=`、`&`、`%`）、多 key 取 AND、旧调用方的单层编码（原样、`urlencode`、`quote`；被转义的 `&` 保留在值内）、值不是 key=value 键值对时返回 400（v1 与 v2） | `lifecycle`；SDK 用例仅 `e2b` 后端执行 | P1 |
+| `cases/lifecycle/test_list_state_filter.py` | `GET /v2/sandboxes` 的 `state` 逗号多值、任一非法值整体 400、默认列表只含 E2B 可解析状态、paused/running 隔离；E2B SDK `SandboxQuery(state=...)` | `lifecycle`；paused 用例另需 `pause_resume`；SDK 用例仅 `e2b` 后端执行 | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause、手动/自动恢复、重入、auto-kill、主动 pause 与 timeout 的交互 | `platform_lifecycle`、CubeProxy、lifecycle-manager；部分需 Code Interpreter | P1 + `slow`，每日运行 |
 | `cases/lifecycle/test_restart_policy.py` | info 中的策略、默认 Never、非法取值拒绝、健康沙箱不重启、guest 崩溃后同 ID 且落盘文件仍在、删除不重启、达到 maxRestarts 放弃、退出码 0 只有 Always 重启、主进程非 0 退出、退避间隔、稳定期清零、退避中暂停、冷启动后暂停再恢复、退避中删除、存活探测失败 | `restart_policy`（仅 CubeSandbox）。随 `--run-e2e` 执行。模板暴露 envd 49983。暂停类另需 `pause_resume` | P1 控制面；崩溃、退出、退避与放弃为 P2/P3 + `slow` |
 
