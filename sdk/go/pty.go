@@ -19,9 +19,9 @@ import (
 )
 
 // defaultPtyTimeout mirrors the Python/Node SDKs' 60s default. It is applied two
-// ways, matching them: sent to envd as Connect-Timeout-Ms (a server-side
-// deadline) and used as a client-side idle abort that resets on every frame
-// received. A timeout <= 0 uses this default.
+// ways, matching them: sent to envd as Connect-Timeout-Ms and used as a
+// client-side idle abort that resets on every frame received. A timeout <= 0
+// uses this default.
 const defaultPtyTimeout = 60 * time.Second
 
 // signalSIGKILL is the Connect-JSON Signal enum name. The wire format uses the
@@ -44,14 +44,16 @@ type PtyCreateOptions struct {
 	// Envs are extra environment variables. TERM/LANG/LC_ALL are seeded with
 	// sensible interactive defaults unless overridden here.
 	Envs map[string]string
-	// Timeout is the server-side deadline for the stream (Connect-Timeout-Ms).
+	// Timeout is the client-side idle/request timeout. Connect does not send a
+	// server-side Connect-Timeout-Ms because an attachment is long-lived.
 	// Zero uses defaultPtyTimeout.
 	Timeout time.Duration
 }
 
 // PtyConnectOptions configures Pty.Connect.
 type PtyConnectOptions struct {
-	// Timeout is the server-side deadline for the stream (Connect-Timeout-Ms).
+	// Timeout is the client-side idle/request timeout. Connect does not send a
+	// server-side Connect-Timeout-Ms because an attachment is long-lived.
 	// Zero uses defaultPtyTimeout.
 	Timeout time.Duration
 }
@@ -172,11 +174,14 @@ type PtyHandle struct {
 	body    io.ReadCloser
 	once    sync.Once
 
-	mu       sync.Mutex
-	exitCode *int
-	errMsg   string
-	exited   bool
-	readErr  error
+	mu        sync.Mutex
+	exitCode  *int
+	errMsg    string
+	exited    bool
+	readErr   error
+	signal    *int
+	oomKilled bool
+	killedBy  string
 }
 
 // PID returns the PTY process ID.
@@ -203,6 +208,32 @@ func (h *PtyHandle) ErrorMessage() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.errMsg
+}
+
+// Signal returns the numeric signal that terminated the PTY, when reported by
+// envd. The second result is false for normal exits or unknown causes.
+func (h *PtyHandle) Signal() (int, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.signal == nil {
+		return 0, false
+	}
+	return *h.signal, true
+}
+
+// OOMKilled reports whether envd observed a cgroup memory OOM kill.
+func (h *PtyHandle) OOMKilled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.oomKilled
+}
+
+// KilledBy returns an envd-side termination cause such as "timeout", "user",
+// or "oom", or an empty string when no cause was recorded.
+func (h *PtyHandle) KilledBy() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.killedBy
 }
 
 // Kill sends SIGKILL to this PTY. See Pty.Kill.
@@ -323,6 +354,11 @@ func (h *PtyHandle) recordEnd(end *processEndEvent) {
 	if end.Error != "" {
 		h.errMsg = end.Error
 	}
+	if end.Signal != nil {
+		h.signal = end.Signal
+	}
+	h.oomKilled = end.OOMKilled
+	h.killedBy = end.KilledBy
 	h.exited = true
 }
 
