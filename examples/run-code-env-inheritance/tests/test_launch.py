@@ -28,6 +28,16 @@ class InterpreterLaunchTest(unittest.TestCase):
     def children(self):
         return [Mock(poll=Mock(return_value=None)), Mock(poll=Mock(return_value=None))]
 
+    def test_creates_custom_log_parent_directories(self):
+        envd = Path(self.temp.name) / 'envd' / 'service.log'
+        jupyter = Path(self.temp.name) / 'jupyter' / 'service.log'
+        with patch.dict(os.environ, {'ENVD_LOG_FILE': str(envd), 'JUPYTER_LOG_FILE': str(jupyter)}), \
+             patch.object(launch.subprocess, 'Popen', side_effect=self.children()), \
+             patch.object(launch.uvicorn, 'Server'):
+            launch.main()
+        self.assertTrue(envd.is_file())
+        self.assertTrue(jupyter.is_file())
+
     def assert_listening(self, listener):
         with socket.create_connection(listener.getsockname(), timeout=1):
             accepted, _ = listener.accept()

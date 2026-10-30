@@ -447,7 +447,15 @@ async def _wait_for_envd(http_client: httpx.AsyncClient) -> None:
             try:
                 await _fetch_sandbox_envs(http_client)
                 return
-            except HTTPException:
+            except HTTPException as exc:
+                cause = exc.__cause__
+                retryable = isinstance(cause, httpx.TransportError) or (
+                    isinstance(cause, httpx.HTTPStatusError)
+                    and (cause.response.status_code >= 500 or cause.response.status_code == 429)
+                )
+                if not retryable:
+                    reason = f"{exc.detail}: {cause}" if cause else exc.detail
+                    raise RuntimeError(f"envd startup failed: {reason}") from exc
                 await asyncio.sleep(0.1)
 
     try:
