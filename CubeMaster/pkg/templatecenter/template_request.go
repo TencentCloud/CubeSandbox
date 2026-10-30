@@ -66,6 +66,7 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
+		constants.CubeAnnotationRootfsArtifactCacheable: strconv.FormatBool(rootfsCacheRecoverable(artifact)),
 		constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
 		constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
 	}

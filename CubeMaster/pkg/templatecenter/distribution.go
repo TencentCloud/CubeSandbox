@@ -208,6 +208,7 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 			constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 			constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 			constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
+			constants.CubeAnnotationRootfsArtifactCacheable: strconv.FormatBool(rootfsCacheRecoverable(artifact)),
 			constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
 			constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
 			constants.CubeAnnotationsInsType:                req.InstanceType,
