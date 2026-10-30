@@ -48,19 +48,20 @@ def prepare_snapshot() -> str:
 
 
 def run_round(snap_id: str, concurrency: int) -> dict:
-    t0 = time.monotonic()
     sandboxes = []
-    if concurrency == 1:
-        sandboxes.append(Sandbox.create(template=snap_id))
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(Sandbox.create, template=snap_id) for _ in range(concurrency)]
-            for fut in as_completed(futures):
-                sandboxes.append(fut.result())
-    wall_ms = (time.monotonic() - t0) * 1000
-
-    for sb in sandboxes:
-        sb.kill()
+    try:
+        t0 = time.monotonic()
+        if concurrency == 1:
+            sandboxes.append(Sandbox.create(template=snap_id))
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(Sandbox.create, template=snap_id) for _ in range(concurrency)]
+                for fut in as_completed(futures):
+                    sandboxes.append(fut.result())
+        wall_ms = (time.monotonic() - t0) * 1000
+    finally:
+        for sb in sandboxes:
+            sb.kill()
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
 

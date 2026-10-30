@@ -44,9 +44,10 @@ def parse_args():
 
 
 def run_round(n: int, concurrency: int, dirty_mb: int) -> dict:
-    src = Sandbox.create(template=TEMPLATE_ID)
+    src = None
     clones = []
     try:
+        src = Sandbox.create(template=TEMPLATE_ID)
         if dirty_mb > 0:
             src.run_code(f"open('/dev/shm/dirty','wb').write(b'x' * {dirty_mb * 1024 * 1024})")
 
@@ -54,15 +55,10 @@ def run_round(n: int, concurrency: int, dirty_mb: int) -> dict:
         clones = src.clone(n=n, concurrency=concurrency)
         wall_ms = (time.monotonic() - t0) * 1000
     finally:
-        try:
+        if src is not None:
             src.kill()
-        except Exception:
-            pass
         for sb in clones:
-            try:
-                sb.kill()
-            except Exception:
-                pass
+            sb.kill()
     return {"wall_ms": wall_ms, "per_ms": wall_ms / n}
 
 

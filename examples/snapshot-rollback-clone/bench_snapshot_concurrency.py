@@ -40,23 +40,26 @@ def parse_args():
 
 
 def run_round(concurrency: int) -> dict:
-    sandboxes = [Sandbox.create(template=TEMPLATE_ID) for _ in range(concurrency)]
-
-    t0 = time.monotonic()
+    sandboxes = []
     snap_ids = []
-    if concurrency == 1:
-        snap_ids.append(sandboxes[0].create_snapshot().snapshot_id)
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {pool.submit(sb.create_snapshot): sb for sb in sandboxes}
-            for fut in as_completed(futures):
-                snap_ids.append(fut.result().snapshot_id)
-    wall_ms = (time.monotonic() - t0) * 1000
+    try:
+        for _ in range(concurrency):
+            sandboxes.append(Sandbox.create(template=TEMPLATE_ID))
 
-    for sb in sandboxes:
-        sb.kill()
-    for sid in snap_ids:
-        Sandbox.delete_snapshot(sid)
+        t0 = time.monotonic()
+        if concurrency == 1:
+            snap_ids.append(sandboxes[0].create_snapshot().snapshot_id)
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {pool.submit(sb.create_snapshot): sb for sb in sandboxes}
+                for fut in as_completed(futures):
+                    snap_ids.append(fut.result().snapshot_id)
+        wall_ms = (time.monotonic() - t0) * 1000
+    finally:
+        for sb in sandboxes:
+            sb.kill()
+        for sid in snap_ids:
+            Sandbox.delete_snapshot(sid)
 
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 

@@ -56,27 +56,32 @@ def rollback_one(sb, checkpoint_id: str, dirty_mb: int):
 
 
 def run_round(concurrency: int, dirty_mb: int) -> dict:
-    # Each sandbox takes its own checkpoint (ownership constraint).
-    sandboxes = [Sandbox.create(template=TEMPLATE_ID) for _ in range(concurrency)]
-    checkpoints = [sb.create_snapshot().snapshot_id for sb in sandboxes]
+    sandboxes = []
+    checkpoints = []
+    try:
+        # Each sandbox takes its own checkpoint (ownership constraint).
+        for _ in range(concurrency):
+            sandboxes.append(Sandbox.create(template=TEMPLATE_ID))
+        for sb in sandboxes:
+            checkpoints.append(sb.create_snapshot().snapshot_id)
 
-    t0 = time.monotonic()
-    if concurrency == 1:
-        rollback_one(sandboxes[0], checkpoints[0], dirty_mb)
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [
-                pool.submit(rollback_one, sb, cp, dirty_mb)
-                for sb, cp in zip(sandboxes, checkpoints)
-            ]
-            for fut in as_completed(futures):
-                fut.result()
-    wall_ms = (time.monotonic() - t0) * 1000
-
-    for sb in sandboxes:
-        sb.kill()
-    for cp in checkpoints:
-        Sandbox.delete_snapshot(cp)
+        t0 = time.monotonic()
+        if concurrency == 1:
+            rollback_one(sandboxes[0], checkpoints[0], dirty_mb)
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [
+                    pool.submit(rollback_one, sb, cp, dirty_mb)
+                    for sb, cp in zip(sandboxes, checkpoints)
+                ]
+                for fut in as_completed(futures):
+                    fut.result()
+        wall_ms = (time.monotonic() - t0) * 1000
+    finally:
+        for sb in sandboxes:
+            sb.kill()
+        for cp in checkpoints:
+            Sandbox.delete_snapshot(cp)
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
 
