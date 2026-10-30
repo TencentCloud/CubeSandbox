@@ -109,6 +109,9 @@ func TestSandboxEventsAction(t *testing.T) {
 	assert.Equal(t, 0, unknown.Ret.RetCode)
 	assert.Empty(t, unknown.Events)
 
+	badCursor := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-gone&cursor=abc", nil))
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), badCursor.Ret.RetCode)
+
 	missing := call(httptest.NewRequest(http.MethodGet, "/cube/sandbox/events", nil))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), missing.Ret.RetCode)
 }

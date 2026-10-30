@@ -149,11 +149,25 @@ func handleSandboxEventsAction(c *gin.Context) {
 		if req.SandboxID == "" {
 			req.SandboxID = c.Query("sandboxID")
 		}
+		var parseErr error
 		if cursor := c.Query("cursor"); cursor != "" {
-			req.Cursor, _ = strconv.ParseUint(cursor, 10, 64)
+			if req.Cursor, parseErr = strconv.ParseUint(cursor, 10, 64); parseErr != nil {
+				parseErr = errors.New("cursor must be a non-negative integer")
+			}
 		}
-		if l := c.Query("limit"); l != "" {
-			req.Limit, _ = strconv.Atoi(l)
+		if l := c.Query("limit"); l != "" && parseErr == nil {
+			if req.Limit, parseErr = strconv.Atoi(l); parseErr != nil {
+				parseErr = errors.New("limit must be an integer")
+			}
+		}
+		// Ignoring a bad cursor would silently restart paging at the first event.
+		if parseErr != nil {
+			setRetCode(int64(errorcode.ErrorCode_MasterParamsError))
+			common.WriteAPI(c, &SandboxEventsRes{Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  parseErr.Error(),
+			}}})
+			return
 		}
 	}
 

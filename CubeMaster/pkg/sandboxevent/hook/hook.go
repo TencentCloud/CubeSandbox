@@ -37,10 +37,15 @@ func Init(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(retryInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			if attach(ctx) {
-				log.G(ctx).Infof("sandboxevent: history enabled")
+		for {
+			select {
+			case <-ctx.Done():
 				return
+			case <-ticker.C:
+				if attach(ctx) {
+					log.G(ctx).Infof("sandboxevent: history enabled")
+					return
+				}
 			}
 		}
 	}()
