@@ -164,7 +164,9 @@ func (s *NetworkController) verifyTapReusableFD(tap *tapDevice) error {
 	if tap == nil || tap.Name == "" {
 		return nil
 	}
-	if s.hasPooledTapFD(tap.Name) {
+	if file := s.takePooledTapFD(tap.Name); file != nil {
+		drainTapFD(file)
+		s.poolTapFD(tap.Name, file)
 		return nil
 	}
 	file, err := s.tapAdapter.Open(tap.Name)
