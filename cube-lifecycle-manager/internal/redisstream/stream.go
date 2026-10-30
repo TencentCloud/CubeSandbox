@@ -359,7 +359,7 @@ func (c *Client) GetStates(ctx context.Context, sandboxIDs []string) (map[string
 		for i, id := range chunk {
 			keys[i] = lifecycle.StateKey(id)
 		}
-		vals, err := c.rdb.MGet(ctx, keys...).Result()
+		vals, err := c.readStateValues(ctx, keys)
 		if err != nil {
 			return nil, fmt.Errorf("mget lifecycle states: %w", err)
 		}
@@ -521,4 +521,32 @@ func decodeEvent(msg redis.XMessage) *Event {
 		}
 	}
 	return ev
+}
+
+// readStateValues preserves order across slots. Registry state is an eventually
+// consistent view; ownership transitions remain single-key WATCH transactions.
+func (c *Client) readStateValues(ctx context.Context, keys []string) ([]interface{}, error) {
+	if _, clustered := c.rdb.(*redis.ClusterClient); !clustered {
+		return c.rdb.MGet(ctx, keys...).Result()
+	}
+	pipe := c.rdb.Pipeline()
+	cmds := make([]*redis.StringCmd, len(keys))
+	for i, key := range keys {
+		cmds[i] = pipe.Get(ctx, key)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	values := make([]interface{}, len(keys))
+	for i, cmd := range cmds {
+		value, err := cmd.Result()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		values[i] = value
+	}
+	return values, nil
 }

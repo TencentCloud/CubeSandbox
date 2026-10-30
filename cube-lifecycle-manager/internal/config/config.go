@@ -19,9 +19,10 @@ import (
 // can wire it up via systemd EnvironmentFile= without a YAML parser dependency.
 type Config struct {
 	// Redis (the same instance CubeMaster writes to).
-	RedisAddr     string
-	RedisPassword string
-	RedisDB       int
+	RedisAddr         string
+	RedisPassword     string
+	RedisDB           int
+	RedisClusterAddrs []string
 	// Sentinel mode: when RedisMasterName is set, RedisSentinelAddrs must be
 	// non-empty and go-redis FailoverClient is used instead of a fixed Addr.
 	RedisMasterName    string
@@ -162,6 +163,9 @@ func Load() (*Config, error) {
 			c.RedisDB = n
 		}
 	}
+	if v := os.Getenv("CUBE_LCM_REDIS_CLUSTER_NODES"); v != "" {
+		c.RedisClusterAddrs = parseClusterAddrs(v)
+	}
 	if v := os.Getenv("CUBE_LCM_REDIS_MASTER_NAME"); v != "" {
 		c.RedisMasterName = v
 	}
@@ -299,11 +303,24 @@ func Load() (*Config, error) {
 // Validate returns an error if the config has any field combination that the
 // CLM can't proceed with.
 func (c *Config) Validate() error {
+	for _, addr := range c.RedisClusterAddrs {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || host == "" {
+			return fmt.Errorf("invalid Redis Cluster endpoint %q", addr)
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("invalid Redis Cluster port %q", port)
+		}
+	}
+	if len(c.RedisClusterAddrs) > 0 && (c.RedisDB != 0 || c.RedisMasterName != "" || len(c.RedisSentinelAddrs) > 0) {
+		return errors.New("Redis Cluster requires DB 0 and cannot use Sentinel")
+	}
 	if c.RedisMasterName != "" {
 		if len(c.RedisSentinelAddrs) == 0 {
 			return errors.New("CUBE_LCM_REDIS_SENTINEL_NODES is empty when CUBE_LCM_REDIS_MASTER_NAME is set")
 		}
-	} else if c.RedisAddr == "" {
+	} else if c.RedisAddr == "" && len(c.RedisClusterAddrs) == 0 {
 		return errors.New("CUBE_LCM_REDIS_ADDR is empty")
 	}
 	if len(c.CubeProxyAdminURLs) == 0 {
@@ -370,6 +387,25 @@ func parseSentinelAddrs(s string) []string {
 			part = net.JoinHostPort(host, "26379")
 		}
 		out = append(out, part)
+	}
+	return out
+}
+
+// Cluster seed endpoints default to the data port, never the Sentinel port.
+func parseClusterAddrs(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		addr := strings.TrimSpace(part)
+		if addr == "" {
+			continue
+		}
+		if !strings.Contains(addr, ":") {
+			addr = net.JoinHostPort(addr, "6379")
+		}
+		out = append(out, addr)
+	}
+	if len(out) == 0 && raw != "" {
+		return []string{""}
 	}
 	return out
 }
