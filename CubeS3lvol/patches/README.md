@@ -15,9 +15,9 @@ After applying, SPDK must be rebuilt (`make -C ../spdk -j$(nproc)`), otherwise
 the headers are new but the libraries are old, which shows up as undefined
 symbols at link time.
 
-The patches are `git format-patch` shaped with full commit messages, so
-`git am` can consume them too -- use it if you want the commits kept in the
-SPDK tree. DCO sign-offs, when present, are supplied by the human author:
+Existing patches with mail headers can also be consumed by `git am`.
+Plain unified diffs, including 0008, use `apply.sh` instead. DCO sign-offs,
+when present, are supplied by the human author:
 
 ```sh
 git -C ../spdk am /path/to/s3lvol/patches/0001-*.patch
@@ -47,11 +47,11 @@ patch here must satisfy:
 3. **It can be proposed upstream on its own.** If a patch is not suitable for
    upstream, that is usually a sign the design went astray.
 
-0004 is the **only patch that modifies an existing function for a behaviour
-change on an existing path**; 0006 also edits an existing function, but only
-removes an exclusion that is idle until a device installs `copy` (see that
-section). Read both sections before adding a third such patch, and make sure
-the reason is of the same kind.
+0004 modifies an existing function for a behaviour change on an existing
+path. 0006 removes an exclusion that is idle until a device installs `copy`.
+0007 repairs the existing crash-recovery path without changing its recovery
+decision or on-disk format. These exceptions require a concrete failure and
+a focused explanation and regression test.
 
 ## 0001-blob-add-spdk_blob_get_io_unit_lba.patch
 
@@ -201,7 +201,7 @@ reallocated at any time.)
 Changes the `fsync()` in `bdev_aio_flush()` to `fdatasync()`. One line of code,
 plus a comment.
 
-**This is the only patch that violates rule 1 above**, so the reason has to be
+**This is one of the exceptions to rule 1 above**, so the reason has to be
 solid.
 
 **Why change it.** Measured (ext4 over a write-through virtio disk, 4 KiB
@@ -264,7 +264,7 @@ reads more like a bug fix.
 Changes the internal allocation path so an esnap clone may use `dest->copy`
 only for the operation started by `spdk_blob_materialize_cluster()`.
 
-**This is a second patch that modifies an existing function.** The gate is
+**This patch also modifies an existing function.** The gate is
 `dest->copy != NULL`, an operation-local boolean passed into
 `bs_allocate_and_copy_cluster()`, and a `copy_on_materialize_only` property on
 the destination device. The last two are essential because `dest` is the
@@ -309,3 +309,40 @@ then wrote the replacement bytes. On an S3-backed parent this put cold-read
 latency in the foreground pause path and doubled destination write traffic.
 Partial writes still read the parent bytes they need to preserve, but write the
 destination cluster only once.
+
+## 0008-blob-register-parent-before-recovery-delete.patch
+
+Repairs recovery of an interrupted nested snapshot on SPDK revision
+`d64c4fa89233397460e2e4ff55a1c69b8e498598`. When a second snapshot's metadata
+has been persisted but its writable child's parent still names the previous
+snapshot, recovery deletes the unfinished snapshot before the normal load
+path registers its parent/clone relation. If the parent entry already exists,
+`bs_blob_list_remove()` cannot find the child and
+`blob_get_snapshot_and_clone_entries()` asserts.
+
+Register that relation before the existing close/delete sequence. The
+recovery decision and on-disk format stay unchanged. Registration ignores
+invalid/external parents and deduplicates clone IDs; successful deletion
+removes the relation through the normal path.
+
+The focused blob-unit regression constructs the interrupted metadata state
+and performs a dirty reload. It checks metadata-ID ordering, removal of the
+unfinished snapshot, and preservation of the original parent, its allocation,
+and its writable child. This is deterministic fault injection, not a test of
+how frequently the interruption occurs.
+
+On a complete, configured Linux SPDK checkout with unit-test dependencies,
+apply the patch series and rebuild the blob unit-test binary:
+
+```sh
+SPDK_ROOT=/path/to/spdk ./patches/apply.sh
+make -C /path/to/spdk/test/unit/lib/blob/blob.c
+/path/to/spdk/test/unit/lib/blob/blob.c/blob_ut \
+  -s blob_nocopy_noextent -t blob_recover_incomplete_nested_snapshot
+/path/to/spdk/test/unit/lib/blob/blob.c/blob_ut \
+  -s blob_nocopy_extent -t blob_recover_incomplete_nested_snapshot
+```
+
+`blob_ut.c` includes `blob/blobstore.c` directly, so rebuilding the unit-test
+binary compiles the recovery change. Patch-application checks do not execute
+this regression.
