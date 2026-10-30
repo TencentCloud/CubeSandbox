@@ -27,9 +27,17 @@ var resolveSandboxIDFn = sandbox.ResolveSandboxID
 
 // A short ID maps to the same full ID on every page of a listing, so the
 // mapping is remembered briefly instead of being resolved for each page.
-const eventIDCacheTTL = 5 * time.Minute
+// The cache is bounded: expired entries are only dropped on lookup, so once it
+// holds eventIDCacheMax entries it is cleared and refills from new lookups.
+const (
+	eventIDCacheTTL = 5 * time.Minute
+	eventIDCacheMax = 1024
+)
 
-var eventIDCache sync.Map // short ID -> resolvedEventID
+var (
+	eventIDCacheMu sync.Mutex
+	eventIDCache   = make(map[string]resolvedEventID, eventIDCacheMax)
+)
 
 type resolvedEventID struct {
 	fullID  string
@@ -37,17 +45,26 @@ type resolvedEventID struct {
 }
 
 func resolveEventSandboxID(ctx context.Context, shortID string) string {
-	if v, ok := eventIDCache.Load(shortID); ok {
-		if r := v.(resolvedEventID); time.Now().Before(r.expires) {
-			return r.fullID
-		}
-		eventIDCache.Delete(shortID)
+	eventIDCacheMu.Lock()
+	r, ok := eventIDCache[shortID]
+	if ok && !time.Now().Before(r.expires) {
+		delete(eventIDCache, shortID)
+		ok = false
+	}
+	eventIDCacheMu.Unlock()
+	if ok {
+		return r.fullID
 	}
 	fullID, err := resolveSandboxIDFn(ctx, shortID)
 	if err != nil || fullID == "" {
 		return ""
 	}
-	eventIDCache.Store(shortID, resolvedEventID{fullID: fullID, expires: time.Now().Add(eventIDCacheTTL)})
+	eventIDCacheMu.Lock()
+	if len(eventIDCache) >= eventIDCacheMax {
+		clear(eventIDCache)
+	}
+	eventIDCache[shortID] = resolvedEventID{fullID: fullID, expires: time.Now().Add(eventIDCacheTTL)}
+	eventIDCacheMu.Unlock()
 	return fullID
 }
 

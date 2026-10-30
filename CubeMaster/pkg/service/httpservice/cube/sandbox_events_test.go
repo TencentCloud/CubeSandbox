@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -128,4 +129,16 @@ func TestSandboxEventsActionWithHistoryDisabled(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
 	assert.Equal(t, 0, res.Ret.RetCode)
 	assert.Empty(t, res.Events)
+}
+
+func TestEventIDCacheIsBounded(t *testing.T) {
+	orig := resolveSandboxIDFn
+	t.Cleanup(func() { resolveSandboxIDFn = orig })
+	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) { return id + "-full", nil }
+	for i := 0; i < 3*eventIDCacheMax; i++ {
+		resolveEventSandboxID(context.Background(), "sb"+strconv.Itoa(i))
+	}
+	eventIDCacheMu.Lock()
+	defer eventIDCacheMu.Unlock()
+	assert.LessOrEqual(t, len(eventIDCache), eventIDCacheMax)
 }
