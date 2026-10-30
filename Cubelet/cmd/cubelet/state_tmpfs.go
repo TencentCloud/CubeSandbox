@@ -54,11 +54,11 @@ func mountFreshStateTmpfs(stateDir string, sizeMB int) error {
 	if err := stateTmpfsMount(sizeMB, false).Mount(stateDir); err != nil {
 		return err
 	}
-	exist, err := mountinfo.Mounted(stateDir)
+	info, err := lookupExactMount(stateDir)
 	if err != nil {
 		return fmt.Errorf("verify tmpfs mount %s: %w", stateDir, err)
 	}
-	if !exist {
+	if info == nil || info.FSType != "tmpfs" {
 		return fmt.Errorf("mount tmpfs:%v fail", stateDir)
 	}
 	stdlog.Printf("mounted state tmpfs %s size=%dm", stateDir, sizeMB)
@@ -110,6 +110,17 @@ func refuseShrinkStateTmpfs(stateDir string, currentBytes, desiredBytes uint64) 
 }
 
 func lookupExactMount(mountpoint string) (*mountinfo.Info, error) {
+	// /proc/self/mountinfo contains the resolved path. A configured path such
+	// as /data/cubelet/state may traverse a /data symlink. Comparing the alias
+	// would miss the live tmpfs and cover all running shim state on restart.
+	resolved, err := filepath.EvalSymlinks(mountpoint)
+	if err != nil {
+		return nil, err
+	}
+	mountpoint, err = filepath.Abs(resolved)
+	if err != nil {
+		return nil, err
+	}
 	mounts, err := mountinfo.GetMounts(mountinfo.SingleEntryFilter(mountpoint))
 	if err != nil {
 		return nil, err
