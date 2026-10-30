@@ -1475,7 +1475,7 @@ func finalizeSynchronousSnapshotJob(info *sandboxtypes.TemplateImageJobInfo) (*s
 }
 
 func claimSnapshotJobExecution(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
-	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	tx := templateImageJobWriteTable(store.db.WithContext(ctx)).
 		Where("job_id = ? AND status = ?", jobID, JobStatusPending).
 		Updates(map[string]any{
 			"status":     JobStatusRunning,

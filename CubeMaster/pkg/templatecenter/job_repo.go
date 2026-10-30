@@ -247,7 +247,7 @@ func updateTemplateImageJob(ctx context.Context, jobID string, values map[string
 
 func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) error {
 	values["updated_at"] = time.Now()
-	result := tx.Table(constants.TemplateImageJobTableName).
+	result := templateImageJobWriteTable(tx).
 		Where("job_id = ?", jobID).Updates(values)
 	if result.Error != nil {
 		return result.Error
@@ -256,6 +256,17 @@ func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) 
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+// templateImageJobWriteTable keeps a point update on the unique job ID index.
+// MySQL can otherwise intersect job_id and status indexes, locking unrelated
+// pending jobs in opposite order and deadlocking concurrent snapshot claims.
+// The status predicate remains in the atomic UPDATE for multi-master CAS.
+func templateImageJobWriteTable(tx *gorm.DB) *gorm.DB {
+	if tx.Dialector.Name() == "mysql" {
+		return tx.Table(constants.TemplateImageJobTableName + " FORCE INDEX (idx_template_image_job_id)")
+	}
+	return tx.Table(constants.TemplateImageJobTableName)
 }
 
 // UpdateTemplateImageJob exports updateTemplateImageJob for the internal
@@ -275,7 +286,7 @@ func UpdateTemplateImageJob(ctx context.Context, jobID string, values map[string
 // error; that read failing is safe because nothing was written.
 func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string, values map[string]any, newStatus string) error {
 	values["updated_at"] = time.Now()
-	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	tx := templateImageJobWriteTable(store.db.WithContext(ctx)).
 		Where("job_id = ?", jobID).
 		Where("status NOT IN ? OR status = ?", []string{JobStatusReady, JobStatusFailed}, newStatus).
 		Updates(values)
@@ -298,7 +309,7 @@ func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string
 // a second continuation. false means the report was an idempotent replay.
 func ApplyTemplateImageJobBuiltReport(ctx context.Context, jobID string, values map[string]any) (bool, error) {
 	values["updated_at"] = time.Now()
-	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	tx := templateImageJobWriteTable(store.db.WithContext(ctx)).
 		Where("job_id = ?", jobID).
 		Where("status NOT IN ?", []string{JobStatusReady, JobStatusFailed}).
 		Where("NOT (status = ? AND phase IN ?)", JobStatusRunning, []string{JobPhaseDistributing, JobPhaseCreatingTemplate}).
@@ -325,7 +336,7 @@ func ApplyTemplateImageJobBuiltReport(ctx context.Context, jobID string, values 
 // safe across CubeMaster processes as well as concurrent callback handlers.
 func claimTemplateImageJobDistribution(ctx context.Context, jobID string, values map[string]any) (bool, error) {
 	values["updated_at"] = time.Now()
-	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	tx := templateImageJobWriteTable(store.db.WithContext(ctx)).
 		Where("job_id = ? AND status = ?", jobID, JobStatusBuilt).
 		Updates(values)
 	if tx.Error != nil {

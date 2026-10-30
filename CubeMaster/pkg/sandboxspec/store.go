@@ -58,6 +58,19 @@ func getDB() *gorm.DB {
 	return db
 }
 
+// SetDBForTest swaps the package handle and returns a restoration function.
+func SetDBForTest(client *gorm.DB) func() {
+	dbMu.Lock()
+	previous := db
+	db = client
+	dbMu.Unlock()
+	return func() {
+		dbMu.Lock()
+		db = previous
+		dbMu.Unlock()
+	}
+}
+
 // IsReady reports whether the store has a usable db handle.
 func IsReady() bool {
 	return getDB() != nil
@@ -272,6 +285,28 @@ func decodeSpec(rec *models.SandboxSpec) (*sandboxtypes.CreateCubeSandboxReq, er
 	return out, nil
 }
 
+// GetHostIP reads the create-time host recorded in the canonical spec.
+// It proves that a record exists, not that this host still owns a resumed VM.
+// Database failures must not be treated as proof that a sandbox is absent.
+func GetHostIP(ctx context.Context, sandboxID string) (string, error) {
+	client := getDB()
+	if client == nil {
+		return "", ErrSandboxSpecStoreNotReady
+	}
+	var rec models.SandboxSpec
+	err := client.WithContext(ctx).Select("host_ip").Where("sandbox_id = ?", strings.TrimSpace(sandboxID)).First(&rec).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", ErrSandboxSpecNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(rec.HostIP) == "" {
+		return "", errors.New("sandbox spec has no destroy route")
+	}
+	return rec.HostIP, nil
+}
+
 // Delete removes the spec record for sandboxID. Missing records are a no-op.
 func Delete(ctx context.Context, sandboxID string) error {
 	client := getDB()
@@ -282,7 +317,13 @@ func Delete(ctx context.Context, sandboxID string) error {
 	if sandboxID == "" {
 		return errors.New("sandboxspec.Delete: sandbox_id is required")
 	}
-	return client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+	query := client.WithContext(ctx).Table(constants.SandboxSpecTableName)
+	if client.Dialector.Name() == "mysql" {
+		// Avoid a deleted_at scan/index intersection locking other sandboxes
+		// before their primary rows during concurrent soft deletion.
+		query = query.Table(constants.SandboxSpecTableName + " FORCE INDEX (idx_sandbox_spec_sandbox_id)")
+	}
+	return query.
 		Where("sandbox_id = ?", sandboxID).
 		Delete(&models.SandboxSpec{}).Error
 }

@@ -272,8 +272,14 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 			// Cubelet so the volume DB releases the reference held by this node.
 			volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
 		}
+		if !handled && !nodeOK {
+			return ret.Err(errorcode.ErrorCode_CubeletUnHealthy, "destroy worker is unavailable; cleanup is not confirmed")
+		}
 
 		if t.InsType() == cubebox.InstanceType_cubebox.String() {
+			if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
+				return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "after-destroy cleanup failed: %s", err.Error())
+			}
 			err := localcache.DeleteSandboxProxyMap(ctx, req.GetSandboxID())
 			if err != nil {
 
@@ -281,9 +287,6 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 				return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "DeleteSandboxProxyMap failed: %s", err.Error())
 			}
 			localcache.DeleteSandboxCache(req.GetSandboxID())
-			if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
-				log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
-			}
 		}
 		return nil
 	})
