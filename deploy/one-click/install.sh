@@ -1628,6 +1628,15 @@ start_systemd_target() {
     systemctl reset-failed cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
   fi
 
+  # JuiceFS is enabled explicitly by scripts/cube-jfs/mount.sh, not merely by
+  # setting ONE_CLICK_ENABLE_JFS=1 during installation. Its unit enablement
+  # survives package upgrades, however, so an install with JFS disabled must
+  # remove stale target Wants= links instead of starting an old client at boot.
+  if [[ "${ONE_CLICK_ENABLE_JFS}" != "1" ]]; then
+    systemctl disable --now cube-sandbox-jfs.service >/dev/null 2>&1 || true
+    systemctl reset-failed cube-sandbox-jfs.service >/dev/null 2>&1 || true
+  fi
+
   # CubeTemplateCenter is part of the default control-plane stack (CubeMaster
   # has no in-process build fallback). The control target's Wants= already
   # pulls it up; the explicit enable creates the .wants symlink so the unit
