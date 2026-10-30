@@ -349,7 +349,7 @@ impl Task for TaskService {
         );
 
         let mut sb = self.sandbox.lock().await;
-        if sb.paused().await {
+        if !sb.normal().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
         }
@@ -374,6 +374,7 @@ impl Task for TaskService {
                 if let Err(cleanup) = sb.destroy_sandbox_after_failed_create().await {
                     errf!(self.log, "failed Create VM cleanup:{}", cleanup);
                 }
+                self.exit.signal();
                 return Err(Error::Other(format!("Create sandbox failed:{}", e)).into());
             }
         }
@@ -400,6 +401,7 @@ impl Task for TaskService {
                 if let Err(cleanup) = sb.destroy_sandbox_after_failed_create().await {
                     errf!(self.log, "failed first-container VM cleanup:{}", cleanup);
                 }
+                self.exit.signal();
             }
             return Err(Error::Other(format!("Create container failed:{}", e)).into());
         }

@@ -787,7 +787,24 @@ impl SandBox {
     }
 
     pub async fn destroy_sandbox_after_failed_create(&mut self) -> CResult<()> {
-        self.destroy_sandbox_with_timeout(Duration::from_secs(3)).await
+        // A failed first Create makes this shim terminal. Stop tasks that can
+        // retain the old agent or mutate its state before joining the VMM.
+        self.stop_watchers().await;
+        let result = self.destroy_sandbox_with_timeout(Duration::from_secs(3)).await;
+        self.stop_log_forward_detached().await;
+        let _ = self.disconnect_agent().await;
+        self.containers.lock().await.clear();
+        self.ch = None;
+        self.inited = false;
+        *self.state.lock().await = SandBoxState::Exited;
+        for path in [utils::SHIM_PID_FILE, utils::VMM_PID_FILE] {
+            if let Err(e) = stdfs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warnf!(self.log, "remove failed-create pid file {}: {}", path, e);
+                }
+            }
+        }
+        result
     }
 
     async fn destroy_sandbox_with_timeout(&mut self, timeout: Duration) -> CResult<()> {
@@ -800,8 +817,8 @@ impl SandBox {
             infof!(self.log, "ch instance is None");
             return Ok(());
         }
-        // Failed-Create cleanup has a short budget. Ordinary shutdown gets a
-        // longer grace period for guest unmounts and persistent-volume writes.
+        // Failed-Create cleanup has a short budget. Ordinary shutdown allows
+        // more time for VMM completion before the process-level fallback.
         let started = Instant::now();
         let deadline = ShutdownDeadline::arm(timeout);
         let mut ch = self.ch.as_mut().unwrap().lock().await;
@@ -1121,7 +1138,7 @@ impl SandBox {
         if containers.contains_key(&id) {
             return Err(format!("container {} already exists", id.clone()));
         }
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| "agent client is unavailable".to_string())?;
         let mut c: Container = Container::new(
             self.id.clone(),
             id.clone(),

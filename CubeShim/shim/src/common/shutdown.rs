@@ -38,7 +38,8 @@ impl ShutdownDeadline {
         Ok(Self { cancel })
     }
 
-    /// Only successful physical teardown can cancel the watchdog. Dropping a
+    /// A completed physical teardown can cancel the watchdog, including one
+    /// reporting that the VMM thread already failed. Dropping a
     /// cancelled async future disconnects the channel and forces exit instead.
     pub fn complete(self) {
         let _ = self.cancel.send(());
