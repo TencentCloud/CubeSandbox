@@ -1637,6 +1637,13 @@ start_systemd_target() {
       || log "WARN: could not enable cube-sandbox-cube-templatecenter.service"
   fi
 
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]] && command -v logrotate >/dev/null 2>&1; then
+    systemctl enable cube-sandbox-s3lvol-logrotate.timer >/dev/null 2>&1 \
+      || log "WARN: could not enable CubeS3lvol log rotation"
+  else
+    systemctl disable --now cube-sandbox-s3lvol-logrotate.timer >/dev/null 2>&1 || true
+  fi
+
   systemctl enable --now "${target}"
 }
 

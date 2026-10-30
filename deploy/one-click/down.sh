@@ -35,6 +35,7 @@ fi
 # service is a full teardown -- disconnect, unload, SIGTERM -- and down.sh is
 # where that is wanted. An upgrade, which is not tearing anything down, stops it
 # on its own terms instead.
+systemctl stop cube-sandbox-s3lvol-logrotate.timer >/dev/null 2>&1 || true
 if systemctl is-enabled cube-sandbox-s3lvol.service >/dev/null 2>&1; then
   systemctl stop cube-sandbox-s3lvol.service
 fi
