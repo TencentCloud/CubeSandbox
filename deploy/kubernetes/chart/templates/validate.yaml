@@ -300,6 +300,9 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if hasKey .Values.cubeProxy "hostNetwork" }}
 {{- fail "cubeProxy.hostNetwork was removed; CubeProxy always runs on the Pod network behind its Service (ClusterIP / NodePort / LoadBalancer; Ingress optional). Remove cubeProxy.hostNetwork from your values." }}
 {{- end }}
+{{- if and (not (kindIs "invalid" .Values.cubeProxy.hostUsers)) (not (kindIs "bool" .Values.cubeProxy.hostUsers)) }}
+{{- fail "cubeProxy.hostUsers must be true, false, or null" }}
+{{- end }}
 {{- if and .Values.lifecycleManager.adminToken (lt (len .Values.lifecycleManager.adminToken) 16) }}
 {{- fail "lifecycleManager.adminToken must be empty for auto-generation or at least 16 characters when explicitly set" }}
 {{- end }}
