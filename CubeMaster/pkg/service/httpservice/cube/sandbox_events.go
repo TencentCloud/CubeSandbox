@@ -29,8 +29,8 @@ var resolveSandboxIDFn = sandbox.ResolveSandboxID
 
 // A short ID maps to the same full ID on every page of a listing, so the
 // mapping is remembered briefly instead of being resolved for each page.
-// The cache is bounded: when full, expired entries are dropped, or else the
-// entry expiring soonest.
+// The cache is bounded: when full, expired entries are dropped, or else one
+// resolved entry, so remembered misses survive a burst of new IDs.
 const (
 	eventIDCacheTTL = 5 * time.Minute
 	// A short ID that does not resolve is remembered briefly too, so polling it
@@ -85,22 +85,34 @@ func resolveEventSandboxID(ctx context.Context, shortID string) string {
 	return fullID
 }
 
-// evictEventIDCacheLocked drops expired entries, or else the one expiring
-// soonest, so a burst of new IDs cannot flush the remembered misses.
+// evictEventIDCacheLocked drops expired entries, or else one resolved entry
+// (the one expiring soonest). Remembered misses are kept as long as any
+// resolved entry is left: a live sandbox's short ID usually resolves from the
+// local cache, while a miss is what costs a cluster scan.
 func evictEventIDCacheLocked(now time.Time) {
-	var oldestKey string
-	var oldest time.Time
+	var hitKey, missKey string
+	var hitExp, missExp time.Time
 	for key, entry := range eventIDCache {
-		if !now.Before(entry.expires) {
+		switch {
+		case !now.Before(entry.expires):
 			delete(eventIDCache, key)
-			continue
-		}
-		if oldestKey == "" || entry.expires.Before(oldest) {
-			oldestKey, oldest = key, entry.expires
+		case entry.fullID != "":
+			if hitKey == "" || entry.expires.Before(hitExp) {
+				hitKey, hitExp = key, entry.expires
+			}
+		default:
+			if missKey == "" || entry.expires.Before(missExp) {
+				missKey, missExp = key, entry.expires
+			}
 		}
 	}
-	if len(eventIDCache) >= eventIDCacheMax && oldestKey != "" {
-		delete(eventIDCache, oldestKey)
+	if len(eventIDCache) < eventIDCacheMax {
+		return
+	}
+	if hitKey != "" {
+		delete(eventIDCache, hitKey)
+	} else if missKey != "" {
+		delete(eventIDCache, missKey)
 	}
 }
 

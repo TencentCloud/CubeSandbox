@@ -195,3 +195,25 @@ func TestEventIDCacheEvictsOneEntryWhenFull(t *testing.T) {
 	resolveEventSandboxID(context.Background(), last)
 	assert.Equal(t, 1, calls[last], "recent entries survive")
 }
+
+func TestEventIDCacheKeepsMissesUnderPressure(t *testing.T) {
+	orig := resolveSandboxIDFn
+	t.Cleanup(func() { resolveSandboxIDFn = orig })
+	eventIDCacheMu.Lock()
+	clear(eventIDCache)
+	eventIDCacheMu.Unlock()
+	misses := 0
+	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) {
+		if id == "f00d" {
+			misses++
+			return "", errors.New("not found")
+		}
+		return id + "-full", nil
+	}
+	resolveEventSandboxID(context.Background(), "f00d")
+	for i := 0; i < 2*eventIDCacheMax; i++ {
+		resolveEventSandboxID(context.Background(), "aaaa"+strconv.FormatInt(int64(i), 16))
+	}
+	resolveEventSandboxID(context.Background(), "f00d")
+	assert.Equal(t, 1, misses, "a burst of new IDs does not flush remembered misses")
+}
