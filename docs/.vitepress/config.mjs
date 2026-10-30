@@ -184,6 +184,7 @@ export default withMermaid(defineConfig({
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                { text: 'Redis Cluster', link: '/guide/redis-cluster' },
                 {
                   text: 'Kubernetes Deployment',
                   link: '/guide/kubernetes/',
