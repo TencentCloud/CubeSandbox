@@ -10,6 +10,8 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 
 ## Service designs
 
+- [Worker rootfs cache GC](./rootfs-cache-gc) — disk watermarks, LRU, download leases and legacy-cache adoption.
+
 - [CubeTemplateCenter Design](./templatecenter-design) — the standalone template build service: control/data plane split, routing rules, callback authentication, artifact lifecycle, deployment wiring, and known limitations.
 
 ## What belongs here
