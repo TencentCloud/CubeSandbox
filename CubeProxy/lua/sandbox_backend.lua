@@ -83,6 +83,7 @@ local function load_sandbox_proxy_metadata(ins_id)
         redis_port = ngx.var.redis_port,
         redis_pd = ngx.var.redis_pd,
         redis_index = ngx.var.redis_index,
+        redis_cluster_nodes = ngx.var.redis_cluster_nodes,
         redis_master_name = ngx.var.redis_master_name,
         redis_sentinel_nodes = ngx.var.redis_sentinel_nodes,
         redis_sentinel_pd = ngx.var.redis_sentinel_pd,
