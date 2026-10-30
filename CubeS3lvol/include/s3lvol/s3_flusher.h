@@ -31,6 +31,12 @@
 /* Tick interval: roughly a millisecond. */
 #define S3_FLUSHER_DEFAULT_POLL_US 1000
 
+/* Drain/WAL/ring pressure wait cap; background escalation is retained. */
+#define S3_FLUSHER_URGENT_RETRY_MAX_US (1ULL * 1000 * 1000)
+
+/* Shared by all chunks in one flusher, independently of retry backoff. */
+#define S3_FLUSHER_FAILURE_LOG_INTERVAL_SEC 30ULL
+
 /* How long a drain waits for dirty data before giving up.
  *
  * A drain must not be able to hang shutdown. If S3 is unreachable the flusher
@@ -145,6 +151,9 @@ void s3_flusher_kick(struct s3_flusher *f);
  *                   completions would otherwise touch freed memory.
  *
  * One drain at a time; a second concurrent call gets -EBUSY.
+ * Each drain allows one immediate attempt per dirty chunk. Further failures
+ * wait at most S3_FLUSHER_URGENT_RETRY_MAX_US during the drain, preserving the
+ * failure history used by background retries after it completes or times out.
  *
  * A drain supersedes a scheduling hold, whether established or still pending: a
  * pending suspend is cancelled and its callback reports -ECANCELED, and the

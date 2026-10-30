@@ -5718,6 +5718,7 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 	out->overlay_flushes_repeated = ostats.flushes_repeated;
 	out->overlay_flushes_repeated_partial =
 		ostats.flushes_repeated_partial;
+	out->overlay_retry_scan_chunks = ostats.retry_scan_chunks;
 
 	if (ctx->flusher) {
 		s3_flusher_get_stats(ctx->flusher, &fstats);

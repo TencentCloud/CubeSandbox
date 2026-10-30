@@ -447,6 +447,44 @@ There is no separate bootstrap state or fixed copy timeout. The standalone
 policy and guard can also be used by a host-managed Kubernetes deployment;
 one-click does not install them on Kubernetes hosts automatically.
 
+Failed flushes retain dirty data and apply exponential backoff from 100 ms up
+to 30 s per chunk. Full chunks and forced flushes can retry after that wait.
+Outside forced flushing, failed partial chunks also wait for the hold-back age
+(45 s by default), measured again from failure. Repeated errors with the same
+status are summarized at most once per 30 s per lvstore; a changed status is
+logged immediately. Successful uploads and idle polls do not reset the log
+rate limits. The count includes failures across all chunks in that lvstore
+since the last successful upload; the named chunk triggered the log entry. Connection or authentication failures still require
+repair; pending WAL must be retained until the object store becomes available.
+
+Each bounded flusher drain allows one immediate attempt per dirty chunk without
+resetting its failure history. Subsequent retry waits during the drain are capped
+at one second, allowing uploads to recover before the deadline. WAL or write-back
+ring pressure uses the same one-second cap, including cooldowns armed before
+pressure began. This bounds the retry wait, not the duration of an S3 request.
+Background flushing retains its accumulated backoff, capped at 30 seconds.
+Neither path retries a failed synchronous upload again inside the same backoff
+window.
+
+When all chunks in a dirty queue are cooling down, scheduling caches the earliest
+retry time instead of scanning that queue on every poll. New eligible work
+invalidates the cached wait and can proceed independently.
+`rcow_get_lvstores` reports `write_path.retry_scan_chunks`, the cumulative number
+of queue entries examined for retry eligibility, including ordinary queue-head
+checks during healthy operation. Cached waits skip queue traversal and add
+nothing to this counter. It increases when scheduling examines eligible work or
+rescans queues after cached waits expire or are invalidated; an increase alone
+does not indicate an outage or a cache problem. A ready partial chunk still
+waiting for its hold-back age can also cause repeated scans of cooling entries
+ahead of it; the cached wait only skips queues whose entries are all cooling.
+
+The first successful upload after failures resets the consecutive failure count
+and reports progress even while writes continue. Recovery notices have their
+own 30-second rate limit, so intermittent successes cannot flood either log.
+A suppressed notice does not delay the count reset. Progress does not mean every
+failed chunk has recovered: each chunk keeps its own backoff until its upload
+succeeds, its data is unmapped, or its failure history expires after 60 seconds.
+
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to
 determine whether an object exists.
 
@@ -686,4 +724,3 @@ esnap reader of an export of the snapshot also keeps it `NO`.
 It is a snapshot of the current state, not a promise: something can pin the
 snapshot again between the query and the delete, and a retry that is refused
 again is reported by `--retry-pending` (exit status 1) rather than hidden.
-
