@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -124,4 +125,13 @@ func TestKillReasonRoundTrip(t *testing.T) {
 	assert.Equal(t, "", KillReason(ctx))
 	assert.Equal(t, ctx, WithKillReason(ctx, ""))
 	assert.Equal(t, "timeout", KillReason(WithKillReason(ctx, "timeout")))
+}
+
+func TestRecordTruncatesOverlongFields(t *testing.T) {
+	newTestDB(t)
+	Record(context.Background(), "sb-long", EventKilled, strings.Repeat("t", 300), strings.Repeat("é", 100))
+	rows := waitForEvents(t, "sb-long", 1)
+	assert.Len(t, rows[0].TemplateID, maxTemplateIDLen)
+	assert.LessOrEqual(t, len(rows[0].Reason), maxReasonLen)
+	assert.True(t, utf8.ValidString(rows[0].Reason))
 }

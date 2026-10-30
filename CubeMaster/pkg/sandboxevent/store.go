@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -90,8 +91,8 @@ func Record(ctx context.Context, sandboxID, event, templateID, reason string) {
 	ev := &models.SandboxEvent{
 		SandboxID:  sandboxID,
 		Event:      event,
-		TemplateID: templateID,
-		Reason:     reason,
+		TemplateID: truncate(templateID, maxTemplateIDLen),
+		Reason:     truncate(reason, maxReasonLen),
 		CreatedAt:  time.Now(),
 	}
 	select {
@@ -99,6 +100,24 @@ func Record(ctx context.Context, sandboxID, event, templateID, reason string) {
 	default:
 		log.G(ctx).Warnf("sandboxevent: queue full, dropping %s event of sandbox %s", event, sandboxID)
 	}
+}
+
+// Column widths of t_cube_sandbox_event. Longer values would make the insert
+// fail and drop the whole event, so they are cut instead.
+const (
+	maxTemplateIDLen = 128
+	maxReasonLen     = 64
+)
+
+// truncate cuts s to at most n bytes without splitting a UTF-8 character.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // One worker keeps the row order equal to the order events were recorded by
