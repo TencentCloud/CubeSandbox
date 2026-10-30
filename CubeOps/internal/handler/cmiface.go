@@ -24,6 +24,7 @@ type CubeMasterClient interface {
 	SetSandboxTimeout(ctx context.Context, body interface{}) (json.RawMessage, error)
 	RefreshSandbox(ctx context.Context, body interface{}) (json.RawMessage, error)
 	GetSandboxLogs(ctx context.Context, body interface{}) (json.RawMessage, error)
+	GetSandboxEvents(ctx context.Context, params map[string]string) (json.RawMessage, error)
 	ListSandboxesWithBody(ctx context.Context, body interface{}) (json.RawMessage, error)
 
 	CreateSnapshot(ctx context.Context, body interface{}) (json.RawMessage, error)

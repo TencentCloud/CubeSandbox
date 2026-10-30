@@ -81,6 +81,7 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 	r.GET("/sandboxes/:id", h.GetSandbox)
 	r.DELETE("/sandboxes/:id", h.DeleteSandbox)
 	r.GET("/sandboxes/:id/logs", h.GetSandboxLogs)
+	r.GET("/sandboxes/:id/events", h.GetSandboxEvents)
 	r.POST("/sandboxes/:id/timeout", h.SetSandboxTimeout)
 	r.POST("/sandboxes/:id/refreshes", h.RefreshSandbox)
 	r.POST("/sandboxes/:id/pause", h.PauseSandbox)
@@ -479,6 +480,31 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 		}
 	}
 	raw, err := h.cm.GetSandboxLogs(c.Request.Context(), body)
+	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// GetSandboxEvents — GET /api/v1/sdk/sandboxes/{id}/events
+//
+// Lifecycle history (created / paused / resumed / killed), oldest first, paged
+// by the event-ID cursor. The history outlives the sandbox, so a deleted or
+// unknown ID is an empty list rather than a 404.
+func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
+	params := map[string]string{"sandbox_id": c.Param("id")}
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			params["limit"] = strconv.Itoa(n)
+		}
+	}
+	if v := c.Query("cursor"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			params["cursor"] = strconv.FormatUint(n, 10)
+		}
+	}
+	raw, err := h.cm.GetSandboxEvents(c.Request.Context(), params)
 	if err != nil {
 		writeCMError(c, err)
 		return

@@ -949,3 +949,47 @@ func TestR12_LongOpHandlerUsesLongContext(t *testing.T) {
 		t.Errorf("CreateSnapshot context deadline remaining = %v, want >=230s (R12: 240s budget, not 30s)", remaining)
 	}
 }
+
+// ── GetSandboxEvents ──────────────────────────────────────────────────────
+
+func TestSDK_GetSandboxEvents_ForwardsPagingAndKeepsShape(t *testing.T) {
+	var captured map[string]string
+	cm := &fakeCM{
+		getSandboxEvents: func(_ context.Context, params map[string]string) (json.RawMessage, error) {
+			captured = params
+			return raw(`{"ret":{"ret_code":0,"ret_msg":""},"events":[` +
+				`{"id":7,"event":"created","timestamp":"2026-10-29T08:00:00Z","templateID":"tpl-1"},` +
+				`{"id":9,"event":"killed","timestamp":"2026-10-29T08:05:00Z","reason":"timeout"}],` +
+				`"nextCursor":9,"hasMore":true}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-gone/events?cursor=3&limit=2")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if captured["sandbox_id"] != "sb-gone" || captured["cursor"] != "3" || captured["limit"] != "2" {
+		t.Errorf("CM params = %v", captured)
+	}
+	var got struct {
+		Events []struct {
+			ID         uint64 `json:"id"`
+			Event      string `json:"event"`
+			TemplateID string `json:"templateID"`
+			Reason     string `json:"reason"`
+		} `json:"events"`
+		NextCursor uint64 `json:"nextCursor"`
+		HasMore    bool   `json:"hasMore"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, w.Body.String())
+	}
+	if len(got.Events) != 2 || got.Events[0].TemplateID != "tpl-1" || got.Events[1].Reason != "timeout" ||
+		got.NextCursor != 9 || !got.HasMore {
+		t.Errorf("response = %+v; body=%s", got, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"ret"`) {
+		t.Errorf("ret envelope leaked: %s", w.Body.String())
+	}
+}
