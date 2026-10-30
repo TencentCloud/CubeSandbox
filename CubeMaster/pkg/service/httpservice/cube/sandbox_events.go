@@ -50,8 +50,10 @@ type resolvedEventID struct {
 }
 
 // Full IDs are 32 hex characters, so only a shorter hex string can be a prefix
-// of one; anything else is never resolved (and never scans the cluster).
-var shortIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{1,31}$`)
+// of one; anything else is never resolved (and never scans the cluster). At
+// least 4 characters are required, which every short ID the WebUI shows has,
+// so very short guesses cannot each cost a scan.
+var shortIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{4,31}$`)
 
 func resolveEventSandboxID(ctx context.Context, shortID string) string {
 	shortID = strings.TrimSpace(shortID)

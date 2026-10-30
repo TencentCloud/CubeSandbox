@@ -136,7 +136,7 @@ func TestEventIDCacheIsBounded(t *testing.T) {
 	t.Cleanup(func() { resolveSandboxIDFn = orig })
 	resolveSandboxIDFn = func(_ context.Context, id string) (string, error) { return id + "-full", nil }
 	for i := 0; i < 3*eventIDCacheMax; i++ {
-		resolveEventSandboxID(context.Background(), strconv.FormatInt(int64(i), 16))
+		resolveEventSandboxID(context.Background(), "aaaa"+strconv.FormatInt(int64(i), 16))
 	}
 	eventIDCacheMu.Lock()
 	defer eventIDCacheMu.Unlock()
@@ -165,6 +165,7 @@ func TestEventIDResolutionSkipsNonPrefixInput(t *testing.T) {
 		return "", nil
 	}
 	assert.Equal(t, "", resolveEventSandboxID(context.Background(), "not-an-id"))
+	assert.Equal(t, "", resolveEventSandboxID(context.Background(), "abc"), "too short to resolve")
 }
 
 func TestEventIDCacheEvictsOneEntryWhenFull(t *testing.T) {
@@ -179,15 +180,15 @@ func TestEventIDCacheEvictsOneEntryWhenFull(t *testing.T) {
 		return id + "-full", nil
 	}
 	for i := 0; i < eventIDCacheMax; i++ {
-		resolveEventSandboxID(context.Background(), "a"+strconv.FormatInt(int64(i), 16))
+		resolveEventSandboxID(context.Background(), "aaaa"+strconv.FormatInt(int64(i), 16))
 	}
 	// One more ID evicts a single entry instead of flushing the cache.
-	resolveEventSandboxID(context.Background(), "b1")
+	resolveEventSandboxID(context.Background(), "bbbb1")
 	eventIDCacheMu.Lock()
 	size := len(eventIDCache)
 	eventIDCacheMu.Unlock()
 	assert.Equal(t, eventIDCacheMax, size)
-	last := "a" + strconv.FormatInt(int64(eventIDCacheMax-1), 16)
+	last := "aaaa" + strconv.FormatInt(int64(eventIDCacheMax-1), 16)
 	resolveEventSandboxID(context.Background(), last)
 	assert.Equal(t, 1, calls[last], "recent entries survive")
 }

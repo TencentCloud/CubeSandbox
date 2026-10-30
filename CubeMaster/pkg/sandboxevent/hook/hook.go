@@ -10,6 +10,7 @@ package hook
 
 import (
 	"context"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -21,21 +22,45 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 )
 
-// Init attaches the event store and registers the hooks. A failure only
-// disables the history; it never stops CubeMaster. db.Init panics when the
-// shared handle was never opened, so that is recovered here instead of
-// relying on the call order in main.
+// retryInterval is how often a failed store setup is retried, e.g. while the
+// table is still being created out-of-band (CUBE_AUTO_MIGRATION=false).
+var retryInterval = 30 * time.Second
+
+// Init registers the hooks and attaches the event store. Recording is a
+// no-op until the store is ready, so a failed setup never stops CubeMaster;
+// it is retried in the background until it succeeds.
 func Init(ctx context.Context) {
+	Register()
+	if attach(ctx) {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(retryInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if attach(ctx) {
+				log.G(ctx).Infof("sandboxevent: history enabled")
+				return
+			}
+		}
+	}()
+}
+
+// attach tries to set up the store once. db.Init panics when the shared
+// handle was never opened, so that is recovered instead of relying on the
+// call order in main.
+func attach(ctx context.Context) (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.G(ctx).Warnf("sandboxevent: history disabled: %v", r)
+			log.G(ctx).Warnf("sandboxevent: history disabled, retrying in %s: %v", retryInterval, r)
+			ok = false
 		}
 	}()
 	if err := sandboxevent.Init(db.Init(config.GetDbConfig())); err != nil {
-		log.G(ctx).Warnf("sandboxevent: history disabled: %v", err)
-		return
+		log.G(ctx).Warnf("sandboxevent: history disabled, retrying in %s: %v", retryInterval, err)
+		return false
 	}
-	Register()
+	return true
 }
 
 // Register adds the recording hooks to the sandbox hook chains. Both the
