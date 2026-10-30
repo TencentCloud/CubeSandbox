@@ -475,6 +475,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		return rsp, nil
 	}
+
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		release, rejected := s.cubeboxMgr.admitAndReserveResume(ctx, sid)
+		if rejected != nil {
+			rsp.Ret.RetMsg = rejected.RetMsg
+			rsp.Ret.RetCode = rejected.RetCode
+			return rsp, nil
+		}
+		defer release()
+	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {

@@ -123,6 +123,28 @@ type aggregatedSandboxView struct {
 	StorageDiskMB int64
 }
 
+// pausedReleaseRatioFor is the fraction of its quota a paused sandbox actually
+// released back to the scheduler under releaseRatio. Only a snapshot that can
+// be restored on another node releases anything: such a resume is placed by
+// CubeMaster through the normal scheduler, which ran the capacity filters.
+// A snapshot pinned to this node (XFS / local-only) can only ever resume here,
+// so it keeps its whole quota on the books and its resume always fits — the
+// ratio does not apply to it.
+//
+// The backend is read from the sandbox's own annotations (the same key Master
+// passes at create and pause); a missing or unknown backend resolves to XFS,
+// i.e. the safe "keep it reserved" answer.
+func pausedReleaseRatioFor(sb *cubeboxstore.CubeBox, releaseRatio float64) float64 {
+	ratio := clampRatio(releaseRatio)
+	if ratio <= 0 {
+		return 0
+	}
+	if !storage.IsS3Backend(pauseCatalogBackend(sb)) {
+		return 0
+	}
+	return ratio
+}
+
 func (l *local) aggregateAllocated() aggregatedSandboxView {
 	return aggregateSandboxResources(
 		l.cubeboxManger.List(),
@@ -178,10 +200,7 @@ func bytesToMB(b int64) int64 {
 // is identical to the legacy behaviour: paused sandboxes keep their full quota
 // and count as running, so resume is guaranteed.
 func aggregateSandboxResources(sbs []*cubeboxstore.CubeBox, releaseRatio float64) aggregatedSandboxView {
-	// Resolve the ratio once: factor is the paused-quota fraction still counted
-	// (1-ratio), and the policy is active only for a strictly positive ratio.
 	ratio := clampRatio(releaseRatio)
-	factor := 1 - ratio
 	policyActive := ratio > 0
 	cpuMilli := int64(0)
 	memBytes := int64(0)
@@ -200,15 +219,18 @@ func aggregateSandboxResources(sbs []*cubeboxstore.CubeBox, releaseRatio float64
 		if !isContainerInGoodState(state) {
 			continue
 		}
-		// A paused sandbox under the policy keeps only `factor` of its quota.
 		paused := policyActive &&
 			(state == cubebox.ContainerState_CONTAINER_PAUSED ||
 				state == cubebox.ContainerState_CONTAINER_PAUSING)
 
 		if sb.ResourceWithOverHead != nil {
 			if paused {
-				cpuMilli += scaleInt64(sb.ResourceWithOverHead.HostCpuQ.MilliValue(), factor)
-				memBytes += scaleInt64(sb.ResourceWithOverHead.HostMemQ.Value(), factor)
+				// Per sandbox, not per node: only a snapshot that can leave
+				// this node gave up any quota, so only that one is scaled
+				// down here — and by the same amount resume has to bring back.
+				kept := 1 - pausedReleaseRatioFor(sb, ratio)
+				cpuMilli += scaleInt64(sb.ResourceWithOverHead.HostCpuQ.MilliValue(), kept)
+				memBytes += scaleInt64(sb.ResourceWithOverHead.HostMemQ.Value(), kept)
 			} else {
 				cpuMilli += sb.ResourceWithOverHead.HostCpuQ.MilliValue()
 				memBytes += sb.ResourceWithOverHead.HostMemQ.Value()
