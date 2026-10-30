@@ -21,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
@@ -688,6 +689,30 @@ func (e *Engine) Init(ctx context.Context, opts *InitInfo) error {
 }
 
 func (e *Engine) Create(ctx context.Context, opts *CreateContext) error {
+	// Protect the gap before the create steps persist their runtime reference.
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	if opts != nil && opts.ReqInfo != nil {
+		instanceType := opts.GetInstanceType()
+		if instanceType == "" {
+			instanceType = cubebox.InstanceType_cubebox.String()
+		}
+		for _, container := range opts.ReqInfo.GetContainers() {
+			image := container.GetImage()
+			if image.GetStorageMedia() != "ext4" || image.GetImage() == "" {
+				continue
+			}
+			release, err := pmem.PinArtifact(ctx, instanceType, image.GetImage())
+			if err != nil {
+				return err
+			}
+			releases = append(releases, release)
+		}
+	}
 	err := e.run(flow_create, ctx, opts)
 	return err
 }

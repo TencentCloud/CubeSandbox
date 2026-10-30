@@ -51,6 +51,11 @@ func DestroyPmemArtifact(ctx context.Context, instanceType, artifactID string, i
 	if err := pathutil.ValidateSafeID(artifactID); err != nil {
 		return fmt.Errorf("invalid artifactID %q: %w", artifactID, err)
 	}
+	release, ok := pmem.TryEvictArtifact(instanceType, artifactID)
+	if !ok {
+		return ErrArtifactInUse
+	}
+	defer release()
 
 	if inUse != nil {
 		used, err := inUse(artifactID)
