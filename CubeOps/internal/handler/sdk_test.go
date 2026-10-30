@@ -1010,3 +1010,16 @@ func TestSDK_GetSandboxEvents_OlderCubeMasterIsEmptyHistory(t *testing.T) {
 		t.Errorf("body = %s", w.Body.String())
 	}
 }
+
+func TestSDK_GetSandboxEvents_OtherNotFoundStillErrors(t *testing.T) {
+	cm := &fakeCM{
+		getSandboxEvents: func(context.Context, map[string]string) (json.RawMessage, error) {
+			return nil, &cubemaster.HTTPError{Status: http.StatusNotFound, Body: "<html>nginx 404</html>"}
+		},
+	}
+	r := newSDKRouter(t, cm)
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/events")
+	if w.Code == http.StatusOK {
+		t.Fatalf("a non-gin 404 must not become an empty history; body=%s", w.Body.String())
+	}
+}

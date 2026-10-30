@@ -506,10 +506,13 @@ func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
 	}
 	raw, err := h.cm.GetSandboxEvents(c.Request.Context(), params)
 	if err != nil {
-		// An older CubeMaster has no history endpoint: an empty history, as
-		// CubeAPI reports it, rather than an error on every timeline poll.
+		// An older CubeMaster has no history endpoint and gin answers with its
+		// own "404 page not found": an empty history rather than an error on
+		// every timeline poll. Any other 404 (wrong base URL, a proxy) still
+		// surfaces as an error.
 		var httpErr *cubemaster.HTTPError
-		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
+		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound &&
+			strings.TrimSpace(httpErr.Body) == "404 page not found" {
 			httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage(`{"events":[],"hasMore":false}`))
 			return
 		}
