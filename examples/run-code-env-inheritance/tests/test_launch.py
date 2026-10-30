@@ -1,0 +1,160 @@
+import errno
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+import launch
+
+
+class InterpreterLaunchTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.env = patch.dict(os.environ, {
+            "CODE_INTERPRETER_HOST": "127.0.0.1", "CODE_INTERPRETER_PORT": "0",
+            "CODE_INTERPRETER_WORKDIR": str(root / "work"),
+            "ENVD_LOG_FILE": str(root / "envd.log"),
+            "JUPYTER_LOG_FILE": str(root / "jupyter.log"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def children(self):
+        return [Mock(poll=Mock(return_value=None)), Mock(poll=Mock(return_value=None))]
+
+    def assert_listening(self, listener):
+        with socket.create_connection(listener.getsockname(), timeout=1):
+            accepted, _ = listener.accept()
+            accepted.close()
+
+    def test_envd_uses_non_firecracker_mode_with_custom_port(self):
+        children = self.children()
+        with patch.dict(os.environ, {'ENVD_PORT': '50123'}), \
+             patch.object(launch.subprocess, 'Popen', side_effect=children) as start, \
+             patch.object(launch.uvicorn, 'Server'):
+            launch.main()
+        self.assertEqual(start.call_args_list[0].args[0],
+                         ['/usr/bin/envd', '-isnotfc', '-port', '50123'])
+
+    def test_listener_reserved_before_dependencies_and_lifespan(self):
+        children = self.children()
+        listener = None
+
+        def construct_server(config):
+            server = Mock()
+            def run(*, sockets):
+                nonlocal listener
+                listener = sockets[0]
+                self.assert_listening(listener)
+                self.assertFalse(listener.get_inheritable())
+                with socket.socket() as contender:
+                    with self.assertRaises(OSError) as caught:
+                        contender.bind(listener.getsockname())
+                    self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+            server.run.side_effect = run
+            return server
+
+        real_socket = socket.socket
+        sockets = []
+        def new_socket(*args, **kwargs):
+            result = real_socket(*args, **kwargs);sockets.append(result);return result
+        def start_child(*args, **kwargs):
+            self.assertTrue(sockets)
+            self.assert_listening(sockets[0])
+            self.assertTrue(kwargs['close_fds'])
+            return children.pop(0)
+        with patch.object(launch.socket, 'socket', side_effect=new_socket), \
+             patch.object(launch.subprocess, 'Popen', side_effect=start_child), \
+             patch.object(launch.uvicorn, 'Server', side_effect=construct_server):
+            launch.main()
+        self.assertEqual(listener.fileno(), -1)
+
+    def test_server_failure_reaps_both_children(self):
+        children = self.children()
+        with patch.object(launch.subprocess, 'Popen', side_effect=children), \
+             patch.object(launch.uvicorn, 'Server') as server:
+            server.return_value.run.side_effect = RuntimeError('startup failed')
+            with self.assertRaisesRegex(RuntimeError, 'startup failed'):
+                launch.main()
+        for child in children:
+            child.terminate.assert_called_once()
+            child.wait.assert_called_once_with(timeout=5)
+
+    def test_partial_child_launch_failure_reaps_started_child(self):
+        child = self.children()[0]
+        with patch.object(launch.subprocess, 'Popen', side_effect=[child, OSError('jupyter unavailable')]), \
+             patch.object(launch.uvicorn, 'Server') as server:
+            with self.assertRaisesRegex(OSError, 'jupyter unavailable'):
+                launch.main()
+        child.terminate.assert_called_once()
+        server.assert_not_called()
+
+    def test_failed_lifespan_returns_nonzero_and_reaps_children(self):
+        children = self.children()
+        with patch.object(launch.subprocess, 'Popen', side_effect=children), \
+             patch.object(launch.uvicorn, 'Server') as server:
+            server.return_value.started = False
+            with self.assertRaises(SystemExit) as caught:
+                launch.main()
+        self.assertEqual(caught.exception.code, 3)
+        for child in children:
+            child.terminate.assert_called_once()
+
+    def test_bind_conflict_does_not_start_children(self):
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            with patch.dict(os.environ, {'CODE_INTERPRETER_PORT': str(occupied.getsockname()[1])}), \
+                 patch.object(launch.subprocess, 'Popen') as start:
+                with self.assertRaises(OSError) as caught:
+                    launch.main()
+        self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+        start.assert_not_called()
+
+    def test_cleanup_failure_still_reaps_other_child(self):
+        children = self.children()
+        children[1].terminate.side_effect = OSError('terminate failed')
+        with self.assertRaisesRegex(OSError, 'terminate failed'):
+            launch.stop_children(children)
+        children[0].terminate.assert_called_once()
+
+    def test_cleanup_failure_preserves_startup_failure(self):
+        children = self.children()
+        children[1].terminate.side_effect = OSError('terminate failed')
+        with patch.object(launch.subprocess, 'Popen', side_effect=children), \
+             patch.object(launch.uvicorn, 'Server') as server:
+            server.return_value.run.side_effect = RuntimeError('startup failed')
+            with self.assertRaisesRegex(RuntimeError, 'startup failed'):
+                launch.main()
+        children[0].terminate.assert_called_once()
+
+    def test_stubborn_child_is_killed_and_reaped(self):
+        child = self.children()[0]
+        child.wait.side_effect = [subprocess.TimeoutExpired('child', 5), 0]
+        launch.stop_child(child)
+        child.kill.assert_called_once()
+        self.assertEqual(child.wait.call_count, 2)
+
+    def test_exited_child_needs_no_signal(self):
+        child = Mock(poll=Mock(return_value=0))
+        launch.stop_child(child)
+        child.terminate.assert_not_called()
+
+    def test_sigterm_exits_through_child_cleanup(self):
+        children = self.children()
+        previous = signal.getsignal(signal.SIGTERM)
+        with patch.object(launch.subprocess, 'Popen', side_effect=children), \
+             patch.object(launch.uvicorn, 'Server') as server:
+            server.return_value.run.side_effect = lambda **kwargs: signal.raise_signal(signal.SIGTERM)
+            with self.assertRaises(SystemExit) as caught:
+                launch.main()
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+        for child in children:
+            child.terminate.assert_called_once()

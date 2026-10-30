@@ -4,3 +4,7 @@ ARG SANDBOX_CODE_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-c
 FROM ${SANDBOX_CODE_IMAGE}
 
 COPY lightweight-code-interpreter/server.py /opt/lightweight-code-interpreter/server.py
+COPY lightweight-code-interpreter/launch.py /opt/lightweight-code-interpreter/launch.py
+
+ENTRYPOINT []
+CMD ["python", "/opt/lightweight-code-interpreter/launch.py"]
