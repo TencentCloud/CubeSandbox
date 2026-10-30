@@ -85,6 +85,9 @@ func (f *fakeCMHandler) ListSnapshots(ctx context.Context, params map[string]str
 	cubemaster.EnsureRequestIDQuery(ctx, params)
 	return nil, errMethodNotConfigured("ListSnapshots")
 }
+func (f *fakeCMHandler) GetSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
+	return nil, errMethodNotConfigured("GetSnapshot")
+}
 func (f *fakeCMHandler) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
 	if f.deleteSnapshot == nil {
 		return raw(`{"ret": {"ret_code": 0}}`), nil // default: success
