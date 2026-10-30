@@ -15,6 +15,8 @@ spec:
       app.kubernetes.io/component: master
   template:
     metadata:
+      annotations:
+        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-master/conf.yaml") . | sha256sum }}
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master

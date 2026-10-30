@@ -42,6 +42,8 @@ spec:
       app.kubernetes.io/component: templatecenter
   template:
     metadata:
+      annotations:
+        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-templatecenter/conf.yaml") . | sha256sum }}
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter

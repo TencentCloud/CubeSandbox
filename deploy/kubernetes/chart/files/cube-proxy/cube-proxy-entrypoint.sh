@@ -102,6 +102,7 @@ resolver_timeout ${CUBE_PROXY_RESOLVER_TIMEOUT};
 set \$redis_ip "$(escape_nginx_value "${REDIS_HOST:-}")";
 set \$redis_port "$(escape_nginx_value "${REDIS_PORT:-6379}")";
 set \$redis_pd "$(escape_nginx_value "${REDIS_PASSWORD:-}")";
+set \$redis_cluster_nodes "$(escape_nginx_value "${REDIS_CLUSTER_NODES:-}")";
 set \$redis_master_name "$(escape_nginx_value "${REDIS_MASTER_NAME:-}")";
 set \$redis_sentinel_nodes "$(escape_nginx_value "${REDIS_SENTINEL_NODES:-}")";
 set \$redis_sentinel_pd "$(escape_nginx_value "${REDIS_SENTINEL_PASSWORD:-}")";

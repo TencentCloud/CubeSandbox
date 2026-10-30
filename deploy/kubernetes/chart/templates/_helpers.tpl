@@ -1044,7 +1044,7 @@ CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
 {{- end -}}
 
 {{- define "cube.redisBuiltinEnabled" -}}
-{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (not .Values.redis.clusterNodes) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{- /* Master conf nodes: empty under Sentinel; else host:port. */ -}}
