@@ -23,6 +23,20 @@ import (
 	volpluginv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
 )
 
+func TestSafePrintRedactsCreateTimeEnvVars(t *testing.T) {
+	const secret = "example-sensitive-value"
+	req := &cubeboxv1.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationCreateTimeEnvVars: `{"TOKEN":"` + secret + `"}`},
+		Containers:  []*cubeboxv1.ContainerConfig{{Envs: []*cubeboxv1.KeyValue{{Key: "TOKEN", Value: secret}}}},
+	}
+	printed := safePrintWithDiagnostics(req, true)
+	assert.NotContains(t, printed, secret)
+	assert.Contains(t, printed, "[redacted]")
+	assert.Contains(t, req.Annotations[constants.MasterAnnotationCreateTimeEnvVars], secret)
+	assert.Equal(t, secret, req.Containers[0].Envs[0].Value)
+	assert.Contains(t, safePrintWithDiagnostics(req, false), secret)
+}
+
 func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {
 	container := &cubeboxstore.Container{
 		Metadata: cubeboxstore.Metadata{

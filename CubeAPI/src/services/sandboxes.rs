@@ -77,6 +77,7 @@ pub struct SandboxService {
     cubemaster: CubeMasterClient,
     instance_type: String,
     sandbox_domain: String,
+    diagnostics_enabled: bool,
 }
 
 impl SandboxService {
@@ -89,6 +90,7 @@ impl SandboxService {
             cubemaster,
             instance_type,
             sandbox_domain,
+            diagnostics_enabled: crate::constants::sandbox_diagnostics_enabled(),
         }
     }
 
@@ -477,11 +479,29 @@ impl SandboxService {
             liveness_probe: liveness_probe.as_ref().map(to_liveness_probe),
         };
 
-        let resp = self
-            .cubemaster
-            .create_sandbox(&req)
-            .await
-            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
+        // Log before awaiting so a caller-side timeout still leaves the ID
+        // needed to find the matching CubeMaster and Cubelet records.
+        if self.diagnostics_enabled {
+            tracing::info!(request_id = %req.request_id, template_id = %template_id, "sandbox create dispatched");
+        }
+        let started = std::time::Instant::now();
+        let resp = self.cubemaster.create_sandbox(&req).await.map_err(|e| {
+            let code = match &e {
+                CubeMasterError::Api { ret_code, .. } => Some(*ret_code),
+                _ => None,
+            };
+            if self.diagnostics_enabled {
+                tracing::warn!(request_id = %req.request_id, template_id = %template_id,
+                    ret_code = ?code, elapsed_ms = started.elapsed().as_millis() as u64,
+                    "sandbox create failed");
+            }
+            let mapped = map_create_cubemaster_err(e, &template_id);
+            if self.diagnostics_enabled {
+                create_error_with_request_id(mapped, &req.request_id)
+            } else {
+                mapped
+            }
+        })?;
 
         // Belt-and-suspenders: parse_response already flattens every non-success
         // ret_code into CubeMasterError::Api on the transport path above, so the
@@ -489,9 +509,14 @@ impl SandboxService {
         // It is kept only so the mapping stays correct if parse_response is ever
         // relaxed to pass a non-success envelope through; the functional 130404/409
         // mapping lives on the transport error above.
-        resp.ret
-            .into_result()
-            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
+        resp.ret.into_result().map_err(|e| {
+            let mapped = map_create_cubemaster_err(e, &template_id);
+            if self.diagnostics_enabled {
+                create_error_with_request_id(mapped, &req.request_id)
+            } else {
+                mapped
+            }
+        })?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
@@ -1228,6 +1253,14 @@ fn map_create_cubemaster_err(e: CubeMasterError, template_id: &str) -> AppError 
             AppError::Conflict(detail)
         }
         other => params_error_or_internal(other),
+    }
+}
+
+fn create_error_with_request_id(err: AppError, request_id: &str) -> AppError {
+    let suffix = format!(" (CubeMaster request ID: {request_id})");
+    match err {
+        AppError::Internal(e) => AppError::Internal(anyhow::anyhow!("{e}{suffix}")),
+        other => other,
     }
 }
 
@@ -2764,6 +2797,37 @@ mod tests {
                 matches!(err, AppError::Internal(_)),
                 "ret_code {ret_code} must stay 5xx, got {err:?}"
             );
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_failure_exposes_the_dispatched_request_id() {
+        for (ret_code, diagnostics_enabled) in [(-1, true), (130497, true), (130497, false)] {
+            let captured = Arc::new(Mutex::new(String::new()));
+            let sink = captured.clone();
+            let mut service = spawn_fake_cubemaster(Router::new().route(
+                "/cube/sandbox",
+                post(move |Json(body): Json<Value>| {
+                    let sink = sink.clone();
+                    async move {
+                        *sink.lock().await = body["RequestID"].as_str().unwrap().to_string();
+                        ret_envelope(ret_code, "backend failure")
+                    }
+                }),
+            ))
+            .await;
+            service.diagnostics_enabled = diagnostics_enabled;
+
+            let err = service.create_sandbox(probe_sandbox()).await.unwrap_err();
+            let request_id = captured.lock().await.clone();
+            assert!(!request_id.is_empty());
+            assert!(matches!(&err, AppError::Internal(_)));
+            assert_eq!(err.to_string().contains(&request_id), diagnostics_enabled);
+            assert!(err.to_string().contains(&ret_code.to_string()));
             assert_eq!(
                 err.into_response().status(),
                 StatusCode::INTERNAL_SERVER_ERROR

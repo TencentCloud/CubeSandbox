@@ -14,7 +14,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +26,12 @@ import (
 	"github.com/stretchr/testify/require"
 	networktypes "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"k8s.io/utils/pointer"
@@ -273,39 +278,145 @@ func TestDoCreateTimeEnvdInitPostsEnvVars(t *testing.T) {
 }
 
 func TestDoCreateTimeEnvdInitFailsOnHTTPError(t *testing.T) {
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		http.Error(w, "envd refused init", http.StatusInternalServerError)
-	}))
-	defer server.Close()
+	for _, markerState := range []string{"absent", "file", "directory"} {
+		t.Run(markerState, func(t *testing.T) {
+			markerPath := filepath.Join(t.TempDir(), "marker")
+			if markerState == "file" {
+				require.NoError(t, os.WriteFile(markerPath, nil, 0600))
+			}
+			if markerState == "directory" {
+				require.NoError(t, os.Mkdir(markerPath, 0700))
+			}
+			callCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				http.Error(w, "sensitive-response-content", http.StatusInternalServerError)
+			}))
+			defer server.Close()
 
-	u, err := neturl.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil {
-		t.Fatalf("parse server port: %v", err)
-	}
+			u, err := neturl.Parse(server.URL)
+			if err != nil {
+				t.Fatalf("parse server URL: %v", err)
+			}
+			port, err := strconv.Atoi(u.Port())
+			if err != nil {
+				t.Fatalf("parse server port: %v", err)
+			}
 
-	req := &cubebox.RunCubeSandboxRequest{
-		Annotations: map[string]string{
-			constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
-			constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
-		},
-	}
-	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+			req := &cubebox.RunCubeSandboxRequest{
+				Annotations: map[string]string{
+					constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
+					constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
+				},
+			}
+			sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
 
-	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
-	retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
-	if retErr == nil {
-		t.Fatal("expected init failure")
+			l := &local{envdHTTPClient: server.Client(), envdInitPort: port, diagnosticsMarkerPath: markerPath}
+			retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
+			if retErr == nil {
+				t.Fatal("expected init failure")
+			}
+			errInfo, _ := ret.FromError(retErr)
+			assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
+			assert.Contains(t, errInfo.Message(), "HTTP 500")
+			if markerState == "absent" {
+				assert.Contains(t, errInfo.Message(), "sensitive-response-content")
+			} else {
+				assert.NotContains(t, errInfo.Message(), "sensitive-response-content")
+			}
+			assert.Equal(t, 1, callCount)
+		})
 	}
-	errInfo, _ := ret.FromError(retErr)
-	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
-	assert.Contains(t, errInfo.Message(), "envd refused init")
-	assert.Equal(t, 1, callCount)
+}
+
+func TestEnvdInitAttemptClassifiesTransportFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		category string
+	}{
+		{"deadline", context.DeadlineExceeded, "deadline_exceeded"},
+		{"canceled", context.Canceled, "canceled"},
+		{"reset", fmt.Errorf("read: connection reset by peer"), "connection_reset"},
+		{"refused", fmt.Errorf("dial: connection refused"), "connection_refused"},
+		{"pipe", fmt.Errorf("write: broken pipe"), "broken_pipe"},
+		{"eof", io.EOF, "eof"},
+		{"unknown", fmt.Errorf("sensitive-value"), "other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, tc.err
+			})}}
+			_, phase, category, status, err := l.doCreateTimeEnvdInitAttempt(context.Background(), "127.0.0.1", 49983, []byte(`{}`), true)
+			require.Error(t, err)
+			assert.Equal(t, "request", phase)
+			assert.Equal(t, tc.category, category)
+			assert.Zero(t, status)
+		})
+	}
+}
+
+func TestEnvdInitRetryLogsEachFailureWithoutSensitiveData(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := CubeLog.GetLogger("envd-init-retry-test-" + format)
+			logger.SetOutput(&output)
+			if format == "text" {
+				logger.SetLogFormat(CubeLog.TextFormat)
+			} else {
+				logger.SetLogFormat(CubeLog.JSONFormat)
+			}
+			ctx := log.WithLogger(context.Background(), log.NewWrapperLogEntry(logger.WithContext(context.Background())))
+			attempts := 0
+			l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				attempts++
+				switch attempts {
+				case 1:
+					return nil, fmt.Errorf("connection reset by peer synthetic-secret")
+				case 2:
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString("synthetic-secret")), Request: r}, nil
+				default:
+					return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(nil)), Request: r}, nil
+				}
+			})}}
+			err := l.doCreateTimeEnvdInitWithDiagnostics(ctx, "req-1", "sb-1", "127.0.0.1", 49983, true, []byte(`{"envVars":{"TOKEN":"synthetic-secret"}}`), true)
+			require.NoError(t, err)
+			require.Equal(t, 3, attempts)
+			lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+			require.Len(t, lines, 2)
+			assert.Contains(t, lines[0], "req-1")
+			assert.Contains(t, lines[0], "sb-1")
+			assert.Contains(t, lines[0], "127.0.0.1")
+			assert.Contains(t, lines[0], "connection_reset")
+			assert.Contains(t, lines[1], "http_status")
+			assert.Contains(t, lines[1], "503")
+			assert.NotContains(t, output.String(), "synthetic-secret")
+			if format == "json" {
+				var first, second map[string]any
+				require.NoError(t, json.Unmarshal([]byte(lines[0]), &first))
+				require.NoError(t, json.Unmarshal([]byte(lines[1]), &second))
+				assert.Equal(t, "connection_reset", first["errorCategory"])
+				assert.Equal(t, float64(2), second["attempt"])
+				assert.Equal(t, float64(503), second["httpStatus"])
+			}
+		})
+	}
+}
+
+func TestEnvdInitResponseDetailsFollowDiagnosticsSwitch(t *testing.T) {
+	for _, diagnostics := range []bool{false, true} {
+		l := &local{envdHTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("synthetic-detail")), Request: r}, nil
+		})}}
+		_, _, _, _, err := l.doCreateTimeEnvdInitAttempt(context.Background(), "127.0.0.1", 49983, []byte(`{}`), diagnostics)
+		require.Error(t, err)
+		if diagnostics {
+			assert.NotContains(t, err.Error(), "synthetic-detail")
+		} else {
+			assert.Contains(t, err.Error(), "synthetic-detail")
+		}
+	}
 }
 
 func TestDoCreateTimeEnvdInitRetriesTransientHTTPError(t *testing.T) {

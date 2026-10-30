@@ -12,11 +12,17 @@ only see the local Cubelet's files.
 
 from __future__ import annotations
 
+import subprocess
+import shutil
+import re
+from pathlib import Path
+
 import pytest
 
 from framework.capabilities import COMMANDS, PAUSE_RESUME, ROLLBACK_CLONE
 from framework.cleanup import safe_kill
 from framework.lifecycle import (
+    wait_until,
     wait_until_data_plane_ready,
     wait_until_paused,
     wait_until_running,
@@ -49,6 +55,16 @@ def _require_cubesandbox(sdk_backend: str) -> None:
         pytest.skip("cubecli envd-log checks only apply to the cubesandbox backend")
 
 
+def _test_archive_dir(sandbox_id: str) -> Path:
+    # Only target the unique sandbox created by this test, never a parent path.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", sandbox_id):
+        raise ValueError("invalid test sandbox ID")
+    path = Path("/data/cubelet/log-archive") / sandbox_id
+    if path.exists():
+        raise RuntimeError("test archive already exists; refusing to remove it")
+    return path
+
+
 @pytest.fixture
 def cubecli_logs_target(sdk_backend: str) -> tuple[str, str]:
     _require_cubesandbox(sdk_backend)
@@ -75,6 +91,45 @@ def _trigger_and_wait(
     )
 
 
+def _wait_for_archived_marker(sandbox_id: str, marker: str, timeout: float) -> Path:
+    archive = Path("/data/cubelet/log-archive") / sandbox_id
+    found = None
+
+    def archived_marker_found() -> bool:
+        nonlocal found
+        for path in archive.glob("*/logs/stdout"):
+            try:
+                if marker in path.read_text(errors="replace"):
+                    found = path
+                    return True
+            except FileNotFoundError:
+                continue
+        return False
+
+    wait_until(
+        archived_marker_found,
+        timeout=timeout,
+        interval=0.5,
+        description=f"archived init log containing marker for {sandbox_id}",
+    )
+    assert found is not None
+    return found
+
+
+def _wait_for_live_marker(sandbox_id: str, marker: str, timeout: float) -> None:
+    path = host_log_dir(sandbox_id) / "stdout"
+
+    def contains_marker() -> bool:
+        try:
+            return marker in path.read_text(errors="replace")
+        except FileNotFoundError:
+            return False
+
+    # Do not include the log contents in a test failure: sandbox output can
+    # contain user data and credentials.
+    wait_until(contains_marker, timeout=timeout, interval=0.5, description="live log marker")
+
+
 @pytest.mark.requires_capability(COMMANDS)
 def test_create_envd_rpc_visible_in_cubecli_logs(
     sdk_sandbox,
@@ -93,9 +148,130 @@ def test_create_envd_rpc_visible_in_cubecli_logs(
     )
     assert contains_envd_access_log(logs)
     sandbox_id = sdk_sandbox.sandbox_id
+    archive = _test_archive_dir(sandbox_id)
     cleanup_errors = safe_kill(sdk_sandbox, sdk_e2e_config)
     assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
     wait_host_logs_absent(sandbox_id, timeout=sdk_e2e_config.default_timeout)
+    if archive.is_dir():
+        shutil.rmtree(archive)
+
+
+@pytest.mark.requires_capability(COMMANDS)
+def test_deleted_sandbox_log_retained(
+    sdk_sandbox,
+    sdk_e2e_config,
+    cubecli_logs_target,
+):
+    marker_file = Path("/etc/cube-sandbox/retain-sandbox-logs")
+    if not marker_file.is_file():
+        pytest.skip("enable node-local sandbox log retention before this test")
+
+    sandbox_id = sdk_sandbox.sandbox_id
+    archive = _test_archive_dir(sandbox_id)
+    marker = trigger_envd(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
+    _wait_for_live_marker(sandbox_id, marker, timeout=sdk_e2e_config.command_timeout)
+
+    cleanup_errors = safe_kill(sdk_sandbox, sdk_e2e_config)
+    assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
+    wait_host_logs_absent(sandbox_id, timeout=sdk_e2e_config.default_timeout)
+
+    _wait_for_archived_marker(sandbox_id, marker, sdk_e2e_config.default_timeout)
+    shutil.rmtree(archive)
+
+
+@pytest.mark.requires_capability(COMMANDS)
+def test_archive_failure_does_not_block_sandbox_deletion(
+    sdk_sandbox,
+    sdk_e2e_config,
+    cubecli_logs_target,
+):
+    if not Path("/etc/cube-sandbox/retain-sandbox-logs").is_file():
+        pytest.skip("enable node-local sandbox log retention before this test")
+
+    cubecli, address = cubecli_logs_target
+    sandbox_id = sdk_sandbox.sandbox_id
+    marker = trigger_envd(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
+    _wait_for_live_marker(sandbox_id, marker, timeout=sdk_e2e_config.command_timeout)
+    archive_root = Path("/data/cubelet/log-archive")
+    archive_root.mkdir(parents=True, exist_ok=True)
+    blocker = _test_archive_dir(sandbox_id)
+    # An exclusive file at the per-sandbox archive path forces mkdir to fail
+    # without changing the policy or interfering with other sandboxes.
+    with blocker.open("x", encoding="utf-8"):
+        pass
+    sandbox_removed = False
+    try:
+        cleanup_errors = safe_kill(sdk_sandbox, sdk_e2e_config)
+        assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
+
+        def cubelet_removed_sandbox() -> bool:
+            try:
+                result = subprocess.run(
+                    [cubecli, "--address", address, "cubebox", "list", "--all", "--quiet",
+                     "--sandbox", sandbox_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return False
+            return sandbox_id not in result.stdout.splitlines()
+
+        wait_until(
+            cubelet_removed_sandbox,
+            timeout=sdk_e2e_config.default_timeout,
+            interval=0.5,
+            description=f"Cubelet to remove sandbox {sandbox_id} despite archive failure",
+        )
+        _wait_for_live_marker(sandbox_id, marker, timeout=sdk_e2e_config.command_timeout)
+        sandbox_removed = True
+    finally:
+        blocker.unlink()
+        # The original log was deliberately retained by the failure test.
+        # Remove it only after confirming this test sandbox is gone.
+        if sandbox_removed:
+            shutil.rmtree(host_log_dir(sandbox_id))
+
+
+@pytest.mark.requires_capability(COMMANDS)
+@pytest.mark.requires_capability(PAUSE_RESUME)
+def test_retention_preserves_logs_across_pause_resume(
+    sdk_sandbox,
+    sdk_e2e_config,
+    cubecli_logs_target,
+):
+    if not Path("/etc/cube-sandbox/retain-sandbox-logs").is_file():
+        pytest.skip("enable node-local sandbox log retention before this test")
+
+    sandbox_id = sdk_sandbox.sandbox_id
+    archive = _test_archive_dir(sandbox_id)
+    first = trigger_envd(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
+    _wait_for_live_marker(sandbox_id, first, timeout=sdk_e2e_config.command_timeout)
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+    wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout)
+    _wait_for_archived_marker(sandbox_id, first, sdk_e2e_config.default_timeout)
+
+    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    try:
+        wait_until_running(resumed, timeout=sdk_e2e_config.default_timeout)
+        assert resumed.sandbox_id == sandbox_id
+        wait_until_data_plane_ready(
+            resumed,
+            timeout=sdk_e2e_config.default_timeout,
+            command_timeout=sdk_e2e_config.command_timeout,
+        )
+        second = trigger_envd(resumed, timeout=sdk_e2e_config.command_timeout)
+        _wait_for_live_marker(sandbox_id, second, timeout=sdk_e2e_config.command_timeout)
+        cleanup_errors = safe_kill(resumed, sdk_e2e_config)
+        assert not cleanup_errors, f"sandbox cleanup failed: {cleanup_errors!r}"
+        wait_host_logs_absent(sandbox_id, timeout=sdk_e2e_config.default_timeout)
+        first_log = _wait_for_archived_marker(sandbox_id, first, sdk_e2e_config.default_timeout)
+        second_log = _wait_for_archived_marker(sandbox_id, second, sdk_e2e_config.default_timeout)
+        assert first_log != second_log, "pause/resume logs should be archived separately"
+        shutil.rmtree(archive)
+    finally:
+        resumed.close()
 
 
 @pytest.mark.requires_capability(COMMANDS)

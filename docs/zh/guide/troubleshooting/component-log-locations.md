@@ -31,7 +31,7 @@ CubeSandbox 的日志分成三类，来源和查看方式完全不同：
 
 1. **业务行为日志**：请求、调度、审计、VMM 创建过程等，各组件直接写文件到 `/data/log/<Module>/`，**不会**进 `journalctl`。
 2. **启动期日志**：进程被 systemd 拉起到稳定运行（或失败退出）期间的 stdout/stderr，只能用 `journalctl -u <unit>` 查看。
-3. **容器沙箱/模板日志**：沙箱内 init 进程（容器 PID 1）的 stdout/stderr，由 CubeShim 写入 Cubelet 的私有挂载命名空间内，必须用 `cubecli logs` 读取；模板构建日志则落在宿主机文件系统，无需进命名空间。
+3. **容器沙箱/模板日志**：沙箱内 init 进程（容器 PID 1）的 stdout/stderr，由 CubeShim 写入宿主机文件系统。`cubecli logs` 可读取沙箱和模板日志，旧版沙箱日志会回退到 Cubelet 挂载命名空间内的路径。
 
 guest kernel（虚拟机内核）的启动日志本质上也是一种"容器 init 进程输出"：CubeShim 会把 guest kernel 通过 `console=hvc0` 输出的内容（包括 `Linux version ...` 之类的启动信息）转发进同一条 `cube-shim-req.log`，因此 **guest kernel log 直接在 CubeShim 的 log 里就能看到**，不需要额外工具。
 
@@ -53,7 +53,7 @@ Cubelet 默认日志级别较低（`warn`），常规运行时不会打印详细
 | CubeShim | 统计日志 | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM 创建过程日志 | `/data/log/CubeVmm/vmm.log` | `tail -F` |
 | cube-proxy | 访问/错误日志 | `/data/log/cube-proxy/{access,error}.log` | `tail -F`（见下文） |
-| 沙箱容器 | init 进程 stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}`（Cubelet 挂载命名空间内） | `cubecli logs <sandbox-id>`（见下文） |
+| 沙箱容器 | init 进程 stdout/stderr | `/data/cubelet/log/<sandbox-id>/{stdout,stderr}`（宿主机文件系统） | `cubecli logs <sandbox-id>`（见下文） |
 | 模板构建 | 构建容器 stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}`（宿主机文件系统） | `cubecli logs --tpl <template-id>` |
 
 ::: tip 业务日志不在 journalctl
@@ -62,7 +62,7 @@ Cubelet 默认日志级别较低（`warn`），常规运行时不会打印详细
 
 ### 2. 用 `cubecli logs` 查看沙箱 / 模板日志
 
-`cubecli` 随 Cubelet 一同构建，一键部署时自动安装。沙箱日志文件位于 Cubelet 的私有挂载命名空间内，因此 `cubecli logs` **必须直接在计算节点上执行**，无法远程调用。
+`cubecli` 随 Cubelet 一同构建，一键部署时自动安装。`cubecli logs` **必须直接在计算节点上执行**，无法远程调用。
 
 ```bash
 # 沙箱 stdout，最后 100 行（默认）
@@ -95,7 +95,7 @@ cubecli logs --tpl --all --stderr <template-id>
 
 `cubecli logs` 只覆盖**容器 init 进程（PID 1）**的输出。通过 E2B `exec` 接口在沙箱内启动的子任务，其 stdout/stderr 需要用 E2B SDK 的 `on_stdout`/`on_stderr` 回调获取，不在本文范围内，详见 [沙箱日志](../sandbox-logs.md)。
 
-沙箱删除后，对应日志文件会一并清除；日志转发需要 v0.4.0 及以上版本的 CubeShim。
+默认情况下，沙箱删除后日志会一并清除；如何选择启用节点本地保留，参见[沙箱日志](../sandbox-logs.md)。日志转发需要 v0.4.0 及以上版本的 CubeShim。
 
 ### 3. Guest kernel 日志：直接在 CubeShim log 里看
 
