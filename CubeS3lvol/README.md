@@ -393,6 +393,30 @@ Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `S3LVOL_CRT_LOG_LEVEL=trace|debug|info|warn|error|none`; `trace` prints every
 request header and the canonical string of the SigV4 signature.
 
+When storage is enabled and `logrotate` is installed, one-click enables
+`cube-sandbox-s3lvol-logrotate.timer` alongside the role targets. The timer
+stops with the stack.
+It checks the active file every minute, rotating at 256 MiB and retaining eight
+archives (compressed after the next rotation). This is a periodic size check,
+not a strict instantaneous byte ceiling. Archives go to a per-source directory
+under `rotated/` below the log directory. `RCOW_LOG_ARCHIVE_DIR` overrides the
+archive base directory. The `logrotate` executable is required.
+
+Rotation uses `copytruncate` to avoid restarting storage or replacing its open
+file descriptor. This has a small concurrent-tail log-loss window; it does not
+discard WAL or volume data. Existing timestamped archives are not deleted by
+this policy. A previously unmanaged active log larger than 1 GiB is deliberately refused:
+archive and verify it first, then enable the timer. Once a source has a
+logrotate state file, exceeding that bootstrap limit does not prevent recovery. Insufficient archive space
+also leaves the active file untouched. The helper supports `--dry-run` and
+explicit `--log`, `--archive-dir`, `--size`, and `--retain` settings for checking
+the policy without changing storage configuration. Dry-run prints the policy
+without creating state or archive directories or invoking logrotate. The default
+free-space reserve is 8 GiB in addition to the active log size; tune
+`--reserve-bytes` in the service command if the archive filesystem requires a
+different reserve. Archive directory names must not contain whitespace; use
+`--archive-dir` if the log parent directory contains spaces.
+
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to
 determine whether an object exists.
 
