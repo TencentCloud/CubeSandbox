@@ -51,14 +51,8 @@ struct s3_flusher {
 
 	uint32_t                    max_concurrent;
 	uint32_t                    in_flight;
-	/* A failed upload must not immediately re-enter the dirty queue in a
-	 * tight loop. Keep acknowledged data dirty, but bound retry pressure even
-	 * when the client fails synchronously or the endpoint refuses connections. */
-	uint64_t                    retry_after;
-	uint64_t                    retry_delay_us;
 	uint64_t                    failures_since_success;
 	uint64_t                    last_failure_log;
-	uint64_t                    last_failure_tsc;
 
 	struct spdk_poller *poller;
 
@@ -220,34 +214,17 @@ flusher_upload_done(void *cb_arg, int status)
 	} else {
 		uint64_t now = spdk_get_ticks();
 		uint64_t hz = spdk_get_ticks_hz();
+		uint64_t delay_us = s3_overlay_backoff_flush(f->overlay, chunk_index,
+				req->view.epoch, f->drain_cb ? 1000000 : 30000000);
 
 		f->stats.failures++;
 		f->failures_since_success++;
-		/* An old outage must not penalize a new failure after a long idle
-		 * interval. Keep normal capped retry rounds in the same sequence. */
-		if (f->last_failure_tsc && now - f->last_failure_tsc > 60 * hz) {
-			f->retry_delay_us = 0;
-			f->retry_after = 0;
-		}
-		f->last_failure_tsc = now;
-		/* Advance once per retry window, rather than once per failed upload
-		 * in the same concurrent round. */
-		if (!f->retry_after || now >= f->retry_after) {
-			f->retry_delay_us = f->retry_delay_us ?
-				spdk_min(f->retry_delay_us * 2, 30000000ULL) : 100000;
-			/* Keep recovery opportunities inside a bounded drain. Ordinary
-			 * outage retries can still back off to thirty seconds. */
-			if (f->drain_cb) {
-				f->retry_delay_us = spdk_min(f->retry_delay_us, 1000000ULL);
-			}
-			f->retry_after = now + f->retry_delay_us * hz / 1000000;
-		}
 		if (!f->last_failure_log || now - f->last_failure_log >= 30 * hz) {
 			SPDK_ERRLOG("Failed to flush chunk %" PRIu64 " to S3: %d "
 				    "(%" PRIu64 " failures since recovery, kept dirty; "
 				    "retry backoff %" PRIu64 " us)\n",
 				    chunk_index, status, f->failures_since_success,
-				    f->retry_delay_us);
+				    delay_us);
 			f->last_failure_log = now;
 		}
 	}
@@ -263,8 +240,7 @@ flusher_upload_done(void *cb_arg, int status)
 			SPDK_NOTICELOG("S3 upload queue recovered after %" PRIu64
 				       " failed uploads\n", f->failures_since_success);
 		}
-		f->retry_after = 0;
-		f->retry_delay_us = 0;
+		f->last_failure_log = 0;
 		f->failures_since_success = 0;
 	}
 
@@ -321,12 +297,6 @@ s3_flusher_kick(struct s3_flusher *f)
 	if (!f) {
 		return;
 	}
-	/* Drain deadlines are still checked by the poller. Neither a drain nor
-	 * WAL pressure may bypass failure backoff and recreate the retry storm. */
-	if (f->retry_after && spdk_get_ticks() < f->retry_after) {
-		flusher_check_drain(f);
-		return;
-	}
 
 	/* Two reasons to set the overlay's hold-back policy aside.
 	 *
@@ -349,12 +319,6 @@ s3_flusher_kick(struct s3_flusher *f)
 	       f->in_flight < f->max_concurrent) {
 		uint64_t chunk_index;
 
-		/* upload_fn may finish synchronously and arm backoff before the
-		 * current scheduling loop resumes. Recheck on every iteration. */
-		if (f->retry_after && spdk_get_ticks() < f->retry_after) {
-			break;
-		}
-
 		if (s3_overlay_next_dirty(f->overlay, force, &chunk_index) != 0) {
 			/* -ENOENT nothing dirty, -EAGAIN dirty but held back. The
 			 * poller comes round again either way. */
@@ -372,6 +336,8 @@ flusher_poll(void *arg)
 	struct s3_flusher *f = arg;
 
 	if (f->in_flight == 0 && !s3_overlay_has_dirty(f->overlay)) {
+		f->failures_since_success = 0;
+		f->last_failure_log = 0;
 		flusher_check_drain(f);
 		flusher_check_suspend(f);
 		return SPDK_POLLER_IDLE;
@@ -510,8 +476,7 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	f->drain_expired = false;
 	/* Give this bounded drain one immediate probe. A synchronous failure
 	 * re-arms the cooldown before the scheduling loop can retry again. */
-	f->retry_after = 0;
-	f->retry_delay_us = 0;
+	s3_overlay_reset_flush_backoff(f->overlay);
 
 	/* Push everything through rather than waiting for the poller tick. */
 	s3_flusher_kick(f);

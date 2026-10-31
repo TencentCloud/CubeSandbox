@@ -864,6 +864,36 @@ test_flusher(void)
 		fake_complete_all(&fake, 0);
 	}
 
+	/* A poisoned object must not stall a different chunk, and unmap must
+	 * discard the failed object's cooldown along with its data. */
+	{
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 2 * BLOCKS_PER_CHUNK, 0x84);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 407);
+		s3_flusher_kick(fl);
+		fake_complete_chunk(&fake, 2, -EIO);
+		uint32_t failed_rounds = fake.rounds[2];
+		uint32_t healthy_rounds = fake.rounds[3];
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 3 * BLOCKS_PER_CHUNK, 0x85);
+		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 408);
+		s3_flusher_kick(fl);
+		check_u64("healthy data bypasses another chunk's cooldown", fake.rounds[3], healthy_rounds + 1);
+		check_u64("failed object remains in cooldown", fake.rounds[2], failed_rounds);
+		fake_complete_chunk(&fake, 3, 0);
+		s3_overlay_drop_chunk(ov, 2);
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 2 * BLOCKS_PER_CHUNK, 0x86);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 409);
+		s3_flusher_kick(fl);
+		check_u64("unmap removes stale retry delay", fake.rounds[2], failed_rounds + 1);
+
+		/* Replace the chunk while the previous generation is in flight. */
+		s3_overlay_drop_chunk(ov, 2);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 410);
+		fake_complete_chunk(&fake, 2, -EIO);
+		check_u64("old generation failure does not defer replacement", fake.rounds[2], failed_rounds + 2);
+		fake_complete_all(&fake, 0);
+		check_true("replacement data reaches the uploader", !s3_overlay_has_dirty(ov), NULL);
+	}
+
 	/* --- drain --- */
 	printf("\n[9] drain waits for everything to reach S3\n");
 	{
