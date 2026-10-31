@@ -18,8 +18,9 @@ sed -e 's/worker_processes 2;/worker_processes 1;/' \
     -e 's@http://\$server_addr:\$server_port@http://127.0.0.1:18080@' \
     -e 's@https://\$server_addr:\$server_port@https://127.0.0.1:18443@' \
     -e 's@/etc/ssl/certs/ca-certificates.crt@/etc/cube/ca/cube-root-ca.crt@' \
-    -e '$d' nginx.conf > /tmp/websocket-nginx.conf
-cat >> /tmp/websocket-nginx.conf <<'NGINX'
+    -e '/^[[:space:]]*http[[:space:]]*{/a\    include /tmp/websocket-upstream.conf;' \
+    nginx.conf > /tmp/websocket-nginx.conf
+cat > /tmp/websocket-upstream.conf <<'NGINX'
     server {
         listen 127.0.0.1:18080;
         listen 127.0.0.1:18443 ssl;
@@ -44,7 +45,6 @@ cat >> /tmp/websocket-nginx.conf <<'NGINX'
             }
         }
     }
-}
 NGINX
 
 openresty -t -c /tmp/websocket-nginx.conf
