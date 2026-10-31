@@ -99,3 +99,25 @@ func TestMissingMigratedShimDoesNotFallBackToOldVersion(t *testing.T) {
 	require.ErrorIs(t, EnsureCubeBoxComponents(context.Background(), cb), components.ErrComponentVersionMissing)
 	require.Equal(t, "missing", cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
 }
+
+func TestRestartKeepsPersistedShimBinding(t *testing.T) {
+	for _, requested := range []string{"new", "../invalid"} {
+		t.Run(requested, func(t *testing.T) {
+			cb := &cubeboxstore.CubeBox{LocalRunTemplate: migrationTemplate()}
+			err := seedCubeBoxComponentVersionsFromRequest(cb, &workflow.CreateContext{IsRestart: true, ReqInfo: &cubebox.RunCubeSandboxRequest{
+				Annotations: map[string]string{constants.MasterAnnotationComponentCubeShimVersion: requested},
+			}})
+			require.NoError(t, err)
+			require.Equal(t, "old", cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
+			require.Equal(t, "old", cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim].Component.Version)
+		})
+	}
+}
+
+func TestRestartWithoutPersistedShimAcceptsRequestBinding(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{}
+	require.NoError(t, seedCubeBoxComponentVersionsFromRequest(cb, &workflow.CreateContext{IsRestart: true, ReqInfo: &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationComponentCubeShimVersion: "new"},
+	}}))
+	require.Equal(t, "new", cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
+}

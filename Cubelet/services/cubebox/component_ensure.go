@@ -108,12 +108,6 @@ func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts 
 	if cb == nil {
 		return nil
 	}
-	if flowOpts != nil && flowOpts.ReqInfo != nil {
-		raw := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationComponentCubeShimVersion])
-		if raw != "" && templatetypes.InventoryVersionKey(raw) == "" {
-			return fmt.Errorf("invalid explicit shim version %q", raw)
-		}
-	}
 	out := make(map[string]string)
 	for k, v := range cb.ComponentVersions {
 		if key := templatetypes.InventoryVersionKey(v); key != "" {
@@ -121,12 +115,23 @@ func seedCubeBoxComponentVersionsFromRequest(cb *cubeboxstore.CubeBox, flowOpts 
 		}
 	}
 	seedVersionsFromTemplate(out, cb.LocalRunTemplate)
+	keepShim := flowOpts != nil && flowOpts.IsRestart && out[templatetypes.CubeComponentCubeShim] != ""
+	if !keepShim && flowOpts != nil && flowOpts.ReqInfo != nil {
+		raw := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationComponentCubeShimVersion])
+		if raw != "" && templatetypes.InventoryVersionKey(raw) == "" {
+			return fmt.Errorf("invalid explicit shim version %q", raw)
+		}
+	}
 	if flowOpts != nil && flowOpts.ReqInfo != nil {
 		for name, ver := range componentVersionsFromAnnotations(flowOpts.ReqInfo.GetAnnotations()) {
 			// The master's selected replica can explicitly migrate the shim
 			// without rewriting a sealed snapshot's catalog. Keep guest, agent
 			// and kernel pins immutable; only the host runtime binding changes.
 			if name == templatetypes.CubeComponentCubeShim {
+				// Restart the existing instance with its persisted host binding.
+				if keepShim {
+					continue
+				}
 				out[name] = ver
 				continue
 			}
