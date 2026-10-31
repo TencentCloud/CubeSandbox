@@ -333,3 +333,13 @@ The added fixture is registered with the blob suite. Review its output for
 `blob_recover_incomplete_nested_snapshot`; a successful library build does not
 execute that binary. This workspace verified patch application to the pinned
 source files, but did not build or execute SPDK unit tests.
+
+`test/test_spdk_blob_recovery.sh` is also run by the SPDK Blob Recovery Test
+workflow when the patch series changes. It builds a complete dedicated SPDK
+checkout because the published builder omits unit-test sources. With only the
+production hunk reversed, it requires the original parent/clone assertion in
+both extent and no-extent configurations; unrelated failures do not count as a
+reproduction. It then restores the repair and runs the full blob unit suite.
+The fixture checks metadata-ID ordering so the parent is loaded first. A failed
+close leaves the relation registered while the blob remains present, matching
+the ordinary load bookkeeping; deletion removes it only after close succeeds.

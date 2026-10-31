@@ -1,0 +1,33 @@
+name: SPDK Blob Recovery Test
+
+on:
+  pull_request:
+    paths:
+      - 'CubeS3lvol/patches/**'
+      - 'CubeS3lvol/setup_dep.sh'
+      - 'CubeS3lvol/test/test_spdk_blob_recovery.sh'
+      - '.github/workflows/spdk-blob-recovery-test.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'CubeS3lvol/patches/**'
+      - 'CubeS3lvol/setup_dep.sh'
+      - 'CubeS3lvol/test/test_spdk_blob_recovery.sh'
+      - '.github/workflows/spdk-blob-recovery-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reproduce the assertion and test the repaired blobstore
+        run: |
+          docker run --rm --ulimit core=0 \
+            -v "$PWD:/workspace" -w /workspace/CubeS3lvol \
+            ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004 \
+            bash test/test_spdk_blob_recovery.sh

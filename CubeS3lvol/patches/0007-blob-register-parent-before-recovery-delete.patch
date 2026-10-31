@@ -1,6 +1,6 @@
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -4267,6 +4267,9 @@
+@@ -4272,6 +4272,9 @@
  
  	ctx->blobid = ctx->blob->id;
  
@@ -12,7 +12,7 @@
  
 --- a/test/unit/lib/blob/blob.c/blob_ut.c
 +++ b/test/unit/lib/blob/blob.c/blob_ut.c
-@@ -7167,6 +7167,80 @@
+@@ -7167,6 +7167,83 @@
  
  		thresholds.general_threshold++;
  	}
@@ -47,6 +47,9 @@
 +	poll_threads();
 +	SPDK_CU_ASSERT_FATAL(g_bserrno == 0);
 +	unfinishedid = g_blobid;
++	/* Recovery iterates metadata IDs in order. This fixture must load the
++	 * parent before it deletes the unfinished child to exercise the bug. */
++	SPDK_CU_ASSERT_FATAL(parentid < unfinishedid);
 +
 +	/* Persist the state of an interrupted nested snapshot: its metadata is
 +	 * present, but the writable child still names the previous parent. */
@@ -93,7 +96,7 @@
  }
  
  static void
-@@ -10633,6 +10707,7 @@
+@@ -10633,6 +10710,7 @@
  		CU_ADD_TEST(suite, blobstore_clean_power_failure);
  		CU_ADD_TEST(suite, blob_delete_snapshot_power_failure);
  		CU_ADD_TEST(suite, blob_create_snapshot_power_failure);
