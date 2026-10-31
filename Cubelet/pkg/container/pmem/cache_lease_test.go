@@ -6,7 +6,9 @@ package pmem
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
 
 func TestCacheLeasePinsAndEviction(t *testing.T) {
@@ -42,5 +44,43 @@ func TestCacheLeasePinsAndEviction(t *testing.T) {
 		t.Fatal("lease leaked")
 	} else {
 		release()
+	}
+}
+
+func TestExplicitEvictionWaitsForGCBorrower(t *testing.T) {
+	release, ok := TryEvictArtifact("cubebox", "concurrent-eviction")
+	if !ok {
+		t.Fatal("could not acquire GC lease")
+	}
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := EvictArtifact(ctx, "cubebox", "concurrent-eviction"); err != context.Canceled {
+		t.Fatalf("cancelled wait: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		releaseNext, ok, err := EvictArtifact(context.Background(), "cubebox", "concurrent-eviction")
+		if err == nil && !ok {
+			err = fmt.Errorf("GC lease reported as a sandbox borrower")
+		}
+		if releaseNext != nil {
+			releaseNext()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("eviction did not wait: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("eviction did not resume")
 	}
 }

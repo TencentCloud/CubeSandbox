@@ -65,6 +65,11 @@ func TryEvictArtifact(instanceType, artifactID string) (func(), bool) {
 	if cacheLeases.entries[key] != nil {
 		return nil, false
 	}
+	return beginEvictionLocked(key), true
+}
+
+// beginEvictionLocked requires cacheLeases to be locked and the key to be free.
+func beginEvictionLocked(key string) func() {
 	entry := &cacheLease{evicting: make(chan struct{})}
 	cacheLeases.entries[key] = entry
 	var once sync.Once
@@ -75,5 +80,34 @@ func TryEvictArtifact(instanceType, artifactID string) (func(), bool) {
 			delete(cacheLeases.entries, key)
 			close(entry.evicting)
 		})
-	}, true
+	}
+}
+
+// EvictArtifact waits for another eviction, but reports active borrowers
+// separately so callers do not mistake a short GC lease for a running sandbox.
+func EvictArtifact(ctx context.Context, instanceType, artifactID string) (func(), bool, error) {
+	key := GetRawImageFilePath(instanceType, artifactID)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		cacheLeases.Lock()
+		entry := cacheLeases.entries[key]
+		if entry == nil {
+			release := beginEvictionLocked(key)
+			cacheLeases.Unlock()
+			return release, true, nil
+		}
+		if entry.users > 0 {
+			cacheLeases.Unlock()
+			return nil, false, nil
+		}
+		wait := entry.evicting
+		cacheLeases.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-wait:
+		}
+	}
 }

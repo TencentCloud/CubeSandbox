@@ -330,3 +330,23 @@ func TestImportCacheSourcesRejectsPipe(t *testing.T) {
 		t.Fatal("accepted a non-regular manifest")
 	}
 }
+
+func TestDisabledCacheGCDoesNotRecordMetadata(t *testing.T) {
+	previous := activeCacheGC.Swap(nil)
+	defer activeCacheGC.Store(previous)
+	// Even an invalid path must not be inspected when the feature is disabled.
+	if err := recordCacheUse(context.Background(), "cubebox", "../disabled"); err != nil {
+		t.Fatal(err)
+	}
+	dryRun := true
+	g := testCacheGC(t, CacheGCConfig{DryRun: &dryRun}, nil)
+	g.Activate()
+	if activeCacheGC.Load() != g {
+		t.Fatal("dry-run did not enable metadata tracking")
+	}
+	release, err := reserveCacheDownload(context.Background(), 1<<60)
+	if err != nil {
+		t.Fatalf("dry-run enforced capacity: %v", err)
+	}
+	release()
+}

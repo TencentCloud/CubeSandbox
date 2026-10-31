@@ -99,9 +99,10 @@ func NewCacheGC(c CacheGCConfig, inUse ArtifactInUseFunc, ready func() bool) (*C
 		space: cacheSpace, client: &http.Client{Timeout: 10 * time.Second}, now: time.Now}, nil
 }
 
-// Activate enables capacity reservations before any asynchronous GC work starts.
+// Activate enables metadata tracking before asynchronous GC starts.
+// Capacity reservations remain disabled in dry-run mode.
 func (g *CacheGC) Activate() {
-	if g.config.Enabled && !g.config.dryRun() {
+	if g.config.Enabled {
 		activeCacheGC.Store(g)
 	}
 }
@@ -343,7 +344,7 @@ func (g *CacheGC) reserve(ctx context.Context, size int64) (func(), error) {
 }
 
 func reserveCacheDownload(ctx context.Context, size int64) (func(), error) {
-	if g := activeCacheGC.Load(); g != nil {
+	if g := activeCacheGC.Load(); g != nil && !g.config.dryRun() {
 		return g.reserve(ctx, size)
 	}
 	return func() {}, nil
