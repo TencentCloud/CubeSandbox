@@ -10,8 +10,17 @@ Scans cost O(total visible file descriptors). Cleanup checks before changing the
 
 A quarantined queue retains its IP until physical ownership ends. It continues
 to count toward the configured inventory to avoid unbounded replacement growth;
-on-demand creation can still use other free addresses. Inspect the reported
-owner PIDs and stop or repair the stale runtime before retrying cleanup. Do not
+on-demand creation can still use other free addresses. Use `cubecli diag tap-holders --iface <tap-name>` to identify the holder and
+its start time. Read `cubecli diag reclaim --help` before reclaiming a confirmed
+stale runtime; reclaim verifies the process identity before signalling it.
+Repair process visibility first if the ownership scan is incomplete: the
+diagnostic command tolerates inaccessible processes and cannot certify reuse. Do not
 delete its pool record or release its IP while a foreign process holds the queue.
 Cleanup returns an error while the durable deleting record remains pending, so
 callers must retry after physical VM teardown instead of treating it as success.
+
+The default destroy and cleanup flows in `Cubelet/config/config.toml` run
+`cubebox` before `network`. `cubebox.Destroy` calls `waitSandboxRuntimeGone`
+before returning success. Preserve this ordering in custom workflow settings.
+A still-open foreign descriptor is therefore retained as a cleanup failure,
+not reported as a completed release.

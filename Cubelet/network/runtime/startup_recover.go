@@ -802,6 +802,9 @@ func (s *NetworkController) cleanupConflictingTap(ip net.IP) error {
 	if err := s.checkTapConflict(tap, ip); err != nil {
 		return err
 	}
+	if err := s.checkTapUnused(tap.Name); err != nil {
+		return fmt.Errorf("verify conflicting TAP %s ownership: %w", tap.Name, err)
+	}
 	if err := s.destroyTapIndex(tap.Index); err != nil {
 		return fmt.Errorf("destroy stale tap %s(%d): %w", tap.Name, tap.Index, err)
 	}

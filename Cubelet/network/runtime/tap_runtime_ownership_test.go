@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 )
 
@@ -138,5 +139,40 @@ func TestAcquireDoesNotAllocateWithoutInspectionAndReadyInventory(t *testing.T) 
 	}
 	if len(controller.tapPool.Entries()) != 0 {
 		t.Fatal("inspection failure consumed an address")
+	}
+}
+
+type legacyOwnedTapAdapter struct {
+	*createTestTapDeviceAdapter
+	legacy  *tapDevice
+	checked string
+}
+
+func (a *legacyOwnedTapAdapter) GetByName(name string) (*tapDevice, error) {
+	if name == a.legacy.Name {
+		return a.legacy, nil
+	}
+	return nil, nil
+}
+
+func (a *legacyOwnedTapAdapter) CheckUnused(name string) error {
+	a.checked = name
+	return errTapOwned
+}
+
+func TestConflictingLegacyTapChecksActualOwnerBeforeDestroy(t *testing.T) {
+	controller := newCreateTestController(t, nil)
+	ip := net.ParseIP("192.168.0.14")
+	names := candidateTapNames(ip.String())
+	adapter := &legacyOwnedTapAdapter{
+		createTestTapDeviceAdapter: &createTestTapDeviceAdapter{},
+		legacy:                     &tapDevice{Name: names[len(names)-1], Index: 42, IP: ip},
+	}
+	controller.tapAdapter = adapter
+	if err := controller.cleanupConflictingTap(ip); !errors.Is(err, errTapOwned) {
+		t.Fatalf("expected occupied legacy TAP, got %v", err)
+	}
+	if adapter.checked != adapter.legacy.Name || adapter.destroyCount != 0 {
+		t.Fatalf("legacy ownership bypassed: checked=%s destroyed=%d", adapter.checked, adapter.destroyCount)
 	}
 }
