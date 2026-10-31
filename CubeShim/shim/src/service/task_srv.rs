@@ -374,7 +374,11 @@ impl Task for TaskService {
                 if let Err(cleanup) = sb.destroy_sandbox_after_failed_create().await {
                     errf!(self.log, "failed Create VM cleanup:{}", cleanup);
                 }
-                self.exit.signal();
+                let exit = self.exit.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    exit.signal();
+                });
                 return Err(Error::Other(format!("Create sandbox failed:{}", e)).into());
             }
         }
@@ -401,7 +405,11 @@ impl Task for TaskService {
                 if let Err(cleanup) = sb.destroy_sandbox_after_failed_create().await {
                     errf!(self.log, "failed first-container VM cleanup:{}", cleanup);
                 }
-                self.exit.signal();
+                let exit = self.exit.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    exit.signal();
+                });
             }
             return Err(Error::Other(format!("Create container failed:{}", e)).into());
         }
@@ -711,7 +719,7 @@ impl Task for TaskService {
         infof!(self.log, "update req start, id:{}", &req.id);
         let outcome = {
             let mut sb = self.sandbox.lock().await;
-            if sb.paused().await {
+            if !sb.normal().await {
                 errf!(self.log, "sandbox not in normal state");
                 return Err(Others(format!("sandbox not in normal state")));
             }

@@ -783,20 +783,26 @@ impl SandBox {
     }
 
     pub async fn destroy_sandbox(&mut self) -> CResult<()> {
-        self.destroy_sandbox_with_timeout(Duration::from_secs(30)).await
+        self.destroy_sandbox_with_timeout(Duration::from_secs(30))
+            .await
     }
 
     pub async fn destroy_sandbox_after_failed_create(&mut self) -> CResult<()> {
         // A failed first Create makes this shim terminal. Stop tasks that can
         // retain the old agent or mutate its state before joining the VMM.
         self.stop_watchers().await;
-        let result = self.destroy_sandbox_with_timeout(Duration::from_secs(3)).await;
+        let result = self
+            .destroy_sandbox_with_timeout(Duration::from_secs(3))
+            .await;
         self.stop_log_forward_detached().await;
         let _ = self.disconnect_agent().await;
         self.containers.lock().await.clear();
         self.ch = None;
         self.inited = false;
         *self.state.lock().await = SandBoxState::Exited;
+        if let Err(e) = Utils::clean_sandbox_resource(&self.id) {
+            warnf!(self.log, "remove failed-create sandbox resources: {}", e);
+        }
         for path in [utils::SHIM_PID_FILE, utils::VMM_PID_FILE] {
             if let Err(e) = stdfs::remove_file(path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
@@ -1138,7 +1144,10 @@ impl SandBox {
         if containers.contains_key(&id) {
             return Err(format!("container {} already exists", id.clone()));
         }
-        let client = self.client.as_ref().ok_or_else(|| "agent client is unavailable".to_string())?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "agent client is unavailable".to_string())?;
         let mut c: Container = Container::new(
             self.id.clone(),
             id.clone(),
@@ -1344,7 +1353,12 @@ impl SandBox {
     }
 
     pub async fn update_sandbox(&mut self, annotation: &HashMap<String, String>) -> CResult<()> {
-        let ch = self.ch.as_ref().unwrap().lock().await;
+        let ch = self
+            .ch
+            .as_ref()
+            .ok_or_else(|| "sandbox hypervisor is unavailable".to_string())?
+            .lock()
+            .await;
 
         //set fs
         let anno = annotation.get(ANNO_VMM_FS);

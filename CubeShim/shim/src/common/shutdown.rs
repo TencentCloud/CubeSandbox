@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::mpsc::{self, Sender};
-use std::time::Duration;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
 
 /// Last resort for final VM teardown. VMM API calls and thread joins are
 /// synchronous: an async timeout alone cannot stop them or release their TAPs.
@@ -25,14 +25,22 @@ impl ShutdownDeadline {
     where
         F: FnOnce() + Send + 'static,
     {
+        let expires_at = Instant::now() + timeout;
         let (cancel, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("vm-shutdown-deadline".into())
             .stack_size(64 * 1024)
             .spawn(move || {
-                if receiver.recv_timeout(timeout).is_err() {
-                    expired();
+                match receiver.recv_timeout(expires_at.saturating_duration_since(Instant::now())) {
+                    Ok(()) => return,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        // Cancellation must not turn a 30-second deadline into
+                        // an immediate exit while another cleanup is in flight.
+                        std::thread::sleep(expires_at.saturating_duration_since(Instant::now()));
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
                 }
+                expired();
             })
             .map_err(|e| format!("start VM shutdown watchdog: {}", e))?;
         Ok(Self { cancel })
@@ -40,7 +48,7 @@ impl ShutdownDeadline {
 
     /// A completed physical teardown can cancel the watchdog, including one
     /// reporting that the VMM thread already failed. Dropping a
-    /// cancelled async future disconnects the channel and forces exit instead.
+    /// cancelled async future leaves the original deadline armed.
     pub fn complete(self) {
         let _ = self.cancel.send(());
     }
@@ -78,20 +86,23 @@ mod tests {
     #[test]
     fn abandoned_shutdown_does_not_disarm_deadline() {
         let (sent, received) = mpsc::channel();
-        let deadline = ShutdownDeadline::with_action(Duration::from_secs(2), move || {
+        let timeout = Duration::from_millis(100);
+        let started = Instant::now();
+        let deadline = ShutdownDeadline::with_action(timeout, move || {
             sent.send(()).unwrap();
         })
         .unwrap();
         drop(deadline);
         received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(started.elapsed() >= timeout);
     }
 
     #[test]
     fn deadline_terminates_a_stuck_shim() {
         const CHILD: &str = "SHIM_SHUTDOWN_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            let _deadline = ShutdownDeadline::with_action(Duration::from_millis(40), || {
-                unsafe { libc::_exit(73) }
+            let _deadline = ShutdownDeadline::with_action(Duration::from_millis(40), || unsafe {
+                libc::_exit(73)
             })
             .unwrap();
             // Reproduce a synchronous VMM join that cannot make progress.
