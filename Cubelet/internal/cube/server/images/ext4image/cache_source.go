@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
@@ -211,18 +213,20 @@ func recordCacheUse(ctx context.Context, instanceType, artifactID string) error 
 // ImportCacheSources adopts existing files without downloading/rebuilding
 // templates. Initial access time is NOW, never the file's creation time.
 func ImportCacheSources(ctx context.Context, manifest string) error {
-	info, err := os.Lstat(manifest)
+	// ConfigMap projections use symlinks. Validate the opened target so a
+	// symlink swap cannot change which file is checked versus decoded.
+	f, err := os.OpenFile(manifest, os.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
 	if !info.Mode().IsRegular() || info.Size() > 8<<20 {
 		return errors.New("cache source manifest must be a bounded regular file")
 	}
-	f, err := os.Open(manifest)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	var input struct {
 		Version   int           `json:"version"`
 		Artifacts []CacheSource `json:"artifacts"`

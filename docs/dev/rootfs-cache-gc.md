@@ -55,3 +55,10 @@ Start with one upgraded worker in dry-run mode. Check candidates, runtime protec
 `rootfs cache GC` logs include `files`, `planned_bytes`, `freed_bytes`, `available_bytes` and `target_bytes`. Incomplete recovery blocks eviction until the underlying recovery errors are repaired. Unreadable sources or no eligible candidates can leave usage above the watermark. New creates may be rejected under pressure, and cold downloads increase creation latency.
 
 TC build files, MySQL binlogs, snapshots and COW volumes need separate lifecycle management.
+
+When GC is enabled, downloads need a declared artifact size before opening the
+HTTP response so concurrent requests can reserve disk space first. Supply the
+size through artifact annotations or an imported source manifest. Downloads
+without a known size fail closed in this mode; disabled GC preserves the legacy
+response-size fallback. ConfigMap symlinks are supported for source manifests,
+but their opened targets must be bounded regular files.

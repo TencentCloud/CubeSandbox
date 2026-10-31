@@ -247,6 +247,12 @@ func (g *CacheGC) collect(ctx context.Context, required int64) (cacheGCResult, e
 }
 
 func (g *CacheGC) evict(ctx context.Context, c cacheCandidate) (bool, error) {
+	// Network probes must not block a creator's shared artifact pin. Recheck
+	// the file, source and usage under the exclusive lease after the probe.
+	used, err := g.inUse(c.entry.ArtifactID)
+	if err != nil || used || !g.ready() || !g.sourceReadable(ctx, c.entry.CacheSource) {
+		return false, nil
+	}
 	release, ok := pmem.TryEvictArtifact("cubebox", c.entry.ArtifactID)
 	if !ok {
 		return false, nil
@@ -257,14 +263,7 @@ func (g *CacheGC) evict(ctx context.Context, c cacheCandidate) (bool, error) {
 		return false, nil
 	}
 	entry, err := readCacheEntry(path)
-	if err != nil || info.Size() != entry.SizeBytes || g.now().Sub(entry.LastUsed) < g.idle {
-		return false, nil
-	}
-	used, err := g.inUse(entry.ArtifactID)
-	if err != nil || used || !g.ready() {
-		return false, nil
-	}
-	if !g.sourceReadable(ctx, entry.CacheSource) {
+	if err != nil || entry.CacheSource != c.entry.CacheSource || info.Size() != entry.SizeBytes || g.now().Sub(entry.LastUsed) < g.idle {
 		return false, nil
 	}
 	// Keep the exclusive lease until unlink; creators wait and then rehydrate.
