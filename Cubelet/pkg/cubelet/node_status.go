@@ -5,14 +5,11 @@
 package cubelet
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"os"
 	goruntime "runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodestatus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/hostquota"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -36,10 +34,7 @@ import (
 )
 
 const (
-	defaultHostQuotaCPUOvercommitFactor = 2
-	defaultHostQuotaMemNumerator        = 5
-	defaultHostQuotaMemDenominator      = 4
-	defaultHostMemPerMVMMB              = 512
+	defaultHostMemPerMVMMB = 512
 )
 
 var (
@@ -649,41 +644,16 @@ func applyHostQuotaWithConfig(node *cubeletnodemeta.Node, hostCfg *config.HostCo
 }
 
 func resolveHostQuotaCPUMilli(hostCfg *config.HostConf, fallbacks ...int64) int64 {
-	if hostCfg != nil && hostCfg.Quota.Cpu > 0 {
-		return int64(hostCfg.Quota.Cpu)
-	}
-	for _, fallback := range fallbacks {
-		if fallback > 0 {
-			return fallback
-		}
-	}
-	cpuCount := hostCPUCount()
-	if cpuCount <= 0 {
-		return 0
-	}
-	return int64(cpuCount) * 1000 * defaultHostQuotaCPUOvercommitFactor
+	return hostquota.CPU(hostCfg, hostCPUCount(), fallbacks...)
 }
 
 func resolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
-	if hostCfg != nil {
-		if memMB := parseMemMB(hostCfg.Quota.Mem); memMB > 0 {
-			return memMB
-		}
-	}
-	for _, fallback := range fallbacks {
-		if fallback > 0 {
-			return fallback
-		}
-	}
-	memMB, err := readHostMemoryTotalMB()
+	memMB, err := hostquota.Memory(hostCfg, readHostMemoryTotalMB, fallbacks...)
 	if err != nil {
 		klog.ErrorS(err, "Failed to detect host memory for default quota")
 		return 0
 	}
-	if memMB <= 0 {
-		return 0
-	}
-	return roundUpFraction(memMB, defaultHostQuotaMemNumerator, defaultHostQuotaMemDenominator)
+	return memMB
 }
 
 func resolveHostMaxMvmNum(hostCfg *config.HostConf, quotaMemMB int64) int64 {
@@ -698,17 +668,6 @@ func resolveHostMaxMvmNum(hostCfg *config.HostConf, quotaMemMB int64) int64 {
 		return 1
 	}
 	return maxMVMNum
-}
-
-func parseMemMB(value string) int64 {
-	if value == "" {
-		return 0
-	}
-	q, err := resource.ParseQuantity(value)
-	if err != nil {
-		return 0
-	}
-	return q.Value() / (1024 * 1024)
 }
 
 func toResourceSnapshot(in map[corev1.ResourceName]resource.Quantity) masterclient.ResourceSnapshot {
@@ -751,37 +710,5 @@ func cloneResourceList(in map[corev1.ResourceName]resource.Quantity) map[corev1.
 }
 
 func detectHostMemoryTotalMB() (int64, error) {
-	file, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "MemTotal:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			return 0, fmt.Errorf("unexpected MemTotal format: %q", line)
-		}
-		memKB, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("parse MemTotal failed: %w", err)
-		}
-		return roundUpFraction(memKB, 1, 1024), nil
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, err
-	}
-	return 0, fmt.Errorf("MemTotal not found in /proc/meminfo")
-}
-
-func roundUpFraction(value int64, numerator int64, denominator int64) int64 {
-	if value <= 0 || numerator <= 0 || denominator <= 0 {
-		return 0
-	}
-	return (value*numerator + denominator - 1) / denominator
+	return hostquota.DetectMemoryTotalMB()
 }

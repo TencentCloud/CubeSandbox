@@ -279,6 +279,9 @@ func IsCircutBreakCode(code ErrorCode) bool {
 }
 
 func IsExcludesRetryCode(code ErrorCode) bool {
+	if excludeLoopRetryCodes == nil {
+		return false
+	}
 	_, ok := excludeLoopRetryCodes.Load(code)
 	return ok
 }
