@@ -136,6 +136,9 @@ func TestStartupNoStateCleanupWaitsForEgress(t *testing.T) {
 	if err := controller.recover(); err != nil {
 		t.Fatal(err)
 	}
+	if len(controller.cubevsAdapter.(*fakeCubeVSAdapter).defaultDenyPolicyCalls) == 0 {
+		t.Fatal("orphan TAP was left without a deny policy while egress starts")
+	}
 	if base.restoreCount != 0 || egress.deleteCalls != 0 {
 		t.Fatal("startup performed synchronous no-state TAP cleanup")
 	}
@@ -842,17 +845,43 @@ func legacyStateJSON(sandboxID, ip string, ifindex int) string {
 	}`
 }
 
-func TestStartupRejectsStaleLocalPortMappings(t *testing.T) {
+func TestStartupRetriesStaleLocalPortMappings(t *testing.T) {
 	controller := newRecoverTestController(t)
 	orphan := &tapDevice{Name: tapName("10.30.0.9"), Index: 9, IP: net.ParseIP("10.30.0.9").To4()}
 	taps := controller.tapAdapter.(*fakeTapDeviceAdapter)
 	taps.listResult = map[string]*tapDevice{orphan.IP.String(): orphan}
 	failure := errors.New("local port map unavailable")
 	controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappingErr = failure
-	if err := controller.recover(); !errors.Is(err, failure) {
-		t.Fatalf("startup with stale local port state: %v", err)
+	if err := controller.recover(); err != nil {
+		t.Fatalf("startup with quarantined local port state: %v", err)
 	}
 	if taps.restoreCount != 0 {
 		t.Fatal("startup opened an unsafe orphan TAP")
+	}
+	controller.handleCleaningEntries()
+	state, _, _ := controller.tapPool.StateByName(orphan.Name)
+	if state != TapPoolCleaning {
+		t.Fatalf("cleanup failure published %s", state)
+	}
+	controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappingErr = nil
+	controller.handleCleaningEntries()
+	state, _, _ = controller.tapPool.StateByName(orphan.Name)
+	if state != TapPoolReady {
+		t.Fatalf("cleanup did not recover: %s", state)
+	}
+}
+
+func TestStartupRefusesUnprotectedOrphanTap(t *testing.T) {
+	controller := newRecoverTestController(t)
+	orphan := &tapDevice{Name: tapName("10.30.0.9"), Index: 9, IP: net.ParseIP("10.30.0.9").To4()}
+	controller.tapAdapter.(*fakeTapDeviceAdapter).listResult = map[string]*tapDevice{orphan.IP.String(): orphan}
+	failure := errors.New("default deny unavailable")
+	controller.cubevsAdapter.(*fakeCubeVSAdapter).defaultDenyPolicyErr = failure
+	if err := controller.recover(); !errors.Is(err, failure) {
+		t.Fatalf("unprotected startup: %v", err)
+	}
+	state, _, _ := controller.tapPool.StateByName(orphan.Name)
+	if state != TapPoolCleaning {
+		t.Fatalf("unprotected TAP state: %s", state)
 	}
 }

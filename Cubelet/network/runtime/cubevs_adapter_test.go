@@ -17,6 +17,7 @@ type fakeCubeVSAdapter struct {
 	deletePortMappings     []PortMapping
 	cleanupPolicyCalls     []uint32
 	defaultDenyPolicyCalls []uint32
+	defaultDenyPolicyErr   error
 	listPortMappings       map[uint16]cubevs.MVMPort
 	getTAPDeviceByIndex    map[uint32]*cubevs.TAPDevice
 	deletedTAPDevices      map[uint32]struct{}
@@ -145,7 +146,7 @@ func (f *fakeCubeVSAdapter) InstallTAPDefaultDenyPolicy(ifindex uint32) error {
 		f.recorder.record("cubevs_default_deny")
 	}
 	f.defaultDenyPolicyCalls = append(f.defaultDenyPolicyCalls, ifindex)
-	return nil
+	return f.defaultDenyPolicyErr
 }
 
 func (f *fakeCubeVSAdapter) GCStaleNetPolicyMaps(_ map[uint32]struct{}, _ func(uint32) bool, _ func(uint32)) (int, error) {

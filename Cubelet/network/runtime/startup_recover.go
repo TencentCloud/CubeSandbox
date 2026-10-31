@@ -440,8 +440,8 @@ func (s *NetworkController) recoverLiveTap(tap *tapDevice, record *StateRecord, 
 
 func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 	// During smooth upgrades a no-state TAP may still carry old CubeVS port maps,
-	// TAP policy, metadata, or CubeEgress rules. Clear local mappings before serving
-	// requests, but defer remote cleanup to maintenance: CubeEgress bootstraps from this
+	// TAP policy, metadata, or CubeEgress rules. Attempt local cleanup before serving
+	// requests, and defer retries and remote cleanup to maintenance: CubeEgress bootstraps from this
 	// controller's HTTP listener, which is not started until recovery returns.
 	// Synchronously cleaning a large idle pool here both repeats ownership scans
 	// and waits on a service that cannot finish starting yet.
@@ -456,15 +456,17 @@ func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 	if err := s.beginTapCleanup(cleaningTap, owner); err != nil {
 		return err
 	}
-	// Local port maps must agree with the empty startup PortBinder before
-	// requests arrive. These operations do not depend on CubeEgress readiness.
-	// Fail startup if local removal fails: leaving a stale mapping while the
-	// empty PortBinder serves requests could assign the same host port twice.
+	// Keep failed cleanup quarantined for maintenance. CubeVS rejects an
+	// occupied port tuple, so stale mappings cannot silently be reassigned.
 	if err := s.cubevsAdapter.DeletePortMappingsByIfindex(uint32(tap.Index)); err != nil {
-		return err
+		CubeLog.WithContext(context.Background()).Warnf("defer orphan TAP port cleanup: tap=%s err=%v", tap.Name, err)
 	}
 	if err := s.cleanupCubeVSTapState(tap.Index, tap.IP.To4()); err != nil {
-		return err
+		CubeLog.WithContext(context.Background()).Warnf("defer orphan TAP policy cleanup: tap=%s err=%v", tap.Name, err)
+	}
+	// Quarantine must deny traffic even while remote cleanup is unavailable.
+	if err := s.installPoolDefaultDeny(cleaningTap); err != nil {
+		return fmt.Errorf("install orphan TAP default deny: %w", err)
 	}
 	// Retain a descriptor if discovery supplied one (production List normally
 	// returns identity only). Do not open or drain a queue during startup. Normal
