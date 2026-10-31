@@ -5,6 +5,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
+
+var errAdmissionDuplicate = errors.New("sandbox already exists during admission")
 
 // Missing runtime metadata belongs to the conservative MicroVM path. Both
 // runtimes populate OciRuntime; only an explicit non-Cube type opts out.
@@ -63,6 +66,9 @@ func (l *local) admitAndSaveWithQuota(ctx context.Context, sb *cubeboxstore.Cube
 		host = &config.HostConf{}
 	}
 	if err := checkCreateQuota(existing, sb, host, cpu, mem); err != nil {
+		if errors.Is(err, errAdmissionDuplicate) {
+			return ret.Err(errorcode.ErrorCode_Conflict, err.Error())
+		}
 		return ret.Err(errorcode.ErrorCode_HostResourcesNotEnough, err.Error())
 	}
 	// CREATED records count as allocated before any VM starts. Failed creates use
@@ -85,7 +91,7 @@ func checkCreateQuota(existing []*cubeboxstore.CubeBox, incoming *cubeboxstore.C
 	// Missing metadata must not silently make a live sandbox free of charge.
 	for _, sb := range existing {
 		if sb.ID == incoming.ID {
-			return fmt.Errorf("sandbox %s already exists during admission", incoming.ID)
+			return fmt.Errorf("%w: %s", errAdmissionDuplicate, incoming.ID)
 		}
 		if status := sb.GetStatus(); status != nil && isContainerInGoodState(status.Get().State()) && sb.ResourceWithOverHead == nil && !isOCISandbox(sb) {
 			return fmt.Errorf("existing sandbox %s has no host resource demand", sb.ID)
