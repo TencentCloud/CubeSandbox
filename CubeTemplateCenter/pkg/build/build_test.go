@@ -5,7 +5,10 @@ package build
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
 
 // Regression coverage for the P1 bug where READY-artifact reuse only ever
@@ -138,5 +142,49 @@ func TestArtifactPresignedURLDisabledWhenS3Off(t *testing.T) {
 	logger := log.G(context.Background())
 	if got := artifactPresignedURL(context.Background(), false, s3, "rfs-1", logger); got != "" {
 		t.Fatalf("expected empty URL when S3 is disabled, got %q", got)
+	}
+}
+
+func TestBuildProtectionFailureReportsTerminalStatus(t *testing.T) {
+	for _, stage := range []string{"store", "marker"} {
+		t.Run(stage, func(t *testing.T) {
+			root := t.TempDir()
+			blocked := filepath.Join(root, "blocked")
+			if err := os.WriteFile(blocked, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			artifactID := "artifact-1"
+			store := blocked
+			if stage == "marker" {
+				store = root
+				artifactID = "blocked"
+			}
+			t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", store)
+			reports := make(chan map[string]any, 4)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var fields map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				reports <- fields
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+			ctx := context.Background()
+			err := runBuildLocked(ctx, "job-1", nil, artifactID, "fingerprint", nil,
+				newTestReporter(t, srv), nil, "", nil, nil, true, false, nil, log.G(ctx))
+			if err == nil {
+				t.Fatal("expected filesystem protection failure")
+			}
+			select {
+			case report := <-reports:
+				if report["status"] != templatecenter.JobStatusFailed || report["phase"] != templatecenter.JobPhaseUnpacking || report["progress"] != float64(100) || report["error_message"] == "" {
+					t.Fatalf("unexpected terminal report: %v", report)
+				}
+			default:
+				t.Fatal("build returned without reporting FAILED")
+			}
+		})
 	}
 }

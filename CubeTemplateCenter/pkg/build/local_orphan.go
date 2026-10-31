@@ -16,6 +16,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 )
 
+var _ interface{ CleanupLocalOrphans(context.Context) error } = (*ArtifactDeleter)(nil)
+
 const localOrphanGrace = 10 * time.Minute
 
 // CleanupLocalOrphans must run on every TC replica: deleting the shared row and

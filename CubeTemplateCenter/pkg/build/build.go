@@ -307,10 +307,22 @@ func runBuildLocked(
 	// cannot delimit the lifetime of these local bytes.
 	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
 	if err != nil {
+		if !pullProgressFlushed {
+			pullProgress.flush(false)
+		}
+		errMsg := fmt.Sprintf("resolve artifact store: %v", err)
+		logger.Errorf(errMsg)
+		reportFailed(templatecenter.JobPhaseUnpacking, errMsg)
 		return err
 	}
 	releaseMarker, err := image.MarkArtifactBuildInProgress(storeDir)
 	if err != nil {
+		if !pullProgressFlushed {
+			pullProgress.flush(false)
+		}
+		errMsg := fmt.Sprintf("protect artifact publication: %v", err)
+		logger.Errorf(errMsg)
+		reportFailed(templatecenter.JobPhaseUnpacking, errMsg)
 		return fmt.Errorf("protect artifact publication: %w", err)
 	}
 	defer releaseMarker()
