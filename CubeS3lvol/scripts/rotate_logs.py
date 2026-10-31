@@ -45,10 +45,19 @@ def configuration(log, archive, size, retain):
 ''' % (json.dumps(str(log), ensure_ascii=False), size, retain, str(archive))
 
 
+def resolve_logrotate():
+    override = os.environ.get('ONE_CLICK_LOGROTATE_BIN')
+    candidates = [override] if override else [shutil.which('logrotate'), '/usr/sbin/logrotate', '/usr/bin/logrotate']
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError('logrotate is required')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    default_log = os.environ.get('RCOW_LOG', os.path.join(
-        os.environ.get('RCOW_LOG_DIR', '/data/log/rcow'), 's3lvol_tgt.log'))
+    default_log = os.environ.get('RCOW_LOG') or os.path.join(
+        os.environ.get('RCOW_LOG_DIR') or '/data/log/rcow', 's3lvol_tgt.log')
     parser.add_argument('--log', default=default_log)
     parser.add_argument('--archive-dir', default=os.environ.get('RCOW_LOG_ARCHIVE_DIR'))
     parser.add_argument('--state-dir', default='/var/lib/cube-sandbox-logrotate')
@@ -76,11 +85,11 @@ def main(argv=None):
     policy = configuration(source, archive, args.size, args.retain)
     state = Path(args.state_dir)
     state_file = state / (identity + '.state')
-    if info.st_size > args.bootstrap_limit and not state_file.is_file():
-        raise RuntimeError('oversized legacy log: archive and verify before enabling rotation')
     if args.dry_run:
         print(policy, end='')
         return 0
+    if info.st_size > args.bootstrap_limit and not state_file.is_file():
+        raise RuntimeError('oversized legacy log: archive and verify before enabling rotation')
     # Different original paths may resolve to one log. A canonical-path state
     # and lock prevent two timers from rotating the same file concurrently.
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -93,9 +102,7 @@ def main(argv=None):
         if source.stat().st_size >= args.size and not args.dry_run:
             if shutil.disk_usage(archive).free < source.stat().st_size + args.reserve_bytes:
                 raise RuntimeError('insufficient archive space; source left untouched')
-        executable = shutil.which('logrotate')
-        if not executable:
-            raise RuntimeError('logrotate is required')
+        executable = resolve_logrotate()
         with tempfile.NamedTemporaryFile(mode='w', dir=state, suffix='.conf') as config:
             config.write(policy)
             config.flush()

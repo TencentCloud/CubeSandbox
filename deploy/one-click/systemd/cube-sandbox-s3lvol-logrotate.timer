@@ -1,6 +1,7 @@
 [Unit]
 Description=Check CubeS3lvol log size every minute
-PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+# Like storage, this timer stays active during role-target upgrades.
+# down.sh stops it explicitly with the storage service.
 
 [Timer]
 OnBootSec=2min

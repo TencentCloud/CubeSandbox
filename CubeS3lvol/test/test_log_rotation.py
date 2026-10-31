@@ -62,7 +62,7 @@ class RotationTest(unittest.TestCase):
             args=['--log',str(log),'--archive-dir',str(p/'archive'),'--state-dir',str(p/'state'),'--size','1','--reserve-bytes','1']
             with patch.object(rotation.shutil,'disk_usage',return_value=type('Usage',(),{'free':4})()):
                 with self.assertRaises(RuntimeError):rotation.main(args)
-            with patch.object(rotation.shutil,'which',return_value='/usr/sbin/logrotate'), patch.object(rotation.subprocess,'run') as run:
+            with patch.object(rotation,'resolve_logrotate',return_value='/usr/sbin/logrotate'), patch.object(rotation.subprocess,'run') as run:
                 self.assertEqual(rotation.main(args+['--dry-run']),0)
                 run.assert_not_called()
             self.assertEqual(log.read_bytes(),b'keep')
@@ -72,7 +72,7 @@ class RotationTest(unittest.TestCase):
             p = Path(root)
             log = p / 'active'
             log.write_bytes(b'keep')
-            self.assertEqual(rotation.main(['--log', str(log), '--state-dir', str(p / 'state'), '--archive-dir', str(p / 'archive'), '--dry-run']), 0)
+            self.assertEqual(rotation.main(['--log', str(log), '--state-dir', str(p / 'state'), '--archive-dir', str(p / 'archive'), '--bootstrap-limit', '3', '--dry-run']), 0)
             self.assertFalse((p / 'state').exists())
             self.assertFalse((p / 'archive').exists())
 
@@ -85,9 +85,20 @@ class RotationTest(unittest.TestCase):
             state.mkdir()
             identity = rotation.hashlib.sha256(rotation.os.fsencode(log.resolve())).hexdigest()[:24]
             (state / (identity + '.state')).write_text('logrotate state -- version 2\n')
-            with patch.object(rotation.shutil, 'which', return_value='/usr/sbin/logrotate'), patch.object(rotation.subprocess, 'run') as run:
+            with patch.object(rotation, 'resolve_logrotate', return_value='/usr/sbin/logrotate'), patch.object(rotation.subprocess, 'run') as run:
                 self.assertEqual(rotation.main(['--log', str(log), '--state-dir', str(state), '--bootstrap-limit', '3']), 0)
                 run.assert_called_once()
+
+    def test_explicit_logrotate_binary_and_invalid_override(self):
+        with tempfile.TemporaryDirectory() as root:
+            executable = Path(root) / 'custom-logrotate'
+            executable.write_text('#!/bin/sh\nexit 0\n')
+            executable.chmod(0o755)
+            with patch.dict(rotation.os.environ, {'ONE_CLICK_LOGROTATE_BIN': str(executable)}):
+                self.assertEqual(rotation.resolve_logrotate(), str(executable))
+                executable.unlink()
+                with self.assertRaises(RuntimeError):
+                    rotation.resolve_logrotate()
 
 
 if __name__ == '__main__':
