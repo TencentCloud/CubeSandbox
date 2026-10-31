@@ -21,6 +21,12 @@ rule list attached at sandbox-creation time:
 Upstream `proxy_read_timeout` / `proxy_send_timeout` are 2h (same
 order as CubeProxy). `proxy_connect_timeout` stays 10s.
 
+Outbound WebSocket connections (`ws://` and `wss://`) use the HTTP and
+HTTPS listeners. The proxy applies L7 rules to the opening HTTP handshake,
+then forwards WebSocket frames after a successful upgrade. Upgrade headers
+for other protocols are not forwarded. The two-hour timeouts limit gaps
+between I/O operations, not the total connection lifetime.
+
 ## How it intercepts
 
 CubeEgress runs as a host-network container and binds two TPROXY

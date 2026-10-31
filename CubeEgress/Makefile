@@ -34,6 +34,12 @@ test-lua:
 		$$LUA_BIN tests/port_scheme_test.lua && \
 		$$LUA_BIN tests/port_scheme_extra_test.lua
 
+.PHONY: test-websocket
+test-websocket: build
+	$(Q)docker run --rm --entrypoint bash \
+		-v "$(CURDIR):/workspace:ro" -w /workspace \
+		$(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) tests/websocket_test.sh
+
 .PHONY: build
 build:
 	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH))
