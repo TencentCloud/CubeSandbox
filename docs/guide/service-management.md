@@ -94,7 +94,7 @@ Dependencies only express **startup ordering** via `After=` / `Wants=`. If an up
 The two most common config entry points:
 
 - Top-level env: `/usr/local/services/cubetoolbox/.one-click.env`
-- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
+- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile.template`
 
 Restart the **service that consumes that config**:
 
@@ -111,9 +111,13 @@ sudo systemctl restart cube-sandbox-cube-api.service
 # cubeproxy/global.conf
 sudo systemctl restart cube-sandbox-cube-proxy.service
 
-# coredns/Corefile
+# coredns/Corefile.template
 sudo systemctl restart cube-sandbox-coredns.service
 ```
+
+::: warning CoreDNS: edit the template, not the rendered Corefile
+`coredns/Corefile` is a generated artifact: every `cube-sandbox-coredns.service` start re-renders it from `coredns/Corefile.template` (`coredns-prepare.sh` → `coredns-start.sh` → `render_template_atomic`), so hand-edits to the rendered file are silently overwritten on the next restart. Edit the template, then restart the service.
+:::
 
 ::: warning Editing the systemd unit file itself
 If you change `/etc/systemd/system/cube-sandbox-*.service`, run `daemon-reload` so systemd picks up the new content:

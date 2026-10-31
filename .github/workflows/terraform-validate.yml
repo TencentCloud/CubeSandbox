@@ -4,20 +4,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - 'deploy/one-click/terraform/**'
-      # The deployer also depends on the release-bundle builder and the
-      # component Dockerfile/package contexts it assembles. Changes there can
-      # break bundle layout or image builds, so validate them too (the
-      # package-layout dry run below covers the wiring).
-      - 'deploy/one-click/build-release-bundle.sh'
-      - 'deploy/one-click/build-release-bundle-builder.sh'
-      - 'deploy/one-click/lib/**'
-      - 'deploy/one-click/tests/**'
-      - 'deploy/one-click/CubeAPI/**'
-      - 'deploy/one-click/CubeMaster/**'
+      # The cloud-free one-click test suite (deploy/one-click/tests/test_*.sh)
+      # statically guards nearly the whole one-click tree: package layout
+      # (install.sh, CubeOps/, assets/, env examples, the release-bundle
+      # builders and the component Dockerfile/package contexts they assemble),
+      # runtime file safety (scripts/, systemd/ units), terraform, lib, webui,
+      # cubeproxy, and the CoreDNS Corefile template. Run it on any one-click
+      # change instead of curating a subset list that drifts every time a new
+      # guard lands.
+      - 'deploy/one-click/**'
       - 'deploy/scripts/docker-install-volume-deps.sh'
-      - 'deploy/one-click/webui/**'
-      - 'deploy/one-click/cubeproxy/**'
       - 'CubeProxy/Dockerfile'
       # bump-image.sh is the single source of truth for the hard-coded image
       # tags this deployer bakes in; test_bump_image.sh guards it.
