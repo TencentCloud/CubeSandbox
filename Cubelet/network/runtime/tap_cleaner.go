@@ -79,8 +79,8 @@ func stateRecordPath(record *StateRecord) string {
 }
 
 // closeRuntimeTapOwnership releases the Active/cleanup state's sole
-// runtime-owned TAP fd back to the idle pool registry after draining frames
-// queued during this lifecycle. Caller-owned handoff duplicates remain the
+// runtime-owned TAP fd back to the idle pool registry. Queue draining happens
+// only in verifyTapReusableFD after the final ownership check. Handoff duplicates remain the
 // shim/hypervisor's responsibility.
 func (s *NetworkController) closeRuntimeTapOwnership(state *managedState) {
 	if s == nil || state == nil || state.tap == nil {
@@ -91,7 +91,7 @@ func (s *NetworkController) closeRuntimeTapOwnership(state *managedState) {
 	if file == nil {
 		return
 	}
-	drainTapFD(file)
+	// Retain frames while an old shim may still own a duplicate of this queue.
 	s.poolTapFD(state.tap.Name, file)
 }
 
@@ -213,6 +213,11 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 		return nil
 	}
 	if err := s.requireCleaningForReuse(state); err != nil {
+		return err
+	}
+	// Do not drain the queue or remove its datapath while an old VM can still
+	// consume it. Preserve the durable deleting record and Cleaning state.
+	if err := s.checkTapUnused(state.TapName); err != nil {
 		return err
 	}
 	if state.tap == nil {

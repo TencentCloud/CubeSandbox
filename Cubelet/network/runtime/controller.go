@@ -816,8 +816,32 @@ func (s *NetworkController) cleanupCreateFailure(ctx context.Context, state *man
 // remains Ready but owner-reserved until success is committed; Active is only
 // published after creating -> success.
 func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry, error) {
-	entry, err := s.tapPool.Acquire(owner)
-	if err == nil {
+	var entry *TapPoolEntry
+	var err error
+	for {
+		entry, err = s.tapPool.Acquire(owner)
+		if err != nil {
+			break
+		}
+		// Includes legacy Ready entries recovered from before ownership checks
+		// were enforced. Quarantine rather than hand an old VM's queue to a new VM.
+		if entry.State == TapPoolReady {
+			if err := s.checkTapUnused(entry.TapName); err != nil {
+				if !errors.Is(err, errTapOwned) {
+					// A host-wide inspection failure also prevents future cleanup.
+					// Allocating fresh TAPs here would consume addresses indefinitely.
+					return nil, nil, errors.Join(
+						fmt.Errorf("cannot verify TAP ownership; refusing fresh allocation: %w", err),
+						s.tapPool.ReleaseReservation(entry, owner))
+				}
+				if quarantineErr := s.tapPool.QuarantineReservation(entry, owner); quarantineErr != nil {
+					return nil, nil, errors.Join(err, quarantineErr)
+				}
+				// A stale queue must not prevent another Ready or fresh TAP
+				// from serving this request.
+				continue
+			}
+		}
 		tap, err := tapDeviceFromEntry(entry)
 		if err != nil {
 			return nil, nil, err
@@ -834,6 +858,12 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 	ip, err := s.allocator.Allocate()
 	if err != nil {
 		return nil, nil, err
+	}
+	// A fresh queue would also become uncollectable on a host whose procfs
+	// cannot be inspected. Check before consuming an address or creating a TAP.
+	if err := s.checkTapUnused(tapName(ip.String())); err != nil {
+		s.allocator.Release(ip)
+		return nil, nil, fmt.Errorf("verify fresh TAP ownership: %w", err)
 	}
 	if err := s.cleanupConflictingTap(ip); err != nil {
 		s.allocator.Release(ip)

@@ -265,6 +265,25 @@ func (p *TapPool) ReleaseReservation(entry *TapPoolEntry, owner string) error {
 	return nil
 }
 
+// QuarantineReservation atomically detaches a busy TAP from the requester.
+// Maintenance must not release the host ports of a later successful retry.
+func (p *TapPool) QuarantineReservation(entry *TapPoolEntry, owner string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry == nil || p.byName[entry.TapName] != entry {
+		return fmt.Errorf("TAP reservation is not managed by this pool")
+	}
+	if entry.State != TapPoolReady || entry.OwnerSandboxID != owner {
+		return fmt.Errorf("TAP reservation changed before quarantine")
+	}
+	if err := entry.BeginCleanup(owner); err != nil {
+		return err
+	}
+	delete(p.byOwner, owner)
+	entry.OwnerSandboxID = "quarantine-" + entry.TapName
+	return nil
+}
+
 // CommitActive publishes a reserved Ready entry as Active for owner.
 func (p *TapPool) CommitActive(entry *TapPoolEntry, owner string) error {
 	p.mu.Lock()

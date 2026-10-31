@@ -5,16 +5,14 @@
 package diag
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/runtimeprocess"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
@@ -101,44 +99,23 @@ The start time column identifies a process incarnation, and is what
 // than failing the scan: a partial answer is useful here, and the alternative
 // is a command that fails whenever the host is busy.
 func scanTunHolders(procRoot string) ([]tunHolder, error) {
-	entries, err := os.ReadDir(procRoot)
+	descriptors, err := runtimeprocess.ScanTAPDescriptors(context.Background(), procRoot, 0, false)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", procRoot, err)
+		return nil, err
 	}
-
 	var holders []tunHolder
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue // not a process directory
+	for _, fd := range descriptors {
+		var startTime uint64
+		if id, err := utils.ReadProcessIdentityAt(procRoot, fd.PID); err == nil {
+			startTime = id.StartTime
 		}
-		fdDir := filepath.Join(procRoot, entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || target != tunDevice {
-				continue
-			}
-			// Every column must come from the same tree. Reading the
-			// identity or the command name from the real /proc while the row
-			// itself came from --proc-root would describe two different
-			// processes, and START_TIME is the value an operator copies into
-			// 'diag reclaim' to stop it acting on a recycled pid.
-			var startTime uint64
-			if id, err := utils.ReadProcessIdentityAt(procRoot, pid); err == nil {
-				startTime = id.StartTime
-			}
-			holders = append(holders, tunHolder{
-				Pid:       pid,
-				Comm:      utils.ProcessCommAt(procRoot, pid),
-				StartTime: startTime,
-				Fd:        fd.Name(),
-				Iface:     readTunIface(filepath.Join(procRoot, entry.Name(), "fdinfo", fd.Name())),
-			})
-		}
+		holders = append(holders, tunHolder{
+			Pid:       fd.PID,
+			Comm:      utils.ProcessCommAt(procRoot, fd.PID),
+			StartTime: startTime,
+			Fd:        fd.FD,
+			Iface:     fd.Interface,
+		})
 	}
 	sort.Slice(holders, func(i, j int) bool {
 		if holders[i].Pid != holders[j].Pid {
@@ -152,14 +129,6 @@ func scanTunHolders(procRoot string) ([]tunHolder, error) {
 // readTunIface returns the tap device an fd is attached to, from the "iff:"
 // line the tun driver adds to fdinfo.
 func readTunIface(fdinfoPath string) string {
-	b, err := os.ReadFile(fdinfoPath)
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if rest, ok := strings.CutPrefix(line, "iff:"); ok {
-			return strings.TrimSpace(rest)
-		}
-	}
-	return ""
+	iface, _ := runtimeprocess.ReadTAPInterface(fdinfoPath)
+	return iface
 }
