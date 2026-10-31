@@ -18,7 +18,10 @@ impl ShutdownDeadline {
             unsafe { libc::_exit(1) }
         })
         // Final teardown must remain bounded even under thread exhaustion.
-        .unwrap_or_else(|_| unsafe { libc::_exit(1) })
+        .unwrap_or_else(|error| {
+            eprintln!("cannot arm VM shutdown watchdog: {}; exiting shim", error);
+            unsafe { libc::_exit(1) }
+        })
     }
 
     fn with_action<F>(timeout: Duration, expired: F) -> Result<Self, String>

@@ -783,16 +783,23 @@ impl SandBox {
     }
 
     pub async fn destroy_sandbox(&mut self) -> CResult<()> {
-        self.destroy_sandbox_with_timeout(Duration::from_secs(30))
-            .await
+        let timeout = Duration::from_secs(30);
+        let deadline = ShutdownDeadline::arm(timeout);
+        let result = self.destroy_sandbox_with_timeout(timeout).await;
+        deadline.complete();
+        result
     }
 
     pub async fn destroy_sandbox_after_failed_create(&mut self) -> CResult<()> {
+        // Bound the entire rollback, including watchers, log drains and files.
+        let timeout = Duration::from_secs(3);
+        let started = Instant::now();
+        let deadline = ShutdownDeadline::arm(timeout);
         // A failed first Create makes this shim terminal. Stop tasks that can
         // retain the old agent or mutate its state before joining the VMM.
         self.stop_watchers().await;
         let result = self
-            .destroy_sandbox_with_timeout(Duration::from_secs(3))
+            .destroy_sandbox_with_timeout(timeout.saturating_sub(started.elapsed()))
             .await;
         self.stop_log_forward_detached().await;
         let _ = self.disconnect_agent().await;
@@ -810,6 +817,7 @@ impl SandBox {
                 }
             }
         }
+        deadline.complete();
         result
     }
 
@@ -819,14 +827,15 @@ impl SandBox {
             ..Default::default()
         };
 
+        *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
         if self.ch.is_none() {
+            *self.state.lock().await = SandBoxState::Exited;
             infof!(self.log, "ch instance is None");
             return Ok(());
         }
         // Failed-Create cleanup has a short budget. Ordinary shutdown allows
         // more time for VMM completion before the process-level fallback.
         let started = Instant::now();
-        let deadline = ShutdownDeadline::arm(timeout);
         let mut ch = self.ch.as_mut().unwrap().lock().await;
         if *self.state.lock().await != SandBoxState::Exited {
             if let Some(client) = self.client.as_ref() {
@@ -838,24 +847,32 @@ impl SandBox {
                         .await
                 };
                 match tokio::time::timeout(Duration::from_millis(200), graceful).await {
-                    Ok(Ok(_)) => {
-                        let remaining = timeout
-                            .saturating_sub(started.elapsed())
-                            .saturating_sub(Duration::from_secs(1));
-                        let graceful_exit = async {
-                            while *self.state.lock().await != SandBoxState::Exited {
-                                match ch.wait_notify(Duration::from_secs(1)).await {
-                                    Ok(CH::NotifyEvent::VmShutdown) => break,
-                                    Ok(_) => continue,
-                                    Err(_) => break,
-                                }
-                            }
-                        };
-                        let _ = tokio::time::timeout(remaining, graceful_exit).await;
-                    }
-                    Ok(Err(e)) => warnf!(self.log, "guest destroy failed; shutting down VMM:{}", e),
-                    Err(_) => warnf!(self.log, "guest destroy timed out; shutting down VMM"),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warnf!(
+                        self.log,
+                        "guest destroy failed; waiting for shutdown notification:{}",
+                        e
+                    ),
+                    Err(_) => warnf!(
+                        self.log,
+                        "guest destroy timed out; waiting for shutdown notification"
+                    ),
                 }
+                // A timed-out reply does not prove the guest missed the request.
+                // Preserve a bounded grace period before host-side shutdown.
+                let remaining = timeout
+                    .saturating_sub(started.elapsed())
+                    .saturating_sub(Duration::from_secs(1));
+                let graceful_exit = async {
+                    while *self.state.lock().await != SandBoxState::Exited {
+                        match ch.wait_notify(Duration::from_secs(1)).await {
+                            Ok(CH::NotifyEvent::VmShutdown) => break,
+                            Ok(_) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(remaining, graceful_exit).await;
             }
         }
         // Even Exited / missing-agent sandboxes can retain a live VMM. Do not
@@ -863,9 +880,8 @@ impl SandBox {
         let result = ch.shutdown_and_join().await;
         // A completed join can report a VMM error after releasing its handles.
         // Return that error through the caller instead of triggering hard exit.
-        deadline.complete();
-        result?;
         *self.state.lock().await = SandBoxState::Exited;
+        result?;
         infof!(self.log, "destroy sandbox finish");
         Ok(())
     }
