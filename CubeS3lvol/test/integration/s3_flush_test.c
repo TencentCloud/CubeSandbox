@@ -200,6 +200,23 @@ fake_complete_all(struct fake_uploader *f, int status)
 	}
 }
 
+/* Complete one chunk while leaving unrelated uploads in flight. */
+static void
+fake_complete_chunk(struct fake_uploader *f, uint64_t chunk_index, int status)
+{
+	for (uint32_t i = 0; i < f->n_pending; i++) {
+		if (f->pending[i].chunk_index == chunk_index) {
+			struct fake_pending request = f->pending[i];
+
+			f->pending[i] = f->pending[--f->n_pending];
+			f->completed++;
+			request.cb(request.cb_arg, status);
+			return;
+		}
+	}
+	check_true("requested chunk has a pending upload", false, NULL);
+}
+
 /* ==========================================================================
  * Sections
  * ========================================================================== */
@@ -801,6 +818,7 @@ test_flusher(void)
 	check_u64("retry starts after the initial backoff", fake.started, 2);
 	s3_flusher_get_stats(fl, &fstats);
 	check_u64("failure counted", fstats.failures, 1);
+	uint64_t second_failure_at = spdk_get_ticks();
 	fake_complete_all(&fake, -EIO);
 	s3_flusher_kick(fl);
 	check_u64("second failure increases the backoff", fake.started, 2);
@@ -810,6 +828,8 @@ test_flusher(void)
 		usleep(1000);
 	}
 	check_u64("second retry starts after doubled backoff", fake.started, 3);
+	check_true("second retry waited at least 200 ms",
+		   spdk_get_ticks() - second_failure_at >= spdk_get_ticks_hz() / 5, NULL);
 
 	fake_complete_all(&fake, 0);
 	check_u64("retried twice", fake.rounds[2], 3);
@@ -817,6 +837,32 @@ test_flusher(void)
 	check_true("the retried upload still had the data",
 		   check_pattern(fake.image[2], 1, 2 * BLOCKS_PER_CHUNK, 0x81),
 		   NULL);
+
+	/* A late success from another chunk must not reset the failed chunk's
+	 * next delay, even after the original cooldown has elapsed. */
+	{
+		fill_pattern(blk, 1, BLOCKS_PER_CHUNK, 0x82);
+		s3_overlay_write(ov, BLOCKS_PER_CHUNK, 1, blk, 405);
+		fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0x83);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 406);
+		s3_flusher_kick(fl);
+		check_u64("two independent uploads are pending", fake.n_pending, 2);
+		fake_complete_chunk(&fake, 2, -EIO);
+		usleep(120000);
+		fake_complete_chunk(&fake, 1, 0);
+		uint64_t failed_again = spdk_get_ticks();
+		fake_complete_chunk(&fake, 2, -EIO);
+		uint64_t before_retry = fake.started;
+		uint64_t limit = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+		while (fake.started == before_retry && spdk_get_ticks() < limit) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_u64("failed chunk retries after unrelated completion", fake.started, before_retry + 1);
+		check_true("unrelated success preserves doubled delay",
+			   spdk_get_ticks() - failed_again >= spdk_get_ticks_hz() / 5, NULL);
+		fake_complete_all(&fake, 0);
+	}
 
 	/* --- drain --- */
 	printf("\n[9] drain waits for everything to reach S3\n");

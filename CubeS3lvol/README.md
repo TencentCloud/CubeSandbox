@@ -645,3 +645,7 @@ During a bounded flusher drain, failure backoff restarts at 100 ms and is capped
 at one second, allowing uploads to recover before the drain deadline. Ordinary
 background flushing retains its 30-second cap. Neither path retries a failed
 synchronous upload again inside the same backoff window.
+
+A successful upload clears the failure sequence only when no upload remains in
+flight and the overlay has no dirty data. A delayed success for another chunk
+cannot reset the backoff of a chunk that is still failing.

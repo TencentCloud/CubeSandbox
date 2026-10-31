@@ -216,16 +216,7 @@ flusher_upload_done(void *cb_arg, int status)
 	if (status == 0) {
 		f->stats.chunks_flushed++;
 		f->stats.blocks_flushed += req->view.nblocks;
-		/* An unrelated in-flight success must not cancel a failure cooldown. */
-		if (!f->retry_after || spdk_get_ticks() >= f->retry_after) {
-			if (f->failures_since_success) {
-				SPDK_NOTICELOG("S3 upload succeeded; retry backoff cleared after %" PRIu64
-					       " failed uploads\n", f->failures_since_success);
-			}
-			f->retry_after = 0;
-			f->retry_delay_us = 0;
-			f->failures_since_success = 0;
-		}
+
 	} else {
 		uint64_t now = spdk_get_ticks();
 		uint64_t hz = spdk_get_ticks_hz();
@@ -253,7 +244,7 @@ flusher_upload_done(void *cb_arg, int status)
 		}
 		if (!f->last_failure_log || now - f->last_failure_log >= 30 * hz) {
 			SPDK_ERRLOG("Failed to flush chunk %" PRIu64 " to S3: %d "
-				    "(%" PRIu64 " failures since success, kept dirty; "
+				    "(%" PRIu64 " failures since recovery, kept dirty; "
 				    "retry backoff %" PRIu64 " us)\n",
 				    chunk_index, status, f->failures_since_success,
 				    f->retry_delay_us);
@@ -265,6 +256,17 @@ flusher_upload_done(void *cb_arg, int status)
 	 * them on failure. Either way it must happen before truncation, which
 	 * reads the overlay's oldest seq. */
 	s3_overlay_flush_end(f->overlay, chunk_index, status == 0);
+	/* A delayed success for another chunk cannot prove failed data recovered.
+	 * Clear the outage only after all dirty work has drained. */
+	if (status == 0 && f->in_flight == 0 && !s3_overlay_has_dirty(f->overlay)) {
+		if (f->failures_since_success) {
+			SPDK_NOTICELOG("S3 upload queue recovered after %" PRIu64
+				       " failed uploads\n", f->failures_since_success);
+		}
+		f->retry_after = 0;
+		f->retry_delay_us = 0;
+		f->failures_since_success = 0;
+	}
 
 	free(req);
 
