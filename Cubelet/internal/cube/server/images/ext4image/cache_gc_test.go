@@ -100,6 +100,12 @@ func TestCacheGCEvictsLRUAndRehydrates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Rehydration runs with the same enabled GC policy as production. Leave
+	// enough free space above the high watermark for this download reservation.
+	previous := activeCacheGC.Load()
+	g.Activate()
+	t.Cleanup(func() { activeCacheGC.Store(previous) })
+	g.space = func() (cacheDiskSpace, error) { return cacheDiskSpace{10000, 6000}, nil }
 	// No current spec and no old signed URL: the retained stable source suffices.
 	if err := EnsurePmemRootfs(context.Background(), "cubebox", "old"); err != nil {
 		t.Fatal(err)
