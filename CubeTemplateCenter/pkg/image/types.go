@@ -23,6 +23,11 @@ type SourceSpec struct {
 }
 
 type BuildOptions struct {
+	// BuildMarkerDir identifies the resolved store protected by the caller
+	// through upload and publication. BuildExt4 must not remove its marker
+	// or silently switch to a different store. Empty means BuildExt4 owns it.
+	BuildMarkerDir string
+
 	ArtifactID string
 	// PostRootfsExport is invoked after the image rootfs has been exported to
 	// the working directory but before mkfs.ext4 runs, so callers can mutate

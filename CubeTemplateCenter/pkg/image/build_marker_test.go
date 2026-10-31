@@ -233,9 +233,8 @@ func TestDescribeArtifactBuildMarker(t *testing.T) {
 func TestMarkArtifactBuildInProgressRejectsUncreatableDir(t *testing.T) {
 	// A path whose parent is a regular file cannot be turned into a directory.
 	// Marking must report the error rather than panic, and the returned release
-	// must stay safe to call — BuildExt4 defers it unconditionally and treats
-	// the error as a warning, because losing the guard is better than failing
-	// a build.
+	// must stay safe to call. BuildExt4 rejects marker failures so no build
+	// can write an unprotected store directory.
 	base := t.TempDir()
 	blocker := filepath.Join(base, "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {

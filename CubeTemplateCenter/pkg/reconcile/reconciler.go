@@ -86,8 +86,9 @@ type ArtifactDeleter interface {
 // Reconciler periodically fails jobs that were abandoned mid-build and sweeps
 // artifacts marked CLEANUP_PENDING whose immediate delete never arrived.
 type Reconciler struct {
-	db       *gorm.DB
-	interval time.Duration
+	withReconcileLock func(context.Context, *gorm.DB, func() error) error
+	db                *gorm.DB
+	interval          time.Duration
 	// Tiered staleness thresholds (see constants above).
 	pendingStaleAfter time.Duration
 	pullingStaleAfter time.Duration
@@ -141,6 +142,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
+	// Local disks are replica-private even when metadata/S3 are shared. Run
+	// this outside the cross-replica lock, including once after startup.
+	r.cleanupLocalArtifacts(ctx)
 
 	for {
 		select {
@@ -148,6 +152,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 			log.G(ctx).Infof("templatecenter reconciler stopped")
 			return
 		case <-ticker.C:
+			r.cleanupLocalArtifacts(ctx)
 			if err := r.SweepOnce(ctx); err != nil {
 				log.G(ctx).Errorf("reconciler sweep fail: %v", err)
 			}
@@ -155,10 +160,22 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
+func (r *Reconciler) cleanupLocalArtifacts(ctx context.Context) {
+	if cleaner, ok := r.deleter.(interface{ CleanupLocalOrphans(context.Context) error }); ok {
+		if err := cleaner.CleanupLocalOrphans(ctx); err != nil {
+			log.G(ctx).Errorf("local artifact cache cleanup failed: %v", err)
+		}
+	}
+}
+
 // SweepOnce runs a single sweep under the cross-replica session lock. It is
 // exported so operators can trigger it from a test harness.
 func (r *Reconciler) SweepOnce(ctx context.Context) error {
-	return lock.WithReconcileLock(ctx, r.db, func() error {
+	withLock := r.withReconcileLock
+	if withLock == nil {
+		withLock = lock.WithReconcileLock
+	}
+	return withLock(ctx, r.db, func() error {
 		if err := r.failStaleJobs(ctx); err != nil {
 			return err
 		}

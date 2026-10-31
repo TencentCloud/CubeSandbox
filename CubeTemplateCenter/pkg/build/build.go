@@ -302,10 +302,35 @@ func runBuildLocked(
 		}
 	}
 
+	// Keep the store protected until upload and the BUILT callback finish.
+	// The callback persists the artifact before returning; BuildExt4 alone
+	// cannot delimit the lifetime of these local bytes.
+	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
+	if err != nil {
+		if !pullProgressFlushed {
+			pullProgress.flush(false)
+		}
+		errMsg := fmt.Sprintf("resolve artifact store: %v", err)
+		logger.Errorf(errMsg)
+		reportFailed(templatecenter.JobPhaseUnpacking, errMsg)
+		return err
+	}
+	releaseMarker, err := image.MarkArtifactBuildInProgress(storeDir)
+	if err != nil {
+		if !pullProgressFlushed {
+			pullProgress.flush(false)
+		}
+		errMsg := fmt.Sprintf("protect artifact publication: %v", err)
+		logger.Errorf(errMsg)
+		reportFailed(templatecenter.JobPhaseUnpacking, errMsg)
+		return fmt.Errorf("protect artifact publication: %w", err)
+	}
+	defer releaseMarker()
+
 	// Step 7: Build ext4 (export rootfs, bake envd + CA, mkfs)
 	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
 	var caBakeResult cube_egress_ca.Result
-	opts := image.BuildOptions{ArtifactID: artifactID}
+	opts := image.BuildOptions{ArtifactID: artifactID, BuildMarkerDir: storeDir}
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
 		if _, err := templatecenter.InjectEnvdPayloadIntoRootfs(ctx, rootfsDir, envdPayload); err != nil {
 			return err
@@ -330,6 +355,8 @@ func runBuildLocked(
 		// Remove the half-written store dir so a failed build does not leak
 		// disk. BuildExt4 cleans up on its own error paths, but a partially
 		// created dir (or a PostRootfsExport failure) can survive.
+		// Cleanup must not mistake this failed build's marker for a peer owner.
+		releaseMarker()
 		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}

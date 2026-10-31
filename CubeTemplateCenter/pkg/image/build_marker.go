@@ -52,9 +52,8 @@ const artifactBuildMarkerTTL = 2 * time.Hour
 // MarkArtifactBuildInProgress publishes the marker for dir and returns the
 // function that removes it. The returned function is always safe to call.
 //
-// The marker is best-effort by design: if it cannot be written the build still
-// proceeds (losing a guard is better than failing a build), so the caller may
-// ignore the error beyond logging it.
+// Callers that can race with orphan cleanup must stop if the marker cannot
+// be written. Keep the marker until local readers and publication finish.
 func MarkArtifactBuildInProgress(dir string) (func(), error) {
 	if dir == "" {
 		return func() {}, nil
