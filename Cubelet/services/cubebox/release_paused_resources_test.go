@@ -349,3 +349,19 @@ func TestResumeLockedRejectsWithoutSkipAdmissionUnderCapacityPressure(t *testing
 	assert.Equal(t, errorcode.ErrorCode_Conflict, result.ret.RetCode)
 	assert.Zero(t, task.resumeCalls, "task.Resume must not be called when admission rejects")
 }
+
+func TestAdmitResumeUsesAutomaticCPUQuota(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	host := config.GetHostConf()
+	before := host.Quota
+	t.Cleanup(func() { host.Quota = before })
+	host.Quota.PausedResourceReleaseRatio = 1
+	host.Quota.Cpu = 0
+	host.Quota.Mem = "4Gi"
+	sb := sandboxWithResourceForTest("automatic-quota", cubeboxstore.Status{PausedAt: time.Now().UnixNano()}, "1000000000m", "1Gi", 0, 0, 0)
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+	result := s.admitResume(context.Background(), sb)
+	require.NotNil(t, result)
+	require.Contains(t, result.RetMsg, "cpu quota")
+}

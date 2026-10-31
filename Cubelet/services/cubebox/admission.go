@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/hostquota"
@@ -16,9 +17,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
+// Missing runtime metadata belongs to the conservative MicroVM path. Both
+// runtimes populate OciRuntime; only an explicit non-Cube type opts out.
+func isOCISandbox(sb *cubeboxstore.CubeBox) bool {
+	return sb != nil && sb.OciRuntime != nil && sb.OciRuntime.Type != "" &&
+		!strings.HasPrefix(sb.OciRuntime.Type, "io.containerd.cube")
+}
+
 func (l *local) admitAndSave(ctx context.Context, sb *cubeboxstore.CubeBox, replacing ...bool) error {
 	// OCI/runc containers do not use the MicroVM overhead/admission contract.
-	if sb != nil && sb.OciRuntime != nil {
+	if isOCISandbox(sb) {
 		if err := l.cubeboxManger.Save(ctx, sb, cubes.WithNoEvent); err != nil {
 			return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
 		}
@@ -79,7 +87,7 @@ func checkCreateQuota(existing []*cubeboxstore.CubeBox, incoming *cubeboxstore.C
 		if sb.ID == incoming.ID {
 			return fmt.Errorf("sandbox %s already exists during admission", incoming.ID)
 		}
-		if status := sb.GetStatus(); status != nil && isContainerInGoodState(status.Get().State()) && sb.ResourceWithOverHead == nil && sb.OciRuntime == nil {
+		if status := sb.GetStatus(); status != nil && isContainerInGoodState(status.Get().State()) && sb.ResourceWithOverHead == nil && !isOCISandbox(sb) {
 			return fmt.Errorf("existing sandbox %s has no host resource demand", sb.ID)
 		}
 	}
