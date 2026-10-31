@@ -58,6 +58,8 @@ struct s3_flusher {
 
 	/* Set only by destroy so no new upload is started. */
 	bool                        stopping;
+	/* Synchronous completions leave scheduling to the active outer loop. */
+	bool                        scheduling;
 
 	/* Reversible scheduling gate used by attach and hot prepare. */
 	bool                        suspended;
@@ -294,9 +296,11 @@ s3_flusher_kick(struct s3_flusher *f)
 {
 	bool force;
 
-	if (!f) {
+	if (!f || f->scheduling) {
 		return;
 	}
+
+	f->scheduling = true;
 
 	/* Two reasons to set the overlay's hold-back policy aside.
 	 *
@@ -327,6 +331,7 @@ s3_flusher_kick(struct s3_flusher *f)
 		flusher_start_one(f, chunk_index);
 	}
 
+	f->scheduling = false;
 	flusher_check_drain(f);
 }
 

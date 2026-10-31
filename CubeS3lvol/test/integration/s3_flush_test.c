@@ -138,6 +138,8 @@ struct fake_uploader {
 	uint32_t started;
 	uint32_t completed;
 	uint32_t max_in_flight;
+	uint32_t callback_depth;
+	uint32_t max_callback_depth;
 
 	uint32_t rounds[TEST_CHUNKS];
 
@@ -168,7 +170,12 @@ fake_upload(void *vctx, const struct s3_overlay_flush_view *view,
 
 	if (f->auto_complete) {
 		f->completed++;
+		f->callback_depth++;
+		if (f->callback_depth > f->max_callback_depth) {
+			f->max_callback_depth = f->callback_depth;
+		}
 		cb(cb_arg, f->forced_status);
+		f->callback_depth--;
 		return;
 	}
 
@@ -892,6 +899,27 @@ test_flusher(void)
 		check_u64("old generation failure does not defer replacement", fake.rounds[2], failed_rounds + 2);
 		fake_complete_all(&fake, 0);
 		check_true("replacement data reaches the uploader", !s3_overlay_has_dirty(ov), NULL);
+	}
+
+	/* Multiple inline failures must return to the scheduling loop instead of
+	 * adding one stack frame per queued chunk. */
+	{
+		for (uint32_t i = 0; i < 4; i++) {
+			fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, i * BLOCKS_PER_CHUNK, 0x87);
+			s3_overlay_write(ov, i * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 420 + i);
+		}
+		uint32_t before = fake.started;
+		fake.max_callback_depth = 0;
+		fake.auto_complete = true;
+		fake.forced_status = -EIO;
+		s3_flusher_kick(fl);
+		check_u64("each failing chunk gets one attempt", fake.started, before + 4);
+		check_u64("inline failures do not nest callbacks", fake.max_callback_depth, 1);
+		fake.auto_complete = false;
+		fake.forced_status = 0;
+		for (uint32_t i = 0; i < 4; i++) {
+			s3_overlay_drop_chunk(ov, i);
+		}
 	}
 
 	/* --- drain --- */
