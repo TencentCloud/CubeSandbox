@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import os
 from pathlib import Path
@@ -5,6 +6,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -168,3 +170,51 @@ class InterpreterLaunchTest(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
         for child in children:
             child.terminate.assert_called_once()
+
+
+class PreboundUvicornTest(unittest.TestCase):
+    def test_http_is_ready_only_after_lifespan(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        async def app(scope, receive, send):
+            if scope['type'] == 'lifespan':
+                await receive()
+                entered.set()
+                while not release.is_set():
+                    await asyncio.sleep(0.01)
+                await send({'type': 'lifespan.startup.complete'})
+                await receive()
+                await send({'type': 'lifespan.shutdown.complete'})
+            else:
+                await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+                await send({'type': 'http.response.body', 'body': b'ready'})
+
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(socket.SOMAXCONN)
+            server = launch.uvicorn.Server(launch.uvicorn.Config(app, lifespan='on', log_level='error'))
+            worker = threading.Thread(target=server.run, kwargs={'sockets': [listener]}, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3), 'Uvicorn did not enter startup')
+                with socket.create_connection(listener.getsockname(), timeout=1) as client:
+                    client.sendall(b'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                    client.settimeout(0.1)
+                    with self.assertRaises(socket.timeout):
+                        client.recv(4096)
+                    release.set()
+                    client.settimeout(3)
+                    response = b''
+                    while True:
+                        data = client.recv(4096)
+                        if not data:
+                            break
+                        response += data
+                    self.assertIn(b'200 OK', response)
+                    self.assertIn(b'ready', response)
+            finally:
+                release.set()
+                server.should_exit = True
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive(), 'Uvicorn shutdown did not complete')

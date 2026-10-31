@@ -124,3 +124,9 @@ SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e \
 ```
 
 `CUBE_TEMPLATE_ID` reuses the SDK compatibility suite's existing template selection mechanism; `--cube-template-id <template_id>` is also supported. The environment-inheritance case is skipped by default before creating a sandbox and runs only when `SDK_E2E_RUN_CODE_ENV_INHERITANCE=true` is explicitly set for a compatible template.
+
+Readiness probes must request the HTTP `/health` endpoint and require a successful
+response. The launcher reserves the TCP listener before starting dependencies;
+a successful TCP connection alone does not mean startup has completed.
+`JUPYTER_LOG_FILE` selects the Jupyter log path (default `/var/log/jupyter.log`);
+its parent directory is created before launching the process.

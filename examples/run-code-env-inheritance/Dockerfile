@@ -6,5 +6,8 @@ FROM ${SANDBOX_CODE_IMAGE}
 COPY lightweight-code-interpreter/server.py /opt/lightweight-code-interpreter/server.py
 COPY lightweight-code-interpreter/launch.py /opt/lightweight-code-interpreter/launch.py
 
+RUN test -x /usr/bin/tini && command -v python && command -v jupyter \
+    && python -c "import uvicorn; import jupyter_server"
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "/opt/lightweight-code-interpreter/launch.py"]
