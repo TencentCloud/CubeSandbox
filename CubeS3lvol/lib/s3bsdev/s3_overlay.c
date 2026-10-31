@@ -42,9 +42,9 @@
  *
  *   So chunks are kept in two queues instead: ripe_q for the ones the policy is
  *   done with, aging_q in dirty-time order for the rest. next_dirty drains
- *   ripe_q first and then considers aging_q in age order. Selection skips
- *   chunks in failure cooldown; without failures it takes the first eligible
- *   entry. A chunk moves between queues as its dirty count crosses the
+ *   an older forced or expired aging chunk before younger ripe chunks. Selection
+ *   skips chunks in failure cooldown; without failures it examines only the
+ *   queue heads. A chunk moves between queues as its dirty count crosses the
  *   threshold.
  */
 
@@ -1130,8 +1130,8 @@ s3_overlay_chunk_is_flushing(struct s3_overlay *ov, uint64_t chunk_index)
 /* Whether the oldest chunk still being held back should be let go anyway.
  *
  * Asked about the oldest chunk outside its retry cooldown. Fullness is not
- * considered here: a full chunk moved to ripe_q, and next_dirty drains that
- * queue first, so anything still on aging_q is by definition not full. */
+ * considered here: a full chunk moved to ripe_q, so anything still on aging_q
+ * is by definition not full. */
 static bool
 overlay_aging_head_expired(struct s3_overlay *ov, struct overlay_chunk *c)
 {

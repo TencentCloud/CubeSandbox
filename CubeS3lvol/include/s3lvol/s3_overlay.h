@@ -348,7 +348,7 @@ int s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
  *
  * \return 0 and fills \c view; -ENOENT nothing dirty; -EBUSY a flush is already
  *         running on this chunk (per-chunk single flight is what serialises the
- *         read-modify-write).
+ *         read-modify-write); -EAGAIN waiting for WAL durability or retry cooldown.
  */
 int s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 			   struct s3_overlay_flush_view *view);

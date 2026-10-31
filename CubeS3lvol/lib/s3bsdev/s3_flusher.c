@@ -65,6 +65,8 @@ struct s3_flusher {
 
 	/* Set only by destroy so no new upload is started. */
 	bool                        stopping;
+	/* Synchronous completions leave scheduling to the active outer loop. */
+	bool                        scheduling;
 
 	/* Reversible scheduling gate used by attach and hot prepare. */
 	bool                        suspended;
@@ -242,7 +244,6 @@ flusher_upload_done(void *cb_arg, int status)
 	if (status == 0) {
 		f->stats.chunks_flushed++;
 		f->stats.blocks_flushed += req->view.nblocks;
-
 	} else {
 		uint64_t now = spdk_get_ticks();
 		uint64_t hz = spdk_get_ticks_hz();
@@ -298,7 +299,8 @@ flusher_submit_req(struct s3_flusher *f, struct flush_req *req,
 	rc = s3_overlay_flush_begin(f->overlay, chunk_index, &req->view);
 	if (rc != 0) {
 		/* -ENOENT: the chunk was unmapped or already flushed between
-		 * being queued and now. -EBUSY cannot happen -- a chunk with a
+		 * being queued and now. -EAGAIN: durability or retry cooldown.
+		 * -EBUSY cannot happen -- a chunk with a
 		 * live flush is never on the queue. */
 		if (rc != -ENOENT && rc != -EAGAIN) {
 			SPDK_ERRLOG("Unexpected %s flush_begin(%" PRIu64
@@ -402,9 +404,11 @@ s3_flusher_kick(struct s3_flusher *f)
 {
 	bool force_all, force_head;
 
-	if (!f) {
+	if (!f || f->scheduling) {
 		return;
 	}
+
+	f->scheduling = true;
 
 	/* Two reasons to set the overlay's hold-back policy aside.
 	 *
@@ -441,6 +445,7 @@ s3_flusher_kick(struct s3_flusher *f)
 		}
 	}
 
+	f->scheduling = false;
 	flusher_check_drain(f);
 }
 
