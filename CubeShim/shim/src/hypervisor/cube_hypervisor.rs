@@ -14,7 +14,7 @@ use cube_hypervisor::{
     VmRemoveDeviceData,
 };
 use std::sync::mpsc::{channel, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -275,6 +275,21 @@ impl CubeHypervisor {
         Err("Receiver is uninitialized".to_string())
     }
 
+    pub async fn wait_shutdown(&self, timeout: Duration) -> CResult<bool> {
+        let deadline = Instant::now() + timeout;
+        let recv = self
+            .ev_receiver
+            .as_ref()
+            .ok_or("Receiver is uninitialized")?;
+        let rx = recv.lock().await;
+        tokio::task::block_in_place(|| {
+            crate::common::shutdown::wait_for_event_until(&rx, deadline, |event| {
+                matches!(event, NotifyEvent::VmShutdown)
+            })
+        })
+        .map_err(|error| format!("Wait for VM shutdown: {}", error))
+    }
+
     pub fn try_wait_notify(&self) -> CResult<NotifyEvent> {
         if let Some(recv) = &self.ev_receiver {
             let rx = {
@@ -292,9 +307,22 @@ impl CubeHypervisor {
         Err("Receiver is uninitialized".to_string())
     }
 
-    pub async fn join(&mut self) -> CResult<()> {
-        let mut ch = self.ch.as_mut().unwrap().lock().await;
-        ch.join().map_err(|e| format!("join ch failed:{}", e))
+    /// Final teardown, including when the guest agent cannot shut down its VM.
+    /// The caller must hold a process-level ShutdownDeadline: neither the VMM
+    /// request nor the synchronous join can be cancelled by an async timeout.
+    pub async fn shutdown_and_join(&mut self) -> CResult<()> {
+        let Some(ch) = self.ch.take() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut ch = ch.blocking_lock();
+            // A disconnected request channel can also mean the VMM has
+            // already stopped. Always join so all disk/TAP owners are gone.
+            let _ = ch.send_request(ApiRequest::VmmShutdown);
+            ch.join().map_err(|e| format!("join ch failed:{}", e))
+        })
+        .await
+        .map_err(|e| format!("shutdown worker failed:{}", e))?
     }
 
     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
