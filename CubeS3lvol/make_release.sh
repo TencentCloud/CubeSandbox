@@ -269,9 +269,9 @@ mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/scripts" || die "cannot create ${PKG_DIR}"
 log "bin/s3lvol_tgt"
 install -m 0755 "${TGT_BIN}" "${PKG_DIR}/bin/s3lvol_tgt" || die "install failed"
 
-log "scripts/ (start, stop, hot stop, recovery, purge, common, cpumask)"
+log "scripts/ (start, stop, hot stop, recovery, purge, common, cpumask, log rotation)"
 for f in rcow_common.sh rcow_cpumask.sh rcow_start.sh rcow_stop.sh rcow_upgrade.sh \
-	rcow_recovery.sh rcow_purge.sh; do
+	rcow_recovery.sh rcow_purge.sh rotate_logs.py; do
 	[ -f "${REPO_ROOT}/scripts/${f}" ] || die "missing scripts/${f}"
 	install -m 0755 "${REPO_ROOT}/scripts/${f}" "${PKG_DIR}/scripts/${f}" ||
 		die "install failed for ${f}"

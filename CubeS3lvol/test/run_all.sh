@@ -361,6 +361,7 @@ echo ""
 # Integration, no S3
 # --------------------------------------------------------------------------
 echo "--- offline tools"
+run_suite log_rotation python3 ./test/test_log_rotation.py
 run_suite s3_bucket_selftest python3 ./test/tools/s3_bucket.py --self-test
 run_suite isa_baseline ./test/tools/test_isa_baseline.sh
 run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh

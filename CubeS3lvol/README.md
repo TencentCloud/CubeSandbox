@@ -393,6 +393,33 @@ Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `S3LVOL_CRT_LOG_LEVEL=trace|debug|info|warn|error|none`; `trace` prints every
 request header and the canonical string of the SigV4 signature.
 
+When storage is enabled and `logrotate` is installed, one-click enables
+`cube-sandbox-s3lvol-logrotate.timer` alongside the role targets. The timer
+stops with the stack.
+It checks the active file every minute, rotating at 256 MiB and retaining eight
+archives (compressed after the next rotation). This is a periodic size check,
+not a strict instantaneous byte ceiling. Archives go to a per-source directory
+under `rotated/` below the log directory. `RCOW_LOG_ARCHIVE_DIR` overrides the
+archive base directory. The `logrotate` executable is required.
+
+Rotation uses `copytruncate` to avoid restarting storage or replacing its open
+file descriptor. This has a small concurrent-tail log-loss window; it does not
+discard WAL or volume data. Existing timestamped archives are not deleted by
+this policy. A previously unmanaged active log larger than 1 GiB is deliberately refused:
+stop the timer, run the installed `rotate_logs.py` helper with the same log and
+archive settings and `--archive-oversized`, then verify the archive before
+restarting the timer. The explicit bootstrap option still checks file identity
+and available archive space. Acceptance is recorded before the first rotation,
+so a temporary failure does not permanently block an accepted log after growth.
+Insufficient archive space leaves the active file untouched. The helper supports
+`--dry-run` and explicit `--log`, `--archive-dir`, `--size`, and `--retain`
+settings. Dry-run prints the policy without creating state or archive directories
+or invoking logrotate. Same-filesystem rotation reserves 1 MiB beyond the active
+log size; a separate archive filesystem reserves 8 GiB. Set
+`RCOW_LOG_RESERVE_BYTES` in the service environment or pass `--reserve-bytes`
+to override either default. Archive directory names must not contain whitespace; use
+`--archive-dir` if the log parent directory contains spaces.
+
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to
 determine whether an object exists.
 

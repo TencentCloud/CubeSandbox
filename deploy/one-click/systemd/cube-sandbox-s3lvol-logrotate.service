@@ -1,0 +1,13 @@
+[Unit]
+Description=Bound CubeS3lvol active logs without restarting storage
+ConditionPathExists=/usr/local/services/cubetoolbox/CubeS3lvol/scripts/rotate_logs.py
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/bin/env python3 /usr/local/services/cubetoolbox/CubeS3lvol/scripts/rotate_logs.py
+TimeoutStartSec=6min
+Nice=10
+IOSchedulingClass=idle
