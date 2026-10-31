@@ -479,7 +479,7 @@ single replica allowed to run idle sweep/kill and stale-proxy pruning. The
 lease uses single-key Redis transactions and requires no Kubernetes RBAC.
 Production deployments should pair this with Sentinel, external native Redis
 Cluster (`redis.clusterNodes`, DB 0), or managed HA Redis. See the
-[Cluster configuration and migration guide](../../../docs/zh/guide/redis-cluster.md);
+[Cluster configuration and migration guide](../../../docs/guide/redis-cluster.md);
 the chart's built-in single-replica Redis remains a shared failure point.
 Because Redis replication is asynchronous, a Redis failover does not provide
 strict fencing for an already in-flight leader operation. The new leader

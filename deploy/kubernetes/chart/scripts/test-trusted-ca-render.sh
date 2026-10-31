@@ -93,6 +93,14 @@ grep -q 'mountPath: /etc/cube/trusted-ca' "$TMP_DIR/on.yaml" \
 grep -q 'checksum/trusted-ca' "$TMP_DIR/on.yaml" \
   && ok || bad "checksum annotation missing on the inline-certs path"
 
+# Both rollout checksums must survive in a single pod-annotations mapping.
+# Restrict this check to the rendered Deployment, not the template source.
+awk '/^# Source: / { keep = ($0 ~ /templatecenter.yaml/) } keep' "$TMP_DIR/on.yaml" >"$TMP_DIR/on.tc.yaml"
+[ "$(grep -c '^      annotations:$' "$TMP_DIR/on.tc.yaml")" -eq 1 ] \
+  && grep -q '^        checksum/runtime-config:' "$TMP_DIR/on.tc.yaml" \
+  && grep -q '^        checksum/trusted-ca:' "$TMP_DIR/on.tc.yaml" \
+  && ok || bad "runtime and CA checksums must share one annotations mapping"
+
 # --- 3. Cert change -> checksum change (rolls the Deployment) -------------
 sed 's/guard-ca-one/guard-ca-one-rotated/' "$TMP_DIR/certs-values.yaml" >"$TMP_DIR/certs-rotated.yaml"
 render rotated --set trustedCACerts.enabled=true -f "$TMP_DIR/certs-rotated.yaml"
