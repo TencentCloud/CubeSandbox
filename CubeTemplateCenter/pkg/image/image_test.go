@@ -1007,6 +1007,25 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workRoot, "artifact-stream")); !os.IsNotExist(err) {
 		t.Fatalf("workDir should be removed after streaming success, stat err=%v", err)
 	}
+	// The caller may still be uploading or publishing when BuildExt4 returns.
+	protected := filepath.Join(storeRoot, "artifact-publication")
+	release, err := MarkArtifactBuildInProgress(protected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	_, err = BuildExt4(context.Background(), &PreparedSource{ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-publication", BuildMarkerDir: protected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := ArtifactBuildInProgress(protected); !active {
+		t.Fatal("BuildExt4 released the caller's publication marker")
+	}
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", t.TempDir())
+	_, err = BuildExt4(context.Background(), &PreparedSource{ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-publication", BuildMarkerDir: protected})
+	if err == nil {
+		t.Fatal("BuildExt4 accepted a store without the caller's marker")
+	}
 }
 
 func TestBuildExt4StreamingWithPostExport(t *testing.T) {

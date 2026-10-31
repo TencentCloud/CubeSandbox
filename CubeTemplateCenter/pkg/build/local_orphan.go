@@ -65,11 +65,11 @@ func (d *ArtifactDeleter) localArtifactReferenced(ctx context.Context, id string
 		{constants.SnapshotTableName, "rootfs_artifact_id = ? AND deleted_at IS NULL"},
 	}
 	for _, check := range checks {
-		var count int64
-		if err := d.db.WithContext(ctx).Unscoped().Table(check.table).Where(check.predicate, id).Count(&count).Error; err != nil {
+		var rows []struct{ Present int }
+		if err := d.db.WithContext(ctx).Unscoped().Table(check.table).Select("1 AS present").Where(check.predicate, id).Limit(1).Scan(&rows).Error; err != nil {
 			return false, err
 		}
-		if count > 0 {
+		if len(rows) > 0 {
 			return true, nil
 		}
 	}

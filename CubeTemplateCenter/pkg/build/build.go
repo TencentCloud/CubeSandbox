@@ -302,10 +302,23 @@ func runBuildLocked(
 		}
 	}
 
+	// Keep the store protected until upload and the BUILT callback finish.
+	// The callback persists the artifact before returning; BuildExt4 alone
+	// cannot delimit the lifetime of these local bytes.
+	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	releaseMarker, err := image.MarkArtifactBuildInProgress(storeDir)
+	if err != nil {
+		return fmt.Errorf("protect artifact publication: %w", err)
+	}
+	defer releaseMarker()
+
 	// Step 7: Build ext4 (export rootfs, bake envd + CA, mkfs)
 	reportPhase(templatecenter.JobPhaseBuildingExt4, 40)
 	var caBakeResult cube_egress_ca.Result
-	opts := image.BuildOptions{ArtifactID: artifactID}
+	opts := image.BuildOptions{ArtifactID: artifactID, BuildMarkerDir: storeDir}
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
 		if _, err := templatecenter.InjectEnvdPayloadIntoRootfs(ctx, rootfsDir, envdPayload); err != nil {
 			return err

@@ -202,12 +202,16 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	// cleanup running in ANOTHER process (CubeTemplateCenter builds while
 	// CubeMaster cleans up) would otherwise be free to RemoveAll the directory
 	// from under this build.
-	releaseMarker, err := MarkArtifactBuildInProgress(storeDir)
-	if err != nil {
-		// Best-effort: losing the guard is preferable to failing the build.
-		log.G(ctx).Warnf("cannot mark artifact build in progress for %s: %v", storeDir, err)
+	if opts.BuildMarkerDir != "" && filepath.Clean(opts.BuildMarkerDir) != filepath.Clean(storeDir) {
+		return BuildResult{}, fmt.Errorf("artifact store changed after publication marker was acquired")
 	}
-	defer releaseMarker()
+	if opts.BuildMarkerDir == "" {
+		releaseMarker, err := MarkArtifactBuildInProgress(storeDir)
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("protect artifact build: %w", err)
+		}
+		defer releaseMarker()
+	}
 
 	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
 	// Passes PostRootfsExport down to be executed before unmounting the loop device.
