@@ -393,6 +393,13 @@ Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `S3LVOL_CRT_LOG_LEVEL=trace|debug|info|warn|error|none`; `trace` prints every
 request header and the canonical string of the SigV4 signature.
 
+Failed background flushes retain dirty data and retry with exponential backoff
+from 100 ms up to 30 s. Repeated flusher errors are summarized at most once per
+30 s, with an upload-success event when progress resumes. Drain deadlines and
+WAL backpressure do not bypass failure backoff. Connection or authentication
+failures still require repair; pending WAL must be retained until the object
+store becomes available.
+
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to
 determine whether an object exists.
 
@@ -633,3 +640,12 @@ It is a snapshot of the current state, not a promise: something can pin the
 snapshot again between the query and the delete, and a retry that is refused
 again is reported by `--retry-pending` (exit status 1) rather than hidden.
 
+
+During a bounded flusher drain, failure backoff restarts at 100 ms and is capped
+at one second, allowing uploads to recover before the drain deadline. Ordinary
+background flushing retains its 30-second cap. Neither path retries a failed
+synchronous upload again inside the same backoff window.
+
+A successful upload clears the failure sequence only when no upload remains in
+flight and the overlay has no dirty data. A delayed success for another chunk
+cannot reset the backoff of a chunk that is still failing.

@@ -138,6 +138,8 @@ struct fake_uploader {
 	uint32_t started;
 	uint32_t completed;
 	uint32_t max_in_flight;
+	uint32_t callback_depth;
+	uint32_t max_callback_depth;
 
 	uint32_t rounds[TEST_CHUNKS];
 
@@ -168,7 +170,12 @@ fake_upload(void *vctx, const struct s3_overlay_flush_view *view,
 
 	if (f->auto_complete) {
 		f->completed++;
+		f->callback_depth++;
+		if (f->callback_depth > f->max_callback_depth) {
+			f->max_callback_depth = f->callback_depth;
+		}
 		cb(cb_arg, f->forced_status);
+		f->callback_depth--;
 		return;
 	}
 
@@ -198,6 +205,23 @@ fake_complete_all(struct fake_uploader *f, int status)
 		f->completed++;
 		batch[i].cb(batch[i].cb_arg, status);
 	}
+}
+
+/* Complete one chunk while leaving unrelated uploads in flight. */
+static void
+fake_complete_chunk(struct fake_uploader *f, uint64_t chunk_index, int status)
+{
+	for (uint32_t i = 0; i < f->n_pending; i++) {
+		if (f->pending[i].chunk_index == chunk_index) {
+			struct fake_pending request = f->pending[i];
+
+			f->pending[i] = f->pending[--f->n_pending];
+			f->completed++;
+			request.cb(request.cb_arg, status);
+			return;
+		}
+	}
+	check_true("requested chunk has a pending upload", false, NULL);
 }
 
 /* ==========================================================================
@@ -778,21 +802,125 @@ test_flusher(void)
 
 	fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0x81);
 	s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 400);
+	/* The original retry storm completes inside upload_fn itself. */
+	fake.auto_complete = true;
+	fake.forced_status = -EIO;
 	s3_flusher_kick(fl);
-	fake_complete_all(&fake, -EIO);
+	fake.auto_complete = false;
+	fake.forced_status = 0;
 
-	/* The completion path kicks the flusher, so the retry is already running by
-	 * the time we get here -- the chunk is in flight again rather than queued. */
-	check_u64("a new round started right away", fake.started, 2);
+	check_u64("failure does not immediately start another upload", fake.started, 1);
+	/* Check a bounded immediate window instead of requiring 1000 kicks to
+	 * finish inside 100 ms on an instrumented CI host. */
+	for (unsigned i = 0; i < 10; i++) {
+		s3_flusher_kick(fl);
+	}
+	check_u64("immediate kicks respect retry backoff", fake.started, 1);
+	check_true("failed data stays dirty during backoff", s3_overlay_has_dirty(ov), NULL);
+	uint64_t retry_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+	while (fake.started < 2 && spdk_get_ticks() < retry_deadline) {
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+		usleep(1000);
+	}
+	check_u64("retry starts after the initial backoff", fake.started, 2);
 	s3_flusher_get_stats(fl, &fstats);
 	check_u64("failure counted", fstats.failures, 1);
+	uint64_t second_failure_at = spdk_get_ticks();
+	fake_complete_all(&fake, -EIO);
+	s3_flusher_kick(fl);
+	check_u64("second failure increases the backoff", fake.started, 2);
+	retry_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+	while (fake.started < 3 && spdk_get_ticks() < retry_deadline) {
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+		usleep(1000);
+	}
+	check_u64("second retry starts after doubled backoff", fake.started, 3);
+	check_true("second retry waited at least 200 ms",
+		   spdk_get_ticks() - second_failure_at >= spdk_get_ticks_hz() / 5, NULL);
 
 	fake_complete_all(&fake, 0);
-	check_u64("retried once", fake.rounds[2], 2);
+	check_u64("retried twice", fake.rounds[2], 3);
 	check_true("and it is clean now", !s3_overlay_has_dirty(ov), NULL);
 	check_true("the retried upload still had the data",
 		   check_pattern(fake.image[2], 1, 2 * BLOCKS_PER_CHUNK, 0x81),
 		   NULL);
+
+	/* A late success from another chunk must not reset the failed chunk's
+	 * next delay, even after the original cooldown has elapsed. */
+	{
+		fill_pattern(blk, 1, BLOCKS_PER_CHUNK, 0x82);
+		s3_overlay_write(ov, BLOCKS_PER_CHUNK, 1, blk, 405);
+		fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0x83);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 406);
+		s3_flusher_kick(fl);
+		check_u64("two independent uploads are pending", fake.n_pending, 2);
+		fake_complete_chunk(&fake, 2, -EIO);
+		usleep(120000);
+		fake_complete_chunk(&fake, 1, 0);
+		uint64_t failed_again = spdk_get_ticks();
+		fake_complete_chunk(&fake, 2, -EIO);
+		uint64_t before_retry = fake.started;
+		uint64_t limit = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+		while (fake.started == before_retry && spdk_get_ticks() < limit) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_u64("failed chunk retries after unrelated completion", fake.started, before_retry + 1);
+		check_true("unrelated success preserves doubled delay",
+			   spdk_get_ticks() - failed_again >= spdk_get_ticks_hz() / 5, NULL);
+		fake_complete_all(&fake, 0);
+	}
+
+	/* A poisoned object must not stall a different chunk, and unmap must
+	 * discard the failed object's cooldown along with its data. */
+	{
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 2 * BLOCKS_PER_CHUNK, 0x84);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 407);
+		s3_flusher_kick(fl);
+		fake_complete_chunk(&fake, 2, -EIO);
+		uint32_t failed_rounds = fake.rounds[2];
+		uint32_t healthy_rounds = fake.rounds[3];
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 3 * BLOCKS_PER_CHUNK, 0x85);
+		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 408);
+		s3_flusher_kick(fl);
+		check_u64("healthy data bypasses another chunk's cooldown", fake.rounds[3], healthy_rounds + 1);
+		check_u64("failed object remains in cooldown", fake.rounds[2], failed_rounds);
+		fake_complete_chunk(&fake, 3, 0);
+		s3_overlay_drop_chunk(ov, 2);
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 2 * BLOCKS_PER_CHUNK, 0x86);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 409);
+		s3_flusher_kick(fl);
+		check_u64("unmap removes stale retry delay", fake.rounds[2], failed_rounds + 1);
+
+		/* Replace the chunk while the previous generation is in flight. */
+		s3_overlay_drop_chunk(ov, 2);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 410);
+		fake_complete_chunk(&fake, 2, -EIO);
+		check_u64("old generation failure does not defer replacement", fake.rounds[2], failed_rounds + 2);
+		fake_complete_all(&fake, 0);
+		check_true("replacement data reaches the uploader", !s3_overlay_has_dirty(ov), NULL);
+	}
+
+	/* Multiple inline failures must return to the scheduling loop instead of
+	 * adding one stack frame per queued chunk. */
+	{
+		for (uint32_t i = 0; i < 4; i++) {
+			fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, i * BLOCKS_PER_CHUNK, 0x87);
+			s3_overlay_write(ov, i * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 420 + i);
+		}
+		uint32_t before = fake.started;
+		fake.max_callback_depth = 0;
+		fake.auto_complete = true;
+		fake.forced_status = -EIO;
+		s3_flusher_kick(fl);
+		check_u64("each failing chunk gets one attempt", fake.started, before + 4);
+		check_u64("inline failures do not nest callbacks", fake.max_callback_depth, 1);
+		fake.auto_complete = false;
+		fake.forced_status = 0;
+		for (uint32_t i = 0; i < 4; i++) {
+			s3_overlay_drop_chunk(ov, i);
+		}
+	}
 
 	/* --- drain --- */
 	printf("\n[9] drain waits for everything to reach S3\n");
@@ -801,11 +929,26 @@ test_flusher(void)
 
 		fill_pattern(blk, 1, 3 * BLOCKS_PER_CHUNK, 0x91);
 		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, 1, blk, 500);
+		s3_flusher_kick(fl);
+		fake_complete_all(&fake, -EIO);
+		uint64_t before_drain = fake.started;
 
 		s3_flusher_drain(fl, 0, drain_cb, &probe);
+		check_u64("drain probes immediately despite an existing cooldown",
+			  fake.started, before_drain + 1);
 
 		check_true("drain does not complete while work is outstanding",
 			   !probe.done, NULL);
+
+		/* Recovery can happen after the initial drain probe failed. Only the
+		 * owner-thread poller drives this retry; no manual kick is involved. */
+		fake_complete_all(&fake, -EIO);
+		uint64_t recovery_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+		while (fake.n_pending == 0 && !probe.done && spdk_get_ticks() < recovery_deadline) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_true("drain retries after storage recovers", fake.n_pending > 0, NULL);
 
 		while (fake.n_pending > 0) {
 			fake_complete_all(&fake, 0);
