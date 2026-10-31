@@ -40,6 +40,16 @@ class InterpreterLaunchTest(unittest.TestCase):
         self.assertTrue(envd.is_file())
         self.assertTrue(jupyter.is_file())
 
+    def test_empty_log_paths_use_entrypoint_defaults(self):
+        with patch.dict(os.environ, {'ENVD_LOG_FILE': '', 'JUPYTER_LOG_FILE': ''}), \
+             patch.object(launch.Path, 'mkdir'), \
+             patch('builtins.open', unittest.mock.mock_open()) as opened, \
+             patch.object(launch.subprocess, 'Popen', side_effect=self.children()), \
+             patch.object(launch.uvicorn, 'Server'):
+            launch.main()
+        self.assertEqual([call.args[0] for call in opened.call_args_list],
+                         ['/var/log/envd.log', '/var/log/jupyter.log'])
+
     def assert_listening(self, listener):
         with socket.create_connection(listener.getsockname(), timeout=1):
             accepted, _ = listener.accept()

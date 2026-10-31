@@ -66,8 +66,8 @@ def main():
         listener.listen(socket.SOMAXCONN)
         listener.set_inheritable(False)
         with ExitStack() as stack:
-            envd_name = os.getenv("ENVD_LOG_FILE", "/var/log/envd.log")
-            jupyter_name = os.getenv("JUPYTER_LOG_FILE", "/var/log/jupyter.log")
+            envd_name = os.getenv("ENVD_LOG_FILE") or "/var/log/envd.log"
+            jupyter_name = os.getenv("JUPYTER_LOG_FILE") or "/var/log/jupyter.log"
             for name in (envd_name, jupyter_name):
                 if name != "-":
                     Path(name).parent.mkdir(parents=True, exist_ok=True)
