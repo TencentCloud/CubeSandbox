@@ -458,13 +458,16 @@ func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 	}
 	// Local port maps must agree with the empty startup PortBinder before
 	// requests arrive. These operations do not depend on CubeEgress readiness.
+	// Fail startup if local removal fails: leaving a stale mapping while the
+	// empty PortBinder serves requests could assign the same host port twice.
 	if err := s.cubevsAdapter.DeletePortMappingsByIfindex(uint32(tap.Index)); err != nil {
 		return err
 	}
 	if err := s.cleanupCubeVSTapState(tap.Index, tap.IP.To4()); err != nil {
 		return err
 	}
-	// Retain the descriptor without draining its queue during startup. Normal
+	// Retain a descriptor if discovery supplied one (production List normally
+	// returns identity only). Do not open or drain a queue during startup. Normal
 	// cleanup and reuse checks belong to maintenance. A second restart
 	// rediscovers the live TAP and quarantines it again, so no synthetic durable
 	// sandbox state is necessary for this ownerless pool entry.

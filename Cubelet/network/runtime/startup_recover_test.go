@@ -161,6 +161,11 @@ func TestStartupNoStateCleanupWaitsForEgress(t *testing.T) {
 
 func TestStartupLargeIdlePoolDoesNotRunSynchronousCleanup(t *testing.T) {
 	controller := newRecoverTestController(t)
+	allocator, err := newIPAllocator("10.30.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.allocator = allocator
 	base := controller.tapAdapter.(*fakeTapDeviceAdapter)
 	base.listResult = make(map[string]*tapDevice)
 	for i := 1; i <= 1500; i++ {
@@ -835,4 +840,19 @@ func legacyStateJSON(sandboxID, ip string, ifindex int) string {
 		"cubevsContext": {"allowInternetAccess": true},
 		"persistMetadata": {"host_tap_name":"` + tapName(ip) + `"}
 	}`
+}
+
+func TestStartupRejectsStaleLocalPortMappings(t *testing.T) {
+	controller := newRecoverTestController(t)
+	orphan := &tapDevice{Name: tapName("10.30.0.9"), Index: 9, IP: net.ParseIP("10.30.0.9").To4()}
+	taps := controller.tapAdapter.(*fakeTapDeviceAdapter)
+	taps.listResult = map[string]*tapDevice{orphan.IP.String(): orphan}
+	failure := errors.New("local port map unavailable")
+	controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappingErr = failure
+	if err := controller.recover(); !errors.Is(err, failure) {
+		t.Fatalf("startup with stale local port state: %v", err)
+	}
+	if taps.restoreCount != 0 {
+		t.Fatal("startup opened an unsafe orphan TAP")
+	}
 }
