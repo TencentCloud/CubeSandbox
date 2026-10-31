@@ -66,3 +66,9 @@ Proxy's `tests/redis_cluster_test.lua` covers MOVED, ASKING, cross-key pipelines
 The primary-promotion case in `pkgs/redisx` additionally requires `TEST_REDIS_CLUSTER_FAILOVER=1`. Its first seed must be a primary with a replica. This test actively promotes a replica and is intended only for disposable clusters.
 
 Before deployment, verify reachability of all advertised endpoints from the target network and exercise a real sandbox lifecycle.
+
+A `READONLY` rejection from a demoted primary invalidates its cached route. The
+Go client refreshes topology and retries once with a fresh connection; each
+attempt retains the existing eight-step redirect limit. The proxy handles
+`READONLY` within its eight-attempt routing loop. Neither path automatically
+replays a command after an ambiguous transport timeout.

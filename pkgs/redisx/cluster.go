@@ -72,6 +72,20 @@ func (c *Cluster) Do(command string, args ...interface{}) (interface{}, error) {
 	case "MULTI", "EXEC", "WATCH", "UNWATCH", "DISCARD", "MSET", "MSETNX", "SCAN", "KEYS", "FLUSHDB", "FLUSHALL":
 		return nil, fmt.Errorf("%s requires a cluster-aware call site", command)
 	}
+	reply, err := c.doOnce(command, args...)
+	// READONLY is a server rejection before applying a write. Refresh topology
+	// once and use a fresh connection; transport failures are never replayed.
+	var serverErr redis.Error
+	if errors.As(err, &serverErr) && (serverErr == "READONLY" || strings.HasPrefix(string(serverErr), "READONLY ")) {
+		if refreshErr := c.cluster.Refresh(); refreshErr != nil {
+			return nil, refreshErr
+		}
+		return c.doOnce(command, args...)
+	}
+	return reply, err
+}
+
+func (c *Cluster) doOnce(command string, args ...interface{}) (interface{}, error) {
 	raw := c.cluster.Get()
 	defer raw.Close()
 	if command == "EVAL" || command == "EVALSHA" {

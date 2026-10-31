@@ -118,6 +118,10 @@ function M.execute(opts, cmd, args)
                 if not split_endpoint(target) then return nil, "invalid Redis Cluster redirect endpoint" end
                 addr, asking = target, kind == "ASK"
                 if kind == "MOVED" and dict then dict:set(cache_key, target, 30) end
+            elseif tostring(e) == "READONLY" or tostring(e):match("^READONLY ") then
+                -- The demoted primary rejected the write before applying it.
+                if dict then dict:delete(cache_key) end
+                addr, asking = nil, false
             elseif tostring(e):match("^TRYAGAIN") then
                 if ngx.sleep then ngx.sleep(0.025) end
             else

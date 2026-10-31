@@ -65,6 +65,21 @@ state.scenario=function(self)
 end
 assert(cluster.execute(opts,"get",{"ask-key"})=="asked")
 
+local promoted_writes = 0
+local readonly_calls = 0
+state.scenario = function(self)
+    readonly_calls = readonly_calls + 1
+    if self.addr == "127.0.0.1:17400" then return nil, "READONLY demoted primary" end
+    promoted_writes = promoted_writes + 1
+    return promoted_writes
+end
+assert(cluster.execute(opts, "incr", {"promotion-key"}) == 1)
+assert(promoted_writes == 1 and readonly_calls == 2)
+local rejected = 0
+state.scenario = function() rejected = rejected + 1; return nil, "READONLY replica" end
+local _, exhausted = cluster.execute(opts, "incr", {"readonly-only"})
+assert(exhausted and rejected == 8, "READONLY retries must remain bounded")
+
 local writes=0
 state.scenario=function() writes=writes+1; return nil,"timeout" end
 local _,err=cluster.execute(opts,"incr",{"ambiguous-write"})
