@@ -611,39 +611,42 @@ func setLogLevel(context *cli.Context, config *srvconfig.Config) error {
 }
 
 func ensureRootSharedMount(rootDir string) error {
+	return ensureRootSharedMountWithLookup(rootDir, lookupExactMount, unix.Mount)
+}
+
+func ensureRootSharedMountWithLookup(rootDir string, lookup func(string) (*mountinfo.Info, error), mountRoot func(string, string, string, uintptr, string) error) error {
 
 	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
 		return nil
 	}
 
-	mountInfo, err := mountinfo.GetMounts(mountinfo.SingleEntryFilter(rootDir))
+	// mountinfo reports canonical paths. Looking up an alias misses an existing
+	// shared bind and can multiply peer mounts on every restart.
+	mountInfo, err := lookup(rootDir)
 	if err != nil {
 		return fmt.Errorf("failed to get mount info for %s: %w", rootDir, err)
 	}
 
-	if len(mountInfo) == 0 {
+	if mountInfo == nil {
 
-		if err := unix.Mount(rootDir, rootDir, "", unix.MS_BIND, ""); err != nil {
+		if err := mountRoot(rootDir, rootDir, "", unix.MS_BIND, ""); err != nil {
 			return fmt.Errorf("failed to bind mount %s: %w", rootDir, err)
 		}
 
-		if err := unix.Mount("", rootDir, "", unix.MS_SHARED, ""); err != nil {
+		if err := mountRoot("", rootDir, "", unix.MS_SHARED, ""); err != nil {
 			return fmt.Errorf("failed to make %s shared: %w", rootDir, err)
 		}
 		stdlog.Printf("set %s as shared mount", rootDir)
 		return nil
 	}
 
-	for _, info := range mountInfo {
-		optsSplit := strings.Split(info.Optional, " ")
-		for _, opt := range optsSplit {
-			if strings.HasPrefix(opt, "shared:") {
-				return nil
-			}
+	for _, opt := range strings.Fields(mountInfo.Optional) {
+		if strings.HasPrefix(opt, "shared:") {
+			return nil
 		}
 	}
 
-	if err := unix.Mount("", rootDir, "", unix.MS_SHARED, ""); err != nil {
+	if err := mountRoot("", rootDir, "", unix.MS_SHARED, ""); err != nil {
 		return fmt.Errorf("failed to make %s shared: %w", rootDir, err)
 	}
 	stdlog.Printf("set %s as shared mount", rootDir)
