@@ -23,3 +23,9 @@ Upgrade CubeMaster first, then upgrade one Cubelet as a canary. Confirm that exi
 After deleting successful instances, verify that their capacity can be reused and that rejected requests leave no VM, storage, network, or resource records. Expand the rollout after these checks pass.
 
 Regression cases cover CPU and memory boundaries, byte precision, paused accounting, instance-count limits, 10/100/1000 contenders for the last allocation, conservative accounting after a failed save, capacity reuse after deletion, and Master retry classification. These cases do not replace a live concurrency test.
+
+Runtime classification uses the configured runtime type, since MicroVM and OCI
+sandboxes both carry runtime metadata. Missing runtime metadata is treated
+conservatively as MicroVM metadata. Resume uses the same automatic host quota
+calculation as create. Operator retry exclusions also apply to capacity errors;
+excluded errors return the capacity response without rescheduling.

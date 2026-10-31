@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -34,10 +35,19 @@ func (s *admissionStore) Save(_ context.Context, sb *cubeboxstore.CubeBox, _ ...
 }
 
 func admissionBox(id, cpu, mem string) *cubeboxstore.CubeBox {
-	return sandboxWithResourceForTest(id, cubeboxstore.Status{CreatedAt: time.Now().UnixNano()}, cpu, mem, 0, 0, 0)
+	sb := sandboxWithResourceForTest(id, cubeboxstore.Status{CreatedAt: time.Now().UnixNano()}, cpu, mem, 0, 0, 0)
+	sb.OciRuntime = &cubeconfig.Runtime{Type: "io.containerd.cube.v2"}
+	return sb
 }
 
 func TestCreateAdmissionConcurrentLastSlot(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	host := config.GetHostConf()
+	before := host.Quota
+	t.Cleanup(func() { host.Quota = before })
+	host.Quota.Cpu, host.Quota.Mem = 64000, "64Gi"
+
 	for _, count := range []int{10, 100, 1000} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store := &admissionStore{boxes: []*cubeboxstore.CubeBox{admissionBox("existing", "63", "63Gi")}}
@@ -48,7 +58,7 @@ func TestCreateAdmissionConcurrentLastSlot(t *testing.T) {
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
-					err := l.admitAndSaveWithQuota(context.Background(), admissionBox(fmt.Sprint(i), "1", "1Gi"), &config.HostConf{}, 64000, 65536)
+					err := l.admitAndSave(context.Background(), admissionBox(fmt.Sprint(i), "1", "1Gi"))
 					if err == nil {
 						accepted.Add(1)
 						return
@@ -130,4 +140,18 @@ func TestCreateAdmissionSaveFailureRemainsReservedUntilCleanup(t *testing.T) {
 	status, _ = ret.FromError(err)
 	require.Equal(t, errorcode.ErrorCode_HostResourcesNotEnough, status.Code())
 	require.Len(t, store.boxes, 1)
+}
+
+func TestCreateAdmissionKeepsOCISavePath(t *testing.T) {
+	store := &admissionStore{}
+	l := &local{cubeboxManger: store}
+	sb := admissionBox("oci", "1", "1Gi")
+	sb.OciRuntime.Type = "io.containerd.runc.v2"
+	sb.ResourceWithOverHead = nil
+	require.NoError(t, l.admitAndSave(context.Background(), sb))
+	require.Len(t, store.boxes, 1)
+	for _, runtime := range []*cubeconfig.Runtime{nil, {}, {Type: "io.containerd.cube.v2"}} {
+		sb.OciRuntime = runtime
+		require.ErrorContains(t, checkCreateQuota(store.boxes, admissionBox("new", "1", "1Gi"), &config.HostConf{}, 2000, 2048), "no host resource")
+	}
 }

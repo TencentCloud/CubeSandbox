@@ -434,8 +434,8 @@ func (c *createSandboxContext) errorCodeRetry() (retry bool) {
 		// The node is authoritative: a stale heartbeat must never bypass its
 		// admission fence. Pinned restores cannot move to a different node.
 		c.loopRetry = false
-		c.reschedule = !c.directHost
-		if !c.directHost && c.retryTimes <= l.CreateRetryConf.MaxRetry() {
+		c.reschedule = !c.directHost && !errorcode.IsExcludesRetryCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
+		if c.reschedule && c.retryTimes <= l.CreateRetryConf.MaxRetry() {
 			c.selctx.AddLastBadNode(c.selectHost)
 			return true
 		}
