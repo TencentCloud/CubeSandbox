@@ -27,15 +27,21 @@ The next execution waits for pending cleanup so per-call values cannot leak into
 
 This derived interpreter requires envd's `/envs` endpoint. Startup waits for the endpoint within the context-creation budget and fails if it cannot become ready. After startup, an unavailable endpoint, a request exceeding `ENVD_TIMEOUT` (2 seconds by default), or an invalid payload causes `run_code` to return HTTP 502. Set `ENVD_TIMEOUT` in the image environment to adjust the fetch timeout.
 
-## Build and test the image
-
 Jupyter context creation, WebSocket opening, and working-directory initialization each use `CODE_INTERPRETER_CONTEXT_CREATE_TIMEOUT` (60 seconds by default), rather than the HTTP and WebSocket defaults of 5 and 10 seconds during concurrent cold starts. A timed-out creation request is not replayed because the kernel may already exist. If no session ID was returned, that session cannot be reclaimed through this cleanup path and may live until the sandbox shuts down. If the session ID is known, a failed handshake closes the connection and attempts to delete that session. Startup also verifies the required envd `/envs` endpoint within the context-creation budget. Failed startup closes the HTTP client without becoming ready. User-code execution timeouts are unchanged.
 
-The derived image clears the inherited entrypoint so the launcher owns dependency startup and does not start a second envd. It honors `ENVD_BIN`, `ENVD_EXTRA_ARGS`, and `ENVD_LOG_FILE=-`. Jupyter is configured to fail on a port conflict instead of selecting another port.
+The derived image replaces the inherited entrypoint with tini so the launcher owns dependency startup and does not start a second envd. It honors `ENVD_BIN`, `ENVD_EXTRA_ARGS`, and `ENVD_LOG_FILE=-`. Jupyter is configured to fail on a port conflict instead of selecting another port.
 
 The launcher binds and listens on the interpreter port before starting envd, Jupyter, or application initialization, then passes that same socket to Uvicorn. Uvicorn normally binds after its lifespan startup; dynamic ports allocated during initialization could otherwise take the default port `49999` and terminate startup with `address already in use`. Dependency processes do not inherit the listener and are terminated and reaped on startup failure or shutdown. The image keeps `/usr/bin/tini` as PID 1 to reap orphaned grandchildren, while the Python launcher manages its direct children. Reserving the port does not mean the application is ready.
 
 The launcher starts envd with `-isnotfc`, matching CubeSandbox's base-image entrypoint. Without this flag, envd 0.5.11 enables its Firecracker MMDS-dependent HTTP log exporter; in an environment without that metadata, the exporter can keep buffering logs without a size limit. Non-Firecracker mode avoids that exporter while preserving the existing local stdout/stderr log file. It does not suppress command logs, force garbage collection, or change command/file APIs.
+
+Readiness probes must request the HTTP `/health` endpoint and require a successful
+response. The launcher reserves the TCP listener before starting dependencies;
+a successful TCP connection alone does not mean startup has completed.
+`JUPYTER_LOG_FILE` selects the Jupyter log path (default `/var/log/jupyter.log`);
+its parent directory is created before launching the process.
+
+## Build and test the image
 
 From the repository root:
 
@@ -124,9 +130,3 @@ SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e \
 ```
 
 `CUBE_TEMPLATE_ID` reuses the SDK compatibility suite's existing template selection mechanism; `--cube-template-id <template_id>` is also supported. The environment-inheritance case is skipped by default before creating a sandbox and runs only when `SDK_E2E_RUN_CODE_ENV_INHERITANCE=true` is explicitly set for a compatible template.
-
-Readiness probes must request the HTTP `/health` endpoint and require a successful
-response. The launcher reserves the TCP listener before starting dependencies;
-a successful TCP connection alone does not mean startup has completed.
-`JUPYTER_LOG_FILE` selects the Jupyter log path (default `/var/log/jupyter.log`);
-its parent directory is created before launching the process.
