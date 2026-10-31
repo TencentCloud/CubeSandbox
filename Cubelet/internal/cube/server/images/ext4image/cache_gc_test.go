@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 )
 
@@ -219,6 +221,11 @@ func TestCacheManifestImportIsConservative(t *testing.T) {
 	if err := os.WriteFile(manifest, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	link := filepath.Join(t.TempDir(), "projected-sources.json")
+	if err := os.Symlink(manifest, link); err != nil {
+		t.Fatal(err)
+	}
+	manifest = link
 	if err := ImportCacheSources(context.Background(), manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -277,5 +284,49 @@ func TestCacheGCDefaultsToDryRun(t *testing.T) {
 	}
 	if !g.config.dryRun() {
 		t.Fatal("omitted dry_run enabled destructive eviction")
+	}
+}
+
+func TestCacheGCProbeDoesNotBlockCreatePin(t *testing.T) {
+	initTestPmemPaths(t, t.TempDir())
+	probing := make(chan struct{})
+	resume := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(probing)
+		<-resume
+		w.Header().Set("Content-Range", "bytes 0-0/1")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer server.Close()
+	path := cacheFixture(t, "probe-pin", []byte("x"), server.URL, 2*time.Hour)
+	g := testCacheGC(t, CacheGCConfig{}, nil)
+	finished := make(chan error, 1)
+	go func() { _, err := g.collect(context.Background(), 0); finished <- err }()
+	<-probing
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	release, err := pmem.PinArtifact(ctx, "cubebox", "probe-pin")
+	close(resume)
+	if err != nil {
+		<-finished
+		t.Fatalf("network probe held the exclusive artifact lease: %v", err)
+	}
+	defer release()
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("creator's pinned artifact was evicted: %v", err)
+	}
+}
+
+func TestImportCacheSourcesRejectsPipe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest-pipe")
+	if err := unix.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ImportCacheSources(context.Background(), path); err == nil {
+		t.Fatal("accepted a non-regular manifest")
 	}
 }

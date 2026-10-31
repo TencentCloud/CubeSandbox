@@ -136,6 +136,15 @@ func tryDownloadPmemFile(ctx context.Context, instanceType, imagePath string, sp
 	if token != "" {
 		req.Header.Set("X-Cube-Artifact-Token", token)
 	}
+	// Reserve before opening the response body; a pressure sweep can take
+	// seconds. Active GC requires the declared artifact size up front.
+	if instanceType == "cubebox" {
+		releaseSpace, err := reserveCacheDownload(ctx, expectedSize)
+		if err != nil {
+			return err
+		}
+		defer releaseSpace()
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -152,13 +161,6 @@ func tryDownloadPmemFile(ctx context.Context, instanceType, imagePath string, sp
 	}
 	if expectedSize > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
 		return fmt.Errorf("artifact content length does not match expected size")
-	}
-	if instanceType == "cubebox" {
-		releaseSpace, err := reserveCacheDownload(ctx, expectedSize)
-		if err != nil {
-			return err
-		}
-		defer releaseSpace()
 	}
 	f, err := os.Create(tmpPath) // NOCC:Path Traversal()
 	if err != nil {
