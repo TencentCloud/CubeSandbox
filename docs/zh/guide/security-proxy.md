@@ -16,6 +16,15 @@ Cube Sandbox 在每台宿主机上部署一个透明出网代理 —— **CubeEg
 上游 `proxy_read_timeout` / `proxy_send_timeout` 为 2h（与 CubeProxy
 同量级）。`proxy_connect_timeout` 仍是 10s。
 
+出方向 WebSocket 连接（`ws://` 和 `wss://`）使用 HTTP 和 HTTPS
+listener。代理对初始 HTTP 握手应用 L7 规则，升级成功后转发 WebSocket
+帧。其他协议的 `Upgrade` 请求头不会转发。两小时超时限制的是相邻读写
+操作之间的空闲时间，而不是连接总时长。
+
+过滤其他升级请求头依赖上游遵守 HTTP 升级协商规则。如果客户端发送了
+`Upgrade` 请求头，而上游未经协商就返回 `101 Switching Protocols`，
+nginx 仍可能切换为隧道。切换后的流量不会再经过 L7 规则检查。
+
 ## 拦截链路
 
 CubeEgress 是一个 host-network 容器，在面向沙箱的 IP 上 bind 两个
