@@ -88,8 +88,6 @@ def main(argv=None):
     if args.dry_run:
         print(policy, end='')
         return 0
-    if info.st_size > args.bootstrap_limit and not state_file.is_file():
-        raise RuntimeError('oversized legacy log: archive and verify before enabling rotation')
     # Different original paths may resolve to one log. A canonical-path state
     # and lock prevent two timers from rotating the same file concurrently.
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -98,6 +96,12 @@ def main(argv=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
+        accepted = state / (identity + '.accepted')
+        if source.stat().st_size > args.bootstrap_limit and not (state_file.is_file() or accepted.is_file()):
+            raise RuntimeError('oversized legacy log: archive and verify before enabling rotation')
+        # Acceptance survives a failed first rotation; it is separate from
+        # logrotate's state format and never created by dry-run.
+        accepted.touch(mode=0o600, exist_ok=True)
         archive.mkdir(mode=0o700, parents=True, exist_ok=True)
         if source.stat().st_size >= args.size and not args.dry_run:
             if shutil.disk_usage(archive).free < source.stat().st_size + args.reserve_bytes:

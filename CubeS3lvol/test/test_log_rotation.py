@@ -53,7 +53,7 @@ class RotationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             p = Path(root)/'old';p.write_bytes(b'keep')
             with self.assertRaises(RuntimeError):
-                rotation.main(['--log', str(p), '--bootstrap-limit', '3'])
+                rotation.main(['--log', str(p), '--state-dir', root + '/state', '--bootstrap-limit', '3'])
             self.assertEqual(p.read_bytes(), b'keep')
 
     def test_space_guard_and_actual_invocation(self):
@@ -88,6 +88,22 @@ class RotationTest(unittest.TestCase):
             with patch.object(rotation, 'resolve_logrotate', return_value='/usr/sbin/logrotate'), patch.object(rotation.subprocess, 'run') as run:
                 self.assertEqual(rotation.main(['--log', str(log), '--state-dir', str(state), '--bootstrap-limit', '3']), 0)
                 run.assert_called_once()
+
+    def test_failed_first_rotation_remains_managed_after_growth(self):
+        for failure in ('discovery', 'space', 'execution'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                p = Path(root)
+                log = p / 'active'
+                log.write_bytes(b'keep')
+                args = ['--log', str(log), '--state-dir', str(p / 'state'), '--archive-dir', str(p / 'archive'), '--size', '1', '--bootstrap-limit', '4', '--reserve-bytes', '1']
+                with patch.object(rotation, 'resolve_logrotate', side_effect=RuntimeError('unavailable') if failure == 'discovery' else None, return_value='/usr/sbin/logrotate'), patch.object(rotation.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 0 if failure == 'space' else 1000})()), patch.object(rotation.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'logrotate') if failure == 'execution' else None):
+                    with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                        rotation.main(args)
+                log.write_bytes(b'keep growing')
+                with patch.object(rotation, 'resolve_logrotate', return_value='/usr/sbin/logrotate'), patch.object(rotation.subprocess, 'run') as run:
+                    self.assertEqual(rotation.main(args), 0)
+                    run.assert_called_once()
+                self.assertEqual(log.read_bytes(), b'keep growing')
 
     def test_explicit_logrotate_binary_and_invalid_override(self):
         with tempfile.TemporaryDirectory() as root:

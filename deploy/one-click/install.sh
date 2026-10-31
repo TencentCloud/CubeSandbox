@@ -1644,12 +1644,18 @@ start_systemd_target() {
     [[ -x "${s3lvol_logrotate}" ]] || s3lvol_logrotate=/usr/bin/logrotate
   fi
   if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" && -f "${s3lvol_logrotate}" && -x "${s3lvol_logrotate}" ]]; then
-    # The timer does not inherit the installer shell's PATH or overrides.
-    s3lvol_logrotate="$(cd "$(dirname "${s3lvol_logrotate}")" && pwd)/$(basename "${s3lvol_logrotate}")"
-    upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_LOGROTATE_BIN" "${s3lvol_logrotate}"
+    # Persist only an operator override; automatic discovery runs again in
+    # the helper and must not become a sticky override after an upgrade.
+    if [[ -n "${ONE_CLICK_LOGROTATE_BIN:-}" ]]; then
+      s3lvol_logrotate="$(cd "$(dirname "${s3lvol_logrotate}")" && pwd)/$(basename "${s3lvol_logrotate}")"
+      upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_LOGROTATE_BIN" "${s3lvol_logrotate}"
+    fi
     systemctl enable cube-sandbox-s3lvol-logrotate.timer >/dev/null 2>&1 \
       || log "WARN: could not enable CubeS3lvol log rotation"
   else
+    if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]]; then
+      log "WARN: logrotate unavailable at ${s3lvol_logrotate}; storage log rotation disabled"
+    fi
     systemctl disable --now cube-sandbox-s3lvol-logrotate.timer >/dev/null 2>&1 || true
   fi
 
