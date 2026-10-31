@@ -916,6 +916,9 @@ func injectReplicaComponentVersionAnnotations(annotations map[string]string, rep
 	set(constants.CubeAnnotationComponentCubeImageVersion, replica.GuestImageVersion)
 	set(constants.CubeAnnotationComponentCubeAgentVersion, replica.AgentVersion)
 	set(constants.CubeAnnotationComponentCubeKernelVersion, replica.KernelVersion)
+	// This annotation changes the sealed snapshot's host-runtime binding.
+	// Always derive it from the selected replica, never from caller input.
+	delete(annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	set(constants.CubeAnnotationComponentCubeShimVersion, replica.ShimVersion)
 }
 

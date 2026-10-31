@@ -25,3 +25,14 @@ func TestInjectReplicaComponentVersionAnnotationsIncludesShim(t *testing.T) {
 	require.Equal(t, "kern-1", annotations[constants.CubeAnnotationComponentCubeKernelVersion])
 	require.Equal(t, "shim-1", annotations[constants.CubeAnnotationComponentCubeShimVersion])
 }
+
+func TestReplicaShimBindingReplacesCallerAnnotation(t *testing.T) {
+	for _, version := range []string{"selected-shim", ""} {
+		annotations := map[string]string{constants.CubeAnnotationComponentCubeShimVersion: "caller-shim"}
+		injectReplicaComponentVersionAnnotations(annotations, templatecenter.ReplicaStatus{ShimVersion: version})
+		require.Equal(t, version, annotations[constants.CubeAnnotationComponentCubeShimVersion])
+		if version == "" {
+			require.NotContains(t, annotations, constants.CubeAnnotationComponentCubeShimVersion)
+		}
+	}
+}

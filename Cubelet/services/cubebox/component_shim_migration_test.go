@@ -70,7 +70,7 @@ func TestAbsentShimBindingKeepsSnapshotVersion(t *testing.T) {
 }
 
 func TestInvalidExplicitShimBindingDoesNotChangeSnapshotPin(t *testing.T) {
-	for _, version := range []string{"sha256:short", ".", "/", "@@@"} {
+	for _, version := range []string{"sha256:short", ".", "..", "../..", "..@invalid", "/", "@@@"} {
 		t.Run(version, func(t *testing.T) {
 			cb := &cubeboxstore.CubeBox{LocalRunTemplate: migrationTemplate()}
 			err := seedCubeBoxComponentVersionsFromRequest(cb, &workflow.CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{
