@@ -27,6 +27,11 @@ then forwards WebSocket frames after a successful upgrade. Upgrade headers
 for other protocols are not forwarded. The two-hour timeouts limit gaps
 between I/O operations, not the total connection lifetime.
 
+Filtering other upgrade headers relies on upstreams honoring HTTP upgrade
+negotiation. If a client sends an `Upgrade` header and an upstream returns
+`101 Switching Protocols` without negotiating it, nginx can still switch to
+a tunnel. L7 rules do not inspect traffic after that switch.
+
 ## How it intercepts
 
 CubeEgress runs as a host-network container and binds two TPROXY
