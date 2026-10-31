@@ -778,6 +778,7 @@ func (l *local) prepareContainerFiles(ctx context.Context, sandBox *cubeboxstore
 		return err
 	}
 	mountsConfig.Mounts = append(mountsConfig.Mounts, cubeMounts...)
+	mountsConfig.Mounts = append(mountsConfig.Mounts, coldStartHostDirMounts(ctxTmp, flowOpts, containerReq)...)
 
 	ci.CubeRootfsInfo = mountsConfig
 	return nil
