@@ -179,6 +179,9 @@ func writeCacheEntry(imagePath string, entry *cacheEntry) error {
 }
 
 func recordCacheUse(ctx context.Context, instanceType, artifactID string) error {
+	if g := activeCacheGC.Load(); g == nil || !g.config.Enabled {
+		return nil
+	}
 	if instanceType != "cubebox" {
 		return nil
 	}
