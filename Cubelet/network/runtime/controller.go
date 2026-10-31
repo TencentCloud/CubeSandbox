@@ -828,9 +828,13 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		if entry.State == TapPoolReady {
 			if err := s.checkTapUnused(entry.TapName); err != nil {
 				if !errors.Is(err, errTapOwned) {
-					// Inspection uncertainty must fail closed without draining the
-					// Ready inventory into quarantine on a host-wide procfs error.
-					return nil, nil, errors.Join(err, s.tapPool.ReleaseReservation(entry, owner))
+					// Do not reuse an unverified queue or consume the entire pool
+					// on a host-wide procfs error. A fresh TAP has no prior owner.
+					if releaseErr := s.tapPool.ReleaseReservation(entry, owner); releaseErr != nil {
+						return nil, nil, errors.Join(err, releaseErr)
+					}
+					CubeLog.WithContext(context.Background()).Warnf("TAP ownership scan failed; using a fresh TAP: %v", err)
+					break
 				}
 				if quarantineErr := s.tapPool.QuarantineReservation(entry, owner); quarantineErr != nil {
 					return nil, nil, errors.Join(err, quarantineErr)

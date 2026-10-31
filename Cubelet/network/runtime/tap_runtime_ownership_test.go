@@ -114,12 +114,18 @@ func TestAcquirePreservesReadyInventoryOnInspectionFailure(t *testing.T) {
 	if _, err := controller.ReleaseNetwork(context.Background(), &ReleaseNetworkRequest{SandboxID: "previous"}); err != nil {
 		t.Fatal(err)
 	}
+	previousName := controller.tapPool.Entries()[0].TapName
 	controller.tapAdapter = &ownershipTestTapAdapter{TapDeviceAdapter: controller.tapAdapter, uncertain: true}
-	if _, _, err := controller.acquireTap("next"); err == nil {
-		t.Fatal("uncertain ownership must fail closed")
+	tap, entry, err := controller.acquireTap("next")
+	if err != nil {
+		t.Fatalf("fresh TAP fallback failed: %v", err)
+	}
+	if entry == nil || tap.Name == previousName {
+		t.Fatal("uncertain ownership reused the unverified TAP")
 	}
 	entries := controller.tapPool.Entries()
-	if len(entries) != 1 || entries[0].State != TapPoolReady || entries[0].OwnerSandboxID != "" {
+	state, owner, found := controller.tapPool.StateByName(previousName)
+	if len(entries) != 2 || !found || state != TapPoolReady || owner != "" {
 		t.Fatalf("inspection failure consumed Ready inventory: %v", entries)
 	}
 }
