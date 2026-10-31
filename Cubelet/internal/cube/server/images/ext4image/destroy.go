@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -51,6 +52,16 @@ func DestroyPmemArtifact(ctx context.Context, instanceType, artifactID string, i
 	if err := pathutil.ValidateSafeID(artifactID); err != nil {
 		return fmt.Errorf("invalid artifactID %q: %w", artifactID, err)
 	}
+	leaseCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	release, ok, err := pmem.EvictArtifact(leaseCtx, instanceType, artifactID)
+	if err != nil {
+		return fmt.Errorf("wait for artifact eviction: %w", err)
+	}
+	if !ok {
+		return ErrArtifactInUse
+	}
+	defer release()
 
 	if inUse != nil {
 		used, err := inUse(artifactID)

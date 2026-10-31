@@ -119,6 +119,7 @@ const (
 	CubeAnnotationRootfsArtifactToken       = "cube.master.rootfs.artifact.token"
 	CubeAnnotationRootfsArtifactSHA256      = "cube.master.rootfs.artifact.sha256"
 	CubeAnnotationRootfsArtifactSizeBytes   = "cube.master.rootfs.artifact.size_bytes"
+	CubeAnnotationRootfsArtifactCacheable   = "cube.master.rootfs.artifact.cacheable"
 	CubeAnnotationWritableLayerSize         = "cube.master.rootfs.writable_layer_size"
 	CubeAnnotationTemplateSpecFingerprint   = "cube.master.template.spec_fingerprint"
 	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map

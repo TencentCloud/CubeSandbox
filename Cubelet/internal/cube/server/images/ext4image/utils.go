@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
@@ -32,6 +33,11 @@ import (
 var pmemFileLocks = utils.NewResourceLocks()
 
 func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
+	release, err := pmem.PinArtifact(ctx, instanceType, imageRef)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
 		return err
 	}
@@ -50,6 +56,11 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 		return fmt.Errorf("invalid imageRef: %w", err)
 	}
 	imagePath := pmem.GetRawImageFilePath(instanceType, imageRef)
+	release, pinErr := pmem.PinArtifact(ctx, instanceType, imageRef)
+	if pinErr != nil {
+		return pinErr
+	}
+	defer release()
 	// CreateImage and node-distribution requests may legitimately reuse the
 	// same artifact. Lock at this shared entry point so every writer of the
 	// fixed .download path is serialized and waiters recheck the final file.
@@ -65,10 +76,7 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 	}
 	if !exist {
 		spec := constants.GetImageSpec(ctx)
-		if spec == nil {
-			return fmt.Errorf("pmem file %s not exist", imagePath)
-		}
-		if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+		if err := tryDownloadPmemFile(ctx, instanceType, imagePath, spec); err != nil {
 			return fmt.Errorf("pmem file %s not exist and download failed: %v", imagePath, err)
 		}
 		exist, err = utils.FileExistAndValid(imagePath)
@@ -79,50 +87,110 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 			return fmt.Errorf("downloaded pmem file %s not exist", imagePath)
 		}
 	}
+	if err := recordCacheUse(ctx, instanceType, imageRef); err != nil {
+		// Missing source information prevents GC, not legacy template use.
+		log.G(ctx).Warnf("record rootfs cache use for %s failed: %v", imageRef, err)
+	}
 	return nil
 }
 
-func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages.ImageSpec) error {
-	if spec == nil || spec.Annotations == nil {
-		return fmt.Errorf("image spec annotations are empty")
+func tryDownloadPmemFile(ctx context.Context, instanceType, imagePath string, spec *cubeimages.ImageSpec) error {
+	annotations := spec.GetAnnotations()
+	downloadURL := strings.TrimSpace(annotations[constants.MasterAnnotationRootfsArtifactURL])
+	expectedSHA := strings.TrimSpace(annotations[constants.MasterAnnotationRootfsArtifactSHA256])
+	expectedSize, _ := strconv.ParseInt(annotations[constants.MasterAnnotationRootfsArtifactSizeBytes], 10, 64)
+	token := strings.TrimSpace(annotations[constants.MasterAnnotationRootfsArtifactToken])
+	var source *CacheSource
+	var err error
+	if instanceType == "cubebox" {
+		source, err = sourceFromSpec(instanceType, filepath.Base(filepath.Dir(imagePath)), spec)
 	}
-	downloadURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactURL])
+	if err != nil {
+		// Recovery metadata controls eligibility for GC, not legacy downloads.
+		log.G(ctx).Warnf("rootfs cache source is not eligible for GC: %v", err)
+		source = nil
+	}
+	if instanceType == "cubebox" && source == nil && annotations[constants.MasterAnnotationRootfsArtifactCacheable] != "false" {
+		if entry, err := readCacheEntry(imagePath); err == nil {
+			source = &entry.CacheSource
+		}
+	}
+	if source != nil {
+		downloadURL, expectedSHA, expectedSize, token = source.downloadURL(), source.SHA256, source.SizeBytes, source.Token
+	}
 	if downloadURL == "" {
 		return fmt.Errorf("artifact download url is empty")
 	}
 	downloadURL = rewriteDownloadHost(downloadURL, cubeMasterHTTPAddr())
-	expectedSHA := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSHA256])
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return err
 	}
 	tmpPath := imagePath + ".download"
-	if err := os.RemoveAll(tmpPath); err != nil { // NOCC:Path Traversal()
+	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) { // NOCC:Path Traversal()
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid artifact download request")
 	}
-	if token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]); token != "" {
+	if token != "" {
 		req.Header.Set("X-Cube-Artifact-Token", token)
+	}
+	// Reserve before opening the response body; a pressure sweep can take
+	// seconds. Active GC requires the declared artifact size up front.
+	if instanceType == "cubebox" {
+		releaseSpace, err := reserveCacheDownload(ctx, expectedSize)
+		if err != nil {
+			return err
+		}
+		defer releaseSpace()
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("artifact download request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("download status code %d", resp.StatusCode)
+	}
+	if expectedSize <= 0 {
+		expectedSize = resp.ContentLength
+	}
+	if expectedSize > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
+		return fmt.Errorf("artifact content length does not match expected size")
 	}
 	f, err := os.Create(tmpPath) // NOCC:Path Traversal()
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	published := false
+	defer func() {
+		if !published {
+			if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+				log.G(ctx).Warnf("remove incomplete rootfs artifact %s failed: %v", tmpPath, err)
+			}
+		}
+	}()
 	hasher := sha256.New()
-	const sparseBufSize = 1024 * 1024 // 1 MiB
-	if _, err := sparseCopy(f, hasher, resp.Body, sparseBufSize); err != nil {
+	var reader io.Reader = resp.Body
+	if expectedSize > 0 {
+		reader = io.LimitReader(reader, expectedSize+1)
+	}
+	if _, err := sparseCopy(f, hasher, reader, 1024*1024); err != nil {
 		return err
+	}
+	if expectedSize > 0 {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if info.Size() != expectedSize {
+			return fmt.Errorf("artifact size mismatch")
+		}
 	}
 	if expectedSHA != "" {
 		gotSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -130,9 +198,16 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 			return fmt.Errorf("artifact sha256 mismatch, got %s want %s", gotSHA, expectedSHA)
 		}
 	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	if err := os.Rename(tmpPath, imagePath); err != nil {
 		return err
 	}
+	published = true
 	return nil
 }
 
@@ -310,6 +385,14 @@ func rewriteDownloadHost(rawURL, endpoint string) string {
 	if isS3PresignedURL(u) {
 		return rawURL
 	}
-	u.Host = endpoint
+	if strings.Contains(endpoint, "://") {
+		target, err := url.Parse(endpoint)
+		if err != nil || target.Host == "" {
+			return rawURL
+		}
+		u.Host, u.Scheme = target.Host, target.Scheme
+	} else {
+		u.Host = endpoint
+	}
 	return u.String()
 }
