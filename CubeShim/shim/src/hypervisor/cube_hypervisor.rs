@@ -14,7 +14,7 @@ use cube_hypervisor::{
     VmRemoveDeviceData,
 };
 use std::sync::mpsc::{channel, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -273,6 +273,21 @@ impl CubeHypervisor {
             });
         }
         Err("Receiver is uninitialized".to_string())
+    }
+
+    pub async fn wait_shutdown(&self, timeout: Duration) -> CResult<bool> {
+        let deadline = Instant::now() + timeout;
+        let recv = self
+            .ev_receiver
+            .as_ref()
+            .ok_or("Receiver is uninitialized")?;
+        let rx = recv.lock().await;
+        tokio::task::block_in_place(|| {
+            crate::common::shutdown::wait_for_event_until(&rx, deadline, |event| {
+                matches!(event, NotifyEvent::VmShutdown)
+            })
+        })
+        .map_err(|error| format!("Wait for VM shutdown: {}", error))
     }
 
     pub fn try_wait_notify(&self) -> CResult<NotifyEvent> {

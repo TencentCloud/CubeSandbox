@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 /// Last resort for final VM teardown. VMM API calls and thread joins are
@@ -57,10 +57,76 @@ impl ShutdownDeadline {
     }
 }
 
+/// Wait for a terminal notification without treating an intermediate event as
+/// completion or extending the caller's deadline.
+pub fn wait_for_event_until<T>(
+    receiver: &Receiver<T>,
+    deadline: Instant,
+    matches: impl Fn(&T) -> bool,
+) -> Result<bool, RecvTimeoutError> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(event) if matches(&event) => return Ok(true),
+            Ok(_) => continue,
+            Err(RecvTimeoutError::Timeout) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc::RecvTimeoutError;
+
+    #[test]
+    fn shutdown_notification_can_arrive_after_one_second() {
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender.send(false).unwrap();
+            std::thread::sleep(Duration::from_millis(1100));
+            sender.send(true).unwrap();
+        });
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_event_until(&receiver, started + Duration::from_secs(3), |event| *event),
+            Ok(true)
+        );
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn unrelated_events_do_not_extend_shutdown_deadline() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(false).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_event_until(&receiver, started + Duration::from_millis(30), |event| {
+                *event
+            }),
+            Ok(false)
+        );
+        assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[test]
+    fn disconnected_shutdown_channel_is_reported() {
+        let (sender, receiver) = mpsc::channel::<bool>();
+        drop(sender);
+        assert_eq!(
+            wait_for_event_until(
+                &receiver,
+                Instant::now() + Duration::from_secs(1),
+                |event| *event
+            ),
+            Err(RecvTimeoutError::Disconnected)
+        );
+    }
 
     #[test]
     fn shutdown_deadline_fires_without_async_runtime_progress() {

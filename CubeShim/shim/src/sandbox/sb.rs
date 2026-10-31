@@ -863,16 +863,13 @@ impl SandBox {
                 let remaining = timeout
                     .saturating_sub(started.elapsed())
                     .saturating_sub(Duration::from_secs(1));
-                let graceful_exit = async {
-                    while *self.state.lock().await != SandBoxState::Exited {
-                        match ch.wait_notify(Duration::from_secs(1)).await {
-                            Ok(CH::NotifyEvent::VmShutdown) => break,
-                            Ok(_) => continue,
-                            Err(_) => break,
-                        }
-                    }
-                };
-                let _ = tokio::time::timeout(remaining, graceful_exit).await;
+                if let Err(error) = ch.wait_shutdown(remaining).await {
+                    warnf!(
+                        self.log,
+                        "guest shutdown notification unavailable: {}",
+                        error
+                    );
+                }
             }
         }
         // Even Exited / missing-agent sandboxes can retain a live VMM. Do not
