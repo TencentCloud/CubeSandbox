@@ -25,8 +25,9 @@ use ttrpc::context::{self, Context};
 use crate::common::types::PropagationContainerMount;
 use crate::common::utils::{AsyncUtils, CPath, Utils};
 use crate::common::{
-    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR,
-    CUBE_BIND_SHARE_TYPE, MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
+    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, ANNO_PROPAGATION_CONTAINER_UMNTS,
+    ANNO_PROPAGATION_EXEC_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR, CUBE_BIND_SHARE_TYPE,
+    MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
 };
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
@@ -35,6 +36,48 @@ use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+
+/// The restore-related annotations only ever carry non-blank values: cubelet
+/// writes `<template>_<n>` for the marker and JSON arrays for the mount keys,
+/// and the agent fails on a blank one. Rejecting blanks here keeps the skip
+/// predicate below a plain presence test.
+///
+/// Only restore requests reach those keys (the agent reads the mount ones
+/// inside its restore branch, keyed on the marker), so without the marker this
+/// is a no-op and cold starts keep ignoring blank values as before.
+fn restore_annotations_well_formed(annotations: Option<&HashMap<String, String>>) -> CResult<()> {
+    let Some(annos) = annotations else {
+        return Ok(());
+    };
+    if !annos.contains_key(ANNO_APP_SNAPSHOT_CONTAINER_ID) {
+        return Ok(());
+    }
+
+    for key in [
+        ANNO_APP_SNAPSHOT_CONTAINER_ID,
+        ANNO_PROPAGATION_EXEC_MNTS,
+        ANNO_PROPAGATION_CONTAINER_UMNTS,
+    ] {
+        if annos.get(key).is_some_and(|v| v.trim().is_empty()) {
+            return Err(format!("annotation {} must not be blank", key));
+        }
+    }
+
+    Ok(())
+}
+
+/// The agent takes its restore branch exactly when the marker is present, and
+/// that branch only has mount work when one of the mount keys is present, so
+/// both questions above are presence tests; blanks are rejected beforehand.
+fn should_skip_app_snapshot_create_rpc(annotations: Option<&HashMap<String, String>>) -> bool {
+    let Some(annos) = annotations else {
+        return false;
+    };
+
+    annos.contains_key(ANNO_APP_SNAPSHOT_CONTAINER_ID)
+        && !annos.contains_key(ANNO_PROPAGATION_EXEC_MNTS)
+        && !annos.contains_key(ANNO_PROPAGATION_CONTAINER_UMNTS)
+}
 
 /// Upper bound on the dedicated vsock connect in start_log_forward.  It runs
 /// while holding log_forward_lifecycle, so an unbounded connect would serialize
@@ -619,7 +662,8 @@ impl Container {
     pub async fn create_container(&mut self) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
 
-        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+        let passfd_io = self.passfd_io_enabled();
+        let (stdin_port, stdout_port, stderr_port) = if passfd_io {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
                 &self.sandbox_id,
                 &self.info.stdin,
@@ -639,6 +683,21 @@ impl Container {
         } else {
             (0, 0, 0)
         };
+
+        restore_annotations_well_formed(self.spec.annotations().as_ref())?;
+
+        // passfd starts must keep the RPC: it is the only place a restored
+        // container's stdio is reconnected, and start_container skips log
+        // forwarding when passfd is on.
+        if !passfd_io && should_skip_app_snapshot_create_rpc(self.spec.annotations().as_ref()) {
+            // Restore-based start without mount annotations: the container is
+            // already running in the restored guest. The agent-side create
+            // would re-find it, apply the annotations excluded above, and reset
+            // the cached log-forward readers.
+            self.state = Some(ContainerState::new(self.log.clone()));
+            stat.set_ok();
+            return Ok(());
+        }
 
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
@@ -1545,5 +1604,93 @@ mod sandbox_log_path_tests {
         assert!(super::remove_sandbox_log_dir_sync("../etc").is_err());
         assert!(super::remove_sandbox_log_dir_sync("a/b").is_err());
         assert!(super::remove_sandbox_log_dir_sync("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod app_snapshot_skip_tests {
+    use super::{
+        restore_annotations_well_formed, should_skip_app_snapshot_create_rpc,
+        ANNO_APP_SNAPSHOT_CONTAINER_ID, ANNO_PROPAGATION_CONTAINER_UMNTS,
+        ANNO_PROPAGATION_EXEC_MNTS,
+    };
+    use std::collections::HashMap;
+
+    const KEYS: [&str; 3] = [
+        ANNO_APP_SNAPSHOT_CONTAINER_ID,
+        ANNO_PROPAGATION_EXEC_MNTS,
+        ANNO_PROPAGATION_CONTAINER_UMNTS,
+    ];
+
+    fn annos(keys: &[&str]) -> HashMap<String, String> {
+        keys.iter()
+            .map(|k| (k.to_string(), "[]".to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn missing_annotations_never_skip() {
+        assert!(!should_skip_app_snapshot_create_rpc(None));
+    }
+
+    #[test]
+    fn without_the_restore_marker_the_rpc_is_kept() {
+        // A restored sandbox can still hold a container the agent never created
+        // through its restore branch; that full create must not be dropped.
+        let a = annos(&[ANNO_PROPAGATION_EXEC_MNTS]);
+        assert!(!should_skip_app_snapshot_create_rpc(Some(&a)));
+    }
+
+    #[test]
+    fn restore_marker_without_mount_annotations_skips() {
+        let a = annos(&[ANNO_APP_SNAPSHOT_CONTAINER_ID]);
+        assert!(should_skip_app_snapshot_create_rpc(Some(&a)));
+    }
+
+    #[test]
+    fn restore_marker_with_exec_mounts_keeps_the_create() {
+        let a = annos(&[ANNO_APP_SNAPSHOT_CONTAINER_ID, ANNO_PROPAGATION_EXEC_MNTS]);
+        assert!(!should_skip_app_snapshot_create_rpc(Some(&a)));
+    }
+
+    #[test]
+    fn restore_marker_with_container_umounts_keeps_the_create() {
+        let a = annos(&[
+            ANNO_APP_SNAPSHOT_CONTAINER_ID,
+            ANNO_PROPAGATION_CONTAINER_UMNTS,
+        ]);
+        assert!(!should_skip_app_snapshot_create_rpc(Some(&a)));
+    }
+
+    #[test]
+    fn well_formed_annotations_are_accepted() {
+        assert!(restore_annotations_well_formed(None).is_ok());
+        for subset in 0..KEYS.len() {
+            let a = annos(&KEYS[..=subset]);
+            assert!(restore_annotations_well_formed(Some(&a)).is_ok());
+        }
+    }
+
+    #[test]
+    fn blank_annotation_is_rejected() {
+        // Blanks never come from cubelet, and keeping them out of the predicate
+        // means the skip stays a plain presence test.
+        for key in KEYS {
+            let mut a = annos(&[ANNO_APP_SNAPSHOT_CONTAINER_ID]);
+            a.insert(key.to_string(), "  ".to_string());
+            assert!(restore_annotations_well_formed(Some(&a)).is_err());
+        }
+    }
+
+    #[test]
+    fn blank_mount_values_without_the_restore_marker_are_ignored() {
+        // Cold starts and template builds never read the mount keys, so they
+        // must not gain a new hard-failure mode. A blank marker is still
+        // rejected above: it decides which agent branch runs.
+        for key in [ANNO_PROPAGATION_EXEC_MNTS, ANNO_PROPAGATION_CONTAINER_UMNTS] {
+            let mut a: HashMap<String, String> = HashMap::new();
+            a.insert(key.to_string(), "  ".to_string());
+            assert!(restore_annotations_well_formed(Some(&a)).is_ok());
+        }
     }
 }
