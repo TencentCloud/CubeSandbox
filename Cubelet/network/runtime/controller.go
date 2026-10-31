@@ -828,13 +828,11 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		if entry.State == TapPoolReady {
 			if err := s.checkTapUnused(entry.TapName); err != nil {
 				if !errors.Is(err, errTapOwned) {
-					// Do not reuse an unverified queue or consume the entire pool
-					// on a host-wide procfs error. A fresh TAP has no prior owner.
-					if releaseErr := s.tapPool.ReleaseReservation(entry, owner); releaseErr != nil {
-						return nil, nil, errors.Join(err, releaseErr)
-					}
-					CubeLog.WithContext(context.Background()).Warnf("TAP ownership scan failed; using a fresh TAP: %v", err)
-					break
+					// A host-wide inspection failure also prevents future cleanup.
+					// Allocating fresh TAPs here would consume addresses indefinitely.
+					return nil, nil, errors.Join(
+						fmt.Errorf("cannot verify TAP ownership; refusing fresh allocation: %w", err),
+						s.tapPool.ReleaseReservation(entry, owner))
 				}
 				if quarantineErr := s.tapPool.QuarantineReservation(entry, owner); quarantineErr != nil {
 					return nil, nil, errors.Join(err, quarantineErr)
@@ -860,6 +858,12 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 	ip, err := s.allocator.Allocate()
 	if err != nil {
 		return nil, nil, err
+	}
+	// A fresh queue would also become uncollectable on a host whose procfs
+	// cannot be inspected. Check before consuming an address or creating a TAP.
+	if err := s.checkTapUnused(tapName(ip.String())); err != nil {
+		s.allocator.Release(ip)
+		return nil, nil, fmt.Errorf("verify fresh TAP ownership: %w", err)
 	}
 	if err := s.cleanupConflictingTap(ip); err != nil {
 		s.allocator.Release(ip)

@@ -80,7 +80,7 @@ func TestAcquireQuarantinesLegacyReadyTapStillHeldByOldShim(t *testing.T) {
 	if _, err := controller.ReleaseNetwork(context.Background(), &ReleaseNetworkRequest{SandboxID: "previous-sandbox"}); err != nil {
 		t.Fatal(err)
 	}
-	controller.tapAdapter = &ownershipTestTapAdapter{TapDeviceAdapter: controller.tapAdapter, busy: true}
+	controller.tapAdapter = &ownershipTestTapAdapter{TapDeviceAdapter: controller.tapAdapter, busyOnCall: 1}
 	if _, err := controller.EnsureNetwork(context.Background(), &EnsureNetworkRequest{SandboxID: "new-sandbox"}); err != nil {
 		t.Fatalf("fresh TAP fallback failed: %v", err)
 	}
@@ -116,16 +116,27 @@ func TestAcquirePreservesReadyInventoryOnInspectionFailure(t *testing.T) {
 	}
 	previousName := controller.tapPool.Entries()[0].TapName
 	controller.tapAdapter = &ownershipTestTapAdapter{TapDeviceAdapter: controller.tapAdapter, uncertain: true}
-	tap, entry, err := controller.acquireTap("next")
-	if err != nil {
-		t.Fatalf("fresh TAP fallback failed: %v", err)
-	}
-	if entry == nil || tap.Name == previousName {
-		t.Fatal("uncertain ownership reused the unverified TAP")
+	for i := 0; i < 10; i++ {
+		if _, _, err := controller.acquireTap("next"); err == nil {
+			t.Fatal("unavailable inspection allocated a new TAP")
+		}
 	}
 	entries := controller.tapPool.Entries()
 	state, owner, found := controller.tapPool.StateByName(previousName)
-	if len(entries) != 2 || !found || state != TapPoolReady || owner != "" {
-		t.Fatalf("inspection failure consumed Ready inventory: %v", entries)
+	if len(entries) != 1 || !found || state != TapPoolReady || owner != "" {
+		t.Fatalf("inspection failure consumed inventory: %v", entries)
+	}
+}
+
+func TestAcquireDoesNotAllocateWithoutInspectionAndReadyInventory(t *testing.T) {
+	controller := newCreateTestController(t, nil)
+	controller.tapAdapter = &ownershipTestTapAdapter{TapDeviceAdapter: controller.tapAdapter, uncertain: true}
+	for i := 0; i < 10; i++ {
+		if _, _, err := controller.acquireTap("next"); err == nil {
+			t.Fatal("inspection failure allocated a fresh TAP")
+		}
+	}
+	if len(controller.tapPool.Entries()) != 0 {
+		t.Fatal("inspection failure consumed an address")
 	}
 }
