@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
 
@@ -34,5 +35,18 @@ func TestReplicaShimBindingReplacesCallerAnnotation(t *testing.T) {
 		if version == "" {
 			require.NotContains(t, annotations, constants.CubeAnnotationComponentCubeShimVersion)
 		}
+	}
+}
+
+func TestTemplateMergeCannotReplaceSelectedReplicaShim(t *testing.T) {
+	for _, selected := range []string{"selected", ""} {
+		t.Run(selected, func(t *testing.T) {
+			request := &types.CreateCubeSandboxReq{Annotations: map[string]string{constants.CubeAnnotationComponentCubeShimVersion: "caller"}}
+			snapshot := &types.CreateCubeSandboxReq{Annotations: map[string]string{constants.CubeAnnotationComponentCubeShimVersion: "snapshot", "custom": "retained"}}
+			injectReplicaComponentVersionAnnotations(request.Annotations, templatecenter.ReplicaStatus{ShimVersion: selected})
+			applyTemplateAnnotationsAndLabels(snapshot, request)
+			require.Equal(t, selected, request.Annotations[constants.CubeAnnotationComponentCubeShimVersion])
+			require.Equal(t, "retained", request.Annotations["custom"])
+		})
 	}
 }

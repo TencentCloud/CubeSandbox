@@ -252,6 +252,10 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 			reqOut.Annotations = make(map[string]string)
 		}
 		for k, v := range reqIn.Annotations {
+			// Host runtime bindings belong to the selected replica, not the saved request.
+			if k == constants.CubeAnnotationComponentCubeShimVersion {
+				continue
+			}
 			if k == constants.AnnotationsNetID {
 				if _, ok := reqOut.Annotations[constants.AnnotationsNetID]; ok {
 
@@ -701,6 +705,7 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 }
 
 func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) error {
+	delete(reqInOut.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
 		return err
 	}
