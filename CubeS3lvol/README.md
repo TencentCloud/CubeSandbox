@@ -406,15 +406,18 @@ Rotation uses `copytruncate` to avoid restarting storage or replacing its open
 file descriptor. This has a small concurrent-tail log-loss window; it does not
 discard WAL or volume data. Existing timestamped archives are not deleted by
 this policy. A previously unmanaged active log larger than 1 GiB is deliberately refused:
-archive and verify it first, then enable the timer. Once a source has a
-logrotate state file, exceeding that bootstrap limit does not prevent recovery. Insufficient archive space
-also leaves the active file untouched. The helper supports `--dry-run` and
-explicit `--log`, `--archive-dir`, `--size`, and `--retain` settings for checking
-the policy without changing storage configuration. Dry-run prints the policy
-without creating state or archive directories or invoking logrotate. The default
-free-space reserve is 8 GiB in addition to the active log size; tune
-`--reserve-bytes` in the service command if the archive filesystem requires a
-different reserve. Archive directory names must not contain whitespace; use
+stop the timer, run the installed `rotate_logs.py` helper with the same log and
+archive settings and `--archive-oversized`, then verify the archive before
+restarting the timer. The explicit bootstrap option still checks file identity
+and available archive space. Acceptance is recorded before the first rotation,
+so a temporary failure does not permanently block an accepted log after growth.
+Insufficient archive space leaves the active file untouched. The helper supports
+`--dry-run` and explicit `--log`, `--archive-dir`, `--size`, and `--retain`
+settings. Dry-run prints the policy without creating state or archive directories
+or invoking logrotate. Same-filesystem rotation reserves 1 MiB beyond the active
+log size; a separate archive filesystem reserves 8 GiB. Set
+`RCOW_LOG_RESERVE_BYTES` in the service environment or pass `--reserve-bytes`
+to override either default. Archive directory names must not contain whitespace; use
 `--archive-dir` if the log parent directory contains spaces.
 
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to

@@ -14,6 +14,27 @@ spec.loader.exec_module(rotation)
 
 
 class RotationTest(unittest.TestCase):
+    def test_reserve_depends_on_archive_filesystem(self):
+        self.assertEqual(rotation.rotation_reserve(1, 1, None), 2**20)
+        self.assertEqual(rotation.rotation_reserve(1, 2, None), 8 * 2**30)
+        self.assertEqual(rotation.rotation_reserve(1, 2, 123), 123)
+
+    def test_explicit_legacy_bootstrap_keeps_space_guard(self):
+        with tempfile.TemporaryDirectory() as root:
+            p = Path(root)
+            log = p / 'active'
+            log.write_bytes(b'keep')
+            args = ['--log', str(log), '--state-dir', str(p / 'state'),
+                    '--size', '1', '--bootstrap-limit', '3', '--archive-oversized']
+            with patch.dict(rotation.os.environ, {'RCOW_LOG_RESERVE_BYTES': '2'}), patch.object(rotation.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 5})()), patch.object(rotation.subprocess, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'insufficient archive space'):
+                    rotation.main(args)
+                run.assert_not_called()
+            self.assertEqual(log.read_bytes(), b'keep')
+            with patch.object(rotation, 'resolve_logrotate', return_value='/usr/sbin/logrotate'), patch.object(rotation.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 2**20 + 4})()), patch.object(rotation.subprocess, 'run') as run:
+                self.assertEqual(rotation.main(args), 0)
+                run.assert_called_once()
+
     def test_release_includes_rotation_helper(self):
         release = (Path(__file__).parents[1] / 'make_release.sh').read_text()
         self.assertIn('rcow_purge.sh rotate_logs.py; do', release)

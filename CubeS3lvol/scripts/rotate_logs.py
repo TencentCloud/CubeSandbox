@@ -21,6 +21,12 @@ def positive(value):
     return result
 
 
+def rotation_reserve(source_device, archive_device, override):
+    if override is not None:
+        return override
+    return 2**20 if source_device == archive_device else 8 * 2**30
+
+
 def configuration(log, archive, size, retain):
     for path in (log, archive):
         if any(ord(c) < 32 for c in str(path)):
@@ -64,7 +70,9 @@ def main(argv=None):
     parser.add_argument('--size', type=positive, default=256 * 2**20)
     parser.add_argument('--retain', type=positive, default=8)
     parser.add_argument('--bootstrap-limit', type=positive, default=2**30)
-    parser.add_argument('--reserve-bytes', type=positive, default=8 * 2**30)
+    parser.add_argument('--reserve-bytes', type=positive, default=os.environ.get('RCOW_LOG_RESERVE_BYTES'))
+    parser.add_argument('--archive-oversized', action='store_true',
+                        help='accept an oversized legacy log after checking archive space')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
     source = Path(args.log)
@@ -97,14 +105,15 @@ def main(argv=None):
         except BlockingIOError:
             return 0
         accepted = state / (identity + '.accepted')
-        if source.stat().st_size > args.bootstrap_limit and not (state_file.is_file() or accepted.is_file()):
-            raise RuntimeError('oversized legacy log: archive and verify before enabling rotation')
+        if source.stat().st_size > args.bootstrap_limit and not args.archive_oversized and not (state_file.is_file() or accepted.is_file()):
+            raise RuntimeError('oversized legacy log: pause the rotation timer and run this helper with --archive-oversized; verify the archive before restarting the timer')
         # Acceptance survives a failed first rotation; it is separate from
         # logrotate's state format and never created by dry-run.
         accepted.touch(mode=0o600, exist_ok=True)
         archive.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if source.stat().st_size >= args.size and not args.dry_run:
-            if shutil.disk_usage(archive).free < source.stat().st_size + args.reserve_bytes:
+        reserve = rotation_reserve(source.stat().st_dev, archive.stat().st_dev, args.reserve_bytes)
+        if source.stat().st_size >= args.size:
+            if shutil.disk_usage(archive).free < source.stat().st_size + reserve:
                 raise RuntimeError('insufficient archive space; source left untouched')
         executable = resolve_logrotate()
         with tempfile.NamedTemporaryFile(mode='w', dir=state, suffix='.conf') as config:
