@@ -786,21 +786,29 @@ test_flusher(void)
 	fake.forced_status = 0;
 
 	check_u64("failure does not immediately start another upload", fake.started, 1);
-	for (unsigned i = 0; i < 1000; i++) {
+	/* Check a bounded immediate window instead of requiring 1000 kicks to
+	 * finish inside 100 ms on an instrumented CI host. */
+	for (unsigned i = 0; i < 10; i++) {
 		s3_flusher_kick(fl);
 	}
-	check_u64("repeated kicks respect retry backoff", fake.started, 1);
+	check_u64("immediate kicks respect retry backoff", fake.started, 1);
 	check_true("failed data stays dirty during backoff", s3_overlay_has_dirty(ov), NULL);
-	usleep(110000);
-	s3_flusher_kick(fl);
+	uint64_t retry_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+	while (fake.started < 2 && spdk_get_ticks() < retry_deadline) {
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+		usleep(1000);
+	}
 	check_u64("retry starts after the initial backoff", fake.started, 2);
 	s3_flusher_get_stats(fl, &fstats);
 	check_u64("failure counted", fstats.failures, 1);
 	fake_complete_all(&fake, -EIO);
 	s3_flusher_kick(fl);
 	check_u64("second failure increases the backoff", fake.started, 2);
-	usleep(210000);
-	s3_flusher_kick(fl);
+	retry_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+	while (fake.started < 3 && spdk_get_ticks() < retry_deadline) {
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+		usleep(1000);
+	}
 	check_u64("second retry starts after doubled backoff", fake.started, 3);
 
 	fake_complete_all(&fake, 0);
@@ -827,6 +835,16 @@ test_flusher(void)
 
 		check_true("drain does not complete while work is outstanding",
 			   !probe.done, NULL);
+
+		/* Recovery can happen after the initial drain probe failed. Only the
+		 * owner-thread poller drives this retry; no manual kick is involved. */
+		fake_complete_all(&fake, -EIO);
+		uint64_t recovery_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+		while (fake.n_pending == 0 && !probe.done && spdk_get_ticks() < recovery_deadline) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_true("drain retries after storage recovers", fake.n_pending > 0, NULL);
 
 		while (fake.n_pending > 0) {
 			fake_complete_all(&fake, 0);

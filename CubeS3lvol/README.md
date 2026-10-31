@@ -640,3 +640,8 @@ It is a snapshot of the current state, not a promise: something can pin the
 snapshot again between the query and the delete, and a retry that is refused
 again is reported by `--retry-pending` (exit status 1) rather than hidden.
 
+
+During a bounded flusher drain, failure backoff restarts at 100 ms and is capped
+at one second, allowing uploads to recover before the drain deadline. Ordinary
+background flushing retains its 30-second cap. Neither path retries a failed
+synchronous upload again inside the same backoff window.

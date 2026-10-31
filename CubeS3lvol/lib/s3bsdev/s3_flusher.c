@@ -244,6 +244,11 @@ flusher_upload_done(void *cb_arg, int status)
 		if (!f->retry_after || now >= f->retry_after) {
 			f->retry_delay_us = f->retry_delay_us ?
 				spdk_min(f->retry_delay_us * 2, 30000000ULL) : 100000;
+			/* Keep recovery opportunities inside a bounded drain. Ordinary
+			 * outage retries can still back off to thirty seconds. */
+			if (f->drain_cb) {
+				f->retry_delay_us = spdk_min(f->retry_delay_us, 1000000ULL);
+			}
 			f->retry_after = now + f->retry_delay_us * hz / 1000000;
 		}
 		if (!f->last_failure_log || now - f->last_failure_log >= 30 * hz) {
@@ -504,6 +509,7 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	/* Give this bounded drain one immediate probe. A synchronous failure
 	 * re-arms the cooldown before the scheduling loop can retry again. */
 	f->retry_after = 0;
+	f->retry_delay_us = 0;
 
 	/* Push everything through rather than waiting for the poller tick. */
 	s3_flusher_kick(f);
