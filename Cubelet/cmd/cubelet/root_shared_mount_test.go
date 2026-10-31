@@ -68,6 +68,8 @@ func TestRootSharedMountSymlinkRestartDoesNotStack(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real", "root")
 	require.NoError(t, os.MkdirAll(real, 0o700))
+	real, err := filepath.EvalSymlinks(real)
+	require.NoError(t, err)
 	alias := filepath.Join(dir, "alias")
 	require.NoError(t, os.Symlink(filepath.Join(dir, "real"), alias))
 	root := filepath.Join(alias, "root")
