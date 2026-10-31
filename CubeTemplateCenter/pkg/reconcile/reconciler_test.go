@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // ---- durationOverride ----
@@ -161,19 +163,37 @@ type fakeDeleter struct {
 
 type fakeLocalCleaner struct {
 	fakeDeleter
-	calls int
+	calls  int
+	onCall func()
 }
 
-func (f *fakeLocalCleaner) CleanupLocalOrphans(context.Context) error { f.calls++; return nil }
+func (f *fakeLocalCleaner) CleanupLocalOrphans(context.Context) error {
+	f.calls++
+	if f.onCall != nil {
+		f.onCall()
+	}
+	return nil
+}
 func TestLocalCleanupDoesNotRequireGlobalSweepLock(t *testing.T) {
-	// A local cleanup must run independently on each replica, even without a
-	// DB session capable of winning the global metadata sweep lock.
+	lockAttempts := 0
+	withLock := func(context.Context, *gorm.DB, func() error) error {
+		lockAttempts++
+		return nil // A different replica owns the lock; never execute the sweep.
+	}
 	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		f := &fakeLocalCleaner{}
-		r := &Reconciler{deleter: f}
-		r.cleanupLocalArtifacts(t.Context())
-		if f.calls != 1 {
-			t.Fatalf("replica %d: calls=%d", i, f.calls)
+		f.onCall = func() {
+			if f.calls >= 2 {
+				cancel()
+			}
+		}
+		r := &Reconciler{db: &gorm.DB{}, deleter: f, interval: time.Millisecond, withReconcileLock: withLock}
+		before := lockAttempts
+		r.Run(ctx)
+		cancel()
+		if f.calls < 2 || lockAttempts <= before {
+			t.Fatalf("replica %d: local calls=%d lock attempts=%d", i, f.calls, lockAttempts-before)
 		}
 	}
 }

@@ -86,8 +86,9 @@ type ArtifactDeleter interface {
 // Reconciler periodically fails jobs that were abandoned mid-build and sweeps
 // artifacts marked CLEANUP_PENDING whose immediate delete never arrived.
 type Reconciler struct {
-	db       *gorm.DB
-	interval time.Duration
+	withReconcileLock func(context.Context, *gorm.DB, func() error) error
+	db                *gorm.DB
+	interval          time.Duration
 	// Tiered staleness thresholds (see constants above).
 	pendingStaleAfter time.Duration
 	pullingStaleAfter time.Duration
@@ -170,7 +171,11 @@ func (r *Reconciler) cleanupLocalArtifacts(ctx context.Context) {
 // SweepOnce runs a single sweep under the cross-replica session lock. It is
 // exported so operators can trigger it from a test harness.
 func (r *Reconciler) SweepOnce(ctx context.Context) error {
-	return lock.WithReconcileLock(ctx, r.db, func() error {
+	withLock := r.withReconcileLock
+	if withLock == nil {
+		withLock = lock.WithReconcileLock
+	}
+	return withLock(ctx, r.db, func() error {
 		if err := r.failStaleJobs(ctx); err != nil {
 			return err
 		}

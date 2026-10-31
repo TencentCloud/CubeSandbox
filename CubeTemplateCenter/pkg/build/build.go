@@ -343,6 +343,8 @@ func runBuildLocked(
 		// Remove the half-written store dir so a failed build does not leak
 		// disk. BuildExt4 cleans up on its own error paths, but a partially
 		// created dir (or a PostRootfsExport failure) can survive.
+		// Cleanup must not mistake this failed build's marker for a peer owner.
+		releaseMarker()
 		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}
