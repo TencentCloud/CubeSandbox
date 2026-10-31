@@ -458,6 +458,11 @@ func configureSnapshotRuntimeRefHooks() {
 			log.G(ctx).Warnf("lookup snapshot runtime ref before destroy release failed: %v", refErr)
 		}
 		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
+		if errReleasingRefs != nil {
+			// Preserve the persisted spec and route while reference cleanup
+			// is incomplete, so a later destroy can retry safely.
+			return errReleasingRefs
+		}
 		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
 		// Status is best-effort. A missing row must not fail destroy.
 		if errDeletingStatus := sandboxstatus.SoftDelete(ctx, sandboxID); errDeletingStatus != nil {
@@ -465,12 +470,6 @@ func configureSnapshotRuntimeRefHooks() {
 		}
 		if ref != nil && strings.TrimSpace(ref.SnapshotID) != "" {
 			maybeFinalizeTombstone(ctx, ref.SnapshotID)
-		}
-		if errReleasingRefs != nil && errDeletingSpec != nil {
-			return errors.Join(errReleasingRefs, errDeletingSpec)
-		}
-		if errReleasingRefs != nil {
-			return errReleasingRefs
 		}
 		if errDeletingSpec != nil && !errors.Is(errDeletingSpec, sandboxspec.ErrSandboxSpecNotFound) {
 			return errDeletingSpec

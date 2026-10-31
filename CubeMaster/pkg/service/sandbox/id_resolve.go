@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -32,6 +33,15 @@ func ResolveSandboxID(ctx context.Context, input string) (string, error) {
 	input = sandboxid.NormalizeInput(input)
 	if input == "" {
 		return "", sandboxid.ErrNotFound
+	}
+	// A cold Master cache or an unhealthy worker is not proof of deletion.
+	// Full IDs can be resolved from the durable routing record without scanning
+	// only healthy workers; the actual lookup then reports worker availability.
+	if sandboxid.IsFullID(input) {
+		canonical := strings.ToLower(input)
+		if proxy, ok := localcache.GetSandboxProxyMap(ctx, canonical); ok && proxy != nil && proxy.HostIP != "" {
+			return canonical, nil
+		}
 	}
 
 	candidates := localcache.ListKnownSandboxIDs()

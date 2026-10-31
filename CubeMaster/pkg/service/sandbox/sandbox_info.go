@@ -125,7 +125,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 	if req.HostID != "" {
 		n, exist = localcache.GetNode(req.HostID)
 		if !exist {
-			setError(errorcode.ErrorCode_NotFound, rsp)
+			setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
 			return "", "", nil, false
 		}
 		locatedHost = n.IP
@@ -142,7 +142,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 	}
 
 	if !exist || !n.Healthy {
-		// A caller-pinned host keeps the old error. An unpinned Info of a
+		// An unavailable caller-pinned host returns an availability error. An unpinned Info of a
 		// shimless pause is answered from Master only when the located host is
 		// the binding's own node. A cache entry that names some other node
 		// (leftover READY after a cross-node resume) stays an error, so a
@@ -150,11 +150,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) && pauseBindingOnHost(rec, locatedHost) {
 			return "", locatedHost, rec, true
 		}
-		if !exist {
-			setError(errorcode.ErrorCode_NotFound, rsp)
-		} else {
-			setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
-		}
+		setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
 		return "", "", nil, false
 	}
 	return cubelet.GetCubeletAddr(locatedHost), locatedHost, rec, true
