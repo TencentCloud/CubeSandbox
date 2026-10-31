@@ -638,7 +638,7 @@ func (s *service) updateWithPauseCow(
 	remoteUUIDsJSON := uploadRemoteUUIDs(workCtx, backend, snapID)
 	stageTimings.PackageFinalizeMS = durationMS(time.Since(packageFinalizeStarted))
 
-	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
+	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; reaping the live runtime", snapID, snapshotPath)
 	destroyStarted := time.Now()
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb, pauseStateSyncErr != nil)
 	stageTimings.DestroyLiveMS = durationMS(time.Since(destroyStarted))
@@ -682,10 +682,10 @@ func (s *service) updateWithPauseCow(
 	return rsp, nil
 }
 
-// destroyLiveAfterPause runs engine.Destroy(keep_tombstone) in-process while
-// Update already holds sandboxLifecycleLocks (do not call service.Destroy).
-// The paused Destroy path uses localTask.Delete ("binary delete") to reap the
-// shim that PauseToSnapshot left alive after Update OK.
+// destroyLiveAfterPause runs engine.Destroy(keep_tombstone) while Update holds
+// sandboxLifecycleLocks (do not call service.Destroy). The paused Destroy path
+// uses localTask.Delete ("binary delete") to reap the shim that PauseToSnapshot
+// left alive after Update OK.
 func (s *service) destroyLiveAfterPause(
 	ctx context.Context,
 	req *cubebox.UpdateCubeSandboxRequest,
@@ -695,29 +695,30 @@ func (s *service) destroyLiveAfterPause(
 	if req == nil || sb == nil {
 		return nil, errors.New("nil pause destroy request")
 	}
+	// The tombstone marker is what a deferred reap is recoverable through: the
+	// caller stamps it together with the PAUSED state, and this retry covers a
+	// persist that failed.
 	if markPauseDestroyPending(sb, req.RequestID) || retryStateSync {
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
 	}
 
-	destroyReq := &cubebox.DestroyCubeSandboxRequest{
-		RequestID: req.RequestID,
-		SandboxID: req.SandboxID,
-		Annotations: map[string]string{
-			constants.AnnotationPauseKeepTombstone: "true",
-		},
-	}
+	instanceType := ""
 	if ann := req.GetAnnotations(); ann != nil {
-		if v := strings.TrimSpace(ann[constants.MasterAnnotationInstanceType]); v != "" {
-			destroyReq.Annotations[constants.MasterAnnotationInstanceType] = v
-		}
+		instanceType = strings.TrimSpace(ann[constants.MasterAnnotationInstanceType])
 	}
-	destroyInfo := &workflow.DestroyContext{
-		DestroyInfo: destroyReq,
-		BaseWorkflowInfo: workflow.BaseWorkflowInfo{
-			SandboxID: req.SandboxID,
-		},
-	}
+	// retryStateSync means the combined PAUSED+marker persist failed once, and a
+	// deferred reap is only recoverable through that marker: keep the destroy on
+	// the response path until it is durable.
+	asyncCleanup := !retryStateSync && s.canDeferPauseCleanup(ctx, req.SandboxID)
+	destroyInfo := buildPauseCleanupDestroy(req.SandboxID, req.RequestID, instanceType)
 	ctx = context.WithValue(ctx, workflow.KDestroyContext, destroyInfo)
+
+	// Only reached when the destroy reports no volume-ref events; Resume/Delete
+	// reap whatever is left via ensurePauseCleanupFinished.
+	if asyncCleanup {
+		s.deferPauseCleanup(ctx, req.SandboxID)
+		return nil, nil
+	}
 
 	// Standalone Destroy RPC still uses destroy_dead_line (60s). Pause already
 	// holds a longer WithoutCancel workCtx (snap + cleanup); do not re-cap here

@@ -53,7 +53,7 @@ func resumeReplaceRequest(desired string) *cubeboxpb.RunCubeSandboxRequest {
 func gateOnlyService(sb *cubeboxstore.CubeBox, ttl time.Duration) *service {
 	mgr := &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}
 	mgr.SetShimIntentTTL(ttl)
-	return &service{cubeboxMgr: mgr}
+	return &service{cubeboxMgr: mgr, sandboxLifecycleLocks: utils.NewResourceLocks()}
 }
 
 // fakeCreateFlow stands in for the create workflow so a test can tell whether

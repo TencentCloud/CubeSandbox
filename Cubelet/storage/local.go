@@ -1791,7 +1791,24 @@ func (l *local) deleteBackendFileInfo(ctx context.Context, id string) error {
 	return err
 }
 
+// readBackendFileInfoRawStrict is readBackendFileInfoRaw without the historical
+// not-found collapse: a caller that must tell "there is no record" from "I
+// cannot read it" needs the underlying store error.
+func (l *local) readBackendFileInfoRawStrict(ctx context.Context, id string) (*StorageInfo, error) {
+	return l.readBackendFileInfoRawWith(ctx, id, true)
+}
+
 func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*StorageInfo, error) {
+	return l.readBackendFileInfoRawWith(ctx, id, false)
+}
+
+// readBackendFileInfoRawWith reads the record, falling back to the failover
+// file when the key is absent. surfaceStoreErr decides what a store read error
+// that is not a not-found becomes: the underlying error (strict) or
+// ErrorKeyNotFound (the historical "no record" contract Destroy relies on). A
+// corrupt record and an unreadable failover file keep their own error either
+// way.
+func (l *local) readBackendFileInfoRawWith(ctx context.Context, id string, surfaceStoreErr bool) (*StorageInfo, error) {
 	b, err := l.db.Get(bucketName, id)
 	if err != nil {
 		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
@@ -1808,6 +1825,8 @@ func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*Storage
 			} else {
 				return nil, utils.ErrorKeyNotFound
 			}
+		} else if surfaceStoreErr {
+			return nil, err
 		} else {
 			return nil, utils.ErrorKeyNotFound
 		}
@@ -1822,6 +1841,18 @@ func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*Storage
 
 func (l *local) readBackendFileInfo(ctx context.Context, id string) (*StorageInfo, error) {
 	bf, err := l.readBackendFileInfoRaw(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.refreshCowPaths(bf); err != nil {
+		return nil, err
+	}
+	return bf, nil
+}
+
+// readBackendFileInfoStrict is readBackendFileInfo with the store error intact.
+func (l *local) readBackendFileInfoStrict(ctx context.Context, id string) (*StorageInfo, error) {
+	bf, err := l.readBackendFileInfoRawStrict(ctx, id)
 	if err != nil {
 		return nil, err
 	}

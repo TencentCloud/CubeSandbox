@@ -330,7 +330,21 @@ func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSan
 		// touched; the create step rejects both as already exists.
 		return nil
 	}
-	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
+	if err := s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb); err != nil {
+		return err
+	}
+	// waitReplacedSandboxGone only proves the runtime pids are gone; the reaper
+	// may still be dropping the volumes and the storage record this create reuses.
+	// The resume form of Create already holds this lock (see below); an
+	// ordinary create that only carries the desired id does not.
+	if resumeFromPauseSandboxID(req) == "" {
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, desired)
+		if lockErr != nil {
+			return fmt.Errorf("sandbox lifecycle operation is in progress; retry resume after 2 seconds")
+		}
+		defer unlock()
+	}
+	return s.ensurePauseCleanupFinished(ctx, desired, "resume")
 }
 
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
@@ -378,6 +392,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			return rsp, nil
 		}
 		defer unlock()
+		// Pause returned before its keep_tombstone Destroy finished; that
+		// reaper releases the names this Create is about to reuse.
+		if err := s.ensurePauseCleanupFinished(ctx, sid, "resume"); err != nil {
+			rsp.Ret.RetMsg = err.Error()
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
 	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
@@ -835,6 +856,14 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			return rsp, nil
 		}
 		defer unlock()
+
+		// Deleting the volumes/metadata a reaper is still releasing would race,
+		// and a delete_tombstone only drops the row: surface it as retryable.
+		if err := s.ensurePauseCleanupFinished(ctx, req.SandboxID, "delete"); err != nil {
+			rsp.Ret.RetMsg = err.Error()
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
 
 		sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
 		ctx = log.WithLogger(ctx, stepLog)

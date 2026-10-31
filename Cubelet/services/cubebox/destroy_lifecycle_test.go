@@ -42,6 +42,7 @@ type destroyRecordingFlow struct {
 	destroyCalls       int
 	cleanupCalls       int
 	destroyErr         error
+	onDestroy          func()
 	destroyDeadline    time.Time
 	hasDestroyDeadline bool
 }
@@ -55,6 +56,9 @@ func (f *destroyRecordingFlow) Create(context.Context, *workflow.CreateContext) 
 func (f *destroyRecordingFlow) Destroy(ctx context.Context, _ *workflow.DestroyContext) error {
 	f.destroyCalls++
 	f.destroyDeadline, f.hasDestroyDeadline = ctx.Deadline()
+	if f.onDestroy != nil {
+		f.onDestroy()
+	}
 	return f.destroyErr
 }
 

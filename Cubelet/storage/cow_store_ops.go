@@ -193,6 +193,29 @@ func GetSandboxRootfsFor(ctx context.Context, backend, sandboxID, preferredVolum
 	return backendFileInfoToSnapshotObject(ctx, store, rootfs)
 }
 
+// SandboxHasPluginVolumes reports whether the sandbox's storage record still
+// lists plugin volumes. Their Detach is the only source of volume-ref 1→0
+// events in a keep_tombstone Destroy, so callers that move that Destroy off
+// the response path must keep this false.
+//
+// It reads strictly on purpose: the plain reader reports a store read error as
+// "no record", and a caller deciding whether the destroy may leave the response
+// path must fail safe (reap synchronously) instead of reading that as "no
+// plugin volumes".
+func SandboxHasPluginVolumes(ctx context.Context, sandboxID string) (bool, error) {
+	if localStorage == nil {
+		return false, fmt.Errorf("storage is not initialized")
+	}
+	info, err := localStorage.readBackendFileInfoStrict(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info != nil && len(info.PluginVolumeBackendInfos) > 0, nil
+}
+
 // GetImportedSandboxMemoryFor returns the sandbox-private memory disk Create
 // minted (cross-node import or same-node S3 pause-resume clone). Empty / missing
 // is not an error: XFS template start and XFS Resume never create one.
