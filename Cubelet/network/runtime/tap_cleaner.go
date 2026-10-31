@@ -249,10 +249,13 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 	}
 	state.tap.PortMappings = append([]PortMapping(nil), state.PortMappings...)
 
-	if err := errors.Join(
+	cleanupErr := errors.Join(
 		s.deleteCubeVSPortMappings(state.SandboxID, state.tap),
 		s.cleanupCubeVSTapState(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4()),
-	); err != nil {
+	)
+	// Policy cleanup can remove the quarantine deny even when another cleanup
+	// step fails. Restore it before returning or waiting on remote readiness.
+	if err := errors.Join(cleanupErr, s.installPoolDefaultDeny(state.tap)); err != nil {
 		return err
 	}
 	if err := s.cleanupEgressForReuse(ctx, &state.persistedState, state.legacyStatePath != "" || stateKind == ""); err != nil {
@@ -262,9 +265,6 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 
 	s.resetTapRuntimeFieldsForPool(state.tap)
 	if err := s.verifyTapReusableFD(state.tap); err != nil {
-		return err
-	}
-	if err := s.installPoolDefaultDeny(state.tap); err != nil {
 		return err
 	}
 	s.recordCleanStep("default_deny_ready")

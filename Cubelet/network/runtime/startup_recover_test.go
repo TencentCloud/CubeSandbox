@@ -151,6 +151,10 @@ func TestStartupNoStateCleanupWaitsForEgress(t *testing.T) {
 	}
 	controller.handleCleaningEntries()
 	assertCleaning()
+	if !controller.cubevsAdapter.(*fakeCubeVSAdapter).defaultDenyInstalled[uint32(orphan.Index)] {
+		t.Fatal("maintenance removed quarantine deny while egress is unavailable")
+	}
+
 	if egress.deleteCalls != 1 || egress.verifyCalls != 0 {
 		t.Fatal("failed egress cleanup must not publish Ready")
 	}

@@ -36,10 +36,10 @@ func TestCleanupTapForReuseDeletesStateBeforeMarkReady(t *testing.T) {
 		"cubevs_port_mapping_deleted",
 		"cubevs_policy_cleaned",
 		"cubevs_tap_metadata_deleted",
+		"cubevs_default_deny",
 		"cubeegress_delete",
 		"cubeegress_verify",
 		"runtime_cleaned",
-		"cubevs_default_deny",
 		"default_deny_ready",
 		"state_deleted",
 		"ready",
@@ -97,8 +97,8 @@ func TestCleanupTapForReuseKeepsCleaningWhenTapFDStillBusy(t *testing.T) {
 	if !ok || poolState != TapPoolCleaning || owner != state.SandboxID {
 		t.Fatalf("tap state=%s owner=%s ok=%v, want Cleaning owned by sandbox", poolState, owner, ok)
 	}
-	if got := len(cubevsAdapter.defaultDenyPolicyCalls); got != defaultDenyCallsBefore {
-		t.Fatalf("default-deny installed before fd reusable: calls=%d want %d", got, defaultDenyCallsBefore)
+	if got := len(cubevsAdapter.defaultDenyPolicyCalls); got != defaultDenyCallsBefore+1 {
+		t.Fatalf("quarantine deny was not restored after fd probe failure: calls=%d want %d", got, defaultDenyCallsBefore+1)
 	}
 	if tapAdapter.destroyCount != 0 {
 		t.Fatalf("Destroy calls = %d, want 0 for fd probe failure", tapAdapter.destroyCount)
