@@ -59,6 +59,8 @@ spec:
                   key: redis-password
             - name: CUBE_LCM_REDIS_DB
               value: {{ include "cube.redisDB" . | quote }}
+            - name: CUBE_LCM_REDIS_CLUSTER_NODES
+              value: {{ .Values.redis.clusterNodes | default "" | quote }}
             - name: CUBE_LCM_REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: CUBE_LCM_REDIS_SENTINEL_NODES

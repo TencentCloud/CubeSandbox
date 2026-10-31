@@ -25,6 +25,24 @@ func TestValidateRedisStandalone(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+func TestValidateRedisCluster(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.RedisAddr = ""
+	cfg.RedisClusterAddrs = parseClusterAddrs("redis-1, redis-2:6380")
+	require.Equal(t, []string{"redis-1:6379", "redis-2:6380"}, cfg.RedisClusterAddrs)
+	require.NoError(t, cfg.Validate())
+	cfg.RedisDB = 1
+	require.ErrorContains(t, cfg.Validate(), "DB 0")
+	cfg.RedisDB = 0
+	cfg.RedisMasterName = "sentinel-master"
+	require.ErrorContains(t, cfg.Validate(), "Sentinel")
+	cfg.RedisMasterName = ""
+	for _, nodes := range []string{" , ", "redis:bad", "redis:70000"} {
+		cfg.RedisClusterAddrs = parseClusterAddrs(nodes)
+		require.Error(t, cfg.Validate(), nodes)
+	}
+}
+
 func TestValidateRedisSentinel(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RedisAddr = ""

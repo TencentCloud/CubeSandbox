@@ -734,6 +734,9 @@ redis:
   # Redis Sentinel (external). Non-empty masterName enables Sentinel for
   # CubeMaster / CubeProxy / cube-lifecycle-manager; requires sentinelNodes.
   # masterName and sentinelNodes must be set together (validated at render time).
+  # Native Cluster seed endpoints (comma-separated host:port). Mutually
+  # exclusive with host/Sentinel; requires db: 0. Cluster is externally managed.
+  clusterNodes: ""
   masterName: ""
   # Comma-separated sentinel endpoints, e.g. "10.0.0.11:26379,10.0.0.12:26379".
   # Also accepts hostname and bracketed IPv6 ([2001:db8::10]:26379).

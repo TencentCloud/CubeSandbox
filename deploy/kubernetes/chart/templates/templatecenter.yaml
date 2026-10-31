@@ -42,16 +42,16 @@ spec:
       app.kubernetes.io/component: templatecenter
   template:
     metadata:
+      annotations:
+        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-templatecenter/conf.yaml") . | sha256sum }}
+        {{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.certs (not .Values.trustedCACerts.existingConfigMap) }}
+        # Inline CA changes require a restart; operator-owned ConfigMaps do not
+        # have a checksum because their contents are outside the release.
+        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toJson | sha256sum }}
+        {{- end }}
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
-      {{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.certs (not .Values.trustedCACerts.existingConfigMap) }}
-      # Roll the Deployment when the inline certs change (the Go process reads
-      # SSL_CERT_DIR once at startup). The existingConfigMap path is owned by
-      # the operator — restart manually (see NOTES).
-      annotations:
-        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toJson | sha256sum }}
-      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

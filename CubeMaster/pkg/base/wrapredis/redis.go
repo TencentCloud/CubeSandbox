@@ -8,6 +8,7 @@ package wrapredis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/redisx"
 )
 
 type RedisWrap struct {
@@ -24,6 +26,7 @@ type RedisWrap struct {
 	ModuleName    string
 	Addr          string
 	redisConf     *config.RedisConf
+	cluster       *redisx.Cluster
 	connectPeak   int64
 }
 
@@ -91,6 +94,16 @@ func GetRedisConnPoolWrap(caller string, redisConf *config.RedisConf) *RedisWrap
 			},
 		},
 	}
+	if redisConf.ClusterNodes != "" {
+		if redisConf.DbNo != 0 || redisConf.MasterName != "" || redisConf.SentinelNodes != "" {
+			panic("Redis Cluster requires DB 0 and cannot use Sentinel")
+		}
+		cluster, err := redisx.NewCluster(redisConf.ClusterNodes, redisConf.Password, redisConf.MaxIdle, redisConf.MaxActive)
+		if err != nil {
+			panic(fmt.Errorf("initialize Redis Cluster: %w", err))
+		}
+		redisW.cluster = cluster
+	}
 	redisW.RedisConnPool.Dial = redisW.Dial
 	go redisW.reportMetric()
 	return redisW
@@ -119,6 +132,9 @@ func normalizeDoReply(reply interface{}, err error) (interface{}, error) {
 }
 
 func (r *RedisWrap) Do(cmd string, args ...interface{}) (reply interface{}, err error) {
+	if r.cluster != nil {
+		return r.cluster.Do(cmd, args...)
+	}
 	readonlyRetried := false
 	for i := 0; i < r.redisConf.MaxRetry; i++ {
 		conn := r.RedisConnPool.Get()
@@ -169,6 +185,9 @@ func (r *RedisWrap) Do(cmd string, args ...interface{}) (reply interface{}, err 
 }
 
 func (r *RedisWrap) Dial() (c redis.Conn, err error) {
+	if r.cluster != nil {
+		return r.cluster.Conn(), nil
+	}
 	defer func() {
 		if err == nil {
 			atomic.AddInt64(&r.connectPeak, 1)

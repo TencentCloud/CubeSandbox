@@ -43,6 +43,7 @@ test:
 	bash tests/test_lua_syntax.sh
 	@if command -v lua >/dev/null 2>&1; then \
 		lua tests/redis_iresty_sentinel_test.lua; \
+		lua tests/redis_cluster_test.lua; \
 		lua tests/backend_cache_test.lua; \
 		lua tests/sandbox_backend_cache_test.lua; \
 		lua tests/sandbox_route_lookup_test.lua; \
@@ -50,6 +51,7 @@ test:
 		lua tests/rewrite_phase_route_test.lua; \
 	elif command -v luajit >/dev/null 2>&1; then \
 		luajit tests/redis_iresty_sentinel_test.lua; \
+		luajit tests/redis_cluster_test.lua; \
 		luajit tests/backend_cache_test.lua; \
 		luajit tests/sandbox_backend_cache_test.lua; \
 		luajit tests/sandbox_route_lookup_test.lua; \

@@ -83,31 +83,38 @@ func ScanNodeSnapshots() ([]*model.NodeSnapshot, error) {
 	defer conn.Close()
 
 	var keys []string
-	cursor := 0
-	for {
-		// SCAN replies [cursor, [key ...]]; unpack the outer tuple first.
-		reply, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", nodeSnapshotKeyPrefix+"*", "COUNT", 200))
+	if clusterClient != nil {
+		var err error
+		keys, err = clusterClient.ScanKeys(nodeSnapshotKeyPrefix + "*")
 		if err != nil {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: %w", err)
+			return nil, err
 		}
-		if len(reply) != 2 {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: unexpected reply shape: %v", reply)
+	} else {
+		cursor := 0
+		for {
+			// SCAN replies [cursor, [key ...]]; unpack the outer tuple first.
+			reply, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", nodeSnapshotKeyPrefix+"*", "COUNT", 200))
+			if err != nil {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: %w", err)
+			}
+			if len(reply) != 2 {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: unexpected reply shape: %v", reply)
+			}
+			next, err := redis.Int(reply[0], nil)
+			if err != nil {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse cursor: %w", err)
+			}
+			keysInBatch, err := redis.Strings(reply[1], nil)
+			if err != nil {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse keys: %w", err)
+			}
+			keys = append(keys, keysInBatch...)
+			if next == 0 {
+				break
+			}
+			cursor = next
 		}
-		next, err := redis.Int(reply[0], nil)
-		if err != nil {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse cursor: %w", err)
-		}
-		keysInBatch, err := redis.Strings(reply[1], nil)
-		if err != nil {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse keys: %w", err)
-		}
-		keys = append(keys, keysInBatch...)
-		if next == 0 {
-			break
-		}
-		cursor = next
 	}
-
 	if len(keys) == 0 {
 		return nil, nil
 	}

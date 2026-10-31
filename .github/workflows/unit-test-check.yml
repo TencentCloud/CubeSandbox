@@ -8,6 +8,7 @@ on:
       - 'CubeOps/**'
       - 'pkgs/cubedb/**'
       - 'pkgs/blobstore/**'
+      - 'pkgs/redisx/**'
       - 'CubeProxy/**'
       - 'CubeMaster/**'
       - 'CubeTemplateCenter/**'
@@ -34,6 +35,7 @@ on:
       - 'CubeOps/**'
       - 'pkgs/cubedb/**'
       - 'pkgs/blobstore/**'
+      - 'pkgs/redisx/**'
       - 'CubeProxy/**'
       - 'CubeMaster/**'
       - 'CubeTemplateCenter/**'
@@ -73,6 +75,7 @@ on:
           - cubelog
           - cubedb
           - blobstore
+          - redisx
           - cube-lifecycle-manager
           - cubelet
           - agent
@@ -141,6 +144,7 @@ jobs:
             add_component "cubelog"
             add_component "cubedb"
             add_component "blobstore"
+            add_component "redisx"
             add_component "cube-lifecycle-manager"
             add_component "cubelet"
             add_component "agent"
@@ -165,6 +169,7 @@ jobs:
               cubelog) add_component "cubelog" ;;
               cubedb) add_component "cubedb" ;;
               blobstore) add_component "blobstore" ;;
+              redisx) add_component "redisx" ;;
               cube-lifecycle-manager) add_component "cube-lifecycle-manager" ;;
               cubelet) add_component "cubelet" ;;
               agent) add_component "agent" ;;
@@ -216,6 +221,12 @@ jobs:
                   # CubeTemplateCenter (replace => ../pkgs/cubedb), so its
                   # changes must re-run their test sets too.
                   add_component "cubedb"
+                  add_component "CubeOps"
+                  add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
+                  ;;
+                pkgs/redisx/*)
+                  add_component "redisx"
                   add_component "CubeOps"
                   add_component "CubeMaster"
                   add_component "CubeTemplateCenter"
@@ -333,6 +344,7 @@ jobs:
                     elif . == "cubelog" then "CubeLog"
                     elif . == "cubedb" then "CubeDB"
                     elif . == "blobstore" then "Blobstore"
+                    elif . == "redisx" then "Redis Cluster"
                     elif . == "cube-lifecycle-manager" then "Cube Lifecycle Manager"
                     elif . == "cubelet" then "Cubelet"
                     elif . == "cubevs" then "CubeVS"
@@ -356,6 +368,7 @@ jobs:
                     elif . == "cubelog" then "cubelog-test"
                     elif . == "cubedb" then "cubedb-test"
                     elif . == "blobstore" then "blobstore-test"
+                    elif . == "redisx" then "redisx-test"
                     elif . == "cube-lifecycle-manager" then "cube-lifecycle-manager-test"
                     elif . == "cubelet" then "cubelet-test"
                     elif . == "cubevs" then "cubevs-test"
@@ -368,7 +381,7 @@ jobs:
                     else error("unsupported component: " + .)
                     end
                   ),
-                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "proto" and . != "cubebench"),
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "redisx" and . != "proto" and . != "cubebench"),
                   run_mode: "root_make"
                 })
               | [

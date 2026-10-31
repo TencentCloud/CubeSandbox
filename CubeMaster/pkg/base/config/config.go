@@ -218,6 +218,9 @@ type RedisConf struct {
 	// must list one or more sentinel endpoints (host:port, comma-separated).
 	MasterName string `yaml:"master_name"`
 
+	// ClusterNodes enables native Redis Cluster; DB must be zero.
+	ClusterNodes string `yaml:"cluster_nodes"`
+
 	// SentinelNodes lists sentinel endpoints used when MasterName is set.
 	SentinelNodes string `yaml:"sentinel_nodes"`
 

@@ -80,6 +80,7 @@ instance_db_config:
 redis:
   nodes: {{ include "cube.redisNodes" . | quote }}
   master_name: {{ .Values.redis.masterName | default "" | quote }}
+  cluster_nodes: {{ .Values.redis.clusterNodes | default "" | quote }}
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}

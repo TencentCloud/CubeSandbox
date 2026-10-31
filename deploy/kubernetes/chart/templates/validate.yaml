@@ -215,6 +215,27 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail (printf "%s.password still equals the CHANGE_ME_* default sentinel. Override it when connecting to an external database." (include "cube.dbDriver" .)) }}
 {{- end }}
 {{- $controlPlaneNeedsRedis := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
+{{- if .Values.redis.clusterNodes }}
+{{- if or .Values.redis.host .Values.redis.masterName .Values.redis.sentinelNodes }}
+{{- fail "redis.clusterNodes cannot be combined with redis.host or Sentinel" }}
+{{- end }}
+{{- if ne (int .Values.redis.db) 0 }}
+{{- fail "redis.clusterNodes requires redis.db=0" }}
+{{- end }}
+{{- $seedCount := 0 }}
+{{- range $raw := splitList "," .Values.redis.clusterNodes }}
+{{- $seed := trim $raw }}
+{{- if $seed }}
+{{- $seedCount = add1 $seedCount }}
+{{- if not (regexMatch "^([^: ]+|\\[[^]]+\\]):[0-9]+$" $seed) }}
+{{- fail "redis.clusterNodes must contain host:port endpoints" }}
+{{- end }}
+{{- $port := regexFind "[0-9]+$" $seed | int }}
+{{- if or (lt $port 1) (gt $port 65535) }}{{- fail "redis.clusterNodes port must be in 1-65535" }}{{- end }}
+{{- end }}
+{{- end }}
+{{- if eq (int $seedCount) 0 }}{{- fail "redis.clusterNodes requires at least one endpoint" }}{{- end }}
+{{- end }}
 {{- if eq (include "cube.redisSentinelEnabled" .) "true" }}
 {{- if eq (include "cube.redisSentinelEndpointCount" .) "0" }}
 {{- fail "redis.masterName requires redis.sentinelNodes with at least one non-empty host:port endpoint" }}
@@ -226,10 +247,10 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and (ne (include "cube.redisSentinelEndpointCount" .) "0") (ne (include "cube.redisSentinelEnabled" .) "true") }}
 {{- fail "redis.sentinelNodes requires redis.masterName" }}
 {{- end }}
-{{- if and $controlPlaneNeedsRedis (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") }}
+{{- if and $controlPlaneNeedsRedis (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.redis.clusterNodes) (ne (include "cube.redisSentinelEnabled" .) "true") }}
 {{- fail "control plane master requires redis.host or redis.masterName when redis.enabled=false" }}
 {{- end }}
-{{- if and (or (eq (include "cube.redisBuiltinEnabled" .) "true") .Values.redis.host (eq (include "cube.redisSentinelEnabled" .) "true")) (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
+{{- if and (or (eq (include "cube.redisBuiltinEnabled" .) "true") .Values.redis.host .Values.redis.clusterNodes (eq (include "cube.redisSentinelEnabled" .) "true")) (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
 {{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying." }}
 {{- end }}
 {{- /* redis.db fans out to Master / Proxy / LCM / Ops; reject non-integer and out-of-range values at render time. */ -}}
@@ -254,7 +275,7 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if not $controlPlaneSelector }}
 {{- fail "cubeProxy.enabled=true requires placement.controlPlane.nodeSelector because CubeProxy runs on control nodes" }}
 {{- end }}
-{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") (not .Values.cubeProxy.redis.host) }}
+{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.redis.clusterNodes) (ne (include "cube.redisSentinelEnabled" .) "true") (not .Values.cubeProxy.redis.host) }}
 {{- fail "cubeProxy.enabled=true requires redis.host, redis.masterName, or cubeProxy.redis.host when redis.enabled=false" }}
 {{- end }}
 {{- if not (has .Values.cubeProxy.tls.mode (list "existingSecret" "certManager" "selfSigned" "inline")) }}
@@ -346,7 +367,7 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if not (include "cube.masterEndpoint" .) }}
 {{- fail "lifecycleManager.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
 {{- end }}
-{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") (not .Values.lifecycleManager.redis.host) (not .Values.cubeProxy.redis.host) }}
+{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.redis.clusterNodes) (ne (include "cube.redisSentinelEnabled" .) "true") (not .Values.lifecycleManager.redis.host) (not .Values.cubeProxy.redis.host) }}
 {{- fail "lifecycleManager.enabled=true requires redis.host, redis.masterName, lifecycleManager.redis.host, or cubeProxy.redis.host when redis.enabled=false" }}
 {{- end }}
 {{- if not .Values.images.lifecycleManager.repository }}

@@ -96,6 +96,11 @@ init_external_dep_defaults() {
   CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
   CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
   CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+  CUBE_EXTERNAL_REDIS_CLUSTER_NODES="${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}"
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}" ]]; then
+    [[ "${CUBE_EXTERNAL_REDIS_DB:-0}" == "0" ]] || die "Redis Cluster requires DB 0"
+    [[ -z "${CUBE_EXTERNAL_REDIS_HOST:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] || die "Redis Cluster cannot use a standalone host or Sentinel"
+  fi
   CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
@@ -582,8 +587,8 @@ patch_cubemaster_external_deps() {
   # resolveRedisAddr keeps preferring MasterName over Nodes.
   local scrub_stale_sentinel=0
   local restore_bundled_redis=0
-  if [[ -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" && -f "${cfg}" ]]; then
-    if grep -qE '^[[:space:]]*master_name:' "${cfg}"; then
+  if [[ -z "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" && -f "${cfg}" ]]; then
+    if grep -qE '^[[:space:]]*(master_name|cluster_nodes):' "${cfg}"; then
       scrub_stale_sentinel=1
       restore_bundled_redis=1
     else
@@ -604,6 +609,7 @@ patch_cubemaster_external_deps() {
   if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_POSTGRES_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
+      && -z "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" \
       && "${scrub_stale_sentinel}" -eq 0 && "${restore_bundled_redis}" -eq 0 ]]; then
     return 0
   fi
@@ -1697,7 +1703,7 @@ mask_external_dep_services() {
     systemctl unmask cube-sandbox-mysql.service >/dev/null 2>&1 || true
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
     if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
       log "masking local Redis service (external Redis Sentinel master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} in use)"
     else
