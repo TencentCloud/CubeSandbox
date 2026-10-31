@@ -38,3 +38,14 @@ func TestFallbackAndDetectionFailures(t *testing.T) {
 	_, err = Memory(c, fail, 8192)
 	require.ErrorContains(t, err, "invalid host memory quota")
 }
+
+func TestExplicitMemoryCannotFallBackToAutomaticQuota(t *testing.T) {
+	for _, limit := range []string{"0", "-1Gi", "500Ki", "1023Ki"} {
+		t.Run(limit, func(t *testing.T) {
+			c := &config.HostConf{}
+			c.Quota.Mem = limit
+			_, err := Memory(c, func() (int64, error) { t.Fatal("explicit quota used host detection"); return 0, nil }, 8192)
+			require.ErrorContains(t, err, "invalid host memory quota")
+		})
+	}
+}

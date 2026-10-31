@@ -36,9 +36,11 @@ func Memory(c *config.HostConf, readTotalMB func() (int64, error), fallbacks ...
 		if err != nil {
 			return 0, fmt.Errorf("invalid host memory quota: %w", err)
 		}
-		if mb := q.Value() / (1024 * 1024); mb > 0 {
-			return mb, nil
+		mb := q.Value() / (1024 * 1024)
+		if mb <= 0 {
+			return 0, fmt.Errorf("invalid host memory quota: explicit limit must be at least 1 MiB")
 		}
+		return mb, nil
 	}
 	for _, value := range fallbacks {
 		if value > 0 {

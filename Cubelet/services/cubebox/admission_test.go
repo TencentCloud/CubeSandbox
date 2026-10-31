@@ -155,3 +155,13 @@ func TestCreateAdmissionKeepsOCISavePath(t *testing.T) {
 		require.ErrorContains(t, checkCreateQuota(store.boxes, admissionBox("new", "1", "1Gi"), &config.HostConf{}, 2000, 2048), "no host resource")
 	}
 }
+
+func TestDuplicateAdmissionReturnsConflictWithoutSaving(t *testing.T) {
+	store := &admissionStore{boxes: []*cubeboxstore.CubeBox{admissionBox("same", "1", "1Gi")}}
+	l := &local{cubeboxManger: store}
+	err := l.admitAndSaveWithQuota(context.Background(), admissionBox("same", "1", "1Gi"), &config.HostConf{}, 64000, 65536)
+	status, ok := ret.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, errorcode.ErrorCode_Conflict, status.Code())
+	require.Len(t, store.boxes, 1)
+}
