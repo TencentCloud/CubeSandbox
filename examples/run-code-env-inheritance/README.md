@@ -25,7 +25,7 @@ Sandbox-level values and per-call overrides are applied in a separate background
 
 The next execution waits for pending cleanup so per-call values cannot leak into later executions. This lifecycle follows E2B code-interpreter. Sandbox-level environment variables are loaded only once per Jupyter kernel; this example does not provide a general runtime refresh mechanism.
 
-This derived interpreter requires envd's `/envs` endpoint. If envd is unavailable, the endpoint is unsupported, the request exceeds `ENVD_TIMEOUT` (2 seconds by default), or the payload is invalid, `run_code` fails with HTTP 502 instead of falling back to the stock interpreter behavior. Set `ENVD_TIMEOUT` in the image environment to adjust the fetch timeout.
+This derived interpreter requires envd's `/envs` endpoint. Startup waits for the endpoint within the context-creation budget and fails if it cannot become ready. After startup, an unavailable endpoint, a request exceeding `ENVD_TIMEOUT` (2 seconds by default), or an invalid payload causes `run_code` to return HTTP 502. Set `ENVD_TIMEOUT` in the image environment to adjust the fetch timeout.
 
 ## Build and test the image
 
@@ -33,7 +33,7 @@ Jupyter context creation, WebSocket opening, and working-directory initializatio
 
 The derived image clears the inherited entrypoint so the launcher owns dependency startup and does not start a second envd. It honors `ENVD_BIN`, `ENVD_EXTRA_ARGS`, and `ENVD_LOG_FILE=-`. Jupyter is configured to fail on a port conflict instead of selecting another port.
 
-The launcher binds and listens on the interpreter port before starting envd, Jupyter, or application initialization, then passes that same socket to Uvicorn. Uvicorn normally binds after its lifespan startup; dynamic ports allocated during initialization could otherwise take the default port `49999` and terminate startup with `address already in use`. Dependency processes do not inherit the listener and are terminated and reaped on startup failure or shutdown. Reserving the port does not mean the application is ready.
+The launcher binds and listens on the interpreter port before starting envd, Jupyter, or application initialization, then passes that same socket to Uvicorn. Uvicorn normally binds after its lifespan startup; dynamic ports allocated during initialization could otherwise take the default port `49999` and terminate startup with `address already in use`. Dependency processes do not inherit the listener and are terminated and reaped on startup failure or shutdown. The image keeps `/usr/bin/tini` as PID 1 to reap orphaned grandchildren, while the Python launcher manages its direct children. Reserving the port does not mean the application is ready.
 
 The launcher starts envd with `-isnotfc`, matching CubeSandbox's base-image entrypoint. Without this flag, envd 0.5.11 enables its Firecracker MMDS-dependent HTTP log exporter; in an environment without that metadata, the exporter can keep buffering logs without a size limit. Non-Firecracker mode avoids that exporter while preserving the existing local stdout/stderr log file. It does not suppress command logs, force garbage collection, or change command/file APIs.
 
