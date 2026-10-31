@@ -127,6 +127,21 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if cloned.EnableIvshmem != nil && !*cloned.EnableIvshmem {
 		cloned.EnableIvshmem = nil
 	}
+	if cloned.CgroupMode != nil {
+		mode := strings.TrimSpace(*cloned.CgroupMode)
+		switch mode {
+		case "":
+			cloned.CgroupMode = nil
+		case "legacy":
+			cloned.CgroupMode = &mode
+		default:
+			// Fail fast: an unrecognized mode would otherwise build a
+			// template that silently boots under the default unified v2
+			// hierarchy — the exact failure --cgroup-mode exists to
+			// prevent.
+			return nil, fmt.Errorf("invalid cgroup_mode %q: supported values are \"\" (default, unified v2) and \"legacy\"", *cloned.CgroupMode)
+		}
+	}
 	if strings.TrimSpace(cloned.Backend) != "" {
 		backend, err := constants.NormalizeSnapshotBackend(cloned.Backend)
 		if err != nil {
