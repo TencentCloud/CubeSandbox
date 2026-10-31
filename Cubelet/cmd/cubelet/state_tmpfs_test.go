@@ -197,3 +197,12 @@ func TestMaybeRemountStateTmpfsRefuseShrinkWhenUsedExceeds(t *testing.T) {
 	}, 1)
 	require.NoError(t, err)
 }
+
+func TestPathFDMountIDMatchesVisibleRoot(t *testing.T) {
+	id, err := mountIDFromPathFD("/")
+	require.NoError(t, err)
+	info, err := lookupExactMount("/")
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.Equal(t, uint64(info.ID), id)
+}

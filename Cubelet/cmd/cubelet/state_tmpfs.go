@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	stdlog "log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -136,18 +137,44 @@ func lookupExactMount(mountpoint string) (*mountinfo.Info, error) {
 	}
 	// Mount IDs are not an ordering contract. Ask the kernel which mount is
 	// visible at this path instead of selecting a hidden layer in a stack.
-	var stat unix.Statx_t
-	if err := unix.Statx(unix.AT_FDCWD, mountpoint, 0, unix.STATX_MNT_ID, &stat); err != nil {
+	mountID, err := visibleMountID(mountpoint)
+	if err != nil {
 		return nil, fmt.Errorf("resolve stacked mount at %s: %w", mountpoint, err)
 	}
-	if stat.Mask&unix.STATX_MNT_ID != 0 {
-		for _, info := range mounts {
-			if uint64(info.ID) == stat.Mnt_id {
-				return info, nil
-			}
+	for _, info := range mounts {
+		if uint64(info.ID) == mountID {
+			return info, nil
 		}
 	}
 	return nil, fmt.Errorf("cannot identify the visible mount at %s", mountpoint)
+}
+
+// visibleMountID uses fdinfo on kernels predating STATX_MNT_ID (Linux 5.8).
+func visibleMountID(path string) (uint64, error) {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, 0, unix.STATX_MNT_ID, &st); err == nil && st.Mask&unix.STATX_MNT_ID != 0 {
+		return st.Mnt_id, nil
+	}
+	return mountIDFromPathFD(path)
+}
+
+func mountIDFromPathFD(path string) (uint64, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer unix.Close(fd)
+	data, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "mnt_id:" {
+			return strconv.ParseUint(fields[1], 10, 64)
+		}
+	}
+	return 0, fmt.Errorf("mount ID missing from fdinfo for %s", path)
 }
 
 // parseTmpfsSizeBytes parses the size= option from mountinfo VFSOptions.
