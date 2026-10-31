@@ -56,6 +56,16 @@ func TestStateTmpfsSymlinkRestartPreservesState(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "must survive restart", string(data))
 	}
+	// Historical restarts can leave stacked mounts. Inspect the visible layer.
+	require.NoError(t, unix.Mount("none", statePath, "tmpfs", 0, "size=32m"))
+	defer unix.Unmount(realPath, 0)
+	top, err := lookupExactMount(statePath)
+	require.NoError(t, err)
+	require.NotNil(t, top)
+	require.NotEqual(t, before.ID, top.ID)
+	size, ok := parseTmpfsSizeBytes(top.VFSOptions)
+	require.True(t, ok)
+	require.Equal(t, uint64(32*1024*1024), size)
 }
 
 func TestLookupExactMountResolvesSymlinkParent(t *testing.T) {
@@ -71,6 +81,10 @@ func TestLookupExactMountResolvesSymlinkParent(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, want.ID, got.ID)
 	require.Equal(t, "/proc", got.Mountpoint)
+	t.Chdir(dir)
+	relative, err := lookupExactMount("root-alias/proc")
+	require.NoError(t, err)
+	require.Equal(t, want.ID, relative.ID)
 }
 
 func TestLookupExactMountRejectsBrokenSymlink(t *testing.T) {

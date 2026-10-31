@@ -113,22 +113,41 @@ func lookupExactMount(mountpoint string) (*mountinfo.Info, error) {
 	// /proc/self/mountinfo contains the resolved path. A configured path such
 	// as /data/cubelet/state may traverse a /data symlink. Comparing the alias
 	// would miss the live tmpfs and cover all running shim state on restart.
-	resolved, err := filepath.EvalSymlinks(mountpoint)
+	absolute, err := filepath.Abs(mountpoint)
 	if err != nil {
 		return nil, err
 	}
-	mountpoint, err = filepath.Abs(resolved)
+	resolved, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return nil, err
 	}
-	mounts, err := mountinfo.GetMounts(mountinfo.SingleEntryFilter(mountpoint))
+	mountpoint = resolved
+	mounts, err := mountinfo.GetMounts(func(info *mountinfo.Info) (bool, bool) {
+		return info.Mountpoint != mountpoint, false
+	})
 	if err != nil {
 		return nil, err
 	}
 	if len(mounts) == 0 {
 		return nil, nil
 	}
-	return mounts[0], nil
+	if len(mounts) == 1 {
+		return mounts[0], nil
+	}
+	// Mount IDs are not an ordering contract. Ask the kernel which mount is
+	// visible at this path instead of selecting a hidden layer in a stack.
+	var stat unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, mountpoint, 0, unix.STATX_MNT_ID, &stat); err != nil {
+		return nil, fmt.Errorf("resolve stacked mount at %s: %w", mountpoint, err)
+	}
+	if stat.Mask&unix.STATX_MNT_ID != 0 {
+		for _, info := range mounts {
+			if uint64(info.ID) == stat.Mnt_id {
+				return info, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("cannot identify the visible mount at %s", mountpoint)
 }
 
 // parseTmpfsSizeBytes parses the size= option from mountinfo VFSOptions.
