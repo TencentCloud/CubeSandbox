@@ -62,8 +62,8 @@ func TestStartupRecoverClassifiesStateAndHostTaps(t *testing.T) {
 		t.Fatal("success port ownership was not restored to sandbox owner")
 	}
 
-	if got := controller.tapAdapter.(*fakeTapDeviceAdapter).restoreCount; got != 2 {
-		t.Fatalf("Restore calls = %d, want recovered success plus no-state cleanup", got)
+	if got := controller.tapAdapter.(*fakeTapDeviceAdapter).restoreCount; got != 1 {
+		t.Fatalf("Restore calls = %d, want recovered success only", got)
 	}
 	for _, cleaned := range []*persistedState{creating, deleting} {
 		if controller.store.Exists(cleaned.SandboxID, StateFileCreating) || controller.store.Exists(cleaned.SandboxID, StateFileDeleting) {
@@ -83,8 +83,8 @@ func TestStartupRecoverClassifiesStateAndHostTaps(t *testing.T) {
 	controller.ports.ReleaseOwnership("new-owner-missing")
 
 	poolState, owner, ok = controller.tapPool.StateByName(tapName("10.30.0.7"))
-	if !ok || poolState != TapPoolReady || owner != "" {
-		t.Fatalf("orphan tap state=%s owner=%s ok=%v, want Ready", poolState, owner, ok)
+	if !ok || poolState != TapPoolCleaning || owner == "" {
+		t.Fatalf("orphan tap state=%s owner=%s ok=%v, want Cleaning", poolState, owner, ok)
 	}
 }
 
@@ -104,6 +104,14 @@ func TestStartupRecoverStagesNoStateTapForCleanupBeforeReady(t *testing.T) {
 		t.Fatalf("recover AttachFilter calls = %d, want 0", got)
 	}
 	poolState, owner, ok := controller.tapPool.StateByName(orphan.Name)
+	if !ok || poolState != TapPoolCleaning || owner == "" {
+		t.Fatalf("orphan tap state=%s owner=%s ok=%v before maintenance, want Cleaning", poolState, owner, ok)
+	}
+	if adapter.restoreCount != 0 || len(controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappings) != 1 {
+		t.Fatal("startup must release local port maps while deferring TAP restore and egress cleanup")
+	}
+	controller.handleCleaningEntries()
+	poolState, owner, ok = controller.tapPool.StateByName(orphan.Name)
 	if !ok || poolState != TapPoolReady || owner != "" {
 		t.Fatalf("orphan tap state=%s owner=%s ok=%v after startup cleanup, want Ready", poolState, owner, ok)
 	}
@@ -115,6 +123,78 @@ func TestStartupRecoverStagesNoStateTapForCleanupBeforeReady(t *testing.T) {
 	}
 	if _, err := controller.ports.Reserve("new-owner", []PortMapping{{HostPort: 20088, ContainerPort: 8088}}, controller.cfg.HostPortBindIP); err != nil {
 		t.Fatalf("cleaned no-state TAP should not reserve host ports: %v", err)
+	}
+}
+
+func TestStartupNoStateCleanupWaitsForEgress(t *testing.T) {
+	controller := newRecoverTestController(t)
+	orphan := &tapDevice{Name: tapName("10.30.0.9"), Index: 9, IP: net.ParseIP("10.30.0.9").To4()}
+	base := controller.tapAdapter.(*fakeTapDeviceAdapter)
+	base.listResult = map[string]*tapDevice{orphan.IP.String(): orphan}
+	egress := &fakeCubeEgressAdapter{configured: true, deleteErr: errors.New("egress not started")}
+	controller.cubeEgressAdapter = egress
+	if err := controller.recover(); err != nil {
+		t.Fatal(err)
+	}
+	if len(controller.cubevsAdapter.(*fakeCubeVSAdapter).defaultDenyPolicyCalls) == 0 {
+		t.Fatal("orphan TAP was left without a deny policy while egress starts")
+	}
+	if base.restoreCount != 0 || egress.deleteCalls != 0 {
+		t.Fatal("startup performed synchronous no-state TAP cleanup")
+	}
+	assertCleaning := func() {
+		t.Helper()
+		state, owner, ok := controller.tapPool.StateByName(orphan.Name)
+		if !ok || state != TapPoolCleaning || owner == "" {
+			t.Fatalf("unsafe reuse before cleanup: state=%s owner=%s ok=%v", state, owner, ok)
+		}
+	}
+	controller.handleCleaningEntries()
+	assertCleaning()
+	if !controller.cubevsAdapter.(*fakeCubeVSAdapter).defaultDenyInstalled[uint32(orphan.Index)] {
+		t.Fatal("maintenance removed quarantine deny while egress is unavailable")
+	}
+
+	if egress.deleteCalls != 1 || egress.verifyCalls != 0 {
+		t.Fatal("failed egress cleanup must not publish Ready")
+	}
+	egress.deleteErr = nil
+	controller.handleCleaningEntries()
+	state, owner, ok := controller.tapPool.StateByName(orphan.Name)
+	if !ok || state != TapPoolReady || owner != "" || egress.verifyCalls != 1 {
+		t.Fatalf("cleanup did not converge: state=%s owner=%s verifyCalls=%d", state, owner, egress.verifyCalls)
+	}
+}
+
+func TestStartupLargeIdlePoolDoesNotRunSynchronousCleanup(t *testing.T) {
+	controller := newRecoverTestController(t)
+	allocator, err := newIPAllocator("10.30.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.allocator = allocator
+	base := controller.tapAdapter.(*fakeTapDeviceAdapter)
+	base.listResult = make(map[string]*tapDevice)
+	for i := 1; i <= 1500; i++ {
+		ip := net.IPv4(10, 30, byte(i/250), byte(i%250+1)).To4()
+		base.listResult[ip.String()] = &tapDevice{Name: tapName(ip.String()), Index: i, IP: ip}
+	}
+	egress := &fakeCubeEgressAdapter{configured: true, deleteErr: errors.New("egress not started")}
+	controller.cubeEgressAdapter = egress
+	if err := controller.recover(); err != nil {
+		t.Fatal(err)
+	}
+	if egress.deleteCalls != 0 || base.restoreCount != 0 {
+		t.Fatal("large idle pool performed synchronous TAP cleanup")
+	}
+	entries := controller.tapPool.Entries()
+	if len(entries) != 1500 {
+		t.Fatalf("quarantined entries=%d, want 1500", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.State != TapPoolCleaning || entry.OwnerSandboxID == "" {
+			t.Fatalf("unverified idle TAP became reusable: %#v", entry)
+		}
 	}
 }
 
@@ -767,4 +847,45 @@ func legacyStateJSON(sandboxID, ip string, ifindex int) string {
 		"cubevsContext": {"allowInternetAccess": true},
 		"persistMetadata": {"host_tap_name":"` + tapName(ip) + `"}
 	}`
+}
+
+func TestStartupRetriesStaleLocalPortMappings(t *testing.T) {
+	controller := newRecoverTestController(t)
+	orphan := &tapDevice{Name: tapName("10.30.0.9"), Index: 9, IP: net.ParseIP("10.30.0.9").To4()}
+	taps := controller.tapAdapter.(*fakeTapDeviceAdapter)
+	taps.listResult = map[string]*tapDevice{orphan.IP.String(): orphan}
+	failure := errors.New("local port map unavailable")
+	controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappingErr = failure
+	if err := controller.recover(); err != nil {
+		t.Fatalf("startup with quarantined local port state: %v", err)
+	}
+	if taps.restoreCount != 0 {
+		t.Fatal("startup opened an unsafe orphan TAP")
+	}
+	controller.handleCleaningEntries()
+	state, _, _ := controller.tapPool.StateByName(orphan.Name)
+	if state != TapPoolCleaning {
+		t.Fatalf("cleanup failure published %s", state)
+	}
+	controller.cubevsAdapter.(*fakeCubeVSAdapter).deletePortMappingErr = nil
+	controller.handleCleaningEntries()
+	state, _, _ = controller.tapPool.StateByName(orphan.Name)
+	if state != TapPoolReady {
+		t.Fatalf("cleanup did not recover: %s", state)
+	}
+}
+
+func TestStartupRefusesUnprotectedOrphanTap(t *testing.T) {
+	controller := newRecoverTestController(t)
+	orphan := &tapDevice{Name: tapName("10.30.0.9"), Index: 9, IP: net.ParseIP("10.30.0.9").To4()}
+	controller.tapAdapter.(*fakeTapDeviceAdapter).listResult = map[string]*tapDevice{orphan.IP.String(): orphan}
+	failure := errors.New("default deny unavailable")
+	controller.cubevsAdapter.(*fakeCubeVSAdapter).defaultDenyPolicyErr = failure
+	if err := controller.recover(); !errors.Is(err, failure) {
+		t.Fatalf("unprotected startup: %v", err)
+	}
+	state, _, _ := controller.tapPool.StateByName(orphan.Name)
+	if state != TapPoolCleaning {
+		t.Fatalf("unprotected TAP state: %s", state)
+	}
 }

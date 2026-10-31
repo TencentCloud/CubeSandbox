@@ -113,7 +113,7 @@ func drainTapFD(file *os.File) {
 }
 
 // tapDeviceFromEntry rebuilds the process-local TAP view from the pool identity.
-// Ready and Cleaning entries never retain a runtime fd.
+// Idle descriptors are tracked separately in the controller's pooled registry.
 func tapDeviceFromEntry(entry *TapPoolEntry) (*tapDevice, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("tap pool entry is nil")
@@ -164,13 +164,16 @@ func (s *NetworkController) verifyTapReusableFD(tap *tapDevice) error {
 	if tap == nil || tap.Name == "" {
 		return nil
 	}
-	if s.hasPooledTapFD(tap.Name) {
+	if file := s.takePooledTapFD(tap.Name); file != nil {
+		drainTapFD(file)
+		s.poolTapFD(tap.Name, file)
 		return nil
 	}
 	file, err := s.tapAdapter.Open(tap.Name)
 	if err != nil {
 		return fmt.Errorf("verify tap %s reusable fd: %w", tap.Name, err)
 	}
+	drainTapFD(file)
 	s.poolTapFD(tap.Name, file)
 	return nil
 }

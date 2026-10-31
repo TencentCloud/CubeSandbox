@@ -23,7 +23,8 @@ import (
 // recover reconciles durable state files with live host TAP devices after
 // Cubelet restarts. Success states restore active ownership; cleanup-intent and
 // state-only records each receive one synchronous cleanup attempt and remain
-// durable for maintenance when that attempt fails.
+// durable for maintenance when that attempt fails. No-state pool TAPs are
+// quarantined for maintenance without blocking the network HTTP listener.
 func (s *NetworkController) recover() error {
 	records, err := s.store.Scan()
 	if err != nil {
@@ -439,8 +440,11 @@ func (s *NetworkController) recoverLiveTap(tap *tapDevice, record *StateRecord, 
 
 func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 	// During smooth upgrades a no-state TAP may still carry old CubeVS port maps,
-	// TAP policy, metadata, or CubeEgress rules. Hold it in Cleaning and let the
-	// normal TapCleaner retry path prove it is clean before publishing Ready.
+	// TAP policy, metadata, or CubeEgress rules. Attempt local cleanup before serving
+	// requests, and defer retries and remote cleanup to maintenance: CubeEgress bootstraps from this
+	// controller's HTTP listener, which is not started until recovery returns.
+	// Synchronously cleaning a large idle pool here both repeats ownership scans
+	// and waits on a service that cannot finish starting yet.
 	owner := "nostate-" + strings.NewReplacer(".", "-", "/", "-", "\\", "-").Replace(tap.Name)
 	cleaningTap := &tapDevice{
 		Index: tap.Index,
@@ -449,20 +453,28 @@ func (s *NetworkController) recoverReadyTapWithoutState(tap *tapDevice) error {
 		InUse: tap.InUse,
 		File:  tap.File,
 	}
-	managed := &managedState{persistedState: persistedState{
-		SandboxID:     owner,
-		NetworkHandle: owner,
-		TapName:       cleaningTap.Name,
-		TapIfIndex:    cleaningTap.Index,
-		SandboxIP:     cleaningTap.IP.String(),
-	}, tap: cleaningTap, restoreBeforeCleanup: true}
 	if err := s.beginTapCleanup(cleaningTap, owner); err != nil {
 		return err
 	}
-	s.closeRuntimeTapOwnership(managed)
-	if err := s.cleanupTapOnce(managed, "", "recover_no_state_tap"); err != nil {
-		CubeLog.WithContext(context.Background()).Warnf("network runtime no-state TAP remains Cleaning after startup cleanup attempt: tap=%s err=%v", tap.Name, err)
+	// Keep failed cleanup quarantined for maintenance. CubeVS rejects an
+	// occupied port tuple, so stale mappings cannot silently be reassigned.
+	if err := s.cubevsAdapter.DeletePortMappingsByIfindex(uint32(tap.Index)); err != nil {
+		CubeLog.WithContext(context.Background()).Warnf("defer orphan TAP port cleanup: tap=%s err=%v", tap.Name, err)
 	}
+	if err := s.cleanupCubeVSTapState(tap.Index, tap.IP.To4()); err != nil {
+		CubeLog.WithContext(context.Background()).Warnf("defer orphan TAP policy cleanup: tap=%s err=%v", tap.Name, err)
+	}
+	// Quarantine must deny traffic even while remote cleanup is unavailable.
+	if err := s.installPoolDefaultDeny(cleaningTap); err != nil {
+		return fmt.Errorf("install orphan TAP default deny: %w", err)
+	}
+	// Retain a descriptor if discovery supplied one (production List normally
+	// returns identity only). Do not open or drain a queue during startup. Normal
+	// cleanup and reuse checks belong to maintenance. A second restart
+	// rediscovers the live TAP and quarantines it again, so no synthetic durable
+	// sandbox state is necessary for this ownerless pool entry.
+	s.poolTapFD(cleaningTap.Name, cleaningTap.File)
+	tap.File = nil
 	return nil
 }
 
