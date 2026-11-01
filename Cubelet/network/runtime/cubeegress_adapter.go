@@ -19,7 +19,7 @@ import (
 // deterministic failures in unit tests without spinning up an httptest server.
 type CubeEgressAdapter interface {
 	Configured() bool
-	PutPolicy(ctx context.Context, sandboxIP string, in *cubeegress.PolicyInput) error
+	PutPolicy(ctx context.Context, sandboxIP, sandboxID string, in *cubeegress.PolicyInput) error
 	DeletePolicy(ctx context.Context, sandboxIP string) error
 	VerifyPolicyAbsent(ctx context.Context, sandboxIP string) error
 }
@@ -170,7 +170,7 @@ func (s *NetworkController) syncEgressPolicy(ctx context.Context, state *managed
 func (s *NetworkController) putEgressPolicyForCreate(ctx context.Context, state *managedState, in *cubeegress.PolicyInput) error {
 	attempts := len(egressCreatePushRetryDelays) + 1
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err := s.cubeEgressAdapter.PutPolicy(ctx, state.SandboxIP, in)
+		err := s.cubeEgressAdapter.PutPolicy(ctx, state.SandboxIP, state.SandboxID, in)
 		if err == nil || cubeegress.IsPermanent(err) || attempt == attempts {
 			return err
 		}
@@ -225,7 +225,7 @@ func (s *NetworkController) deleteEgressForState(ctx context.Context, sandboxID,
 // CubeEgress's bootstrap.lua reads on worker init. The wire shape
 // matches what bootstrap.lua's `_apply` already accepts:
 //
-//	{ "policies": { "<sandbox_ip>": { "policy_id": ..., "rules": [...] } } }
+//	{ "policies": { "<sandbox_ip>": { "policy_id": "<sandbox_id>", "rules": [...] } } }
 //
 // (the outer `policies` wrapper is added by the HTTP layer; this
 // method returns the inner map only).
@@ -247,7 +247,7 @@ func (s *NetworkController) DumpEgressPolicies(_ context.Context) (map[string]ma
 	out := make(map[string]map[string]any, len(s.states))
 	for _, st := range s.states {
 		input := toEgressInput(st.CubeNetworkConfig)
-		body := cubeegress.BuildPolicyBody(st.SandboxIP, input)
+		body := cubeegress.BuildPolicyBody(st.SandboxID, input)
 		if body == nil {
 			continue
 		}

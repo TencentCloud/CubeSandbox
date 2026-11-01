@@ -258,12 +258,20 @@ HTTP 和 HTTPS，HTTP 一侧同样会注入凭证。
 | `metadata`（默认） | 时间戳、沙箱 IP、目的 IP/端口、scheme、host、method、path、status、收发字节、延迟、TLS 版本+cipher、上游 addr |
 | `full` | 预留 —— 当前等同 `metadata`，未来用于完整请求/响应 body 抓取 |
 
+对于 Cubelet 管理的策略，查到策略后，HTTP 和安全事件记录中的
+`sandbox.policy_id` 使用稳定的沙箱 ID。策略查找和 `sandbox.src_ip`
+仍使用沙箱 IP。升级 Cubelet 后，已有策略会在下次推送或 CubeEgress
+启动引导时使用新的 ID。
+
 日志在主机 `/data/log/cube-egress/access.jsonl`，每行一条 JSON：
 
 ```json
 {
   "ts": "2026-05-29T11:24:01+08:00",
-  "sandbox_ip": "192.168.1.154",
+  "sandbox": {
+    "src_ip": "192.168.1.154",
+    "policy_id": "sandbox-1"
+  },
   "dst_ip": "104.16.132.229",
   "dst_port": 443,
   "scheme": "https",

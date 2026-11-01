@@ -287,13 +287,21 @@ per rule via `action.audit`:
 | `metadata` (default) | timestamp, sandbox IP, dst IP/port, scheme, host, method, path, status, request/response sizes, latency, TLS version + cipher, upstream addr |
 | `full` | Reserved — same as `metadata` today; full request/response body capture is planned |
 
+For Cubelet-managed policies, `sandbox.policy_id` in HTTP and security-event
+records contains the stable sandbox ID once a policy is found. Policy lookup
+and `sandbox.src_ip` still use the sandbox IP. Existing policies take the new
+ID on their next push or CubeEgress bootstrap after Cubelet is upgraded.
+
 Logs are JSONL on the host at `/data/log/cube-egress/access.jsonl`,
 one line per request:
 
 ```json
 {
   "ts": "2026-05-29T11:24:01+08:00",
-  "sandbox_ip": "192.168.1.154",
+  "sandbox": {
+    "src_ip": "192.168.1.154",
+    "policy_id": "sandbox-1"
+  },
   "dst_ip": "104.16.132.229",
   "dst_port": 443,
   "scheme": "https",

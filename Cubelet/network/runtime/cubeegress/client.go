@@ -100,18 +100,20 @@ func (c *Client) Configured() bool {
 // 200 OK, a *PermanentError on 4xx, or a generic error on transport
 // failures / 5xx (the maintenance loop retries those).
 //
+// policy_id uses sandboxID because sandbox IPs can be reused.
+//
 // When in has no rules, PutPolicy returns nil without making a call —
 // CubeEgress would reject an empty rules array and there's nothing
 // useful to install. The caller should treat the absence of rules as
 // "no L7 policy for this sandbox", not as a failure.
-func (c *Client) PutPolicy(ctx context.Context, sandboxIP string, in *PolicyInput) error {
+func (c *Client) PutPolicy(ctx context.Context, sandboxIP, sandboxID string, in *PolicyInput) error {
 	if !c.Configured() {
 		return ErrNotConfigured
 	}
 	if err := validateSandboxIP(sandboxIP); err != nil {
 		return err
 	}
-	body, err := RenderEgressPolicy(sandboxIP, in)
+	body, err := RenderEgressPolicy(sandboxID, in)
 	if err != nil {
 		return err
 	}
