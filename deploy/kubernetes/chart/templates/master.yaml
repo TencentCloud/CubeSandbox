@@ -18,6 +18,8 @@ spec:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master
+      annotations:
+        checksum/config: {{ include "cube.masterConf" . | sha256sum | quote }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

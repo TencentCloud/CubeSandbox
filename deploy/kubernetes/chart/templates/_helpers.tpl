@@ -457,6 +457,13 @@ http {
 {{- end -}}
 
 {{/*
+Rendered CubeMaster conf. The master Deployment checksums it so config edits roll Pods.
+*/}}
+{{- define "cube.masterConf" -}}
+{{- tpl (.Files.Get "files/cube-master/conf.yaml") . -}}
+{{- end -}}
+
+{{/*
 cube.adminToken resolves the shared CubeProxy admin token. CubeProxy reads it at
 runtime as CUBE_PROXY_ADMIN_TOKEN and the lifecycle manager as CUBE_LCM_ADMIN_TOKEN
 from the release Secret key cube-admin-token; CubeMaster needs the same value
