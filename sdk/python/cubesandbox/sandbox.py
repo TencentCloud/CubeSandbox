@@ -483,9 +483,12 @@ class Sandbox:
 
     @classmethod
     def list_v2(cls, config: Config | None = None) -> list[dict]:
-        """GET /v2/sandboxes - List all running sandboxes (v2).
+        """GET /v2/sandboxes - List sandboxes in the E2B view (v2).
 
-        Supports state / metadata filtering on the server side.
+        Returns running and paused sandboxes; ``unknown`` (exited, still
+        creating) is omitted unless the server is asked for it, which this
+        method does not do. Use :meth:`list` for the Cube-native view that
+        includes ``unknown``.
 
         The endpoint answers one page at a time (``limit``, 100 by default) and
         reports the next page's position in the ``x-next-token`` response
