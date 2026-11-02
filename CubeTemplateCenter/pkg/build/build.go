@@ -312,7 +312,12 @@ func runBuildLocked(
 		// is baked in. Requests without a user skip this entirely.
 		user, err := templatecenter.ResolveTemplateUserFromRootfs(rootfsDir, req)
 		if err != nil {
-			return fmt.Errorf("%w: resolve template user: %w", image.ErrPostExportPermanent, err)
+			// Only failures caused by the image content are permanent. Host
+			// I/O errors keep the phase-1 fallback reachable.
+			if templatecenter.IsTemplateUserImageError(err) {
+				return fmt.Errorf("%w: resolve template user: %w", image.ErrPostExportPermanent, err)
+			}
+			return fmt.Errorf("resolve template user: %w", err)
 		}
 		if user != nil {
 			if !user.InPasswd {

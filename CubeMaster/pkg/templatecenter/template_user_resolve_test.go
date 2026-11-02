@@ -106,7 +106,7 @@ func TestResolveTemplateUserRejectsPasswdSymlinkEscape(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "passwd"), filepath.Join(rootfs, "etc", "passwd")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ResolveTemplateUserFromRootfs(rootfs, userReq(t, "evil")); !errors.Is(err, ErrTemplateUserNotFound) {
+	if _, err := ResolveTemplateUserFromRootfs(rootfs, userReq(t, "evil")); !errors.Is(err, ErrTemplateUserNotFound) || !IsTemplateUserImageError(err) {
 		t.Fatalf("symlink escaping the rootfs must not be followed, got %v", err)
 	}
 }
@@ -167,4 +167,52 @@ func TestResolvedTemplateUserRoundTrip(t *testing.T) {
 	if DecodeResolvedTemplateUser(nil) != nil || DecodeResolvedTemplateUser(map[string]any{"uid": -1, "gid": 0}) != nil {
 		t.Fatalf("missing or invalid resolved_user must decode to nil")
 	}
+}
+
+func TestResolveTemplateUserErrorClasses(t *testing.T) {
+	t.Run("missing rootfs is not an image error", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "gone")
+		for _, spec := range []string{"sandbox", "1000"} {
+			_, err := ResolveTemplateUserFromRootfs(missing, userReq(t, spec))
+			if err == nil || IsTemplateUserImageError(err) {
+				t.Fatalf("%s: missing rootfs must be a non-image error, got %v", spec, err)
+			}
+		}
+	})
+	t.Run("oversized passwd is an image error", func(t *testing.T) {
+		rootfs := writeTestRootfs(t, strings.Repeat("x", maxTemplatePasswdBytes+1))
+		_, err := ResolveTemplateUserFromRootfs(rootfs, userReq(t, "sandbox"))
+		if !errors.Is(err, ErrTemplatePasswdInvalid) || !IsTemplateUserImageError(err) {
+			t.Fatalf("want ErrTemplatePasswdInvalid, got %v", err)
+		}
+		got, err := ResolveTemplateUserFromRootfs(rootfs, userReq(t, "1000"))
+		if err != nil || got == nil || *got != (ResolvedTemplateUser{UID: 1000}) {
+			t.Fatalf("numeric uid must ignore an unusable passwd, got %+v %v", got, err)
+		}
+	})
+	t.Run("non-regular passwd is an image error", func(t *testing.T) {
+		rootfs := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(rootfs, "etc", "passwd"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolveTemplateUserFromRootfs(rootfs, userReq(t, "sandbox"))
+		if !errors.Is(err, ErrTemplatePasswdInvalid) {
+			t.Fatalf("want ErrTemplatePasswdInvalid for a directory, got %v", err)
+		}
+	})
+	t.Run("unknown username is an image error", func(t *testing.T) {
+		_, err := ResolveTemplateUserFromRootfs(writeTestRootfs(t, testPasswd), userReq(t, "ghost"))
+		if !errors.Is(err, ErrTemplateUserNotFound) || !IsTemplateUserImageError(err) {
+			t.Fatalf("want image error for ghost, got %v", err)
+		}
+	})
+	t.Run("out of range uid is not an image error", func(t *testing.T) {
+		req := &types.CreateTemplateFromImageReq{ContainerOverrides: &types.ContainerOverrides{
+			SecurityContext: &types.ContainerSecurityContext{RunAsUser: &types.Int64Value{Value: -1}},
+		}}
+		_, err := ResolveTemplateUserFromRootfs(writeTestRootfs(t, testPasswd), req)
+		if err == nil || IsTemplateUserImageError(err) {
+			t.Fatalf("invalid request must be a non-image error, got %v", err)
+		}
+	})
 }

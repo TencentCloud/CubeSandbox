@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -27,6 +28,24 @@ const maxTemplatePasswdBytes = 4 << 20
 // ErrTemplateUserNotFound is returned when a template asks for a username
 // that the image's /etc/passwd does not define.
 var ErrTemplateUserNotFound = errors.New("template user not found in image")
+
+// ErrTemplatePasswdInvalid is returned when the image's /etc/passwd cannot be
+// used at all: it is not a regular file, or it is larger than the read cap.
+// Only a username lookup fails on it; a numeric uid is resolved as if the
+// file were missing.
+var ErrTemplatePasswdInvalid = errors.New("invalid /etc/passwd in image")
+
+// errTemplatePasswdMissing marks an image without /etc/passwd. It is only an
+// error for usernames; a numeric uid does not need the file.
+var errTemplatePasswdMissing = errors.New("image has no /etc/passwd")
+
+// IsTemplateUserImageError reports whether err from
+// ResolveTemplateUserFromRootfs depends only on the image content, so building
+// the same image again cannot succeed. Other errors (rootfs open or read I/O
+// failures, malformed requests) are not image errors.
+func IsTemplateUserImageError(err error) bool {
+	return errors.Is(err, ErrTemplateUserNotFound) || errors.Is(err, ErrTemplatePasswdInvalid)
+}
 
 // ResolvedTemplateUser is the numeric identity a template's --user resolved to
 // against the image rootfs at build time. Cubelet only receives these numbers,
@@ -67,11 +86,16 @@ func ResolveTemplateUserFromRootfs(rootfsDir string, req *types.CreateTemplateFr
 	}
 
 	entries, readErr := readTemplatePasswd(rootfsDir)
+	if readErr != nil && !errors.Is(readErr, errTemplatePasswdMissing) && !errors.Is(readErr, ErrTemplatePasswdInvalid) {
+		// Host I/O failure: neither a username nor a numeric uid can be
+		// resolved reliably, and a retry may succeed.
+		return nil, readErr
+	}
 	resolved := &ResolvedTemplateUser{}
 	var entry *templatePasswdEntry
 	if sc.RunAsUsername != "" {
 		if readErr != nil {
-			return nil, fmt.Errorf("%w: cannot resolve user %q: %v", ErrTemplateUserNotFound, sc.RunAsUsername, readErr)
+			return nil, fmt.Errorf("%w: cannot resolve user %q: %w", ErrTemplateUserNotFound, sc.RunAsUsername, readErr)
 		}
 		for i := range entries {
 			if entries[i].name == sc.RunAsUsername {
@@ -110,17 +134,32 @@ type templatePasswdEntry struct {
 
 // readTemplatePasswd reads etc/passwd inside rootfsDir through os.Root, so a
 // symlink planted in the image cannot make the build read host files.
+// A missing file returns errTemplatePasswdMissing; a file that is not regular
+// or too large returns ErrTemplatePasswdInvalid. Any other error is an I/O
+// failure on the build host and is returned wrapped as is.
 func readTemplatePasswd(rootfsDir string) ([]templatePasswdEntry, error) {
 	root, err := os.OpenRoot(rootfsDir)
 	if err != nil {
 		return nil, fmt.Errorf("open rootfs: %w", err)
 	}
 	defer root.Close()
-	f, err := root.Open("etc/passwd")
+	// Stat before Open: the file comes from the image, and opening a FIFO
+	// would block the build until a writer shows up.
+	fi, err := root.Stat("etc/passwd")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("image has no /etc/passwd")
+			return nil, errTemplatePasswdMissing
 		}
+		if isTemplatePasswdPathError(err) {
+			return nil, fmt.Errorf("%w: %w", ErrTemplatePasswdInvalid, err)
+		}
+		return nil, fmt.Errorf("stat /etc/passwd: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: not a regular file (mode %s)", ErrTemplatePasswdInvalid, fi.Mode().Type())
+	}
+	f, err := root.Open("etc/passwd")
+	if err != nil {
 		return nil, fmt.Errorf("open /etc/passwd: %w", err)
 	}
 	defer f.Close()
@@ -129,7 +168,7 @@ func readTemplatePasswd(rootfsDir string) ([]templatePasswdEntry, error) {
 		return nil, fmt.Errorf("read /etc/passwd: %w", err)
 	}
 	if len(data) > maxTemplatePasswdBytes {
-		return nil, fmt.Errorf("/etc/passwd is larger than %d bytes", maxTemplatePasswdBytes)
+		return nil, fmt.Errorf("%w: larger than %d bytes", ErrTemplatePasswdInvalid, maxTemplatePasswdBytes)
 	}
 	return parseTemplatePasswd(data), nil
 }
@@ -221,4 +260,17 @@ func DecodeResolvedTemplateUser(v any) *ResolvedTemplateUser {
 		return nil
 	}
 	return &out
+}
+
+// isTemplatePasswdPathError reports whether a stat error on etc/passwd comes
+// from how the image lays out the path rather than from the build host: a
+// symlink loop, a non-directory path component, or a symlink that os.Root
+// refuses because it escapes the rootfs. os.Root reports the escape with a
+// plain error, not an errno, so any non-errno failure is treated the same.
+func isTemplatePasswdPathError(err error) bool {
+	if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
+		return true
+	}
+	var errno syscall.Errno
+	return !errors.As(err, &errno)
 }
