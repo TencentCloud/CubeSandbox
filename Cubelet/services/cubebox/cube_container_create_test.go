@@ -390,9 +390,11 @@ func TestWithRuntimePathOpt(t *testing.T) {
 	tests := []struct {
 		name    string
 		cubebox *cubeboxstore.CubeBox
+		want    string
 	}{
 		{
 			name: "use oci runtime path",
+			want: "/custom/runtime/path",
 			cubebox: &cubeboxstore.CubeBox{
 				OciRuntime: &cubeconfig.Runtime{
 					Path: "/custom/runtime/path",
@@ -401,6 +403,7 @@ func TestWithRuntimePathOpt(t *testing.T) {
 		},
 		{
 			name: "use local run template component path",
+			want: "/template/shim/path",
 			cubebox: &cubeboxstore.CubeBox{
 				OciRuntime: &cubeconfig.Runtime{
 					Path: "",
@@ -418,6 +421,7 @@ func TestWithRuntimePathOpt(t *testing.T) {
 		},
 		{
 			name: "use annotation runtime path - highest priority",
+			want: "/annotation/runtime/path",
 			cubebox: &cubeboxstore.CubeBox{
 				Metadata: cubeboxstore.Metadata{
 					Annotations: map[string]string{
@@ -448,6 +452,7 @@ func TestWithRuntimePathOpt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, runtimePathFor(tt.cubebox))
 
 			assert.NotPanics(t, func() {
 				_ = withRuntimePathOpt(tt.cubebox)

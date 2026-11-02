@@ -187,11 +187,20 @@ pub async fn create_sandbox_log_paths(sandbox_id: &str) -> CResult<(String, Stri
 /// reaps the leftover task.
 pub fn remove_sandbox_log_dir_sync(sandbox_id: &str) -> CResult<()> {
     let dir = sandbox_log_dir(sandbox_id)?;
-    // Cubelet owns delayed cleanup when explicitly enabled. The flag is
-    // inherited by both the live shim and containerd's delete invocation.
-    let delayed = std::env::var_os("CUBELET_DELAY_SANDBOX_LOG_CLEANUP").as_deref()
-        == Some(std::ffi::OsStr::new("1"));
+    // Only accept the flag from Cubelet's shim launcher. An unrelated setting
+    // in Cubelet's own environment must not enable retention by accident.
+    let delayed = delayed_cleanup_enabled(
+        std::env::var_os("CUBELET_DELAY_SANDBOX_LOG_CLEANUP").as_deref(),
+        std::env::var_os("CUBELET_MANAGED_SANDBOX_LOG_CLEANUP").as_deref(),
+    );
     remove_sandbox_log_dir_at(&dir, delayed)
+}
+
+fn delayed_cleanup_enabled(
+    flag: Option<&std::ffi::OsStr>,
+    managed: Option<&std::ffi::OsStr>,
+) -> bool {
+    flag == Some(std::ffi::OsStr::new("1")) && managed == Some(std::ffi::OsStr::new("1"))
 }
 
 fn remove_sandbox_log_dir_at(dir: &std::path::Path, delayed: bool) -> CResult<()> {
@@ -1572,5 +1581,13 @@ mod sandbox_log_path_tests {
         super::remove_sandbox_log_dir_at(&dir, false).unwrap();
         assert!(!dir.exists());
         super::remove_sandbox_log_dir_at(&dir, false).unwrap();
+    }
+
+    #[test]
+    fn delayed_cleanup_requires_the_managed_flag() {
+        let one = Some(std::ffi::OsStr::new("1"));
+        assert!(super::delayed_cleanup_enabled(one, one));
+        assert!(!super::delayed_cleanup_enabled(one, None));
+        assert!(!super::delayed_cleanup_enabled(None, one));
     }
 }

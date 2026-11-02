@@ -56,12 +56,13 @@ var errNotShimOfID = errors.New("not a shim server of this id")
 
 // orphanShim is a shim server that outlived a failed task create.
 type orphanShim struct {
-	ident     utils.ProcessIdentity
-	exe       string // verified binary to run the delete with; "" if none
-	argv0     string
-	namespace string
-	address   string // containerd address the shim was started with
-	socket    string // shim ttrpc socket, always "unix://..."
+	ident      utils.ProcessIdentity
+	exe        string // verified binary to run the delete with; "" if none
+	argv0      string
+	namespace  string
+	address    string // containerd address the shim was started with
+	socket     string // shim ttrpc socket, always "unix://..."
+	retainLogs bool
 }
 
 // reapOrphanShims runs the shim's own "delete" for shim servers of id that
@@ -81,12 +82,13 @@ type orphanShim struct {
 //
 // A non-zero result means a shim may still hold the sandbox's resources; the
 // caller must not record the sandbox as having no shim.
-func reapOrphanShims(ctx context.Context, id string) int {
+func reapOrphanShims(ctx context.Context, id string, retainLogs bool) int {
 	if id == "" {
 		return 0
 	}
 	survivors := 0
 	for _, s := range findOrphanShims(ctx, orphanShimProcRoot, id) {
+		s.retainLogs = retainLogs
 		if !reapOrphanShim(ctx, id, s) {
 			survivors++
 		}
@@ -178,10 +180,13 @@ func shimDeleteEnv(s orphanShim) []string {
 		"GRPC_ADDRESS=" + s.address,
 		"NAMESPACE=" + s.namespace,
 	}
-	for _, k := range []string{"RUST_LOG", "FUNCTION_TYPE", delayedShimLogCleanupEnv} {
+	for _, k := range []string{"RUST_LOG", "FUNCTION_TYPE"} {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
+	}
+	if s.retainLogs {
+		env = append(env, delayedShimLogCleanupEnv+"=1", managedShimLogCleanupEnv+"=1")
 	}
 	return env
 }

@@ -90,6 +90,8 @@ Delayed cleanup is disabled by default. To enable it, deploy the updated Cubelet
 
 Both durations must be positive. Restart Cubelet after changing the configuration. The setting is inherited by newly started shims; already running shims retain the setting they started with. When disabling the feature, logs from previously enabled shims may remain and require operator cleanup.
 
+When enabled, Cubelet creates a small launcher for each selected CubeShim path under its configured root directory. That directory must support executing files and must survive Cubelet and host restarts, because containerd also uses the launcher to clean up an unexpectedly exited shim. The launcher keeps the original shim version and passes the retention setting only to that shim. No launcher is created when the option is disabled.
+
 Cubelet starts the retention period only after it confirms the sandbox runtime has exited. Its background scan removes marked log directories after that period, once sandbox metadata and the shim are gone. Paused sandboxes, unmarked logs and logs whose runtime state is uncertain are retained. A Cubelet restart preserves the cleanup deadline in the log directory. Without the option, no scan is started and shim deletion follows its existing behavior.
 
 The feature only retains init stdout/stderr that CubeShim forwards to the host; it does not collect files written solely inside the guest. Retained logs are node-local and can consume disk space: monitor usage and export them elsewhere if longer retention or node-loss protection is needed.

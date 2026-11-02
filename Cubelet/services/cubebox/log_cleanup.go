@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"runtime/debug"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 
 const (
 	delayedShimLogCleanupEnv = "CUBELET_DELAY_SANDBOX_LOG_CLEANUP"
+	managedShimLogCleanupEnv = "CUBELET_MANAGED_SANDBOX_LOG_CLEANUP"
 	logCleanupLockTimeout    = 250 * time.Millisecond
 )
 
@@ -44,7 +44,7 @@ func (l *local) markSandboxLogsAt(ctx context.Context, root, id, namespace strin
 
 func (c *CubeConfig) configureLogCleanup() error {
 	if !c.SandboxLogCleanupEnabled {
-		return os.Unsetenv(delayedShimLogCleanupEnv)
+		return nil
 	}
 	var err error
 	c.logRetention, err = positiveDuration(c.SandboxLogRetention, "sandbox_log_retention")
@@ -55,9 +55,7 @@ func (c *CubeConfig) configureLogCleanup() error {
 	if err != nil {
 		return err
 	}
-	// ShimManager launches both the live shim and its delete command with
-	// Cubelet's environment. This flag is intentionally absent when disabled.
-	return os.Setenv(delayedShimLogCleanupEnv, "1")
+	return nil
 }
 
 func positiveDuration(raw, name string) (time.Duration, error) {

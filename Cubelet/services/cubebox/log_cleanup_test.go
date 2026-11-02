@@ -22,7 +22,7 @@ import (
 )
 
 func TestDelayedLogCleanupConfiguration(t *testing.T) {
-	t.Setenv(delayedShimLogCleanupEnv, "1")
+	t.Setenv(delayedShimLogCleanupEnv, "external")
 	cfg := defaultConfig()
 	if cfg.SandboxLogCleanupEnabled {
 		t.Fatal("delayed cleanup must default to disabled")
@@ -30,8 +30,8 @@ func TestDelayedLogCleanupConfiguration(t *testing.T) {
 	if err := cfg.configureLogCleanup(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := os.LookupEnv(delayedShimLogCleanupEnv); ok {
-		t.Fatal("disabled configuration must not pass retention to shim")
+	if os.Getenv(delayedShimLogCleanupEnv) != "external" {
+		t.Fatal("disabled configuration changed the process environment")
 	}
 
 	cfg.SandboxLogCleanupEnabled = true
@@ -43,8 +43,8 @@ func TestDelayedLogCleanupConfiguration(t *testing.T) {
 	if cfg.logRetention != 2*time.Hour || cfg.logCleanupInterval != 5*time.Minute {
 		t.Fatal("durations were not applied")
 	}
-	if os.Getenv(delayedShimLogCleanupEnv) != "1" {
-		t.Fatal("enabled configuration must pass retention to shim")
+	if os.Getenv(delayedShimLogCleanupEnv) != "external" {
+		t.Fatal("enabled configuration changed the process environment")
 	}
 	for _, raw := range []string{"", "0s", "-1s", "invalid"} {
 		if _, err := positiveDuration(raw, "retention"); err == nil {
@@ -325,14 +325,23 @@ func TestLogCleanupRequiresAbsentSandboxAndShim(t *testing.T) {
 	}
 }
 
-func TestOrphanShimDeleteInheritsDelayedCleanup(t *testing.T) {
+func TestOrphanShimDeleteUsesExplicitDelayedCleanup(t *testing.T) {
 	t.Setenv(delayedShimLogCleanupEnv, "1")
-	env := shimDeleteEnv(orphanShim{})
-	want := delayedShimLogCleanupEnv + "=1"
-	for _, item := range env {
-		if item == want {
-			return
+	t.Setenv(managedShimLogCleanupEnv, "1")
+	disabled := strings.Join(shimDeleteEnv(orphanShim{}), "\n")
+	env := shimDeleteEnv(orphanShim{retainLogs: true})
+	for _, key := range []string{delayedShimLogCleanupEnv, managedShimLogCleanupEnv} {
+		if strings.Contains(disabled, key+"=") {
+			t.Fatalf("disabled shim inherited %s", key)
+		}
+		found := false
+		for _, item := range env {
+			if item == key+"=1" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("shim delete environment missing %s", key)
 		}
 	}
-	t.Fatalf("shim delete environment missing %s in %s", want, strings.Join(env, ","))
 }

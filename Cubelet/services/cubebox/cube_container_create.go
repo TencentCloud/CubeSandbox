@@ -1390,6 +1390,18 @@ func (l *local) runContainer(
 	ociRuntime cubeconfig.Runtime) (err error) {
 
 	start := time.Now()
+	var taskOpts []containerd.NewTaskOpts
+	delayShimLogs := l.config != nil && l.config.SandboxLogCleanupEnabled && strings.HasPrefix(ociRuntime.Type, "io.containerd.cube")
+	if delayShimLogs {
+		shimPath, err := delayedCleanupShimPath(l.config.RootPath, runtimePathFor(cubebox), ociRuntime.Type)
+		if err != nil {
+			return fmt.Errorf("prepare delayed log cleanup shim: %w", err)
+		}
+		taskOpts = append(taskOpts, containerd.WithRuntimePath(shimPath))
+	} else {
+		taskOpts = append(taskOpts, withRuntimePathOpt(cubebox))
+	}
+
 	newContainer := l.newContainerFn
 	if newContainer == nil {
 		newContainer = l.client.NewContainer
@@ -1411,10 +1423,6 @@ func (l *local) runContainer(
 	} else {
 		ioCreater = taskio.New(true)
 	}
-
-	var taskOpts []containerd.NewTaskOpts
-
-	taskOpts = append(taskOpts, withRuntimePathOpt(cubebox))
 
 	endpoint := cubebox.Endpoint
 	if endpoint.IsValid() {
@@ -1470,7 +1478,7 @@ func (l *local) runContainer(
 		// container therefore gets its own shim server, started with
 		// -id <container id>, and that one leaks the same way when its
 		// create fails. Match ci.ID, never the sandbox id.
-		if survivors := reapOrphanShims(ctx, ci.ID); survivors > 0 && ci.IsPod {
+		if survivors := reapOrphanShims(ctx, ci.ID, delayShimLogs); survivors > 0 && ci.IsPod {
 			// The bundle is already gone, so withdrawShimIntent cannot see
 			// these shims through the pid files. Keep the intent: it is what
 			// stops the destroy path from releasing the tap, IP and volumes
@@ -1888,6 +1896,10 @@ func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeB
 }
 
 func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {
+	return containerd.WithRuntimePath(runtimePathFor(cubebox))
+}
+
+func runtimePathFor(cubebox *cubeboxstore.CubeBox) string {
 	var runtimePath string
 	if cubebox.OciRuntime != nil && cubebox.OciRuntime.Path != "" {
 		runtimePath = cubebox.OciRuntime.Path
@@ -1903,7 +1915,7 @@ func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {
 	if p, ok := cubebox.Annotations[constants.AnnotationCubeletInternalRuntimePath]; ok {
 		runtimePath = p
 	}
-	return containerd.WithRuntimePath(runtimePath)
+	return runtimePath
 }
 
 func (l *local) genHooksOpts(ctx context.Context, flowOpts *workflow.CreateContext, containerReq *cubebox.ContainerConfig) (oci.SpecOpts, error) {
