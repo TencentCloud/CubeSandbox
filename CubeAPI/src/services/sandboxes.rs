@@ -2177,6 +2177,7 @@ mod tests {
     async fn sandbox_detail_serializes_error_reason() {
         for (status, reason) in [
             (2, Some(serde_json::json!("OOMKilled"))),
+            (3, Some(serde_json::json!("PauseFailed"))),
             (2, Some(serde_json::json!(""))),
             (2, Some(Value::Null)),
             (2, None),

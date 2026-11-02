@@ -2431,7 +2431,7 @@ components:
           type:
           - string
           - 'null'
-          description: Stored termination reason for the primary container, when available.
+          description: Stored status reason for the primary container, when available.
         memoryMB:
           type: integer
           format: int32
