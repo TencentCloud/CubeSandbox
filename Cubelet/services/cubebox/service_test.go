@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"testing"
@@ -22,6 +23,47 @@ import (
 	imagesv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	volpluginv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
 )
+
+func TestListLooksUpIDBeforeSerializingStorage(t *testing.T) {
+	box := newCubeboxWithStatusForTest("sandbox-1", cubeboxstore.Status{FinishedAt: 1, Reason: "OOMKilled"})
+	other := newCubeboxWithStatusForTest("sandbox-2", cubeboxstore.Status{StartedAt: 1})
+	for _, tc := range []struct {
+		name      string
+		id        string
+		private   bool
+		getErr    error
+		wantIDs   []string
+		wantLists int
+	}{
+		{"detail with storage", box.ID, true, nil, []string{box.ID}, 0},
+		{"detail without storage", box.ID, false, nil, []string{box.ID}, 0},
+		{"missing sandbox", "missing", true, errors.New("not found"), nil, 0},
+		{"list all", "", false, nil, []string{box.ID, other.ID}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := &fakeCubeboxAPI{cb: box, list: []*cubeboxstore.CubeBox{box, other}, getErr: tc.getErr}
+			s := &service{cubeboxMgr: &local{cubeboxManger: manager}}
+			rsp, err := s.List(context.Background(), &cubeboxv1.ListCubeSandboxRequest{
+				Id:     &tc.id,
+				Option: &cubeboxv1.ListCubeSandboxOption{PrivateWithCubeboxStore: tc.private},
+			})
+			require.NoError(t, err)
+			var ids []string
+			for _, item := range rsp.GetItems() {
+				ids = append(ids, item.GetId())
+				if tc.private {
+					var stored cubeboxstore.CubeBox
+					require.NoError(t, json.Unmarshal(item.GetPrivateCubeboxStorageData(), &stored))
+					require.Equal(t, "OOMKilled", stored.FirstContainer().Status.Get().Reason)
+				} else {
+					require.Empty(t, item.GetPrivateCubeboxStorageData())
+				}
+			}
+			require.Equal(t, tc.wantIDs, ids)
+			require.Equal(t, tc.wantLists, manager.listCalls)
+		})
+	}
+}
 
 func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {
 	container := &cubeboxstore.Container{

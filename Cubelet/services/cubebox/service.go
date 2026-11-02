@@ -1010,6 +1010,10 @@ func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest)
 	})
 	res = &cubebox.ListCubeSandboxResponse{}
 
+	if req.GetId() != "" {
+		return &cubebox.ListCubeSandboxResponse{Items: s.filterGRPCContainer(nil, req)}, nil
+	}
+
 	cubeboxInStore := s.cubeboxMgr.cubeboxManger.List()
 	if len(cubeboxInStore) > maxListCubebox {
 
