@@ -236,6 +236,13 @@ spec:
               value: {{ .Values.cubeProxy.resolver.timeout | quote }}
             - name: CUBE_PROXY_RESOLVER_IPV6
               value: {{ ternary "on" "off" .Values.cubeProxy.resolver.ipv6 | quote }}
+            # Prometheus request metrics (opt-in).
+            - name: CUBE_PROXY_METRICS_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeProxy.metrics.enabled | quote }}
+            {{- if .Values.cubeProxy.metrics.enabled }}
+            - name: CUBE_PROXY_METRICS_LISTEN
+              value: {{ .Values.cubeProxy.metrics.listen | quote }}
+            {{- end }}
             {{- if and .Values.cubeProxy.registry.enabled (eq (include "cube.lifecycleManagerEnabled" .) "true") }}
             - name: CUBE_PROXY_REGISTRY_ENABLE
               value: "1"

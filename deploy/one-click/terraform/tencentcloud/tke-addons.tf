@@ -1508,6 +1508,18 @@ resource "kubernetes_deployment" "cube_proxy" {
             name  = "CUBE_PROXY_VERSION"
             value = var.image_tag
           }
+          # Prometheus request metrics (opt-in). LISTEN injected only when enabled.
+          env {
+            name  = "CUBE_PROXY_METRICS_ENABLE"
+            value = var.cube_proxy_metrics_enabled ? "1" : "0"
+          }
+          dynamic "env" {
+            for_each = var.cube_proxy_metrics_enabled ? [1] : []
+            content {
+              name  = "CUBE_PROXY_METRICS_LISTEN"
+              value = var.cube_proxy_metrics_listen
+            }
+          }
           env {
             name  = "CUBE_PROXY_HEARTBEAT_INTERVAL_MS"
             value = tostring(var.cube_proxy_heartbeat_interval_ms)
