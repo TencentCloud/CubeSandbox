@@ -4,7 +4,36 @@
   "noTemplates": "No templates yet. Use the CLI or SDK to publish a template.",
   "tabs": {
     "list": "Templates",
+    "snapshots": "Snapshots",
     "compat": "Compatibility"
+  },
+  "snap": {
+    "none": "No snapshots yet. Create one from a running sandbox via the SDK or CLI.",
+    "emptyPage": "This page is empty. Go back to the previous page.",
+    "loadError": "Failed to load snapshots.",
+    "retry": "Retry",
+    "copied": "Copied",
+    "col": {
+      "originSandbox": "Origin sandbox",
+      "version": "version",
+      "refs": "Sandbox refs"
+    },
+    "delete": {
+      "button": "Delete Snapshot",
+      "title": "Delete Snapshot",
+      "confirmDesc": "Are you sure you want to delete the snapshot",
+      "confirmDescSuffix": "? This action cannot be undone.",
+      "inUseNote": "This snapshot is referenced by running sandboxes; its data is reclaimed asynchronously after those sandboxes are released.",
+      "templateNote": "If assistant templates were published from this snapshot, the delete is rejected until you remove them in AgentHub.",
+      "cancel": "Cancel",
+      "confirm": "Confirm Delete",
+      "deleting": "Deleting…"
+    },
+    "pagination": {
+      "prev": "Previous",
+      "next": "Next",
+      "page": "Page {{page}}"
+    }
   },
   "compat": {
     "banner": "{{count}} templates need to be rebuilt. After the node upgrade, creating sandboxes from them may fail. Open a template and click Rebuild Template.",
@@ -102,6 +131,10 @@
   "errors": {
     "templateInUse": "This template has sandbox instances in use. Destroy all related sandboxes before deleting it.",
     "buildInProgress": "This template is still building. Wait for the build to finish before deleting it.",
-    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator."
+    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator.",
+    "snapshotReferenced": "This snapshot is referenced by an assistant template. Remove the template first in AgentHub.",
+    "snapshotCreating": "This snapshot is still being created. Try again later.",
+    "snapshotDeleting": "This snapshot is already being deleted. Try again later.",
+    "snapshotBusy": "This snapshot has an operation in progress. Try again later."
   }
 }

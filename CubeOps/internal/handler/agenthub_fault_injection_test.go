@@ -248,6 +248,33 @@ func TestAgentHub_DeleteSnapshot_CMDeleteFails_NoDBDelete(t *testing.T) {
 	}
 }
 
+// TestAgentHub_DeleteSnapshot_CMNotFound_StillCleansDB: CM 404 → idempotent delete, DB row still cleaned.
+func TestAgentHub_DeleteSnapshot_CMNotFound_StillCleansDB(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.teardown()
+	seedInstance(t, env.store, "agent-snap-404", "Snap404", "sb-snap-404")
+
+	seedSnapshot(t, env, "snap-404-1", "agent-snap-404", "sb-snap-404", "gone-snap", "full_snapshot")
+
+	env.fakeCM.deleteSnapshot = func(ctx context.Context, snapshotID string) (json.RawMessage, error) {
+		return nil, &cubemaster.CMError{RetCode: 130404, RetMsg: "snapshot not found"}
+	}
+
+	w := doRequest(t, env, "DELETE", "/api/v1/agenthub/instances/agent-snap-404/snapshots/snap-404-1", "")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204 (idempotent delete); body=%s", w.Code, w.Body.String())
+	}
+
+	// DB record must be gone: CM already lost it, keeping the row would dangle.
+	snap, err := env.store.GetAgentSnapshot(t.Context(), "agent-snap-404", "snap-404-1")
+	if err != nil {
+		t.Fatalf("GetAgentSnapshot: %v", err)
+	}
+	if snap != nil {
+		t.Error("snapshot DB record still exists despite CM 404; expected idempotent local cleanup")
+	}
+}
+
 // ── R08: rollback sends request_id ──
 
 // TestAgentHub_Rollback_SendsRequestID verifies that the full_snapshot

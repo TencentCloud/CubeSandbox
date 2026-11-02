@@ -276,6 +276,8 @@ uses these as its primary data path.
 
 **Snapshots**
 - `GET /api/v1/sdk/snapshots` — List snapshots
+- `GET /api/v1/sdk/snapshots/{id}` — Get snapshot detail
+- `DELETE /api/v1/sdk/snapshots/{id}` — Delete snapshot (409 while templates reference it)
 - `POST /api/v1/sdk/sandboxes/{id}/snapshots` — Create snapshot
 - `POST /api/v1/sdk/sandboxes/{id}/rollback` — Rollback sandbox to snapshot
 
