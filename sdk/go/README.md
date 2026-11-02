@@ -238,6 +238,32 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 err = client.DeleteVolume(ctx, "my-data") // DELETE /volumes/:id
 ```
 
+For opaque plugin input, use the separate creation method (requires support in
+CubeAPI, every serving CubeMaster, and the plugin; existing `CreateVolume` calls are unchanged):
+
+```go
+volume, err := client.CreateVolumeWithPrivateData(ctx, cubesandbox.CreateVolumeWithPrivateDataOptions{
+	Name:        "my-data",
+	Driver:      "my-storage",
+	PrivateData: `{"bucket":"my-bucket","prefix":"work/","cred_ref":"account-7"}`,
+}) // POST /v2/volumes
+```
+
+`PrivateData` must be valid UTF-8, limited to 1024 bytes without NUL. Invalid
+UTF-8 is rejected before any HTTP request, rather than replaced during JSON encoding.
+Valid input is passed unchanged.
+Use credential references, never plaintext credentials. Empty strings are
+forwarded; API versions without `/v2/volumes` return an error without a legacy fallback.
+The returned `VolumeInfo` works with the existing query, delete and mount APIs.
+
+Upgrade order: check or upgrade the Controller/Node plugins for Create input A
+and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,
+then deploy the new CubeAPI and begin using this method. A new API connected to
+an old Master can return 201 while silently dropping A; the old Master also omits
+B on Destroy. The SDK does not detect this mixed-version deployment. Keep compatible
+Masters serving existing A/B-dependent volumes during any rollback. See the
+[plugin upgrade guide](../../docs/guide/volume-plugin.md#private_data-upgrade-order).
+
 Deleting a volume does not auto-detach it: destroy the sandboxes using it first, otherwise the server refuses with an error matching `ErrVolumeInUse`. A delete of a missing volume matches `ErrVolumeNotFound`, so idempotent cleanup can ignore that case:
 
 ```go

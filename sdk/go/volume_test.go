@@ -43,6 +43,9 @@ func TestCreateVolumeSendsPayloadAndParsesResponse(t *testing.T) {
 
 	assertString(t, got, "name", "my-data")
 	assertString(t, got, "driver", "cos")
+	if len(got) != 2 {
+		t.Fatal("legacy create payload must keep its existing definition")
+	}
 }
 
 func TestCreateVolumeOmitsDriverAndAllowsEmptyName(t *testing.T) {
