@@ -19,7 +19,7 @@ A sandbox is always in exactly one of these states:
 
 `unknown` is not a synonym for "gone": CubeAPI reports it for a sandbox that is still being created, one whose container has exited, and one whose state could not be read from its node. The `terminated` row describes what `kill()` and `on_timeout="kill"` do; a container that exits on its own is reported as `unknown`, not as a separate terminal state. Because those cases share one value, `state` alone cannot tell a sandbox that is still coming up from one that is already dead — `POST /sandboxes/<id>/connect` is the signal: it fails with HTTP 409 (`... is not connectable in state 'stopped'`) once the container is gone, and still connects in the other two cases.
 
-When Cubelet has a stored termination reason for the primary container, `GET /sandboxes/<id>` includes `errorReason`, for example `"OOMKilled"`. The field is omitted when no reason is available, including with older CubeMaster versions. It does not change `state` or retain history after the sandbox is deleted.
+When Cubelet has a stored status reason for the primary container, `GET /sandboxes/<id>` includes `errorReason`, for example `"OOMKilled"` or `"PauseFailed"`. A reason does not necessarily mean the container has exited: `"PauseFailed"` can describe a failed pause while the container is still alive. The field is omitted when no reason is available, including with older Cubelet or CubeMaster versions. It does not change `state` or retain history after the sandbox is deleted. The last container exit reason is reported separately in `restartStatus.lastExitReason`.
 
 Two settings drive transitions:
 

@@ -19,7 +19,7 @@
 
 `unknown` 并不等于"已经没了"：上述三种情况 CubeAPI 都会报 `unknown`。上表的 `terminated` 描述的是 `kill()` 与 `on_timeout="kill"` 的结果；容器自行退出时报的是 `unknown`，而不是另一个独立的终态。因为这几种情况共用一个取值，只看 `state` 无法区分沙箱是还在启动还是已经死了——判据是 `POST /sandboxes/<id>/connect`：容器已经退出时返回 HTTP 409（`... is not connectable in state 'stopped'`），另外两种情况仍能正常 connect。
 
-当 Cubelet 存有主容器的终止原因时，`GET /sandboxes/<id>` 会返回 `errorReason`，例如 `"OOMKilled"`。没有可用原因时会省略该字段，使用旧版 CubeMaster 时也是如此。该字段不改变 `state`，也不会在沙箱删除后保留历史。
+当 Cubelet 存有主容器的状态原因时，`GET /sandboxes/<id>` 会返回 `errorReason`，例如 `"OOMKilled"` 或 `"PauseFailed"`。存在原因不一定表示容器已退出：`"PauseFailed"` 可以表示暂停失败但容器仍在运行。没有可用原因时会省略该字段，使用旧版 Cubelet 或 CubeMaster 时也是如此。该字段不改变 `state`，也不会在沙箱删除后保留历史。容器最近一次退出的原因通过 `restartStatus.lastExitReason` 单独返回。
 
 状态转换主要由两个参数驱动：
 
