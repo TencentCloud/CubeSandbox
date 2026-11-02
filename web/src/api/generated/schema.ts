@@ -445,7 +445,7 @@ export interface components {
             endAt: string;
             envdAccessToken?: string | null;
             envdVersion: string;
-            /** @description Stored termination reason for the primary container, when available. */
+            /** @description Stored status reason for the primary container, when available. */
             errorReason?: string | null;
             /** Memory in MiB; the MB suffix is retained for API compatibility. Format: int32 */
             memoryMB: number;
