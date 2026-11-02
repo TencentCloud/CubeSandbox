@@ -1311,6 +1311,8 @@ pub struct GetSandboxDataItem {
     #[serde(default)]
     pub host_id: String,
     #[serde(default)]
+    pub error_reason: Option<String>,
+    #[serde(default)]
     pub template_id: String,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
@@ -1377,6 +1379,7 @@ pub struct GetSandboxContainerItem {
 pub struct SandboxDetail {
     pub sandbox_id: String,
     pub host_id: String,
+    pub error_reason: Option<String>,
     pub instance_type: String,
     pub status: SandboxStatus,
     pub template_id: String,
@@ -1614,6 +1617,7 @@ impl GetSandboxResponse {
         Some(SandboxDetail {
             sandbox_id: sid.clone(),
             host_id: item.host_id,
+            error_reason: item.error_reason.filter(|reason| !reason.trim().is_empty()),
             instance_type: instance_type.to_string(),
             status,
             template_id,
@@ -2782,6 +2786,7 @@ mod tests {
                 "configured_qos": {
                     "network": { "bandwidthMbps": 100 }
                 },
+                "error_reason": "OOMKilled",
                 "containers": [
                     {
                         "container_id": "workload-1",
@@ -2808,6 +2813,7 @@ mod tests {
             .expect("detail should exist");
 
         assert_eq!(detail.host_id, "host-1");
+        assert_eq!(detail.error_reason.as_deref(), Some("OOMKilled"));
         assert_eq!(detail.cpu_count, 2);
         assert_eq!(detail.cpu_milli, 2000);
         assert_eq!(detail.memory_mb, 2048);
@@ -2839,6 +2845,7 @@ mod tests {
             "data": [{
                 "sandbox_id": "sb-frac",
                 "host_id": "host-1",
+                "error_reason": " \t ",
                 "status": 1,
                 "containers": [{
                     "container_id": "sb-frac",
@@ -2858,6 +2865,7 @@ mod tests {
             .expect("detail should exist");
 
         assert_eq!(detail.cpu_count, 0);
+        assert_eq!(detail.error_reason, None);
         assert_eq!(detail.cpu_milli, 250);
         assert_eq!(detail.memory_mb, 2048);
     }
@@ -2888,6 +2896,7 @@ mod tests {
             .expect("detail should exist");
 
         assert_eq!(detail.cpu_milli, 500);
+        assert_eq!(detail.error_reason, None);
         assert_eq!(detail.memory_mb, 2048);
     }
 }
