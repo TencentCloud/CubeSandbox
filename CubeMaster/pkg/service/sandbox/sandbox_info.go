@@ -6,7 +6,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -65,9 +64,7 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 		CubeLog.Trace(rt)
 	}()
 
-	cubeletReq := &cubebox.ListCubeSandboxRequest{
-		Option: &cubebox.ListCubeSandboxOption{PrivateWithCubeboxStore: true},
-	}
+	cubeletReq := &cubebox.ListCubeSandboxRequest{}
 	endpoint, locatedHost, rec, ok := checkValidAndGetReq(ctx, req, cubeletReq, rsp)
 	if !ok {
 		return
@@ -204,7 +201,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one := &types.SandboxData{
 			SandboxID:   sandbox.GetId(),
 			NameSpace:   sandbox.GetNamespace(),
-			ErrorReason: sandboxTerminationReason(sandbox.GetPrivateCubeboxStorageData(), sandbox.GetId()),
+			ErrorReason: sandbox.GetErrorReason(),
 		}
 		sandboxLabels := cloneStringMap(sandbox.GetLabels())
 
@@ -238,30 +235,6 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		rsp.Data = append(rsp.Data, one)
 	}
 	return nil
-}
-
-// Read only the primary container's reason from Cubelet's private store format.
-func sandboxTerminationReason(data []byte, sandboxID string) string {
-	var stored struct {
-		FirstContainerName string `json:"first_container_name"`
-		ContainersMap      struct {
-			ContainerMap map[string]struct {
-				Status struct {
-					Status struct {
-						Reason string
-					}
-				} `json:"status"`
-			}
-		}
-	}
-	if json.Unmarshal(data, &stored) != nil {
-		return ""
-	}
-	containerID := stored.FirstContainerName
-	if containerID == "" {
-		containerID = sandboxID
-	}
-	return stored.ContainersMap.ContainerMap[containerID].Status.Status.Reason
 }
 
 func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes) error {
