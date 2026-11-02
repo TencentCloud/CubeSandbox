@@ -17,7 +17,9 @@
 | `terminated`| 沙箱被显式销毁（`kill`）或因 `on_timeout="kill"` 超时被回收，无法恢复 |
 | `unknown`   | CubeAPI 无法把沙箱映射为上表任一状态：沙箱仍在创建、容器已退出，或无法从节点读取其状态 |
 
-`unknown` 并不等于"已经没了"：上述三种情况 CubeAPI 都会报 `unknown`。上表的 `terminated` 描述的是 `kill()` 与 `on_timeout="kill"` 的结果；容器自行退出时报的是 `unknown`，而不是另一个独立的终态。因为这几种情况共用一个取值，只看 `GET /sandboxes/<id>` 无法区分沙箱是还在启动还是已经死了——判据是 `POST /sandboxes/<id>/connect`：容器已经退出时返回 HTTP 409（`... is not connectable in state 'stopped'`），另外两种情况仍能正常 connect。
+`unknown` 并不等于"已经没了"：上述三种情况 CubeAPI 都会报 `unknown`。上表的 `terminated` 描述的是 `kill()` 与 `on_timeout="kill"` 的结果；容器自行退出时报的是 `unknown`，而不是另一个独立的终态。因为这几种情况共用一个取值，只看 `state` 无法区分沙箱是还在启动还是已经死了——判据是 `POST /sandboxes/<id>/connect`：容器已经退出时返回 HTTP 409（`... is not connectable in state 'stopped'`），另外两种情况仍能正常 connect。
+
+当 Cubelet 存有主容器的终止原因时，`GET /sandboxes/<id>` 会返回 `errorReason`，例如 `"OOMKilled"`。没有可用原因时会省略该字段，使用旧版 CubeMaster 时也是如此。该字段不改变 `state`，也不会在沙箱删除后保留历史。
 
 状态转换主要由两个参数驱动：
 
@@ -312,7 +314,7 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 ### 查询重启状态
 
-`GET /sandboxes/<id>` 和列表接口会返回 `restartStatus`，它是 `state` 之外的独立对象：`state` 回答"沙箱在生命周期哪一站"，`restartStatus` 回答"重启状态机走到哪、为什么停下"。容器自行退出后，`state` 只会报 `unknown`，只有靠这个对象才能分清正常退出、崩溃和放弃重启。
+`GET /sandboxes/<id>` 和列表接口会返回 `restartStatus`，它是 `state` 之外的独立对象：`state` 回答"沙箱在生命周期哪一站"，`restartStatus` 回答"重启状态机走到哪、为什么停下"。容器自行退出后，`state` 只会报 `unknown`，该对象提供退出码和重启状态，可与详情响应中的 `errorReason` 一起查看。
 
 它不改变 `state`，只在策略为 `OnFailure` / `Always`、或沙箱发生过退出时出现；默认 `Never` 且从未退出过的沙箱没有它。
 

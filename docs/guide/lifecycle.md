@@ -17,7 +17,9 @@ A sandbox is always in exactly one of these states:
 | `terminated` | Killed (`kill()`) or reaped after `on_timeout="kill"`. Cannot be brought back.                 |
 | `unknown`    | CubeAPI could not map the sandbox to one of the rows above: it is still being created, its container has exited, or its state could not be read from its node. |
 
-`unknown` is not a synonym for "gone": CubeAPI reports it for a sandbox that is still being created, one whose container has exited, and one whose state could not be read from its node. The `terminated` row describes what `kill()` and `on_timeout="kill"` do; a container that exits on its own is reported as `unknown`, not as a separate terminal state. Because those cases share one value, `GET /sandboxes/<id>` alone cannot tell a sandbox that is still coming up from one that is already dead — `POST /sandboxes/<id>/connect` is the signal: it fails with HTTP 409 (`... is not connectable in state 'stopped'`) once the container is gone, and still connects in the other two cases.
+`unknown` is not a synonym for "gone": CubeAPI reports it for a sandbox that is still being created, one whose container has exited, and one whose state could not be read from its node. The `terminated` row describes what `kill()` and `on_timeout="kill"` do; a container that exits on its own is reported as `unknown`, not as a separate terminal state. Because those cases share one value, `state` alone cannot tell a sandbox that is still coming up from one that is already dead — `POST /sandboxes/<id>/connect` is the signal: it fails with HTTP 409 (`... is not connectable in state 'stopped'`) once the container is gone, and still connects in the other two cases.
+
+When Cubelet has a stored termination reason for the primary container, `GET /sandboxes/<id>` includes `errorReason`, for example `"OOMKilled"`. The field is omitted when no reason is available, including with older CubeMaster versions. It does not change `state` or retain history after the sandbox is deleted.
 
 Two settings drive transitions:
 
@@ -312,7 +314,7 @@ Put a liveness probe on the create request. When the request has none and the im
 
 ### Restart status
 
-`GET /sandboxes/<id>` and the list endpoint return `restartStatus`, a separate object from `state`: `state` answers "where is the sandbox in its lifecycle", while `restartStatus` answers "where is the restart state machine, and why did it stop". Once the container exits on its own, `state` only reports `unknown`; this object is what distinguishes a clean exit, a crash, and a give-up.
+`GET /sandboxes/<id>` and the list endpoint return `restartStatus`, a separate object from `state`: `state` answers "where is the sandbox in its lifecycle", while `restartStatus` answers "where is the restart state machine, and why did it stop". Once the container exits on its own, `state` only reports `unknown`; this object supplies the exit code and restart state alongside any `errorReason` in the detail response.
 
 It does not change `state`, and it only appears when the policy is `OnFailure` / `Always` or the sandbox has exited; a default `Never` sandbox that has never exited has no such object.
 
