@@ -182,8 +182,9 @@ Config field `type` selects the plugin type; **`name` (driver) must match end-to
 |-----------|-------|------|-------------|
 | Input | `volumeID` | string | Stable ID (UUID or same as `name`) |
 | Input | `name` | string | Display name |
+| Input | `private_data` | string | Optional opaque caller input, forwarded unchanged by CubeMaster (max **1024** UTF-8 bytes). binary: `--private-data`, omitted when empty |
 | Output | `token` | string | Optional auth token returned to SDK |
-| Output | `private_data` | string | Opaque plugin state (max **1024** bytes). Persisted in `t_cube_volume` and forwarded to **Attach** on sandbox create. **Not** returned to API/SDK clients. May be empty. |
+| Output | `private_data` | string | Opaque plugin state (max **1024** bytes). Persisted in `t_cube_volume` and forwarded to **Attach** and **Destroy**. Omitted from successful Volume API/SDK responses. May be empty. |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
 **binary example**
@@ -192,6 +193,8 @@ Input (CLI):
 
 ```bash
 /path/to/my-plugin --op create --volume-id my-vol --name my-vol
+# For non-empty caller input, add one argument containing the original value:
+#   --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
 ```
 
 Output (stdout JSON, exit 0):
@@ -205,9 +208,10 @@ Output (stdout JSON, exit 0):
 | Direction | Field | Type | Description |
 |-----------|-------|------|-------------|
 | Input | `volumeID` | string | Volume to delete in backend |
+| Input | `private_data` | string | Plugin-returned state read from `t_cube_volume`; on create-failure rollback, the state returned by Create. binary: `--private-data`, omitted when empty |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
-Plugin must locate backend resources using only `volumeID` (e.g. delete prefix `volumes/<volumeID>/`). Destroy does **not** auto-Detach running sandboxes.
+Plugin locates backend resources using `volumeID` and the returned `private_data` (for example, its assigned bucket/prefix). Destroy must only delete resources belonging to that volume; it does **not** auto-Detach running sandboxes.
 
 **binary example**
 
@@ -215,6 +219,8 @@ Input (CLI):
 
 ```bash
 /path/to/my-plugin --op destroy --volume-id my-vol
+# For non-empty state returned by Create, add:
+#   --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
 ```
 
 Output (stdout JSON, exit 0):
@@ -291,6 +297,24 @@ Output (stdout JSON, exit 0):
 {"error":""}
 ```
 
+### `private_data` contract
+
+Legacy CubeAPI `POST /volumes` keeps its existing `name`/`driver` request definition. The separate `POST /v2/volumes` accepts optional `private_data` and forwards it unchanged to CubeMaster's internal `POST /cube/volume`. It returns HTTP 400 for values over 1024 UTF-8 bytes or containing NUL, before calling CubeMaster. Omitted or null input omits the field in the Master request; an explicit empty string is forwarded as empty. Both APIs return the same volume response and share existing query, delete and sandbox mount APIs.
+
+SDKs expose the new creation path explicitly: Go `Client.CreateVolumeWithPrivateData`, Python `Volume.create_with_private_data`, and Node `Volume.createWithPrivateData`. Existing create methods continue to call `/volumes`. New methods require support in CubeAPI, every CubeMaster serving volume operations, and the selected plugin; they never fall back to the legacy route. Follow the [upgrade order](#private_data-upgrade-order) before using them: an older Master can silently discard the input even when the new API returns 201.
+
+CubeMaster treats the value as an opaque string: it does not parse JSON, trim whitespace, or normalize storage paths. Both the caller input and Create's returned state are limited to **1024 bytes** (Go `len`, not character count) and must not contain NUL. This applies to every Controller transport because the same state may later be sent to a binary Node plugin. The plugin validates and interprets its contents.
+
+- Create receives caller input A and may return different state B. Only B is persisted and forwarded to Attach and normal Destroy.
+- An empty return is stored as empty; CubeMaster does not fall back to A.
+- If Create succeeds but validation of B or its DB update fails, rollback Destroy receives B directly, including the full value when B exceeds the persistence limit. Cleanup is best effort; binary argument limits or plugin errors can prevent it.
+- If rollback Destroy fails, CubeMaster logs the volume ID, driver, failure phase, and a fixed error category, without the state or the raw plugin error. It still attempts to delete the reserved DB row; automatic cleanup recovery is not provided. A failed DB update does not establish whether state was committed.
+- Binary Create/Destroy and Node Attach reject NUL before starting a process. Node checks also protect against invalid legacy state. An RPC rollback may still carry the invalid returned state so that the plugin can attempt cleanup.
+
+Use bucket, prefix, endpoint/region, and a credential reference such as `cred_ref`; **never put plaintext access keys or secrets in `private_data`**. The plugin exchanges the reference for credentials outside the sandbox. The value is stored in plaintext in the DB and forwarded through annotations, and binary arguments are visible on the host. Binary arguments cannot contain NUL bytes.
+
+Plugins must not log this field or include it in error messages. Existing error paths can echo binary stderr/stdout, structured plugin errors, or gRPC status messages into API errors; HTTP debug body dumping can also log the request when enabled. The controller forwarding change does not provide comprehensive error/log redaction.
+
 ### RefCount
 
 One Volume may be shared by multiple sandboxes. Cubelet maintains a **per-node** reference count and passes `refCount` into Node Hooks:
@@ -334,7 +358,7 @@ sequenceDiagram
     Note over U,VM: ① Create Volume (control plane)
     U->>API: POST /volumes {name, driver}
     API->>M: POST /cube/volume
-    M->>P: Create(volumeID, name)
+    M->>P: Create(volumeID, name, private_data)
     P-->>M: stdout JSON {"token":"...","private_data":"...","error":""}
     M->>M: write t_cube_volume
     M-->>U: {volumeID, name, token}
@@ -362,7 +386,7 @@ sequenceDiagram
     U->>API: DELETE /volumes/:id
     API->>M: DELETE /cube/volume/:id
     M->>M: refcount ≠ 0 → reject delete
-    M->>P: Destroy(volumeID) (when refcount == 0)
+    M->>P: Destroy(volumeID, stored private_data) (when refcount == 0)
     P-->>M: ok
     M->>M: hard-delete DB record
 ```
@@ -733,6 +757,23 @@ Volume requires **both** CubeMaster and Cubelet to be on a release that supports
 | Old (e.g. v0.5.x) | New / old | Unsupported | Unsupported; do not send `volumeMounts` — plain create is unaffected |
 
 Do not assume mounts succeed on old nodes; schedule onto an upgraded Cubelet when you need mount behavior.
+
+### `private_data` upgrade order
+
+Before creating volumes through `/v2/volumes` or the new SDK methods:
+
+1. Check or upgrade the Controller and Node plugins so Create accepts caller input A, Attach and Destroy use returned state B, and existing volumes remain usable during the transition. Check compatibility with both old and new Master callers while they coexist.
+2. Upgrade **all CubeMasters serving volume operations**, including create, delete and sandbox mount metadata resolution. Complete the Master rollout before relying on per-volume A/B; an old Master must not handle operations on volumes that require the new contract.
+3. Deploy CubeAPI with `/v2/volumes` support, then begin using the new API or SDK methods. Merely deploying the new API does not verify support in its downstream Masters.
+
+A new CubeAPI connected to an old Master can return **201** while the old Master ignores A. That Master also omits B on Destroy, which can fail or operate on the plugin's defaults. There is no automatic downstream capability check. If rolling back, stop new versioned creates and keep compatible Masters serving volumes that depend on A/B until those volumes are removed or a compatible migration is verified.
+
+Controller plugin compatibility also needs checking:
+
+- Empty Create input and empty Destroy state omit `--private-data`, preserving the previous binary command form.
+- An older binary plugin may reject the new flag. Even when callers omit the field, an older plugin that returns non-empty state from Create will receive that state on Destroy, including for existing volumes and create rollback. Check both operations; omitted input alone does not guarantee lifecycle compatibility.
+- Older RPC services can ignore the new request fields. That does not mean they use the supplied configuration or return empty state; their existing Create response remains authoritative.
+- CubeMaster does not retry a failed Destroy without `private_data`: the first call may have side effects, and removing the state may select different resources.
 
 ---
 
