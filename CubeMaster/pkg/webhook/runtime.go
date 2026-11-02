@@ -8,57 +8,42 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
-var deliveryCounts = promauto.NewCounterVec(prometheus.CounterOpts{Name: "cubemaster_webhook_operations_total", Help: "Local observations, not an audit log."}, []string{"operation", "result"})
+var deliveryCounts = promauto.NewCounterVec(prometheus.CounterOpts{Name: "cubemaster_webhook_operations_total", Help: "Local notification outcomes."}, []string{"operation", "result"})
 var deliveryAge = promauto.NewHistogram(prometheus.HistogramOpts{Name: "cubemaster_webhook_claim_age_seconds", Help: "Age since task creation at claim.", Buckets: prometheus.ExponentialBuckets(0.1, 4, 10)})
 var queueDepth = promauto.NewGauge(prometheus.GaugeOpts{Name: "cubemaster_webhook_ingress_depth", Help: "Local buffered events."})
-var backlog = promauto.NewGauge(prometheus.GaugeOpts{Name: "cubemaster_webhook_backlog", Help: "Shared pending plus inflight tasks; do not sum across Masters."})
-var dueDelay = promauto.NewGauge(prometheus.GaugeOpts{Name: "cubemaster_webhook_due_delay_seconds", Help: "Oldest scheduling due delay, not event age."})
-var sampleAvailable = promauto.NewGauge(prometheus.GaugeOpts{Name: "cubemaster_webhook_sample_available", Help: "One when the latest queue sample succeeded."})
 var inFlight = promauto.NewGauge(prometheus.GaugeOpts{Name: "cubemaster_webhook_inflight", Help: "Local active worker tasks."})
 
 func count(op, result string) { deliveryCounts.WithLabelValues(op, result).Inc() }
 
-// Runtime owns a private work context: parent cancellation starts bounded flush
-// instead of cancelling storage before the writer can drain. No lifecycle calls
-// are installed here; P4/P5 receive Publisher through the owning App.
+// Runtime owns one writer, fixed workers and a private, cancellable work context.
+// Parent cancellation initiates the same short drain used by App shutdown.
 type Runtime struct {
-	publisher    Publisher
-	buffer       *BufferedPublisher
-	provider     SubscriptionProvider
-	store        DeliveryStore
-	closeStore   func() error
-	sender       *Sender
-	conf         config.WebhookConf
-	ctx          context.Context
-	cancel       context.CancelFunc
-	writerCtx    context.Context
-	cancelWriter context.CancelFunc
-	flush        chan struct{}
-	writerDone   chan struct{}
-	stopClaim    chan struct{}
-	done         chan struct{}
-	once         sync.Once
-	wg           sync.WaitGroup
-	corrupt      atomic.Bool
-	lastWarning  atomic.Int64
+	publisher  Publisher
+	buffer     *BufferedPublisher
+	provider   SubscriptionProvider
+	store      DeliveryStore
+	sender     *Sender
+	conf       config.WebhookConf
+	ctx        context.Context
+	cancel     context.CancelFunc
+	writerCtx  context.Context
+	flush      chan struct{}
+	writerDone chan struct{}
+	stopClaim  chan struct{}
+	done       chan struct{}
+	once       sync.Once
+	wg         sync.WaitGroup
 }
 
-func NewRuntime(parent context.Context, c config.WebhookConf, redisConf *config.RedisConf) (*Runtime, error) {
-	return newRuntime(parent, c, redisConf, NewRedisDeliveryStore, NewSender)
-}
-func newRuntime(parent context.Context, c config.WebhookConf, redisConf *config.RedisConf,
-	storeFactory func(config.RedisConf, RedisStoreOptions) (*RedisDeliveryStore, error), senderFactory func(config.WebhookConf) *Sender) (*Runtime, error) {
-
+func NewRuntime(parent context.Context, c config.WebhookConf) (*Runtime, error) {
 	r := &Runtime{publisher: NopPublisher{}, done: make(chan struct{})}
 	if c.Invalid {
 		close(r.done)
@@ -73,19 +58,23 @@ func newRuntime(parent context.Context, c config.WebhookConf, redisConf *config.
 		close(r.done)
 		return r, err
 	}
-	var rc config.RedisConf
-	if redisConf != nil {
-		rc = *redisConf
+	enabled := false
+	for _, s := range p.List() {
+		if s.Enabled {
+			enabled = true
+			break
+		}
 	}
-	if c.Store.Redis != nil {
-		rc = *c.Store.Redis
+	if !enabled {
+		close(r.done)
+		return r, nil
 	}
-	s, err := storeFactory(rc, RedisStoreOptions{MaxRecords: c.Store.MaxRecords, MaxActive: c.Store.MaxActive, MaxIdle: c.Store.MaxIdle, OperationTimeout: c.Store.OperationTimeout, TerminalRetention: c.Store.TerminalRetention, WriterRetryWindow: 32 * time.Second})
+	store, err := NewMemoryDeliveryStore(c.Store.MaxRecords)
 	if err != nil {
 		close(r.done)
-		return r, config.ErrWebhookConfig
+		return r, err
 	}
-	r = startRuntime(c, p, s, s.Close, senderFactory(c))
+	r = startRuntime(c, p, store, NewSender(c))
 	go func() {
 		select {
 		case <-parent.Done():
@@ -95,27 +84,25 @@ func newRuntime(parent context.Context, c config.WebhookConf, redisConf *config.
 	}()
 	return r, nil
 }
-func startRuntime(c config.WebhookConf, p SubscriptionProvider, s DeliveryStore, closeStore func() error, sender *Sender) *Runtime {
+func startRuntime(c config.WebhookConf, p SubscriptionProvider, s DeliveryStore, sender *Sender) *Runtime {
 	c.Subscriptions = cloneSubscriptions(c.Subscriptions)
 	c.AllowedCIDRs = append([]string(nil), c.AllowedCIDRs...)
-	if c.Store.Redis != nil {
-		rc := *c.Store.Redis
-		c.Store.Redis = &rc
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	wc, cw := context.WithCancel(ctx)
 	b, _ := NewBufferedPublisher(c.IngressCapacity)
-	r := &Runtime{publisher: b, buffer: b, provider: p, store: s, closeStore: closeStore, sender: sender, conf: c, ctx: ctx, cancel: cancel, writerCtx: wc, cancelWriter: cw, flush: make(chan struct{}), writerDone: make(chan struct{}), stopClaim: make(chan struct{}), done: make(chan struct{})}
+	r := &Runtime{publisher: b, buffer: b, provider: p, store: s, sender: sender, conf: c, ctx: ctx, cancel: cancel, writerCtx: ctx, flush: make(chan struct{}), writerDone: make(chan struct{}), stopClaim: make(chan struct{}), done: make(chan struct{})}
 	go r.writer()
 	for i := 0; i < c.Workers; i++ {
 		r.wg.Add(1)
 		go r.worker()
 	}
-	r.wg.Add(1)
-	go r.maintain()
 	return r
 }
-func (r *Runtime) Publisher() Publisher { return r }
+func (r *Runtime) Publisher() Publisher {
+	if r == nil || r.buffer == nil {
+		return NopPublisher{}
+	}
+	return r
+}
 
 // Prebind finite labels: the business path performs atomic increments only,
 // never a metric-vector lookup or registry lock.
@@ -135,6 +122,9 @@ var ingressCounters = func() [5]prometheus.Counter {
 }()
 
 func (r *Runtime) TryPublish(e *CapturedEvent) PublishResult {
+	if r.buffer == nil {
+		return NopPublisher{}.TryPublish(e)
+	}
 	v := r.publisher.TryPublish(e)
 	if v.Status != PublishDisabled {
 		ingressCounters[v.Status].Inc()
@@ -142,38 +132,33 @@ func (r *Runtime) TryPublish(e *CapturedEvent) PublishResult {
 	return v
 }
 func (r *Runtime) Shutdown(ctx context.Context) {
-	if r.buffer == nil {
+	if r == nil || r.buffer == nil {
 		return
 	}
+	// A concurrent caller with an earlier cancellation also stops notification I/O.
+	stopCaller := context.AfterFunc(ctx, r.cancel)
+	defer stopCaller()
 	r.once.Do(func() {
 		defer close(r.done)
-		budget, cancel := context.WithTimeout(ctx, 10*time.Second)
+		budget, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
+		stopBudget := context.AfterFunc(budget, r.cancel)
+		defer stopBudget()
 		r.buffer.Stop()
 		close(r.flush)
-		timer := time.NewTimer(5 * time.Second)
-		select {
-		case <-r.writerDone:
-		case <-timer.C:
-			r.cancelWriter()
-		case <-budget.Done():
-			r.cancelWriter()
-		}
-		timer.Stop()
 		<-r.writerDone
-		close(r.stopClaim)
-		joined := make(chan struct{})
-		go func() { r.wg.Wait(); close(joined) }()
-		select {
-		case <-joined:
-		case <-budget.Done():
-			r.cancel()
-			<-joined
+		if s, ok := r.store.(*MemoryDeliveryStore); ok {
+			for s.size() > 0 && r.ctx.Err() == nil && pause(budget, 10*time.Millisecond) {
+			}
 		}
-		r.cancelWriter()
+		close(r.stopClaim)
 		r.cancel()
+		r.wg.Wait()
 		r.sender.Close()
-		_ = r.closeStore()
+		if s, ok := r.store.(*MemoryDeliveryStore); ok {
+			deliveryCounts.WithLabelValues("task", "shutdown_discarded").Add(float64(s.discard()))
+		}
+		queueDepth.Set(0)
 	})
 	<-r.done
 }
@@ -198,34 +183,21 @@ func backoff(n int) time.Duration {
 	return d + time.Duration(rand.Int64N(int64(d/4)+1))
 }
 func (r *Runtime) storeError(op string, err error) {
-	if err == nil {
-		count(op, "confirmed")
-		return
-	}
-	reason := "unavailable"
+	result := "ok"
 	switch {
-	case errors.Is(err, ErrStoreUncertain):
-		reason = "uncertain"
-	case errors.Is(err, ErrStoreCorrupt):
-		reason = "corrupt"
-		r.buffer.Stop()
-		r.corrupt.Store(true)
-		r.cancelWriter()
+	case err == nil:
 	case errors.Is(err, ErrDeliveryCapacity):
-		reason = "capacity"
-	case errors.Is(err, ErrStaleReceipt):
-		reason = "stale"
-	case errors.Is(err, ErrInvalidDelivery):
-		reason = "invalid"
+		result = "capacity"
 	case errors.Is(err, ErrDeliveryConflict):
-		reason = "conflict"
+		result = "conflict"
+	case errors.Is(err, ErrStaleReceipt):
+		result = "stale"
+	case errors.Is(err, ErrInvalidDelivery):
+		result = "invalid"
+	default:
+		result = "cancelled"
 	}
-	count(op, reason)
-	now := time.Now().Unix()
-	old := r.lastWarning.Load()
-	if now-old >= 30 && r.lastWarning.CompareAndSwap(old, now) {
-		CubeLog.Warnf("webhook storage operation=%s result=%s; values redacted", op, reason)
-	}
+	count(op, result)
 }
 func (r *Runtime) writer() {
 	defer close(r.writerDone)
@@ -268,6 +240,7 @@ func (r *Runtime) writer() {
 	}
 }
 func (r *Runtime) write(c *CapturedEvent) {
+	queueDepth.Set(float64(len(r.buffer.Events())))
 	var targets []Subscription
 	for _, s := range r.provider.List() {
 		if matches(s, c.input.Type) {
@@ -288,50 +261,10 @@ func (r *Runtime) write(c *CapturedEvent) {
 		count("event", "encoding_failed")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.writerCtx, 30*time.Second)
-	defer cancel()
 	now := time.Now().UTC()
-	tasks := make([]DeliveryTask, len(targets))
-	pending := make([]bool, len(targets))
-	uncertain := make([]bool, len(targets))
-	remaining := len(targets)
-	for i, s := range targets {
-		tasks[i] = DeliveryTask{e, s.ID, s.URL, now, now, r.conf.MaxAttempts}
-		pending[i] = true
-	}
-	for round := 1; remaining > 0 && ctx.Err() == nil; round++ {
-		for i, t := range tasks {
-			if !pending[i] || ctx.Err() != nil {
-				continue
-			}
-			err = r.store.Put(ctx, t)
-			r.storeError("put", err)
-			if err == nil {
-				pending[i] = false
-				remaining--
-				continue
-			}
-			if errors.Is(err, ErrStoreUncertain) || errors.Is(err, ErrStoreCorrupt) {
-				uncertain[i] = true
-			}
-			if errors.Is(err, ErrInvalidDelivery) || errors.Is(err, ErrDeliveryConflict) {
-				pending[i] = false
-				remaining--
-				count("persist", "rejected")
-			}
-		}
-		if remaining > 0 && !pause(ctx, backoff(round)) {
-			break
-		}
-	}
-	for i, v := range pending {
-		if v {
-			if uncertain[i] {
-				count("persist", "unconfirmed")
-			} else {
-				count("persist", "abandoned")
-			}
-		}
+	for _, s := range targets {
+		err := r.store.Put(r.writerCtx, DeliveryTask{Event: e, SubscriptionID: s.ID, TargetURL: s.URL, CreatedAt: now, NextAttemptAt: now, MaxAttempts: r.conf.MaxAttempts})
+		r.storeError("put", err)
 	}
 }
 func (r *Runtime) stopping() bool {
@@ -341,35 +274,24 @@ func (r *Runtime) stopping() bool {
 	case <-r.ctx.Done():
 		return true
 	default:
-		return r.corrupt.Load()
+		return false
 	}
 }
 func (r *Runtime) worker() {
 	defer r.wg.Done()
-	failures := 0
 	for !r.stopping() {
-		tasks, err := r.store.Claim(r.ctx, time.Now().UTC(), 1, r.conf.Lease)
-		r.storeError("claim", err)
+		task, err := r.store.Claim(r.ctx, time.Now().UTC())
 		if err != nil {
-			failures++
-			if !r.workerPause(backoff(failures)) {
+			r.storeError("claim", err)
+			return
+		}
+		if task == nil {
+			if !r.workerPause(50 * time.Millisecond) {
 				return
 			}
 			continue
 		}
-		failures = 0
-		if len(tasks) == 0 {
-			if !r.workerPause(500 * time.Millisecond) {
-				return
-			}
-			continue
-		}
-		for _, t := range tasks {
-			if r.stopping() {
-				return
-			}
-			r.deliver(t)
-		}
+		r.deliver(*task)
 	}
 }
 func (r *Runtime) workerPause(d time.Duration) bool {
@@ -384,15 +306,19 @@ func (r *Runtime) workerPause(d time.Duration) bool {
 		return true
 	}
 }
+func (r *Runtime) complete(t ClaimedTask, state DeliveryState, summary FailureSummary) {
+	// Cleanup must release the local slot even after the work context expires.
+	err := r.store.Complete(context.Background(), t.Receipt, TerminalResult{State: state, Summary: summary})
+	r.storeError("complete", err)
+	if err == nil {
+		count("terminal", string(state))
+	}
+}
 func (r *Runtime) deliver(t ClaimedTask) {
 	count("task", "claimed")
 	deliveryAge.Observe(time.Since(t.Task.CreatedAt).Seconds())
 	inFlight.Inc()
 	defer inFlight.Dec()
-	if time.Until(t.LeaseUntil) < r.conf.RequestTimeout+r.conf.Store.OperationTimeout+2*time.Second {
-		count("task", "lease_short")
-		return
-	}
 	valid := false
 	for _, s := range r.provider.List() {
 		if s.ID == t.Task.SubscriptionID && s.URL == t.Task.TargetURL && matches(s, t.Task.Event.Type()) {
@@ -400,28 +326,17 @@ func (r *Runtime) deliver(t ClaimedTask) {
 			break
 		}
 	}
-	if !valid {
-		err := r.store.Complete(r.ctx, t.Receipt, TerminalResult{State: DeliveryCancelled})
-		r.storeError("complete", err)
-		if err == nil {
-			count("terminal", "cancelled")
-		}
-		return
-	}
-	if r.stopping() {
+	if !valid || r.stopping() {
+		r.complete(t, DeliveryCancelled, FailureSummary{})
 		return
 	}
 	id, err := uuid.NewRandom()
 	if err != nil {
 		count("send", "identity_failed")
+		r.retry(t, FailureSummary{Code: "identity_failed"})
 		return
 	}
-	deadline := time.Now().Add(r.conf.RequestTimeout)
-	leaseDeadline := t.LeaseUntil.Add(-r.conf.Store.OperationTimeout - 2*time.Second)
-	if leaseDeadline.Before(deadline) {
-		deadline = leaseDeadline
-	}
-	ctx, cancel := context.WithDeadline(r.ctx, deadline)
+	ctx, cancel := context.WithTimeout(r.ctx, r.conf.RequestTimeout)
 	result := r.sender.Send(ctx, t.Task, id.String())
 	cancel()
 	if result.Attempted {
@@ -432,53 +347,22 @@ func (r *Runtime) deliver(t ClaimedTask) {
 	if status != 0 {
 		count("http_status", strconv.Itoa(status))
 	}
-	if r.corrupt.Load() {
-		count("submit", "paused_corrupt")
-		return
-	}
-	if status >= 200 && status < 300 {
+	if r.ctx.Err() != nil {
+		r.complete(t, DeliveryCancelled, result.Summary)
+	} else if status >= 200 && status < 300 {
 		count("http", "success")
-		err = r.store.Complete(r.ctx, t.Receipt, TerminalResult{State: DeliverySucceeded, Summary: result.Summary})
-	} else if t.Attempts >= t.Task.MaxAttempts {
-		err = r.store.Complete(r.ctx, t.Receipt, TerminalResult{State: DeliveryFailed, Summary: result.Summary})
-		if err == nil {
-			count("terminal", "failed")
-		}
+		r.complete(t, DeliverySucceeded, result.Summary)
 	} else {
-		err = r.store.Retry(r.ctx, t.Receipt, time.Now().UTC().Add(backoff(t.Attempts)), result.Summary)
-		r.storeError("retry", err)
-		return
+		r.retry(t, result.Summary)
 	}
-	r.storeError("complete", err)
 }
-func (r *Runtime) maintain() {
-	defer r.wg.Done()
-	for !r.stopping() {
-		if !r.workerPause(30 * time.Second) {
-			return
-		}
-		if r.stopping() {
-			return
-		}
-		queueDepth.Set(float64(len(r.buffer.Events())))
-		if store, ok := r.store.(*RedisDeliveryStore); ok {
-			sample, err := store.Sample(r.ctx, time.Now().UTC())
-			if err != nil {
-				sampleAvailable.Set(0)
-				r.storeError("sample", err)
-			} else {
-				sampleAvailable.Set(1)
-				backlog.Set(float64(sample.PendingAndInflight))
-				dueDelay.Set(sample.DueDelay.Seconds())
-			}
-			if r.stopping() {
-				return
-			}
-		}
-		n, err := r.store.Prune(r.ctx, time.Now().UTC(), 32)
-		r.storeError("prune", err)
-		if err == nil {
-			deliveryCounts.WithLabelValues("prune", "removed").Add(float64(n))
-		}
+func (r *Runtime) retry(t ClaimedTask, summary FailureSummary) {
+	if r.ctx.Err() != nil {
+		r.complete(t, DeliveryCancelled, summary)
+	} else if t.Attempts >= t.Task.MaxAttempts {
+		r.complete(t, DeliveryFailed, summary)
+	} else {
+		err := r.store.Retry(context.Background(), t.Receipt, time.Now().UTC().Add(backoff(t.Attempts)), summary)
+		r.storeError("retry", err)
 	}
 }

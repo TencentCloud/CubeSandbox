@@ -19,13 +19,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This opt-in measurement reports observations, not a benchmark threshold.
+// This measurement reports observations, not a benchmark threshold.
 // Timing covers only the named caller operations. Allocation/heap samples are
 // process-wide and include concurrent background work; benchmark below isolates
 // caller allocations. IDs and sample storage are prepared outside measurement.
 func TestPublishLatencyDistribution(t *testing.T) {
-	realConf(t)
-	for _, scenario := range []string{"nop", "enabled", "slow-store", "disconnected-store", "slow-http", "full-ingress", "capacity"} {
+	for _, scenario := range []string{"nop", "enabled", "slow-http", "full-ingress", "capacity"} {
 		for _, withCapture := range []bool{false, true} {
 			for _, parallel := range []int{1, 4} {
 				t.Run(scenario+map[bool]string{false: "/publish", true: "/capture-publish"}[withCapture]+map[int]string{1: "/c1", 4: "/c4"}[parallel], func(t *testing.T) {
@@ -44,7 +43,7 @@ func TestPublishLatencyDistribution(t *testing.T) {
 						w.WriteHeader(204)
 					}))
 					defer srv.Close()
-					c.Subscriptions = []Subscription{{"measure", true, srv.URL, []string{TypeCreated}}}
+					c.Subscriptions = []Subscription{{ID: "measure", Enabled: true, URL: srv.URL, Events: []string{TypeCreated}}}
 					var pub Publisher = NopPublisher{}
 					var active *Runtime
 					if scenario == "full-ingress" {
@@ -52,35 +51,15 @@ func TestPublishLatencyDistribution(t *testing.T) {
 						b.TryPublish(runtimeCaptured(t))
 						pub = b
 					} else if scenario != "nop" {
-						o := testOptions()
-						o.MaxRecords = 2000
+						capacity := 2000
 						if scenario == "capacity" {
-							o.MaxRecords = 1
+							capacity = 1
 						}
-						s, conf := newTestStore(t, o)
+						store := memoryStore(t, capacity)
 						if scenario == "capacity" {
-							require.NoError(t, s.Put(testCtx, testTask()))
-						}
-						var store DeliveryStore = s
-						if scenario == "disconnected-store" {
-							conf.Nodes = "127.0.0.1:1"
-							s2, e := NewRedisDeliveryStore(conf, o)
-							require.NoError(t, e)
-							defer s2.Close()
-							store = s2
-						}
-						if scenario == "slow-store" {
-							store = &faultStore{DeliveryStore: s, put: func(ctx context.Context, task DeliveryTask) error {
-								if !pause(ctx, 200*time.Millisecond) {
-									return ErrStoreUncertain
-								}
-								return s.Put(ctx, task)
-							}, claim: func(ctx context.Context, now time.Time, n int, d time.Duration) ([]ClaimedTask, error) {
-								if !pause(ctx, 200*time.Millisecond) {
-									return nil, ErrStoreUnavailable
-								}
-								return s.Claim(ctx, now, n, d)
-							}}
+							task := testTask()
+							task.NextAttemptAt = time.Now().Add(time.Hour)
+							require.NoError(t, store.Put(testCtx, task))
 						}
 						active = runtimeFor(t, c, store)
 						pub = active

@@ -27,8 +27,6 @@ func localConf() config.WebhookConf {
 	c.AllowHTTP = true
 	c.AllowedCIDRs = []string{"127.0.0.0/8", "::1/128"}
 	c.RequestTimeout = 150 * time.Millisecond
-	c.Store.OperationTimeout = 100 * time.Millisecond
-	c.Lease = 3 * time.Second
 	return c
 }
 func TestSenderExactHeadersAndStatuses(t *testing.T) {

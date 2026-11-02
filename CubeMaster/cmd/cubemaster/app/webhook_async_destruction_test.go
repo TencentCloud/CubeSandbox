@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -32,10 +31,6 @@ import (
 )
 
 func TestP5AppPublisherRealAsyncDelete(t *testing.T) {
-	addr := os.Getenv("WEBHOOK_P4_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("isolated Redis not configured")
-	}
 	bodies := make(chan []byte, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -48,7 +43,6 @@ func TestP5AppPublisherRealAsyncDelete(t *testing.T) {
 	cfg.Webhooks.AllowHTTP = true
 	cfg.Webhooks.AllowedCIDRs = []string{"127.0.0.0/8"}
 	cfg.Webhooks.Subscriptions = []config.WebhookSubscription{{ID: uuid.NewString(), Enabled: true, URL: srv.URL, Events: []string{webhook.TypeKilled}}}
-	cfg.Webhooks.Store.Redis = &config.RedisConf{Nodes: addr, Password: os.Getenv("WEBHOOK_P4_REDIS_PASSWORD"), DbNo: 15}
 	a := New()
 	a.startWebhooks(context.Background(), cfg)
 	defer a.webhooks.Shutdown(context.Background())

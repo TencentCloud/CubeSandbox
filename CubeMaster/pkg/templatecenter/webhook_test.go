@@ -137,7 +137,7 @@ func TestP4CheckpointFinalBoundary(t *testing.T) {
 	}
 }
 func TestP4CheckpointRedisHTTP(t *testing.T) {
-	r, bodies := webhooktest.Runtime(t, 11, webhook.TypeCheckpointed)
+	r, bodies := webhooktest.Runtime(t, webhook.TypeCheckpointed)
 	SetWebhookPublisher(r.Publisher())
 	defer SetWebhookPublisher(nil)
 	require.NoError(t, p4Checkpoint(t, "s3", ""))

@@ -25,7 +25,6 @@ type WebhookConf struct {
 	Workers         int                   `yaml:"workers"`
 	RequestTimeout  time.Duration         `yaml:"request_timeout"`
 	MaxAttempts     int                   `yaml:"max_attempts"`
-	Lease           time.Duration         `yaml:"lease"`
 	AllowHTTP       bool                  `yaml:"allow_http"`
 	AllowedCIDRs    []string              `yaml:"allowed_cidrs,omitempty"`
 	Store           WebhookStoreConf      `yaml:"store"`
@@ -34,13 +33,7 @@ type WebhookConf struct {
 	Invalid         bool `yaml:"-"`
 }
 type WebhookStoreConf struct {
-	Backend           string        `yaml:"backend"`
-	Redis             *RedisConf    `yaml:"redis,omitempty"`
-	OperationTimeout  time.Duration `yaml:"operation_timeout"`
-	MaxRecords        int           `yaml:"max_records"`
-	MaxActive         int           `yaml:"max_active"`
-	MaxIdle           int           `yaml:"max_idle"`
-	TerminalRetention time.Duration `yaml:"terminal_retention"`
+	MaxRecords int `yaml:"max_records"`
 }
 type WebhookSubscription struct {
 	ID      string   `yaml:"id"`
@@ -50,8 +43,8 @@ type WebhookSubscription struct {
 }
 
 func DefaultWebhookConf() WebhookConf {
-	return WebhookConf{IngressCapacity: 1024, Workers: 4, RequestTimeout: 5 * time.Second, MaxAttempts: 3, Lease: 15 * time.Second,
-		Store: WebhookStoreConf{Backend: "redis", OperationTimeout: 2 * time.Second, MaxRecords: 10000, MaxActive: 8, MaxIdle: 4, TerminalRetention: 24 * time.Hour}}
+	return WebhookConf{IngressCapacity: 1024, Workers: 4, RequestTimeout: 5 * time.Second, MaxAttempts: 3,
+		Store: WebhookStoreConf{MaxRecords: 10000}}
 }
 func (c *WebhookConf) UnmarshalYAML(n *yaml.Node) error {
 	type wire WebhookConf
@@ -87,10 +80,8 @@ var ErrWebhookConfig = errors.New("webhooks disabled: invalid configuration (val
 func (c WebhookConf) Validate() error {
 	s := c.Store
 	if c.Invalid || c.IngressCapacity < 1 || c.IngressCapacity > 4096 || c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 1000 ||
-		c.RequestTimeout < time.Millisecond || c.RequestTimeout > time.Minute || s.OperationTimeout < time.Millisecond || s.OperationTimeout > 10*time.Second ||
-		c.Lease <= 2*s.OperationTimeout+c.RequestTimeout+2*time.Second || c.Lease > 5*time.Minute || s.Backend != "redis" ||
-		s.MaxRecords < 1 || s.MaxRecords > 1000000 || s.MaxActive < 1 || s.MaxActive > 64 || s.MaxIdle < 0 || s.MaxIdle > s.MaxActive ||
-		s.TerminalRetention < 32*time.Second || s.TerminalRetention > 30*24*time.Hour || s.TerminalRetention%time.Millisecond != 0 || len(c.Subscriptions) > 64 || len(c.AllowedCIDRs) > 64 {
+		c.RequestTimeout < time.Millisecond || c.RequestTimeout > time.Minute ||
+		s.MaxRecords < 1 || s.MaxRecords > 1000000 || len(c.Subscriptions) > 64 || len(c.AllowedCIDRs) > 64 {
 		return ErrWebhookConfig
 	}
 	for _, cidr := range c.AllowedCIDRs {
@@ -120,9 +111,7 @@ func (c WebhookConf) Validate() error {
 			events[e] = true
 		}
 	}
-	if s.Redis != nil && (s.Redis.DbNo < 0 || (s.Redis.MasterName == "" && strings.TrimSpace(s.Redis.Nodes) == "") || (s.Redis.MasterName != "" && strings.TrimSpace(s.Redis.SentinelNodes) == "")) {
-		return ErrWebhookConfig
-	}
+
 	return nil
 }
 func ValidateWebhookURL(raw string, allowHTTP bool) (*url.URL, error) {

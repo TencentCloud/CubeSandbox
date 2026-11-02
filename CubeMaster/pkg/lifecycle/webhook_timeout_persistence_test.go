@@ -81,7 +81,10 @@ func TestP5TimeoutAuthoritativeWrite(t *testing.T) {
 }
 
 func TestP5AuthoritativeRedisHTTP(t *testing.T) {
-	r, bodies := webhooktest.Runtime(t, 8, webhook.TypeUpdated)
+	if os.Getenv("WEBHOOK_P4_REDIS_ADDR") == "" {
+		t.Skip("isolated business lifecycle Redis required; webhook delivery itself is in memory")
+	}
+	r, bodies := webhooktest.Runtime(t, webhook.TypeUpdated)
 	conn, err := redis.Dial("tcp", os.Getenv("WEBHOOK_P4_REDIS_ADDR"), redis.DialPassword(os.Getenv("WEBHOOK_P4_REDIS_PASSWORD")), redis.DialDatabase(8))
 	require.NoError(t, err)
 	defer conn.Close()

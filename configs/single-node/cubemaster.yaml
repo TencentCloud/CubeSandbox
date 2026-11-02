@@ -151,7 +151,7 @@ webhooks:
   request_timeout: 5s
   max_attempts: 3
   store:
-    backend: redis
+    max_records: 10000
   subscriptions:
     - id: lifecycle-receiver
       enabled: false

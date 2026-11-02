@@ -282,7 +282,7 @@ func TestP5DestroyBoundary(t *testing.T) {
 	}
 }
 func TestP5BusinessRedisHTTP(t *testing.T) {
-	r, bodies := webhooktest.Runtime(t, 13, webhook.TypeUpdated, webhook.TypeKilled)
+	r, bodies := webhooktest.Runtime(t, webhook.TypeUpdated, webhook.TypeKilled)
 	f := p5Setup(t)
 	SetWebhookPublisher(r.Publisher())
 	task.SetWebhookPublisher(r.Publisher())

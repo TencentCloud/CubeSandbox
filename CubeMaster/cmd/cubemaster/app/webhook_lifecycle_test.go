@@ -25,17 +25,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestP4AppPublisherRealCreate(t *testing.T) {
-	addr := os.Getenv("WEBHOOK_P4_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("isolated Redis not configured")
-	}
 	path, e := filepath.Abs("../../../conf.yaml")
 	require.NoError(t, e)
 	t.Setenv("CUBE_MASTER_CONFIG_PATH", path)
@@ -54,7 +49,6 @@ func TestP4AppPublisherRealCreate(t *testing.T) {
 	cfg.Webhooks.AllowHTTP = true
 	cfg.Webhooks.AllowedCIDRs = []string{"127.0.0.0/8"}
 	cfg.Webhooks.Subscriptions = []config.WebhookSubscription{{ID: uuid.NewString(), Enabled: true, URL: srv.URL, Events: []string{webhook.TypeCreated}}}
-	cfg.Webhooks.Store.Redis = &config.RedisConf{Nodes: addr, Password: os.Getenv("WEBHOOK_P4_REDIS_PASSWORD"), DbNo: 14}
 	a := New()
 	a.startWebhooks(context.Background(), cfg)
 	defer a.webhooks.Shutdown(context.Background())

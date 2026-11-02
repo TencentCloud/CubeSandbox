@@ -233,7 +233,7 @@ func TestP4ResumeFinalBoundary(t *testing.T) {
 }
 
 func TestP4BusinessRedisHTTP(t *testing.T) {
-	r, bodies := webhooktest.Runtime(t, 10, webhook.TypeCreated, webhook.TypeResumed, webhook.TypePaused)
+	r, bodies := webhooktest.Runtime(t, webhook.TypeCreated, webhook.TypeResumed, webhook.TypePaused)
 	SetWebhookPublisher(r.Publisher())
 	t.Cleanup(func() { SetWebhookPublisher(nil) })
 	c := p4Create(t, context.Background(), nil)

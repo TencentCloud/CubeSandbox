@@ -21,7 +21,7 @@ import (
 func TestP4CaptureDistribution(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{InstanceType: "cubebox", WebhookMetadata: UserMetadata(map[string]string{"user_token": strings.Repeat("v", 4096), "project": strings.Repeat("p", 4096)}), Containers: []*types.Container{{Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
 	for _, kind := range []string{TypeCreated, TypeResumed, TypePaused, TypeCheckpointed, TypeUpdated, TypeKilled} {
-		for _, scenario := range []string{"disabled", "enabled", "full", "stopped", "disconnected", "slow-store", "slow-http"} {
+		for _, scenario := range []string{"disabled", "enabled", "full", "stopped", "disconnected", "slow-http"} {
 			t.Run(kind+"/"+scenario, func(t *testing.T) {
 				var p Publisher = NopPublisher{}
 				if scenario == "full" || scenario == "stopped" {
@@ -35,9 +35,8 @@ func TestP4CaptureDistribution(t *testing.T) {
 				if scenario == "disconnected" {
 					cfg := config.DefaultWebhookConf()
 					cfg.Enabled = true
-					cfg.Store.OperationTimeout = 50 * time.Millisecond
 					cfg.Subscriptions = []config.WebhookSubscription{{ID: "measurement", Enabled: true, URL: "https://example.invalid/hook", Events: []string{kind}}}
-					r, e := NewRuntime(context.Background(), cfg, &config.RedisConf{Nodes: "127.0.0.1:1"})
+					r, e := NewRuntime(context.Background(), cfg)
 					require.NoError(t, e)
 					p = r.Publisher()
 					defer func() {
@@ -47,7 +46,7 @@ func TestP4CaptureDistribution(t *testing.T) {
 					}()
 				}
 
-				if scenario == "enabled" || scenario == "slow-store" || scenario == "slow-http" {
+				if scenario == "enabled" || scenario == "slow-http" {
 					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						if scenario == "slow-http" {
 							time.Sleep(200 * time.Millisecond)
@@ -56,19 +55,8 @@ func TestP4CaptureDistribution(t *testing.T) {
 					}))
 					defer srv.Close()
 					cfg := localConf()
-					cfg.Subscriptions = []Subscription{{"measure", true, srv.URL, []string{kind}}}
-					options := testOptions()
-					options.MaxRecords = 2000
-					store, _ := newTestStore(t, options)
-					var delivery DeliveryStore = store
-					if scenario == "slow-store" {
-						delivery = &faultStore{DeliveryStore: store, put: func(ctx context.Context, task DeliveryTask) error {
-							if !pause(ctx, 200*time.Millisecond) {
-								return ErrStoreUncertain
-							}
-							return store.Put(ctx, task)
-						}}
-					}
+					cfg.Subscriptions = []Subscription{{ID: "measure", Enabled: true, URL: srv.URL, Events: []string{kind}}}
+					delivery := memoryStore(t, 2000)
 					r := runtimeFor(t, cfg, delivery)
 					p = r.Publisher()
 					defer func() {

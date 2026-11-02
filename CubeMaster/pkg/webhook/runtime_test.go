@@ -4,575 +4,327 @@ package webhook
 
 import (
 	"context"
-	"encoding/json"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/hotswap"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
 	"github.com/google/uuid"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/hotswap"
 	"gopkg.in/yaml.v3"
 )
 
 func runtimeCaptured(t *testing.T) *CapturedEvent {
 	t.Helper()
-	c, e := Capture(CaptureInput{ID: uuid.New(), Type: TypeCreated, Origin: OriginLifecycle, SandboxID: "synthetic-p3", OccurredAt: time.Now()})
-	require.NoError(t, e)
+	c, err := Capture(CaptureInput{ID: uuid.New(), Type: TypeCreated, Origin: OriginLifecycle, SandboxID: "synthetic", OccurredAt: time.Now()})
+	require.NoError(t, err)
 	return c
-}
-func taskKey(t DeliveryTask) string {
-	return t.Event.ID().String() + ":" + strconv.Itoa(len(t.SubscriptionID)) + ":" + t.SubscriptionID
 }
 func runtimeFor(t *testing.T, c config.WebhookConf, s DeliveryStore) *Runtime {
 	t.Helper()
-	p, e := NewStaticConfigSubscriptionProvider(c)
-	require.NoError(t, e)
-	r := startRuntime(c, p, s, func() error { return nil }, NewSender(c))
+	p, err := NewStaticConfigSubscriptionProvider(c)
+	require.NoError(t, err)
+	r := startRuntime(c, p, s, NewSender(c))
 	t.Cleanup(func() { r.Shutdown(testCtx) })
 	return r
 }
-func waitTerminal(t *testing.T, s *RedisDeliveryStore, task DeliveryTask, state DeliveryState) {
+func metricValue(t *testing.T, op, result string) float64 {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		v, e := redis.Bytes(command(t, s, "HGET", s.keys[0], taskKey(task)), nil)
-		if e != nil {
-			return false
-		}
-		var r deliveryRecord
-		if json.Unmarshal(v, &r) != nil {
-			return false
-		}
-		return r.State == string(state)
-	}, 12*time.Second, 20*time.Millisecond)
+	m := &dto.Metric{}
+	require.NoError(t, deliveryCounts.WithLabelValues(op, result).Write(m))
+	return m.GetCounter().GetValue()
 }
-func TestRuntimeRealPipelineAndCompetition(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	c := localConf()
-	c.Workers = 2
-	bodies := make(chan []byte, 10)
-	var calls atomic.Int32
+func TestDisabledRuntimePublisherSkipsCapture(t *testing.T) {
+	empty := config.DefaultWebhookConf()
+	empty.Enabled = true
+	disabledSub := empty
+	disabledSub.Subscriptions = []Subscription{{ID: "off", URL: "https://example.test", Events: []string{TypeCreated}}}
+	invalid := empty
+	invalid.Workers = 0
+	for _, c := range []config.WebhookConf{{}, config.DefaultWebhookConf(), {Enabled: true, Invalid: true}, empty, disabledSub, invalid} {
+		r, _ := NewRuntime(testCtx, c)
+		require.IsType(t, NopPublisher{}, r.Publisher())
+		require.Nil(t, r.buffer)
+		require.Nil(t, r.store)
+		require.Nil(t, r.sender)
+		before := metricValue(t, "capture", "accepted")
+		var holder PublisherHolder
+		holder.Set(r.Publisher())
+		require.False(t, holder.Enabled())
+		holder.Publish(TypeCreated, "sb", "", LifecycleFields{})
+		require.Equal(t, before, metricValue(t, "capture", "accepted"))
+		r.Shutdown(testCtx)
+	}
+	require.IsType(t, NopPublisher{}, (&Runtime{}).Publisher())
+}
+func TestRuntimeFanoutFilterAndEnabledCounters(t *testing.T) {
+	type request struct {
+		body          []byte
+		sub, id, path string
+	}
+	requests := make(chan request, 8)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		bodies <- b
-		calls.Add(1)
+		requests <- request{b, r.Header.Get("e2b-webhook-id"), r.Header.Get("e2b-delivery-id"), r.URL.Path}
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()
-	c.Subscriptions = []Subscription{{"a", true, srv.URL, []string{TypeCreated}}, {"b", true, srv.URL + "/two", []string{TypeCreated}}, {"filtered", true, srv.URL, []string{TypeCheckpointed}}}
-	raw, err := yaml.Marshal(struct {
-		Webhooks config.WebhookConf `yaml:"webhooks"`
-	}{c})
-	require.NoError(t, err)
-	var loaded config.Config
-	require.NoError(t, yaml.Unmarshal(raw, &loaded))
-	require.False(t, loaded.Webhooks.Invalid)
-	c = loaded.Webhooks
-	first := runtimeFor(t, c, s)
-	second := runtimeFor(t, c, s)
-	cap := runtimeCaptured(t)
-	require.Equal(t, PublishAccepted, first.TryPublish(cap).Status)
-	require.Eventually(t, func() bool { return calls.Load() == 2 }, 5*time.Second, 10*time.Millisecond)
-	require.Equal(t, <-bodies, <-bodies)
-	p, _ := MapToProtocol(cap)
-	ev, _ := Encode(cap, p)
-	for _, id := range []string{"a", "b"} {
-		waitTerminal(t, s, DeliveryTask{Event: ev, SubscriptionID: id}, DeliverySucceeded)
+	c := localConf()
+	c.Workers = 4
+	c.Subscriptions = []Subscription{
+		{ID: "a", Enabled: true, URL: srv.URL + "/a", Events: []string{TypeCreated}},
+		{ID: "b", Enabled: true, URL: srv.URL + "/b", Events: []string{TypeCreated}},
+		{ID: "filtered", Enabled: true, URL: srv.URL, Events: []string{TypeCheckpointed}},
+		{ID: "off", Enabled: false, URL: srv.URL, Events: []string{TypeCreated}},
 	}
-	sample, err := s.Sample(testCtx, time.Now())
+	raw, err := yaml.Marshal(c)
 	require.NoError(t, err)
-	require.Zero(t, sample.PendingAndInflight)
-	first.Shutdown(testCtx)
-	second.Shutdown(testCtx)
-	require.EqualValues(t, 2, calls.Load())
-	n, err := s.Prune(testCtx, time.Now().Add(2*time.Hour), 32)
+	require.NoError(t, yaml.Unmarshal(raw, &c))
+	require.False(t, c.Invalid)
+	r, err := NewRuntime(testCtx, c)
 	require.NoError(t, err)
-	require.Equal(t, 2, n)
+	defer r.Shutdown(testCtx)
+	require.Same(t, r, r.Publisher())
+	before := metricValue(t, "ingress", "accepted")
+	event := runtimeCaptured(t)
+	require.Equal(t, PublishAccepted, r.Publisher().TryPublish(event).Status)
+	require.Equal(t, before+1, metricValue(t, "ingress", "accepted"))
+	var got []request
+	for i := 0; i < 2; i++ {
+		select {
+		case v := <-requests:
+			got = append(got, v)
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing fanout")
+		}
+	}
+	require.Equal(t, got[0].body, got[1].body)
+	require.NotEqual(t, got[0].id, got[1].id)
+	require.NotEmpty(t, got[0].id)
+	require.ElementsMatch(t, []string{"a", "b"}, []string{got[0].sub, got[1].sub})
+	require.ElementsMatch(t, []string{"/a", "/b"}, []string{got[0].path, got[1].path})
+	r.Shutdown(testCtx)
+	require.Empty(t, requests)
 }
-func TestRuntimeRevokedTargets(t *testing.T) {
-	for _, change := range []string{"delete", "disable", "path", "query", "events"} {
-		t.Run(change, func(t *testing.T) {
-			s, _ := newTestStore(t, testOptions())
-			task := testTask()
+func TestRuntimeFiniteRetryStableSnapshot(t *testing.T) {
+	for _, success := range []bool{false, true} {
+		t.Run(map[bool]string{false: "exhausted", true: "succeeded"}[success], func(t *testing.T) {
 			var calls atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+			var mu sync.Mutex
+			var bodies [][]byte
+			var ids []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				bodies = append(bodies, b)
+				ids = append(ids, r.Header.Get("e2b-delivery-id"))
+				mu.Unlock()
+				n := calls.Add(1)
+				require.Empty(t, r.Header.Get("e2b-signature"))
+				if success && n == 2 {
+					w.WriteHeader(204)
+				} else {
+					w.WriteHeader(401)
+				}
+			}))
 			defer srv.Close()
-			task.TargetURL = srv.URL + "/old?token=original"
-			require.NoError(t, s.Put(testCtx, task))
 			c := localConf()
-			sub := Subscription{task.SubscriptionID, true, task.TargetURL, []string{TypeCreated}}
-			switch change {
-			case "disable":
-				sub.Enabled = false
-			case "path":
-				sub.URL = srv.URL + "/new?token=original"
-			case "query":
-				sub.URL = srv.URL + "/old?token=changed"
-			case "events":
-				sub.Events = []string{TypeCheckpointed}
-			}
-			if change != "delete" {
-				c.Subscriptions = []Subscription{sub}
-			}
+			c.MaxAttempts = 2
+			c.Subscriptions = []Subscription{{ID: "retry", Enabled: true, URL: srv.URL, Events: []string{TypeCreated}}}
+			s := memoryStore(t, 1)
 			r := runtimeFor(t, c, s)
-			waitTerminal(t, s, task, DeliveryCancelled)
+			before := metricValue(t, "terminal", map[bool]string{false: "failed", true: "succeeded"}[success])
+			require.Equal(t, PublishAccepted, r.Publisher().TryPublish(runtimeCaptured(t)).Status)
+			require.Eventually(t, func() bool { return calls.Load() == 2 && s.size() == 0 }, 4*time.Second, 10*time.Millisecond)
 			r.Shutdown(testCtx)
-			require.Zero(t, calls.Load())
-			require.Contains(t, record(t, s, taskKey(task)).Input, "original")
+			require.EqualValues(t, 2, calls.Load())
+			mu.Lock()
+			defer mu.Unlock()
+			require.Equal(t, bodies[0], bodies[1])
+			require.NotEqual(t, ids[0], ids[1])
+			require.Equal(t, before+1, metricValue(t, "terminal", map[bool]string{false: "failed", true: "succeeded"}[success]))
+		})
+	}
+}
+func TestRuntimeDropsWhenCapacityFull(t *testing.T) {
+	s := memoryStore(t, 1)
+	held := testTask()
+	held.NextAttemptAt = time.Now().Add(time.Hour)
+	require.NoError(t, s.Put(testCtx, held))
+	c := localConf()
+	c.Subscriptions = []Subscription{{ID: "capacity", Enabled: true, URL: "https://example.test", Events: []string{TypeCreated}}}
+	r := runtimeFor(t, c, s)
+	before := metricValue(t, "put", "capacity")
+	for i := 0; i < 4; i++ {
+		require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
+	}
+	require.Eventually(t, func() bool { return metricValue(t, "put", "capacity") == before+4 }, time.Second, time.Millisecond)
+	require.Equal(t, 1, s.size())
+	claim := claimOne(t, s, held.NextAttemptAt)
+	require.NoError(t, s.Complete(testCtx, claim.Receipt, TerminalResult{State: DeliveryCancelled}))
+	// No queued writer retry competes for the released slot.
+	require.NoError(t, s.Put(testCtx, testTask()))
+	ctx, cancel := context.WithCancel(testCtx)
+	cancel()
+	r.Shutdown(ctx)
+	require.Zero(t, s.size())
+}
+
+// A blocked writer fixture verifies bounded ingress without altering producers.
+type faultStore struct {
+	DeliveryStore
+	put func(context.Context, DeliveryTask) error
+}
+
+func (s *faultStore) Put(ctx context.Context, t DeliveryTask) error { return s.put(ctx, t) }
+func TestRuntimeFullIngressDoesNotWait(t *testing.T) {
+	s := memoryStore(t, 1)
+	entered := make(chan struct{})
+	var once sync.Once
+	fs := &faultStore{DeliveryStore: s, put: func(ctx context.Context, _ DeliveryTask) error {
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	c := localConf()
+	c.IngressCapacity = 1
+	c.Subscriptions = []Subscription{{ID: "full", Enabled: true, URL: "https://example.test", Events: []string{TypeCreated}}}
+	r := runtimeFor(t, c, fs)
+	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
+	<-entered
+	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
+	done := make(chan PublishResult, 1)
+	go func() { done <- r.TryPublish(runtimeCaptured(t)) }()
+	select {
+	case v := <-done:
+		require.Equal(t, PublishFull, v.Status)
+	case <-time.After(time.Second):
+		t.Fatal("full ingress waited")
+	}
+	ctx, cancel := context.WithCancel(testCtx)
+	cancel()
+	r.Shutdown(ctx)
+	require.Empty(t, r.buffer.Events())
+}
+func TestRuntimeShutdownCancelsHTTPAndBackoff(t *testing.T) {
+	for _, mode := range []string{"http-total-budget", "http-earlier-deadline", "backoff"} {
+		t.Run(mode, func(t *testing.T) {
+			entered := make(chan struct{}, 1)
+			cancelled := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				_, _ = io.Copy(io.Discard, req.Body)
+				entered <- struct{}{}
+				if mode == "backoff" {
+					w.WriteHeader(503)
+					return
+				}
+				<-req.Context().Done()
+				cancelled <- struct{}{}
+			}))
+			defer srv.Close()
+			c := localConf()
+			c.RequestTimeout = 30 * time.Second
+			c.Subscriptions = []Subscription{{ID: "shutdown", Enabled: true, URL: srv.URL, Events: []string{TypeCreated}}}
+			r, err := NewRuntime(testCtx, c)
+			require.NoError(t, err)
+			defer r.Shutdown(testCtx)
+			retried := metricValue(t, "retry", "ok")
+			require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("HTTP not entered")
+			}
+			if mode == "backoff" {
+				require.Eventually(t, func() bool { return metricValue(t, "retry", "ok") > retried }, time.Second, time.Millisecond)
+			}
+			ctx := testCtx
+			cancel := func() {}
+			if mode != "http-total-budget" {
+				ctx, cancel = context.WithTimeout(testCtx, 100*time.Millisecond)
+			}
+			defer cancel()
+			start := time.Now()
+			var wg sync.WaitGroup
+			for i := 0; i < 8; i++ {
+				wg.Add(1)
+				go func() { defer wg.Done(); r.Shutdown(ctx) }()
+			}
+			wg.Wait()
+			limit := 2500 * time.Millisecond
+			if mode != "http-total-budget" {
+				limit = time.Second
+			}
+			require.Less(t, time.Since(start), limit)
+			require.Zero(t, r.store.(*MemoryDeliveryStore).size())
+			require.Equal(t, PublishStopped, r.TryPublish(nil).Status)
+			if mode != "backoff" {
+				select {
+				case <-cancelled:
+				case <-time.After(time.Second):
+					t.Fatal("HTTP not cancelled")
+				}
+			}
+			r.Shutdown(testCtx)
 		})
 	}
 }
 
-// Tests inject faults around the real store, not a second production backend.
-type faultStore struct {
-	DeliveryStore
-	put      func(context.Context, DeliveryTask) error
-	claim    func(context.Context, time.Time, int, time.Duration) ([]ClaimedTask, error)
-	complete func(context.Context, Receipt, TerminalResult) error
-	retry    func(context.Context, Receipt, time.Time, FailureSummary) error
-}
+type brokenRandom struct{}
 
-func (s *faultStore) Put(c context.Context, t DeliveryTask) error {
-	if s.put != nil {
-		return s.put(c, t)
+func (brokenRandom) Read([]byte) (int, error) { return 0, errors.New("identity unavailable") }
+func TestRuntimePreSendFailuresReleaseClaim(t *testing.T) {
+	for _, mode := range []string{"revoked", "cancelled", "identity", "address"} {
+		t.Run(mode, func(t *testing.T) {
+			c := localConf()
+			task := testTask()
+			task.MaxAttempts = 1
+			if mode == "address" {
+				task.TargetURL = "http://169.254.169.254/metadata"
+			}
+			c.Subscriptions = []Subscription{{ID: task.SubscriptionID, Enabled: mode != "revoked", URL: task.TargetURL, Events: []string{TypeCreated}}}
+			s := memoryStore(t, 1)
+			require.NoError(t, s.Put(testCtx, task))
+			p, err := NewStaticConfigSubscriptionProvider(c)
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(testCtx)
+			defer cancel()
+			r := &Runtime{store: s, provider: p, sender: NewSender(c), conf: c, ctx: ctx, stopClaim: make(chan struct{})}
+			defer r.sender.Close()
+			if mode == "cancelled" {
+				cancel()
+			}
+			if mode == "identity" {
+				uuid.SetRand(brokenRandom{})
+				defer uuid.SetRand(nil)
+			}
+			r.deliver(claimOne(t, s, task.NextAttemptAt))
+			require.Zero(t, s.size())
+		})
 	}
-	return s.DeliveryStore.Put(c, t)
 }
-func (s *faultStore) Claim(c context.Context, n time.Time, l int, d time.Duration) ([]ClaimedTask, error) {
-	if s.claim != nil {
-		return s.claim(c, n, l, d)
-	}
-	return s.DeliveryStore.Claim(c, n, l, d)
-}
-func (s *faultStore) Complete(c context.Context, r Receipt, v TerminalResult) error {
-	if s.complete != nil {
-		return s.complete(c, r, v)
-	}
-	return s.DeliveryStore.Complete(c, r, v)
-}
-func (s *faultStore) Retry(c context.Context, r Receipt, n time.Time, f FailureSummary) error {
-	if s.retry != nil {
-		return s.retry(c, r, n, f)
-	}
-	return s.DeliveryStore.Retry(c, r, n, f)
-}
-func TestWriterRealLostPutResponseSameSnapshot(t *testing.T) {
-	s, conf := newTestStore(t, testOptions())
-	addr, mode := faultProxy(t, conf)
-	conf.Nodes = addr
-	proxy, err := NewRedisDeliveryStore(conf, testOptions())
-	require.NoError(t, err)
-	defer proxy.Close()
-	proxy.keys = s.keys
+func TestRuntimeParentCancellation(t *testing.T) {
 	c := localConf()
-	c.Subscriptions = []Subscription{{"a", true, "https://example.test/a", []string{TypeCreated}}, {"b", true, "https://example.test/b", []string{TypeCreated}}}
-	var mu sync.Mutex
-	var snapshots []DeliveryTask
-	fs := &faultStore{DeliveryStore: s, put: func(ctx context.Context, task DeliveryTask) error {
-		mu.Lock()
-		snapshots = append(snapshots, task)
-		n := len(snapshots)
-		mu.Unlock()
-		if n == 1 {
-			mode.Store(1)
-		}
-		return proxy.Put(ctx, task)
-	}, claim: func(ctx context.Context, _ time.Time, _ int, _ time.Duration) ([]ClaimedTask, error) { return nil, nil }}
-	r := runtimeFor(t, c, fs)
-	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
-	r.Shutdown(testCtx)
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, snapshots, 3)
-	require.Equal(t, snapshots[0], snapshots[2])
-	require.Equal(t, "b", snapshots[1].SubscriptionID)
-	require.EqualValues(t, 2, command(t, s, "HLEN", s.keys[0]))
-}
-func TestWorkerRealUncertainTransitions(t *testing.T) {
-	for _, op := range []string{"claim", "complete", "retry"} {
-		for _, committed := range []bool{true, false} {
-			t.Run(op+strconv.FormatBool(committed), func(t *testing.T) {
-				s, conf := newTestStore(t, testOptions())
-				addr, mode := faultProxy(t, conf)
-				conf.Nodes = addr
-				proxy, err := NewRedisDeliveryStore(conf, testOptions())
-				require.NoError(t, err)
-				defer proxy.Close()
-				proxy.keys = s.keys
-				var calls atomic.Int32
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					calls.Add(1)
-					if op == "retry" {
-						w.WriteHeader(500)
-					} else {
-						w.WriteHeader(204)
-					}
-				}))
-				defer srv.Close()
-				task := testTask()
-				task.TargetURL = srv.URL
-				require.NoError(t, s.Put(testCtx, task))
-				c := localConf()
-				c.Subscriptions = []Subscription{{task.SubscriptionID, true, task.TargetURL, []string{TypeCreated}}}
-				p, _ := NewStaticConfigSubscriptionProvider(c)
-				ctx, cancel := context.WithCancel(testCtx)
-				defer cancel()
-				r := &Runtime{store: proxy, provider: p, sender: NewSender(c), ctx: ctx, conf: c, buffer: mustBuffer(t), stopClaim: make(chan struct{})}
-				defer r.sender.Close()
-				fault := int32(2)
-				if committed {
-					fault = 1
-				}
-				if op == "claim" {
-					mode.Store(fault)
-					v, e := proxy.Claim(ctx, time.Now(), 1, c.Lease)
-					require.Error(t, e)
-					require.Empty(t, v)
-					require.Zero(t, calls.Load())
-					v, e = s.Claim(ctx, time.Now().Add(c.Lease+time.Second), 1, c.Lease)
-					require.NoError(t, e)
-					require.Len(t, v, 1)
-					if committed {
-						require.Equal(t, 2, v[0].Attempts)
-					} else {
-						require.Equal(t, 1, v[0].Attempts)
-					}
-					return
-				}
-				v, err := s.Claim(ctx, time.Now(), 1, c.Lease)
-				require.NoError(t, err)
-				require.Len(t, v, 1)
-				mode.Store(fault)
-				r.deliver(v[0])
-				require.EqualValues(t, 1, calls.Load())
-				saved := record(t, s, taskKey(task))
-				if committed && op == "complete" {
-					require.Equal(t, "succeeded", saved.State)
-				} else if committed {
-					require.Equal(t, "pending", saved.State)
-					require.Greater(t, saved.Next, time.Now().UnixMilli())
-				} else {
-					require.Equal(t, "inflight", saved.State)
-				}
-				next, err := s.Claim(ctx, time.Now().Add(c.Lease+time.Second), 1, c.Lease)
-				require.NoError(t, err)
-				if committed && op == "complete" {
-					require.Empty(t, next)
-				} else {
-					require.Len(t, next, 1)
-					require.Equal(t, 2, next[0].Attempts)
-				}
-				require.EqualValues(t, 1, calls.Load(), "current memory task must never resend")
-			})
-		}
-	}
-}
-func mustBuffer(t *testing.T) *BufferedPublisher {
-	b, e := NewBufferedPublisher(1)
-	require.NoError(t, e)
-	return b
-}
-func TestRuntimeDisabledAndBoundedShutdown(t *testing.T) {
-	c := config.DefaultWebhookConf()
-	c.Store.Redis = &config.RedisConf{Nodes: "127.0.0.1:1"}
-	r, err := NewRuntime(testCtx, c, nil)
-	require.NoError(t, err)
-	require.Nil(t, r.store)
-	require.Nil(t, r.sender)
-	require.Nil(t, r.buffer)
-	require.Equal(t, PublishDisabled, r.TryPublish(runtimeCaptured(t)).Status)
-	c = localConf()
-	c.IngressCapacity = 2
-	c.Subscriptions = []Subscription{{"a", true, "https://example.test", []string{TypeCreated}}}
-	entered := make(chan struct{})
-	var once sync.Once
-	fs := &faultStore{put: func(ctx context.Context, _ DeliveryTask) error {
-		once.Do(func() { close(entered) })
-		<-ctx.Done()
-		return ErrStoreUncertain
-	}, claim: func(ctx context.Context, _ time.Time, _ int, _ time.Duration) ([]ClaimedTask, error) {
-		<-ctx.Done()
-		return nil, ErrStoreUnavailable
-	}}
-	before := runtime.NumGoroutine()
-	r = runtimeFor(t, c, fs)
-	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
-	<-entered
-	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
-	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
-	start := time.Now()
-	require.Equal(t, PublishFull, r.TryPublish(runtimeCaptured(t)).Status)
-	require.Less(t, time.Since(start), 50*time.Millisecond)
-	ctx, cancel := context.WithTimeout(testCtx, 100*time.Millisecond)
-	defer cancel()
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); r.Shutdown(ctx) }()
-	}
-	wg.Wait()
-	require.Less(t, time.Since(start), time.Second)
-	require.Equal(t, PublishStopped, r.TryPublish(runtimeCaptured(t)).Status)
-	select {
-	case _, ok := <-r.buffer.Events():
-		require.True(t, ok)
-		t.Fatal("writer should have drained")
-	default:
-	}
-	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+2 }, time.Second, 10*time.Millisecond)
-}
-func TestRuntimeSignatureRequiredFiniteFailure(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		if r.Header.Get("e2b-signature") == "" {
-			w.WriteHeader(401)
-		} else {
-			t.Error("unexpected signature")
-		}
-	}))
-	defer srv.Close()
-	task := testTask()
-	task.TargetURL = srv.URL
-	task.MaxAttempts = 2
-	require.NoError(t, s.Put(testCtx, task))
-	c := localConf()
-	c.Subscriptions = []Subscription{{task.SubscriptionID, true, task.TargetURL, []string{TypeCreated}}}
-	r := runtimeFor(t, c, s)
-	waitTerminal(t, s, task, DeliveryFailed)
-	r.Shutdown(testCtx)
-	require.EqualValues(t, 2, calls.Load())
-	require.Equal(t, 2, record(t, s, taskKey(task)).Attempts)
-}
-func TestRuntimeParentCancellationFlush(t *testing.T) {
-	conf := realConf(t)
-	c := localConf()
+	c.Subscriptions = []Subscription{{ID: "parent", Enabled: true, URL: "https://example.test", Events: []string{TypeCreated}}}
 	ctx, cancel := context.WithCancel(testCtx)
-	// No subscriptions: no new records, but this exercises production construction
-	// on an isolated instance and the same parent-cancel ownership used by App.
-	r, e := NewRuntime(ctx, c, &conf)
-	require.NoError(t, e)
-	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
+	r, err := NewRuntime(ctx, c)
+	require.NoError(t, err)
 	cancel()
 	select {
 	case <-r.done:
-	case <-time.After(time.Second):
-		t.Fatal("parent cancellation did not close runtime")
+	case <-time.After(2500 * time.Millisecond):
+		t.Fatal("parent cancellation did not finish")
 	}
-	require.Equal(t, PublishStopped, r.TryPublish(runtimeCaptured(t)).Status)
-	require.Zero(t, len(r.buffer.Events()))
-}
-func TestRuntimeProcessHelper(t *testing.T) {
-	phase := os.Getenv("P3_RUNTIME_PHASE")
-	if phase == "" {
-		return
-	}
-	var keys []interface{}
-	require.NoError(t, json.Unmarshal([]byte(os.Getenv("P3_RUNTIME_KEYS")), &keys))
-	s, e := NewRedisDeliveryStore(realConf(t), testOptions())
-	require.NoError(t, e)
-	s.keys = keys
-	defer s.Close()
-	c := localConf()
-	var tasks []DeliveryTask
-	require.NoError(t, json.Unmarshal([]byte(os.Getenv("P3_RUNTIME_SUBS")), &c.Subscriptions))
-	// Fixed payload and identity across processes; task records remain authoritative.
-	for _, sub := range c.Subscriptions {
-		task := testTask()
-		task.SubscriptionID = sub.ID
-		task.TargetURL = sub.URL
-		task.Event.id = uuid.MustParse("d12727fc-ab97-43d8-80cf-556cc1215017")
-		task.Event.body = []byte("{ \"id\":\"d12727fc-ab97-43d8-80cf-556cc1215017\" }\n")
-		tasks = append(tasks, task)
-	}
-	if phase == "seed" {
-		for i, task := range tasks {
-			task.NextAttemptAt = time.Now().Add(time.Duration(i) * time.Millisecond)
-			require.NoError(t, s.Put(testCtx, task))
-		}
-		v, e := s.Claim(testCtx, time.Now().Add(time.Second), 1, 2500*time.Millisecond)
-		require.NoError(t, e)
-		require.Len(t, v, 1)
-		require.NoError(t, s.Retry(testCtx, v[0].Receipt, time.Now().Add(2*time.Second), FailureSummary{Code: "retry_saved"}))
-		v, e = s.Claim(testCtx, time.Now().Add(time.Second), 1, 2500*time.Millisecond)
-		require.NoError(t, e)
-		require.Len(t, v, 1)
-		// A Runtime exists in the seeding process; abrupt exit skips its shutdown.
-		p, _ := NewStaticConfigSubscriptionProvider(c)
-		startRuntime(c, p, &faultStore{DeliveryStore: s, claim: func(ctx context.Context, _ time.Time, _ int, _ time.Duration) ([]ClaimedTask, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}}, s.Close, NewSender(c))
-		os.Exit(0)
-	}
-	if phase == "disabled" {
-		c.Enabled = false
-		r, e := NewRuntime(testCtx, c, nil)
-		require.NoError(t, e)
-		require.Nil(t, r.store)
-		time.Sleep(100 * time.Millisecond)
-		return
-	}
-	r := runtimeFor(t, c, s)
-	for _, task := range tasks {
-		waitTerminal(t, s, task, DeliverySucceeded)
-	}
-	r.Shutdown(testCtx)
-}
-func TestRuntimeRealSubprocessRecovery(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		if string(b) != "{ \"id\":\"d12727fc-ab97-43d8-80cf-556cc1215017\" }\n" {
-			t.Error("recovery changed exact body")
-		}
-		calls.Add(1)
-		w.WriteHeader(204)
-	}))
-	defer srv.Close()
-	subs := []Subscription{{"retry", true, srv.URL, []string{TypeCreated}}, {"inflight", true, srv.URL, []string{TypeCreated}}, {"pending", true, srv.URL, []string{TypeCreated}}}
-	keys, _ := json.Marshal(s.keys)
-	raw, _ := json.Marshal(subs)
-	for _, phase := range []string{"seed", "disabled", "recover"} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestRuntimeProcessHelper$", "-test.timeout=20s")
-		cmd.Env = append(os.Environ(), "P3_RUNTIME_PHASE="+phase, "P3_RUNTIME_KEYS="+string(keys), "P3_RUNTIME_SUBS="+string(raw))
-		out, e := cmd.CombinedOutput()
-		require.NoError(t, e, string(out))
-		if phase != "recover" {
-			require.Zero(t, calls.Load())
-			require.EqualValues(t, 3, command(t, s, "ZCARD", s.keys[1]))
-		}
-	}
-	require.EqualValues(t, 3, calls.Load())
-	for _, sub := range subs {
-		task := testTask()
-		task.SubscriptionID = sub.ID
-		task.Event.id = uuid.MustParse("d12727fc-ab97-43d8-80cf-556cc1215017")
-		r := record(t, s, taskKey(task))
-		want := 2
-		if sub.ID == "pending" {
-			want = 1
-		}
-		require.Equal(t, want, r.Attempts)
-	}
-}
-
-func TestRuntimeCorruptStopsAdmission(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	c := localConf()
-	c.Subscriptions = []Subscription{{"a", true, "https://example.test", []string{TypeCreated}}}
-	fs := &faultStore{DeliveryStore: s, claim: func(context.Context, time.Time, int, time.Duration) ([]ClaimedTask, error) {
-		return nil, ErrStoreCorrupt
-	}}
-	r := runtimeFor(t, c, fs)
-	require.Eventually(t, func() bool { return r.corrupt.Load() }, time.Second, time.Millisecond)
-	require.Equal(t, PublishStopped, r.TryPublish(runtimeCaptured(t)).Status)
-	r.Shutdown(testCtx)
-	require.EqualValues(t, 0, command(t, s, "HLEN", s.keys[0]))
-}
-func TestQueueSampleAndRecoveryObservations(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	task := testTask()
-	task.MaxAttempts = 2
-	require.NoError(t, s.Put(testCtx, task))
-	sample, e := s.Sample(testCtx, time.Now().Add(time.Second))
-	require.NoError(t, e)
-	require.Equal(t, 1, sample.PendingAndInflight)
-	require.GreaterOrEqual(t, sample.DueDelay, time.Second)
-	first := claimOne(t, s, task.NextAttemptAt)
-	require.NoError(t, s.Retry(testCtx, first.Receipt, task.NextAttemptAt, FailureSummary{}))
-	second := claimOne(t, s, task.NextAttemptAt)
-	require.Equal(t, 2, second.Attempts)
-	v, e := s.Claim(testCtx, second.LeaseUntil, 1, time.Second)
-	require.NoError(t, e)
-	require.Empty(t, v)
-	require.Equal(t, "failed", record(t, s, taskKey(task)).State)
-	sample, e = s.Sample(testCtx, time.Now())
-	require.NoError(t, e)
-	require.Zero(t, sample.PendingAndInflight)
-}
-
-func TestRuntimeFinalClaimCrashNeverSends(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
-	defer srv.Close()
-	task := testTask()
-	task.TargetURL = srv.URL
-	task.MaxAttempts = 1
-	require.NoError(t, s.Put(testCtx, task))
-	claims, err := s.Claim(testCtx, time.Now(), 1, time.Millisecond)
-	require.NoError(t, err)
-	require.Len(t, claims, 1)
-	c := localConf()
-	c.Subscriptions = []Subscription{{task.SubscriptionID, true, task.TargetURL, []string{TypeCreated}}}
-	r := runtimeFor(t, c, s)
-	waitTerminal(t, s, task, DeliveryFailed)
-	r.Shutdown(testCtx)
-	require.Zero(t, calls.Load())
-	require.Equal(t, 1, record(t, s, taskKey(task)).Attempts)
-}
-
-func TestDisabledDoesNotConstructResources(t *testing.T) {
-	var stores, senders int
-	sf := func(config.RedisConf, RedisStoreOptions) (*RedisDeliveryStore, error) {
-		stores++
-		return nil, ErrStoreUnavailable
-	}
-	hf := func(config.WebhookConf) *Sender { senders++; return nil }
-	for _, c := range []config.WebhookConf{{}, config.DefaultWebhookConf(), {Enabled: true, Invalid: true}} {
-		r, _ := newRuntime(testCtx, c, nil, sf, hf)
-		require.Equal(t, PublishDisabled, r.TryPublish(nil).Status)
-		r.Shutdown(testCtx)
-	}
-	require.Zero(t, stores)
-	require.Zero(t, senders)
-}
-
-func TestRuntimeNetworkFaultAndDisabledProbe(t *testing.T) {
-	var connections atomic.Int32
-	addr := respServer(t, func(cmd string, args []interface{}) (interface{}, bool) {
-		connections.Add(1)
-		time.Sleep(200 * time.Millisecond)
-		return "OK", false
-	})
-	c := localConf()
-	c.Enabled = false
-	rc := config.RedisConf{Nodes: addr}
-	r, err := NewRuntime(testCtx, c, &rc)
-	require.NoError(t, err)
-	time.Sleep(30 * time.Millisecond)
-	require.Zero(t, connections.Load())
-	r.Shutdown(testCtx)
-	c.Enabled = true
-	c.Subscriptions = []Subscription{{"a", true, "https://example.test", []string{TypeCreated}}}
-	r, err = NewRuntime(testCtx, c, &rc)
-	require.NoError(t, err)
-	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
-	require.Eventually(t, func() bool { return connections.Load() > 0 }, time.Second, time.Millisecond)
-	start := time.Now()
-	for i := 0; i < 2000; i++ {
-		r.TryPublish(runtimeCaptured(t))
-	}
-	require.Less(t, time.Since(start), time.Second)
-	ctx, cancel := context.WithTimeout(testCtx, 150*time.Millisecond)
-	defer cancel()
-	r.Shutdown(ctx)
-	require.Less(t, time.Since(start), time.Second)
+	require.Equal(t, PublishStopped, r.TryPublish(nil).Status)
 }
 
 type configUpdateChannel chan *config.Config
@@ -616,25 +368,54 @@ updated:
 	require.Contains(t, p.List()[0].URL, "/old?")
 }
 
-func observationValue(t *testing.T, result string) float64 {
-	metric := &dto.Metric{}
-	require.NoError(t, deliveryCounts.WithLabelValues("claim", result).Write(metric))
-	return metric.GetCounter().GetValue()
+func TestRuntimeRevokedTargets(t *testing.T) {
+	for _, change := range []string{"delete", "disable", "path", "query", "events"} {
+		t.Run(change, func(t *testing.T) {
+			s := memoryStore(t, 1)
+			task := testTask()
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+			defer srv.Close()
+			task.TargetURL = srv.URL + "/old?token=original"
+			require.NoError(t, s.Put(testCtx, task))
+			c := localConf()
+			sub := Subscription{ID: task.SubscriptionID, Enabled: true, URL: task.TargetURL, Events: []string{TypeCreated}}
+			switch change {
+			case "disable":
+				sub.Enabled = false
+			case "path":
+				sub.URL = srv.URL + "/new?token=original"
+			case "query":
+				sub.URL = srv.URL + "/old?token=changed"
+			case "events":
+				sub.Events = []string{TypeCheckpointed}
+			}
+			if change != "delete" {
+				c.Subscriptions = []Subscription{sub}
+			}
+			before := metricValue(t, "terminal", "cancelled")
+			r := runtimeFor(t, c, s)
+			require.Eventually(t, func() bool { return s.size() == 0 }, time.Second, time.Millisecond)
+			r.Shutdown(testCtx)
+			require.Zero(t, calls.Load())
+			require.Equal(t, before+1, metricValue(t, "terminal", "cancelled"))
+		})
+	}
 }
-func TestClaimMetricsSeparateRetryRecoveryAndExhaustion(t *testing.T) {
-	s, _ := newTestStore(t, testOptions())
-	task := testTask()
-	require.NoError(t, s.Put(testCtx, task))
-	recovered := observationValue(t, "lease_recovered")
-	exhausted := observationValue(t, "exhausted")
-	first := claimOne(t, s, task.NextAttemptAt)
-	require.NoError(t, s.Retry(testCtx, first.Receipt, task.NextAttemptAt, FailureSummary{}))
-	second := claimOne(t, s, task.NextAttemptAt)
-	require.Equal(t, recovered, observationValue(t, "lease_recovered"))
-	third := claimOne(t, s, second.LeaseUntil)
-	require.Equal(t, recovered+1, observationValue(t, "lease_recovered"))
-	v, e := s.Claim(testCtx, third.LeaseUntil, 1, time.Second)
-	require.NoError(t, e)
-	require.Empty(t, v)
-	require.Equal(t, exhausted+1, observationValue(t, "exhausted"))
+func TestRuntimeShutdownDrainsAcceptedEvents(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(204) }))
+	defer srv.Close()
+	c := localConf()
+	c.Subscriptions = []Subscription{{ID: "drain", Enabled: true, URL: srv.URL, Events: []string{TypeCreated}}}
+	r, err := NewRuntime(testCtx, c)
+	require.NoError(t, err)
+	defer r.Shutdown(testCtx)
+	for i := 0; i < 8; i++ {
+		require.Equal(t, PublishAccepted, r.Publisher().TryPublish(runtimeCaptured(t)).Status)
+	}
+	r.Shutdown(testCtx)
+	require.EqualValues(t, 8, calls.Load())
+	require.Empty(t, r.buffer.Events())
+	require.Zero(t, r.store.(*MemoryDeliveryStore).size())
 }

@@ -832,7 +832,7 @@ func Init() (*Config, error) {
 		return nil, fmt.Errorf("validate config fail:%v", err)
 	}
 	cfg = newCfg
-	fmt.Printf("cfg:%+v\n", utils.InterfaceToString(redactedConfig(cfg)))
+	fmt.Printf("cfg:%+v\n", utils.InterfaceToString(cfg))
 	return newCfg, nil
 }
 
@@ -847,12 +847,12 @@ type listener struct {
 func (l *listener) OnEvent(data interface{}) {
 	conf, err := preHandle(data.(*Config))
 	if err != nil {
-		CubeLog.Fatalf("preHandle Config:%v fail:%v", redactedConfig(data.(*Config)), err)
+		CubeLog.Fatalf("preHandle Config:%v fail:%v", data, err)
 		return
 	}
 	err = validate(conf)
 	if err != nil {
-		CubeLog.Fatalf("validate Config:%v fail:%v", redactedConfig(data.(*Config)), err)
+		CubeLog.Fatalf("validate Config:%v fail:%v", data, err)
 		return
 	}
 	cfg = conf
@@ -1514,19 +1514,4 @@ func HasEnvVirtiofsCacheHook(app string, envKey string) string {
 	}
 
 	return cache
-}
-
-// redactedConfig is only for logging; watcher comparison retains real values.
-func redactedConfig(c *Config) *Config {
-	if c == nil {
-		return nil
-	}
-	out := *c
-	if c.RedisConf != nil {
-		r := *c.RedisConf
-		r.Password = "[redacted]"
-		r.SentinelPassword = "[redacted]"
-		out.RedisConf = &r
-	}
-	return &out
 }
