@@ -26,7 +26,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/lock"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/s3store"
-	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 	"gorm.io/gorm"
@@ -125,6 +124,12 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 	// loop-mount is enabled) exist and that mkfs.ext4 supports -d BEFORE
 	// spending minutes pulling an image, so a misconfigured host fails fast
 	// at PULLING with a clear message instead of deep inside BUILDING_EXT4.
+	s3Client, s3CfgEnabled := SharedS3Client()
+	if err := sharedS3.initErr; err != nil {
+		// No build phase has started; this is a storage initialization failure.
+		reportFailed("", err.Error())
+		return err
+	}
 	reportPhase(templatecenter.JobPhasePulling, 5)
 	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
 		errMsg := fmt.Sprintf("build preflight fail: %v", err)
@@ -205,15 +210,6 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		"source_image_digest":       source.Digest,
 	}); err != nil {
 		logger.Warnf("report fingerprint fail: %v", err)
-	}
-
-	// Resolve S3 config once for both reuse and fresh-build paths. This is
-	// done before acquiring the artifact lock so the lock-free polling path
-	// can still generate presigned URLs when reusing an artifact built by a
-	// sibling replica.
-	s3Client, s3CfgEnabled := SharedS3Client()
-	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
-		return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
 	}
 
 	// Step 6: Serialize same-spec builds (fingerprint, not artifactID — the
@@ -356,20 +352,31 @@ func runBuildLocked(
 	}
 
 	// Step 8: Upload to the configured blob backend, then report BUILT.
-	// backend=s3 keeps today's fallback-to-local-disk on upload failure.
-	// backend=fs is explicit: a failed put is a failed build.
 	artifactURL := ""
 	uploaded := false
 	if s3CfgEnabled && s3Client != nil {
-		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
-			if s3Client.BackendName() == "fs" {
-				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
-				return fmt.Errorf("upload artifact to fs store: %w", err)
-			}
-			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
-		} else {
+		_, uploadErr := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256)
+		if uploadErr == nil {
 			uploaded = true
 			artifactURL = artifactPresignedURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
+			if artifactURL == "" && s3Client.BackendName() == "s3" {
+				// PUT already established the durable copy. Preserve its locator
+				// for callback replay and proxy downloads if HEAD or presign fails.
+				artifactURL = blobstore.ObjectLocator("s3", s3Client.FullObjectKey(artifactID))
+			}
+		}
+		if s3Client.BackendName() == "s3" {
+			// Upload has finished reading the file. This build's local copy is
+			// scratch in S3 mode, even when the upload failed. Use the actual
+			// output directory because BuildExt4 may have used the fallback root.
+			if err := cleanupBuildOutput(artifactID, result.Ext4Path); err != nil {
+				logger.Warnf("cleanup local artifact after S3 upload: %v", err)
+			}
+		}
+		if uploadErr != nil {
+			err := fmt.Errorf("upload artifact to %s store: %w", s3Client.BackendName(), uploadErr)
+			reportFailed(templatecenter.JobPhaseBuildingExt4, err.Error())
+			return err
 		}
 	}
 
@@ -383,6 +390,31 @@ func runBuildLocked(
 	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d",
 		artifactID, result.SHA256, result.SizeBytes)
 	return nil
+}
+
+func cleanupBuildOutput(artifactID, ext4Path string) error {
+	if !image.ValidArtifactID(artifactID) || strings.TrimSpace(ext4Path) == "" {
+		return fmt.Errorf("invalid build output: artifact_id=%q ext4_path=%q", artifactID, ext4Path)
+	}
+	abs, err := filepath.Abs(ext4Path)
+	if err != nil {
+		return fmt.Errorf("resolve build output: %w", err)
+	}
+	workDir, err := filepath.Abs(filepath.Join(image.ArtifactWorkRootDir(), artifactID))
+	if err != nil {
+		return fmt.Errorf("resolve build work directory: %w", err)
+	}
+	// Validate both directories before removing either. A malformed result
+	// must never turn cleanup into removal of a root or another artifact.
+	if filepath.Base(filepath.Dir(abs)) != artifactID || !managedArtifactDir(filepath.Dir(abs)) || !managedArtifactDir(workDir) {
+		return fmt.Errorf("build output is outside the managed artifact directory: %q", ext4Path)
+	}
+	storeErr := deleteLocalExt4(abs)
+	var workErr error
+	if err := os.RemoveAll(workDir); err != nil {
+		workErr = fmt.Errorf("remove build work directory %s: %w", workDir, err)
+	}
+	return errors.Join(storeErr, workErr)
 }
 
 func reportExistingArtifact(
@@ -472,8 +504,7 @@ func reportArtifactBuilt(
 		payload["resolved_user"] = resolvedUser
 	}
 	// Only stamp backend/key after a successful upload (or reuse of an
-	// already-stored object). A configured client that failed Put must
-	// leave the three store columns empty so Master stays on local disk.
+	// already-stored object). Local-only builds leave these fields empty.
 	if inStore && s3Client != nil {
 		payload["storage_backend"] = s3Client.BackendName()
 		if objectKey == "" {
@@ -616,10 +647,9 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 //     configured -- checking only os.Stat(Ext4Path) meant a replica other
 //     than the one that built the artifact would always see the local file
 //     "missing" and silently fall through to a full rebuild.
-//   - If the HEAD check itself errors (transient network issue, not
-//     necessarily a missing object), fall back to os.Stat rather than
-//     forcing an unnecessary rebuild when a valid local copy exists on this
-//     replica.
+//   - If HEAD errors, check any retained local copy (for example, from a
+//     legacy build). New S3 builds remove that copy after upload, so a HEAD
+//     error normally forces a rebuild for those artifacts.
 //   - Local-only artifacts (no ArtifactURL, or S3 not configured on this
 //     replica) are verified with os.Stat only, since that IS the artifact's
 //     only copy in that mode.

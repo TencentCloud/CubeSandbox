@@ -104,13 +104,19 @@ func TestRemoteBuildResultFromResultJSONS3SkipsLocalStat(t *testing.T) {
 		}`, missing, artifactURL)
 	}
 
-	// S3-backed: replay succeeds despite the missing local file.
-	result, err := remoteBuildResultFromResultJSON(mkPayload("https://s3.example.com/bucket/rfs-3?X-Amz-Signature=abc"))
-	if err != nil {
-		t.Fatalf("S3-backed replay must not require the local ext4: %v", err)
-	}
-	if result.ArtifactURL == "" {
-		t.Fatal("ArtifactURL lost in replay")
+	// S3-backed: replay succeeds despite the missing local file, including
+	// when TC could not presign after upload and reported a durable locator.
+	for _, artifactURL := range []string{
+		"https://s3.example.com/bucket/rfs-3?X-Amz-Signature=abc",
+		"blobstore:s3:templates/rfs-3.ext4",
+	} {
+		result, err := remoteBuildResultFromResultJSON(mkPayload(artifactURL))
+		if err != nil {
+			t.Fatalf("S3-backed replay must not require the local ext4: %v", err)
+		}
+		if result.ArtifactURL != artifactURL {
+			t.Fatalf("ArtifactURL = %q, want %q", result.ArtifactURL, artifactURL)
+		}
 	}
 
 	// Local-disk: same missing file is still an error.
