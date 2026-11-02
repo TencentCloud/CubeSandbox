@@ -9,10 +9,7 @@ common:
   sync_meta_data_interval: 1s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
-  # The chart does not deploy a headless Service, so this static value is the
-  # only source HealthyMasterNodes() has. Keep it aligned with master.replicas
-  # so multi-Master deployments estimate the global create concurrency
-  # correctly.
+  # Tracks the master replica count.
   default_headless_service_nodes_num: {{ .Values.controlPlane.master.replicas | default 1 }}
   enable_check_com_net_id_param: false
   # Template build wiring: CubeMaster no longer has a templatecenter_enabled

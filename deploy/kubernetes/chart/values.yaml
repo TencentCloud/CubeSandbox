@@ -241,9 +241,8 @@ controlPlane:
     enabled: true
     # Number of Master replicas. Master is stateless (all state in DB), so
     # multiple replicas can run concurrently without coordination. Increase
-    # for higher API throughput and availability. This value is also rendered
-    # into common.default_headless_service_nodes_num, which CubeMaster uses to
-    # estimate cluster-wide create concurrency.
+    # for higher API throughput and availability. Also feeds CubeMaster's
+    # cluster-wide concurrency estimate.
     replicas: 1
     # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
     # templates or slow networks/disks.
