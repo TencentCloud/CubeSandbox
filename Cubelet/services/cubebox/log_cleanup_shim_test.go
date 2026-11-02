@@ -15,7 +15,7 @@ import (
 func TestDelayedCleanupShimLauncher(t *testing.T) {
 	root := t.TempDir()
 	shim := filepath.Join(root, "shim 'quoted'")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf '%s %s %s' \"$CUBELET_DELAY_SANDBOX_LOG_CLEANUP\" \"$CUBELET_MANAGED_SANDBOX_LOG_CLEANUP\" \"$1\"\n"), 0700); err != nil {
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf '%s' \"$1\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	const n = 8
@@ -48,11 +48,14 @@ func TestDelayedCleanupShimLauncher(t *testing.T) {
 	}
 	for _, action := range []string{"start", "delete"} {
 		out, err := exec.Command(launcher, action).CombinedOutput()
-		if err != nil || string(out) != "1 1 "+action {
+		if err != nil || string(out) != action {
 			t.Fatalf("%s: output=%q error=%v", action, out, err)
 		}
 	}
-	if err := os.WriteFile(launcher, []byte("unexpected"), 0700); err != nil {
+	if err := os.Remove(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "different-shim"), launcher); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := delayedCleanupShimPath(root, shim, ""); err == nil || !strings.Contains(err.Error(), "invalid shim launcher") {

@@ -129,7 +129,7 @@ func TestReapOrphanShimsRunsShimDelete(t *testing.T) {
 	deletes, kills := withFakeShimEnv(t, root, true)
 	t.Setenv("CUBELET_SECRET_FOR_TEST", "must-not-leak")
 
-	assert.Zero(t, reapOrphanShims(context.Background(), "sb1", false))
+	assert.Zero(t, reapOrphanShims(context.Background(), "sb1"))
 
 	require.Len(t, *deletes, 1)
 	cmd := (*deletes)[0]
@@ -147,6 +147,25 @@ func TestReapOrphanShimsRunsShimDelete(t *testing.T) {
 	assert.NoError(t, err, "a shim of another sandbox must be left alone")
 }
 
+func TestReapOrphanUsesOriginalShimPolicy(t *testing.T) {
+	root := t.TempDir()
+	argv := shimServerArgv("sb1")
+	argv[0] = "/cubelet/delayed-log-shims/containerd-shim-cube-rs-retained-example"
+	writeFakeProc(t, root, 100001, testShimBin, argv...)
+	deletes, _ := withFakeShimEnv(t, root, true)
+	t.Setenv(delayedShimLogCleanupEnv, "outside")
+	t.Setenv(managedShimLogCleanupEnv, "outside")
+	assert.Zero(t, reapOrphanShims(context.Background(), "sb1"))
+	require.Len(t, *deletes, 1)
+	cmd := (*deletes)[0]
+	assert.Equal(t, testShimBin, cmd.Path)
+	assert.Equal(t, argv[0], cmd.Args[0])
+	for _, entry := range cmd.Env {
+		assert.NotContains(t, entry, delayedShimLogCleanupEnv+"=")
+		assert.NotContains(t, entry, managedShimLogCleanupEnv+"=")
+	}
+}
+
 // A process may claim to be a shim in its argv; what decides is the image it
 // runs, because that is what the delete would execute as root.
 func TestReapOrphanShimsIgnoresSpoofedArgv(t *testing.T) {
@@ -155,10 +174,38 @@ func TestReapOrphanShimsIgnoresSpoofedArgv(t *testing.T) {
 	writeFakeProc(t, root, 100002, "", shimServerArgv("sb1")...) // exe unreadable
 	deletes, kills := withFakeShimEnv(t, root, true)
 
-	assert.Zero(t, reapOrphanShims(context.Background(), "sb1", false))
+	assert.Zero(t, reapOrphanShims(context.Background(), "sb1"))
 
 	assert.Empty(t, *deletes, "nothing may be executed for a process that is not running a shim")
 	assert.Empty(t, *kills, "a process that is not a shim must not be signalled either")
+}
+
+func TestStrictOrphanScanFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	writeFakeProc(t, root, 100001, "/tmp/payload", shimServerArgv("sb1")...)
+	_, err := findOrphanShimsChecked(context.Background(), root, "sb1", true)
+	require.Error(t, err, "an unverifiable matching process must retain logs")
+	_, err = findOrphanShimsChecked(context.Background(), filepath.Join(root, "missing"), "sb1", true)
+	require.Error(t, err, "an unavailable process table must retain logs")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = findOrphanShimsChecked(ctx, root, "sb1", true)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestStrictOrphanScanIncludesTransientShim(t *testing.T) {
+	for _, action := range []string{"start", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeProc(t, root, 100001, testShimBin, append(shimServerArgv("sb1"), action)...)
+			found, err := findOrphanShimsChecked(context.Background(), root, "sb1", true)
+			require.NoError(t, err)
+			require.Len(t, found, 1)
+			found, err = findOrphanShimsChecked(context.Background(), root, "sb1", false)
+			require.NoError(t, err)
+			assert.Empty(t, found)
+		})
+	}
 }
 
 // When the shim binary was replaced after the shim started, the running image
@@ -169,7 +216,7 @@ func TestReapOrphanShimsKillsWhenImageReplaced(t *testing.T) {
 	writeFakeProc(t, root, 100001, testShimBin+" (deleted)", shimServerArgv("sb1")...)
 	deletes, kills := withFakeShimEnv(t, root, true)
 
-	assert.Zero(t, reapOrphanShims(context.Background(), "sb1", false))
+	assert.Zero(t, reapOrphanShims(context.Background(), "sb1"))
 
 	assert.Empty(t, *deletes, "argv[0] is not a root-owned shim binary here, so it must not be run")
 	assert.Equal(t, []int{100001}, *kills)
@@ -180,7 +227,7 @@ func TestReapOrphanShimsKillsWhenDeleteFails(t *testing.T) {
 	writeFakeProc(t, root, 100001, testShimBin, shimServerArgv("sb1")...)
 	deletes, kills := withFakeShimEnv(t, root, false)
 
-	assert.Zero(t, reapOrphanShims(context.Background(), "sb1", false))
+	assert.Zero(t, reapOrphanShims(context.Background(), "sb1"))
 
 	assert.Len(t, *deletes, 1)
 	assert.Equal(t, []int{100001}, *kills)
@@ -192,7 +239,7 @@ func TestReapOrphanShimsReportsSurvivors(t *testing.T) {
 	withFakeShimEnv(t, root, false)
 	killOrphanShim = func(utils.ProcessIdentity) error { return errors.New("EPERM") }
 
-	assert.Equal(t, 1, reapOrphanShims(context.Background(), "sb1", false))
+	assert.Equal(t, 1, reapOrphanShims(context.Background(), "sb1"))
 }
 
 func TestReapOrphanShimsNoMatch(t *testing.T) {
@@ -200,8 +247,8 @@ func TestReapOrphanShimsNoMatch(t *testing.T) {
 	writeFakeProc(t, root, 100001, testShimBin, shimServerArgv("sb2")...)
 	deletes, kills := withFakeShimEnv(t, root, true)
 
-	assert.Zero(t, reapOrphanShims(context.Background(), "sb1", false))
-	assert.Zero(t, reapOrphanShims(context.Background(), "", false))
+	assert.Zero(t, reapOrphanShims(context.Background(), "sb1"))
+	assert.Zero(t, reapOrphanShims(context.Background(), ""))
 
 	assert.Empty(t, *deletes)
 	assert.Empty(t, *kills)

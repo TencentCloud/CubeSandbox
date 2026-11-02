@@ -1558,6 +1558,7 @@ mod sandbox_log_path_tests {
         assert!(sandbox_log_dir("../etc").is_err());
         assert!(sandbox_log_dir("a/b").is_err());
         assert!(sandbox_log_dir("").is_err());
+        assert!(sandbox_log_dir(".cubelet..legacy-history").is_err());
     }
 
     #[test]

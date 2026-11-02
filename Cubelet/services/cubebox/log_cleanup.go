@@ -22,6 +22,7 @@ const (
 	delayedShimLogCleanupEnv = "CUBELET_DELAY_SANDBOX_LOG_CLEANUP"
 	managedShimLogCleanupEnv = "CUBELET_MANAGED_SANDBOX_LOG_CLEANUP"
 	logCleanupLockTimeout    = 250 * time.Millisecond
+	logCleanupProcTimeout    = 2 * time.Second
 )
 
 func (l *local) markSandboxLogs(ctx context.Context, id, namespace string) {
@@ -110,6 +111,17 @@ func (s *service) guardDelayedLogCleanup(ctx context.Context, id string, remove 
 		})
 		if err != nil || !safe {
 			return err
+		}
+		// A shim can outlive its containerd record after a failed create. Do not
+		// mark or delete logs while an orphan of this ID is still running.
+		procCtx, cancel := context.WithTimeout(ctx, logCleanupProcTimeout)
+		defer cancel()
+		orphans, err := findOrphanShimsChecked(procCtx, orphanShimProcRoot, id, true)
+		if err != nil {
+			return fmt.Errorf("check orphan shims: %w", err)
+		}
+		if len(orphans) != 0 {
+			return nil
 		}
 		return remove()
 	})

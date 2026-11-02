@@ -54,6 +54,162 @@ func TestScanOnlyRemovesExpiredAndSafeLogs(t *testing.T) {
 	}
 }
 
+func TestPreparePreservesEarlierLogsAndResetsDeadline(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sandbox")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"stdout", "stderr"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old-"+name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Mark(root, "sandbox", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Prepare(root, "sandbox", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, markerName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old deadline remains: %v", err)
+	}
+	if ns, err := Namespace(root, "sandbox"); err != nil || ns != "default" {
+		t.Fatalf("pending namespace %q: %v", ns, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, historyDir))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("history: %v, %v", entries, err)
+	}
+	for _, name := range []string{"stdout", "stderr"} {
+		data, err := os.ReadFile(filepath.Join(dir, historyDir, entries[0].Name(), name))
+		if err != nil || string(data) != "old-"+name {
+			t.Fatalf("history %s = %q: %v", name, data, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("current %s still exists: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stdout"), []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "stdout")); err != nil || string(data) != "new" {
+		t.Fatalf("new output: %q, %v", data, err)
+	}
+}
+
+func TestPrepareKeepsHistoryAccessibleLikeTheSandboxDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sandbox")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stdout"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Mark(root, "sandbox", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Prepare(root, "sandbox", "default"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, historyDir))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("history: %v, %v", entries, err)
+	}
+	history, err := os.Stat(filepath.Join(dir, historyDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := os.Stat(filepath.Join(dir, historyDir, entries[0].Name()))
+	if err != nil || generation.Mode().Perm() != history.Mode().Perm() {
+		t.Fatalf("history generation permissions differ from history directory: %v", err)
+	}
+}
+
+func TestPreparePreservesUnmarkedLegacyLogsOutsideScan(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sandbox")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stdout"), []byte("legacy evidence"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Prepare(root, "sandbox", "default"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, legacyDirName, "sandbox"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("legacy history: %v, %v", entries, err)
+	}
+	legacy := filepath.Join(root, legacyDirName, "sandbox", entries[0].Name(), "logs", "stdout")
+	if data, err := os.ReadFile(legacy); err != nil || string(data) != "legacy evidence" {
+		t.Fatalf("legacy output: %q, %v", data, err)
+	}
+	if err := Mark(root, "sandbox", "default"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	marker := filepath.Join(root, "sandbox", markerName)
+	if err := os.Chtimes(marker, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Scan(context.Background(), root, time.Hour, now, func(_ context.Context, _ string, remove func() error) error { return remove() }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new generation was not removed: %v", err)
+	}
+	if data, err := os.ReadFile(legacy); err != nil || string(data) != "legacy evidence" {
+		t.Fatalf("legacy evidence changed: %q, %v", data, err)
+	}
+}
+
+func TestScanStartsRetentionForPendingLogsOnlyAfterGuard(t *testing.T) {
+	root := t.TempDir()
+	if err := Prepare(root, "pending", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "legacy"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	busy := true
+	guard := func(_ context.Context, id string, remove func() error) error {
+		if busy {
+			return nil
+		}
+		return remove()
+	}
+	now := time.Now()
+	if err := Scan(context.Background(), root, time.Hour, now, guard); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "pending", markerName)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active sandbox was marked: %v", err)
+	}
+	busy = false
+	if err := Scan(context.Background(), root, time.Hour, now, guard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("pending logs not marked after exit: %v", err)
+	}
+	if err := os.Chtimes(marker, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Scan(context.Background(), root, time.Hour, now, guard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pending")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired pending logs not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "legacy")); err != nil {
+		t.Fatalf("legacy unmarked logs changed: %v", err)
+	}
+}
+
 func TestScanRechecksMarkerAfterAcquiringGuard(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "sandbox")
@@ -84,7 +240,7 @@ func TestScanRechecksMarkerAfterAcquiringGuard(t *testing.T) {
 
 func TestMarkRejectsUnsafePaths(t *testing.T) {
 	root := t.TempDir()
-	for _, id := range []string{"", ".", "../outside", "a/b"} {
+	for _, id := range []string{"", ".", legacyDirName, "../outside", "a/b"} {
 		if err := Mark(root, id, "default"); err == nil {
 			t.Fatalf("Mark accepted %q", id)
 		}

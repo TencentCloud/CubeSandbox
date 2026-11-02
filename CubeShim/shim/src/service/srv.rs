@@ -13,7 +13,8 @@ use containerd_shim::{
 };
 
 use nix::sys::signal::Signal;
-use std::{fs, sync::Arc};
+use std::{fs, os::unix::process::CommandExt, process::Stdio, sync::Arc};
+use tokio::process::Command;
 
 #[derive(Clone)]
 pub struct Service {
@@ -38,7 +39,12 @@ impl Shim for Service {
 
     async fn start_shim(&mut self, opts: StartOpts) -> Result<String, Error> {
         let grouping = opts.id.clone();
-        let address: String = spawn(opts, &grouping, Vec::new()).await?;
+        let argv0 = std::env::args_os().next().unwrap_or_default();
+        let address: String = if utils::is_retained_shim_name(&argv0) {
+            spawn_retained_shim(opts, &grouping, argv0).await?
+        } else {
+            spawn(opts, &grouping, Vec::new()).await?
+        };
         fs::write(ADDRESS_FILE, address.as_bytes()).map_err(|e| Error::IoError {
             context: "write address file failed".to_string(),
             err: e,
@@ -87,4 +93,50 @@ impl Shim for Service {
         )
         .await
     }
+}
+
+// Match containerd-shim's spawn, while preserving argv[0] so orphan cleanup
+// can recover this particular shim's policy without reading another file.
+async fn spawn_retained_shim(
+    opts: StartOpts,
+    grouping: &str,
+    argv0: std::ffi::OsString,
+) -> Result<String, Error> {
+    let io_error = |context: &str, err| Error::IoError {
+        context: context.to_string(),
+        err,
+    };
+    let exe = std::env::current_exe().map_err(|e| io_error("current executable", e))?;
+    let cwd = std::env::current_dir().map_err(|e| io_error("current directory", e))?;
+    let address = containerd_shim::socket_address(&opts.address, &opts.namespace, grouping);
+    let mut command = Command::new(exe);
+    command.as_std_mut().arg0(argv0);
+    command
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "-namespace",
+            &opts.namespace,
+            "-id",
+            &opts.id,
+            "-address",
+            &opts.address,
+            "-socket",
+            &address,
+        ]);
+    if opts.debug {
+        command.arg("-debug");
+    }
+    let mut child = command.spawn().map_err(|e| io_error("spawn shim", e))?;
+    containerd_shim::cgroup::set_cgroup_and_oom_score(child.id().unwrap_or_default())?;
+    let mut output = child
+        .stdout
+        .take()
+        .ok_or_else(|| io_error("shim stdout", std::io::Error::other("missing shim stdout")))?;
+    tokio::io::copy(&mut output, &mut tokio::io::stderr())
+        .await
+        .map_err(|e| io_error("read shim stdout", e))?;
+    Ok(address)
 }

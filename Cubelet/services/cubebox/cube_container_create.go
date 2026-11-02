@@ -57,6 +57,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/logcleanup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -1415,6 +1416,37 @@ func (l *local) runContainer(
 	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, time.Since(start))
 
 	ci.Container = c
+	if delayShimLogs && ci.IsPod && cubebox.Annotations[constants.MasterAnnotationsAppSnapshotCreate] != "true" {
+		// Never move output while a previous shim of this ID can still write.
+		if _, err := os.Lstat(filepath.Join(logcleanup.Root, ci.ID)); err == nil {
+			if l.shims == nil {
+				return fmt.Errorf("shim manager unavailable while preparing sandbox logs")
+			}
+			if _, err := l.shims.Get(ctx, ci.ID); err == nil {
+				return fmt.Errorf("previous shim for %s is still registered", ci.ID)
+			} else if !errdefs.IsNotFound(err) {
+				return fmt.Errorf("check previous shim for %s: %w", ci.ID, err)
+			}
+			procCtx, cancel := context.WithTimeout(ctx, logCleanupProcTimeout)
+			orphans, err := findOrphanShimsChecked(procCtx, orphanShimProcRoot, ci.ID, true)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("check previous shim processes for %s: %w", ci.ID, err)
+			}
+			if len(orphans) != 0 {
+				return fmt.Errorf("previous shim for %s is still running", ci.ID)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check previous sandbox logs for %s: %w", ci.ID, err)
+		}
+		namespace := cubebox.Namespace
+		if namespace == "" {
+			namespace = namespaces.Default
+		}
+		if err := logcleanup.Prepare(logcleanup.Root, ci.ID, namespace); err != nil {
+			return fmt.Errorf("prepare sandbox logs for %s: %w", ci.ID, err)
+		}
+	}
 
 	var ioCreater cio.Creator
 	if ci.IsDebugStdout {
@@ -1478,7 +1510,7 @@ func (l *local) runContainer(
 		// container therefore gets its own shim server, started with
 		// -id <container id>, and that one leaks the same way when its
 		// create fails. Match ci.ID, never the sandbox id.
-		if survivors := reapOrphanShims(ctx, ci.ID, delayShimLogs); survivors > 0 && ci.IsPod {
+		if survivors := reapOrphanShims(ctx, ci.ID); survivors > 0 && ci.IsPod {
 			// The bundle is already gone, so withdrawShimIntent cannot see
 			// these shims through the pid files. Keep the intent: it is what
 			// stops the destroy path from releasing the tap, IP and volumes

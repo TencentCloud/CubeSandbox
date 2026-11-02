@@ -283,7 +283,7 @@ func TestDelayedCleanupRejectsUnsafeDesiredIDsBeforeLocking(t *testing.T) {
 		cubeboxMgr:            &local{config: &CubeConfig{SandboxLogCleanupEnabled: true}},
 		sandboxLifecycleLocks: locks,
 	}
-	for _, id := range []string{" sandbox", "sandbox ", " ", ".", "../sandbox", "bad\x00id"} {
+	for _, id := range []string{" sandbox", "sandbox ", " ", ".", ".cubelet..legacy-history", "../sandbox", "bad\x00id"} {
 		rsp, err := s.Create(context.Background(), &cubebox.RunCubeSandboxRequest{
 			Annotations: map[string]string{constants.MasterAnnotationDesiredSandboxID: id},
 		})
@@ -325,23 +325,13 @@ func TestLogCleanupRequiresAbsentSandboxAndShim(t *testing.T) {
 	}
 }
 
-func TestOrphanShimDeleteUsesExplicitDelayedCleanup(t *testing.T) {
+func TestOrphanShimDeleteDoesNotInheritPolicyEnvironment(t *testing.T) {
 	t.Setenv(delayedShimLogCleanupEnv, "1")
 	t.Setenv(managedShimLogCleanupEnv, "1")
 	disabled := strings.Join(shimDeleteEnv(orphanShim{}), "\n")
-	env := shimDeleteEnv(orphanShim{retainLogs: true})
 	for _, key := range []string{delayedShimLogCleanupEnv, managedShimLogCleanupEnv} {
 		if strings.Contains(disabled, key+"=") {
 			t.Fatalf("disabled shim inherited %s", key)
-		}
-		found := false
-		for _, item := range env {
-			if item == key+"=1" {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("shim delete environment missing %s", key)
 		}
 	}
 }
