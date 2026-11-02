@@ -61,3 +61,28 @@ func TestSorted(t *testing.T) {
 	}
 	assert.Equal(t, 1, tmpNode.Index)
 }
+
+// TestLeastRandomSelectClearsStaleItems locks in the admission-failure
+// reselect behavior: the reused SelectorCtx must not return a node that was
+// marked last-bad after the first pick, even though the selector accumulated
+// it during that pick.
+func TestLeastRandomSelectClearsStaleItems(t *testing.T) {
+	bad := &node.Node{InsID: "bad"}
+	good := &node.Node{InsID: "good"}
+
+	slctx := New("random")
+	slctx.SetNodes(node.NodeList{bad})
+	if got := slctx.LeastRandomSelect(1); got == nil || got.ID() != "bad" {
+		t.Fatalf("first pick = %v, want the only candidate (bad)", got)
+	}
+
+	// Admission failure on the selected node: mark it bad and reselect
+	// from the remaining candidates with the same SelectorCtx.
+	slctx.AddLastBadNode(bad)
+	slctx.SetNodes(node.NodeList{good})
+	for i := 0; i < 100; i++ {
+		if got := slctx.LeastRandomSelect(1); got == nil || got.ID() != "good" {
+			t.Fatalf("reselect iteration %d returned stale node: %v", i, got)
+		}
+	}
+}
