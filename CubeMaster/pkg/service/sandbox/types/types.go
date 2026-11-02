@@ -628,6 +628,7 @@ type GetCubeSandboxRes struct {
 type SandboxData struct {
 	SandboxID              string            `json:"sandbox_id,omitempty"`
 	Status                 int32             `json:"status,omitempty"`
+	ErrorReason            string            `json:"error_reason,omitempty"`
 	HostID                 string            `json:"host_id,omitempty"`
 	HostIP                 string            `json:"host_ip,omitempty"`
 	SandboxIP              string            `json:"sandbox_ip,omitempty"`
