@@ -255,7 +255,7 @@ HTTP 和 HTTPS，HTTP 一侧同样会注入凭证。
 | 级别 | 落盘内容 |
 | --- | --- |
 | `none` | 不记录 |
-| `metadata`（默认） | 时间戳、沙箱 IP、目的 IP/端口、scheme、host、method、path、status、收发字节、延迟、TLS 版本+cipher、上游 addr |
+| `metadata`（默认） | 请求 ID、沙箱 ID/IP、目的 IP/端口、HTTP 方法/主机/路径/状态及收发字节、TLS SNI/版本/加密套件、命中规则及决策、耗时（微秒）、脱敏请求头 |
 | `full` | 预留 —— 当前等同 `metadata`，未来用于完整请求/响应 body 抓取 |
 
 对于 Cubelet 管理的策略，查到策略后，HTTP 和安全事件记录中的
@@ -268,26 +268,43 @@ HTTP 和 HTTPS，HTTP 一侧同样会注入凭证。
 ```json
 {
   "ts": "2026-05-29T11:24:01+08:00",
+  "request_id": "42-1",
+  "event": "http_request",
   "sandbox": {
     "src_ip": "192.168.1.154",
     "policy_id": "sandbox-1"
   },
-  "dst_ip": "104.16.132.229",
-  "dst_port": 443,
-  "scheme": "https",
-  "host": "api.deepseek.com",
-  "method": "POST",
-  "path": "/v1/chat",
-  "status": 200,
-  "bytes_in": 412,
-  "bytes_out": 1856,
-  "latency_ms": 384,
-  "tls_version": "TLSv1.3",
-  "cipher": "TLS_AES_128_GCM_SHA256",
-  "upstream_status": "200",
-  "upstream_addr": "104.16.132.229:443"
+  "conn": {
+    "original_dst_ip": "203.0.113.10",
+    "original_dst_port": 443
+  },
+  "tls": {
+    "sni": "api.example.com",
+    "cipher": "TLS_AES_128_GCM_SHA256",
+    "version": "TLSv1.3"
+  },
+  "http": {
+    "method": "POST",
+    "host": "api.example.com",
+    "path": "/v1/chat",
+    "status": 200,
+    "req_bytes": 412,
+    "resp_bytes": 1856
+  },
+  "policy": {
+    "matched_rule": "api_rule",
+    "decision": "allow",
+    "duration_us": 384000
+  },
+  "redacted_request_headers": {
+    "Content-Type": "application/json"
+  }
 }
 ```
+
+没有值的字段会被省略。记录凭证注入时才有 `credentials`，发生安全事件或
+上游失败时才有 `security`。`upstream_addr` 和 `upstream_status` 仅在
+上游失败时出现在 `security` 中。
 
 同一日志文件还落两类事件，schema 略有不同：
 

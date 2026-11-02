@@ -95,6 +95,9 @@ func (c *Client) Configured() bool {
 	return c != nil && c.adminURL != ""
 }
 
+// SandboxID distinguishes stable audit identity from a reusable sandbox IP.
+type SandboxID string
+
 // PutPolicy renders in into the wire shape and uploads it to the
 // admin API at PUT /admin/v1/policies/<sandboxIP>. Returns nil on
 // 200 OK, a *PermanentError on 4xx, or a generic error on transport
@@ -106,14 +109,14 @@ func (c *Client) Configured() bool {
 // CubeEgress would reject an empty rules array and there's nothing
 // useful to install. The caller should treat the absence of rules as
 // "no L7 policy for this sandbox", not as a failure.
-func (c *Client) PutPolicy(ctx context.Context, sandboxIP, sandboxID string, in *PolicyInput) error {
+func (c *Client) PutPolicy(ctx context.Context, sandboxIP string, sandboxID SandboxID, in *PolicyInput) error {
 	if !c.Configured() {
 		return ErrNotConfigured
 	}
 	if err := validateSandboxIP(sandboxIP); err != nil {
 		return err
 	}
-	body, err := RenderEgressPolicy(sandboxID, in)
+	body, err := RenderEgressPolicy(string(sandboxID), in)
 	if err != nil {
 		return err
 	}

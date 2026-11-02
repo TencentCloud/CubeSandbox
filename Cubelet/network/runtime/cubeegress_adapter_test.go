@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,7 +29,7 @@ func (f *fakeCubeEgressAdapter) Configured() bool {
 	return f.configured
 }
 
-func (f *fakeCubeEgressAdapter) PutPolicy(_ context.Context, _, _ string, _ *cubeegress.PolicyInput) error {
+func (f *fakeCubeEgressAdapter) PutPolicy(_ context.Context, _ string, _ cubeegress.SandboxID, _ *cubeegress.PolicyInput) error {
 	if f.recorder != nil {
 		f.recorder.record("cubeegress_put")
 	}
@@ -190,12 +191,15 @@ func TestEgressPolicyUsesSandboxID(t *testing.T) {
 
 func TestEgressPolicyOmitsSandboxesWithoutRules(t *testing.T) {
 	adapter := &fakeCubeEgressAdapter{configured: true}
+	withRules := newEgressPolicyTestState()
 	controller := &NetworkController{
 		cubeEgressAdapter: adapter,
-		states:            make(map[string]*managedState),
+		states:            map[string]*managedState{withRules.SandboxID: withRules},
 	}
 	for i, cfg := range []*CubeNetworkConfig{nil, {}, {Rules: []*EgressRule{nil}}} {
 		state := newEgressPolicyTestState()
+		state.SandboxID = fmt.Sprintf("sandbox-without-rules-%d", i)
+		state.SandboxIP = fmt.Sprintf("10.0.0.%d", i+3)
 		state.CubeNetworkConfig = cfg
 		controller.states[state.SandboxID] = state
 		if err := controller.pushEgressForState(context.Background(), state); err != nil {
@@ -205,8 +209,8 @@ func TestEgressPolicyOmitsSandboxesWithoutRules(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if adapter.putCalls != 0 || len(dump) != 0 {
-			t.Errorf("case %d: PUT count = %d, dump = %v, want no policy", i, adapter.putCalls, dump)
+		if adapter.putCalls != 0 || len(dump) != 1 || dump[withRules.SandboxIP]["policy_id"] != withRules.SandboxID {
+			t.Errorf("case %d: PUT count = %d, dump = %v, want only the existing policy", i, adapter.putCalls, dump)
 		}
 	}
 }

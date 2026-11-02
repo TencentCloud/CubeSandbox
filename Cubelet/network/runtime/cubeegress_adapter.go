@@ -19,7 +19,7 @@ import (
 // deterministic failures in unit tests without spinning up an httptest server.
 type CubeEgressAdapter interface {
 	Configured() bool
-	PutPolicy(ctx context.Context, sandboxIP, sandboxID string, in *cubeegress.PolicyInput) error
+	PutPolicy(ctx context.Context, sandboxIP string, sandboxID cubeegress.SandboxID, in *cubeegress.PolicyInput) error
 	DeletePolicy(ctx context.Context, sandboxIP string) error
 	VerifyPolicyAbsent(ctx context.Context, sandboxIP string) error
 }
@@ -170,7 +170,7 @@ func (s *NetworkController) syncEgressPolicy(ctx context.Context, state *managed
 func (s *NetworkController) putEgressPolicyForCreate(ctx context.Context, state *managedState, in *cubeegress.PolicyInput) error {
 	attempts := len(egressCreatePushRetryDelays) + 1
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err := s.cubeEgressAdapter.PutPolicy(ctx, state.SandboxIP, state.SandboxID, in)
+		err := s.cubeEgressAdapter.PutPolicy(ctx, state.SandboxIP, cubeegress.SandboxID(state.SandboxID), in)
 		if err == nil || cubeegress.IsPermanent(err) || attempt == attempts {
 			return err
 		}
