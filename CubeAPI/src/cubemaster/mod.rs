@@ -2906,6 +2906,9 @@ pub struct CubeMasterVolume {
     /// Auth token used by volume-content service; present on create/get.
     #[serde(default)]
     pub token: String,
+    /// Origin of the volume-content service the token is valid for.
+    #[serde(default)]
+    pub endpoint: String,
 }
 
 /// GET /cube/volume — request context.

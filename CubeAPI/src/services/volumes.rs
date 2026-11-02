@@ -8,7 +8,10 @@
 use uuid::Uuid;
 
 use crate::{
-    cubemaster::{CreateVolumeRequest, CubeMasterClient, CubeMasterError, ListVolumesRequest},
+    cubemaster::{
+        CreateVolumeRequest, CubeMasterClient, CubeMasterError, CubeMasterVolume,
+        ListVolumesRequest,
+    },
     error::{AppError, AppResult},
     models::{Volume, VolumeAndToken},
 };
@@ -32,6 +35,15 @@ fn cm_err_to_app(e: CubeMasterError) -> AppError {
             AppError::BadRequest(e.to_string())
         }
         _ => AppError::Internal(anyhow::anyhow!("{e}")),
+    }
+}
+
+fn to_volume_and_token(v: CubeMasterVolume) -> VolumeAndToken {
+    VolumeAndToken {
+        volume_id: v.volume_id,
+        name: v.name,
+        token: v.token,
+        endpoint: Some(v.endpoint).filter(|e| !e.is_empty()),
     }
 }
 
@@ -92,11 +104,7 @@ impl VolumeService {
 
         resp.ret.into_result().map_err(cm_err_to_app)?;
 
-        Ok(VolumeAndToken {
-            volume_id: resp.volume.volume_id,
-            name: resp.volume.name,
-            token: resp.volume.token,
-        })
+        Ok(to_volume_and_token(resp.volume))
     }
 
     // ── GET /volumes/{volumeID} ───────────────────────────────────────────
@@ -111,11 +119,7 @@ impl VolumeService {
 
         resp.ret.into_result().map_err(cm_err_to_app)?;
 
-        Ok(VolumeAndToken {
-            volume_id: resp.volume.volume_id,
-            name: resp.volume.name,
-            token: resp.volume.token,
-        })
+        Ok(to_volume_and_token(resp.volume))
     }
 
     // ── DELETE /volumes/{volumeID} ────────────────────────────────────────

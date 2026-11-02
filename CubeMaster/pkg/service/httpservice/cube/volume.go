@@ -41,10 +41,13 @@ type CreateVolumeReq struct {
 
 // VolumeItem is the serialised form of a volume returned to the caller.
 type VolumeItem struct {
-	VolumeID  string `json:"volumeID"`
-	Name      string `json:"name"`
-	Driver    string `json:"driver"`
-	Token     string `json:"token,omitempty"`
+	VolumeID string `json:"volumeID"`
+	Name     string `json:"name"`
+	Driver   string `json:"driver"`
+	Token    string `json:"token,omitempty"`
+	// Endpoint is the /volumecontent service origin the token is valid for.
+	// Set together with a minted content token; omitted otherwise.
+	Endpoint  string `json:"endpoint,omitempty"`
 	RefCount  int64  `json:"refCount"`
 	CreatedAt int64  `json:"createdAt"`
 }
@@ -230,6 +233,10 @@ func handleCreateVolume(c *gin.Context) {
 	}
 
 	item := volumeItemFromRecord(record)
+	if err := applyVolumeContentToken(&item, record); err != nil {
+		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, err.Error())})
+		return
+	}
 	rt.RetCode = 0
 	common.WriteAPI(c, &singleVolumeRes{Ret: retOK(), Volume: &item})
 }
@@ -258,6 +265,10 @@ func handleGetVolume(c *gin.Context) {
 	}
 
 	item := volumeItemFromRecord(&record)
+	if err := applyVolumeContentToken(&item, &record); err != nil {
+		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, err.Error())})
+		return
+	}
 	rt.RetCode = 0
 	common.WriteAPI(c, &singleVolumeRes{Ret: retOK(), Volume: &item})
 }

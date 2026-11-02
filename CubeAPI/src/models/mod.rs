@@ -2352,6 +2352,10 @@ pub struct VolumeAndToken {
     /// Auth token returned by the volume plugin. Empty string when not applicable.
     #[serde(default)]
     pub token: String,
+    /// Origin of the volume-content service this token is valid for. Omitted
+    /// when the deployment has no content service configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 /// Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.

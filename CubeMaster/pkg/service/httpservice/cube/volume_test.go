@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	// glebarez/sqlite is a pure-Go (CGO-free) SQLite driver, used here as an
@@ -29,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/volumecontent"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -291,6 +293,48 @@ func TestVolumeHTTP_PrivateDataPersistedButOmittedFromWire(t *testing.T) {
 	var record models.VolumeRecord
 	require.NoError(t, db.Where("volume_id = ?", volumeID).First(&record).Error)
 	assert.Equal(t, "volumes/vol-pd/", record.PrivateData)
+}
+
+// With the content-token secret configured, create/get return a volume-scoped
+// JWT instead of the plugin token, never expose private_data in it, and list
+// still carries no token. Without a secret the plugin token is unchanged.
+func TestVolumeHTTP_ContentTokenMintedWhenConfigured(t *testing.T) {
+	cfg, err := volumecontent.NewConfig("0123456789abcdef0123456789abcdef", "", "https://vol.example.com", 0)
+	require.NoError(t, err)
+	orig := volumeContentConfigFn
+	volumeContentConfigFn = func() (*volumecontent.Config, error) { return cfg, nil }
+	t.Cleanup(func() { volumeContentConfigFn = orig })
+
+	r, _, fake := newVolumeTestEngine(t)
+	fake.privateData = "volumes/vol-tok/"
+	volumeID := "vol-tok"
+
+	_, created := doVolumeRequest(t, r, http.MethodPost, "/cube/volume",
+		fmt.Sprintf(`{"name":%q,"driver":%q}`, volumeID, fake.Name()))
+	require.Equal(t, 0, created.Ret.RetCode)
+	require.NotNil(t, created.Volume)
+	assert.NotEqual(t, "tok-"+volumeID, created.Volume.Token)
+	assert.NotContains(t, created.Volume.Token, "volumes/vol-tok")
+	assert.Equal(t, "https://vol.example.com", created.Volume.Endpoint)
+
+	claims, err := cfg.Verify(created.Volume.Token, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, volumeID, claims.VolumeID)
+	assert.Equal(t, fake.Name(), claims.Driver)
+	assert.Equal(t, "volumes/vol-tok/", claims.PrivateData)
+	assert.True(t, claims.CanWrite())
+
+	_, got := doVolumeRequest(t, r, http.MethodGet, "/cube/volume/"+volumeID, "")
+	require.NotNil(t, got.Volume)
+	_, err = cfg.Verify(got.Volume.Token, time.Now())
+	assert.NoError(t, err)
+
+	_, listed := doVolumeRequest(t, r, http.MethodGet, "/cube/volume", "")
+	for _, v := range listed.Volumes {
+		if v.VolumeID == volumeID {
+			assert.Equal(t, "tok-"+volumeID, v.Token, "list must not mint content tokens")
+		}
+	}
 }
 
 // Oversized Create private_data must reject and roll back the reserved row.

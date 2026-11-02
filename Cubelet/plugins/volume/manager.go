@@ -139,7 +139,11 @@ func (m *Manager) Attach(ctx context.Context, req *AttachRequest) (*AttachResult
 		}
 		req.RefCount = ar.Before // 0 = first attach
 		// 0 → 1 on this node: first sandbox here to reference the volume.
-		req.NodeRefFirstAttach = ar.Before == 0 && !ar.AlreadyHeld
+		// Request-scoped content holders pin the mount (they count in
+		// RefCount above) but are not sandboxes, so they never start or hide
+		// a transition that CubeMaster tracks.
+		req.NodeRefFirstAttach = ar.SandboxBefore == 0 && !ar.AlreadyHeld &&
+			!refcount.IsTransientHolder(req.SandboxID)
 	}
 
 	res, pluginErr := p.Attach(ctx, req)
@@ -171,7 +175,8 @@ func (m *Manager) Detach(ctx context.Context, req *DetachRequest) error {
 		// Unknown driver during Detach: release ref-count and continue.
 		if rc := m.rcStore; rc != nil {
 			rr, _ := rc.Release(req.Namespace, req.VolumeID, req.SandboxID)
-			req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
+			req.NodeRefLastDetach = rr.SandboxAfter == 0 && !rr.NotHeld &&
+				!refcount.IsTransientHolder(req.SandboxID)
 		}
 		return nil
 	}
@@ -192,8 +197,11 @@ func (m *Manager) Detach(ctx context.Context, req *DetachRequest) error {
 			released = true
 		}
 		req.RefCount = rr.After // 0 = last detach
-		// 1 → 0 on this node: last sandbox here stopped referencing the volume.
-		req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
+		// 1 → 0 on this node: last sandbox here stopped referencing the volume,
+		// even if a content request still pins the mount (RefCount > 0 keeps
+		// the plugin from tearing it down until that request ends).
+		req.NodeRefLastDetach = rr.SandboxAfter == 0 && !rr.NotHeld &&
+			!refcount.IsTransientHolder(req.SandboxID)
 	}
 
 	if pluginErr := p.Detach(ctx, req); pluginErr != nil {

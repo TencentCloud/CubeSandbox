@@ -1,219 +1,191 @@
-# 持久化卷（Persistent Volumes）
+# 持久化卷：同步管理与无沙箱直通访问
 
-> 英文版见 [`volume.md`](./volume.md)。本文为中文版，内容对齐英文版。
+英文参考见 [volume.md](volume.md)。固定 E2B 版本、HTTP 协议和兼容边界见
+[E2B Volume 合同](../../../docs/e2b-volume-contract.md)，直通服务端范围见
+[Volume 直通方案](../../../docs/volume-direct-access.md)。
 
-`Volume` 是管理 CubeSandbox **持久化卷**的类级别工具类——卷是与 e2b 兼容的存储，
-底层由卷插件（COS、NFS…）支撑。创建卷后通过
-`Sandbox.create(volume_mounts={...})`（e2b 兼容的 mapping 形式）挂载进沙箱，其数据可跨沙箱重启保留，也可在多个
-沙箱之间共享。
+本次只提供同步 Python，不加入异步或原生传输栈，也不为了读取卷而启动辅助沙箱。
+现有卷管理、沙箱挂载与独立内容访问是三种不同能力。Cubelet 提供可选的
+`/volumecontent` 内容服务（默认关闭），CubeMaster 在创建/获取卷时签发卷级 JWT 并返回
+`endpoint`。未启用该服务时，客户端需对接已部署的兼容网关；仅有 CubeAPI 的管理接口
+不能直接读取文件。服务端配置见 [volume.md](volume.md#server-side-volumecontent)。
 
-```python
-from cubesandbox import Sandbox, Volume, VolumeMount
-```
+## 配置与鉴权
 
-`Volume` 的方法均为**类方法**——无需手动实例化即可调用。对齐 e2b：`create` 与
-`connect` 返回一个 **`Volume` 实例**（携带 `volume_id` / `name` / `token`），而
-`list` / `get_info` 返回纯数据 `VolumeInfo`，`destroy` 返回 `bool`。
+| 配置 | 用途 |
+|---|---|
+| `CUBE_API_URL` / `E2B_API_URL` 或管理 `api_url` | 管理 `/volumes` |
+| `CUBE_API_KEY` / `E2B_API_KEY` 或管理 `api_key` | 管理 `X-API-Key` |
+| `CUBE_VOLUME_API_URL` / `E2B_VOLUME_API_URL` 或内容 `api_url` | 内容服务地址；未设置时使用服务端随 token 返回的 `endpoint` |
+| 句柄 token 或内容 `token` | 内容 `Authorization: Bearer ...` |
+| `domain`、`debug` | 无显式地址时按 E2B 域名/debug 规则解析 |
+| `request_timeout`、`headers`、`proxy`、`http_version`、`logger` | 逐次请求选项 |
 
----
+管理和内容地址分别解析。内容地址优先级：显式 `api_url` / `CUBE_VOLUME_API_URL`，
+其次服务端返回的 `endpoint`，最后默认 `https://api.<domain>`（domain 为
+`E2B_DOMAIN` 或 `e2b.app`；debug 使用 `http://localhost:8080`）。
+Cube 额外保留绑定 `Config` 的兼容入口。非本机内容请求须 HTTPS，不能用管理 key
+或空插件 token 冒充内容凭证。直通不需要模板、`CUBE_PROXY_NODE_IP` 或沙箱 access token。
 
-## 配置
+普通请求默认 60 秒，绑定 Cube Config 时保留其预算；缓冲文件操作默认一小时。
+`request_timeout=0` 禁用超时。同步流默认 read 空闲限制为 60 秒；和所核对的 E2B
+同步实现一样，`stream_idle_timeout` 参数不单独生效。HTTPX 超时是阶段/空闲限制，
+尚不是与 E2B 原生传输完全相同的 wall-clock 总期限。
 
-卷管理类调用只走管控面（`CUBE_API_URL`）。而对已挂载卷的**文件读写**走数据面，
-因此在 CubeProxy 节点之外运行时还需要配置 `CUBE_PROXY_NODE_IP`。
+## 已有管理 API
 
-| 环境变量 | 是否必填 | 默认值 | 使用方 |
-|---|:---:|---|---|
-| `CUBE_API_URL` | ✅ | `http://127.0.0.1:3000` | 所有 `Volume.*` 调用 |
-| `CUBE_PROXY_NODE_IP` | 远程时必填 | — | 对已挂载卷的 `sb.files.*` 读写 |
-| `CUBE_TEMPLATE_ID` | 挂载时必填 | — | `Sandbox.create(...)` |
-
-也可以给每个方法显式传入 `config=` 参数指定 `Config`。
-
----
-
-## API 参考
-
-| 方法 | HTTP | 入参 | 返回 |
-|---|---|---|---|
-| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | 见下方参数表 | `Volume` |
-| `Volume.connect(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`：卷标识 | `Volume` |
-| `Volume.list(*, config=None)` | `GET /volumes` | — | `list[VolumeInfo]`（**`token` 恒为空**） |
-| `Volume.get_info(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`：卷标识 | `VolumeInfo`（**含 `token`**） |
-| `Volume.destroy(volume_id, *, config=None)` | `DELETE /volumes/{id}` | `volume_id`：卷标识 | `bool`（成功 `True`，404 时 `False`） |
-
-**`Volume.create` 参数**
-
-| 参数 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `name` | `str \| None` | 否 | 卷名称。须满足 `^[a-zA-Z0-9_-]+$`，≤128 字符。省略时服务端分配 UUID。 |
-| `driver` | `str \| None` | 否 | 卷插件名称（如 `"cos"`）。传 `None` 或 `""` 时不发送该字段，后端使用默认插件。 |
-| `config` | `Config \| None` | 否 | SDK 配置对象，覆盖环境变量。 |
-
-### 返回值详解
-
-`create` / `connect` 返回可用的 `Volume` 实例，`list` / `get_info` 返回 `VolumeInfo`
-数据，`destroy` 返回 `bool`。各方法返回的字段填充情况如下：
-
-| 方法 | 返回类型 | `.volume_id` | `.name` | `.token` |
-|---|---|:---:|:---:|:---:|
-| `create` | `Volume` | ✅ 有值 | ✅ 有值 | ✅ 插件签发时有值，否则为空串 |
-| `connect` | `Volume` | ✅ 有值 | ✅ 有值 | ✅ 插件签发时有值，否则为空串 |
-| `list` | `list[VolumeInfo]` | ✅ 每项有值 | ✅ 每项有值 | ⚠️ **恒为空串**（列表不返回 token） |
-| `get_info` | `VolumeInfo` | ✅ 有值 | ✅ 有值 | ✅ 插件签发时有值，否则为空串 |
-| `destroy` | `bool` | — | — | — |
-
-### `create`
-
-对齐 e2b —— `Volume.create(name)` 不带 driver：
-
-- **`create(name)`** —— e2b 兼容。请求体仅为 `{"name": ...}`；后端使用
-  **第一个已配置**的卷插件。
-- **`create(name, driver="cos")`** —— CubeSandbox 扩展。传入非空 `driver` 即绑定指定插件。
-  仅在需要在多个插件中显式选择时才用。
-
-> 省略 `name` 时，服务端生成一个 UUID，并将其同时用作卷名与卷 ID。
-
-### `VolumeInfo`
-
-| 属性 | 类型 | 说明 |
+| Python 方法 | HTTP | 返回 |
 |---|---|---|
-| `.volume_id` | `str` | 稳定标识（等于 `name` 或自动生成的 UUID）。由返回体的 `volumeID`/`volume_id` 映射而来。 |
-| `.name` | `str` | 显示名称。 |
-| `.token` | `str` | 插件签发的 token。`create` / `get_info` 时填充；**`list` 时恒为空串**。 |
+| `Volume.create(name, **opts)` | `POST /volumes`，JSON `{name}` | `Volume` |
+| `Volume.connect(volume_id, **opts)` | `GET /volumes/{id}` | `Volume`，不创建沙箱 |
+| `Volume.list(**opts)` | `GET /volumes` | `list[VolumeInfo]` |
+| `Volume.get_info(volume_id, **opts)` | `GET /volumes/{id}` | `VolumeAndToken` |
+| `Volume.destroy(volume_id, **opts)` | `DELETE /volumes/{id}` | 成功 True，404 False |
 
-### 挂载与按沙箱访问模式
+`name` 是 Python 必填入参，非空值须满足 `^[a-zA-Z0-9_-]+$` 且最多 128 字符。
+标准创建仅发送 name；Cube 可选 `driver` 扩展仅在显式非空时发送。
+管理方法支持 E2B 风格直接 kwargs；`config` 作为 Cube 兼容扩展保留。
 
-传入一个 mount 路径到卷的映射（e2b 兼容）：
+`VolumeInfo` 只有 `volume_id/name`，列表条目没有 token 属性。
+`VolumeAndToken` 在基础信息上增加 `token/domain`。时间类型不涉及管理模型。
+创建或连接句柄保留响应 domain；默认 S3 插件不会因此自动生成内容 token。
+
+## 直通内容 API
+
+以下是内容网关协议，不是把卷 ID 替换进现有沙箱文件接口。
+所有路径使用 `/volumecontent/{volumeID}` 前缀，卷内 `path` 放在查询参数中。
+
+| Python 方法 | HTTP | 返回 |
+|---|---|---|
+| `vol.read_file(path, format="text", stream_idle_timeout=None, **opts)` | `GET /file?path=...` | str / bytes / Iterator[bytes] |
+| `vol.write_file(path, data, uid=None, gid=None, mode=None, force=None, **opts)` | `PUT /file`，原始字节；元数据查询参数 | `VolumeEntryStat` |
+| `vol.list(path, depth=None, **opts)` | `GET /dir`，path/depth 查询参数 | `list[VolumeEntryStat]` |
+| `vol.make_dir(path, uid=None, gid=None, mode=None, force=None, **opts)` | `POST /dir`，查询参数 | `VolumeEntryStat` |
+| `vol.get_info(path, **opts)` | `GET /path?path=...` | `VolumeEntryStat` |
+| `vol.update_metadata(path, uid=None, gid=None, mode=None, **opts)` | `PATCH /path`，JSON 元数据 | `VolumeEntryStat` |
+| `vol.exists(path, **opts)` | 复用查询元数据 | bool |
+| `vol.remove(path, **opts)` | `DELETE /path?path=...` | None |
+
+类级 list/get_info 走管理，实例级方法必须有内容 path，不再按相对路径猜测管理调用。
+path 为卷内绝对 POSIX 路径，不是宿主机路径；NUL、反斜线和点穿越段被拒绝，
+禁止删除卷根目录。客户端校验不能代替网关的符号链接和跨租户隔离。
+未指定元数据省略；显式 uid/gid/mode/depth 的 0 和 force=False 都保留。
+
+文件线上返回原始字节。Python 文本为 str，bytes 为 bytes，stream 为惰性同步迭代器。
+元数据字段为 `name/type/path/size/mode/uid/gid/atime/mtime/ctime/target`；
+type 为 `unknown/file/directory/symlink` 枚举，时间返回 datetime，target 可为 None。
 
 ```python
-Sandbox.create(volume_mounts={"/workspace": vol})
-Sandbox.create(volume_mounts={"/workspace": "vol-xxx"})
-```
-
-每个值可以是 `Volume`、`VolumeInfo` 或 `volume_id` 字符串，且必须能解析为已存在的卷。原有 e2b 风格写法继续保持读写挂载。
-
-若只想把某次沙箱挂载设为只读，用 `VolumeMount` 包装对应值：
-
-```python
-from cubesandbox import Sandbox, VolumeMount
-
-Sandbox.create(
-    volume_mounts={
-        "/dataset": VolumeMount(vol, read_only=True),
-        "/workspace": workspace_vol,
-    }
-)
-```
-
-`read_only` 仅表示该挂载点以只读方式挂载。只会禁止当前沙箱经由该挂载点写入或修改文件，不会生成不可变快照。同一个 Volume 可以同时在不同沙箱中以不同权限挂载，例如在沙箱 A 中读写，在沙箱 B 中只读。
-
----
-
-## 示例
-
-### 1. 创建
-
-```python
+import os
+from contextlib import closing
 from cubesandbox import Volume
 
-vol = Volume.create("my-data")     # 指定名称
-print(vol.volume_id, vol.name, vol.token)
-
-vol = Volume.create()              # 省略 name，服务端生成 UUID
-print(vol.volume_id)               # 自动生成的 UUID
+vol = Volume(os.environ["CUBE_VOLUME_ID"], "dataset", os.environ["CUBE_VOLUME_CONTENT_TOKEN"])
+opts = {"api_url": os.environ["CUBE_VOLUME_API_URL"]}
+path = os.environ["CUBE_VOLUME_TEST_PATH"]
+data = vol.read_file(path, format="bytes", **opts)
+info = vol.get_info(path, **opts)
+entries = vol.list("/", depth=1, **opts)
+with closing(vol.read_file(path, format="stream", **opts)) as chunks:
+    for chunk in chunks:
+        pass
 ```
 
-### 2. 挂载进沙箱
+## 无沙箱 E2E
 
-```python
-from cubesandbox import Sandbox, Volume
+在 `sdk/python` 执行；完整变量表和清理说明见
+[中文 README](../README.zh.md#直通卷-e2e-测试)。
 
-vol = Volume.create("my-data", driver="cos")
-
-with Sandbox.create(
-    volume_mounts={"/workspace": vol},
-) as sb:
-    sb.files.write("/workspace/note.txt", "已持久化！")
-    print(sb.files.read("/workspace/note.txt"))   # "已持久化！"
+```sh
+python3 -m pip install -e '.[dev]'
+python3 -m pytest -q tests/test_volume.py tests/test_volume_content.py tests/test_volume_direct_harness.py
+python3 -m pytest -q tests/test_volume_direct_e2e.py --run-e2e
 ```
 
-### 3. 查询与销毁
+真实测试必需 `CUBE_VOLUME_API_URL`（或 `E2B_VOLUME_API_URL`）、`CUBE_VOLUME_ID`、
+`CUBE_VOLUME_CONTENT_TOKEN`、`CUBE_VOLUME_TEST_PATH`；最后一项必须是稳定已有文件。
+凭证从环境注入，不提交到仓库。可选 SHA-256 校验预期数据。
 
-```python
-for v in Volume.list():            # 注意：此处 v.token 为 ""
-    print(v.volume_id, v.name)
+16 个用例覆盖二进制、流、可选文本、元数据、目录深度、路径缺失、非法 token、
+逐次地址/token/headers 和提前关闭流。默认只读；管理验证由
+`CUBE_VOLUME_TEST_MANAGEMENT=1` 开启，写入由 `CUBE_VOLUME_E2E_WRITE=1` 单独开启。
+写入只在唯一 `sdk-e2e-*` 目录中进行并清理自建路径，绝不销毁传入的卷。
+未加 `--run-e2e` 时所有真实用例跳过；开启后缺配置会失败。
 
-one = Volume.get_info(vol.volume_id)  # one.token 已填充
-vol = Volume.connect(vol.volume_id)   # -> 返回可用的 Volume 实例
-Volume.destroy(vol.volume_id)         # 删除前须先 kill 所有挂载它的沙箱（见注意事项）
-```
+本地回环验证器用相同用例校验只读/写入模式和清理；不是生产服务验证。
+用例禁止 SDK 沙箱创建/连接和非卷 HTTP 路由，但服务端是否启动 VM、挂载租约是否
+正确仍需服务端观测。没有部署兼容网关时测试失败应修服务，不允许启动沙箱兜底。
 
-### 4. 跨沙箱数据共享
+## 异常
 
-多个沙箱可同时挂载同一个卷，数据对所有挂载者实时可见。
-
-```python
-from cubesandbox import Sandbox, Volume
-
-vol = Volume.create("shared", driver="cos")
-mount = {"/workspace": vol}
-
-# 沙箱 A 写入数据。
-a = Sandbox.create(volume_mounts=mount)
-a.files.write("/workspace/probe.txt", "hello from A")
-
-# 沙箱 B 挂载同一卷，立即可读。
-with Sandbox.create(volume_mounts=mount) as b:
-    print(b.files.read("/workspace/probe.txt"))   # "hello from A"
-
-# ⚠️ 删除卷前，必须 kill 所有挂载它的沙箱。
-a.kill()
-b.kill()  # 上下文管理器退出时已自动 kill，此处仅为说明
-Volume.destroy(vol.volume_id)
-```
-
----
-
-## 错误与状态码
-
-`Volume` 的每个方法都会把非 2xx 响应经过同一套映射：
-
-| HTTP 状态码 | 抛出的异常 | 含义 |
-|---|---|---|
-| 2xx | —（正常返回） | 成功 |
-| 401 / 403 | `AuthenticationError` | 未认证 / 无权限 |
-| 404 | `VolumeNotFoundError` | 卷不存在（`get_info` / `connect` / `destroy`） |
-| 其余非 2xx（400 / 405 / 409 / 500 …） | `ApiError` | 参数非法、重名冲突、后端错误 |
-
-客户端预校验会在**任何网络请求之前**就抛异常：
-
-| 条件 | 异常 |
+| HTTP | Python 行为 |
 |---|---|
-| `name` 不满足 `^[a-zA-Z0-9_-]+$` 或超过 128 字符 | `ValueError` |
-| 挂载 dict 缺少 `name` / `path` | `ValueError` |
+| 内容 404 | `VolumePathNotFoundException`；exists 返回 False |
+| 管理详情/连接 404 | `VolumeNotFoundException` |
+| 管理 destroy 404 | False |
+| 401 | `AuthenticationException`，兼容别名 `AuthenticationError` |
+| 429 | `RateLimitException` |
+| 503 | `ServiceBusyException` |
+| 其他非 2xx（含 403） | `VolumeException`，同时兼容 Cube `ApiError` 捕获 |
 
-所有 API 异常都派生自 `CubeSandboxError`，并暴露 `.status_code`：
+鉴权和服务错误不变成空列表或 False。内容任何 404 都按 E2B 视为路径不存在，
+因此不能用 exists 判断路由是否部署。所有认证请求禁止自动重定向。
 
-```python
-from cubesandbox import Volume, VolumeNotFoundError, ApiError
+## 数据流
 
-try:
-    Volume.get_info("does-not-exist")
-except VolumeNotFoundError:
-    ...                       # 404
-except ApiError as e:
-    print(e.status_code)      # 500
+```mermaid
+flowchart LR
+    SDK[Python SDK]
+    API[CubeAPI]
+    M[CubeMaster]
+    C["Cubelet<br/>/volumecontent"]
+    R["节点引用计数<br/>(bbolt)"]
+    P["卷插件<br/>S3/COS/..."]
+    FS["宿主机挂载<br/>(os.Root 限定)"]
+
+    SDK -- "1. 创建/获取卷 (API key)" --> API --> M
+    M -. "2. 卷 + 内容 token + endpoint" .-> SDK
+    SDK -- "3. Bearer token: 读/写/列目录/..." --> C
+    C -- "4. 校验 token(签名/过期/audience/卷/读写)" --> C
+    C -- "5. GET /cube/volume/id<br/>(存在缓存30s, 不存在缓存5s)" --> M
+    C -- "6. 仅卷存在: 获取 volcontent- 持有者" --> R
+    C -- "7. Attach" --> P --> FS
+    C -- "8. 文件操作后 Detach + 释放" --> R
 ```
 
----
+- 控制面（步骤 1-2）每个卷句柄一次；文件字节（步骤 3 起）直达 Cubelet，不经过 CubeAPI/CubeMaster，也不启动沙箱。
+- 步骤 4 失败返回 `401/403`，不会访问 CubeMaster。
+- 步骤 5 卷不存在返回 `404`、CubeMaster 不可达或异常返回 `503`（带 `Retry-After`），两者都**不会**进入步骤 6/7。
+- `volcontent-` 持有者只钉住挂载，不算沙箱引用，不会向 CubeMaster 上报节点 0→1 / 1→0，因此不影响 `DELETE /volumes/{id}` 的 409 保护。
 
-## 注意事项
+Cubelet 侧整条链路由 `Cubelet/plugins/volume/content/e2e_test.go` 的
+`TestDirectVolumeAccessEndToEnd` 端到端覆盖（真实 handler、token 校验、`MasterChecker`、
+`ManagerLeaser`、`volume.Manager` + bbolt 引用计数 + 本地目录插件，仅 CubeMaster 为假服务）：
+无沙箱读写、持有者不上报节点转换、删卷后缓存窗口内可读/之后 `404` 且插件 Attach 次数为 0、
+CubeMaster 故障 `503` 且恢复后不受错误缓存影响。运行：
 
-- **删除卷前必须 kill 所有挂载方。** 一个卷可以被多个沙箱同时挂载。`Volume.destroy()` 不会
-  自动 detach——若仍有运行中的沙箱持有该卷，删除操作可能失败或导致后端挂载泄漏。务必先对所有
-  挂载它的沙箱执行 `sb.kill()`，再调用 `Volume.destroy(volume_id)`。
-- **`list` 不返回 token。** token 仅在 `create` 和 `get_info` 时暴露；需要 token 时请调用
-  `Volume.get_info(volume_id)`。
-- **`name` 可选。** 省略时服务端分配一个 UUID，该 UUID 同时用作 `volume_id` 和 `name`。
-- **只读是单次挂载属性。** 在创建沙箱时使用 `VolumeMount(volume, read_only=True)`；创建 `Volume` 本身的接口不变。
+```sh
+cd Cubelet && go test -race -count=1 -run TestDirectVolumeAccessEndToEnd ./plugins/volume/content/
+```
+
+## 已删除的卷
+
+token 在过期前一直有效，即使卷已被删除。Cubelet 在调用任何插件 `Attach` 之前，会先向
+CubeMaster 确认卷仍然存在：
+
+- 卷存在：正常处理。
+- 卷不存在：返回 `404`，**不会** Attach 插件。
+- CubeMaster 不可达、出错或返回异常：返回 `503`（带 `Retry-After`），同样**不会** Attach
+  插件（失败关闭）。
+
+对已删除的卷执行 Attach 属于预期之外的行为，可能让插件挂载或重建一个空的后端位置，所以不做。
+"存在"的结果缓存 30 秒，"不存在"缓存 5 秒，错误不缓存。该检查只按卷 ID 判断：同名卷被删除后
+重新创建，旧 token 在过期前对新卷仍然有效，请避免复用仍可能被旧 token 持有的卷名，或缩短
+`CUBE_VOLUME_CONTENT_TOKEN_TTL`。详见 [volume.md](volume.md#deleted-volumes)。
+
+## 沙箱挂载是另一条已有链路
+
+原有 `Sandbox.create(volume_mounts={path: vol})` 保留。映射值可为 Volume、
+VolumeInfo 或 ID 字符串；`VolumeMount(vol, read_only=True)` 仅控制本次沙箱挂载，
+不生成不可变快照。这条链路不是直通读取前置条件，不会在上述 E2E 中调用。
+删除卷应先释放所有真实挂载/读取引用，SDK 不自动 detach。
