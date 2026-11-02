@@ -140,7 +140,7 @@ func run(ctx context.Context, opts *options) error {
 // exists, then write the volumes/<id>/ directory object.
 //
 // private_data is opaque create-to-attach state (max 1024 bytes). This plugin
-// stores the object key prefix so attach can log it without hardcoding a layout.
+// returns the object key prefix through this field.
 func doCreate(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("create: --volume-id is required")
@@ -163,7 +163,7 @@ func doCreate(ctx context.Context, opts *options) error {
 	}
 
 	privateData := config.VolumePrefix(opts.volumeID)
-	log.Printf("create ready: private_data=%s", privateData)
+	log.Printf("create ready: volumeID=%s", opts.volumeID)
 	emit(createResponse{PrivateData: privateData})
 	return nil
 }
@@ -196,8 +196,8 @@ func doAttach(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("attach: --volume-id is required")
 	}
-	log.Printf("attach sandbox=%s volumeID=%s refcount_before=%d private_data=%s",
-		opts.sandboxID, opts.volumeID, opts.refCount, opts.privateData)
+	log.Printf("attach sandbox=%s volumeID=%s refcount_before=%d",
+		opts.sandboxID, opts.volumeID, opts.refCount)
 
 	cfg, err := config.Load("")
 	if err != nil {

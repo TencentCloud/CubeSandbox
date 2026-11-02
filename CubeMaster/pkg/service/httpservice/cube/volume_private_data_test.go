@@ -21,6 +21,9 @@ func TestValidatePluginPrivateData(t *testing.T) {
 	if err := validatePluginPrivateData("volumes/vol-1/"); err != nil {
 		t.Fatalf("short private_data should be allowed: %v", err)
 	}
+	if err := validatePluginPrivateData("before\x00after"); err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("expected sanitized NUL rejection, got %v", err)
+	}
 	exact := strings.Repeat("a", models.MaxPrivateDataLen)
 	if err := validatePluginPrivateData(exact); err != nil {
 		t.Fatalf("exact max length should be allowed: %v", err)
