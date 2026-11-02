@@ -215,11 +215,18 @@ func (l *CgPlugin) initDb() error {
 }
 
 func (l *CgPlugin) initPool() error {
+	if l.pool != nil {
+		// Stop the old pool: the workflow Init path rebuilds it at runtime.
+		l.pool.stop()
+	}
 	p := &cgPool{
-		initialSize:  dynamConf.GetPoolSizeForInit(l.config.PoolSize),
-		db:           l.db,
-		poolV1Handle: l.poolV1Handle,
-		poolV2Handle: l.poolV2Handle,
+		initialSize:         dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+		db:                  l.db,
+		poolV1Handle:        l.poolV1Handle,
+		poolV2Handle:        l.poolV2Handle,
+		workers:             l.config.PoolWorkers,
+		triggerInterval:     time.Duration(l.config.PoolTriggerIntervalInMs) * time.Millisecond,
+		reparentFileEnabled: l.config.ShouldSetMemoryReparentFile,
 	}
 	if err := p.init(); err != nil {
 		return err
@@ -352,10 +359,7 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "%s", err)
 	}
 	cgroupPath := MakeCgroupPathByID(*fullCgID)
-	baseline, err := l.hostMetricsBaselineAtAssignment(ctx, cgroupPath)
-	if err != nil {
-		log.G(ctx).Warnf("capture host metrics baseline for cgroup assignment %s: %v", cgroupPath, err)
-	}
+	baseline := l.baselineForAssignment(ctx, *fullCgID, cgroupPath)
 	cgIDStr := strconv.Itoa(int(*fullCgID))
 	err = l.db.Set(bucket, opts.GetSandboxID(), []byte(cgIDStr))
 	if err != nil {
@@ -374,7 +378,7 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 	return nil
 }
 
-func (l *CgPlugin) setupMemoryReparentFile(ctx context.Context, fullCgID uint32, set bool) error {
+func setupMemoryReparentFile(ctx context.Context, fullCgID uint32, set bool) error {
 
 	var err error
 
@@ -508,32 +512,21 @@ func (l *CgPlugin) UsageSnapshot(ctx context.Context, group string) (handle.Usag
 	}
 }
 
-func (l *CgPlugin) hostMetricsBaselineAtAssignment(ctx context.Context, group string) (*cubeboxstore.HostMetricsBaseline, error) {
-	var usage handle.UsageSnapshot
-	var err error
-	for attempt := 1; attempt <= hostMetricsBaselineAttempts; attempt++ {
-		usage, err = l.UsageSnapshot(ctx, group)
-		if err == nil {
-			break
-		}
-		if attempt == hostMetricsBaselineAttempts {
-			return nil, err
-		}
-		timer := time.NewTimer(hostMetricsBaselineRetryDelay)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+// baselineForAssignment returns the counters at assignment time: the
+// return-time cache, or a synchronous read on a miss. A read failure yields
+// a nil baseline.
+func (l *CgPlugin) baselineForAssignment(ctx context.Context, fullCgID uint32, cgroupPath string) *cubeboxstore.HostMetricsBaseline {
+	usage, _, err := l.pool.BaselineFor(ctx, fullCgID)
+	if err != nil {
+		log.G(ctx).Warnf("capture host metrics baseline for cgroup assignment %s: %v", cgroupPath, err)
+		return nil
 	}
+	return hostMetricsBaselineFromUsage(cgroupPath, usage)
+}
+
+func hostMetricsBaselineFromUsage(cgroupPath string, usage handle.UsageSnapshot) *cubeboxstore.HostMetricsBaseline {
 	return &cubeboxstore.HostMetricsBaseline{
-		CGroupPath:               group,
+		CGroupPath:               cgroupPath,
 		CPUUsageTotalNS:          usage.CPUUsageTotalNS,
 		CPUUserTotalNS:           usage.CPUUserTotalNS,
 		CPUSystemTotalNS:         usage.CPUSystemTotalNS,
@@ -541,7 +534,7 @@ func (l *CgPlugin) hostMetricsBaselineAtAssignment(ctx context.Context, group st
 		CPUPeriodsTotal:          usage.CPUPeriodsTotal,
 		CPUThrottledPeriodsTotal: usage.CPUThrottledPeriodsTotal,
 		MemoryFailuresTotal:      usage.MemoryFailuresTotal,
-	}, nil
+	}
 }
 
 func ceilMemQuota(q resource.Quantity) resource.Quantity {
