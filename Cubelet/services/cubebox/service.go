@@ -1150,12 +1150,14 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		NumaNode:     box.NumaNode,
 	}
 
-	if box.GetStatus() != nil {
-		switch box.GetStatus().Get().State() {
+	if status := box.GetStatus(); status != nil {
+		stored := status.Get()
+		cb.ErrorReason = stored.Reason
+		switch stored.State() {
 		case cubebox.ContainerState_CONTAINER_PAUSING:
-			cb.PausedAt = box.GetStatus().Get().PausingAt
+			cb.PausedAt = stored.PausingAt
 		case cubebox.ContainerState_CONTAINER_PAUSED:
-			cb.PausedAt = box.GetStatus().Get().PausedAt
+			cb.PausedAt = stored.PausedAt
 		}
 	}
 
