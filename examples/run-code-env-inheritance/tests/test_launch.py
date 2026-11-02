@@ -64,6 +64,14 @@ class InterpreterLaunchTest(unittest.TestCase):
         self.assertEqual(start.call_args_list[0].args[0],
                          ['/usr/bin/envd', '-isnotfc', '-port', '50123'])
 
+    def test_empty_envd_settings_use_entrypoint_defaults(self):
+        with patch.dict(os.environ, {'ENVD_BIN': '', 'ENVD_PORT': ''}), \
+             patch.object(launch.subprocess, 'Popen', side_effect=self.children()) as start, \
+             patch.object(launch.uvicorn, 'Server'):
+            launch.main()
+        self.assertEqual(start.call_args_list[0].args[0],
+                         ['/usr/bin/envd', '-isnotfc', '-port', '49983'])
+
     def test_listener_reserved_before_dependencies_and_lifespan(self):
         children = self.children()
         listener = None

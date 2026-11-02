@@ -48,7 +48,7 @@ def main():
     workdir = Path(os.getenv("CODE_INTERPRETER_WORKDIR", "/workspace"))
     jupyter_host = os.getenv("JUPYTER_HOST", "127.0.0.1")
     jupyter_port = os.getenv("JUPYTER_PORT", "8888")
-    envd_port = os.getenv("ENVD_PORT", "49983")
+    envd_port = (os.getenv("ENVD_PORT") or "49983")
     url_host = f"[{jupyter_host}]" if ":" in jupyter_host else jupyter_host
     os.environ["JUPYTER_BASE_URL"] = f"http://{url_host}:{jupyter_port}"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -76,7 +76,7 @@ def main():
             previous_term = signal.signal(signal.SIGTERM, exit_on_signal)
             try:
                 children.append(subprocess.Popen(
-                    [os.getenv("ENVD_BIN", "/usr/bin/envd"), "-isnotfc", "-port", envd_port]
+                    [(os.getenv("ENVD_BIN") or "/usr/bin/envd"), "-isnotfc", "-port", envd_port]
                     + shlex.split(os.getenv("ENVD_EXTRA_ARGS", "")),
                     stdin=subprocess.DEVNULL, stdout=envd_log,
                     stderr=subprocess.STDOUT, close_fds=True,

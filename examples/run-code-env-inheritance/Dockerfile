@@ -7,7 +7,7 @@ COPY lightweight-code-interpreter/server.py /opt/lightweight-code-interpreter/se
 COPY lightweight-code-interpreter/launch.py /opt/lightweight-code-interpreter/launch.py
 
 RUN test -x /usr/bin/tini && command -v python && command -v jupyter \
-    && python -c "import uvicorn; import jupyter_server"
+    && python -c "import sys; import uvicorn; import jupyter_server; sys.path.insert(0, '/opt/lightweight-code-interpreter'); import server"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "/opt/lightweight-code-interpreter/launch.py"]

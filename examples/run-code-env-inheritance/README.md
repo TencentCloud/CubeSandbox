@@ -2,7 +2,7 @@
 
 [中文](README_zh.md)
 
-This example provides a derived image based on the official `sandbox-code` image. It replaces only the lightweight code interpreter so `run_code` can read sandbox-level environment variables injected through `Sandbox.create(envs=...)`, while preserving temporary per-call environment overrides.
+This example provides a derived image based on the official `sandbox-code` image. It replaces the lightweight code interpreter and its startup supervision so `run_code` can read sandbox-level environment variables injected through `Sandbox.create(envs=...)`, while preserving temporary per-call environment overrides.
 
 ## Background
 

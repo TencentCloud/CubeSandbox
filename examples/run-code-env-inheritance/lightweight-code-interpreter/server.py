@@ -21,7 +21,7 @@ from websockets.client import WebSocketClientProtocol, connect
 
 JUPYTER_BASE_URL = os.getenv("JUPYTER_BASE_URL", "http://127.0.0.1:8888")
 JUPYTER_WS_URL = JUPYTER_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
-ENVD_ENVS_URL = f"http://127.0.0.1:{os.getenv('ENVD_PORT', '49983')}/envs"
+ENVD_ENVS_URL = f"http://127.0.0.1:{os.getenv('ENVD_PORT') or '49983'}/envs"
 ENVD_TIMEOUT = float(os.getenv("ENVD_TIMEOUT", "2"))
 WORKDIR = Path(os.getenv("CODE_INTERPRETER_WORKDIR", "/workspace")).resolve()
 DEFAULT_LANGUAGE = "python"

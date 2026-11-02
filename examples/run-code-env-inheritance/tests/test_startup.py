@@ -1,4 +1,6 @@
 import unittest
+import importlib
+import os
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -6,6 +8,12 @@ import server
 
 
 class ContextStartupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_envd_port_uses_default_readiness_endpoint(self):
+        with patch.dict(os.environ, {'ENVD_PORT': ''}):
+            importlib.reload(server)
+            self.assertEqual(server.ENVD_ENVS_URL, 'http://127.0.0.1:49983/envs')
+        importlib.reload(server)
+
     async def test_envd_unsupported_endpoint_fails_without_readiness_retries(self):
         calls = []
         def respond(request):
