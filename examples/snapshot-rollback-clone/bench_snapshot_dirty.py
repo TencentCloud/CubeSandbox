@@ -118,9 +118,15 @@ def run_round(size_mb: int) -> dict:
     finally:
         for s in (sb, sa, sb2):
             if s is not None:
-                s.kill()
+                try:
+                    s.kill()
+                except Exception:
+                    pass
         if snap_id is not None:
-            Sandbox.delete_snapshot(snap_id)
+            try:
+                Sandbox.delete_snapshot(snap_id)
+            except Exception:
+                pass
 
 
 def main():

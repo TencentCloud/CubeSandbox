@@ -19,6 +19,7 @@ import argparse
 import math
 import statistics
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -49,19 +50,30 @@ def prepare_snapshot() -> str:
 
 def run_round(snap_id: str, concurrency: int) -> dict:
     sandboxes = []
+    lock = threading.Lock()
+
+    def _create_one():
+        sb = Sandbox.create(template=snap_id)
+        with lock:
+            sandboxes.append(sb)
+        return sb
+
     try:
         t0 = time.monotonic()
         if concurrency == 1:
-            sandboxes.append(Sandbox.create(template=snap_id))
+            _create_one()
         else:
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                futures = [pool.submit(Sandbox.create, template=snap_id) for _ in range(concurrency)]
+                futures = [pool.submit(_create_one) for _ in range(concurrency)]
                 for fut in as_completed(futures):
-                    sandboxes.append(fut.result())
+                    fut.result()
         wall_ms = (time.monotonic() - t0) * 1000
     finally:
         for sb in sandboxes:
-            sb.kill()
+            try:
+                sb.kill()
+            except Exception:
+                pass
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
 

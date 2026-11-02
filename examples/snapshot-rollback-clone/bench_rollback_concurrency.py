@@ -79,9 +79,15 @@ def run_round(concurrency: int, dirty_mb: int) -> dict:
         wall_ms = (time.monotonic() - t0) * 1000
     finally:
         for sb in sandboxes:
-            sb.kill()
+            try:
+                sb.kill()
+            except Exception:
+                pass
         for cp in checkpoints:
-            Sandbox.delete_snapshot(cp)
+            try:
+                Sandbox.delete_snapshot(cp)
+            except Exception:
+                pass
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
 

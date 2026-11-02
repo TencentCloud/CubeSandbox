@@ -55,10 +55,12 @@ def run_round(n: int, concurrency: int, dirty_mb: int) -> dict:
         clones = src.clone(n=n, concurrency=concurrency)
         wall_ms = (time.monotonic() - t0) * 1000
     finally:
-        if src is not None:
-            src.kill()
-        for sb in clones:
-            sb.kill()
+        for sb in [src] + clones:
+            if sb is not None:
+                try:
+                    sb.kill()
+                except Exception:
+                    pass
     return {"wall_ms": wall_ms, "per_ms": wall_ms / n}
 
 
