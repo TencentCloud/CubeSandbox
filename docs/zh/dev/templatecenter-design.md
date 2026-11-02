@@ -244,6 +244,13 @@ TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供�
 
 因为 artifact 存储是共享的 / 可寻址的，构建期记录的路径与对象引用对 reconciler 始终有效，即使中途发生 TC 重启也不需要把 job “绑死”在某个实例上。
 
+当对象存储才是持久副本时，TC 写出的 ext4 只是一份缓存。设置
+`CUBE_TEMPLATE_CENTER_PURGE_LOCAL_ARTIFACT_AFTER_UPLOAD=1` 后，每次构建在 BUILT
+上报成功后立即删除本地副本，构建节点不会再“每构建一次就多留一个 artifact”。
+默认关闭：Master 与 TC 共置时，本地文件能让下载走本地磁盘。只有上传到 `s3`
+的构建才会清理——`CUBE_ARTIFACT_STORE_BACKEND=fs` 的存储根可能就是同一个目录；
+而没有记录下载 URL 的 artifact 永远不清理，因为那样 Master 就无处可取。
+
 ## 10. 已知限制与后续项
 
 以下问题在当前版本里仍然存在：

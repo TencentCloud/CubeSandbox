@@ -263,6 +263,15 @@ terraform: shared CFS when enabled, otherwise pod-local emptyDir with
 single-replica co-location. Because the directory is shared, a path recorded
 at build time remains valid for the reconciler even if TC has restarted since.
 
+When the object store is the durable copy, the ext4 TC writes is only a cache.
+`CUBE_TEMPLATE_CENTER_PURGE_LOCAL_ARTIFACT_AFTER_UPLOAD=1` makes every build
+delete its local copy immediately after the BUILT report, so a build host does
+not accumulate one artifact per build. It is off by default because the local
+file keeps downloads on local disk when Master is co-located. Only `s3` uploads
+qualify: with `CUBE_ARTIFACT_STORE_BACKEND=fs` the store root may be the same
+directory, and an artifact with no recorded download URL is never purged
+because Master would then have nothing to serve.
+
 ## 10. Known limitations and follow-ups
 
 Released with full awareness; each item lists the planned follow-up.

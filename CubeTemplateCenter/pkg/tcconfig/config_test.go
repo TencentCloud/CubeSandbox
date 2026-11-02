@@ -351,6 +351,37 @@ func TestIsLocalAddrRecognisesLoopback(t *testing.T) {
 	}
 }
 
+// Deleting the local artifact copy is destructive when the bucket does not hold
+// the object, so the switch must be off unless it is explicitly turned on and
+// must not be enabled by a typo.
+func TestPurgeLocalArtifactAfterUpload(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{"", false},
+		{"   ", false},
+		{"0", false},
+		{"false", false},
+		{"no", false},
+		{"please", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"yes", true},
+		{"on", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearEnv(t, EnvPurgeLocalArtifactAfterUpload)
+			t.Setenv(EnvPurgeLocalArtifactAfterUpload, tc.raw)
+			if got := PurgeLocalArtifactAfterUpload(); got != tc.want {
+				t.Fatalf("%s=%q: got %t, want %t", EnvPurgeLocalArtifactAfterUpload, tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 // envValue reads a variable the same way lookup does, so a value that is only
 // whitespace reads as absent.
 func envValue(name string) string {

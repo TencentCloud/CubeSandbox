@@ -362,8 +362,22 @@ func runBuildLocked(
 		return err
 	}
 
-	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d",
-		artifactID, result.SHA256, result.SizeBytes)
+	// Step 10: Optional local cleanup. Once the bucket holds the object and
+	// CubeMaster can address it, the ext4 this build just wrote is only a
+	// cache; removing it keeps a build host's disk flat instead of growing by
+	// one artifact per build. Deliberately after the report: a failed report
+	// must still leave the artifact complete somewhere this replica controls.
+	backend := ""
+	if s3Client != nil {
+		backend = s3Client.BackendName()
+	}
+	purged := false
+	if shouldPurgeLocalArtifact(tcconfig.PurgeLocalArtifactAfterUpload(), uploaded, artifactURL, backend) {
+		purged = purgeLocalArtifactCopy(result.Ext4Path, logger)
+	}
+
+	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d local_copy_purged=%t",
+		artifactID, result.SHA256, result.SizeBytes, purged)
 	return nil
 }
 
@@ -552,6 +566,76 @@ func cleanupArtifactResidue(ctx context.Context, artifactID string) error {
 func isBuildInProgress(storeDir string) bool {
 	inProgress, _ := image.ArtifactBuildInProgress(storeDir)
 	return inProgress
+}
+
+// shouldPurgeLocalArtifact decides whether the ext4 this build just wrote may be
+// deleted once the build has been reported BUILT.
+//
+// Every condition is required:
+//
+//   - optIn: the operator set CUBE_TEMPLATE_CENTER_PURGE_LOCAL_ARTIFACT_AFTER_UPLOAD.
+//     Default off, because deleting the local copy is a trade: it reclaims disk
+//     but turns this replica's warm download cache into a bucket fetch.
+//   - uploaded: the Put to the object store succeeded. A failed upload leaves the
+//     local file as the artifact's only copy -- the fallback backend=s3
+//     documents -- so it must survive.
+//   - backend "s3": the fs backend's root may BE this artifact store (one-click
+//     defaults to a local directory), so nothing is reclaimed there and
+//     unlinking could destroy the durable copy.
+//   - artifactURL non-empty: CubeMaster needs an address for the object. Without
+//     a presigned URL or locator it falls back to serving the artifact from the
+//     shared directory, i.e. from the very file this would delete.
+func shouldPurgeLocalArtifact(optIn, uploaded bool, artifactURL, backend string) bool {
+	if !optIn || !uploaded {
+		return false
+	}
+	if backend != "s3" {
+		return false
+	}
+	return strings.TrimSpace(artifactURL) != ""
+}
+
+// purgeLocalArtifactCopy unlinks the artifact's ext4 and, when that leaves the
+// per-artifact directory empty, the directory itself. It reports whether the
+// file was actually removed.
+//
+// Only the FILE is unlinked, never the directory tree: that directory can still
+// hold an in-progress marker or a native-exporter prefetch dir from a concurrent
+// build, and RemoveAll there would delete another build's working data. An empty
+// directory is removed because the store layout is <root>/<artifactID>/ and a
+// leftover empty dir is invisible disk usage; if the removal fails the directory
+// simply stays, which is harmless.
+//
+// For a loop-mount build this also frees the loop device eventually: the device
+// stays attached to the deleted inode until the next build's
+// reclaimOrphanLoopDevices detaches it (that is exactly the "(deleted)" backing
+// file it looks for).
+func purgeLocalArtifactCopy(ext4Path string, logger *cubelog.Entry) bool {
+	abs, err := filepath.Abs(ext4Path)
+	if err != nil {
+		logger.Warnf("purge local artifact copy: resolve %s failed: %v", ext4Path, err)
+		return false
+	}
+	dir := filepath.Dir(abs)
+	if !managedArtifactDir(dir) {
+		// Same guard the artifact deleter uses: never unlink outside the roots TC
+		// writes artifacts to, so a bad path cannot delete arbitrary files.
+		logger.Warnf("purge local artifact copy: %s is outside the managed artifact roots, refusing", ext4Path)
+		return false
+	}
+	if err := os.Remove(abs); err != nil {
+		if os.IsNotExist(err) {
+			// Already gone (sibling replica, `tpl merge`, previous run).
+			return false
+		}
+		logger.Warnf("purge local artifact copy %s failed: %v", ext4Path, err)
+		return false
+	}
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+		logger.Debugf("keeping local artifact dir %s after purge (not empty): %v", dir, err)
+	}
+	logger.Infof("purged local artifact copy %s; the durable copy is in the object store", abs)
+	return true
 }
 
 // reuseExistingArtifact returns a READY artifact for fingerprint when its
