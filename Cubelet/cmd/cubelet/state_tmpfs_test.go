@@ -206,3 +206,11 @@ func TestPathFDMountIDMatchesVisibleRoot(t *testing.T) {
 	require.NotNil(t, info)
 	require.Equal(t, uint64(info.ID), id)
 }
+
+func TestVisibleMountIDReportsBothLookupFailures(t *testing.T) {
+	_, err := visibleMountID(filepath.Join(t.TempDir(), "missing"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "statx")
+	require.Contains(t, err.Error(), "fdinfo")
+	require.ErrorIs(t, err, unix.ENOENT)
+}

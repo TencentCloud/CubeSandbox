@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	stdlog "log"
 	"os"
@@ -149,13 +150,21 @@ func lookupExactMount(mountpoint string) (*mountinfo.Info, error) {
 	return nil, fmt.Errorf("cannot identify the visible mount at %s", mountpoint)
 }
 
-// visibleMountID uses fdinfo on kernels predating STATX_MNT_ID (Linux 5.8).
+// visibleMountID prefers statx and uses fdinfo on kernels without mount IDs.
 func visibleMountID(path string) (uint64, error) {
 	var st unix.Statx_t
-	if err := unix.Statx(unix.AT_FDCWD, path, 0, unix.STATX_MNT_ID, &st); err == nil && st.Mask&unix.STATX_MNT_ID != 0 {
+	statErr := unix.Statx(unix.AT_FDCWD, path, 0, unix.STATX_MNT_ID, &st)
+	if statErr == nil && st.Mask&unix.STATX_MNT_ID != 0 {
 		return st.Mnt_id, nil
 	}
-	return mountIDFromPathFD(path)
+	id, fdErr := mountIDFromPathFD(path)
+	if fdErr == nil {
+		return id, nil
+	}
+	if statErr == nil {
+		statErr = fmt.Errorf("statx mount ID unavailable")
+	}
+	return 0, errors.Join(fmt.Errorf("statx %s: %w", path, statErr), fmt.Errorf("fdinfo %s: %w", path, fdErr))
 }
 
 func mountIDFromPathFD(path string) (uint64, error) {
