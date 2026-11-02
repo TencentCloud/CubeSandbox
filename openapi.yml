@@ -1303,6 +1303,47 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /v2/volumes:
+    post:
+      tags:
+      - handlers::volumes
+      summary: |-
+        Create a volume with opaque plugin input. Query, delete and mount it through
+        the existing volume APIs using the returned volumeID.
+      operationId: create_volume_v2
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewVolumeV2'
+        required: true
+      responses:
+        '201':
+          description: Successfully created a new volume
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeAndToken'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+      security:
+      - apiKeyAuth: []
   /volumes:
     get:
       tags:
@@ -2171,6 +2212,22 @@ components:
         `autoPauseMemory` flag. CubeSandbox always keeps the full memory snapshot
         on pause, so `autoPauseMemory=false` (filesystem-only snapshot) is rejected
         by the handler rather than silently ignored.
+    NewVolumeV2:
+      allOf:
+      - $ref: '#/components/schemas/NewVolume'
+      - type: object
+        properties:
+          private_data:
+            type:
+            - string
+            - 'null'
+            description: |-
+              Opaque input forwarded unchanged to the volume plugin's Create hook.
+              At most 1024 UTF-8 bytes, with no NUL. Use credential references, never
+              plaintext credentials. This field is not included in volume responses.
+      description: |-
+        Request body for POST /v2/volumes, extending the legacy creation request
+        with opaque plugin input. Existing /volumes callers keep using NewVolume.
     NewVolume:
       type: object
       description: |-

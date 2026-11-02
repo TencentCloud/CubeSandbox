@@ -14,14 +14,14 @@ use crate::{
     models::{
         ApiError, BlockIoQosConfig, ConnectSandbox, ConnectSandboxV2, CreateSnapshotRequest,
         CreateTemplateRequest, ForkError, ForkRequest, ForkResult, NetworkQosConfig, NewSandbox,
-        NewSandboxV2, NewVolume, QosConfig, RebuildTemplateRequest, RefreshRequest, ResumedSandbox,
-        RollbackRequest, RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogs,
-        SandboxLogsV2Response, SandboxState, SandboxVolumeMount, SetTemplateAliasRequest,
-        SetTimeoutRequest, SnapshotInfo, SnapshotListItem, TemplateAliasLookupResponse,
-        TemplateBuildJob, TemplateBuildStatus, TemplateCompatAdoptResponseView,
-        TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
-        TemplateNodeCompatView, TemplateSummary, UpdateSandboxNetworkRequest, Volume,
-        VolumeAndToken,
+        NewSandboxV2, NewVolume, NewVolumeV2, QosConfig, RebuildTemplateRequest, RefreshRequest,
+        ResumedSandbox, RollbackRequest, RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry,
+        SandboxLogs, SandboxLogsV2Response, SandboxState, SandboxVolumeMount,
+        SetTemplateAliasRequest, SetTimeoutRequest, SnapshotInfo, SnapshotListItem,
+        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
+        TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
+        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
+        UpdateSandboxNetworkRequest, Volume, VolumeAndToken,
     },
 };
 
@@ -90,6 +90,7 @@ impl Modify for SecurityAddon {
         handlers::snapshots::rollback_sandbox,
         handlers::volumes::list_volumes,
         handlers::volumes::create_volume,
+        handlers::volumes::create_volume_v2,
         handlers::volumes::get_volume,
         handlers::volumes::delete_volume
     ),
@@ -137,6 +138,7 @@ impl Modify for SecurityAddon {
         RollbackRequest,
         RollbackResponse,
         NewVolume,
+        NewVolumeV2,
         Volume,
         VolumeAndToken
     )),
