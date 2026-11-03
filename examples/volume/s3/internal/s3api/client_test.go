@@ -6,15 +6,68 @@ package s3api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
 
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/config"
 )
+
+func TestConditionalClaimWriteHasNoUnconditionalFallback(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+		want   error
+	}{
+		{501, "NotImplemented", ErrConditionalWritesUnsupported},
+		{412, "PreconditionFailed", ErrPreconditionFailed},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPut || r.Header.Get("If-None-Match") != "*" {
+					t.Error("registry request lost its create-only condition")
+				}
+				w.WriteHeader(tc.status)
+				fmt.Fprintf(w, "<Error><Code>%s</Code></Error>", tc.code)
+			}))
+			defer srv.Close()
+			err := claimsTestClient(t, srv.URL).WriteClaims(context.Background(), ".cube-sandbox/volume-claims.json", []byte(`{"v":1,"claims":[]}`), "")
+			if !errors.Is(err, tc.want) || calls.Load() != 1 {
+				t.Fatalf("err=%v requests=%d, want one conditional attempt returning %v", err, calls.Load(), tc.want)
+			}
+		})
+	}
+}
+
+func TestPrefixHasDataDistinguishesEmptyDirectoryMarker(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		size int
+		want bool
+	}{
+		{"workspace/", 0, false},
+		{"workspace/", 1, true},
+		{"workspace/file", 0, true},
+	} {
+		t.Run(fmt.Sprintf("%s-%d", tc.key, tc.size), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `<ListBucketResult><Name>test-bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>%s</Key><Size>%d</Size></Contents></ListBucketResult>`, tc.key, tc.size)
+			}))
+			defer srv.Close()
+			got, err := claimsTestClient(t, srv.URL).PrefixHasData(context.Background(), "workspace/")
+			if err != nil || got != tc.want {
+				t.Fatalf("hasData=%v err=%v, want %v", got, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseEndpoint(t *testing.T) {
 	for _, tc := range []struct {
@@ -107,6 +160,26 @@ func TestIsNotFound(t *testing.T) {
 	}
 	if IsNotFound(errors.New("dial tcp: connection refused")) {
 		t.Error("IsNotFound(non-S3 error) = true, want false")
+	}
+}
+
+// A backend that cannot do the conditional PUT must fail the claim write
+// outright. Falling back to a plain PUT would replay a stale registry snapshot
+// and silently drop another CubeMaster's claim.
+func TestClaimsWriteError(t *testing.T) {
+	if err := claimsWriteError("claims.json", nil); err != nil {
+		t.Fatalf("claimsWriteError(nil) = %v, want nil", err)
+	}
+	if err := claimsWriteError("claims.json", minio.ErrorResponse{StatusCode: 412, Code: "PreconditionFailed"}); !errors.Is(err, ErrPreconditionFailed) {
+		t.Errorf("claimsWriteError(412) = %v, want ErrPreconditionFailed", err)
+	}
+	err := claimsWriteError("claims.json", minio.ErrorResponse{StatusCode: 501, Code: "NotImplemented"})
+	if !errors.Is(err, ErrConditionalWritesUnsupported) {
+		t.Errorf("claimsWriteError(501) = %v, want ErrConditionalWritesUnsupported", err)
+	}
+	other := claimsWriteError("claims.json", errors.New("access denied"))
+	if errors.Is(other, ErrConditionalWritesUnsupported) || !strings.Contains(other.Error(), "access denied") {
+		t.Errorf("claimsWriteError(other) = %v, want the original error", other)
 	}
 }
 

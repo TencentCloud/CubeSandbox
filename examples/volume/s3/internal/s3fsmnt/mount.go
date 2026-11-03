@@ -12,9 +12,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/config"
 )
+
+// Spec is one volume's mount binding: where the data lives and which
+// credentials address it. Legacy volumes derive it from volume-s3.conf;
+// dynamic volumes derive it from the persisted private_data state.
+type Spec struct {
+	Bucket   string
+	Subdir   string // object key under the bucket, without a trailing slash
+	Endpoint string
+	Region   string
+
+	// Addressing is the bucket addressing mode. s3fs defaults to
+	// virtual-hosted style, so path-style adds -ouse_path_request_style and
+	// explicit virtual removes any inherited path-style flag.
+	Addressing config.Addressing
+
+	// PasswdFile holds bucket:access-key:secret for static credentials.
+	PasswdFile string
+
+	// AccessKeyID and SecretAccessKey are written into PasswdFile. They are
+	// never placed in the s3fs argument list.
+	AccessKeyID     string
+	SecretAccessKey string
+
+	// InstanceRole uses -oiam_role=auto instead of a passwd file.
+	InstanceRole bool
+
+	// ExtraOpts come from resolved configuration and are appended last.
+	ExtraOpts []string
+}
 
 // Manager mounts and unmounts one s3fs process per volume.
 type Manager struct {
@@ -35,7 +65,24 @@ func (m *Manager) MountPoint(baseDir, volumeID string) string {
 	return config.MountPointUnder(baseDir, volumeID)
 }
 
-// EnsurePasswdFile writes the s3fs credential file (Bucket:AccessKeyId:SecretAccessKey).
+// defaultSpec is the legacy binding from volume-s3.conf.
+func (m *Manager) defaultSpec(volumeID string) Spec {
+	return Spec{
+		Bucket:          m.cfg.Bucket,
+		Subdir:          config.VolumeSubdir(volumeID),
+		Endpoint:        m.cfg.Endpoint,
+		Region:          m.cfg.Region,
+		Addressing:      m.cfg.Addressing,
+		PasswdFile:      m.cfg.PasswdFile,
+		AccessKeyID:     m.cfg.AccessKeyID,
+		SecretAccessKey: m.cfg.SecretAccessKey,
+		InstanceRole:    m.cfg.UseInstanceRole(),
+		ExtraOpts:       m.cfg.S3FSExtraOpts,
+	}
+}
+
+// EnsurePasswdFile writes the legacy s3fs credential file
+// (Bucket:AccessKeyId:SecretAccessKey).
 //
 // The path is per-bucket so several plugin instances (different driver names,
 // different buckets) on one node never race on a shared credential file. It is
@@ -43,18 +90,28 @@ func (m *Manager) MountPoint(baseDir, volumeID string) string {
 //
 // In instance-role mode no file is written; see RemoveStalePasswdFile.
 func (m *Manager) EnsurePasswdFile() error {
-	if m.cfg.UseInstanceRole() {
+	return ensurePasswdFile(m.defaultSpec(""))
+}
+
+func ensurePasswdFile(spec Spec) error {
+	if spec.InstanceRole {
 		return nil
 	}
-	content := fmt.Sprintf("%s:%s:%s\n", m.cfg.Bucket, m.cfg.AccessKeyID, m.cfg.SecretAccessKey)
-	if b, err := os.ReadFile(m.cfg.PasswdFile); err == nil && string(b) == content {
+	if spec.Bucket == "" || spec.PasswdFile == "" {
+		return errors.New("s3fs: bucket and passwd file are required for static credentials")
+	}
+	if spec.AccessKeyID == "" || spec.SecretAccessKey == "" {
+		return errors.New("s3fs: access key and secret are required for static credentials")
+	}
+	content := fmt.Sprintf("%s:%s:%s\n", spec.Bucket, spec.AccessKeyID, spec.SecretAccessKey)
+	if b, err := os.ReadFile(spec.PasswdFile); err == nil && string(b) == content {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(m.cfg.PasswdFile), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(spec.PasswdFile), 0o755); err != nil {
 		return fmt.Errorf("create passwd dir: %w", err)
 	}
-	if err := os.WriteFile(m.cfg.PasswdFile, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("write passwd file %q: %w", m.cfg.PasswdFile, err)
+	if err := os.WriteFile(spec.PasswdFile, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write passwd file %q: %w", spec.PasswdFile, err)
 	}
 	return nil
 }
@@ -72,36 +129,60 @@ func (m *Manager) RemoveStalePasswdFile() {
 	}
 }
 
-// MountArgs builds the s3fs argument list for one volume.
+// MountArgs builds the s3fs argument list for one legacy volume.
+func (m *Manager) MountArgs(mnt, volumeID string) []string {
+	return MountArgsFor(mnt, m.defaultSpec(volumeID))
+}
+
+// MountArgsFor builds the s3fs argument list for one binding.
 //
-//	-o url          the S3-compatible endpoint from volume-s3.conf
+//	-o url          the S3-compatible endpoint
 //	-o endpoint     region used for SigV4 signing
-//	-o passwd_file  per-bucket credential file, or -o iam_role=auto with
-//	                CREDENTIALS=instance_role (EC2 instance role via IMDS)
+//	-o passwd_file  per-bucket or per-volume credential file, or
+//	                -o iam_role=auto with CREDENTIALS=instance_role
 //	-o allow_other  Cubelet (a different user) must traverse the mount to bind
 //	                it into the microVM via virtiofs
 //
-// Create already PUT volumes/<id>/, the same object s3fs mkdir would write, so
-// no compat_dir option is needed.
-func (m *Manager) MountArgs(mnt, volumeID string) []string {
+// Create already PUT the prefix directory object, the same object s3fs mkdir
+// would write, so no compat_dir option is needed.
+func MountArgsFor(mnt string, spec Spec) []string {
 	args := []string{
-		fmt.Sprintf("%s:/%s", m.cfg.Bucket, config.VolumeSubdir(volumeID)),
+		fmt.Sprintf("%s:/%s", spec.Bucket, strings.TrimSuffix(spec.Subdir, "/")),
 		mnt,
-		"-ourl=" + m.cfg.Endpoint,
-		"-oendpoint=" + m.cfg.Region,
+		"-ourl=" + spec.Endpoint,
+		"-oendpoint=" + spec.Region,
 		"-oallow_other",
 	}
-	if m.cfg.UseInstanceRole() {
+	if spec.InstanceRole {
 		args = append(args, "-oiam_role=auto")
 	} else {
-		args = append(args, "-opasswd_file="+m.cfg.PasswdFile)
+		args = append(args, "-opasswd_file="+spec.PasswdFile)
 	}
-	return append(args, m.cfg.S3FSExtraOpts...)
+	if spec.Addressing == config.AddressingPath && !config.HasPathRequestStyle(spec.ExtraOpts) {
+		args = append(args, "-ouse_path_request_style")
+	}
+	return append(args, spec.ExtraOpts...)
 }
 
-// Mount idempotently mounts BUCKET:/volumes/<volumeID> under baseDir and
-// returns the mountpoint. Callers must hold the per-volume lock.
+// Mount idempotently mounts the configured bucket under baseDir and returns the
+// mountpoint. Callers must hold the per-volume lock.
 func (m *Manager) Mount(baseDir, volumeID string) (string, error) {
+	return m.MountWithSpec(baseDir, volumeID, m.defaultSpec(volumeID))
+}
+
+// MountWithSpec idempotently mounts one binding under baseDir and returns the
+// mountpoint. Callers must hold the per-volume lock.
+func (m *Manager) MountWithSpec(baseDir, volumeID string, spec Spec) (string, error) {
+	if spec.Bucket == "" || spec.Subdir == "" {
+		return "", errors.New("s3fs: bucket and subdir are required")
+	}
+	if spec.Endpoint == "" {
+		return "", errors.New("s3fs: endpoint is required")
+	}
+	if !spec.InstanceRole && spec.PasswdFile == "" {
+		return "", errors.New("s3fs: passwd file is required for static credentials")
+	}
+
 	mnt := m.MountPoint(baseDir, volumeID)
 
 	// Before the early return, so nodes whose volumes are all mounted already
@@ -122,14 +203,14 @@ func (m *Manager) Mount(baseDir, volumeID string) (string, error) {
 		}
 	}
 
-	if err := m.EnsurePasswdFile(); err != nil {
+	if err := ensurePasswdFile(spec); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(mnt, 0o755); err != nil {
 		return "", fmt.Errorf("create mount dir %q: %w", mnt, err)
 	}
 
-	out, runErr := exec.Command("s3fs", m.MountArgs(mnt, volumeID)...).CombinedOutput()
+	out, runErr := exec.Command("s3fs", MountArgsFor(mnt, spec)...).CombinedOutput()
 
 	// s3fs can exit 0 even when authentication fails; require a real mountpoint.
 	mounted, mntErr := IsMountPoint(mnt)

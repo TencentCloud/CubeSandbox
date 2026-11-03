@@ -26,6 +26,7 @@ func testManager(t *testing.T) *Manager {
 		Region:          "us-east-1",
 		PasswdFile:      filepath.Join(t.TempDir(), "passwd"),
 		S3FSExtraOpts:   []string{"-ouse_path_request_style"},
+		Addressing:      config.AddressingPath,
 	})
 }
 
@@ -63,6 +64,160 @@ func TestMountArgs(t *testing.T) {
 	// override the defaults above.
 	if args[len(args)-1] != "-ouse_path_request_style" {
 		t.Errorf("extra opts must be appended last, got %v", args)
+	}
+}
+
+// A dynamic volume mounts its own bucket/prefix with the credentials its
+// reference resolved; nothing may fall back to the deployment defaults.
+func TestMountArgsForDynamicSpec(t *testing.T) {
+	spec := Spec{
+		Bucket:          "user-bucket",
+		Subdir:          "workspaces/user-a",
+		Endpoint:        "https://cos.ap-guangzhou.myqcloud.com",
+		Region:          "ap-guangzhou",
+		Addressing:      config.AddressingPath,
+		PasswdFile:      "/etc/cube/.passwd-s3fs-volume-vol-1",
+		AccessKeyID:     "AKA",
+		SecretAccessKey: "SKA",
+	}
+	args := MountArgsFor("/data/cube-shared/volume/s3-vol-1", spec)
+
+	if args[0] != "user-bucket:/workspaces/user-a" {
+		t.Errorf("args[0] = %q, want user-bucket:/workspaces/user-a", args[0])
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-ourl=https://cos.ap-guangzhou.myqcloud.com",
+		"-oendpoint=ap-guangzhou",
+		"-opasswd_file=/etc/cube/.passwd-s3fs-volume-vol-1",
+		"-oallow_other",
+		"-ouse_path_request_style",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q: %v", want, args)
+		}
+	}
+	if strings.Contains(joined, "AKA") || strings.Contains(joined, "SKA") {
+		t.Errorf("credentials leaked into argv: %v", args)
+	}
+}
+
+// If the operator already set path-style in the extra options, the plugin must
+// not pass the flag twice.
+func TestMountArgsForDynamicSpecDoesNotDuplicatePathStyle(t *testing.T) {
+	spec := Spec{
+		Bucket:     "user-bucket",
+		Subdir:     "workspaces/user-a/",
+		Endpoint:   "http://minio:9000",
+		PasswdFile: "/tmp/passwd",
+		Addressing: config.AddressingPath,
+		ExtraOpts:  []string{"-ouse_path_request_style"},
+	}
+	args := MountArgsFor("/mnt/v", spec)
+	count := 0
+	for _, a := range args {
+		if strings.Contains(a, "path_request_style") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("path-style option appears %d times, want 1: %v", count, args)
+	}
+}
+
+// Explicit virtual addressing must remove an inherited path-style flag before
+// s3fs sees it, even when the Spec was built without ResolveCredentials.
+
+func TestResolvedVirtualReferenceMountsWithVirtualAddressing(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, config.ConfigFileName)
+	body := "ACCESS_KEY_ID=ak\nSECRET_ACCESS_KEY=sk\nBUCKET=legacy\nENDPOINT=https://s3.example.com\n" +
+		"S3FS_EXTRA_OPTS='-ouse_path_request_style -odbglevel=info'\n"
+	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(conf)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.CredentialsDir = t.TempDir()
+	refBody := "ACCESS_KEY_ID=AKV\nSECRET_ACCESS_KEY=SKV\nENDPOINT=https://virtual.example.com\n" +
+		"ADDRESSING_STYLE=virtual\n"
+	if err := os.WriteFile(filepath.Join(cfg.CredentialsDir, "team-v"+config.CredentialFileSuffix), []byte(refBody), 0o600); err != nil {
+		t.Fatalf("write credential file: %v", err)
+	}
+
+	creds, err := cfg.ResolveCredentials("team-v")
+	if err != nil {
+		t.Fatalf("ResolveCredentials: %v", err)
+	}
+	if creds.Addressing != config.AddressingVirtual {
+		t.Fatalf("control-plane addressing = %v, want virtual", creds.Addressing)
+	}
+
+	spec := Spec{
+		Bucket:     "user-bucket",
+		Subdir:     "workspaces/user-a",
+		Endpoint:   creds.Endpoint,
+		Region:     creds.Region,
+		Addressing: creds.Addressing,
+		PasswdFile: "/etc/cube/.passwd-s3fs-dynamic-vol-1",
+		ExtraOpts:  creds.ExtraOpts,
+	}
+	args := MountArgsFor("/mnt/v", spec)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "use_path_request_style") {
+		t.Errorf("s3fs still forces path-style: %v", args)
+	}
+	for _, want := range []string{"-odbglevel=info"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing unrelated option %q: %v", want, args)
+		}
+	}
+}
+
+func TestEnsurePasswdFileForDynamicSpec(t *testing.T) {
+	body, err := os.ReadFile(writeDynamicPasswd(t, "user-bucket", "AKA", "SKA"))
+	if err != nil {
+		t.Fatalf("read passwd: %v", err)
+	}
+	if got, want := string(body), "user-bucket:AKA:SKA\n"; got != want {
+		t.Errorf("passwd = %q, want %q", got, want)
+	}
+}
+
+func writeDynamicPasswd(t *testing.T, bucket, ak, sk string) string {
+	t.Helper()
+	passwd := filepath.Join(t.TempDir(), ".passwd-s3fs-volume-vol-1")
+	spec := Spec{Bucket: bucket, PasswdFile: passwd, AccessKeyID: ak, SecretAccessKey: sk}
+	if err := ensurePasswdFile(spec); err != nil {
+		t.Fatalf("ensurePasswdFile: %v", err)
+	}
+	return passwd
+}
+
+func TestMountWithSpecRejectsIncompleteBinding(t *testing.T) {
+	m := testManager(t)
+	for _, tc := range []struct {
+		name string
+		spec Spec
+		want string
+	}{
+		{"no bucket", Spec{Subdir: "a", Endpoint: "http://e", PasswdFile: "/p"}, "bucket and subdir"},
+		{"no subdir", Spec{Bucket: "b", Endpoint: "http://e", PasswdFile: "/p"}, "bucket and subdir"},
+		{"no endpoint", Spec{Bucket: "b", Subdir: "a", PasswdFile: "/p"}, "endpoint"},
+		{"no passwd file", Spec{Bucket: "b", Subdir: "a", Endpoint: "http://e"}, "passwd file"},
+		{"no keys", Spec{Bucket: "b", Subdir: "a", Endpoint: "http://e", PasswdFile: "/p"}, "access key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := m.MountWithSpec(t.TempDir(), "v1", tc.spec)
+			if err == nil {
+				t.Fatal("MountWithSpec succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -317,6 +472,8 @@ func TestMountRunsBeforeMountOnlyWhenMounting(t *testing.T) {
 	m := New(&config.Config{
 		Credentials: config.CredentialsInstanceRole,
 		Bucket:      "b",
+		Endpoint:    "http://minio:9000",
+		Region:      "us-east-1",
 		PasswdFile:  passwd,
 	})
 	calls := 0

@@ -8,7 +8,10 @@ package s3api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -24,6 +27,19 @@ type Client struct {
 	bucket string
 	region string
 	inner  *minio.Client
+}
+
+// Options selects the bucket and credentials for one client. Dynamic volumes
+// build their own credentials from a credential reference; legacy volumes use
+// the plugin configuration.
+type Options struct {
+	Bucket          string
+	Endpoint        string
+	Region          string
+	Addressing      config.Addressing
+	AccessKeyID     string
+	SecretAccessKey string
+	InstanceRole    bool
 }
 
 // imdsEndpoint is where the instance-role provider asks for credentials;
@@ -75,32 +91,61 @@ func probeInstanceRole(ctx context.Context, creds *credentials.Credentials) erro
 // New builds an S3 client from plugin config. With the instance role it
 // fetches credentials before returning; see CheckInstanceRole.
 func New(ctx context.Context, cfg *config.Config) (*Client, error) {
-	host, secure, err := ParseEndpoint(cfg.Endpoint)
+	return NewFor(ctx, Options{
+		Bucket:          cfg.Bucket,
+		Endpoint:        cfg.Endpoint,
+		Region:          cfg.Region,
+		Addressing:      cfg.Addressing,
+		AccessKeyID:     cfg.AccessKeyID,
+		SecretAccessKey: cfg.SecretAccessKey,
+		InstanceRole:    cfg.UseInstanceRole(),
+	})
+}
+
+// NewFor builds an S3 client for one bucket and credential set.
+func NewFor(ctx context.Context, opts Options) (*Client, error) {
+	if opts.Bucket == "" {
+		return nil, fmt.Errorf("s3: bucket is required")
+	}
+	host, secure, err := ParseEndpoint(opts.Endpoint)
 	if err != nil {
 		return nil, err
 	}
 
+	// minio-go's false value in the old options mapped to Auto; virtual must be
+	// explicit (BucketLookupDNS), otherwise an endpoint that also supports
+	// path-style could still be addressed the wrong way.
 	lookup := minio.BucketLookupAuto
-	if cfg.PathStyle {
+	switch opts.Addressing {
+	case config.AddressingPath:
 		lookup = minio.BucketLookupPath
+	case config.AddressingVirtual:
+		lookup = minio.BucketLookupDNS
 	}
 
-	creds := credentialsFor(cfg)
-	if cfg.UseInstanceRole() {
+	var creds *credentials.Credentials
+	if opts.InstanceRole {
+		creds = credentials.NewIAM(imdsEndpoint)
 		if err := probeInstanceRole(ctx, creds); err != nil {
 			return nil, err
 		}
+	} else {
+		if opts.AccessKeyID == "" || opts.SecretAccessKey == "" {
+			return nil, fmt.Errorf("s3: access key and secret are required for bucket %q", opts.Bucket)
+		}
+		creds = credentials.NewStaticV4(opts.AccessKeyID, opts.SecretAccessKey, "")
 	}
+
 	inner, err := minio.New(host, &minio.Options{
 		Creds:        creds,
 		Secure:       secure,
-		Region:       cfg.Region,
+		Region:       opts.Region,
 		BucketLookup: lookup,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("s3 client for %q: %w", cfg.Endpoint, err)
+		return nil, fmt.Errorf("s3 client for %q: %w", opts.Endpoint, err)
 	}
-	return &Client{bucket: cfg.Bucket, region: cfg.Region, inner: inner}, nil
+	return &Client{bucket: opts.Bucket, region: opts.Region, inner: inner}, nil
 }
 
 // ParseEndpoint splits an endpoint URL into the host:port minio-go expects and
@@ -155,9 +200,21 @@ func BucketCreateRegion(region string) string {
 	}
 }
 
+// BucketExists reports whether the bucket exists. Dynamic volumes use an
+// existing user bucket, so create fails clearly instead of creating one by
+// mistake when the name is wrong.
+func (c *Client) BucketExists(ctx context.Context) (bool, error) {
+	exists, err := c.inner.BucketExists(ctx, c.bucket)
+	if err != nil {
+		return false, fmt.Errorf("head bucket %q: %w", c.bucket, err)
+	}
+	return exists, nil
+}
+
 // EnsureBucket creates the bucket when the store does not have it yet (typical
 // for a bundled MinIO). An existing bucket is left untouched, so the credentials
-// do not need s3:CreateBucket in the common case.
+// do not need s3:CreateBucket in the common case. Only legacy volumes call
+// this; dynamic buckets are user-owned and must already exist.
 func (c *Client) EnsureBucket(ctx context.Context) error {
 	exists, err := c.inner.BucketExists(ctx, c.bucket)
 	if err != nil {
@@ -181,27 +238,65 @@ func (c *Client) EnsureBucket(ctx context.Context) error {
 	return nil
 }
 
-// CreateVolumeDir PUTs the trailing-slash directory object s3fs uses for mkdir
-// (key "volumes/<volumeID>/").
+// CreatePrefix PUTs the trailing-slash directory object s3fs uses for mkdir.
 //
 // Object storage has no real directories; s3fs 1.91+ stats this key when
-// mounting bucket:/volumes/<volumeID>. A sibling ".keep" file is a different key
-// and does not satisfy that stat.
-func (c *Client) CreateVolumeDir(ctx context.Context, volumeID string) error {
-	key := config.VolumePrefix(volumeID)
-	_, err := c.inner.PutObject(ctx, c.bucket, key, bytes.NewReader(nil), 0, minio.PutObjectOptions{})
-	if err != nil {
-		return fmt.Errorf("put object %q: %w", key, err)
+// mounting bucket:/<prefix>. A sibling ".keep" file is a different key and does
+// not satisfy that stat.
+func (c *Client) CreatePrefix(ctx context.Context, prefix string) error {
+	if err := checkPrefix(prefix); err != nil {
+		return err
+	}
+	if _, err := c.inner.PutObject(ctx, c.bucket, prefix, bytes.NewReader(nil), 0, minio.PutObjectOptions{}); err != nil {
+		return fmt.Errorf("put object %q: %w", prefix, err)
 	}
 	return nil
 }
 
-// RemoveVolumeDir recursively deletes every object under volumes/<volumeID>/.
+// PrefixHasData reports whether any object other than the empty directory
+// marker itself exists under prefix.
+//
+// Dynamic create accepts only an empty prefix. CubeMaster can call Destroy with
+// the binding from a create whose database write then failed; that rollback
+// recursively deletes the prefix. Adopting objects that already lived there
+// would turn that compensating delete into data loss, so create refuses a
+// non-empty prefix instead. The zero-byte "prefix/" object that an earlier
+// failed attempt left behind is not data and does not block the retry.
+func (c *Client) PrefixHasData(ctx context.Context, prefix string) (bool, error) {
+	if err := checkPrefix(prefix); err != nil {
+		return false, err
+	}
+
+	listCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	objects := c.inner.ListObjects(listCtx, c.bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+	for obj := range objects {
+		if obj.Err != nil {
+			if IsNotFound(obj.Err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("list prefix %q: %w", prefix, obj.Err)
+		}
+		if obj.Key == prefix && obj.Size == 0 {
+			continue // the directory object Create itself writes
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// RemovePrefix recursively deletes every object under prefix.
 //
 // Only an explicitly missing bucket or key is ignored; every other failure must
 // propagate so CubeMaster does not drop the volume record while objects remain.
-func (c *Client) RemoveVolumeDir(ctx context.Context, volumeID string) error {
-	prefix := config.VolumePrefix(volumeID)
+func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
+	if err := checkPrefix(prefix); err != nil {
+		return err
+	}
 
 	listCtx, cancelList := context.WithCancel(ctx)
 	defer cancelList()
@@ -255,6 +350,114 @@ func (c *Client) RemoveVolumeDir(ctx context.Context, volumeID string) error {
 	}
 }
 
+// ErrPreconditionFailed reports that a conditional PUT lost a race with
+// another writer. The registry CAS loop retries after re-reading.
+var ErrPreconditionFailed = errors.New("precondition failed")
+
+// ReadClaims returns the ownership registry together with its ETag, which is
+// what the compare-and-swap write needs. A missing object is not an error: it
+// returns nil data and empty ETag, meaning "create it with If-None-Match: *".
+func (c *Client) ReadClaims(ctx context.Context, key string) ([]byte, string, error) {
+	obj, err := c.inner.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("get object %q: %w", key, err)
+	}
+	defer obj.Close()
+
+	// Read first so the body and ETag come from the same GET response. Stat
+	// before Read would issue HEAD, then the SDK pins GET to that HEAD's ETag:
+	// a concurrent registry update in between would fail the read with 412.
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("read object %q: %w", key, err)
+	}
+	// The completed read cached this response's metadata on obj; this does
+	// not issue a separate HEAD that could observe a newer registry version.
+	info, err := obj.Stat()
+	if err != nil {
+		return nil, "", fmt.Errorf("stat object %q: %w", key, err)
+	}
+	return data, info.ETag, nil
+}
+
+// ErrConditionalWritesUnsupported reports that the endpoint rejected the
+// If-Match / If-None-Match header the ownership registry needs, typically with
+// 501 NotImplemented. Dynamic create fails closed on this error: without a
+// compare-and-swap, two CubeMaster instances could both claim overlapping
+// prefixes and one claim would silently overwrite the other.
+var ErrConditionalWritesUnsupported = errors.New(
+	"the S3 endpoint does not support conditional PUT (If-Match / If-None-Match); " +
+		"dynamic volumes need it so two CubeMaster instances cannot claim overlapping prefixes")
+
+// WriteClaims stores the registry under a conditional PUT: an empty etag means
+// "only if absent", otherwise "only if it still has this etag". A lost race
+// returns ErrPreconditionFailed instead of overwriting another writer's claims.
+//
+// This makes check-and-register atomic across CubeMaster instances on backends
+// that honour If-Match / If-None-Match on PUT (AWS S3, MinIO, R2). A backend
+// that rejects the conditional header (501) returns
+// ErrConditionalWritesUnsupported; the caller must refuse the dynamic create.
+// There is deliberately no unconditional-write fallback: a plain PUT replays a
+// stale registry snapshot and can drop another master's claim, which is the
+// lost update the registry exists to prevent.
+func (c *Client) WriteClaims(ctx context.Context, key string, data []byte, etag string) error {
+	if key == "" {
+		return fmt.Errorf("write claims: key is empty")
+	}
+	opts := minio.PutObjectOptions{ContentType: "application/json"}
+	if etag == "" {
+		opts.SetMatchETagExcept("*")
+	} else {
+		opts.SetMatchETag(etag)
+	}
+	_, err := c.inner.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), opts)
+	return claimsWriteError(key, err)
+}
+
+// claimsWriteError classifies a conditional PUT result. Kept separate so the
+// 501 and 412 outcomes are unit-testable without an S3 server.
+func claimsWriteError(key string, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case IsPreconditionFailed(err):
+		return ErrPreconditionFailed
+	case isNotImplemented(err):
+		return fmt.Errorf("put object %q: %w", key, ErrConditionalWritesUnsupported)
+	default:
+		return fmt.Errorf("put object %q: %w", key, err)
+	}
+}
+
+// isNotImplemented reports whether the backend rejected an unsupported header
+// or method with 501 NotImplemented.
+func isNotImplemented(err error) bool {
+	resp := minio.ToErrorResponse(err)
+	return resp.StatusCode == http.StatusNotImplemented || resp.Code == "NotImplemented"
+}
+
+// checkPrefix is the last line of defence before a recursive delete: only a
+// non-empty key ending in "/" is accepted, so a malformed binding can never
+// address the whole bucket.
+func checkPrefix(prefix string) error {
+	if prefix == "" || prefix == "/" {
+		return fmt.Errorf("prefix is empty")
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		return fmt.Errorf("prefix %q must end with /", prefix)
+	}
+	if strings.HasPrefix(prefix, "/") {
+		return fmt.Errorf("prefix %q must be relative", prefix)
+	}
+	return nil
+}
+
 // IsBucketAlreadyExists reports whether err means the bucket is already there.
 func IsBucketAlreadyExists(err error) bool {
 	switch minio.ToErrorResponse(err).Code {
@@ -274,4 +477,13 @@ func IsNotFound(err error) bool {
 		return true
 	}
 	return resp.StatusCode == 404
+}
+
+// IsPreconditionFailed reports whether err is a lost conditional-PUT race.
+func IsPreconditionFailed(err error) bool {
+	if errors.Is(err, ErrPreconditionFailed) {
+		return true
+	}
+	resp := minio.ToErrorResponse(err)
+	return resp.StatusCode == http.StatusPreconditionFailed || resp.Code == "PreconditionFailed"
 }

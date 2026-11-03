@@ -158,7 +158,7 @@ func doCreate(ctx context.Context, opts *options) error {
 	if err := client.EnsureBucket(ctx); err != nil {
 		return err
 	}
-	if err := client.CreateVolumeDir(ctx, opts.volumeID); err != nil {
+	if err := client.CreatePrefix(ctx, config.VolumePrefix(opts.volumeID)); err != nil {
 		return err
 	}
 
@@ -183,7 +183,7 @@ func doDestroy(ctx context.Context, opts *options) error {
 	if err != nil {
 		return err
 	}
-	if err := client.RemoveVolumeDir(ctx, opts.volumeID); err != nil {
+	if err := client.RemovePrefix(ctx, config.VolumePrefix(opts.volumeID)); err != nil {
 		return err
 	}
 	emit(statusResponse{})
