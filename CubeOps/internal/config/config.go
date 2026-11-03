@@ -70,6 +70,7 @@ type Config struct {
 	RedisPort             int    `yaml:"redis_port"`
 	RedisDB               int    `yaml:"redis_db"`
 	RedisPassword         string `yaml:"redis_password"`
+	RedisClusterNodes     string `yaml:"redis_cluster_nodes"`
 	RedisMasterName       string `yaml:"redis_master_name"`
 	RedisSentinelNodes    string `yaml:"redis_sentinel_nodes"`
 	RedisSentinelPassword string `yaml:"redis_sentinel_password"`
@@ -514,6 +515,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("REDIS_PASSWORD"); v != "" {
 		cfg.RedisPassword = v
+	}
+	if v := os.Getenv("REDIS_CLUSTER_NODES"); v != "" {
+		cfg.RedisClusterNodes = v
 	}
 	if v := os.Getenv("REDIS_MASTER_NAME"); v != "" {
 		cfg.RedisMasterName = v
