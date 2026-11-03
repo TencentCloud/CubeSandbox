@@ -2492,10 +2492,8 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let client = super::CubeMasterClient::new(
-            format!("http://{address}"),
-            reqwest::Client::new(),
-        );
+        let client =
+            super::CubeMasterClient::new(format!("http://{address}"), reqwest::Client::new());
         let response = client
             .get_sandbox_exposed_port("sb-test", 8080)
             .await
