@@ -4,11 +4,11 @@
 
 Cube 的 JuiceFS 存储方案架构见 [JuiceFS 跨机存储架构](/zh/architecture/juicefs-storage)，性能测试数据见 [JuiceFS 性能测试](/zh/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark)。
 
-关于 JuiceFS 的更多内部设计见 JuiceFS 官方的[技术架构](https://juicefs.com/docs/zh/community/architecture/)。
+> 关于 JuiceFS 的更多内部设计见 JuiceFS 官方的[技术架构](https://juicefs.com/docs/zh/community/architecture/)。
 
 ## 前置条件
 
-- 所有节点需要 FUSE 支持
+- 所有节点的内核需要 FUSE 支持
 - 所有节点能够访问同一个 JuiceFS 元数据引擎和对象存储。
 
 ## 安装部署
@@ -29,9 +29,9 @@ vim /usr/local/services/cubetoolbox/.one-click.env
 
 首先在应在控制节点配置信息并初始化 JuiceFS 文件系统，然后再在各计算节点进行配置。
 
-Cube 默认使用 Redis 作为 JuiceFS 元数据引擎，使用 MinIO 作为对象存储。
+Cube 默认使用控制节点上的 Redis 作为 JuiceFS 元数据引擎，使用控制节点上的 MinIO 作为对象存储。
 
-> 后续如需切换其他元数据引擎或对象存储，见下文[更换存储](#更换存储)。
+> **该方案仅适用于快速上手尝试，后续如需在生产环境部署，请切换到其他元数据引擎或对象存储**，见下文[更换存储](#更换存储)。
 
 设置 `ONE_CLICK_ENABLE_JFS=1`：
 
@@ -65,9 +65,7 @@ ONE_CLICK_ENABLE_JFS=1
 sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh
 ```
 
-`ONE_CLICK_ENABLE_JFS` 及上述路径配置会保存到 `.one-click.env`。后续升级即使替换了
-Cubelet 的默认 `config.toml`，Cubelet 启动脚本也会在进程启动前自动恢复 `[cow.jfs]`
-的 `enable`、`mount_path`、`root` 和 `cache_dir`，无需再次手工修改配置。
+> 执行了 mount.sh 脚本后 JuiceFS 挂载将会开机自启。
 
 ### 在控制节点检查
 
@@ -77,7 +75,7 @@ Cubelet 的默认 `config.toml`，Cubelet 启动脚本也会在进程启动前�
 sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/check.sh
 ```
 
-输出类似如下内容：
+应当输出类似如下内容：
 
 ```bash
 JuiceFS volume
@@ -157,13 +155,15 @@ CUBE_JFS_META_PASSWORD="password"
 
 新集群直接填写该地址后执行控制节点初始化即可。已有卷迁移时，先停止写入并卸载所有客户端，再用 `juicefs dump` 从旧元数据引擎导出、用 `juicefs load` 导入一个空的新元数据引擎，随后更新所有节点的 `CUBE_JFS_META_URL` 并重新挂载。对象存储密钥默认不会包含在 dump 中，需要在新元数据引擎上重新配置。参考 JuiceFS 官方的[元数据备份与迁移](https://juicefs.com/docs/zh/community/metadata_dump_load/)文档。
 
+> JuiceFS 的元数据存储非常重要，如果在生产环境部署，推荐使用 Redis 集群以降低数据丢失的风险。
+
 ## 镜像分发
 
 目标节点默认从镜像仓库拉取 `juicedata/mount:ce-v1.4.1`。
 
 如果是离线环境，可以提前 `docker load` 下载镜像，并通过修改配置文件中的 `CUBE_JFS_IMAGE` 指向本地镜像名。
 
-升级镜像时应让所有节点使用同一个固定版本。
+非必要无需升级 JuiceFS 镜像，应让所有节点使用同一个固定版本。
 
 ## 排障
 
