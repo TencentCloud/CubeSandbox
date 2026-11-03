@@ -1566,6 +1566,21 @@ one_click_patch_conf_redis_endpoint() {
   local restore_bundled="${3:-0}"
   [[ -f "${cfg}" ]] || die "Redis config not found for ${component}: ${cfg}"
 
+  # Remove stale Cluster config before selecting another mode.
+  one_click_sed_in_place "${cfg}" -e '/^  cluster_nodes:/d'
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    [[ -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" && -z "${CUBE_EXTERNAL_REDIS_HOST:-}" ]] \
+      || die "Redis Cluster cannot be combined with a standalone host or Sentinel"
+    [[ "$(one_click_redis_db)" == "0" ]] || die "Redis Cluster requires DB 0"
+    local nodes_esc pwd_esc
+    nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}")"
+    pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD:-}")"
+    one_click_sed_in_place "${cfg}" \
+      -e '/^  master_name:/d' -e '/^  sentinel_nodes:/d' -e '/^  sentinel_password:/d' \
+      -e "/^redis:/,/^[^[:space:]#]/{s|^  nodes:.*|  nodes: \"\"\\
+  cluster_nodes: \"${nodes_esc}\"|; s|^  password:.*|  password: \"${pwd_esc}\"|;}"
+    return
+  fi
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] \
       || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
@@ -1649,6 +1664,32 @@ persist_one_click_redis_runtime_env() {
     CUBE_PROXY_REGISTRY_REDIS_DB \
     CUBE_LCM_REDIS_DB
 
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    [[ -z "${CUBE_EXTERNAL_REDIS_HOST:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] || die "Redis Cluster cannot use a standalone host or Sentinel"
+    [[ "${redis_db}" == "0" ]] || die "Redis Cluster requires DB 0"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_CLUSTER_NODES" "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    # Unified Cluster config replaces per-component endpoint overrides from
+    # older installs, including exported variables in this install process.
+    local stale_key
+    for stale_key in \
+      CUBE_PROXY_REDIS_IP CUBE_PROXY_REDIS_PORT CUBE_PROXY_REDIS_PASSWORD CUBE_PROXY_REDIS_CLUSTER_NODES \
+      CUBE_PROXY_REDIS_MASTER_NAME CUBE_PROXY_REDIS_SENTINEL_NODES CUBE_PROXY_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REGISTRY_REDIS_HOST CUBE_PROXY_REGISTRY_REDIS_PORT CUBE_PROXY_REGISTRY_REDIS_PASSWORD \
+      CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME \
+      CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD \
+      CUBE_LCM_REDIS_ADDR CUBE_LCM_REDIS_HOST CUBE_LCM_REDIS_PORT CUBE_LCM_REDIS_PASSWORD \
+      CUBE_LCM_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_MASTER_NAME CUBE_LCM_REDIS_SENTINEL_NODES CUBE_LCM_REDIS_SENTINEL_PASSWORD; do
+      _remove_env_keys "${env_file}" "${stale_key}"
+      unset "${stale_key}"
+    done
+    _remove_env_keys "${env_file}" CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_PORT \
+      CUBE_EXTERNAL_REDIS_MASTER_NAME CUBE_EXTERNAL_REDIS_SENTINEL_NODES CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REDIS_MASTER_NAME CUBE_PROXY_REDIS_SENTINEL_NODES CUBE_PROXY_REDIS_SENTINEL_PASSWORD
+    return
+  fi
+  _remove_env_keys "${env_file}" CUBE_EXTERNAL_REDIS_CLUSTER_NODES CUBE_PROXY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_CLUSTER_NODES
+  unset CUBE_PROXY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_CLUSTER_NODES
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"

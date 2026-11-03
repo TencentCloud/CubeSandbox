@@ -367,6 +367,10 @@ During installation, runtime files are prepared in this directory and the follow
 - `redis:7-alpine`
 - `minio` (S3-compatible volume backend; explicit via `CUBE_SANDBOX_MINIO_ENABLED`, default on)
 
+### External native Redis Cluster
+
+Set `CUBE_EXTERNAL_REDIS_CLUSTER_NODES` to comma-separated `host:port` seed endpoints, set `CUBE_EXTERNAL_REDIS_DB=0`, and clear fixed standalone Redis and Sentinel settings. The deployment scripts connect to an existing Cluster. See the [configuration and migration guide](../../docs/guide/redis-cluster.md) for component settings, consistency limits, and rollout checks.
+
 ### Using an external MySQL / PostgreSQL / Redis
 
 To point CubeSandbox at an existing MySQL, PostgreSQL, or Redis server instead

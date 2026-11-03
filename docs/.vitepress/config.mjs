@@ -280,7 +280,8 @@ export default withMermaid(defineConfig({
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
-                { text: 'Component multi-version', link: '/guide/component-multiversion' }
+                { text: 'Component multi-version', link: '/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/guide/redis-cluster' }
               ]
             },
             {
@@ -509,7 +510,8 @@ export default withMermaid(defineConfig({
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
-                { text: '组件多版本', link: '/zh/guide/component-multiversion' }
+                { text: '组件多版本', link: '/zh/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/zh/guide/redis-cluster' }
               ]
             },
             {

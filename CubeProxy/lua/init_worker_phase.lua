@@ -23,6 +23,7 @@ proxy_registry.setup({
     redis_port  = tonumber(os.getenv("CUBE_PROXY_REGISTRY_REDIS_PORT") or "") or 6379,
     redis_pd    = os.getenv("CUBE_PROXY_REGISTRY_REDIS_PASSWORD") or "",
     redis_index = tonumber(os.getenv("CUBE_PROXY_REGISTRY_REDIS_DB") or "") or 0,
+    redis_cluster_nodes = os.getenv("CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES"),
     redis_master_name = os.getenv("CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME"),
     redis_sentinel_nodes = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES"),
     redis_sentinel_pd = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD"),

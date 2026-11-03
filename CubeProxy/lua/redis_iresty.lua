@@ -317,6 +317,22 @@ function _M.commit_pipeline(self)
         self._reqs = nil
     end
 
+    if self.redis_cluster_nodes ~= "" then
+        local cluster = require "redis_cluster"
+        local results = {}
+        for _, req in ipairs(reqs) do
+            local cmd = req[1]
+            if cmd == "multi" or cmd == "exec" or cmd == "watch" or cmd == "unwatch" or cmd == "discard" then
+                return {}, "Redis Cluster pipelines do not support transactions"
+            end
+        end
+        for i, req in ipairs(reqs) do
+            local value, err = cluster.execute(self, req[1], {unpack(req, 2)})
+            if err then results[i] = {false, err}
+            elseif not is_redis_null(value) then results[i] = value end
+        end
+        return results
+    end
     local results, err, readonly_at = exec_pipeline(self, reqs)
     if sentinel_mode(self) and readonly_at then
         -- Replay only the suffix starting at the first READONLY reply. Earlier
@@ -396,6 +412,11 @@ local function do_command(self, cmd, ...)
         return
     end
 
+    if self.redis_cluster_nodes ~= "" then
+        local result, err = require("redis_cluster").execute(self, cmd, {...})
+        if result == ngx.null then result = nil end
+        return result, err
+    end
     local result, err = exec_command(self, cmd, ...)
     -- At most one retry after Sentinel failover signals. READONLY means the
     -- write did not apply on the demoted replica, so retrying is safe.
@@ -426,6 +447,7 @@ function _M.new(self, opts)
         redis_ip = opts.redis_ip or "",
         redis_port = opts.redis_port or 0,
         redis_pd = opts.redis_pd or "",
+        redis_cluster_nodes = opts.redis_cluster_nodes or "",
         redis_master_name = opts.redis_master_name or "",
         redis_sentinel_nodes = opts.redis_sentinel_nodes or "",
         redis_sentinel_pd = opts.redis_sentinel_pd or "",
