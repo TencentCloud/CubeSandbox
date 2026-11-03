@@ -1,0 +1,146 @@
+[
+  {
+    "probe": "actual Pod network namespace",
+    "component": "lifecycle-manager",
+    "endpoint": "redis-a:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "lifecycle-manager",
+    "endpoint": "redis-a:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "lifecycle-manager",
+    "endpoint": "redis-b:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "lifecycle-manager",
+    "endpoint": "redis-b:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "lifecycle-manager",
+    "endpoint": "redis-c:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "lifecycle-manager",
+    "endpoint": "redis-c:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "master",
+    "endpoint": "redis-a:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "master",
+    "endpoint": "redis-a:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "master",
+    "endpoint": "redis-b:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "master",
+    "endpoint": "redis-b:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "master",
+    "endpoint": "redis-c:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "master",
+    "endpoint": "redis-c:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "ops",
+    "endpoint": "redis-a:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "ops",
+    "endpoint": "redis-a:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "ops",
+    "endpoint": "redis-b:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "ops",
+    "endpoint": "redis-b:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "ops",
+    "endpoint": "redis-c:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "ops",
+    "endpoint": "redis-c:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "cube-proxy",
+    "endpoint": "redis-a:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "cube-proxy",
+    "endpoint": "redis-a:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "cube-proxy",
+    "endpoint": "redis-b:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "cube-proxy",
+    "endpoint": "redis-b:6381",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "cube-proxy",
+    "endpoint": "redis-c:6380",
+    "reachable": true
+  },
+  {
+    "probe": "actual Pod network namespace",
+    "component": "cube-proxy",
+    "endpoint": "redis-c:6381",
+    "reachable": true
+  }
+]

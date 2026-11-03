@@ -1,0 +1,169 @@
+{
+  "provenance": "Recorded final lifecycle after deploying the corrected Ops binary; request bodies reconstructed from the executed smoke drivers and responses extracted from retained run records.",
+  "redactions": "Service addresses, request IDs, sandbox IDs, worker addresses, template identifiers, run labels and timestamps are omitted or replaced consistently. Credentials and unrelated response metadata are omitted. Status codes and process outcomes are preserved.",
+  "steps": [
+    {
+      "step": "create",
+      "request": {
+        "method": "POST",
+        "url": "${MASTER_URL}/cube/sandbox",
+        "body": {
+          "requestID": "<create-request-id>",
+          "instance_type": "cubebox",
+          "timeout": 600,
+          "auto_resume": true,
+          "auto_pause": true,
+          "backend": "s3",
+          "annotations": {
+            "cube.master.appsnapshot.template.id": "<template-id>",
+            "cube.master.appsnapshot.template.version": "<template-version>"
+          },
+          "labels": {
+            "validation": "<run-label>"
+          }
+        }
+      },
+      "response_excerpt": {
+        "RequestID": "<create-request-id>",
+        "ret": {
+          "ret_code": 200,
+          "ret_msg": ""
+        },
+        "sandbox_id": "<sandbox-id>",
+        "sandbox_ip": "<sandbox-ip>",
+        "host_id": "<worker-host>",
+        "host_ip": "<worker-host>"
+      }
+    },
+    {
+      "step": "route-after-create",
+      "request": {
+        "method": "POST",
+        "url": "${PROXY_URL}/sandbox/<sandbox-id>/49983/process.Process/Start",
+        "headers": {
+          "Content-Type": "application/connect+json",
+          "Connect-Protocol-Version": "1",
+          "Connect-Timeout-Ms": "15000",
+          "X-User": "root"
+        },
+        "framing": "One zero flag byte, a four-byte big-endian JSON byte count, then UTF-8 JSON",
+        "body": {
+          "process": {
+            "cmd": "/bin/sh",
+            "args": [
+              "-c",
+              "printf redis-cluster-route-after-create-<sandbox-short-id>"
+            ],
+            "envs": {},
+            "cwd": "/tmp"
+          },
+          "stdin": false
+        }
+      },
+      "response_excerpt": {
+        "http_status": 200,
+        "decoded_stdout": "redis-cluster-route-after-create-<sandbox-short-id>",
+        "process_end": {
+          "exited": true,
+          "status": "exit status 0"
+        },
+        "observed_exit_code": 0
+      }
+    },
+    {
+      "step": "pause",
+      "request": {
+        "method": "POST",
+        "url": "${MASTER_URL}/cube/sandbox/update",
+        "body": {
+          "requestID": "<pause-request-id>",
+          "sandbox_id": "<sandbox-id>",
+          "instance_type": "cubebox",
+          "action": "pause"
+        }
+      },
+      "response_excerpt": {
+        "ret": {
+          "ret_code": 200,
+          "ret_msg": ""
+        }
+      }
+    },
+    {
+      "step": "resume",
+      "request": {
+        "method": "POST",
+        "url": "${MASTER_URL}/cube/sandbox/update",
+        "body": {
+          "requestID": "<resume-request-id>",
+          "sandbox_id": "<sandbox-id>",
+          "instance_type": "cubebox",
+          "action": "resume"
+        }
+      },
+      "response_excerpt": {
+        "ret": {
+          "ret_code": 200,
+          "ret_msg": ""
+        }
+      }
+    },
+    {
+      "step": "route-after-resume",
+      "request": {
+        "method": "POST",
+        "url": "${PROXY_URL}/sandbox/<sandbox-id>/49983/process.Process/Start",
+        "headers": {
+          "Content-Type": "application/connect+json",
+          "Connect-Protocol-Version": "1",
+          "Connect-Timeout-Ms": "15000",
+          "X-User": "root"
+        },
+        "framing": "One zero flag byte, a four-byte big-endian JSON byte count, then UTF-8 JSON",
+        "body": {
+          "process": {
+            "cmd": "/bin/sh",
+            "args": [
+              "-c",
+              "printf redis-cluster-route-after-resume-<sandbox-short-id>"
+            ],
+            "envs": {},
+            "cwd": "/tmp"
+          },
+          "stdin": false
+        }
+      },
+      "response_excerpt": {
+        "http_status": 200,
+        "decoded_stdout": "redis-cluster-route-after-resume-<sandbox-short-id>",
+        "process_end": {
+          "exited": true,
+          "status": "exit status 0"
+        },
+        "observed_exit_code": 0
+      }
+    },
+    {
+      "step": "delete",
+      "request": {
+        "method": "DELETE",
+        "url": "${MASTER_URL}/cube/sandbox",
+        "body": {
+          "requestID": "<delete-request-id>",
+          "sandbox_id": "<sandbox-id>",
+          "instance_type": "cubebox",
+          "host_ip": "<worker-host>",
+          "sync": true
+        }
+      },
+      "response_excerpt": {
+        "requestID": "<delete-request-id>",
+        "ret": {
+          "ret_code": 200,
+          "ret_msg": "Success"
+        },
+        "sandbox_id": "<sandbox-id>"
+      }
+    }
+  ]
+}
