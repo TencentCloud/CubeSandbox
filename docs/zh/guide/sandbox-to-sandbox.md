@@ -155,9 +155,10 @@ endpoint = sandbox_b.get_exposed_port_endpoint(8080)
 # "9.135.152.214:20006"——恒为 hostIP:hostPort 形式
 ```
 
-该端点对跨节点、宿主侧、沙箱内调用方一致可用：同节点沙箱流量由 CubeVS
-hairpin 回环到主网卡 ingress 完成投递。Go / Node SDK 同样有
-`GetExposedPortEndpoint` / `getExposedPortEndpoint`。
+该端点适用于跨节点和沙箱内调用方：同节点沙箱流量由 CubeVS hairpin 回环
+到主网卡 ingress 完成投递。如果调用进程运行在目标节点本机，请改用
+CubeProxy Host 路由——host-local 流量不经过 from_world/hairpin DNAT 路径。
+Go / Node SDK 同样有 `GetExposedPortEndpoint` / `getExposedPortEndpoint`。
 
 **节点版本要求**：同节点沙箱互访依赖含 hairpin 的 CubeVS（与本 API 同版本
 发布）。旧节点没有同节点访问能力（既无 hostPort 也无 tap 直连），升级节点

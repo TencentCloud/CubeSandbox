@@ -337,6 +337,13 @@ def _wait_host_port_endpoint(sandbox_b, config: SdkE2EConfig) -> str:
     )
 
 
+def _sandbox_host_id(sandbox) -> str:
+    """Return CubeAPI's clientID (the node that currently hosts the sandbox)."""
+    info = sandbox.info()
+    raw = getattr(info, "raw", info)
+    return str(raw.get("clientID", "")).strip()
+
+
 def test_cubeproxy_host_routing_between_sandboxes(
     sdk_sandbox, sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
 ):
@@ -448,6 +455,46 @@ def test_host_port_mapping_between_sandboxes(
             )
             assert code == "200" and SERVICE_BODY in body, (
                 f"A should reach B via {endpoint}; "
+                f"rc={rc} code={code!r} body={body[:120]!r}"
+            )
+        finally:
+            safe_kill(sandbox_a, sdk_e2e_config)
+    finally:
+        safe_kill(sandbox_b, sdk_e2e_config)
+
+
+def test_host_port_mapping_same_node_hairpin(
+    sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
+):
+    """Co-located A/B must reach B through the same-node hairpin path.
+
+    Unlike the placement-independent case above, this case explicitly checks
+    the two clientIDs and only runs when A and B share a node.
+    """
+    if not s2s_expose_template_id:
+        pytest.skip("host-port mapping cases require a CubeSandbox template build")
+    sandbox_b = _create_sandbox(
+        sdk_backend, sdk_e2e_config, request, template_id=s2s_expose_template_id
+    )
+    try:
+        sandbox_a = _create_sandbox(sdk_backend, sdk_e2e_config, request)
+        try:
+            a_host = _sandbox_host_id(sandbox_a)
+            b_host = _sandbox_host_id(sandbox_b)
+            if not a_host or not b_host:
+                pytest.skip("clientID is unavailable for same-node placement assertion")
+            if a_host != b_host:
+                pytest.skip(
+                    f"same-node hairpin requires co-located A/B; got A={a_host} B={b_host}"
+                )
+
+            _start_marker_http_server(sandbox_b, sdk_e2e_config)
+            endpoint = _wait_host_port_endpoint(sandbox_b, sdk_e2e_config)
+            rc, code, body = _curl_until_ready(
+                sandbox_a, sdk_e2e_config, f"http://{endpoint}/"
+            )
+            assert rc == 0 and code == "200" and SERVICE_BODY in body, (
+                f"co-located A should reach B through hairpin at {endpoint}; "
                 f"rc={rc} code={code!r} body={body[:120]!r}"
             )
         finally:

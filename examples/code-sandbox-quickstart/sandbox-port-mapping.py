@@ -24,8 +24,10 @@ Exposed ports come from the TEMPLATE (`cubemastercli tpl create-from-image
 true (shipped default). The host port is discovered with the CubeSandbox SDK:
 
     endpoint = sandbox_b.get_exposed_port_endpoint(8080)
-    # "<hostIP>:<hostPort>", usable by off-node, host-side, and in-sandbox
-    # callers alike (same-node callers are served by CubeVS hairpin).
+    # "<hostIP>:<hostPort>", usable by off-node and in-sandbox callers
+    # (same-node callers are served by CubeVS hairpin). For a process running
+    # on the target node itself, use CubeProxy Host routing instead:
+    # host-local traffic does not traverse the from_world/hairpin DNAT path.
 
 Required env (see .env.example):
     CUBE_TEMPLATE_ID     template used for both sandboxes

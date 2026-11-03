@@ -170,10 +170,12 @@ endpoint = sandbox_b.get_exposed_port_endpoint(8080)
 # "9.135.152.214:20006" — always the hostIP:hostPort form
 ```
 
-The endpoint works identically for off-node, host-side, and in-sandbox
-callers: same-node sandbox traffic is looped back through the primary NIC
-ingress by CubeVS hairpin. The Go / Node SDKs expose the same method as
-`GetExposedPortEndpoint` / `getExposedPortEndpoint`.
+The endpoint works for off-node and in-sandbox callers: same-node sandbox
+traffic is looped back through the primary NIC ingress by CubeVS hairpin.
+For processes running on the target node itself, use CubeProxy Host routing
+instead — host-local traffic does not traverse the from_world/hairpin DNAT
+path. The Go / Node SDKs expose the same method as `GetExposedPortEndpoint`
+/ `getExposedPortEndpoint`.
 
 **Node version requirement**: same-node sandbox-to-sandbox access requires a
 hairpin-capable CubeVS (shipped in the same release as this API). Older nodes
