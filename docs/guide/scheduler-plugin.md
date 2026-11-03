@@ -118,11 +118,11 @@ A gRPC plugin configured as a filter:
           circuit_breaker_cooldown: 30s
 ```
 
-The protocol lives in `pkgs/proto/services/schedulerplugin/v1/plugin.proto`. Every request carries the full frozen snapshot, so plugin servers can be stateless and concurrent attempts share one connection. Unix Domain Socket is recommended in production. A runnable example is in `CubeMaster/examples/scheduler-plugin`:
+The protocol lives in `pkgs/proto/services/schedulerplugin/v1/plugin.proto`. Every request carries the full frozen snapshot, so plugin servers can be stateless and concurrent attempts share one connection. Unix Domain Socket is recommended in production. A runnable example is in `examples/scheduler-plugin`:
 
 ```bash
-cd CubeMaster
-SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
+cd examples/scheduler-plugin
+SOCKET=/tmp/cube-scheduler-example.sock go run .
 ```
 
 ### Score plugin contract

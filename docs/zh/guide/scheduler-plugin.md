@@ -118,11 +118,11 @@ gRPC 插件配置示例：
           circuit_breaker_cooldown: 30s
 ```
 
-协议在 `pkgs/proto/services/schedulerplugin/v1/plugin.proto`。每个请求都带完整冻结快照，所以插件服务端可以无状态，并发请求共享一条连接即可。生产环境建议 Unix Domain Socket。可运行示例在 `CubeMaster/examples/scheduler-plugin`：
+协议在 `pkgs/proto/services/schedulerplugin/v1/plugin.proto`。每个请求都带完整冻结快照，所以插件服务端可以无状态，并发请求共享一条连接即可。生产环境建议 Unix Domain Socket。可运行示例在 `examples/scheduler-plugin`：
 
 ```bash
-cd CubeMaster
-SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
+cd examples/scheduler-plugin
+SOCKET=/tmp/cube-scheduler-example.sock go run .
 ```
 
 ### Score 插件契约
