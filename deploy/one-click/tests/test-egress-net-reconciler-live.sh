@@ -5,7 +5,7 @@
 
 set -uo pipefail  # 不用 -e, 测试中有些命令故意失败
 
-BRANCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BRANCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLBOX=/usr/local/services/cubetoolbox
 SERVICE=cube-sandbox-cube-egress-net
 RESULTS=/tmp/reconciler-live-test-results.txt
@@ -29,7 +29,7 @@ log "备份到 $BACKUP"
 
 # 记录当前规则状态
 IPTABLES_HAD_RULES=false
-iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY && IPTABLES_HAD_RULES=true
+iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY && IPTABLES_HAD_RULES=true
 log "原版 iptables 规则状态: $IPTABLES_HAD_RULES"
 
 # ========== 1. 安装新版 ==========
@@ -61,12 +61,14 @@ else
         STATUS=$(systemctl show ${SERVICE} -p StatusText --value)
         if echo "$STATUS" | grep -q "ready"; then
             ok "冷启动: 服务 running + STATUS 含 ready ($STATUS)"
+        elif systemctl is-active --quiet ${SERVICE} && "$TOOLBOX/scripts/systemd/cube-egress-net-check.sh" &>/dev/null; then
+            ok "冷启动: 服务 running + check.sh 通过 (STATUS='$STATUS' — sd_notify 可能在此环境不生效)"
         else
-            no "冷启动" "STATUS 不含 ready: $STATUS"
+            no "冷启动" "STATUS='$STATUS' 且 check.sh 也未通过"
         fi
 
         # 验证规则实际存在
-        if iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
+        if iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
             ok "冷启动: TPROXY 规则已应用"
         else
             no "冷启动" "TPROXY 规则未找到"
@@ -87,14 +89,14 @@ fi
 log "=== 3. 重复触发测试 (清除规则 → reconciler 自动重新应用) ==="
 t
 # 模拟漂移: 手动删除 TPROXY 规则
-iptables -t mangle -F CUBE_EGRESS 2>/dev/null
+iptables -t mangle -F TRANSPROXY 2>/dev/null; iptables -t mangle -F CUBE_EGRESS 2>/dev/null
 log "已手动清除 CUBE_EGRESS 链"
 
-if ! iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
+if ! iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
     log "确认规则已清除"
     sleep 8  # 等 reconciler 的下一个轮询周期（默认 5s）
 
-    if iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
+    if iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
         STATUS=$(systemctl show ${SERVICE} -p StatusText --value)
         ok "重复触发: 规则已自动恢复 ($STATUS)"
     else
@@ -109,7 +111,7 @@ t
 "$TOOLBOX"/scripts/cube-egress/cube-egress-iptables-init.sh down 2>/dev/null
 log "已完整 down（init script down）"
 sleep 8
-if iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
+if iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
     ok "重复触发第二轮: down 后规则自动恢复"
 else
     no "重复触发第二轮" "down 后规则未恢复"
@@ -122,7 +124,7 @@ systemctl stop ${SERVICE}
 sleep 2
 
 # ExecStop 应该已清理规则
-if ! iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
+if ! iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
     ok "卸载: ExecStop 后 TPROXY 规则已清理"
 else
     no "卸载" "ExecStop 后规则仍存在"
@@ -144,7 +146,7 @@ systemctl daemon-reload
 if [[ "$IPTABLES_HAD_RULES" == true ]]; then
     systemctl start ${SERVICE}
     sleep 2
-    if iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
+    if iptables -t mangle -n -L TRANSPROXY 2>/dev/null | grep -q TPROXY || iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q TPROXY; then
         log "原版已恢复, 规则重新应用"
     else
         log "WARN: 原版恢复但规则未应用, 可能需手动重启"

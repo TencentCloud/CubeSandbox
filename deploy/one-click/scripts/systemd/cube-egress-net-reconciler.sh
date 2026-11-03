@@ -23,8 +23,20 @@ source "${SCRIPT_DIR}/common.sh"
 
 require_root
 
-INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-${TOOLBOX_ROOT}/scripts/cube-egress/cube-egress-iptables-init.sh}"
-ensure_executable "${INIT_SCRIPT}"
+INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-}"
+if [[ -z "${INIT_SCRIPT}" ]]; then
+  # Auto-detect: deployment versions name this script differently (egress vs proxy)
+  for _candidate in     "${TOOLBOX_ROOT}/scripts/cube-egress/cube-egress-iptables-init.sh"     "${TOOLBOX_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"; do
+    if [[ -x "${_candidate}" ]]; then
+      INIT_SCRIPT="${_candidate}"
+      break
+    fi
+  done
+fi
+if [[ -z "${INIT_SCRIPT}" ]]; then
+  log "ERROR: no egress iptables init script found (tried cube-egress-* and cube-proxy-*)"
+  exit 1
+fi
 
 INGRESS_IFACE="${CUBE_INGRESS_IFACE:-cube-dev}"
 POLL_INTERVAL="${CUBE_EGRESS_RECONCILE_INTERVAL:-5}"
@@ -42,14 +54,29 @@ iface_present() {
 }
 
 rules_applied() {
-  # The init script is idempotent; "up" against an already-configured
-  # host is a fast no-op. We detect drift by checking for the presence
-  # of the TPROXY mangle chain that the init script creates.
-  iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q "TPROXY"
+  # Detect drift by checking for the TPROXY mangle chain.
+  # The init script creates a chain named TRANSPROXY (auto-detected below);
+  # we also probe CUBE_EGRESS as a fallback for other deployments.
+  for chain in TRANSPROXY CUBE_EGRESS; do
+    if iptables -t mangle -n -L "${chain}" 2>/dev/null | grep -q "TPROXY"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 apply_rules() {
-  "${INIT_SCRIPT}" up
+  # The init script is NOT fully idempotent: its `ip rule add` fails with
+  # "File exists" when the fwmark rule is already installed, and it exits
+  # before reaching the iptables setup. So we always do a down-up cycle:
+  # down is safe (no-op on clean state), up then installs everything fresh.
+  "${INIT_SCRIPT}" down 2>&1 | while IFS= read -r line; do
+    log "init-down: ${line}"
+  done || true
+  "${INIT_SCRIPT}" up 2>&1 | while IFS= read -r line; do
+    log "init-up: ${line}"
+  done
+  return 0
 }
 
 # --- main loop ---
@@ -65,17 +92,25 @@ done
 while true; do
   if iface_present; then
     if ! rules_applied; then
-      apply_rules
+      apply_rules || true
       APPLIED=true
-      notify "ready (cube-dev present, rules applied)"
+      if rules_applied; then
+        notify "ready (cube-dev present, rules applied)"
+      else
+        notify "degraded (applied but TPROXY still missing, will retry next cycle)"
+      fi
     elif [[ "${APPLIED}" == false ]]; then
       APPLIED=true
       notify "ready (cube-dev present, rules already in place)"
     else
       # Periodic drift check: rules could have been flushed externally.
-      # The init script is idempotent, so calling it again is safe.
-      apply_rules
-      notify "reconciled (periodic check)"
+      # The init script is mostly idempotent; tolerate partial failures.
+      apply_rules || true
+      if rules_applied; then
+        notify "reconciled (periodic check, rules verified)"
+      else
+        notify "degraded (periodic check, TPROXY missing, will retry)"
+      fi
     fi
   else
     if [[ "${APPLIED}" == true ]]; then

@@ -16,8 +16,15 @@ if ! ip link show "${INGRESS_IFACE}" >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! iptables -t mangle -n -L CUBE_EGRESS 2>/dev/null | grep -q "TPROXY"; then
-  echo "FAIL: CUBE_EGRESS mangle chain missing TPROXY rule" >&2
+TPROXY_OK=false
+for chain in TRANSPROXY CUBE_EGRESS; do
+  if iptables -t mangle -n -L "${chain}" 2>/dev/null | grep -q "TPROXY"; then
+    TPROXY_OK=true
+    break
+  fi
+done
+if [[ "${TPROXY_OK}" != true ]]; then
+  echo "FAIL: no TPROXY rule found in mangle chains (checked TRANSPROXY and CUBE_EGRESS)" >&2
   exit 1
 fi
 
