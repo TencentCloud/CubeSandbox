@@ -45,7 +45,7 @@
 控制节点的前置条件请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
 
 :::: warning 保持节点时间同步
-如果计算节点的时间落后于控制节点，其心跳时间可能看起来已超过 15 秒的过期窗口，导致该节点被标记为不健康，模板也不会下发到该节点。时间恢复同步后，CubeMaster 通常会自动补齐缺失的模板副本；如需立即触发重新下发，可执行 [template redo](./cubemaster-scheduler-config.md#新增计算节点后的-template-redo)。
+如果计算节点的时间落后于控制节点，其心跳时间可能看起来已超过 15 秒的过期窗口，导致该节点被标记为不健康，模板也不会下发到该节点。时间恢复同步后，CubeMaster 通常会自动补齐缺失的模板副本；如需立即触发重新下发，可执行 [template redo](./cubemaster-scheduler-config.md#扩容后的-template-redo)。
 ::::
 
 ## 第一步：准备发布包
@@ -180,18 +180,6 @@ scheduler:
 完整的 CubeMaster 调度配置、Cubelet 节点上报、quota / label / 并发对调度的影响，以及新增计算节点后的 template redo 操作，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
 
 更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
-
-## 预留与 Redis
-
-CubeMaster 不再维护资源预留账本，也不再在派发前执行同步 Redis reservation 检查。每个副本根据本地节点快照执行准入，指标独立传播；在上报窗口内，多副本可能针对同一可见容量重复准入，因此不提供跨副本原子配额协调。旧配置中的 `scheduler.reservation_redis_error_policy` 已废弃，应删除。
-
-多个 CubeMaster 仍通过节点指标及创建并发估算获得压力信息，但这些估算对其他 Master 不可见，不能保证跨副本原子容量接收；节点指标更新前仍可能出现超额派发。Cubelet 现有的创建并发限流和单沙箱资源限制不等同于节点总配额的原子检查：Cubelet 在创建路径上不做 CPU/内存/MVM 配额准入，节点实际装不下时返回的错误码也不在任何重试集合中，因此创建会在第一次尝试直接失败，而不会转移到其他节点重试。让 Cubelet 以可重试的超配错误码拒绝创建、CubeMaster 排除该节点并重选，属于后续工作，将在单独的 PR 中实现。
-
-此变更仅撤掉 Redis 调度预留，不移除 Redis 服务：节点指标读取和创建成功后的代理路由元数据写入等仍依赖 Redis。因此不代表完整创建链路可以在 Redis 故障时正常工作。
-
-滚动升级期间，新版本不参与旧版本的 Redis 预留，不能把混合版本集群视为具有完整跨副本协调。全部 Master 升级后，旧 reservation key 不再被使用；不要在旧版本仍处理请求时删除这些 key。
-
-详见[调度配置](./cubemaster-scheduler-config.md)与[调度插件](./scheduler-plugin.md)。
 
 ## 从客户端连接集群
 

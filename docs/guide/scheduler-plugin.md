@@ -1,29 +1,38 @@
 # Extensible scheduler plugins
 
-CubeMaster routes each request to a scheduling **Profile** composed of mandatory safety guards, optional filters, weighted scores, selection settings, and failure policies. Which profile serves a request is decided by the [strategy selection rules](./cubemaster-scheduler-config.md#which-scheduling-strategy-is-active); this page covers how to configure and extend profiles.
+CubeMaster routes every create request to a **scheduling Profile** and runs it through that Profile's guards, filters, scores, and selection method. Each request walks the full pipeline:
+
+```mermaid
+flowchart LR
+    A[Create request] --> B[Route to Profile<br>by label or instance type]
+    B --> C[Mandatory guards] --> D[Optional filters] --> E[Weighted scores] --> F[Pick from top scores]
+    C -.no candidates.-> G[no_candidate<br>fail or backoff]
+    E -.plugin failure.-> H[Failure policy]
+```
+
+Which Profile serves a request is decided by the [strategy selection rules](./cubemaster-scheduler-config.md#which-scheduling-strategy-is-active); this page covers how to configure and extend Profiles.
 
 ## Upgrade behavior changes
 
-Clusters that upgrade without touching their scheduler configuration are affected by two behavior changes:
+Clusters that upgrade without touching their scheduler config are affected by two changes:
 
-| Change | Who is affected | How to keep the old behavior |
-|---|---|---|
-| **Empty scheduler config now activates the factory Profiles.** A zero-config deployment used to run without filtering or scoring, picking a random pre-filter candidate. Now every request passes the mandatory guards and the factory scorers with spread selection. CubeMaster logs a warning when it injects the factory set. | Every deployment with neither `scheduler.profiles` nor legacy `scheduler.filter` / `scheduler.score` / `scheduler.postscore` | Set `scheduler.disable_factory_profiles: true`, or configure any legacy block (compiled into a compatible `default` Profile) |
-| **Template locality scoring is boolean 100/0.** The `template_id` factor of `image_score` used to grade nodes linearly by local replica size over a `[23MB, 80GB]` window; now every node holding the template scores 100, others 0, matching the `template_local` fact exposed to CEL and gRPC plugins. (The old linear value was numerically crushed by resource factors at GiB scale, so the preference was already weak — but not zero.) | Deployments running `image_score`: the factory `template_reuse` Profile (0.7-weight factor) and legacy clusters with `enable_scorers: [image_score]` may see material placement changes for template requests | No opt-out; tune the scorer weights if placement shifts undesirably |
+**Empty scheduler config now activates factory Profiles.** Zero-config deployments move from "random pick among pre-filtered candidates" to "mandatory guards + factory scorers with spread selection", which changes placement. Injection logs a warning. To keep the old behavior, set `scheduler.disable_factory_profiles: true` or configure any legacy block.
+
+**Template affinity scoring became boolean.** The `template_id` factor of `image_score` used to score linearly by local replica size; now nodes holding the template score 100 and others 0 — matching the `template_local` fact exposed to plugins. The reason: at GiB scale the linear score was numerically crushed by resource factors, so the preference was already weak. There is no opt-out; tune scorer weights if the new placement doesn't suit you. Deployments using `image_score` (the factory `template_reuse` Profile, and legacy clusters with `enable_scorers: [image_score]`) will notice placement changes.
 
 ## Factory Profiles
 
-Three built-in Profiles ship inside the binary (`CubeMaster/pkg/base/config/scheduler_factory.yaml`):
+Three Profiles ship inside the binary (`scheduler_factory.yaml`):
 
-- `burst_balance` (label `workload=burst_balance`) — spreads high-rate, similarly sized requests across nodes by resource watermark and in-flight creates;
-- `template_reuse` (label `workload=template_reuse`) — prefers nodes already holding a local replica of the template;
-- `mixed_binpack` (default) — tighter placement that preserves entirely free nodes.
+| Profile | Route | Behavior |
+|---------|-------|----------|
+| `burst_balance` | label `workload=burst_balance` | Spreads high-rate, similarly sized requests by resource watermark and in-flight creates |
+| `template_reuse` | label `workload=template_reuse` | Prefers nodes already holding a local template replica |
+| `mixed_binpack` | default | Tight placement that preserves entirely free nodes |
 
-With no `scheduler.profiles` and no legacy filter/score/postscore blocks, this set is injected automatically so a zero-config deployment still schedules with real strategies. Any explicit configuration replaces it entirely; with only legacy blocks present, they are compiled into a compatible `default` Profile as before.
+The set is injected only when no scheduling config exists at all; any explicit `profiles` or legacy block replaces it entirely (legacy blocks compile into a compatible `default` Profile with unchanged behavior).
 
 ## Configuring a Profile
-
-Only request labels listed in `profile_route_label_keys` may affect routing or be sent to an external plugin. A non-default Profile must have an instance-type or label condition. Routes are evaluated in configuration order and the first match wins.
 
 ```yaml
 scheduler:
@@ -49,52 +58,48 @@ scheduler:
         no_candidate: fail
 ```
 
-`selection.method` controls how the final node is picked from the scored candidates: `highest` takes the single highest-scored node; `spread` deterministically picks the node with the fewest running sandboxes among the top `top_n` candidates (ties keep score order), pushing placement apart; `random` (the default) draws a score-weighted random node among the top `top_n`. `top_n: -1` widens the candidate window to every node that passed filtering.
+The rules:
 
-Custom Profiles always run the `node_safety`, `cpu`, `mem`, `disk`, `template_locality`, and `realtime_create_num` guards. They cannot be disabled or repeated as optional filters. `node_safety` checks health, metric freshness, the MVM limit, and CPU-load validity on both the normal and backoff paths.
+- Only request labels listed in `profile_route_label_keys` participate in routing and are passed to external plugins.
+- Routes are evaluated in order; the first match wins. Non-default Profiles must carry an instance-type or label condition.
+- `selection.method` picks the final node from the scored candidates: `highest` takes the top scorer; `spread` picks the node with the fewest running sandboxes among the top `top_n` (spreading placement); `random` (the default) draws score-weighted among the top `top_n`. `top_n: -1` widens the window to every node that passed filtering.
+- Every Profile runs the `node_safety`, `cpu`, `mem`, `disk`, `template_locality`, and `realtime_create_num` guards — they cannot be turned off.
 
-## Verifying which profile served a request
-
-Every scheduler metric carries the routed profile as the `profile` label. The quickest checks:
-
-- `scheduler_attempts_total{profile=...}` — which profile is receiving traffic (unrouted failures land in `profile="default"`);
-- `scheduler_plugin_duration_seconds{profile,kind,plugin}` — per-plugin latency, useful when tuning weights;
-- `sandbox_create_duration_seconds{profile,result}` — end-to-end create latency per profile.
+The built-in scorers read their factor switches from the global `scheduler.score` tree, not from the Profile — see [Scheduler Configuration](./cubemaster-scheduler-config.md#which-configuration-is-active).
 
 ## Failure semantics
 
-- Mandatory guards are always fail-closed.
-- Filters default to `fail-closed`; explicitly configured `fail-open` emits a risk warning.
-- Scores default to `default-score`, which substitutes the plugin's `default_score` after a failure; `fail-closed` is also available.
-- `no_candidate` supports `fail` and `backoff`. A custom Profile using backoff still reruns its guards, filters, and scores.
+Guards are always fail-closed. Filters default to fail-closed; an explicit fail-open emits a risk warning. Scores default to default-score, which substitutes the plugin's `default_score` after a failure; fail-closed is also available. `no_candidate` supports fail and backoff — a backoff reruns the whole pipeline.
 
-Configuration is compiled as one unit at startup or during a hot reload. If a plugin name, route, expression, weight, selection method, or failure policy is invalid, the new Profile set is not activated and the scheduler continues using the previous complete pipeline.
+Configuration compiles as one unit at startup or hot reload. Anything invalid — plugin name, route, expression, weight, selection method, failure policy — and the new set is not activated; the scheduler keeps running the previous pipeline.
+
+## Verifying
+
+Every scheduler metric carries a `profile` label. The three most useful:
+
+- `scheduler_attempts_total{profile=...}` — which Profile is taking traffic;
+- `scheduler_plugin_duration_seconds{profile,kind,plugin}` — per-plugin latency, useful when tuning weights;
+- `sandbox_create_duration_seconds{profile,result}` — end-to-end create latency per Profile.
 
 ## Admission and reservations
 
-The reservation ledger and synchronous Redis reservation check have been removed from the create path. Cross-replica admission is advisory: during the metric reporting window multiple Masters can admit against the same apparent capacity, and a node that turns out to be full fails the create on the first attempt instead of failing over to another node. Delete the obsolete `scheduler.reservation_redis_error_policy` setting. See [Reservations and Redis](./multi-node-deploy.md#reservations-and-redis) for the full semantics, upgrade caveats, and the follow-up work.
+Cross-replica admission is advisory: each replica admits against its local node snapshot while metrics propagate independently per reporting window, so during a window several Masters can admit against the same apparent capacity and briefly over-dispatch. A node that can't actually fit the request fails the create on the first attempt — no failover. Keep quotas close to real node capacity and handle create failures on the client.
 
-## Built-in scorers and the legacy score tree
+Redis is a required dependency (node metric reads and the post-create routing metadata write both go through it), so a Redis outage breaks the create chain. During rolling upgrades a mixed-version cluster has no full cross-replica coordination; don't delete old reservation keys while old Masters still serve traffic — after everyone is upgraded, the keys go unused.
 
-Three built-in scorers still read their factor switches from the legacy global `scheduler.score` tree rather than from Profile `args`:
+::: details The rest of this page is for plugin developers
 
-- `real_time_weighted_average` requires `scheduler.score.plugin_conf.real_time_weighted_average` and `scheduler.score.resource_weights`;
-- `image_score` requires `scheduler.score.plugin_conf.image_score`;
-- `multi_factor_weighted_average` requires `scheduler.score.plugin_conf.multi_factor_weighted_average` (its background refresh loop also runs off that block).
+Everything above targets operators configuring scheduling policies. From here on it's about writing CubeMaster scheduler plugins — if you only use built-in Profiles or CEL expressions, you can stop reading.
 
-A Profile that references one of these scorers without the required legacy block is **rejected at compile time** (startup or hot reload), so a silently no-op scorer is not possible. The factory Profiles embed a matching legacy `scheduler.score` subtree inside `scheduler_factory.yaml` for exactly this reason — when you customize a factory Profile, edit the weights on the Profile entry, but keep (or adjust) that legacy subtree for the factor switches.
+### Plugin types
 
-## Plugin types
+Three plugin types:
 
-- `go` (default): compiled into CubeMaster and registered by name through the unified Registry.
-- `expr`: CEL compiled at startup; a Filter must return `bool`, and a Score must return a value from 0 through 100.
-- `grpc`: an independent process that completes a protocol/capability handshake at startup. CubeMaster validates timeouts, consecutive-failure circuit breaking, snapshot versions, and returned nodes and scores.
+- **go** (default): compiled into CubeMaster. Implement `filter.Selector` or `score.Selector`, register via `plugin.RegisterGoFilter` / `plugin.RegisterGoScore` at package init. The binary must import the package, so new plugins require a rebuild; duplicate names are rejected at startup.
+- **expr**: CEL compiled at startup. Filters return `bool`; scores return 0–100. CEL gets strongly typed read-only `node` and `request` objects — unknown fields, type errors, and invalid returns are rejected when the Profile activates. Common node fields include `cpu_util`, `quota_cpu`, `allocated_cpu`, `creating`, `mvm_num`, `labels`, `template_local`, `snapshot_storage_writable`; request fields include `instance_type`, `cpu_millis`, `memory_bytes`, `template_id`, `labels`.
+- **grpc**: an independent process. One handshake at startup, then batched `Filter`/`Score` calls; CubeMaster validates timeouts, circuit breaking, snapshot versions, and returned values.
 
-In-process implementations use the existing `filter.Selector` or `score.Selector` interface and register through `plugin.RegisterGoFilter` / `plugin.RegisterGoScore` from package initialization. The CubeMaster binary must import that package and be rebuilt; duplicate names are rejected at startup.
-
-CEL receives strongly typed, read-only, versioned protobuf `node` and `request` objects. Unknown fields, invalid type operations, and invalid return types are rejected when the Profile is activated. Common node fields include `cpu_util`, `cpu_load`, `quota_cpu`, `allocated_cpu`, `quota_mem_mb`, `allocated_mem_mb`, `creating`, `local_creating`, `mvm_num`, `labels`, `local_templates`, `template_local`, and `snapshot_storage_writable`. Request fields include `instance_type`, `cpu_millis`, `memory_bytes`, `system_disk_size`, `template_id`, and `labels`.
-
-External plugin example:
+A gRPC plugin configured as a filter:
 
 ```yaml
       filters:
@@ -106,16 +111,17 @@ External plugin example:
           circuit_breaker_cooldown: 30s
 ```
 
-The versioned protocol is in `pkgs/proto/services/schedulerplugin/v1/plugin.proto`. CubeMaster calls `Handshake` once at startup, then batched `Filter` or `Score` requests. Every request carries the full frozen candidate snapshot for its `snapshot_version`, so plugin servers are stateless and concurrent scheduling attempts can share one connection without serializing. A Unix Domain Socket is recommended in production. A runnable server is available in `CubeMaster/examples/scheduler-plugin`:
+The protocol lives in `pkgs/proto/services/schedulerplugin/v1/plugin.proto`. Every request carries the full frozen snapshot, so plugin servers can be stateless and concurrent attempts share one connection. Unix Domain Socket is recommended in production. A runnable example is in `CubeMaster/examples/scheduler-plugin`:
 
 ```bash
 cd CubeMaster
 SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 ```
 
-## Plugin developer contract notes
+### Score plugin contract
 
-Two contract details matter when writing a Score plugin:
+Two points:
 
-- A score plugin whose dimension does not apply to a request can return `score.ErrNotApplicable` to be skipped explicitly: it then contributes no scores and no weight and is not treated as a failure, even under `fail-closed` / `default-score` policies.
-- Returning an empty score list with a nil error is instead a contract violation for profile-mode scorers and triggers the configured failure policy. The built-in legacy-coupled scorers report `ErrNotApplicable` when their legacy factor configuration is missing, disabled, or has no non-zero-weighted factor.
+- When a scoring dimension doesn't apply to a request, return `score.ErrNotApplicable` to skip explicitly — no score, no weight, and not a failure (even under fail-closed).
+- Returning an empty score list with a nil error violates the contract and triggers the configured failure policy. Built-in scorers also return `ErrNotApplicable` when their legacy factor config is missing, disabled, or has no non-zero-weighted factor.
+:::
