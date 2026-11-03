@@ -184,7 +184,6 @@ export default withMermaid(defineConfig({
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
-                { text: 'Redis Cluster', link: '/guide/redis-cluster' },
                 {
                   text: 'Kubernetes Deployment',
                   link: '/guide/kubernetes/',
@@ -281,7 +280,8 @@ export default withMermaid(defineConfig({
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
-                { text: 'Component multi-version', link: '/guide/component-multiversion' }
+                { text: 'Component multi-version', link: '/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/guide/redis-cluster' }
               ]
             },
             {
@@ -414,7 +414,6 @@ export default withMermaid(defineConfig({
                 { text: '裸金属部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
-                { text: 'Redis Cluster', link: '/zh/guide/redis-cluster' },
                 {
                   text: 'Kubernetes 部署',
                   link: '/zh/guide/kubernetes/',
@@ -511,7 +510,8 @@ export default withMermaid(defineConfig({
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
-                { text: '组件多版本', link: '/zh/guide/component-multiversion' }
+                { text: '组件多版本', link: '/zh/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/zh/guide/redis-cluster' }
               ]
             },
             {
