@@ -14,11 +14,19 @@ flowchart LR
 
 ## 升级时的行为变化
 
-不改调度配置直接升级的集群受两处影响：
+从 **v0.7.3 及更早版本**升级、且不修改调度配置的集群，受两处影响：
 
-**空调度配置会激活出厂 Profile。** 零配置部署从"预过滤候选里随机选点"变成"强制 Guards + 出厂 Score 按 spread 选点"，放置行为不同，注入时打一条告警。想保持旧行为，设 `scheduler.disable_factory_profiles: true` 或配置任一 legacy 块。
+**零调度配置会激活出厂 Profile。** 完全没配调度策略的集群，选点从"预过滤候选里随机挑"变为"强制 Guards + 出厂 Score 按 spread 选点"，放置会不同（注入时打一条告警）。想保持旧行为，设 `scheduler.disable_factory_profiles: true`，或配置任一 legacy 块；已配置过调度策略的集群不受影响。
 
-**模板亲和打分变成布尔值。** `image_score` 的 `template_id` 因子以前按模板本地副本大小线性打分，现在持有该模板的节点一律 100、其余 0——和暴露给插件的 `template_local` 事实语义一致。之所以改，是因为 GiB 级模板的线性分值会被资源因子数值碾压，偏好本来就弱。没有退回开关；落点变化不符合预期就调 scorer 权重。启用 `image_score` 的部署（含出厂 `template_reuse` Profile 和 legacy `enable_scorers: [image_score]` 集群）会感知到落点变化。
+**模板亲和打分：持有模板的节点得满分，其余 0 分。** 受影响的只有显式启用 `image_score` 的部署（含出厂 `template_reuse` Profile 和 legacy `enable_scorers: [image_score]` 集群）——默认配置、推荐配置和一键部署都不启用它，升级无感知。落点变化不符合预期时：
+
+- 想完全恢复升级前的放置：从 `score.plugin_conf.image_score.enable_weight_factors` 移除 `template_id`，或把 `score.resource_weights.template_id` 置 0。
+- 想保留模板亲和、但让负载能压过它：调低 `image_score` 权重。
+- JFS 等共享存储后端不要为此启用模板亲和——模板所有节点都能直接读取，没有"避免拉取"的收益。
+
+::: details 为什么有这个变化
+`template_id` 因子以前按模板本地副本大小线性打分，但副本注册到调度器的尺寸是占位值，线性分值恒为 0——升级前模板亲和在打分中从未生效，本次变更让它第一次真正起作用。即使注册真实大小，GiB 级模板的线性分值也会被资源因子数值碾压；布尔化后它与暴露给插件的 `template_local` 事实语义一致，行为可预测。
+:::
 
 ## 出厂 Profile
 

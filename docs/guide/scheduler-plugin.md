@@ -14,11 +14,19 @@ Which Profile serves a request is decided by the [strategy selection rules](./cu
 
 ## Upgrade behavior changes
 
-Clusters that upgrade without touching their scheduler config are affected by two changes:
+Clusters upgrading from **v0.7.3 or earlier** without touching their scheduler config are affected by two changes:
 
-**Empty scheduler config now activates factory Profiles.** Zero-config deployments move from "random pick among pre-filtered candidates" to "mandatory guards + factory scorers with spread selection", which changes placement. Injection logs a warning. To keep the old behavior, set `scheduler.disable_factory_profiles: true` or configure any legacy block.
+**Empty scheduler config now activates the factory Profiles.** Clusters with no scheduler policy at all move from "random pick among pre-filtered candidates" to "mandatory guards + factory scorers with spread selection"; placement will differ (injection logs a warning). To keep the old behavior, set `scheduler.disable_factory_profiles: true` or configure any legacy block; clusters that already configure a policy are unaffected.
 
-**Template affinity scoring became boolean.** The `template_id` factor of `image_score` used to score linearly by local replica size; now nodes holding the template score 100 and others 0 — matching the `template_local` fact exposed to plugins. The reason: at GiB scale the linear score was numerically crushed by resource factors, so the preference was already weak. There is no opt-out; tune scorer weights if the new placement doesn't suit you. Deployments using `image_score` (the factory `template_reuse` Profile, and legacy clusters with `enable_scorers: [image_score]`) will notice placement changes.
+**Template affinity now scores 100 for holders, 0 for the rest.** Only deployments that explicitly enable `image_score` are affected (the factory `template_reuse` Profile, and legacy clusters with `enable_scorers: [image_score]`) — the default config, the recommended config, and one-click deployments do not enable it and notice nothing. If the new placement doesn't suit you:
+
+- To fully restore pre-upgrade placement: remove `template_id` from `score.plugin_conf.image_score.enable_weight_factors`, or set `score.resource_weights.template_id` to 0.
+- To keep template affinity but let load override it: lower the `image_score` weight.
+- Do not enable template affinity for shared-storage backends such as JFS — every node reads those templates directly, so there is no pull to avoid.
+
+::: details Why this change
+The `template_id` factor used to score linearly by local replica size, but replicas are registered with a placeholder size, so the linear score was always 0 — template affinity never took effect in scoring before this change. Even with real sizes, the linear score of a GiB-scale template would be numerically crushed by resource factors; making it boolean aligns it with the `template_local` fact exposed to plugins, so the behavior is predictable.
+:::
 
 ## Factory Profiles
 
