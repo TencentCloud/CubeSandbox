@@ -331,6 +331,8 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 这两个瞬时态期间不会自动暂停；但空闲超时照常生效，重启操作也不会重置空闲计时（空闲按[客户端活动](#何时算-活跃)计算）。对象里还有 `restartCount`、`lastExitCode`、`lastExitReason`、`lastRestartAt` 等字段，可用于定位退出原因。
 
+暂停不算一次重启：`pause()` 后恢复会保留 `restartCount` 与退出诊断信息，退避间隔也从该计数继续计算。只有稳定期重置才会清零它，因此已经达到 `maxRestarts` 的沙箱即便中间暂停再恢复，下一次退出后仍会停止重启。
+
 ## 下一步
 
 - [模板概览](./templates.md) —— 沙箱基于模板启动，模板的构建过程也会影响首次冷启动开销。

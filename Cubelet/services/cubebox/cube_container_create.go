@@ -277,7 +277,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if flowOpts.RestartPrior != nil && (flowOpts.IsRestart || flowOpts.RestartPrior.StatusSeq != 0 || flowOpts.RestartPrior.RestartCount != 0 || flowOpts.RestartPrior.LastExitReason != "" || len(flowOpts.RestartPrior.OriginalRequest) > 0) {
 		applyRestartBookkeeping(sandBox, flowOpts.RestartPrior, flowOpts.IsRestart)
 		if flowOpts.IsPauseResume() {
-			clearRestartCountForResume(sandBox)
+			markResumedAfterPause(sandBox)
 		}
 	} else if restartpolicy.KeepsRequest(realReq.GetRestartPolicy()) {
 		if err := sandBox.SetOriginalRequest(realReq); err != nil {
