@@ -21,22 +21,50 @@
 // A single JSON object goes to stdout; logs go to stderr. Exit 0 with an empty
 // "error" field means success.
 //
+// Dynamic storage: Create may receive --private-data with a JSON object such
+// as {"bucket":"customer-bucket","prefix":"workspaces/user-a/","cred_ref":"user-a"}.
+// The plugin provisions that prefix in the caller's own bucket, returns the
+// resolved binding as private_data, and Attach/Destroy use only the returned
+// state. cred_ref names a file in CREDENTIALS_DIR; plaintext credentials never
+// appear in private_data. A volume created without private_data keeps the
+// legacy shape: BUCKET:/volumes/<volume_id>/ and a plain prefix string.
+//
+// Dynamic prefixes are registered in .cube-sandbox/volume-claims.json. The
+// check-and-register step is a conditional PUT, so two CubeMaster instances
+// cannot both claim overlapping prefixes on a backend that honours
+// If-Match / If-None-Match (AWS S3, MinIO, R2). A backend that rejects the
+// conditional header fails the dynamic create; there is no unconditional
+// fallback, because that would reintroduce lost updates. A dynamic create also
+// requires an empty prefix (only the empty directory marker may be there): a
+// competing Destroy issued after a failed CubeMaster database write deletes the
+// whole prefix, so adopting pre-existing objects would make that rollback
+// destructive.
+//
+// Destroy takes a deletion lease in the same registry before removing objects
+// and releases the claim afterwards. A fresh lease blocks another destroy
+// from deleting concurrently; it does not identify volume generations. Each attempt has its own
+// random lease ID, so a retry cannot be mistaken for an earlier attempt even
+// within the same second; deleting_at only decides when a crashed attempt's
+// lease may be taken over. See beginDestroy.
+//
 // Config file: volume-s3.conf next to this binary (or $CUBE_S3_CONFIG). It holds
 // a plaintext secret, so keep it root-owned and chmod 600. See
 // volume-s3.conf.example.
 //
 // Path overrides, so the plugin can be exercised without root (e.g. in CI):
 //
-//	CUBE_S3_CONFIG       config file path
-//	CUBE_S3_PASSWD_FILE  s3fs credential file (default /etc/cube/.passwd-s3fs-volume-<bucket>)
-//	CUBE_S3_LOCK_DIR     attach/detach locks  (default /run/cube-volume-s3)
+//	CUBE_S3_CONFIG           config file path
+//	CUBE_S3_CREDENTIALS_DIR  cred_ref files (default /etc/cube/s3-credentials)
+//	CUBE_S3_PASSWD_FILE      legacy s3fs credential file
+//	CUBE_S3_PASSWD_DIR       per-volume s3fs credential files (default /etc/cube)
+//	CUBE_S3_LOCK_DIR         attach/detach locks (default /run/cube-volume-s3)
 //
 // The control plane talks to the endpoint directly over HTTP, so no S3 command
 // line tool is needed. The data plane still requires s3fs on every Cubelet node.
 //
 // Mount layout (one s3fs process per volume):
 //
-//	<volume-base-dir>/s3-<volume_id>/  ->  BUCKET:/volumes/<volume_id>/
+//	<volume-base-dir>/s3-<volume_id>/  ->  BUCKET:/<binding prefix>
 //
 // where <volume-base-dir> is passed by Cubelet via --volume-base-dir (default
 // /data/cube-shared/volume). host_path MUST live inside it.
@@ -50,6 +78,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/binding"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/config"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/lockfile"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/s3api"
@@ -136,55 +165,180 @@ func run(ctx context.Context, opts *options) error {
 	}
 }
 
-// doCreate provisions backend storage for a new volume: ensure the bucket
-// exists, then write the volumes/<id>/ directory object.
+// doCreate provisions backend storage for a new volume: ensure the target
+// bucket exists, then write the directory object for the volume prefix.
 //
 // private_data is opaque create-to-attach state (max 1024 bytes). This plugin
-// returns the object key prefix through this field.
+// accepts an optional JSON descriptor from the caller and returns the resolved
+// binding through this field. A volume created without the descriptor keeps
+// the deployment-configured bucket and volumes/<id>/ layout.
+//
+// A dynamic create only proceeds on an empty prefix that no other volume owns.
+// CubeMaster may roll a failed create back with Destroy(B), and that delete
+// cannot be distinguished from a user delete, so adopting existing objects
+// would make the rollback destructive.
 func doCreate(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("create: --volume-id is required")
 	}
-	log.Printf("create volumeID=%s name=%s", opts.volumeID, opts.name)
+
+	req, err := binding.ParseCreate(opts.privateData, opts.volumeID)
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	log.Printf("create volumeID=%s name=%s dynamic=%t", opts.volumeID, opts.name, req.Dynamic)
 
 	cfg, err := config.Load("")
 	if err != nil {
 		return err
 	}
-	client, err := s3api.New(ctx, cfg)
+
+	volume, err := resolveVolume(cfg, binding.Binding{
+		Bucket: req.Bucket, Prefix: req.Prefix, CredRef: req.CredRef, Dynamic: req.Dynamic,
+	})
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	client, err := volume.client(ctx)
 	if err != nil {
 		return err
 	}
-	if err := client.EnsureBucket(ctx); err != nil {
-		return err
-	}
-	if err := client.CreatePrefix(ctx, config.VolumePrefix(opts.volumeID)); err != nil {
-		return err
+
+	// Resolve state B before touching the bucket. Encoding can fail even
+	// though the caller's descriptor passed the size check (JSON escaping and
+	// the resolved bucket add bytes), and a failure here must not roll back
+	// data that already lived under the prefix.
+	var state string
+	if req.Dynamic {
+		state, err = binding.EncodeState(volume.state)
+		if err != nil {
+			return fmt.Errorf("create: %w", err)
+		}
 	}
 
-	privateData := config.VolumePrefix(opts.volumeID)
-	log.Printf("create ready: volumeID=%s", opts.volumeID)
-	emit(createResponse{PrivateData: privateData})
+	if req.Dynamic {
+		if err := createDynamicPrefix(ctx, client, volume.state.Bucket, volume.state.Prefix, opts.volumeID); err != nil {
+			return err
+		}
+	} else {
+		if err := client.EnsureBucket(ctx); err != nil {
+			return err
+		}
+		if err := client.CreatePrefix(ctx, volume.state.Prefix); err != nil {
+			return err
+		}
+	}
+
+	if !req.Dynamic {
+		log.Printf("create ready: volumeID=%s bucket=%s prefix=%s", opts.volumeID, volume.state.Bucket, volume.state.Prefix)
+		emit(createResponse{PrivateData: volume.state.Prefix})
+		return nil
+	}
+
+	log.Printf("create ready: volumeID=%s bucket=%s prefix=%s cred_ref=%s", opts.volumeID, volume.state.Bucket, volume.state.Prefix, req.CredRef)
+	emit(createResponse{PrivateData: state})
+	return nil
+}
+
+type createStore interface {
+	claimsStore
+	BucketExists(context.Context) (bool, error)
+	CreatePrefix(context.Context, string) error
+}
+
+// createDynamicPrefix provisions only an empty, owned prefix. State B must
+// already have passed encoding and size validation before this is called.
+func createDynamicPrefix(ctx context.Context, store createStore, bucket, prefix, volumeID string) error {
+	exists, err := store.BucketExists(ctx)
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("create: bucket %q does not exist; create it before creating the volume (user buckets are never auto-created)", bucket)
+	}
+	hasData, err := store.PrefixHasData(ctx, prefix)
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	if hasData {
+		return fmt.Errorf("create: prefix %q already contains objects; dynamic volumes require an empty prefix (existing data is never adopted, because a rollback delete would destroy it)", prefix)
+	}
+	registered, err := claimPrefix(ctx, store, bucket, prefix, volumeID)
+	if err != nil {
+		return err
+	}
+	if err := store.CreatePrefix(ctx, prefix); err != nil {
+		// Never delete caller data on failure; release only this new claim.
+		if releaseErr := cancelRegistration(ctx, store, registered); releaseErr != nil {
+			log.Printf("warning: release prefix claim for %s after failed create: %v", volumeID, releaseErr)
+		}
+		return err
+	}
 	return nil
 }
 
 // doDestroy removes the volume prefix from the bucket. This is irreversible.
+//
+// It refuses to delete a prefix recorded for another volume, one that contains
+// another volume's prefix, or a dynamic prefix with no ownership claim at all,
+// so a malformed or stale binding can never widen the delete beyond the
+// volume's own data. A dynamic destroy also takes a deletion lease so two
+// concurrent destroys cannot overlap with a later reuse of the prefix.
 func doDestroy(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("destroy: --volume-id is required")
 	}
-	log.Printf("destroy volumeID=%s", opts.volumeID)
+
+	b, err := binding.ParseState(opts.privateData, opts.volumeID)
+	if err != nil {
+		return fmt.Errorf("destroy: %w", err)
+	}
+	log.Printf("destroy volumeID=%s prefix=%s dynamic=%t", opts.volumeID, b.Prefix, b.Dynamic)
 
 	cfg, err := config.Load("")
 	if err != nil {
 		return err
 	}
-	client, err := s3api.New(ctx, cfg)
+	volume, err := resolveVolume(cfg, b)
+	if err != nil {
+		return fmt.Errorf("destroy: %w", err)
+	}
+	client, err := volume.client(ctx)
 	if err != nil {
 		return err
 	}
-	if err := client.RemovePrefix(ctx, config.VolumePrefix(opts.volumeID)); err != nil {
+
+	// Legacy volumes never touch the registry, so a legacy destroy keeps its
+	// exact pre-upgrade behaviour (a bucket policy scoped to volumes/* must
+	// keep working). Dynamic volumes take the deletion lease before the
+	// recursive delete; the claim stays in place until the data is gone.
+	var lease *deletionLease
+	if b.Dynamic {
+		lease, err = beginDestroy(ctx, client, volume.state.Prefix, opts.volumeID)
+		if err != nil {
+			return fmt.Errorf("destroy: %w", err)
+		}
+		if lease == nil {
+			// The prefix is already gone (retried destroy after a success).
+			emit(statusResponse{})
+			return nil
+		}
+	}
+
+	if err := client.RemovePrefix(ctx, volume.state.Prefix); err != nil {
+		if lease != nil {
+			// Give the lease back so a retry is not blocked for its whole
+			// duration; only a deleter that died keeps the lease.
+			if clearErr := clearDeleteLease(ctx, client, *lease); clearErr != nil {
+				log.Printf("warning: clear delete lease for %s: %v", opts.volumeID, clearErr)
+			}
+		}
 		return err
+	}
+	if lease != nil {
+		if err := finishDestroy(ctx, client, *lease); err != nil {
+			return fmt.Errorf("destroy: prefix %q removed, but claim cleanup failed: %w", b.Prefix, err)
+		}
 	}
 	emit(statusResponse{})
 	return nil
@@ -196,18 +350,32 @@ func doAttach(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("attach: --volume-id is required")
 	}
-	log.Printf("attach sandbox=%s volumeID=%s refcount_before=%d",
-		opts.sandboxID, opts.volumeID, opts.refCount)
+
+	b, err := binding.ParseState(opts.privateData, opts.volumeID)
+	if err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+	log.Printf("attach sandbox=%s volumeID=%s refcount_before=%d prefix=%s dynamic=%t",
+		opts.sandboxID, opts.volumeID, opts.refCount, b.Prefix, b.Dynamic)
 
 	cfg, err := config.Load("")
 	if err != nil {
 		return err
 	}
+	volume, err := resolveVolume(cfg, b)
+	if err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+
+	spec := volume.mountSpec(cfg, opts.volumeID)
+
 	mounts := s3fsmnt.New(cfg)
 	// s3fs asks IMDS itself; checking first turns a missing role into a clear
 	// error instead of an opaque mount failure. Only on a real mount, so a
 	// repeat attach of a mounted volume does not depend on IMDS.
-	mounts.BeforeMount = func() error { return s3api.CheckInstanceRole(ctx, cfg) }
+	if volume.credentials.InstanceRole {
+		mounts.BeforeMount = func() error { return s3api.CheckInstanceRole(ctx, cfg) }
+	}
 
 	lock, err := lockfile.Acquire(cfg.LockDir, opts.volumeID)
 	if err != nil {
@@ -218,7 +386,7 @@ func doAttach(ctx context.Context, opts *options) error {
 
 	// Mount is idempotent, so a repeat attach (refCount > 0) resolves to the
 	// mountpoint that is already there instead of mounting twice.
-	mnt, err := mounts.Mount(opts.volumeBaseDir, opts.volumeID)
+	mnt, err := mounts.MountWithSpec(opts.volumeBaseDir, opts.volumeID, spec)
 	if err != nil {
 		return err
 	}
