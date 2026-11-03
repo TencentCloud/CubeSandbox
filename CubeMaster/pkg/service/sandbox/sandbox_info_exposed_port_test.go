@@ -56,6 +56,16 @@ func TestDecorateSandboxInfoExposedPortWithoutCallerIP(t *testing.T) {
 		assert.Equal(t, int32(8080), item.RequestedContainerPort)
 	})
 
+	t.Run("unspecified sentinel forces host port despite topology", func(t *testing.T) {
+		req, rsp := newInfo()
+		ctx := constants.WithHostIP(context.Background(), "0.0.0.0")
+		require.NoError(t, decorateSandboxInfo(ctx, req, rsp))
+		item := rsp.Data[0]
+		assert.Equal(t, ExposedPortModeHostPort, item.ExposedPortMode)
+		assert.Equal(t, "10.0.0.1:32000", item.ExposedPortEndpoint)
+		assert.Equal(t, int32(32000), item.ExposedPortHostPort)
+	})
+
 	t.Run("same-node caller host still selects tap ip as control", func(t *testing.T) {
 		req, rsp := newInfo()
 		ctx := constants.WithHostIP(context.Background(), "10.0.0.1")

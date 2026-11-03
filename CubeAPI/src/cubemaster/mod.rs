@@ -127,9 +127,12 @@ impl CubeMasterClient {
     }
 
     /// GET /cube/sandbox/info with container_port — resolve the exposed-port
-    /// endpoint. No caller address is forwarded, so CubeMaster always resolves
-    /// the host_port form (hostIP:hostPort); CubeVS hairpin makes that form
-    /// reachable for same-node sandbox callers as well.
+    /// endpoint in host_port form (hostIP:hostPort). CubeMaster otherwise falls
+    /// back to the connection's RemoteAddr when no caller header is present,
+    /// which could select tap_ip for a same-node CubeAPI. Send an unspecified
+    /// sentinel (not a user-supplied address) to make the host_port choice
+    /// explicit and independent of deployment topology. CubeVS hairpin makes
+    /// that form reachable for same-node sandbox callers as well.
     pub async fn get_sandbox_exposed_port(
         &self,
         sandbox_id: &str,
@@ -141,6 +144,7 @@ impl CubeMasterClient {
             .inner
             .get(&url)
             .query(&[("sandbox_id", sandbox_id), ("container_port", &port)])
+            .header("X-Cube-Caller-Host-IP", "0.0.0.0")
             .send()
             .await
             .map_err(CubeMasterError::Http)?;
@@ -2454,6 +2458,52 @@ mod tests {
         non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
         GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
     };
+
+    #[tokio::test]
+    async fn exposed_port_info_uses_explicit_host_port_sentinel() {
+        use axum::{extract::Request, routing::get, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None::<String>));
+        let captured = seen.clone();
+        let app = Router::new().route(
+            "/cube/sandbox/info",
+            get(move |request: Request| {
+                let captured = captured.clone();
+                async move {
+                    let value = request
+                        .headers()
+                        .get("X-Cube-Caller-Host-IP")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    *captured.lock().unwrap() = Some(value);
+                    axum::Json(serde_json::json!({
+                        "requestID": "req-test",
+                        "ret": {"ret_code": 200, "ret_msg": "success"},
+                        "data": []
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = super::CubeMasterClient::new(
+            format!("http://{address}"),
+            reqwest::Client::new(),
+        );
+        let response = client
+            .get_sandbox_exposed_port("sb-test", 8080)
+            .await
+            .unwrap();
+        assert!(response.data.is_empty());
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("0.0.0.0"));
+        server.abort();
+    }
 
     #[test]
     fn non_empty_str_trims_surrounding_whitespace() {
