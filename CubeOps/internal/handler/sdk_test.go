@@ -1011,16 +1011,23 @@ func TestSDK_GetSandboxEvents_OlderCubeMasterIsEmptyHistory(t *testing.T) {
 	}
 }
 
-func TestSDK_GetSandboxEvents_OtherNotFoundStillErrors(t *testing.T) {
+func TestSDK_GetSandboxEvents_ClampsLimit(t *testing.T) {
+	var captured map[string]string
 	cm := &fakeCM{
-		getSandboxEvents: func(context.Context, map[string]string) (json.RawMessage, error) {
-			return nil, &cubemaster.HTTPError{Status: http.StatusNotFound, Body: "<html>nginx 404</html>"}
+		getSandboxEvents: func(_ context.Context, params map[string]string) (json.RawMessage, error) {
+			captured = params
+			return raw(`{"ret":{"ret_code":0,"ret_msg":""},"events":[],"hasMore":false}`), nil
 		},
 	}
 	r := newSDKRouter(t, cm)
-	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/events")
-	if w.Code == http.StatusOK {
-		t.Fatalf("a non-gin 404 must not become an empty history; body=%s", w.Body.String())
+	for q, want := range map[string]string{"?limit=0": "0", "?limit=500": "500", "?limit=99999": "500"} {
+		w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/events"+q)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d; body=%s", q, w.Code, w.Body.String())
+		}
+		if captured["limit"] != want {
+			t.Errorf("%s: CM limit = %q, want %q", q, captured["limit"], want)
+		}
 	}
 }
 

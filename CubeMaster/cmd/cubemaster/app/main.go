@@ -221,8 +221,11 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
 	}
 
-	// Lifecycle history is best effort; a missing table only disables it.
-	sandboxeventhook.Init(ctx)
+	// Lifecycle history is best effort: a missing table disables it until a
+	// background retry succeeds, and never blocks serving sandboxes.
+	if err := sandboxeventhook.Init(ctx, db.Init(config.GetDbConfig())); err != nil {
+		log.G(ctx).Warnf("sandboxevent init fail (non-fatal, retrying in background): %v", err)
+	}
 
 	scheduler.InitScheduler(ctx)
 

@@ -487,6 +487,9 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 	writeSDKResponse(c, raw)
 }
 
+// maxSandboxEventsLimit is the largest page CubeMaster returns.
+const maxSandboxEventsLimit = 500
+
 // GetSandboxEvents — GET /api/v1/sdk/sandboxes/{id}/events
 //
 // Lifecycle history (created / paused / resumed / killed), oldest first, paged
@@ -502,7 +505,8 @@ func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
 			httputil.WriteError(c, http.StatusBadRequest, "limit must be a non-negative integer")
 			return
 		}
-		params["limit"] = strconv.FormatUint(n, 10)
+		// Same cap as CubeAPI and CubeMaster; 0 keeps the default page size.
+		params["limit"] = strconv.FormatUint(min(n, maxSandboxEventsLimit), 10)
 	}
 	if v := c.Query("cursor"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
@@ -514,13 +518,12 @@ func (h *SDKHandler) GetSandboxEvents(c *gin.Context) {
 	}
 	raw, err := h.cm.GetSandboxEvents(c.Request.Context(), params)
 	if err != nil {
-		// An older CubeMaster has no history endpoint and gin answers with its
-		// own "404 page not found": an empty history rather than an error on
-		// every timeline poll. Any other 404 (wrong base URL, a proxy) still
-		// surfaces as an error.
+		// The events route never answers 404 itself (an unknown ID is an
+		// empty list), so a 404 means an older CubeMaster without the route:
+		// an empty history rather than an error on every timeline poll. This
+		// matches CubeAPI's is_endpoint_missing.
 		var httpErr *cubemaster.HTTPError
-		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound &&
-			strings.TrimSpace(httpErr.Body) == "404 page not found" {
+		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
 			// A CubeOps base URL with a wrong path prefix gives the same answer,
 			// so make the fallback visible in the logs.
 			logging.G(c.Request.Context()).Warnf("sdk: cubemaster has no /cube/sandbox/events route; returning empty history")

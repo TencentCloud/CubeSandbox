@@ -49,7 +49,8 @@ func TestHooksRecordLifecycle(t *testing.T) {
 	assert.Equal(t, "timeout", rows[3].Reason)
 }
 
-func TestInitSurvivesUnopenedDatabase(t *testing.T) {
-	// db.Init panics when the shared handle was never opened; Init must not.
-	assert.NotPanics(t, func() { Init(context.Background()) })
+func TestInitReportsMissingStore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	assert.Error(t, Init(ctx, nil))
 }
