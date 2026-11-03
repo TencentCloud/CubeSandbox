@@ -478,7 +478,7 @@ func TestBuildTemplateSpecFingerprintWithCAChangesOnRotation(t *testing.T) {
 	if a == b {
 		t.Fatal("CA fingerprint rotation must yield a different spec fingerprint, otherwise the artifact reuse cache would serve stale CAs")
 	}
-	// Same CA 鈫?same fingerprint (idempotent for identical inputs).
+	// Same CA → same fingerprint (idempotent for identical inputs).
 	again := buildTemplateSpecFingerprintWithCA(req, "repo@sha256:aaa", "fp-old")
 	if a != again {
 		t.Fatal("fingerprint should be deterministic for identical inputs")
