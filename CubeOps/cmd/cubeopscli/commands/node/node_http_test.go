@@ -165,3 +165,16 @@ func TestDoHttpReq_EmptyBody(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "1", rsp["ok"])
 }
+
+func TestDeleteAction_MultiNodeErrorOnce(t *testing.T) {
+	srv, h, p := setupStubServer(t, 500, "internal error")
+	defer srv.Close()
+	ctx := newCommandContext(t, "delete", []cli.Flag{cli.BoolFlag{Name: "force"}}, h, p, []string{"node-1", "node-2"})
+
+	var err error
+	stderr := captureStderr(t, func() { err = deleteAction(ctx) })
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "delete failed: node-1")
+	assert.Contains(t, err.Error(), "delete failed: node-2")
+	assert.Empty(t, stderr)
+}
