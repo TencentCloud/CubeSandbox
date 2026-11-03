@@ -379,6 +379,12 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 			if ci.IsPod {
 				additionalOpt = append(additionalOpt, additionalSandboxOpt...)
+				// The host KSM policy is authoritative: write it last so a
+				// caller-supplied container annotation copied by
+				// WithCubeFsAnnotation cannot override it.
+				additionalOpt = append(additionalOpt, oci.WithAnnotations(map[string]string{
+					constants.AnnotationMemoryMergeable: strconv.FormatBool(config.GetHostConf().Memory.Mergeable),
+				}))
 			}
 		} else {
 			containerLog.Errorf("create container oci spec failed.%s", err.Error())

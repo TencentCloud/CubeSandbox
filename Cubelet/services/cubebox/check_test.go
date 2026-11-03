@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -309,5 +310,33 @@ func TestCheckParamExposedPorts(t *testing.T) {
 			ExposedPorts: []int64{49983, 80, 443, 8080, 9000},
 		})
 		assert.NoError(t, err)
+	})
+}
+
+func TestStripReservedAnnotations(t *testing.T) {
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.AnnotationMemoryMergeable: "true",
+			"cube.master.instance.type":         "x",
+		},
+		Containers: []*cubebox.ContainerConfig{
+			{Annotations: map[string]string{
+				constants.AnnotationMemoryMergeable: "true",
+				"k":                                 "v",
+			}},
+		},
+	}
+	stripReservedAnnotations(req)
+
+	_, ok := req.Annotations[constants.AnnotationMemoryMergeable]
+	assert.False(t, ok, "sandbox-level key must be stripped")
+	assert.Equal(t, "x", req.Annotations["cube.master.instance.type"], "other keys must stay")
+	_, ok = req.Containers[0].Annotations[constants.AnnotationMemoryMergeable]
+	assert.False(t, ok, "container-level key must be stripped")
+	assert.Equal(t, "v", req.Containers[0].Annotations["k"], "other container keys must stay")
+
+	// Must stay safe when the maps are absent.
+	stripReservedAnnotations(&cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{{}},
 	})
 }

@@ -24,3 +24,8 @@ host:
   gc:
     code_expiration_time: "72h"
     image_expiration_time: "24h"
+  # KSM page-dedup opt-in for sandboxes on this host. Off by default: merged
+  # pages are a cross-VM side channel, so enable only where ksmd is
+  # intentionally run and co-tenant exposure is acceptable.
+  memory:
+    mergeable: false
