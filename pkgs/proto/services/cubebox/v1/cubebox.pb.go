@@ -87,11 +87,11 @@ func (MountPropagation) EnumDescriptor() ([]byte, []int) {
 type StorageMedium int32
 
 const (
-	// use blk device the default is for the node
+	//use blk device the default is for the node
 	StorageMedium_StorageMediumDefault StorageMedium = 0
-	// use memory (e.g. tmpfs on linux)
+	//use memory (e.g. tmpfs on linux)
 	StorageMedium_StorageMediumMemory StorageMedium = 1
-	// use cubemsg
+	//use cubemsg
 	StorageMedium_StorageMediumCubeMsg StorageMedium = 2
 )
 
@@ -2530,9 +2530,9 @@ func (x *SysCall) GetArgs() []*LinuxSeccompArg {
 // ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definitions/quantity/#Quantity
 type Resource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Cpu的限制，单位为core数
+	//Cpu的限制，单位为core数
 	Cpu string `protobuf:"bytes,1,opt,name=cpu,proto3" json:"cpu,omitempty"`
-	// 内存限制，单位可以为字节
+	//内存限制，单位可以为字节
 	Mem string `protobuf:"bytes,2,opt,name=mem,proto3" json:"mem,omitempty"`
 	// mvm内对容器的cpu限制，单位为core数
 	CpuLimit string `protobuf:"bytes,3,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
@@ -3800,7 +3800,9 @@ type CubeSandbox struct {
 	// It is used to store the data of the cubebox store.
 	// this field only used with with_cubebox_store option for cubecli command.
 	PrivateCubeboxStorageData []byte `protobuf:"bytes,9,opt,name=private_cubebox_storage_data,json=privateCubeboxStorageData,proto3" json:"private_cubebox_storage_data,omitempty"`
-	// Stored status reason for the primary container, when available.
+	// Stored primary-container status or exit reason for sandbox Info. Kept here
+	// instead of Container to match the sandbox detail response; Status.Message
+	// is deliberately not exposed.
 	ErrorReason   string `protobuf:"bytes,10,opt,name=error_reason,json=errorReason,proto3" json:"error_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
