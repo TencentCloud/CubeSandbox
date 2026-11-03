@@ -1,3 +1,4 @@
 * text=auto
 *.yaml text eol=lf
 *.tpl text eol=lf
+deploy/pvm/patches/*.patch -whitespace

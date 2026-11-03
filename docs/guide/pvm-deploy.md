@@ -69,6 +69,34 @@ The PVM host kernel package is published on dedicated `kernel-release-*` Release
 
 <small>Optional assets like `kernel-headers-*` and `-dbg` are not needed.</small>
 
+### Build the host kernel with the IPv4 RCU fix
+
+`deploy/pvm/build-pvm-host-kernel-pkg.sh` verifies that the default source tag
+`6.6.117-45.16.cubesandbox` resolves to
+`bc75224fca7e4308531af422a1ec2c3a78ca1e54`, then applies Linux stable fix
+[`742f73df544e`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/?id=742f73df544e03744f2981c467d6542fe8172a2a).
+The fix defers freeing IPv4 socket and request options until RCU readers finish.
+The bundled host config produces kernel release
+`6.6.117-opencloudos9.cubesandbox.pvm.host-rcu742f73df544e`.
+The build disables the automatic Git suffix and sets `LOCALVERSION` to identify
+this backport in both RPM and DEB packages. A custom `BRANCH`/`REPO_URL` also
+requires a matching `PVM_KERNEL_COMMIT`; a source mismatch or patch failure stops
+the build.
+
+Build from a repository checkout on an x86_64 Linux host:
+
+```bash
+bash deploy/pvm/build-pvm-host-kernel-pkg.sh
+```
+
+This changes newly built host packages. Existing release assets and the download
+pins in `deploy/release-assets.yaml` and
+`deploy/kubernetes/images/build-cube-images.sh` still select the previous build.
+Publish rebuilt packages under a new `kernel-release-*` tag before updating those
+pins and package filenames. Installing the package and rebooting into the release
+shown above are required to update a running host; a `pvm.host` match alone does
+not prove the fix is active.
+
 ### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
 Install the downloaded package:

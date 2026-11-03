@@ -4,10 +4,11 @@
 #
 # Build the pvm-host kernel installation package:
 #   - Clone https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel.git (tag: 6.6.117-45.16.cubesandbox)
+#   - Verify the source commit and apply the IPv4 option RCU lifetime fix
 #   - Apply the pvm-host kernel .config
 #   - Build an RPM or DEB package depending on the host distribution family
 #
-# The defaults of REPO_URL / BRANCH / CONFIG_URL / CONFIG_SHA256 / WORK_DIR /
+# The defaults of REPO_URL / BRANCH / PVM_KERNEL_COMMIT / CONFIG_URL / CONFIG_SHA256 / WORK_DIR /
 # SRC_DIR / CONFIG_FILE / OUTPUT_DIR / JOBS / SKIP_DEPS can all be overridden
 # via environment variables.
 # ============================================================================
@@ -35,6 +36,7 @@ PVM_TARGET_DESC="target host"
 
 REPO_URL="${REPO_URL:-https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel.git}"
 BRANCH="${BRANCH:-6.6.117-45.16.cubesandbox}"
+PVM_KERNEL_COMMIT="${PVM_KERNEL_COMMIT:-bc75224fca7e4308531af422a1ec2c3a78ca1e54}"
 CONFIG_URL="${CONFIG_URL:-https://raw.githubusercontent.com/virt-pvm/misc/refs/heads/main/pvm-host-6.12.33.config}"
 CONFIG_SHA256="${CONFIG_SHA256:-edc1965a48fbe972ee6eb3d1be96de3d0fd00c1edfe665974330dea819545e00}"
 
@@ -55,6 +57,17 @@ JOBS="${JOBS:-$(nproc)}"
 BUILD_MARKER="${WORK_DIR}/.build-start.stamp"
 
 # ------------------------- Build -------------------------
+patch_source() {
+    local actual
+    actual="$(git -C "${SRC_DIR}" rev-parse HEAD)"
+    if [[ "${actual}" != "${PVM_KERNEL_COMMIT}" ]]; then
+        err "Kernel source mismatch: expected ${PVM_KERNEL_COMMIT}, got ${actual}"
+        return 1
+    fi
+    log "Applying IPv4 option RCU lifetime fix to ${actual}"
+    git -C "${SRC_DIR}" apply "${SCRIPT_DIR}/patches/0001-ipv4-free-inet_opt-and-ireq_opt-after-an-RCU-grace-period.patch"
+}
+
 build_rpm() {
     log "Building RPM kernel package (binrpm-pkg) with ${JOBS} parallel jobs"
     : >"${BUILD_MARKER}"
@@ -143,7 +156,12 @@ main() {
     ensure_build_tools
 
     clone_source
+    patch_source
     fetch_config
+
+    # Identify the backport without the source tree's generic -dirty suffix.
+    "${SRC_DIR}/scripts/config" --file "${SRC_DIR}/.config" --disable LOCALVERSION_AUTO
+    export LOCALVERSION="-rcu742f73df544e"
 
     case "${pkg_type}" in
     rpm) build_rpm ;;
@@ -157,4 +175,6 @@ main() {
     log "All done."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

@@ -71,6 +71,32 @@ PVM 宿主机内核包发布在专属的 `kernel-release-*` Release 上，请到
 
 <small>资产列表中的 `kernel-headers-*`、`-dbg` 等为可选包，无需下载。</small>
 
+### 构建包含 IPv4 RCU 修复的宿主机内核
+
+`deploy/pvm/build-pvm-host-kernel-pkg.sh` 会验证默认源码标签
+`6.6.117-45.16.cubesandbox` 指向提交
+`bc75224fca7e4308531af422a1ec2c3a78ca1e54`，然后应用 Linux stable 修复
+[`742f73df544e`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/?id=742f73df544e03744f2981c467d6542fe8172a2a)。
+此修复将 IPv4 socket 和 request 选项的释放延迟到 RCU 读取完成之后。
+使用仓库内的宿主机配置时，内核版本为
+`6.6.117-opencloudos9.cubesandbox.pvm.host-rcu742f73df544e`。
+构建脚本禁用自动 Git 后缀，并设置 `LOCALVERSION`，使 RPM 和 DEB 包都能标识此修复。
+自定义 `BRANCH`/`REPO_URL` 时，还需设置对应的 `PVM_KERNEL_COMMIT`；
+源码提交不匹配或补丁应用失败时，构建会停止。
+
+在 x86_64 Linux 主机上的仓库目录中执行：
+
+```bash
+bash deploy/pvm/build-pvm-host-kernel-pkg.sh
+```
+
+此变更只影响新构建的宿主机包。现有 Release 资产，以及
+`deploy/release-assets.yaml` 和 `deploy/kubernetes/images/build-cube-images.sh`
+中的下载固定版本，仍选择之前的构建。应先将重新构建的包发布到新的
+`kernel-release-*` 标签，再更新这些固定版本和包文件名。
+正在运行的主机必须安装新包并重启到上述内核版本才能生效；
+仅匹配 `pvm.host` 不能证明已启用此修复。
+
 ### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
 
 安装下载好的内核包：
