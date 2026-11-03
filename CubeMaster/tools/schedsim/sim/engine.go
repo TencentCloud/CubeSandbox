@@ -478,10 +478,12 @@ func (e *engine) onCreate(ctx context.Context, ev event) {
 	}
 }
 
-// warmupReplica 模拟数据面的缓存升温：模板经远程 restore 落到节点后，在该节点
-// 注册本地副本，后续同模板创建即可命中（与真实 fake cubelet 行为模型一致：
-// miss 慢一次，随后升温）。仿真不建模 restore 延迟，副本在放置的同一虚拟时刻
-// 可见；副本计入 registered，轮末 cleanup 一并注销
+// warmupReplica models data-plane cache warm-up: after a template lands on a
+// node via remote restore, a local replica is registered there so later
+// same-template creates hit (matching the real fake-cubelet behavior model:
+// one slow miss, then warm). The simulation does not model restore latency;
+// the replica becomes visible at the same virtual instant as the placement,
+// and it is counted in registered for the end-of-round cleanup to deregister.
 func (e *engine) warmupReplica(templateID, nodeID string) {
 	localcache.RegisterTemplateReplica(templateID, nodeID, e.p.effectiveTemplateSizeBytes())
 	if e.replicas[templateID] == nil {
@@ -598,11 +600,9 @@ func (e *engine) result() *RoundResult {
 		"jain_cpu":             mean.JainCPU,
 		"jain_mem":             mean.JainMem,
 		"fragmentation_ratio":  mean.FragmentationRatio,
-		// herding/template_hit denominators differ from the online Prometheus
-		// metrics by design: whole-run placements here vs a 100-decision
-		// rolling ring online, and template-bearing successes only vs every
-		// decision. See docs/dev/scheduler-strategy-mapping.md before
-		// comparing the two sides.
+		// sim's herding/template_hit denominators differ from the online
+		// Prometheus metrics; see docs/dev/scheduler-strategy-mapping.md
+		// before comparing the two sides.
 		"herding_top1_share": ratio(int64(top1), int64(e.successes)),
 		"template_hit_rate":  ratio(int64(e.templateHits), int64(e.templatedSuccesses)),
 		"active_nodes_avg":   mean.ActiveNodes,

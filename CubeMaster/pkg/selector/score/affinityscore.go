@@ -14,8 +14,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
-// affinityScore 节点亲和性偏好评分插件：
-// 依据软性亲和性条款（PreferredSchedulingTerms）为节点打分，作为调度偏好的软约束
+// affinityScore is the node-affinity preference score plugin: it scores nodes
+// by soft affinity terms (PreferredSchedulingTerms) as a soft scheduling
+// preference.
 type affinityScore struct {
 	weight float64
 }
@@ -59,7 +60,8 @@ func (l *affinityScore) Disable() bool {
 	return conf == nil || conf.Disable
 }
 
-// Select 为每个候选节点计算亲和性偏好得分；未配置偏好条款时全部为 0 分
+// Select scores each candidate node by affinity preference; all zeros when no
+// preference terms are configured.
 func (l *affinityScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
 	err error) {
 	defer func() {

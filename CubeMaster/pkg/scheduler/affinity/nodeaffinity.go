@@ -14,22 +14,22 @@ import (
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 )
 
-// NodeLabels 节点标签接口：节点需能提供其标签集合用于匹配
+// NodeLabels is the node-label interface: nodes expose their label set for matching.
 type NodeLabels interface {
 	Labels() map[string]string
 }
 
-// NodeSelector 节点选择器：判断节点是否满足亲和性约束
+// NodeSelector reports whether a node satisfies an affinity constraint.
 type NodeSelector interface {
 	Match(node NodeLabels) bool
 }
 
-// PreferredSchedulingTerms 优先调度条款：为节点亲和性偏好打分
+// PreferredSchedulingTerms scores node-affinity preferences.
 type PreferredSchedulingTerms interface {
 	Score(node NodeLabels) int64
 }
 
-// NewNodeSelector 根据节点选择条款列表构造节点选择器
+// NewNodeSelector builds a node selector from a list of selector terms.
 func NewNodeSelector(ns []NodeSelectorTerm) (NodeSelector, error) {
 	wns := &wrapNodeSelector{}
 	var err error
@@ -41,7 +41,7 @@ type wrapNodeSelector struct {
 	nodeselector *lazyErrorNodeSelector
 }
 
-// Match 判断节点是否匹配：选择器或节点为空时视为匹配
+// Match treats an empty selector or an empty node as a match.
 func (w *wrapNodeSelector) Match(n NodeLabels) bool {
 	if w.nodeselector == nil {
 		return true
@@ -52,7 +52,7 @@ func (w *wrapNodeSelector) Match(n NodeLabels) bool {
 	return w.nodeselector.Match(labels.Set(n.Labels()))
 }
 
-// lazyErrorNodeSelector 延迟解析的节点选择器：仅在 Match 时才求值各条款
+// lazyErrorNodeSelector defers term evaluation until Match is called.
 type lazyErrorNodeSelector struct {
 	terms []NodeSelectorTerm
 }
@@ -63,7 +63,7 @@ func NewLazyErrorNodeSelector(ns []NodeSelectorTerm) (*lazyErrorNodeSelector, er
 	}, nil
 }
 
-// Match 任一条款匹配即算匹配（条款之间是 OR 关系）
+// Match succeeds if any term matches (terms are OR-ed).
 func (ns *lazyErrorNodeSelector) Match(nodeLabels labels.Set) bool {
 	if nodeLabels == nil {
 		return true
@@ -76,7 +76,7 @@ func (ns *lazyErrorNodeSelector) Match(nodeLabels labels.Set) bool {
 	return false
 }
 
-// Match 条款内的所有表达式必须全部匹配（表达式之间是 AND 关系）
+// Match requires every expression in the term to match (expressions are AND-ed).
 func (term NodeSelectorTerm) Match(nodeLabels labels.Set) bool {
 	if len(term.MatchExpressions) == 0 {
 		return true
@@ -91,9 +91,8 @@ func (term NodeSelectorTerm) Match(nodeLabels labels.Set) bool {
 	return true
 }
 
-// Match 按操作符匹配单个需求：
-// In/NotIn 比较标签值是否在集合中；Exists/DoesNotExist 判断标签是否存在；
-// Gt/Lt 仅支持内存大小与 CPU 核数两个标签键，按资源量大小比较
+// Match applies a single requirement by operator; Gt/Lt support only the
+// memory-size and CPU-cores label keys, compared by resource amount.
 func (require NodeSelectorRequirement) Match(ls labels.Set) bool {
 	switch require.Operator {
 	case NodeSelectorOpIn:
@@ -131,7 +130,6 @@ func (require NodeSelectorRequirement) Match(ls labels.Set) bool {
 			if err != nil {
 				return false
 			}
-			// Gt 要求节点资源量 >= 阈值，Lt 要求节点资源量 <= 阈值
 			return (require.Operator == NodeSelectorOpGt && lValue.Cmp(rValue) >= 0) ||
 				(require.Operator == NodeSelectorOpLt && lValue.Cmp(rValue) <= 0)
 		default:
@@ -142,12 +140,11 @@ func (require NodeSelectorRequirement) Match(ls labels.Set) bool {
 	}
 }
 
-// wrapPreferredSchedulingTerms 包装 k8s 官方的优先调度条款实现
 type wrapPreferredSchedulingTerms struct {
 	preferredSchedulingTerms *nodeaffinity.PreferredSchedulingTerms
 }
 
-// NewPreferredSchedulingTerms 根据 k8s 优先调度条款列表构造评分器
+// NewPreferredSchedulingTerms builds a scorer from k8s preferred scheduling terms.
 func NewPreferredSchedulingTerms(terms []v1.PreferredSchedulingTerm) (PreferredSchedulingTerms, error) {
 	wrapPreferst := &wrapPreferredSchedulingTerms{}
 	var err error
@@ -155,7 +152,8 @@ func NewPreferredSchedulingTerms(terms []v1.PreferredSchedulingTerm) (PreferredS
 	return wrapPreferst, err
 }
 
-// Score 按节点标签计算亲和性偏好得分，无偏好或无标签时返回 0
+// Score computes the affinity preference score from node labels; 0 when there
+// are no preferences or no labels.
 func (w *wrapPreferredSchedulingTerms) Score(n NodeLabels) int64 {
 	if w.preferredSchedulingTerms == nil {
 		return 0

@@ -141,10 +141,9 @@ var (
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 13), // 100ms .. ~7min
 	}, []string{profileLabel, resultLabel})
 
-	// clusterQuotaGauge exposes summed cluster resources: allocated is the raw
-	// accounted usage (never EffectiveAllocated — it collapses to 0 under
-	// ignore_redis_allocation), capacity is the raw node-reported quota.
-	// cpu is reported in millicores and mem in MB.
+	// clusterQuotaGauge exposes summed cluster resources; allocated uses the
+	// same raw-accounted rule as nodeCapacityFunc. cpu is reported in
+	// millicores and mem in MB.
 	clusterQuotaGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "scheduler_cluster_quota",
 		Help: "Summed cluster quota seen by the scheduler (cpu in millicores, mem in MB), by resource and type (allocated/capacity).",
@@ -238,9 +237,8 @@ func classifyAttemptError(err error) string {
 
 // RecordDecision counts one successful scheduling decision. templateHit marks
 // that the selected node already holds a local replica of the requested
-// template. Templateless requests always record false, so the denominator of
-// this counter is every decision — unlike sim's template_hit_rate, whose
-// denominator counts template-bearing successes only (metric definitions:
+// template; templateless requests always record false, so the denominator is
+// every decision (sim uses a different denominator; see
 // docs/dev/scheduler-strategy-mapping.md).
 func RecordDecision(profile string, templateHit bool) {
 	schedulerDecisions.WithLabelValues(profile, strconv.FormatBool(templateHit)).Inc()
@@ -327,11 +325,10 @@ const herdingWindowSize = 100
 
 // herdingWindow is a concurrency-safe fixed-size ring of the most recent
 // decision node IDs with per-node counts, used to compute the top-1 share.
-// The current top-1 is maintained incrementally: the common path (plain
-// insert, or eviction of a node other than the top-1) is O(1) under the
-// per-window mutex, and only the eviction of the current top-1 falls back to
-// a counts scan. The window mutates exclusively inside add, so recomputing at
-// that single point keeps the gauge exact between events.
+// Top-1 is maintained incrementally: plain inserts are O(1); only eviction
+// of the current top-1 falls back to a counts scan. The window mutates
+// exclusively inside add, so recomputing at that single point keeps the
+// gauge exact between events.
 type herdingWindow struct {
 	mu        sync.Mutex
 	ring      []string
@@ -370,7 +367,6 @@ func herdingWindowFor(profile string) *herdingWindow {
 func (w *herdingWindow) add(id string) float64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// Evict the oldest entry once the ring is full.
 	if w.size == herdingWindowSize {
 		evicted := w.ring[w.head]
 		if w.counts[evicted]--; w.counts[evicted] == 0 {
@@ -596,12 +592,10 @@ func DisableClusterGauges() { clusterGaugesDisabled.Store(true) }
 
 // startClusterGaugeCollector launches the periodic gauge collection exactly
 // once per process, even if InitScheduler is called repeatedly (e.g.
-// in-process restarts). The loop deliberately runs on a process-lifetime
-// context rather than the caller's: the Once would otherwise capture the
-// first InitScheduler's context, and that context being cancelled (in-process
-// restart, test teardown) would stop the collector forever while the Once
-// blocks any restart. DisableClusterGauges remains the stop switch and is
-// checked inside the loop, so it also halts an already-running collector.
+// in-process restarts). The loop deliberately runs without the caller's
+// context: once the Once fires, a cancelled caller context must not be able
+// to stop the collector forever. DisableClusterGauges remains the stop
+// switch and is checked inside the loop.
 func startClusterGaugeCollector() {
 	if clusterGaugesDisabled.Load() {
 		return

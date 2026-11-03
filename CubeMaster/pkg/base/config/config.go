@@ -1077,28 +1077,34 @@ func preHandOverhead(config *Config) error {
 	return nil
 }
 
-// preHandleScheduler 为调度器配置补默认值：
-// 节点上限、过滤/评分插件参数、选择算法名等
-// schedulerFactoryYAML 是嵌入二进制的出厂调度策略配置（三条内置 profile：
-// burst_balance / template_reuse / mixed_binpack）。作为单一事实来源，
-// docs/guide/scheduler-plugin.md 引用的默认行为以此文件为准。
+// preHandleScheduler fills in scheduler config defaults: node limits,
+// filter/score plugin parameters, selection algorithm names, etc.
+// schedulerFactoryYAML is the factory scheduler policy embedded in the binary
+// (three built-in profiles: burst_balance / template_reuse / mixed_binpack).
+// As the single source of truth, the default behavior referenced by
+// docs/guide/scheduler-plugin.md is defined by this file.
 //
 //go:embed scheduler_factory.yaml
 var schedulerFactoryYAML []byte
 
-// factoryProfileInjectWarnOnce 保证"空配置注入出厂策略"的行为变化告警
-// 每个进程只输出一次：热更新会反复重新注入，但重复刷这条 warn 没有意义。
+// factoryProfileInjectWarnOnce keeps the behavior-change warning for
+// "empty-config factory injection" to one output per process: hot reloads
+// re-run injection repeatedly, and repeating this warn adds no value.
 var factoryProfileInjectWarnOnce sync.Once
 
-// injectFactorySchedulerProfiles 在用户完全没有配置调度策略时注入出厂策略：
-// 要求 scheduler.profiles 与 legacy 的 scheduler.filter / scheduler.score /
-// scheduler.postscore 全部为空，且未显式设置 scheduler.disable_factory_profiles。
-// 一旦用户显式配置了其中任意一项，出厂策略整体不注入（all-or-nothing），
-// 避免覆盖存量部署依赖的 legacy 编译路径（profile.Compile 有 profiles 时忽略 legacy）。
+// injectFactorySchedulerProfiles injects the factory policy when the user has
+// configured no scheduling policy at all: scheduler.profiles and the legacy
+// scheduler.filter / scheduler.score / scheduler.postscore must all be empty,
+// and scheduler.disable_factory_profiles must not be set explicitly. If the
+// user configured any one of them, the factory policy is skipped entirely
+// (all-or-nothing) so the legacy compile path existing deployments rely on is
+// never overridden (profile.Compile ignores legacy when profiles are present).
 //
-// 出厂 YAML 同时携带 legacy score 子树：profile 模式下它不参与流水线编译，
-// 但内置 scorer（real_time_weighted_average / image_score）的 enable_weight_factors
-// 只存在于该 legacy 子树中；缺失时这些 scorer 空转（见 pkg/selector/score/realtimescore.go）。
+// The factory YAML also carries the legacy score subtree: in profile mode it
+// does not participate in pipeline compilation, but the enable_weight_factors
+// of the built-in scorers (real_time_weighted_average / image_score) live only
+// in that legacy subtree; without them those scorers no-op (see
+// pkg/selector/score/realtimescore.go).
 func injectFactorySchedulerProfiles(config *Config) error {
 	sched := config.Scheduler
 	if sched.DisableFactoryProfiles {
@@ -1131,9 +1137,9 @@ func injectFactorySchedulerProfiles(config *Config) error {
 	for _, profileConf := range sched.Profiles {
 		names = append(names, profileConf.Name)
 	}
-	// 注入出厂策略会改变空配置部署的放置行为（此前是"无过滤、无评分、随机选"），
-	// 必须显式告知运维，避免升级后策略静默切换。热更新会重新执行注入，
-	// 告警每个进程只输出一次，避免无关 key 的 reload 重复刷日志。
+	// Injection changes placement for empty-config deployments and must be
+	// made visible to operators; the warn fires once per process via
+	// factoryProfileInjectWarnOnce.
 	factoryProfileInjectWarnOnce.Do(func() {
 		CubeLog.Warnf("no scheduler policy configured (scheduler.profiles/filter/score/postscore all empty); "+
 			"injecting factory scheduler profiles %v: placement now follows mandatory guards + factory scorers + spread selection, "+
@@ -1230,7 +1236,8 @@ func preHandleScheduler(config *Config) error {
 		}
 	}
 
-	// 出厂策略注入后再走 score 默认值补全，注入的配置与用户配置走同一路径
+	// After factory injection, apply the score default-value pass; the injected
+	// config flows through the same path as user-provided config.
 	if err := injectFactorySchedulerProfiles(config); err != nil {
 		return err
 	}

@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package grpcplugin implements external scheduler plugins over gRPC. It uses
-// Unix Domain Sockets by default, performs a version/capability handshake,
-// carries the frozen candidate snapshot inside every Filter/Score request so
-// plugins stay stateless and concurrent attempts never serialize on a shared
-// server-side snapshot slot, validates all plugin output, and bounds failures
-// with timeouts and a small circuit breaker.
+// Package grpcplugin implements external scheduler plugins over gRPC: Unix
+// Domain Sockets by default, a version/capability handshake, validated output,
+// timeouts and a small circuit breaker. The per-request frozen-snapshot
+// transport that keeps plugins stateless is defined in the proto
+// (pkgs/proto/services/schedulerplugin/v1/plugin.proto).
 package grpcplugin
 
 import (

@@ -14,10 +14,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-// TestFactoryProfilesCompile 锁死内嵌出厂配置的合法性：用户零调度配置时
-// config.Init 经 preHandle 注入三条内置 profile，它们必须能连同真实内置
-// scorer 一起编译成功，且路由/兜底符合预期。出厂 YAML 一旦损坏，所有零配置
-// 部署都会启动失败，这个测试是最后的安全网。
+// TestFactoryProfilesCompile pins the validity of the embedded factory config:
+// with a zero-scheduling config, config.Init injects the three built-in
+// profiles via preHandle, and they must compile successfully together with the
+// real built-in scorers, with routing and fallback as expected. If the factory
+// YAML breaks, every zero-config deployment fails at startup — this test is
+// the last safety net.
 func TestFactoryProfilesCompile(t *testing.T) {
 	dir := t.TempDir()
 	confPath := filepath.Join(dir, "conf.yaml")
@@ -63,8 +65,9 @@ func TestFactoryProfilesCompile(t *testing.T) {
 		}
 	}
 
-	// 锁定出厂策略的打分组成为设计口径：burst_balance 带创建并发软偏好，
-	// template_reuse 带同模板创建压力分散维度
+	// Pin the factory policies' scoring composition as the design contract:
+	// burst_balance carries a soft in-flight-create preference, and
+	// template_reuse carries a per-template in-flight-create spread dimension.
 	wantScores := map[string][]string{
 		"burst_balance":  {"real_time_weighted_average"},
 		"template_reuse": {"image_score", "real_time_weighted_average"},

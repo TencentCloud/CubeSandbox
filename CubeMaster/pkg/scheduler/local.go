@@ -21,9 +21,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
-// local 本地调度器状态：维护各实例类型的任务缓冲队列，以及全局销毁并发限制
+// local holds scheduler-local state: per-instance-type task buffer queues and
+// the global destroy concurrency limit.
 type local struct {
-	// bufferTaskMap 按实例类型(product)维度组织的缓冲任务队列
+	// bufferTaskMap organizes buffer queues by instance type (product).
 	bufferTaskMap              map[string]*buffertask
 	stop                       chan struct{}
 	ctx                        context.Context
@@ -32,8 +33,10 @@ type local struct {
 
 var l *local
 
-// initTask 初始化本地调度器：为默认实例类型和所有配置的实例类型创建缓冲队列，
-// 并启动指标采集、指标上报、并发限制监控三个后台协程
+// initTask initializes the local scheduler: it creates buffer queues for the
+// default instance type and every configured instance type, then starts three
+// background goroutines (metric collection, metric reporting, concurrency-limit
+// monitoring).
 func initTask(ctx context.Context) error {
 	l = &local{
 		ctx:                        ctx,
@@ -52,7 +55,8 @@ func initTask(ctx context.Context) error {
 	return nil
 }
 
-// Stop 停止调度器：关闭停止信号，并优雅停止所有缓冲队列
+// Stop shuts the scheduler down: closes the stop signal and gracefully stops
+// every buffer queue.
 func Stop(ctx context.Context) {
 	close(l.stop)
 	for _, v := range l.bufferTaskMap {
@@ -60,7 +64,8 @@ func Stop(ctx context.Context) {
 	}
 }
 
-// buffertask 单个实例类型的缓冲任务队列，带并发限制与指标统计
+// buffertask is one instance type's buffer queue with concurrency limits and
+// metric bookkeeping.
 type buffertask struct {
 	bufferQ                         bufferqueue.BufferQueue
 	lastCreateConcurrentLimit       int64 // 上一次设置的创建并发上限
@@ -69,7 +74,8 @@ type buffertask struct {
 	localCreateConcurrentNumMetrics *sync.Map
 }
 
-// newTask 创建缓冲任务队列，队列容量取配置中的 BufferQueueMinJob
+// newTask creates a buffer queue whose capacity comes from the configured
+// BufferQueueMinJob.
 func newTask() *buffertask {
 	return &buffertask{
 		bufferQ: bufferqueue.New(
@@ -81,7 +87,6 @@ func newTask() *buffertask {
 	}
 }
 
-// Push 将任务加入缓冲队列
 func (t *buffertask) Push(x interface{}) {
 	if t == nil || t.bufferQ == nil {
 		return
@@ -89,7 +94,6 @@ func (t *buffertask) Push(x interface{}) {
 	t.bufferQ.Push(x)
 }
 
-// Len 返回缓冲队列当前长度
 func (t *buffertask) Len() int {
 	if t == nil || t.bufferQ == nil {
 		return 0
@@ -97,7 +101,6 @@ func (t *buffertask) Len() int {
 	return t.bufferQ.Len()
 }
 
-// Workings 返回缓冲队列当前在途（正在处理）的任务数
 func (t *buffertask) Workings() int {
 	if t == nil || t.bufferQ == nil {
 		return 0
@@ -105,7 +108,6 @@ func (t *buffertask) Workings() int {
 	return int(t.bufferQ.Workings())
 }
 
-// setBufferTaskConcurrent 设置该队列的并发处理上限
 func (t *buffertask) setBufferTaskConcurrent(n int64) {
 	if t == nil || t.bufferQ == nil {
 		return
@@ -113,7 +115,6 @@ func (t *buffertask) setBufferTaskConcurrent(n int64) {
 	t.bufferQ.SetLimit(n)
 }
 
-// setLastCreateConcurrentLimit 记录当前生效的创建并发上限
 func (t *buffertask) setLastCreateConcurrentLimit(n int64) {
 	if t == nil {
 		return
@@ -121,8 +122,9 @@ func (t *buffertask) setLastCreateConcurrentLimit(n int64) {
 	t.lastCreateConcurrentLimit = n
 }
 
-// AddBufferTask 将任务推入指定产品（实例类型）的缓冲队列；
-// 若该实例类型未配置队列，则回退到默认实例类型的队列
+// AddBufferTask pushes a task into the buffer queue of the given product
+// (instance type); when no queue is configured for that type, it falls back to
+// the default instance type's queue.
 func AddBufferTask(x interface{}, product string) {
 	bufferQ, ok := l.bufferTaskMap[product]
 	if !ok || bufferQ == nil {
@@ -132,8 +134,9 @@ func AddBufferTask(x interface{}, product string) {
 	bufferQ.Push(x)
 }
 
-// collectMetric 周期性采集各缓冲队列的指标：记录队列长度与在途任务数的历史峰值，
-// 并按节点统计单节点创建并发数（>5 时记录其峰值，供后续上报）
+// collectMetric periodically samples buffer-queue metrics: it records the peak
+// queue length and peak in-flight task count, and tracks per-node create
+// concurrency (peaks above 5, for later reporting).
 func (l *local) collectMetric() {
 	ticker := time.NewTicker(config.GetConfig().Common.CollectMetricInterval)
 	defer ticker.Stop()
@@ -178,8 +181,9 @@ func (l *local) collectMetric() {
 	}
 }
 
-// reportMetric 周期性上报指标：将采集到的峰值（队列长度、在途任务数、单节点创建并发数）
-// 通过日志 Trace 上报，上报后清零
+// reportMetric periodically reports the collected peaks (queue length,
+// in-flight tasks, per-node create concurrency) via log Trace, then resets
+// them.
 func (l *local) reportMetric() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -234,8 +238,8 @@ func (l *local) reportMetric() {
 	}
 }
 
-// reportStdevTrace 上报集群节点资源分布的均衡度指标（标准差）：
-// 分别统计 CPU 配额使用率、内存配额使用率、MVM 数量的标准差并上报
+// reportStdevTrace reports the cluster's node resource-distribution balance as
+// standard deviations of CPU quota usage, memory quota usage and MVM counts.
 func reportStdevTrace() {
 	metricTrace := &CubeLog.RequestTrace{
 		Caller: constants.CubeMasterServiceID,
@@ -273,15 +277,16 @@ func reportStdevTrace() {
 	CubeLog.Trace(metricTrace)
 }
 
-// limitDestroyOfEveryNode 返回每节点配置的销毁并发上限
 func limitDestroyOfEveryNode() int64 {
 
 	return config.GetConfig().CubeletConf.DestroyConcurentLimit
 }
 
-// monitorLimit 周期性监控并动态调整并发限制：
-// 1. 按集群健康节点数与 master 节点数，为每个实例类型重新计算创建并发上限并下发到缓冲队列；
-// 2. 计算全局销毁并发上限，变化时更新销毁任务 worker 并发数
+// monitorLimit periodically monitors and adjusts concurrency limits:
+//  1. recomputes each instance type's create concurrency limit from the healthy
+//     node count and the master node count, and pushes it to the buffer queues;
+//  2. computes the global destroy concurrency limit and updates the destroy
+//     task worker concurrency when it changes.
 func (l *local) monitorLimit() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -306,11 +311,11 @@ func (l *local) monitorLimit() {
 				}
 				newMasterNodes := localcache.HealthyMasterNodes()
 
-				// 每节点创建并发上限：取集群平均与配置下限中的较大值
+				// Per-node create limit: max(cluster average, configured floor).
 				newCreateLimitOfEveryNode := max(int64(math.Ceil(float64(totalLimitCreate*1.0/newHealthyNodes))),
 					config.GetConfig().CubeletConf.CreateConcurrentLimit)
 
-				// 按 master 节点数分摊后的全局创建并发上限
+				// Global create limit amortized across master nodes.
 				limitCreate := int64(math.Ceil(float64(newHealthyNodes * newCreateLimitOfEveryNode * 1.0 / newMasterNodes)))
 				if bufferQ.lastCreateConcurrentLimit != limitCreate {
 					bufferQ.setLastCreateConcurrentLimit(limitCreate)

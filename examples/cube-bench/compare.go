@@ -280,9 +280,7 @@ func aggregateSamples(samples []map[string]float64) map[string]metricStats {
 }
 
 // tCrit95Table holds the two-sided 95% critical values of Student's t,
-// indexed by degrees of freedom (df = n-1). Small samples need much wider
-// intervals than the normal-theory 1.96 (df=1 is ~6.5x wider), which is why
-// the t distribution is used instead of a hardcoded 1.96·σ/√n.
+// indexed by degrees of freedom (df = n-1).
 var tCrit95Table = [...]float64{ // index = df-1
 	12.706205, // df=1  (n=2)
 	4.302653,  // df=2  (n=3)
@@ -317,10 +315,8 @@ var tCrit95Table = [...]float64{ // index = df-1
 }
 
 // tCrit95 returns the two-sided 95% critical value for the confidence
-// interval of a mean over n samples: Student's t with n-1 degrees of freedom
-// for small n, converging to the normal 1.96 as n grows (a lookup table
-// avoids a stats dependency). n < 2 produces no interval; the return value is
-// then unused because callers gate on hasCI.
+// interval of a mean over n samples (Student's t with n-1 degrees of
+// freedom; n < 2 produces no interval and callers gate on hasCI).
 func tCrit95(n int) float64 {
 	if n < 2 {
 		return 0

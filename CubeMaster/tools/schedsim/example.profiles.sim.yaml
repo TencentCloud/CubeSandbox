@@ -1,5 +1,5 @@
 # Example CubeMaster config for schedsim using the profile-based scheduler
-# plugin system (scheduler.profiles, merged from PR #1), contrasted with the
+# plugin system (scheduler.profiles), contrasted with the
 # legacy flat config in example.sim.yaml.
 #
 # Usage (single run):

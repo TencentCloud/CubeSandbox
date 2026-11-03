@@ -1,31 +1,28 @@
 # Built-in ("factory") scheduler profiles embedded into the CubeMaster binary.
 #
-# This file is compiled into the binary via go:embed (see schedulerFactoryYAML
-# in config.go) and injected by preHandleScheduler ONLY when the user has
-# configured nothing scheduler-policy related: no scheduler.profiles and no
-# legacy scheduler.filter / scheduler.score / scheduler.postscore block. Any
-# explicit scheduler policy configuration replaces this file entirely
-# (all-or-nothing).
-#
-# IMPORTANT: with this file injected, scheduling follows the three factory
-# profiles below (mandatory guards + factory scorers + spread selection); that
-# is NOT identical to the pre-profile legacy static registration. To keep the
-# legacy behavior on an existing deployment, set
-# scheduler.disable_factory_profiles: true, or configure at least one legacy
-# key (scheduler.filter.enable_filters and/or scheduler.score.enable_scorers):
-# injection is then skipped entirely and profile.Compile rebuilds the pipeline
-# from the legacy config (compileLegacy), preserving the old tolerance
-# semantics (unknown plugin names and zero-weight scorers are skipped).
+# Compiled into the binary via go:embed (see schedulerFactoryYAML in config.go)
+# and injected ONLY when no scheduler policy is configured at all (no
+# scheduler.profiles and no legacy scheduler.filter / scheduler.score /
+# scheduler.postscore block); any explicit policy configuration replaces this
+# file entirely (all-or-nothing). Injection changes placement versus the
+# legacy empty-config behavior — see config.go and
+# docs/guide/scheduler-plugin.md for the injection rules and the
+# disable_factory_profiles escape hatch.
 #
 # Three built-in strategies:
 #   - burst_balance   route: labels {workload: burst_balance}
-#                     突发均衡：高并发同规格请求按资源水位与创建并发在候选节点间打散
+#                     Burst balancing: spreads high-rate, similarly sized
+#                     requests across candidate nodes by resource watermark
+#                     and in-flight creates.
 #   - template_reuse  route: labels {workload: template_reuse}
-#                     模板复用：优先落在已持有该模板本地副本的节点，并按同模板创建压力分散
+#                     Template reuse: prefers nodes already holding a local
+#                     replica of the template, spread by same-template create
+#                     pressure.
 #   - mixed_binpack   default
-#                     混合装箱（默认）：紧凑放置、保留整空节点，Top-2 打散防 herds
-#
-# The legacy `score` subtree below is NOT a pipeline definition: with profiles
+#                     Mixed bin-packing (default): tighter placement that
+#                     preserves entirely free nodes, Top-2 spread against
+#                     herding.
+## The legacy `score` subtree below is NOT a pipeline definition: with profiles
 # present, compileLegacy never runs. It only feeds the factor weights that the
 # built-in scorers read from the global config at runtime
 # (pkg/selector/score/realtimescore.go, imagescore.go); without it those
@@ -77,8 +74,8 @@ scheduler:
           workload: template_reuse
       scores:
         # Main objective: prefer nodes holding a local template replica.
-        # 权重 0.7/0.3 经 schedsim 多 seed 对照实验裁决：压到 0.1/0.9
-        # 会在高负载下牺牲模板本地命中（见 docs/dev/scheduler-sim-report.md）
+        # Weights were calibrated by offline simulation; rationale and
+        # trade-offs in docs/dev/scheduler-sim-report.md.
         - name: image_score
           type: go
           weight: 0.7

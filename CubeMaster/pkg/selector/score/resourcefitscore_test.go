@@ -14,16 +14,16 @@ import (
 )
 
 func TestCalculateResourceFitScorePrefersTighterBalancedFit(t *testing.T) {
-	// 节点 A：8 核/16 GB，已使用 4 核/8 GB。
-	// 放入 2 核/4 GB 请求后，CPU 和内存都剩余 25%。
+	// Node A: 8 cores / 16 GB with 4 cores / 8 GB already used.
+	// After placing a 2 cores / 4 GB request, cpu and mem both have 25% left.
 	tightFit := calculateResourceFitScore(
 		8000, 4000, 2000,
 		16384, 8192, 4096,
 		0.5,
 	)
 
-	// 节点 B：8 核/16 GB，当前完全空闲。
-	// 放入相同请求后，CPU 和内存都剩余 75%。
+	// Node B: 8 cores / 16 GB, currently completely idle.
+	// After the same request, cpu and mem both have 75% left.
 	looseFit := calculateResourceFitScore(
 		8000, 0, 2000,
 		16384, 0, 4096,
@@ -40,15 +40,16 @@ func TestCalculateResourceFitScorePrefersTighterBalancedFit(t *testing.T) {
 }
 
 func TestCalculateResourceFitScorePenalizesImbalance(t *testing.T) {
-	// 放入请求后，CPU 和内存都剩余 25%。
+	// After placement, cpu and mem both have 25% left.
 	balanced := calculateResourceFitScore(
 		8000, 4000, 2000,
 		16384, 8192, 4096,
 		0.5,
 	)
 
-	// 放入请求后，CPU 剩余 0%，内存剩余 50%。
-	// 总体剩余资源与 balanced 相近，但资源比例严重失衡。
+	// After placement, cpu has 0% left and mem 50%.
+	// Total remaining resources are close to the balanced case, but the
+	// resource ratios are severely imbalanced.
 	imbalanced := calculateResourceFitScore(
 		8000, 6000, 2000,
 		16384, 4096, 4096,

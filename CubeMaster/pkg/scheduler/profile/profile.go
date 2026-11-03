@@ -178,9 +178,8 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 			selector, err := registry.BuildFilter(ctx, conf)
 			if err != nil {
 				// Legacy compatibility: pre-plugin configs silently skipped
-				// unregistered filter names (filter.NewSelector). Keep
-				// tolerating them so stale entries in existing deployments do
-				// not become a startup-fatal error after upgrade.
+				// unregistered filter names; keep tolerating stale entries
+				// so an upgrade does not turn them startup-fatal.
 				if errors.Is(err, plugin.ErrUnknownPlugin) {
 					log.G(ctx).Warnf("legacy scheduler filter %q is not registered; skipping", name)
 					continue
@@ -204,10 +203,8 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 			}
 			weight := selector.Weight()
 			if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
-				// Legacy compatibility: pre-plugin scoring tolerated a zero
-				// weight (score * 0, random pick when all weights are zero).
-				// Skipping the scorer preserves that behavior instead of
-				// failing every create with an internal error at runtime.
+				// Legacy compatibility: a zero weight meant score*0 (random
+				// pick); skipping preserves that instead of failing every create.
 				log.G(ctx).Warnf("legacy scheduler scorer %q has invalid weight %v; skipping", name, weight)
 				continue
 			}
@@ -218,9 +215,11 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 		}
 	}
 	if len(pipeline.Scores) == 0 {
-		// 零 scorer 的 legacy 流水线没有打分阶段：终选退化为按枚举序的近似
-		// first-fit（priority_select_num=1 时永远选中首节点），会产生极端堆叠。
-		// 这通常是 score 配置缺失/遗漏而非有意为之，给出显眼告警
+		// A legacy pipeline with zero scorers has no scoring stage: selection
+		// degrades to an approximate first-fit over enumeration order (with
+		// priority_select_num=1 the first node always wins), producing extreme
+		// stacking. This usually indicates a missing score config rather than
+		// intent, so warn loudly.
 		log.G(ctx).Warnf("legacy scheduler profile compiled with zero scorers; " +
 			"selection degenerates to first-fit stacking (check scheduler.score config)")
 	}
@@ -351,15 +350,10 @@ func enabled(value *bool) bool { return value == nil || *value }
 // validateLegacyCoupledScoreConf rejects profile entries that reference the
 // built-in scorers still reading their factor switches from the legacy global
 // scheduler.score tree when that tree is missing the required block, disables
-// the scorer, or leaves every enabled factor with a zero resource weight.
-// Without these checks such a scorer silently contributes nothing; profile
-// scorers are compiled ForceEnabled, so the runtime empty result would either
-// trip the coverage check or be replaced by the default score. (At runtime
-// the built-ins also report score.ErrNotApplicable for these degenerate
-// configurations, so a hot-reload race degrades to a sanctioned skip instead
-// of a failure.) Factory-injected profiles carry the legacy score subtree
-// (scheduler_factory.yaml), so they always pass; the error only fires for
-// hand-written profiles that forgot the coupling.
+// the scorer, or leaves every enabled factor with a zero resource weight —
+// without these checks such a scorer silently contributes nothing. Profiles
+// injected from scheduler_factory.yaml always carry the legacy score subtree,
+// so the error only fires for hand-written profiles that forgot the coupling.
 func validateLegacyCoupledScoreConf(sched *config.WrapperSchedulerConf, name string, conf config.SchedulerProfilePluginConf) error {
 	kind := strings.ToLower(strings.TrimSpace(conf.Type))
 	if kind == "" || kind == "builtin" {

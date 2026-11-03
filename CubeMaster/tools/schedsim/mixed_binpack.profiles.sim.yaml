@@ -32,8 +32,6 @@ cubelet_conf:
 scheduler:
   pre_select_num: -1
 
-  # These legacy picker fields are ignored when scheduler.profiles is present.
-  # They are retained to keep the simulator configuration compatible.
   priority_select_num: 1
   least_select_name: "random"
 
@@ -66,8 +64,6 @@ scheduler:
     - name: mixed_binpack
       default: true
 
-      # Mandatory guards such as node_safety, cpu, mem, disk,
-      # template_locality and realtime_create_num are added automatically.
       scores:
         # Main objective: prefer tighter placement while penalizing
         # unbalanced CPU and memory residual ratios.

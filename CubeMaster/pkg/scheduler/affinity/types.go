@@ -4,7 +4,7 @@
 
 package affinity
 
-// NodeSelectorOperator 节点选择器操作符类型
+// NodeSelectorOperator is a node selector operator type.
 type NodeSelectorOperator string
 
 const (
@@ -16,7 +16,8 @@ const (
 	NodeSelectorOpLt           NodeSelectorOperator = "Lt"           // 标签资源量小于阈值
 )
 
-// NodeSelectorRequirement 单条节点选择需求：标签键 + 操作符 + 候选值集合
+// NodeSelectorRequirement is a single node selection requirement: a label key,
+// an operator and a set of candidate values.
 type NodeSelectorRequirement struct {
 	Key string `json:"key" protobuf:"bytes,1,opt,name=key"`
 
@@ -25,7 +26,8 @@ type NodeSelectorRequirement struct {
 	Values map[string]any `json:"values,omitempty" protobuf:"bytes,3,rep,name=values"`
 }
 
-// NodeSelectorTerm 一组节点选择条款：包含按标签表达式匹配与按字段匹配两类需求
+// NodeSelectorTerm is a group of selector requirements: label-expression
+// matches plus field matches.
 type NodeSelectorTerm struct {
 	MatchExpressions []NodeSelectorRequirement `json:"matchExpressions,omitempty" protobuf:"bytes,1,rep,name=matchExpressions"`
 

@@ -14,7 +14,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-// memFilter 内存资源过滤插件：剔除配额内存或实际负载内存不足的节点
+// memFilter rejects nodes whose free quota memory or physical free memory
+// cannot fit the request.
 type memFilter struct {
 }
 
@@ -30,9 +31,6 @@ func (l *memFilter) String() string {
 	return l.ID()
 }
 
-// Select 过滤规则：
-// 1. 节点空闲配额内存（有效配额 - 已分配）必须大于请求内存；
-// 2. 节点实际负载空闲内存（总内存 - 已用）必须大于请求内存 + 节点保留内存
 func (l *memFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	memq := selCtx.GetResMemFromCtx()
 	sconf := config.GetConfig().Scheduler

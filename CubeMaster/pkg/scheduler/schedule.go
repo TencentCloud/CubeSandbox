@@ -73,9 +73,11 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	}
 	freezeSnapshot(selCtx, pipeline)
 
-	// guard 阶段同样受 no_candidate 策略约束:策略为 backoff 且候选被过滤空
-	// 时,走 backoff 路径重跑完整流水线(含 guards,安全检查不被绕过);其余
-	// 失败保持 fail-closed。legacy 流水线无 guards,此分支不可达。
+	// The guard stage is subject to the no_candidate policy too: with the
+	// backoff policy and an emptied candidate set, the backoff path reruns the
+	// full pipeline (guards included, so safety checks are never bypassed);
+	// other failures stay fail-closed. Legacy pipelines have no guards, so
+	// this branch is unreachable there.
 	if err := runProfileFilters(selCtx, pluginKindGuard, pipeline.Guards); err != nil {
 		if pipeline.NoCandidate != profile.NoCandidateBackoff || !isNoCandidateError(err) {
 			return nil, err
@@ -102,7 +104,8 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 		return nil, err
 	}
 
-	// 按 Profile 的选择策略（highest / spread / random）从评分结果中选出最终节点
+	// Pick the final node from the scored results per the profile's selection
+	// policy (highest / spread / random).
 	selected := selectNode(selCtx, pipeline)
 	if selected == nil && pipeline.NoCandidate == profile.NoCandidateBackoff {
 		if len(pipeline.Guards) == 0 {
@@ -117,13 +120,10 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 // profile set. Callers must treat that as a hard error: synthesizing a
 // fallback pipeline here would schedule without any of the safety guards
 // (node_safety/cpu/mem/disk/...) that only exist inside compiled profiles.
-// Two attempts, not one and not unbounded: the config watcher installs the
-// replacement with Swap *before* retiring the old set with Close, so a Load
-// that raced a reload can Acquire a set that retired in between — the retry
-// then observes the replacement and succeeds. More attempts are useless:
-// Acquire only fails on a retired set, and a set left installed past
-// retirement can never start succeeding, so the loop must terminate and fall
-// through to the nil error path.
+//
+// Two attempts, exactly: hot reload Swaps in the replacement *before*
+// retiring the old set, so an Acquire that raced the retirement succeeds on
+// the retry; Acquire fails only on retired sets, so more attempts are useless.
 func currentPipeline(selCtx *selctx.SelectorCtx) (*profile.Pipeline, func()) {
 	for attempt := 0; attempt < 2; attempt++ {
 		profiles := scheduler.profiles.Load()
@@ -171,9 +171,10 @@ func selectNode(selCtx *selctx.SelectorCtx, pipeline *profile.Pipeline) *node.No
 	}
 }
 
-// spreadSelect 实现摊平语义：在评分最高的前 topN 个候选中确定性选取当前运行
-// 沙箱数最少的节点，占用相同时保持评分顺序。与 random（top_n 内按分数加权随机）
-// 不同，spread 保证打分聚拢时放置仍然向空闲节点摊开。
+// spreadSelect spreads deterministically: among the top-N scored candidates it
+// picks the node with the fewest running sandboxes, keeping score order on
+// ties. Unlike random (score-weighted random within top_n), spread keeps
+// placement fanning out toward idle nodes even when scores cluster.
 func spreadSelect(selCtx *selctx.SelectorCtx, topN int) *node.Node {
 	var candidates node.NodeList
 	if scored := selCtx.LeastScoreNodes(topN); scored.Len() > 0 {
@@ -319,10 +320,12 @@ func runPreFilter(selCtx *selctx.SelectorCtx) (err error) {
 	return nil
 }
 
-// runProfileFilters 并发执行 Profile 中的一组过滤插件：
-// 每个插件独立运行并校验其返回的候选节点，只有被全部插件保留的节点才进入结果；
-// 插件失败按 Failure 策略决定 fail-open（放行全部候选）或 fail-closed（直接报错）
-// kind 区分 guard/filter 两类执行点，仅用于逐插件耗时指标的标签。
+// runProfileFilters runs a profile's filter plugins concurrently: each plugin
+// runs independently and its returned candidates are validated; only nodes
+// kept by every plugin advance. Plugin failures follow the Failure policy:
+// fail-open (admit all candidates) or fail-closed (fail the request).
+// kind distinguishes the guard/filter execution points, used only as a label
+// of the per-plugin duration metric.
 func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profile.FilterPlugin) error {
 	if len(filters) == 0 {
 		return nil

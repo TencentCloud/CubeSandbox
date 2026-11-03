@@ -30,8 +30,6 @@ cubelet_conf:
 scheduler:
   pre_select_num: -1
 
-  # These legacy picker fields are ignored when scheduler.profiles is present.
-  # They are retained to keep the simulator configuration compatible.
   priority_select_num: 1
   least_select_name: "random"
 
@@ -67,12 +65,12 @@ scheduler:
     - name: burst_balance
       default: true
 
-      # Mandatory safety and capacity guards are added automatically.
       scores:
         - name: real_time_weighted_average
           type: go
           weight: 1.0
-        # 与出厂 burst_balance 对齐：在途创建越少的节点分越高
+        # Aligned with the factory burst_balance: fewer in-flight creates
+        # scores higher.
 
       # Spread requests among the three highest-ranked candidates.
       selection:

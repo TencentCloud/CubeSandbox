@@ -15,10 +15,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-// 编译期检查 resourceFitScore 是否完整实现 Selector 接口。
+// Compile-time check that resourceFitScore implements the Selector interface.
 var _ Selector = (*resourceFitScore)(nil)
 
-// resourceFitScore 根据请求放入节点后的资源剩余量和比例失衡程度打分。
+// resourceFitScore scores nodes by the resources left after placing the
+// request and by the resulting cpu/mem imbalance.
 type resourceFitScore struct {
 	weight           float64
 	imbalancePenalty float64
@@ -30,7 +31,8 @@ const (
 	defaultResourceFitImbalancePenalty = 0.5
 )
 
-// NewResourceFitScore 根据 Profile 插件配置创建资源适配评分插件。
+// NewResourceFitScore creates the resource-fit score plugin from its Profile
+// plugin config.
 func NewResourceFitScore(
 	conf config.SchedulerProfilePluginConf,
 ) (*resourceFitScore, error) {
@@ -83,7 +85,7 @@ func NewResourceFitScore(
 	), nil
 }
 
-// numericProfileArg 将 YAML Args 中的数值转换为 float64。
+// numericProfileArg converts a numeric YAML Args entry to float64.
 func numericProfileArg(value any) (float64, error) {
 	switch number := value.(type) {
 	case float64:
@@ -110,8 +112,9 @@ func numericProfileArg(value any) (float64, error) {
 	}
 }
 
-// newResourceFitScore 创建资源适配评分插件。
-// 当前使用显式参数，避免依赖尚未确定的 Profile/Registry 配置结构。
+// newResourceFitScore creates the resource-fit score plugin.
+// It uses explicit arguments for now, avoiding a dependency on the
+// not-yet-finalized Profile/Registry config shape.
 func newResourceFitScore(
 	weight float64,
 	imbalancePenalty float64,
@@ -140,10 +143,10 @@ func (l *resourceFitScore) Disable() bool {
 	return l.disable
 }
 
-// Select 为每个候选节点计算请求感知的资源适配分数。
+// Select computes the request-aware resource-fit score for every candidate node.
 //
-// CPU 使用 millicore，内存使用 MB；有效容量和已分配量的计算方式
-// 与现有 CPU、内存 Filter 保持一致。
+// CPU is in millicores and memory in MB; effective capacity and allocated
+// usage follow the same rules as the existing CPU and memory filters.
 func (l *resourceFitScore) Select(
 	selCtx *selctx.SelectorCtx,
 ) (node.NodeScoreList, error) {
@@ -217,16 +220,19 @@ func (l *resourceFitScore) Select(
 	return nodes, nil
 }
 
-// calculateResourceFitScore 计算请求放入节点后的资源适配分数。
+// calculateResourceFitScore computes the resource-fit score after placing the
+// request on the node.
 //
-// cpuCapacity、cpuUsed 和 cpuRequest 必须使用相同单位，例如 millicore；
-// memCapacity、memUsed 和 memRequest 必须使用相同单位，例如 MB。
+// cpuCapacity, cpuUsed and cpuRequest must share a unit (e.g. millicores);
+// memCapacity, memUsed and memRequest must share a unit (e.g. MB).
 //
-// 分数由两部分组成：
-//   - packingScore：放入请求后剩余资源越少，分数越高；
-//   - imbalancePenalty：CPU 和内存剩余比例差异越大，扣分越多。
+// The score has two parts:
+//   - packingScore: the fewer resources remain after placement, the higher;
+//   - imbalancePenalty: the larger the gap between the remaining cpu/mem
+//     ratios, the larger the deduction.
 //
-// 返回值范围为 0～100，分数越高表示节点越适合当前请求。
+// The result is in [0,100]; a higher score means the node fits the request
+// better.
 func calculateResourceFitScore(
 	cpuCapacity int64,
 	cpuUsed int64,
@@ -255,7 +261,7 @@ func calculateResourceFitScore(
 		return 0
 	}
 
-	// 使用减法判断，避免 cpuUsed + cpuRequest 发生整数溢出。
+	// Subtraction-based check avoids integer overflow in cpuUsed + cpuRequest.
 	if cpuRequest > cpuCapacity-cpuUsed {
 		return 0
 	}

@@ -6,9 +6,8 @@
 // nodes with fewer than eight in-flight creates and scores lower CPU usage
 // higher. Run with SOCKET=/run/cube-scheduler-example.sock.
 //
-// The server is stateless: every Filter/Score request carries the frozen
-// candidate snapshot for its snapshot_version, so concurrent scheduling
-// attempts never contend on shared server-side state.
+// The server is stateless: each request carries its own frozen snapshot
+// (see plugin.proto).
 package main
 
 import (

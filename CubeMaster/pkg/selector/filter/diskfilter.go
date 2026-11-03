@@ -14,7 +14,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-// diskFilter 磁盘资源过滤插件：剔除存储盘、系统盘或数据盘使用率超过阈值的节点
+// diskFilter rejects nodes whose storage, system or data disk usage exceeds
+// the threshold.
 type diskFilter struct {
 }
 
@@ -30,7 +31,6 @@ func (l *diskFilter) String() string {
 	return l.ID()
 }
 
-// Select 过滤规则：三类磁盘（存储盘/系统盘/数据盘）的使用率都必须低于 DiskUsageMaxPercent
 func (l *diskFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil {

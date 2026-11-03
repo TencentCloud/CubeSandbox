@@ -10,8 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestInjectFactorySchedulerProfilesOnEmptyScheduler 验证零调度配置时
-// 注入三条内置策略及其 scorer 依赖的 score 子树
+// TestInjectFactorySchedulerProfilesOnEmptyScheduler verifies that a
+// zero-scheduling config injects the three built-in profiles together with
+// the score subtree their scorers depend on.
 func TestInjectFactorySchedulerProfilesOnEmptyScheduler(t *testing.T) {
 	cfg := &Config{}
 	assert.NoError(t, preHandleScheduler(cfg))
@@ -52,9 +53,10 @@ func TestInjectFactorySchedulerProfilesOnEmptyScheduler(t *testing.T) {
 	assert.InDelta(t, 0.7, templateReuseWeights["image_score"], 1e-9)
 	assert.InDelta(t, 0.3, templateReuseWeights["real_time_weighted_average"], 1e-9)
 
-	// 内置 scorer 的构造函数会读全局 plugin_conf，缺失时启动即 panic，
-	// 所以 score 子树必须随出厂策略一并注入；enable_scorers 保持为空，
-	// 不激活 legacy 评分流水线
+	// The built-in scorers' constructors read the global plugin_conf and panic
+	// at startup when it is missing, so the score subtree must be injected
+	// along with the factory policy; enable_scorers stays empty so the legacy
+	// scoring pipeline is not activated.
 	if assert.NotNil(t, sched.Score) {
 		assert.NotNil(t, sched.Score.ScorePluginConf.RealTimeWeightedAverage)
 		assert.NotNil(t, sched.Score.ScorePluginConf.ImageScore)
@@ -63,8 +65,9 @@ func TestInjectFactorySchedulerProfilesOnEmptyScheduler(t *testing.T) {
 	}
 }
 
-// TestInjectFactorySchedulerProfilesRespectsUserConfig 验证用户显式配置
-// （profiles 或 legacy filter/score 任意其一）时出厂策略整体不注入
+// TestInjectFactorySchedulerProfilesRespectsUserConfig verifies that the
+// factory policy is skipped entirely when the user configured any explicit
+// policy (profiles or legacy filter/score).
 func TestInjectFactorySchedulerProfilesRespectsUserConfig(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -106,7 +109,7 @@ func TestInjectFactorySchedulerProfilesRespectsUserConfig(t *testing.T) {
 					assert.Equal(t, "mine", cfg.Scheduler.Profiles[0].Name)
 				}
 			}
-			// 出厂 score 子树也不得注入
+			// The factory score subtree must not be injected either.
 			if cfg.Scheduler.Score != nil {
 				assert.Nil(t, cfg.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage)
 				assert.Nil(t, cfg.Scheduler.Score.ScorePluginConf.ImageScore)

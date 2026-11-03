@@ -113,21 +113,16 @@ type SnapshotNodeFacts struct {
 var snapshotSequence atomic.Uint64
 
 // FreezeSnapshot defensively clones all mutable request and node data used by
-// plugins and assigns a version shared by the whole scheduling pipeline. The
-// local cache already returns clones; this second boundary makes the snapshot
-// ownership explicit and protects callers that inject nodes in tests or
-// benchmark simulations.
+// plugins and assigns a version shared by the whole scheduling pipeline — a
+// second ownership boundary on top of the clones the local cache already
+// returns, protecting test/benchmark callers that inject their own nodes.
 func (s *SelectorCtx) FreezeSnapshot() {
 	s.freeze(true)
 }
 
-// FreezeMetadata is FreezeSnapshot without the per-node deep clone: it freezes
-// the request data, snapshot facts and version, and pins the candidate list
-// (shallow slice copy, still stable while result is narrowed by filters), but
-// the snapshot shares the node objects with result. Use it when no consumer
-// reads SnapshotNodes — today only gRPC external plugins serialize the frozen
-// node set, and the local cache already hands out clones, so without them the
-// O(len(candidates)) deep clone has no consumer.
+// FreezeMetadata is FreezeSnapshot without the per-node deep clone: it shares
+// the node objects with result and is only safe when no consumer reads
+// SnapshotNodes (today only gRPC external plugins do).
 func (s *SelectorCtx) FreezeMetadata() {
 	s.freeze(false)
 }
