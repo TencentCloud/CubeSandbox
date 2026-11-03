@@ -189,10 +189,9 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 // Injectable getter keeps config wiring testable without initializing global config.
 var distributionConfig = config.GetConfig
 
-// distributionWorkerCount returns the configured artifact distribution
-// concurrency (common.distribution_workers), falling back to the built-in
-// default when no config is loaded (e.g. unit tests). The knob sizes only the
-// artifact-push fan-out; replica creation keeps its own fixed concurrency.
+// distributionWorkerCount returns the configured concurrency for one rootfs
+// artifact distribution call, falling back to the built-in default when no
+// config is loaded (e.g. unit tests).
 func distributionWorkerCount() int {
 	if cfg := distributionConfig(); cfg != nil && cfg.Common != nil && cfg.Common.DistributionWorkers > 0 {
 		return cfg.Common.DistributionWorkers

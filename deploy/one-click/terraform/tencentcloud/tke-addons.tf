@@ -293,6 +293,8 @@ resource "kubernetes_secret" "cubemaster_conf" {
         collect_metric_interval            = "1s"
         default_headless_service_nodes_num = local.cubemaster_replicas
         enable_check_com_net_id_param      = false
+        # Per-call max concurrency for rootfs artifact distribution. Default 4.
+        # distribution_workers = 4
         # CubeMaster no longer has a templatecenter_enabled switch: every
         # template-from-image build is forwarded to CubeTemplateCenter.
       }
