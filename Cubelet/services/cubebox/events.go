@@ -442,6 +442,10 @@ func (em *eventMonitor) handleContainerExit(ctx context.Context, e *eventtypes.T
 		status.Pid = pid
 		status.FinishedAt = exitTime
 		status.ExitCode = int32(e.ExitStatus)
+		// TaskExit can follow TaskOOM; retain the more specific OOM reason.
+		if status.Reason != string(restartpolicy.ReasonOOMKilled) {
+			status.Reason = string(restartpolicy.ReasonForTaskExit(e.Pid, e.ExitStatus))
+		}
 		return status, nil
 	})
 

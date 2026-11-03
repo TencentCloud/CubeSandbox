@@ -195,6 +195,7 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 	if ctr.SandboxID == "" {
 		ctr.SandboxID = cb.ID
 	}
+	newStatus.Reason = oldStatus.Reason
 	ctr.Status = cubeboxstore.StoreStatus(*newStatus)
 	ctr.Container = cntr
 

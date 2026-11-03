@@ -103,8 +103,21 @@ func TestToGRPCCubeBoxErrorReason(t *testing.T) {
 			got := toGRPCCubeBox(box, nil)
 			require.Equal(t, tc.status.Reason, got.GetErrorReason())
 			require.Empty(t, got.GetPrivateCubeboxStorageData())
+			require.Nil(t, box.Status, "serializing the public view must not populate the legacy status field")
 		})
 	}
+}
+
+func TestToGRPCCubeBoxWithoutPrimaryStatus(t *testing.T) {
+	box := newCubeboxWithStatusForTest("sandbox-created", cubeboxstore.Status{})
+	container := box.FirstContainer()
+	container.CreatedAt = box.CreatedAt
+	container.Status = nil
+	got := toGRPCCubeBox(box, nil)
+	require.Empty(t, got.GetErrorReason())
+	require.Nil(t, box.Status)
+	require.Nil(t, container.Status)
+	require.Equal(t, cubeboxv1.ContainerState_CONTAINER_CREATED, got.Containers[0].State)
 }
 
 func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {
