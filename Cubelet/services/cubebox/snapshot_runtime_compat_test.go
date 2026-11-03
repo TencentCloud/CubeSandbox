@@ -326,6 +326,24 @@ func TestShouldRetryWithLegacy(t *testing.T) {
 	require.False(t, shouldRetryWithLegacy(rejected, nil, snapshotmode.FsOnly))
 }
 
+// TestUseCoordinatedSnapshotPath pins that fs-only ignores the recorded pin -- it
+// is decided by the shim -- while full snapshots keep the version boundary.
+func TestUseCoordinatedSnapshotPath(t *testing.T) {
+	legacy := shimSnapshotCapability{Version: "manual-refs-pull-2145-head-f1cd3394613e", Coordinated: false}
+	unknown := shimSnapshotCapability{Version: "", Coordinated: false}
+	coordinated := shimSnapshotCapability{Version: "v0.7.3", Coordinated: true}
+
+	require.True(t, useCoordinatedSnapshotPath(legacy, snapshotmode.FsOnly),
+		"fs-only is decided by the shim, not by the recorded pin")
+	require.True(t, useCoordinatedSnapshotPath(unknown, snapshotmode.FsOnly))
+	require.True(t, useCoordinatedSnapshotPath(coordinated, snapshotmode.FsOnly))
+
+	// Full snapshots keep the version boundary; the legacy path is their fallback.
+	require.False(t, useCoordinatedSnapshotPath(legacy, snapshotmode.Full))
+	require.False(t, useCoordinatedSnapshotPath(unknown, snapshotmode.Full))
+	require.True(t, useCoordinatedSnapshotPath(coordinated, snapshotmode.Full))
+}
+
 func TestRunSnapshotWithRootfs(t *testing.T) {
 	failure := errors.New("injected failure")
 	for _, tc := range []struct {

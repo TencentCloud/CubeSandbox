@@ -259,7 +259,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return snapshotErr, rootfsErr
 	}
 
-	if shimCapability.Coordinated {
+	if useCoordinatedSnapshotPath(shimCapability, mode) {
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {

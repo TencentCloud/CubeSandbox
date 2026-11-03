@@ -256,6 +256,16 @@ func logSnapshotPathSelection(logger snapshotPathLogger, capability shimSnapshot
 	)
 }
 
+// useCoordinatedSnapshotPath reports whether this capture must use the
+// coordinated shim actions.
+//
+// fs-only always does: the legacy path cannot produce it, and a shim without the
+// action rejects the request before the VM is touched. Full snapshots follow the
+// recorded shim version, whose legacy path is a correct fallback.
+func useCoordinatedSnapshotPath(capability shimSnapshotCapability, mode snapshotmode.Mode) bool {
+	return capability.Coordinated || mode.IsFsOnly()
+}
+
 // shouldRetryWithLegacy reports whether a failed coordinated attempt should be
 // redone on the legacy path: the shim rejected the action, and no artifact was
 // produced before it did.
