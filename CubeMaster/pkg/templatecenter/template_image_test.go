@@ -370,9 +370,9 @@ func TestNormalizeRequestStripsProbeInitialDelay(t *testing.T) {
 					InitialDelayMs:      5000,
 					InitialDelaySeconds: 5,
 					TimeoutMs:           30000,
-					PeriodMs:            500,
+					PeriodMs:            100,
 					SuccessThreshold:    1,
-					FailureThreshold:    60,
+					FailureThreshold:    300,
 				},
 			},
 		},
@@ -387,7 +387,7 @@ func TestNormalizeRequestStripsProbeInitialDelay(t *testing.T) {
 	if probe.InitialDelayMs != 0 || probe.InitialDelaySeconds != 0 {
 		t.Fatalf("stored probe must not inherit the build-only initial delay, got %+v", probe)
 	}
-	if probe.TimeoutMs != 30000 || probe.PeriodMs != 500 || probe.FailureThreshold != 60 || probe.SuccessThreshold != 1 {
+	if probe.TimeoutMs != 30000 || probe.PeriodMs != 100 || probe.FailureThreshold != 300 || probe.SuccessThreshold != 1 {
 		t.Fatalf("other probe fields must be preserved, got %+v", probe)
 	}
 }

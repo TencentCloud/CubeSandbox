@@ -1125,8 +1125,8 @@ func TestParseContainerOverridesProbeTCP(t *testing.T) {
 	if overrides.Probe.TimeoutMs != 30000 {
 		t.Fatalf("expected default TimeoutMs=30000, got %d", overrides.Probe.TimeoutMs)
 	}
-	if overrides.Probe.FailureThreshold != 60 {
-		t.Fatalf("expected FailureThreshold=60 derived from 30000/500, got %d", overrides.Probe.FailureThreshold)
+	if overrides.Probe.FailureThreshold != 300 {
+		t.Fatalf("expected FailureThreshold=300 derived from 30000/100, got %d", overrides.Probe.FailureThreshold)
 	}
 	if overrides.Probe.InitialDelayMs != 0 {
 		t.Fatalf("expected default InitialDelayMs=0, got %d", overrides.Probe.InitialDelayMs)
@@ -1161,13 +1161,13 @@ func TestParseContainerOverridesProbeTimeoutWindow(t *testing.T) {
 	if overrides.Probe.TimeoutMs != 600000 {
 		t.Fatalf("expected TimeoutMs=600000, got %d", overrides.Probe.TimeoutMs)
 	}
-	if overrides.Probe.FailureThreshold != 1200 {
-		t.Fatalf("expected FailureThreshold=1200 derived from 600000/500, got %d", overrides.Probe.FailureThreshold)
+	if overrides.Probe.FailureThreshold != 6000 {
+		t.Fatalf("expected FailureThreshold=6000 derived from 600000/100, got %d", overrides.Probe.FailureThreshold)
 	}
 }
 
 func TestParseContainerOverridesProbeTimeoutTooSmall(t *testing.T) {
-	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-timeout", "100"})
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-timeout", "50"})
 	_, err := parseContainerOverrides(ctx)
 	if err == nil || !strings.Contains(err.Error(), "invalid --probe-timeout") {
 		t.Fatalf("expected invalid --probe-timeout error for explicit small value, got %v", err)
