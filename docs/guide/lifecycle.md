@@ -19,7 +19,9 @@ A sandbox is always in exactly one of these states:
 
 `unknown` is not a synonym for "gone": CubeAPI reports it for a sandbox that is still being created, one whose container has exited, and one whose state could not be read from its node. The `terminated` row describes what `kill()` and `on_timeout="kill"` do; a container that exits on its own is reported as `unknown`, not as a separate terminal state. Because those cases share one value, `state` alone cannot tell a sandbox that is still coming up from one that is already dead — `POST /sandboxes/<id>/connect` is the signal: it fails with HTTP 409 (`... is not connectable in state 'stopped'`) once the container is gone, and still connects in the other two cases.
 
-When Cubelet has a stored status reason for the primary container, `GET /sandboxes/<id>` includes `errorReason`, for example `"OOMKilled"` or `"PauseFailed"`. A reason does not necessarily mean the container has exited: `"PauseFailed"` can describe a failed pause while the container is still alive. The field is omitted when no reason is available, including with older Cubelet or CubeMaster versions. It does not change `state` or retain history after the sandbox is deleted. The last container exit reason is reported separately in `restartStatus.lastExitReason`.
+`GET /sandboxes/<id>` can include `errorReason`, a CubeSandbox extension with no equivalent field in the e2b API. It contains the stored status or exit reason of the primary container: `FirstContainerName`, falling back to the sandbox ID (`box.ID`) for legacy records. Other containers' reasons and the internal status message are not exposed. The field is omitted when the reason is missing, empty, or whitespace-only, including with older Cubelet or CubeMaster versions.
+
+Ordinary container exits record `"Completed"` for exit code 0, `"Error"` for a non-zero exit (including a killed process), or `"SandboxCrashed"` when the shim disappears. `"OOMKilled"` identifies an out-of-memory exit and is preserved if a subsequent exit event arrives. Cubelet's exited state maps to public `state: "unknown"`; the detail API does not return an `"exited"` state. `"PauseFailed"` describes a failed pause while the container may still be alive: its state is usually `"unknown"`, but can be `"running"` after a Cubelet restart. A reason does not change `state` or retain history after sandbox deletion. `restartStatus` separately records the last exit and restart decisions.
 
 Two settings drive transitions:
 
@@ -314,7 +316,7 @@ Put a liveness probe on the create request. When the request has none and the im
 
 ### Restart status
 
-`GET /sandboxes/<id>` and the list endpoint return `restartStatus`, a separate object from `state`: `state` answers "where is the sandbox in its lifecycle", while `restartStatus` answers "where is the restart state machine, and why did it stop". Once the container exits on its own, `state` only reports `unknown`; this object supplies the exit code and restart state alongside any `errorReason` in the detail response.
+`GET /sandboxes/<id>` and the list endpoint return `restartStatus`, a separate object from `state`: `state` answers "where is the sandbox in its lifecycle", while `restartStatus` answers "where is the restart state machine, and why did it stop". Once the container exits on its own, `state` only reports `unknown`; this object is what distinguishes a clean exit, a crash, and a give-up.
 
 It does not change `state`, and it only appears when the policy is `OnFailure` / `Always` or the sandbox has exited; a default `Never` sandbox that has never exited has no such object.
 
