@@ -78,6 +78,9 @@ func (c *Client) CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*V
 	if err := c.doJSON(ctx, http.MethodPost, "/volumes", payload, &volume, http.StatusOK, http.StatusCreated); err != nil {
 		return nil, err
 	}
+	if err := validateVolumeID(volume.VolumeID); err != nil {
+		return nil, &APIError{Kind: apiErrorKindAPI, Message: "invalid volume response"}
+	}
 	return &volume, nil
 }
 
@@ -87,6 +90,14 @@ func (c *Client) ListVolumes(ctx context.Context) ([]VolumeInfo, error) {
 	var volumes []VolumeInfo
 	if err := c.doJSON(ctx, http.MethodGet, "/volumes", nil, &volumes, http.StatusOK); err != nil {
 		return nil, err
+	}
+	if volumes == nil {
+		return nil, &APIError{Kind: apiErrorKindAPI, Message: "invalid volume list response"}
+	}
+	for _, volume := range volumes {
+		if err := validateVolumeID(volume.VolumeID); err != nil {
+			return nil, &APIError{Kind: apiErrorKindAPI, Message: "invalid volume list entry"}
+		}
 	}
 	return volumes, nil
 }
@@ -100,6 +111,9 @@ func (c *Client) GetVolume(ctx context.Context, volumeID string) (*VolumeInfo, e
 	var volume VolumeInfo
 	if err := c.doJSON(ctx, http.MethodGet, "/volumes/"+url.PathEscape(volumeID), nil, &volume, http.StatusOK); err != nil {
 		return nil, err
+	}
+	if err := validateVolumeID(volume.VolumeID); err != nil {
+		return nil, &APIError{Kind: apiErrorKindAPI, Message: "invalid volume response"}
 	}
 	return &volume, nil
 }
