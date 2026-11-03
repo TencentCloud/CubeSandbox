@@ -516,11 +516,19 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
-		if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
+		pinToOrigin := snapshotRestoreHasRawHostMount(reqInOut, templateReq)
+		src, err := bindSnapshotCreateReplicaForCreate(ctx, templateID, reqInOut, pinToOrigin)
+		if err != nil {
 			return err
 		}
-		pinToOrigin := snapshotRestoreHasRawHostMount(reqInOut, templateReq)
-		if err := bindSnapshotCreateReplicaWithHostMount(ctx, templateID, reqInOut, pinToOrigin); err != nil {
+		if src != nil && src.Mode.IsFsOnly() {
+			// The snapshot holds the rootfs only. Mounts recorded by the origin
+			// sandbox are not part of the image, and copying them into a fresh
+			// guest would attach empty or shared data the user never asked for.
+			// Only the template side is stripped: the request's own
+			// volumeMounts stay and are mounted into the new guest.
+			stripSnapshotPluginVolumes(templateReq)
+		} else if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
 			return err
 		}
 	}
@@ -628,6 +636,31 @@ func reconcileSnapshotPluginVolumes(snapshotID string, req, templateReq *types.C
 	return nil
 }
 
+// stripSnapshotPluginVolumes removes external volumes recorded by the origin
+// sandbox from a template request that came from a filesystem-only snapshot.
+// The snapshot only captured the rootfs, so these volumes carry no image data.
+func stripSnapshotPluginVolumes(templateReq *types.CreateCubeSandboxReq) {
+	if templateReq == nil {
+		return
+	}
+	mounts, err := parseSnapshotPluginVolumeMounts(templateReq.Annotations[sandbox.AnnotationPluginVolumeMounts])
+	if err == nil && len(mounts) > 0 {
+		kept := templateReq.Volumes[:0]
+		for _, volume := range templateReq.Volumes {
+			if volume != nil {
+				if _, ok := mounts[strings.TrimSpace(volume.Name)]; ok {
+					continue
+				}
+			}
+			kept = append(kept, volume)
+		}
+		templateReq.Volumes = kept
+	}
+	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeMounts)
+	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeSources)
+	delete(templateReq.Annotations, sandbox.AnnotationHostDirMount)
+}
+
 func parseSnapshotPluginVolumeMounts(raw string) (map[string]snapshotPluginVolumeMount, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -725,20 +758,27 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 }
 
 func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) error {
+	_, err := bindSnapshotCreateReplicaForCreate(ctx, snapshotID, reqInOut, pinToOrigin)
+	return err
+}
+
+// bindSnapshotCreateReplicaForCreate places the sandbox and returns the
+// restore source it used; nil on the legacy local fallback.
+func bindSnapshotCreateReplicaForCreate(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) (*templatecenter.RestoreSource, error) {
 	delete(reqInOut.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
-		return err
+		return nil, err
 	}
 	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
-		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
+		return src, bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
 	} else if err != nil && !errors.Is(err, templatecenter.ErrSnapshotNotFound) &&
 		!errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
-		return err
+		return nil, err
 	}
 	if pinToOrigin {
-		return fmt.Errorf("snapshot %s with host mount requires origin restore metadata", snapshotID)
+		return nil, fmt.Errorf("snapshot %s with host mount requires origin restore metadata", snapshotID)
 	}
-	return bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
+	return nil, bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
 }
 
 // fromSnapshotPlacement pins FromSnap to the snapshot origin unless the
@@ -764,6 +804,10 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 	if reqInOut != nil {
 		requestedScope = append([]string(nil), reqInOut.DistributionScope...)
 	}
+	kind := restoreplace.MemoryRestore
+	if src.Mode.IsFsOnly() {
+		kind = restoreplace.FilesystemColdBoot
+	}
 	return decideRestorePlacementFn(ctx, restoreplace.Input{
 		SnapshotID:          src.SnapshotID,
 		Backend:             src.Backend,
@@ -775,6 +819,7 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 		ReqRes:              reqRes,
 		RequestedScope:      requestedScope,
 		PinToOrigin:         pinToOrigin,
+		Kind:                kind,
 	})
 }
 
@@ -802,6 +847,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 		selectedNodeID = strings.TrimSpace(placement.NodeIP)
 	}
 	reqInOut.DistributionScope = []string{selectedNodeID}
+	reqInOut.SnapshotMode = src.Mode.String()
 
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}

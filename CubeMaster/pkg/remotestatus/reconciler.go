@@ -13,6 +13,8 @@ package remotestatus
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	snapshotv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
 )
 
@@ -44,6 +47,18 @@ type workItem struct {
 	snapshotID string
 	hostIP     string
 	backend    string
+	// mode and exportUUIDs are only set for user snapshots; together they
+	// let the reconciler reject a package that cannot be published under its
+	// recorded mode.
+	mode        snapshotmode.Mode
+	exportUUIDs string
+}
+
+// snapshotExportUUIDs mirrors the fields of Cubelet's remote_uuids JSON that
+// this package checks. Only those fields are declared.
+type snapshotExportUUIDs struct {
+	Memory   string `json:"memory"`
+	Metadata string `json:"metadata"`
 }
 
 const (
@@ -108,10 +123,11 @@ func WatchPause(ctx context.Context, snapshotID, nodeIP, backend string) {
 }
 
 // WatchSnapshot is WatchPause for a snapshot CommitSandbox just left
-// inprogress.
-func WatchSnapshot(ctx context.Context, snapshotID, nodeIP, backend string) {
+// inprogress. mode and exportUUIDs feed the remote-package defect gate.
+func WatchSnapshot(ctx context.Context, snapshotID, nodeIP, backend, exportUUIDs string, mode snapshotmode.Mode) {
 	watch(ctx, workItem{kind: kindSnapshot, table: constants.SnapshotTableName,
-		snapshotID: snapshotID, hostIP: nodeIP, backend: backend})
+		snapshotID: snapshotID, hostIP: nodeIP, backend: backend,
+		mode: mode, exportUUIDs: exportUUIDs})
 }
 
 func watch(ctx context.Context, item workItem) {
@@ -146,11 +162,13 @@ func listInProgress(ctx context.Context, db *gorm.DB) ([]workItem, error) {
 	}
 	for _, rec := range snaps {
 		items = append(items, workItem{
-			kind:       kindSnapshot,
-			table:      constants.SnapshotTableName,
-			snapshotID: rec.SnapshotID,
-			hostIP:     rec.OriginNodeIP,
-			backend:    rec.Backend,
+			kind:        kindSnapshot,
+			table:       constants.SnapshotTableName,
+			snapshotID:  rec.SnapshotID,
+			hostIP:      rec.OriginNodeIP,
+			backend:     rec.Backend,
+			mode:        snapshotmode.Normalize(rec.Mode),
+			exportUUIDs: rec.ExportUUIDs,
 		})
 	}
 	var pauses []models.PauseSnapshotRecord
@@ -200,6 +218,13 @@ func settleItem(ctx context.Context, db *gorm.DB, item workItem, wait time.Durat
 	if !ok {
 		return false
 	}
+	if next == constants.RemoteStatusReady {
+		if defect := remotePackageDefect(item); defect != "" {
+			log.G(ctx).Warnf("remote_status %s %s (mode %s): %s",
+				item.kind, snapshotID, item.mode, defect)
+			next = constants.RemoteStatusFailed
+		}
+	}
 	res := db.WithContext(ctx).Table(item.table).
 		Where("snapshot_id = ? AND remote_status = ?", snapshotID, constants.RemoteStatusInProgress).
 		Updates(map[string]any{
@@ -214,6 +239,35 @@ func settleItem(ctx context.Context, db *gorm.DB, item workItem, wait time.Durat
 		log.G(ctx).Infof("remote_status %s %s -> %s", item.kind, snapshotID, next)
 	}
 	return true
+}
+
+// remotePackageDefect reports why an exported package cannot be published under
+// the mode it is recorded with, or "" when it can: a full package must carry
+// guest memory, a filesystem-only package must not, and every package with a
+// recorded export list must carry the metadata that describes its guest runtime.
+// Rows with no recorded export list (pause packages, legacy snapshot rows) are
+// not audited.
+func remotePackageDefect(item workItem) string {
+	if item.kind != kindSnapshot || item.exportUUIDs == "" {
+		return ""
+	}
+	var uuids snapshotExportUUIDs
+	if err := json.Unmarshal([]byte(item.exportUUIDs), &uuids); err != nil {
+		return fmt.Sprintf("exported uuids are unreadable: %v", err)
+	}
+	if strings.TrimSpace(uuids.Metadata) == "" {
+		return "package exported no metadata, so it cannot be cold booted"
+	}
+	if item.mode.IsFsOnly() {
+		if strings.TrimSpace(uuids.Memory) != "" {
+			return "filesystem-only package exported guest memory"
+		}
+		return ""
+	}
+	if strings.TrimSpace(uuids.Memory) == "" {
+		return "full package exported no guest memory"
+	}
+	return ""
 }
 
 func terminalRemoteStatus(state string, remoteReady bool) (string, bool) {

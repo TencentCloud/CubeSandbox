@@ -71,6 +71,11 @@ type CreateCubeSandboxReq struct {
 	// Empty means xfs.
 	Backend string `json:"backend,omitempty"`
 
+	// SnapshotMode is the artifact mode of the snapshot this sandbox is created
+	// from. Master sets it from the snapshot record; the public create DTO never
+	// exposes it (constructCreateReq clears any client value).
+	SnapshotMode string `json:"snapshot_mode,omitempty"`
+
 	// RestartPolicy is Never, OnFailure or Always. Empty means Never.
 	RestartPolicy  string                          `json:"restart_policy,omitempty"`
 	RestartBackoff *cubeboxv1.RestartBackoffConfig `json:"restart_backoff,omitempty"`

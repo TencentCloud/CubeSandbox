@@ -275,15 +275,16 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.set_timeout(timeout),
         )
 
-    def create_snapshot(self, name: str | None = None) -> str:
+    def create_snapshot(self, name: str | None = None, *, mode: str | None = None) -> str:
         return self._trace.capture(
             "create_snapshot",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
                 "name": name,
+                "mode": mode,
             },
-            lambda: self._wrapped.create_snapshot(name=name),
+            lambda: self._wrapped.create_snapshot(name=name, mode=mode),
             output=lambda snapshot_id: {"snapshot_id": snapshot_id},
         )
 

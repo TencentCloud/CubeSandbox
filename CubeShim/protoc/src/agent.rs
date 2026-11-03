@@ -11898,6 +11898,7 @@ pub struct GuestDetailsResponse {
     pub mem_block_size_bytes: u64,
     pub agent_details: ::protobuf::SingularPtrField<AgentDetails>,
     pub support_mem_hotplug_probe: bool,
+    pub support_filesystem_freeze: bool,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -11978,6 +11979,21 @@ impl GuestDetailsResponse {
     pub fn set_support_mem_hotplug_probe(&mut self, v: bool) {
         self.support_mem_hotplug_probe = v;
     }
+
+    // bool support_filesystem_freeze = 4;
+
+
+    pub fn get_support_filesystem_freeze(&self) -> bool {
+        self.support_filesystem_freeze
+    }
+    pub fn clear_support_filesystem_freeze(&mut self) {
+        self.support_filesystem_freeze = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_support_filesystem_freeze(&mut self, v: bool) {
+        self.support_filesystem_freeze = v;
+    }
 }
 
 impl ::protobuf::Message for GuestDetailsResponse {
@@ -12011,6 +12027,13 @@ impl ::protobuf::Message for GuestDetailsResponse {
                     let tmp = is.read_bool()?;
                     self.support_mem_hotplug_probe = tmp;
                 },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.support_filesystem_freeze = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -12033,6 +12056,9 @@ impl ::protobuf::Message for GuestDetailsResponse {
         if self.support_mem_hotplug_probe != false {
             my_size += 2;
         }
+        if self.support_filesystem_freeze != false {
+            my_size += 2;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -12049,6 +12075,9 @@ impl ::protobuf::Message for GuestDetailsResponse {
         }
         if self.support_mem_hotplug_probe != false {
             os.write_bool(3, self.support_mem_hotplug_probe)?;
+        }
+        if self.support_filesystem_freeze != false {
+            os.write_bool(4, self.support_filesystem_freeze)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -12103,6 +12132,11 @@ impl ::protobuf::Message for GuestDetailsResponse {
                 |m: &GuestDetailsResponse| { &m.support_mem_hotplug_probe },
                 |m: &mut GuestDetailsResponse| { &mut m.support_mem_hotplug_probe },
             ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                "support_filesystem_freeze",
+                |m: &GuestDetailsResponse| { &m.support_filesystem_freeze },
+                |m: &mut GuestDetailsResponse| { &mut m.support_filesystem_freeze },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<GuestDetailsResponse>(
                 "GuestDetailsResponse",
                 fields,
@@ -12122,6 +12156,7 @@ impl ::protobuf::Clear for GuestDetailsResponse {
         self.mem_block_size_bytes = 0;
         self.agent_details.clear();
         self.support_mem_hotplug_probe = false;
+        self.support_filesystem_freeze = false;
         self.unknown_fields.clear();
     }
 }
@@ -12133,6 +12168,488 @@ impl ::std::fmt::Debug for GuestDetailsResponse {
 }
 
 impl ::protobuf::reflect::ProtobufValue for GuestDetailsResponse {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct FreezeRootfsRequest {
+    // message fields
+    pub mount_point: ::std::string::String,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a FreezeRootfsRequest {
+    fn default() -> &'a FreezeRootfsRequest {
+        <FreezeRootfsRequest as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl FreezeRootfsRequest {
+    pub fn new() -> FreezeRootfsRequest {
+        ::std::default::Default::default()
+    }
+
+    // string mount_point = 1;
+
+
+    pub fn get_mount_point(&self) -> &str {
+        &self.mount_point
+    }
+    pub fn clear_mount_point(&mut self) {
+        self.mount_point.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_mount_point(&mut self, v: ::std::string::String) {
+        self.mount_point = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_mount_point(&mut self) -> &mut ::std::string::String {
+        &mut self.mount_point
+    }
+
+    // Take field
+    pub fn take_mount_point(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.mount_point, ::std::string::String::new())
+    }
+}
+
+impl ::protobuf::Message for FreezeRootfsRequest {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.mount_point)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if !self.mount_point.is_empty() {
+            my_size += ::protobuf::rt::string_size(1, &self.mount_point);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if !self.mount_point.is_empty() {
+            os.write_string(1, &self.mount_point)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> FreezeRootfsRequest {
+        FreezeRootfsRequest::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                "mount_point",
+                |m: &FreezeRootfsRequest| { &m.mount_point },
+                |m: &mut FreezeRootfsRequest| { &mut m.mount_point },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<FreezeRootfsRequest>(
+                "FreezeRootfsRequest",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static FreezeRootfsRequest {
+        static instance: ::protobuf::rt::LazyV2<FreezeRootfsRequest> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(FreezeRootfsRequest::new)
+    }
+}
+
+impl ::protobuf::Clear for FreezeRootfsRequest {
+    fn clear(&mut self) {
+        self.mount_point.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for FreezeRootfsRequest {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for FreezeRootfsRequest {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct FreezeRootfsResponse {
+    // message fields
+    pub device: u64,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a FreezeRootfsResponse {
+    fn default() -> &'a FreezeRootfsResponse {
+        <FreezeRootfsResponse as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl FreezeRootfsResponse {
+    pub fn new() -> FreezeRootfsResponse {
+        ::std::default::Default::default()
+    }
+
+    // uint64 device = 1;
+
+
+    pub fn get_device(&self) -> u64 {
+        self.device
+    }
+    pub fn clear_device(&mut self) {
+        self.device = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_device(&mut self, v: u64) {
+        self.device = v;
+    }
+}
+
+impl ::protobuf::Message for FreezeRootfsResponse {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.device = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.device != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.device, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if self.device != 0 {
+            os.write_uint64(1, self.device)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> FreezeRootfsResponse {
+        FreezeRootfsResponse::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "device",
+                |m: &FreezeRootfsResponse| { &m.device },
+                |m: &mut FreezeRootfsResponse| { &mut m.device },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<FreezeRootfsResponse>(
+                "FreezeRootfsResponse",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static FreezeRootfsResponse {
+        static instance: ::protobuf::rt::LazyV2<FreezeRootfsResponse> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(FreezeRootfsResponse::new)
+    }
+}
+
+impl ::protobuf::Clear for FreezeRootfsResponse {
+    fn clear(&mut self) {
+        self.device = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for FreezeRootfsResponse {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for FreezeRootfsResponse {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct ThawRootfsRequest {
+    // message fields
+    pub mount_point: ::std::string::String,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a ThawRootfsRequest {
+    fn default() -> &'a ThawRootfsRequest {
+        <ThawRootfsRequest as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl ThawRootfsRequest {
+    pub fn new() -> ThawRootfsRequest {
+        ::std::default::Default::default()
+    }
+
+    // string mount_point = 1;
+
+
+    pub fn get_mount_point(&self) -> &str {
+        &self.mount_point
+    }
+    pub fn clear_mount_point(&mut self) {
+        self.mount_point.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_mount_point(&mut self, v: ::std::string::String) {
+        self.mount_point = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_mount_point(&mut self) -> &mut ::std::string::String {
+        &mut self.mount_point
+    }
+
+    // Take field
+    pub fn take_mount_point(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.mount_point, ::std::string::String::new())
+    }
+}
+
+impl ::protobuf::Message for ThawRootfsRequest {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.mount_point)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if !self.mount_point.is_empty() {
+            my_size += ::protobuf::rt::string_size(1, &self.mount_point);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if !self.mount_point.is_empty() {
+            os.write_string(1, &self.mount_point)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> ThawRootfsRequest {
+        ThawRootfsRequest::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                "mount_point",
+                |m: &ThawRootfsRequest| { &m.mount_point },
+                |m: &mut ThawRootfsRequest| { &mut m.mount_point },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<ThawRootfsRequest>(
+                "ThawRootfsRequest",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static ThawRootfsRequest {
+        static instance: ::protobuf::rt::LazyV2<ThawRootfsRequest> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(ThawRootfsRequest::new)
+    }
+}
+
+impl ::protobuf::Clear for ThawRootfsRequest {
+    fn clear(&mut self) {
+        self.mount_point.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for ThawRootfsRequest {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for ThawRootfsRequest {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
@@ -15672,49 +16189,54 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \0\x12+\n\x10supports_seccomp\x18\x05\x20\x01(\x08R\x0fsupportsSeccompB\
     \0:\0\"m\n\x13GuestDetailsRequest\x12&\n\x0emem_block_size\x18\x01\x20\
     \x01(\x08R\x0cmemBlockSizeB\0\x12,\n\x11mem_hotplug_probe\x18\x02\x20\
-    \x01(\x08R\x0fmemHotplugProbeB\0:\0\"\xc3\x01\n\x14GuestDetailsResponse\
+    \x01(\x08R\x0fmemHotplugProbeB\0:\0\"\x81\x02\n\x14GuestDetailsResponse\
     \x121\n\x14mem_block_size_bytes\x18\x01\x20\x01(\x04R\x11memBlockSizeByt\
     esB\0\x129\n\ragent_details\x18\x02\x20\x01(\x0b2\x12.grpc.AgentDetailsR\
     \x0cagentDetailsB\0\x12;\n\x19support_mem_hotplug_probe\x18\x03\x20\x01(\
-    \x08R\x16supportMemHotplugProbeB\0:\0\"P\n\x18MemHotplugByProbeRequest\
-    \x122\n\x13memHotplugProbeAddr\x18\x01\x20\x03(\x04R\x13memHotplugProbeA\
-    ddrB\0:\0\"E\n\x17SetGuestDateTimeRequest\x12\x12\n\x03Sec\x18\x01\x20\
-    \x01(\x03R\x03SecB\0\x12\x14\n\x04Usec\x18\x02\x20\x01(\x03R\x04UsecB\0:\
-    \0\"v\n\x07FSGroup\x12\x1b\n\x08group_id\x18\x02\x20\x01(\rR\x07groupIdB\
-    \0\x12L\n\x13group_change_policy\x18\x03\x20\x01(\x0e2\x1a.types.FSGroup\
-    ChangePolicyR\x11groupChangePolicyB\0:\0\"\xb3\x02\n\x07Storage\x12\x18\
-    \n\x06driver\x18\x01\x20\x01(\tR\x06driverB\0\x12'\n\x0edriver_options\
-    \x18\x02\x20\x03(\tR\rdriverOptionsB\0\x12\x18\n\x06source\x18\x03\x20\
-    \x01(\tR\x06sourceB\0\x12\x18\n\x06fstype\x18\x04\x20\x01(\tR\x06fstypeB\
-    \0\x12\x1a\n\x07options\x18\x05\x20\x03(\tR\x07optionsB\0\x12!\n\x0bmoun\
-    t_point\x18\x06\x20\x01(\tR\nmountPointB\0\x12*\n\x08fs_group\x18\x07\
-    \x20\x01(\x0b2\r.grpc.FSGroupR\x07fsGroupB\0\x12!\n\x0bneed_format\x18\
-    \x08\x20\x01(\x08R\nneedFormatB\0\x12!\n\x0bneed_resize\x18\t\x20\x01(\
-    \x08R\nneedResizeB\0:\0\"\x92\x01\n\x06Device\x12\x10\n\x02id\x18\x01\
-    \x20\x01(\tR\x02idB\0\x12\x14\n\x04type\x18\x02\x20\x01(\tR\x04typeB\0\
-    \x12\x19\n\x07vm_path\x18\x03\x20\x01(\tR\x06vmPathB\0\x12'\n\x0econtain\
-    er_path\x18\x04\x20\x01(\tR\rcontainerPathB\0\x12\x1a\n\x07options\x18\
-    \x05\x20\x03(\tR\x07optionsB\0:\0\"`\n\nStringUser\x12\x12\n\x03uid\x18\
-    \x01\x20\x01(\tR\x03uidB\0\x12\x12\n\x03gid\x18\x02\x20\x01(\tR\x03gidB\
-    \0\x12(\n\x0eadditionalGids\x18\x03\x20\x03(\tR\x0eadditionalGidsB\0:\0\
-    \"\xdc\x01\n\x0fCopyFileRequest\x12\x14\n\x04path\x18\x01\x20\x01(\tR\
-    \x04pathB\0\x12\x1d\n\tfile_size\x18\x02\x20\x01(\x03R\x08fileSizeB\0\
-    \x12\x1d\n\tfile_mode\x18\x03\x20\x01(\rR\x08fileModeB\0\x12\x1b\n\x08di\
-    r_mode\x18\x04\x20\x01(\rR\x07dirModeB\0\x12\x12\n\x03uid\x18\x05\x20\
-    \x01(\x05R\x03uidB\0\x12\x12\n\x03gid\x18\x06\x20\x01(\x05R\x03gidB\0\
-    \x12\x18\n\x06offset\x18\x07\x20\x01(\x03R\x06offsetB\0\x12\x14\n\x04dat\
-    a\x18\x08\x20\x01(\x0cR\x04dataB\0:\0\"\x16\n\x12GetOOMEventRequest:\0\"\
-    1\n\x08OOMEvent\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerI\
-    dB\0:\0\".\n\x0eAddSwapRequest\x12\x1a\n\x07PCIPath\x18\x01\x20\x03(\rR\
-    \x07PCIPathB\0:\0\"\x15\n\x11GetMetricsRequest:\0\"'\n\x07Metrics\x12\
-    \x1a\n\x07metrics\x18\x01\x20\x01(\tR\x07metricsB\0:\0\"D\n\x12VolumeSta\
-    tsRequest\x12,\n\x11volume_guest_path\x18\x01\x20\x01(\tR\x0fvolumeGuest\
-    PathB\0:\0\"[\n\x13ResizeVolumeRequest\x12,\n\x11volume_guest_path\x18\
-    \x01\x20\x01(\tR\x0fvolumeGuestPathB\0\x12\x14\n\x04size\x18\x02\x20\x01\
-    (\x04R\x04sizeB\0:\0\"@\n\nCustomFile\x12\x14\n\x04path\x18\x01\x20\x01(\
-    \tR\x04pathB\0\x12\x1a\n\x07content\x18\x02\x20\x01(\tR\x07contentB\0:\0\
-    *3\n\tStartMode\x12\t\n\x05START\x10\0\x12\x0c\n\x08SNAPSHOT\x10\x01\x12\
-    \x0b\n\x07RESTORE\x10\x02\x1a\0B\0b\x06proto3\
+    \x08R\x16supportMemHotplugProbeB\0\x12<\n\x19support_filesystem_freeze\
+    \x18\x04\x20\x01(\x08R\x17supportFilesystemFreezeB\0:\0\":\n\x13FreezeRo\
+    otfsRequest\x12!\n\x0bmount_point\x18\x01\x20\x01(\tR\nmountPointB\0:\0\
+    \"2\n\x14FreezeRootfsResponse\x12\x18\n\x06device\x18\x01\x20\x01(\x04R\
+    \x06deviceB\0:\0\"8\n\x11ThawRootfsRequest\x12!\n\x0bmount_point\x18\x01\
+    \x20\x01(\tR\nmountPointB\0:\0\"P\n\x18MemHotplugByProbeRequest\x122\n\
+    \x13memHotplugProbeAddr\x18\x01\x20\x03(\x04R\x13memHotplugProbeAddrB\0:\
+    \0\"E\n\x17SetGuestDateTimeRequest\x12\x12\n\x03Sec\x18\x01\x20\x01(\x03\
+    R\x03SecB\0\x12\x14\n\x04Usec\x18\x02\x20\x01(\x03R\x04UsecB\0:\0\"v\n\
+    \x07FSGroup\x12\x1b\n\x08group_id\x18\x02\x20\x01(\rR\x07groupIdB\0\x12L\
+    \n\x13group_change_policy\x18\x03\x20\x01(\x0e2\x1a.types.FSGroupChangeP\
+    olicyR\x11groupChangePolicyB\0:\0\"\xb3\x02\n\x07Storage\x12\x18\n\x06dr\
+    iver\x18\x01\x20\x01(\tR\x06driverB\0\x12'\n\x0edriver_options\x18\x02\
+    \x20\x03(\tR\rdriverOptionsB\0\x12\x18\n\x06source\x18\x03\x20\x01(\tR\
+    \x06sourceB\0\x12\x18\n\x06fstype\x18\x04\x20\x01(\tR\x06fstypeB\0\x12\
+    \x1a\n\x07options\x18\x05\x20\x03(\tR\x07optionsB\0\x12!\n\x0bmount_poin\
+    t\x18\x06\x20\x01(\tR\nmountPointB\0\x12*\n\x08fs_group\x18\x07\x20\x01(\
+    \x0b2\r.grpc.FSGroupR\x07fsGroupB\0\x12!\n\x0bneed_format\x18\x08\x20\
+    \x01(\x08R\nneedFormatB\0\x12!\n\x0bneed_resize\x18\t\x20\x01(\x08R\nnee\
+    dResizeB\0:\0\"\x92\x01\n\x06Device\x12\x10\n\x02id\x18\x01\x20\x01(\tR\
+    \x02idB\0\x12\x14\n\x04type\x18\x02\x20\x01(\tR\x04typeB\0\x12\x19\n\x07\
+    vm_path\x18\x03\x20\x01(\tR\x06vmPathB\0\x12'\n\x0econtainer_path\x18\
+    \x04\x20\x01(\tR\rcontainerPathB\0\x12\x1a\n\x07options\x18\x05\x20\x03(\
+    \tR\x07optionsB\0:\0\"`\n\nStringUser\x12\x12\n\x03uid\x18\x01\x20\x01(\
+    \tR\x03uidB\0\x12\x12\n\x03gid\x18\x02\x20\x01(\tR\x03gidB\0\x12(\n\x0ea\
+    dditionalGids\x18\x03\x20\x03(\tR\x0eadditionalGidsB\0:\0\"\xdc\x01\n\
+    \x0fCopyFileRequest\x12\x14\n\x04path\x18\x01\x20\x01(\tR\x04pathB\0\x12\
+    \x1d\n\tfile_size\x18\x02\x20\x01(\x03R\x08fileSizeB\0\x12\x1d\n\tfile_m\
+    ode\x18\x03\x20\x01(\rR\x08fileModeB\0\x12\x1b\n\x08dir_mode\x18\x04\x20\
+    \x01(\rR\x07dirModeB\0\x12\x12\n\x03uid\x18\x05\x20\x01(\x05R\x03uidB\0\
+    \x12\x12\n\x03gid\x18\x06\x20\x01(\x05R\x03gidB\0\x12\x18\n\x06offset\
+    \x18\x07\x20\x01(\x03R\x06offsetB\0\x12\x14\n\x04data\x18\x08\x20\x01(\
+    \x0cR\x04dataB\0:\0\"\x16\n\x12GetOOMEventRequest:\0\"1\n\x08OOMEvent\
+    \x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0:\0\".\n\
+    \x0eAddSwapRequest\x12\x1a\n\x07PCIPath\x18\x01\x20\x03(\rR\x07PCIPathB\
+    \0:\0\"\x15\n\x11GetMetricsRequest:\0\"'\n\x07Metrics\x12\x1a\n\x07metri\
+    cs\x18\x01\x20\x01(\tR\x07metricsB\0:\0\"D\n\x12VolumeStatsRequest\x12,\
+    \n\x11volume_guest_path\x18\x01\x20\x01(\tR\x0fvolumeGuestPathB\0:\0\"[\
+    \n\x13ResizeVolumeRequest\x12,\n\x11volume_guest_path\x18\x01\x20\x01(\t\
+    R\x0fvolumeGuestPathB\0\x12\x14\n\x04size\x18\x02\x20\x01(\x04R\x04sizeB\
+    \0:\0\"@\n\nCustomFile\x12\x14\n\x04path\x18\x01\x20\x01(\tR\x04pathB\0\
+    \x12\x1a\n\x07content\x18\x02\x20\x01(\tR\x07contentB\0:\0*3\n\tStartMod\
+    e\x12\t\n\x05START\x10\0\x12\x0c\n\x08SNAPSHOT\x10\x01\x12\x0b\n\x07REST\
+    ORE\x10\x02\x1a\0B\0b\x06proto3\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;

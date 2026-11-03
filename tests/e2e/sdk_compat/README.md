@@ -481,8 +481,9 @@ tests/e2e/sdk_compat/
 Current capability domains:
 
 - `cases/lifecycle/`: create/info smoke, connect, create options, pause/resume,
-  kill, platform-managed auto-pause/auto-resume/auto-kill, and node-local
-  restart policy (`test_restart_policy.py`, CubeSandbox only).
+  kill, platform-managed auto-pause/auto-resume/auto-kill, node-local
+  restart policy (`test_restart_policy.py`), and filesystem-only snapshots plus
+  cold boot (`test_filesystem_only_snapshot.py`; both CubeSandbox only).
 - `cases/commands/`: stdout, stderr, exit code, env, special characters, multiline output, missing command.
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
@@ -527,7 +528,8 @@ Capability markers:
 - Optional capabilities include `code_interpreter`, `pause_resume`, `set_timeout`,
   `rollback_clone`, `network_allow_deny`, `network_public_access`,
   `network_mask_request_host`, `platform_lifecycle`, `host_mount`,
-  `volume_plugin`, `auth_simple_key`, and `restart_policy`.
+  `volume_plugin`, `auth_simple_key`, `restart_policy`, and
+  `filesystem_only_snapshot`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 - `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that

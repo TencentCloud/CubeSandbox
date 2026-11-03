@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 const (
@@ -26,6 +30,41 @@ const (
 )
 
 var errSnapshotShimIncompatible = errors.New("incompatible CubeShim: SnapshotCapture is unavailable; upgrade the sandbox shim to create a consistent memory/rootfs snapshot")
+
+// errFilesystemOnlyNeedsCoordinatedShim is what the legacy capture path returns
+// for a filesystem-only request: that path always writes guest memory, so it
+// can never stand in for a capture that must not produce memory.
+var errFilesystemOnlyNeedsCoordinatedShim = errors.New("filesystem-only snapshot requires the coordinated shim path")
+
+// errFilesystemOnlyCapturedMemory reports a filesystem-only capture whose
+// artifact contains guest memory; the artifact, not a version number, proves
+// which capture path ran.
+var errFilesystemOnlyCapturedMemory = errors.New("shim captured guest memory for a filesystem-only request")
+
+// snapshotVMMStateFile is the file a memory capture always writes next to the
+// VM config (hypervisor SnapshotConfig: "state.json" plus the memory ranges).
+// A filesystem-only capture writes only "config.json", so its presence is
+// positive evidence that guest memory was dumped.
+const snapshotVMMStateFile = "state.json"
+
+// capturedGuestMemory reports whether the shim wrote a VM state file for this
+// capture. See snapshotVMMStateFile.
+//
+// A leftover file from an earlier attempt cannot produce a false positive:
+// each attempt starts with a cleared work directory and a create_new config
+// write, so a re-run into a dirty directory fails outright.
+func capturedGuestMemory(specDir string) bool {
+	if strings.TrimSpace(specDir) == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(specDir, "snapshot", snapshotVMMStateFile))
+	if err == nil {
+		return true
+	}
+	// Uninspectable directory: fail closed rather than publish a package
+	// that claims to be filesystem-only but may not be.
+	return !errors.Is(err, fs.ErrNotExist)
+}
 
 func snapshotCaptureError(err error) error {
 	if shimSnapshotUnsupported(err) {
@@ -40,6 +79,12 @@ type frozenSnapshotConfig struct {
 	MemoryVolURL   string `json:"memory_vol_url,omitempty"`
 	SnapshotType   string `json:"snapshot_type"`
 	RenewOnly      bool   `json:"renew_only,omitempty"`
+	// SnapshotMode is only set for filesystem-only captures; full captures
+	// keep the historical payload shape.
+	SnapshotMode string `json:"snapshot_mode,omitempty"`
+	// RootfsHostPath is the writable rootfs disk path; the shim resolves it
+	// to the guest mount point.
+	RootfsHostPath string `json:"rootfs_host_path,omitempty"`
 }
 
 func (s *service) updateSnapshotShim(ctx context.Context, cb *cubeboxstore.CubeBox, annotations map[string]string) error {
@@ -61,18 +106,47 @@ func (s *service) updateSnapshotShim(ctx context.Context, cb *cubeboxstore.CubeB
 	return nil
 }
 
-func (s *service) captureSnapshotWithShim(ctx context.Context, cb *cubeboxstore.CubeBox, snapshotID, path, memoryVol, snapshotType string) error {
-	config, err := json.Marshal(frozenSnapshotConfig{
-		SnapshotID: snapshotID, DestinationURL: path,
-		MemoryVolURL: snapshotMemoryVolURL(memoryVol), SnapshotType: normalizeSnapshotType(snapshotType),
-	})
+// buildFrozenSnapshotConfig renders the SnapshotCapture payload. A
+// filesystem-only capture must not name a memory volume at all.
+func buildFrozenSnapshotConfig(
+	snapshotID, destination, memoryDevPath, snapshotType, rootfsHostPath string,
+	mode snapshotmode.Mode,
+) ([]byte, error) {
+	cfg := frozenSnapshotConfig{
+		SnapshotID: snapshotID, DestinationURL: destination,
+		SnapshotType: normalizeSnapshotType(snapshotType),
+	}
+	if mode.IsFsOnly() {
+		cfg.SnapshotMode = mode.String()
+		cfg.RootfsHostPath = rootfsHostPath
+	} else {
+		cfg.MemoryVolURL = snapshotMemoryVolURL(memoryDevPath)
+	}
+	return json.Marshal(cfg)
+}
+
+func (s *service) captureSnapshotWithShim(
+	ctx context.Context,
+	cb *cubeboxstore.CubeBox,
+	snapshotID, path, memoryDevPath, snapshotType, rootfsHostPath string,
+	mode snapshotmode.Mode,
+) error {
+	config, err := buildFrozenSnapshotConfig(snapshotID, path, memoryDevPath, snapshotType, rootfsHostPath, mode)
 	if err != nil {
 		return err
 	}
-	return s.updateSnapshotShim(ctx, cb, map[string]string{
+	err = s.updateSnapshotShim(ctx, cb, map[string]string{
 		shimUpdateActionAnnotation: shimSnapshotCaptureAction,
 		shimSnapshotCaptureConfig:  string(config),
 	})
+	// The artifact, not the reply, proves which capture path ran.
+	if mode.IsFsOnly() && capturedGuestMemory(path) {
+		if err == nil {
+			return errFilesystemOnlyCapturedMemory
+		}
+		return fmt.Errorf("%w: %v", errFilesystemOnlyCapturedMemory, err)
+	}
+	return err
 }
 
 func (s *service) resumeSnapshotWithShim(ctx context.Context, cb *cubeboxstore.CubeBox, snapshotID string) error {
@@ -140,4 +214,33 @@ func (s *service) startSnapshotLeaseRenewal(ctx context.Context, cb *cubeboxstor
 
 func shimSnapshotUnsupported(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unknown update ext action: "+shimSnapshotCaptureAction)
+}
+
+// filesystemOnlyUnsupportedMessage reports the stable, user-facing rejection
+// for a sandbox whose shim cannot capture without guest memory, or "" when err
+// is not that case. Shim capability is judged by the artifact and error
+// identity, never by a version comparison.
+func filesystemOnlyUnsupportedMessage(err error, shimVersion string, mode snapshotmode.Mode) string {
+	if err == nil || !mode.IsFsOnly() {
+		return ""
+	}
+	if !errors.Is(err, errSnapshotShimIncompatible) &&
+		!errors.Is(err, errFilesystemOnlyNeedsCoordinatedShim) &&
+		!errors.Is(err, errFilesystemOnlyCapturedMemory) {
+		return ""
+	}
+	return fmt.Sprintf("%s: shim %q does not support filesystem-only snapshots",
+		snapshotmode.ErrFilesystemOnlyUnsupported, shimVersion)
+}
+
+// filesystemOnlyPrecondition reports a filesystem-only rejection that happened
+// before the guest or the disk was touched. These must surface as 409: the
+// request is impossible on this sandbox, not a server fault to retry.
+func filesystemOnlyPrecondition(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, snapshotmode.ErrFilesystemOnlyFreezeUnsupported) ||
+		strings.Contains(message, snapshotmode.ErrFilesystemOnlyRootfsUnsupported)
 }

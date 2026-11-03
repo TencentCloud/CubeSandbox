@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1229,6 +1230,17 @@ func TestWritableLayerSubdirKeepsTemplateUpperOnRestart(t *testing.T) {
 	assert.Equal(t, "disk/"+tpl+"_1", writableLayerSubdir(restart, "sandbox-id", "1"))
 	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", ""))
 
+	coldBoot := &workflow.CreateContext{
+		IsRestart:             true,
+		SnapshotWritableLayer: "disk/tpl-from-the-snapshot_0",
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+			},
+		},
+	}
+	assert.Equal(t, "disk/tpl-from-the-snapshot_0", writableLayerSubdir(coldBoot, "sandbox-id", "0"))
+
 	plain := &workflow.CreateContext{IsRestart: true, ReqInfo: &cubebox.RunCubeSandboxRequest{}}
 	assert.Equal(t, "disk/sandbox-id", writableLayerSubdir(plain, "sandbox-id", "0"))
 
@@ -1537,4 +1549,30 @@ func TestPersistCreateResult(t *testing.T) {
 	assert.True(t, ret.IsErrorCode(err, errorcode.ErrorCode_UpdateLocalMetaDataFailed))
 	assert.Contains(t, err.Error(), "persist sandbox sb-1")
 	assert.Contains(t, err.Error(), "disk full")
+}
+
+// A missing guest artifact is a precondition the client can act on, so the
+// stable identifier inside CBRI's message must survive. Every other CBRI code
+// keeps the endpoint's historical generic 400 instead of leaking through.
+func TestCBRIcreateErrorKeepsOnlyThePrecondition(t *testing.T) {
+	precondition := ret.Err(errorcode.ErrorCode_PreConditionFailed,
+		"snapshot_filesystem_only_guest_runtime_mismatch: cube-agent/v2")
+	got := cbriCreateError(precondition)
+	if !ret.IsErrorCode(got, errorcode.ErrorCode_PreConditionFailed) {
+		t.Fatalf("precondition was rewritten to %v, want it preserved", got)
+	}
+	if !strings.Contains(got.Error(), "snapshot_filesystem_only_guest_runtime_mismatch") {
+		t.Fatalf("stable identifier lost: %v", got)
+	}
+
+	snapshotMissing := ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
+	got = cbriCreateError(snapshotMissing)
+	if !ret.IsErrorCode(got, errorcode.ErrorCode_InvalidParamFormat) {
+		t.Fatalf("unmapped CBRI code %v must keep the historical 400", got)
+	}
+
+	got = cbriCreateError(errors.New("boom"))
+	if !ret.IsErrorCode(got, errorcode.ErrorCode_InvalidParamFormat) {
+		t.Fatalf("plain error must keep the historical 400, got %v", got)
+	}
 }

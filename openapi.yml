@@ -565,6 +565,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '409':
+          description: The control plane refused the capture or recorded a different mode than the one requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Filesystem-only support could not be verified; retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
           content:
@@ -1487,6 +1499,21 @@ components:
           - string
           - 'null'
           description: CoW backend (xfs | s3). Empty means xfs.
+        keepMemory:
+          type:
+          - boolean
+          - 'null'
+          description: 'Deprecated E2B compatibility alias: false means fs-only.'
+        memory:
+          type:
+          - boolean
+          - 'null'
+          description: 'E2B compatibility alias: false means fs-only.'
+        mode:
+          type:
+          - string
+          - 'null'
+          description: 'Snapshot artifact mode: full | fs-only | filesystem (E2B alias).'
         name:
           type:
           - string
@@ -1847,6 +1874,11 @@ components:
           type: integer
           format: int32
           description: Number of fork sandboxes to derive (1..=100). Defaults to 1 when absent.
+        mode:
+          type:
+          - string
+          - 'null'
+          description: Snapshot artifact mode for the one shared fork snapshot.
         timeout:
           type:
           - integer
@@ -2611,12 +2643,16 @@ components:
       required:
       - snapshotID
       - names
+      - mode
       properties:
         backend:
           type:
           - string
           - 'null'
           description: CoW backend that produced this snapshot (xfs | s3).
+        mode:
+          $ref: '#/components/schemas/SnapshotMode'
+          description: Snapshot artifact mode. Always one of full | fs-only.
         names:
           type: array
           items:
@@ -2635,6 +2671,7 @@ components:
       - snapshotID
       - names
       - status
+      - mode
       properties:
         backend:
           type:
@@ -2663,11 +2700,20 @@ components:
           type: string
         status:
           type: string
+        mode:
+          $ref: '#/components/schemas/SnapshotMode'
+          description: Snapshot artifact mode. Always one of full | fs-only.
         updatedAt:
           type:
           - string
           - 'null'
           format: date-time
+    SnapshotMode:
+      type: string
+      description: Canonical snapshot artifact mode.
+      enum:
+      - full
+      - fs-only
     TemplateAliasLookupResponse:
       type: object
       required:

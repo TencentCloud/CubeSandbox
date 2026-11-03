@@ -47,6 +47,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 type local struct {
@@ -360,10 +361,9 @@ func (l *local) recoverStorageInfo(ctx context.Context, id string, info *Storage
 	if IsS3Backend(storageBackendFromInfo(info)) {
 		// Boot does nothing for an S3 sandbox. Every disk it needs is resolved
 		// and attached by the request that uses it, and a restarted Cubelet
-		// cannot tell a leftover from a disk a live sandbox is reading: acting
-		// on that guess is what used to pull the memory snapshot out from
-		// under a resumed VM. Reading this entry later drops the stale device
-		// path (see refreshCowPaths), so there is nothing to persist here.
+		// cannot tell a leftover from a disk a live sandbox is reading, so
+		// guessing would be unsafe. refreshCowPaths drops the stale device
+		// path, so there is nothing to persist here.
 		return nil
 	}
 	if err := l.refreshCowPaths(info); err != nil {
@@ -1007,6 +1007,12 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
 		return "", "", nil
 	}
+	// A cold boot starts a fresh VM without guest memory: there is no memory
+	// artifact to resolve, and looking one up would either fail on a node that
+	// never had the package or attach the pre-restart image to a new VM.
+	if opts.IsColdBoot() {
+		return "", "", nil
+	}
 	// Emptydir / file pools do not use the cubecow snapshot catalog.
 	if !l.useCowStorage() {
 		return "", "", nil
@@ -1048,6 +1054,12 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		if name != "" {
 			return cowFileURLFromPath(devPath), name, nil
 		}
+		// A full restore needs memory. An import without one is an incomplete
+		// package; falling through to the local catalog would only look up a
+		// package this node does not have and fail later with a worse error.
+		snapshotID, _ := opts.GetSnapshotTemplateID()
+		return "", "", fmt.Errorf("%s: cross-node import of %s carries no memory volume",
+			snapshotmode.ErrSnapshotMemoryMissing, snapshotID)
 	}
 	pauseOwner := ""
 	if pauseResumeClonesLiveMemory(backend) && opts.IsPauseResume() && CrossNodeSandboxImport(annotations) == nil {
@@ -1063,6 +1075,19 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		return "", "", err
 	}
 	if volumeName == "" {
+		// Only a runtime snapshot or a pause package must carry memory: both
+		// restore guest memory. An app-snapshot template may legitimately be
+		// rootfs-only (the template itself has no memory to prefetch), so it
+		// keeps the historical empty result instead of failing.
+		runtimeSnapshotID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
+		if opts.IsPauseResume() || runtimeSnapshotID != "" {
+			reference := runtimeSnapshotID
+			if reference == "" {
+				reference = opts.GetSandboxID()
+			}
+			return "", "", fmt.Errorf("%s: snapshot %s has no memory volume for memory restore",
+				snapshotmode.ErrSnapshotMemoryMissing, reference)
+		}
 		return "", "", nil
 	}
 	if pauseOwner != "" {

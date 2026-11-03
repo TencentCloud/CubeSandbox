@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,21 +305,25 @@ func TestReleaseCandidateNumber(t *testing.T) {
 func TestShouldRetryWithLegacy(t *testing.T) {
 	rejected := snapshotCaptureError(
 		fmt.Errorf("update shim: %w", errors.New("unknown update ext action: SnapshotCapture")))
-	require.True(t, shouldRetryWithLegacy(rejected, nil))
+	require.True(t, shouldRetryWithLegacy(rejected, nil, snapshotmode.Full))
 
 	// CommitSandbox wraps the sentinel again when restoring the binding labels
 	// fails; the retry must still see it.
 	wrapped := fmt.Errorf("%w; failed to restore runtime snapshot binding: %v",
 		rejected, errors.New("sync failed"))
-	require.True(t, shouldRetryWithLegacy(wrapped, nil))
+	require.True(t, shouldRetryWithLegacy(wrapped, nil, snapshotmode.Full))
 
 	// The retry must never redo a transaction that already produced an artifact.
 	// runSnapshotWithRootfs makes this unreachable today; the case pins the
 	// invariant so a change to that helper cannot quietly break it.
-	require.False(t, shouldRetryWithLegacy(rejected, errors.New("rootfs committed")))
+	require.False(t, shouldRetryWithLegacy(rejected, errors.New("rootfs committed"), snapshotmode.Full))
 
-	require.False(t, shouldRetryWithLegacy(errors.New("memory capture failed"), nil))
-	require.False(t, shouldRetryWithLegacy(nil, nil))
+	require.False(t, shouldRetryWithLegacy(errors.New("memory capture failed"), nil, snapshotmode.Full))
+	require.False(t, shouldRetryWithLegacy(nil, nil, snapshotmode.Full))
+
+	// The legacy path always captures memory, so it can never stand in for a
+	// filesystem-only capture.
+	require.False(t, shouldRetryWithLegacy(rejected, nil, snapshotmode.FsOnly))
 }
 
 func TestRunSnapshotWithRootfs(t *testing.T) {

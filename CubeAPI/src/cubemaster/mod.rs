@@ -559,6 +559,19 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// GET /cube/capabilities — the snapshot modes this Master accepts;
+    /// empty means filesystem-only is unsupported.
+    pub async fn get_capabilities(&self) -> Result<CapabilitiesResponse, CubeMasterError> {
+        let url = format!("{}/cube/capabilities", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// DELETE /cube/volume/{volume_id} — delete a volume.
     pub async fn delete_volume(
         &self,
@@ -1765,6 +1778,9 @@ pub struct CreateSnapshotRequest {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Canonical snapshot mode: full | fs-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Snapshot resource as returned by CubeMaster.
@@ -1790,10 +1806,24 @@ pub struct SnapshotResource {
     pub backend: String,
     #[serde(default)]
     pub remote_status: String,
+    /// Snapshot mode. Older Masters omit it; empty means full.
+    #[serde(default)]
+    pub mode: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// GET /cube/capabilities — the fields CubeAPI consumes.
+///
+/// The list is the set of `mode` values this Master accepts on create and fork.
+/// It is empty when the Master predates the endpoint or its modes contract,
+/// which is exactly the answer the caller needs: treated as "cannot do it".
+#[derive(Debug, Deserialize, Default)]
+pub struct CapabilitiesResponse {
+    #[serde(default)]
+    pub snapshot_modes: Vec<String>,
 }
 
 /// Slimmed mirror of CubeMaster's nested `operation` block returned alongside
@@ -1984,6 +2014,9 @@ pub struct ForkSandboxRequest {
     /// Optional idle TTL (seconds) applied to each forked sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
+    /// Canonical snapshot mode for the one shared fork snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn is_zero(value: &i32) -> bool {

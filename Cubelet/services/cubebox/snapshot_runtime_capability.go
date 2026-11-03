@@ -12,6 +12,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
+
 	"golang.org/x/mod/semver"
 )
 
@@ -46,6 +48,10 @@ type shimSnapshotCapability struct {
 	Source string
 	// Coordinated reports whether Version exposes the coordinated snapshot
 	// actions.
+	//
+	// There is deliberately no counterpart for filesystem-only captures:
+	// shim capability is judged by the artifact, not by a version number.
+	// See filesystemOnlyUnsupportedMessage in snapshot_shim.go.
 	Coordinated bool
 }
 
@@ -99,12 +105,19 @@ func pinnedShimVersion(cb *cubeboxstore.CubeBox) (version, source string) {
 // and an unrecognised scheme ("-vendor", "-s1", "-alpha") has no defined order
 // against "-rcN".
 func coordinatedSnapshotSupported(version string) bool {
+	return versionAtLeast(version, minCoordinatedSnapshotShimVersion)
+}
+
+// versionAtLeast compares an inventory-normalized shim version with a release
+// candidate boundary. An unrecognised scheme has no defined order against
+// "-rcN" and is treated as unsupported.
+func versionAtLeast(version, boundary string) bool {
 	canonical := canonicalShimSemver(version)
 	if canonical == "" {
 		return false
 	}
 
-	boundaryBase, boundaryRC, ok := splitReleaseCandidate(minCoordinatedSnapshotShimVersion)
+	boundaryBase, boundaryRC, ok := splitReleaseCandidate(boundary)
 	if !ok {
 		return false
 	}
@@ -255,19 +268,19 @@ func logSnapshotPathSelection(logger snapshotPathLogger, capability shimSnapshot
 // the memory step fails. The check is therefore latent coupling rather than a
 // live branch, kept and tested so that the invariant stays explicit if that
 // helper ever changes.
-func shouldRetryWithLegacy(snapshotErr, rootfsErr error) bool {
+func shouldRetryWithLegacy(snapshotErr, rootfsErr error, mode snapshotmode.Mode) bool {
+	// The legacy path always captures memory, so it can never produce a
+	// filesystem-only artifact. Retrying would turn an explicit rejection into
+	// a silent full snapshot.
+	if mode.IsFsOnly() {
+		return false
+	}
 	return rootfsErr == nil && errors.Is(snapshotErr, errSnapshotShimIncompatible)
 }
 
 // logShimDegradedToLegacy records that the version gate selected the coordinated
-// path but the running shim rejected the action. It states the two facts that are
-// actually known -- the recorded pin is at or above the boundary, and the shim
-// rejected the action -- rather than claiming the shim advertises a capability it
-// just refused to use. The gate guessed wrong about this shim, so it is worth
-// surfacing rather than hiding.
-//
-// version is non-empty by construction: the retry only runs on the coordinated
-// path, which requires a resolved pin.
+// path but the running shim rejected the action; the gate was wrong for this
+// shim and the mismatch is worth surfacing.
 func logShimDegradedToLegacy(logger snapshotPathLogger, version string) {
 	logger.Warnf(
 		"recorded CubeShim pin %s is at or above the coordinated snapshot boundary %s, "+

@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 func TestCreateSnapshotSuccessResponse(t *testing.T) {
@@ -48,7 +49,7 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		}
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return &types.TemplateImageJobInfo{
 			JobID:        "op-1",
 			TemplateID:   "snap-1",
@@ -107,7 +108,7 @@ func TestCreateSnapshotRejectsReservedPrefixNameAsParamsError(t *testing.T) {
 	resolveSnapshotHostFn = func(context.Context, string, string) (string, string, error) {
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return nil, fmt.Errorf("%w: %q", templatecenter.ErrInvalidSnapshotName, displayName)
 	}
 
@@ -134,6 +135,47 @@ func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {
 	}
 }
 
+// Cubelet wraps the stable identifier in a sentence and Master stores that text
+// in the job's error_message, so the status must be derived from the identifier
+// by containment.
+func TestSnapshotErrorCodeClassifiesStableIdentifiers(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{
+			err:  fmt.Errorf("failed to capture sandbox snapshot: %s: guest agent too old", snapshotmode.ErrFilesystemOnlyFreezeUnsupported),
+			want: int(errorcode.ErrorCode_Conflict),
+		},
+		{
+			err:  fmt.Errorf("failed to capture sandbox snapshot: %s: not a blk-cube disk", snapshotmode.ErrFilesystemOnlyRootfsUnsupported),
+			want: int(errorcode.ErrorCode_Conflict),
+		},
+		{
+			err:  fmt.Errorf("%s: snap-1", snapshotmode.ErrFilesystemOnlyRollback),
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			err:  fmt.Errorf("%s: node heartbeat missing", snapshotmode.ErrFilesystemOnlyNodeUnknown),
+			want: int(errorcode.ErrorCode_MasterUnavailable),
+		},
+		{
+			// Server-side failure: no client action, keeps the existing default.
+			err:  fmt.Errorf("%s: FIFREEZE failed", snapshotmode.ErrFilesystemOnlyFreezeFailed),
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			// Not-found messages quote the requested id, so an id that looks
+			// like an identifier must not turn a 404 into a 400.
+			err:  fmt.Errorf("%w: snapshot %s", templatecenter.ErrSnapshotNotFound, snapshotmode.ErrSnapshotModeInvalid),
+			want: int(errorcode.ErrorCode_NotFound),
+		},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, snapshotErrorCode(tc.err), tc.err.Error())
+	}
+}
+
 func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
 	registerKnownSandboxTestID(t)
 
@@ -149,7 +191,7 @@ func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
 	resolveSnapshotHostFn = func(ctx context.Context, requestID, sandboxID string) (string, string, error) {
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return &types.TemplateImageJobInfo{JobID: "op-2", TemplateID: "snap-2", RequestID: requestID}, nil
 	}
 	getSnapshotInfoFn = func(ctx context.Context, snapshotID string, includeRequest bool) (*templatecenter.SnapshotInfo, error) {
@@ -189,7 +231,7 @@ func TestCreateSnapshotDetachesExecutionFromCanceledRequest(t *testing.T) {
 		}
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("snapshot execution context should not be canceled with the HTTP request: %v", ctx.Err())
@@ -614,6 +656,50 @@ func TestReconcileSnapshotPluginVolumes(t *testing.T) {
 	}
 }
 
+// A filesystem-only snapshot carries the rootfs only, so the volumes recorded
+// by the origin sandbox must not be inherited by a new guest. The request's own
+// mounts are the caller's choice and stay.
+func TestStripSnapshotPluginVolumesStripsOnlyTheTemplateSide(t *testing.T) {
+	templateReq := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			sandbox.AnnotationPluginVolumeMounts:  `[{"name":"data","container_path":"/mnt/data"}]`,
+			sandbox.AnnotationPluginVolumeSources: `[{"name":"data","plugin":"p1"}]`,
+			sandbox.AnnotationHostDirMount:        `[{"hostPath":"/data/shared","mountPath":"/mnt/shared"}]`,
+		},
+		Volumes: []*types.Volume{{Name: "data"}, {Name: "scratch"}},
+	}
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			sandbox.AnnotationPluginVolumeMounts: `[{"name":"mine","container_path":"/mnt/mine"}]`,
+		},
+		Volumes: []*types.Volume{{Name: "mine"}},
+	}
+
+	stripSnapshotPluginVolumes(templateReq)
+
+	assert.Equal(t, []string{"scratch"}, volumeNames(templateReq.Volumes))
+	for _, key := range []string{
+		sandbox.AnnotationPluginVolumeMounts,
+		sandbox.AnnotationPluginVolumeSources,
+		sandbox.AnnotationHostDirMount,
+	} {
+		_, ok := templateReq.Annotations[key]
+		assert.False(t, ok, "%s must be stripped from the template request", key)
+	}
+	// The caller's own mounts are untouched: stripping them would silently
+	// drop volumes the user asked for.
+	assert.Equal(t, []string{"mine"}, volumeNames(req.Volumes))
+	assert.Contains(t, req.Annotations, sandbox.AnnotationPluginVolumeMounts)
+}
+
+func volumeNames(volumes []*types.Volume) []string {
+	names := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		names = append(names, volume.Name)
+	}
+	return names
+}
+
 func TestBindSnapshotCreateReplicaHostMountFailsWithoutOriginMetadata(t *testing.T) {
 	stubSnapshotReadyForNewUse(t)
 	origSource := getSnapshotRestoreSourceFn
@@ -913,4 +999,29 @@ func TestSnapshotColdReplicaDropsCallerShimOverride(t *testing.T) {
 	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-cold", req))
 	assert.NotContains(t, req.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	assert.Equal(t, "snap-cold", req.Annotations[constants.CubeAnnotationRuntimeSnapshotID])
+}
+
+// CubeAPI reads the ret envelope from the top level of the body, exactly like
+// every other /cube route. A nested {"res":{...}} would hide a non-success ret
+// and be read as "no modes supported" instead of as an error.
+func TestCapabilitiesResponseKeepsTheFlatEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/cube/capabilities?request_id=req-1", nil)
+	ctx.Request = ctx.Request.WithContext(
+		CubeLog.WithRequestTrace(ctx.Request.Context(), &CubeLog.RequestTrace{}),
+	)
+
+	handleCapabilitiesAction(ctx)
+
+	body := recorder.Body.String()
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, body, `"ret"`, "ret must be at the top level")
+	assert.NotContains(t, body, `"res"`, "the envelope must not be nested under res")
+	assert.Contains(t, body, `"snapshot_modes":["full","fs-only"]`,
+		"the contract is the set of modes this build accepts")
+	assert.NotContains(t, body, `"filesystem_only_snapshot"`,
+		"a feature switch is not part of the contract; the build supports both modes")
+	assert.Contains(t, body, `"requestID":"req-1"`)
 }

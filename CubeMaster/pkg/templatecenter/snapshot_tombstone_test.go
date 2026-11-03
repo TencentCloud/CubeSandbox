@@ -692,3 +692,52 @@ func stubListTemplatesDB(t *testing.T, defs []models.TemplateDefinition, jobs []
 	}
 	return db
 }
+
+func TestRollbackSandboxToSnapshotRejectsFilesystemOnlyTarget(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{
+			SnapshotID:      snapshotID,
+			Status:          StatusReady,
+			OriginSandboxID: "sb-1",
+			Mode:            "fs-only",
+		}, nil
+	})
+
+	_, err := RollbackSandboxToSnapshot(context.Background(), "req-rb", "sb-1", "snap-fs", "cubebox", "")
+	if !errors.Is(err, ErrFilesystemOnlyRollback) {
+		t.Fatalf("RollbackSandboxToSnapshot error = %v, want ErrFilesystemOnlyRollback", err)
+	}
+}
+
+func TestRollbackSandboxToSnapshotAcceptsLegacyEmptyMode(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		// Rows created before the mode column exist are always full.
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Status: StatusReady, OriginSandboxID: "sb-1"}, nil
+	})
+	patches.ApplyFunc(getSandboxData, func(ctx context.Context, sandboxID, instanceType string) (*sandboxtypes.SandboxData, error) {
+		return nil, errors.New("stop after mode check")
+	})
+
+	_, err := RollbackSandboxToSnapshot(context.Background(), "req-rb", "sb-1", "snap-legacy", "cubebox", "")
+	if errors.Is(err, ErrFilesystemOnlyRollback) {
+		t.Fatalf("legacy empty mode must be treated as full, got %v", err)
+	}
+}

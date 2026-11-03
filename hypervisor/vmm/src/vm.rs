@@ -2882,6 +2882,34 @@ impl Snapshottable for Vm {
     }
 }
 
+/// Writes only `snapshot/config.json`, mirroring the config half of
+/// `Vm::send`. Used for snapshots without guest memory; the caller owns the
+/// destination directory lifecycle and any prior cleanup.
+pub fn write_vm_config_only(
+    snapshot_config: &SnapshotConfig,
+    vm_config: &Arc<Mutex<VmConfig>>,
+) -> std::result::Result<(), MigratableError> {
+    let mut snapshot_config_path = url_to_path(&snapshot_config.destination_url)?;
+    snapshot_config_path.push(SNAPSHOT_CONFIG_FILE);
+
+    let vm_config = serde_json::to_string(vm_config.lock().unwrap().deref())
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+
+    let mut snapshot_config_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(snapshot_config_path)
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    snapshot_config_file
+        .write(vm_config.as_bytes())
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    snapshot_config_file
+        .sync_all()
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    Ok(())
+}
+
 impl Transportable for Vm {
     fn send(
         &self,
@@ -2948,6 +2976,7 @@ impl Transportable for Vm {
                 destination_url: destination_url.clone(),
                 snapshot_type: config.snapshot_type,
                 memory_vol_url: config.memory_vol_url.clone(),
+                include_memory: true,
             };
             self.memory_manager
                 .lock()

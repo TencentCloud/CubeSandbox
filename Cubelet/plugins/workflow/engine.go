@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 type ReqContext interface {
@@ -147,6 +148,20 @@ type CreateContext struct {
 	// create response ext_info on success.
 	VolumeRefEvents []VolumeRefEvent
 
+	// SnapshotMode is the artifact mode of the snapshot this sandbox is
+	// created from. It is empty for ordinary creates and is always full for
+	// pause/resume. Master supplies it through the typed proto field.
+	SnapshotMode snapshotmode.Mode
+
+	// SnapshotWritableLayer names the overlay upper directory the snapshot's
+	// rootfs was written by ("disk/<container id>"). A cold boot boots the
+	// captured disk, so it must mount that layer instead of deriving a fresh
+	// one from this sandbox's own ids -- a fresh name would be empty and the
+	// guest would see the base image alone. The CBRI plugin fills this from the
+	// snapshot package while resolving the boot artifacts, and only for a cold
+	// boot; ordinary creates leave it empty.
+	SnapshotWritableLayer string
+
 	// IsRestart rebuilds a sandbox that already has an ID, disk and network.
 	// Plugins consult Retain and WantsSnapshotRestore instead of guessing.
 	IsRestart         bool
@@ -173,16 +188,45 @@ func (b *CreateContext) IsCreateSnapshot() bool {
 	return ok
 }
 
-func (b *CreateContext) IsRetoreSnapshot() bool {
-	if b == nil || b.IsRestart {
+func (b *CreateContext) GetSnapshotMode() snapshotmode.Mode {
+	if b == nil {
+		return snapshotmode.Full
+	}
+	return snapshotmode.Normalize(b.SnapshotMode.String())
+}
+
+func (b *CreateContext) hasArtifactSnapshot() bool {
+	if b == nil {
 		return false
 	}
 	_, ok := b.GetSnapshotTemplateID()
-	if !ok {
+	return ok
+}
+
+// IsColdBoot reports that this create starts a brand-new VM instead of
+// restoring guest memory. Restart and create-from-fs-only both qualify.
+//
+// It is the first predicate every other restore decision consults: a cold boot
+// must never set app_snapshot_restore, a memory URL or a memory lineage.
+func (b *CreateContext) IsColdBoot() bool {
+	if b == nil || b.IsCreateSnapshot() {
 		return false
 	}
-	_, ok = b.ReqInfo.GetAnnotations()[constants.MasterAnnotationsAppSnapshotCreate]
-	return !ok
+	if b.IsRestart {
+		return true
+	}
+	return b.GetSnapshotMode().IsFsOnly() && b.hasArtifactSnapshot()
+}
+
+// IsColdBootFromSnapshot is the narrower CBRI decision: only a create from an
+// fs-only snapshot reads the package (config.json/metadata.json). Restart
+// reuses its retained disk and must stay on the ordinary create branch.
+func (b *CreateContext) IsColdBootFromSnapshot() bool {
+	return b.IsColdBoot() && !b.IsRestart && b.hasArtifactSnapshot()
+}
+
+func (b *CreateContext) IsRetoreSnapshot() bool {
+	return b.WantsSnapshotRestore()
 }
 
 // IsPauseResume is true when Master asks Cubelet to recreate the same sandbox
@@ -202,7 +246,7 @@ func (b *CreateContext) IsPauseResume() bool {
 // Create-from-template only has appsnapshot.template.id — that memory is a
 // clean template and still needs virtio_rw mounted for newly attached volumes.
 func (b *CreateContext) IsGuestMountRestore() bool {
-	if b == nil || b.IsRestart || b.ReqInfo == nil {
+	if b == nil || b.IsColdBoot() || b.ReqInfo == nil {
 		return false
 	}
 	if b.IsPauseResume() {
@@ -242,11 +286,10 @@ func (b *CreateContext) GetSnapshotTemplateID() (string, bool) {
 // WantsSnapshotRestore reports whether this create should restore guest
 // memory from a snapshot. A restart keeps the disk and cold-boots.
 func (b *CreateContext) WantsSnapshotRestore() bool {
-	if b == nil || b.IsRestart {
+	if b == nil || b.IsColdBoot() || b.IsCreateSnapshot() {
 		return false
 	}
-	_, ok := b.GetSnapshotTemplateID()
-	return ok
+	return b.hasArtifactSnapshot()
 }
 
 func (b *CreateContext) IsCubeboxV2() bool {

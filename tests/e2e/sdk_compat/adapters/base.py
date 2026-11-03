@@ -115,7 +115,7 @@ class SandboxAdapter(ABC):
     def set_timeout(self, timeout: int) -> None:
         raise UnsupportedCapability(self.backend, "set_timeout")
 
-    def create_snapshot(self, name: str | None = None) -> str:
+    def create_snapshot(self, name: str | None = None, *, mode: str | None = None) -> str:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
     def delete_snapshot(self, snapshot_id: str) -> bool:

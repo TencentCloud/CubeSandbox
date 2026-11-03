@@ -403,6 +403,33 @@ func TestJFSPackageUploadIncludesRestoreMetadata(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A filesystem-only package has no memory, but a cold boot still reads the
+// guest runtime metadata and the VM config. Only the VM state file is
+// mode-specific, so its absence must not excuse the other two.
+func TestJFSPackageUploadRequiresGuestMetadataWithoutMemory(t *testing.T) {
+	_, _ = useTestJFSStorage(t, &fakeCowEngine{})
+	home := t.TempDir()
+	meta := filepath.Join(home, SnapshotMetadataDir)
+	write := func(name, body string) {
+		t.Helper()
+		path := filepath.Join(meta, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+	}
+	write(snapshotCatalogFileName, `{"kind":"runtime_snapshot"}`)
+	write("metadata.json", `{}`)
+	write("snapshot/config.json", `{}`)
+
+	// No memory: exactly the filesystem-only shape.
+	files := &cow.RemoteUUIDs{Rootfs: "/rootfs", Metadata: home}
+	_, err := jfsPackageUploadPaths(files)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(filepath.Join(meta, "metadata.json")))
+	_, err = jfsPackageUploadPaths(files)
+	require.Error(t, err)
+}
+
 func TestJFSStagedBlocksInspectionFailures(t *testing.T) {
 	_, cache := useTestJFSStorage(t, &fakeCowEngine{})
 	_, err := jfsStagedBlocks(context.Background(), "/f")
