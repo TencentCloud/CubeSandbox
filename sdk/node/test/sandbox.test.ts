@@ -453,7 +453,8 @@ describe("Sandbox instance operations", () => {
     setHandler((req) => {
       expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/exposed-ports/8080`);
       expect(req.method).toBe("GET");
-      expect(req.url.searchParams.get("callerHostIP")).toBe("198.51.100.254");
+      // No caller-IP parameter is ever sent.
+      expect(req.url.searchParams.get("callerHostIP")).toBeNull();
       return {
         status: 200,
         json: {
@@ -467,32 +468,8 @@ describe("Sandbox instance operations", () => {
         },
       };
     });
-    const ep = await sb.getExposedPortEndpoint(8080, "198.51.100.254");
-    expect(ep.mode).toBe("host_port");
-    expect(ep.endpoint).toBe("9.135.152.214:20006");
-    expect(ep.hostPort).toBe(20006);
-    sb.close();
-  });
-
-  it("resolves an exposed-port endpoint without a caller override", async () => {
-    const sb = await createSandbox();
-    setHandler((req) => {
-      expect(req.url.searchParams.get("callerHostIP")).toBeNull();
-      return {
-        status: 200,
-        json: {
-          sandboxID: SANDBOX_ID,
-          containerPort: 8080,
-          mode: "tap_ip",
-          endpoint: "192.168.0.20:8080",
-          sandboxIP: "192.168.0.20",
-        },
-      };
-    });
-    const ep = await sb.getExposedPortEndpoint(8080);
-    expect(ep.mode).toBe("tap_ip");
-    expect(ep.endpoint).toBe("192.168.0.20:8080");
-    expect(ep.hostPort).toBeUndefined();
+    const endpoint = await sb.getExposedPortEndpoint(8080);
+    expect(endpoint).toBe("9.135.152.214:20006");
     sb.close();
   });
 
