@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-ops-agent, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -218,6 +218,7 @@ jobs:
               "cube-wait-node-prep",
               "cube-api",
               "cube-ops",
+              "cube-ops-agent",
               "cube-proxy",
               "webui",
               "cube-lifecycle-manager",
@@ -346,6 +347,13 @@ jobs:
                   "context": ".",
                   "dockerfile": "CubeOps/Dockerfile",
                   "cache_scope": "cube-ops",
+              },
+              {
+                  "component": "cube-ops-agent",
+                  "image": "cube-ops-agent",
+                  "context": ".",
+                  "dockerfile": "OpsAgent/Dockerfile",
+                  "cache_scope": "cube-ops-agent",
               },
               {
                   "component": "cube-proxy",

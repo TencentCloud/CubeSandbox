@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeOps/cmd/cubeopscli/commands/cluster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/cmd/cubeopscli/commands/node"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/cmd/cubeopscli/commands/version"
 	pkgv "github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
@@ -45,6 +46,7 @@ func New() *cli.App {
 	app.Commands = []cli.Command{
 		version.Command,
 		node.NodeCommand,
+		cluster.Command,
 	}
 	return app
 }

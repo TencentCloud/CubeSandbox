@@ -87,6 +87,14 @@ type Config struct {
 	S3        S3Config        `yaml:"s3"`
 	Warehouse WarehouseConfig `yaml:"warehouse"`
 	Store     StoreConfig     `yaml:"store"`
+	OpsAgent  OpsAgentConfig  `yaml:"ops_agent"`
+}
+
+// OpsAgentConfig configures the CubeOps → ops-agent push channel;
+// Port 0 disables push (pull reconcile only).
+type OpsAgentConfig struct {
+	Port        int           `yaml:"port"`         // ops-agent listen port on each node
+	PushTimeout time.Duration `yaml:"push_timeout"` // default 5s
 }
 
 // StoreConfig selects the warehouse blob backend. Default is s3.
@@ -555,6 +563,16 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_TOKEN"); v != "" {
 		cfg.Warehouse.CNBToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_OPSAGENT_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.OpsAgent.Port = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_OPSAGENT_PUSH_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.OpsAgent.PushTimeout = d
+		}
 	}
 	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_REPOS"); v != "" {
 		cfg.Warehouse.GitHubRepos = splitCSV(v)

@@ -26,9 +26,11 @@ const (
 )
 
 const (
-	OpIsolate   = "isolate"
-	OpUnisolate = "unisolate"
-	OpSetLabels = "set-labels"
-	OpDelLabel  = "delete-label"
-	OpDelete    = "delete"
+	OpIsolate         = "isolate"
+	OpUnisolate       = "unisolate"
+	OpSetLabels       = "set-labels"
+	OpDelLabel        = "delete-label"
+	OpSetQuota        = "set-quota"
+	OpSetClusterQuota = "set-cluster-quota"
+	OpDelete          = "delete"
 )

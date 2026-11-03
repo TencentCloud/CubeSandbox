@@ -115,7 +115,7 @@ if base.get("CHECK_HOST_PORTS") != "true":
     raise SystemExit(f"CHECK_HOST_PORTS must default to true, got {base.get('CHECK_HOST_PORTS')!r}")
 if base.get("CUBE_NODE_HOST_NETWORK") != "true":
     raise SystemExit("the default render must tell node-init it is on the host network")
-if base.get("HOST_PORT_RESERVED_PORTS") != "9998 9999 9966":
+if base.get("HOST_PORT_RESERVED_PORTS") != "9998 9999 9966 8890":
     raise SystemExit(f"unexpected default port set: {base.get('HOST_PORT_RESERVED_PORTS')!r}")
 if base.get("PREP_GENERATION") != "2":
     raise SystemExit(f"prepGeneration must be pinned at 2 so already-ready nodes re-run node-init, got {base.get('PREP_GENERATION')!r}")
@@ -128,7 +128,7 @@ PY
 render "$TMP_DIR/s3lvol-pods.yaml" --set cubeS3lvol.enabled=true --set-string cubeS3lvol.listenPort=5520
 extract_bootstrap "$TMP_DIR/s3lvol-pods.yaml" > "$TMP_DIR/s3lvol-bootstrap.yaml"
 grep -q 'HOST_PORT_RESERVED_PORTS' "$TMP_DIR/s3lvol-bootstrap.yaml" || fail "expected the port env"
-if ! grep -A1 'name: HOST_PORT_RESERVED_PORTS' "$TMP_DIR/s3lvol-bootstrap.yaml" | grep -q '"9998 9999 9966 5520"'; then
+if ! grep -A1 'name: HOST_PORT_RESERVED_PORTS' "$TMP_DIR/s3lvol-bootstrap.yaml" | grep -q '"9998 9999 9966 8890 5520"'; then
   fail "enabling s3lvol must add its listen port to the checked set: $(grep -A1 HOST_PORT_RESERVED_PORTS "$TMP_DIR/s3lvol-bootstrap.yaml")"
 fi
 

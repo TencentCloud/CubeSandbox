@@ -191,6 +191,18 @@ tolerations:
 {{- printf "%s-master" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.opsAgentName" -}}
+{{- printf "%s-ops-agent" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- /*
+ops-agent deploys on compute nodes whenever a CubeOps endpoint is reachable:
+the built-in control plane, or an external one (compute-only mode).
+*/ -}}
+{{- define "cube.opsAgentEnabled" -}}
+{{- if and .Values.cubeNode.enabled (or (eq (include "cube.opsEnabled" .) "true") .Values.externalControlPlane.enabled) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
 {{- define "cube.apiName" -}}
 {{- printf "%s-api" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -939,6 +951,19 @@ podAffinity in templatecenter.yaml enforces.
 {{- end -}}
 {{- end -}}
 
+{{- /*
+opsEndpoint guaranteed to carry an http(s):// scheme. The external value may
+already include one, the in-cluster FQDN does not.
+*/ -}}
+{{- define "cube.opsEndpointHTTP" -}}
+{{- $e := include "cube.opsEndpoint" . -}}
+{{- if or (hasPrefix "http://" $e) (hasPrefix "https://" $e) -}}
+{{- $e -}}
+{{- else -}}
+{{- printf "http://%s" $e -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 database.driver selects which connection section the control plane reads:
   mysql    -> mysql.*    (built-in StatefulSet when mysql.host is empty)
@@ -1401,6 +1426,9 @@ node-init conflict check. Only ports whose holder we can name are listed; see
 deploy/kubernetes/images/scripts/node-prep-lib.sh. */}}
 {{- define "cube.hostPortReserved" -}}
 {{- $ports := list "9998" "9999" "9966" -}}
+{{- if eq (include "cube.opsAgentEnabled" .) "true" -}}
+{{- $ports = append $ports (.Values.opsAgent.port | default 8890 | toString) -}}
+{{- end -}}
 {{- if eq (include "cube.s3lvolEnabled" .) "true" -}}
 {{- $ports = append $ports (((.Values.cubeS3lvol).listenPort) | default 4420 | toString) -}}
 {{- end -}}

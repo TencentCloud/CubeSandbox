@@ -2004,6 +2004,7 @@ rm -rf \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/CubeTemplateCenter" \
   "${INSTALL_PREFIX}/Cubelet" \
+  "${INSTALL_PREFIX}/ops-agent" \
   "${INSTALL_PREFIX}/cubeproxy" \
   "${INSTALL_PREFIX}/coredns" \
   "${INSTALL_PREFIX}/webui" \
@@ -2022,6 +2023,7 @@ rm -rf \
 mkdir -p "${INSTALL_PREFIX}"
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/Cubelet" "${INSTALL_PREFIX}/Cubelet"
+  copy_dir_contents "${PKG_ROOT}/ops-agent" "${INSTALL_PREFIX}/ops-agent"
   copy_dir_contents "${PKG_ROOT}/cube-vs" "${INSTALL_PREFIX}/cube-vs"
   copy_dir_contents "${PKG_ROOT}/cube-shim" "${INSTALL_PREFIX}/cube-shim"
   copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
@@ -2152,6 +2154,9 @@ if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
   validate_host_port "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}"
 fi
+# ops-agent push port: fixed by the deployment layout; absent on older
+# installs, where CubeOps falls back to pull-reconcile-only.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_OPSAGENT_PORT" "8890"
 # CubeOps address for compute-role node registration. Prefer the explicit
 # ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR; otherwise derive from the control
 # plane IP or CubeMaster addr host (CubeOps listens on port 3010).
