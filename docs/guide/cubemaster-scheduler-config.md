@@ -182,7 +182,7 @@ New sandboxes still land on old nodes after scale-out, or logs mention missing l
 
 ### Node label mismatch
 
-A request with affinity, cluster labels, or a specific instance type finds no candidates: compare Cubelet's `host.scheduler_label` against the request; verify the `instance_type` matches; check that `node_affinity_selector_allowed_keys` allows the selector key; for heterogeneous pools, confirm templates were redone onto the right instance type.
+A request with affinity or cluster labels finds no candidates: compare Cubelet's `host.scheduler_label` against the request; check that `node_affinity_selector_allowed_keys` allows the selector key; for heterogeneous pools, confirm templates were redone onto the right instance type.
 
 ### Creates concentrate on a few nodes
 

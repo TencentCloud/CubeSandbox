@@ -182,7 +182,7 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 
 ### 节点标签不匹配
 
-请求带了 affinity、cluster label 或指定 instance type 但没有候选节点：对照 Cubelet 的 `host.scheduler_label` 和请求的标签；确认 `instance_type` 匹配；确认 `node_affinity_selector_allowed_keys` 放行了请求用的 selector key；异构节点池要确认模板已 redo 到对应机型。
+请求带了 affinity 或 cluster label 但没有候选节点：对照 Cubelet 的 `host.scheduler_label` 和请求的标签；确认 `node_affinity_selector_allowed_keys` 放行了请求用的 selector key；异构节点池要确认模板已 redo 到对应实例类型。
 
 ### 创建集中在少数节点
 

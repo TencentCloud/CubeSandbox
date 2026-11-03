@@ -48,7 +48,6 @@ scheduler:
   profiles:
     - name: burst
       route:
-        instance_types: ["S.*", "M.*"]
         labels: {workload: burst}
       filters:
         - name: skip-high-create
@@ -69,7 +68,7 @@ scheduler:
 规则要点：
 
 - 只有 `profile_route_label_keys` 列出的请求 label 能参与路由，也才会传给外部插件。
-- 路由按配置顺序匹配，第一个命中的 Profile 生效；非默认 Profile 必须带 instance type 或 label 条件。
+- 路由按配置顺序匹配，第一个命中的 Profile 生效；非默认 Profile 必须带 instance type 或 label 条件（`instance_type` 当前统一为 `cubebox`，实际区分流量用 label 即可）。
 - `selection.method` 从打分结果里选最终节点：`highest` 取最高分；`spread` 在前 `top_n` 里选当前运行沙箱数最少的（把放置摊开）；`random`（缺省）按分数加权随机。`top_n: -1` 表示全部通过过滤的节点。
 - 每个 Profile 固定跑 `node_safety`、`cpu`、`mem`、`disk`、`template_locality`、`realtime_create_num` 这六个 Guards，配置关不掉。
 
@@ -104,7 +103,7 @@ Redis 是必选依赖（节点指标读取和创建后的路由元数据写入�
 三种插件类型：
 
 - **go**（默认）：编译进 CubeMaster，实现 `filter.Selector` 或 `score.Selector` 接口，在包初始化时调 `plugin.RegisterGoFilter` / `plugin.RegisterGoScore` 注册。二进制需要导入该包，新增插件后要重新编译；重名在启动时被拒。
-- **expr**：启动时编译 CEL。Filter 返回 `bool`，Score 返回 0—100。CEL 拿到的是强类型只读的 `node` 和 `request` 对象，未知字段、类型错误、非法返回值在 Profile 激活时被拒。常用节点字段有 `cpu_util`、`quota_cpu`、`allocated_cpu`、`creating`、`mvm_num`、`labels`、`template_local`、`snapshot_storage_writable` 等；请求字段有 `instance_type`、`cpu_millis`、`memory_bytes`、`template_id`、`labels`。
+- **expr**：启动时编译 CEL。Filter 返回 `bool`，Score 返回 0—100。CEL 拿到的是强类型只读的 `node` 和 `request` 对象，未知字段、类型错误、返回类型不对在 Profile 激活时被拒；Score 数值超出 0—100 在请求时才会报错并触发 score 失败策略。常用节点字段有 `cpu_util`、`quota_cpu`、`allocated_cpu`、`creating`、`mvm_num`、`labels`、`template_local`、`snapshot_storage_writable` 等；请求字段有 `instance_type`、`cpu_millis`、`memory_bytes`、`template_id`、`labels`。
 - **grpc**：独立进程。启动时完成一次握手，之后批量调 `Filter` 或 `Score`；CubeMaster 校验超时、熔断、快照版本和返回值。
 
 gRPC 插件配置示例：

@@ -48,7 +48,6 @@ scheduler:
   profiles:
     - name: burst
       route:
-        instance_types: ["S.*", "M.*"]
         labels: {workload: burst}
       filters:
         - name: skip-high-create
@@ -69,7 +68,7 @@ scheduler:
 The rules:
 
 - Only request labels listed in `profile_route_label_keys` participate in routing and are passed to external plugins.
-- Routes are evaluated in order; the first match wins. Non-default Profiles must carry an instance-type or label condition.
+- Routes are evaluated in order; the first match wins. Non-default Profiles must carry an instance-type or label condition (all `instance_type` values are currently `cubebox`; use labels to distinguish traffic).
 - `selection.method` picks the final node from the scored candidates: `highest` takes the top scorer; `spread` picks the node with the fewest running sandboxes among the top `top_n` (spreading placement); `random` (the default) draws score-weighted among the top `top_n`. `top_n: -1` widens the window to every node that passed filtering.
 - Every Profile runs the `node_safety`, `cpu`, `mem`, `disk`, `template_locality`, and `realtime_create_num` guards — they cannot be turned off.
 
@@ -104,7 +103,7 @@ Everything above targets operators configuring scheduling policies. From here on
 Three plugin types:
 
 - **go** (default): compiled into CubeMaster. Implement `filter.Selector` or `score.Selector`, register via `plugin.RegisterGoFilter` / `plugin.RegisterGoScore` at package init. The binary must import the package, so new plugins require a rebuild; duplicate names are rejected at startup.
-- **expr**: CEL compiled at startup. Filters return `bool`; scores return 0–100. CEL gets strongly typed read-only `node` and `request` objects — unknown fields, type errors, and invalid returns are rejected when the Profile activates. Common node fields include `cpu_util`, `quota_cpu`, `allocated_cpu`, `creating`, `mvm_num`, `labels`, `template_local`, `snapshot_storage_writable`; request fields include `instance_type`, `cpu_millis`, `memory_bytes`, `template_id`, `labels`.
+- **expr**: CEL compiled at startup. Filters return `bool`; scores return 0–100. CEL gets strongly typed read-only `node` and `request` objects — unknown fields, type errors, and wrong return types are rejected when the Profile activates; a score outside 0–100 is caught per request and triggers the score failure policy. Common node fields include `cpu_util`, `quota_cpu`, `allocated_cpu`, `creating`, `mvm_num`, `labels`, `template_local`, `snapshot_storage_writable`; request fields include `instance_type`, `cpu_millis`, `memory_bytes`, `template_id`, `labels`.
 - **grpc**: an independent process. One handshake at startup, then batched `Filter`/`Score` calls; CubeMaster validates timeouts, circuit breaking, snapshot versions, and returned values.
 
 A gRPC plugin configured as a filter:
