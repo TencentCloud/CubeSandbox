@@ -29,6 +29,21 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(data)
 }
 
+// captureStderr runs fn and returns everything written to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = old })
+
+	fn()
+	_ = w.Close()
+	data, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(data)
+}
+
 func sampleSchedulerNodes() []*model.SchedulerNode {
 	return []*model.SchedulerNode{
 		{

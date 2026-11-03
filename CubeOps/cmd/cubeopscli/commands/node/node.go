@@ -242,8 +242,7 @@ func deleteAction(c *cli.Context) error {
 	var opErr error
 	for _, nodeID := range c.Args() {
 		if err := deleteOne(c, nodeID); err != nil {
-			fmt.Fprintf(os.Stderr, "delete failed: %s %s\n", nodeID, err.Error())
-			opErr = errors.Join(opErr, fmt.Errorf("%s: %w", nodeID, err))
+			opErr = errors.Join(opErr, fmt.Errorf("delete failed: %s: %w", nodeID, err))
 		}
 	}
 	return opErr

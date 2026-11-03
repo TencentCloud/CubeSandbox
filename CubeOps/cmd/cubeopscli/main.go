@@ -12,7 +12,7 @@ import (
 
 func main() {
 	if err := app.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintf(os.Stderr, "cubeopscli run fail: %s\n", err)
 		os.Exit(1)
 	}
 }
