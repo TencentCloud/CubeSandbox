@@ -194,7 +194,6 @@ Today a node that cannot fit the request does not fail over: Cubelet performs no
 
 During a rolling upgrade, new versions do not participate in old versions' Redis reservations, and a mixed-version cluster must not be treated as having full cross-replica coordination. Once every Master is upgraded, the old reservation keys are no longer touched; do not delete those keys while an old version may still serve requests.
 
-
 See [scheduler configuration](./cubemaster-scheduler-config.md) and [scheduler plugins](./scheduler-plugin.md).
 
 ## Connect Clients to the Cluster

@@ -74,8 +74,7 @@ scheduler:
           workload: template_reuse
       scores:
         # Main objective: prefer nodes holding a local template replica.
-        # Weights were calibrated by offline simulation; rationale and
-        # trade-offs in docs/dev/scheduler-sim-report.md.
+        # Weights were calibrated by offline simulation.
         - name: image_score
           type: go
           weight: 0.7

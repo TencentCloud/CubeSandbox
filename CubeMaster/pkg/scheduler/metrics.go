@@ -238,8 +238,8 @@ func classifyAttemptError(err error) string {
 // RecordDecision counts one successful scheduling decision. templateHit marks
 // that the selected node already holds a local replica of the requested
 // template; templateless requests always record false, so the denominator is
-// every decision (sim uses a different denominator; see
-// docs/dev/scheduler-strategy-mapping.md).
+// every decision (sim uses a different denominator; see the metric-caliber
+// section in CubeMaster/tools/schedsim/README.md).
 func RecordDecision(profile string, templateHit bool) {
 	schedulerDecisions.WithLabelValues(profile, strconv.FormatBool(templateHit)).Inc()
 }

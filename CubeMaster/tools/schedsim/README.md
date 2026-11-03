@@ -192,6 +192,30 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 
 指标计算均为纯函数（`sim/metrics.go`），单测手算对拍。
 
+### 在线指标与仿真指标的口径差异
+
+生产侧对应的信号由 `CubeMaster/pkg/scheduler/metrics.go` 的 Prometheus
+指标发出（`scheduler_decisions_total{profile,template_hit}`、
+`sandbox_create_duration_seconds{profile,result}` 等，均带 profile 标签）。
+两侧指标同名同义，仿真结论可以外推到生产，但若下细节口径不同——
+**不要把 schedsim 与 Prometheus 的数值直接互换**：
+
+- **空集群的 Jain 指数**：schedsim 把空输入定义为完全均衡（1）；生产
+  gauge（`jainOfRatios`）对空集群报 0。两者对全 0（完全空闲）集合都返回 1。
+- **碎片率**：schedsim 的 `fragmentation_ratio` 只看 CPU，参考 shape 取
+  trace 中最大请求（`free <= shape` 即放不下，与 filter 的 `free > req`
+  严格准入互补）；生产的 `fragmented_capacity_ratio` 用集群级 MaxMvm
+  shape、CPU 或内存任一不足即判放不下，并取 CPU/内存两个比例的均值。
+- **羊群度窗口**：schedsim 的 `herding_top1_share` 是单次运行全部成功
+  放置中被选最多节点的占比；生产的 `scheduler_herding_top1_share{profile}`
+  是该 profile 最近 100 次成功决策的滚动窗口（每 profile 一个环，繁忙
+  profile 不会互相稀释信号）。
+- **template_hit 分母**：schedsim 的 `template_hit_rate` 分母只计带模板的
+  成功请求；生产的 `scheduler_decisions_total{profile,template_hit}` 记录
+  每一次成功决策，无模板请求恒记 `template_hit="false"`——在线 false
+  份额因此混入了无模板流量。在线份额只应在模板流量占比相同的窗口之间
+  比较，且不要与 schedsim 的 `template_hit_rate` 直接对拍。
+
 ## 验证
 
 ```bash

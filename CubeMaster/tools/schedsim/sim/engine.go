@@ -601,8 +601,8 @@ func (e *engine) result() *RoundResult {
 		"jain_mem":             mean.JainMem,
 		"fragmentation_ratio":  mean.FragmentationRatio,
 		// sim's herding/template_hit denominators differ from the online
-		// Prometheus metrics; see docs/dev/scheduler-strategy-mapping.md
-		// before comparing the two sides.
+		// Prometheus metrics; see the metric-caliber section in
+		// CubeMaster/tools/schedsim/README.md before comparing the two sides.
 		"herding_top1_share": ratio(int64(top1), int64(e.successes)),
 		"template_hit_rate":  ratio(int64(e.templateHits), int64(e.templatedSuccesses)),
 		"active_nodes_avg":   mean.ActiveNodes,

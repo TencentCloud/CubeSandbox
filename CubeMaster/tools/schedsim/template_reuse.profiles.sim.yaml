@@ -12,8 +12,7 @@
 #   4. Top-3 spread avoids repeatedly selecting one cache node.
 #
 # Weights 0.7/0.2/0.3 (image/pressure/realtime) were calibrated by offline
-# simulation; see the template_reuse weight comparison section in
-# docs/dev/scheduler-sim-report.md.
+# simulation.
 
 common:
   http_port: 18089

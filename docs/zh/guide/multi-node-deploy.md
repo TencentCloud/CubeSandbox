@@ -181,7 +181,7 @@ scheduler:
 
 更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
 
-## 本地预留与 Redis
+## 预留与 Redis
 
 CubeMaster 不再维护资源预留账本，也不再在派发前执行同步 Redis reservation 检查。每个副本根据本地节点快照执行准入，指标独立传播；在上报窗口内，多副本可能针对同一可见容量重复准入，因此不提供跨副本原子配额协调。旧配置中的 `scheduler.reservation_redis_error_policy` 已废弃，应删除。
 
