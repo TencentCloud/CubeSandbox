@@ -1,5 +1,5 @@
 [Unit]
-Description=Cube Sandbox cube-egress host network rules (TPROXY + ip rule)
+Description=Cube Sandbox cube-egress host network reconciler (TPROXY + ip rule)
 After=network-online.target cube-sandbox-cubelet.service
 Wants=network-online.target
 Requires=cube-sandbox-cubelet.service
@@ -7,13 +7,17 @@ ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
-ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-start.sh
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-reconciler.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-stop.sh
+Restart=on-failure
+RestartSec=5
+# Readiness is reported via STATUS= (waiting / ready / reconciled).
+# Use cube-egress-net-check.sh for a real readiness check — don't
+# rely on "active (running)" alone (the process is always running).
 
 [Install]
 WantedBy=cube-sandbox-control.target cube-sandbox-compute.target
