@@ -96,6 +96,11 @@ init_external_dep_defaults() {
   CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
   CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
   CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+  CUBE_EXTERNAL_REDIS_CLUSTER_NODES="${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}"
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}" ]]; then
+    [[ "${CUBE_EXTERNAL_REDIS_DB:-0}" == "0" ]] || die "Redis Cluster requires DB 0"
+    [[ -z "${CUBE_EXTERNAL_REDIS_HOST:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] || die "Redis Cluster cannot use a standalone host or Sentinel"
+  fi
   CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
@@ -143,6 +148,10 @@ warn_default_external_credentials() {
     log "WARNING: external Redis (${CUBE_EXTERNAL_REDIS_HOST}) configured with the default password 'ceuhvu123'."
     log "WARNING: set CUBE_EXTERNAL_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
   fi
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
+    log "WARNING: external Redis Cluster configured with the default password; set CUBE_EXTERNAL_REDIS_PASSWORD before deployment."
+  fi
+
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
     log "WARNING: external Redis Sentinel (${CUBE_EXTERNAL_REDIS_MASTER_NAME}) configured with the default password 'ceuhvu123'."
     log "WARNING: set CUBE_EXTERNAL_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
@@ -582,8 +591,8 @@ patch_cubemaster_external_deps() {
   # resolveRedisAddr keeps preferring MasterName over Nodes.
   local scrub_stale_sentinel=0
   local restore_bundled_redis=0
-  if [[ -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" && -f "${cfg}" ]]; then
-    if grep -qE '^[[:space:]]*master_name:' "${cfg}"; then
+  if [[ -z "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" && -f "${cfg}" ]]; then
+    if grep -qE '^[[:space:]]*(master_name|cluster_nodes):' "${cfg}"; then
       scrub_stale_sentinel=1
       restore_bundled_redis=1
     else
@@ -604,6 +613,7 @@ patch_cubemaster_external_deps() {
   if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_POSTGRES_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
+      && -z "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" \
       && "${scrub_stale_sentinel}" -eq 0 && "${restore_bundled_redis}" -eq 0 ]]; then
     return 0
   fi
@@ -634,6 +644,49 @@ patch_cubemaster_external_deps() {
 # surfaces much later during up-with-deps.sh seeding. The check is best-effort:
 # if the corresponding client binary is missing we skip rather than block, since
 # the seed step (which requires the client) runs later anyway.
+check_external_redis_cluster_connectivity() {
+  if ! command -v redis-cli >/dev/null 2>&1; then
+    log "redis-cli not found; skipping external Redis Cluster connectivity preflight"
+    return
+  fi
+  local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
+  local help_output endpoint host port reply info
+  local timeout_args=() endpoints=() use_timeout_wrapper=0
+  help_output="$(redis_cli_help_output)"
+  if redis_cli_help_supports_flag "${help_output}" "--connect-timeout"; then
+    timeout_args+=(--connect-timeout "${connect_timeout}")
+  fi
+  if redis_cli_help_supports_flag "${help_output}" "--timeout"; then
+    timeout_args+=(--timeout "${connect_timeout}")
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    use_timeout_wrapper=1
+  elif [[ ${#timeout_args[@]} -ne 4 ]]; then
+    die "Redis Cluster preflight requires timeout or redis-cli with connection and command timeouts"
+  fi
+  IFS=',' read -ra endpoints <<< "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}"
+  for endpoint in "${endpoints[@]}"; do
+    endpoint="${endpoint//[[:space:]]/}"
+    [[ -n "${endpoint}" ]] || continue
+    host="${endpoint%:*}"
+    port="${endpoint##*:}"
+    host="${host#[}"; host="${host%]}"
+    local base_cmd=(redis-cli -h "${host}" -p "${port}" "${timeout_args[@]}")
+    if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
+      reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | run_redis_preflight_cmd \
+        "${use_timeout_wrapper}" "${connect_timeout}" "${base_cmd[@]}" \
+        --no-auth-warning -x AUTH 2>/dev/null || true)"
+      [[ "${reply}" == "OK" ]] || die "Redis Cluster seed ${endpoint} is unreachable or rejected authentication"
+    fi
+    info="$(REDISCLI_AUTH="${CUBE_EXTERNAL_REDIS_PASSWORD}" run_redis_preflight_cmd \
+      "${use_timeout_wrapper}" "${connect_timeout}" "${base_cmd[@]}" \
+      --no-auth-warning CLUSTER INFO 2>/dev/null || true)"
+    printf '%s\n' "${info}" | tr -d '\r' | grep -qx 'cluster_state:ok' \
+      || die "Redis Cluster seed ${endpoint} did not report cluster_state:ok"
+  done
+  log "external Redis Cluster seed connectivity and authentication OK"
+}
+
 check_external_deps_preflight() {
   local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
 
@@ -709,7 +762,9 @@ EOF
     fi
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    check_external_redis_cluster_connectivity
+  elif [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
     [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}" ]] \
       || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
     if command -v redis-cli >/dev/null 2>&1; then
@@ -1688,7 +1743,7 @@ mask_external_dep_services() {
     systemctl unmask cube-sandbox-mysql.service >/dev/null 2>&1 || true
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
     if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
       log "masking local Redis service (external Redis Sentinel master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} in use)"
     else

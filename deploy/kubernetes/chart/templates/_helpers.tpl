@@ -1044,12 +1044,12 @@ CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
 {{- end -}}
 
 {{- define "cube.redisBuiltinEnabled" -}}
-{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (not .Values.redis.clusterNodes) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
-{{- /* Master conf nodes: empty under Sentinel; else host:port. */ -}}
+{{- /* Master and TemplateCenter nodes: empty under Cluster or Sentinel. */ -}}
 {{- define "cube.redisNodes" -}}
-{{- if eq (include "cube.redisSentinelEnabled" .) "true" -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
+{{- if or .Values.redis.clusterNodes (eq (include "cube.redisSentinelEnabled" .) "true") -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
 {{- end -}}
 
 {{- /* Logical Redis DB for Master / Proxy / LCM / Ops (same instance isolation). */ -}}

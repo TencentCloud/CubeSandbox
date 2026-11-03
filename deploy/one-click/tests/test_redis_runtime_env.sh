@@ -58,7 +58,7 @@ persist_clean() {
   local env_file="$1"
   shift
   (
-    unset CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_PORT \
+    unset CUBE_EXTERNAL_REDIS_CLUSTER_NODES CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_PORT \
       CUBE_EXTERNAL_REDIS_PASSWORD CUBE_EXTERNAL_REDIS_MASTER_NAME \
       CUBE_EXTERNAL_REDIS_SENTINEL_NODES CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
       CUBE_EXTERNAL_REDIS_DB REDIS_DB CUBE_PROXY_REGISTRY_REDIS_DB CUBE_LCM_REDIS_DB \
@@ -605,5 +605,31 @@ test_legacy_master_missing_redis_falls_back_to_env
 test_legacy_master_db_zero_ignores_nonzero_legacy
 test_redis_db_in_db_intent_keys
 test_redis_db_intent_survives_upgrade_merge
+
+
+test_external_redis_cluster() (
+  unset CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_MASTER_NAME CUBE_EXTERNAL_REDIS_SENTINEL_NODES
+  CUBE_EXTERNAL_REDIS_CLUSTER_NODES='127.0.0.1:17400,127.0.0.1:17401'
+  CUBE_EXTERNAL_REDIS_PASSWORD=test-cluster-password
+  CUBE_EXTERNAL_REDIS_DB=0
+  local cfg="${TMP_DIR}/cluster-conf.yaml" env_file="${TMP_DIR}/cluster.env"
+  CUBE_PROXY_REDIS_PASSWORD=old-password
+  CUBE_LCM_REDIS_MASTER_NAME=old-master
+  printf 'CUBE_PROXY_REDIS_PASSWORD=old-password\nCUBE_LCM_REDIS_MASTER_NAME=old-master\n' > "${env_file}"
+  printf 'redis:\n  nodes: "127.0.0.1:6379"\n  password: "old"\n  db_no: 0\nother:\n  password: "preserved"\n' > "${cfg}"
+  one_click_patch_conf_redis_endpoint "${cfg}" ClusterTest
+  grep -qF 'cluster_nodes: "127.0.0.1:17400,127.0.0.1:17401"' "${cfg}" || fail "Cluster seeds missing"
+  grep -qF 'password: "preserved"' "${cfg}" || fail "unrelated credentials changed"
+  persist_one_click_redis_runtime_env "${env_file}"
+  assert_value "${env_file}" CUBE_EXTERNAL_REDIS_CLUSTER_NODES "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}"
+  assert_not_contains "${env_file}" CUBE_LCM_REDIS_MASTER_NAME
+  [[ -z "${CUBE_PROXY_REDIS_PASSWORD:-}" && -z "${CUBE_LCM_REDIS_MASTER_NAME:-}" ]] || fail "stale component overrides remain exported"
+  CUBE_EXTERNAL_REDIS_CLUSTER_NODES=
+  persist_one_click_redis_runtime_env "${env_file}"
+  assert_not_contains "${env_file}" CUBE_EXTERNAL_REDIS_CLUSTER_NODES
+  one_click_patch_conf_redis_endpoint "${cfg}" ClusterTest 1
+  assert_not_contains "${cfg}" 'cluster_nodes:'
+)
+test_external_redis_cluster
 
 echo "redis runtime env tests OK"
