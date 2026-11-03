@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,8 +42,6 @@ import (
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
-var addCreateFailoverTaskFn = task.AddAsyncTask
-
 var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
 var getSandboxProxyMapFn = localcache.GetSandboxProxyMap
 
@@ -63,9 +60,8 @@ type createSandboxContext struct {
 	done      chan struct{}
 	cancel    context.CancelFunc
 
-	rspMu            sync.Mutex
 	setMasterRspOnce sync.Once
-	hasSetRet        atomic.Bool
+	hasSetRet        bool
 	masterRsp        *types.CreateCubeSandboxRes
 	cubeletReq       *cubebox.RunCubeSandboxRequest
 	cubeletRsp       *cubebox.RunCubeSandboxResponse
@@ -141,23 +137,7 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 	}
 
 	defer func() {
-		if createCtx.hasSetRet.Load() && createCtx.masterRsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
-			createCtx.setProbeInfo()
-		}
-		if createCtx.masterRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-			// The worker may still complete after cancellation. Return an owned response.
-			createCtx.rspMu.Lock()
-			copyRsp := *createCtx.masterRsp
-			copyRet := *copyRsp.Ret
-			copyRsp.Ret = &copyRet
-			copyRsp.ExtInfo = make(map[string]string, len(createCtx.masterRsp.ExtInfo))
-			for k, v := range createCtx.masterRsp.ExtInfo {
-				copyRsp.ExtInfo[k] = v
-			}
-			rsp = &copyRsp
-			createCtx.rspMu.Unlock()
-		}
-
+		createCtx.setProbeInfo()
 		if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
 			msg := ""
 			if !filterErrMsg(rsp.Ret.RetCode) {
@@ -192,7 +172,7 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 	createCtx.Wait()
 	createCtx.endTime = time.Now()
 
-	go func() { <-createCtx.done; createCtx.dealMetric() }()
+	go createCtx.dealMetric()
 	return
 }
 
@@ -333,7 +313,6 @@ func (c *createSandboxContext) callCubelet() bool {
 
 func (c *createSandboxContext) dealSuccResult() {
 	if c.cubeletRsp.GetRet().GetRetCode() == cubeleterrorcode.ErrorCode_Success {
-		c.rspMu.Lock()
 		c.masterRsp.SandboxID = c.cubeletRsp.GetSandboxID()
 		c.masterRsp.SandboxIP = c.cubeletRsp.GetSandboxIP()
 		c.masterRsp.HostIP = c.selectHost.HostIP()
@@ -346,7 +325,6 @@ func (c *createSandboxContext) dealSuccResult() {
 				c.masterRsp.ExtInfo[constants.CubeExtNumaKey] = string(v)
 			}
 		}
-		c.rspMu.Unlock()
 		// Apply any node-level volume ref-count transitions (0→1) reported by
 		// Cubelet so the volume DB knows how many nodes reference each volume.
 		volrefcount.ApplyFromExtInfo(c.ctx, c.cubeletRsp.GetExtInfo())
@@ -389,24 +367,7 @@ func (c *createSandboxContext) dealSuccResult() {
 			c.setMasterRsp(int(errorcode.ErrorCode_DBError), fmt.Sprintf("setProxyToRedis fail:%s", redisErr))
 		}
 
-		c.setMasterRspOnce.Do(func() {
-			c.rspMu.Lock()
-			defer c.rspMu.Unlock()
-			defer c.hasSetRet.Store(true)
-			c.masterRsp.Ret.RetCode = int(c.cubeletRsp.GetRet().GetRetCode())
-			c.masterRsp.Ret.RetMsg = c.cubeletRsp.GetRet().GetRetMsg()
-			template, fields := webhook.PrepareLifecycle(createOriginRequestFromContext(c.ctx))
-			resolved, snapshot := webhook.ResolvedStart(c.ctx)
-			if resolved != "" {
-				template = resolved
-			}
-			kind := webhook.TypeCreated
-			if snapshot {
-				kind = webhook.TypeResumed
-				fields.ResumeMode = "restore"
-			}
-			lifecyclePublisher.Publish(kind, c.cubeletRsp.GetSandboxID(), template, fields)
-		})
+		c.setMasterRsp(int(c.cubeletRsp.GetRet().GetRetCode()), c.cubeletRsp.GetRet().GetRetMsg())
 	}
 }
 
@@ -440,7 +401,7 @@ func (c *createSandboxContext) failover() {
 				InstanceType: c.cubeletReq.GetInstanceType(),
 				SandboxID:    c.cubeletRsp.GetSandboxID(),
 			},
-			Ctx:       webhook.WithOrigin(CubeLog.WithRequestTrace(c.ctx, rt), webhook.OriginCreateFailover),
+			Ctx:       CubeLog.WithRequestTrace(c.ctx, rt),
 			RequestId: c.masterRsp.RequestID,
 			Request: &cubebox.DestroyCubeSandboxRequest{
 				RequestID: c.cubeletRsp.GetRequestID(),
@@ -453,7 +414,10 @@ func (c *createSandboxContext) failover() {
 			CallEp:   rt.CalleeEndpoint,
 		}
 
-		if err := addCreateFailoverTaskFn(t); err != nil {
+		if lifecyclePublisher.Enabled() {
+			t.Ctx = webhook.WithOrigin(t.Ctx, webhook.OriginCreateFailover)
+		}
+		if err := task.AddAsyncTask(t); err != nil {
 			log.G(c.ctx).Fatalf("failover_DestroySandbox error:%+v", err.Error())
 		}
 	}
@@ -611,16 +575,14 @@ func (c *createSandboxContext) dealMetric() {
 
 func (c *createSandboxContext) setMasterRsp(code int, msg string) {
 	c.setMasterRspOnce.Do(func() {
-		c.rspMu.Lock()
-		defer c.rspMu.Unlock()
-		defer c.hasSetRet.Store(true)
+		c.hasSetRet = true
 		c.masterRsp.Ret.RetCode = code
 		c.masterRsp.Ret.RetMsg = msg
 	})
 }
 
 func (c *createSandboxContext) setProxyToRedis() error {
-	if c.hasSetRet.Load() &&
+	if c.hasSetRet &&
 		c.masterRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
 
 		return nil
@@ -670,9 +632,7 @@ func (c *createSandboxContext) setProxyToRedis() error {
 		// Surface the token to the master response only after the proxy
 		// metadata is durably in Redis — avoids the window where API
 		// callers receive a token CubeProxy cannot yet validate.
-		c.rspMu.Lock()
 		c.masterRsp.TrafficAccessToken = token
-		c.rspMu.Unlock()
 		return nil
 	}
 	return nil

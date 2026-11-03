@@ -4,8 +4,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -13,13 +16,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/cube"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	ec "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"io"
@@ -30,7 +34,13 @@ import (
 	"time"
 )
 
-func TestP4AppPublisherRealCreate(t *testing.T) {
+func TestAppPublisherPublicCreate(t *testing.T) {
+	for _, mode := range []string{"enabled", "disabled", "invalid"} {
+		t.Run(mode, func(t *testing.T) { appPublisherPublicCreate(t, mode) })
+	}
+}
+
+func appPublisherPublicCreate(t *testing.T, mode string) {
 	path, e := filepath.Abs("../../../conf.yaml")
 	require.NoError(t, e)
 	t.Setenv("CUBE_MASTER_CONFIG_PATH", path)
@@ -45,7 +55,8 @@ func TestP4AppPublisherRealCreate(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg.Webhooks = config.DefaultWebhookConf()
-	cfg.Webhooks.Enabled = true
+	cfg.Webhooks.Enabled = mode != "disabled"
+	cfg.Webhooks.Invalid = mode == "invalid"
 	cfg.Webhooks.AllowHTTP = true
 	cfg.Webhooks.AllowedCIDRs = []string{"127.0.0.0/8"}
 	cfg.Webhooks.Subscriptions = []config.WebhookSubscription{{ID: uuid.NewString(), Enabled: true, URL: srv.URL, Events: []string{webhook.TypeCreated}}}
@@ -55,8 +66,14 @@ func TestP4AppPublisherRealCreate(t *testing.T) {
 	defer sandbox.SetWebhookPublisher(nil)
 	defer task.SetWebhookPublisher(nil)
 	defer templatecenter.SetWebhookPublisher(nil)
+	before := webhookCounter(t, "capture", "accepted")
 	p := gomonkey.NewPatches()
 	defer p.Reset()
+	if mode != "enabled" {
+		p.ApplyFunc(webhook.UserMetadata, func(map[string]string) webhook.LifecycleFields { panic("App disabled metadata") })
+		p.ApplyFunc(webhook.PrepareLifecycle, func(*types.CreateCubeSandboxReq) (string, webhook.LifecycleFields) { panic("App disabled fields") })
+		p.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("App disabled Capture") })
+	}
 	n := &node.Node{InsID: "node", IP: "127.0.0.1"}
 	p.ApplyFunc(localcache.IncrNodeConcurrent, func(*node.Node) error { return nil })
 	p.ApplyFunc(localcache.DecrNodeConcurrent, func(*node.Node) error { return nil })
@@ -69,8 +86,21 @@ func TestP4AppPublisherRealCreate(t *testing.T) {
 	p.ApplyFunc(cubelet.Create, func(context.Context, string, *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 		return &cubebox.RunCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}, SandboxID: "app-real-create", SandboxIP: "10.0.0.1"}, nil
 	})
-	rsp := sandbox.CreateSandbox(context.Background(), &types.CreateCubeSandboxReq{Request: &types.Request{RequestID: "r"}, InsIp: "127.0.0.1", InstanceType: "cubebox", Annotations: map[string]string{constants.AnnotationsDebug: "true"}, Containers: []*types.Container{{Image: &types.ImageSpec{}, Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}})
-	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	req := &types.CreateCubeSandboxReq{Volumes: []*types.Volume{{Name: "tmp", VolumeSource: &types.VolumeSource{EmptyDir: &types.EmptyDirVolumeSource{}}}}, Request: &types.Request{RequestID: "r"}, InsIp: "127.0.0.1", InstanceType: "cubebox", Annotations: map[string]string{constants.AnnotationsDebug: "true"}, Containers: []*types.Container{{Image: &types.ImageSpec{}, Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
+	payload, e := json.Marshal(req)
+	require.NoError(t, e)
+	router := gin.New()
+	cube.RegisterCubeRoutes(router.Group("/cube"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/cube/sandbox", bytes.NewReader(payload)).WithContext(CubeLog.WithRequestTrace(context.Background(), &CubeLog.RequestTrace{})))
+	require.Equal(t, 200, w.Code)
+	require.Contains(t, w.Body.String(), "app-real-create")
+	if mode != "enabled" {
+		require.Equal(t, before, webhookCounter(t, "capture", "accepted"))
+		require.Empty(t, bodies)
+		return
+	}
+
 	select {
 	case body := <-bodies:
 		require.Contains(t, string(body), "app-real-create")

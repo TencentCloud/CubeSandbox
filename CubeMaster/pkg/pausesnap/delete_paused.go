@@ -38,50 +38,35 @@ var (
 //
 // Returns handled=false when there is no pause binding (caller should Destroy).
 func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (handled bool, err error) {
-	return TryDeletePausedWithEvidence(ctx, requestID, sandboxID, hostIP, nil)
-}
-
-// TryDeletePausedWithEvidence retains explicit node success across task retries.
-// Tolerated nil/not-found replies do not set evidence.
-func TryDeletePausedWithEvidence(ctx context.Context, requestID, sandboxID, hostIP string, destroyed *bool) (bool, error) {
-	handled, _, err := TryDeletePausedWithCompletion(ctx, requestID, sandboxID, hostIP, destroyed)
-	return handled, err
-}
-
-// TryDeletePausedWithCompletion also reports whether the Master binding was
-// removed. A binding-delete failure remains warn-only for business compatibility,
-// but must not qualify a lifecycle completion notification. Node destruction
-// evidence remains independent and is never fabricated or discarded.
-func TryDeletePausedWithCompletion(ctx context.Context, requestID, sandboxID, hostIP string, destroyed *bool) (handled, complete bool, err error) {
 	sandboxID = strings.TrimSpace(sandboxID)
 	hostIP = strings.TrimSpace(hostIP)
 	if sandboxID == "" {
-		return false, false, nil
+		return false, nil
 	}
 	rec, err := GetBySandbox(ctx, sandboxID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return false, false, nil
+			return false, nil
 		}
-		return false, false, err
+		return false, err
 	}
 	if rec == nil || strings.TrimSpace(rec.SnapshotID) == "" {
-		return false, false, nil
+		return false, nil
 	}
 	if ip := strings.TrimSpace(rec.NodeIP); ip != "" {
 		hostIP = ip
 	}
 	if hostIP == "" {
-		return true, false, fmt.Errorf("pause snapshot %s has no source node for sandbox %s", rec.SnapshotID, sandboxID)
+		return true, fmt.Errorf("pause snapshot %s has no source node for sandbox %s", rec.SnapshotID, sandboxID)
 	}
 
 	addr := cubeletAddr(hostIP)
 	if isShimGonePauseSnapshot(rec.Status) {
-		if err := destroyPausedTombstone(ctx, addr, requestID, sandboxID, hostIP, destroyed); err != nil {
-			return true, false, err
+		if err := destroyPausedTombstone(ctx, addr, requestID, sandboxID, hostIP); err != nil {
+			return true, err
 		}
-	} else if err := destroyFailedPauseSandbox(ctx, addr, requestID, sandboxID, hostIP, destroyed); err != nil {
-		return true, false, err
+	} else if err := destroyFailedPauseSandbox(ctx, addr, requestID, sandboxID, hostIP); err != nil {
+		return true, err
 	}
 
 	if err := cleanupPauseSnapshotOnCubelet(ctx, addr, requestID, rec.SnapshotID, rec.Backend); err != nil {
@@ -89,13 +74,12 @@ func TryDeletePausedWithCompletion(ctx context.Context, requestID, sandboxID, ho
 		// would leave an unnamed package on the node that nothing points at,
 		// so keep it and say why in the row.
 		MarkDeleteFailed(ctx, sandboxID, rec.SnapshotID, err.Error())
-		return true, false, err
+		return true, err
 	}
 	if err := Delete(ctx, rec.SnapshotID); err != nil {
 		log.G(ctx).Warnf("delete pause snap meta %s after cleanup: %v", rec.SnapshotID, err)
-		return true, false, nil
 	}
-	return true, true, nil
+	return true, nil
 }
 
 // isShimGonePauseSnapshot reports whether the sandbox process is already
@@ -135,7 +119,7 @@ func CleanupPauseSnapshot(ctx context.Context, requestID, nodeIP, snapshotID, ba
 	return cleanupPauseSnapshotOnCubelet(ctx, cubeletAddr(nodeIP), requestID, snapshotID, backend)
 }
 
-func destroyPausedTombstone(ctx context.Context, addr, requestID, sandboxID, hostIP string, evidence ...*bool) error {
+func destroyPausedTombstone(ctx context.Context, addr, requestID, sandboxID, hostIP string) error {
 	destroyRsp, err := destroyOnCubelet(ctx, addr, &cubebox.DestroyCubeSandboxRequest{
 		RequestID: requestID,
 		SandboxID: sandboxID,
@@ -147,11 +131,10 @@ func destroyPausedTombstone(ctx context.Context, addr, requestID, sandboxID, hos
 	if err != nil {
 		return fmt.Errorf("delete paused tombstone %s on %s: %w", sandboxID, hostIP, err)
 	}
-	recordDestroyEvidence(destroyRsp, evidence)
 	return checkDestroyRet(destroyRsp, sandboxID, "delete paused tombstone")
 }
 
-func destroyFailedPauseSandbox(ctx context.Context, addr, requestID, sandboxID, hostIP string, evidence ...*bool) error {
+func destroyFailedPauseSandbox(ctx context.Context, addr, requestID, sandboxID, hostIP string) error {
 	destroyRsp, err := destroyOnCubelet(ctx, addr, &cubebox.DestroyCubeSandboxRequest{
 		RequestID: requestID,
 		SandboxID: sandboxID,
@@ -165,7 +148,6 @@ func destroyFailedPauseSandbox(ctx context.Context, addr, requestID, sandboxID, 
 	if err := checkDestroyRet(destroyRsp, sandboxID, "destroy failed-pause sandbox"); err != nil {
 		return err
 	}
-	recordDestroyEvidence(destroyRsp, evidence)
 	if destroyRsp != nil {
 		volrefcount.ApplyFromExtInfo(ctx, destroyRsp.GetExtInfo())
 	}
@@ -210,15 +192,4 @@ func cleanupPauseSnapshotOnCubelet(ctx context.Context, addr, requestID, snapsho
 			snapshotID, code, rsp.GetRet().GetRetMsg())
 	}
 	return nil
-}
-
-// Only explicit successful replies prove this operation reached the node.
-func recordDestroyEvidence(rsp *cubebox.DestroyCubeSandboxResponse, evidence []*bool) {
-	if rsp == nil || rsp.GetRet() == nil || len(evidence) == 0 || evidence[0] == nil {
-		return
-	}
-	code := rsp.GetRet().GetRetCode()
-	if code == cubeleterrorcode.ErrorCode_Success || code == cubeleterrorcode.ErrorCode_OK {
-		*evidence[0] = true
-	}
 }

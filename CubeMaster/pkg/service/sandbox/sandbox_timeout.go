@@ -61,6 +61,9 @@ func SetTimeout(ctx context.Context, req *types.SetTimeoutRequest) (rsp *types.S
 
 	endAt := refreshTimeoutMeta(ctx, req.SandboxID, int(req.Timeout))
 	rsp.EndAt = endAt
+	if lifecyclePublisher.Enabled() && req.Timeout >= 0 && rsp.EndAt > 0 {
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, req.SandboxID, "", webhook.LifecycleFields{EndAtMS: rsp.EndAt})
+	}
 	return
 }
 
@@ -109,6 +112,9 @@ func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.
 
 	endAt := refreshTimeoutMeta(ctx, req.SandboxID, int(req.Duration))
 	rsp.EndAt = endAt
+	if lifecyclePublisher.Enabled() && rsp.EndAt > 0 {
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, req.SandboxID, "", webhook.LifecycleFields{EndAtMS: rsp.EndAt})
+	}
 	return
 }
 
@@ -124,10 +130,7 @@ func sandboxExists(ctx context.Context, sandboxID string) bool {
 
 func refreshTimeoutMeta(ctx context.Context, sandboxID string, timeoutSeconds int) int64 {
 	if p := getTimeoutProvider(); p != nil {
-		endAt, applied, err := p.RefreshTimeout(ctx, sandboxID, timeoutSeconds)
-		if applied && err == nil && timeoutSeconds >= 0 && endAt > 0 {
-			lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, sandboxID, "", webhook.LifecycleFields{EndAtMS: endAt})
-		}
+		endAt, err := p.RefreshTimeout(ctx, sandboxID, timeoutSeconds)
 		if err != nil {
 			log.G(ctx).Errorf("lifecycle: RefreshTimeout sandbox=%s failed: %v", sandboxID, err)
 		} else if timeoutSeconds < 0 {

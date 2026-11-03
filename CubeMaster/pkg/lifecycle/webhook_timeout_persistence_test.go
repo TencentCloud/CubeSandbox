@@ -38,14 +38,14 @@ func (r *p5Redis) Do(cmd string, args ...interface{}) (interface{}, error) {
 	}
 	return r.fakeRedis.Do(cmd, args...)
 }
-func TestP5TimeoutAuthoritativeWrite(t *testing.T) {
+func TestRefreshTimeoutKeepsBestEffortWriteOrder(t *testing.T) {
 	for _, hfail := range []bool{false, true} {
 		for _, xfail := range []bool{false, true} {
 			r := &p5Redis{fakeRedis: fakeRedis{failHSET: hfail, failXADD: xfail}}
 			p := &storeTimeoutProvider{store: NewStore(r)}
-			end, applied, err := p.RefreshTimeout(context.Background(), "sb", 10)
-			if err != nil || applied == hfail || end <= 0 {
-				t.Fatalf("HSET fail=%v XADD fail=%v: %d %v %v", hfail, xfail, end, applied, err)
+			end, err := p.RefreshTimeout(context.Background(), "sb", 10)
+			if err != nil || end <= 0 {
+				t.Fatalf("HSET fail=%v XADD fail=%v: %d %v", hfail, xfail, end, err)
 			}
 			calls := r.snapshot()
 			if len(calls) != 2 || calls[0].cmd != "HSET" || calls[1].cmd != "XADD" {
@@ -72,10 +72,18 @@ func TestP5TimeoutAuthoritativeWrite(t *testing.T) {
 			case "no-store":
 				p.store = nil
 			}
-			_, applied, _ := p.RefreshTimeout(context.Background(), "sb", 10)
-			if applied {
-				t.Fatal("unconfirmed write")
+			end, err := p.RefreshTimeout(context.Background(), "sb", 10)
+			if name == "disabled" {
+				require.Positive(t, end)
+			} else {
+				require.Zero(t, end)
 			}
+			if name == "read-error" {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Empty(t, r.snapshot())
 		})
 	}
 }

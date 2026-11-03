@@ -66,20 +66,36 @@ func cloneFields(f LifecycleFields) LifecycleFields {
 	return f
 }
 
-// UserMetadata must run before template merging or internal label injection.
-// Exact internal namespaces/keys are excluded; user keys such as api_token stay.
-func UserMetadata(labels map[string]string) *types.WebhookMetadata {
-	f := LifecycleFields{Metadata: labels}
-	if validateFields(f) != nil {
-		return &types.WebhookMetadata{TooLarge: true}
-	}
-	m := cloneFields(f).Metadata
-	for k := range m {
-		if k == "host-mount" || k == constants.Caller || strings.HasPrefix(k, "cube.master.") {
-			delete(m, k)
+// UserMetadata must run before template merging. The request constructor's
+// internal labels do not consume the user budget. Exact internal namespaces/keys
+// are excluded; user keys such as api_token stay.
+func UserMetadata(labels map[string]string) LifecycleFields {
+	entries := len(labels)
+	for _, key := range []string{constants.Caller, constants.CubeAnnotationsInsType, constants.CubeAnnotationAppSnapshotTemplateID} {
+		if _, ok := labels[key]; ok {
+			entries--
 		}
 	}
-	return &types.WebhookMetadata{Values: m}
+	// Bound traversal before filtering: at most 64 input user labels and the
+	// three known constructor labels, even if other reserved keys are supplied.
+	if entries > maxMetadataEntries {
+		return LifecycleFields{TooLarge: true}
+	}
+	var metadata map[string]string
+	if labels != nil {
+		metadata = make(map[string]string, entries)
+		for k, v := range labels {
+			if k == "host-mount" || k == constants.Caller || strings.HasPrefix(k, "cube.master.") {
+				continue
+			}
+			metadata[k] = v
+		}
+	}
+	f := LifecycleFields{Metadata: metadata}
+	if validateFields(f) != nil {
+		return LifecycleFields{TooLarge: true}
+	}
+	return cloneFields(f)
 }
 
 // PrepareLifecycle snapshots existing spec values before cleanup. No parsing or
@@ -90,10 +106,6 @@ func PrepareLifecycle(req *types.CreateCubeSandboxReq) (string, LifecycleFields)
 	}
 	template := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 	f := LifecycleFields{}
-	if req.WebhookMetadata != nil {
-		f.Metadata = req.WebhookMetadata.Values
-		f.TooLarge = req.WebhookMetadata.TooLarge
-	}
 	if req.InstanceType == "cubebox" && len(req.Containers) == 1 && req.Containers[0] != nil && req.Containers[0].Resources != nil {
 		f.CPU = req.Containers[0].Resources.Cpu
 		f.Memory = req.Containers[0].Resources.Mem
@@ -212,21 +224,19 @@ func OriginFromContext(ctx context.Context) Origin {
 	return OriginLifecycle
 }
 
-type startKey struct{}
-type startSource struct {
-	template string
-	snapshot bool
+type killReasonKey struct{}
+
+// WithKillReason keeps notification provenance in the existing operation context.
+// It never changes the business request, node annotations or retry state.
+func WithKillReason(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, killReasonKey{}, reason)
 }
 
-// WithResolvedStart is called only with the existing trusted template result.
-func WithResolvedStart(ctx context.Context, template string, snapshot bool) context.Context {
-	return context.WithValue(ctx, startKey{}, startSource{template, snapshot})
-}
-func ResolvedStart(ctx context.Context) (string, bool) {
+func KillReasonFromContext(ctx context.Context) string {
 	if ctx != nil {
-		if s, ok := ctx.Value(startKey{}).(startSource); ok {
-			return s.template, s.snapshot
+		if reason, ok := ctx.Value(killReasonKey{}).(string); ok {
+			return reason
 		}
 	}
-	return "", false
+	return ""
 }

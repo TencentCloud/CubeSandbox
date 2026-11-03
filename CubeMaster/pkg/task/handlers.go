@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -245,12 +246,12 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 		ctx = context.WithoutCancel(ctx)
 		hostIP := strings.Split(t.CallEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
-		handled, pauseComplete, err := pausesnap.TryDeletePausedWithCompletion(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
+		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
 		}
-		if !handled && nodeOK && !t.Destroyed {
+		if !handled && nodeOK {
 			rsp, err := cubelet.Destroy(ctx, t.CallEp, req)
 			defer func() {
 				if log.IsDebug() {
@@ -267,9 +268,6 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 				rsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_OK {
 				log.G(ctx).Errorf("Destroy error:%+v", rsp)
 				return ret.Errorf(errorcode.MasterCode(rsp.GetRet().GetRetCode()), "%s", rsp.GetRet().GetRetMsg())
-			}
-			if rsp != nil && rsp.GetRet() != nil {
-				t.Destroyed = true
 			}
 			// Apply any node-level volume ref-count transitions (1→0) reported by
 			// Cubelet so the volume DB releases the reference held by this node.
@@ -288,13 +286,13 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 				log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
 			}
 		}
-		if t.Destroyed && (!handled || pauseComplete) && t.InsType() == cubebox.InstanceType_cubebox.String() {
-			t.Destruction.Complete(&lifecyclePublisher)
-		}
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	if lifecyclePublisher.Enabled() && t.InsType() == cubebox.InstanceType_cubebox.String() {
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeKilled, req.GetSandboxID(), "", webhook.LifecycleFields{KillReason: webhook.KillReasonFromContext(ctx)})
 	}
 	return nil
 }

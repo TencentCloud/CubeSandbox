@@ -14,7 +14,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/queueworker"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 )
 
 type OpType string
@@ -35,9 +34,6 @@ type Task struct {
 	TaskType  OpType
 
 	DescribeTaskID string
-	// Destroyed survives retries after node completion and before Master cleanup.
-	Destroyed   bool
-	Destruction *webhook.Destruction
 
 	retryTimes int64
 	loopRetry  bool

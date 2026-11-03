@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -42,10 +43,8 @@ func deleteSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"InstanceId":   req.SandboxID,
 		"InstanceType": req.InstanceType,
 	}))
-	// This HTTP endpoint is an explicit delete request; internal callers keep
-	// their original empty reason (unknown for webhook purposes).
-	if req.KillReason == "" {
-		req.KillReason = "request"
+	if sandbox.WebhooksEnabled() {
+		ctx = webhook.WithKillReason(ctx, "request")
 	}
 	ret := sandbox.DestroySandbox(ctx, req)
 	rt.RetCode = int64(ret.Ret.RetCode)

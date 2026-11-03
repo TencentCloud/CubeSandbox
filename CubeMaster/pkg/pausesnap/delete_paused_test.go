@@ -292,26 +292,22 @@ func TestTryDeletePausedRetriesDeleteFailedWithTombstone(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
-func TestPausedBindingDeleteFailureKeepsBusinessResultButIsNotComplete(t *testing.T) {
+func TestPausedBindingDeleteFailureKeepsWarnOnlyResult(t *testing.T) {
 	db := setupPauseDeleteTest(t)
 	seedPauseBinding(t, db, "sb-binding-fail", "snap-binding-fail", statusReady, "10.0.0.7")
 	mockCubeletOK(t)
 	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register("p6_binding_delete_failure", func(tx *gorm.DB) {
 		tx.AddError(errors.New("binding delete rejected"))
 	}))
-	evidence := false
-	handled, complete, err := TryDeletePausedWithCompletion(context.Background(), "request", "sb-binding-fail", "10.0.0.7", &evidence)
+	handled, err := TryDeletePaused(context.Background(), "request", "sb-binding-fail", "10.0.0.7")
 	require.NoError(t, err, "retain historical warn-only business result")
 	require.True(t, handled)
-	require.True(t, evidence, "retain real node destruction evidence")
-	require.False(t, complete, "necessary Master cleanup did not finish")
 	_, err = GetBySandbox(context.Background(), "sb-binding-fail")
 	require.NoError(t, err)
 	require.NoError(t, db.Callback().Delete().Remove("p6_binding_delete_failure"))
-	handled, complete, err = TryDeletePausedWithCompletion(context.Background(), "request", "sb-binding-fail", "10.0.0.7", &evidence)
+	handled, err = TryDeletePaused(context.Background(), "request", "sb-binding-fail", "10.0.0.7")
 	require.NoError(t, err)
 	require.True(t, handled)
-	require.True(t, complete)
 }
 
 func TestCheckDestroyRet(t *testing.T) {
@@ -372,7 +368,7 @@ func TestDropPausedTombstoneReturnsRPCError(t *testing.T) {
 	require.ErrorContains(t, err, "tombstone rpc failed")
 }
 
-func TestP5PausedDeleteEvidence(t *testing.T) {
+func TestPausedDeleteToleratesExistingNodeReplies(t *testing.T) {
 	for _, status := range []string{statusReady, statusFailed, statusCreating, statusDeleteFailed} {
 		for _, reply := range []string{"success", "nil", "no-ret", "not-found", "failure"} {
 			t.Run(status+"/"+reply, func(t *testing.T) {
@@ -392,10 +388,8 @@ func TestP5PausedDeleteEvidence(t *testing.T) {
 					}
 					return &cubebox.DestroyCubeSandboxResponse{Ret: &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_Success}}, nil
 				}
-				evidence := false
-				handled, err := TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", &evidence)
+				handled, err := TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
 				require.True(t, handled)
-				require.Equal(t, reply == "success", evidence)
 				if reply == "failure" {
 					require.Error(t, err)
 				} else {
@@ -405,28 +399,24 @@ func TestP5PausedDeleteEvidence(t *testing.T) {
 		}
 	}
 }
-func TestP5PausedCleanupRetryEvidence(t *testing.T) {
+func TestPausedCleanupRetryRepeatsNodeOperation(t *testing.T) {
 	db := setupPauseDeleteTest(t)
 	seedPauseBinding(t, db, "sb", "snap", statusReady, "127.0.0.1")
-	mockCubeletOK(t)
+	destroys, _ := mockCubeletOK(t)
 	good := cleanupTemplateOnCubelet
 	cleanupTemplateOnCubelet = func(context.Context, string, *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
 		return nil, errors.New("package")
 	}
-	evidence := false
-	handled, err := TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", &evidence)
+	handled, err := TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
 	require.True(t, handled)
+	require.Len(t, *destroys, 1)
 	require.Error(t, err)
-	require.True(t, evidence)
 	cleanupTemplateOnCubelet = good
-	destroyOnCubelet = func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
-		return nil, nil
-	}
-	handled, err = TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", &evidence)
+	handled, err = TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
 	require.True(t, handled)
 	require.NoError(t, err)
-	require.True(t, evidence)
-	handled, err = TryDeletePausedWithEvidence(context.Background(), "req", "sb", "127.0.0.1", new(bool))
+	require.Len(t, *destroys, 2, "cleanup retry still invokes the existing tombstone destroy")
+	handled, err = TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
 	require.False(t, handled)
 	require.NoError(t, err)
 }

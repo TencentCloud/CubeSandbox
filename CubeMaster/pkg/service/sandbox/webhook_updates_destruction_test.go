@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/internal/webhooktest"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/queueworker"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
@@ -28,13 +29,12 @@ import (
 )
 
 type p5Timeout struct {
-	end     int64
-	applied bool
-	err     error
+	end int64
+	err error
 }
 
-func (p p5Timeout) RefreshTimeout(context.Context, string, int) (int64, bool, error) {
-	return p.end, p.applied, p.err
+func (p p5Timeout) RefreshTimeout(context.Context, string, int) (int64, error) {
+	return p.end, p.err
 }
 func (p p5Timeout) LookupEndAt(context.Context, string) (int64, error) { return p.end, p.err }
 func p5Read(t *testing.T, p *webhook.BufferedPublisher) map[string]any {
@@ -53,49 +53,60 @@ func p5Read(t *testing.T, p *webhook.BufferedPublisher) map[string]any {
 		return nil
 	}
 }
-func TestP5TimeoutAuthority(t *testing.T) {
-	localcache.SetSandboxCache("sb-p5", &localcache.SandboxCache{SandboxID: "sb-p5", HostIP: "127.0.0.1"})
-	defer localcache.DeleteSandboxCache("sb-p5")
+func TestTimeoutResponseBoundaryIncludesFallback(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
+	localcache.SetSandboxCache("sb-timeout", &localcache.SandboxCache{SandboxID: "sb-timeout", HostIP: "127.0.0.1"})
+	defer localcache.DeleteSandboxCache("sb-timeout")
 	old := getTimeoutProvider()
 	defer SetTimeoutProvider(old)
 	for _, tc := range []struct {
-		name   string
-		p      TimeoutProvider
-		value  int32
-		origin webhook.Origin
-		want   bool
+		name     string
+		provider TimeoutProvider
+		value    int32
+		event    bool
 	}{
-		{"finite", p5Timeout{1700000000123, true, nil}, 5, webhook.OriginLifecycle, true},
-		{"zero", p5Timeout{1700000000123, true, nil}, 0, webhook.OriginLifecycle, true},
-		{"infinite", p5Timeout{0, true, nil}, -1, webhook.OriginLifecycle, false},
-		{"not-applied", p5Timeout{1700000000123, false, nil}, 5, webhook.OriginLifecycle, false},
-		{"failed", p5Timeout{1700000000123, false, errors.New("write")}, 5, webhook.OriginLifecycle, false},
-		{"missing", nil, 5, webhook.OriginLifecycle, false},
-		{"zero-result", p5Timeout{0, true, nil}, 5, webhook.OriginLifecycle, false},
-		{"resume", p5Timeout{1700000000123, true, nil}, 5, webhook.OriginResumeTimeoutRefresh, false},
-		{"invalid", p5Timeout{1700000000123, true, nil}, -2, webhook.OriginLifecycle, false},
+		{"finite", p5Timeout{1700000000123, nil}, 5, true},
+		{"zero", p5Timeout{1700000000123, nil}, 0, true},
+		{"infinite", p5Timeout{0, nil}, -1, false},
+		{"provider-error-fallback", p5Timeout{0, errors.New("read")}, 5, true},
+		{"missing-provider-fallback", nil, 5, true},
+		{"zero-result-fallback", p5Timeout{0, nil}, 5, true},
+		{"invalid", p5Timeout{1700000000123, nil}, -2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := p4Buffer(t)
-			SetTimeoutProvider(tc.p)
-			rsp := SetTimeout(webhook.WithOrigin(context.Background(), tc.origin), &types.SetTimeoutRequest{SandboxID: "sb-p5", Timeout: tc.value})
+			SetTimeoutProvider(tc.provider)
+			before := time.Now().UnixMilli()
+			rsp := SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb-timeout", Timeout: tc.value})
 			if tc.value >= -1 {
 				require.Equal(t, 200, rsp.Ret.RetCode)
+			} else {
+				require.NotEqual(t, 200, rsp.Ret.RetCode)
 			}
-			if tc.want {
+			if tc.event {
+				require.Positive(t, rsp.EndAt)
 				body := p5Read(t, p)
-				require.Equal(t, "2023-11-14T22:13:20Z", body["event_data"].(map[string]any)["set_timeout"])
+				require.Equal(t, "sb-timeout", body["sandbox_id"])
+				require.Equal(t, time.UnixMilli(rsp.EndAt).UTC().Format(time.RFC3339), body["event_data"].(map[string]any)["set_timeout"])
+				if strings.Contains(tc.name, "fallback") {
+					require.GreaterOrEqual(t, rsp.EndAt, before+5000)
+				}
 			}
 			require.Empty(t, p.Events())
 		})
 	}
 	p := p4Buffer(t)
-	SetTimeoutProvider(p5Timeout{1700000000123, true, nil})
+	SetTimeoutProvider(p5Timeout{1700000000123, nil})
 	for i := 0; i < 2; i++ {
-		rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{SandboxID: "sb-p5", Duration: 5})
+		rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{SandboxID: "sb-timeout", Duration: 5})
 		require.Equal(t, 200, rsp.Ret.RetCode)
 		p5Read(t, p)
 	}
+	// Resume's shared refresh helper retains ordinary context and never publishes.
+	refreshTimeoutMeta(context.Background(), "sb-timeout", 5)
+	require.Empty(t, p.Events())
 }
 
 // Existing business seams are controlled; all producer entrypoints, capture,
@@ -105,16 +116,32 @@ type p5Fixture struct {
 	spec                      *types.CreateCubeSandboxReq
 	node                      bool
 	rpcErr, specErr, proxyErr error
+	enqueueErr                error
 	nilReply                  bool
 	pending                   *task.Task
 	nodeCalls, specReads      int
+	order                     []string
+}
+
+type capturedDestroyQueue struct {
+	queueworker.QueueWorker
+	fixture *p5Fixture
+}
+
+func (q *capturedDestroyQueue) Push(value interface{}) error {
+	if q.fixture.enqueueErr != nil {
+		return q.fixture.enqueueErr
+	}
+	q.fixture.pending = value.(*task.Task)
+	return nil
 }
 
 func p5Setup(t *testing.T) *p5Fixture {
 	f := &p5Fixture{patches: gomonkey.NewPatches(), spec: p4Spec(), node: true}
 	p := f.patches
 	t.Cleanup(p.Reset)
-	p.ApplyFunc(config.GetConfig, func() *config.Config { return &config.Config{Common: &config.CommonConf{}} })
+	cfg := &config.Config{Common: &config.CommonConf{AsyncTaskQueueSize: 4, AsyncTaskWorkerNum: 4, CollectMetricInterval: time.Millisecond}, CubeletConf: &config.CubeletConf{MaxRetries: 1, LoopMaxRetries: 1}}
+	p.ApplyFunc(config.GetConfig, func() *config.Config { return cfg })
 	p.ApplyFunc(ResolveSandboxID, func(_ context.Context, id string) (string, error) { return id, nil })
 	p.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache {
 		return &localcache.SandboxCache{SandboxID: "sb-p5", HostIP: "127.0.0.1"}
@@ -124,14 +151,20 @@ func p5Setup(t *testing.T) *p5Fixture {
 	p.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
-	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) { f.specReads++; return f.spec, nil })
+	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		f.specReads++
+		f.order = append(f.order, "spec-get")
+		return f.spec, nil
+	})
 	p.ApplyFunc(sandboxspec.Put, func(context.Context, string, *types.CreateCubeSandboxReq, sandboxspec.PutOptions) error {
+		f.order = append(f.order, "spec-put")
 		return f.specErr
 	})
-	p.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(context.Context, string, string, string, *bool) (bool, bool, error) { return false, false, nil })
-	p.ApplyFunc(localcache.DeleteSandboxProxyMap, func(context.Context, string) error { return f.proxyErr })
+	p.ApplyFunc(pausesnap.TryDeletePaused, func(context.Context, string, string, string) (bool, error) { return false, nil })
+	p.ApplyFunc(localcache.DeleteSandboxProxyMap, func(context.Context, string) error { f.order = append(f.order, "proxy-delete"); return f.proxyErr })
 	p.ApplyFunc(cubelet.Destroy, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
 		f.nodeCalls++
+		f.order = append(f.order, "node-destroy")
 		if f.rpcErr != nil {
 			return nil, f.rpcErr
 		}
@@ -142,6 +175,7 @@ func p5Setup(t *testing.T) *p5Fixture {
 	})
 	p.ApplyFunc(cubelet.Update, func(context.Context, string, *cubebox.UpdateCubeSandboxRequest) (*cubebox.UpdateCubeSandboxResponse, error) {
 		f.nodeCalls++
+		f.order = append(f.order, "node-network")
 		if f.rpcErr != nil {
 			return nil, f.rpcErr
 		}
@@ -150,7 +184,18 @@ func p5Setup(t *testing.T) *p5Fixture {
 		}
 		return &cubebox.UpdateCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}}, nil
 	})
-	p.ApplyFunc(task.AddAsyncTask, func(job *task.Task) error { f.pending = job; return nil })
+	// Capture admission synchronously for deterministic boundary tests, behind
+	// the real InitTask interface dispatch. The App test exercises the unwrapped
+	// queue, real worker handler and its retry path separately.
+	worker := queueworker.NewQueueWorker(&queueworker.Options{QueueSize: 4, WorkerNum: 4}, func(interface{}) error { return nil })
+	p.ApplyFunc(queueworker.NewQueueWorker, func(options *queueworker.Options, _ queueworker.WorkHandler) queueworker.QueueWorker {
+		require.Equal(t, 4, options.QueueSize)
+		require.Equal(t, 4, options.WorkerNum)
+		return &capturedDestroyQueue{QueueWorker: worker, fixture: f}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	task.InitTask(ctx, cfg)
+	t.Cleanup(func() { task.Stop(context.Background()); cancel() })
 	return f
 }
 func p5Network() *types.UpdateNetworkRequest {
@@ -158,6 +203,9 @@ func p5Network() *types.UpdateNetworkRequest {
 	return &types.UpdateNetworkRequest{SandboxID: "sb-p5", InstanceType: "cubebox", CubeNetworkConfig: &types.CubeNetworkConfig{AllowInternetAccess: &no, AllowOut: []string{"8.8.8.8", "10.1.2.3/8", "*.Example.COM"}, DenyOut: []string{"1.2.3.4"}}}
 }
 func TestP5NetworkBoundary(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	for _, scenario := range []string{"success", "spec-write-fail", "spec-missing", "rpc-fail", "nil", "oversize", "same", "l7-empty", "mixed", "l7-only"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := p5Setup(t)
@@ -215,6 +263,9 @@ func TestP5NetworkBoundary(t *testing.T) {
 	}
 }
 func TestP5DestroyBoundary(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	for _, async := range []bool{false, true} {
 		for _, scenario := range []string{"success", "rpc-fail", "nil", "node-missing", "cleanup-fail", "internal", "unknown", "timeout", "oversize"} {
 			t.Run(scenario+map[bool]string{true: "/async", false: "/sync"}[async], func(t *testing.T) {
@@ -248,19 +299,17 @@ func TestP5DestroyBoundary(t *testing.T) {
 					require.Equal(t, 200, rsp.Ret.RetCode)
 					require.Empty(t, p.Events())
 					require.NotNil(t, f.pending)
-					f.spec.WebhookMetadata.Values["user_token"] = "mutated"
 					err = (&task.DestroySandboxTaskHandler{}).HandleTask(f.pending.Ctx, f.pending)
 					if scenario == "cleanup-fail" {
 						require.Error(t, err)
 						require.Empty(t, p.Events())
 						f.proxyErr = nil
-						f.node = false
 						err = (&task.DestroySandboxTaskHandler{}).HandleTask(f.pending.Ctx, f.pending)
 						require.NoError(t, err)
-						require.Equal(t, 1, f.nodeCalls)
+						require.Equal(t, 2, f.nodeCalls, "cleanup retry must repeat the node operation")
 					}
 				}
-				want := scenario == "success" || scenario == "unknown" || scenario == "timeout" || (async && scenario == "cleanup-fail")
+				want := scenario == "success" || scenario == "unknown" || scenario == "timeout" || scenario == "nil" || scenario == "node-missing" || (async && scenario == "cleanup-fail")
 				if want {
 					body := p5Read(t, p)
 					data := body["event_data"].(map[string]any)
@@ -268,13 +317,16 @@ func TestP5DestroyBoundary(t *testing.T) {
 						reason = "unknown"
 					}
 					require.Equal(t, reason, data["kill_reason"])
-					require.Equal(t, "kept", data["sandbox_metadata"].(map[string]any)["user_token"])
-					require.Equal(t, float64(1), data["execution"].(map[string]any)["vcpu_count"])
+					require.NotContains(t, data, "sandbox_metadata")
+					require.NotContains(t, data["execution"].(map[string]any), "vcpu_count")
+					require.NotContains(t, data["execution"].(map[string]any), "memory_mb")
+					require.Empty(t, body["sandbox_template_id"])
 				}
 				require.Empty(t, p.Events())
 				if async && want {
 					require.NoError(t, (&task.DestroySandboxTaskHandler{}).HandleTask(f.pending.Ctx, f.pending))
-					require.Empty(t, p.Events())
+					p5Read(t, p)
+					require.Empty(t, p.Events(), "each successful business operation may create a fresh event")
 				}
 				require.Equal(t, 1, f.specReads)
 			})
@@ -282,6 +334,9 @@ func TestP5DestroyBoundary(t *testing.T) {
 	}
 }
 func TestP5BusinessRedisHTTP(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	r, bodies := webhooktest.Runtime(t, webhook.TypeUpdated, webhook.TypeKilled)
 	f := p5Setup(t)
 	SetWebhookPublisher(r.Publisher())
@@ -290,7 +345,7 @@ func TestP5BusinessRedisHTTP(t *testing.T) {
 	defer task.SetWebhookPublisher(nil)
 	old := getTimeoutProvider()
 	defer SetTimeoutProvider(old)
-	SetTimeoutProvider(p5Timeout{1700000000123, true, nil})
+	SetTimeoutProvider(p5Timeout{1700000000123, nil})
 	require.Equal(t, 200, SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb-p5", Timeout: 5}).Ret.RetCode)
 	require.Equal(t, 200, UpdateNetwork(context.Background(), p5Network()).Ret.RetCode)
 	for _, sync := range []bool{true, false} {
@@ -314,6 +369,9 @@ func TestP5BusinessRedisHTTP(t *testing.T) {
 
 }
 func TestP5BusinessFailureIsolation(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	webhooktest.FaultPublishers(t, func(t *testing.T, p webhook.Publisher) {
 		f := p5Setup(t)
 		SetWebhookPublisher(p)
@@ -322,7 +380,7 @@ func TestP5BusinessFailureIsolation(t *testing.T) {
 		defer task.SetWebhookPublisher(nil)
 		old := getTimeoutProvider()
 		defer SetTimeoutProvider(old)
-		SetTimeoutProvider(p5Timeout{1700000000123, true, nil})
+		SetTimeoutProvider(p5Timeout{1700000000123, nil})
 		require.Equal(t, 200, SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb-p5", Timeout: 5}).Ret.RetCode)
 		require.Equal(t, 200, UpdateNetwork(context.Background(), p5Network()).Ret.RetCode)
 		for _, sync := range []bool{true, false} {
@@ -331,10 +389,16 @@ func TestP5BusinessFailureIsolation(t *testing.T) {
 				require.NoError(t, (&task.DestroySandboxTaskHandler{}).HandleTask(f.pending.Ctx, f.pending))
 			}
 		}
+		require.Equal(t, []string{"node-network", "spec-get", "spec-put", "spec-get", "node-destroy", "proxy-delete", "spec-get", "node-destroy", "proxy-delete"}, f.order)
+		require.Equal(t, 3, f.nodeCalls)
+		require.Equal(t, 3, f.specReads)
 	})
 }
 
 func TestP5DestroyCompletionBarrier(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	for _, async := range []bool{false, true} {
 		t.Run(map[bool]string{false: "sync", true: "async"}[async], func(t *testing.T) {
 			f := p5Setup(t)
@@ -370,6 +434,9 @@ func TestP5DestroyCompletionBarrier(t *testing.T) {
 }
 
 func TestP5ProducerFailureBoundaries(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	for _, scenario := range []string{"lock", "enqueue", "node-code", "paused-unproven", "paused-error", "paused-binding-failed", "paused-complete", "hook-warning", "pause-origin", "resume-origin"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := p5Setup(t)
@@ -383,7 +450,7 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 					return sandboxlock.ErrLockNotAcquired
 				})
 			case "enqueue":
-				f.patches.ApplyFunc(task.AddAsyncTask, func(*task.Task) error { return errors.New("queue") })
+				f.enqueueErr = errors.New("queue")
 			case "node-code":
 				f.patches.ApplyFunc(cubelet.Destroy, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
 					return &cubebox.DestroyCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_TaskStateInvalid}}, nil
@@ -392,13 +459,11 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 					return &cubebox.UpdateCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_TaskStateInvalid}}, nil
 				})
 			case "paused-unproven", "paused-error", "paused-binding-failed", "paused-complete":
-				f.patches.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(_ context.Context, _, _, _ string, evidence *bool) (bool, bool, error) {
+				f.patches.ApplyFunc(pausesnap.TryDeletePaused, func(_ context.Context, _, _, _ string) (bool, error) {
 					if scenario == "paused-error" {
-						*evidence = true
-						return true, false, errors.New("cleanup")
+						return true, errors.New("cleanup")
 					}
-					*evidence = scenario == "paused-complete" || scenario == "paused-binding-failed"
-					return true, scenario != "paused-binding-failed", nil
+					return true, nil
 				})
 			case "hook-warning":
 				RegisterAfterDestroySandboxSuccessHook(func(context.Context, string) error { return errors.New("warn-only") })
@@ -416,7 +481,7 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 			if scenario == "paused-binding-failed" {
 				require.Equal(t, 200, rsp.Ret.RetCode, "binding cleanup remains warn-only")
 			}
-			if scenario == "paused-complete" || scenario == "hook-warning" {
+			if scenario == "paused-complete" || scenario == "paused-unproven" || scenario == "paused-binding-failed" || scenario == "hook-warning" {
 				require.Equal(t, 200, rsp.Ret.RetCode)
 				p5Read(t, p)
 			}
@@ -425,22 +490,27 @@ func TestP5ProducerFailureBoundaries(t *testing.T) {
 	}
 }
 
-func TestP5AsyncPausedBindingFailureDoesNotPublishKilled(t *testing.T) {
+func TestAsyncPausedWarnOnlyBindingFailurePublishesKilled(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	f := p5Setup(t)
 	p := p4Buffer(t)
 	task.SetWebhookPublisher(p)
 	defer task.SetWebhookPublisher(nil)
-	f.patches.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(_ context.Context, _, _, _ string, evidence *bool) (bool, bool, error) {
-		*evidence = true
-		return true, false, nil
+	f.patches.ApplyFunc(pausesnap.TryDeletePaused, func(_ context.Context, _, _, _ string) (bool, error) {
+		return true, nil
 	})
 	require.Equal(t, 200, DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "sb-p5", InstanceType: "cubebox"}).Ret.RetCode)
 	h := &task.DestroySandboxTaskHandler{}
 	require.NoError(t, h.HandleTask(f.pending.Ctx, f.pending))
-	require.True(t, f.pending.Destroyed)
+	p5Read(t, p)
 	require.Empty(t, p.Events())
 }
 func TestP5TaskRetryAfterRPCFailure(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
 	f := p5Setup(t)
 	p := p4Buffer(t)
 	task.SetWebhookPublisher(p)
@@ -455,10 +525,28 @@ func TestP5TaskRetryAfterRPCFailure(t *testing.T) {
 	require.Equal(t, "evicted", p5Read(t, p)["event_data"].(map[string]any)["kill_reason"])
 	require.Equal(t, 2, f.nodeCalls)
 	require.Empty(t, p.Events())
-	// A separate request has no right to reuse the previous Task's evidence.
+	// A failed separate operation must not publish success.
 	f.patches.ApplyFunc(cubelet.Destroy, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
 		return &cubebox.DestroyCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_TaskStateInvalid, RetMsg: "not found"}}, nil
 	})
 	DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "sb-p5", InstanceType: "cubebox", Sync: true})
 	require.Empty(t, p.Events())
+}
+
+func TestTimeoutNotificationUsesNormalizedIDWithoutChangingResponse(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
+	f := p5Setup(t)
+	f.patches.ApplyFunc(ResolveSandboxID, func(context.Context, string) (string, error) { return "canonical-sandbox", nil })
+	p := p4Buffer(t)
+	old := getTimeoutProvider()
+	defer SetTimeoutProvider(old)
+	SetTimeoutProvider(p5Timeout{1700000000123, nil})
+	rsp := SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "canonical", Timeout: 5})
+	require.Equal(t, 200, rsp.Ret.RetCode)
+	require.Equal(t, "canonical", rsp.SandboxID, "retain the existing response construction")
+	require.Equal(t, "canonical-sandbox", p5Read(t, p)["sandbox_id"])
+	require.Zero(t, f.nodeCalls)
+	require.Zero(t, f.specReads)
 }

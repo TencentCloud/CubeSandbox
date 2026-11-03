@@ -86,9 +86,11 @@ func TestP5CaptureDistribution(t *testing.T) {
 					f = LifecycleFields{Network: &NetworkFields{AllowOut: []string{"8.8.8.8", "*.example.com"}}}
 				}
 				invoke := func() {
+					if !h.Enabled() {
+						return
+					}
 					if kind == "killed" {
-						d := h.PrepareDestruction(context.Background(), "sb", "", "request", LifecycleFields{CPU: "1", Memory: "1Gi"})
-						d.Complete(&h)
+						h.PublishContext(context.Background(), TypeKilled, "sb", "", LifecycleFields{KillReason: "request"})
 					} else {
 						h.PublishContext(context.Background(), TypeUpdated, "sb", "", f)
 					}

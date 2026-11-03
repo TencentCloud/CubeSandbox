@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/internal/webhooktest"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -31,7 +33,7 @@ import (
 )
 
 func p4Spec() *types.CreateCubeSandboxReq {
-	return &types.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}, WebhookMetadata: webhook.UserMetadata(map[string]string{"user_token": "kept"}), Containers: []*types.Container{{Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
+	return &types.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}, Containers: []*types.Container{{Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
 }
 func p4Buffer(t *testing.T) *webhook.BufferedPublisher {
 	p, e := webhook.NewBufferedPublisher(32)
@@ -53,7 +55,7 @@ func p4Read(t *testing.T, p *webhook.BufferedPublisher, kind string) {
 		require.NoError(t, json.Unmarshal(ev.Body(), &body))
 		require.Equal(t, "original-template", body["sandbox_template_id"])
 		data := body["event_data"].(map[string]any)
-		require.Equal(t, "kept", data["sandbox_metadata"].(map[string]any)["user_token"])
+		require.NotContains(t, data, "sandbox_metadata")
 	default:
 		t.Fatal("missing event")
 	}
@@ -65,25 +67,16 @@ func p4Create(t *testing.T, ctx context.Context, proxyErr error) *createSandboxC
 	setSandboxProxyMapFn = func(context.Context, *proxytypes.SandboxProxyMap) error { return proxyErr }
 	return &createSandboxContext{ctx: withCreateOriginRequest(ctx, p4Spec()), selectHost: &node.Node{IP: "127.0.0.1", InsID: "node"}, masterRsp: &types.CreateCubeSandboxRes{Ret: &types.Ret{RetCode: -1}, ExtInfo: map[string]string{}}, cubeletReq: &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"}, cubeletRsp: &cubebox.RunCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}, SandboxID: "sb", SandboxIP: "10.0.0.2"}}
 }
-func TestP4CreateFinalBoundary(t *testing.T) {
-	for _, scenario := range []string{"success", "snapshot", "forged", "proxy-error", "cancel-wins", "spec-warning", "oversize"} {
+func TestInternalCreateResultDoesNotPublish(t *testing.T) {
+	for _, scenario := range []string{"success", "proxy-error", "cancel-wins", "spec-warning"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := p4Buffer(t)
 			ctx := context.Background()
 			var err error
-			if scenario == "snapshot" {
-				ctx = webhook.WithResolvedStart(ctx, "original-template", true)
-			}
 			if scenario == "proxy-error" {
 				err = errors.New("proxy")
 			}
 			c := p4Create(t, ctx, err)
-			if scenario == "oversize" {
-				createOriginRequestFromContext(c.ctx).WebhookMetadata = &types.WebhookMetadata{TooLarge: true}
-			}
-			if scenario == "forged" {
-				createOriginRequestFromContext(c.ctx).Annotations[constants.CubeAnnotationRuntimeSnapshotID] = "snap-forged"
-			}
 			if scenario == "cancel-wins" {
 				c.setMasterRsp(int(errorcode.ErrorCode_ClientCancel), "cancel")
 			}
@@ -101,15 +94,7 @@ func TestP4CreateFinalBoundary(t *testing.T) {
 				return
 			}
 			require.Equal(t, int(errorcode.ErrorCode_Success), c.masterRsp.Ret.RetCode)
-			if scenario == "oversize" {
-				require.Empty(t, p.Events())
-				return
-			}
-			kind := webhook.TypeCreated
-			if scenario == "snapshot" {
-				kind = webhook.TypeResumed
-			}
-			p4Read(t, p, kind)
+			require.Empty(t, p.Events(), "internal create success never publishes; public HTTP owns this hook")
 			c.dealSuccResult()
 			require.Empty(t, p.Events())
 		})
@@ -138,9 +123,8 @@ func p4PausePatches(t *testing.T, failure, backend string) *gomonkey.Patches {
 		})
 	}
 	p.ApplyFunc(cubelet.UpdateWithTimeout, func(ctx context.Context, _ string, _ *cubebox.UpdateCubeSandboxRequest, _ time.Duration) (*cubebox.UpdateCubeSandboxResponse, error) {
-		stored.WebhookMetadata.Values["user_token"] = "after-cleanup"
 		stored.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = "after-cleanup"
-		require.Equal(t, webhook.OriginPauseTeardown, webhook.OriginFromContext(ctx))
+		require.Equal(t, webhook.OriginLifecycle, webhook.OriginFromContext(ctx))
 		if failure == "timeout" {
 			return nil, context.DeadlineExceeded
 		}
@@ -249,7 +233,7 @@ func TestP4BusinessRedisHTTP(t *testing.T) {
 		require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	})
 	seen := map[string]bool{}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		select {
 		case b := <-bodies:
 			var v map[string]any
@@ -260,7 +244,7 @@ func TestP4BusinessRedisHTTP(t *testing.T) {
 			t.Fatal("pipeline timeout")
 		}
 	}
-	require.Len(t, seen, 3)
+	require.Len(t, seen, 2)
 }
 
 func TestP4CreateCancellationDuringPostProcessing(t *testing.T) {
@@ -285,9 +269,9 @@ func TestP4CreateCancellationDuringPostProcessing(t *testing.T) {
 
 type p4TimeoutProvider struct{ seen []webhook.Origin }
 
-func (p *p4TimeoutProvider) RefreshTimeout(ctx context.Context, _ string, _ int) (int64, bool, error) {
+func (p *p4TimeoutProvider) RefreshTimeout(ctx context.Context, _ string, _ int) (int64, error) {
 	p.seen = append(p.seen, webhook.OriginFromContext(ctx))
-	return 100, true, nil
+	return 100, nil
 }
 func (p *p4TimeoutProvider) LookupEndAt(context.Context, string) (int64, error) { return 0, nil }
 func TestP4ResumeTimeoutOrigin(t *testing.T) {
@@ -301,21 +285,22 @@ func TestP4ResumeTimeoutOrigin(t *testing.T) {
 		publishUpdateTimeout(ctx, &types.UpdateRequest{Action: "resume", SandboxID: "sb", Timeout: &v})
 	}
 	publishUpdateTimeout(ctx, &types.UpdateRequest{Action: "resume", SandboxID: "sb"})
-	require.Equal(t, []webhook.Origin{webhook.OriginResumeTimeoutRefresh, webhook.OriginResumeTimeoutRefresh}, p.seen)
+	require.Equal(t, []webhook.Origin{webhook.OriginLifecycle, webhook.OriginLifecycle}, p.seen)
 	require.Equal(t, webhook.OriginLifecycle, webhook.OriginFromContext(ctx))
 }
 func TestP4FailoverEnqueuesOrigin(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
+	f := p5Setup(t)
+	p4Buffer(t)
 	c := p4Create(t, context.Background(), nil)
 	c.masterRsp.SandboxID = "sb"
 	c.setMasterRsp(int(errorcode.ErrorCode_DBError), "fail")
-	old := addCreateFailoverTaskFn
-	defer func() { addCreateFailoverTaskFn = old }()
-	addCreateFailoverTaskFn = func(job *task.Task) error {
-		require.Equal(t, webhook.OriginCreateFailover, webhook.OriginFromContext(job.Ctx))
-		require.Equal(t, task.DestroySandbox, job.TaskType)
-		return nil
-	}
 	c.failover()
+	require.NotNil(t, f.pending)
+	require.Equal(t, webhook.OriginCreateFailover, webhook.OriginFromContext(f.pending.Ctx))
+	require.Equal(t, task.DestroySandbox, f.pending.TaskType)
 }
 
 func TestP4BusinessFailureIsolation(t *testing.T) {
@@ -371,7 +356,7 @@ func TestP4UpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
 				}
 				p4Read(t, buffer, kind)
 				if action == "resume" && timeout != nil && *timeout != 0 {
-					require.Equal(t, []webhook.Origin{webhook.OriginResumeTimeoutRefresh}, provider.seen)
+					require.Equal(t, []webhook.Origin{webhook.OriginLifecycle}, provider.seen)
 				} else {
 					require.Empty(t, provider.seen)
 				}
@@ -421,4 +406,72 @@ func TestP4PauseTimeoutHealingDoesNotPublish(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "READY", healed.Status)
 	require.Empty(t, p.Events(), "healing a timed-out pause is not a new successful pause")
+}
+
+func TestDisabledRuntimeSkipsLifecycleProducerPreparation(t *testing.T) {
+	if webhooktest.Isolated(t) {
+		return
+	}
+	for _, invalid := range []bool{false, true} {
+		t.Run(fmt.Sprint(invalid), func(t *testing.T) {
+			cfg := config.DefaultWebhookConf()
+			cfg.Invalid, cfg.Enabled = invalid, invalid
+			r, err := webhook.NewRuntime(context.Background(), cfg)
+			if invalid {
+				require.ErrorIs(t, err, config.ErrWebhookConfig)
+			} else {
+				require.NoError(t, err)
+			}
+			defer r.Shutdown(context.Background())
+			SetWebhookPublisher(r.Publisher())
+			task.SetWebhookPublisher(r.Publisher())
+			defer SetWebhookPublisher(nil)
+			defer task.SetWebhookPublisher(nil)
+			before := webhooktest.CaptureAccepted(t)
+			patches := gomonkey.NewPatches()
+			defer patches.Reset()
+			patches.ApplyFunc(webhook.PrepareLifecycle, func(*types.CreateCubeSandboxReq) (string, webhook.LifecycleFields) {
+				panic("disabled lifecycle fields")
+			})
+			patches.ApplyFunc(webhook.UserMetadata, func(map[string]string) webhook.LifecycleFields { panic("disabled metadata") })
+			patches.ApplyFunc(webhook.WithOrigin, func(context.Context, webhook.Origin) context.Context { panic("disabled origin context") })
+			patches.ApplyFunc(webhook.WithKillReason, func(context.Context, string) context.Context { panic("disabled reason context") })
+			patches.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("disabled Capture/UUID path") })
+			t.Run("pause", func(t *testing.T) {
+				p4PausePatches(t, "", "xfs")
+				require.Equal(t, 200, pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1").Ret.RetCode)
+			})
+			t.Run("resume", func(t *testing.T) {
+				p4ResumePatches(t, "")
+				require.Equal(t, 200, resumeFromPauseSnapshot(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1").Ret.RetCode)
+			})
+			t.Run("updates-and-destroy", func(t *testing.T) {
+				f := p5Setup(t)
+				old := getTimeoutProvider()
+				defer SetTimeoutProvider(old)
+				SetTimeoutProvider(p5Timeout{1700000000123, nil})
+				require.Equal(t, 200, SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb", Timeout: 5}).Ret.RetCode)
+				require.Equal(t, 200, Refresh(context.Background(), &types.RefreshSandboxRequest{SandboxID: "sb", Duration: 5}).Ret.RetCode)
+				require.Equal(t, 200, UpdateNetwork(context.Background(), p5Network()).Ret.RetCode)
+				for _, sync := range []bool{true, false} {
+					require.Equal(t, 200, DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "sb", InstanceType: "cubebox", Sync: sync}).Ret.RetCode)
+					if !sync {
+						require.NoError(t, (&task.DestroySandboxTaskHandler{}).HandleTask(f.pending.Ctx, f.pending))
+					}
+				}
+				require.Equal(t, 3, f.nodeCalls)
+				require.Equal(t, 3, f.specReads)
+			})
+			t.Run("failover", func(t *testing.T) {
+				f := p5Setup(t)
+				c := p4Create(t, context.Background(), nil)
+				c.masterRsp.SandboxID = "sb"
+				c.setMasterRsp(int(errorcode.ErrorCode_DBError), "fail")
+				c.failover()
+				require.NotNil(t, f.pending)
+				require.Equal(t, webhook.OriginLifecycle, webhook.OriginFromContext(f.pending.Ctx))
+			})
+			require.Equal(t, before, webhooktest.CaptureAccepted(t))
+		})
+	}
 }

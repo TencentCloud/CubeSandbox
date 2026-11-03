@@ -287,7 +287,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
 		return true, nil
 	})
-	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq, _ snapshotWebhook) error {
+	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
 		ran = true
 		return nil
 	})
@@ -595,7 +595,7 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 		SnapshotDir: "/data/snapshots/snap-1",
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}, snapshotWebhook{}); err != nil {
+	}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 
@@ -647,7 +647,7 @@ func TestRunSnapshotCreateJobPersistsS3RemoteUUIDs(t *testing.T) {
 		},
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}, snapshotWebhook{}); err != nil {
+	}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 	if persisted == nil {
@@ -695,7 +695,7 @@ func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T
 		},
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}, snapshotWebhook{}); err != nil {
+	}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 	if persisted == nil {
@@ -777,7 +777,7 @@ func TestExecuteSnapshotCreateJobReturnsTerminalPersistenceError(t *testing.T) {
 	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
 		return true, nil
 	})
-	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq, _ snapshotWebhook) error {
+	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
 		return errors.New("persist ready status failed")
 	})
 

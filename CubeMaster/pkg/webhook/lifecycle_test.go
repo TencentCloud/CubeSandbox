@@ -6,7 +6,9 @@ package webhook
 import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +17,7 @@ import (
 func TestLifecycleMetadataAndCapture(t *testing.T) {
 	for _, labels := range []map[string]string{nil, {}, {"api_token": "user", "cube.master.auth": "credential", "host-mount": "private", "X-Caller": "internal"}} {
 		m := UserMetadata(labels)
-		req := &types.CreateCubeSandboxReq{WebhookMetadata: m}
-		_, f := PrepareLifecycle(req)
+		f := m
 		c, err := Capture(CaptureInput{ID: uuid.New(), Type: TypeCreated, Origin: OriginLifecycle, SandboxID: "sb", OccurredAt: time.Now(), Fields: f})
 		require.NoError(t, err)
 		if f.Metadata != nil {
@@ -27,7 +28,7 @@ func TestLifecycleMetadataAndCapture(t *testing.T) {
 		}
 		p, err := MapToProtocol(c)
 		require.NoError(t, err)
-		if m.Values == nil {
+		if m.Metadata == nil {
 			require.Nil(t, p.SandboxMetadata)
 		} else {
 			require.NotNil(t, p.SandboxMetadata)
@@ -48,6 +49,49 @@ func TestLifecycleMetadataAndCapture(t *testing.T) {
 	}
 	require.True(t, UserMetadata(m).TooLarge)
 }
+
+func TestUserMetadataBudgetExcludesInjectedLabels(t *testing.T) {
+	labels := map[string]string{
+		constants.Caller:                              strings.Repeat("internal", 1024),
+		constants.CubeAnnotationsInsType:              "cubebox",
+		constants.CubeAnnotationAppSnapshotTemplateID: "trusted-template",
+	}
+	for i := 0; i < 64; i++ {
+		labels["user_"+strconv.Itoa(i)] = "value"
+	}
+	fields := UserMetadata(labels)
+	require.False(t, fields.TooLarge)
+	require.Len(t, fields.Metadata, 64)
+	require.NotContains(t, fields.Metadata, constants.Caller)
+	require.NotContains(t, fields.Metadata, constants.CubeAnnotationsInsType)
+	require.NotContains(t, fields.Metadata, constants.CubeAnnotationAppSnapshotTemplateID)
+	require.Len(t, labels, 67, "notification preparation must not change business labels")
+	require.Equal(t, strings.Repeat("internal", 1024), labels[constants.Caller])
+	labels["user_0"] = "changed"
+	require.Equal(t, "value", fields.Metadata["user_0"])
+	labels["user_64"] = "too many"
+	require.True(t, UserMetadata(labels).TooLarge, "65 user entries must still be rejected")
+
+	bytes := map[string]string{constants.Caller: strings.Repeat("internal", 1024)}
+	for _, key := range []string{"a", "b", "c", "d"} {
+		bytes[key] = strings.Repeat("v", 4095)
+	}
+	require.False(t, UserMetadata(bytes).TooLarge, "four one-byte keys plus values total exactly 16 KiB")
+	bytes["a"] += "v"
+	require.True(t, UserMetadata(bytes).TooLarge, "16 KiB plus one byte must still be rejected")
+	for _, input := range []map[string]string{
+		{constants.Caller: "internal", strings.Repeat("k", 257): "value"},
+		{constants.Caller: "internal", "key": strings.Repeat("v", 4097)},
+	} {
+		require.True(t, UserMetadata(input).TooLarge)
+	}
+	reserved := map[string]string{}
+	for i := 0; i < 65; i++ {
+		reserved["cube.master.user-supplied-"+strconv.Itoa(i)] = "private"
+	}
+	require.True(t, UserMetadata(reserved).TooLarge, "filtering must not allow unbounded input scans")
+}
+
 func TestLifecycleResources(t *testing.T) {
 	for _, tc := range []struct {
 		raw  string

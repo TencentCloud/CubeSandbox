@@ -10,6 +10,7 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/internal/webhooktest"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
@@ -93,7 +94,7 @@ func p4Checkpoint(t *testing.T, backend, failure string) error {
 		}
 		return &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil
 	})
-	req := &sandboxtypes.CreateCubeSandboxReq{Request: &sandboxtypes.Request{RequestID: "req"}, InstanceType: "cubebox", Backend: backend, Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}, WebhookMetadata: webhook.UserMetadata(map[string]string{"user_token": "kept"})}
+	req := &sandboxtypes.CreateCubeSandboxReq{Request: &sandboxtypes.Request{RequestID: "req"}, InstanceType: "cubebox", Backend: backend, Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}}
 	_, err := executeSnapshotCreateJob(parent, &sandboxtypes.TemplateImageJobInfo{JobID: "job", TemplateID: "snap-new", Status: JobStatusPending}, req, "sb", "node", "127.0.0.1")
 	require.Equal(t, "original-template", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	return err
@@ -175,5 +176,30 @@ func TestP4CheckpointUploadResult(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, p.Events(), 1)
 		})
+	}
+}
+
+func TestCheckpointDisabledRuntimeSkipsPreparation(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		cfg := config.DefaultWebhookConf()
+		cfg.Enabled, cfg.Invalid = invalid, invalid
+		runtime, err := webhook.NewRuntime(context.Background(), cfg)
+		if invalid {
+			require.ErrorIs(t, err, config.ErrWebhookConfig)
+		} else {
+			require.NoError(t, err)
+		}
+		SetWebhookPublisher(runtime.Publisher())
+		before := webhooktest.CaptureAccepted(t)
+		patches := gomonkey.NewPatches()
+		patches.ApplyFunc(webhook.PrepareLifecycle, func(*sandboxtypes.CreateCubeSandboxReq) (string, webhook.LifecycleFields) {
+			panic("disabled checkpoint fields")
+		})
+		patches.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("disabled checkpoint capture") })
+		require.NoError(t, p4Checkpoint(t, "xfs", ""))
+		patches.Reset()
+		require.Equal(t, before, webhooktest.CaptureAccepted(t))
+		SetWebhookPublisher(nil)
+		runtime.Shutdown(context.Background())
 	}
 }

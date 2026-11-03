@@ -61,18 +61,13 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		destroyReq.Annotations = make(map[string]string)
 		destroyReq.Annotations[constants.CubeAnnotationsInsType] = req.InstanceType
 	}
-	spec := stampDestroyStorageBackend(ctx, req.SandboxID, destroyReq)
-	var destruction *webhook.Destruction
-	if lifecyclePublisher.Enabled() {
-		template, fields := webhook.PrepareLifecycle(spec)
-		destruction = lifecyclePublisher.PrepareDestruction(ctx, req.SandboxID, template, req.KillReason, fields)
-	}
 	reason := req.KillReason
 	if reason == "" {
 		reason = "request"
 	}
 	destroyReq.Annotations[constants.CubeAnnotationsKillReason] = reason
 	collectMemoryOption(req, destroyReq)
+	stampDestroyStorageBackend(ctx, req.SandboxID, destroyReq)
 	if config.GetConfig().Common.CubeDestroyCheckFilter {
 
 		if req.Filter == nil || req.Filter.LabelSelector == nil {
@@ -85,16 +80,22 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 			InstanceType:  req.InstanceType,
 		}
 	}
+	if lifecyclePublisher.Enabled() {
+		reason := req.KillReason
+		if reason == "" {
+			reason = webhook.KillReasonFromContext(ctx)
+		}
+		ctx = webhook.WithKillReason(ctx, reason)
+	}
 	t := &task.Task{
 		BaseInfo: task.BaseInfo{
 			InstanceType: req.InstanceType,
 			SandboxID:    req.SandboxID,
 		},
-		Ctx:         ctx,
-		RequestId:   req.RequestID,
-		TaskType:    task.DestroySandbox,
-		Destruction: destruction,
-		Request:     destroyReq,
+		Ctx:       ctx,
+		RequestId: req.RequestID,
+		TaskType:  task.DestroySandbox,
+		Request:   destroyReq,
 	}
 	log.G(ctx).Warnf("async DestroySandbox:%+v", utils.InterfaceToString(req))
 	defer func() {
@@ -118,8 +119,10 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 			return
 		}
 		if req.Sync {
-			if err := callCubeletTask(ctx, t.CallEp, destroyReq, t); err != nil {
+			if err := callCubelet(ctx, t.CallEp, destroyReq); err != nil {
 				setSyncDestroyFailure(rsp, err)
+			} else if lifecyclePublisher.Enabled() {
+				lifecyclePublisher.PublishContext(ctx, webhook.TypeKilled, req.SandboxID, "", webhook.LifecycleFields{KillReason: webhook.KillReasonFromContext(ctx)})
 			}
 			return
 		}
@@ -194,10 +197,6 @@ func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *tas
 }
 
 func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSandboxRequest) error {
-	return callCubeletTask(ctx, callEp, req, &task.Task{})
-}
-
-func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCubeSandboxRequest, t *task.Task) error {
 	return sandboxlock.WithLock(ctx, req.GetSandboxID(), sandboxlock.Options{
 		Value: "delete",
 		TTL:   sandboxlock.DeleteTTL,
@@ -205,12 +204,12 @@ func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCub
 		ctx = context.WithoutCancel(ctx)
 		hostIP := strings.Split(callEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
-		handled, pauseComplete, err := pausesnap.TryDeletePausedWithCompletion(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP, &t.Destroyed)
+		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return err
 		}
-		if !handled && nodeOK && !t.Destroyed {
+		if !handled && nodeOK {
 			rsp, err := cubelet.Destroy(ctx, callEp, req)
 			defer func() {
 				if log.IsDebug() {
@@ -227,9 +226,6 @@ func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCub
 				log.G(ctx).Errorf("Destroy error:%+v", rsp)
 				return ret.Err(errorcode.MasterCode(rsp.GetRet().GetRetCode()), rsp.GetRet().GetRetMsg())
 			}
-			if rsp != nil && rsp.GetRet() != nil {
-				t.Destroyed = true
-			}
 			// Apply any node-level volume ref-count transitions (1→0) reported by
 			// Cubelet so the volume DB releases the reference held by this node.
 			volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
@@ -245,31 +241,27 @@ func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCub
 			log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
 		}
 
-		if t.Destroyed && (!handled || pauseComplete) {
-			t.Destruction.Complete(&lifecyclePublisher)
-		}
 		return nil
 	})
 }
 
 // stampDestroyStorageBackend copies the sandbox's persisted CoW backend onto
 // the Cubelet Destroy request so S3 sandboxes delete on the S3 Store.
-func stampDestroyStorageBackend(ctx context.Context, sandboxID string, req *cubebox.DestroyCubeSandboxRequest) *types.CreateCubeSandboxReq {
+func stampDestroyStorageBackend(ctx context.Context, sandboxID string, req *cubebox.DestroyCubeSandboxRequest) {
 	if req == nil {
-		return nil
+		return
 	}
 	if req.Annotations == nil {
 		req.Annotations = map[string]string{}
 	}
 	if strings.TrimSpace(req.Annotations[constants.CubeAnnotationStorageBackend]) != "" {
-		return nil
+		return
 	}
 	spec, err := sandboxspec.Get(ctx, sandboxID)
 	if err != nil || spec == nil {
-		return nil
+		return
 	}
 	if b, ok, err := constants.OptionalSnapshotBackend(spec.Backend); err == nil && ok {
 		req.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	return spec
 }

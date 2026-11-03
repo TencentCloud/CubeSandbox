@@ -5,9 +5,14 @@ package app
 
 import (
 	"context"
+	"errors"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,7 +35,18 @@ import (
 	ec "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
-func TestP5AppPublisherRealAsyncDelete(t *testing.T) {
+func TestAppPublisherRealAsyncDelete(t *testing.T) {
+	// InitTask registers process-global watchers; isolate and reclaim all of them
+	// by running this test in a child process, with no production scheduler seam.
+	if os.Getenv("WEBHOOK_ASYNC_QUEUE_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAppPublisherRealAsyncDelete$", "-test.v")
+		cmd.Env = append(os.Environ(), "WEBHOOK_ASYNC_QUEUE_CHILD=1")
+		output, err := cmd.CombinedOutput()
+		t.Log(string(output))
+		require.NoError(t, err)
+		return
+	}
+
 	bodies := make(chan []byte, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -38,7 +54,7 @@ func TestP5AppPublisherRealAsyncDelete(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()
-	cfg := &config.Config{Common: &config.CommonConf{}, Webhooks: config.DefaultWebhookConf()}
+	cfg := &config.Config{Common: &config.CommonConf{AsyncTaskWorkerNum: 4, AsyncTaskQueueSize: 4, CollectMetricInterval: time.Millisecond}, CubeletConf: &config.CubeletConf{MaxRetries: 1, LoopMaxRetries: 1}, Webhooks: config.DefaultWebhookConf()}
 	cfg.Webhooks.Enabled = true
 	cfg.Webhooks.AllowHTTP = true
 	cfg.Webhooks.AllowedCIDRs = []string{"127.0.0.0/8"}
@@ -60,22 +76,48 @@ func TestP5AppPublisherRealAsyncDelete(t *testing.T) {
 	p.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
-	p.ApplyFunc(pausesnap.TryDeletePausedWithCompletion, func(context.Context, string, string, string, *bool) (bool, bool, error) { return false, false, nil })
-	p.ApplyFunc(localcache.DeleteSandboxProxyMap, func(context.Context, string) error { return nil })
+	p.ApplyFunc(pausesnap.TryDeletePaused, func(context.Context, string, string, string) (bool, error) { return false, nil })
+	var cleanupCalls, nodeCalls atomic.Int32
+	p.ApplyFunc(localcache.DeleteSandboxProxyMap, func(context.Context, string) error {
+		if cleanupCalls.Add(1) == 1 {
+			return errors.New("retry control-plane cleanup after node success")
+		}
+		return nil
+	})
+	entered, release := make(chan int32, 2), make(chan struct{})
 	p.ApplyFunc(cubelet.Destroy, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+		entered <- nodeCalls.Add(1)
+		<-release
 		return &cubebox.DestroyCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}}, nil
 	})
-	var pending *task.Task
-	p.ApplyFunc(task.AddAsyncTask, func(job *task.Task) error { pending = job; return nil })
-	rsp := sandbox.DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "app-p5-delete", InstanceType: "cubebox", KillReason: "request"})
+	taskCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorcode.InitCubeCodeRetryMap(cfg)
+	task.InitTask(taskCtx, cfg)
+	defer task.Stop(context.Background())
+	rsp := sandbox.DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "app-async-delete", InstanceType: "cubebox", KillReason: "request"})
 	require.Equal(t, 200, rsp.Ret.RetCode)
-	require.NotNil(t, pending)
-	// Deterministic pre-completion publication is separately checked with the
-	// BufferedPublisher in the producer barrier test.
-	require.NoError(t, (&task.DestroySandboxTaskHandler{}).HandleTask(pending.Ctx, pending))
+	select {
+	case n := <-entered:
+		require.Equal(t, int32(1), n)
+	case <-time.After(3 * time.Second):
+		t.Fatal("real queue did not invoke node")
+	}
+	require.Empty(t, bodies, "enqueue and an in-flight node call are not handler success")
+	release <- struct{}{}
+	select {
+	case n := <-entered:
+		require.Equal(t, int32(2), n, "original queue retry must call the node again")
+	case <-time.After(4 * time.Second):
+		t.Fatal("real queue did not retry after cleanup failure")
+	}
+	require.Empty(t, bodies, "failed cleanup and retry in flight are not handler success")
+	release <- struct{}{}
 	select {
 	case body := <-bodies:
-		require.Contains(t, string(body), "app-p5-delete")
+		require.Equal(t, int32(2), nodeCalls.Load())
+		require.Equal(t, int32(2), cleanupCalls.Load())
+		require.Contains(t, string(body), "app-async-delete")
 		require.Contains(t, string(body), webhook.TypeKilled)
 	case <-time.After(10 * time.Second):
 		t.Fatal("App did not inject task publisher")
