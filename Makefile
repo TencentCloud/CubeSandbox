@@ -541,6 +541,9 @@ blobstore-test:
 .PHONY: sandboxrestart-test
 sandboxrestart-test:
 	cd pkgs/sandboxrestart && go test ./...
+.PHONY: redisx-test
+redisx-test:
+	cd pkgs/redisx && go test ./...
 
 # pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
 # deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
