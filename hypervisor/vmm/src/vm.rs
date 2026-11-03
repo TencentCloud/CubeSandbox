@@ -78,6 +78,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
+#[cfg(target_arch = "aarch64")]
+use std::io::Read;
 use std::io::{self, Seek, SeekFrom, Write};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use std::mem::size_of;
@@ -120,6 +122,10 @@ pub enum Error {
 
     #[error("Cannot load the kernel into memory: {0}")]
     KernelLoad(#[source] linux_loader::loader::Error),
+
+    #[cfg(target_arch = "aarch64")]
+    #[error("Kernel image '{0}' is a raw ELF vmlinux; ARM64 direct boot requires the PE-format boot Image (built from arch/arm64/boot/Image)")]
+    ElfKernelImage(String),
 
     #[cfg(target_arch = "aarch64")]
     #[error("Cannot load the UEFI binary in memory: {0:?}")]
@@ -1028,13 +1034,13 @@ impl Vm {
     #[cfg(target_arch = "aarch64")]
     fn load_kernel(
         firmware: Option<File>,
-        kernel: Option<File>,
+        kernel: Option<(File, &std::path::Path)>,
         memory_manager: Arc<Mutex<MemoryManager>>,
     ) -> Result<EntryPoint> {
         let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
         let entry_addr = match (firmware, kernel) {
-            (None, Some(mut kernel)) => {
+            (None, Some((mut kernel, kernel_path))) => {
                 match linux_loader::loader::pe::PE::load(
                     mem.deref(),
                     Some(arch::layout::KERNEL_START),
@@ -1046,6 +1052,14 @@ impl Vm {
                     // If failed, retry to load it as UEFI binary.
                     // As the UEFI binary is formatless, it must be the last option to try.
                     Err(linux_loader::loader::Error::Pe(InvalidImageMagicNumber)) => {
+                        // A raw ELF vmlinux is not a UEFI binary either; the
+                        // fall-through only surfaces as a confusing UefiTooBig.
+                        // Detect the ELF magic and name the artifact problem.
+                        if kernel_starts_with_elf_magic(&mut kernel) {
+                            return Err(Error::ElfKernelImage(
+                                kernel_path.to_string_lossy().into_owned(),
+                            ));
+                        }
                         Self::load_firmware(&kernel, memory_manager)?;
                         arch::layout::UEFI_START
                     }
@@ -1136,8 +1150,8 @@ impl Vm {
                 Self::load_kernel(Some(firmware), None, memory_manager)
             }
             (None, Some(kernel)) => {
-                let kernel = File::open(kernel).map_err(Error::KernelFile)?;
-                Self::load_kernel(None, Some(kernel), memory_manager)
+                let kernel_file = File::open(kernel).map_err(Error::KernelFile)?;
+                Self::load_kernel(None, Some((kernel_file, kernel.as_path())), memory_manager)
             }
             _ => Err(Error::InvalidPayload),
         }
@@ -3399,6 +3413,17 @@ mod tests {
     }
 }
 
+// Probe the first bytes of a guest kernel image for the ELF magic. The file
+// is rewound after probing, so a negative result leaves it ready for the
+// formatless UEFI fallback in Vm::load_kernel.
+#[cfg(target_arch = "aarch64")]
+fn kernel_starts_with_elf_magic(kernel: &mut File) -> bool {
+    let mut magic = [0u8; 4];
+    let probed = kernel.rewind().is_ok() && kernel.read_exact(&mut magic).is_ok();
+    let _ = kernel.rewind();
+    probed && magic == [0x7f, b'E', b'L', b'F']
+}
+
 #[cfg(target_arch = "aarch64")]
 #[cfg(test)]
 mod tests {
@@ -3548,4 +3573,34 @@ pub fn test_vm_snapshot_restore() {
 
     let vm_snapshot = get_vm_snapshot(&snapshot).map_err(Error::Restore).unwrap();
     println!("{:?}", vm_snapshot.clock.unwrap());
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn test_kernel_starts_with_elf_magic_detects_elf() {
+    let path = std::env::temp_dir().join("ut_vmm_kernel_elf.img");
+    std::fs::write(&path, [0x7f, b'E', b'L', b'F', 1, 2, 3, 4]).unwrap();
+
+    let mut kernel = File::open(&path).unwrap();
+    assert!(kernel_starts_with_elf_magic(&mut kernel));
+    // The probe must rewind so the formatless UEFI fallback still sees the
+    // whole file.
+    let mut first = [0u8; 4];
+    kernel.read_exact(&mut first).unwrap();
+    assert_eq!(first, [0x7f, b'E', b'L', b'F']);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn test_kernel_starts_with_elf_magic_accepts_pe_image() {
+    let path = std::env::temp_dir().join("ut_vmm_kernel_pe.img");
+    std::fs::write(&path, b"MZpe-placeholder-boot-image").unwrap();
+
+    let mut kernel = File::open(&path).unwrap();
+    assert!(!kernel_starts_with_elf_magic(&mut kernel));
+    let mut first = [0u8; 4];
+    kernel.read_exact(&mut first).unwrap();
+    assert_eq!(first, *b"MZpe");
+    let _ = std::fs::remove_file(&path);
 }

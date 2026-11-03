@@ -84,6 +84,22 @@ cp /path/to/vmlinux deploy/one-click/assets/kernel-artifacts/
 
 The default expected filename is `vmlinux`. You can override the path via the `ONE_CLICK_CUBE_KERNEL_VMLINUX` environment variable.
 
+> **Architecture note — `vmlinux` is a generic name.** On **x86_64** the guest
+> kernel is indeed a raw ELF `vmlinux`. On **aarch64** the guest kernel is the
+> PE/COFF-format boot Image produced by `make arch/arm64/boot/Image` — the
+> release asset `vmlinux-arm64` is that Image published under the historical
+> `vmlinux` name, and the VMM boots it through its PE loader. A raw ELF
+> `vmlinux` (the unstripped linker output of a kernel build tree) cannot boot
+> on aarch64 and is rejected at VM start with an error naming the file and
+> this requirement. The easiest way to get the right artifact is the in-tree
+> helper, which builds the correct image for either architecture and installs
+> it under the `vmlinux` name:
+>
+> ```bash
+> # native build for the host arch; cross build with KERNEL_TARGET_ARCH=aarch64
+> make guest-kernel KERNEL_SRC=/path/to/linux KERNEL_TARGET_ARCH=aarch64
+> ```
+
 ### 1.2 Run the Build
 
 Copy the build environment template if you need overrides, then run from the repository root:
