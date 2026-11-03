@@ -23,13 +23,9 @@ Exposed ports come from the TEMPLATE (`cubemastercli tpl create-from-image
 --expose-port ...`); cubemaster `cubelet_conf.enable_exposed_port` must be
 true (shipped default). The host port is discovered with the CubeSandbox SDK:
 
-    ep = sandbox_b.get_exposed_port_endpoint(8080)
-    ep.endpoint  # "<hostIP>:<hostPort>" (mode "host_port")
-
-A caller on the sandbox's own node gets the tap_ip endpoint
-(sandboxIP:containerPort) by default; this script passes
-caller_host_ip="198.51.100.254" to force host_port mode because that is the
-endpoint under test.
+    endpoint = sandbox_b.get_exposed_port_endpoint(8080)
+    # "<hostIP>:<hostPort>", usable by off-node, host-side, and in-sandbox
+    # callers alike (same-node callers are served by CubeVS hairpin).
 
 Required env (see .env.example):
     CUBE_TEMPLATE_ID     template used for both sandboxes
@@ -72,17 +68,10 @@ CONNREFUSED_HINT = """\
 
 def query_exposed_endpoint(sandbox_b: CubeSandbox) -> str:
     """Return '<hostIP>:<hostPort>' for the sandbox's exposed container port."""
-    ep = sandbox_b.get_exposed_port_endpoint(
-        SERVICE_PORT,
-        # Force host_port mode: without a caller host IP that differs from the
-        # sandbox's node, single-node clusters answer with the tap-ip endpoint.
-        caller_host_ip="198.51.100.254",
-    )
-    if ep.mode != "host_port" or not ep.endpoint:
-        raise RuntimeError(
-            f"unexpected exposed-port answer: mode={ep.mode!r} endpoint={ep.endpoint!r}"
-        )
-    return ep.endpoint
+    endpoint = sandbox_b.get_exposed_port_endpoint(SERVICE_PORT)
+    if not endpoint:
+        raise RuntimeError("exposed-port query returned an empty endpoint")
+    return endpoint
 
 
 def main() -> None:

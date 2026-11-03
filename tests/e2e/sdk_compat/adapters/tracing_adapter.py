@@ -373,21 +373,16 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.get_host(port),
         )
 
-    def get_exposed_port_endpoint(
-        self, port: int, *, caller_host_ip: str | None = None
-    ):
+    def get_exposed_port_endpoint(self, port: int) -> str:
         return self._trace.capture(
             "get_exposed_port_endpoint",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
                 "port": port,
-                "caller_host_ip": caller_host_ip,
             },
-            lambda: self._wrapped.get_exposed_port_endpoint(
-                port, caller_host_ip=caller_host_ip
-            ),
-            output=lambda ep: {"endpoint": ep.endpoint, "mode": ep.mode},
+            lambda: self._wrapped.get_exposed_port_endpoint(port),
+            output=lambda endpoint: {"endpoint": endpoint},
         )
 
     def traffic_access_token(self) -> str | None:

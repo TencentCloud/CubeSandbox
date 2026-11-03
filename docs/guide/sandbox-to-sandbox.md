@@ -166,20 +166,24 @@ sandbox — **no CubeProxy involved**.
 Host ports are allocated per sandbox. Query with the SDK (recommended):
 
 ```python
-ep = sandbox_b.get_exposed_port_endpoint(8080)
-ep.endpoint  # "9.135.152.214:20006" (mode == "host_port")
+endpoint = sandbox_b.get_exposed_port_endpoint(8080)
+# "9.135.152.214:20006" — always the hostIP:hostPort form
 ```
 
-Callers on the sandbox's own node get the `tap_ip` endpoint
-(`sandboxIP:containerPort`) by default; pass `caller_host_ip` with any
-out-of-node address (e.g. `"198.51.100.254"`) to force the `host_port`
-answer. The Go / Node SDKs expose the same method as
+The endpoint works identically for off-node, host-side, and in-sandbox
+callers: same-node sandbox traffic is looped back through the primary NIC
+ingress by CubeVS hairpin. The Go / Node SDKs expose the same method as
 `GetExposedPortEndpoint` / `getExposedPortEndpoint`.
+
+**Node version requirement**: same-node sandbox-to-sandbox access requires a
+hairpin-capable CubeVS (shipped in the same release as this API). Older nodes
+have no same-node access at all (neither hostPort nor tap-direct); upgrade
+the nodes to gain it — no caller-side changes needed.
 
 HTTP fallback (CubeAPI forwards to CubeMaster):
 
 ```bash
-curl -s 'http://<cubeapi>:3000/sandboxes/<B>/exposed-ports/8080?callerHostIP=198.51.100.254'
+curl -s 'http://<cubeapi>:3000/sandboxes/<B>/exposed-ports/8080'
 # → {"sandboxID":"<B>","containerPort":8080,"mode":"host_port",
 #    "endpoint":"9.135.152.214:20006","hostIP":"9.135.152.214","hostPort":20006}
 ```

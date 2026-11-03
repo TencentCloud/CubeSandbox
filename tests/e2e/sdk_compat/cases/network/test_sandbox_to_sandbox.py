@@ -61,9 +61,6 @@ TEMPLATE_EXPOSED_PORTS = [49999, 49983, SERVICE_PORT]
 TEMPLATE_READY_TIMEOUT = 300
 CURL_DEADLINE_SECONDS = 30
 ENDPOINT_QUERY_TIMEOUT_SECONDS = 60
-# TEST-NET-2 placeholder: forces the exposed-port query to answer with the
-# host_port endpoint instead of the same-node tap_ip endpoint.
-CALLER_HOST_IP_OVERRIDE = "198.51.100.254"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -317,21 +314,19 @@ def _curl_until_ready(
 
 
 def _wait_host_port_endpoint(sandbox_b, config: SdkE2EConfig) -> str:
-    """Poll the SDK's exposed-port query until the host-port endpoint appears.
+    """Poll the SDK's exposed-port query until the endpoint appears.
 
-    CALLER_HOST_IP_OVERRIDE forces host_port mode: without it a caller on B's
-    own node would get the tap_ip endpoint instead.
+    The endpoint is always the hostIP:hostPort form; same-node callers are
+    served by CubeVS hairpin, so no caller override is needed.
     """
     deadline = time.monotonic() + ENDPOINT_QUERY_TIMEOUT_SECONDS
     last = "not queried"
     while time.monotonic() < deadline:
         try:
-            ep = sandbox_b.get_exposed_port_endpoint(
-                SERVICE_PORT, caller_host_ip=CALLER_HOST_IP_OVERRIDE
-            )
-            if ep.endpoint and ep.mode == "host_port":
-                return ep.endpoint
-            last = f"mode={ep.mode!r} endpoint={ep.endpoint!r}"
+            endpoint = sandbox_b.get_exposed_port_endpoint(SERVICE_PORT)
+            if endpoint:
+                return endpoint
+            last = "empty endpoint"
         except Exception as exc:  # mapping not programmed yet (404), etc.
             last = f"{type(exc).__name__}: {exc}"
         time.sleep(1)

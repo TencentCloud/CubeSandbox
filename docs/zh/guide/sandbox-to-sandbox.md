@@ -151,19 +151,22 @@ B 用按上文声明了服务端口的模板创建。调用方在 Host 头里指
 hostPort 按沙箱动态分配，用 SDK 查询（推荐）：
 
 ```python
-ep = sandbox_b.get_exposed_port_endpoint(8080)
-ep.endpoint  # "9.135.152.214:20006"（mode == "host_port"）
+endpoint = sandbox_b.get_exposed_port_endpoint(8080)
+# "9.135.152.214:20006"——恒为 hostIP:hostPort 形式
 ```
 
-与沙箱同节点的调用方默认拿到的是 `tap_ip` 端点（`sandboxIP:containerPort`）；
-传 `caller_host_ip="198.51.100.254"`（任意节点外地址）可强制返回
-`host_port` 端点。Go / Node SDK 同样有 `GetExposedPortEndpoint` /
-`getExposedPortEndpoint`。
+该端点对跨节点、宿主侧、沙箱内调用方一致可用：同节点沙箱流量由 CubeVS
+hairpin 回环到主网卡 ingress 完成投递。Go / Node SDK 同样有
+`GetExposedPortEndpoint` / `getExposedPortEndpoint`。
+
+**节点版本要求**：同节点沙箱互访依赖含 hairpin 的 CubeVS（与本 API 同版本
+发布）。旧节点没有同节点访问能力（既无 hostPort 也无 tap 直连），升级节点
+即可获得，调用方无需改代码。
 
 HTTP 兜底（CubeAPI 转发到 CubeMaster）：
 
 ```bash
-curl -s 'http://<cubeapi>:3000/sandboxes/<B>/exposed-ports/8080?callerHostIP=198.51.100.254'
+curl -s 'http://<cubeapi>:3000/sandboxes/<B>/exposed-ports/8080'
 # → {"sandboxID":"<B>","containerPort":8080,"mode":"host_port",
 #    "endpoint":"9.135.152.214:20006","hostIP":"9.135.152.214","hostPort":20006}
 ```
