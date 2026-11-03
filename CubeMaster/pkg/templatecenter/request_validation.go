@@ -137,6 +137,9 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err
 	}
+	if err := validateTemplateContainerUser(cloned.ContainerOverrides); err != nil {
+		return nil, err
+	}
 	return &cloned, nil
 }
 
