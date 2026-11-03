@@ -1426,9 +1426,6 @@ node-init conflict check. Only ports whose holder we can name are listed; see
 deploy/kubernetes/images/scripts/node-prep-lib.sh. */}}
 {{- define "cube.hostPortReserved" -}}
 {{- $ports := list "9998" "9999" "9966" -}}
-{{- if eq (include "cube.opsAgentEnabled" .) "true" -}}
-{{- $ports = append $ports (.Values.opsAgent.port | default 8890 | toString) -}}
-{{- end -}}
 {{- if eq (include "cube.s3lvolEnabled" .) "true" -}}
 {{- $ports = append $ports (((.Values.cubeS3lvol).listenPort) | default 4420 | toString) -}}
 {{- end -}}
