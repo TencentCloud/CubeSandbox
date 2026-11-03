@@ -3774,7 +3774,7 @@ type CubeSandbox struct {
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// containerd namespace.
 	Namespace string `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	// Creation time of the sandbox.
+	// Creation time of the sandbox in nanoseconds.
 	CreatedAt int64 `protobuf:"varint,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// containers Sandbox.Spec.Containers
 	Containers []*Container `protobuf:"bytes,4,rep,name=containers,proto3" json:"containers,omitempty"`

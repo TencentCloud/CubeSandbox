@@ -714,7 +714,7 @@ message CubeSandbox {
   string id = 1;
   // containerd namespace.
   string namespace = 2;
-  // Creation time of the sandbox.
+  // Creation time of the sandbox in nanoseconds.
   int64 created_at = 3;
   // containers Sandbox.Spec.Containers
   repeated Container containers = 4;
