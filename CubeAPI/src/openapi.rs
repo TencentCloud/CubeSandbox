@@ -53,6 +53,10 @@ impl Modify for SecurityAddon {
         version = "0.1.0",
         description = "E2B-compatible sandbox API server."
     ),
+    servers((
+        url = "/cubeapi/v1",
+        description = "CubeAPI SDK/dashboard surface (source of truth generated via `cube-api --export-openapi`)"
+    )),
     paths(
         handlers::health::health,
         handlers::templates::list_templates,
@@ -96,6 +100,10 @@ impl Modify for SecurityAddon {
     components(schemas(
         ApiError,
         handlers::health::HealthResponse,
+        crate::models::ClusterOverview,
+        crate::models::NodeView,
+        crate::models::ComponentVersionView,
+        crate::models::VersionMatrixView,
         TemplateSummary,
         TemplateDetail,
         TemplateAliasLookupResponse,

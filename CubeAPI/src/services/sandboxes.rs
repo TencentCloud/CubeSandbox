@@ -2175,13 +2175,30 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_detail_serializes_error_reason() {
-        for (status, reason) in [
-            (2, Some(serde_json::json!("OOMKilled"))),
-            (3, Some(serde_json::json!("PauseFailed"))),
-            (2, Some(serde_json::json!(""))),
-            (2, Some(Value::Null)),
-            (2, None),
-            (1, None),
+        for (status, reason, expected) in [
+            (2, Some(serde_json::json!("OOMKilled")), Some("OOMKilled")),
+            (2, Some(serde_json::json!("Error")), Some("Error")),
+            (2, Some(serde_json::json!("Completed")), Some("Completed")),
+            (
+                2,
+                Some(serde_json::json!("SandboxCrashed")),
+                Some("SandboxCrashed"),
+            ),
+            (
+                3,
+                Some(serde_json::json!("PauseFailed")),
+                Some("PauseFailed"),
+            ),
+            (
+                1,
+                Some(serde_json::json!("PauseFailed")),
+                Some("PauseFailed"),
+            ),
+            (2, Some(serde_json::json!("")), None),
+            (2, Some(serde_json::json!(" \t\n")), None),
+            (2, Some(Value::Null), None),
+            (2, None, None),
+            (1, None, None),
         ] {
             let mut info = sandbox_detail_envelope(status).0;
             if let Some(reason) = &reason {
@@ -2210,11 +2227,7 @@ mod tests {
                 .await
                 .expect("response body");
             let wire: Value = serde_json::from_slice(&body).expect("JSON response");
-            if let Some(reason) = reason
-                .as_ref()
-                .and_then(Value::as_str)
-                .filter(|reason| !reason.is_empty())
-            {
+            if let Some(reason) = expected {
                 assert_eq!(wire["errorReason"], reason);
             } else {
                 assert!(wire.get("errorReason").is_none());

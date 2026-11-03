@@ -1462,6 +1462,94 @@ components:
           format: int32
         message:
           type: string
+    ClusterOverview:
+      type: object
+      required:
+      - nodeCount
+      - healthyNodes
+      - totalCpuMilli
+      - allocatableCpuMilli
+      - totalMemoryMB
+      - allocatableMemoryMB
+      - maxMvmSlots
+      properties:
+        allocatableCpuMilli:
+          type: integer
+          format: int64
+          description: Currently-allocatable CPU in millicpu.
+        allocatableMemoryMB:
+          type: integer
+          format: int64
+          description: Currently-allocatable memory in MiB.
+        healthyNodes:
+          type: integer
+          minimum: 0
+        maxMvmSlots:
+          type: integer
+          format: int64
+          description: Sum of every node's maximum MVM slots.
+        nodeCount:
+          type: integer
+          minimum: 0
+        totalCpuMilli:
+          type: integer
+          format: int64
+          description: Total CPU across the cluster, expressed in millicpu.
+        totalMemoryMB:
+          type: integer
+          format: int64
+          description: Total memory in MiB.
+    ComponentMatrixRowView:
+      type: object
+      description: Per-component aggregation across all nodes.
+      required:
+      - component
+      - consistent
+      - versions
+      properties:
+        component:
+          type: string
+        consistent:
+          type: boolean
+        declaredVersion:
+          type: string
+        declaredVersions:
+          type: array
+          items:
+            type: string
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentVersionGroupView'
+    ComponentVersionGroupView:
+      type: object
+      description: A group of nodes that report the same version of a component.
+      required:
+      - version
+      - nodes
+      properties:
+        nodes:
+          type: array
+          items:
+            type: string
+        version:
+          type: string
+    ComponentVersionView:
+      type: object
+      description: One component's version on a node.
+      required:
+      - component
+      properties:
+        buildTime:
+          type: string
+        commit:
+          type: string
+        component:
+          type: string
+        source:
+          type: string
+        version:
+          type: string
     ConnectSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/connect.
@@ -1471,7 +1559,9 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry, and a positive value ensures at least that much remaining lifetime. For an already-running sandbox, a shorter positive window is ignored; use POST /sandboxes/{id}/timeout to shorten it. Zero and values below -1 are invalid.
+          description: |-
+            Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+            Zero and values below -1 are invalid.
     ConnectSandboxV2:
       allOf:
       - $ref: '#/components/schemas/ConnectSandbox'
@@ -1490,6 +1580,18 @@ components:
         Reuses the v1 [`ConnectSandbox`] shape and adds the v2-only `memory` flag.
         CubeSandbox always resumes from the memory snapshot, so `memory=false`
         (cold-boot from disk) is rejected by the handler.
+    ControlPlaneVersionView:
+      type: object
+      description: Control-plane reference version (the cluster's target version).
+      required:
+      - version
+      properties:
+        buildTime:
+          type: string
+        commit:
+          type: string
+        version:
+          type: string
     CreateSnapshotRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
@@ -1552,7 +1654,9 @@ components:
           type:
           - string
           - 'null'
-          description: CoW backend for this template and its sandboxes/snapshots (xfs | s3). Omitted keeps the historical xfs path.
+          description: |-
+            CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
+            Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
         command:
           type:
           - array
@@ -2088,11 +2192,6 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
-        livenessProbe:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/LivenessProbe'
-            description: Runtime health check applied to the sandbox. Times are seconds.
         lifecycle:
           oneOf:
           - type: 'null'
@@ -2101,6 +2200,11 @@ components:
               Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
               callers that already speak e2b can pass through unchanged. Absent
               (None) means today's behaviour: idle sandboxes are killed.
+        livenessProbe:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessProbe'
+            description: Runtime health check applied to the sandbox. Times are seconds.
         mcp:
           type:
           - object
@@ -2193,6 +2297,136 @@ components:
           description: |-
             Human-readable name for the volume. Optional;
             if omitted a UUIDv4 is generated and used as both name and volume_id.
+    NodeComponentEntryView:
+      type: object
+      description: A single component version on a single node, with release declaration membership.
+      required:
+      - component
+      - version
+      - declared
+      properties:
+        component:
+          type: string
+        declared:
+          type: boolean
+        version:
+          type: string
+    NodeConditionView:
+      type: object
+      required:
+      - type
+      - status
+      properties:
+        lastHeartbeatTime:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        message:
+          type: string
+        reason:
+          type: string
+        status:
+          type: string
+        type:
+          type: string
+    NodeResourcesView:
+      type: object
+      required:
+      - cpuMilli
+      - memoryMB
+      properties:
+        cpuMilli:
+          type: integer
+          format: int64
+          description: CPU capacity or availability expressed in millicpu.
+        memoryMB:
+          type: integer
+          format: int64
+          description: Memory in MiB. The MB suffix is retained for API compatibility.
+    NodeVersionRowView:
+      type: object
+      description: Per-node view of the version matrix.
+      required:
+      - nodeID
+      - healthy
+      - components
+      properties:
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeComponentEntryView'
+        healthy:
+          type: boolean
+        nodeID:
+          type: string
+    NodeView:
+      type: object
+      required:
+      - nodeID
+      - hostIP
+      - healthy
+      - capacity
+      - allocatable
+      - cpuSaturation
+      - memorySaturation
+      - maxMvmSlots
+      - quotaCpu
+      - quotaMemMB
+      - createConcurrentNum
+      properties:
+        allocatable:
+          $ref: '#/components/schemas/NodeResourcesView'
+        capacity:
+          $ref: '#/components/schemas/NodeResourcesView'
+        conditions:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeConditionView'
+        cpuSaturation:
+          type: number
+          format: float
+          description: Percentage (0-100) of CPU currently in use.
+        createConcurrentNum:
+          type: integer
+          format: int64
+          description: Max concurrent sandbox-create operations on this node.
+        healthy:
+          type: boolean
+        heartbeatTime:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        hostIP:
+          type: string
+        instanceType:
+          type: string
+        localTemplates:
+          type: array
+          items:
+            type: string
+        maxMvmSlots:
+          type: integer
+          format: int64
+        memorySaturation:
+          type: number
+          format: float
+          description: Percentage (0-100) of memory currently in use.
+        nodeID:
+          type: string
+        quotaCpu:
+          type: integer
+          format: int64
+          description: CPU quota in millicores assigned to this node.
+        quotaMemMB:
+          type: integer
+          format: int64
+          description: Memory quota in MiB assigned to this node.
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentVersionView'
     RebuildTemplateRequest:
       type: object
       description: Body for POST /templates/:id (rebuild).
@@ -2296,7 +2530,10 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; omitted or 0 keeps the current value, -1 disables expiry, and a positive value starts a new window after resume.
+          description: |-
+            Idle timeout in seconds; None keeps the current value, 0 keeps the
+            current value for this deprecated endpoint, -1 disables expiry, and a
+            positive value starts a new window after resume.
     RollbackRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/rollback.
@@ -2428,10 +2665,8 @@ components:
         envdVersion:
           type: string
         errorReason:
-          type:
-          - string
-          - 'null'
-          description: Stored status reason for the primary container, when available.
+          type: string
+          description: Stored status or exit reason for the primary container. Omitted when unavailable.
         memoryMB:
           type: integer
           format: int32
@@ -3034,6 +3269,24 @@ components:
           - type: 'null'
           - $ref: '#/components/schemas/EgressRulesInput'
       additionalProperties: false
+    VersionMatrixView:
+      type: object
+      description: Full node x component version matrix.
+      required:
+      - controlPlane
+      - components
+      - nodes
+      properties:
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentMatrixRowView'
+        controlPlane:
+          $ref: '#/components/schemas/ControlPlaneVersionView'
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeVersionRowView'
     Volume:
       type: object
       description: Volume descriptor returned in list responses (no token).
