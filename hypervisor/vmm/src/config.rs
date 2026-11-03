@@ -2124,6 +2124,10 @@ pub struct RestoreConfig {
     pub pmem: Option<Vec<PmemConfig>>,
     #[serde(default)]
     pub dirty_log: bool,
+    /// Mark guest RAM mergeable for host KSM. `None` keeps the value already
+    /// present in the restored configuration.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
     /// Optional existing memory blob path for reading memory range data from a
     /// separate volume.
     /// Accepts either an absolute path like `/dev/vdb` or a `file:///dev/vdb`
@@ -2139,9 +2143,10 @@ pub struct RestoreConfig {
 
 impl RestoreConfig {
     pub const SYNTAX: &'static str = "Restore from a VM snapshot. \
-        \nRestore parameters \"source_url=<source_url>,prefault=on|off,memory_vol_url=<memory_vol_url>\" \
+        \nRestore parameters \"source_url=<source_url>,prefault=on|off,mergeable=on|off,memory_vol_url=<memory_vol_url>\" \
         \n`source_url` should be a valid URL (e.g file:///foo/bar or tcp://192.168.1.10/foo) \
         \n`prefault` brings memory pages in when enabled (disabled by default) \
+        \n`mergeable` marks guest memory mergeable for host KSM when enabled (absent: keep the snapshot's value) \
         \n`memory_vol_url` optional existing memory blob path (for example /dev/vdb or file:///dev/vdb) \
         \nfor reading memory range data from a separate volume";
     pub fn parse(restore: &str) -> Result<Self> {
@@ -2149,6 +2154,7 @@ impl RestoreConfig {
         parser
             .add("source_url")
             .add("prefault")
+            .add("mergeable")
             .add("memory_vol_url");
         parser.parse(restore).map_err(Error::ParseRestore)?;
 
@@ -2161,6 +2167,10 @@ impl RestoreConfig {
             .map_err(Error::ParseRestore)?
             .unwrap_or(Toggle(false))
             .0;
+        let mergeable = parser
+            .convert::<Toggle>("mergeable")
+            .map_err(Error::ParseRestore)?
+            .map(|t| t.0);
         let dirty_log = parser
             .convert::<Toggle>("dirty_log")
             .map_err(Error::ParseRestore)?
@@ -2170,6 +2180,7 @@ impl RestoreConfig {
         let memory_vol_url = parser.get("memory_vol_url");
 
         Ok(RestoreConfig {
+            mergeable,
             source_url,
             prefault,
             disks: None,
@@ -2908,6 +2919,21 @@ mod tests {
                 .unwrap()
                 .remap_filter
         );
+    }
+
+    #[test]
+    fn test_restore_config_mergeable() -> Result<()> {
+        let base = "source_url=file:///tmp/snap";
+        assert_eq!(RestoreConfig::parse(base)?.mergeable, None);
+        assert_eq!(
+            RestoreConfig::parse(&format!("{base},mergeable=on"))?.mergeable,
+            Some(true)
+        );
+        assert_eq!(
+            RestoreConfig::parse(&format!("{base},mergeable=off"))?.mergeable,
+            Some(false)
+        );
+        Ok(())
     }
 
     #[test]

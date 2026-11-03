@@ -777,6 +777,7 @@ impl SandBox {
             .add_disks(&self.conf.disk)
             .add_virtiofs(&self.conf.virtiofs)
             .add_vsock(self.id.clone());
+        vc.mergeable = self.conf.memory_mergeable;
 
         // Enable ivshmem device when the template build path sets the internal annotation.
         if self.is_ivshmem_enabled() {
@@ -1000,6 +1001,7 @@ impl SandBox {
             disks: Some(disks),
             pmem: Some(pmems),
             vsock: Some(vsock),
+            mergeable: Some(self.conf.memory_mergeable),
             memory_vol_url: restore_memory_vol_url,
             ivshmem: if enable_ivshmem {
                 Some(Self::default_ivshmem_config(&self.id)?)

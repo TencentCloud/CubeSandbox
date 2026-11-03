@@ -39,6 +39,9 @@ pub const ANNO_PAUSE_SNAPSHOT_ID: &str = "cube.master.pause.snapshot.id";
 /// Present on create-from-runtime-snapshot (FromSnap). Same guest-mount
 /// contract as pause resume: reconnect host virtiofs, do not remount in-guest.
 pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
+/// Opt-in for host KSM page dedup: only an explicit "true" (case-insensitive)
+/// makes guest RAM mergeable; absent or any other value keeps it off.
+pub const ANNO_MEMORY_MERGEABLE: &str = "cube.memory.mergeable";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;
@@ -71,6 +74,8 @@ pub struct Config {
     pub notify_snapshot_ret: bool,
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
+    /// Whether guest RAM may be merged by host KSM (opt-in, default off).
+    pub memory_mergeable: bool,
     pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
@@ -101,6 +106,7 @@ impl Default for Config {
             notify_snapshot_ret: false,
             app_snapshot_create: false,
             app_snapshot_restore: false,
+            memory_mergeable: false,
             use_passfd_io: false,
             extra_kernel_params: Vec::new(),
         }
@@ -222,6 +228,13 @@ impl Config {
             app_snapshot_restore = true;
         }
 
+        // Opt-in only, same convention as cube.use_passfd_io: only an explicit
+        // (case-insensitive) "true" enables it.
+        let memory_mergeable = anno
+            .get(ANNO_MEMORY_MERGEABLE)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         if app_snapshot_restore && app_snapshot_create {
             return Err(format!(
                 "{} conflicts with {}",
@@ -273,6 +286,7 @@ impl Config {
             notify_snapshot_ret,
             app_snapshot_create,
             app_snapshot_restore,
+            memory_mergeable,
             use_passfd_io,
             extra_kernel_params,
         };
@@ -314,6 +328,7 @@ mod tests {
     use crate::common::utils::Utils;
     use crate::common::PRODUCT_CUBEBOX;
     use crate::sandbox::config::Config;
+    use crate::sandbox::config::ANNO_MEMORY_MERGEABLE;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
     use crate::sandbox::config::ANNO_VM_AGENT;
@@ -551,5 +566,38 @@ mod tests {
                 .unwrap()
                 .use_passfd_io
         );
+    }
+
+    #[test]
+    fn test_memory_mergeable_optin() {
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+
+        // Absent or non-truthy values keep merging off.
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .memory_mergeable
+        );
+        for v in ["false", "0", "off", "no", "1", "on", "On", ""] {
+            annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), v.to_string());
+            assert!(
+                !Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_mergeable,
+                "value {v:?} must not enable merging"
+            );
+        }
+
+        for v in ["true", "TRUE", "True"] {
+            annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), v.to_string());
+            assert!(
+                Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_mergeable,
+                "value {v:?} must enable merging"
+            );
+        }
     }
 }
