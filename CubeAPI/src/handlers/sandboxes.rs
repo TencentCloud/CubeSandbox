@@ -3,13 +3,12 @@
 //
 
 use axum::{
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
-use std::net::SocketAddr;
 use validator::Validate;
 
 use crate::{
@@ -24,16 +23,6 @@ use crate::{
     state::AppState,
 };
 
-#[derive(Debug, Deserialize)]
-pub struct ExposedPortQuery {
-    /// Caller host IP used for CubeMaster's same-node check. Defaults to the
-    /// HTTP client's remote address, which for an in-sandbox caller is its
-    /// node IP after SNAT. Pass any out-of-node address to force the
-    /// host_port endpoint.
-    #[serde(rename = "callerHostIP")]
-    pub caller_host_ip: Option<String>,
-}
-
 // ─── GET /sandboxes/:sandboxID/exposed-ports/:containerPort ──────────────────
 
 #[utoipa::path(
@@ -42,7 +31,6 @@ pub struct ExposedPortQuery {
     params(
         ("sandboxID" = String, Path, description = "Sandbox ID"),
         ("containerPort" = i32, Path, description = "Container port declared via the template's expose-port list"),
-        ("callerHostIP" = Option<String>, Query, description = "Caller host IP for same-node detection; defaults to the connection's remote address"),
     ),
     responses(
         (status = 200, description = "Exposed port endpoint", body = ExposedPortEndpoint),
@@ -54,20 +42,14 @@ pub struct ExposedPortQuery {
 pub async fn get_sandbox_exposed_port(
     State(state): State<AppState>,
     Path((sandbox_id, container_port)): Path<(String, i32)>,
-    Query(params): Query<ExposedPortQuery>,
-    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
 ) -> AppResult<impl IntoResponse> {
-    // The explicit query parameter wins; otherwise the caller's real address
-    // drives CubeMaster's same-node (tap_ip vs host_port) decision.
-    let caller_host_ip = params
-        .caller_host_ip
-        .as_deref()
-        .map(str::to_string)
-        .unwrap_or_else(|| remote_addr.ip().to_string());
+    // The endpoint is always the hostIP:hostPort form. CubeVS hairpin makes it
+    // reachable for same-node sandbox callers too, so no caller-IP based
+    // same-node detection is needed (and the caller address is not trusted).
     let endpoint = state
         .services
         .sandboxes
-        .get_exposed_port_endpoint(&sandbox_id, container_port, Some(&caller_host_ip))
+        .get_exposed_port_endpoint(&sandbox_id, container_port)
         .await?;
     Ok(Json(endpoint))
 }

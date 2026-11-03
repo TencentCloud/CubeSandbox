@@ -358,15 +358,13 @@ impl SandboxService {
 
     /// Resolve the exposed-port endpoint for one container port.
     ///
-    /// CubeMaster decides the mode by comparing caller_host_ip with the
-    /// sandbox's node IP: same node → tap_ip (sandboxIP:containerPort),
-    /// otherwise → host_port (hostIP:hostPort). Callers that want the host
-    /// port form regardless can pass any address outside the node.
+    /// The endpoint is always host_port (hostIP:hostPort). CubeVS hairpin
+    /// makes that form reachable from same-node sandboxes as well, so no
+    /// caller-address based mode selection is performed.
     pub async fn get_exposed_port_endpoint(
         &self,
         sandbox_id: &str,
         container_port: i32,
-        caller_host_ip: Option<&str>,
     ) -> AppResult<crate::models::ExposedPortEndpoint> {
         if container_port <= 0 {
             return Err(AppError::BadRequest(format!(
@@ -376,7 +374,7 @@ impl SandboxService {
         }
         let resp = self
             .cubemaster
-            .get_sandbox_exposed_port(sandbox_id, container_port, caller_host_ip)
+            .get_sandbox_exposed_port(sandbox_id, container_port)
             .await
             .map_err(map_exposed_port_err(sandbox_id, container_port))?;
         let item = resp
