@@ -382,8 +382,38 @@ func isContainerReqWhiteTag(tag string) bool {
 	return ok
 }
 
+// stripUserMemoryMergeable removes a caller-supplied template-level KSM
+// opt-in from every annotation surface a Create request can carry. The value
+// is owned by the template's canonical request; only the template-merge path
+// may reintroduce it.
+func stripUserMemoryMergeable(req *types.CreateCubeSandboxReq) {
+	if req == nil {
+		return
+	}
+	for _, key := range []string{
+		constants.CubeAnnotationMemoryMergeable,
+		constants.CubeAnnotationRuntimeMemoryMergeable,
+	} {
+		delete(req.Annotations, key)
+		delete(req.Labels, key)
+		for _, c := range req.Containers {
+			if c == nil {
+				continue
+			}
+			delete(c.Annotations, key)
+			if c.Image != nil {
+				delete(c.Image.Annotations, key)
+			}
+		}
+	}
+}
+
 //go:noinline
 func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.CreateCubeSandboxReq) error {
+	// This key belongs to the template (or to a privileged template-create
+	// override). Strip any caller-supplied value before the early returns so
+	// non-cubebox/cold-start paths cannot forward or persist a forged opt-in.
+	stripUserMemoryMergeable(reqInOut)
 
 	if reqInOut.InstanceType != cubebox.InstanceType_cubebox.String() {
 		return nil

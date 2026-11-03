@@ -1371,6 +1371,17 @@ components:
           format: int32
           description: Memory in MiB, e.g. 2000.
           minimum: 0
+        mergeable:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            Opt this template's sandboxes into host KSM page dedup. Strict opt-in:
+            omitted/false means no sandbox from this template is marked mergeable.
+            Immutable after creation; changing it requires creating a new template
+            (new template ID). The node-level switch still has to be enabled by the
+            operator, and KSM has a node-wide cross-VM side-channel risk, so only
+            use it on single-tenant or dedicated-KSM nodes.
         name:
           type:
           - string

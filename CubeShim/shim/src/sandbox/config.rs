@@ -39,6 +39,12 @@ pub const ANNO_PAUSE_SNAPSHOT_ID: &str = "cube.master.pause.snapshot.id";
 /// Present on create-from-runtime-snapshot (FromSnap). Same guest-mount
 /// contract as pause resume: reconnect host virtiofs, do not remount in-guest.
 pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
+/// Runtime key written by Cubelet: the node switch combined with the
+/// template request. The shim ANDs it with the template key below.
+pub const ANNO_MEMORY_MERGEABLE: &str = "cube.memory.mergeable";
+/// Template-level request forwarded by CubeMaster. It is absent when the
+/// template does not opt in; absence means false.
+pub const ANNO_TEMPLATE_MEMORY_MERGEABLE: &str = "cube.master.memory.mergeable";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;
@@ -71,6 +77,14 @@ pub struct Config {
     pub notify_snapshot_ret: bool,
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
+    /// Runtime key (node switch combined with the template request by
+    /// Cubelet). Only an explicit true is accepted.
+    pub memory_mergeable_allowed: bool,
+    /// Template-level request. Only an explicit true is accepted; absent
+    /// means false.
+    pub memory_mergeable_requested: bool,
+    /// Final decision: both keys must be true.
+    pub memory_mergeable: bool,
     pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
@@ -101,6 +115,9 @@ impl Default for Config {
             notify_snapshot_ret: false,
             app_snapshot_create: false,
             app_snapshot_restore: false,
+            memory_mergeable_allowed: false,
+            memory_mergeable_requested: false,
+            memory_mergeable: false,
             use_passfd_io: false,
             extra_kernel_params: Vec::new(),
         }
@@ -222,6 +239,20 @@ impl Config {
             app_snapshot_restore = true;
         }
 
+        // Two independent consents: the runtime key (node switch combined
+        // with the template request by Cubelet) and the template key.
+        // Requiring both makes the template gate independent of the runtime
+        // writer; a missing template key is false.
+        let memory_mergeable_allowed = anno
+            .get(ANNO_MEMORY_MERGEABLE)
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let memory_mergeable_requested = anno
+            .get(ANNO_TEMPLATE_MEMORY_MERGEABLE)
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let memory_mergeable = memory_mergeable_allowed && memory_mergeable_requested;
+
         if app_snapshot_restore && app_snapshot_create {
             return Err(format!(
                 "{} conflicts with {}",
@@ -273,6 +304,9 @@ impl Config {
             notify_snapshot_ret,
             app_snapshot_create,
             app_snapshot_restore,
+            memory_mergeable_allowed,
+            memory_mergeable_requested,
+            memory_mergeable,
             use_passfd_io,
             extra_kernel_params,
         };
@@ -314,8 +348,10 @@ mod tests {
     use crate::common::utils::Utils;
     use crate::common::PRODUCT_CUBEBOX;
     use crate::sandbox::config::Config;
+    use crate::sandbox::config::ANNO_MEMORY_MERGEABLE;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
+    use crate::sandbox::config::ANNO_TEMPLATE_MEMORY_MERGEABLE;
     use crate::sandbox::config::ANNO_VM_AGENT;
     use crate::sandbox::config::ANNO_VM_KERNEL;
     use crate::sandbox::config::ANNO_VM_KERNEL_CMDLINE_APPEND;
@@ -551,5 +587,65 @@ mod tests {
                 .unwrap()
                 .use_passfd_io
         );
+    }
+
+    #[test]
+    fn test_memory_mergeable_optin() {
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+
+        // Absent or non-truthy values keep merging off.
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .memory_mergeable
+        );
+        for v in ["false", "0", "off", "no", "1", "on", "On", "", " false "] {
+            annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), v.to_string());
+            annotations.insert(
+                ANNO_TEMPLATE_MEMORY_MERGEABLE.to_string(),
+                "true".to_string(),
+            );
+            assert!(
+                !Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_mergeable,
+                "runtime value {v:?} must not enable merging"
+            );
+        }
+
+        // A truthy runtime key without the template request stays off.
+        annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), "true".to_string());
+        annotations.remove(ANNO_TEMPLATE_MEMORY_MERGEABLE);
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .memory_mergeable,
+            "runtime-only opt-in must not enable merging"
+        );
+
+        // A false/non-truthy template request also keeps it off.
+        for v in ["false", "0", "off", "no", ""] {
+            annotations.insert(ANNO_TEMPLATE_MEMORY_MERGEABLE.to_string(), v.to_string());
+            assert!(
+                !Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_mergeable,
+                "template value {v:?} must not enable merging"
+            );
+        }
+
+        // Both keys explicitly true (case-insensitive) enable it.
+        for v in ["true", "TRUE", "True", " true "] {
+            annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), v.to_string());
+            annotations.insert(ANNO_TEMPLATE_MEMORY_MERGEABLE.to_string(), v.to_string());
+            assert!(
+                Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_mergeable,
+                "both values {v:?} must enable merging"
+            );
+        }
     }
 }

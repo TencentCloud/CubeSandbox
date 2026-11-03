@@ -58,12 +58,21 @@ const (
 	CubeAnnotationsPICMode                  = "cube.master.instance.pic_mode"
 	CubeAnnotationsDisableVmCgroup          = "cube.master.disable_vm_cgroup"
 	CubeAnnotationsDisableHostCgroup        = "cube.master.disable_host_cgroup"
-	CubeAnnotationsUpdateAction             = "cube.master.update_action"
-	CubeAnnotationsTerminateFatalEvent      = "cube.master.terminate_fatal_event"
-	CubeAnnotationsCloadPrefix              = "cloud.tencent.com"
-	CubeAnnotationsNumaNode                 = "cube.master.instance.numa_node"
-	CubeAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
-	CubeAnnotationsSystemDiskSize           = "cube.master.system_disk_size"
+	// CubeAnnotationMemoryMergeable is the template-level KSM opt-in. It is
+	// written into the template's canonical create request and copied into
+	// every sandbox created from that template. Cubelet forwards it into the
+	// sandbox spec; the shim combines it with the runtime key.
+	CubeAnnotationMemoryMergeable = "cube.master.memory.mergeable"
+	// CubeAnnotationRuntimeMemoryMergeable is the runtime key written by
+	// Cubelet. It is never a template-level value and must be stripped from
+	// stored/forwarded requests.
+	CubeAnnotationRuntimeMemoryMergeable = "cube.memory.mergeable"
+	CubeAnnotationsUpdateAction          = "cube.master.update_action"
+	CubeAnnotationsTerminateFatalEvent   = "cube.master.terminate_fatal_event"
+	CubeAnnotationsCloadPrefix           = "cloud.tencent.com"
+	CubeAnnotationsNumaNode              = "cube.master.instance.numa_node"
+	CubeAnnotationsFallbackToSlowPath    = "cube.master.fallback_to_slow_path"
+	CubeAnnotationsSystemDiskSize        = "cube.master.system_disk_size"
 
 	CubeAnnotationsAppSnapshotCreate         = "cube.master.appsnapshot.create"
 	CubeAnnotationAppSnapshotTemplateID      = "cube.master.appsnapshot.template.id"

@@ -328,6 +328,18 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		return err
 	}
 
+	// Sample the node switch once per create. The template request comes from
+	// the Master-merged master key; a caller-supplied runtime key was already
+	// removed by stripReservedAnnotations.
+	mergeableAllowed := config.GetHostConf().Memory.Mergeable
+	mergeableRequested, mergeableEffective := memoryMergeableDecision(mergeableAllowed, realReq.GetAnnotations())
+	if mergeableRequested && !mergeableAllowed && !flowOpts.IsCreateSnapshot() {
+		log.G(ctx).Warnf(
+			"KSM mergeable requested by template but host.memory.mergeable is false; sandbox %s will run unmarked",
+			sandBox.ID,
+		)
+	}
+
 	var (
 		params    []createContainerParam
 		sanboxlog = log.G(ctx).WithFields(CubeLog.Fields{
@@ -368,6 +380,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 			if ci.IsPod {
 				additionalOpt = append(additionalOpt, additionalSandboxOpt...)
+				// Write the runtime key last so a caller-supplied container
+				// annotation copied by WithCubeFsAnnotation cannot override it.
+				// The template key is rewritten from the sandbox-level request
+				// (never copied from a container annotation) and canonicalized,
+				// so the shim's second AND sees the same value the Cubelet did.
+				mergeableAnnotations := memoryMergeablePodAnnotations(mergeableRequested, mergeableEffective)
+				additionalOpt = append(additionalOpt, oci.WithAnnotations(mergeableAnnotations))
 			}
 		} else {
 			containerLog.Errorf("create container oci spec failed.%s", err.Error())

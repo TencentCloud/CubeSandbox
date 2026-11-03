@@ -1861,11 +1861,13 @@ impl MemoryManager {
                 // last_os_error(), which ensures the output will be Some().
                 let errno = err.raw_os_error().unwrap();
                 if errno == libc::EINVAL {
-                    warn!("kernel not configured with CONFIG_KSM");
+                    error!(
+                        "madvise(MADV_MERGEABLE) failed with EINVAL; kernel may not be configured with CONFIG_KSM"
+                    );
                 } else {
-                    warn!("madvise error: {}", err);
+                    error!("madvise(MADV_MERGEABLE) failed: {}", err);
                 }
-                warn!("failed to mark pages as mergeable");
+                error!("guest memory remains unmerged for this region");
             }
         }
 

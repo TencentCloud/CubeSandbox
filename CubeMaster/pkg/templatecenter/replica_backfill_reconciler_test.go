@@ -5,6 +5,7 @@
 package templatecenter
 
 import (
+	"context"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -51,5 +52,37 @@ func TestNodesWithoutReadyReplicaIPOnlyRow(t *testing.T) {
 	targets := []*node.Node{testNode("node-a", "10.0.0.1")}
 	if missing := nodesWithoutReadyReplica(replicas, targets); len(missing) != 0 {
 		t.Fatalf("missing = %v, want none (IP-only replica covers the node)", missing)
+	}
+}
+
+func TestDecodeBackfillJobRequestRebuildsRequestEnvelope(t *testing.T) {
+	// marshalTemplateImageJobRequest persists Request=nil. A bare decode left
+	// the embedded *Request nil and generateTemplateCreateRequest panicked on
+	// RequestID; this test locks in the rebuilt envelope and the artifact-side
+	// writable-layer fallback.
+	payload := `{"source_image_ref":"docker.io/library/nginx:latest","template_id":"tpl-backfill","instance_type":"cubebox","network_type":"tap"}`
+	req, err := decodeBackfillJobRequest(payload, "1Gi")
+	if err != nil {
+		t.Fatalf("decodeBackfillJobRequest: %v", err)
+	}
+	if req.Request == nil || req.Request.RequestID == "" {
+		t.Fatalf("Request envelope was not rebuilt: %#v", req.Request)
+	}
+	if req.TemplateID != "tpl-backfill" {
+		t.Fatalf("template id = %q", req.TemplateID)
+	}
+	if req.WritableLayerSize != "1Gi" {
+		t.Fatalf("writable layer size = %q", req.WritableLayerSize)
+	}
+
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "rfs-backfill",
+		TemplateSpecFingerprint: "fp-backfill",
+		Ext4SHA256:              "sha-backfill",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-backfill",
+	}
+	if _, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, ""); err != nil {
+		t.Fatalf("generateTemplateCreateRequest after backfill decode: %v", err)
 	}
 }

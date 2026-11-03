@@ -1459,6 +1459,14 @@ pub struct CreateTemplateRequest {
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
+    /// Opt this template's sandboxes into host KSM page dedup. Strict opt-in:
+    /// omitted/false means no sandbox from this template is marked mergeable.
+    /// Immutable after creation; changing it requires creating a new template
+    /// (new template ID). The node-level switch still has to be enabled by the
+    /// operator. KSM has a node-wide cross-VM side-channel risk, so only use it
+    /// on single-tenant or dedicated-KSM nodes.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
 }
 
 /// Body for POST /templates/:id (rebuild).

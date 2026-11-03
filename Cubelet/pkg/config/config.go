@@ -36,9 +36,18 @@ type Config struct {
 }
 
 type HostConf struct {
-	Quota          HostConfigQuota `yaml:"quota"`
-	GC             HostConfigGC    `yaml:"gc"`
-	SchedulerLabel string          `yaml:"scheduler_label"`
+	Quota          HostConfigQuota  `yaml:"quota"`
+	GC             HostConfigGC     `yaml:"gc"`
+	SchedulerLabel string           `yaml:"scheduler_label"`
+	Memory         HostConfigMemory `yaml:"memory"`
+}
+
+type HostConfigMemory struct {
+	// Mergeable is the node-level permission for guest RAM to be marked
+	// mergeable. It is not a blanket opt-in: the sandbox's template must also
+	// set mergeable=true. Off by default; merged pages are a cross-VM side
+	// channel, so enable it only where ksmd is intentionally run.
+	Mergeable bool `yaml:"mergeable"`
 }
 
 type HostConfigQuota struct {

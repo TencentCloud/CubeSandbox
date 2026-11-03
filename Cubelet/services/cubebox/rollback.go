@@ -15,6 +15,8 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -41,6 +43,10 @@ type rollbackRestoreConfig struct {
 	SourceURL    string               `json:"source_url"`
 	MemoryVolURL string               `json:"memory_vol_url,omitempty"`
 	Disks        []rollbackDiskConfig `json:"disks,omitempty"`
+	// Mergeable is the effective value at rollback time: the current node
+	// switch AND the template request stored in the sandbox metadata. Sent
+	// explicitly so the restored VM cannot inherit a stale snapshot value.
+	Mergeable bool `json:"mergeable"`
 }
 
 type rollbackDiskConfig struct {
@@ -179,7 +185,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		}
 	}()
 
-	restoreConfig, err := s.buildRollbackRestoreConfig(ctx, req.GetSandboxID(), metaDir, currentRootfs, newRootfs, refs.Memory)
+	restoreConfig, err := s.buildRollbackRestoreConfig(ctx, req.GetSandboxID(), cb.Annotations, metaDir, currentRootfs, newRootfs, refs.Memory)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to build restore config: %v", err)
@@ -363,7 +369,7 @@ func bumpRollbackNetworkGeneration(sandboxIP string) error {
 	return cubevs.BumpMvmVersion(ifindex)
 }
 
-func (s *service) buildRollbackRestoreConfig(ctx context.Context, sandboxID, metaDir string, currentRootfs, newRootfs, memory *storage.CowSnapshotObject) (string, error) {
+func (s *service) buildRollbackRestoreConfig(ctx context.Context, sandboxID string, annotations map[string]string, metaDir string, currentRootfs, newRootfs, memory *storage.CowSnapshotObject) (string, error) {
 	if currentRootfs == nil || currentRootfs.DevPath == "" {
 		return "", fmt.Errorf("current rootfs dev path is required")
 	}
@@ -382,10 +388,24 @@ func (s *service) buildRollbackRestoreConfig(ctx context.Context, sandboxID, met
 	if err != nil {
 		return "", err
 	}
+	// The template request is persisted in the sandbox metadata; never infer
+	// it from an already-computed effective value (that would lose a node
+	// switch change between create and rollback).
+	_, mergeableEffective := memoryMergeableDecision(
+		config.GetHostConf().Memory.Mergeable,
+		annotations,
+	)
+	if _, ok := annotations[constants.MasterAnnotationMemoryMergeable]; !ok {
+		log.G(ctx).Infof(
+			"rollback: sandbox %s has no template mergeable request; treating requested=false",
+			sandboxID,
+		)
+	}
 	cfg := rollbackRestoreConfig{
 		SourceURL:    fileURL(snapshotStateDir(metaDir)),
 		MemoryVolURL: memory.DevPath,
 		Disks:        disks,
+		Mergeable:    mergeableEffective,
 	}
 	body, err := json.Marshal(cfg)
 	if err != nil {

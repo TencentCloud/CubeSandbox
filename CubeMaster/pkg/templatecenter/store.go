@@ -592,6 +592,22 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	// longer exist).
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
+	// The KSM opt-in is a template-level value; strip the runtime key and any
+	// container-level copy so they cannot act as a second switch.
+	delete(cloned.Annotations, constants.CubeAnnotationRuntimeMemoryMergeable)
+	delete(cloned.Labels, constants.CubeAnnotationMemoryMergeable)
+	delete(cloned.Labels, constants.CubeAnnotationRuntimeMemoryMergeable)
+	for _, c := range cloned.Containers {
+		if c == nil {
+			continue
+		}
+		delete(c.Annotations, constants.CubeAnnotationMemoryMergeable)
+		delete(c.Annotations, constants.CubeAnnotationRuntimeMemoryMergeable)
+		if c.Image != nil {
+			delete(c.Image.Annotations, constants.CubeAnnotationMemoryMergeable)
+			delete(c.Image.Annotations, constants.CubeAnnotationRuntimeMemoryMergeable)
+		}
+	}
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	return cloned, nil
 }

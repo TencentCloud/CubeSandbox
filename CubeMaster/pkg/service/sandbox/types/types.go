@@ -702,6 +702,12 @@ type CreateTemplateFromImageReq struct {
 	// device topology.
 	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
 
+	// Mergeable opts this template's sandboxes into host KSM page dedup.
+	// Strict opt-in: omitted/false means no sandbox created from this
+	// template is marked mergeable. It is immutable after template creation;
+	// changing it requires creating a new template (new template ID).
+	Mergeable *bool `json:"mergeable,omitempty"`
+
 	// Backend is the CoW store (xfs｜s3) for this template and every
 	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.
 	Backend string `json:"backend,omitempty"`

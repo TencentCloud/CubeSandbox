@@ -149,6 +149,13 @@ impl SandBox {
         self.conf.app_snapshot_restore
     }
 
+    /// Template-level KSM request. Rollback restores are driven by a
+    /// Cubelet-supplied config; a mixed-version (host-only) Cubelet may only
+    /// send the node switch, so the shim ANDs it with this value.
+    pub fn memory_mergeable_requested(&self) -> bool {
+        self.conf.memory_mergeable_requested
+    }
+
     /// True when Cubelet recreates the same sandbox from a pause snapshot.
     /// Guest mounts (virtiofs + binds) are already in restored memory.
     pub fn pause_resume(&self) -> bool {
@@ -777,6 +784,7 @@ impl SandBox {
             .add_disks(&self.conf.disk)
             .add_virtiofs(&self.conf.virtiofs)
             .add_vsock(self.id.clone());
+        vc.mergeable = self.conf.memory_mergeable;
 
         // Enable ivshmem device when the template build path sets the internal annotation.
         if self.is_ivshmem_enabled() {
@@ -1000,6 +1008,7 @@ impl SandBox {
             disks: Some(disks),
             pmem: Some(pmems),
             vsock: Some(vsock),
+            mergeable: Some(self.conf.memory_mergeable),
             memory_vol_url: restore_memory_vol_url,
             ivshmem: if enable_ivshmem {
                 Some(Self::default_ivshmem_config(&self.id)?)

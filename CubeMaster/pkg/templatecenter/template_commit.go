@@ -175,6 +175,50 @@ func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, tem
 		source, err = loadSandboxCreateRequestFn(ctx, sandboxID)
 	} else {
 		source, err = cloneCreateRequest(override)
+		if err != nil {
+			return nil, err
+		}
+		// The template-level KSM opt-in is part of the source sandbox's
+		// immutable config. An override is a replacement request but cannot
+		// flip it: drop any caller-supplied value and inherit the source's.
+		// Inheritance is best-effort so legacy sandboxes without a spec can
+		// still be committed with an explicit override.
+		if source != nil {
+			for _, key := range []string{
+				constants.CubeAnnotationMemoryMergeable,
+				constants.CubeAnnotationRuntimeMemoryMergeable,
+			} {
+				delete(source.Annotations, key)
+				delete(source.Labels, key)
+				for _, c := range source.Containers {
+					if c == nil {
+						continue
+					}
+					delete(c.Annotations, key)
+					if c.Image != nil {
+						delete(c.Image.Annotations, key)
+					}
+				}
+			}
+			src, srcErr := loadSandboxCreateRequestFn(ctx, sandboxID)
+			if srcErr != nil {
+				if !errors.Is(srcErr, ErrSandboxRequestUnavailable) {
+					return nil, fmt.Errorf("load source sandbox request to inherit %s: %w", constants.CubeAnnotationMemoryMergeable, srcErr)
+				}
+				log.G(ctx).Warnf(
+					"commit override: source sandbox request is unavailable to inherit %s, treating it as false: %v",
+					constants.CubeAnnotationMemoryMergeable,
+					srcErr,
+				)
+			} else if src != nil {
+				if v, ok := src.Annotations[constants.CubeAnnotationMemoryMergeable]; ok {
+					if source.Annotations == nil {
+						source.Annotations = map[string]string{}
+					}
+					source.Annotations[constants.CubeAnnotationMemoryMergeable] = v
+				}
+			}
+		}
 	}
 	if err != nil {
 		return nil, err

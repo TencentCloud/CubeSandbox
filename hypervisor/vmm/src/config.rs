@@ -202,6 +202,10 @@ pub enum ValidationError {
     InvalidMtu(u16),
     /// native virtio-fs shouldn't have socket argument
     NativeVirtioFsSocket,
+    /// KSM-mergeable memory cannot be backed by shared memory
+    MergeableWithSharedMemory,
+    /// KSM-mergeable memory cannot be backed by hugepages
+    MergeableWithHugePages,
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -221,6 +225,12 @@ impl fmt::Display for ValidationError {
                 )
             }
             VhostUserMissingSocket => write!(f, "No socket provided when using vhost-user"),
+            MergeableWithSharedMemory => {
+                write!(f, "KSM-mergeable memory cannot be backed by shared memory")
+            }
+            MergeableWithHugePages => {
+                write!(f, "KSM-mergeable memory cannot be backed by hugepages")
+            }
             IommuUnsupported => write!(f, "Using an IOMMU without PCI support is unsupported"),
             VfioUnsupported => write!(f, "Using VFIO without PCI support is unsupported"),
             CpuTopologyZeroPart => write!(f, "No part of the CPU topology can be zero"),
@@ -2124,6 +2134,10 @@ pub struct RestoreConfig {
     pub pmem: Option<Vec<PmemConfig>>,
     #[serde(default)]
     pub dirty_log: bool,
+    /// Mark guest RAM mergeable for host KSM. `None` keeps the value already
+    /// present in the restored configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeable: Option<bool>,
     /// Optional existing memory blob path for reading memory range data from a
     /// separate volume.
     /// Accepts either an absolute path like `/dev/vdb` or a `file:///dev/vdb`
@@ -2139,9 +2153,10 @@ pub struct RestoreConfig {
 
 impl RestoreConfig {
     pub const SYNTAX: &'static str = "Restore from a VM snapshot. \
-        \nRestore parameters \"source_url=<source_url>,prefault=on|off,memory_vol_url=<memory_vol_url>\" \
+        \nRestore parameters \"source_url=<source_url>,prefault=on|off,mergeable=on|off,memory_vol_url=<memory_vol_url>\" \
         \n`source_url` should be a valid URL (e.g file:///foo/bar or tcp://192.168.1.10/foo) \
         \n`prefault` brings memory pages in when enabled (disabled by default) \
+        \n`mergeable` marks guest memory mergeable for host KSM when enabled (absent: keep the snapshot's value) \
         \n`memory_vol_url` optional existing memory blob path (for example /dev/vdb or file:///dev/vdb) \
         \nfor reading memory range data from a separate volume";
     pub fn parse(restore: &str) -> Result<Self> {
@@ -2149,6 +2164,7 @@ impl RestoreConfig {
         parser
             .add("source_url")
             .add("prefault")
+            .add("mergeable")
             .add("memory_vol_url");
         parser.parse(restore).map_err(Error::ParseRestore)?;
 
@@ -2161,6 +2177,10 @@ impl RestoreConfig {
             .map_err(Error::ParseRestore)?
             .unwrap_or(Toggle(false))
             .0;
+        let mergeable = parser
+            .convert::<Toggle>("mergeable")
+            .map_err(Error::ParseRestore)?
+            .map(|t| t.0);
         let dirty_log = parser
             .convert::<Toggle>("dirty_log")
             .map_err(Error::ParseRestore)?
@@ -2170,6 +2190,7 @@ impl RestoreConfig {
         let memory_vol_url = parser.get("memory_vol_url");
 
         Ok(RestoreConfig {
+            mergeable,
             source_url,
             prefault,
             disks: None,
@@ -2467,6 +2488,31 @@ impl VmConfig {
         self.payload
             .as_ref()
             .ok_or(ValidationError::KernelMissing)?;
+
+        // KSM operates on private anonymous pages; shared/hugepage-backed
+        // guest memory would either be ignored by madvise or bypass KSM's
+        // page accounting, so reject the combination instead of silently
+        // running unmerged.
+        if self.memory.mergeable {
+            if self.memory.shared
+                || self
+                    .memory
+                    .zones
+                    .as_ref()
+                    .is_some_and(|zones| zones.iter().any(|z| z.shared))
+            {
+                return Err(ValidationError::MergeableWithSharedMemory);
+            }
+            if self.memory.hugepages
+                || self
+                    .memory
+                    .zones
+                    .as_ref()
+                    .is_some_and(|zones| zones.iter().any(|z| z.hugepages))
+            {
+                return Err(ValidationError::MergeableWithHugePages);
+            }
+        }
 
         #[cfg(feature = "tdx")]
         {
@@ -2908,6 +2954,21 @@ mod tests {
                 .unwrap()
                 .remap_filter
         );
+    }
+
+    #[test]
+    fn test_restore_config_mergeable() -> Result<()> {
+        let base = "source_url=file:///tmp/snap";
+        assert_eq!(RestoreConfig::parse(base)?.mergeable, None);
+        assert_eq!(
+            RestoreConfig::parse(&format!("{base},mergeable=on"))?.mergeable,
+            Some(true)
+        );
+        assert_eq!(
+            RestoreConfig::parse(&format!("{base},mergeable=off"))?.mergeable,
+            Some(false)
+        );
+        Ok(())
     }
 
     #[test]
@@ -3566,6 +3627,60 @@ mod tests {
         };
 
         assert!(valid_config.validate().is_ok());
+
+        let mut mergeable_shared = valid_config.clone();
+        mergeable_shared.memory.mergeable = true;
+        mergeable_shared.memory.shared = true;
+        assert_eq!(
+            mergeable_shared.validate(),
+            Err(ValidationError::MergeableWithSharedMemory)
+        );
+
+        let mut mergeable_hugepages = valid_config.clone();
+        mergeable_hugepages.memory.mergeable = true;
+        mergeable_hugepages.memory.hugepages = true;
+        assert_eq!(
+            mergeable_hugepages.validate(),
+            Err(ValidationError::MergeableWithHugePages)
+        );
+
+        let mut mergeable_zone_shared = valid_config.clone();
+        mergeable_zone_shared.memory.mergeable = true;
+        mergeable_zone_shared.memory.zones = Some(vec![MemoryZoneConfig {
+            id: "zone0".to_string(),
+            size: 1024 * 1024,
+            file: None,
+            shared: true,
+            hugepages: false,
+            hugepage_size: None,
+            host_numa_node: None,
+            hotplug_size: None,
+            hotplugged_size: None,
+            prefault: false,
+        }]);
+        assert_eq!(
+            mergeable_zone_shared.validate(),
+            Err(ValidationError::MergeableWithSharedMemory)
+        );
+
+        let mut mergeable_zone_hugepages = valid_config.clone();
+        mergeable_zone_hugepages.memory.mergeable = true;
+        mergeable_zone_hugepages.memory.zones = Some(vec![MemoryZoneConfig {
+            id: "zone0".to_string(),
+            size: 1024 * 1024,
+            file: None,
+            shared: false,
+            hugepages: true,
+            hugepage_size: None,
+            host_numa_node: None,
+            hotplug_size: None,
+            hotplugged_size: None,
+            prefault: false,
+        }]);
+        assert_eq!(
+            mergeable_zone_hugepages.validate(),
+            Err(ValidationError::MergeableWithHugePages)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.serial.mode = ConsoleOutputMode::Tty;

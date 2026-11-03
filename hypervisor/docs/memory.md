@@ -55,6 +55,19 @@ on a single host, as it will reduce the amount of memory consumed by each VM.
 
 By default this option is turned off.
 
+`mergeable` is incompatible with `shared` and `hugepages` (including the
+per-zone `shared` / `hugepages` flags). KSM only merges private anonymous
+pages, so the VMM rejects the combination at validation time instead of
+silently running unmerged.
+
+File-backed memory (including the `MAP_PRIVATE` snapshot mapping used by the
+fast restore path) is already shared through the page cache; KSM only adds
+value for pages that become anonymous after a guest write.
+
+Merging and transparent huge pages compete for the same pages: a VMA marked
+`MADV_MERGEABLE` is not collapsed by khugepaged, so enabling `mergeable` with
+`thp=on` trades huge-page coverage for deduplication. Pick one per workload.
+
 _Example_
 
 ```

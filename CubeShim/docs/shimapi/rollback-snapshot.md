@@ -53,6 +53,12 @@ caller  ──UpdateTaskRequest { id, annotations }──▶  CubeShim (ttrpc)
   // [Optional] Enable dirty-log tracking after restore (default: false).
   "dirty_log": false,
 
+  // [Optional] Mark guest RAM mergeable for host KSM. Cubelet sends the
+  // effective value (node switch AND template request) explicitly. If the
+  // field is omitted, the shim treats it as false and also requires the
+  // sandbox's template-level opt-in before enabling merging.
+  "mergeable": false,
+
   // [Optional] Replace block devices after restore.
   "disks": [ /* DiskConfig, see below */ ],
 

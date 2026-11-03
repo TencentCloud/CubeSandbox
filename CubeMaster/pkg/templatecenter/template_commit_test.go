@@ -194,15 +194,28 @@ func TestPrepareTemplateCommitRequestLoadsSandboxSpec(t *testing.T) {
 	}
 }
 
-func TestPrepareTemplateCommitRequestUsesExplicitOverride(t *testing.T) {
+func TestPrepareTemplateCommitRequestOverrideCannotFlipMergeable(t *testing.T) {
 	origLoad := loadSandboxCreateRequestFn
 	defer func() { loadSandboxCreateRequestFn = origLoad }()
 	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
-		t.Fatal("sandbox request resolver should not be called for an explicit override")
-		return nil, nil
+		return &types.CreateCubeSandboxReq{
+			Annotations: map[string]string{
+				constants.CubeAnnotationMemoryMergeable: "true",
+			},
+		}, nil
 	}
 
-	override := &types.CreateCubeSandboxReq{InstanceType: "custom"}
+	override := &types.CreateCubeSandboxReq{
+		InstanceType: "custom",
+		Annotations: map[string]string{
+			constants.CubeAnnotationMemoryMergeable: "false",
+		},
+		Containers: []*types.Container{{
+			Annotations: map[string]string{
+				constants.CubeAnnotationMemoryMergeable: "true",
+			},
+		}},
+	}
 	got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new", override)
 	if err != nil {
 		t.Fatalf("prepareTemplateCommitRequest: %v", err)
@@ -212,6 +225,85 @@ func TestPrepareTemplateCommitRequestUsesExplicitOverride(t *testing.T) {
 	}
 	if got == override {
 		t.Fatal("explicit override should be cloned before normalization")
+	}
+	if got.Annotations[constants.CubeAnnotationMemoryMergeable] != "true" {
+		t.Fatalf("source mergeable must win over the override: %#v", got.Annotations)
+	}
+	if _, ok := got.Containers[0].Annotations[constants.CubeAnnotationMemoryMergeable]; ok {
+		t.Fatalf("container-level mergeable must not survive a commit override: %#v", got.Containers[0].Annotations)
+	}
+}
+
+func TestPrepareTemplateCommitRequestInheritsMergeableFromSandboxSpec(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+
+	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		return &types.CreateCubeSandboxReq{
+			Annotations: map[string]string{
+				constants.CubeAnnotationMemoryMergeable: "true",
+			},
+		}, nil
+	}
+
+	got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new",
+		&types.CreateCubeSandboxReq{InstanceType: "custom"})
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest: %v", err)
+	}
+	if got.Annotations[constants.CubeAnnotationMemoryMergeable] != "true" {
+		t.Fatalf("mergeable was not inherited from the source sandbox: %#v", got.Annotations)
+	}
+
+	// Even an explicit false in the override cannot flip the source value.
+	explicitFalse := &types.CreateCubeSandboxReq{
+		InstanceType: "custom",
+		Annotations: map[string]string{
+			constants.CubeAnnotationMemoryMergeable: "false",
+		},
+	}
+	got, err = prepareTemplateCommitRequest(context.Background(), "req-2", "sb-1", "tpl-new", explicitFalse)
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest: %v", err)
+	}
+	if got.Annotations[constants.CubeAnnotationMemoryMergeable] != "true" {
+		t.Fatalf("source mergeable=true must not be flipped by the override: %#v", got.Annotations)
+	}
+}
+
+func TestPrepareTemplateCommitRequestOverrideToleratesMissingSourceSpec(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		return nil, ErrSandboxRequestUnavailable
+	}
+
+	got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-legacy", "tpl-new",
+		&types.CreateCubeSandboxReq{
+			InstanceType: "custom",
+			Annotations: map[string]string{
+				constants.CubeAnnotationMemoryMergeable: "true",
+			},
+		})
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest should tolerate a missing source spec: %v", err)
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationMemoryMergeable]; ok {
+		t.Fatalf("an uninheritable mergeable must fail closed, got %#v", got.Annotations)
+	}
+}
+
+func TestPrepareTemplateCommitRequestOverrideFailsOnTransientSourceError(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		return nil, errors.New("database is temporarily unavailable")
+	}
+
+	_, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new",
+		&types.CreateCubeSandboxReq{InstanceType: "custom"})
+	if err == nil {
+		t.Fatal("a transient source read error must fail the commit instead of silently dropping mergeable")
 	}
 }
 

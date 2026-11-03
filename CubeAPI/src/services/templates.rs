@@ -159,6 +159,7 @@ impl TemplateService {
             cube_network_config,
             enable_ivshmem: body.enable_ivshmem,
             with_cube_ca: body.with_cube_ca,
+            mergeable: body.mergeable,
         };
 
         let resp = self
@@ -697,6 +698,7 @@ mod tests {
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
             enable_ivshmem: Some(true),
             with_cube_ca: Some(false),
+            mergeable: None,
         }
     }
 
@@ -932,6 +934,7 @@ mod tests {
         let mut req = sample_request();
         req.name = Some("team-slug/stable-python:v1".to_string());
         req.alias = Some("legacy-python".to_string());
+        req.mergeable = Some(true);
 
         service
             .create_template(req)
@@ -945,6 +948,7 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert_eq!(body["alias"], "stable-python");
+        assert_eq!(body["mergeable"], true);
     }
 
     #[tokio::test]

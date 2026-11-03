@@ -27,7 +27,7 @@ const ANNO_SNAPSHOT_ID: &str = "cube.shimapi.update.snapshot.id";
 ///   `source_url`  — URL of the snapshot to restore from (e.g. `file:///data/snapshots/foo`)
 ///
 /// Optional fields (replace backend devices after restore):
-///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`, `memory_vol_url`
+///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`, `mergeable`, `memory_vol_url`
 const ANNO_ROLLBACK_RESTORE_CONFIG: &str = "cube.shimapi.update.rollback.restore_config";
 
 /// (PauseToSnapshot) **Required.** JSON-encoded `PauseSnapshotConfig`.
@@ -73,6 +73,12 @@ struct RollbackRestoreConfig {
     #[serde(default)]
     pub dirty_log: bool,
 
+    /// Mark guest RAM mergeable for host KSM. Cubelet sends the effective
+    /// value explicitly. If absent, the shim treats it as false and still
+    /// requires the template-level opt-in before enabling merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeable: Option<bool>,
+
     /// Optional URL for reading memory range data from a separate volume.
     /// Mirrors RestoreConfig.memory_vol_url: when set, memory data is read
     /// from this path instead of source_url/<memory-ranges>.
@@ -83,6 +89,7 @@ struct RollbackRestoreConfig {
 impl From<RollbackRestoreConfig> for RestoreConfig {
     fn from(r: RollbackRestoreConfig) -> Self {
         RestoreConfig {
+            mergeable: r.mergeable,
             source_url: PathBuf::from(r.source_url),
             disks: r.disks,
             net: r.net,
@@ -183,6 +190,13 @@ pub struct UpdateOutcome {
 
 // ── action implementations ────────────────────────────────────────────────────
 
+/// Rollback must carry both consents: the Cubelet-sent effective value (which
+/// already includes the node switch) and the template-level request captured
+/// when the sandbox was created. A missing sent value is fail-closed.
+fn effective_rollback_mergeable(sent: Option<bool>, template_requested: bool) -> Option<bool> {
+    Some(sent.unwrap_or(false) && template_requested)
+}
+
 /// Roll back the running VM to a previously-taken snapshot.
 ///
 /// Steps:
@@ -201,8 +215,14 @@ async fn do_rollback_snapshot(
         .get(ANNO_ROLLBACK_RESTORE_CONFIG)
         .ok_or_else(|| format!("missing annotation: {}", ANNO_ROLLBACK_RESTORE_CONFIG))?;
 
-    let rollback_cfg: RollbackRestoreConfig = serde_json::from_str(raw)
+    let mut rollback_cfg: RollbackRestoreConfig = serde_json::from_str(raw)
         .map_err(|e| format!("invalid {}: {}", ANNO_ROLLBACK_RESTORE_CONFIG, e))?;
+
+    // A host-only Cubelet sends mergeable based only on the node switch. The
+    // template request is still available in the shim's sandbox config; require
+    // it as well so a mixed-version rollback cannot bypass the template gate.
+    rollback_cfg.mergeable =
+        effective_rollback_mergeable(rollback_cfg.mergeable, sb.memory_mergeable_requested());
 
     infof!(
         log,
@@ -325,6 +345,14 @@ pub async fn update_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_mergeable_requires_both_consents() {
+        assert_eq!(effective_rollback_mergeable(None, true), Some(false));
+        assert_eq!(effective_rollback_mergeable(Some(true), false), Some(false));
+        assert_eq!(effective_rollback_mergeable(Some(false), true), Some(false));
+        assert_eq!(effective_rollback_mergeable(Some(true), true), Some(true));
+    }
 
     #[test]
     fn strip_file_url_accepts_plain_and_file_scheme() {

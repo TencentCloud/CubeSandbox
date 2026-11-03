@@ -46,6 +46,11 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if req.EnableIvshmem != nil && *req.EnableIvshmem {
 		annotations[constants.CubeAnnotationEnableIvshmem] = "true"
 	}
+	// Strict opt-in: only an explicit true is persisted. Absence means the
+	// template never opts its sandboxes into KSM.
+	if req.Mergeable != nil && *req.Mergeable {
+		annotations[constants.CubeAnnotationMemoryMergeable] = "true"
+	}
 	rootVolume := &types.Volume{
 		Name: rootfsWritableVolumeName,
 		VolumeSource: &types.VolumeSource{
@@ -115,6 +120,10 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		for k, v := range req.ContainerOverrides.Annotations {
 			containerAnnotations[k] = v
 		}
+		// The template opt-in is a top-level (template-level) value; a
+		// container annotation must never be able to set or override it.
+		delete(containerAnnotations, constants.CubeAnnotationMemoryMergeable)
+		delete(containerAnnotations, constants.CubeAnnotationRuntimeMemoryMergeable)
 	}
 	container := &types.Container{
 		Name:            "cubebox-name-0",

@@ -10,11 +10,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 // Template replica backfill sweep.
@@ -120,21 +123,56 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		return err
 	}
 
-	var req types.CreateTemplateFromImageReq
-	if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil {
+	req, err := decodeBackfillJobRequest(job.RequestJSON, artifact.WritableLayerSize)
+	if err != nil {
 		return fmt.Errorf("decode job request snapshot: %w", err)
 	}
+	if strings.TrimSpace(req.InstanceType) == "" {
+		req.InstanceType = strings.TrimSpace(def.InstanceType)
+	}
+	if strings.TrimSpace(req.InstanceType) == "" {
+		req.InstanceType = cubeboxv1.InstanceType_cubebox.String()
+	}
 	// The generated create request and the writable layer size are persisted
-	// on the ARTIFACT row (finalizeRemoteArtifact), not on the job.
-	if strings.TrimSpace(artifact.GeneratedRequestJSON) == "" {
-		return fmt.Errorf("artifact %s has no generated request snapshot; redo the template once to materialize it", artifact.ArtifactID)
+	// on the ARTIFACT row (finalizeRemoteArtifact), not on the job. The
+	// artifact can be shared by multiple templates whose only difference is a
+	// non-fingerprinted field (mergeable), so never reuse the artifact's
+	// generated request verbatim: regenerate it from THIS job's request and
+	// fall back to the stored snapshot on any regeneration failure.
+	var generatedReq *types.CreateCubeSandboxReq
+	imageCfg, cfgErr := decodeImageConfigJSON(artifact.ImageConfigJSON)
+	if cfgErr == nil {
+		generatedReq, err = generateTemplateCreateRequest(ctx, req, artifact, imageCfg, artifact.MasterNodeIP)
+		if err != nil {
+			log.G(ctx).Warnf(
+				"template replica backfill: regenerate create request failed, falling back to the artifact snapshot: %v",
+				err,
+			)
+			generatedReq = nil
+			cfgErr = err
+		}
 	}
-	var generatedReq types.CreateCubeSandboxReq
-	if err := json.Unmarshal([]byte(artifact.GeneratedRequestJSON), &generatedReq); err != nil {
-		return fmt.Errorf("decode generated request snapshot: %w", err)
-	}
-	if strings.TrimSpace(req.WritableLayerSize) == "" {
-		req.WritableLayerSize = artifact.WritableLayerSize
+	if generatedReq == nil {
+		if strings.TrimSpace(artifact.GeneratedRequestJSON) == "" {
+			return fmt.Errorf("artifact %s has no usable generated request snapshot: %v", artifact.ArtifactID, cfgErr)
+		}
+		var stored types.CreateCubeSandboxReq
+		if err := json.Unmarshal([]byte(artifact.GeneratedRequestJSON), &stored); err != nil {
+			return fmt.Errorf("decode generated request snapshot: %w", err)
+		}
+		delete(stored.Annotations, constants.CubeAnnotationMemoryMergeable)
+		for _, c := range stored.Containers {
+			if c != nil {
+				delete(c.Annotations, constants.CubeAnnotationMemoryMergeable)
+			}
+		}
+		if req.Mergeable != nil && *req.Mergeable {
+			if stored.Annotations == nil {
+				stored.Annotations = map[string]string{}
+			}
+			stored.Annotations[constants.CubeAnnotationMemoryMergeable] = "true"
+		}
+		generatedReq = &stored
 	}
 
 	instanceType := def.InstanceType
@@ -155,8 +193,13 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	}
 
 	// Serialize against a live create/redo resume of the same artifact: the
-	// callback goroutine and the stuck-BUILT replay both take this lock.
-	release := acquireResumeArtifactLock(artifact.ArtifactID)
+	// callback goroutine and the stuck-BUILT replay both take the same
+	// fingerprint-keyed lock.
+	lockKey := strings.TrimSpace(artifact.TemplateSpecFingerprint)
+	if lockKey == "" {
+		lockKey = artifact.ArtifactID
+	}
+	release := acquireResumeArtifactLock(lockKey)
 	defer release()
 
 	logger := log.G(ctx).WithFields(map[string]any{
@@ -164,10 +207,33 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		"template_id": def.TemplateID,
 		"artifact_id": artifact.ArtifactID,
 	})
-	_, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing)
+	_, _, ready, failed, distErr := backfillDistribute(ctx, req, generatedReq, artifact, def.TemplateID, job.JobID, missing)
 	logger.Infof("template replica backfill: %d node(s) missing a READY replica, distributed ready=%d failed=%d err=%v",
 		len(missing), ready, failed, distErr)
 	return distErr
+}
+
+// decodeBackfillJobRequest rebuilds the Request envelope that
+// marshalTemplateImageJobRequest deliberately strips (Request=nil in the job
+// snapshot). Keeping the rest of the payload unnormalized lets older jobs
+// that lack fields current normalization requires still be backfilled; the
+// writable layer size is persisted on the artifact row, not the job.
+//
+// The regenerated request can differ from the artifact's persisted request
+// for templates with a custom container user; backfill only uses the
+// instance type and resource spec, so that difference is intentional.
+func decodeBackfillJobRequest(payload, artifactWritableLayerSize string) (*types.CreateTemplateFromImageReq, error) {
+	req := &types.CreateTemplateFromImageReq{}
+	if err := json.Unmarshal([]byte(payload), req); err != nil {
+		return nil, err
+	}
+	// A fresh request ID is safe here: backfillDistribute gates on existing
+	// replica rows, not on request-id idempotency.
+	req.Request = &types.Request{RequestID: uuid.NewString()}
+	if strings.TrimSpace(req.WritableLayerSize) == "" {
+		req.WritableLayerSize = artifactWritableLayerSize
+	}
+	return req, nil
 }
 
 // nodesWithoutReadyReplica returns the targets that do not hold a READY,

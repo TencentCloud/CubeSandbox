@@ -292,7 +292,16 @@ const (
 	AnnotationAppSnapshotRestore       = "cube.appsnapshot.restore"
 	AnnotationAppSnapshotContainerID   = "cube.appsnapshot.container.id"
 	AnnotationSnapshotDisable          = "cube.snapshot.disable"
-	AnnotationAppSnapshotFinished      = "cube.appsnapshot.finished"
+	// AnnotationMemoryMergeable is the runtime key read by the shim. Cubelet
+	// writes it explicitly "true"/"false" after combining the node switch
+	// (host.memory.mergeable) with the template request.
+	AnnotationMemoryMergeable = "cube.memory.mergeable"
+	// MasterAnnotationMemoryMergeable is the template-level request forwarded
+	// by CubeMaster from the template's canonical create request. It is not
+	// user-writable on the public Master sandbox-create path; direct Cubelet
+	// access is a trusted control-plane boundary.
+	MasterAnnotationMemoryMergeable = "cube.master.memory.mergeable"
+	AnnotationAppSnapshotFinished   = "cube.appsnapshot.finished"
 
 	DefaultSnapshotDir = "/usr/local/services/cubetoolbox/cube-snapshot"
 

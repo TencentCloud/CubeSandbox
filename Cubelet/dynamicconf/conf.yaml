@@ -44,6 +44,13 @@ host:
   gc:
     code_expiration_time: "72h"
     image_expiration_time: "24h"
+  # Node-level permission for guest RAM to be marked mergeable. It is not a
+  # blanket opt-in: the template must also set mergeable=true. This is an
+  # admission gate, not a kill switch; running VMs are only re-evaluated on
+  # their next create/restore. Enable only where ksmd is intentionally run
+  # and co-tenant exposure is acceptable.
+  memory:
+    mergeable: false
 
 meta_server_config:
   # Endpoints are injected by the installer (one-click / prepare-compute-role)

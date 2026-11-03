@@ -268,6 +268,12 @@ func registerTemplateReplicaForSnapshot(templateID, nodeID string, sizeBytes int
 	localcache.RegisterTemplateReplica(templateID, nodeID, sizeBytes)
 }
 
+// ErrSandboxRequestUnavailable marks a legacy sandbox for which the canonical
+// spec is missing and the base-template fallback cannot reconstruct a create
+// request. Callers may treat this as "no spec" rather than a transient error;
+// any other loader failure must be surfaced.
+var ErrSandboxRequestUnavailable = errors.New("sandbox create request unavailable")
+
 // loadSandboxCreateRequest is the authoritative way to get a sandbox's
 // create-time spec on master. It prefers the canonical sandboxspec record
 // (always present for sandboxes created after Phase 1 lands) and falls back to
@@ -288,7 +294,7 @@ func loadSandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxty
 	}
 	templateID := strings.TrimSpace(info.TemplateID)
 	if templateID == "" {
-		return nil, fmt.Errorf("sandbox %s has no spec record and no base template id; cannot reconstruct create request", sandboxID)
+		return nil, fmt.Errorf("%w: sandbox %s has no spec record and no base template id", ErrSandboxRequestUnavailable, sandboxID)
 	}
 	tmplReq, tmplErr := GetTemplateRequest(ctx, templateID)
 	if tmplErr != nil {

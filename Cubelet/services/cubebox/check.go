@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -251,4 +252,39 @@ func transformError(err error) error {
 		return ret.Err(errorcode.ErrorCode_InitCommandPathError, err.Error())
 	}
 	return ret.Err(errorcode.ErrorCode_NewTaskFailed, err.Error())
+}
+
+// stripReservedAnnotations removes internal keys that only Cubelet's spec
+// builders may write, so no caller-supplied annotation map on the public
+// Master path can carry them into the sandbox spec. Container-level master
+// keys are dropped too: the template request is an authoritative
+// sandbox-level value, never a container annotation.
+func stripReservedAnnotations(req *cubebox.RunCubeSandboxRequest) {
+	delete(req.Annotations, constants.AnnotationMemoryMergeable)
+	for _, c := range req.GetContainers() {
+		delete(c.GetAnnotations(), constants.AnnotationMemoryMergeable)
+		delete(c.GetAnnotations(), constants.MasterAnnotationMemoryMergeable)
+	}
+}
+
+// memoryMergeableDecision combines the node-level switch with the
+// template-level request forwarded by CubeMaster. The template key is the only
+// source of "requested"; the runtime key is written later by createContainers
+// and must never be read back as an input.
+func memoryMergeableDecision(hostAllowed bool, annotations map[string]string) (requested, effective bool) {
+	requested = strings.EqualFold(
+		strings.TrimSpace(annotations[constants.MasterAnnotationMemoryMergeable]),
+		"true",
+	)
+	return requested, hostAllowed && requested
+}
+
+// memoryMergeablePodAnnotations returns the canonical pair written onto the
+// pod OCI spec: the runtime value already includes the node switch, and the
+// template value is echoed so the shim can AND both keys a second time.
+func memoryMergeablePodAnnotations(requested, effective bool) map[string]string {
+	return map[string]string{
+		constants.AnnotationMemoryMergeable:       strconv.FormatBool(effective),
+		constants.MasterAnnotationMemoryMergeable: strconv.FormatBool(requested),
+	}
 }
