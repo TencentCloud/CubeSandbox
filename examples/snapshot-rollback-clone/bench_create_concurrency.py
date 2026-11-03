@@ -43,9 +43,15 @@ def parse_args():
 
 def prepare_snapshot() -> str:
     sb = Sandbox.create(template=TEMPLATE_ID)
-    snap = sb.create_snapshot()
-    sb.kill()
-    return snap.snapshot_id
+    try:
+        snap = sb.create_snapshot()
+        snap_id = snap.snapshot_id
+    finally:
+        try:
+            sb.kill()
+        except Exception:
+            pass
+    return snap_id
 
 
 def run_round(snap_id: str, concurrency: int) -> dict:
@@ -92,20 +98,26 @@ def main():
         print("-" * 95)
 
     snap_id = prepare_snapshot()
-
-    # warm-up: first restore eliminates page-cache cold-miss (~150 ms spike)
-    wb = Sandbox.create(template=snap_id)
-    wb.kill()
-    time.sleep(args.settle_secs)
-
-    walls, pers = [], []
-    for _ in range(args.rounds):
-        r = run_round(snap_id, args.concurrency)
-        walls.append(r["wall_ms"])
-        pers.append(r["per_ms"])
+    try:
+        # warm-up: first restore eliminates page-cache cold-miss (~150 ms spike)
+        wb = Sandbox.create(template=snap_id)
+        try:
+            wb.kill()
+        except Exception:
+            pass
         time.sleep(args.settle_secs)
 
-    Sandbox.delete_snapshot(snap_id)
+        walls, pers = [], []
+        for _ in range(args.rounds):
+            r = run_round(snap_id, args.concurrency)
+            walls.append(r["wall_ms"])
+            pers.append(r["per_ms"])
+            time.sleep(args.settle_secs)
+    finally:
+        try:
+            Sandbox.delete_snapshot(snap_id)
+        except Exception:
+            pass
 
     print(
         f"{args.concurrency:>11}  {args.concurrency:>7}  {args.rounds:>6}  "
