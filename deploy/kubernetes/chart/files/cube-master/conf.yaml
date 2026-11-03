@@ -12,6 +12,8 @@ common:
   # Tracks the master replica count.
   default_headless_service_nodes_num: {{ .Values.controlPlane.master.replicas | default 1 }}
   enable_check_com_net_id_param: false
+  # Per-call max concurrency for rootfs artifact distribution. Default 4.
+  # distribution_workers: 4
   # Template build wiring: CubeMaster no longer has a templatecenter_enabled
   # switch. Every template-from-image build is forwarded to CubeTemplateCenter.
   #
