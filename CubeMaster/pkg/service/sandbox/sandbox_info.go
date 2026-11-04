@@ -227,6 +227,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
+		one.CreateAt = sandbox.GetCreatedAt()
 		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
 		one.VolumeMounts = volumeMountsToContainerInfo(collectVolumeMountsFromContainers(sandbox.GetContainers()))
 		rsp.Data = append(rsp.Data, one)
@@ -331,6 +332,11 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		}
 		item = sandboxDataFromSpec(req.SandboxID, spec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
+		// The binding only knows when the pause happened; the durable spec
+		// carries when the sandbox was created.
+		if ts, err := sandboxspec.GetCreatedAt(ctx, req.SandboxID); err == nil && !ts.IsZero() {
+			item.CreateAt = ts.UnixNano()
+		}
 	}
 	setSandboxDataStatus(item, view.status)
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
