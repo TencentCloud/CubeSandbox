@@ -14,6 +14,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/moby/sys/mountinfo"
+	coremount "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/core/mount"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 )
@@ -60,8 +61,11 @@ func mountFreshStateTmpfs(stateDir string, sizeMB int) error {
 	if err != nil {
 		return fmt.Errorf("verify tmpfs mount %s: %w", stateDir, err)
 	}
-	if info == nil || info.FSType != "tmpfs" {
-		return fmt.Errorf("mount tmpfs:%v fail", stateDir)
+	if info == nil {
+		return fmt.Errorf("verify tmpfs mount %s: no visible mount", stateDir)
+	}
+	if info.FSType != "tmpfs" {
+		return fmt.Errorf("verify tmpfs mount %s: expected tmpfs, got %s", stateDir, info.FSType)
 	}
 	stdlog.Printf("mounted state tmpfs %s size=%dm", stateDir, sizeMB)
 	return nil
@@ -115,39 +119,33 @@ func lookupExactMount(mountpoint string) (*mountinfo.Info, error) {
 	// /proc/self/mountinfo contains the resolved path. A configured path such
 	// as /data/cubelet/state may traverse a /data symlink. Comparing the alias
 	// would miss the live tmpfs and cover all running shim state on restart.
-	absolute, err := filepath.Abs(mountpoint)
+	resolved, err := coremount.CanonicalizePath(mountpoint)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("canonicalize %s: %w", mountpoint, err)
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return nil, err
-	}
-	mountpoint = resolved
-	mounts, err := mountinfo.GetMounts(func(info *mountinfo.Info) (bool, bool) {
-		return info.Mountpoint != mountpoint, false
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(mounts) == 0 {
-		return nil, nil
-	}
-	if len(mounts) == 1 {
-		return mounts[0], nil
-	}
-	// Mount IDs are not an ordering contract. Ask the kernel which mount is
-	// visible at this path instead of selecting a hidden layer in a stack.
+	return lookupVisibleExactMount(resolved)
+}
+
+// lookupVisibleExactMount returns nil when the path is only a directory on
+// another mount, including when an ancestor covers an old exact mount.
+func lookupVisibleExactMount(mountpoint string) (*mountinfo.Info, error) {
 	mountID, err := visibleMountID(mountpoint)
 	if err != nil {
-		return nil, fmt.Errorf("resolve stacked mount at %s: %w", mountpoint, err)
+		return nil, fmt.Errorf("resolve visible mount at %s: %w", mountpoint, err)
+	}
+	mounts, err := mountinfo.GetMounts(nil)
+	if err != nil {
+		return nil, fmt.Errorf("read mount table: %w", err)
 	}
 	for _, info := range mounts {
 		if uint64(info.ID) == mountID {
+			if info.Mountpoint != mountpoint {
+				return nil, nil
+			}
 			return info, nil
 		}
 	}
-	return nil, fmt.Errorf("cannot identify the visible mount at %s", mountpoint)
+	return nil, fmt.Errorf("visible mount ID %d at %s is absent from mount table", mountID, mountpoint)
 }
 
 // visibleMountID prefers statx and uses fdinfo on kernels without mount IDs.

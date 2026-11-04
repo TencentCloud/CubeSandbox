@@ -5,8 +5,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -53,16 +53,7 @@ func TestRootSharedMountLookupFailureDoesNotMutateMounts(t *testing.T) {
 }
 
 func TestRootSharedMountSymlinkRestartDoesNotStack(t *testing.T) {
-	if os.Getenv("CUBELET_TEST_ROOT_MOUNT_CHILD") != "1" {
-		if os.Getenv("CUBELET_REQUIRE_MOUNT_TESTS") != "1" {
-			t.Skip("set CUBELET_REQUIRE_MOUNT_TESTS=1 for isolated Linux mount regression")
-		}
-		cmd := exec.Command("unshare", "--mount", "--propagation", "private", os.Args[0],
-			"-test.run=^TestRootSharedMountSymlinkRestartDoesNotStack$", "-test.v")
-		cmd.Env = append(os.Environ(), "CUBELET_TEST_ROOT_MOUNT_CHILD=1")
-		output, err := cmd.CombinedOutput()
-		require.NoError(t, err, "%s", output)
-		t.Logf("%s", output)
+	if runMountNamespace(t) {
 		return
 	}
 	dir := t.TempDir()
@@ -75,16 +66,20 @@ func TestRootSharedMountSymlinkRestartDoesNotStack(t *testing.T) {
 	root := filepath.Join(alias, "root")
 	require.NoError(t, ensureRootSharedMount(root))
 	defer unix.Unmount(real, 0)
-	before, err := lookupExactMount(root)
+	before := kernelMountID(t, root)
+	mounts, err := mountinfo.GetMounts(mountinfo.SingleEntryFilter(real))
 	require.NoError(t, err)
-	require.NotNil(t, before)
+	require.Len(t, mounts, 1)
+	require.Contains(t, mounts[0].Optional, "shared:")
 	marker := filepath.Join(real, "preserved-data")
 	require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
 	for i := 0; i < 16; i++ {
 		require.NoError(t, ensureRootSharedMount(root))
 		after, err := lookupExactMount(root)
 		require.NoError(t, err)
-		require.Equal(t, before.ID, after.ID)
+		require.Equal(t, before, uint64(after.ID))
+		require.Equal(t, before, kernelMountID(t, root))
+		require.Contains(t, after.Optional, "shared:")
 		mounts, err := mountinfo.GetMounts(nil)
 		require.NoError(t, err)
 		count := 0
@@ -98,4 +93,32 @@ func TestRootSharedMountSymlinkRestartDoesNotStack(t *testing.T) {
 	data, err := os.ReadFile(marker)
 	require.NoError(t, err)
 	require.Equal(t, "unchanged", string(data))
+}
+
+func TestRootSharedMountCoveredAncestor(t *testing.T) {
+	if runMountNamespace(t) {
+		return
+	}
+	for _, layers := range []int{1, 2} {
+		t.Run(fmt.Sprint(layers), func(t *testing.T) {
+			path := coveredMountPath(t, layers, true)
+			before := kernelMountID(t, path)
+			require.NoError(t, ensureRootSharedMount(path))
+			visible := kernelMountID(t, path)
+			require.NotEqual(t, before, visible, "the visible directory needs its own bind mount")
+			entries, err := mountinfo.GetMounts(nil)
+			require.NoError(t, err)
+			found := false
+			for _, entry := range entries {
+				if uint64(entry.ID) == visible {
+					require.Equal(t, path, entry.Mountpoint)
+					require.Contains(t, entry.Optional, "shared:")
+					found = true
+				}
+			}
+			require.True(t, found)
+			require.NoError(t, ensureRootSharedMount(path))
+			require.Equal(t, visible, kernelMountID(t, path))
+		})
+	}
 }
