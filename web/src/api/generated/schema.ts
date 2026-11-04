@@ -101,6 +101,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxID}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_sandbox_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxID}/pause": {
         parameters: {
             query?: never;
@@ -455,6 +471,29 @@ export interface components {
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
         };
+        /** @description Lifecycle history of a sandbox, oldest first. Also served after the sandbox is deleted; an unknown ID yields no events. Paging is best effort: with several CubeMaster replicas an event can be missed by a page that was read just before it was written. */
+        SandboxEvents: {
+            events: components["schemas"]["SandboxLifecycleEvent"][];
+            hasMore: boolean;
+            /** Format: int64 */
+            nextCursor?: number | null;
+        };
+        /** @description One sandbox lifecycle event. */
+        SandboxLifecycleEvent: {
+            /** @description `created`, `paused`, `resumed` or `killed`. */
+            event: string;
+            /**
+             * Format: int64
+             * @description Event ID, usable as the `cursor` of the next page.
+             */
+            id: number;
+            /** @description Why the sandbox was killed, e.g. `request` or `timeout` (on `killed` events). */
+            reason?: string | null;
+            /** @description Template the sandbox was created from (on `created` events). */
+            templateID?: string | null;
+            /** Format: date-time */
+            timestamp: string;
+        };
         /** @description Structured log entry (v2 logs). */
         SandboxLogEntry: {
             fields: {
@@ -632,6 +671,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionMatrixView"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_sandbox_events: {
+        parameters: {
+            query?: {
+                /** @description ID of the last event already read. */
+                cursor?: number;
+                /** @description Page size, 1 to 500; 0 or absent means 100. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sandbox lifecycle history, oldest first; kept after the sandbox is deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SandboxEvents"];
+                };
+            };
+            /** @description Invalid parameters */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description Unexpected backend error */

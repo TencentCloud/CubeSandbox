@@ -42,6 +42,7 @@ const (
 	CADownloadActionPrefix                 = "/ca/"
 	ListInventoryAction                    = "/listinventory"
 	SandboxLogsAction                      = "/sandbox/logs"
+	SandboxEventsAction                    = "/sandbox/events"
 	VolumeAction                           = "/volume"
 )
 

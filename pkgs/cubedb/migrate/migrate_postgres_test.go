@@ -476,3 +476,35 @@ func TestPostgres_Upgrade_RuntimeActiveBinding(t *testing.T) {
 		t.Errorf("after idempotent re-run: active count=%d, want 3", activeCount)
 	}
 }
+
+// TestPostgres_SandboxEventCreatedAtKeepsInstant guards the column type of
+// t_cube_sandbox_event.created_at. A plain timestamp drops the offset on
+// write, so an event recorded by a CubeMaster outside UTC reads back hours
+// off; timestamptz keeps the instant.
+func TestPostgres_SandboxEventCreatedAtKeepsInstant(t *testing.T) {
+	env := newPostgres(t)
+	defer env.teardown()
+	db := openPGDB(t, env.dsn)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := migrate.Run(ctx, db, "postgres", pgTestSessionLocker()); err != nil {
+		t.Fatalf("migrate.Run: %v", err)
+	}
+	now := time.Now().In(time.FixedZone("UTC+8", 8*60*60))
+	var id int64
+	if err := db.QueryRowContext(ctx,
+		`INSERT INTO t_cube_sandbox_event (sandbox_id, event, created_at) VALUES ($1, $2, $3) RETURNING id`,
+		"sb-tz", "created", now).Scan(&id); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	var got time.Time
+	if err := db.QueryRowContext(ctx,
+		`SELECT created_at FROM t_cube_sandbox_event WHERE id = $1`, id).Scan(&got); err != nil {
+		t.Fatalf("read event: %v", err)
+	}
+	if skew := got.Sub(now); skew > 2*time.Second || skew < -2*time.Second {
+		t.Fatalf("created_at read back %s for %s (skew %s)", got.UTC(), now.UTC(), skew)
+	}
+}

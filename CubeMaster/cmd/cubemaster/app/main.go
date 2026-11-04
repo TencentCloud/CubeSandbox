@@ -28,6 +28,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent"
+	sandboxeventhook "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxevent/hook"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/server"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
@@ -219,6 +221,12 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
 	}
 
+	// Lifecycle history is best effort: a missing table disables it until a
+	// background retry succeeds, and never blocks serving sandboxes.
+	if err := sandboxeventhook.Init(ctx, db.Init(config.GetDbConfig())); err != nil {
+		log.G(ctx).Warnf("sandboxevent init fail (non-fatal, retrying in background): %v", err)
+	}
+
 	scheduler.InitScheduler(ctx)
 
 	if err := sandbox.Init(ctx, cfg); err != nil {
@@ -282,7 +290,18 @@ func graceFullStop() {
 	case <-done:
 		CubeLog.WithContext(ctx).Error("graceFullStop succ")
 	}
+
+	// After the tasks, so in-flight destroys have recorded their kills, and
+	// with a budget of its own so slow tasks cannot leave no time to write
+	// the queued events.
+	eventCtx, eventCancel := context.WithTimeout(context.Background(), sandboxEventStopTimeout)
+	defer eventCancel()
+	sandboxevent.Stop(eventCtx)
 }
+
+// sandboxEventStopTimeout bounds writing the queued lifecycle events on
+// shutdown; a full queue is a handful of batch inserts.
+const sandboxEventStopTimeout = 5 * time.Second
 
 func serveDebug(ctx context.Context, cfg *config.Config) error {
 	if cfg.Common.Debug.Address != "" {

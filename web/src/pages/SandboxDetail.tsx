@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { sandboxApi } from '@/api/client';
 import { ApiError } from '@/lib/api';
@@ -16,6 +16,7 @@ import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
 import { cn, formatBytes, formatCpu, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { SandboxLifecycleTimeline } from '@/components/SandboxLifecycleTimeline';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -38,7 +39,6 @@ function formatLogTime(ts: string): string {
 // ── Main page ───────────────────────────────────────────────────────────────
 export default function SandboxDetailPage() {
   const { sandboxID = '' } = useParams();
-  const nav = useNavigate();
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxDetail');
 
@@ -57,8 +57,9 @@ export default function SandboxDetailPage() {
   useEffect(() => {
     if (isUnavailable) {
       void qc.invalidateQueries({ queryKey: ['sandboxes'] });
+      void qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     }
-  }, [isUnavailable, qc]);
+  }, [isUnavailable, qc, sandboxID]);
 
   // ── Logs ────────────────────────────────────────────────────────────────
   const logs = useQuery({
@@ -86,9 +87,12 @@ export default function SandboxDetailPage() {
     mutationFn: () => sandboxApi.kill(sandboxID),
     onMutate: () => setActionError(null),
     onError: onLifecycleError,
+    // Stay on the page: the detail query then 404s into the ended view,
+    // where the timeline shows the kill.
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
-      nav('/sandboxes');
+      qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
+      qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     },
   });
   const pause = useMutation({
@@ -98,6 +102,7 @@ export default function SandboxDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
+      qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     },
   });
   const resume = useMutation({
@@ -107,6 +112,7 @@ export default function SandboxDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
+      qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     },
   });
 
@@ -133,6 +139,8 @@ export default function SandboxDetailPage() {
               </Button>
             </div>
           </Card>
+          {/* A deleted sandbox keeps its lifecycle history. */}
+          <SandboxLifecycleTimeline sandboxID={sandboxID} live={false} hideWhenEmpty />
         </div>
       );
     }
@@ -167,6 +175,8 @@ export default function SandboxDetailPage() {
             <Field label={t('fields.ends')} value={formatDateTime(data.endAt)} />
           </dl>
         </Card>
+
+        <SandboxLifecycleTimeline sandboxID={sandboxID} live={false} />
 
         <div className="flex justify-center">
           <Button variant="outline" asChild>
@@ -308,6 +318,8 @@ export default function SandboxDetailPage() {
           </dl>
         </Card>
       </div>
+
+      <SandboxLifecycleTimeline sandboxID={sandboxID} live />
 
       {/* ── Logs ── */}
       <Card>
