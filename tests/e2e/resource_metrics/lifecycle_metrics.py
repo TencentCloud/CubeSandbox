@@ -49,6 +49,7 @@ from cubesandbox import ApiError, Config, Sandbox, Template  # noqa: E402
 GUEST_CPU = "cubesandbox_guest_workload_cpu_usage_seconds_total"
 GUEST_MEMORY = "cubesandbox_guest_workload_memory_current_bytes"
 GUEST_EPOCH = "cubesandbox_guest_workload_metrics_epoch"
+GUEST_EPOCH_START = "cubesandbox_guest_workload_metrics_epoch_start_time_seconds"
 HOST_CPU = "cubesandbox_host_sandbox_cpu_usage_seconds_total"
 
 
@@ -361,7 +362,26 @@ def main() -> int:
         result["samples"]["before_rollback"] = before_rollback
         result["samples"]["after_rollback"] = after_rollback
 
-        log("validating pause removes series and resume keeps the rollback epoch")
+        log("running a short CPU load before pause to pin the counter reset")
+        run_workload(
+            sandbox,
+            "import time\nend=time.perf_counter()+1.5\nx=0\nwhile time.perf_counter()<end:\n x=(x+1)%1000003\nprint(x)",
+            timeout=30,
+        )
+        before_pause = wait_for(
+            "guest CPU before pause",
+            args.poll_timeout,
+            lambda: (
+                values
+                if (values := snapshot(args.metrics_url, sandbox_id, require_guest=True))
+                and values[GUEST_CPU] > 0.5
+                else None
+            ),
+        )
+        assert isinstance(before_pause, dict)
+        result["samples"]["before_pause"] = before_pause
+
+        log("validating pause removes series and resume starts a new metrics epoch")
         sandbox.pause(timeout=args.poll_timeout)
         wait_for(
             "resource series removal while paused",
@@ -376,8 +396,16 @@ def main() -> int:
             lambda: snapshot(args.metrics_url, sandbox_id, require_guest=True),
         )
         assert isinstance(after_resume, dict)
-        if after_resume[GUEST_EPOCH] != after_rollback[GUEST_EPOCH]:
-            raise AssertionError("pause/resume changed the guest metrics epoch")
+        if after_resume[GUEST_EPOCH_START] <= after_rollback[GUEST_EPOCH_START]:
+            raise AssertionError(
+                "pause/resume did not start a new guest metrics epoch: "
+                f"start_time {after_resume[GUEST_EPOCH_START]} <= {after_rollback[GUEST_EPOCH_START]}"
+            )
+        if after_resume[GUEST_CPU] >= before_pause[GUEST_CPU]:
+            raise AssertionError(
+                "guest cumulative CPU did not restart after resume: "
+                f"{after_resume[GUEST_CPU]} >= {before_pause[GUEST_CPU]}"
+            )
         result["samples"]["after_resume"] = after_resume
 
         log("destroying sandbox and waiting for cached series cleanup")
