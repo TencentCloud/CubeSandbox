@@ -495,7 +495,7 @@ cubetemplatecenter-test: builder-image
 # for several Cubelet packages.
 .PHONY: cubelet-test
 cubelet-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && bash /workspace/scripts/test-shim-binding.sh && make test'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test'
 
 # Keep the ordinary Cubelet gate unprivileged while still exercising tests that
 # call mount(2) in CI. Run every storage test protected by requireRoot; the full

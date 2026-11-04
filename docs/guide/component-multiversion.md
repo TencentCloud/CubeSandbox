@@ -15,9 +15,6 @@ The four components:
 | `cube-agent` | The agent inside the guest |
 | `cube-kernel-scf` | Guest kernel |
 
-For direct CubeMaster create requests, `cube.master.components.cube-shim.version` selects the shim inventory version. Ordinary templates keep an operator-configured pin ahead of caller and replica values; snapshot creates discard the caller's pin and use the selected replica's binding. This changes only the host shim, not the sealed guest image, kernel or agent. An existing sandbox restart keeps its persisted shim version; updating a template pin affects new instances. A missing selected version fails creation instead of silently using another shim.
-
-
 ## Background: why multi-version
 
 Previously a node had only one copy of each component (the current toolbox). When the upgrader bumped it, the version changed. The trouble is that a template is built against a specific version. Say the node bumps `cube-image` from v1 to v2:

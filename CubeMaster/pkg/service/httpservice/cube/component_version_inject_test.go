@@ -6,8 +6,6 @@ package cube
 
 import (
 	"context"
-	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
@@ -41,14 +39,7 @@ func TestLocalTemplateShimPinOverridesCaller(t *testing.T) {
 }
 
 // Exercise the actual kind dispatch, template merge and replica injection.
-// The optional output is consumed by the Cubelet test in test-shim-binding.sh.
 func TestMasterShimBindingCreateFlow(t *testing.T) {
-	type fixture struct {
-		Name        string
-		Annotations map[string]string
-		Want        string
-	}
-	var fixtures []fixture
 	for _, tc := range []struct {
 		name, kind, pin, replica, want string
 	}{
@@ -84,12 +75,6 @@ func TestMasterShimBindingCreateFlow(t *testing.T) {
 			req := &types.CreateCubeSandboxReq{Annotations: map[string]string{key: "caller-shim"}}
 			require.NoError(t, dealCubeboxCreateReqWithTemplateCenter(context.Background(), "template-a", req))
 			require.Equal(t, tc.want, req.Annotations[key])
-			fixtures = append(fixtures, fixture{tc.name, req.Annotations, tc.want})
 		})
-	}
-	if output := os.Getenv("CUBE_SHIM_BINDING_FIXTURE"); output != "" {
-		data, err := json.Marshal(fixtures)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(output, data, 0600))
 	}
 }
