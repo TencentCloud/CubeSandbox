@@ -183,9 +183,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
+              value: "$(POD_IP)"
             - name: REDIS_HOST
               value: {{ $redisHost | quote }}
             - name: REDIS_PORT
@@ -250,9 +248,7 @@ spec:
             - name: CUBE_PROXY_RESUME_URL
               value: {{ printf "http://$(POD_IP):%v" .Values.cubeProxy.adminPort | quote }}
             - name: CUBE_PROXY_NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
+              value: "$(POD_IP)"
             - name: CUBE_PROXY_VERSION
               value: {{ .Values.images.proxy.tag | quote }}
             - name: CUBE_PROXY_HEARTBEAT_INTERVAL_MS
