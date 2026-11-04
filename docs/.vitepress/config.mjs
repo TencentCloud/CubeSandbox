@@ -156,7 +156,6 @@ export default withMermaid(defineConfig({
             text: 'Community',
             items: [
               { text: 'Developer', link: '/dev/' },
-              { text: 'Roadmap', link: '/guide/roadmap' },
               { text: 'Cube 100 Program', link: '/guide/cube100' },
               { text: 'Contributing', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING.md' }
             ]
@@ -226,6 +225,7 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
+                    { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' },
                     { text: 'Python', link: '/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/guide/tutorials/sdk/nodejs' }
@@ -289,8 +289,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
-                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
-                { text: 'QualityStatus', link: '/guide/quality-status' }
+                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
             },
             {
@@ -386,7 +385,6 @@ export default withMermaid(defineConfig({
             text: '社区',
             items: [
               { text: '开发者', link: '/zh/dev/' },
-              { text: '路线图', link: '/zh/guide/roadmap' },
               { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
               { text: '参与贡献', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING_zh.md' }
             ]
@@ -456,6 +454,7 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
+                    { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' },
                     { text: 'Python', link: '/zh/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/zh/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/zh/guide/tutorials/sdk/nodejs' }
@@ -519,8 +518,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
-                { text: '性能基准', link: '/zh/guide/performance-benchmark' },
-                { text: '质量状态', link: '/zh/guide/quality-status' }
+                { text: '性能基准', link: '/zh/guide/performance-benchmark' }
               ]
             },
             {
