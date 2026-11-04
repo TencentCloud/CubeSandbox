@@ -84,7 +84,10 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 	})
 	p.ApplyFunc(setTemplateLocalityCache, func(string, []ReplicaStatus) {})
 	p.ApplyFunc(registerTemplateReplicaForSnapshot, func(string, string, int64) {})
-	p.ApplyFunc(setTemplateRequestCache, func(string, *sandboxtypes.CreateCubeSandboxReq) error { return errors.New("warn-only cache") })
+	p.ApplyFunc(setTemplateRequestCache, func(_ string, req *sandboxtypes.CreateCubeSandboxReq) error {
+		require.Equal(t, "snapshot-name", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias])
+		return errors.New("warn-only cache")
+	})
 	p.ApplyFunc(failSnapshotCreateJob, func(_ context.Context, _, _, _, _ string, _ *cubebox.CommitSandboxResponse, e error, _ string) error {
 		return e
 	})
@@ -95,7 +98,7 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 		return &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil
 	})
 	req := &sandboxtypes.CreateCubeSandboxReq{Request: &sandboxtypes.Request{RequestID: "req"}, InstanceType: "cubebox", Backend: backend, Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}}
-	_, err := executeSnapshotCreateJob(parent, &sandboxtypes.TemplateImageJobInfo{JobID: "job", TemplateID: "snap-new", Status: JobStatusPending}, req, "sb", "node", "127.0.0.1")
+	_, err := executeSnapshotCreateJob(parent, &sandboxtypes.TemplateImageJobInfo{JobID: "job", TemplateID: "snap-new", Status: JobStatusPending}, req, "sb", "node", "127.0.0.1", "snapshot-name")
 	require.Equal(t, "original-template", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	return err
 }
@@ -130,7 +133,7 @@ func TestCheckpointFinalBoundary(t *testing.T) {
 				default:
 					t.Fatal("missing checkpoint")
 				}
-				_, e = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip")
+				_, e = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip", "")
 				require.NoError(t, e)
 				require.Empty(t, p.Events())
 			})
@@ -172,7 +175,7 @@ func TestCheckpointUploadResult(t *testing.T) {
 			// Seed the persisted READY result of the controlled storage dependency.
 			require.NoError(t, db.Create(&models.SnapshotRecord{SnapshotID: "snap-new", OriginNodeIP: "127.0.0.1", Backend: "s3", Status: "READY", RemoteStatus: constants.RemoteStatusInProgress}).Error)
 			webhooktest.ReconcileUpload(t, db, constants.SnapshotTableName, "snap-new", terminal, p)
-			_, err = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip")
+			_, err = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip", "")
 			require.NoError(t, err)
 			require.Len(t, p.Events(), 1)
 		})

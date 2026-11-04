@@ -41,6 +41,7 @@ func createWebhookFixture(t *testing.T, kind, failure string) interface{} {
 		}
 		r := templateResolveResultFromContext(ctx)
 		r.TemplateID, r.Kind = "trusted-template", kind
+		req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = "trusted-alias"
 		req.Labels["template-secret"] = "not-user"
 		req.Labels["user_token"] = "template-overwrite"
 		return nil
@@ -89,6 +90,7 @@ func TestCreateWebhookUsesTrustedFinalResult(t *testing.T) {
 					return
 				}
 				require.Equal(t, 200, result.(*types.CreateCubeSandboxRes).Ret.RetCode)
+				require.Equal(t, "trusted-alias", result.(*types.CreateCubeSandboxRes).ExtInfo[constants.CubeAnnotationAppSnapshotTemplateAlias])
 				require.Len(t, p.Events(), 1)
 				captured := <-p.Events()
 				data, err := webhook.MapToProtocol(captured)
