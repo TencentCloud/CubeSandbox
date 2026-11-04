@@ -180,6 +180,34 @@ describe("Template.build", () => {
     };
     await Template.build({ image: "python:3.11-slim", config: makeConfig() });
   });
+
+  it("forwards backend into the request body when provided", async () => {
+    handler = (req) => {
+      const body = JSON.parse(req.body.toString());
+      expect(body.backend).toBe("s3");
+      return { status: 200, json: { jobID: "job-backend", templateID: "tpl-backend" } };
+    };
+    await Template.build({ image: "python:3.11-slim", backend: "s3", config: makeConfig() });
+  });
+
+  it("forwards user into the request body when provided", async () => {
+    handler = (req) => {
+      const body = JSON.parse(req.body.toString());
+      expect(body.user).toBe("1000:1000");
+      return { status: 200, json: { jobID: "job-user", templateID: "tpl-user" } };
+    };
+    await Template.build({ image: "python:3.11-slim", user: "1000:1000", config: makeConfig() });
+  });
+
+  it("omits backend when undefined", async () => {
+    handler = (req) => {
+      const body = JSON.parse(req.body.toString());
+      expect(body.backend).toBeUndefined();
+      expect(body.user).toBeUndefined();
+      return { status: 200, json: { jobID: "j", templateID: "t" } };
+    };
+    await Template.build({ image: "python:3.11-slim", config: makeConfig() });
+  });
 });
 
 describe("Template.rebuild", () => {

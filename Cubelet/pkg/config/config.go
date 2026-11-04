@@ -76,6 +76,19 @@ type HostConfigGC struct {
 	ImageExpirationTime string `yaml:"image_expiration_time"`
 }
 
+// DefaultLivenessProbeConf gates the envd health check used when a
+// restarting sandbox has no user probe.
+type DefaultLivenessProbeConf struct {
+	Enabled *bool `yaml:"enabled"`
+}
+
+// SandboxStatusReportConf tunes the CubeMaster status client.
+type SandboxStatusReportConf struct {
+	Enabled   *bool         `yaml:"enabled"`
+	Interval  time.Duration `yaml:"interval"`
+	BatchSize int           `yaml:"batch_size"`
+}
+
 type CommonConf struct {
 	CommonTimeout         time.Duration `yaml:"common_timeout"`
 	LogLevel              string        `yaml:"log_level"`
@@ -88,6 +101,22 @@ type CommonConf struct {
 	CommandTimeout        time.Duration `yaml:"command_timeout"`
 
 	DisableHostCgroup bool `yaml:"disable_host_cgroup"`
+
+	// DisableRestartPolicy stops new liveness probes and restart loops.
+	// In-flight loops exit at their next check. Default false (enabled).
+	DisableRestartPolicy bool `yaml:"disable_restart_policy"`
+
+	// DisableRecoverLivenessProbes skips reattaching probes after this
+	// process starts. A sandbox that is already dead still restarts.
+	DisableRecoverLivenessProbes bool `yaml:"disable_recover_liveness_probes"`
+
+	// DefaultLivenessProbe injects GET :49983/health only when the sandbox
+	// has envd and the user did not set a probe. Nil means enabled.
+	DefaultLivenessProbe *DefaultLivenessProbeConf `yaml:"default_liveness_probe"`
+
+	// SandboxStatusReport posts restart status to CubeMaster. Nil means
+	// enabled, once a second, 100 items per batch.
+	SandboxStatusReport *SandboxStatusReportConf `yaml:"sandbox_status_report"`
 
 	DisableVmCgroup bool `yaml:"disable_vm_cgroup"`
 
@@ -106,6 +135,8 @@ type CommonConf struct {
 
 	DisableHostNetfile bool `yaml:"disable_host_netfile"`
 
+	// OperatorAllowOut is an administrator-owned IPv4 CIDR allowlist. Restart Cubelet after changes.
+	OperatorAllowOut   []string      `yaml:"operator_allow_out"`
 	DefaultDNSServers  []string      `yaml:"default_dns_servers"`
 	DefaultDNSSearches []string      `yaml:"default_dns_searches"`
 	DefaultDNSOptions  []string      `yaml:"default_dns_options"`
@@ -171,6 +202,12 @@ func validate(cfg *Config) error {
 		}
 	}
 	if cfg.Common != nil {
+		for _, cidr := range cfg.Common.OperatorAllowOut {
+			ip, _, err := net.ParseCIDR(cidr)
+			if err != nil || ip.To4() == nil {
+				return fmt.Errorf("invalid common.operator_allow_out IPv4 CIDR: %q", cidr)
+			}
+		}
 		for _, dns := range cfg.Common.DefaultDNSServers {
 			if net.ParseIP(dns) == nil {
 				return fmt.Errorf("invalid common.default_dns_servers entry: %q", dns)
@@ -253,6 +290,7 @@ func preHandle(config *Config) (*Config, error) {
 	if config.Common.GetBDFByIfNameCmd == "" {
 		config.Common.GetBDFByIfNameCmd = "/usr/local/services/AdamPlugins-1.0/snhost_snic_sdk/cath/bm/tools/get_bdf_by_ifname"
 	}
+	config.Common.OperatorAllowOut = normalizeStringList(config.Common.OperatorAllowOut)
 	config.Common.DefaultDNSServers = normalizeStringList(config.Common.DefaultDNSServers)
 	config.Common.DefaultDNSSearches = normalizeStringList(config.Common.DefaultDNSSearches)
 	config.Common.DefaultDNSOptions = normalizeStringList(config.Common.DefaultDNSOptions)
@@ -322,6 +360,52 @@ func GetConfig() *Config {
 //go:noinline
 func GetCommon() *CommonConf {
 	return cfg.Common
+}
+
+// DefaultLivenessProbeEnabled is true unless config turns the envd probe off.
+func DefaultLivenessProbeEnabled() bool {
+	c := GetConfig()
+	if c == nil || c.Common == nil || c.Common.DefaultLivenessProbe == nil || c.Common.DefaultLivenessProbe.Enabled == nil {
+		return true
+	}
+	return *c.Common.DefaultLivenessProbe.Enabled
+}
+
+// RecoverLivenessProbesDisabled reports the debug switch that skips
+// reattaching probes after process start.
+func RecoverLivenessProbesDisabled() bool {
+	c := GetConfig()
+	if c == nil || c.Common == nil {
+		return false
+	}
+	return c.Common.DisableRecoverLivenessProbes
+}
+
+// StatusReportEnabled is true unless sandbox_status_report.enabled is false.
+func StatusReportEnabled() bool {
+	c := GetConfig()
+	if c == nil || c.Common == nil || c.Common.SandboxStatusReport == nil || c.Common.SandboxStatusReport.Enabled == nil {
+		return true
+	}
+	return *c.Common.SandboxStatusReport.Enabled
+}
+
+// StatusReportInterval is the flush period. The default is one second.
+func StatusReportInterval() time.Duration {
+	c := GetConfig()
+	if c == nil || c.Common == nil || c.Common.SandboxStatusReport == nil || c.Common.SandboxStatusReport.Interval <= 0 {
+		return time.Second
+	}
+	return c.Common.SandboxStatusReport.Interval
+}
+
+// StatusReportBatchSize is how many sandboxes one POST carries. The default is 100.
+func StatusReportBatchSize() int {
+	c := GetConfig()
+	if c == nil || c.Common == nil || c.Common.SandboxStatusReport == nil || c.Common.SandboxStatusReport.BatchSize <= 0 {
+		return 100
+	}
+	return c.Common.SandboxStatusReport.BatchSize
 }
 
 func defaultHostConf() *HostConf {

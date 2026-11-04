@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -23,8 +24,16 @@ type fakeCubeVSAdapter struct {
 	deleteMetadataErr      error
 	deletePortMappingErr   error
 	updatedPolicies        []updatedPolicy
+	installedPolicies      []cubevs.MVMOptions
 	updateTAPPolicyErr     error
 	recorder               *createOrderRecorder
+	attachFilterMu         sync.Mutex
+	attachFilterCalls      []uint32
+	attachFilterErr        error
+	attachFilterEntered    chan struct{}
+	attachFilterRelease    chan struct{}
+	attachInFlight         int
+	attachMaxInFlight      int
 }
 
 // updatedPolicy records one UpdateTAPPolicy call so tests can assert both that
@@ -34,14 +43,16 @@ type updatedPolicy struct {
 	opts    cubevs.MVMOptions
 }
 
-func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
+func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, opts cubevs.MVMOptions) error {
+	f.installedPolicies = append(f.installedPolicies, opts)
 	if f.recorder != nil {
 		f.recorder.record("cubevs_tap")
 	}
 	return nil
 }
 
-func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
+func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, _ uint32, opts cubevs.MVMOptions) error {
+	f.installedPolicies = append(f.installedPolicies, opts)
 	f.upsertTAPDeviceCalls = append(f.upsertTAPDeviceCalls, ifindex)
 	return nil
 }
@@ -90,8 +101,46 @@ func (f *fakeCubeVSAdapter) DeleteTAPDeviceMetadata(ifindex uint32, _ net.IP) er
 	return nil
 }
 
-func (f *fakeCubeVSAdapter) AttachFilter(_ uint32) error {
-	return nil
+func (f *fakeCubeVSAdapter) AttachFilter(ifindex uint32) error {
+	if f.attachFilterEntered != nil || f.attachFilterRelease != nil {
+		f.attachFilterMu.Lock()
+		f.attachInFlight++
+		if f.attachInFlight > f.attachMaxInFlight {
+			f.attachMaxInFlight = f.attachInFlight
+		}
+		f.attachFilterMu.Unlock()
+		if f.attachFilterEntered != nil {
+			f.attachFilterEntered <- struct{}{}
+		}
+		if f.attachFilterRelease != nil {
+			<-f.attachFilterRelease
+		}
+		f.attachFilterMu.Lock()
+		f.attachInFlight--
+		f.attachFilterMu.Unlock()
+	}
+	f.attachFilterMu.Lock()
+	defer f.attachFilterMu.Unlock()
+	f.attachFilterCalls = append(f.attachFilterCalls, ifindex)
+	return f.attachFilterErr
+}
+
+func (f *fakeCubeVSAdapter) attachFilterCount() int {
+	if f == nil {
+		return 0
+	}
+	f.attachFilterMu.Lock()
+	defer f.attachFilterMu.Unlock()
+	return len(f.attachFilterCalls)
+}
+
+func (f *fakeCubeVSAdapter) attachFilterMaxInFlight() int {
+	if f == nil {
+		return 0
+	}
+	f.attachFilterMu.Lock()
+	defer f.attachFilterMu.Unlock()
+	return f.attachMaxInFlight
 }
 
 func (f *fakeCubeVSAdapter) InstallTAPDefaultDenyPolicy(ifindex uint32) error {

@@ -17,6 +17,7 @@
 ///   - GET    /cube/snapshot                          list snapshots (paginated)
 ///   - DELETE /cube/snapshot/{snapshot_id}            delete snapshot (synchronous terminal result)
 ///   - POST   /cube/sandbox/{sandbox_id}/rollback     rollback sandbox to snapshot (synchronous terminal result)
+///   - POST   /cube/sandbox/{sandbox_id}/fork         fork sandbox into N copies (server-side, one snapshot)
 ///   - GET    /cube/operation/{operation_id}          query operation/audit record (not required for snapshot completion)
 ///
 /// New APIs required (❌ not yet on CubeMaster — pending implementation):
@@ -265,22 +266,6 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
-    /// GET /cube/snapshot/{snapshot_id} — fetch a single snapshot.
-    pub async fn get_snapshot(
-        &self,
-        snapshot_id: &str,
-        include_request: bool,
-    ) -> Result<SnapshotDetailResponse, CubeMasterError> {
-        validate_path_segment("snapshot_id", snapshot_id)?;
-        let url = format!("{}/cube/snapshot/{}", self.base_url, snapshot_id);
-        let mut builder = self.inner.get(&url);
-        if include_request {
-            builder = builder.query(&[("include_request", "true")]);
-        }
-        let resp = builder.send().await.map_err(CubeMasterError::Http)?;
-        parse_response(resp).await
-    }
-
     /// DELETE /cube/snapshot/{snapshot_id} — delete a snapshot.
     pub async fn delete_snapshot(
         &self,
@@ -307,6 +292,27 @@ impl CubeMasterClient {
     ) -> Result<RollbackResponse, CubeMasterError> {
         validate_path_segment("sandbox_id", sandbox_id)?;
         let url = format!("{}/cube/sandbox/{}/rollback", self.base_url, sandbox_id);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/sandbox/{sandbox_id}/fork — fork a running sandbox into N
+    /// copies from a single snapshot. CubeMaster performs the fork server-side
+    /// (one snapshot, N bounded-concurrency derives) and returns one result per
+    /// requested fork.
+    pub async fn fork_sandbox(
+        &self,
+        sandbox_id: &str,
+        req: &ForkSandboxRequest,
+    ) -> Result<ForkSandboxResponse, CubeMasterError> {
+        validate_path_segment("sandbox_id", sandbox_id)?;
+        let url = format!("{}/cube/sandbox/{}/fork", self.base_url, sandbox_id);
         let resp = self
             .inner
             .post(&url)
@@ -696,6 +702,11 @@ pub enum SandboxStatus {
     Paused,
     Pausing,
     Stopped,
+    /// No backend status currently maps here: `into_first_sandbox` produces
+    /// only `Running`, `Paused`, `Pausing`, `Stopped`, and `Unknown` from
+    /// CubeMaster's container codes, and nothing deserializes this enum from a
+    /// string. Kept so a future backend status can be classified as a failure
+    /// without changing the public state vocabulary.
     Error,
     #[serde(other)]
     Unknown,
@@ -765,6 +776,67 @@ pub struct CreateSandboxRequest {
     /// CoW backend (xfs | s3). Omitted keeps the historical Cubelet default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_backoff: Option<RestartBackoffConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_probe: Option<CubeLivenessProbe>,
+}
+
+/// Wire shape of cubebox.RestartBackoffConfig (proto JSON names).
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct RestartBackoffConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_interval_second: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_interval_second: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_restarts: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable_duration_second: Option<i32>,
+}
+
+/// Wire shape of cubebox.LivenessProbe.
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct CubeLivenessProbe {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_handler: Option<CubeProbeHandler>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_delay_second: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_second: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_timeout_second: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct CubeProbeHandler {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_get: Option<CubeHTTPGet>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_socket: Option<CubeTCPSocket>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct CubeHTTPGet {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub port: i32,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct CubeTCPSocket {
+    pub port: i32,
 }
 
 /// Network egress control sent to CubeMaster.
@@ -1089,6 +1161,58 @@ pub struct ListSandboxResponse {
     #[serde(default, alias = "data")]
     pub sandboxes: Vec<SandboxInfo>,
     pub ret: RetCode,
+    /// Number of nodes this window actually covered
+    /// (`rsp.Size = len(nodeList)`), which is what says whether another window
+    /// remains.
+    #[serde(default, alias = "Size")]
+    pub size: Option<i32>,
+    /// Last node `Index` this window covered — the backend's own cursor, and
+    /// what the walker advances on (`end_idx + 1` is the next node's position
+    /// in both `IndexByPage` branches, `node.go`). It is a node *row id*
+    /// (`Index: int(elem.ID)`), **not** a position, so it must not be compared
+    /// against the healthy-node count the backend also reports as `Total` to
+    /// decide whether more nodes remain — `size` answers that.
+    #[serde(default, alias = "EndIdx")]
+    pub end_idx: Option<i32>,
+}
+
+/// Restart bookkeeping from CubeMaster `restart_status`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CubeRestartStatus {
+    #[serde(default, alias = "restartPolicy")]
+    pub restart_policy: String,
+    #[serde(default, alias = "restartState")]
+    pub restart_state: String,
+    #[serde(default, alias = "restartCount")]
+    pub restart_count: i32,
+    #[serde(default, alias = "lastExitCode")]
+    pub last_exit_code: Option<i32>,
+    #[serde(default, alias = "lastExitReason")]
+    pub last_exit_reason: String,
+    #[serde(
+        default,
+        alias = "lastRestartAt",
+        deserialize_with = "deserialize_optional_datetime"
+    )]
+    pub last_restart_at: Option<DateTime<Utc>>,
+    #[serde(
+        default,
+        alias = "lastSuccessfulRestartAt",
+        deserialize_with = "deserialize_optional_datetime"
+    )]
+    pub last_successful_restart_at: Option<DateTime<Utc>>,
+    #[serde(
+        default,
+        alias = "lastFailedRestartAt",
+        deserialize_with = "deserialize_optional_datetime"
+    )]
+    pub last_failed_restart_at: Option<DateTime<Utc>>,
+    #[serde(
+        default,
+        alias = "nextRestartAt",
+        deserialize_with = "deserialize_optional_datetime"
+    )]
+    pub next_restart_at: Option<DateTime<Utc>>,
 }
 
 /// One sandbox entry as returned by /cube/sandbox/list.
@@ -1101,7 +1225,7 @@ pub struct SandboxInfo {
     pub status: String,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub started_at: Option<DateTime<Utc>>,
-    /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
+    /// Unix nanoseconds from Cubelet sandbox.created_at — used as fallback for started_at.
     #[serde(default)]
     pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
@@ -1122,6 +1246,8 @@ pub struct SandboxInfo {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub volume_mounts: Vec<CubeVolumeMount>,
+    #[serde(default)]
+    pub restart_status: Option<CubeRestartStatus>,
 }
 
 // ─── Get single sandbox ────────────────────────────────────────────────────
@@ -1160,6 +1286,8 @@ pub struct GetSandboxDataItem {
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub volume_mounts: Vec<CubeVolumeMount>,
+    #[serde(default)]
+    pub restart_status: Option<CubeRestartStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1207,6 +1335,7 @@ pub struct SandboxDetail {
     pub annotations: HashMap<String, String>,
     pub labels: HashMap<String, String>,
     pub volume_mounts: Vec<CubeVolumeMount>,
+    pub restart_status: Option<CubeRestartStatus>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1442,6 +1571,7 @@ impl GetSandboxResponse {
             annotations: item.annotations,
             labels: item.labels,
             volume_mounts: item.volume_mounts,
+            restart_status: item.restart_status,
         })
     }
 }
@@ -1686,16 +1816,6 @@ pub struct ListSnapshotsResponse {
     pub next_token: String,
 }
 
-/// GET /cube/snapshot/{snapshot_id} — response.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct SnapshotDetailResponse {
-    #[serde(rename = "RequestID", alias = "requestID", default)]
-    pub request_id: String,
-    pub ret: RetCode,
-    pub snapshot: SnapshotResource,
-}
-
 /// DELETE /cube/snapshot/{snapshot_id} — request body.
 #[derive(Debug, Serialize)]
 pub struct DeleteSnapshotRequest {
@@ -1799,6 +1919,80 @@ impl RollbackResponse {
 // only consumer of `/cube/operation/{id}` left in the system is human audit.
 // If a programmatic consumer comes back, restore the wrapper next to the
 // commented-out method on `CubeMasterClient`.
+
+// ─── POST /cube/sandbox/{sandbox_id}/fork ─────────────────────────────────
+//
+// Mirror of CubeMaster's server-side fork (pkg/service/httpservice/cube/fork.go):
+// it snapshots the source sandbox once, derives `count` sandboxes from that
+// snapshot with bounded concurrency, and returns one result per requested fork
+// (each either a created sandbox or a business error). CubeAPI forwards the
+// whole `results` array verbatim and only re-shapes each element into the
+// E2B-compatible `{ sandbox | error }` model (see services::sandboxes::fork).
+
+/// POST /cube/sandbox/{sandbox_id}/fork — request body.
+#[derive(Debug, Serialize)]
+pub struct ForkSandboxRequest {
+    #[serde(
+        rename = "request_id",
+        skip_serializing_if = "String::is_empty",
+        default
+    )]
+    pub request_id: String,
+    /// Number of fork sandboxes to derive (1..=100).
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub count: i32,
+    /// Optional idle TTL (seconds) applied to each forked sandbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
+}
+
+fn is_zero(value: &i32) -> bool {
+    *value == 0
+}
+
+/// One created sandbox inside a successful fork result — a slim mirror of
+/// CubeMaster's `types.CreateCubeSandboxRes`. Only the fields CubeAPI needs to
+/// assemble an E2B `Sandbox` are surfaced.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ForkSandbox {
+    #[serde(default)]
+    pub sandbox_id: String,
+    #[serde(default)]
+    pub sandbox_ip: String,
+    #[serde(default)]
+    pub host_id: String,
+    #[serde(default)]
+    pub host_ip: String,
+    /// Per-sandbox traffic token, populated only when the derived sandbox is
+    /// not publicly reachable (`allowPublicTraffic=false`).
+    #[serde(default)]
+    pub traffic_access_token: Option<String>,
+    /// Generic extension metadata echoed by CubeMaster (may carry envd version).
+    #[serde(default)]
+    pub ext_info: HashMap<String, String>,
+}
+
+/// One element of the `results` array: exactly one of `sandbox` or `ret` is
+/// present, encoding per-fork success/failure independently.
+#[derive(Debug, Deserialize)]
+pub struct ForkSandboxResult {
+    #[serde(default)]
+    pub sandbox: Option<ForkSandbox>,
+    #[serde(default)]
+    pub ret: Option<RetCode>,
+}
+
+/// POST /cube/sandbox/{sandbox_id}/fork — response envelope.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ForkSandboxResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub results: Vec<ForkSandboxResult>,
+}
 
 // Returns the trimmed slice of `value` if it contains any non-whitespace
 // characters, otherwise `None`.
@@ -2077,6 +2271,9 @@ pub struct CreateTemplateFromImageReq {
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
+    /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// Minimal container overrides for template creation.
@@ -2094,6 +2291,28 @@ pub struct CreateTemplateContainerOverrides {
     pub envs: Option<Vec<CreateTemplateEnv>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_config: Option<DnsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<TemplateSecurityContext>,
+}
+
+/// Numeric uid/gid wrapper expected by CubeMaster `Int64Value`.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct TemplateInt64Value {
+    pub value: i64,
+}
+
+/// User fields for a template container. Privileged stays on so the guest can
+/// still set up devices; only the process uid/gid changes.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct TemplateSecurityContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<TemplateInt64Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_group: Option<TemplateInt64Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_username: Option<String>,
 }
 
 /// CPU / memory resources for template container.

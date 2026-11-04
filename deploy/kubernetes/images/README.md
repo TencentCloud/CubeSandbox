@@ -243,7 +243,7 @@ behavior.
   uses the just-built base instead of pulling a drifting external image.
 - `cube-egress-net` is a Kubernetes helper image that owns the host TPROXY
   iptables/ip-rule setup for CubeEgress. It packages the upstream
-  `CubeEgress/scripts/cube-proxy-iptables-init.sh` plus a small idempotent
+  `CubeEgress/scripts/cube-egress-iptables-init.sh` plus a small idempotent
   entrypoint that waits for `cube-dev`, applies rules, and removes them on
   termination.
 - `cube-s3lvol` is the optional cube-node sidecar that runs the CubeS3lvol

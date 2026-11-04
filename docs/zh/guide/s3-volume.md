@@ -81,7 +81,7 @@ with Sandbox.create(volume_mounts={"/data": VolumeMount(vol, read_only=True)}) a
     sb.files.read("/data/model.bin")
 ```
 
-### 配合跨机快照使用
+### 配合跨机迁移使用
 
 S3 Volume 的数据位于共享对象存储，因此沙箱在其他节点恢复时可以重新 Attach。它与 VM Snapshot backend 是两套独立配置：
 
@@ -90,7 +90,7 @@ S3 Volume 的数据位于共享对象存储，因此沙箱在其他节点恢复�
 - FromSnap 先从 VM Snapshot 包恢复 VM/rootfs 状态，再 Attach 已有 Volume ID。Volume 数据不会回到快照时刻；恢复后的沙箱看到当前内容。
 - 如果 Volume 已删除、目标节点缺少 driver，或者 S3 Attach 失败，沙箱创建会在 VM 启动前失败。
 
-VM 兼容性和跨机调度条件见[跨机快照](./cross-node-snapshot.md)。
+VM 兼容性和跨机调度条件见[跨机迁移](./cross-node-snapshot/requirements.md)。
 
 ---
 

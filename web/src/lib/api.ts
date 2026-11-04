@@ -88,7 +88,12 @@ async function refreshAccessToken(): Promise<string | null> {
 
 // --- SDK API (CubeAPI via CubeOps proxy, JWT Bearer auth) ---
 
-export async function api<T = unknown>(path: string, init: ApiInit = {}): Promise<T> {
+interface ApiResponse<T = unknown> {
+  data: T;
+  headers: Headers;
+}
+
+async function request<T = unknown>(path: string, init: ApiInit = {}): Promise<ApiResponse<T>> {
   const { params, headers, ...rest } = init;
   const query = buildQuery(params);
 
@@ -131,7 +136,22 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
       `${resp.status} ${resp.statusText}`;
     throw new ApiError(resp.status, String(msg), body);
   }
-  return body as T;
+  return { data: body as T, headers: resp.headers };
+}
+
+export async function api<T = unknown>(path: string, init: ApiInit = {}): Promise<T> {
+  const { data } = await request<T>(path, init);
+  return data;
+}
+
+/// Like `api`, but also surfaces the response headers so callers can read
+/// continuation cursors such as `x-next-token` that ride in headers rather
+/// than in the body.
+export async function apiWithHeaders<T = unknown>(
+  path: string,
+  init: ApiInit = {},
+): Promise<{ data: T; headers: Headers }> {
+  return request<T>(path, init);
 }
 
 // --- Ops API (CubeOps, JWT Bearer auth) ---

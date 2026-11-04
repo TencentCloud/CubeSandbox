@@ -124,7 +124,10 @@ type CommonConf struct {
 	// Named with a Value suffix to avoid colliding with the TemplateCenterAddr()
 	// method on Config. Access via Config.TemplateCenterAddr() which handles the
 	// env > yaml priority.
-	TemplateCenterAddrValue         string          `yaml:"template_center_addr"`
+	TemplateCenterAddrValue string `yaml:"template_center_addr"`
+	// DistributionWorkers is the max concurrency of one rootfs artifact
+	// distribution call. Default 4.
+	DistributionWorkers             int             `yaml:"distribution_workers"`
 	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`
 	EnableAllCollectSandboxMemory   bool            `yaml:"enable_all_collect_sandbox_memory"`
 	FilterErrMsgErrorCode           map[int]bool    `yaml:"filter_err_msg_error_code"`
@@ -218,6 +221,9 @@ type RedisConf struct {
 	// MasterName enables Redis Sentinel mode when non-empty. SentinelNodes
 	// must list one or more sentinel endpoints (host:port, comma-separated).
 	MasterName string `yaml:"master_name"`
+
+	// ClusterNodes enables native Redis Cluster; DB must be zero.
+	ClusterNodes string `yaml:"cluster_nodes"`
 
 	// SentinelNodes lists sentinel endpoints used when MasterName is set.
 	SentinelNodes string `yaml:"sentinel_nodes"`
@@ -567,9 +573,11 @@ type CubeletConf struct {
 	DestroyConcurentLimit int64                `yaml:"destroy_concurent_limit"`
 	ExposedPortList       []string             `yaml:"exposed_port_list"`
 	EnableExposedPort     bool                 `yaml:"enable_exposed_port"`
-	DisableRedisProxyPort bool                 `yaml:"disable_redis_proxy_port"`
-	MaxDelayInSecond      int64                `yaml:"max_delay_in_second"`
-	BackoffRetryDelay     time.Duration        `yaml:"backoff_retry_delay"`
+	// MaxRestartsCap clamps restart_backoff.max_restarts. 0 means no cap.
+	MaxRestartsCap        int32         `yaml:"max_restarts_cap"`
+	DisableRedisProxyPort bool          `yaml:"disable_redis_proxy_port"`
+	MaxDelayInSecond      int64         `yaml:"max_delay_in_second"`
+	BackoffRetryDelay     time.Duration `yaml:"backoff_retry_delay"`
 }
 
 type GrpcConf struct {
@@ -650,6 +658,12 @@ type SoftDeletePurgeConf struct {
 // configure the path; we'd rather try the canonical path than refuse
 // to start).
 const DefaultCubeEgressCAPath = "/etc/cube/ca/cube-root-ca.crt"
+
+// DefaultDistributionWorkers is the default max concurrency for pushing a
+// rootfs artifact to cubelet nodes (common.distribution_workers), matching
+// the historical hardcoded behavior. Exported so templatecenter can derive
+// its own fallback from this single source of truth.
+const DefaultDistributionWorkers = 4
 
 type AppHookConfig struct {
 	PrestartHookByEnvKeys map[string][]*types.Hook `yaml:"prestart_hook_by_env_keys"`
@@ -833,6 +847,10 @@ func preComHandleConf(config *Config) error {
 
 	if config.Common.AsyncTaskWorkerNum == 0 {
 		config.Common.AsyncTaskWorkerNum = runtime.NumCPU()
+	}
+	if config.Common.DistributionWorkers <= 0 {
+		// Template rootfs artifact distribution concurrency.
+		config.Common.DistributionWorkers = DefaultDistributionWorkers
 	}
 	if config.Common.DefaultHeadlessServiceNodesNum == 0 {
 		config.Common.DefaultHeadlessServiceNodesNum = 1

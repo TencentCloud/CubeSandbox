@@ -33,10 +33,17 @@ const (
 	runTemplateConfigFile  = "config.json"
 )
 
+// Recovery lookups are replaceable so tests can verify backend isolation
+// without accessing host mounts.
+var (
+	recoverySnapshotKindRoot     = storage.SnapshotKindRoot
+	findGlobalJFSRuntimeSnapshot = storage.FindJFSGlobalRuntimeSnapshot
+)
+
 type RunTemplateManager interface {
 	SetInstanceType(instanceType string)
 
-	EnsureCubeRunTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error)
+	EnsureCubeRunTemplate(ctx context.Context, templateID, backend string) (*templatetypes.LocalRunTemplate, error)
 
 	ListLocalTemplates(context.Context) (map[string]*templatetypes.LocalRunTemplate, error)
 }
@@ -92,6 +99,11 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 		log.G(ctx).WithFields(CubeLog.Fields{
 			"err": err.Error(),
 		}).Warn("failed to recover local templates from xfs snapshot root")
+	}
+	if err := h.recoverBackendMetadataHomes(ctx, cow.BackendJFS, "cubebox", ""); err != nil {
+		log.G(ctx).WithFields(CubeLog.Fields{
+			"err": err.Error(),
+		}).Warn("failed to recover local templates from jfs snapshot root")
 	}
 	if err := h.recoverS3LocalTemplates(ctx, ""); err != nil {
 		log.G(ctx).WithFields(CubeLog.Fields{
@@ -183,7 +195,7 @@ func (h *localCubeRunTemplateManager) removeMissingLocalTemplates(ctx context.Co
 	return nil
 }
 
-func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
+func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID, backend string) (*templatetypes.LocalRunTemplate, error) {
 	h.lock.Lock()
 	delete(h.unusedTemplateMap, templateID)
 	h.lock.Unlock()
@@ -198,23 +210,42 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 	if cloned != nil {
 		return cloned, nil
 	}
-	if err := h.recoverLocalTemplatesFromSnapshotRoot(ctx, constants.DefaultSnapshotDir, templateID); err != nil {
-		log.G(ctx).WithFields(CubeLog.Fields{
-			"template_id": templateID,
-			"err":         err.Error(),
-		}).Warn("failed to recover template from snapshot root")
+	backend, err = cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, err
 	}
-	if err := h.recoverBackendMetadataHomes(ctx, cow.BackendXFS, "cubebox", templateID); err != nil {
-		log.G(ctx).WithFields(CubeLog.Fields{
-			"template_id": templateID,
-			"err":         err.Error(),
-		}).Warn("failed to recover template from xfs snapshot root")
+	reportRecoveryError := func(err error) {
+		if err != nil {
+			log.G(ctx).WithFields(CubeLog.Fields{
+				"template_id": templateID,
+				"backend":     backend,
+				"err":         err.Error(),
+			}).Warn("failed to recover run template")
+		}
 	}
-	if err := h.recoverS3LocalTemplates(ctx, templateID); err != nil {
-		log.G(ctx).WithFields(CubeLog.Fields{
-			"template_id": templateID,
-			"err":         err.Error(),
-		}).Warn("failed to recover template from s3 snapshot root")
+	// Only inspect the requested backend. In particular, a local XFS miss
+	// must never wait for a shared JuiceFS mount or scan other nodes.
+	switch backend {
+	case cow.BackendXFS:
+		reportRecoveryError(h.recoverLocalTemplatesFromSnapshotRoot(ctx, constants.DefaultSnapshotDir, templateID))
+		if cloned, err := h.cloneAndHydrate(templateID); err != nil || cloned != nil {
+			return cloned, err
+		}
+		reportRecoveryError(h.recoverBackendMetadataHomes(ctx, backend, "cubebox", templateID))
+	case cow.BackendS3:
+		reportRecoveryError(h.recoverS3LocalTemplates(ctx, templateID))
+	case cow.BackendJFS:
+		reportRecoveryError(h.recoverBackendMetadataHomes(ctx, backend, "cubebox", templateID))
+		if cloned, err := h.cloneAndHydrate(templateID); err != nil || cloned != nil {
+			return cloned, err
+		}
+		// Cross-node runtime snapshots use Master's registered home; older
+		// JFS callers may locate the immutable package in another node's tree.
+		if home, ok := storage.RegisteredJFSRuntimeSnapshotHome(ctx, templateID); ok {
+			reportRecoveryError(h.recoverMetadataHomes(ctx, filepath.Dir(home), "cubebox", templateID))
+		} else if global, err := findGlobalJFSRuntimeSnapshot(templateID); err == nil {
+			reportRecoveryError(h.recoverMetadataHomes(ctx, filepath.Dir(global.Home), "cubebox", templateID))
+		}
 	}
 	cloned, err = h.cloneAndHydrate(templateID)
 	if err != nil {
@@ -350,7 +381,7 @@ func metadataHomeConfigPath(home string) string {
 func (h *localCubeRunTemplateManager) recoverBackendMetadataHomes(ctx context.Context, backend, media, templateID string) error {
 	var first error
 	for _, kind := range []string{storage.SnapshotKindNormal, storage.SnapshotKindPause} {
-		if err := h.recoverMetadataHomes(ctx, storage.SnapshotKindRoot(backend, kind), media, templateID); err != nil && first == nil {
+		if err := h.recoverMetadataHomes(ctx, recoverySnapshotKindRoot(backend, kind), media, templateID); err != nil && first == nil {
 			first = err
 		}
 	}

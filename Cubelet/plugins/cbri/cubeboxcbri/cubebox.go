@@ -183,7 +183,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		}
 		specOpts = append(specOpts, oci.WithAnnotations(virtiofsAnnotations))
 
-	} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok {
+	} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.WantsSnapshotRestore() {
 
 		var snapBasePath, snapSpecPath string
 
@@ -371,7 +371,7 @@ func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cu
 
 				constants.AnnotationPropagationContainerMounts: virtiofs.GenPropagationContainerDirs(),
 			}))
-		} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok {
+		} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.WantsSnapshotRestore() {
 
 			snapshotContainerID := templateID
 			if innerIndex, ok := ctx.Value(constants.KCubeIndexContext).(string); ok {
@@ -673,7 +673,7 @@ func mountRestoreMetadata(ctx context.Context, flowOpts *workflow.CreateContext,
 
 func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {
 	seen := map[string]struct{}{}
-	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3} {
+	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3, cow.BackendJFS} {
 		backend = strings.TrimSpace(backend)
 		if backend == "" {
 			continue

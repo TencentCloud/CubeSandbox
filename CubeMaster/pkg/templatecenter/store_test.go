@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -462,6 +463,119 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 	}
 	if first.RequestID == second.RequestID {
 		t.Fatalf("expected a fresh runtime requestID per fetch, got duplicate %q", first.RequestID)
+	}
+}
+
+func TestGetTemplateRequestSurfacesAliasAnnotation(t *testing.T) {
+	templateID := "tpl-runtime-alias"
+	invalidateTemplateCaches(templateID)
+	defer invalidateTemplateCaches(templateID)
+
+	cached := &sandboxtypes.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "python-runtime",
+		},
+	}
+	if err := setTemplateRequestCache(templateID, cached); err != nil {
+		t.Fatalf("setTemplateRequestCache returned error: %v", err)
+	}
+
+	req, err := GetTemplateRequest(context.Background(), templateID)
+	if err != nil {
+		t.Fatalf("GetTemplateRequest returned error: %v", err)
+	}
+	if got := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; got != "python-runtime" {
+		t.Fatalf("expected alias annotation python-runtime, got %q", got)
+	}
+}
+
+func TestGetTemplateRequestStampsSnapshotDisplayNameAsAlias(t *testing.T) {
+	snapshotID := "snap-alias-stamp"
+	invalidateTemplateCaches(snapshotID)
+	defer invalidateTemplateCaches(snapshotID)
+
+	// The stored snapshot request still carries the source template's alias.
+	stored := &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "source-template-alias",
+		},
+		Labels: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "source-template-alias",
+		},
+	}
+	storedJSON, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored request: %v", err)
+	}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, id string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{
+			SnapshotID:  id,
+			DisplayName: "my-snap",
+			RequestJSON: string(storedJSON),
+			Status:      StatusReady,
+		}, nil
+	})
+
+	req, err := GetTemplateRequest(context.Background(), snapshotID)
+	if err != nil {
+		t.Fatalf("GetTemplateRequest returned error: %v", err)
+	}
+	if got := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; got != "my-snap" {
+		t.Fatalf("expected snapshot name my-snap as alias, got %q", got)
+	}
+	if _, ok := req.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("inherited source template alias must be scrubbed from labels")
+	}
+}
+
+// TestGetTemplateRequestClearsStaleAliasWhenDisplayNameEmpty verifies the
+// definition read path scrubs a leaked alias when display_name is empty.
+func TestGetTemplateRequestClearsStaleAliasWhenDisplayNameEmpty(t *testing.T) {
+	templateID := "tpl-alias-clear"
+	invalidateTemplateCaches(templateID)
+	defer invalidateTemplateCaches(templateID)
+
+	// The definition's request_json still carries a stale alias from the
+	// source template, but the definition itself has no display_name.
+	stored := &sandboxtypes.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "source-alias",
+		},
+		Labels: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "source-alias",
+		},
+	}
+	storedJSON, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored request: %v", err)
+	}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, id string) (*models.SnapshotRecord, error) {
+		return nil, ErrSnapshotNotFound
+	})
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, id string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID:  id,
+			DisplayName: "",
+			RequestJSON: string(storedJSON),
+		}, nil
+	})
+
+	req, err := GetTemplateRequest(context.Background(), templateID)
+	if err != nil {
+		t.Fatalf("GetTemplateRequest returned error: %v", err)
+	}
+	if _, ok := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("stale alias annotation must be scrubbed when display_name is empty")
+	}
+	if _, ok := req.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("stale alias label must be scrubbed when display_name is empty")
 	}
 }
 

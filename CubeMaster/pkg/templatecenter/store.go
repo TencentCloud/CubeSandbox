@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxstatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
@@ -90,6 +91,7 @@ var (
 	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
 	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
 	ErrInvalidAlias                 = errors.New("alias is invalid")
+	ErrInvalidSnapshotName          = errors.New("snapshot name is invalid")
 	ErrTemplateNotReady             = errors.New("template is not ready")
 )
 
@@ -412,6 +414,9 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 			if initErr = sandboxspec.Init(store.db); initErr != nil {
 				return
 			}
+			if initErr = sandboxstatus.Init(store.db); initErr != nil {
+				return
+			}
 			configureSnapshotRuntimeRefHooks()
 			configureSandboxSpecHooks()
 		}
@@ -455,6 +460,10 @@ func configureSnapshotRuntimeRefHooks() {
 		}
 		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
 		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
+		// Status is best-effort. A missing row must not fail destroy.
+		if errDeletingStatus := sandboxstatus.SoftDelete(ctx, sandboxID); errDeletingStatus != nil {
+			log.G(ctx).Warnf("sandbox status soft delete %s: %v", sandboxID, errDeletingStatus)
+		}
 		if ref != nil && strings.TrimSpace(ref.SnapshotID) != "" {
 			maybeFinalizeTombstone(ctx, ref.SnapshotID)
 		}
@@ -663,6 +672,7 @@ func healthyTemplateNodes(instanceType string) []*node.Node {
 }
 
 func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
+	targets = templateBuildTargets(storageBackendFromCreate(req), targets)
 	replicas := make([]ReplicaStatus, 0, len(targets))
 	envdVersions := make([]nodeEnvdVersion, 0, len(targets))
 	var lock sync.Mutex
@@ -1802,6 +1812,14 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 					return err
 				}
 				req = parsed
+				// Stamp the snapshot's display_name as the alias, replacing the
+				// source template's inherited one.
+				delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				if name := strings.TrimSpace(rec.DisplayName); name != "" {
+					req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = name
+				} else {
+					delete(req.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				}
 				if err = applyStoredCreateBackend(req, rec.Backend); err != nil {
 					return err
 				}
@@ -1823,6 +1841,13 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 			}
 			if req.Annotations == nil {
 				req.Annotations = make(map[string]string)
+			}
+			// Carry the alias on the cached request so later hits need no extra lookup.
+			if alias := strings.TrimSpace(def.DisplayName); alias != "" {
+				req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = alias
+			} else {
+				delete(req.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
 			}
 			constants.NormalizeAppSnapshotAnnotations(req.Annotations)
 			if err = applyStoredCreateBackend(req, def.StorageBackend); err != nil {
@@ -2332,13 +2357,27 @@ func applyTemplateRequest(templateReq, reqInOut *sandboxtypes.CreateCubeSandboxR
 	}
 	reqInOut.Volumes = append(reqInOut.Volumes, templateReq.Volumes...)
 	for i, templateCtr := range templateReq.Containers {
+		if templateCtr == nil {
+			continue
+		}
 		if len(reqInOut.Containers) <= i {
 			reqInOut.Containers = append(reqInOut.Containers, templateCtr)
 			continue
 		}
 		if reqInOut.Containers[i] == nil {
 			reqInOut.Containers[i] = templateCtr
+			continue
 		}
+		ctr := reqInOut.Containers[i]
+		if ctr.LivenessProbe == nil {
+			ctr.LivenessProbe = templateCtr.LivenessProbe
+		}
+	}
+	if reqInOut.RestartPolicy == "" {
+		reqInOut.RestartPolicy = templateReq.RestartPolicy
+	}
+	if reqInOut.RestartBackoff == nil {
+		reqInOut.RestartBackoff = templateReq.RestartBackoff
 	}
 	if reqInOut.NetworkType == "" {
 		reqInOut.NetworkType = templateReq.NetworkType

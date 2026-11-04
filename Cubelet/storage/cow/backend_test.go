@@ -20,6 +20,8 @@ func TestNormalizeBackend(t *testing.T) {
 		{"cubecow", BackendXFS, false},
 		{"s3", BackendS3, false},
 		{"S3", BackendS3, false},
+		{"jfs", BackendJFS, false},
+		{"JuiceFS", BackendJFS, false},
 		{"cos", "", true},
 	}
 	for _, tc := range cases {
@@ -35,6 +37,20 @@ func TestNormalizeBackend(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Fatalf("NormalizeBackend(%q)=%q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIsReflinkBackend(t *testing.T) {
+	t.Parallel()
+	for _, b := range []string{"", "xfs", "jfs", "juicefs"} {
+		if !IsReflinkBackend(b) {
+			t.Fatalf("IsReflinkBackend(%q)=false, want true", b)
+		}
+	}
+	for _, b := range []string{"s3", "cos"} {
+		if IsReflinkBackend(b) {
+			t.Fatalf("IsReflinkBackend(%q)=true, want false", b)
 		}
 	}
 }

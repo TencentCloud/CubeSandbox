@@ -559,7 +559,7 @@ Snapshot 会保存稳定的 Volume ID、容器挂载路径和只读属性，但�
 - Plugin Volume 不会把原本支持跨机的 VM Snapshot 固定到源节点。对于 `remote_status=ready` 的 S3 VM Snapshot，目标 Cubelet 会在启动 VM 前尝试 Attach Volume。
 - 调度器当前只检查 VM 兼容性，不检查 Volume portability、topology、multi-attach 能力或目标节点 driver。Volume 不存在、目标节点未注册 driver 或 `Attach` 返回错误时，沙箱创建失败。运维方需要在每个候选节点配置相同 driver，并确保它们能够访问目标后端。
 
-Volume backend 与 VM Snapshot backend 相互独立。VM Snapshot 包必须使用 S3 backend 才能跨机；Plugin Volume 可以使用目标节点 driver 能够 Attach 的任意后端。raw host mount 与此不同，始终固定在源节点。
+Volume backend 与 VM Snapshot backend 相互独立。VM Snapshot 包必须使用 `jfs` 或 `s3` backend 才能跨机；Plugin Volume 可以使用目标节点 driver 能够 Attach 的任意后端。raw host mount 始终固定在源节点。
 
 ### 常见异常（SDK）
 

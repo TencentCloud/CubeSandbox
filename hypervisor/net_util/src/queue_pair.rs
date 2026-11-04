@@ -33,6 +33,8 @@ pub struct TxVirtio {
     /// Frames the tap refused with EIO and we dropped instead of killing the
     /// VM (see the EIO branch in `process_desc_chain`).
     pub dropped_frames: Wrapping<u64>,
+    /// Malformed frames shorter than the mandatory virtio-net header.
+    pub malformed_frames: Wrapping<u64>,
 }
 
 impl Default for TxVirtio {
@@ -49,6 +51,7 @@ impl TxVirtio {
             limit_bytes: Wrapping(0),
             limit_frames: Wrapping(0),
             dropped_frames: Wrapping(0),
+            malformed_frames: Wrapping(0),
         }
     }
 
@@ -106,7 +109,16 @@ impl TxVirtio {
                 next_desc = desc_chain.next();
             }
 
-            let len = if !iovecs.is_empty() {
+            let frame_len = iovecs.iter().map(|iovec| iovec.iov_len).sum::<usize>();
+            let len = if frame_len < vnet_hdr_len() {
+                // The virtio-net header is mandatory. Letting the short chain
+                // reach a VNET_HDR tap makes Linux return EINVAL, which is
+                // otherwise indistinguishable from a host-side tap failure.
+                // Complete it with zero bytes so a malformed guest frame cannot
+                // terminate the worker.
+                self.malformed_frames += Wrapping(1);
+                0
+            } else {
                 let result = unsafe {
                     libc::writev(
                         tap.as_raw_fd() as libc::c_int,
@@ -140,8 +152,6 @@ impl TxVirtio {
                     self.counter_frames += Wrapping(1);
                     result as u32
                 }
-            } else {
-                0
             };
 
             // For the sake of simplicity (similar to the RX rate limiting), we always
@@ -344,6 +354,7 @@ pub struct NetCounters {
     pub tx_bytes: Arc<AtomicU64>,
     pub tx_frames: Arc<AtomicU64>,
     pub tx_dropped_frames: Arc<AtomicU64>,
+    pub tx_malformed_frames: Arc<AtomicU64>,
     pub rx_bytes: Arc<AtomicU64>,
     pub rx_frames: Arc<AtomicU64>,
     pub rx_limit_bytes: Arc<AtomicU64>,
@@ -449,6 +460,9 @@ impl NetQueuePair {
             .tx_frames
             .fetch_add(self.tx.counter_frames.0, Ordering::AcqRel);
         self.counters
+            .tx_malformed_frames
+            .fetch_add(self.tx.malformed_frames.0, Ordering::AcqRel);
+        self.counters
             .tx_limit_bytes
             .fetch_add(self.tx.limit_bytes.0, Ordering::AcqRel);
         self.counters
@@ -472,6 +486,7 @@ impl NetQueuePair {
         self.tx.limit_bytes = Wrapping(0);
         self.tx.limit_frames = Wrapping(0);
         self.tx.dropped_frames = Wrapping(0);
+        self.tx.malformed_frames = Wrapping(0);
 
         queue
             .needs_notification(mem)
@@ -535,7 +550,53 @@ impl NetQueuePair {
 
 #[cfg(test)]
 mod tests {
-    use super::should_log_dropped;
+    use super::{should_log_dropped, NetCounters, TxVirtio};
+    use std::num::Wrapping;
+    use std::sync::atomic::Ordering;
+    use vm_memory::{GuestAddress, GuestMemoryMmap};
+    use vm_virtio::queue::testing::VirtQueue as GuestQ;
+
+    #[test]
+    fn drops_short_tx_chain_without_writing_to_tap() {
+        const QUEUE_ADDRESS: GuestAddress = GuestAddress(0x1_0000);
+        const FRAME_ADDRESS: GuestAddress = GuestAddress(0x2_0000);
+
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x3_0000)]).unwrap();
+        let guest_queue = GuestQ::new(QUEUE_ADDRESS, &memory, 4);
+        guest_queue.dtable[0].set(FRAME_ADDRESS.0, 9, 0, 0);
+        guest_queue.avail.ring[0].set(0);
+        guest_queue.avail.idx.set(1);
+        let mut queue = guest_queue.create_queue();
+
+        // A regular file is deliberately not a TAP. The short-frame check must
+        // complete the chain before touching the fd, which also makes this a
+        // deterministic fault-injection test without CAP_NET_ADMIN.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut tap = super::Tap::from_file_for_test(file);
+        let mut tx = TxVirtio::new();
+        tx.process_desc_chain(
+            &memory,
+            &mut tap,
+            &mut queue,
+            &mut None,
+            None,
+            &mut std::sync::Once::new(),
+        )
+        .unwrap();
+
+        assert_eq!(guest_queue.used.idx.get(), 1);
+        assert_eq!(tx.malformed_frames, Wrapping(1));
+        assert_eq!(tx.dropped_frames, Wrapping(0));
+    }
+
+    #[test]
+    fn malformed_counter_is_independent_from_eio_drops() {
+        let counters = NetCounters::default();
+        counters.tx_malformed_frames.fetch_add(1, Ordering::Relaxed);
+
+        assert_eq!(counters.tx_malformed_frames.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.tx_dropped_frames.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn logs_first_drop() {

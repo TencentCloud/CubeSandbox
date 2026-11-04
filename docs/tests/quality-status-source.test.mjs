@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   emptyQualityStatus,
+  historyUrlFromLatest,
   localizeBaselineUrl,
   normalizeQualityStatus,
   resolveBaselineUrl,
-  safeHttpUrl
+  safeHttpUrl,
+  sortNightsByDate
 } from '../.vitepress/quality-status-source.js'
 
 test('normalizeQualityStatus accepts the public status payload shape', () => {
@@ -130,6 +132,67 @@ test('resolveBaselineUrl prefers locale-specific URLs and rewrites known sites',
   assert.equal(localizeBaselineUrl(zhUrl, 'en'), enUrl)
   assert.equal(localizeBaselineUrl('https://cubesandbox.com/zh', 'en'), 'https://cubesandbox.com/')
   assert.equal(localizeBaselineUrl('https://cubesandbox.com/zh', 'zh'), 'https://cubesandbox.com/zh')
+})
+
+test('historyUrlFromLatest points at the sibling history object', () => {
+  assert.equal(
+    historyUrlFromLatest('https://cubesandbox-1253970226.cos.ap-singapore.myqcloud.com/page-data/quality-status.json'),
+    'https://cubesandbox-1253970226.cos.ap-singapore.myqcloud.com/page-data/quality-status-history.json'
+  )
+  assert.equal(historyUrlFromLatest('/page-data/quality-status.json'), '/page-data/quality-status-history.json')
+  assert.equal(historyUrlFromLatest('/page-data/quality-status.json?source=local'), '/page-data/quality-status-history.json?source=local')
+  assert.equal(historyUrlFromLatest(''), '')
+})
+
+test('normalizeQualityStatus keeps performance thresholds and sections', () => {
+  const status = normalizeQualityStatus({
+    date: '2026-10-16',
+    performance: {
+      thresholds: { similar_pct: 5 },
+      sections: [{ key: '3.2', title: 'Cold start' }, null],
+      metrics: [{ key: '3.2-c1-create-avg', section: '3.2', label: '3.2 c=1 create avg', baseline: 47.8 }]
+    }
+  })
+  assert.equal(status.performance.thresholds.similar_pct, 5)
+  assert.equal(status.performance.sections.length, 1)
+  assert.equal(status.performance.sections[0].title, 'Cold start')
+  assert.equal(status.performance.metrics[0].key, '3.2-c1-create-avg')
+  assert.equal(status.performance.metrics[0].baseline, 47.8)
+})
+
+test('normalizeQualityStatus prefers sections nested under comparison', () => {
+  const nested = normalizeQualityStatus({
+    date: '2026-10-16',
+    performance: {
+      sections: [{ key: '4.1', title: 'from performance' }],
+      comparison: {
+        sections: [{ key: '3.2', title: 'from comparison' }, null]
+      }
+    }
+  })
+  assert.equal(nested.performance.sections.length, 1)
+  assert.equal(nested.performance.sections[0].title, 'from comparison')
+
+  const fallback = normalizeQualityStatus({
+    date: '2026-10-16',
+    performance: {
+      sections: [{ key: '4.1', title: 'from performance' }],
+      comparison: { thresholds: { similar_pct: 5 } }
+    }
+  })
+  assert.equal(fallback.performance.sections[0].title, 'from performance')
+})
+
+test('sortNightsByDate orders oldest to newest and drops undated rows', () => {
+  assert.deepEqual(
+    sortNightsByDate([
+      { date: '2026-10-16' },
+      null,
+      { date: '2026-09-17' },
+      { status: 'failed' }
+    ]).map((night) => night.date),
+    ['2026-09-17', '2026-10-16']
+  )
 })
 
 test('emptyQualityStatus returns the unknown status skeleton', () => {

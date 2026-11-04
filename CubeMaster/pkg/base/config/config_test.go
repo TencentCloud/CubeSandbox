@@ -52,6 +52,23 @@ func TestInit(t *testing.T) {
 	assert.True(t, expectCpu.Equal(gotCpu))
 }
 
+func TestPreComHandleConfDistributionWorkersDefault(t *testing.T) {
+	// Unset (or non-positive) distribution_workers falls back to the built-in
+	// default of 4, matching the historical hardcoded defaultDistributionWorkers.
+	cfg := &Config{Common: &CommonConf{}}
+	assert.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 4, cfg.Common.DistributionWorkers)
+
+	cfg = &Config{Common: &CommonConf{DistributionWorkers: -1}}
+	assert.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 4, cfg.Common.DistributionWorkers)
+
+	// An explicit positive value is preserved.
+	cfg = &Config{Common: &CommonConf{DistributionWorkers: 16}}
+	assert.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 16, cfg.Common.DistributionWorkers)
+}
+
 func TestNestedLogSettingsUseSnakeCaseOnRoundTrip(t *testing.T) {
 	var cfg Config
 	err := yaml.Unmarshal([]byte("log:\n  file_size: 100\n  file_num: 10\n  enable_log_metric: true\n"), &cfg)

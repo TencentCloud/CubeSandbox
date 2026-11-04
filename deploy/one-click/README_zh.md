@@ -160,7 +160,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
-- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-proxy-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-egress-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
@@ -296,6 +296,10 @@ MySQL/Redis 依赖默认会部署到：
 - `mysql:8.0`
 - `redis:7-alpine`
 - `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
+
+### 使用外部原生 Redis Cluster
+
+将 `CUBE_EXTERNAL_REDIS_CLUSTER_NODES` 设置为以逗号分隔的 `host:port` 种子节点列表，将 `CUBE_EXTERNAL_REDIS_DB` 设置为 `0`，并清空固定的单机 Redis 地址和 Sentinel 配置。部署脚本连接已有的 Cluster，不负责创建 Redis 集群。各组件配置、一致性限制和迁移检查见 [配置与迁移指南](../../docs/zh/guide/redis-cluster.md)。
 
 ### 使用外部 MySQL / PostgreSQL / Redis
 
@@ -463,6 +467,7 @@ export E2B_API_KEY=e2b_000000
 - `sed`
 - `pgrep`
 - `date`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
 
 条件命令：
 
@@ -514,6 +519,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 - `date`
 - `ip`
 - `awk`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
 
 二选一命令：
 

@@ -78,13 +78,13 @@ __pycache__
 !/tests/skills/sdk-e2e-cases/
 !/tests/skills/sdk-e2e-cases/**
 
-# Keep the performance benchmark script tracked, but ignore everything else
-# under tests/perf/ (venvs, *.log, the markdown/JSON reports the script emits),
-# matching the ignore-then-un-ignore-specific-paths convention used above.
+# Keep reusable performance scripts/docs; ignore generated reports and local config.
 !/tests/perf/
 /tests/perf/*
-!/tests/perf/cubebench.sh
-!/tests/perf/cubebench_test.sh
+!/tests/perf/*.sh
+!/tests/perf/*.py
+!/tests/perf/README.md
+!/tests/perf/env.example
 
 web/tsconfig.tsbuildinfo
 

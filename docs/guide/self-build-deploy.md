@@ -255,6 +255,23 @@ sudo ./down.sh
 
 This stops all host processes (cubelet, cubemaster, cube-api), Docker containers (CubeProxy, CoreDNS, MySQL, Redis), and rolls back the `cube.app` DNS routing configuration.
 
+### Uninstall
+
+A complete uninstall removes CubeSandbox services, containers, volumes, network configuration, runtime data, and logs. Existing templates, sandboxes, and snapshots are also deleted, so back up anything you need first.
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+Once the check passes and you no longer need the uninstall script or installed bundle, remove the preserved toolbox directory manually:
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> The uninstall script does not delete Cube-related Docker images. To remove them as well, follow the command printed by the script.
+
 ### Upgrade or reinstall
 
 On a machine that already has CubeSandbox, running `install.sh` again defaults

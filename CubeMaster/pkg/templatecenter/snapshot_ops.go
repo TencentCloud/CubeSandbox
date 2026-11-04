@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -120,6 +121,9 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	if sandboxID == "" {
 		return nil, errors.New("sandboxID is required")
 	}
+	if err := validateSnapshotName(displayName); err != nil {
+		return nil, err
+	}
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
 
@@ -153,7 +157,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			if existing.Operation != JobOperationSnapshotCreate {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
 			}
-			_, storedReq, err := buildSnapshotRequests(originReq, existing.TemplateID)
+			_, storedReq, err := buildSnapshotRequests(originReq, existing.TemplateID, displayName)
 			if err != nil {
 				return err
 			}
@@ -180,7 +184,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 		}
 
 		snapshotID := generateSnapshotID()
-		createReq, storedReq, err := buildSnapshotRequests(originReq, snapshotID)
+		createReq, storedReq, err := buildSnapshotRequests(originReq, snapshotID, displayName)
 		if err != nil {
 			return err
 		}
@@ -249,9 +253,9 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 		return nil, err
 	}
 	if reusedExistingJob {
-		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP)
+		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
 	}
-	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP)
+	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
 }
 
 // loadSandboxCreateRequestFn is the indirection point used by
@@ -380,7 +384,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"last_error":                    "",
 		"rootfs_size_bytes_at_snapshot": commitRsp.GetRootfsSizeBytes(),
 	}
-	if constants.IsS3Backend(commitBackend) {
+	if constants.IsRemoteTrackedBackend(commitBackend) {
 		raw := strings.TrimSpace(commitRsp.GetRemoteUuids())
 		if raw != "" {
 			snapUpdates["export_uuids"] = raw
@@ -394,6 +398,9 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 	if err := updateSnapshotFields(ctx, snapshotID, snapUpdates); err != nil {
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
+	}
+	if snapUpdates["remote_status"] == constants.RemoteStatusInProgress {
+		remotestatus.WatchSnapshot(ctx, snapshotID, nodeIP, commitBackend)
 	}
 	// Commit yields a single authoritative envd version; persist it (best-effort)
 	// to the snapshot definition annotation so created sandboxes inherit it.
@@ -903,7 +910,7 @@ func failSnapshotRollbackJob(ctx context.Context, jobID, phase string, resultPay
 	return updateTemplateImageJob(ctx, jobID, fields)
 }
 
-func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID string) (*sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq, error) {
+func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID, snapshotName string) (*sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq, error) {
 	createReq, err := cloneCreateRequest(req)
 	if err != nil {
 		return nil, nil, err
@@ -918,6 +925,13 @@ func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID st
 		createReq.InstanceType = cubeboxv1.InstanceType_cubebox.String()
 	}
 	createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = snapshotID
+	// Replace the source template's inherited alias with the snapshot's own name.
+	if name := strings.TrimSpace(snapshotName); name != "" {
+		createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = name
+	} else {
+		delete(createReq.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+	}
+	delete(createReq.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
 	if constants.GetAppSnapshotVersion(createReq.Annotations) == "" {
 		constants.SetAppSnapshotVersion(createReq.Annotations, DefaultTemplateVersion)
 	}
@@ -1316,17 +1330,17 @@ func resolveExistingSnapshotJob(info *sandboxtypes.TemplateImageJobInfo) (*sandb
 	}
 }
 
-func resumeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, req *sandboxtypes.CreateCubeSandboxReq, sandboxID, nodeID, nodeIP string) (*sandboxtypes.TemplateImageJobInfo, error) {
+func resumeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, req *sandboxtypes.CreateCubeSandboxReq, sandboxID, nodeID, nodeIP, displayName string) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if info == nil {
 		return nil, errors.New("snapshot job info is nil")
 	}
 	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
 		return resolveExistingSnapshotJob(info)
 	}
-	return executeSnapshotCreateJob(ctx, info, req, sandboxID, nodeID, nodeIP)
+	return executeSnapshotCreateJob(ctx, info, req, sandboxID, nodeID, nodeIP, displayName)
 }
 
-func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, req *sandboxtypes.CreateCubeSandboxReq, sandboxID, nodeID, nodeIP string) (*sandboxtypes.TemplateImageJobInfo, error) {
+func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, req *sandboxtypes.CreateCubeSandboxReq, sandboxID, nodeID, nodeIP, displayName string) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if info == nil {
 		return nil, errors.New("snapshot job info is nil")
 	}
@@ -1349,7 +1363,7 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	})
 	defer cancel()
 	template, fields := webhook.PrepareLifecycle(req)
-	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID)
+	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID, displayName)
 	if err != nil {
 		return nil, err
 	}

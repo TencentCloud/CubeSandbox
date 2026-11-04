@@ -133,7 +133,7 @@ func TestEnsureCubeRunTemplateReturnsClone(t *testing.T) {
 		templatetypes.CubeComponentCubeShim: {Component: templatetypes.MachineComponent{Version: "v1"}},
 	})
 
-	got, err := manager.EnsureCubeRunTemplate(context.Background(), "tpl-clone")
+	got, err := manager.EnsureCubeRunTemplate(context.Background(), "tpl-clone", "xfs")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestEnsureCubeRunTemplateHydratesCloneNotCache(t *testing.T) {
 		t.Fatalf("seed template: %v", err)
 	}
 
-	got, err := manager.EnsureCubeRunTemplate(context.Background(), "tpl-hydrate")
+	got, err := manager.EnsureCubeRunTemplate(context.Background(), "tpl-hydrate", "xfs")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestConcurrentEnsureMutatesClonesOnly(t *testing.T) {
 			defer done.Done()
 			start.Done()
 			start.Wait()
-			got, err := manager.EnsureCubeRunTemplate(context.Background(), "tpl-race")
+			got, err := manager.EnsureCubeRunTemplate(context.Background(), "tpl-race", "xfs")
 			if err != nil {
 				t.Errorf("ensure: %v", err)
 				return
@@ -387,4 +387,88 @@ func TestS3RecoveryIDsListsPackageHomesWhenIDUnknown(t *testing.T) {
 func TestMountS3PackageMetadataForRecoveryTolerAtesMissingPackage(t *testing.T) {
 	mountS3PackageMetadataForRecovery(context.Background(), "")
 	mountS3PackageMetadataForRecovery(context.Background(), "snap-does-not-exist")
+}
+
+// A cold XFS lookup must stay local, including when its template is missing.
+// JFS may use a shared package only after its own local lookup misses.
+func TestEnsureCubeRunTemplateRecoveryIsolatesBackends(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend string
+		local   bool
+		global  bool
+	}{
+		{name: "xfs_local", backend: "xfs", local: true},
+		{name: "xfs_missing", backend: "xfs"},
+		{name: "default_local", backend: "", local: true},
+		{name: "jfs_local", backend: "jfs", local: true},
+		{name: "jfs_shared", backend: "jfs", global: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := newReadyTemplateManager(t)
+			root := t.TempDir()
+			id := "tpl-backend-isolation-" + filepath.Base(root)
+			expectedBackend := tc.backend
+			if expectedBackend == "" {
+				expectedBackend = "xfs"
+			}
+			home := filepath.Join(root, "snapshots", id)
+			sharedHome := filepath.Join(root, "shared", id)
+			makeHome := func(home string) {
+				t.Helper()
+				path := metadataHomeConfigPath(home)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.local {
+				makeHome(home)
+			}
+			if tc.global {
+				makeHome(sharedHome)
+			}
+			oldRoot, oldGlobal := recoverySnapshotKindRoot, findGlobalJFSRuntimeSnapshot
+			t.Cleanup(func() { recoverySnapshotKindRoot, findGlobalJFSRuntimeSnapshot = oldRoot, oldGlobal })
+			recoverySnapshotKindRoot = func(backend, kind string) string {
+				if backend != expectedBackend {
+					t.Fatalf("%s request accessed %s storage", expectedBackend, backend)
+				}
+				return filepath.Join(root, kind)
+			}
+			globalCalls := 0
+			findGlobalJFSRuntimeSnapshot = func(snapshotID string) (*storage.JFSGlobalRuntimeSnapshot, error) {
+				globalCalls++
+				if !tc.global {
+					t.Fatal("unexpected shared JFS scan")
+				}
+				if snapshotID != id {
+					t.Fatalf("snapshot ID = %s", snapshotID)
+				}
+				return &storage.JFSGlobalRuntimeSnapshot{Home: sharedHome}, nil
+			}
+			got, err := manager.EnsureCubeRunTemplate(context.Background(), id, tc.backend)
+			if !tc.local && !tc.global {
+				if err == nil || got != nil {
+					t.Fatalf("missing template: got=%v err=%v", got, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedHome := home
+				if tc.global {
+					expectedHome = sharedHome
+				}
+				if got == nil || got.Snapshot.Snapshot.Path != filepath.Join(expectedHome, storage.SnapshotMetadataDir) {
+					t.Fatalf("wrong recovered template: %+v", got)
+				}
+			}
+			if tc.global && globalCalls != 1 {
+				t.Fatalf("shared scans = %d, want 1", globalCalls)
+			}
+		})
+	}
 }

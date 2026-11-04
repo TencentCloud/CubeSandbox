@@ -72,6 +72,12 @@ require_cmd() {
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
 }
 
+require_web_build_prerequisites() {
+  local web_dist_override="${1:-}"
+  [[ -n "${web_dist_override}" ]] && return 0
+  require_cmd npm
+}
+
 _version_trim_leading_zeroes() {
   local value="$1"
   value="${value#${value%%[!0]*}}"
@@ -513,6 +519,7 @@ load_env_file() {
 # default (documented caveat in the one-click README).
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
+  ONE_CLICK_ENABLE_JFS
   CUBE_PVM_ENABLE
 )
 
@@ -1559,6 +1566,21 @@ one_click_patch_conf_redis_endpoint() {
   local restore_bundled="${3:-0}"
   [[ -f "${cfg}" ]] || die "Redis config not found for ${component}: ${cfg}"
 
+  # Remove stale Cluster config before selecting another mode.
+  one_click_sed_in_place "${cfg}" -e '/^  cluster_nodes:/d'
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    [[ -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" && -z "${CUBE_EXTERNAL_REDIS_HOST:-}" ]] \
+      || die "Redis Cluster cannot be combined with a standalone host or Sentinel"
+    [[ "$(one_click_redis_db)" == "0" ]] || die "Redis Cluster requires DB 0"
+    local nodes_esc pwd_esc
+    nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}")"
+    pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD:-}")"
+    one_click_sed_in_place "${cfg}" \
+      -e '/^  master_name:/d' -e '/^  sentinel_nodes:/d' -e '/^  sentinel_password:/d' \
+      -e "/^redis:/,/^[^[:space:]#]/{s|^  nodes:.*|  nodes: \"\"\\
+  cluster_nodes: \"${nodes_esc}\"|; s|^  password:.*|  password: \"${pwd_esc}\"|;}"
+    return
+  fi
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] \
       || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
@@ -1642,6 +1664,32 @@ persist_one_click_redis_runtime_env() {
     CUBE_PROXY_REGISTRY_REDIS_DB \
     CUBE_LCM_REDIS_DB
 
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    [[ -z "${CUBE_EXTERNAL_REDIS_HOST:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] || die "Redis Cluster cannot use a standalone host or Sentinel"
+    [[ "${redis_db}" == "0" ]] || die "Redis Cluster requires DB 0"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_CLUSTER_NODES" "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    # Unified Cluster config replaces per-component endpoint overrides from
+    # older installs, including exported variables in this install process.
+    local stale_key
+    for stale_key in \
+      CUBE_PROXY_REDIS_IP CUBE_PROXY_REDIS_PORT CUBE_PROXY_REDIS_PASSWORD CUBE_PROXY_REDIS_CLUSTER_NODES \
+      CUBE_PROXY_REDIS_MASTER_NAME CUBE_PROXY_REDIS_SENTINEL_NODES CUBE_PROXY_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REGISTRY_REDIS_HOST CUBE_PROXY_REGISTRY_REDIS_PORT CUBE_PROXY_REGISTRY_REDIS_PASSWORD \
+      CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME \
+      CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD \
+      CUBE_LCM_REDIS_ADDR CUBE_LCM_REDIS_HOST CUBE_LCM_REDIS_PORT CUBE_LCM_REDIS_PASSWORD \
+      CUBE_LCM_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_MASTER_NAME CUBE_LCM_REDIS_SENTINEL_NODES CUBE_LCM_REDIS_SENTINEL_PASSWORD; do
+      _remove_env_keys "${env_file}" "${stale_key}"
+      unset "${stale_key}"
+    done
+    _remove_env_keys "${env_file}" CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_PORT \
+      CUBE_EXTERNAL_REDIS_MASTER_NAME CUBE_EXTERNAL_REDIS_SENTINEL_NODES CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REDIS_MASTER_NAME CUBE_PROXY_REDIS_SENTINEL_NODES CUBE_PROXY_REDIS_SENTINEL_PASSWORD
+    return
+  fi
+  _remove_env_keys "${env_file}" CUBE_EXTERNAL_REDIS_CLUSTER_NODES CUBE_PROXY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_CLUSTER_NODES
+  unset CUBE_PROXY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_CLUSTER_NODES
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
@@ -2912,6 +2960,66 @@ EOF
   exit 1
 }
 
+# Print one key from an os-release file (quotes stripped); missing prints nothing.
+host_os_release_field() {
+  local key="$1"
+  local release="${2:-/etc/os-release}"
+  local line value
+  [[ -r "${release}" ]] || return 0
+  line="$(grep -E "^${key}=" "${release}" | head -n 1 || true)"
+  value="${line#"${key}"=}"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf '%s\n' "${value}"
+}
+
+# True when ID or ID_LIKE names OpenCloudOS.
+host_is_opencloudos() {
+  local release="${1:-/etc/os-release}"
+  local id like
+  id="$(host_os_release_field ID "${release}")"
+  like="$(host_os_release_field ID_LIKE "${release}")"
+  case " ${id} ${like} " in
+    *opencloudos*) return 0 ;;
+  esac
+  return 1
+}
+
+# die_yum_docker_packages_missing <packages> [release]: report a failed yum
+# install. OpenCloudOS ships docker-compose only in EPOL, not AppStream (#1959).
+die_yum_docker_packages_missing() {
+  local packages="$1"
+  local release="${2:-/etc/os-release}"
+  printf '[one-click] ERROR: failed to install %s with yum.\n' "${packages}" >&2
+  if host_is_opencloudos "${release}"; then
+    cat >&2 <<'EOF'
+[one-click]   A common cause on OpenCloudOS: docker comes from moby in
+[one-click]   AppStream, while docker-compose is published only in EPOL.
+[one-click]   If that is the cause here, enable EPOL and rerun this installer:
+[one-click]     sudo dnf install -y epol-release
+EOF
+    printf '[one-click]     sudo dnf install -y %s\n' "${packages}" >&2
+    cat >&2 <<'EOF'
+[one-click]   If docker-compose is still missing, the EPOL mirror does not contain it.
+[one-click]   Check with: dnf repolist; rpm -q epol-release
+EOF
+  else
+    cat >&2 <<'EOF'
+[one-click]   The packages were not found in the enabled repositories, or the
+[one-click]   package manager returned an error. Install them manually, then
+[one-click]   rerun this installer.
+EOF
+  fi
+  exit 1
+}
+
+# yum_install_docker_or_die <package>...: install via yum, or abort with the
+# Docker-specific hint. Do not reuse for other packages.
+yum_install_docker_or_die() {
+  local packages="$*"
+  yum install -y "$@" || die_yum_docker_packages_missing "${packages}"
+}
+
 install_docker() {
   reject_snap_docker
   if command -v docker >/dev/null 2>&1; then
@@ -2926,7 +3034,7 @@ install_docker() {
       apt-get install -y -qq docker.io docker-compose
       ;;
     yum)
-      yum install -y docker docker-compose
+      yum_install_docker_or_die docker docker-compose
       ;;
   esac
   systemctl enable docker && systemctl start docker
@@ -2948,7 +3056,7 @@ install_docker_compose() {
       apt-get update -qq && apt-get install -y -qq docker-compose
       ;;
     yum)
-      yum install -y docker-compose
+      yum_install_docker_or_die docker-compose
       ;;
   esac
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then

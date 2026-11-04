@@ -109,9 +109,6 @@ spec:
           node_ds="$(kget "{{ include "cube.nodeDaemonSetAPIPath" . }}/${ns}/daemonsets/{{ include "cube.nodeName" . }}")"
           printf '%s\n' "${node_ds}" | grep -Eq '"numberReady"[[:space:]]*:[[:space:]]*[1-9]'
           printf '%s\n' "${node_ds}" | grep -Eq '"desiredNumberScheduled"[[:space:]]*:[[:space:]]*[1-9]'
-          {{- end }}
-
-          {{- if .Values.cubeEgress.enabled }}
           echo '[health-test] check CubeEgress containers by name in CubeNode pods'
           pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-node")"
           # Extract container names precisely instead of grepping the whole JSON,

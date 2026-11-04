@@ -25,6 +25,8 @@ COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
 COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
 COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
 COPY pkgs/proto/go.mod pkgs/proto/go.sum /pkgs/proto/
+COPY pkgs/sandboxrestart/go.mod /pkgs/sandboxrestart/
+COPY pkgs/redisx/go.mod pkgs/redisx/go.sum /pkgs/redisx/
 RUN go mod download
 
 COPY CubeTemplateCenter/ ./
@@ -34,6 +36,8 @@ COPY pkgs/blobstore/ /pkgs/blobstore/
 COPY pkgs/cubedb/ /pkgs/cubedb/
 COPY Cubelet/ /Cubelet/
 COPY pkgs/proto/ /pkgs/proto/
+COPY pkgs/sandboxrestart/ /pkgs/sandboxrestart/
+COPY pkgs/redisx/ /pkgs/redisx/
 
 ENV CGO_ENABLED=0
 RUN set -eux; \

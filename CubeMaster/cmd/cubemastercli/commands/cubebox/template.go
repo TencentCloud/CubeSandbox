@@ -24,6 +24,7 @@ import (
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/urfave/cli"
 )
@@ -126,6 +127,7 @@ type templateDeleteRequest struct {
 	TemplateID   string `json:"template_id,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
 	Sync         bool   `json:"sync,omitempty"`
+	Force        bool   `json:"force,omitempty"`
 }
 
 type templateMigrateRequest struct {
@@ -624,6 +626,10 @@ var TemplateDeleteCommand = cli.Command{
 			Name:  "template-id",
 			Usage: "template id to delete",
 		},
+		cli.BoolFlag{
+			Name:  "force",
+			Usage: "clear stuck builds before deleting; templates in use cannot be deleted",
+		},
 	},
 	Action: func(c *cli.Context) error {
 		templateIDs := resolveTemplateIDs(c)
@@ -663,6 +669,7 @@ func deleteTemplate(c *cli.Context, url, templateID string) error {
 	req := &templateDeleteRequest{
 		RequestID:  requestID,
 		TemplateID: templateID,
+		Force:      c.Bool("force"),
 	}
 	body, err := jsoniter.Marshal(req)
 	if err != nil {
@@ -881,7 +888,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "writable-layer-size", Usage: "immutable writable layer size, e.g. 20Gi"},
 		cli.StringSliceFlag{Name: "expose-port", Usage: "container port to expose for the template; repeat the flag to specify multiple ports"},
 		cli.StringFlag{Name: "instance-type", Value: "cubebox", Usage: "instance type"},
-		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3); omit to keep the historical xfs path"},
+		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3|jfs; jfs keeps volumes and snapshots on the JuiceFS mount); omit to keep the historical xfs path"},
 		cli.StringFlag{Name: "network-type", Value: "tap", Usage: "network type"},
 		cli.StringSliceFlag{Name: "node", Usage: "create template only on the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},
@@ -893,9 +900,10 @@ var TemplateCreateFromImageCommand = cli.Command{
 
 		cli.StringSliceFlag{Name: "cmd", Usage: "override container ENTRYPOINT (command); repeat for multiple elements, e.g. --cmd /bin/sh --cmd -c"},
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
-		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs"},
+		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs. Merged over the image ENV (same key overrides, like docker run -e)"},
+		cli.StringFlag{Name: "user", Usage: "container user for the template build and later sandboxes: uid, uid:gid, username, or username:gid (gid must be numeric). Omit to keep the default root user"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
-		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
+		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=100, probe_timeout_ms=300"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
@@ -1644,8 +1652,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
 	enableInjectEnvd := c.Bool("enable-inject-envd")
+	user := strings.TrimSpace(c.String("user"))
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" {
 		return nil, nil
 	}
 
@@ -1695,10 +1704,18 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 				},
 			},
 			TimeoutMs:        30000,
-			PeriodMs:         500,
-			FailureThreshold: 60,
+			PeriodMs:         100,
+			FailureThreshold: 300,
 			SuccessThreshold: 1,
+			ProbeTimeoutMs:   300,
 		}
+	}
+	if user != "" {
+		securityContext, err := templatecenter.ParseTemplateUser(user)
+		if err != nil {
+			return nil, err
+		}
+		overrides.SecurityContext = securityContext
 	}
 	if enableInjectEnvd {
 		if overrides.Annotations == nil {

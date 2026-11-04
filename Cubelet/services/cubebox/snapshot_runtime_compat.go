@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -61,7 +60,7 @@ func captureLegacyCommitMemory(cb *cubeboxstore.CubeBox, snapshotID string, inva
 	}
 	// cube-runtime has cleared soft-dirty state, so every subsequent commit
 	// must resolve this snapshot or safely degrade to a full capture.
-	setRuntimeSnapshotBindingLabels(cb, snapshotID, time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, snapshotID)
 	return nil
 }
 

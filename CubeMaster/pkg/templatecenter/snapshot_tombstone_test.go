@@ -202,6 +202,43 @@ func TestRegisterSnapshotRuntimeRefReadyStillValidates(t *testing.T) {
 	}
 }
 
+func TestRegisterSnapshotRuntimeRefWithForeignReadyReplicaProtectsGlobalSnapshot(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Status: StatusReady}, nil
+	})
+	origAcquire := acquireSnapshotRuntimeRefFn
+	t.Cleanup(func() { acquireSnapshotRuntimeRefFn = origAcquire })
+	var acquired SnapshotRuntimeRefInfo
+	acquireSnapshotRuntimeRefFn = func(ctx context.Context, ref SnapshotRuntimeRefInfo) error {
+		acquired = ref
+		return nil
+	}
+
+	err := RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica(
+		context.Background(),
+		"snap-global",
+		"sb-cross",
+		"node-target",
+		"10.0.0.2",
+		ReplicaStatus{NodeID: "node-origin", NodeIP: "10.0.0.1", Status: StatusReady},
+	)
+	if err != nil {
+		t.Fatalf("RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica: %v", err)
+	}
+	if acquired.SnapshotID != "snap-global" || acquired.SandboxID != "sb-cross" {
+		t.Fatalf("acquired ref = %+v, want global snapshot binding", acquired)
+	}
+	if acquired.NodeID != "node-target" {
+		t.Fatalf("acquired node = %q, want target node", acquired.NodeID)
+	}
+}
+
 func TestFailSnapshotDeleteJobReturnsTombstone(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}

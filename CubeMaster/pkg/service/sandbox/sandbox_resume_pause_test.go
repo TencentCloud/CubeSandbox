@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/require"
@@ -20,6 +21,46 @@ func TestValidatePauseResumeVolumesEmptyOK(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, validatePauseResumeVolumes(nil))
 	require.NoError(t, validatePauseResumeVolumes([]string{"", "  "}))
+}
+
+func TestPausePackageNodes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, record, target, origin, pkg string
+	}{
+		{"same node", "10.0.0.1", "10.0.0.1", "", "10.0.0.1"},
+		{"blank origin", " ", "10.0.0.1", "", "10.0.0.1"},
+		{"cross node", " 10.0.0.2 ", "10.0.0.1", "10.0.0.2", "10.0.0.2"},
+	} {
+		origin, pkg := pausePackageNodes(tc.record, tc.target)
+		require.Equal(t, tc.origin, origin, tc.name)
+		require.Equal(t, tc.pkg, pkg, tc.name)
+	}
+}
+
+func TestCleanupPausePackageAfterResumeOutlivesCaller(t *testing.T) {
+	type call struct {
+		ctxErr                  error
+		node, snapshot, backend string
+	}
+	got := make(chan call, 1)
+	patches := gomonkey.ApplyFunc(pausesnap.CleanupPauseSnapshot,
+		func(ctx context.Context, _, nodeIP, snapshotID, backend string) error {
+			got <- call{ctx.Err(), nodeIP, snapshotID, backend}
+			return nil
+		})
+	defer patches.Reset()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cleanupPausePackageAfterResume(ctx, "req-1", "sb-1", "10.0.0.2", "snap-1", "jfs")
+	select {
+	case c := <-got:
+		require.NoError(t, c.ctxErr)
+		require.Equal(t, call{nil, "10.0.0.2", "snap-1", "jfs"}, c)
+	case <-time.After(5 * time.Second):
+		t.Fatal("pause package cleanup never ran")
+	}
 }
 
 func TestValidatePauseResumeVolumesMissing(t *testing.T) {

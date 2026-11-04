@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
@@ -20,6 +21,8 @@ import (
 )
 
 var _ api.SnapshotServer = &service{}
+
+var snapshotUploadStatus = storage.SnapshotUploadStatus
 
 func init() {
 	registry.Register(&plugin.Registration{
@@ -47,8 +50,42 @@ func (s *service) Register(server *grpc.Server) error {
 	return nil
 }
 
+const (
+	// statusWaitPoll is how often a Status call held by wait_ready_ms checks
+	// again; a jfs check runs `juicefs info` on the package files.
+	statusWaitPoll = 100 * time.Millisecond
+	statusWaitMax  = time.Minute
+)
+
 func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.StatusResponse, error) {
-	return s.statusOne(ctx, req.GetRequestId(), req.GetSnapshotId(), req.GetBackend()), nil
+	rsp := s.statusOne(ctx, req.GetRequestId(), req.GetSnapshotId(), req.GetBackend())
+	wait := min(time.Duration(req.GetWaitReadyMs())*time.Millisecond, statusWaitMax)
+	if wait <= 0 || !storage.CrossNodeImportBackend(rsp.GetBackend()) {
+		return rsp, nil
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	poll := time.NewTicker(statusWaitPoll)
+	defer poll.Stop()
+	for !uploadSettled(rsp) {
+		select {
+		case <-ctx.Done():
+			return rsp, nil
+		case <-deadline.C:
+			return rsp, nil
+		case <-poll.C:
+		}
+		rsp = s.statusOne(ctx, req.GetRequestId(), req.GetSnapshotId(), req.GetBackend())
+	}
+	return rsp, nil
+}
+
+func uploadSettled(rsp *api.StatusResponse) bool {
+	switch rsp.GetState() {
+	case cow.RemoteStateReady, cow.RemoteStateFailed:
+		return true
+	}
+	return false
 }
 
 func (s *service) BatchStatus(ctx context.Context, req *api.BatchStatusRequest) (*api.BatchStatusResponse, error) {
@@ -82,12 +119,12 @@ func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBacke
 		Backend:    backend,
 		State:      cow.RemoteStatePending,
 	}
-	if backend != cow.BackendS3 {
-		rsp.Message = "xfs has no remote upload"
+	if !storage.CrossNodeImportBackend(backend) {
+		rsp.Message = backend + " has no remote upload"
 		return rsp
 	}
 
-	st, err := storage.SnapshotUploadStatus(ctx, backend, snapshotID)
+	st, err := snapshotUploadStatus(ctx, backend, snapshotID)
 	if err != nil {
 		// Store-not-ready / lookup errors are transient. Empty State means
 		// the remotestatus poller must not stamp failed.
@@ -130,7 +167,9 @@ func normalizeStatusBackend(raw string) (string, error) {
 		return cow.BackendXFS, nil
 	case "s3":
 		return cow.BackendS3, nil
+	case "jfs", "juicefs":
+		return cow.BackendJFS, nil
 	default:
-		return "", fmt.Errorf("unsupported backend %q (want xfs or s3)", raw)
+		return "", fmt.Errorf("unsupported backend %q (want xfs, s3 or jfs)", raw)
 	}
 }

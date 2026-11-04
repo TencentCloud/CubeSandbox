@@ -320,6 +320,73 @@ pub enum Error {
 }
 pub type Result<T> = result::Result<T, Error>;
 
+fn build_cmdline(payload_cmdline: Option<&str>, additions: &[String]) -> Result<Cmdline> {
+    let mut cmdline = match payload_cmdline {
+        Some(payload_cmdline) => {
+            // Cmdline::try_from() separates init arguments but does not validate its input.
+            let mut validator =
+                Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::CmdLineCreate)?;
+            validator
+                .insert_str(payload_cmdline)
+                .map_err(Error::CmdLineInsertStr)?;
+            Cmdline::try_from(payload_cmdline, arch::CMDLINE_MAX_SIZE)
+                .map_err(Error::CmdLineCreate)?
+        }
+        None => Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::CmdLineCreate)?,
+    };
+
+    for addition in additions {
+        cmdline
+            .insert_str(addition)
+            .map_err(Error::CmdLineInsertStr)?;
+    }
+
+    Ok(cmdline)
+}
+
+#[cfg(test)]
+mod cmdline_tests {
+    use super::*;
+
+    fn cmdline_string(cmdline: Cmdline) -> String {
+        cmdline.as_cstring().unwrap().into_string().unwrap()
+    }
+
+    #[test]
+    fn test_build_cmdline_additions_precede_init_args() {
+        let additions = vec!["earlycon".to_string()];
+        let cmdline = build_cmdline(Some("console=x -- /init arg"), &additions).unwrap();
+
+        assert_eq!(cmdline_string(cmdline), "console=x earlycon -- /init arg");
+    }
+
+    #[test]
+    fn test_build_cmdline_additions_without_init_args() {
+        let additions = vec!["earlycon".to_string()];
+        let cmdline = build_cmdline(Some("console=x"), &additions).unwrap();
+
+        assert_eq!(cmdline_string(cmdline), "console=x earlycon");
+    }
+
+    #[test]
+    fn test_build_cmdline_preserves_additional_init_separators() {
+        let additions = vec!["earlycon".to_string()];
+        let cmdline = build_cmdline(Some("console=x -- /init -- arg"), &additions).unwrap();
+
+        assert_eq!(
+            cmdline_string(cmdline),
+            "console=x earlycon -- /init -- arg"
+        );
+    }
+
+    #[test]
+    fn test_build_cmdline_rejects_invalid_input() {
+        let error = build_cmdline(Some("console=x\nroot=x"), &[]).unwrap_err();
+
+        assert!(matches!(error, Error::CmdLineInsertStr(_)));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum VmState {
     Created,
@@ -939,16 +1006,14 @@ impl Vm {
         payload: &PayloadConfig,
         #[cfg(target_arch = "aarch64")] device_manager: &Arc<Mutex<DeviceManager>>,
     ) -> Result<Cmdline> {
-        let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::CmdLineCreate)?;
-        if let Some(s) = payload.cmdline.as_ref() {
-            cmdline.insert_str(s).map_err(Error::CmdLineInsertStr)?;
-        }
-
         #[cfg(target_arch = "aarch64")]
-        for entry in device_manager.lock().unwrap().cmdline_additions() {
-            cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
-        }
-        Ok(cmdline)
+        let device_manager = device_manager.lock().unwrap();
+        #[cfg(target_arch = "aarch64")]
+        let additions = device_manager.cmdline_additions();
+        #[cfg(not(target_arch = "aarch64"))]
+        let additions: &[String] = &[];
+
+        build_cmdline(payload.cmdline.as_deref(), additions)
     }
 
     #[cfg(target_arch = "aarch64")]

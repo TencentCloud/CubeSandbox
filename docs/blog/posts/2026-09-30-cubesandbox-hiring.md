@@ -3,8 +3,7 @@ title: "Global Hiring: Building the Foundation for AI Agents Worldwide — Join 
 date: 2026-09-30
 author: CubeSandbox Team
 description: "Five months after open-sourcing, CubeSandbox has earned 12,000+ stars from developers across time zones. The AI Agent era is arriving, and we're looking for someone to build the foundation with us: R&D Engineer for the Tencent Cloud CubeSandbox elastic computing platform (Shenzhen), full-stack platform development from internal business support to open-source community building."
-featured: true
-weight: 1
+featured: false
 ---
 
 # Global Hiring: Building the Foundation for AI Agents Worldwide — Join Us

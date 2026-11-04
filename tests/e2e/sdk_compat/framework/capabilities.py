@@ -12,6 +12,10 @@ CODE_INTERPRETER = "code_interpreter"
 PAUSE_RESUME = "pause_resume"
 SET_TIMEOUT = "set_timeout"
 ROLLBACK_CLONE = "rollback_clone"
+# E2B added Sandbox.fork in 2.46.4; the suite's validated e2b range
+# (2.21.0-2.37.1, see e2b-versions.txt) predates it, so fork stays
+# CubeSandbox-only until the range catches up.
+FORK = "fork"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 # In-place egress policy replacement on a running sandbox, including
 # re-evaluation of already-established connections.
@@ -25,6 +29,8 @@ NETWORK_DNS_ALLOW = "network_dns_allow"
 NETWORK_ALWAYS_DENIED = "network_always_denied"
 # CubeEgress L7 rules: inject, first-match, deny, TLS MITM, SNI/host.
 NETWORK_L7_EGRESS = "network_l7_egress"
+# Sandbox access to a service bound on the node IP (direct and via CubeEgress).
+NETWORK_NODE_LOCAL = "network_node_local"
 # Template CubeNetworkConfig merged with per-create network options.
 NETWORK_TEMPLATE_MERGE = "network_template_merge"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
@@ -33,6 +39,8 @@ VOLUME_PLUGIN = "volume_plugin"
 AUTH_SIMPLE_KEY = "auth_simple_key"
 # E2B-compatible `mcp` create option served by the in-sandbox mcp-gateway.
 MCP_GATEWAY = "mcp_gateway"
+# Node-local restart policy (Never / OnFailure / Always) and restartStatus.
+RESTART_POLICY = "restart_policy"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -58,12 +66,14 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         SET_TIMEOUT,
         ROLLBACK_CLONE,
+        FORK,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,
         NETWORK_DNS_ALLOW,
         NETWORK_ALWAYS_DENIED,
         NETWORK_L7_EGRESS,
+        NETWORK_NODE_LOCAL,
         NETWORK_TEMPLATE_MERGE,
         NETWORK_DYNAMIC_UPDATE,
         PLATFORM_LIFECYCLE,
@@ -72,6 +82,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         AUTH_SIMPLE_KEY,
         NETWORK_L7_CUSTOM_PORT,
         MCP_GATEWAY,
+        RESTART_POLICY,
     }
 )
 

@@ -100,6 +100,9 @@ func TestStartupRecoverStagesNoStateTapForCleanupBeforeReady(t *testing.T) {
 	if err := controller.recover(); err != nil {
 		t.Fatal(err)
 	}
+	if got := controller.cubevsAdapter.(*fakeCubeVSAdapter).attachFilterCount(); got != 0 {
+		t.Fatalf("recover AttachFilter calls = %d, want 0", got)
+	}
 	poolState, owner, ok := controller.tapPool.StateByName(orphan.Name)
 	if !ok || poolState != TapPoolReady || owner != "" {
 		t.Fatalf("orphan tap state=%s owner=%s ok=%v after startup cleanup, want Ready", poolState, owner, ok)

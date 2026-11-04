@@ -124,6 +124,11 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil {
 		return fmt.Errorf("decode job request snapshot: %w", err)
 	}
+	// A jfs template is one package on the shared volume; nodes without a
+	// replica adopt it on first use instead of building their own.
+	if constants.IsJFSBackend(req.Backend) {
+		return nil
+	}
 	// The generated create request and the writable layer size are persisted
 	// on the ARTIFACT row (finalizeRemoteArtifact), not on the job.
 	if strings.TrimSpace(artifact.GeneratedRequestJSON) == "" {

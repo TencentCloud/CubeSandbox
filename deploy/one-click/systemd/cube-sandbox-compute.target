@@ -4,6 +4,7 @@ After=network-online.target
 Wants=network-online.target
 Wants=cube-sandbox-cubelet.service
 Wants=cube-sandbox-cube-egress-net.service cube-sandbox-cube-egress.service
+Wants=cube-sandbox-ops-agent.service
 AllowIsolate=no
 
 [Install]

@@ -10,9 +10,9 @@
 //!
 use crate::{read_le_u32, write_le_u32};
 use std::fmt;
+use std::result;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
-use std::{io, result};
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
 
@@ -42,14 +42,12 @@ pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
 #[derive(Debug)]
 pub enum Error {
     BadWriteOffset(u64),
-    InterruptFailure(io::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::BadWriteOffset(offset) => write!(f, "Bad Write Offset: {}", offset),
-            Error::InterruptFailure(e) => write!(f, "Failed to trigger interrupt: {}", e),
         }
     }
 }
@@ -224,6 +222,8 @@ pub struct Rtc {
     load: u32,
     imsc: u32,
     ris: u32,
+    // Retained for a future alarm implementation and test observability.
+    #[allow(dead_code)]
     interrupt: Arc<dyn InterruptSourceGroup>,
 }
 
@@ -240,11 +240,6 @@ impl Rtc {
             ris: 0,
             interrupt,
         }
-    }
-
-    fn trigger_interrupt(&mut self) -> Result<()> {
-        self.interrupt.trigger(0).map_err(Error::InterruptFailure)?;
-        Ok(())
     }
 
     fn get_time(&self) -> u32 {
@@ -271,14 +266,14 @@ impl Rtc {
                 self.tick_offset = seconds_to_nanoseconds(i64::from(val)).unwrap();
             }
             RTCIMSC => {
+                // The alarm is not implemented, so changing the mask cannot
+                // assert an interrupt.
                 self.imsc = val & 1;
-                self.trigger_interrupt()?;
             }
             RTCICR => {
-                // As per above mentioned doc, the interrupt is cleared by writing any data value to
-                // the Interrupt Clear Register.
+                // PL031 clears the raw interrupt on any write. The alarm is not
+                // implemented, so this must not raise a spurious IRQ.
                 self.ris = 0;
-                self.trigger_interrupt()?;
             }
             RTCCR => (), // ignore attempts to turn off the timer.
             o => {
@@ -314,7 +309,7 @@ impl BusDevice for Rtc {
                 }
             }
         };
-        if read_ok && data.len() <= 4 {
+        if read_ok && data.len() == 4 {
             write_le_u32(data, v);
         } else {
             warn!(
@@ -326,7 +321,7 @@ impl BusDevice for Rtc {
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        if data.len() <= 4 {
+        if data.len() == 4 {
             let v = read_le_u32(data);
             if let Err(e) = self.handle_write(offset, v) {
                 warn!("Failed to write to RTC PL031 device: {}", e);
@@ -472,13 +467,20 @@ mod tests {
         let v_read = read_le_u32(&data);
         assert_eq!((v / NANOS_PER_SECOND) as u32, v_read);
 
-        // Read and write to IMSC register.
-        // Test with non zero value.
+        // Read and write to IMSC register. The alarm is not implemented,
+        // so changing the mask must not assert an interrupt.
         let non_zero = 1;
         write_le_u32(&mut data, non_zero);
         rtc.write(LEGACY_RTC_MAPPED_IO_START, RTCIMSC, &data);
-        // The interrupt line should be on.
-        assert!(rtc.interrupt.notifier(0).unwrap().read().unwrap() == 1);
+        assert_eq!(
+            rtc.interrupt
+                .notifier(0)
+                .unwrap()
+                .read()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         rtc.read(LEGACY_RTC_MAPPED_IO_START, RTCIMSC, &mut data);
         let v = read_le_u32(&data);
         assert_eq!(non_zero & 1, v);
@@ -490,11 +492,19 @@ mod tests {
         let v = read_le_u32(&data);
         assert_eq!(0, v);
 
-        // Read and write to the ICR register.
+        // Read and write to the ICR register. Clearing an unasserted alarm
+        // must not generate a guest interrupt.
         write_le_u32(&mut data, 1);
         rtc.write(LEGACY_RTC_MAPPED_IO_START, RTCICR, &data);
-        // The interrupt line should be on.
-        assert!(rtc.interrupt.notifier(0).unwrap().read().unwrap() > 1);
+        assert_eq!(
+            rtc.interrupt
+                .notifier(0)
+                .unwrap()
+                .read()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         let v_before = read_le_u32(&data);
 
         rtc.read(LEGACY_RTC_MAPPED_IO_START, RTCICR, &mut data);
@@ -519,6 +529,22 @@ mod tests {
         rtc.read(LEGACY_RTC_MAPPED_IO_START, AMBA_ID_LOW, &mut data);
         let index = AMBA_ID_LOW + 3;
         assert_eq!(data[0], PL031_ID[((index - AMBA_ID_LOW) >> 2) as usize]);
+    }
+
+    #[test]
+    fn test_rtc_rejects_non_word_access() {
+        let intr_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut rtc = Rtc::new(Arc::new(TestInterrupt::new(intr_evt)));
+        let original_load = rtc.load;
+
+        for len in [1, 2, 3, 5] {
+            let mut data = vec![0xff; len];
+            rtc.write(LEGACY_RTC_MAPPED_IO_START, RTCLR, &data);
+            assert_eq!(rtc.load, original_load);
+
+            rtc.read(LEGACY_RTC_MAPPED_IO_START, RTCLR, &mut data);
+            assert_eq!(data, vec![0xff; len]);
+        }
     }
 
     macro_rules! byte_order_test_read_write {

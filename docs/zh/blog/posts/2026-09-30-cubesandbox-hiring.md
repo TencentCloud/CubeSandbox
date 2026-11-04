@@ -3,8 +3,7 @@ title: "全球招聘｜给全世界的 AI Agent 造底座，缺一个你"
 date: 2026-09-30
 author: CubeSandbox 团队
 description: "CubeSandbox 开源五个月，收获了来自不同时区开发者的 12,000+ 颗 Star。AI Agent 时代正在到来，我们想找一个一起造底座的人：腾讯云 CubeSandbox 弹性计算平台研发工程师（深圳），全链路研发，从支撑内部业务到和开源社区共建。"
-featured: true
-weight: 1
+featured: false
 ---
 
 # 全球招聘｜给全世界的 AI Agent 造底座，缺一个你

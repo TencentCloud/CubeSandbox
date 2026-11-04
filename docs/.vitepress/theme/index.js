@@ -18,5 +18,9 @@ export default {
       'QualityStatusPage',
       defineAsyncComponent(() => import('./QualityStatusPage.vue'))
     )
+    app.component(
+      'JuiceFSArchitecture',
+      defineAsyncComponent(() => import('./components/JuiceFSArchitecture.vue'))
+    )
   }
 }

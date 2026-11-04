@@ -78,8 +78,12 @@ func backendDirName(backend string) string {
 	return cow.BackendXFS
 }
 
-// BackendStorageRoot is <work>/xfs or <work>/s3.
+// BackendStorageRoot is <work>/xfs or <work>/s3, and [JFSStorageRoot] on the
+// JuiceFS mount for jfs.
 func BackendStorageRoot(backend string) string {
+	if isJFSBackend(backend) {
+		return JFSStorageRoot()
+	}
 	return filepath.Join(CubeletStorageWorkPath(), backendDirName(backend))
 }
 

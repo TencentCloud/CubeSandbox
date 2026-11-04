@@ -13,18 +13,12 @@
 #include "tcp.h"
 #include "tcp_reset.h"
 
-/* Update a CubeEgress TCP session from the original reply tuple before DNAT
- * rewrites the sandbox-assigned destination address to mvm_inner_ip. A missing
- * or non-L7 session is intentionally non-blocking.
- */
-/* Update a CubeEgress TCP session from the original reply tuple before DNAT
- * rewrites the sandbox-assigned destination address to mvm_inner_ip.
+/* Update a cube-dev TCP reply before DNAT rewrites the sandbox-assigned
+ * destination to mvm_inner_ip.
  *
- * Returns the reset-redirect action when the reply belongs to a stale
- * (pre-rollback) L7 session — a RST is reflected to the proxy and the session
- * pair removed so the proxied connection is torn down instead of desyncing —
- * or 0 to continue normal delivery. A missing or non-L7 session is
- * intentionally non-blocking (returns 0).
+ * Tracks L7 proxy sessions and node-local identity sessions (SNAT_PACKET
+ * delivered via cubegw0, no outer SNAT). A stale session is reset back to the
+ * sender and removed. Anything else is non-blocking and returns 0.
  */
 static __always_inline int update_l7_session_from_cubedev(struct __sk_buff *skb)
 {
@@ -47,7 +41,15 @@ static __always_inline int update_l7_session_from_cubedev(struct __sk_buff *skb)
 	key.version = 0;
 	key.protocol = IPPROTO_TCP;
 	sess = lookup_session(&key);
-	if (!sess || sess->packet_class != L7PROXY_PACKET)
+	if (!sess)
+		return 0;
+	/* Node-local TCP uses an identity tuple and is answered by the host
+	 * stack, so the reply also arrives on cube-dev. Without this update the
+	 * session stays SYN_SENT and the reaper resets it after 60s.
+	 */
+	if (sess->packet_class != L7PROXY_PACKET &&
+	    !(sess->packet_class == SNAT_PACKET &&
+	      sess->node_ifindex == cubegw0_ifindex))
 		return 0;
 
 	if (session_is_stale(sess)) {
@@ -76,8 +78,8 @@ int from_envoy(struct __sk_buff *skb)
 	if (skb->protocol != bpf_htons(ETH_P_IP))
 		return TC_ACT_OK;
 
-	/* A stale (pre-rollback) L7 session gets its RST reflected to the proxy;
-	 * stop before delivering the reply to the guest. */
+	/* A stale (pre-rollback) L7 or node-local session gets its RST reflected
+	 * to the sender; stop before delivering the reply to the guest. */
 	ret = update_l7_session_from_cubedev(skb);
 	if (ret)
 		return ret;

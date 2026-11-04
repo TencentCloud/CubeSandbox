@@ -34,6 +34,10 @@ type CowSnapshotObject struct {
 	DevPath   string
 	SizeBytes uint64
 	Gen       uint32
+	// SharedSource is true only for an immutable object owned by another
+	// node in the shared JuiceFS namespace. It may be read or cloned but
+	// must never be deleted by this node's sandbox lifecycle.
+	SharedSource bool
 }
 
 type CowRollbackSnapshotRefs struct {

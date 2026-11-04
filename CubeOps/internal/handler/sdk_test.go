@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 )
 
 // ── ListSandboxes ─────────────────────────────────────────────────────────
@@ -310,6 +312,379 @@ func TestSDK_DeleteSandbox_Success(t *testing.T) {
 	}
 	if capturedBody["instance_type"] != "cubebox" {
 		t.Errorf("CM body instance_type = %v, want cubebox", capturedBody["instance_type"])
+	}
+}
+
+// ── DeleteSnapshot ───────────────────────────────────────────────────────
+
+func TestSDK_DeleteSnapshot_Success(t *testing.T) {
+	var capturedID string
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, snapshotID string) (json.RawMessage, error) {
+			capturedID = snapshotID
+			return raw(`{"ret": {"ret_code": 0}, "request_id": "r-1"}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-99")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if capturedID != "snap-99" {
+		t.Errorf("CM deleteSnapshot id = %q, want snap-99", capturedID)
+	}
+}
+
+func TestSDK_ListSnapshots_PassesNextTokenHeader(t *testing.T) {
+	cm := &fakeCM{
+		listSnapshots: func(_ context.Context, _ map[string]string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 0}, "data": [], "next_token": "100"}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots?limit=100")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Next-Token"); got != "100" {
+		t.Errorf("X-Next-Token = %q, want 100", got)
+	}
+}
+
+// TestSDK_ListSnapshots_Empty verifies the SDK returns [] (not a {requestID}
+// object) when CubeMaster omits `data` for an empty list.
+func TestSDK_ListSnapshots_Empty(t *testing.T) {
+	cm := &fakeCM{
+		listSnapshots: func(_ context.Context, _ map[string]string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 0}, "request_id": "r-1"}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots?limit=100")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
+		t.Errorf("body = %q, want []", got)
+	}
+}
+
+// TestSDK_ListSnapshots_NonJSONUpstream verifies a 2xx non-envelope body (e.g. a
+// proxy HTML page) surfaces as 502 instead of being masked as an empty list.
+func TestSDK_ListSnapshots_NonJSONUpstream(t *testing.T) {
+	cm := &fakeCM{
+		listSnapshots: func(_ context.Context, _ map[string]string) (json.RawMessage, error) {
+			return raw(`<html>proxy error</html>`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots?limit=100")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "proxy error") {
+		t.Errorf("body leaks upstream content: %s", w.Body.String())
+	}
+	if got := w.Header().Get("X-Next-Token"); got != "" {
+		t.Errorf("X-Next-Token = %q, want empty", got)
+	}
+}
+
+func TestSDK_GetSnapshot_Success(t *testing.T) {
+	var capturedID string
+	cm := &fakeCM{
+		getSnapshot: func(_ context.Context, snapshotID string) (json.RawMessage, error) {
+			capturedID = snapshotID
+			// CubeMaster's real detail shape: {ret, requestID, snapshot}, not data.
+			return raw(`{"ret": {"ret_code": 0}, "request_id": "r-1", "snapshot": {"snapshot_id": "snap-99", "status": "READY"}}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots/snap-99")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if capturedID != "snap-99" {
+		t.Errorf("CM getSnapshot id = %q, want snap-99", capturedID)
+	}
+	// SDK passes through the whole envelope (minus ret), keeping the snapshot
+	// object nested — the frontend unwraps res.snapshot.
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	snapObj, ok := body["snapshot"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("body has no snapshot object; body=%s", w.Body.String())
+	}
+	if snapObj["snapshotID"] != "snap-99" {
+		t.Errorf("snapshot.snapshotID = %v, want snap-99", snapObj["snapshotID"])
+	}
+}
+
+func TestSDK_GetSnapshot_NotFoundInCM(t *testing.T) {
+	cm := &fakeCM{
+		getSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 130404, "ret_msg": "snapshot not found"}, "data": null}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots/snap-nope")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestSDK_GetSnapshot_HTTPErrorShapes verifies a not-found carried as an HTTP
+// status maps to 404 like the ret_code shape, while opaque failures stay 502.
+func TestSDK_GetSnapshot_HTTPErrorShapes(t *testing.T) {
+	const notFoundEnvelope = `{"ret":{"ret_code":130404,"ret_msg":"snapshot not found"}}`
+	cases := []struct {
+		name   string
+		err    error
+		want   int
+		wantIn string
+	}{
+		{"404 with not-found envelope", &cubemaster.HTTPError{Status: http.StatusNotFound, Body: notFoundEnvelope}, http.StatusNotFound, "snapshot not found"},
+		{"400 with not-found envelope", &cubemaster.HTTPError{Status: http.StatusBadRequest, Body: notFoundEnvelope}, http.StatusNotFound, "snapshot not found"},
+		{"bare 404 is a route problem", &cubemaster.HTTPError{Status: http.StatusNotFound, Body: "404 page not found"}, http.StatusBadGateway, ""},
+		{"503 with not-found envelope", &cubemaster.HTTPError{Status: http.StatusServiceUnavailable, Body: notFoundEnvelope}, http.StatusBadGateway, ""},
+		{"404 with other business code", &cubemaster.HTTPError{Status: http.StatusNotFound, Body: `{"ret":{"ret_code":130500,"ret_msg":"boom"}}`}, http.StatusBadGateway, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := &fakeCM{
+				getSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+					return nil, tc.err
+				},
+			}
+			r := newSDKRouter(t, cm)
+
+			w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots/snap-x")
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.wantIn != "" && !strings.Contains(w.Body.String(), tc.wantIn) {
+				t.Errorf("body = %s, want it to contain %q", w.Body.String(), tc.wantIn)
+			}
+		})
+	}
+}
+
+// TestSDK_SnapshotID_MalformedIsRejected verifies IDs CubeMaster never issues
+// get 404 on GET and DELETE without reaching CubeMaster or AgentHub.
+func TestSDK_SnapshotID_MalformedIsRejected(t *testing.T) {
+	ids := []string{
+		"storage", "compatible-nodes-by-factors", "..", ".", "tpl-abc",
+		"agenthub-0a1b2c3d", "snap-", "snap-a%2Fb", "snap-" + strings.Repeat("a", 65),
+	}
+	for _, id := range ids {
+		for _, method := range []string{"GET", "DELETE"} {
+			t.Run(method+" "+id, func(t *testing.T) {
+				calls := 0
+				cm := &fakeCM{
+					getSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+						calls++
+						return raw(`{}`), nil
+					},
+					deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+						calls++
+						return raw(`{}`), nil
+					},
+				}
+				softDeletes := 0
+				svc := &service.AgentHubService{Store: &stubAgentStore{
+					countRefFn: func(context.Context, string) (int, error) { calls++; return 0, nil },
+					softDeleteFn: func(context.Context, string) (int64, error) {
+						softDeletes++
+						return 0, nil
+					},
+				}}
+				r := gin.New()
+				NewSDKHandler(cm).WithAgentHubService(svc).Register(r.Group("/api/v1/sdk"))
+
+				w := httptestRecorder(t, r, method, "/api/v1/sdk/snapshots/"+id)
+				if w.Code != http.StatusNotFound {
+					t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+				}
+				if calls != 0 || softDeletes != 0 {
+					t.Errorf("upstream reached: cm/store calls=%d softDeletes=%d, want 0", calls, softDeletes)
+				}
+			})
+		}
+	}
+}
+
+// stubAgentStore embeds service.AgentStore so only the method under test is
+// overridden; any other call panics (never expected in these tests).
+type stubAgentStore struct {
+	service.AgentStore
+	countRefFn   func(ctx context.Context, snapshotID string) (int, error)
+	softDeleteFn func(ctx context.Context, snapshotID string) (int64, error)
+}
+
+func (s *stubAgentStore) CountTemplatesReferencingSnapshot(ctx context.Context, snapshotID string) (int, error) {
+	return s.countRefFn(ctx, snapshotID)
+}
+
+func (s *stubAgentStore) SoftDeleteAgentSnapshotsByInfraID(ctx context.Context, snapshotID string) (int64, error) {
+	if s.softDeleteFn == nil {
+		return 0, nil
+	}
+	return s.softDeleteFn(ctx, snapshotID)
+}
+
+func (s *stubAgentStore) ClearBaseSnapshotIDBySnapshotID(context.Context, string) (int64, error) {
+	return 0, nil
+}
+
+// TestSDK_DeleteSnapshot_ReverseSyncFailureWarns verifies a failed AgentHub cleanup
+// keeps the success status but adds X-Cube-Warning, and a later retry clears it.
+func TestSDK_DeleteSnapshot_ReverseSyncFailureWarns(t *testing.T) {
+	const warnHeader = "X-Cube-Warning"
+	syncFails := true
+	cmDeleted := false
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			if cmDeleted {
+				return nil, &cubemaster.CMError{RetCode: 130404, RetMsg: "snapshot not found"}
+			}
+			cmDeleted = true
+			return raw(`{"ret": {"ret_code": 0}, "request_id": "r-1"}`), nil
+		},
+	}
+	svc := &service.AgentHubService{Store: &stubAgentStore{
+		countRefFn: func(_ context.Context, _ string) (int, error) { return 0, nil },
+		softDeleteFn: func(_ context.Context, _ string) (int64, error) {
+			if syncFails {
+				return 0, errors.New("db down")
+			}
+			return 1, nil
+		},
+	}}
+	r := gin.New()
+	NewSDKHandler(cm).WithAgentHubService(svc).Register(r.Group("/api/v1/sdk"))
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("first delete: status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if w.Header().Get(warnHeader) == "" {
+		t.Errorf("first delete: %s header missing after a failed cleanup", warnHeader)
+	}
+	if strings.Contains(w.Header().Get(warnHeader), "db down") {
+		t.Errorf("%s leaks the store error: %q", warnHeader, w.Header().Get(warnHeader))
+	}
+
+	w = httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("retry while cleanup still fails: status = %d, want 204; body=%s", w.Code, w.Body.String())
+	}
+	if w.Header().Get(warnHeader) == "" {
+		t.Errorf("retry while cleanup still fails: %s header missing", warnHeader)
+	}
+
+	syncFails = false
+	w = httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("reconciling retry: status = %d, want 204; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get(warnHeader); got != "" {
+		t.Errorf("reconciling retry: %s = %q, want empty", warnHeader, got)
+	}
+}
+
+func TestSDK_DeleteSnapshot_TemplateReferenced_Returns409(t *testing.T) {
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 0}}`), nil
+		},
+	}
+	svc := &service.AgentHubService{Store: &stubAgentStore{
+		countRefFn: func(_ context.Context, _ string) (int, error) { return 3, nil },
+	}}
+	r := gin.New()
+	h := NewSDKHandler(cm).WithAgentHubService(svc)
+	h.Register(r.Group("/api/v1/sdk"))
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSDK_DeleteSnapshot_RefCountError_Returns502(t *testing.T) {
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return raw(`{"ret": {"ret_code": 0}}`), nil
+		},
+	}
+	svc := &service.AgentHubService{Store: &stubAgentStore{
+		countRefFn: func(_ context.Context, _ string) (int, error) { return 0, errors.New("db down") },
+	}}
+	r := gin.New()
+	h := NewSDKHandler(cm).WithAgentHubService(svc)
+	h.Register(r.Group("/api/v1/sdk"))
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSDK_DeleteSnapshot_ConflictInCM(t *testing.T) {
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			// Snapshot in CREATING/DELETING or active job → CubeMaster 130409.
+			return raw(`{"ret": {"ret_code": 130409, "ret_msg": "snapshot in use"}, "data": null}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-1")
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 (ret_code 130409 must map to Conflict); body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestSDK_DeleteSnapshot_CMNotFoundIsIdempotent verifies a CM 404 (already
+// deleted out-of-band) returns 204 instead of 404.
+func TestSDK_DeleteSnapshot_CMNotFoundIsIdempotent(t *testing.T) {
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return nil, &cubemaster.CMError{RetCode: 130404, RetMsg: "snapshot not found"}
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-gone")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestSDK_DeleteSnapshot_HTTPNotFoundIsIdempotent verifies a 4xx carrying the
+// 130404 envelope (HTTPError shape) is also treated as already-deleted.
+func TestSDK_DeleteSnapshot_HTTPNotFoundIsIdempotent(t *testing.T) {
+	cm := &fakeCM{
+		deleteSnapshot: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return nil, &cubemaster.HTTPError{
+				Status: http.StatusNotFound,
+				Body:   `{"ret":{"ret_code":130404,"ret_msg":"snapshot not found"}}`,
+			}
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/snapshots/snap-gone")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204; body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -861,6 +1236,8 @@ func TestSDK_RouteCompleteness(t *testing.T) {
 		{"POST", "/api/v1/sdk/sandboxes/sb-1/pause"},
 		{"POST", "/api/v1/sdk/sandboxes/sb-1/resume"},
 		{"GET", "/api/v1/sdk/snapshots"},
+		{"GET", "/api/v1/sdk/snapshots/snap-1"},
+		{"DELETE", "/api/v1/sdk/snapshots/snap-1"},
 		{"POST", "/api/v1/sdk/sandboxes/sb-1/snapshots"},
 		{"POST", "/api/v1/sdk/sandboxes/sb-1/rollback"},
 		{"GET", "/api/v1/sdk/templates"},
@@ -886,20 +1263,16 @@ func TestSDK_RouteCompleteness(t *testing.T) {
 
 // ── R12: long operation timeout ───────────────────────────────────────────
 
-// TestR12_LongOpTimeoutIs240s verifies that the long-operation timeout
-// constant is 240 seconds, matching the original CubeAPI budget for
-// synchronous snapshot create/rollback and template delete. R12 fix: the
-// new CubeMaster client must not impose a shorter fixed timeout.
-func TestR12_LongOpTimeoutIs240s(t *testing.T) {
-	if longOpTimeout != 240*time.Second {
-		t.Errorf("longOpTimeout = %v, want 240s", longOpTimeout)
+// TestR12_LongOpTimeoutIs15min verifies the long-operation timeout aligns
+// with CubeMaster's snapshotOperationTimeout (15 min).
+func TestR12_LongOpTimeoutIs15min(t *testing.T) {
+	if longOpTimeout != 15*time.Minute {
+		t.Errorf("longOpTimeout = %v, want 15m", longOpTimeout)
 	}
 }
 
 // TestR12_LongOpCtxSetsDeadline verifies that longOpCtx produces a context
-// with a deadline approximately 240s in the future. This proves the long-op
-// handlers (CreateSnapshot, RollbackSandbox, DeleteTemplate) get a 240s
-// budget instead of the old 30s client-level timeout.
+// with a deadline approximately 15 min in the future.
 func TestR12_LongOpCtxSetsDeadline(t *testing.T) {
 	c, _ := gin.CreateTestContext(nil)
 	// longOpCtx derives from c.Request.Context(); attach a request so
@@ -913,17 +1286,61 @@ func TestR12_LongOpCtxSetsDeadline(t *testing.T) {
 		t.Fatal("longOpCtx returned context with no deadline")
 	}
 	remaining := time.Until(dl)
-	// Should be close to 240s (allow some slack for test execution).
-	if remaining < 230*time.Second || remaining > 240*time.Second {
-		t.Errorf("longOpCtx deadline remaining = %v, want ~240s", remaining)
+	// Should be close to 15 min (allow some slack for test execution).
+	if remaining < 14*time.Minute || remaining > 15*time.Minute {
+		t.Errorf("longOpCtx deadline remaining = %v, want ~15m", remaining)
 	}
 }
 
-// TestR12_LongOpHandlerUsesLongContext verifies that CreateSnapshot (a
-// long-op handler) passes a context with the 240s deadline to the CubeMaster
-// client, not the default request context. The fake CM captures the context
-// deadline and the test asserts it's ~240s, proving R12: long operations
-// get the full 240s budget, not a 30s cap.
+// TestTemplateDeleteCtx_Deadline verifies DeleteTemplate's budget is ~350s and stays
+// below CubeMaster's default 360s write timeout and the snapshot handlers' budget.
+func TestTemplateDeleteCtx_Deadline(t *testing.T) {
+	const cmDefaultWriteTimeout = 360 * time.Second
+	if templateDeleteTimeout >= cmDefaultWriteTimeout || templateDeleteTimeout >= longOpTimeout {
+		t.Fatalf("templateDeleteTimeout = %v, want below %v and %v", templateDeleteTimeout, cmDefaultWriteTimeout, longOpTimeout)
+	}
+
+	c, _ := gin.CreateTestContext(nil)
+	c.Request = httptest.NewRequest("DELETE", "/", nil)
+	ctx, cancel := templateDeleteCtx(c)
+	defer cancel()
+
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("templateDeleteCtx returned context with no deadline")
+	}
+	if remaining := time.Until(dl); remaining < 340*time.Second || remaining > templateDeleteTimeout {
+		t.Errorf("templateDeleteCtx deadline remaining = %v, want ~350s", remaining)
+	}
+}
+
+// TestSDK_DeleteTemplate_UsesTemplateDeleteDeadline verifies the handler passes the
+// ~350s context to CubeMaster, not the 15 min snapshot one.
+func TestSDK_DeleteTemplate_UsesTemplateDeleteDeadline(t *testing.T) {
+	var captured context.Context
+	cm := &fakeCM{
+		deleteTemplate: func(ctx context.Context, _ interface{}) (json.RawMessage, error) {
+			captured = ctx
+			return raw(`{"ret": {"ret_code": 0}}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "DELETE", "/api/v1/sdk/templates/tpl-1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	dl, ok := captured.Deadline()
+	if !ok {
+		t.Fatal("CubeMaster call got a context with no deadline")
+	}
+	if remaining := time.Until(dl); remaining > templateDeleteTimeout {
+		t.Errorf("deadline remaining = %v, want at most %v", remaining, templateDeleteTimeout)
+	}
+}
+
+// TestR12_LongOpHandlerUsesLongContext verifies CreateSnapshot passes the 15 min
+// deadline context to the CubeMaster client, not the default request context.
 func TestR12_LongOpHandlerUsesLongContext(t *testing.T) {
 	var capturedCtx context.Context
 	cm := &fakeCM{
@@ -944,8 +1361,7 @@ func TestR12_LongOpHandlerUsesLongContext(t *testing.T) {
 		t.Fatal("CreateSnapshot did not pass a context with a deadline to CM client")
 	}
 	remaining := time.Until(dl)
-	// R12 fix: the deadline should be ~240s, NOT 30s.
-	if remaining < 230*time.Second {
-		t.Errorf("CreateSnapshot context deadline remaining = %v, want >=230s (R12: 240s budget, not 30s)", remaining)
+	if remaining < 14*time.Minute {
+		t.Errorf("CreateSnapshot context deadline remaining = %v, want >=14m (15m budget)", remaining)
 	}
 }

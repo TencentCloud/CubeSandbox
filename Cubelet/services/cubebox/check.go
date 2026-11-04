@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -27,6 +28,9 @@ import (
 const debugStdoutFIFOFlags = syscall.O_RDWR | syscall.O_CREAT
 
 func checkParam(ctx context.Context, realReq *cubebox.RunCubeSandboxRequest) error {
+	if err := restartpolicy.Validate(realReq); err != nil {
+		return err
+	}
 	if err := checkReqVolumes(ctx, realReq); err != nil {
 		return err
 	}

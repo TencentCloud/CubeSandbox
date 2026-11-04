@@ -36,7 +36,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-> 加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
+> 加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot/requirements.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
 
 
 构建模板的过程可以暴露多个端口以及自定义探针路径，也可以传入环境变量
@@ -52,6 +52,16 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
+`--user` 指定模板构建进程、以及之后从该模板创建的沙箱的容器用户。写法是 `uid`、`uid:gid`、`用户名` 或 `用户名:gid`，组必须是数字。不传 `--user` 时仍然以 root 运行，和以前一样。
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --user      1000:1000
+```
+
+`POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
 ## 第三步 — 监控进度
 
@@ -170,7 +180,7 @@ cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec --json --include-request
 cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 ```
 
-如果你更关心“应该看什么、如何一步步预览最终请求”，可继续阅读[模板检查与请求预览](../template-inspection-and-preview.md)。
+关于镜像 `ENV`、模板 `--env` 以及 Sandbox 运行时环境变量的作用域和覆盖规则，见[环境变量](../environment-variables.md)。
 
 ## 第五步 — （可选）把历史本地 artifact 迁入 TC 存储
 
@@ -216,6 +226,9 @@ cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
 
 # 一次删除多个模板
 cubemastercli tpl delete tpl-first tpl-second tpl-third
+
+# 使用 --force 清除卡住的构建工作
+cubemastercli tpl delete --force tpl-748094d2f2374b0a8a37e6ec
 ```
 
 传入多个模板 ID 时，即使其中某个模板删除失败，CLI 也会继续尝试删除其余模板，最后汇总返回失败项。
@@ -226,7 +239,9 @@ cubemastercli tpl delete tpl-first tpl-second tpl-third
 template deleted: tpl-748094d2f2374b0a8a37e6ec
 ```
 
-> ⚠️ 删除操作会同时移除模板元数据和所有节点上的 artifact 副本。已基于该模板运行的沙箱**不受影响**，但此后无法再用该模板创建新沙箱。
+`--force` 只用于清除卡住的构建任务或定义构建，使删除可以继续；它不会覆盖使用中检查：只要仍有运行中的沙箱依赖该模板，后端就会拒绝删除，包括带 `--force` 的请求。
+
+> ⚠️ 删除操作会同时移除模板元数据和所有节点上的 artifact 副本。删除后无法再用该模板创建新沙箱。
 
 
 ## 常见问题

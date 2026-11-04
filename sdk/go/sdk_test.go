@@ -233,7 +233,7 @@ func TestLifecycleEndpoints(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/sandboxes":
 			fmt.Fprint(w, "["+sandboxInfoJSON(testSandboxID, "paused")+"]")
 		case r.Method == http.MethodGet && r.URL.Path == "/health":
-			fmt.Fprint(w, `{"status":"ok","sandboxes":1}`)
+			fmt.Fprint(w, `{"status":"ok"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/"+testSandboxID:
 			fmt.Fprint(w, sandboxInfoJSON(testSandboxID, "paused"))
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/pause":
@@ -823,6 +823,58 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 	}
 }
 
+func TestFilesReadBytesPreservesBinary(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4e, 0x47}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/files" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Write(png)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-bin", TemplateID: "tpl-test"}
+
+	got, err := sb.Files().ReadBytes(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("ReadBytes: %v", err)
+	}
+	if !bytes.Equal(got, png) {
+		t.Fatalf("got=%x want=%x", got, png)
+	}
+
+	stream, err := sb.Files().ReadStream(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("ReadStream: %v", err)
+	}
+	defer stream.Close()
+	streamed, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(streamed, png) {
+		t.Fatalf("streamed=%x want=%x", streamed, png)
+	}
+
+	// Go strings hold arbitrary bytes (unlike JS/Python UTF-8 text paths), so
+	// Read still round-trips binary. ReadBytes is the e2b format=bytes surface
+	// for callers that want an explicit []byte API.
+	textContent, err := sb.Files().Read(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal([]byte(textContent), png) {
+		t.Fatalf("Read round-trip=%x want=%x", []byte(textContent), png)
+	}
+}
+
 func TestFilesReadReturnsEnvdFileError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"file not found"}`, http.StatusNotFound)
@@ -889,14 +941,37 @@ type fakeFileReader struct {
 	path    string
 	user    string
 	content string
+	raw     []byte
 	err     error
 }
 
-func (r *fakeFileReader) readFile(_ context.Context, path string, options ...fileRequestOption) (string, error) {
+func (r *fakeFileReader) readFile(ctx context.Context, path string, options ...fileRequestOption) (string, error) {
+	raw, err := r.readFileBytes(ctx, path, options...)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func (r *fakeFileReader) readFileBytes(_ context.Context, path string, options ...fileRequestOption) ([]byte, error) {
 	r.path = path
 	opts := resolveFileRequestOptions(options...)
 	r.user = opts.user
-	return r.content, r.err
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.raw != nil {
+		return append([]byte(nil), r.raw...), nil
+	}
+	return []byte(r.content), nil
+}
+
+func (r *fakeFileReader) openFileStream(ctx context.Context, path string, options ...fileRequestOption) (io.ReadCloser, error) {
+	raw, err := r.readFileBytes(ctx, path, options...)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(raw)), nil
 }
 
 func connectEnvelope(flags byte, payload string) []byte {
@@ -928,6 +1003,12 @@ func clearEnv(t *testing.T) {
 
 func sandboxJSON(sandboxID, templateID string) string {
 	return fmt.Sprintf(`{"sandboxID":%q,"templateID":%q,"clientID":"client-1","envdVersion":"0.0.1","domain":"cube.app"}`, sandboxID, templateID)
+}
+
+// sandboxField renders the `"sandbox":{...}` fragment inside one element of a
+// server-side fork response array.
+func sandboxField(sandboxID string) string {
+	return `"sandbox":` + sandboxJSON(sandboxID, "tpl-test")
 }
 
 func sandboxInfoJSON(sandboxID, state string) string {
@@ -1666,6 +1747,8 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 		DNS:                 []string{"8.8.8.8", "1.1.1.1"},
 		AllowOut:            []string{"172.67.0.0/16"},
 		DenyOut:             []string{"10.0.0.0/8"},
+		Backend:             "s3",
+		User:                "1000:1000",
 	})
 	if err != nil {
 		t.Fatalf("BuildTemplate returned error: %v", err)
@@ -1674,6 +1757,8 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 	assertString(t, got, "image", "registry.example.com/app:latest")
 	assertString(t, got, "writableLayerSize", "20Gi")
 	assertString(t, got, "networkType", "tap")
+	assertString(t, got, "backend", "s3")
+	assertString(t, got, "user", "1000:1000")
 	assertString(t, got, "registryUsername", "pull-user")
 	assertString(t, got, "registryPassword", "pull-pass")
 	assertString(t, got, "probePath", "/health")
@@ -1696,6 +1781,33 @@ func TestBuildTemplateRequiresImage(t *testing.T) {
 	client := NewClient(Config{APIURL: "http://example.com", Timeout: 300 * time.Second})
 	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{}); err == nil {
 		t.Fatal("BuildTemplate without image returned nil error")
+	}
+}
+
+func TestBuildTemplateOmitsBackendWhenBlank(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"job-1","templateID":"tpl-1","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image:   "python:3.11-slim",
+		Backend: "   ",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	if _, ok := got["backend"]; ok {
+		t.Fatalf("blank backend must be omitted, got %#v", got["backend"])
+	}
+	if _, ok := got["user"]; ok {
+		t.Fatalf("empty user must be omitted, got %#v", got["user"])
 	}
 }
 

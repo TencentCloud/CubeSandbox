@@ -81,6 +81,46 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=_content_summary,
         )
 
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        return self._trace.capture(
+            "write_bytes",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+                **_content_summary(content),
+            },
+            lambda: self._wrapped.write_bytes(path, content, user=user),
+            output=lambda _: {"written": True},
+        )
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return self._trace.capture(
+            "read_bytes",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+            },
+            lambda: self._wrapped.read_bytes(path, user=user),
+            output=_content_summary,
+        )
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return self._trace.capture(
+            "read_stream",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+            },
+            lambda: self._wrapped.read_stream(path, user=user),
+            output=_content_summary,
+        )
+
     def list_files(self, path: str) -> list[dict[str, Any]]:
         return self._trace.capture(
             "list_files",
@@ -235,18 +275,19 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.set_timeout(timeout),
         )
 
-    def create_snapshot(self) -> str:
+    def create_snapshot(self, name: str | None = None) -> str:
         return self._trace.capture(
             "create_snapshot",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
+                "name": name,
             },
-            self._wrapped.create_snapshot,
+            lambda: self._wrapped.create_snapshot(name=name),
             output=lambda snapshot_id: {"snapshot_id": snapshot_id},
         )
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         return self._trace.capture(
             "delete_snapshot",
             {
@@ -255,7 +296,7 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "snapshot_id": snapshot_id,
             },
             lambda: self._wrapped.delete_snapshot(snapshot_id),
-            output=lambda _: {"deleted": True},
+            output=lambda deleted: {"deleted": deleted},
         )
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
@@ -284,6 +325,28 @@ class TracingSandboxAdapter(SandboxAdapter):
             },
         )
         return [wrap_adapter(clone, self._trace) for clone in clones]
+
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple[SandboxAdapter | None, Exception | None]]:
+        results = self._trace.capture(
+            "fork",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "count": count,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.fork(count, timeout=timeout),
+            output=lambda results: {
+                "forked_ids": [a.sandbox_id for a, _ in results if a is not None],
+                "failures": [str(err) for _, err in results if err is not None],
+            },
+        )
+        return [
+            (wrap_adapter(adapter, self._trace) if adapter is not None else None, err)
+            for adapter, err in results
+        ]
 
     def list_snapshot_ids(self) -> set[str]:
         return self._trace.capture(
@@ -368,6 +431,8 @@ def wrap_adapter(adapter: SandboxAdapter, trace: TraceCollector | None) -> Sandb
 
 
 def _content_summary(content: Any) -> dict[str, Any]:
+    if isinstance(content, (bytes, bytearray)):
+        return {"content_length": len(content)}
     text = str(content)
     return {
         "content_length": len(text),

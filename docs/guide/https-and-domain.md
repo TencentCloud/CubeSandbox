@@ -87,6 +87,12 @@ When to use which:
 
 Both modes coexist on every CubeProxy instance and share the same Redis-backed routing metadata; no additional configuration is required to enable the path form.
 
+## Header-Based Routing for E2B SDKs (No DNS)
+
+CubeProxy has a third, fallback routing source for the official E2B SDKs: when the `Host` header carries no `<port>-<sandbox-id>.<domain>` attributes, it reads the `E2b-Sandbox-Id` (required) and `E2b-Sandbox-Port` (optional, defaults to `49983`) request headers instead. E2B SDKs that read `E2B_SANDBOX_URL` send these headers on sandbox data-plane requests, so they can target a CubeProxy IP directly without wildcard DNS.
+
+Host-based routing keeps priority, so wildcard-domain traffic is unaffected. Like path mode, this exposes the whole data plane on the plaintext listener — trusted networks only. See [E2B SDKs on a fixed address: header mode](./multi-node-deploy.md#e2b-sdks-on-a-fixed-address-header-mode) for the client configuration.
+
 ## Customizing the Host Seen by Sandbox Services
 
 Some web frameworks validate the HTTP `Host`, while Cube public URLs use

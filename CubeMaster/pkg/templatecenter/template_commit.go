@@ -190,6 +190,10 @@ func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, tem
 		source.Annotations = map[string]string{}
 	}
 	source.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = strings.TrimSpace(templateID)
+	// Commit never sets display_name, so scrub the inherited alias to keep the
+	// committed template from reporting the source template's alias.
+	delete(source.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+	delete(source.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
 	return source, nil
 }
 

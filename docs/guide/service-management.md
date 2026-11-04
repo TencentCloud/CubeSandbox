@@ -94,7 +94,7 @@ Dependencies only express **startup ordering** via `After=` / `Wants=`. If an up
 The two most common config entry points:
 
 - Top-level env: `/usr/local/services/cubetoolbox/.one-click.env`
-- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
+- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile.template`
 
 Restart the **service that consumes that config**:
 
@@ -111,9 +111,13 @@ sudo systemctl restart cube-sandbox-cube-api.service
 # cubeproxy/global.conf
 sudo systemctl restart cube-sandbox-cube-proxy.service
 
-# coredns/Corefile
+# coredns/Corefile.template
 sudo systemctl restart cube-sandbox-coredns.service
 ```
+
+::: warning CoreDNS: edit the template, not the rendered Corefile
+`coredns/Corefile` is a generated artifact: every `cube-sandbox-coredns.service` start re-renders it from `coredns/Corefile.template` (`coredns-prepare.sh` → `coredns-start.sh` → `render_template_atomic`), so hand-edits to the rendered file are silently overwritten on the next restart. Edit the template, then restart the service.
+:::
 
 ::: warning Editing the systemd unit file itself
 If you change `/etc/systemd/system/cube-sandbox-*.service`, run `daemon-reload` so systemd picks up the new content:
@@ -294,12 +298,22 @@ control thread, not by deferred logger initialization or a vCPU/API thread.
 The host-side policy should run hourly and use `rename` + `create`; do not use
 `copytruncate`.
 
-For example, install the following as `/etc/logrotate.d/cubesandbox` and make
-sure the host invokes `logrotate` hourly:
+One-click installs this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
+and enables an hourly `cube-sandbox-logrotate.timer`. The installer validates a
+new policy before replacing the live one; if validation fails, the live policy
+stays, a new timer is not enabled, and an existing timer keeps running the
+previous policy. The one-click file is installer-managed and
+is overwritten on every install or upgrade. An old
+`/etc/logrotate.d/cubesandbox` is moved to
+`/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>`.
+
+On Kubernetes / Helm hosts, save the example below as
+`/etc/logrotate.d/cubesandbox` and run `logrotate` hourly; a distro's default
+daily job rotates only once a day.
 
 ```text
-/data/log/CubeVmm/vmm.log
-/data/log/CubeShim/*.log {
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
+    su root root
     hourly
     rotate 24
     missingok
@@ -310,7 +324,8 @@ sure the host invokes `logrotate` hourly:
 }
 ```
 
-`rotate 24` retains 24 hourly files; adjust it to the required retention period.
+With hourly invocation, `rotate 24` keeps about 24 hours of logs; adjust it for
+the retention period you need.
 `delaycompress` keeps the newest rotated file uncompressed for one cycle because
 a writer may still use the old descriptor until its next scheduled reopen.
 CubeShim's internal event runs every 30 minutes, while the VMM control thread
@@ -320,8 +335,9 @@ but does not promise immediate handling of an arbitrary manual rotation; it
 does not support `copytruncate`.
 
 The example uses `root root` because the bundled one-click systemd services run as
-root. If CubeShim or the VMM run under another account, set the `create` owner and
-group to that account; otherwise a newly-created file may not be reopenable.
+root. If CubeShim or the VMM run under another account, set both the `su`
+user/group and the `create` owner/group to that account; otherwise logrotate
+cannot switch identity and a newly-created file may not be reopenable.
 The `0640` mode in this example applies to files created by `logrotate`; the
 CubeShim and VMM writers themselves continue to use the process umask.
 

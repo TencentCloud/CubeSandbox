@@ -105,6 +105,25 @@ sb.pause(timeout=60, interval=0.5) # 自定义轮询参数
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
 
+### 分叉（Fork）
+
+```python
+sb = Sandbox.create()
+
+# 一次服务端调用：后端对 sb 只打一次快照，派生 N 个副本。
+forks = sb.fork(count=3)              # list[Sandbox | Exception]，每个 fork 一项
+forks = sb.fork(count=3, timeout=60)  # timeout：新副本空闲存活时长，单位秒
+
+for f in forks:
+    if isinstance(f, Sandbox):
+        f.run_code("print('alive')")  # 运行中的副本
+    else:
+        print(f)                      # 该 fork 的异常
+```
+
+部分成功会保留副本且不抛异常；只有整体失败才抛异常（如源沙箱不存在）。
+`count` 为 1..100（默认 1）。与 `clone` 不同，临时快照由服务端管理。
+
 ### 指定计算节点
 
 通过计算节点 ID 或 Host IP 限定调度范围。只传一个节点即可将沙箱固定到
@@ -283,7 +302,7 @@ Volume.destroy(vol.volume_id)           # -> bool；先杀掉所有挂载它的�
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # 运行中沙箱列表
 print(Sandbox.list_v2())    # v2 API（支持过滤）
 ```
@@ -321,7 +340,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — 创建新沙箱（可限定计算节点或挂载卷） |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — 连接（暂停状态下自动恢复），并可选地重置空闲超时 |
 | `Sandbox.list(config)` | `GET /sandboxes` — 列出运行中沙箱（v1） |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出沙箱（v2） |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出运行中与已暂停的沙箱（v2 E2B 视图） |
 | `Sandbox.health(config)` | `GET /health` — 服务健康检查 |
 
 ### `Sandbox` — 实例方法

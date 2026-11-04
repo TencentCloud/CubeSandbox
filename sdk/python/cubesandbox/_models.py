@@ -209,12 +209,20 @@ class SnapshotInfo:
 class SandboxState(str, Enum):
     """E2B-compatible sandbox lifecycle state.
 
+    E2B's own SDK declares only ``RUNNING`` and ``PAUSED``. CubeAPI also
+    reports ``pausing`` while a pause is in flight and ``unknown`` for a
+    sandbox that is still being created, whose state could not be read, or
+    that has already exited, so both are declared here: every state CubeAPI
+    documents resolves to a member instead of falling back to a raw string.
+
     Subclasses ``str`` so comparisons against plain strings (e.g.
     ``state == "running"``) keep working for existing callers.
     """
 
     RUNNING = "running"
     PAUSED = "paused"
+    PAUSING = "pausing"
+    UNKNOWN = "unknown"
 
     def __str__(self) -> str:
         return self.value

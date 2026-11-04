@@ -23,6 +23,8 @@ cubeProxy:
   domain: "cube.app"
   tls:
     mode: selfSigned   # trial; production: existingSecret or certManager
+    # selfSigned:
+    #   rotateOnSanChange: true   # re-issue cert (and CA) when domain/dnsNames change
   # TKE only (when using values-tke.yaml LoadBalancer):
   # service:
   #   annotations:
@@ -63,6 +65,8 @@ mysql:
 #   password: "replace-me-pg-password"
 #   database: cube_mvp
 redis:
+  # External native Cluster: leave host/Sentinel empty and use db: 0.
+  # clusterNodes: "redis-1.example:6379,redis-2.example:6379,redis-3.example:6379"
   host: ""
   password: "replace-me-redis-password"
   # External Redis Sentinel (skips chart-managed redis). Example:

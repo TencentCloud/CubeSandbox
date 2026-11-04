@@ -66,9 +66,11 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 					ID:   "container1",
 					Name: "test-container",
 				},
-				IP:            "192.168.1.2",
-				IsDebugStdout: true,
-				Status:        StoreStatus(Status{Pid: 12345}),
+				IP:              "192.168.1.2",
+				IsDebugStdout:   true,
+				RequestIndex:    2,
+				RequestIndexSet: true,
+				Status:          StoreStatus(Status{Pid: 12345}),
 			},
 		},
 	}
@@ -125,6 +127,9 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 	}
 
 	copiedContainer, _ := copied.ContainersMap.Get("container1")
+	if copiedContainer.RequestIndex != 2 || !copiedContainer.RequestIndexSet {
+		t.Errorf("RequestIndex not copied: %+v", copiedContainer.RequestIndex)
+	}
 	copiedContainer.IP = "192.168.1.100"
 	originalContainer, _ := original.ContainersMap.Get("container1")
 	if originalContainer.IP == "192.168.1.100" {

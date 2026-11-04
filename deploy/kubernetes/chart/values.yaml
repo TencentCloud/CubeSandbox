@@ -40,6 +40,12 @@ images:
     tag: v0.7.3
     pullPolicy: IfNotPresent
 
+  # Node-local ops-agent: applies CubeOps-desired config to dynamicconf.
+  opsAgent:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops-agent
+    tag: v0.7.3
+    pullPolicy: IfNotPresent
+
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
     tag: v0.7.3
@@ -162,6 +168,23 @@ storageClass:
 persistence:
   storageClassName: ""
 
+# Private-CA trust for the CubeTemplateCenter pod's outbound TLS (image
+# registries behind a private CA). Off by default: with enabled=false the
+# render is byte-identical to a release without this block. Enabled, the
+# certificates are exposed to the pod via SSL_CERT_DIR (Go reads the mounted
+# directory IN ADDITION to the system bundle, so publicly-trusted registries
+# keep working). See the chart README for the exact value shapes.
+trustedCACerts:
+  enabled: false
+  # Inline PEM certificates — a list of CERTIFICATE blocks (or multi-cert
+  # chains), rendered into a chart-managed ConfigMap. Private keys are
+  # rejected at render time.
+  certs: []
+  # OR (mutually exclusive with certs): reference an operator-managed
+  # ConfigMap in the release namespace whose keys hold PEM content. Changes
+  # require a pod restart (NOTES prints the exact command).
+  existingConfigMap: ""
+
 placement:
   # Control-plane components run only on dedicated control nodes.
   controlPlane:
@@ -224,7 +247,8 @@ controlPlane:
     enabled: true
     # Number of Master replicas. Master is stateless (all state in DB), so
     # multiple replicas can run concurrently without coordination. Increase
-    # for higher API throughput and availability.
+    # for higher API throughput and availability. Also feeds CubeMaster's
+    # cluster-wide concurrency estimate.
     replicas: 1
     # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
     # templates or slow networks/disks.
@@ -717,6 +741,9 @@ redis:
   # Redis Sentinel (external). Non-empty masterName enables Sentinel for
   # CubeMaster / CubeProxy / cube-lifecycle-manager; requires sentinelNodes.
   # masterName and sentinelNodes must be set together (validated at render time).
+  # Native Cluster seed endpoints (comma-separated host:port). Mutually
+  # exclusive with host/Sentinel; requires db: 0. Cluster is externally managed.
+  clusterNodes: ""
   masterName: ""
   # Comma-separated sentinel endpoints, e.g. "10.0.0.11:26379,10.0.0.12:26379".
   # Also accepts hostname and bracketed IPv6 ([2001:db8::10]:26379).
@@ -770,7 +797,19 @@ minio:
       - ReadWriteOnce
   resources: {}
 
+# Node-local ops-agent DaemonSet: applies CubeOps-desired quota config to the
+# cubelet dynamicconf on every compute node. Shares the compute placement of
+# the cubelet DaemonSet and follows cubeNode.hostNetwork so CubeOps reaches it
+# on the same address the cubelet registers.
+opsAgent:
+  port: 8890
+  resources: {}
+  extraEnv: []
+
 cubeNode:
+  # Operator-owned IPv4 CIDRs, all ports. Empty preserves existing policy.
+  # Restart Cubelet after changes; sandbox callers cannot modify this list.
+  operatorAllowOut: []
   enabled: true
   podAnnotations:
     # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
@@ -791,7 +830,9 @@ cubeNode:
   # networking on that node. Trade-offs: NetworkPolicy cannot govern sandbox
   # traffic, and cubelet / CubeS3lvol / cube-egress bind on the host (cubelet
   # is unauthenticated — firewall it like kubelet). Set false only when
-  # NetworkPolicy must apply.
+  # NetworkPolicy must apply. On the Pod network CubeOps cannot push quota to
+  # ops-agent (pushes target the node IP); quota then converges via the 300s
+  # pull reconcile instead.
   hostNetwork: true
   # One-time acknowledgement read by the cube-node-hostnet preflight Hook
   # (pre-install/pre-upgrade/pre-rollback): changing hostNetwork on an existing
@@ -967,7 +1008,8 @@ cubeProxy:
   # Traffic reaches CubeProxy via ClusterIP Service + Ingress (TLS still
   # terminates in CubeProxy; Ingress uses SSL passthrough / HTTPS backend).
   enabled: true
-  # Public sandbox domain (also used for TLS CN / wildcard DNS / Ingress hosts).
+  # Public sandbox domain (also used for TLS CN/SAN, wildcard DNS, and Ingress
+  # hosts). Keep controlPlane.api.sandboxDomain consistent with this value.
   # For production, point external DNS at the Ingress entrypoint.
   domain: cube.app
   podAnnotations: {}
@@ -1045,6 +1087,8 @@ cubeProxy:
         kind: ClusterIssuer
         name: ""
       commonName: ""
+      # Explicit SAN list. The chart does not auto-add *.domain here because
+      # wildcard certificates normally require a DNS-01 issuer.
       dnsNames: []
       ipAddresses: []
       duration: ""
@@ -1055,12 +1099,20 @@ cubeProxy:
         - server auth
     selfSigned:
       commonName: ""
+      # Additive to cubeProxy.domain and its wildcard; the chart always adds
+      # both automatically when cubeProxy.domain is set.
       dnsNames:
         - cube.app
         - "*.cube.app"
         - localhost
       ipAddresses:
         - 127.0.0.1
+      # When true, record the desired certificate spec on the proxy-certs
+      # Secret and re-issue the certificate (and CA) when that spec changes
+      # (domain, dnsNames, ipAddresses, commonName, or validity). This rotates
+      # ca.crt: re-import it into clients. Default false preserves the existing
+      # Secret across helm upgrades.
+      rotateOnSanChange: false
       caValidityDays: 3650
       certValidityDays: 3650
     # Used only when tls.mode=inline.
@@ -1103,10 +1155,8 @@ cubeProxy:
   resources: {}
 
 cubeEgress:
-  # Transparent outbound egress/MITM data-plane component. When enabled, the
-  # Cube Node Big Pod gets a cube-egress sidecar and a cube-egress-net helper
-  # sidecar that owns host TPROXY iptables/ip-rule state.
-  enabled: true
+  # Transparent outbound egress/MITM data-plane component. cube-egress-net
+  # owns the host TPROXY iptables and ip-rule state configured under network.
   # Loopback admin API port (policy push from Cubelet). Default 9091 avoids
   # colliding with CubeProxy plaintext gRPC on 9090. Keep cubeNode / Cubelet
   # cube_egress_admin_url in sync (chart sets CUBE_EGRESS_ADMIN_PORT on both).
@@ -1136,7 +1186,6 @@ cubeEgress:
       placeholderCert: ""
       placeholderKey: ""
   network:
-    enabled: true
     ingressInterface: cube-dev
     # Must match cube-dev gateway (first usable IP of cubeNode.network.cidr).
     tproxyOnIP: 172.16.0.1

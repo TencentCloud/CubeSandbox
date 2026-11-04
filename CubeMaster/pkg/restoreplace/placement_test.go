@@ -71,6 +71,12 @@ func TestCanCrossNode(t *testing.T) {
 	if !CanCrossNode("S3", "READY") {
 		t.Fatal("s3 ready must be case-insensitive")
 	}
+	if CanCrossNode(constants.SnapshotBackendJFS, constants.RemoteStatusInProgress) {
+		t.Fatal("jfs with blocks still staged must not cross")
+	}
+	if !CanCrossNode(constants.SnapshotBackendJFS, constants.RemoteStatusReady) {
+		t.Fatal("jfs ready must allow cross")
+	}
 }
 
 func TestDecidePrefersOriginWhenSchedulable(t *testing.T) {

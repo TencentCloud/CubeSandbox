@@ -1057,3 +1057,15 @@ func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 			triggered, failed)
 	}
 }
+
+func TestSkipSweepStateLeavesRestartingAlone(t *testing.T) {
+	if !skipSweepState(lifecycle.StateRestarting, true) || !skipSweepState(lifecycle.StateBackOff, true) {
+		t.Fatal("auto-pause must skip restarting and backoff")
+	}
+	if skipSweepState(lifecycle.StateRestarting, false) || skipSweepState(lifecycle.StateBackOff, false) {
+		t.Fatal("timeout kill must still run during restart")
+	}
+	if skipSweepState(lifecycle.StateGaveUp, false) || skipSweepState(lifecycle.StateRunning, false) {
+		t.Fatal("gaveup and running are sweepable")
+	}
+}

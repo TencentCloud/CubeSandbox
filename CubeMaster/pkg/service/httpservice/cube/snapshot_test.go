@@ -73,7 +73,7 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
 		"requestID":"req-1",
 		"sandbox_id":"`+knownSandboxTestID+`",
-		"display_name":"snap-name"
+		"display_name":"my-snapshot"
 	}`))
 	rt := &CubeLog.RequestTrace{}
 	resp := createSnapshot(req, rt)
@@ -93,6 +93,36 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		assert.Equal(t, "READY", got.Operation.Status)
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestCreateSnapshotRejectsReservedPrefixNameAsParamsError(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
+	origCreateSnapshotFn := createSnapshotFn
+	origResolveSnapshotHostFn := resolveSnapshotHostFn
+	t.Cleanup(func() {
+		createSnapshotFn = origCreateSnapshotFn
+		resolveSnapshotHostFn = origResolveSnapshotHostFn
+	})
+	resolveSnapshotHostFn = func(context.Context, string, string) (string, string, error) {
+		return "node-a", "10.0.0.1", nil
+	}
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+		return nil, fmt.Errorf("%w: %q", templatecenter.ErrInvalidSnapshotName, displayName)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
+		"requestID":"req-1",
+		"sandbox_id":"`+knownSandboxTestID+`",
+		"display_name":"snap-backup"
+	}`))
+	resp := createSnapshot(req, &CubeLog.RequestTrace{})
+
+	got, ok := resp.(*snapshotResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
 }
 
 func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {
@@ -707,8 +737,32 @@ func TestBindAppSnapshotTemplateReplicaRequiresReadyReplica(t *testing.T) {
 	}
 
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
-	err := bindAppSnapshotTemplateReplica(context.Background(), "tpl-missing", req)
+	err := bindAppSnapshotTemplateReplica(context.Background(), "tpl-missing", req, false)
 	assert.Error(t, err)
+}
+
+// A shared jfs template has one replica, on whichever node built it; the
+// create may land on any node, scoped or not.
+func TestBindAppSnapshotTemplateReplicaSharedTemplateIgnoresReplicaNode(t *testing.T) {
+	origResolveTemplateReadyReplicaFn := resolveTemplateReadyReplicaFn
+	t.Cleanup(func() {
+		resolveTemplateReadyReplicaFn = origResolveTemplateReadyReplicaFn
+	})
+	var preferred []string
+	resolveTemplateReadyReplicaFn = func(ctx context.Context, templateID, preferredNodeID string) (templatecenter.ReplicaStatus, error) {
+		preferred = append(preferred, preferredNodeID)
+		return templatecenter.ReplicaStatus{NodeID: "builder", AgentVersion: "v1"}, nil
+	}
+
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}, DistributionScope: []string{"node-c"}}
+	assert.NoError(t, bindAppSnapshotTemplateReplica(context.Background(), "tpl-1", req, true))
+	assert.Equal(t, []string{""}, preferred)
+	assert.Equal(t, "true", req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
+	assert.Equal(t, "v1", req.Annotations[constants.CubeAnnotationComponentCubeAgentVersion])
+
+	assert.True(t, sharedJFSTemplate(&types.CreateCubeSandboxReq{Backend: "jfs"}, templatecenter.TemplateKindTemplate))
+	assert.False(t, sharedJFSTemplate(&types.CreateCubeSandboxReq{Backend: "jfs"}, templatecenter.TemplateKindSnapshot))
+	assert.False(t, sharedJFSTemplate(&types.CreateCubeSandboxReq{Backend: "xfs"}, templatecenter.TemplateKindTemplate))
 }
 
 func TestCompatibleNodesBySnapshot(t *testing.T) {

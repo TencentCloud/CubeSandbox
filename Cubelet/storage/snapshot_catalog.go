@@ -119,12 +119,13 @@ type snapshotCatalogNS struct {
 
 var (
 	snapshotCatalogMu sync.RWMutex
-	// snapshotCatalogs keeps XFS and S3 catalogs in separate namespaces.
-	// Backend is chosen by the request (or which root was registered), never
-	// by a field inside catalog.json.
+	// snapshotCatalogs keeps XFS, S3 and jfs catalogs in separate
+	// namespaces. Backend is chosen by the request (or which root was
+	// registered), never by a field inside catalog.json.
 	snapshotCatalogs = map[string]*snapshotCatalogNS{
 		cow.BackendXFS: {index: map[string]*SnapshotCatalogEntry{}},
 		cow.BackendS3:  {index: map[string]*SnapshotCatalogEntry{}},
+		cow.BackendJFS: {index: map[string]*SnapshotCatalogEntry{}},
 	}
 )
 
@@ -275,6 +276,7 @@ func DeleteSnapshotCatalog(snapshotID string) {
 	if snapshotID == "" {
 		return
 	}
+	deleteJFSUploadTracker(snapshotID)
 	snapshotCatalogMu.Lock()
 	for _, ns := range snapshotCatalogs {
 		if ns != nil && ns.index != nil {
@@ -289,6 +291,9 @@ func DeleteSnapshotCatalogFor(backend, snapshotID string) {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {
 		return
+	}
+	if catalogBackendKey(backend) == cow.BackendJFS {
+		deleteJFSUploadTracker(snapshotID)
 	}
 	snapshotCatalogMu.Lock()
 	delete(catalogNSLocked(backend).index, snapshotID)
@@ -332,6 +337,124 @@ func GetLocalSnapshotFor(ctx context.Context, backend, snapshotID string) (*Snap
 	catalogNSLocked(key).index[snapshotID] = cloneCatalogEntry(entry)
 	snapshotCatalogMu.Unlock()
 	return entry, nil
+}
+
+// JFSGlobalRuntimeSnapshot is an immutable runtime snapshot package owned by
+// any node in the shared JuiceFS namespace. It is a lookup result, not a
+// local replica; callers must not register or delete it as local state.
+type JFSGlobalRuntimeSnapshot struct {
+	Entry      *SnapshotCatalogEntry
+	Home       string
+	RootfsPath string
+	MemoryPath string
+}
+
+// FindJFSGlobalRuntimeSnapshot finds a user-created runtime snapshot across
+// all JuiceFS node trees. Local catalog lookup remains the preferred path;
+// this function is for a sandbox placed away from the package owner.
+func FindJFSGlobalRuntimeSnapshot(snapshotID string) (*JFSGlobalRuntimeSnapshot, error) {
+	id := strings.TrimSpace(snapshotID)
+	if id == "" || filepath.Base(id) != id || id == "." || id == ".." {
+		return nil, fmt.Errorf("invalid snapshot id %q", snapshotID)
+	}
+	if localStorage == nil || localStorage.config == nil {
+		return nil, errors.New("storage is not initialized")
+	}
+	cfg := localStorage.config
+	pattern := filepath.Join(cfg.jfsNodesRoot(), "*", SnapshotKindNormal, id, SnapshotMetadataDir, snapshotCatalogFileName)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, catalogPath := range matches {
+		entry, readErr := readSnapshotCatalogFile(catalogPath)
+		if readErr != nil || entry.SnapshotID != id || entry.Kind != CatalogKindRuntimeSnapshot {
+			continue
+		}
+		home := filepath.Dir(filepath.Dir(catalogPath))
+		resolvedHome, pathErr := jfsForeignPath(home)
+		if pathErr != nil {
+			lastErr = pathErr
+			continue
+		}
+		if fi, statErr := os.Stat(resolvedHome); statErr != nil || !fi.IsDir() {
+			lastErr = fmt.Errorf("global jfs snapshot %s home is unavailable: %v", id, statErr)
+			continue
+		}
+		nodeDir := filepath.Dir(filepath.Dir(home))
+		rootfs, pathErr := findJFSObjectFile(nodeDir, entry.RootfsVol, entry.RootfsKind, entry.BuildRootfsVol)
+		if pathErr != nil {
+			lastErr = fmt.Errorf("global jfs snapshot %s rootfs: %w", id, pathErr)
+			continue
+		}
+		memory := ""
+		if strings.TrimSpace(entry.MemoryVol) != "" {
+			memory, pathErr = findJFSObjectFile(nodeDir, entry.MemoryVol, entry.MemoryKind, "")
+			if pathErr != nil {
+				lastErr = fmt.Errorf("global jfs snapshot %s memory: %w", id, pathErr)
+				continue
+			}
+		}
+		return &JFSGlobalRuntimeSnapshot{
+			Entry:      cloneCatalogEntry(entry),
+			Home:       resolvedHome,
+			RootfsPath: rootfs,
+			MemoryPath: memory,
+		}, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("global jfs runtime snapshot %s: %w", id, ErrSnapshotCatalogNotFound)
+}
+
+func findJFSObjectFile(nodeDir, name, kind, origin string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || filepath.Base(name) != name || name == "." || name == ".." {
+		return "", fmt.Errorf("invalid jfs object name %q", name)
+	}
+	origin = strings.TrimSpace(origin)
+	if origin != "" && (filepath.Base(origin) != origin || origin == "." || origin == "..") {
+		return "", fmt.Errorf("invalid jfs object origin %q", origin)
+	}
+	if path, err := jfsObjectFile(nodeDir, name, kind, origin); err == nil {
+		return validateJFSObjectFile(path)
+	}
+	normalized, err := normalizeCowKind(kind)
+	if err != nil {
+		return "", err
+	}
+	if normalized != cowKindSnapshot || name == "" {
+		return "", fmt.Errorf("cannot resolve jfs object %s/%s", name, kind)
+	}
+	matches, err := filepath.Glob(filepath.Join(nodeDir, SnapshotObjectsDir, "volumes", "*", name))
+	if err != nil {
+		return "", err
+	}
+	for _, match := range matches {
+		if filepath.Base(match) == name {
+			if path, validateErr := validateJFSObjectFile(match); validateErr == nil {
+				return path, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("jfs snapshot object %s not found under %s", name, nodeDir)
+}
+
+func validateJFSObjectFile(path string) (string, error) {
+	resolved, err := jfsForeignPath(path)
+	if err != nil {
+		return "", err
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("jfs object is not a regular file: %s", resolved)
+	}
+	return resolved, nil
 }
 
 // ListLocalSnapshots returns every XFS catalog entry.

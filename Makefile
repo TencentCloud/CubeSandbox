@@ -161,6 +161,8 @@ help:
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  cubeops       Build CubeOps in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
+	@printf "  ops-agent     Build ops-agent in Docker\n"
+	@printf "  ops-agent-test Run ops-agent unit tests in Docker\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
@@ -173,6 +175,7 @@ help:
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
 	@printf "  blobstore-test Run pkgs/blobstore unit tests on the host\n"
+	@printf "  sandboxrestart-test Run pkgs/sandboxrestart unit tests on the host\n"
 	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -466,6 +469,16 @@ cubeops: builder-image
 cubeops-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeOps && go mod download && go test ./...'
 
+# ops-agent: standalone Go module (own go.mod, replace => ../pkgs/CubeLog).
+.PHONY: ops-agent
+ops-agent: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/OpsAgent && go mod download && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/ops-agent ./cmd/ops-agent"
+
+.PHONY: ops-agent-test
+ops-agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/OpsAgent && go mod download && go test ./...'
+
 # The plugin's tests need no cloud access; the s3fs helpers skip themselves when
 # mountpoint(1) is unavailable.
 .PHONY: cube-volume-s3-test
@@ -488,7 +501,7 @@ cubemaster-test: builder-image
 # through the builder like every other Go component.
 .PHONY: cubetemplatecenter-test
 cubetemplatecenter-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && go test ./... -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 go test ./... -count=1'
 
 # cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
 # for several Cubelet packages.
@@ -535,6 +548,14 @@ cubedb-test:
 .PHONY: blobstore-test
 blobstore-test:
 	cd pkgs/blobstore && go mod download && go test ./...
+
+# pkgs/sandboxrestart is stdlib-only, so no module download is needed.
+.PHONY: sandboxrestart-test
+sandboxrestart-test:
+	cd pkgs/sandboxrestart && go test ./...
+.PHONY: redisx-test
+redisx-test:
+	cd pkgs/redisx && go test ./...
 
 # pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
 # deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
@@ -668,6 +689,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C pkgs/proto fmt
 	@printf '  %-8s %s\n' "FMT" "blobstore"
 	@$(MAKE) -C pkgs/blobstore fmt
+	@printf '  %-8s %s\n' "FMT" "sandboxrestart"
+	@$(MAKE) -C pkgs/sandboxrestart fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeTemplateCenter"
@@ -676,6 +699,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C CubeNet fmt
 	@printf '  %-8s %s\n' "FMT" "CubeOps"
 	@$(MAKE) -C CubeOps fmt
+	@printf '  %-8s %s\n' "FMT" "OpsAgent"
+	@$(MAKE) -C OpsAgent fmt
 	@printf '  %-8s %s\n' "FMT" "CubeShim"
 	@$(MAKE) -C CubeShim fmt
 	@printf '  %-8s %s\n' "FMT" "cube-lifecycle-manager"

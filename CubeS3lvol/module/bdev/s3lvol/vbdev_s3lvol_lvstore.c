@@ -1718,9 +1718,10 @@ lvs_attach_exports_loaded(void *cb_arg, int status)
 	struct spdk_lvs_opts lvs_opts;
 
 	if (status != 0) {
-		SPDK_ERRLOG("Failed to read the imports registry of '%s': %s. Not "
-			    "loading: an esnap clone whose manifest is unknown would "
-			    "either fail to open or, worse, be opened against nothing.\n",
+		SPDK_ERRLOG("Failed to read the exports registry of '%s': %s. Not "
+			    "loading: without it this node would not know which "
+			    "snapshots are spoken for, and a delete could revoke one "
+			    "another node is still reading.\n",
 			lvs->name, spdk_strerror(-status));
 		lvs_setup_fail(ctx, status);
 		return;

@@ -156,7 +156,6 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.cubeNode.resources | nindent 12 }}
-        {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgress "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
@@ -222,7 +221,6 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- if .Values.cubeEgress.network.enabled }}
         - name: cube-egress-net
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgressNet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
@@ -275,8 +273,6 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- end }}
-        {{- end }}
         {{- if .Values.cubeS3lvol.enabled }}
         - name: cube-s3lvol
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeS3lvol "context" $) | quote }}
@@ -445,7 +441,6 @@ spec:
             secretName: {{ include "cube.volumeS3SecretName" . }}
             defaultMode: 0400
       {{- end }}
-      {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
@@ -453,7 +448,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
-      {{- end }}
       {{- if .Values.cubeS3lvol.enabled }}
         - name: s3lvol-rpc
           emptyDir:

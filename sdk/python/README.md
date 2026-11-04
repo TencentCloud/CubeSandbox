@@ -116,6 +116,26 @@ url = sb.get_mcp_url()      # streamable HTTP endpoint
 token = sb.get_mcp_token()  # send as "Authorization: Bearer <token>"
 ```
 
+### Fork
+
+```python
+sb = Sandbox.create()
+
+# One server-side call: the backend snapshots sb once and derives N copies.
+forks = sb.fork(count=3)              # list[Sandbox | Exception], one per fork
+forks = sb.fork(count=3, timeout=60)  # timeout: per-fork idle TTL in seconds
+
+for f in forks:
+    if isinstance(f, Sandbox):
+        f.run_code("print('alive')")  # a running copy
+    else:
+        print(f)                      # that fork's exception
+```
+
+Partial success keeps the copies and does not raise; only whole-request
+failures raise (e.g. unknown sandbox). `count` is 1..100 (default 1). Unlike
+`clone`, the temporary snapshot is managed by the server.
+
 ### Compute node placement
 
 Restrict scheduling to one or more compute node IDs or host IPs. A single
@@ -222,6 +242,7 @@ with Sandbox.create() as sb:
     # Read & write
     sb.files.write("/tmp/hello.txt", "Hello, world!")
     print(sb.files.read("/tmp/hello.txt"))  # "Hello, world!"
+    png = sb.files.read("/tmp/chart.png", format="bytes")  # bytearray
 
     # Batch write
     sb.files.write_files([
@@ -305,9 +326,9 @@ invalid names raise `ValueError` before any network call. See
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # list of running sandbox dicts
-print(Sandbox.list_v2())    # v2 API (supports filtering)
+print(Sandbox.list_v2())    # v2 E2B view: running and paused only
 ```
 
 ## Configuration
@@ -346,7 +367,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, envs, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally restricted to specified compute nodes or mounting volumes); `envs` is the E2B-compatible alias for `env_vars` |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) and optionally reset the idle timeout |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list running and paused sandboxes (v2 E2B view) |
 | `Sandbox.health(config)` | `GET /health` — service health check |
 
 ### `Sandbox` — instance methods
@@ -365,7 +386,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `sb.files.read(path)` | Download file content via `GET /files` |
+| `sb.files.read(path, *, format=...)` | Download via `GET /files`; `format` is `text` (default) / `bytes` / `stream` (e2b-compatible) |
 | `sb.files.write(path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `sb.files.write_files(files)` | Batch write `[(path, data), ...]`, stops on first error |
 | `sb.files.list(path)` | List directory entries → `list[dict]` |

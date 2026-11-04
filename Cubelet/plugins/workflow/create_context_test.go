@@ -13,6 +13,22 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
+func TestRestartDestroyKeepsResources(t *testing.T) {
+	t.Parallel()
+	require.False(t, restartDestroyKeepsResources(nil))
+	require.False(t, restartDestroyKeepsResources(&DestroyContext{}))
+	require.False(t, restartDestroyKeepsResources(&CreateContext{IsRestart: true}))
+	require.True(t, restartDestroyKeepsResources(&DestroyContext{IsRestartDestroy: true}))
+}
+
+func TestReuseForMirrorsRestart(t *testing.T) {
+	t.Parallel()
+	require.False(t, ReuseFor(nil).Storage)
+	require.False(t, ReuseFor(&CreateContext{}).Network)
+	got := ReuseFor(&CreateContext{IsRestart: true})
+	require.True(t, got.Storage && got.Network && got.Volume && got.CubeboxMeta)
+}
+
 func TestCreateContextIsPauseResume(t *testing.T) {
 	t.Parallel()
 

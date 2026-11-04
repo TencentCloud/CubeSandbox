@@ -22,6 +22,12 @@ ensure_executable "${CUBELET_BIN}"
 ensure_file "${CUBELET_CONFIG}"
 ensure_file "${CUBELET_DYNAMICCONF}"
 write_cubelet_s3lvol_enable "${CUBELET_CONFIG}" "${ONE_CLICK_ENABLE_S3LVOL:-0}"
+write_cubelet_jfs_config \
+  "${CUBELET_CONFIG}" \
+  "${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}" \
+  "${CUBE_JFS_ROOT:-cube}" \
+  "${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}" \
+  "${ONE_CLICK_ENABLE_JFS:-0}"
 mkdir -p \
   "${TOOLBOX_ROOT}/cube-vs/network" \
   "${TOOLBOX_ROOT}/cube-snapshot" \

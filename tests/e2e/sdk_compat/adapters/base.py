@@ -47,6 +47,15 @@ class SandboxAdapter(ABC):
     def read_file(self, path: str, *, user: str = "root") -> str:
         raise NotImplementedError
 
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        raise UnsupportedCapability(self.backend, "filesystem")
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        raise UnsupportedCapability(self.backend, "filesystem")
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        raise UnsupportedCapability(self.backend, "filesystem")
+
     def list_files(self, path: str) -> list[dict[str, Any]]:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
@@ -106,10 +115,10 @@ class SandboxAdapter(ABC):
     def set_timeout(self, timeout: int) -> None:
         raise UnsupportedCapability(self.backend, "set_timeout")
 
-    def create_snapshot(self) -> str:
+    def create_snapshot(self, name: str | None = None) -> str:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
@@ -117,6 +126,12 @@ class SandboxAdapter(ABC):
 
     def clone(self, n: int = 1, *, concurrency: int = 1) -> list["SandboxAdapter"]:
         raise UnsupportedCapability(self.backend, "rollback_clone")
+
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple["SandboxAdapter" | None, Exception | None]]:
+        """Server-side fork: one entry per requested fork, success or failure."""
+        raise UnsupportedCapability(self.backend, "fork")
 
     def list_snapshot_ids(self) -> set[str]:
         raise UnsupportedCapability(self.backend, "rollback_clone")

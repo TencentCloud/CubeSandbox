@@ -171,7 +171,7 @@ One-click does not create an extra global `configs/` layer on the target machine
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
-- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-proxy-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-egress-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
@@ -367,6 +367,10 @@ During installation, runtime files are prepared in this directory and the follow
 - `redis:7-alpine`
 - `minio` (S3-compatible volume backend; explicit via `CUBE_SANDBOX_MINIO_ENABLED`, default on)
 
+### External native Redis Cluster
+
+Set `CUBE_EXTERNAL_REDIS_CLUSTER_NODES` to comma-separated `host:port` seed endpoints, set `CUBE_EXTERNAL_REDIS_DB=0`, and clear fixed standalone Redis and Sentinel settings. The deployment scripts connect to an existing Cluster. See the [configuration and migration guide](../../docs/guide/redis-cluster.md) for component settings, consistency limits, and rollout checks.
+
 ### Using an external MySQL / PostgreSQL / Redis
 
 To point CubeSandbox at an existing MySQL, PostgreSQL, or Redis server instead
@@ -556,6 +560,7 @@ Required commands:
 - `sed`
 - `pgrep`
 - `date`
+- `openssl` (hard dependency of cube-egress-prepare.sh for generating the CubeEgress root CA; may be absent on minimal/cloud images such as OpenCloudOS 9 minimal — install with `dnf install -y openssl` or `apt-get install -y openssl`)
 
 Conditional commands:
 
@@ -608,6 +613,7 @@ Required commands:
 - `date`
 - `ip`
 - `awk`
+- `openssl` (hard dependency of cube-egress-prepare.sh for generating the CubeEgress root CA; may be absent on minimal/cloud images such as OpenCloudOS 9 minimal — install with `dnf install -y openssl` or `apt-get install -y openssl`)
 
 One-of-two commands:
 

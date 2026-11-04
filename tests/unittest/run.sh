@@ -78,6 +78,7 @@ cd "$REPO_ROOT" || exit 2
 
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
+	"ops-agent|Go|0|make ops-agent-test"
 	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
 	# tests in ./pkg/templatecenter: gomonkey rewrites a function's machine code
 	# to redirect it, but an inlined call site bypasses that patch, so a stub
@@ -106,6 +107,9 @@ WITH_TESTS=(
 	"cubelog|Go|0|cd pkgs/CubeLog && go test -short ./..."
 	"cubedb|Go|0|cd pkgs/cubedb && go mod download && go test ./..."
 	"blobstore|Go|0|cd pkgs/blobstore && go mod download && go test ./..."
+	# sandboxrestart is stdlib-only, so no module download is needed.
+	"sandboxrestart|Go|0|cd pkgs/sandboxrestart && go test ./..."
+	"redisx|Go|0|make redisx-test"
 	"cubebench|Shell|0|make cubebench-test"
 	# Same entry point as CI (unit-test-check).
 	"cubelet|Go|0|make cubelet-test"
@@ -114,6 +118,8 @@ WITH_TESTS=(
 	# The root package command does not execute workspace member tests, so run
 	# block_util explicitly. Runtime-KVM tests run in `hypervisor-kvm` below.
 	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins && cargo test -p block_util --lib'"
+	# Shell-only test; no builder or KVM needed.
+	"cubeegress|Shell|0|bash CubeEgress/tests/cube-egress-iptables-init_test.sh"
 )
 
 GATED_TESTS=(
@@ -141,7 +147,6 @@ GATED_TESTS=(
 )
 
 NO_TESTS=(
-	"cubeegress|no unit tests present in CubeEgress/"
 	"web|no unit test script in web/package.json"
 	# CubeS3lvol ships integration tests only (test/integration/, driven by
 	# `make check` / `make check-offline`). They need a full SPDK/DPDK/AWS

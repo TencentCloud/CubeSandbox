@@ -11,10 +11,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
-func TestUploadRemoteUUIDsIfS3SkipsXFS(t *testing.T) {
+func TestUploadRemoteUUIDsSkipsXFS(t *testing.T) {
 	t.Parallel()
 	for _, backend := range []string{"", cow.BackendXFS, "cubecow"} {
-		if raw := uploadRemoteUUIDsIfS3(context.Background(), backend, "snap-1"); raw != "" {
+		if raw := uploadRemoteUUIDs(context.Background(), backend, "snap-1"); raw != "" {
 			t.Fatalf("backend %q: unexpected uuids %s", backend, raw)
 		}
 	}

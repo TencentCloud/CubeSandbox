@@ -988,15 +988,33 @@ impl Engine for S3Engine {
             .name_index
             .write()
             .expect("s3 name_index lock poisoned");
-        if let Some(entry) = idx.get_mut(name) {
-            match entry {
-                NameKind::Volume { activated, .. } => *activated = Some(info.clone()),
-                NameKind::Snapshot { activated, .. } => *activated = Some(info.clone()),
-            }
+        // `delete_volume` holds this lock across its own RPCs and then
+        // removes the name, so the entry can disappear during
+        // `call_activate`. That is a lost race, not a broken invariant:
+        // panicking while this guard is held poisons `name_index`, and the
+        // FFI `catch_unwind` leaves the process up with every later volume
+        // op failing until restart.
+        //
+        // The best-effort detach stays under the write guard: the RPC is
+        // keyed only by name, so releasing the guard first would let a
+        // concurrent `create_volume` re-create the name and have its fresh
+        // bdev torn down by this stale detach.
+        let Some(entry) = idx.get_mut(name) else {
+            let _ = self.rpc.call_typed(
+                "rcow_deactive_bdev",
+                &serde_json::json!({ "device_name": name }),
+            );
+            return Err(CubecowError::NotFound(format!(
+                "volume or snapshot '{name}'"
+            )));
+        };
+        match entry {
+            NameKind::Volume { activated, .. } => *activated = Some(info.clone()),
+            NameKind::Snapshot { activated, .. } => *activated = Some(info.clone()),
         }
+        let projected = Self::project_volume(name, entry);
         self.persist(&idx)?;
 
-        let projected = Self::project_volume(name, idx.get(name).expect("just inserted"));
         debug!(name, device_path = %info.device_path, "s3 volume/snapshot activated");
         Ok(projected)
     }
@@ -1857,5 +1875,123 @@ mod tests {
 
         // Malformed JSON → error.
         assert!(parse_snapshot_status("not-json").is_err());
+    }
+
+    #[test]
+    fn activate_returns_not_found_when_name_disappears_during_rpc() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        use std::panic::AssertUnwindSafe;
+
+        use crate::engine::Engine;
+
+        let dir = PathBuf::from(format!("/tmp/cubecow-act-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s.sock");
+
+        let cfg = S3Config {
+            socket_path: sock.clone(),
+            state_dir: dir.clone(),
+            rpc_timeout_ms: 2_000,
+            rpc_connect_budget_ms: 2_000,
+            size_policy: "round_up".to_string(),
+        };
+        let engine = Arc::new(S3Engine {
+            cfg: cfg.clone(),
+            rpc: Arc::new(JsonRpcClient::new(
+                cfg.socket_path.clone(),
+                Duration::from_millis(cfg.rpc_timeout_ms),
+                Duration::from_millis(cfg.rpc_connect_budget_ms),
+            )),
+            name_index: RwLock::new(HashMap::new()),
+            metrics: Arc::new(MetricsCollector::new()),
+        });
+        engine.name_index.write().unwrap().insert(
+            "vol".into(),
+            NameKind::Volume {
+                size_bytes: BYTES_PER_GIB,
+                created_at: "2026-10-19T00:00:00+00:00".into(),
+                activated: None,
+            },
+        );
+
+        let eng = Arc::clone(&engine);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        // Reports, for each detach request, whether activate still held the
+        // write guard when it arrived.
+        let (detach_tx, detach_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let listener = UnixListener::bind(&sock).expect("bind");
+            ready_tx.send(()).ok();
+            let (mut stream, _) = listener.accept().expect("accept");
+            // Never block forever if the client stops sending requests.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value =
+                    serde_json::from_str(line.trim()).unwrap_or(serde_json::json!({}));
+                let id = req.get("id").cloned().unwrap_or(serde_json::json!(0));
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                if method == "rcow_active_bdev" || method == "rcow_get_bdev" {
+                    eng.name_index.write().unwrap().remove("vol");
+                }
+                let nested = r#"{"device_name":"vol","uuid":"u","nqn":"nqn","subsys":1,"nsid":1,"device_path":"/dev/nvme0n1"}"#;
+                if method == "rcow_deactive_bdev" {
+                    detach_tx.send(eng.name_index.try_write().is_err()).ok();
+                }
+                let resp = if method == "rcow_deactive_bdev" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"bool_value": true}
+                    })
+                } else {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"string_value": nested}
+                    })
+                };
+                let mut body = serde_json::to_vec(&resp).unwrap();
+                body.push(b'\n');
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+                if method == "rcow_deactive_bdev" {
+                    break;
+                }
+            }
+        });
+        ready_rx.recv().unwrap();
+
+        let activated =
+            std::panic::catch_unwind(AssertUnwindSafe(|| engine.activate_volume("vol")));
+        let activated = activated.expect("activate must not panic");
+        assert!(
+            matches!(activated, Err(CubecowError::NotFound(_))),
+            "{activated:?}"
+        );
+        assert!(
+            engine.name_index.read().is_ok(),
+            "name_index must stay usable"
+        );
+        let guard_held = detach_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("activate must detach the bdev it attached");
+        assert!(guard_held, "detach must run under the write guard");
+
+        let deactivated =
+            std::panic::catch_unwind(AssertUnwindSafe(|| engine.deactivate_volume("vol")));
+        let deactivated = deactivated.expect("deactivate must not panic");
+        assert!(matches!(deactivated, Err(CubecowError::NotFound(_))));
+
+        server.join().expect("server thread");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

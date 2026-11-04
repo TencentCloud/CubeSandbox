@@ -4,6 +4,7 @@
 
 pub mod stat_defer;
 use crate::common::CResult;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::unistd::dup2;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -205,7 +206,15 @@ impl Log {
         // The crate's signal_server_started() runs dup2(STDERR->STDOUT) only after
         // server.start(), which then redirects stdout onto this datagram for us while
         // preserving the readiness handshake.
-        dup2(writer.as_raw_fd(), std::io::stderr().as_raw_fd()).expect("dup stderr failed");
+        let writer_fd = writer.as_raw_fd();
+        dup2(writer_fd, std::io::stderr().as_raw_fd()).expect("dup stderr failed");
+
+        // Inherited console writes must block under log backpressure; the separate reader
+        // descriptor stays nonblocking, so clear only O_NONBLOCK here.
+        let flags = fcntl(writer_fd, FcntlArg::F_GETFL).expect("get stderr file flags failed");
+        let oflags = OFlag::from_bits_retain(flags & !OFlag::O_NONBLOCK.bits());
+        fcntl(writer_fd, FcntlArg::F_SETFL(oflags)).expect("clear stderr nonblock failed");
+
         mem::forget(writer);
 
         tokio::spawn(Self::consumer(sender.clone(), receiver));

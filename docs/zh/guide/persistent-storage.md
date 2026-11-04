@@ -391,7 +391,7 @@ Agent B 使用相同的只读父挂载，只把 `members/agent-b` 挂载为读�
 - `readOnly` 对每个挂载独立生效，但仍需满足 Linux 的 UID、GID、mode 和 ACL 权限。即使子挂载是读写模式，如果宿主机权限不允许沙箱用户写入，仍会返回 `Permission denied`。
 - 推荐使用一个只读父挂载和明确的读写子挂载。避免重复目标路径或相互重叠的读写挂载，否则目录归属和最终可见结果会变得难以判断。
 - `mountPath` 应使用不含 `.` 或 `..` 路径段的规范绝对路径。不要依赖输入顺序处理相互重叠的目标路径。
-- Host Mount 是节点本地的，并且数据位于沙箱快照之外。带 raw host mount 的 Snapshot FromSnap 和 Pause/Resume 会固定在源节点；其他节点上的同名路径不会被视为同一份存储。如需可移植的跨机快照恢复，应使用由所有候选节点都能 Attach 的共享存储所支持的 Plugin Volume。
+- Host Mount 是节点本地的，并且数据位于沙箱快照之外。带 raw host mount 的 Snapshot FromSnap 和 Pause/Resume 会固定在源节点；其他节点上的同名路径不会被视为同一份存储。如需跨机迁移，应使用由所有候选节点都能 Attach 的共享存储所支持的 Plugin Volume。
 
 ::: warning 鉴权边界
 调用 `Sandbox.create()` 的平台必须根据已经认证的沙箱归属主体和适用的组边界（如租户、团队或项目）生成 `hostPath`。不要接受用户任意传入的宿主机路径，也不要把 `/data/shared/tenants/` 之类的全局根目录挂载到某个租户的沙箱中：只读挂载只能阻止写入，不能阻止该沙箱读取其他租户的数据。

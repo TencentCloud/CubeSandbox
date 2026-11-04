@@ -79,10 +79,8 @@ func TestBeginFreshGuestMetricsEpochBestEffortKeepsPendingStateOnPersistenceFail
 
 func TestPrepareAndPersistRollbackGuestMetricsEpochDoesNotAdvanceBindings(t *testing.T) {
 	startedAt := time.Date(2026, time.July, 18, 2, 0, 0, 0, time.UTC)
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{
-		ID:     "sandbox",
-		Labels: map[string]string{constants.MasterAnnotationRuntimeSnapshotID: "previous"},
-	}}
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
+	cb.BindRuntimeBase("previous")
 
 	require.NoError(t, prepareAndPersistRollbackGuestMetricsEpoch(
 		context.Background(), &guestMetricsEpochSyncerFake{}, cb, startedAt,
@@ -90,7 +88,7 @@ func TestPrepareAndPersistRollbackGuestMetricsEpochDoesNotAdvanceBindings(t *tes
 	require.Equal(t, uint64(1), cb.GuestMetricsEpoch.Generation)
 	require.Equal(t, cubeboxstore.GuestMetricsEpochRollback, cb.GuestMetricsEpoch.Reason)
 	require.Equal(t, cubeboxstore.GuestMetricsEpochPrepared, cb.GuestMetricsEpoch.State)
-	require.Equal(t, "previous", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
+	require.Equal(t, "previous", cb.RuntimeBaseID())
 }
 
 func TestPrepareAndPersistRollbackGuestMetricsEpochRestoresPreviousEpochOnFailure(t *testing.T) {
@@ -123,36 +121,33 @@ func TestPrepareAndPersistRollbackGuestMetricsEpochRestoresPreviousEpochOnFailur
 
 func TestActivateAndPersistRollbackGuestMetricsEpochAdvancesBindings(t *testing.T) {
 	startedAt := time.Date(2026, time.July, 18, 2, 0, 0, 0, time.UTC)
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{
-		ID:     "sandbox",
-		Labels: map[string]string{constants.MasterAnnotationRuntimeSnapshotID: "previous"},
-	}}
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
+	cb.BindRuntimeBase("previous")
 	require.NoError(t, cb.PrepareRollbackGuestMetricsEpoch(startedAt))
 	syncer := &guestMetricsEpochSyncerFake{}
 
 	require.NoError(t, activateAndPersistRollbackGuestMetricsEpoch(context.Background(), syncer, cb, "snapshot", startedAt.Add(time.Minute)))
 	require.Equal(t, cubeboxstore.GuestMetricsEpochPending, cb.GuestMetricsEpoch.State)
-	require.Equal(t, "snapshot", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	require.Equal(t, "snapshot", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
+	require.Equal(t, "snapshot", cb.RuntimeBaseID())
+	require.Equal(t, "snapshot", cb.RestoreBaseID())
 	require.Equal(t, []string{"sandbox"}, syncer.syncIDs)
 }
 
-func TestActivateRollbackGuestMetricsEpochRestoresPreparedStateAndBindingsOnPersistenceFailure(t *testing.T) {
+func TestActivateRollbackGuestMetricsEpochClearsStaleBindingsOnPersistenceFailure(t *testing.T) {
 	startedAt := time.Date(2026, time.July, 18, 2, 0, 0, 0, time.UTC)
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{
-		ID: "sandbox",
-		Labels: map[string]string{
-			constants.MasterAnnotationRuntimeSnapshotID:        "previous",
-			constants.MasterAnnotationRuntimeRestoreSnapshotID: "previous-restore",
-		},
-	}}
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
+	cb.BindRuntimeBase("previous")
+	cb.BindRestoreBase("previous-restore")
 	require.NoError(t, cb.PrepareRollbackGuestMetricsEpoch(startedAt))
 	previousEpoch := cb.GuestMetricsEpochCopy()
-	previousLabels := deepCopyStringMap(cb.Labels)
 	syncer := &guestMetricsEpochSyncerFake{err: errors.New("metadata store unavailable")}
 
 	err := activateAndPersistRollbackGuestMetricsEpoch(context.Background(), syncer, cb, "snapshot", startedAt.Add(time.Minute))
 	require.ErrorContains(t, err, "persist activated guest metrics epoch")
 	require.Equal(t, previousEpoch, cb.GuestMetricsEpochCopy())
-	require.Equal(t, previousLabels, cb.Labels)
+	// The VM has already been restored to "snapshot", so the pre-rollback
+	// bases are stale. Keeping them would let the next Commit clone memory
+	// that no longer matches the guest. Clearing forces a full capture.
+	require.Equal(t, "", cb.RuntimeBaseID())
+	require.Equal(t, "", cb.RestoreBaseID())
 }

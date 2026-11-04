@@ -12,7 +12,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -24,6 +27,24 @@ import (
 // manager; production reads them from the shim manager, which is the only
 // authoritative mapping from a sandbox to the directory its shim runs in.
 var resolveShimBundles = (*local).shimBundlePaths
+
+// runtimeReapWait bounds the wait after SIGKILL. The caller's context is
+// already canceled, so this cannot reuse it.
+const runtimeReapWait = 2 * time.Second
+
+// shimWaitBound is how long stopTask waits for the shim to exit after SIGKILL.
+// It is not the destroy deadline: a panicked guest must not burn that deadline
+// inside Wait and leave the later destroy steps unrun.
+var shimWaitBound = 5 * time.Second
+
+// shimWaitContext is a short child of parent. The child expiring does not
+// cancel parent, so Delete and the rest of the destroy flow still have time.
+func shimWaitContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, shimWaitBound)
+}
 
 const (
 	shimPidFileName = "shim.pid"
@@ -526,6 +547,10 @@ func readPidFile(path string) int {
 //
 // Unresolved evidence fails the wait. An empty identity list only means
 // "nothing to wait for" when we are sure there was nothing to find.
+//
+// A hung shim is reaped in stopTask (reapShimProcess) before this wait.
+// This function does not SIGKILL: a pid number that has been recycled must
+// not be killed, and an unresolved identity fails closed so GC can quarantine.
 func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRuntimeEvidence) error {
 	if len(ev.identities) > 0 {
 		start := time.Now()
@@ -581,4 +606,67 @@ func (l *local) waitReplacedSandboxGone(ctx context.Context, sb *cubeboxstore.Cu
 	waitCtx, cancel := context.WithTimeout(ctx, replaceGateTimeout)
 	defer cancel()
 	return waitSandboxRuntimeGone(waitCtx, sb.SandboxID, evidence)
+}
+
+// reapShimProcess SIGKILLs the shim and vmm recorded in the bundle.
+// Call it only after the shim has failed to accept a bounded Kill. Process
+// exit starts containerd's disconnect callback; the following tasks.Delete
+// waits for that callback, including bundle removal.
+//
+// The bundle pid files are written by the shim about itself. A live pid there
+// is the holder even though the file carries no start time, which is the same
+// trust master already gives those files when collecting evidence.
+func (l *local) reapShimProcess(ctx context.Context, id string) {
+	if l == nil || l.shims == nil || id == "" {
+		return
+	}
+	lookup := ctx
+	if lookup == nil || lookup.Err() != nil {
+		ns := namespaces.Default
+		if lookup != nil {
+			if got, ok := namespaces.Namespace(lookup); ok && got != "" {
+				ns = got
+			}
+		}
+		lookup = namespaces.WithNamespace(context.Background(), ns)
+	}
+	shim, err := l.shims.Get(lookup, id)
+	if err != nil || shim == nil {
+		return
+	}
+	bundle := strings.TrimSpace(shim.Bundle())
+	if bundle == "" {
+		return
+	}
+	self := os.Getpid()
+	for _, name := range []string{shimPidFileName, vmmPidFileName} {
+		pid := readPidFile(filepath.Join(bundle, name))
+		if pid == self {
+			continue
+		}
+		if err := reapRuntimePID(pid); err != nil {
+			log.G(lookup).Warnf("reap runtime pid %d for %s: %v", pid, id, err)
+		}
+	}
+}
+
+// reapRuntimePID SIGKILLs a shim or vmm that outlived the destroy deadline.
+// Success means the pid no longer holds disks, including when it is already gone.
+func reapRuntimePID(pid int) error {
+	if pid <= 1 {
+		return nil
+	}
+	// Pin the incarnation before SIGKILL. A bare pid can be recycled between
+	// the bundle read and the signal, and killing that stranger is worse than
+	// failing the restart.
+	id, err := utils.ReadProcessIdentity(pid)
+	if err != nil || id.Status() != utils.LivenessAlive {
+		return nil
+	}
+	if err := syscall.Kill(id.Pid, syscall.SIGKILL); err != nil && id.Status() == utils.LivenessAlive {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeReapWait)
+	defer cancel()
+	return utils.WaitIdentityGone(ctx, id)
 }

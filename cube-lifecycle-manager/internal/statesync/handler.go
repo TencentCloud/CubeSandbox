@@ -97,6 +97,14 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 	}
 
 	newState := ev.State.State
+	if ev.State.Source == "cubelet" && newState == lifecycle.StateRunning {
+		applyCubeletRunning(ctx, d, ev.SandboxID, log)
+		return
+	}
+	if isRestartRuntimeState(newState) {
+		applyRestartRuntime(ctx, d, ev.SandboxID, newState, log)
+		return
+	}
 	if newState != lifecycle.StatePaused && newState != lifecycle.StateRunning {
 		log.Warn("state event has invalid state",
 			zap.String("sandbox_id", ev.SandboxID),
@@ -171,4 +179,119 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 		zap.String("new", newState),
 		zap.String("actor", ev.State.Actor),
 		zap.String("source", ev.State.Source))
+}
+
+// applyCubeletRunning moves a sandbox from restarting or backoff back to
+// running. A late report must not undo pause, and it must not refresh the
+// idle timer: timeout still uses the original last-active time.
+func applyCubeletRunning(ctx context.Context, d Deps, sandboxID string, log *zap.Logger) {
+	if d.Registry == nil || d.Registry.Get(sandboxID) == nil {
+		log.Warn("cubelet running for unknown sandbox", zap.String("sandbox_id", sandboxID))
+		return
+	}
+	if d.Redis == nil {
+		return
+	}
+	cur, _, err := d.Redis.GetState(ctx, sandboxID)
+	if err != nil {
+		log.Warn("cubelet running: get current state failed",
+			zap.String("sandbox_id", sandboxID), zap.Error(err))
+		return
+	}
+	if cur != lifecycle.StateRestarting && cur != lifecycle.StateBackOff {
+		log.Info("cubelet running skipped",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("cur", cur))
+		return
+	}
+	if !writeEnabled(d) {
+		d.Registry.SetRuntimeState(sandboxID, lifecycle.StateRunning)
+		return
+	}
+	updated, err := d.Redis.WriteStateCAS(ctx, sandboxID, cur, lifecycle.StateRunning, d.TTL)
+	if err != nil {
+		log.Warn("cubelet running: set state failed",
+			zap.String("sandbox_id", sandboxID), zap.Error(err))
+		return
+	}
+	if !updated {
+		log.Info("cubelet running skipped: state changed concurrently",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("cur", cur))
+		return
+	}
+	d.Registry.SetRuntimeState(sandboxID, lifecycle.StateRunning)
+	log.Info("cubelet running applied",
+		zap.String("sandbox_id", sandboxID),
+		zap.String("cur", cur))
+}
+
+// isRestartRuntimeState reports states Cubelet publishes while it still
+// holds the sandbox's disk and address. gaveup means the retry budget is
+// spent and the sweeper may reap the sandbox again.
+func isRestartRuntimeState(state string) bool {
+	switch state {
+	case lifecycle.StateRestarting, lifecycle.StateBackOff, lifecycle.StateGaveUp:
+		return true
+	default:
+		return false
+	}
+}
+
+// applyRestartRuntime records a restart on the registry and, on the leader,
+// on the Redis state key the sweeper reads after a process restart.
+// CubeProxy is not told: it only understands running and paused, and the
+// dataplane already fails closed while the VM is down.
+func applyRestartRuntime(ctx context.Context, d Deps, sandboxID, newState string, log *zap.Logger) {
+	if d.Registry == nil || d.Registry.Get(sandboxID) == nil {
+		log.Warn("restart state for unknown sandbox",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("state", newState))
+		return
+	}
+	stored := newState
+	if newState == lifecycle.StateGaveUp {
+		stored = lifecycle.StateRunning
+	}
+	if !writeEnabled(d) || d.Redis == nil {
+		d.Registry.SetRuntimeState(sandboxID, stored)
+		return
+	}
+	cur, _, err := d.Redis.GetState(ctx, sandboxID)
+	if err != nil {
+		log.Warn("restart state: get current state failed",
+			zap.String("sandbox_id", sandboxID), zap.Error(err))
+		d.Registry.SetRuntimeState(sandboxID, stored)
+		return
+	}
+	if cur == "pausing" || cur == "resuming" || cur == "killing" || cur == lifecycle.StateKilled {
+		d.Registry.SetRuntimeState(sandboxID, stored)
+		log.Info("restart state kept in registry; redis holds a transition",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("cur", cur),
+			zap.String("new", stored))
+		return
+	}
+	if cur != stored {
+		updated, err := d.Redis.WriteStateCAS(ctx, sandboxID, cur, stored, d.TTL)
+		if err != nil {
+			log.Warn("restart state: set state failed",
+				zap.String("sandbox_id", sandboxID),
+				zap.String("new", stored), zap.Error(err))
+			d.Registry.SetRuntimeState(sandboxID, stored)
+			return
+		}
+		if !updated {
+			log.Info("restart state skipped: state changed concurrently",
+				zap.String("sandbox_id", sandboxID),
+				zap.String("cur", cur),
+				zap.String("new", stored))
+			return
+		}
+	}
+	d.Registry.SetRuntimeState(sandboxID, stored)
+	log.Info("restart state recorded",
+		zap.String("sandbox_id", sandboxID),
+		zap.String("cur", cur),
+		zap.String("new", stored))
 }

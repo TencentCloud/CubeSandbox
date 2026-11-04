@@ -152,10 +152,10 @@ export default withMermaid(defineConfig({
           { text: 'Home', link: '/' },
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
-          { text: 'Developer', link: '/dev/' },
           {
             text: 'Community',
             items: [
+              { text: 'Developer', link: '/dev/' },
               { text: 'Roadmap', link: '/guide/roadmap' },
               { text: 'Cube 100 Program', link: '/guide/cube100' },
               { text: 'Contributing', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING.md' }
@@ -163,6 +163,7 @@ export default withMermaid(defineConfig({
           },
           { text: 'Blog', link: '/blog/' },
           { text: 'Changelog', link: '/changelog/' },
+          { text: 'QualityStatus', link: '/guide/quality-status' },
           { text: 'Contributors', link: '/contributors' },
           { text: 'About us', link: '/about-us' }
         ],
@@ -206,7 +207,15 @@ export default withMermaid(defineConfig({
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
-                { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
+                {
+                  text: 'Cross-Node Migration',
+                  collapsed: true,
+                  items: [
+                    { text: 'Requirements', link: '/guide/cross-node-snapshot/requirements' },
+                    { text: 'JuiceFS Service', link: '/guide/cross-node-snapshot/juicefs' },
+                    { text: 'CubeS3lvol Service', link: '/guide/cross-node-snapshot/cubes3lvol' }
+                  ]
+                }
               ]
             },
             {
@@ -232,7 +241,7 @@ export default withMermaid(defineConfig({
                 { text: 'Commit a Running Sandbox', link: '/guide/tutorials/template-from-sandbox' },
                 { text: 'Pre-warm a Template Service', link: '/guide/tutorials/prewarm-template-service' },
                 { text: 'Local & Remote Image Practice', link: '/guide/tutorials/template-build-practice' },
-                { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
+                { text: 'Environment Variables', link: '/guide/environment-variables' },
                 { text: 'Template Aliases', link: '/guide/template-aliases' },
                 { text: 'MCP in Sandboxes', link: '/guide/mcp-gateway' }
               ]
@@ -271,7 +280,8 @@ export default withMermaid(defineConfig({
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
-                { text: 'Component multi-version', link: '/guide/component-multiversion' }
+                { text: 'Component multi-version', link: '/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/guide/redis-cluster' }
               ]
             },
             {
@@ -280,7 +290,7 @@ export default withMermaid(defineConfig({
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
-                { text: 'Quality Status', link: '/guide/quality-status' }
+                { text: 'QualityStatus', link: '/guide/quality-status' }
               ]
             },
             {
@@ -325,7 +335,9 @@ export default withMermaid(defineConfig({
                     { text: 'unisound', link: '/guide/usecases/unisound-rl-rollout' },
                     { text: 'WeKnora', link: '/guide/usecases/weknora' },
                     { text: 'Huajiao', link: '/guide/usecases/huajiao' },
-                    { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' }
+                    { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' },
+                    { text: 'Galxe Alva', link: '/guide/usecases/galxe-alva' },
+                    { text: 'LambChat', link: '/guide/usecases/lambchat' }
                   ]
                 }
               ]
@@ -342,6 +354,7 @@ export default withMermaid(defineConfig({
               text: 'System Design',
               items: [
                 { text: 'Architecture Overview', link: '/architecture/overview' },
+                { text: 'JuiceFS Storage Architecture', link: '/architecture/juicefs-storage' },
                 { text: 'CubeVS Network Model', link: '/architecture/network' }
               ]
             }
@@ -369,10 +382,10 @@ export default withMermaid(defineConfig({
           { text: '首页', link: '/zh/' },
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
-          { text: '开发者', link: '/zh/dev/' },
           {
             text: '社区',
             items: [
+              { text: '开发者', link: '/zh/dev/' },
               { text: '路线图', link: '/zh/guide/roadmap' },
               { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
               { text: '参与贡献', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING_zh.md' }
@@ -380,6 +393,7 @@ export default withMermaid(defineConfig({
           },
           { text: '博客', link: '/zh/blog/' },
           { text: '更新日志', link: '/zh/changelog/' },
+          { text: '质量状态', link: '/zh/guide/quality-status' },
           { text: '贡献者', link: '/zh/contributors' },
           { text: '关于我们', link: '/zh/about-us' }
         ],
@@ -423,7 +437,15 @@ export default withMermaid(defineConfig({
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
-                { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }
+                {
+                  text: '跨机迁移',
+                  collapsed: true,
+                  items: [
+                    { text: '跨机条件', link: '/zh/guide/cross-node-snapshot/requirements' },
+                    { text: 'JuiceFS 服务配置', link: '/zh/guide/cross-node-snapshot/juicefs' },
+                    { text: 'CubeS3lvol 服务配置', link: '/zh/guide/cross-node-snapshot/cubes3lvol' }
+                  ]
+                }
               ]
             },
             {
@@ -449,7 +471,7 @@ export default withMermaid(defineConfig({
                 { text: '将运行中的沙箱提交为模板', link: '/zh/guide/tutorials/template-from-sandbox' },
                 { text: '预热模板服务', link: '/zh/guide/tutorials/prewarm-template-service' },
                 { text: '本地与远程镜像实战', link: '/zh/guide/tutorials/template-build-practice' },
-                { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
+                { text: '环境变量', link: '/zh/guide/environment-variables' },
                 { text: '模板别名', link: '/zh/guide/template-aliases' },
                 { text: '在沙箱中使用 MCP', link: '/zh/guide/mcp-gateway' }
               ]
@@ -488,7 +510,8 @@ export default withMermaid(defineConfig({
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
-                { text: '组件多版本', link: '/zh/guide/component-multiversion' }
+                { text: '组件多版本', link: '/zh/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/zh/guide/redis-cluster' }
               ]
             },
             {
@@ -542,7 +565,9 @@ export default withMermaid(defineConfig({
                     { text: 'unisound', link: '/zh/guide/usecases/unisound-rl-rollout' },
                     { text: 'WeKnora', link: '/zh/guide/usecases/weknora' },
                     { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
-                    { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' }
+                    { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' },
+                    { text: 'Galxe Alva', link: '/zh/guide/usecases/galxe-alva' },
+                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' }
                   ]
                 }
               ]
@@ -559,6 +584,7 @@ export default withMermaid(defineConfig({
               text: '系统设计',
               items: [
                 { text: '架构概览 (Overview)', link: '/zh/architecture/overview' },
+                { text: 'JuiceFS 跨机存储架构', link: '/zh/architecture/juicefs-storage' },
                 { text: 'CubeVS 网络模型', link: '/zh/architecture/network' }
               ]
             }

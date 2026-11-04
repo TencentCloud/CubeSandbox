@@ -118,7 +118,7 @@ assert_recreate_change_detected network \
 assert_recreate_change_detected host-network \
   --set cubeNode.hostNetwork=false
 assert_recreate_change_detected egress \
-  --set cubeEgress.enabled=false
+  --set cubeEgress.adminPort=9092
 assert_recreate_change_detected s3lvol \
   --set cubeS3lvol.enabled=true
 echo "Big Pod template stability guard passed"

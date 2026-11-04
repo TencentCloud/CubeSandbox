@@ -10,7 +10,8 @@ use crate::{
         CreateTemplateContainerOverrides, CreateTemplateCubeNetworkConfig, CreateTemplateEnv,
         CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient, CubeMasterError,
         DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateCompatAdoptRequest,
-        TemplateDeleteRequest, TemplateJob, TemplateJobResponse,
+        TemplateDeleteRequest, TemplateInt64Value, TemplateJob, TemplateJobResponse,
+        TemplateSecurityContext,
     },
     error::{AppError, AppResult},
     models::{
@@ -134,7 +135,8 @@ impl TemplateService {
         }
 
         let dns_servers = validate_dns_servers(body.dns.as_deref())?;
-        let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
+        let container_overrides =
+            build_template_container_overrides(&body, dns_servers.as_deref())?;
         let cube_network_config = build_template_cube_network_config(&body)?;
         let alias = template_alias_from_request(&body);
 
@@ -159,6 +161,7 @@ impl TemplateService {
             cube_network_config,
             enable_ivshmem: body.enable_ivshmem,
             with_cube_ca: body.with_cube_ca,
+            backend: non_empty_option(body.backend),
         };
 
         let resp = self
@@ -565,9 +568,9 @@ fn build_template_probe(body: &CreateTemplateRequest) -> Option<Probe> {
                 exec: None,
             },
             timeout_ms: Some(30000),
-            period_ms: Some(500),
+            period_ms: Some(100),
             success_threshold: Some(1),
-            failure_threshold: Some(60),
+            failure_threshold: Some(300),
         })
 }
 
@@ -604,7 +607,7 @@ fn build_template_envs(body: &CreateTemplateRequest) -> Option<Vec<CreateTemplat
 fn build_template_container_overrides(
     body: &CreateTemplateRequest,
     dns_servers: Option<&[String]>,
-) -> Option<CreateTemplateContainerOverrides> {
+) -> AppResult<Option<CreateTemplateContainerOverrides>> {
     let command = non_empty_vec(body.command.clone());
     let args = non_empty_vec(body.args.clone());
     let probe = build_template_probe(body);
@@ -614,6 +617,10 @@ fn build_template_container_overrides(
         servers: servers.to_vec(),
         searches: Vec::new(),
     });
+    let security_context = match body.user.as_deref() {
+        Some(user) => Some(parse_template_user(user)?),
+        None => None,
+    };
 
     if command.is_none()
         && args.is_none()
@@ -621,18 +628,90 @@ fn build_template_container_overrides(
         && resources.is_none()
         && envs.is_none()
         && dns_config.is_none()
+        && security_context.is_none()
     {
-        return None;
+        return Ok(None);
     }
 
-    Some(CreateTemplateContainerOverrides {
+    Ok(Some(CreateTemplateContainerOverrides {
         command,
         args,
         probe,
         resources,
         envs,
         dns_config,
-    })
+        security_context,
+    }))
+}
+
+fn parse_template_user(spec: &str) -> AppResult<TemplateSecurityContext> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(AppError::BadRequest("user is empty".to_string()));
+    }
+    let (user, group) = match spec.split_once(':') {
+        Some((user, rest)) => {
+            if user.is_empty() || rest.is_empty() || rest.contains(':') {
+                return Err(AppError::BadRequest(format!(
+                    "invalid user {spec:?}: expected user or user:gid"
+                )));
+            }
+            (user, Some(rest))
+        }
+        None => (spec, None),
+    };
+    let mut security_context = TemplateSecurityContext {
+        privileged: Some(true),
+        run_as_user: None,
+        run_as_group: None,
+        run_as_username: None,
+    };
+    if user.bytes().all(|b| b.is_ascii_digit()) {
+        security_context.run_as_user = Some(TemplateInt64Value {
+            value: parse_template_user_id(user)?,
+        });
+    } else {
+        validate_template_username(user)?;
+        security_context.run_as_username = Some(user.to_string());
+    }
+    if let Some(group) = group {
+        if !group.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(AppError::BadRequest(format!(
+                "invalid user {spec:?}: group must be a numeric gid"
+            )));
+        }
+        security_context.run_as_group = Some(TemplateInt64Value {
+            value: parse_template_user_id(group)?,
+        });
+    }
+    Ok(security_context)
+}
+
+fn parse_template_user_id(raw: &str) -> AppResult<i64> {
+    let value: u32 = raw
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid user id {raw:?}")))?;
+    Ok(i64::from(value))
+}
+
+fn validate_template_username(name: &str) -> AppResult<()> {
+    // ASCII only, matching validateTemplateUsername in CubeMaster.
+    if name.is_empty() || name.len() > 32 {
+        return Err(AppError::BadRequest(
+            "username must be 1-32 characters".to_string(),
+        ));
+    }
+    for (i, ch) in name.chars().enumerate() {
+        let ok = if i == 0 {
+            ch.is_ascii_alphabetic() || ch == '_'
+        } else {
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')
+        };
+        if !ok {
+            return Err(AppError::BadRequest(format!("invalid user {name:?}")));
+        }
+    }
+    Ok(())
 }
 
 fn build_template_cube_network_config(
@@ -697,6 +776,8 @@ mod tests {
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
             enable_ivshmem: Some(true),
             with_cube_ca: Some(false),
+            backend: Some("s3".to_string()),
+            user: None,
         }
     }
 
@@ -704,7 +785,8 @@ mod tests {
     fn build_template_container_overrides_maps_cli_fields() {
         let body = sample_request();
         let overrides = build_template_container_overrides(&body, Some(&["8.8.8.8".to_string()]))
-            .expect("overrides");
+            .expect("overrides")
+            .expect("some");
 
         assert_eq!(
             overrides.command,
@@ -718,6 +800,44 @@ mod tests {
         assert!(overrides.probe.is_some());
         assert!(overrides.resources.is_some());
         assert_eq!(overrides.envs.as_ref().map(|envs| envs.len()), Some(1));
+        assert!(overrides.security_context.is_none());
+    }
+
+    #[test]
+    fn build_template_container_overrides_maps_user() {
+        let mut body = sample_request();
+        body.user = Some("sandbox:1000".to_string());
+        let overrides = build_template_container_overrides(&body, None)
+            .expect("overrides")
+            .expect("some");
+        let security_context = overrides.security_context.expect("security context");
+        assert_eq!(security_context.privileged, Some(true));
+        assert_eq!(security_context.run_as_username.as_deref(), Some("sandbox"));
+        assert_eq!(
+            security_context.run_as_group,
+            Some(TemplateInt64Value { value: 1000 })
+        );
+        assert!(security_context.run_as_user.is_none());
+
+        body.user = Some("0:0".to_string());
+        let security_context = build_template_container_overrides(&body, None)
+            .expect("overrides")
+            .expect("some")
+            .security_context
+            .expect("security context");
+        assert_eq!(
+            security_context.run_as_user,
+            Some(TemplateInt64Value { value: 0 })
+        );
+        assert_eq!(
+            security_context.run_as_group,
+            Some(TemplateInt64Value { value: 0 })
+        );
+
+        body.user = Some(":1000".to_string());
+        assert!(build_template_container_overrides(&body, None).is_err());
+        body.user = Some("1000:sandbox".to_string());
+        assert!(build_template_container_overrides(&body, None).is_err());
     }
 
     #[test]
@@ -879,6 +999,16 @@ mod tests {
     }
 
     #[test]
+    fn validate_template_username_is_ascii_only() {
+        assert!(validate_template_username("_apt").is_ok());
+        assert!(validate_template_username(&"a".repeat(32)).is_ok());
+        assert!(validate_template_username(&"a".repeat(33)).is_err());
+        assert!(validate_template_username("josé").is_err());
+        assert!(validate_template_username("用户").is_err());
+        assert!(validate_template_username("a١").is_err());
+    }
+
+    #[test]
     fn validate_dns_servers_rejects_invalid_ip() {
         let err = validate_dns_servers(Some(&["not-an-ip".to_string()])).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
@@ -945,6 +1075,97 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert_eq!(body["alias"], "stable-python");
+    }
+
+    #[tokio::test]
+    async fn create_template_forwards_backend_to_cubemaster() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        // s3 backend must reach CubeMaster verbatim.
+        let mut req = sample_request();
+        req.backend = Some("s3".to_string());
+        service
+            .create_template(req)
+            .await
+            .expect("template create should succeed");
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert_eq!(body["backend"], "s3");
+
+        // Omitted backend must be absent from the wire, not sent as null.
+        let mut req = sample_request();
+        req.backend = None;
+        service
+            .create_template(req)
+            .await
+            .expect("template create should succeed");
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert!(body.get("backend").is_none());
+    }
+
+    #[test]
+    fn non_empty_option_normalizes_blank_backend_to_none() {
+        // Blank backend must collapse to None so it is omitted on the wire,
+        // mirroring CubeMaster's `backend,omitempty` (empty = historical xfs).
+        assert_eq!(non_empty_option(Some("".to_string())), None);
+        assert_eq!(non_empty_option(Some("   ".to_string())), None);
+        assert_eq!(non_empty_option(Some("\t".to_string())), None);
+        assert_eq!(non_empty_option(None), None);
+        assert_eq!(
+            non_empty_option(Some("s3".to_string())),
+            Some("s3".to_string())
+        );
     }
 
     #[tokio::test]

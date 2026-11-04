@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 )
 
 type Files struct {
@@ -40,6 +41,8 @@ func resolveFileRequestOptions(options ...fileRequestOption) fileRequestOptions 
 
 type fileReader interface {
 	readFile(context.Context, string, ...fileRequestOption) (string, error)
+	readFileBytes(context.Context, string, ...fileRequestOption) ([]byte, error)
+	openFileStream(context.Context, string, ...fileRequestOption) (io.ReadCloser, error)
 }
 
 type fileWriter interface {
@@ -67,11 +70,31 @@ func (f *Files) ForUser(user string) *Files {
 	return &scoped
 }
 
+// Read downloads file content as text (UTF-8 string), matching the e2b
+// files.read(..., format="text") default. Binary files should use ReadBytes.
 func (f *Files) Read(ctx context.Context, path string) (string, error) {
 	if f == nil || f.reader == nil {
 		return "", fmt.Errorf("files is not attached to a sandbox")
 	}
 	return f.reader.readFile(ctx, path, withUser(f.user))
+}
+
+// ReadBytes downloads file content as raw bytes, matching e2b
+// files.read(..., format="bytes"). Prefer this for any non-UTF-8 payload.
+func (f *Files) ReadBytes(ctx context.Context, path string) ([]byte, error) {
+	if f == nil || f.reader == nil {
+		return nil, fmt.Errorf("files is not attached to a sandbox")
+	}
+	return f.reader.readFileBytes(ctx, path, withUser(f.user))
+}
+
+// ReadStream opens a streaming download of path, matching e2b
+// files.read(..., format="stream"). The caller must Close the reader.
+func (f *Files) ReadStream(ctx context.Context, path string) (io.ReadCloser, error) {
+	if f == nil || f.reader == nil {
+		return nil, fmt.Errorf("files is not attached to a sandbox")
+	}
+	return f.reader.openFileStream(ctx, path, withUser(f.user))
 }
 
 // Write uploads data to path through envd's HTTP file API.

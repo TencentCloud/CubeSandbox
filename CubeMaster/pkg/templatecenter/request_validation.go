@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"regexp"
 	"sort"
@@ -67,6 +68,25 @@ func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, er
 	return selected, nil
 }
 
+// templateBuildTargets narrows the nodes a template is built on. A jfs
+// template lives on the JuiceFS volume every node mounts, so it is built on
+// one schedulable node and the others adopt that package on first use.
+func templateBuildTargets(backend string, nodes []*node.Node) []*node.Node {
+	if !constants.IsJFSBackend(backend) || len(nodes) <= 1 {
+		return nodes
+	}
+	candidates := make([]*node.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil && n.SchedulingAllowed() {
+			candidates = append(candidates, n)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = nodes
+	}
+	return []*node.Node{candidates[rand.Intn(len(candidates))]}
+}
+
 func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*types.CreateTemplateFromImageReq, error) {
 	if req == nil {
 		return nil, errors.New("request is nil")
@@ -117,6 +137,9 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err
 	}
+	if err := validateTemplateContainerUser(cloned.ContainerOverrides); err != nil {
+		return nil, err
+	}
 	return &cloned, nil
 }
 
@@ -142,6 +165,16 @@ func validateTemplateAlias(alias string) error {
 	}
 	if !aliasValidationRe.MatchString(alias) {
 		return fmt.Errorf("alias %q is invalid: must match ^[a-z0-9][a-z0-9-]{0,63}$ (lowercase alphanumeric and hyphens, max 64 chars)", alias)
+	}
+	return nil
+}
+
+// validateSnapshotName rejects snapshot names that start with the tpl-/snap-
+// ID prefixes, which would be indistinguishable from IDs on delete.
+func validateSnapshotName(name string) error {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "tpl-") || strings.HasPrefix(name, "snap-") {
+		return fmt.Errorf("%w: %q must not start with 'tpl-' or 'snap-'", ErrInvalidSnapshotName, name)
 	}
 	return nil
 }

@@ -87,6 +87,12 @@ CubeProxy 会在转发时剥离 `/sandbox/<id>/<port>` 前缀，沙箱内的应�
 
 两种模式在每个 CubeProxy 实例上同时启用，共享同一份 Redis 路由元数据，无需额外配置即可使用路径形式。
 
+## 面向 E2B SDK 的 header 路由（免 DNS）
+
+CubeProxy 还有第三种回退路由来源，面向官方 E2B SDK：当 `Host` 不带 `<port>-<sandbox-id>.<domain>` 路由属性时，改为读取请求 header `E2b-Sandbox-Id`（必填）和 `E2b-Sandbox-Port`（可选，默认为 `49983`）。读取 `E2B_SANDBOX_URL` 的 E2B SDK 会在沙箱数据面请求上携带这些 header，因此无需泛域名 DNS 即可直接按 IP 指向 CubeProxy。
+
+Host 路由保持优先，存量泛域名流量不受影响。与路径模式一样，该方式在明文端口上暴露整条数据面，请仅在可信网络中使用。客户端配置见[固定地址下的 E2B SDK：header 模式](./multi-node-deploy.md#固定地址下的-e2b-sdkheader-模式)。
+
 ## 自定义沙箱服务收到的 Host
 
 部分 Web 框架会校验 HTTP `Host`，而 Cube 的 public URL Host 默认是
