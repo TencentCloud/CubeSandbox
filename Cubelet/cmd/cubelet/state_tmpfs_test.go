@@ -65,6 +65,43 @@ func TestStateTmpfsSymlinkRestartPreservesState(t *testing.T) {
 	require.Equal(t, uint64(32*1024*1024), size)
 }
 
+func TestFreshStateTmpfsVerificationFailures(t *testing.T) {
+	if runMountNamespace(t) {
+		return
+	}
+	for _, tc := range []struct {
+		name string
+		info *mountinfo.Info
+		err  error
+		want string
+	}{
+		{name: "wrong filesystem", info: &mountinfo.Info{FSType: "ext4"}, want: "expected tmpfs, got ext4"},
+		{name: "no visible mount", want: "no visible mount"},
+		{name: "lookup failure", err: unix.EIO, want: "input/output error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir()
+			t.Cleanup(func() { require.NoError(t, unix.Unmount(path, 0)) })
+			called := false
+			err := mountFreshStateTmpfsWithLookup(path, 16, func(got string) (*mountinfo.Info, error) {
+				called = true
+				require.Equal(t, path, got)
+				// Mount a real tmpfs, then inject only the verification result.
+				actual, err := lookupExactMount(got)
+				require.NoError(t, err)
+				require.NotNil(t, actual)
+				require.Equal(t, "tmpfs", actual.FSType)
+				return tc.info, tc.err
+			})
+			require.True(t, called)
+			require.ErrorContains(t, err, "verify tmpfs mount "+path+": "+tc.want)
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+			}
+		})
+	}
+}
+
 func TestLookupExactMountResolvesSymlinkParent(t *testing.T) {
 	dir := t.TempDir()
 	alias := filepath.Join(dir, "root-alias")

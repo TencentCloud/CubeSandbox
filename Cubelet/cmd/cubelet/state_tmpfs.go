@@ -54,10 +54,14 @@ func stateTmpfsMount(sizeMB int, remount bool) *mount.Mount {
 }
 
 func mountFreshStateTmpfs(stateDir string, sizeMB int) error {
+	return mountFreshStateTmpfsWithLookup(stateDir, sizeMB, lookupExactMount)
+}
+
+func mountFreshStateTmpfsWithLookup(stateDir string, sizeMB int, lookup func(string) (*mountinfo.Info, error)) error {
 	if err := stateTmpfsMount(sizeMB, false).Mount(stateDir); err != nil {
 		return err
 	}
-	info, err := lookupExactMount(stateDir)
+	info, err := lookup(stateDir)
 	if err != nil {
 		return fmt.Errorf("verify tmpfs mount %s: %w", stateDir, err)
 	}
