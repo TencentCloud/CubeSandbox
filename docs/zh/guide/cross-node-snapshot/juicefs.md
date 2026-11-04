@@ -2,9 +2,11 @@
 
 [JuiceFS](https://juicefs.com/docs/zh/community/introduction/) 是一个开源、POSIX 兼容的分布式文件系统。JuiceFS 采用数据与元数据分离的设计，数据存储在对象存储，元数据存储在元数据存储，支持接入使用 Redis、MySQL、TiKV 等元数据存储和 MinIO、S3、COS 等对象存储。
 
-Cube 的 JuiceFS 存储方案架构见 [JuiceFS 跨机存储架构](/zh/architecture/juicefs-storage)，性能测试数据见 [JuiceFS 性能测试](/zh/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark)。
+Cube 的 JuiceFS 存储方案架构见 [JuiceFS 跨机存储架构](/zh/architecture/juicefs-storage)，性能测试数据见 [JuiceFS 性能测试](/zh/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark)。
 
-> 关于 JuiceFS 的更多内部设计见 JuiceFS 官方的[技术架构](https://juicefs.com/docs/zh/community/architecture/)。
+::: warning 预览版
+JuiceFS 存储方案目前处于 Preview 预览阶段，适合快速上手与早期试用。配置项、部署脚本和运行行为在后续版本中仍可能调整。默认搭配控制节点 Redis/MinIO 仅适用于试用；生产环境请先在测试环境验证，并参考[更换存储](#更换存储)切换到更可靠的元数据引擎与对象存储。
+:::
 
 ## 前置条件
 
@@ -156,6 +158,36 @@ CUBE_JFS_META_PASSWORD="password"
 新集群直接填写该地址后执行控制节点初始化即可。已有卷迁移时，先停止写入并卸载所有客户端，再用 `juicefs dump` 从旧元数据引擎导出、用 `juicefs load` 导入一个空的新元数据引擎，随后更新所有节点的 `CUBE_JFS_META_URL` 并重新挂载。对象存储密钥默认不会包含在 dump 中，需要在新元数据引擎上重新配置。参考 JuiceFS 官方的[元数据备份与迁移](https://juicefs.com/docs/zh/community/metadata_dump_load/)文档。
 
 > JuiceFS 的元数据存储非常重要，如果在生产环境部署，推荐使用 Redis 集群以降低数据丢失的风险。
+
+
+## JFS 相关配置说明
+
+`CUBE_JFS_*` 系列变量可以在 `.env` / `.one-click.env` 中调整，大部分配置项不建议修改，这里说明几个需要关注的配置项。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `CUBE_JFS_MOUNT_PATH` | `/data/cubelet/jfs` | 挂载点|
+| `CUBE_JFS_CACHE_DIR` | `/data/cubelet/jfs-cache` | 本地缓存目录，读缓存与写 staging 都放在其中，建议放在节点的 NVMe/SSD 数据盘上 |
+| `CUBE_JFS_CACHE_SIZE_MB` | `102400`（100 GiB） | 读缓存大小上限 |
+
+### 缓存目录与容量建议
+
+`CUBE_JFS_CACHE_DIR` 中同时存放两类数据，目录结构见 [JuiceFS 跨机存储架构](/zh/architecture/juicefs-storage)：
+
+- 读缓存（`raw/`）：从对象存储拉回的数据块，可随时按 LRU 淘汰，受 `CUBE_JFS_CACHE_SIZE_MB` 上限约束；
+- 写 staging（`rawstaging/`）：`--writeback` 下尚未上传到对象存储的脏数据块，上传完成后即删除，不占用 `CUBE_JFS_CACHE_SIZE_MB` 配额。
+
+`CUBE_JFS_CACHE_SIZE_MB` 默认 100 GiB，与[性能测试](/zh/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark)所用配置一致。注意它是一个**上限而不是预留空间**，缓存按需增长：
+
+- 磁盘可用空间不足 100 GiB 时挂载不会失败，读缓存只会增长到实际可用的大小；
+- JuiceFS 默认 `--free-space-ratio 0.1`：当缓存所在文件系统剩余空间低于 10% 时，客户端按近似 LRU 的 2-random 算法主动淘汰读缓存块，直到剩余空间回到阈值以上。被淘汰的块下次读取时需重新从对象存储拉取，缓存命中率下降；
+  
+  **请注意，该参数的 10% 是相对于该目录所在的数据盘总容量计算的**，即 `/data/cubelet/jfs-cache` 缓存目录所在数据盘 `/data` 总容量为 1000 GiB，那么即使 `/data/cubelet/jfs-cache` 已使用 100 GiB，剩余空间也高于 10%，该兜底永远不会触发，读缓存的实际限制就是 `CUBE_JFS_CACHE_SIZE_MB`。
+- 若磁盘被缓存之外的数据（Cubelet 数据、镜像、staging 等）持续占满，淘汰只能暂时腾出空间：客户端会反复淘汰以守住阈值，读缓存被持续压缩，越来越多读请求退化为直读对象存储，性能明显下降；
+- 剩余空间低于阈值的一半（默认 5%）时，staging 写入同样受限：JuiceFS 会提前上传 staging 中的块以释放空间，新写入可能退化为同步写对象存储。必要时可通过 `CUBE_JFS_MOUNT_OPTS` 调整 `--free-space-ratio`（例如 0.2）。
+- staging 没有独立配额：若数据盘被写满，`--writeback` 下的新写入会直接失败，快照、暂停等操作可能报错，因此必须为 staging 和其他数据预留空间。
+
+建议将缓存目录放在独立的快速数据盘上，`CUBE_JFS_CACHE_SIZE_MB` 不超过该盘可用空间的 70%–80%；数据盘较小（如 100–200 GiB）时按比例调小该值。读缓存的淘汰通常先由 `CUBE_JFS_CACHE_SIZE_MB` 触发；`--free-space-ratio` 更多是在缓存盘被其他数据（尤其是 staging 积压）持续填满时兜底，缓存盘越宽裕该兜底触发越晚，建议同时监控缓存盘整体使用率。
 
 ## 镜像分发
 
