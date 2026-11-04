@@ -421,12 +421,13 @@ func TestBindSnapshotCreateReplicaCrossNodeWhenOriginCannotSchedule(t *testing.T
 
 	req := &types.CreateCubeSandboxReq{
 		InstanceType: "cubebox",
-		Annotations:  map[string]string{},
+		Annotations:  map[string]string{constants.CubeAnnotationComponentCubeShimVersion: "caller-shim"},
 	}
 	err := bindSnapshotCreateReplica(context.Background(), "snap-1", req)
 	if err != nil {
 		t.Fatalf("bindSnapshotCreateReplica failed: %v", err)
 	}
+	assert.NotContains(t, req.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	assert.Equal(t, []string{"node-b"}, req.DistributionScope)
 	assert.Equal(t, "true", req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
 	assert.Equal(t, constants.SnapshotBackendS3, req.Annotations[constants.CubeAnnotationStorageBackend])
@@ -895,4 +896,20 @@ func TestCompatibleNodesBareFactorUnderspecified(t *testing.T) {
 		assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
 	}
 	assert.False(t, called, "factors fn must not be called for under-specified query")
+}
+
+func TestSnapshotColdReplicaDropsCallerShimOverride(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
+	previousSource, previousReplica := getSnapshotRestoreSourceFn, resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() { getSnapshotRestoreSourceFn = previousSource; resolveSnapshotReadyReplicaFn = previousReplica })
+	getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+		return &templatecenter.RestoreSource{SnapshotID: "snap-cold", Backend: constants.SnapshotBackendXFS, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1"}, nil
+	}
+	resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+		return templatecenter.ReplicaStatus{}, errors.New("cold replica cache")
+	}
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{constants.CubeAnnotationComponentCubeShimVersion: "caller-shim"}}
+	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-cold", req))
+	assert.NotContains(t, req.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
+	assert.Equal(t, "snap-cold", req.Annotations[constants.CubeAnnotationRuntimeSnapshotID])
 }

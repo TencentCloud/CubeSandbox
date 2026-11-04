@@ -299,7 +299,9 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 	log.G(ctx).Infof("create sandbox with namespace %s", sandBox.Namespace)
 
-	seedCubeBoxComponentVersionsFromRequest(sandBox, flowOpts)
+	if err := seedCubeBoxComponentVersionsFromRequest(sandBox, flowOpts); err != nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+	}
 	if err := EnsureCubeBoxComponents(ctx, sandBox); err != nil {
 		return err
 	}
