@@ -198,10 +198,13 @@ impl SnapshotService {
         snapshot_id: &str,
         backend: Option<String>,
     ) -> AppResult<RollbackResponse> {
+        // Public snapshot references use their requested name when available;
+        // CubeMaster operations continue to use the immutable snap-* identity.
+        let snapshot_id = self.resolve_only(snapshot_id).await?;
         let req_id = new_request_id();
         let req = MasterRollbackRequest {
             request_id: req_id.clone(),
-            snapshot_id: snapshot_id.to_string(),
+            snapshot_id: snapshot_id.clone(),
             instance_type: self.instance_type.clone(),
             backend,
         };
@@ -211,25 +214,25 @@ impl SnapshotService {
                 let operation_id = required_operation_id(resp.operation_id(), "snapshot rollback")?;
                 resp.ret.as_result().map_err(|e| {
                     if e.is_not_found() {
-                        sandbox_or_snapshot_not_found(sandbox_id, snapshot_id)
+                        sandbox_or_snapshot_not_found(sandbox_id, &snapshot_id)
                     } else if e.is_conflict() {
-                        rollback_conflict(sandbox_id, snapshot_id)
+                        rollback_conflict(sandbox_id, &snapshot_id)
                     } else {
                         internal_error(e)
                     }
                 })?;
                 let status =
-                    ensure_operation_ready(resp.status(), "snapshot rollback", snapshot_id)?;
+                    ensure_operation_ready(resp.status(), "snapshot rollback", &snapshot_id)?;
 
                 Ok(RollbackResponse {
                     sandbox_id: owned_or_fallback(resp.sandbox_id, sandbox_id),
-                    snapshot_id: owned_or_fallback(resp.snapshot_id, snapshot_id),
+                    snapshot_id: owned_or_fallback(resp.snapshot_id, &snapshot_id),
                     operation_id,
                     status,
                 })
             }
             Err(e) if e.is_not_found() => {
-                Err(sandbox_or_snapshot_not_found(sandbox_id, snapshot_id))
+                Err(sandbox_or_snapshot_not_found(sandbox_id, &snapshot_id))
             }
             Err(e) => Err(internal_error(e)),
         }
@@ -352,7 +355,7 @@ fn snapshot_resource_to_info(r: SnapshotResource) -> SnapshotInfo {
     let backend = snapshot_backend(&r);
     let remote_status = optional_backend(&r.remote_status);
     SnapshotInfo {
-        snapshot_id: r.snapshot_id,
+        snapshot_id: public_snapshot_id(&r, &names),
         names,
         backend,
         remote_status,
@@ -402,7 +405,7 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
     let backend = snapshot_backend(&r);
     let remote_status = optional_backend(&r.remote_status);
     SnapshotListItem {
-        snapshot_id: r.snapshot_id,
+        snapshot_id: public_snapshot_id(&r, &names),
         names,
         status: r.status,
         origin_sandbox_id: if r.origin_sandbox_id.is_empty() {
@@ -444,6 +447,16 @@ fn snapshot_names(resource: &SnapshotResource) -> Vec<String> {
         return Vec::new();
     }
     vec![resource.snapshot_id.clone()]
+}
+
+/// E2B exposes a named snapshot through its name-based reference, not the
+/// provider's opaque storage ID.  Unnamed snapshots retain their snap-* ID.
+fn public_snapshot_id(resource: &SnapshotResource, names: &[String]) -> String {
+    names
+        .first()
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| resource.snapshot_id.clone())
 }
 
 /// Reject names starting with `tpl-`/`snap-`: they would be read as IDs on delete.
@@ -579,7 +592,7 @@ mod tests {
 
         assert_eq!(
             payload.get("snapshotID").and_then(|value| value.as_str()),
-            Some("snap-1")
+            Some("snap-name")
         );
         assert!(payload.get("operationID").is_none());
     }
@@ -615,7 +628,7 @@ mod tests {
 
         assert_eq!(
             payload.get("snapshotID").and_then(|value| value.as_str()),
-            Some("snap-1")
+            Some("snap-name")
         );
         assert_eq!(
             payload

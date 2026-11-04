@@ -200,3 +200,71 @@ def test_delete_snapshot_by_name(sdk_sandbox, sdk_e2e_config):
         interval=0.5,
         description=f"snapshot {snapshot_id} to disappear after delete by name",
     )
+
+
+def test_named_snapshot_reference_restores_and_deletes(
+    sdk_sandbox,
+    sdk_backend,
+    sdk_e2e_config,
+):
+    """The named snapshot reference is usable across the complete lifecycle.
+
+    This is the SDK E2E equivalent of Issue #1522's Python reproduction: a
+    named snapshot must not expose CubeMaster's opaque ``snap-*`` ID to the
+    caller, because the returned reference is then used to restore and delete
+    the snapshot.
+    """
+    if sdk_backend != "cubesandbox":
+        pytest.skip("CubeSandbox-specific named snapshot reference contract")
+
+    name = f"issue-1522-{uuid.uuid4().hex[:12]}"
+    snapshot_id = None
+    restored = None
+    cleanup_errors: list[object] = []
+
+    try:
+        snapshot_id = sdk_sandbox.create_snapshot(name=name)
+        assert snapshot_id == name, (
+            "a named snapshot must expose its name as snapshotID, not an "
+            f"opaque internal ID; got {snapshot_id!r}, want {name!r}"
+        )
+        assert snapshot_id in sdk_sandbox.list_snapshot_ids()
+
+        restored = create_adapter_with_capacity_retry(
+            sdk_backend,
+            sdk_e2e_config,
+            metadata={
+                "test_suite": "sdk_compat",
+                "test_role": "issue_1522_named_snapshot_restore",
+            },
+            create_options={"template": snapshot_id},
+        )
+        assert_command_ok(
+            restored.run_command("true", timeout=sdk_e2e_config.command_timeout)
+        )
+
+        release_errors = safe_kill(restored, sdk_e2e_config)
+        restored = None
+        assert not release_errors, f"restored sandbox cleanup failed: {release_errors!r}"
+
+        deleted = sdk_sandbox.delete_snapshot(snapshot_id)
+        if deleted is not None:
+            assert deleted is True, "deleting the returned snapshot reference should succeed"
+        wait_until(
+            lambda: snapshot_id not in sdk_sandbox.list_snapshot_ids(),
+            timeout=sdk_e2e_config.default_timeout,
+            interval=0.5,
+            description=f"snapshot {snapshot_id} to disappear after delete",
+        )
+        snapshot_id = None
+    finally:
+        active_failure = sys.exc_info()[0] is not None
+        if restored is not None:
+            cleanup_errors.extend(safe_kill(restored, sdk_e2e_config))
+        if snapshot_id is not None:
+            try:
+                sdk_sandbox.delete_snapshot(snapshot_id)
+            except Exception as exc:  # noqa: BLE001 - preserve test diagnostics
+                cleanup_errors.append(exc)
+        if not active_failure:
+            assert not cleanup_errors, cleanup_errors
