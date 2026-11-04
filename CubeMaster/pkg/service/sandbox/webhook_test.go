@@ -168,6 +168,22 @@ func TestPauseLocalBoundary(t *testing.T) {
 func patchResumeDependencies(t *testing.T, failure string) {
 	p := gomonkey.NewPatches()
 	t.Cleanup(p.Reset)
+	// Keep package cleanup inside this fixture's patch lifetime. The production
+	// wrapper starts a goroutine that could otherwise outlive Reset.
+	oldCleanup := cleanupPausePackageAfterResume
+	cleanupCalls := 0
+	cleanupPausePackageAfterResume = func(ctx context.Context, requestID, sandboxID, nodeIP, snapshotID, backend string) {
+		cleanupCalls++
+		require.EqualError(t, pausesnap.CleanupPauseSnapshot(ctx, requestID, nodeIP, snapshotID, backend), "warn-only cleanup")
+	}
+	t.Cleanup(func() {
+		cleanupPausePackageAfterResume = oldCleanup
+		want := 0
+		if failure == "" || failure == "purge" {
+			want = 1
+		}
+		require.Equal(t, want, cleanupCalls)
+	})
 	p.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
 		return &pausesnap.Record{SnapshotID: "snap", Status: "READY", NodeIP: "127.0.0.1", Backend: "xfs"}, nil
 	})

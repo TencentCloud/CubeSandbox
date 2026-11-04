@@ -189,41 +189,6 @@ def test_running_file_edit_keeps_startup_subscription(request, sdk_backend, webh
                                      if event["type"] == "sandbox.lifecycle.updated"])
 
 
-def test_deployment_api_isolation_and_latency(request, sdk_backend, webhook_master):
-    """Serial deployment observations; no fixed latency or capacity gate."""
-    if sdk_backend != "cubesandbox" or os.environ.get("WEBHOOK_TEST_PERFORMANCE") != "1":
-        pytest.skip("dedicated deployment performance experiment not requested")
-    import math
-    master = webhook_master
-    sandbox = sandbox_with_receiver(request, master)
-    for phase in ("disabled", "healthy", "slow-http", "failed-http"):
-        config = copy.deepcopy(master.base)
-        config["webhooks"]["enabled"] = phase != "disabled"
-        master.mode.write_text({"slow-http": "slow", "failed-http": "503"}.get(phase, "204"))
-        master.restart(config)
-        before = {event["id"] for _, event in master.observed(sandbox)}
-        samples = []
-        for number in range(25):
-            started = time.monotonic()
-            sandbox.set_timeout(300 + number)
-            elapsed = (time.monotonic() - started) * 1000
-            with (master.output / "api-latency.jsonl").open("a") as stream:
-                stream.write(json.dumps({"phase": phase, "index": number, "success": True,
-                                         "elapsed_ms": elapsed, "warmup": number < 5}) + "\n")
-            if number >= 5:
-                samples.append(elapsed)
-        if phase != "disabled":
-            wait_until(lambda: any(row["mode"] == master.mode.read_text() and event["id"] not in before
-                                   for row, event in master.observed(sandbox)),
-                       timeout=15, description="actual receiver intake for " + phase)
-        values = sorted(samples)
-        master.save(phase + "-distribution", {"samples": len(values), "warmup": 5, "concurrency": 1,
-            "p50_ms": values[math.ceil(len(values)*.50)-1], "p95_ms": values[math.ceil(len(values)*.95)-1],
-            "max_ms": max(values), "pid": master.pid()})
-        master.metric("ingress", "accepted")
-    # Deterministic ingress/task capacity assertions live in the Go components.
-
-
 def test_real_event_fanout_and_filter(request, sdk_backend, webhook_master):
     if sdk_backend != "cubesandbox" or not os.environ.get("WEBHOOK_TEST_CONCURRENT_RECEIVER_LOG"):
         pytest.skip("two dedicated receivers required")

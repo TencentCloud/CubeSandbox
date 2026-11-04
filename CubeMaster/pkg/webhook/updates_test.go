@@ -6,10 +6,8 @@ package webhook
 import (
 	"context"
 	"encoding/json"
-	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -61,50 +59,5 @@ func TestUpdateCaptureBudgetAndSnapshot(t *testing.T) {
 	for _, origin := range []Origin{OriginCreateFailover, OriginPauseTeardown, OriginResumeTimeoutRefresh} {
 		h.PublishContext(WithOrigin(context.Background(), origin), TypeUpdated, "sb", "", LifecycleFields{EndAtMS: 1})
 		require.Empty(t, p.Events())
-	}
-}
-func TestUpdateDestroyCaptureDistribution(t *testing.T) {
-	for _, kind := range []string{"timeout", "network", "killed"} {
-		for _, scenario := range []string{"disabled", "enabled", "full", "stopped"} {
-			t.Run(kind+"/"+scenario, func(t *testing.T) {
-				p, _ := NewBufferedPublisher(4096)
-				var h PublisherHolder
-				h.Set(p)
-				if scenario == "disabled" {
-					h.Set(NopPublisher{})
-				}
-				if scenario == "stopped" {
-					p.Stop()
-				}
-				if scenario == "full" {
-					p, _ = NewBufferedPublisher(1)
-					h.Set(p)
-					h.Publish(TypeCreated, "fill", "", LifecycleFields{})
-				}
-				f := LifecycleFields{EndAtMS: 1700000000123}
-				if kind == "network" {
-					f = LifecycleFields{Network: &NetworkFields{AllowOut: []string{"8.8.8.8", "*.example.com"}}}
-				}
-				invoke := func() {
-					if !h.Enabled() {
-						return
-					}
-					if kind == "killed" {
-						h.PublishContext(context.Background(), TypeKilled, "sb", "", LifecycleFields{KillReason: "request"})
-					} else {
-						h.PublishContext(context.Background(), TypeUpdated, "sb", "", f)
-					}
-				}
-				samples := make([]int64, 1000)
-				for i := range samples {
-					start := time.Now()
-					invoke()
-					samples[i] = time.Since(start).Nanoseconds()
-				}
-				sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-				alloc := testing.AllocsPerRun(100, invoke)
-				t.Logf("n=1000 p50=%dns p95=%dns p99=%dns allocs=%g", samples[499], samples[949], samples[989], alloc)
-			})
-		}
 	}
 }

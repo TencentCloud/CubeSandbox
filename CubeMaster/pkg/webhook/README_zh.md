@@ -10,5 +10,5 @@ CubeMaster 观察六类生命周期成功点，向静态集群级订阅发送 JS
 字段兼容、HTTP 安全和旧 PR 试用配置迁移。Timeout 响应截止时间可来自 fallback，
 killed 遵循原 handler 成功规则，metadata 仅来自可信当前创建输入。
 
-实现维护见 [DELIVERY.md](DELIVERY.md)。当前 receiver/组件/SDK 命令和证据限制见
+当前 receiver/组件/SDK 命令和证据限制见
 [测试运行说明](../../../tests/e2e/webhook/README.md)。旧 Redis 验证不构成内存版本验收。

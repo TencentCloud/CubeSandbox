@@ -856,7 +856,6 @@ func (l *listener) OnEvent(data interface{}) {
 		return
 	}
 	cfg = conf
-	CubeLog.Warnf("webhooks configuration update requires restart; running snapshot unchanged")
 	notify(conf)
 }
 

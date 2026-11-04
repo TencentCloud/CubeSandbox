@@ -136,7 +136,7 @@ requires user `webhook_test_1903` and the matching isolated MySQL container.
 
 | File | Coverage / additional settings (all `WEBHOOK_TEST_` prefixed) |
 | --- | --- |
-| `test_webhook_delivery.py` | Disabled/invalid config, static startup subscriptions, fanout/filter, SIGTERM/restart loss. `HTTP_FAILURES=1` covers finite 400/401/503/disconnect/timeout attempts; `PERFORMANCE=1` records serial latency samples under disabled/healthy/slow/failing HTTP. Fanout requires `CONCURRENT_RECEIVER_URL/LOG`. |
+| `test_webhook_delivery.py` | Disabled/invalid config, static startup subscriptions, fanout/filter, SIGTERM/restart loss. `HTTP_FAILURES=1` covers finite 400/401/503/disconnect/timeout attempts. Fanout requires `CONCURRENT_RECEIVER_URL/LOG`. |
 | `test_webhook_boundaries.py` | `NODE_FAULTS=1`, owned node unit/binary, XFS root, egress container and LCM unit as applicable. Preserve node failure negatives and sync/async/paused/timeout destroy behavior. `BUSINESS_PROXY_DIR` plus inventoried business Redis tests HGET fallback and HSET/XADD best-effort faults. |
 | `test_webhook_completion_boundaries.py` | Existing business RESP proxy for create rollback and async cleanup; `NODE_CLI/SOCKET` for full-ID node observations. `DATABASE_FAULTS=1` plus owned MySQL for Complete/READY/spec failures and warn-only paused binding deletion. `PROXY_FAULTS=1` plus owned CubeProxy for resume purge. Receiver rejection and metadata limits need only Master/receiver control. |
 | `test_webhook_storage.py` | `STORAGE_BACKEND=xfs` or `s3`, matching real template, receiver and `MASTER_URL`: local READY and actual same-node user snapshot restore. No control opt-in needed. |

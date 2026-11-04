@@ -17,8 +17,10 @@ func WebhooksEnabled() bool { return lifecyclePublisher.Enabled() }
 
 // PublishCreatedSandbox observes the public create result and trusted resolution.
 // Metadata was captured locally before template merging; it is never stored.
+// The caller has observed business success; later request cancellation does not
+// undo that result. Wait already arbitrates cancellation against success.
 func PublishCreatedSandbox(ctx context.Context, req *types.CreateCubeSandboxReq, sandboxID, templateID string, snapshot bool, metadata webhook.LifecycleFields) {
-	if !lifecyclePublisher.Enabled() || ctx.Err() != nil || sandboxID == "" {
+	if !lifecyclePublisher.Enabled() || sandboxID == "" {
 		return
 	}
 	_, fields := webhook.PrepareLifecycle(req)

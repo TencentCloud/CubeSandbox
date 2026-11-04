@@ -79,6 +79,12 @@ purge does not publish its corresponding success event. Internal create rollback
 pause teardown and resume timeout refresh add no user-facing killed/updated.
 Mock bypasses are not real lifecycle notification entrypoints.
 
+Create cancellation follows the existing business result. If cancellation wins
+and the operation returns failure, later background success and internal rollback
+emit no created/resumed/killed event. If business success returns first, subsequent
+request cancellation before the notification hook does not suppress created or
+snapshot resumed. Delivery remains best effort.
+
 SetTimeout accepts positive seconds, `0` (immediate deadline) and `-1` (never
 timeout); `-1` emits no timeout-only event. Refresh requires positive seconds,
 rejecting `0` and negative values. A finite successful response with `EndAt > 0`
@@ -199,6 +205,9 @@ Each Master owns two bounds, shared by all its subscriptions:
   HTTP. An event matching three subscriptions needs three records. Fanout can
   partially succeed; full task capacity drops that target without waiting. Retry
   reuses its record; success/exhaustion/cancellation releases it.
+
+Each target task stores at most 256 KiB of encoded body. Target copies and
+workers/transports also consume memory, so these bounds do not cap process RSS.
 
 Notification state is process-local memory behind `DeliveryStore`. Restart, crash
 or shutdown can lose remaining work. Masters neither share notification backlog

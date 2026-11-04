@@ -14,7 +14,6 @@ from earlier PR trials. Timeout response deadlines can be fallback values,
 killed follows existing handler success, and metadata comes only from trusted
 current create input.
 
-Implementation ownership is in [DELIVERY.md](DELIVERY.md). Current receiver,
-component and SDK commands and evidence limits are in the
+Current receiver, component and SDK commands and evidence limits are in the
 [test runbook](../../../tests/e2e/webhook/README.md). Historical Redis validation
 does not establish acceptance of this memory implementation.

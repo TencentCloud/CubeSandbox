@@ -70,6 +70,10 @@ XFS 与 S3 的 pause/checkpoint 都表示**本地成功**，不表示 S3 上传�
 purge 失败，不发布其对应成功事件。内部创建回滚、暂停拆除和 resume timeout 刷新不
 额外产生用户级 killed/updated。Mock 旁路不是真实生命周期通知入口。
 
+创建取消遵循既有业务结果：取消先赢、操作返回失败时，后台随后成功和内部回收均不发布
+created/resumed/killed。若业务成功先返回，之后请求在通知 hook 前取消，不抑制 created
+或用户快照 resumed。投递仍为 best effort。
+
 SetTimeout 接受正数秒数、`0`（立即截止）和 `-1`（永不超时），`-1` 不发 timeout-only
 事件。Refresh 只接受正数秒数，拒绝 `0` 和负数。有限成功响应的 `EndAt > 0` 即可发布，
 provider 缺失或失败时也可能如此，因为截止时间可由既有 fallback 提供。
@@ -173,6 +177,9 @@ key/value 共 16 KiB、key ≤256 字节、value ≤4096 字节。未知 metadat
 - `store.max_records` 按目标任务计数，含 pending 重试和 inflight HTTP。一个事件匹配
   三个订阅需三条记录。Fanout 可部分成功，任务满时丢该目标，不等空位。Retry 复用原记录，
   成功/耗尽/取消释放容量。
+
+每个目标任务的编码正文最多 256 KiB。目标副本和 worker/transport 也占用内存，
+因此这些上限不限制进程 RSS。
 
 通知状态由 `DeliveryStore` 后的进程内存保存。重启、崩溃或退出可丢失剩余工作。
 各 Master 不共享通知积压、不互相接管。无磁盘/Redis 持久化、严格顺序、恰好一次、

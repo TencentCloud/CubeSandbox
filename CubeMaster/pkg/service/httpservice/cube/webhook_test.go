@@ -53,9 +53,6 @@ func createWebhookFixture(t *testing.T, kind, failure string) interface{} {
 		if failure == "create" {
 			code = int(errorcode.ErrorCode_MasterInternalError)
 		}
-		if failure == "late-success" {
-			cancel()
-		}
 		id := "created-sandbox"
 		if failure == "mock-shortcut" {
 			id = ""
@@ -78,7 +75,7 @@ func createWebhookFixture(t *testing.T, kind, failure string) interface{} {
 
 func TestCreateWebhookUsesTrustedFinalResult(t *testing.T) {
 	for _, kind := range []string{"template", "snapshot", ""} {
-		for _, failure := range []string{"", "template", "create", "late-success", "mock-shortcut", "oversize"} {
+		for _, failure := range []string{"", "template", "create", "mock-shortcut", "oversize"} {
 			t.Run(kind+"/"+failure, func(t *testing.T) {
 				p, err := webhook.NewBufferedPublisher(4)
 				require.NoError(t, err)
