@@ -124,12 +124,17 @@ lvstore online, pins the initiator timeouts the pause depends on, then kills the
 target so the host keeps its namespaces and only pauses I/O, leaving the state
 for a replacement to pick up.
 
-The pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`): what it could
-not push is already durable in the WAL and the replacement attach replays it, so
-the drain only added time to the pause. Setting `RCOW_HOT_FLUSH_MS` to a positive
-value restores it as a drain deadline, which shortens the replay at the cost of
-waiting out in-flight GET+PUT (under a write load the overlay never goes clean,
-so the drain runs to its deadline and returns `-ETIMEDOUT`).
+The pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`): acknowledged
+writes that have not reached S3 sit in the shared-memory write-back ring, and
+the replacement attach on the same node replays that ring. The ring is not the
+disk WAL. A node reboot loses records that have not reached S3. Once the new
+process is serving, or has attached the lvstore, `cube-s3lvol-hot-upgrade.sh`
+refuses to roll back: those writes exist only in the new process's ring, and
+the previous binary cannot replay them. Setting `RCOW_HOT_FLUSH_MS` to a
+positive value restores the pre-kill flush as a drain deadline, which shortens
+the replay at the cost of waiting out in-flight GET+PUT (under a write load the
+overlay never goes clean, so the drain runs to its deadline and returns
+`-ETIMEDOUT`).
 
 `--candidate <binary>` is required on a real run: it is the binary the upgrade
 will start, and the version gate refuses if the two builds cannot share the
@@ -177,7 +182,9 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
-| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports promote this default to 4096, `0` disables tuning |
+| `RCOW_WRITEBACK_MB` | `4096` | `/dev/shm` payload-ring capacity per lvstore; 64–4096 MiB |
+| `S3LVOL_WRITEBACK_TOTAL_MB` | `8192` | process-wide cap for all write-back rings; must be at least `RCOW_WRITEBACK_MB` |
+| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports (at least 20% of chunks present) promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
 | `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
@@ -387,6 +394,13 @@ default 1 MiB chunk size, including during attach. Set it to `0` for disk-only
 cache operation. `rcow_get_lvstores` exposes native RAM/disk hit, miss,
 populate, eviction, residency and byte counters, plus separate imported-object
 cache and CopyObject-alias counters under each lvstore's `write_path`.
+
+The write-back payload ring is different from the cache: its complete configured
+size is reserved in `/dev/shm` during create/attach so running out later cannot
+SIGBUS the target. `rcow_start.sh` checks the available tmpfs capacity before
+starting the target and passes `RCOW_WRITEBACK_MB` to both RPC paths. Reduce the
+value on smaller nodes; acknowledged records that have not reached S3 are lost
+on a node reboot because `/dev/shm` is not persistent.
 
 Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `RCOW_LOG_DIR`). The CRT log level is set with

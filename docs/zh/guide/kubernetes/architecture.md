@@ -422,7 +422,7 @@ externalControlPlane:
 | `volumeS3.endpoint` / `existingSecret` | `""` | S3 配置来源：都为空且 `minio.enabled=true` 时由内置 MinIO 自动填充；显式设置任一值需 `minio.enabled=false`（二选一，互斥） |
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
-| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 19 GiB / 512 GiB 稀疏 WAL，含默认 1 GiB RAM cache） |
+| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 23 GiB / 512 GiB 稀疏 WAL，含默认 1 GiB RAM cache 和 4 GiB 宿主机 tmpfs 写回环） |
 | `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI 上游） |
 | `webui.enabled` | `true` | WebUI（要求 `cubeOps.enabled=true`） |
 

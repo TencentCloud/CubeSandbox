@@ -50,6 +50,39 @@ static char g_cached_bucket[S3_EXPORT_BUCKET_MAX];
 static uint8_t *g_cached_object;
 static uint32_t g_cached_object_len;
 static bool g_fail_cache_read;
+#define PREHEAT_CACHED 32
+static char g_preheat_keys[PREHEAT_CACHED][S3_EXPORT_KEY_MAX];
+static uint32_t g_preheat_nkeys;
+static uint32_t g_object_free_slots = 1024;
+static uint32_t g_object_reservations;
+static uint32_t g_reserved_populate_failures;
+static s3_cache_populate_cb g_failed_populate_cbs[2];
+static void *g_failed_populate_args[2];
+static uint32_t g_failed_populate_count;
+static bool g_defer_reserved_populate;
+static s3_cache_populate_cb g_deferred_populate_cb;
+static void *g_deferred_populate_arg;
+
+struct s3_cache_object_reservation {
+	struct s3_cache_object_id id;
+	char endpoint[S3_EXPORT_ENDPOINT_MAX];
+	char bucket[S3_EXPORT_BUCKET_MAX];
+	char key[S3_EXPORT_KEY_MAX];
+	uint32_t object_valid_bytes;
+};
+
+static bool
+preheat_key_known(const char *key)
+{
+	uint32_t i;
+
+	for (i = 0; i < g_preheat_nkeys; i++) {
+		if (strcmp(g_preheat_keys[i], key) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
 
 static void
 token_granted(void *cb_arg)
@@ -155,6 +188,103 @@ s3_cache_object_populate(struct s3_cache *cache,
 	snprintf(g_cached_endpoint, sizeof(g_cached_endpoint), "%s", id->endpoint);
 	snprintf(g_cached_bucket, sizeof(g_cached_bucket), "%s", id->bucket);
 	snprintf(g_cached_key, sizeof(g_cached_key), "%s", id->key);
+}
+
+int
+s3_cache_object_reserve(struct s3_cache *cache,
+			const struct s3_cache_object_id *id,
+			uint32_t object_valid_bytes,
+			struct s3_cache_object_reservation **out)
+{
+	struct s3_cache_object_reservation *reservation;
+
+	(void)cache;
+	if (!id || !out || object_valid_bytes == 0) {
+		return -EINVAL;
+	}
+	if (preheat_key_known(id->key)) {
+		return 1;
+	}
+	if (g_object_reservations >= S3_CACHE_PREHEAT_MAX) {
+		return -EAGAIN;
+	}
+	if (g_object_free_slots == 0) {
+		return -ENOSPC;
+	}
+	reservation = calloc(1, sizeof(*reservation));
+	if (!reservation) {
+		return -ENOMEM;
+	}
+	snprintf(reservation->endpoint, sizeof(reservation->endpoint), "%s",
+		 id->endpoint);
+	snprintf(reservation->bucket, sizeof(reservation->bucket), "%s",
+		 id->bucket);
+	snprintf(reservation->key, sizeof(reservation->key), "%s", id->key);
+	reservation->id.endpoint = reservation->endpoint;
+	reservation->id.bucket = reservation->bucket;
+	reservation->id.key = reservation->key;
+	reservation->object_valid_bytes = object_valid_bytes;
+	g_object_reservations++;
+	g_object_free_slots--;
+	*out = reservation;
+	return 0;
+}
+
+void
+s3_cache_object_reservation_cancel(
+	struct s3_cache_object_reservation *reservation)
+{
+	if (!reservation) {
+		return;
+	}
+	assert(g_object_reservations > 0);
+	g_object_reservations--;
+	g_object_free_slots++;
+	free(reservation);
+}
+
+int
+s3_cache_object_populate_reserved_notify(
+	struct s3_cache_object_reservation *reservation, const void *buf,
+	uint32_t length, s3_cache_populate_cb cb_fn, void *cb_arg)
+{
+	if (!reservation || length != reservation->object_valid_bytes) {
+		s3_cache_object_reservation_cancel(reservation);
+		return -EINVAL;
+	}
+	assert(g_object_reservations > 0);
+	g_object_reservations--;
+	if (g_reserved_populate_failures > 0) {
+		g_reserved_populate_failures--;
+		g_object_free_slots++;
+		free(reservation);
+		if (cb_fn &&
+		    g_failed_populate_count < SPDK_COUNTOF(g_failed_populate_cbs)) {
+			g_failed_populate_cbs[g_failed_populate_count] = cb_fn;
+			g_failed_populate_args[g_failed_populate_count] = cb_arg;
+			g_failed_populate_count++;
+		}
+		return 0;
+	}
+	if (g_defer_reserved_populate) {
+		g_defer_reserved_populate = false;
+		g_deferred_populate_cb = cb_fn;
+		g_deferred_populate_arg = cb_arg;
+		free(reservation);
+		return 0;
+	}
+	s3_cache_object_populate((struct s3_cache *)(uintptr_t)1,
+				 &reservation->id, 0, buf, length, length);
+	if (g_preheat_nkeys < PREHEAT_CACHED) {
+		snprintf(g_preheat_keys[g_preheat_nkeys],
+			 sizeof(g_preheat_keys[0]), "%s", reservation->key);
+		g_preheat_nkeys++;
+	}
+	free(reservation);
+	if (cb_fn) {
+		cb_fn(cb_arg, 0);
+	}
+	return 0;
 }
 
 int
@@ -801,6 +931,581 @@ main(void)
 		free(fallback_read.buf);
 		free(g_cached_object);
 		g_cached_object = NULL;
+	}
+
+	printf("\n[15] template preheat fills the object cache and yields\n");
+	{
+		struct s3_export_manifest *warm = NULL;
+		struct spdk_bs_dev *warm_dev = NULL;
+		struct spdk_io_channel *warm_ch = NULL;
+		struct read_result joined = {0};
+		struct s3_cache *fake_cache = (struct s3_cache *)(uintptr_t)1;
+		struct spdk_uuid uuid;
+		uint8_t raw[16];
+		uint8_t src_idx;
+		uint32_t i;
+		uint32_t base;
+
+		g_preheat_nkeys = 0;
+		g_object_free_slots = 8;
+		if (s3_export_manifest_create(TEST_UUID, 8ULL * CHUNK_SIZE,
+					      CHUNK_SIZE, S3_EXPORT_LAYOUT_REF,
+					      &warm) == 0) {
+			snprintf(warm->src.prefix, sizeof(warm->src.prefix),
+				 "preheat");
+			if (s3_export_manifest_add_src(warm, warm->src.prefix,
+						       NULL, NULL, &src_idx) != 0) {
+				s3_export_manifest_unref(warm);
+				warm = NULL;
+			}
+		}
+		for (i = 0; warm && i < 8; i++) {
+			if (i == 1 || i == 6 || i == 7) {
+				continue;
+			}
+			memset(raw, (int)(i + 1), sizeof(raw));
+			memcpy(&uuid, raw, sizeof(uuid));
+			if (s3_export_manifest_set_ref(warm, i, &uuid,
+						      CHUNK_SIZE) != 0) {
+				s3_export_manifest_unref(warm);
+				warm = NULL;
+			}
+		}
+		if (warm) {
+			s3_export_manifest_seal(warm);
+		}
+		check_true("preheat manifest created", warm != NULL);
+		if (warm) {
+			rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1,
+						     warm, fake_cache, &warm_dev);
+			check_true("preheat export device is created", rc == 0);
+		}
+		if (warm_dev) {
+			base = g_ngets;
+			s3_export_bs_dev_preheat(warm_dev);
+			check_u64("preheat fetches every present object in one window",
+				  g_ngets - base, 5);
+			check_true("preheat GETs are whole objects from offset zero",
+				   g_gets[base].offset == 0 &&
+				   g_gets[base].len == CHUNK_SIZE);
+			for (i = 0; i < 5; i++) {
+				complete_get(base + i, 0, CHUNK_SIZE);
+			}
+			spdk_thread_poll(thread, 0, 0);
+			check_u64("holes are not fetched", g_ngets - base, 5);
+			check_u64("five present objects were cached",
+				  g_preheat_nkeys, 5);
+
+			base = g_ngets;
+			s3_export_bs_dev_preheat(warm_dev);
+			spdk_thread_poll(thread, 0, 0);
+			check_u64("a second preheat does not GET again",
+				  g_ngets, base);
+
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 1;
+			warm_dev->destroy(warm_dev);
+			spdk_thread_poll(thread, 0, 0);
+			warm_dev = NULL;
+			rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1,
+						     warm, fake_cache, &warm_dev);
+			check_true("cache-full device is created", rc == 0);
+			if (rc == 0) {
+				base = g_ngets;
+				s3_export_bs_dev_preheat(warm_dev);
+				check_u64("preheat stops before it would evict",
+					  g_ngets - base, 1);
+				complete_get(base, 0, CHUNK_SIZE);
+				spdk_thread_poll(thread, 0, 0);
+				check_u64("no further GET follows a full cache",
+					  g_ngets - base, 1);
+				warm_dev->destroy(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+				warm_dev = NULL;
+			}
+
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 8;
+			rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1,
+						     warm, fake_cache, &warm_dev);
+			check_true("coalesced preheat device is created", rc == 0);
+			if (rc == 0) {
+				base = g_ngets;
+				s3_export_bs_dev_preheat(warm_dev);
+				check_u64("coalesce setup has every present object in flight",
+					  g_ngets - base, 5);
+				warm_ch = warm_dev->create_channel(warm_dev);
+				submit_read_on_channel(warm_dev, warm_ch, &joined,
+						       0, 4 * 1024);
+				check_u64("a demand read joins the preheat GET",
+					  g_ngets - base, 5);
+				complete_get(base, 0, CHUNK_SIZE);
+				check_true("joined read completes from the preheat",
+					   joined.done && joined.status == 0 &&
+					   buffer_has_pattern(&joined, 0, joined.len));
+				complete_outstanding();
+				spdk_thread_poll(thread, 0, 0);
+				/* The four cache completions above admit the final
+				 * present chunk. Drain that new GET before starting
+				 * the token-starvation case. */
+				complete_outstanding();
+				spdk_thread_poll(thread, 0, 0);
+				warm_dev->destroy_channel(warm_dev, warm_ch);
+				warm_dev->destroy(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+				warm_dev = NULL;
+				free(joined.buf);
+				joined.buf = NULL;
+			}
+
+			for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
+				if (s3_whole_get_token_acquire_ex(false, token_granted,
+								  NULL, &g_token_callbacks) != 1) {
+					break;
+				}
+			}
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 8;
+			rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1,
+						     warm, fake_cache, &warm_dev);
+			check_true("token-starved device is created", rc == 0);
+			if (rc == 0) {
+				base = g_ngets;
+				s3_export_bs_dev_preheat(warm_dev);
+				check_u64("preheat does not take the last demand token",
+					  g_ngets, base);
+				for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
+					s3_whole_get_token_release();
+				}
+				spdk_delay_us(20 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+				check_u64("preheat resumes after a demand token frees",
+					  g_ngets - base, 5);
+				complete_outstanding();
+				spdk_thread_poll(thread, 0, 0);
+				warm_dev->destroy(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+				warm_dev = NULL;
+			}
+
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 32;
+			s3_export_manifest_unref(warm);
+			warm = NULL;
+			if (s3_export_manifest_create(TEST_UUID,
+						      12ULL * CHUNK_SIZE,
+						      CHUNK_SIZE,
+						      S3_EXPORT_LAYOUT_REF,
+						      &warm) == 0) {
+				snprintf(warm->src.prefix, sizeof(warm->src.prefix),
+					 "preheat-wide");
+				if (s3_export_manifest_add_src(warm, warm->src.prefix,
+							       NULL, NULL,
+							       &src_idx) != 0) {
+					s3_export_manifest_unref(warm);
+					warm = NULL;
+				}
+			}
+			for (i = 0; warm && i < 12; i++) {
+				memset(raw, (int)(i + 1), sizeof(raw));
+				memcpy(&uuid, raw, sizeof(uuid));
+				if (s3_export_manifest_set_ref(warm, i, &uuid,
+							      CHUNK_SIZE) != 0) {
+					s3_export_manifest_unref(warm);
+					warm = NULL;
+				}
+			}
+			warm_dev = NULL;
+			if (warm) {
+				s3_export_manifest_seal(warm);
+				rc = s3_export_bs_dev_create(
+					(struct s3_client *)(uintptr_t)1, warm,
+					fake_cache, &warm_dev);
+				check_true("per-export cap device is created",
+					   rc == 0);
+				if (rc != 0) {
+					warm_dev = NULL;
+				}
+			}
+			if (warm_dev) {
+				base = g_ngets;
+				s3_export_bs_dev_preheat(warm_dev);
+				check_u64("one export stops at its own GET cap",
+					  g_ngets - base, S3_EXPORT_PREHEAT_MAX);
+				complete_get(base, 0, CHUNK_SIZE);
+				spdk_thread_poll(thread, 0, 0);
+				check_u64("a completion admits the next object",
+					  g_ngets - base,
+					  S3_EXPORT_PREHEAT_MAX + 1);
+				complete_outstanding();
+				spdk_thread_poll(thread, 0, 0);
+				complete_outstanding();
+				spdk_thread_poll(thread, 0, 0);
+				warm_dev->destroy(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+			}
+
+			/* A missing object completes the preheat GET with an error.
+			 * That path frees the fill; it must not treat the idle
+			 * preheat_finish_now pointer as this completion. */
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 8;
+			s3_export_manifest_unref(warm);
+			warm = NULL;
+			if (s3_export_manifest_create(TEST_UUID, CHUNK_SIZE,
+						      CHUNK_SIZE,
+						      S3_EXPORT_LAYOUT_REF,
+						      &warm) == 0) {
+				snprintf(warm->src.prefix, sizeof(warm->src.prefix),
+					 "preheat-missing");
+				if (s3_export_manifest_add_src(warm, warm->src.prefix,
+							       NULL, NULL,
+							       &src_idx) != 0) {
+					s3_export_manifest_unref(warm);
+					warm = NULL;
+				}
+			}
+			if (warm) {
+				memset(raw, 9, sizeof(raw));
+				memcpy(&uuid, raw, sizeof(uuid));
+				if (s3_export_manifest_set_ref(warm, 0, &uuid,
+							      CHUNK_SIZE) != 0) {
+					s3_export_manifest_unref(warm);
+					warm = NULL;
+				}
+			}
+			warm_dev = NULL;
+			if (warm) {
+				s3_export_manifest_seal(warm);
+				rc = s3_export_bs_dev_create(
+					(struct s3_client *)(uintptr_t)1, warm,
+					fake_cache, &warm_dev);
+				check_true("missing-object preheat device is created",
+					   rc == 0);
+				if (rc != 0) {
+					warm_dev = NULL;
+				}
+			}
+			if (warm_dev) {
+				base = g_ngets;
+				s3_export_bs_dev_preheat(warm_dev);
+				check_u64("missing object is still prefetched",
+					  g_ngets - base, 1);
+				complete_get(base, -ENOENT, 0);
+				spdk_thread_poll(thread, 0, 0);
+				check_u64("a missing object is not fetched again",
+					  g_ngets - base, 1);
+				warm_dev->destroy(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+			}
+
+			/* A completed preheat GET waiting on its disk-cache
+			 * write must stay visible in RAM so a demand read that
+			 * arrives before the cache slot becomes resident copies
+			 * those bytes instead of issuing a second GET. */
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 8;
+			free(g_cached_object);
+			g_cached_object = NULL;
+			g_cached_object_len = 0;
+			warm_dev = NULL;
+			if (warm) {
+				rc = s3_export_bs_dev_create(
+					(struct s3_client *)(uintptr_t)1, warm,
+					fake_cache, &warm_dev);
+				check_true("queued-populate preheat device is created",
+					   rc == 0);
+				if (rc != 0) {
+					warm_dev = NULL;
+				}
+			}
+			if (warm_dev) {
+				base = g_ngets;
+				g_defer_reserved_populate = true;
+				s3_export_bs_dev_preheat(warm_dev);
+				check_u64("preheat issues one GET",
+					  g_ngets - base, 1);
+				complete_get(base, 0, CHUNK_SIZE);
+				warm_ch = warm_dev->create_channel(warm_dev);
+				submit_read_on_channel(warm_dev, warm_ch, &joined,
+						       0, 4 * 1024);
+				check_u64("demand read during cache write does not re-GET",
+					  g_ngets - base, 1);
+				check_true("demand read during cache write gets the bytes",
+					   joined.done && joined.status == 0 &&
+					   buffer_has_pattern(&joined, 0, joined.len));
+				/* The cache callback owns the preheat lifetime ref.
+				 * Destroy first to prove that its final async_put is
+				 * the last operation that dereferences the device. */
+				warm_dev->destroy_channel(warm_dev, warm_ch);
+				warm_dev->destroy(warm_dev);
+				if (g_deferred_populate_cb) {
+					s3_cache_populate_cb cb = g_deferred_populate_cb;
+					void *arg = g_deferred_populate_arg;
+
+					g_deferred_populate_cb = NULL;
+					g_deferred_populate_arg = NULL;
+					cb(arg, 0);
+				}
+				spdk_thread_poll(thread, 0, 0);
+				free(joined.buf);
+				joined.buf = NULL;
+			}
+
+			/* A demand read whose opportunistic cache populate was
+			 * dropped leaves a READY entry in RAM. Preheat must
+			 * reuse that buffer to populate its reservation instead
+			 * of discarding the entry and issuing a second GET. */
+			g_preheat_nkeys = 0;
+			g_object_free_slots = 8;
+			free(g_cached_object);
+			g_cached_object = NULL;
+			g_cached_object_len = 0;
+			warm_dev = NULL;
+			if (warm) {
+				rc = s3_export_bs_dev_create(
+					(struct s3_client *)(uintptr_t)1, warm,
+					fake_cache, &warm_dev);
+				check_true("demand-first preheat device is created",
+					   rc == 0);
+				if (rc != 0) {
+					warm_dev = NULL;
+				}
+			}
+			if (warm_dev) {
+				base = g_ngets;
+				warm_ch = warm_dev->create_channel(warm_dev);
+				submit_read_on_channel(warm_dev, warm_ch, &joined,
+						       0, 4 * 1024);
+				check_u64("demand read issues one GET",
+					  g_ngets - base, 1);
+				complete_get(base, 0, CHUNK_SIZE);
+				check_true("demand read completes",
+					   joined.done && joined.status == 0);
+				/* Simulate a dropped opportunistic cache write. */
+				free(g_cached_object);
+				g_cached_object = NULL;
+				g_cached_object_len = 0;
+				s3_export_bs_dev_preheat(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+				check_u64("preheat reuses READY RAM without a second GET",
+					  g_ngets - base, 1);
+				check_u64("preheat still populates the shared cache",
+					  g_preheat_nkeys, 1);
+				warm_dev->destroy_channel(warm_dev, warm_ch);
+				warm_dev->destroy(warm_dev);
+				spdk_thread_poll(thread, 0, 0);
+			}
+
+			/* A sparse manifest is scanned in bounded slices so its absent
+			 * chunks cannot monopolise the home reactor. */
+			{
+				struct s3_export_manifest *sparse = NULL;
+				struct spdk_bs_dev *sparse_dev = NULL;
+				const uint32_t sparse_chunks = 2049;
+
+				g_preheat_nkeys = 0;
+				g_object_free_slots = 8;
+				if (s3_export_manifest_create(
+					    TEST_UUID,
+					    (uint64_t)sparse_chunks * CHUNK_SIZE,
+					    CHUNK_SIZE, S3_EXPORT_LAYOUT_REF,
+					    &sparse) == 0) {
+					snprintf(sparse->src.prefix,
+						 sizeof(sparse->src.prefix),
+						 "preheat-sparse");
+					if (s3_export_manifest_add_src(
+						    sparse, sparse->src.prefix,
+						    NULL, NULL, &src_idx) != 0) {
+						s3_export_manifest_unref(sparse);
+						sparse = NULL;
+					}
+				}
+				if (sparse) {
+					memset(raw, 0x5a, sizeof(raw));
+					memcpy(&uuid, raw, sizeof(uuid));
+					if (s3_export_manifest_set_ref(
+						    sparse, sparse_chunks - 1,
+						    &uuid, CHUNK_SIZE) != 0) {
+						s3_export_manifest_unref(sparse);
+						sparse = NULL;
+					}
+				}
+				if (sparse) {
+					s3_export_manifest_seal(sparse);
+					rc = s3_export_bs_dev_create(
+						(struct s3_client *)(uintptr_t)1,
+						sparse, fake_cache, &sparse_dev);
+					check_true("sparse preheat device is created",
+						   rc == 0);
+				}
+				if (sparse_dev) {
+					base = g_ngets;
+					s3_export_bs_dev_preheat(sparse_dev);
+					check_u64("first sparse scan slice yields",
+						  g_ngets, base);
+					spdk_delay_us(11 * 1000);
+					spdk_thread_poll(thread, 0, 0);
+					check_u64("second sparse scan slice yields",
+						  g_ngets, base);
+					spdk_delay_us(11 * 1000);
+					spdk_thread_poll(thread, 0, 0);
+					check_u64("sparse scan eventually reaches data",
+						  g_ngets, base + 1);
+					complete_get(base, 0, CHUNK_SIZE);
+					spdk_thread_poll(thread, 0, 0);
+					sparse_dev->destroy(sparse_dev);
+					spdk_thread_poll(thread, 0, 0);
+					sparse_dev = NULL;
+					rc = s3_export_bs_dev_create(
+						(struct s3_client *)(uintptr_t)1,
+						sparse, fake_cache, &sparse_dev);
+					check_true("poller lifetime device is created",
+						   rc == 0);
+				}
+				if (sparse_dev) {
+					uint32_t puts_before = g_client_puts;
+
+					s3_export_bs_dev_preheat(sparse_dev);
+					spdk_set_thread(thread2);
+					sparse_dev->destroy(sparse_dev);
+					check_u64("sparse poller pins the device",
+						  g_client_puts, puts_before);
+					spdk_set_thread(thread);
+					spdk_delay_us(11 * 1000);
+					for (i = 0; i < 8 &&
+					     g_client_puts == puts_before; i++) {
+						spdk_thread_poll(thread, 0, 0);
+					}
+					check_u64("destroyed sparse poller releases device",
+						  g_client_puts, puts_before + 1);
+				}
+				s3_export_manifest_unref(sparse);
+			}
+
+			/* Several cache fills can fail after the cursor has passed
+			 * them. Retrying from the earliest failure must revisit every
+			 * later failed chunk instead of retaining only the last one. */
+			{
+				struct s3_export_manifest *retry_m = NULL;
+				struct spdk_bs_dev *retry_dev = NULL;
+				uint32_t held_tokens = 0;
+
+				g_preheat_nkeys = 0;
+				g_object_free_slots = 8;
+				if (s3_export_manifest_create(
+					    TEST_UUID, 2ULL * CHUNK_SIZE,
+					    CHUNK_SIZE, S3_EXPORT_LAYOUT_REF,
+					    &retry_m) == 0) {
+					snprintf(retry_m->src.prefix,
+						 sizeof(retry_m->src.prefix),
+						 "preheat-retry");
+					if (s3_export_manifest_add_src(
+						    retry_m, retry_m->src.prefix,
+						    NULL, NULL, &src_idx) != 0) {
+						s3_export_manifest_unref(retry_m);
+						retry_m = NULL;
+					}
+				}
+				for (i = 0; retry_m && i < 2; i++) {
+					memset(raw, (int)(0x60 + i), sizeof(raw));
+					memcpy(&uuid, raw, sizeof(uuid));
+					if (s3_export_manifest_set_ref(
+						    retry_m, i, &uuid,
+						    CHUNK_SIZE) != 0) {
+						s3_export_manifest_unref(retry_m);
+						retry_m = NULL;
+					}
+				}
+				if (retry_m) {
+					s3_export_manifest_seal(retry_m);
+					rc = s3_export_bs_dev_create(
+						(struct s3_client *)(uintptr_t)1,
+						retry_m, fake_cache, &retry_dev);
+					check_true("retry preheat device is created",
+						   rc == 0);
+				}
+				if (retry_dev) {
+					base = g_ngets;
+					g_reserved_populate_failures = 2;
+					s3_export_bs_dev_preheat(retry_dev);
+					check_u64("retry case starts both GETs",
+						  g_ngets, base + 2);
+					spdk_set_thread(thread2);
+					complete_get(base, 0, CHUNK_SIZE);
+					complete_get(base + 1, 0, CHUNK_SIZE);
+					spdk_set_thread(thread);
+					spdk_thread_poll(thread, 0, 0);
+					spdk_set_thread(thread2);
+					for (i = 0; i < g_failed_populate_count; i++) {
+						g_failed_populate_cbs[i](
+							g_failed_populate_args[i],
+							-EAGAIN);
+					}
+					g_failed_populate_count = 0;
+					while (held_tokens <
+					       S3_WHOLE_GET_MAX_INFLIGHT &&
+					       s3_whole_get_token_acquire_ex(
+						       false, token_granted, NULL,
+						       &g_token_callbacks) == 1) {
+						held_tokens++;
+					}
+					check_u64("retry case holds every GET token",
+						  held_tokens,
+						  S3_WHOLE_GET_MAX_INFLIGHT);
+					spdk_set_thread(thread);
+					spdk_thread_poll(thread, 0, 0);
+					while (held_tokens > 0) {
+						s3_whole_get_token_release();
+						held_tokens--;
+					}
+					spdk_delay_us(11 * 1000);
+					spdk_thread_poll(thread, 0, 0);
+					check_u64("retry reuses both READY buffers",
+						  g_ngets, base + 2);
+					check_u64("both failed fills reach the cache",
+						  g_preheat_nkeys, 2);
+					complete_outstanding();
+					spdk_thread_poll(thread, 0, 0);
+					retry_dev->destroy(retry_dev);
+					spdk_thread_poll(thread, 0, 0);
+				}
+				g_reserved_populate_failures = 0;
+				g_failed_populate_count = 0;
+				s3_export_manifest_unref(retry_m);
+			}
+
+			/* The off-home start message owns a device reference. Destroy
+			 * may race ahead of that message without freeing its argument. */
+			{
+				struct spdk_bs_dev *queued_dev = NULL;
+				uint32_t puts_before = g_client_puts;
+
+				rc = s3_export_bs_dev_create(
+					(struct s3_client *)(uintptr_t)1, warm,
+					fake_cache, &queued_dev);
+				check_true("queued preheat device is created",
+					   rc == 0);
+				if (queued_dev) {
+					spdk_set_thread(thread2);
+					rc = s3_export_bs_dev_preheat(queued_dev);
+					check_true("off-home preheat is queued",
+						   rc == 0);
+					queued_dev->destroy(queued_dev);
+					check_u64("queued message pins the device",
+						  g_client_puts, puts_before);
+					spdk_set_thread(thread);
+					for (i = 0; i < 8 &&
+					     g_client_puts == puts_before; i++) {
+						spdk_thread_poll(thread, 0, 0);
+					}
+					check_u64("device releases after queued message",
+						  g_client_puts, puts_before + 1);
+				}
+			}
+		}
+		free(joined.buf);
+		s3_export_manifest_unref(warm);
 	}
 
 out_manifest:

@@ -775,6 +775,28 @@ int s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest 
 			    struct s3_cache *shared_cache,
 			    struct spdk_bs_dev **out);
 
+/* One export's in-flight preheat GETs. Several exports of the same lvstore
+ * still share S3_CACHE_PREHEAT_MAX, so this cap keeps the first template from
+ * taking the whole window. */
+#define S3_EXPORT_PREHEAT_MAX 8
+
+/**
+ * Download this export's present objects into the shared object cache.
+ *
+ * Fire and forget. One export keeps at most S3_EXPORT_PREHEAT_MAX GETs in
+ * flight; the shared cache admits S3_CACHE_PREHEAT_MAX across every export.
+ * Demand reads join the same GETs. The walk stops when the object slots that
+ * are still free have been spoken for, so it does not evict native entries or
+ * its own earlier objects. Import calls this once per process for a hidden
+ * template that is not being decoupled.
+ *
+ * \return 0 when the walk is running or was already started, including when
+ *         it had to be queued onto the device's creating thread. -EINVAL
+ *         without a shared cache, or the send_msg error when that queue fails.
+ *         A negative return means nothing was started.
+ */
+int s3_export_bs_dev_preheat(struct spdk_bs_dev *bs_dev);
+
 /** Called once the swap is complete and the old manifest has been released. */
 typedef void (*s3_export_bs_dev_swap_cb)(void *cb_arg, int status);
 

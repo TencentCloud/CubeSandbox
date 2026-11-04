@@ -142,6 +142,7 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./test/dataplane/run_snapshot_test.sh  -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_export_test.sh    -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_selfimport_test.sh    # reads /data/cubelet/s3.cfg, no arguments
+./test/dataplane/run_preheat_test.sh       # same; import preheat, then cold reads
 ./test/dataplane/run_snapdelete_test.sh    # same
 ./test/dataplane/run_cubecow_client_test.sh    # same; cubecow/Cubelet RPC order
 ./test/dataplane/run_activation_test.sh    # same
@@ -259,6 +260,40 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   parent is protected by the export lease until the esnap clone decouples or is
   deleted. So it is safer, not just faster.
 
+- `run_shared_chain_test.sh` -- repeated imports of one export on one lvstore
+  share a hidden read-only template named `__rcow_tpl_<uuid>`. The template is
+  created first and every user lvol is a clone of it. `decouple:false`
+  still joins that chain. The template is omitted from listing and refused by
+  get, delete, clone, export, activate and decouple-by-name. Deleting the last
+  clone reaps it. Decoupling one user lvol copies the template, so a later
+  import on that lvstore is a local clone and does not renew the source lease.
+  Deleting those clones reaps the local template, and the next import is an
+  esnap again. The same export on another lvstore stays an esnap. After the source objects are deleted, that other lvstore
+  cannot read the pattern. The decoupled clones are checked in the same
+  process; their bytes are not yet durable across an unload.
+
+- `run_import_fanout_test.sh` -- 10 and 50 concurrent imports of one export
+  (`FANOUT_WIDTHS` overrides the widths). Each width is one `decouple:false`
+  burst and one `decouple:true` burst. Every import must succeed. The false
+  burst stays on one esnap template and does not copy; the true burst starts
+  that template's copy once. After the copy, another import is a local clone.
+  A sample of each burst reads back the source pattern. The payload is 128 MiB
+  so the template copy is still running when the burst's clones return.
+
+- `run_preheat_test.sh` -- four exports imported together onto one lvstore
+  with `decouple:false`, which is the path that preheats the hidden template
+  into the shared object cache. The imports are one burst, and at least two
+  preheat walks must start before the first one finishes. The test then waits
+  until every present object has been populated, and only then issues
+  concurrent direct reads of every clone. Those reads must match the source
+  bytes, raise `cache_object_hits`, and leave `cache_object_misses` and
+  `cache_object_populates` unchanged. A second burst imports one other export
+  eight times. Those imports must share one hidden template, start exactly one
+  preheat, and all eight clones must read concurrently from that shared cache.
+  The target is then stopped and started again. Attaching the same lvstore must
+  start one new preheat per template, populate the fresh cache, and serve a
+  later read from that cache.
+
 - `run_cubecow_client_test.sh` -- the cubecow / Cubelet client contract. Cubelet
   never calls JSON-RPC itself; cubecow always uses the same 11 `rcow_*` methods
   in a fixed order, and that order is what this suite drives. Existing suites
@@ -372,6 +407,16 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   change; without the flag that case is skipped loudly,
   never silently repeated with the same binary. Owns its lvstore and **must not
   run concurrently with anything else on the machine**.
+- `run_hot_upgrade_orchestrator_test.sh` -- drives the deployment-level
+  `cube-s3lvol-hot-upgrade.sh` while fio stays active. It covers successful
+  replacement plus rollback after startup, post-start layout verification, and
+  symlink-switch failures. Set `S3LVOL_HOTORCH_OLD_ROOT` and
+  `S3LVOL_HOTORCH_OLD_BIN` to a checked-out previous release and its target,
+  and `S3LVOL_HOTORCH_REQUIRE_OLD=1`, for the release-compatibility lane. The
+  startup-crash case proves rollback to that actual old target. A separate
+  post-start verification failure proves that, once the new target can accept
+  I/O, the orchestrator leaves it running instead of risking an old target that
+  cannot replay the new volatile write-back format.
 - `run_hot_upgrade_negative_test.sh` -- the same path with faults injected, one
   scenario per function: a new binary that crashes on start and rolls back; the
   version gate refusing a bumped `ckpt_version` / `journal_op_max` while the

@@ -423,7 +423,7 @@ Does not install built-in Master / API / MySQL / Redis / MinIO / WebUI; by defau
 | `volumeS3.endpoint` / `existingSecret` | `""` | S3 config source: auto-filled from the built-in MinIO when both are empty and `minio.enabled=true`; setting either explicitly requires `minio.enabled=false` (pick one, mutually exclusive) |
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Required when Proxy is enabled |
-| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar (recreates the Pod; ~2 CPU / 19 GiB / 512 GiB sparse WAL, including the default 1 GiB RAM cache) |
+| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar (recreates the Pod; ~2 CPU / 23 GiB / 512 GiB sparse WAL, including the default 1 GiB RAM cache and 4 GiB host-tmpfs write-back ring) |
 | `cubeOps.enabled` | `true` | CubeOps (JWT ops API; WebUI upstream) |
 | `webui.enabled` | `true` | WebUI (requires `cubeOps.enabled=true`) |
 

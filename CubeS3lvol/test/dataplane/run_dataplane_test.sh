@@ -811,7 +811,7 @@ else
 fi
 
 # ==========================================================================
-# [5b] Is the WAL write path actually in use?
+# [5b] Is the shared write-back path actually in use?
 #
 # Everything below would also pass on the direct-to-S3 path, right up to the
 # point where it silently drops concurrent writes. So check explicitly rather
@@ -819,10 +819,10 @@ fi
 # script into a test of the wrong code path.
 # ==========================================================================
 echo
-echo "[5b] confirming the WAL write path is active"
+echo "[5b] confirming the shared write-back path is active"
 
 WAL_ATTACHED="$(wal_stat wal_attached)"
-WAL_WRITES="$(wal_stat wal_writes)"
+WRITEBACK_PUBLISHES="$(wal_stat writeback_publishes)"
 
 if [ "${WAL_ATTACHED}" = "True" ]; then
 	pass "the lvstore reports the WAL path attached"
@@ -831,10 +831,11 @@ else
 	info "every result below would describe the direct-to-S3 path instead"
 fi
 
-if [ "${WAL_WRITES}" != "missing" ] && [ "${WAL_WRITES}" -gt 0 ] 2>/dev/null; then
-	pass "${WAL_WRITES} writes were acknowledged from the log"
+if [ "${WRITEBACK_PUBLISHES}" != "missing" ] &&
+   [ "${WRITEBACK_PUBLISHES}" -gt 0 ] 2>/dev/null; then
+	pass "${WRITEBACK_PUBLISHES} records were published to shared write-back"
 else
-	fail "no write went through the log (wal_writes=${WAL_WRITES})"
+	fail "no write went through shared write-back (writeback_publishes=${WRITEBACK_PUBLISHES})"
 fi
 
 info "chunks flushed to S3 so far: $(wal_stat chunks_flushed)"
@@ -981,11 +982,15 @@ check_target "step 7, re-reading after the reconnect" || exit 1
 # ==========================================================================
 # [7b] Dest cache plus overlay: do not serve a stale dest object
 #
-# Step 7 populated dest cache from S3. A later 4 KiB write in one of those
-# chunks is durable in the WAL overlay while dest cache still names the old
-# uuid. The 1 MiB containing that 4 KiB is not fully overlay-covered, so dest
-# read must hit cache (or S3) and apply the overlay. The next 1 MiB was not
-# written: dest cache must still serve it, which is the per-chunk bypass.
+# Step 7 populated dest cache from S3. A later ordinary 4 KiB write in one of
+# those chunks is acknowledged from shared write-back while dest cache still
+# names the old uuid. Guest FLUSH/FUA deliberately stops at shm durability, so
+# even an fsync would leave this as an overlay-merge case; this section keeps the
+# write plain because durability ordering is covered by the filesystem suite.
+# The 1 MiB containing that 4 KiB is not fully
+# overlay-covered, so dest read must hit cache (or S3) and apply the overlay.
+# The next 1 MiB was not written: dest cache must still serve it, which is the
+# per-chunk bypass.
 # ==========================================================================
 echo
 echo "[7b] dest cache plus overlay (stale dest object must not be served)"
@@ -1039,7 +1044,7 @@ dd if=/dev/urandom of="${WORKDIR}/dirty4k.bin" bs=4k count=1 status=none
 DIRTY_SEEK=$(((1024 * 1024 + 4096) / 4096))
 OVERLAY_BEFORE="$(wal_stat overlay_bytes)"
 if ! dd if="${WORKDIR}/dirty4k.bin" of="${NVME_DEV}" bs=4k count=1 \
-		seek="${DIRTY_SEEK}" oflag=direct conv=fsync status=none \
+		seek="${DIRTY_SEEK}" oflag=direct status=none \
 		2>"${WORKDIR}/dd_dirty.log"; then
 	fail "4 KiB overlay write at 1 MiB + 4 KiB"
 	sed 's/^/       /' "${WORKDIR}/dd_dirty.log"

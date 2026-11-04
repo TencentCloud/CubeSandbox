@@ -12,24 +12,21 @@
 #  clears it on the origin). The queued decouple then materialised everything
 #  and failed its detach with "blob is not a clone of an external snapshot".
 #
-#  This test reproduces the queue window and asserts the fix. The fix was first a
-#  refusal, and is now a cancellation: refusing was correct about the hazard but
-#  made "import a volume, then snapshot it" impossible, since an import that
-#  asks for a decouple starts it before the import replies. So create_snapshot cancels the
-#  decouple and proceeds, which removes the hazard by removing the decouple. What
-#  is asserted either way is that no decouple ever materialises everything and then
-#  fails to detach.
+#  Two imports of different exports still queue, one template each. Snapshotting
+#  the user volume does not cancel its template's decouple: the esnap stays on
+#  __rcow_tpl_<uuid>. What must not happen is a decouple that materialises
+#  everything and then fails to detach.
 #
 #  Scenario:
 #    src: a big volume written full -> snapshot -> export  (the decouple of its
-#         import takes minutes, which is the queue window)
+#         template takes long enough to be the queue window)
 #    src: a small sparse volume -> snapshot -> export
-#    dst: import big (decouple:true)   -- starts materialising, slowly
-#    dst: import small (decouple:true) -- queued behind big
+#    dst: import big (decouple:true)   -- starts materialising its template
+#    dst: import small (decouple:true) -- its template waits behind big
 #    while big is ingesting: partial-write small's first parent-backed cluster
 #         -- must CoW from small's export, never from big's active ingest
-#    while small is queued: snapshot small -> cancels the queued decouple, succeeds
-#    big's decouple must be unaffected, and small must afterwards be undecouplable
+#    while small is queued: snapshot small -> succeeds, and does not cancel
+#    both templates then finish, and a further decouple of small is refused
 #
 #  Usage:
 #    sudo -E ./test/dataplane/repro_issue2.sh -e <endpoint> -b <bucket> [-r <region>]
@@ -506,7 +503,7 @@ if ! raw_rpc rcow_import_lvol \
 	exit 1
 fi
 pass "small imported, decouple queued behind big"
-if grep -qE "Imported export .* as lvol '${SMALL_IMP}': .* 0 of [0-9]+ chunk" "${TGT_LOG}"; then
+if grep -qE "Sealed shared template '__rcow_tpl_${SMALL_EXP_UUID}'.*: .* 0 of [0-9]+ chunk" "${TGT_LOG}"; then
 	fail "small import has no parent chunks; the CoW check would be vacuous"
 	exit 1
 fi
@@ -534,7 +531,7 @@ try:
 except Exception:
     rows = []
 print(len([r for r in rows if r.get('lvol_name') == name and not r.get('queued')]))
-" "${BIG_IMP}" 2>/dev/null || echo 0)"
+" "__rcow_tpl_${BIG_EXP_UUID}" 2>/dev/null || echo 0)"
 if [ "${BIG_STILL_RUNNING}" != "1" ]; then
 	fail "big decouple finished before the CoW; the cross-volume window was missed"
 	exit 1
@@ -561,7 +558,7 @@ else
 fi
 
 # ==========================================================================
-echo "[8] while small is queued: snapshot it, which cancels that decouple"
+echo "[8] while small is queued: snapshot it, which must not cancel that decouple"
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
 	"${SMALL_IMP}" "${SMALL_IMP_SNAP}")" \
 	>"${WORKDIR}/snap_small.json" 2>"${WORKDIR}/snap_small.err"
@@ -573,18 +570,19 @@ else
 	sed 's/^/    /' "${WORKDIR}/snap_small.err" 2>/dev/null | tail -5
 fi
 
-# The reply has to say the decouple was dropped: the caller asked for one and
-# is not getting it. The snapshot now holds the external parent.
+# The esnap is the hidden template, not this volume, so the snapshot reply must
+# not claim the queued copy was dropped.
 if grep -q 'decouple_cancelled' "${WORKDIR}/snap_small.json" 2>/dev/null; then
-	pass "reply confirms the queued decouple was cancelled"
+	fail "snapshot reported decouple_cancelled; small's template must keep waiting"
 else
-	fail "reply did not report decouple_cancelled"
+	pass "snapshot did not cancel small's queued template decouple"
 fi
 
-if grep -qE "'${SMALL_IMP}' was waiting to be decoupled .* is being snapshotted" "${TGT_LOG}"; then
-	pass "queued decouple of ${SMALL_IMP} was dropped for the snapshot"
+SMALL_TPL="__rcow_tpl_${SMALL_EXP_UUID}"
+if grep -qE "Cancelling the decouple of lvol '${SMALL_TPL}'" "${TGT_LOG}"; then
+	fail "snapshot cancelled ${SMALL_TPL}"
 else
-	fail "queued decouple of ${SMALL_IMP} was not dropped"
+	pass "small's template decouple was not cancelled"
 fi
 
 # ==========================================================================
@@ -601,35 +599,31 @@ echo "--- relevant log lines:"
 grep -nE 'queued to be decoupled|decouple_start|decouple_finish|Decoupling|blob is not a clone' \
 	"${TGT_LOG}" | tail -40 | sed 's/^/    /' || true
 
-# The point of the whole test. Whether the snapshot is refused or the decouple is
-# cancelled, what must never appear is a decouple that materialised everything and
-# then could not detach.
+# Snapshotting the user volume must not make either template fail its detach.
 if grep -qE 'blob is not a clone of an external snapshot' "${TGT_LOG}"; then
 	fail "decouple detach failed -- the fix did not hold"
 else
 	pass "no detach failure: every decouple detached cleanly"
 fi
 
-# big was never snapshotted, so its decouple must still have run to completion --
-# cancelling one volume's decouple must not disturb another's.
-if grep -qE "'${BIG_IMP}' no longer reads export" "${TGT_LOG}"; then
-	pass "${BIG_IMP} decoupled cleanly, unaffected by the cancellation"
+BIG_TPL="__rcow_tpl_${BIG_EXP_UUID}"
+SMALL_TPL="__rcow_tpl_${SMALL_EXP_UUID}"
+if grep -qF "'${BIG_TPL}' no longer reads export" "${TGT_LOG}"; then
+	pass "${BIG_TPL} decoupled cleanly"
 else
-	fail "${BIG_IMP} did not finish its decouple"
+	fail "${BIG_TPL} did not finish its decouple"
 fi
-
-# Small was snapshotted, so its decouple was cancelled and must not have finished.
-if grep -qE "'${SMALL_IMP}' no longer reads export" "${TGT_LOG}"; then
-	fail "${SMALL_IMP} finished a decouple the snapshot was supposed to cancel"
+if grep -qF "'${SMALL_TPL}' no longer reads export" "${TGT_LOG}"; then
+	pass "${SMALL_TPL} decoupled cleanly after waiting behind big"
 else
-	pass "${SMALL_IMP}'s queued decouple was cancelled and did not finish"
+	fail "${SMALL_TPL} did not finish its decouple"
 fi
 raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${SMALL_IMP}")" \
 	>/dev/null 2>"${WORKDIR}/redecouple.err"
 if [ $? -ne 0 ]; then
-	pass "${SMALL_IMP} can no longer be decoupled (its snapshot holds the export)"
+	pass "${SMALL_IMP} can no longer be decoupled (its template is already local)"
 else
-	fail "${SMALL_IMP} accepted a decouple after its snapshot took the export"
+	fail "${SMALL_IMP} accepted another decouple after its template finished"
 fi
 
 check_target "step 9" || exit 1

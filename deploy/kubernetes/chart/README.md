@@ -758,19 +758,26 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 
 ## CubeS3lvol
 
-`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 23 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
 
 When enabled, the sidecar:
 
 - runs in its own `cube-s3lvol` image next to cubelet;
 - shares a Unix socket (`/var/run/s3lvol/s3lvol.sock`) with cubelet over an in-memory emptyDir, and writes cubelet's `[cow.s3] enable = true` + `socket_path` (a socket path alone does not opt in);
-- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths, so a Pod recreate loses nothing;
+- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths and
+  mounts the fixed host path `/dev/shm/cube-s3lvol` at `/dev/shm`,
+  so a Pod recreate on the same node can replay acknowledged writes that have
+  not reached S3;
 - reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
 - uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
 - reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
   per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
+- uses the host's memory-backed `/dev/shm` for the default 4 GiB write-back
+  ring. The sidecar refuses to start if that mount is not tmpfs or lacks room.
+  The host path survives Pod recreation but is cleared by a node reboot; writes
+  that have not reached S3 can therefore still be lost on node reboot.
 
 ```yaml
 cubeS3lvol:

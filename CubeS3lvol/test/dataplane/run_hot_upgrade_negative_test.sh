@@ -202,6 +202,7 @@ cleanup()
 	"${SCRIPTS}/rcow_stop.sh" --force >/dev/null 2>&1 || true
 
 	if [ "${FAIL}" -eq 0 ] && [ -z "${S3LVOL_KEEP_S3:-}" ]; then
+		rcow_discard_writeback_shm "${RCOW_LVS_NAME}" || true
 		rcow_load_credentials 2>/dev/null || true
 		python3 "${PREFIX_RM}" -e "${ENDPOINT}" -b "${BUCKET}" -r "${REGION}" \
 			-p "${RCOW_LVS_NAME}/" 2>&1 | tail -1

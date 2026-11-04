@@ -134,6 +134,8 @@ s3lvol_pending_reason_str(enum s3lvol_pending_reason reason)
 		return "clone_count";
 	case S3LVOL_PENDING_DECOUPLE:
 		return "decouple";
+	case S3LVOL_PENDING_DESTROY_BUSY:
+		return "destroy_busy";
 	case S3LVOL_PENDING_FAILED:
 		return "failed";
 	default:
@@ -158,7 +160,8 @@ pending_reason_auto(enum s3lvol_pending_reason reason)
 	       reason == S3LVOL_PENDING_EXPORT_LEGACY ||
 	       reason == S3LVOL_PENDING_EXPORT_INFLIGHT ||
 	       reason == S3LVOL_PENDING_CLONE_COUNT ||
-	       reason == S3LVOL_PENDING_DECOUPLE;
+	       reason == S3LVOL_PENDING_DECOUPLE ||
+	       reason == S3LVOL_PENDING_DESTROY_BUSY;
 }
 
 /* ==========================================================================
@@ -486,6 +489,13 @@ pending_poll(void *arg)
 		struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(lvs);
 		struct spdk_lvol *lvol;
 
+		if (s3lvol_lvstore_has_open_failures(lvs)) {
+			SPDK_WARNLOG("lvstore '%s' has lvols that could not be "
+				     "opened; pending deletes are paused until a "
+				     "clean attach restores the complete topology\n",
+				     s3lvol_lvstore_get_name(lvs));
+			continue;
+		}
 		if (!store) {
 			continue;	/* still loading */
 		}
@@ -636,6 +646,9 @@ pending_reason_parse(const char *s)
 	}
 	if (strcmp(s, "decouple") == 0) {
 		return S3LVOL_PENDING_DECOUPLE;
+	}
+	if (strcmp(s, "destroy_busy") == 0) {
+		return S3LVOL_PENDING_DESTROY_BUSY;
 	}
 	/* Including "failed" and anything a newer version wrote: an unrecognised
 	 * blocker is one this build cannot reason about, and treating it as

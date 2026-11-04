@@ -38,13 +38,8 @@
 
 #include "vbdev_s3lvol.h"
 #include "vbdev_s3lvol_json.h"
-
-/* Same reasoning as the import cap: the registry is read into a fixed decoder
- * table, and a node with more live exports than this has a different problem.
- *
- * Raised from 64 because that was not true in practice. An export leaves the
- * registry when it is explicitly released or when its snapshot is deleted. */
-#define S3LVOL_MAX_EXPORTS 256
+#include "vbdev_s3lvol_exports_json.h"
+#include "registry_persist_ctl.h"
 
 /* One in-flight lease check. Defined below, next to the machinery that uses it;
  * named here because an export points at the check it is waiting for. */
@@ -1354,23 +1349,6 @@ exports_serialize(struct s3lvol_lvstore *lvs, char **out, size_t *out_len)
 	return 0;
 }
 
-/* The upstream lease keys of one entry. A fixed table rather than allocations,
- * because the whole registry is decoded into fixed tables and one exception would
- * be one more thing to free on every error path here. */
-struct src_leases_holder {
-	char  *k[S3_EXPORT_MAX_SOURCES];
-	size_t n;
-};
-
-static int
-decode_src_leases(const struct spdk_json_val *val, void *out)
-{
-	struct src_leases_holder *h = out;
-
-	return spdk_json_decode_array(val, spdk_json_decode_string, h->k,
-				      S3_EXPORT_MAX_SOURCES, &h->n, sizeof(h->k[0]));
-}
-
 /* Resume renewing the upstream leases of an export read back from the registry.
  *
  * The keys are stored verbatim, so nothing has to be derived -- but the endpoint,
@@ -1420,63 +1398,6 @@ export_src_lease_restart(struct s3lvol_export *exp,
 	export_src_lease_arm(exp, &src);
 }
 
-struct export_entry_json {
-	char *export_uuid;
-	char    *snapshot;
-	char    *snapshot_uuid;
-	char    *layout;
-	uint64_t blob_id;
-	uint64_t expires_at;
-	uint32_t generation;
-	bool     lease_aware;
-	struct src_leases_holder src_leases;
-};
-
-static const struct spdk_json_object_decoder export_entry_decoders[] = {
-	{"export_uuid", offsetof(struct export_entry_json, export_uuid), spdk_json_decode_string, false},
-	{"snapshot",  offsetof(struct export_entry_json, snapshot),    spdk_json_decode_string, false},
-	{"snapshot_uuid", offsetof(struct export_entry_json, snapshot_uuid), spdk_json_decode_string, true},
-	{"layout",      offsetof(struct export_entry_json, layout),      spdk_json_decode_string, false},
-	{"blob_id",     offsetof(struct export_entry_json, blob_id),     spdk_json_decode_uint64, true},
-	{"expires_at",  offsetof(struct export_entry_json, expires_at),  spdk_json_decode_uint64, true},
-	{"generation",  offsetof(struct export_entry_json, generation),  spdk_json_decode_uint32, true},
-	{"lease_aware", offsetof(struct export_entry_json, lease_aware), spdk_json_decode_bool, true},
-	/* Optional: absent for a non-derived export and for anything an older build
-	 * wrote, both of which mean "renews nothing upstream". */
-	{"src_leases",  offsetof(struct export_entry_json, src_leases),  decode_src_leases, true},
-};
-
-struct export_entries_holder {
-	struct export_entry_json e[S3LVOL_MAX_EXPORTS];
-	size_t           n;
-};
-
-struct exports_json {
-	uint32_t           version;
-	struct export_entries_holder entries;
-};
-
-static int
-decode_export_entry(const struct spdk_json_val *val, void *out)
-{
-	return spdk_json_decode_object(val, export_entry_decoders,
-				       SPDK_COUNTOF(export_entry_decoders), out);
-}
-
-static int
-decode_export_entries(const struct spdk_json_val *val, void *out)
-{
-	struct export_entries_holder *h = out;
-
-	return spdk_json_decode_array(val, decode_export_entry, h->e,
-				      S3LVOL_MAX_EXPORTS, &h->n, sizeof(h->e[0]));
-}
-
-static const struct spdk_json_object_decoder exports_decoders[] = {
-	{"version", offsetof(struct exports_json, version), spdk_json_decode_uint32, false},
-	{"exports", offsetof(struct exports_json, entries), decode_export_entries,   false},
-};
-
 static int
 exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 {
@@ -1519,11 +1440,17 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		rc = -EINVAL;
 		goto out;
 	}
-	if (spdk_json_decode_object(values, exports_decoders,
-				    SPDK_COUNTOF(exports_decoders), &j) != 0) {
+	if (spdk_json_decode_object(values, s3lvol_exports_decoders,
+				    SPDK_COUNTOF(s3lvol_exports_decoders), &j) != 0) {
 		SPDK_ERRLOG("exports registry of '%s' could not be decoded\n",
 			    s3lvol_lvstore_get_name(lvs));
-		rc = -EINVAL;
+		rc = j.entries.status != 0 ? j.entries.status : -EINVAL;
+		goto out;
+	}
+	rc = s3lvol_exports_json_validate(&j);
+	if (rc != 0) {
+		SPDK_ERRLOG("exports registry of '%s' has unsupported version or layout\n",
+			    s3lvol_lvstore_get_name(lvs));
 		goto out;
 	}
 
@@ -1587,19 +1514,7 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 	SPDK_NOTICELOG("lvstore '%s': %zu export(s) in the registry\n",
 		       s3lvol_lvstore_get_name(lvs), j.entries.n);
 out:
-	for (i = 0; i < j.entries.n; i++) {
-		size_t k;
-
-		free(j.entries.e[i].export_uuid);
-		free(j.entries.e[i].snapshot);
-		free(j.entries.e[i].snapshot_uuid);
-		free(j.entries.e[i].layout);
-		/* spdk_json_decode_string strdup()s into the table, so each element is
-		 * its own allocation. The restart above copied what it needed. */
-		for (k = 0; k < j.entries.e[i].src_leases.n; k++) {
-			free(j.entries.e[i].src_leases.k[k]);
-		}
-	}
+	s3lvol_exports_json_free(&j);
 	free(values);
 	free(copy);
 	return rc;
@@ -1712,65 +1627,220 @@ s3lvol_xfer_exports_load(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
 
 /* ---- save ---- */
 
-struct exports_save_ctx {
+struct exports_save_waiter {
+	uint64_t             seq;
 	spdk_lvs_op_complete cb_fn;
-	void        *cb_arg;
-	char    *json;
-	struct iovec       iov;
-	char                 key[S3_EXPORT_KEY_MAX];
+	void                *cb_arg;
+	TAILQ_ENTRY(exports_save_waiter) link;
 };
 
-static void
-exports_save_done(void *cb_arg, int status)
+struct exports_persist {
+	struct s3lvol_lvstore       *lvs;
+	struct registry_persist_ctl  ctl;
+	TAILQ_HEAD(, exports_save_waiter) waiters;
+	unsigned                    dispatch_depth;
+	TAILQ_ENTRY(exports_persist) link;
+};
+
+static TAILQ_HEAD(, exports_persist) g_exports_persists =
+	TAILQ_HEAD_INITIALIZER(g_exports_persists);
+
+struct exports_save_ctx {
+	struct exports_persist *persist;
+	char                   *json;
+	struct iovec            iov;
+	char                    key[S3_EXPORT_KEY_MAX];
+};
+
+static struct exports_persist *
+exports_persist_find(struct s3lvol_lvstore *lvs)
 {
-	struct exports_save_ctx *ctx = cb_arg;
-	spdk_lvs_op_complete cb_fn = ctx->cb_fn;
-	void *user_arg = ctx->cb_arg;
+	struct exports_persist *persist;
+
+	TAILQ_FOREACH(persist, &g_exports_persists, link) {
+		if (persist->lvs == lvs) {
+			return persist;
+		}
+	}
+	return NULL;
+}
+
+static struct exports_persist *
+exports_persist_get(struct s3lvol_lvstore *lvs)
+{
+	struct exports_persist *persist = exports_persist_find(lvs);
+
+	if (persist) {
+		return persist;
+	}
+	persist = calloc(1, sizeof(*persist));
+	if (!persist) {
+		return NULL;
+	}
+	persist->lvs = lvs;
+	TAILQ_INIT(&persist->waiters);
+	TAILQ_INSERT_TAIL(&g_exports_persists, persist, link);
+	return persist;
+}
+
+static void
+exports_persist_maybe_drop(struct exports_persist *persist)
+{
+	if (persist->dispatch_depth == 0 && !persist->ctl.in_flight &&
+	    !registry_persist_pending(&persist->ctl) &&
+	    TAILQ_EMPTY(&persist->waiters)) {
+		TAILQ_REMOVE(&g_exports_persists, persist, link);
+		free(persist);
+	}
+}
+
+static int exports_persist_submit(struct exports_persist *persist);
+
+static void
+exports_persist_complete(struct exports_persist *persist, int status,
+			 const char *key)
+{
+	struct exports_save_waiter *waiter, *tmp;
+	uint64_t boundary;
 
 	if (status != 0) {
 		SPDK_ERRLOG("Failed to write '%s': %s. After a restart this node will "
 			    "not know it owes a snapshot to an importer, and deleting "
 			    "that snapshot would break it.\n",
-			    ctx->key, spdk_strerror(-status));
+			    key, spdk_strerror(-status));
 	}
 
+	boundary = registry_persist_complete(&persist->ctl);
+	persist->dispatch_depth++;
+	TAILQ_FOREACH_SAFE(waiter, &persist->waiters, link, tmp) {
+		spdk_lvs_op_complete cb_fn;
+		void *cb_arg;
+
+		if (waiter->seq > boundary) {
+			continue;
+		}
+		TAILQ_REMOVE(&persist->waiters, waiter, link);
+		cb_fn = waiter->cb_fn;
+		cb_arg = waiter->cb_arg;
+		free(waiter);
+		cb_fn(cb_arg, status);
+	}
+	persist->dispatch_depth--;
+
+	/* Callbacks run first. A failure callback may roll its mutation back and
+	 * enqueue another save; that correction then shares the follow-up with
+	 * mutations which arrived during this PUT. */
+	if (!persist->ctl.in_flight && registry_persist_pending(&persist->ctl)) {
+		persist->dispatch_depth++;
+		(void)exports_persist_submit(persist);
+		persist->dispatch_depth--;
+	}
+	exports_persist_maybe_drop(persist);
+}
+
+static void
+exports_save_done(void *cb_arg, int status)
+{
+	struct exports_save_ctx *ctx = cb_arg;
+	struct exports_persist *persist = ctx->persist;
+	char key[S3_EXPORT_KEY_MAX];
+
+	snprintf(key, sizeof(key), "%s", ctx->key);
 	free(ctx->json);
 	free(ctx);
+	exports_persist_complete(persist, status, key);
+}
 
-	if (cb_fn) {
-		cb_fn(user_arg, status);
+static int
+exports_persist_submit(struct exports_persist *persist)
+{
+	struct exports_save_ctx *ctx;
+	size_t len;
+	int rc;
+
+	if (!registry_persist_start(&persist->ctl)) {
+		return 0;
 	}
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		exports_persist_complete(persist, -ENOMEM,
+					 s3lvol_lvstore_get_name(persist->lvs));
+		return -ENOMEM;
+	}
+	ctx->persist = persist;
+	exports_registry_key(s3lvol_lvstore_get_name(persist->lvs), ctx->key,
+			     sizeof(ctx->key));
+
+	rc = exports_serialize(persist->lvs, &ctx->json, &len);
+	if (rc != 0) {
+		char key[S3_EXPORT_KEY_MAX];
+
+		snprintf(key, sizeof(key), "%s", ctx->key);
+		free(ctx);
+		exports_persist_complete(persist, rc, key);
+		return rc;
+	}
+	ctx->iov.iov_base = ctx->json;
+	ctx->iov.iov_len = len;
+
+	rc = s3_put(s3lvol_lvstore_get_client(persist->lvs), ctx->key, &ctx->iov,
+		    1, false, exports_save_done, ctx);
+	if (rc != 0) {
+		char key[S3_EXPORT_KEY_MAX];
+
+		snprintf(key, sizeof(key), "%s", ctx->key);
+		free(ctx->json);
+		free(ctx);
+		exports_persist_complete(persist, rc, key);
+	}
+	return rc;
 }
 
 int
 s3lvol_export_registry_save(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
 			    void *cb_arg)
 {
-	struct exports_save_ctx *ctx;
-	size_t len;
+	struct exports_save_waiter *waiter = NULL;
+	struct exports_persist *persist;
+	uint64_t seq;
 	int rc;
 
-	ctx = calloc(1, sizeof(*ctx));
-	if (!ctx) {
+	if (cb_fn) {
+		waiter = calloc(1, sizeof(*waiter));
+		if (!waiter) {
+			return -ENOMEM;
+		}
+		waiter->cb_fn = cb_fn;
+		waiter->cb_arg = cb_arg;
+	}
+	persist = exports_persist_get(lvs);
+	if (!persist) {
+		free(waiter);
 		return -ENOMEM;
 	}
-	ctx->cb_fn  = cb_fn;
-	ctx->cb_arg = cb_arg;
-	exports_registry_key(s3lvol_lvstore_get_name(lvs), ctx->key, sizeof(ctx->key));
 
-	rc = exports_serialize(lvs, &ctx->json, &len);
-	if (rc != 0) {
-		free(ctx);
-		return rc;
+	seq = registry_persist_mutate(&persist->ctl);
+	if (waiter) {
+		waiter->seq = seq;
+		TAILQ_INSERT_TAIL(&persist->waiters, waiter, link);
 	}
-	ctx->iov.iov_base = ctx->json;
-	ctx->iov.iov_len = len;
 
-	rc = s3_put(s3lvol_lvstore_get_client(lvs), ctx->key, &ctx->iov, 1, false,
-		    exports_save_done, ctx);
-	if (rc != 0) {
-		free(ctx->json);
-		free(ctx);
+	rc = exports_persist_submit(persist);
+	/* Callback-bearing calls are accepted once queued. Immediate failures have
+	 * already been delivered through the same callback as asynchronous ones,
+	 * which preserves exactly-once completion for coalesced callers. */
+	return cb_fn ? 0 : rc;
+}
+
+bool
+s3lvol_export_registry_persist_pending(const struct s3lvol_lvstore *lvs)
+{
+	struct exports_persist *persist;
+
+	TAILQ_FOREACH(persist, &g_exports_persists, link) {
+		if (persist->lvs == lvs) {
+			return true;
+		}
 	}
-	return rc;
+	return false;
 }
