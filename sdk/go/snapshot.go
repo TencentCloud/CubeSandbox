@@ -28,6 +28,7 @@ type ListSnapshotsOptions struct {
 	SandboxID string
 	Limit     int
 	NextToken string
+	Name      string
 }
 
 // CloneOptions controls Sandbox.Clone. N defaults to 1; Concurrency defaults to
@@ -118,6 +119,9 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (
 	}
 	if opts.NextToken != "" {
 		query.Set("nextToken", opts.NextToken)
+	}
+	if opts.Name != "" {
+		query.Set("name", opts.Name)
 	}
 	path := "/snapshots"
 	if encoded := query.Encode(); encoded != "" {

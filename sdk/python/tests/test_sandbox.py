@@ -2488,6 +2488,25 @@ class TestDeleteSnapshot:
                 Sandbox.delete_snapshot("prod", config=make_config())
 
 
+class TestListSnapshots:
+    def test_forwards_name_query_param(self):
+        cfg = make_config()
+        body = [{"snapshotID": "snap-1", "names": ["prod"]}]
+        resp = mock_response(body)
+        resp.headers = {"x-next-token": ""}
+        with patch("requests.Session.get", return_value=resp) as get:
+            Sandbox.list_snapshots(name="prod", config=cfg)
+        assert get.call_args.kwargs["params"] == {"name": "prod"}
+
+    def test_omits_name_when_not_set(self):
+        cfg = make_config()
+        resp = mock_response([])
+        resp.headers = {}
+        with patch("requests.Session.get", return_value=resp) as get:
+            Sandbox.list_snapshots(config=cfg)
+        assert get.call_args.kwargs["params"] == {}
+
+
 # ── Sandbox.clone ─────────────────────────────────────────────────────────────
 
 

@@ -136,6 +136,9 @@ class SandboxAdapter(ABC):
     def list_snapshot_ids(self) -> set[str]:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        raise UnsupportedCapability(self.backend, "rollback_clone")
+
     def get_host(self, port: int) -> str:
         raise UnsupportedCapability(self.backend, "network_public_access")
 

@@ -355,6 +355,13 @@ class TracingSandboxAdapter(SandboxAdapter):
             self._wrapped.list_snapshot_ids,
         )
 
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        return self._trace.capture(
+            "list_snapshot_ids_by_name",
+            {"backend": self.backend, "name": name},
+            lambda: self._wrapped.list_snapshot_ids_by_name(name),
+        )
+
     def get_host(self, port: int) -> str:
         return self._trace.capture(
             "get_host",

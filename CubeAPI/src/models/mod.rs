@@ -937,6 +937,8 @@ pub struct ListSnapshotsQuery {
     /// Pagination cursor from previous response header x-next-token.
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
+    /// Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0)
+    pub name: Option<String>,
     /// Filter by CoW backend (xfs | s3).
     pub backend: Option<String>,
 }
