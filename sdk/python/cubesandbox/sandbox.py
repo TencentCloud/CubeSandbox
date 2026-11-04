@@ -829,6 +829,7 @@ class Sandbox:
         sandbox_id: str | None = None,
         limit: int | None = None,
         next_token: str | None = None,
+        name: str | None = None,
         config: Config | None = None,
     ) -> tuple[list[SnapshotInfo], str | None]:
         """GET /snapshots — List snapshots (1.2).
@@ -837,6 +838,7 @@ class Sandbox:
             sandbox_id: Filter by source sandbox ID.
             limit: Page size (default: 100).
             next_token: Pagination cursor from a previous call.
+            name: Filter by snapshot name or ID.
             config: SDK config.  Uses default (env-based) config if omitted.
 
         Returns:
@@ -851,6 +853,8 @@ class Sandbox:
             params["limit"] = limit
         if next_token is not None:
             params["nextToken"] = next_token
+        if name is not None:
+            params["name"] = name
         s = requests.Session()
         resp = s.get(
             f"{cfg.api_url}/snapshots",

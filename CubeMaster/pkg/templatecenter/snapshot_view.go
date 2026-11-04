@@ -338,7 +338,10 @@ func matchesSnapshotRecordListOptions(rec *models.SnapshotRecord, opts ListSnaps
 	if opts.SandboxID != "" && !strings.EqualFold(strings.TrimSpace(rec.OriginSandboxID), opts.SandboxID) {
 		return false
 	}
-	if opts.Name != "" && !strings.EqualFold(strings.TrimSpace(rec.DisplayName), opts.Name) {
+	// E2B-compatible: name matches display name or snapshot ID.
+	if opts.Name != "" &&
+		!strings.EqualFold(strings.TrimSpace(rec.DisplayName), opts.Name) &&
+		!strings.EqualFold(strings.TrimSpace(rec.SnapshotID), opts.Name) {
 		return false
 	}
 	if opts.Backend != "" && !strings.EqualFold(strings.TrimSpace(rec.Backend), opts.Backend) {

@@ -172,6 +172,7 @@ export interface ListSnapshotsOptions {
   sandboxId?: string;
   limit?: number;
   nextToken?: string;
+  name?: string;
   config?: Config | ConfigOptions;
 }
 
@@ -639,6 +640,7 @@ export class Sandbox {
     if (options.sandboxId !== undefined) params.set("sandboxID", options.sandboxId);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.nextToken !== undefined) params.set("nextToken", options.nextToken);
+    if (options.name !== undefined) params.set("name", options.name);
     const query = params.toString();
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/snapshots${query ? `?${query}` : ""}`);
     await checkControlResponse(resp);

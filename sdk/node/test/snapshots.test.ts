@@ -144,6 +144,7 @@ describe("Sandbox.listSnapshots", () => {
       expect(req.url.searchParams.get("sandboxID")).toBe(SANDBOX_ID);
       expect(req.url.searchParams.get("limit")).toBe("10");
       expect(req.url.searchParams.get("nextToken")).toBe("tok-in");
+      expect(req.url.searchParams.get("name")).toBe("prod");
       return {
         status: 200,
         json: [{ snapshotID: "s1" }, { snapshotID: "s2", names: ["b"] }],
@@ -154,6 +155,7 @@ describe("Sandbox.listSnapshots", () => {
       sandboxId: SANDBOX_ID,
       limit: 10,
       nextToken: "tok-in",
+      name: "prod",
       config: makeConfig(),
     });
     expect(snapshots.map((s) => s.snapshotId)).toEqual(["s1", "s2"]);

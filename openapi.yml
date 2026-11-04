@@ -635,6 +635,12 @@ paths:
         required: false
         schema:
           type: string
+      - name: name
+        in: query
+        description: Filter by snapshot name or ID.
+        required: false
+        schema:
+          type: string
       - name: backend
         in: query
         description: Filter by CoW backend (xfs | s3).

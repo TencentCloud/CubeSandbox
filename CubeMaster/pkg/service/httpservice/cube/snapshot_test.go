@@ -270,13 +270,14 @@ func TestGetSnapshotListSupportsFiltersAndPagination(t *testing.T) {
 	listSnapshotsFn = func(ctx context.Context, opts *templatecenter.ListSnapshotsOptions) ([]templatecenter.SnapshotInfo, string, error) {
 		assert.Equal(t, "snap-1", opts.SnapshotID)
 		assert.Equal(t, "sb-1", opts.SandboxID)
+		assert.Equal(t, "prod", opts.Name)
 		assert.Equal(t, "READY", opts.Status)
 		assert.Equal(t, 1, opts.Limit)
 		assert.Equal(t, "1", opts.NextToken)
 		return []templatecenter.SnapshotInfo{{SnapshotID: "snap-1", OriginSandboxID: "sb-1", Status: "READY"}}, "2", nil
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot?snapshot_id=snap-1&sandbox_id=sb-1&status=READY&limit=1&next_token=1&request_id=req-list", nil)
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot?snapshot_id=snap-1&sandbox_id=sb-1&name=prod&status=READY&limit=1&next_token=1&request_id=req-list", nil)
 	rt := &CubeLog.RequestTrace{}
 	resp := getSnapshot(req, rt, "")
 

@@ -38,6 +38,32 @@ func TestMatchesSnapshotRecordListOptionsHidesTombstone(t *testing.T) {
 	}
 }
 
+func TestMatchesSnapshotRecordListOptionsNameMatchesNameOrID(t *testing.T) {
+	ready := &models.SnapshotRecord{SnapshotID: "snap-1", DisplayName: "prod", Status: StatusReady}
+
+	// Name matches display name or snapshot ID, case-insensitive.
+	for _, name := range []string{"prod", "PROD", "snap-1", "SNAP-1"} {
+		if !matchesSnapshotRecordListOptions(ready, ListSnapshotsOptions{Name: name}) {
+			t.Fatalf("name %q should match snapshot", name)
+		}
+	}
+	// Substrings and unrelated values never match.
+	for _, name := range []string{"pro", "snap-", "tpl-1"} {
+		if matchesSnapshotRecordListOptions(ready, ListSnapshotsOptions{Name: name}) {
+			t.Fatalf("name %q should not match snapshot", name)
+		}
+	}
+	// name AND backend must both hold.
+	if matchesSnapshotRecordListOptions(ready, ListSnapshotsOptions{Name: "prod", Backend: "s3"}) {
+		t.Fatal("name match must not bypass a non-matching backend")
+	}
+	// A name hit must not resurrect a tombstoned snapshot without status.
+	tomb := &models.SnapshotRecord{SnapshotID: "snap-2", DisplayName: "old", Status: StatusDeleted}
+	if matchesSnapshotRecordListOptions(tomb, ListSnapshotsOptions{Name: "snap-2"}) {
+		t.Fatal("name matching an ID must not expose a DELETED snapshot by default")
+	}
+}
+
 func TestGetSnapshotInfoHidesTombstone(t *testing.T) {
 	for _, status := range []string{StatusDeleted, StatusDeleting} {
 		t.Run(status, func(t *testing.T) {

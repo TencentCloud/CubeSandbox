@@ -79,12 +79,13 @@ impl SnapshotService {
         sandbox_id: Option<&str>,
         limit: Option<i32>,
         next_token: Option<&str>,
+        name: Option<&str>,
     ) -> AppResult<(Vec<SnapshotListItem>, String)> {
         let req = ListSnapshotsRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
             sandbox_id: sandbox_id.map(str::to_string),
-            name: None,
+            name: normalize_next_token(name),
             status: None,
             // Apply the documented "default 100, max 100" contract here so an
             // oversized or non-positive `limit` never reaches CubeMaster.

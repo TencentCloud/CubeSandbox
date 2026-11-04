@@ -200,3 +200,20 @@ def test_delete_snapshot_by_name(sdk_sandbox, sdk_e2e_config):
         interval=0.5,
         description=f"snapshot {snapshot_id} to disappear after delete by name",
     )
+
+
+def test_list_snapshots_by_name_and_id(sdk_sandbox, sdk_e2e_config):
+    """A snapshot is discoverable via `name=` by its name and by its ID."""
+    name = f"e2e-snap-{uuid.uuid4().hex[:8]}"
+    snapshot_id = sdk_sandbox.create_snapshot(name=name)
+    try:
+        by_name = sdk_sandbox.list_snapshot_ids_by_name(name)
+        assert snapshot_id in by_name, (
+            f"list by name {name!r} should include {snapshot_id}, got {by_name!r}"
+        )
+        by_id = sdk_sandbox.list_snapshot_ids_by_name(snapshot_id)
+        assert snapshot_id in by_id, (
+            f"list by ID {snapshot_id!r} should include itself, got {by_id!r}"
+        )
+    finally:
+        sdk_sandbox.delete_snapshot(snapshot_id)

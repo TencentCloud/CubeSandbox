@@ -282,6 +282,15 @@ class CubeSandboxAdapter(SandboxAdapter):
         )
         return {str(snapshot.snapshot_id) for snapshot in snapshots}
 
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        from cubesandbox import Sandbox
+
+        snapshots, _ = Sandbox.list_snapshots(
+            name=name,
+            config=self._sdk_config,
+        )
+        return {str(snapshot.snapshot_id) for snapshot in snapshots}
+
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))
 

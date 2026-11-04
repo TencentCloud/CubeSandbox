@@ -72,6 +72,7 @@ pub async fn list_snapshots(
         sandbox_id = ?params.sandbox_id,
         limit = ?params.limit,
         next_token = ?params.next_token,
+        name = ?params.name,
         backend = ?params.backend,
         "list_snapshots"
     );
@@ -83,6 +84,7 @@ pub async fn list_snapshots(
             params.sandbox_id.as_deref(),
             params.limit,
             params.next_token.as_deref(),
+            params.name.as_deref(),
         )
         .await?;
 

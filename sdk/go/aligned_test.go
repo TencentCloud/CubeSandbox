@@ -325,6 +325,9 @@ func TestSnapshotLifecycle(t *testing.T) {
 			if r.URL.Query().Get("sandboxID") != testSandboxID || r.URL.Query().Get("limit") != "50" {
 				t.Fatalf("query=%s", r.URL.RawQuery)
 			}
+			if r.URL.Query().Get("name") != "prod" {
+				t.Fatalf("name query=%s", r.URL.RawQuery)
+			}
 			w.Header().Set("x-next-token", "tok-2")
 			fmt.Fprint(w, `[{"snapshotID":"snap-1","names":["n1"]}]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-1":
@@ -351,7 +354,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("CreateSnapshot=%#v err=%v", snap, err)
 	}
 
-	items, next, err := client.ListSnapshots(ctx, ListSnapshotsOptions{SandboxID: testSandboxID, Limit: 50})
+	items, next, err := client.ListSnapshots(ctx, ListSnapshotsOptions{SandboxID: testSandboxID, Limit: 50, Name: "prod"})
 	if err != nil || len(items) != 1 || next != "tok-2" {
 		t.Fatalf("ListSnapshots items=%#v next=%q err=%v", items, next, err)
 	}
