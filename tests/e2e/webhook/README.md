@@ -1,279 +1,194 @@
-# Webhook tests and dedicated deployment
+# Best-effort webhook lifecycle tests
 
-Start with the [feature guide](../../../CubeMaster/pkg/webhook/README.md) /
-[中文使用说明](../../../CubeMaster/pkg/webhook/README_zh.md) for enabling webhooks,
-event semantics and supported features. This runbook covers reproducible tests.
-[Acceptance results](../../../CubeMaster/pkg/webhook/END-TO-END-VALIDATION.md)
-describe a previous execution, not a promise that your deployment has passed.
+These tests exercise bounded in-memory notification delivery. Process exit loses
+pending work; there is no notification Redis, persisted terminal state, replay,
+Sentinel or cross-Master takeover. Business Redis is still a platform dependency.
+This runbook describes tests, not a completed platform acceptance report.
 
-## 1. Choose the test layer
+## Local checks
 
-| Layer | Needs | What it proves |
-| --- | --- | --- |
-| Receiver/resource self-tests | Python 3.10+, local TCP/Unix sockets | Fixture behavior and resource ownership checks |
-| Payload tests | SDK test Python dependencies | Payload assertion behavior |
-| Go components | Repository Go toolchain, isolated real Redis for store tests | Publisher, storage, retry and safety logic |
-| SDK lifecycle | Dedicated running CubeSandbox, READY template, receiver | Real operations and notifications |
-| Deployment faults | Linux, systemd, Docker, sudo, isolated services/data | Selected failure/recovery boundaries |
-| Host reboot | Expendable host, explicit operator approval and recovery console | Optional normal reboot witness only |
-
-No test runner provisions a complete platform automatically. Reuse
-[one-click deployment](../../../deploy/one-click/README.md) or your existing
-isolated deployment procedure. The fault-control suites specifically require
-systemd/Docker control on the test runner host; they do not control arbitrary
-remote Kubernetes deployments. A remote receiver is usable for basic lifecycle
-tests if its evidence log is accessible to the runner.
-
-## 2. Python and quick local checks
-
-Run from the repository root; retain its absolute path if changing directories:
+Use an existing Python 3.10+ environment satisfying
+[SDK requirements](../sdk_compat/requirements.txt), including PyYAML. If preparing
+a new environment, install those requirements and the repository SDK with its
+existing versions; dependency/toolchain upgrades are not a test fix.
 
 ```bash
+# repository root, with the chosen environment active
 REPO=$(pwd)
-python3 -m venv /tmp/webhook-test-venv
-source /tmp/webhook-test-venv/bin/activate
-python -m pip install -e "$REPO/sdk/python"
-python -m pip install -r "$REPO/tests/e2e/sdk_compat/requirements.txt" boto3
-python -m unittest discover -s tests/e2e/webhook -p 'test_*.py' -v
-(cd tests/e2e/sdk_compat && python -m pytest --confcutdir=. cases/framework/test_webhook.py -v)
+python3 -m unittest discover -s tests/e2e/webhook -p test_receiver.py -v
+python3 -m unittest discover -s tests/e2e/webhook -p test_resources.py -v
+python3 -m unittest discover -s tests/e2e/webhook -p test_storage_proxy.py -v
+cd "$REPO/tests/e2e/sdk_compat"
+python3 -m pytest --confcutdir=. cases/framework/test_webhook.py -q
+python3 -m pytest --confcutdir=. --collect-only cases/lifecycle/test_webhook*.py -q
 ```
 
-These checks do not restart services or count as deployed-platform acceptance.
-Use the Go version declared by the repository. Run component tests from
-`CubeMaster`, following [STORE.md](../../../CubeMaster/pkg/webhook/STORE.md)
-for the isolated Redis variables. For gomonkey suites, include
-`-gcflags=github.com/tencentcloud/CubeSandbox/CubeMaster/...=-l` and `-count=1`;
-repeat with `-race`. A skipped real-Redis test is not acceptance.
+Receiver tests cover bounded records/concurrency, raw body and headers, 503,
+disconnect, retry identity and actual rejection policies. Resource tests cover
+path/symlink escape, exact labels, units and executable ownership. The small Unix
+RPC fixture tests native forwarding and local snapshot rejection. None of these
+is a six-event platform run; collection is only discovery.
 
-## 3. Inventory your dedicated deployment
-
-Copy [env.example](env.example) outside Git, chmod it to 600, replace its values,
-and source it in the runner shell. The example uses illustrative ports and
-paths; **no `/data/cubelet`, home directory, date or historical binary name is
-required**. Do not source an unreviewed environment file.
-
-- `WEBHOOK_P6_RUN_ROOT`: existing absolute directory reserved for this run, on
-  persistent storage for recovery tests. Use a fresh directory. Configs,
-  binaries, receiver files, proxy sockets/modes and evidence must resolve inside
-  it, including through symlinks. Do not point it at an existing installation,
-  shared data root or another run. Spaces are best avoided in systemd setup.
-- `WEBHOOK_P6_RESOURCE_LABEL`: unique `webhook-p6-...` Docker `purpose` label.
-  Apply it at container creation, e.g. `--label purpose="$WEBHOOK_P6_RESOURCE_LABEL"`.
-  Every controlled container must carry the exact label, not merely its prefix.
-- Controlled containers and systemd units must have a `webhook-1903-` name prefix;
-  units end in `.service`. These are reserved test names, not fixed names from
-  the author's installation. Unit `ExecStart` binaries must be inside RUN_ROOT.
-- Put dedicated Master/Cubelet binaries inside RUN_ROOT; set `MASTER_BINARY` and
-  `NODE_BINARY` to their actual absolute paths. PID checks compare the actual
-  executable, not a suffix such as `cubemaster-shutdown-fixed`.
-- Keep business Redis and webhook Redis separate. Use Redis containers exposing
-  internal port 6379 and publish chosen loopback ports. Inspect actual AOF,
-  appendfsync, save, maxmemory/noeviction, volumes and free space. Platform
-  evidence uses `WEBHOOK_P6_REDIS_DB` (default 6); OOM filler keys use DB 15 on
-  the dedicated notification service. Never use shared Redis for fault tests.
-- Use a dedicated MySQL container with the run label and loopback publication.
-  The cloned schema must match `whp6_[0-9_]+`, with user `p6_1903`; these narrow
-  database ownership guards are intentional. Configure its actual address and
-  credential in the dedicated Master's YAML. Database fault tests read that
-  container's existing root credential for scoped trigger DDL only.
-
-Create only your new run directories, for example after editing the environment:
+Use the repository's existing Go toolchain or builder, from `CubeMaster`:
 
 ```bash
-source /absolute/path/to/your-reviewed-webhook.env
-mkdir -p "$WEBHOOK_P6_RUN_ROOT"/{bin,master,evidence,receiver}
-(cd "$REPO/CubeMaster" && go build -o "$WEBHOOK_P6_MASTER_BINARY" ./cmd/cubemaster)
+go test -count=1 -gcflags=all=-l ./pkg/webhook ./pkg/base/config \
+  ./pkg/service/httpservice/cube ./pkg/service/sandbox ./pkg/task \
+  ./pkg/templatecenter ./pkg/lifecycle ./pkg/pausesnap ./pkg/sandboxspec \
+  ./cmd/cubemaster/app
+# Repeat with -race; gomonkey-based suites require disabled inlining.
+go vet ./internal/webhooktest ./pkg/webhook ./pkg/base/config \
+  ./pkg/service/httpservice/cube ./pkg/service/sandbox ./pkg/task \
+  ./pkg/templatecenter ./pkg/lifecycle ./pkg/pausesnap ./pkg/sandboxspec \
+  ./cmd/cubemaster/app
+make test TEST_FLAGS=-count=1
+make test-race
 ```
 
-Provision the remaining services from the deployment guide. The Master unit must
-set `CUBE_MASTER_CONFIG_PATH` to `WEBHOOK_P6_MASTER_CONFIG`, and execute the
-inventoried binary directly. Configure each service's real database/network and
-mount dependencies; this test suite does not create units or modify the original
-installation. Verify health before enabling fault control.
+Core delivery tests need no Redis opt-in. The separate
+`TestBusinessRedisTimeoutRuntimeHTTP` uses
+`WEBHOOK_TEST_BUSINESS_REDIS_ADDR` / `WEBHOOK_TEST_BUSINESS_REDIS_PASSWORD` and DB 8
+on an isolated disposable **business lifecycle** Redis. It verifies existing
+Redis metadata → timeout response → memory Runtime → HTTP, and must never point
+at a live business database. HSET/XADD order and best-effort failures remain
+ordinary regressions. A missing fixture skip is not a pass. Existing create trace
+and hotswap races must be reported with logs, not hidden by removing tests.
 
-Merge the feature guide's webhook YAML into that Master config:
+## Real six-event run
 
-- Global/subscription enabled, all six exact event names.
-- Subscription ID and URL match `SUBSCRIPTION_ID` and `RECEIVER_URL`.
-- Complete `store.redis` override points to notification Redis and the selected DB.
-- Allowlist the receiver CIDR, with `allow_http: true` for private HTTP tests.
-- Restart all dedicated Masters. Use real XFS/S3 READY templates, not fabricated
-  metadata or `mock_debug` / `mock_create_direct` paths.
+Reuse a healthy Master/Cubelet/API deployment and a real READY template. The
+runner does not provision a platform, change mounts or repair storage. Copy and
+review [env.example](env.example) outside Git, chmod 600, then source it. Basic
+lifecycle tests need only the SDK API/template and accessible receiver log plus
+subscription ID; they do not require systemd/Docker inventory or control opt-in.
+Use synthetic metadata because evidence contains actual payloads.
 
-## 4. Receiver and real lifecycle tests
+Configure the existing dedicated Master with this notification block (normal
+business Redis/MySQL configuration stays with the platform):
 
-In one shell with the reviewed environment loaded:
+```yaml
+webhooks:
+  enabled: true
+  allow_http: true            # private test receiver only
+  allowed_cidrs: [127.0.0.0/8] # replace with its exact reachable test network
+  max_attempts: 3
+  store:
+    max_records: 10000
+  subscriptions:
+    - id: review-receiver
+      enabled: true
+      url: http://127.0.0.1:18096/events
+      events:
+        - sandbox.lifecycle.created
+        - sandbox.lifecycle.resumed
+        - sandbox.lifecycle.paused
+        - sandbox.lifecycle.checkpointed
+        - sandbox.lifecycle.updated
+        - sandbox.lifecycle.killed
+```
+
+Restart the dedicated Master under your deployment procedure. In one shell:
 
 ```bash
-printf '204\n' > "$WEBHOOK_P6_RECEIVER_MODE"
-python "$REPO/tests/e2e/webhook/receiver.py" --host 127.0.0.1 --port 18096 \
-  --output "$WEBHOOK_P6_RECEIVER_LOG" --mode-file "$WEBHOOK_P6_RECEIVER_MODE" \
-  --limit 2000 --fsync
+printf '204\n' > "$WEBHOOK_TEST_RECEIVER_MODE"
+python3 "$REPO/tests/e2e/webhook/receiver.py" --host 127.0.0.1 --port 18096 \
+  --output "$WEBHOOK_TEST_RECEIVER_LOG" --mode-file "$WEBHOOK_TEST_RECEIVER_MODE" \
+  --limit 2000 --workers 4 --fsync
 ```
 
-Replace `18096` with the port in your `RECEIVER_URL`; for remote Masters use a
-reachable restricted interface and the corresponding CIDR. Logs use exclusive
-creation: every receiver restart needs a new log path. Update the runner's log
-variable as well. Default concurrency is one; `--workers 1..16` is bounded.
-The receiver limits request size (256 KiB), reads (5s) and record count. Evidence
-contains actual payloads: use synthetic metadata and keep files private.
+`RECEIVER_MODE` is optional for an always-successful basic receiver: omit
+`--mode-file` if not using faults. Set it explicitly for the command above.
+For remote Masters choose a restricted reachable interface and matching CIDR.
+Logs are exclusively created; restart with a new path and update the runner.
+The receiver records bytes/headers before responding, enforces 256 KiB/read/time
+limits and 1–16 workers. Use `retry-once` plus `WEBHOOK_TEST_EXPECT_RETRY=1` to
+require 503→204 attempts for each operation. Slow mode defaults to 10 seconds;
+retain that setting for the bounded HTTP timeout/shutdown scenarios.
 
-In another shell using the same environment:
+In another shell:
 
 ```bash
 cd "$REPO/tests/e2e/sdk_compat"
-python -m pytest --run-e2e --confcutdir=. cases/lifecycle/test_webhook.py -vv
+SDK_E2E_TRACE=true SDK_E2E_REPORT_DIR=/absolute/fresh/evidence/sdk \
+  python3 -m pytest --run-e2e --confcutdir=. cases/lifecycle/test_webhook.py -vv \
+  --junitxml=/absolute/fresh/evidence/junit.xml
 ```
 
-Use separate XFS and S3 templates and fresh evidence paths for each run.
-`retry-once` receiver mode plus `WEBHOOK_P6_EXPECT_RETRY=1` requires actual retries.
-Absent opt-ins skip; `--collect-only` verifies discovery, not execution.
+This uses actual SDK operations, including checkpoint, pause/resume and kill.
+Async acceptance is separate from handler success. Metadata is checked only on
+trusted current create requests; subsequent events must omit it. Timeout/network/
+killed template IDs are empty when unavailable; killed execution resources are
+unknown. Finite/zero timeout uses the successful response deadline, including
+fallback; -1 emits no timeout update. A successful response does not certify HSET.
+No direct Capture or handcrafted HTTP event is platform evidence.
 
-## 5. Select fault experiments explicitly
+## Optional boundaries on an isolated deployment
 
-Enable `WEBHOOK_P6_CONTROL=1` only after inventory and normal lifecycle success.
-All names below have the `WEBHOOK_P6_` prefix. Set only applicable groups from
-`env.example`. Run destructive scenarios serially, never with pytest-xdist.
+Run serially, without xdist. Set `WEBHOOK_TEST_CONTROL=1` only for a deployment
+inventoried for this run. `RUN_ROOT` must be an existing dedicated absolute
+subdirectory; paths must resolve strictly inside it, including symlinks. Container
+names and units retain `webhook-1903-`; units end in `.service`, with ExecStart
+binaries inside RUN_ROOT. `MASTER_BINARY` / `NODE_BINARY` must match actual PID
+executables. Every controlled container needs the exact unique
+`purpose=webhook-test-...` label. Never relabel or clean an old experiment
+implicitly. Control requires schema `wh_test_[0-9_]+`; trigger DDL additionally
+requires user `webhook_test_1903` and the matching isolated MySQL container.
 
-| Suite / selection | Additional configuration |
+| File | Coverage / additional settings (all `WEBHOOK_TEST_` prefixed) |
 | --- | --- |
-| `test_webhook_recovery.py` basic configuration cases | Master unit/config/URL/binary, notification Redis, receiver paths/ID, RUN_ROOT and label |
-| `-k deployment_api` | `PERFORMANCE=1`, `MASTER_DEBUG_URL`, concurrent receiver URL/mode/log |
-| `-k two_complete` / mixed-Master completion test | Second Master unit/config/URL; same queue and config; concurrent receiver |
-| Redis restart / HTTP failures / OOM | Respectively `REDIS_RESTART=1`, `HTTP_FAILURES=1`, `OOM=1` |
-| `test_webhook_boundaries.py` | `NODE_FAULTS=1`, node unit/binary; `NODE_XFS_ROOT` with real snapshots/pause-snapshots directories; egress container; LCM unit for manager timeout |
-| `test_webhook_completion_boundaries.py` | `DATABASE_FAULTS=1` and dedicated MySQL for write failures; business RESP proxy for Redis cleanup faults; `NODE_CLI`/`NODE_SOCKET` for full-ID node observations; CubeProxy container for proxy faults |
-| `test_webhook_faults.py` | `REPLY_FAULTS=1`, notification RESP proxy directory, Master configured to proxy `ready` address |
-| Sentinel recovery | `SENTINEL_PLATFORM=1`, current primary/replica/Sentinel containers, published Sentinel endpoints, monitor name and both passwords |
-| `test_webhook_storage.py` / `test_webhook_s3_boundaries.py` | `S3_STATUS=1`, MinIO container, storage evidence directory, RPC/HTTP proxy controls and S3 HTTP URL/bucket |
-| Cross-node negative test | `CROSS_UNREADY=1`, independent node B container/target ID, Ops URL, node A unit/binary and reachable host/port |
-| Cross-node positive restore | Saved `SNAPSHOT_MANIFEST`, `RESTORE_TARGET`, fresh `RESTORE_EVIDENCE`; preserve a real snapshot with `KEEP_SNAPSHOT=1` |
-| `test_webhook_tls.py` | `TLS_CA`, trusted/untrusted/wrong-host HTTPS URLs; real CA/certificates, `SSL_CERT_FILE` scoped to dedicated Master |
+| `test_webhook_delivery.py` | Disabled/invalid config, static startup subscriptions, fanout/filter, SIGTERM/restart loss. `HTTP_FAILURES=1` covers finite 400/401/503/disconnect/timeout attempts; `PERFORMANCE=1` records serial latency samples under disabled/healthy/slow/failing HTTP. Fanout requires `CONCURRENT_RECEIVER_URL/LOG`. |
+| `test_webhook_boundaries.py` | `NODE_FAULTS=1`, owned node unit/binary, XFS root, egress container and LCM unit as applicable. Preserve node failure negatives and sync/async/paused/timeout destroy behavior. `BUSINESS_PROXY_DIR` plus inventoried business Redis tests HGET fallback and HSET/XADD best-effort faults. |
+| `test_webhook_completion_boundaries.py` | Existing business RESP proxy for create rollback and async cleanup; `NODE_CLI/SOCKET` for full-ID node observations. `DATABASE_FAULTS=1` plus owned MySQL for Complete/READY/spec failures and warn-only paused binding deletion. `PROXY_FAULTS=1` plus owned CubeProxy for resume purge. Receiver rejection and metadata limits need only Master/receiver control. |
+| `test_webhook_storage.py` | `STORAGE_BACKEND=xfs` or `s3`, matching real template, receiver and `MASTER_URL`: local READY and actual same-node user snapshot restore. No control opt-in needed. |
+| `test_webhook_s3_boundaries.py` | `STORAGE_BACKEND=s3`, `STORAGE_PROXY_MODE` with the narrow local snapshot fixture below; pause/checkpoint failure negatives. |
+| `test_webhook_tls.py` | `TLS_CA` and trusted/untrusted/wrong-host HTTPS endpoints forwarding to the receiver log. Scope `SSL_CERT_FILE` to the dedicated Master. No global CA changes or disabled verification. |
 
-Example selections, from `tests/e2e/sdk_compat`:
+Run the selected file with the same `--run-e2e --confcutdir=.` and fresh
+JUnit/JSONL paths. Business proxy tests consume an **already running** dedicated
+RESP fault fixture: owned directory containing `ready`, atomic `control.json`
+(`id`, `op`, `when=before`, `error`, optional key/field/repeat), and
+`fault-<id>*.json` match evidence. They do not start an old notification Redis
+proxy test. If that external fixture is unavailable, record the missing
+integration coverage; the Go business Redis regressions remain independently
+runnable.
 
-```bash
-WEBHOOK_P6_CONTROL=1 python -m pytest --run-e2e --confcutdir=. \
-  cases/lifecycle/test_webhook_recovery.py -k 'global_off or revoked_saved' -vv
-WEBHOOK_P6_CONTROL=1 WEBHOOK_P6_PERFORMANCE=1 python -m pytest --run-e2e --confcutdir=. \
-  cases/lifecycle/test_webhook_recovery.py -k deployment_api -vv
-```
-
-For concurrent delivery, start a second receiver with its own output/mode, the
-configured port, `--workers 4 --slow-seconds 30`. The slow delay must exceed the
-configured lease to exercise HTTP overlap. For multiple Masters, align every
-subscription and its receiver; mixed-config behavior is tested separately.
-Performance observations are serial SDK timeout calls with warmups, not a fixed
-SLO or proof of zero overhead. Do not combine performance, OOM and Sentinel runs.
-
-### Redis proxy and Sentinel
-
-In a separate shell, from `CubeMaster`, set `PROXY_DIR` to a new directory,
-`PROXY_UPSTREAM` to your Redis loopback publication, and `PROXY_REDIS_CONTAINER`
-to that exact container. The proxy verifies the `purpose` label and that Docker's
-published 6379 port matches the configured upstream; arbitrary addresses fail.
+For S3 local rejection only, point the dedicated node's existing storage socket
+configuration at a proxy under RUN_ROOT using your deployment procedure:
 
 ```bash
-go test -gcflags=github.com/tencentcloud/CubeSandbox/CubeMaster/...=-l \
-  ./pkg/webhook -run '^TestP6PlatformRedisProxy$' -count=1 -v
+printf 'forward\n' > "$WEBHOOK_TEST_STORAGE_PROXY_MODE"
+python3 "$REPO/tests/e2e/webhook/storage_proxy.py" \
+  --upstream "$WEBHOOK_TEST_RUN_ROOT/rcow/native.sock" \
+  --listen "$WEBHOOK_TEST_RUN_ROOT/proxy-local-snapshot/rpc.sock" \
+  --control "$WEBHOOK_TEST_STORAGE_PROXY_MODE" \
+  --evidence "$WEBHOOK_TEST_RUN_ROOT/proxy-local-snapshot/faults.jsonl"
 ```
 
-Point only the dedicated Master's notification Redis at the emitted `ready`
-address. For business HSET/XADD faults start a separate proxy process with a
-separate `PROXY_DIR`, business Redis upstream/container, and export that directory
-as `BUSINESS_PROXY_DIR` in the SDK runner. Stop each fixture by creating its own
-`stop` file before its 30-minute deadline. This serial proxy is for precise faults;
-bypass it for performance measurements. It forwards authentication from clients.
+Only `forward` and `snapshot-error` are supported; no fabricated success, export
+reply manipulation, HTTP upload proxy, independent-node orchestration or host
+reboot. Existing small Go upload-reconciliation tests retain local READY/no-repeat
+checks. Run XFS and S3 separately and report their actual backend; one backend's
+result cannot establish the other's behavior. Deterministic queue capacity,
+DNS/SSRF/allowlist, TLS/hostname, proxy/redirect/POST-replay protection and webhook's
+own two-second shutdown budget are exercised in Go components. The platform
+SIGTERM observation includes existing App/systemd shutdown, not just that budget.
 
-For the component Sentinel election use `SENTINEL_PRIMARY_CONTAINER`,
-`SENTINEL_MASTER_NAME`, `SENTINEL_NODES`, `SENTINEL_PASSWORD`, `RESOURCE_LABEL` and
-`WEBHOOK_REDIS_PASSWORD`, then select `TestP6RealSentinelElection`. It uses DB 9
-with unique test keys. The platform suite uses `SENTINEL_CURRENT_PRIMARY` and
-`SENTINEL_CURRENT_REPLICA`; re-inventory roles after each election. Internal
-Redis/Sentinel ports are 6379/26379; published ports are your choice.
-Same-volume component restart uses `WEBHOOK_REDIS_RESTART_CONTAINER` with its
-existing `webhook-1903-p2-` prefix and `WEBHOOK_REDIS_RESTART_MODE=normal|kill`.
-These tests never discover/restart a business Redis automatically.
+## Evidence and restoration
 
-### S3 and HTTPS fixtures
+Save commands/cwd, UTC times, versions, source diff, redacted environment, exit
+codes, stdout/stderr, JUnit/SDK JSONL and receiver raw bytes/headers. Keep initial
+failures. Distinguish passed, failed, skipped, compile-only, collection-only and
+not-run; do not claim full v1 acceptance from collection, normal restart or Redis
+health. Scope an existing service problem separately; do not alter storage state
+mapping, destroy retries or timeout/spec behavior to make webhook tests pass.
 
-Provision real S3 storage using existing CubeS3lvol build/export interfaces.
-Use your own dedicated WALs, lvstores, endpoints and volumes. For RPC injection,
-stop the dedicated node safely, point its RPC config to your proxy socket and
-restart it. All four paths must resolve within RUN_ROOT:
+Control fixtures restore original YAML and receiver mode and record health/PID;
+fault tests restore mounts, processes, containers, triggers and control modes in
+finally blocks. After interruption, independently inspect those exact resources.
+Preserve data/evidence; never FLUSHALL/FLUSHDB, global prune or delete another run.
 
-```bash
-python "$REPO/tests/e2e/webhook/storage_proxy.py" \
-  --upstream "$WEBHOOK_P6_RUN_ROOT/rcow/s3lvol.sock" \
-  --listen "$WEBHOOK_P6_RUN_ROOT/proxy-s3/rpc.sock" \
-  --control "$WEBHOOK_P6_STORAGE_PROXY_MODE" \
-  --evidence "$WEBHOOK_P6_RUN_ROOT/proxy-s3/faults.jsonl"
-```
-
-Create the parent directories and initialize the mode to `forward`. RPC modes
-are `forward`, `snapshot-error`, `error` and `empty`; no mode fabricates success.
-Copy [s3_http_proxy.conf](s3_http_proxy.conf) into your run directory and edit its
-`listen` and `proxy_pass` to your chosen endpoints. The default port values in
-that file are examples. `/evidence` is a **container mount point**: bind your own
-HTTP proxy evidence directory there and initialize its `mode` to `forward`.
-Use the existing OpenResty image, restrict access, and point only the test node's
-S3 endpoint at it. Host/SigV4 is preserved. Modes are `deny-manifest`,
-`deny-exports` and `hold-manifest`; the hold expires after 120s. Node B needs its
-own data/mounts and reachable object storage; do not copy A's snapshots.
-
-For TLS, provision three actual endpoints forwarding to the receiver: trusted CA
-with matching SAN, untrusted CA, trusted CA with wrong SAN. Use your own ports
-and temporary certificates, set the three `TLS_*_URL` values and `TLS_CA`, and
-scope `SSL_CERT_FILE` to the dedicated Master. Never install the CA globally or
-disable certificate checks. There is no dependency on an unpublished TLS script.
-
-## 6. Optional normal reboot witness
-
-This is separate from ordinary acceptance and needs explicit operator approval,
-an expendable host and console recovery. Keep the reviewed environment file and
-RUN_ROOT persistent; configure the boot unit's `EnvironmentFile` with the same
-settings (systemd environment files omit shell `export` and do not expand `$VAR`:
-write resolved absolute values). Boot control URLs and receiver must be loopback.
-
-`prepare_reboot.py RUN_ROOT` uses real SDK create/kill operations and saved tasks,
-then kills only the inventoried Master. It writes private `reboot/seed.json` and
-does not reboot or arm anything. Set Master/Ops units, business/notification Redis
-containers, receiver paths/URL, subscription and SDK API/template beforehand.
-Ensure the dedicated Master supervisor will not auto-restart after this stop.
-
-Inventory mounts and services, stop own test nodes/VMs, restore original service
-state yourself, and verify it. Copy the reviewed seed to `reboot/armed.json` only
-after setting `original_cubelet_restored=true` from actual checks. Configure the
-operator-owned boot oneshot with `RequiresMountsFor=RUN_ROOT`, database/network
-ordering, `ConditionPathExists=.../reboot/armed.json`, a bounded timeout and:
-
-```bash
-python /absolute/checkout/tests/e2e/webhook/host_recovery.py /your/run/root --verify-plan
-# Boot ExecStart uses the same command without --verify-plan.
-```
-
-`--verify-plan` is read-only. The witness requires a new boot ID, validates the
-inventoried resources, reapplies loopback firewall restrictions to the configured
-Master/Ops ports and starts only dedicated Redis/Ops/Master services. It never
-starts or changes original installation services. It uses the configured receiver
-port, saves a fresh log, checks byte/identity/budget recovery and disarms itself.
-Provision/recover other dependencies through your own units. A normal reboot is
-not hard-reset, physical power-loss or physical HA evidence.
-
-## 7. Results and cleanup
-
-Retain argv, source revision/diff, binaries, exit codes, JUnit, receiver records,
-actual storage settings and before/fault/after state outside Git. Preserve failed
-attempts and skip reasons. Never label a skipped opt-in as a pass or replace
-real business operations with synthetic event injection.
-
-OOM can partially execute Lua and stop scheduling. Restore capacity, audit saved
-records and due/terminal indexes read-only, and restart only after consistency
-supports it; do not clear queues or reset budgets. Storage-status inconsistencies
-are separate diagnostics, not permission to change business/storage behavior.
-
-Most tests restore their fault modes in finally blocks. After a failed process
-or host experiment, independently recheck service/container states, database
-triggers, proxy modes, mounts and Sentinel replication. Stop/remove only exact
-inventoried resources and firewall rules from this run. Preserve logs and data;
-do not use FLUSHALL/FLUSHDB, global cleanup or an existing volume purge.
+All retained `WEBHOOK_P6_<suffix>` options were renamed to
+`WEBHOOK_TEST_<suffix>` with no compatibility alias. Removed notification Redis,
+Sentinel, second-Master, remote-upload and host inventory options have no v1
+replacement. Database ownership names changed from `whp6_...` / `p6_1903` to the
+explicit names above; existing resources are not migrated automatically.

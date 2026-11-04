@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 
 def setting(name):
-    key = "WEBHOOK_P6_" + name
+    key = "WEBHOOK_TEST_" + name
     value = os.environ.get(key, "")
     if not value:
         raise ValueError(f"Set {key} for this experiment (see tests/e2e/webhook/README.md)")
@@ -35,8 +35,8 @@ def owned_path(value):
 
 def resource_label():
     label = setting("RESOURCE_LABEL")
-    if not label.startswith("webhook-p6-") or label == "webhook-p6-":
-        raise ValueError("RESOURCE_LABEL must start with webhook-p6- and identify this run")
+    if not label.startswith("webhook-test-") or label == "webhook-test-":
+        raise ValueError("RESOURCE_LABEL must start with webhook-test- and identify this run")
     return label
 
 

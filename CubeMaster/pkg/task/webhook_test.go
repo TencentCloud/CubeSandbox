@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-func TestP4OriginAcrossDestroyQueueRetry(t *testing.T) {
+func TestOriginAcrossDestroyQueueRetry(t *testing.T) {
 	p := gomonkey.NewPatches()
 	defer p.Reset()
 	p.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, f func(context.Context) error) error {

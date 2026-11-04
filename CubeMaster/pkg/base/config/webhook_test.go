@@ -51,7 +51,7 @@ func TestWebhookConfigIsolation(t *testing.T) {
 	}
 }
 func TestWebhookConfigProcessHelper(t *testing.T) {
-	mode := os.Getenv("P3_CONFIG_HELPER")
+	mode := os.Getenv("WEBHOOK_TEST_CONFIG_HELPER")
 	if mode == "" {
 		return
 	}
@@ -89,7 +89,7 @@ func TestWebhookActualInitAndListener(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "config.yaml")
 			require.NoError(t, os.WriteFile(file, []byte(body), 0600))
 			cmd := exec.Command(os.Args[0], "-test.run=^TestWebhookConfigProcessHelper$")
-			cmd.Env = append(os.Environ(), "P3_CONFIG_HELPER="+mode, "CUBE_MASTER_CONFIG_PATH="+file)
+			cmd.Env = append(os.Environ(), "WEBHOOK_TEST_CONFIG_HELPER="+mode, "CUBE_MASTER_CONFIG_PATH="+file)
 			out, err := cmd.CombinedOutput()
 			if mode == "listener-fatal" {
 				require.Error(t, err, string(out))

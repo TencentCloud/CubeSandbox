@@ -296,7 +296,7 @@ func TestPausedBindingDeleteFailureKeepsWarnOnlyResult(t *testing.T) {
 	db := setupPauseDeleteTest(t)
 	seedPauseBinding(t, db, "sb-binding-fail", "snap-binding-fail", statusReady, "10.0.0.7")
 	mockCubeletOK(t)
-	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register("p6_binding_delete_failure", func(tx *gorm.DB) {
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register("webhook_binding_delete_failure", func(tx *gorm.DB) {
 		tx.AddError(errors.New("binding delete rejected"))
 	}))
 	handled, err := TryDeletePaused(context.Background(), "request", "sb-binding-fail", "10.0.0.7")
@@ -304,7 +304,7 @@ func TestPausedBindingDeleteFailureKeepsWarnOnlyResult(t *testing.T) {
 	require.True(t, handled)
 	_, err = GetBySandbox(context.Background(), "sb-binding-fail")
 	require.NoError(t, err)
-	require.NoError(t, db.Callback().Delete().Remove("p6_binding_delete_failure"))
+	require.NoError(t, db.Callback().Delete().Remove("webhook_binding_delete_failure"))
 	handled, err = TryDeletePaused(context.Background(), "request", "sb-binding-fail", "10.0.0.7")
 	require.NoError(t, err)
 	require.True(t, handled)

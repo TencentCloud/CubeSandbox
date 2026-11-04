@@ -38,9 +38,9 @@ import (
 func TestAppPublisherRealAsyncDelete(t *testing.T) {
 	// InitTask registers process-global watchers; isolate and reclaim all of them
 	// by running this test in a child process, with no production scheduler seam.
-	if os.Getenv("WEBHOOK_ASYNC_QUEUE_CHILD") != "1" {
+	if os.Getenv("WEBHOOK_TEST_ASYNC_QUEUE_CHILD") != "1" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAppPublisherRealAsyncDelete$", "-test.v")
-		cmd.Env = append(os.Environ(), "WEBHOOK_ASYNC_QUEUE_CHILD=1")
+		cmd.Env = append(os.Environ(), "WEBHOOK_TEST_ASYNC_QUEUE_CHILD=1")
 		output, err := cmd.CombinedOutput()
 		t.Log(string(output))
 		require.NoError(t, err)

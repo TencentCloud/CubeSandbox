@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded receiver for a dedicated P6 deployment.
+"""Bounded receiver for a dedicated webhook deployment.
 
 Records raw bytes before replying. A mode file allows failure injection without
 restarting the receiver: 204, 400, 401, 503, drop, slow (10s then 204), or retry-once (503 then 204 per event).
@@ -110,6 +110,7 @@ def serve(host, port, output, mode_file, limit, durable=False, workers=1, slow_s
                         "active_requests": self.server.active,
                         "received_at": datetime.now(timezone.utc).isoformat(),
                         "body_base64": base64.b64encode(body).decode(),
+                        "headers": list(self.headers.raw_items()),
                         "event_id": payload.get("id"),
                         "sandbox_id": payload.get("sandbox_id"),
                         "type": payload.get("type"),

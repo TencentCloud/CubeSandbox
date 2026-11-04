@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in P6 positive path; requires the dedicated receiver's local JSONL file.
+"""Opt-in lifecycle positive path; requires the dedicated receiver's local JSONL file.
 
 This does not attest remote durability, failure boundaries or cross-node restore.
 Run separately on XFS and S3. No handcrafted webhook events are submitted.
@@ -19,12 +19,12 @@ pytestmark = [pytest.mark.e2e, pytest.mark.sdk_compat, pytest.mark.lifecycle]
 
 
 def test_six_lifecycle_webhooks(request, sdk_backend, sdk_e2e_config):
-    path = os.environ.get("WEBHOOK_P6_RECEIVER_LOG")
-    subscription = os.environ.get("WEBHOOK_P6_SUBSCRIPTION_ID")
+    path = os.environ.get("WEBHOOK_TEST_RECEIVER_LOG")
+    subscription = os.environ.get("WEBHOOK_TEST_SUBSCRIPTION_ID")
     if not path or not subscription:
-        pytest.skip("P6 receiver log and subscription ID must be explicitly configured")
+        pytest.skip("webhook receiver log and subscription ID must be explicitly configured")
     if sdk_backend != "cubesandbox":
-        pytest.skip("CubeSandbox P6 acceptance")
+        pytest.skip("CubeSandbox lifecycle acceptance")
     log = Path(path)
     assert log.is_file(), "start receiver before creating the sandbox"
     sandbox = request.getfixturevalue("sdk_sandbox")
@@ -34,7 +34,7 @@ def test_six_lifecycle_webhooks(request, sdk_backend, sdk_e2e_config):
     seen = {}
     template = sdk_e2e_config.cube_template_id
     execution = {key: int(os.environ[env]) for key, env in (
-        ("vcpu_count", "WEBHOOK_P6_EXPECT_VCPU"), ("memory_mb", "WEBHOOK_P6_EXPECT_MEMORY_MB")
+        ("vcpu_count", "WEBHOOK_TEST_EXPECT_VCPU"), ("memory_mb", "WEBHOOK_TEST_EXPECT_MEMORY_MB")
     ) if env in os.environ} or None
 
     def observed():
@@ -68,21 +68,20 @@ def test_six_lifecycle_webhooks(request, sdk_backend, sdk_e2e_config):
         current.update_network(network={"allow_internet_access": False})
         wait_event("updated", before=before, field="network_egress", network={
             "allowed_cidrs": None, "denied_cidrs": ["0.0.0.0/0"], "allowed_domains": None},
-            template=template, metadata={"test_suite": "sdk_compat"})
+            template="")
         snapshot = current.create_snapshot()
-        wait_event("checkpointed", template=template, metadata={"test_suite": "sdk_compat"})
+        wait_event("checkpointed", template=template)
         current.pause(timeout=sdk_e2e_config.default_timeout)
         wait_until_paused(current, timeout=sdk_e2e_config.default_timeout)
-        wait_event("paused", template=template, execution=execution, metadata={"test_suite": "sdk_compat"})
+        wait_event("paused", template=template, execution=execution)
         current = current.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
         wait_until_running(current, timeout=sdk_e2e_config.default_timeout)
-        wait_event("resumed", template=template, metadata={"test_suite": "sdk_compat"})
+        wait_event("resumed", template=template)
         current.kill()
         killed = True
-        wait_event("killed", reason="request", template=template, execution=execution,
-                   metadata={"test_suite": "sdk_compat"})
+        wait_event("killed", reason="request", template="", execution={"started_at": ""})
         assert len(set(seen.values())) == 7
-        if os.environ.get("WEBHOOK_P6_EXPECT_RETRY") == "1":
+        if os.environ.get("WEBHOOK_TEST_EXPECT_RETRY") == "1":
             deadline = time.monotonic() + sdk_e2e_config.default_timeout
             while time.monotonic() < deadline:
                 rows = observed()
@@ -107,19 +106,20 @@ def test_six_lifecycle_webhooks(request, sdk_backend, sdk_e2e_config):
 
 
 def test_never_timeout_and_repeated_network(request, sdk_backend, sdk_e2e_config):
-    path = os.environ.get("WEBHOOK_P6_RECEIVER_LOG")
-    subscription = os.environ.get("WEBHOOK_P6_SUBSCRIPTION_ID")
+    path = os.environ.get("WEBHOOK_TEST_RECEIVER_LOG")
+    subscription = os.environ.get("WEBHOOK_TEST_SUBSCRIPTION_ID")
     if not path or not subscription or sdk_backend != "cubesandbox":
-        pytest.skip("dedicated CubeSandbox P6 receiver required")
+        pytest.skip("dedicated CubeSandbox receiver required")
     sandbox = request.getfixturevalue("sdk_sandbox")
 
     def observed():
         return records(path, sandbox.sandbox_id, subscription)
 
+    before_timeout = {event["id"] for _, event in observed()}
     sandbox.set_timeout(-1)
     # A bounded observation, followed by two positive Writer/Worker barriers.
     time.sleep(2)
-    assert not new_events(observed(), "updated", field="set_timeout")
+    assert not new_events(observed(), "updated", before_timeout, "set_timeout")
     expected = {"allowed_cidrs": None, "denied_cidrs": ["0.0.0.0/0"], "allowed_domains": None}
     for _ in range(2):
         before = {event["id"] for _, event in observed()}
@@ -130,14 +130,14 @@ def test_never_timeout_and_repeated_network(request, sdk_backend, sdk_e2e_config
         assert len(matches) == 1
         assert_payload(matches[0], "updated", network=expected)
     assert len(new_events(observed(), "updated", field="network_egress")) == 2
-    assert not new_events(observed(), "updated", field="set_timeout")
+    assert not new_events(observed(), "updated", before_timeout, "set_timeout")
 
 
 def test_zero_timeout_deadline(request, sdk_backend, sdk_e2e_config):
-    path = os.environ.get("WEBHOOK_P6_RECEIVER_LOG")
-    subscription = os.environ.get("WEBHOOK_P6_SUBSCRIPTION_ID")
+    path = os.environ.get("WEBHOOK_TEST_RECEIVER_LOG")
+    subscription = os.environ.get("WEBHOOK_TEST_SUBSCRIPTION_ID")
     if not path or not subscription or sdk_backend != "cubesandbox":
-        pytest.skip("dedicated CubeSandbox P6 receiver required")
+        pytest.skip("dedicated CubeSandbox receiver required")
     sandbox = request.getfixturevalue("sdk_sandbox")
     earliest = datetime.now(timezone.utc)
     sandbox.set_timeout(0)

@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Dedicated P6 S3 RPC fault fixture; forwards real storage calls unchanged.
-
-Only rcow_create_snapshot and rcow_export_snapshot may be rejected; exports
-may also receive an empty establishment reply. Successful snapshots and upload
-states always come from the native backend.
-"""
+"""Dedicated local snapshot failure fixture; other RPC calls forward unchanged."""
 import argparse
 import json
 import os
@@ -58,13 +53,10 @@ def serve(upstream, listen, control, evidence):
                         request = json.loads(line)
                         mode = control.read_text().strip()
                         reject_snapshot = request.get("method") == "rcow_create_snapshot" and mode == "snapshot-error"
-                        reject_export = request.get("method") == "rcow_export_snapshot" and mode in {"error", "empty"}
-                        if reject_snapshot or reject_export:
+                        assert mode in {"forward", "snapshot-error"}, "unknown local snapshot fault mode"
+                        if reject_snapshot:
                             response = {"jsonrpc": "2.0", "id": request["id"]}
-                            if mode != "empty":
-                                response["error"] = {"code": -32000, "message": "P6 dedicated storage operation rejected"}
-                            else:
-                                response["result"] = ""
+                            response["error"] = {"code": -32000, "message": "webhook dedicated storage operation rejected"}
                             with lock:
                                 evidence.write(json.dumps({"at": time.time(), "mode": mode,
                                     "upstream_executed": False, "request": request, "response": response}) + "\n")

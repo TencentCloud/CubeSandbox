@@ -16,7 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestP5NetworkProtoProjection(t *testing.T) {
+func TestNetworkProtoProjection(t *testing.T) {
 	for _, empty := range [][]string{nil, {}} {
 		raw := &cubebox.CubeNetworkConfig{AllowOut: empty, DenyOut: empty}
 		b, e := proto.Marshal(raw)
@@ -39,7 +39,7 @@ func TestP5NetworkProtoProjection(t *testing.T) {
 		}
 	}
 }
-func TestP5CaptureBudgetAndSnapshot(t *testing.T) {
+func TestUpdateCaptureBudgetAndSnapshot(t *testing.T) {
 	p, _ := NewBufferedPublisher(10)
 	var h PublisherHolder
 	h.Set(p)
@@ -63,7 +63,7 @@ func TestP5CaptureBudgetAndSnapshot(t *testing.T) {
 		require.Empty(t, p.Events())
 	}
 }
-func TestP5CaptureDistribution(t *testing.T) {
+func TestUpdateDestroyCaptureDistribution(t *testing.T) {
 	for _, kind := range []string{"timeout", "network", "killed"} {
 		for _, scenario := range []string{"disabled", "enabled", "full", "stopped"} {
 			t.Run(kind+"/"+scenario, func(t *testing.T) {

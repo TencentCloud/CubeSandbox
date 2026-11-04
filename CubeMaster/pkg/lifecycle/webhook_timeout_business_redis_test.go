@@ -19,13 +19,13 @@ import (
 	"time"
 )
 
-type p5Redis struct {
+type timeoutBusinessRedis struct {
 	fakeRedis
 	readErr error
 	missing bool
 }
 
-func (r *p5Redis) Do(cmd string, args ...interface{}) (interface{}, error) {
+func (r *timeoutBusinessRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 	if cmd == "HGET" {
 		if r.readErr != nil {
 			return nil, r.readErr
@@ -41,7 +41,7 @@ func (r *p5Redis) Do(cmd string, args ...interface{}) (interface{}, error) {
 func TestRefreshTimeoutKeepsBestEffortWriteOrder(t *testing.T) {
 	for _, hfail := range []bool{false, true} {
 		for _, xfail := range []bool{false, true} {
-			r := &p5Redis{fakeRedis: fakeRedis{failHSET: hfail, failXADD: xfail}}
+			r := &timeoutBusinessRedis{fakeRedis: fakeRedis{failHSET: hfail, failXADD: xfail}}
 			p := &storeTimeoutProvider{store: NewStore(r)}
 			end, err := p.RefreshTimeout(context.Background(), "sb", 10)
 			if err != nil || end <= 0 {
@@ -59,7 +59,7 @@ func TestRefreshTimeoutKeepsBestEffortWriteOrder(t *testing.T) {
 	}
 	for _, name := range []string{"missing", "read-error", "disabled", "no-store"} {
 		t.Run(name, func(t *testing.T) {
-			r := &p5Redis{}
+			r := &timeoutBusinessRedis{}
 			s := NewStore(r)
 			p := &storeTimeoutProvider{store: s}
 			switch name {
@@ -88,27 +88,27 @@ func TestRefreshTimeoutKeepsBestEffortWriteOrder(t *testing.T) {
 	}
 }
 
-func TestP5AuthoritativeRedisHTTP(t *testing.T) {
-	if os.Getenv("WEBHOOK_P4_REDIS_ADDR") == "" {
+func TestBusinessRedisTimeoutRuntimeHTTP(t *testing.T) {
+	if os.Getenv("WEBHOOK_TEST_BUSINESS_REDIS_ADDR") == "" {
 		t.Skip("isolated business lifecycle Redis required; webhook delivery itself is in memory")
 	}
 	r, bodies := webhooktest.Runtime(t, webhook.TypeUpdated)
-	conn, err := redis.Dial("tcp", os.Getenv("WEBHOOK_P4_REDIS_ADDR"), redis.DialPassword(os.Getenv("WEBHOOK_P4_REDIS_PASSWORD")), redis.DialDatabase(8))
+	conn, err := redis.Dial("tcp", os.Getenv("WEBHOOK_TEST_BUSINESS_REDIS_ADDR"), redis.DialPassword(os.Getenv("WEBHOOK_TEST_BUSINESS_REDIS_PASSWORD")), redis.DialDatabase(8))
 	require.NoError(t, err)
 	defer conn.Close()
 	s := NewStore(conn)
-	payload, _ := json.Marshal(&SandboxLifecycleMeta{SandboxID: "sb-p5-authority"})
-	_, err = conn.Do("HSET", MetaKey, "sb-p5-authority", payload)
+	payload, _ := json.Marshal(&SandboxLifecycleMeta{SandboxID: "sb-destroy-authority"})
+	_, err = conn.Do("HSET", MetaKey, "sb-destroy-authority", payload)
 	require.NoError(t, err)
 	sandbox.SetTimeoutProvider(&storeTimeoutProvider{store: s})
 	defer sandbox.SetTimeoutProvider(nil)
 	sandbox.SetWebhookPublisher(r.Publisher())
 	defer sandbox.SetWebhookPublisher(nil)
-	localcache.SetSandboxCache("sb-p5-authority", &localcache.SandboxCache{SandboxID: "sb-p5-authority"})
-	defer localcache.DeleteSandboxCache("sb-p5-authority")
-	rsp := sandbox.SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb-p5-authority", Timeout: 5})
+	localcache.SetSandboxCache("sb-destroy-authority", &localcache.SandboxCache{SandboxID: "sb-destroy-authority"})
+	defer localcache.DeleteSandboxCache("sb-destroy-authority")
+	rsp := sandbox.SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb-destroy-authority", Timeout: 5})
 	require.Equal(t, 200, rsp.Ret.RetCode)
-	stored, err := s.LoadMeta(context.Background(), "sb-p5-authority")
+	stored, err := s.LoadMeta(context.Background(), "sb-destroy-authority")
 	require.NoError(t, err)
 	require.Equal(t, rsp.EndAt, stored.EndAt)
 	select {

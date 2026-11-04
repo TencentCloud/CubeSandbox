@@ -32,17 +32,17 @@ import (
 	"time"
 )
 
-func p4Spec() *types.CreateCubeSandboxReq {
+func lifecycleSpec() *types.CreateCubeSandboxReq {
 	return &types.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}, Containers: []*types.Container{{Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
 }
-func p4Buffer(t *testing.T) *webhook.BufferedPublisher {
+func lifecycleBuffer(t *testing.T) *webhook.BufferedPublisher {
 	p, e := webhook.NewBufferedPublisher(32)
 	require.NoError(t, e)
 	SetWebhookPublisher(p)
 	t.Cleanup(func() { SetWebhookPublisher(nil) })
 	return p
 }
-func p4Read(t *testing.T, p *webhook.BufferedPublisher, kind string) {
+func readLifecycleEvent(t *testing.T, p *webhook.BufferedPublisher, kind string) {
 	t.Helper()
 	select {
 	case c := <-p.Events():
@@ -61,22 +61,22 @@ func p4Read(t *testing.T, p *webhook.BufferedPublisher, kind string) {
 	}
 	require.Empty(t, p.Events())
 }
-func p4Create(t *testing.T, ctx context.Context, proxyErr error) *createSandboxContext {
+func createLifecycleFixture(t *testing.T, ctx context.Context, proxyErr error) *createSandboxContext {
 	old := setSandboxProxyMapFn
 	t.Cleanup(func() { setSandboxProxyMapFn = old })
 	setSandboxProxyMapFn = func(context.Context, *proxytypes.SandboxProxyMap) error { return proxyErr }
-	return &createSandboxContext{ctx: withCreateOriginRequest(ctx, p4Spec()), selectHost: &node.Node{IP: "127.0.0.1", InsID: "node"}, masterRsp: &types.CreateCubeSandboxRes{Ret: &types.Ret{RetCode: -1}, ExtInfo: map[string]string{}}, cubeletReq: &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"}, cubeletRsp: &cubebox.RunCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}, SandboxID: "sb", SandboxIP: "10.0.0.2"}}
+	return &createSandboxContext{ctx: withCreateOriginRequest(ctx, lifecycleSpec()), selectHost: &node.Node{IP: "127.0.0.1", InsID: "node"}, masterRsp: &types.CreateCubeSandboxRes{Ret: &types.Ret{RetCode: -1}, ExtInfo: map[string]string{}}, cubeletReq: &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"}, cubeletRsp: &cubebox.RunCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}, SandboxID: "sb", SandboxIP: "10.0.0.2"}}
 }
 func TestInternalCreateResultDoesNotPublish(t *testing.T) {
 	for _, scenario := range []string{"success", "proxy-error", "cancel-wins", "spec-warning"} {
 		t.Run(scenario, func(t *testing.T) {
-			p := p4Buffer(t)
+			p := lifecycleBuffer(t)
 			ctx := context.Background()
 			var err error
 			if scenario == "proxy-error" {
 				err = errors.New("proxy")
 			}
-			c := p4Create(t, ctx, err)
+			c := createLifecycleFixture(t, ctx, err)
 			if scenario == "cancel-wins" {
 				c.setMasterRsp(int(errorcode.ErrorCode_ClientCancel), "cancel")
 			}
@@ -100,14 +100,14 @@ func TestInternalCreateResultDoesNotPublish(t *testing.T) {
 		})
 	}
 }
-func p4PausePatches(t *testing.T, failure, backend string) *gomonkey.Patches {
+func patchPauseDependencies(t *testing.T, failure, backend string) *gomonkey.Patches {
 	p := gomonkey.NewPatches()
 	t.Cleanup(p.Reset)
 	p.ApplyFunc(localcache.GetNodesByIp, func(string) (*node.Node, bool) { return nil, false })
 	p.ApplyFunc(clearStalePauseBindingIfRunning, func(context.Context, string, string, string) {})
 	var stored *types.CreateCubeSandboxReq
 	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
-		s := p4Spec()
+		s := lifecycleSpec()
 		s.Backend = backend
 		stored = s
 		return s, nil
@@ -147,31 +147,31 @@ func p4PausePatches(t *testing.T, failure, backend string) *gomonkey.Patches {
 	p.ApplyFunc(runAfterUpdateSandboxSuccessHook, func(context.Context, string, string, string, string) {})
 	return p
 }
-func TestP4PauseLocalBoundary(t *testing.T) {
+func TestPauseLocalBoundary(t *testing.T) {
 	for _, backend := range []string{"xfs", "s3"} {
 		for _, failure := range []string{"", "node", "timeout", "nil", "nil-ret", "complete"} {
 			t.Run(backend+failure, func(t *testing.T) {
-				p := p4Buffer(t)
-				p4PausePatches(t, failure, backend)
+				p := lifecycleBuffer(t)
+				patchPauseDependencies(t, failure, backend)
 				rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
 				if failure != "" {
 					require.NotEqual(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 					require.Empty(t, p.Events())
 				} else {
 					require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
-					p4Read(t, p, webhook.TypePaused)
+					readLifecycleEvent(t, p, webhook.TypePaused)
 				}
 			})
 		}
 	}
 }
-func p4ResumePatches(t *testing.T, failure string) {
+func patchResumeDependencies(t *testing.T, failure string) {
 	p := gomonkey.NewPatches()
 	t.Cleanup(p.Reset)
 	p.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
 		return &pausesnap.Record{SnapshotID: "snap", Status: "READY", NodeIP: "127.0.0.1", Backend: "xfs"}, nil
 	})
-	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) { return p4Spec(), nil })
+	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) { return lifecycleSpec(), nil })
 	p.ApplyFunc(cubelet.Create, func(ctx context.Context, _ string, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 		require.NoError(t, ctx.Err())
 		if failure == "node" {
@@ -199,36 +199,36 @@ func p4ResumePatches(t *testing.T, failure string) {
 	p.ApplyFunc(pausesnap.Delete, func(context.Context, string) error { return errors.New("warn-only binding") })
 	p.ApplyFunc(runAfterUpdateSandboxSuccessHook, func(context.Context, string, string, string, string) {})
 }
-func TestP4ResumeFinalBoundary(t *testing.T) {
+func TestResumeFinalBoundary(t *testing.T) {
 	for _, failure := range []string{"", "node", "identity", "proxy", "purge"} {
 		t.Run(failure, func(t *testing.T) {
-			p := p4Buffer(t)
-			p4ResumePatches(t, failure)
+			p := lifecycleBuffer(t)
+			patchResumeDependencies(t, failure)
 			rsp := resumeFromPauseSnapshot(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
 			if failure != "" {
 				require.NotEqual(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 				require.Empty(t, p.Events())
 			} else {
 				require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
-				p4Read(t, p, webhook.TypeResumed)
+				readLifecycleEvent(t, p, webhook.TypeResumed)
 			}
 		})
 	}
 }
 
-func TestP4BusinessRedisHTTP(t *testing.T) {
+func TestPauseResumeRuntimeHTTP(t *testing.T) {
 	r, bodies := webhooktest.Runtime(t, webhook.TypeCreated, webhook.TypeResumed, webhook.TypePaused)
 	SetWebhookPublisher(r.Publisher())
 	t.Cleanup(func() { SetWebhookPublisher(nil) })
-	c := p4Create(t, context.Background(), nil)
+	c := createLifecycleFixture(t, context.Background(), nil)
 	c.dealSuccResult()
 	t.Run("pause", func(t *testing.T) {
-		p4PausePatches(t, "", "s3")
+		patchPauseDependencies(t, "", "s3")
 		rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
 		require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	})
 	t.Run("resume", func(t *testing.T) {
-		p4ResumePatches(t, "")
+		patchResumeDependencies(t, "")
 		rsp := resumeFromPauseSnapshot(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
 		require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	})
@@ -247,11 +247,11 @@ func TestP4BusinessRedisHTTP(t *testing.T) {
 	require.Len(t, seen, 2)
 }
 
-func TestP4CreateCancellationDuringPostProcessing(t *testing.T) {
-	p := p4Buffer(t)
+func TestCreateCancellationDuringPostProcessing(t *testing.T) {
+	p := lifecycleBuffer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := p4Create(t, ctx, nil)
+	c := createLifecycleFixture(t, ctx, nil)
 	entered, release := make(chan struct{}), make(chan struct{})
 	setSandboxProxyMapFn = func(context.Context, *proxytypes.SandboxProxyMap) error { close(entered); <-release; return nil }
 	c.done = make(chan struct{})
@@ -267,15 +267,15 @@ func TestP4CreateCancellationDuringPostProcessing(t *testing.T) {
 	require.Empty(t, p.Events())
 }
 
-type p4TimeoutProvider struct{ seen []webhook.Origin }
+type resumeTimeoutProvider struct{ seen []webhook.Origin }
 
-func (p *p4TimeoutProvider) RefreshTimeout(ctx context.Context, _ string, _ int) (int64, error) {
+func (p *resumeTimeoutProvider) RefreshTimeout(ctx context.Context, _ string, _ int) (int64, error) {
 	p.seen = append(p.seen, webhook.OriginFromContext(ctx))
 	return 100, nil
 }
-func (p *p4TimeoutProvider) LookupEndAt(context.Context, string) (int64, error) { return 0, nil }
-func TestP4ResumeTimeoutOrigin(t *testing.T) {
-	p := &p4TimeoutProvider{}
+func (p *resumeTimeoutProvider) LookupEndAt(context.Context, string) (int64, error) { return 0, nil }
+func TestResumeTimeoutOrigin(t *testing.T) {
+	p := &resumeTimeoutProvider{}
 	old := getTimeoutProvider()
 	SetTimeoutProvider(p)
 	defer SetTimeoutProvider(old)
@@ -288,13 +288,13 @@ func TestP4ResumeTimeoutOrigin(t *testing.T) {
 	require.Equal(t, []webhook.Origin{webhook.OriginLifecycle, webhook.OriginLifecycle}, p.seen)
 	require.Equal(t, webhook.OriginLifecycle, webhook.OriginFromContext(ctx))
 }
-func TestP4FailoverEnqueuesOrigin(t *testing.T) {
+func TestFailoverEnqueuesOrigin(t *testing.T) {
 	if webhooktest.Isolated(t) {
 		return
 	}
-	f := p5Setup(t)
-	p4Buffer(t)
-	c := p4Create(t, context.Background(), nil)
+	f := setupDestroyFixture(t)
+	lifecycleBuffer(t)
+	c := createLifecycleFixture(t, context.Background(), nil)
 	c.masterRsp.SandboxID = "sb"
 	c.setMasterRsp(int(errorcode.ErrorCode_DBError), "fail")
 	c.failover()
@@ -303,35 +303,35 @@ func TestP4FailoverEnqueuesOrigin(t *testing.T) {
 	require.Equal(t, task.DestroySandbox, f.pending.TaskType)
 }
 
-func TestP4BusinessFailureIsolation(t *testing.T) {
+func TestPauseResumeNotificationFailureIsolation(t *testing.T) {
 	webhooktest.FaultPublishers(t, func(t *testing.T, p webhook.Publisher) {
 		SetWebhookPublisher(p)
 		defer SetWebhookPublisher(nil)
-		c := p4Create(t, context.Background(), nil)
+		c := createLifecycleFixture(t, context.Background(), nil)
 		c.dealSuccResult()
 		require.Equal(t, int(errorcode.ErrorCode_Success), c.masterRsp.Ret.RetCode)
 		t.Run("pause", func(t *testing.T) {
-			p4PausePatches(t, "", "s3")
+			patchPauseDependencies(t, "", "s3")
 			rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
 			require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 		})
 		t.Run("resume", func(t *testing.T) {
-			p4ResumePatches(t, "")
+			patchResumeDependencies(t, "")
 			rsp := resumeFromPauseSnapshot(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
 			require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 		})
 	})
 }
 
-func TestP4UpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
+func TestUpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
 	for _, action := range []string{"pause", "resume"} {
 		for _, timeout := range []*int{nil, types.TimeoutPtr(0), types.TimeoutPtr(5), types.TimeoutPtr(-1)} {
 			t.Run(action, func(t *testing.T) {
-				buffer := p4Buffer(t)
+				buffer := lifecycleBuffer(t)
 				if action == "pause" {
-					p4PausePatches(t, "", "s3")
+					patchPauseDependencies(t, "", "s3")
 				} else {
-					p4ResumePatches(t, "")
+					patchResumeDependencies(t, "")
 				}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -344,7 +344,7 @@ func TestP4UpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
 				})
 				p.ApplyFunc(localcache.ListKnownSandboxIDs, func() []string { return []string{"sb"} })
 				p.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache { return &localcache.SandboxCache{HostIP: "127.0.0.1"} })
-				provider := &p4TimeoutProvider{}
+				provider := &resumeTimeoutProvider{}
 				old := getTimeoutProvider()
 				SetTimeoutProvider(provider)
 				defer SetTimeoutProvider(old)
@@ -354,7 +354,7 @@ func TestP4UpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
 				if action == "resume" {
 					kind = webhook.TypeResumed
 				}
-				p4Read(t, buffer, kind)
+				readLifecycleEvent(t, buffer, kind)
 				if action == "resume" && timeout != nil && *timeout != 0 {
 					require.Equal(t, []webhook.Origin{webhook.OriginLifecycle}, provider.seen)
 				} else {
@@ -365,14 +365,14 @@ func TestP4UpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
 	}
 }
 
-func TestP4PauseDuplicateAndUploadResult(t *testing.T) {
+func TestPauseDuplicateAndUploadResult(t *testing.T) {
 	for _, terminal := range []string{constants.RemoteStatusReady, constants.RemoteStatusFailed} {
 		t.Run(terminal, func(t *testing.T) {
 			db := webhooktest.SnapshotDB(t)
 			pausesnap.Init(db)
 			defer pausesnap.Init(nil)
-			p := p4Buffer(t)
-			p4PausePatches(t, "real-store", "s3")
+			p := lifecycleBuffer(t)
+			patchPauseDependencies(t, "real-store", "s3")
 			req := &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}
 			first := pauseSandbox(context.Background(), req, "127.0.0.1")
 			require.Equal(t, int(errorcode.ErrorCode_Success), first.Ret.RetCode)
@@ -385,16 +385,16 @@ func TestP4PauseDuplicateAndUploadResult(t *testing.T) {
 			require.Contains(t, again.Ret.RetMsg, "already has pause snapshot")
 			require.Len(t, p.Events(), 1)
 			webhooktest.ReconcileUpload(t, db, constants.PauseSnapshotTableName, row.SnapshotID, terminal, p)
-			p4Read(t, p, webhook.TypePaused)
+			readLifecycleEvent(t, p, webhook.TypePaused)
 		})
 	}
 }
 
-func TestP4PauseTimeoutHealingDoesNotPublish(t *testing.T) {
+func TestPauseTimeoutHealingDoesNotPublish(t *testing.T) {
 	db := webhooktest.SnapshotDB(t)
 	pausesnap.Init(db)
 	defer pausesnap.Init(nil)
-	p := p4Buffer(t)
+	p := lifecycleBuffer(t)
 	row := &models.PauseSnapshotRecord{SnapshotID: "snap-timeout", SandboxID: "sb", NodeID: "node", NodeIP: "127.0.0.1", InstanceType: "cubebox", Backend: "s3", Status: "FAILED", LastError: "rpc error: code = DeadlineExceeded desc = context deadline exceeded"}
 	require.NoError(t, db.Create(row).Error)
 	patches := gomonkey.NewPatches()
@@ -438,21 +438,21 @@ func TestDisabledRuntimeSkipsLifecycleProducerPreparation(t *testing.T) {
 			patches.ApplyFunc(webhook.WithKillReason, func(context.Context, string) context.Context { panic("disabled reason context") })
 			patches.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("disabled Capture/UUID path") })
 			t.Run("pause", func(t *testing.T) {
-				p4PausePatches(t, "", "xfs")
+				patchPauseDependencies(t, "", "xfs")
 				require.Equal(t, 200, pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1").Ret.RetCode)
 			})
 			t.Run("resume", func(t *testing.T) {
-				p4ResumePatches(t, "")
+				patchResumeDependencies(t, "")
 				require.Equal(t, 200, resumeFromPauseSnapshot(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1").Ret.RetCode)
 			})
 			t.Run("updates-and-destroy", func(t *testing.T) {
-				f := p5Setup(t)
+				f := setupDestroyFixture(t)
 				old := getTimeoutProvider()
 				defer SetTimeoutProvider(old)
-				SetTimeoutProvider(p5Timeout{1700000000123, nil})
+				SetTimeoutProvider(timeoutFixture{1700000000123, nil})
 				require.Equal(t, 200, SetTimeout(context.Background(), &types.SetTimeoutRequest{SandboxID: "sb", Timeout: 5}).Ret.RetCode)
 				require.Equal(t, 200, Refresh(context.Background(), &types.RefreshSandboxRequest{SandboxID: "sb", Duration: 5}).Ret.RetCode)
-				require.Equal(t, 200, UpdateNetwork(context.Background(), p5Network()).Ret.RetCode)
+				require.Equal(t, 200, UpdateNetwork(context.Background(), networkFixture()).Ret.RetCode)
 				for _, sync := range []bool{true, false} {
 					require.Equal(t, 200, DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{SandboxID: "sb", InstanceType: "cubebox", Sync: sync}).Ret.RetCode)
 					if !sync {
@@ -463,8 +463,8 @@ func TestDisabledRuntimeSkipsLifecycleProducerPreparation(t *testing.T) {
 				require.Equal(t, 3, f.specReads)
 			})
 			t.Run("failover", func(t *testing.T) {
-				f := p5Setup(t)
-				c := p4Create(t, context.Background(), nil)
+				f := setupDestroyFixture(t)
+				c := createLifecycleFixture(t, context.Background(), nil)
 				c.masterRsp.SandboxID = "sb"
 				c.setMasterRsp(int(errorcode.ErrorCode_DBError), "fail")
 				c.failover()

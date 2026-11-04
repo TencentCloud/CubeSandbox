@@ -89,6 +89,10 @@ class ReceiverTest(unittest.TestCase):
                 self.assertFalse(records[-1]["signature_present"])
                 for index, record in enumerate(records):
                     self.assertEqual(base64.b64decode(record["body_base64"]), body if index < 3 else fresh)
+                    headers = {key.lower(): value for key, value in record["headers"]}
+                    self.assertEqual(headers["e2b-webhook-id"], "sub")
+                    self.assertEqual(headers["e2b-delivery-id"], record["delivery_id"])
+                    self.assertEqual(headers["content-type"], "application/json")
                 conn = http.client.HTTPConnection(*address, timeout=3)
                 try:
                     conn.request("POST", "/", b"", {"Content-Length": str(256*1024+1)})

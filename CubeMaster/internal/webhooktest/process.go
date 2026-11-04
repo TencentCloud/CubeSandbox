@@ -16,12 +16,12 @@ import (
 // Call only from a top-level test, before installing any dependency patches.
 func Isolated(t *testing.T) bool {
 	t.Helper()
-	if os.Getenv("WEBHOOK_FIXTURE_PROCESS") == t.Name() {
+	if os.Getenv("WEBHOOK_TEST_FIXTURE_PROCESS") == t.Name() {
 		return false
 	}
 	args := append(os.Args[1:], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.v")
 	cmd := exec.Command(os.Args[0], args...)
-	cmd.Env = append(os.Environ(), "WEBHOOK_FIXTURE_PROCESS="+t.Name())
+	cmd.Env = append(os.Environ(), "WEBHOOK_TEST_FIXTURE_PROCESS="+t.Name())
 	output, err := cmd.CombinedOutput()
 	t.Log(string(output))
 	require.NoError(t, err)

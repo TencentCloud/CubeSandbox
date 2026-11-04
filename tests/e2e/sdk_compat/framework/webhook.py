@@ -1,12 +1,10 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""P6 receiver evidence checks, shared by real-entrypoint acceptance cases."""
+"""Receiver evidence checks shared by real lifecycle acceptance cases."""
 import base64
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
-import subprocess
 from uuid import UUID
 
 ENVELOPE = {
@@ -50,33 +48,16 @@ def records(path, sandbox_id, subscription):
         UUID(event["id"])
         UUID(row["delivery_id"])
         assert row["content_type"] == "application/json"
+        headers = {key.lower(): value for key, value in row["headers"]}
+        assert headers["e2b-webhook-id"] == subscription
+        assert headers["e2b-delivery-id"] == row["delivery_id"]
+        assert headers["content-type"] == row["content_type"]
         assert not row.get("signature_present", False)
         assert not row.get("signature_version_present", False)
         assert row["delivery_id"] not in deliveries, "delivery ID reused"
         deliveries.add(row["delivery_id"])
         assert bodies.setdefault(event["id"], body) == body, "retry changed stored bytes"
         result.append((row, event))
-    return result
-
-
-def delivery_records(container, password):
-    """Read-only P6 evidence from an already inventoried dedicated Redis."""
-    env = {**os.environ, "REDISCLI_AUTH": password}
-    raw = subprocess.check_output([
-        "docker", "exec", "-e", "REDISCLI_AUTH", container,
-        "redis-cli", "--json", "-n", os.environ.get("WEBHOOK_P6_REDIS_DB", "6"), "HGETALL",
-        "cube:v1:master:webhook:tasks:{delivery}"
-    ], env=env, text=True)
-    data = json.loads(raw)
-    if isinstance(data, list):
-        data = dict(zip(data[::2], data[1::2]))
-    result = []
-    for key, value in data.items():
-        record = json.loads(value)
-        immutable = json.loads(record["input"])
-        encoded = immutable["Body"]
-        body = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
-        result.append({"key": key, "record": record, "event": json.loads(body)})
     return result
 
 
@@ -100,11 +81,15 @@ def assert_payload(event, label, *, template=None, metadata=None, execution=None
     utc_time(event["timestamp"])
     for key in ("sandbox_execution_id", "sandbox_build_id", "sandbox_team_id", "event_category", "event_label"):
         assert event[key] == "", f"invented {key}"
+    if template is None and label in {"updated", "killed"}:
+        template = ""
     if template is not None:
         assert event["sandbox_template_id"] == template
     data = event.get("event_data", {})
     assert not set(data) - FIELDS[label] - {"sandbox_metadata"}, "unexpected event fields"
-    if metadata is not None:
+    if metadata is None:
+        assert "sandbox_metadata" not in data, "metadata without a trusted current create request"
+    else:
         actual = data["sandbox_metadata"]
         for key, value in metadata.items():
             assert actual[key] == value
@@ -124,6 +109,7 @@ def assert_payload(event, label, *, template=None, metadata=None, execution=None
         for key, value in execution.items():
             assert data["execution"][key] == value
     if label == "killed":
+        assert data["execution"] == {"started_at": ""}, "invented destroy execution resources"
         assert isinstance(data["kill_reason"], str) and data["kill_reason"]
         if reason is not None:
             assert data["kill_reason"] == reason

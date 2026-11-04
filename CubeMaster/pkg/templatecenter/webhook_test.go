@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-func p4Checkpoint(t *testing.T, backend, failure string) error {
+func runCheckpointFixture(t *testing.T, backend, failure string) error {
 	t.Helper()
 	p := gomonkey.NewPatches()
 	defer p.Reset()
@@ -99,7 +99,7 @@ func p4Checkpoint(t *testing.T, backend, failure string) error {
 	require.Equal(t, "original-template", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	return err
 }
-func TestP4CheckpointFinalBoundary(t *testing.T) {
+func TestCheckpointFinalBoundary(t *testing.T) {
 	for _, backend := range []string{"xfs", "s3"} {
 		for _, failure := range []string{"", "commit", "replica", "snapshot", "ready", "query", "unclaimed", "uploading", "cancel-after-claim", "cancel-during", "cancel-failure", "cancel-at-claim"} {
 			t.Run(backend+failure, func(t *testing.T) {
@@ -107,7 +107,7 @@ func TestP4CheckpointFinalBoundary(t *testing.T) {
 				require.NoError(t, e)
 				SetWebhookPublisher(p)
 				defer SetWebhookPublisher(nil)
-				e = p4Checkpoint(t, backend, failure)
+				e = runCheckpointFixture(t, backend, failure)
 				if failure == "" || failure == "unclaimed" || failure == "uploading" || failure == "cancel-after-claim" || failure == "cancel-during" {
 					require.NoError(t, e)
 				} else {
@@ -137,11 +137,11 @@ func TestP4CheckpointFinalBoundary(t *testing.T) {
 		}
 	}
 }
-func TestP4CheckpointRedisHTTP(t *testing.T) {
+func TestCheckpointRuntimeHTTP(t *testing.T) {
 	r, bodies := webhooktest.Runtime(t, webhook.TypeCheckpointed)
 	SetWebhookPublisher(r.Publisher())
 	defer SetWebhookPublisher(nil)
-	require.NoError(t, p4Checkpoint(t, "s3", ""))
+	require.NoError(t, runCheckpointFixture(t, "s3", ""))
 	select {
 	case raw := <-bodies:
 		var b map[string]any
@@ -152,22 +152,22 @@ func TestP4CheckpointRedisHTTP(t *testing.T) {
 		t.Fatal("checkpoint pipeline timeout")
 	}
 }
-func TestP4CheckpointFailureIsolation(t *testing.T) {
+func TestCheckpointFailureIsolation(t *testing.T) {
 	webhooktest.FaultPublishers(t, func(t *testing.T, p webhook.Publisher) {
 		SetWebhookPublisher(p)
 		defer SetWebhookPublisher(nil)
-		require.NoError(t, p4Checkpoint(t, "s3", ""))
+		require.NoError(t, runCheckpointFixture(t, "s3", ""))
 	})
 }
 
-func TestP4CheckpointUploadResult(t *testing.T) {
+func TestCheckpointUploadResult(t *testing.T) {
 	for _, terminal := range []string{constants.RemoteStatusReady, constants.RemoteStatusFailed} {
 		t.Run(terminal, func(t *testing.T) {
 			p, err := webhook.NewBufferedPublisher(4)
 			require.NoError(t, err)
 			SetWebhookPublisher(p)
 			defer SetWebhookPublisher(nil)
-			require.NoError(t, p4Checkpoint(t, "s3", "uploading"))
+			require.NoError(t, runCheckpointFixture(t, "s3", "uploading"))
 			db := webhooktest.SnapshotDB(t)
 			// Seed the persisted READY result of the controlled storage dependency.
 			require.NoError(t, db.Create(&models.SnapshotRecord{SnapshotID: "snap-new", OriginNodeIP: "127.0.0.1", Backend: "s3", Status: "READY", RemoteStatus: constants.RemoteStatusInProgress}).Error)
@@ -196,7 +196,7 @@ func TestCheckpointDisabledRuntimeSkipsPreparation(t *testing.T) {
 			panic("disabled checkpoint fields")
 		})
 		patches.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("disabled checkpoint capture") })
-		require.NoError(t, p4Checkpoint(t, "xfs", ""))
+		require.NoError(t, runCheckpointFixture(t, "xfs", ""))
 		patches.Reset()
 		require.Equal(t, before, webhooktest.CaptureAccepted(t))
 		SetWebhookPublisher(nil)

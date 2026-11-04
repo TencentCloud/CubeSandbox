@@ -21,7 +21,7 @@ import (
 func TestNetworkNotificationRetryAndRestartLoss(t *testing.T) {
 	for _, restart := range []bool{false, true} {
 		t.Run(map[bool]string{false: "retry", true: "restart-loses-backlog"}[restart], func(t *testing.T) {
-			p5Setup(t)
+			setupDestroyFixture(t)
 			defer SetWebhookPublisher(nil)
 			type request struct {
 				body                          []byte
@@ -55,7 +55,7 @@ func TestNetworkNotificationRetryAndRestartLoss(t *testing.T) {
 				return r
 			}
 			first := start()
-			require.Equal(t, 200, UpdateNetwork(context.Background(), p5Network()).Ret.RetCode)
+			require.Equal(t, 200, UpdateNetwork(context.Background(), networkFixture()).Ret.RetCode)
 			var original request
 			select {
 			case original = <-received:

@@ -40,7 +40,7 @@ class StorageProxyTest(unittest.TestCase):
                 process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("storage_proxy.py")),
                     "--upstream", str(upstream), "--listen", str(listener),
                     "--control", str(control), "--evidence", str(evidence)],
-                    env={**os.environ, "WEBHOOK_P6_RUN_ROOT": str(root)},
+                    env={**os.environ, "WEBHOOK_TEST_RUN_ROOT": str(root)},
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 try:
                     deadline = time.monotonic() + 5
