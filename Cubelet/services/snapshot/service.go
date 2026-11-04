@@ -52,7 +52,7 @@ func (s *service) Register(server *grpc.Server) error {
 
 const (
 	// statusWaitPoll is how often a Status call held by wait_ready_ms checks
-	// again; a jfs check runs `juicefs info` on the package files.
+	// again; a jfs check queries the mount's control file for package objects.
 	statusWaitPoll = 100 * time.Millisecond
 	statusWaitMax  = time.Minute
 )
