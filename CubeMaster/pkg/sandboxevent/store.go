@@ -6,9 +6,10 @@
 // paused, resumed, killed). Schema lives in pkgs/cubedb/migrate.
 //
 // Recording never affects the sandbox operation that produced the event:
-// events are queued and written by one background worker, and are dropped
-// with a warning when the queue is full or the write fails. Before Init has
-// succeeded nothing is recorded.
+// events are queued and written in batches by one background worker. An
+// event is dropped, with a warning and a count in
+// sandbox_event_dropped_total{reason}, when the store is not ready, the
+// queue is full, the write fails, or CubeMaster is shutting down.
 package sandboxevent
 
 import (
@@ -19,6 +20,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"gorm.io/gorm"
@@ -39,7 +42,27 @@ const (
 
 	queueSize    = 1024
 	writeTimeout = 3 * time.Second
+
+	// A batch is written when it holds maxBatch events or batchWait after
+	// its first event, whichever comes first.
+	maxBatch  = 100
+	batchWait = 200 * time.Millisecond
 )
+
+// Drop reasons, the values of the reason label of droppedTotal.
+const (
+	dropNotReady    = "not_ready"
+	dropQueueFull   = "queue_full"
+	dropWriteFailed = "write_failed"
+	dropShutdown    = "shutdown"
+)
+
+// droppedTotal counts events that were never written, so operators can tell
+// an incomplete history from a quiet sandbox.
+var droppedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "sandbox_event_dropped_total",
+	Help: "Total sandbox lifecycle events dropped without being written, by reason.",
+}, []string{"reason"})
 
 var ErrNotReady = errors.New("sandbox event store is not initialized")
 
@@ -48,6 +71,9 @@ var (
 	db         *gorm.DB
 	queue      chan *models.SandboxEvent
 	writerDone chan struct{}
+	// stopped is set by Stop, so late events count as shutdown drops
+	// rather than as an unready store.
+	stopped bool
 )
 
 // Init attaches the shared gorm handle and starts the writer. The table is
@@ -64,6 +90,7 @@ func Init(client *gorm.DB) error {
 	mu.Lock()
 	defer mu.Unlock()
 	db = client
+	stopped = false
 	if queue == nil {
 		queue = make(chan *models.SandboxEvent, queueSize)
 		writerDone = make(chan struct{})
@@ -90,6 +117,11 @@ func Record(ctx context.Context, sandboxID, event, templateID, reason string) {
 	defer mu.RUnlock()
 	q := queue
 	if q == nil {
+		if stopped {
+			droppedTotal.WithLabelValues(dropShutdown).Inc()
+		} else {
+			droppedTotal.WithLabelValues(dropNotReady).Inc()
+		}
 		return
 	}
 	ev := &models.SandboxEvent{
@@ -102,6 +134,7 @@ func Record(ctx context.Context, sandboxID, event, templateID, reason string) {
 	select {
 	case q <- ev:
 	default:
+		droppedTotal.WithLabelValues(dropQueueFull).Inc()
 		log.G(ctx).Warnf("sandboxevent: queue full, dropping %s event of sandbox %s", event, sandboxID)
 	}
 }
@@ -132,8 +165,34 @@ func truncate(s string, n int) string {
 // CreatedAt, which is stamped when the event is recorded.
 func writeLoop(q <-chan *models.SandboxEvent, done chan<- struct{}) {
 	defer close(done)
-	for ev := range q {
-		write(context.Background(), ev)
+	batch := make([]*models.SandboxEvent, 0, maxBatch)
+	timer := time.NewTimer(batchWait)
+	timer.Stop()
+	flush := func() {
+		if len(batch) > 0 {
+			write(context.Background(), batch)
+			batch = batch[:0]
+		}
+	}
+	for {
+		select {
+		case ev, ok := <-q:
+			if !ok {
+				timer.Stop()
+				flush()
+				return
+			}
+			batch = append(batch, ev)
+			if len(batch) == 1 {
+				timer.Reset(batchWait)
+			}
+			if len(batch) == maxBatch {
+				timer.Stop()
+				flush()
+			}
+		case <-timer.C:
+			flush()
+		}
 	}
 }
 
@@ -144,6 +203,7 @@ func Stop(ctx context.Context) {
 	mu.Lock()
 	q, done := queue, writerDone
 	queue, writerDone = nil, nil
+	stopped = true
 	mu.Unlock()
 	if q == nil {
 		return
@@ -152,7 +212,9 @@ func Stop(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		log.G(ctx).Warnf("sandboxevent: stopped before %d queued events were written", len(q))
+		n := len(q)
+		droppedTotal.WithLabelValues(dropShutdown).Add(float64(n))
+		log.G(ctx).Warnf("sandboxevent: stopped before %d queued events were written", n)
 	}
 }
 
@@ -162,16 +224,38 @@ func normalizeID(id string) string {
 	return strings.ToLower(strings.TrimSpace(id))
 }
 
-func write(ctx context.Context, ev *models.SandboxEvent) {
+// write inserts a batch in one statement. When that fails it retries the
+// rows one by one, so a single bad row does not take the batch with it.
+func write(ctx context.Context, batch []*models.SandboxEvent) {
 	client := getDB()
 	if client == nil {
+		droppedTotal.WithLabelValues(dropNotReady).Add(float64(len(batch)))
 		return
 	}
+	err := insert(ctx, client, batch)
+	if err == nil {
+		return
+	}
+	if len(batch) == 1 {
+		reportDropped(ctx, batch[0], err)
+		return
+	}
+	for _, ev := range batch {
+		if err := insert(ctx, client, ev); err != nil {
+			reportDropped(ctx, ev, err)
+		}
+	}
+}
+
+func insert(ctx context.Context, client *gorm.DB, rows any) error {
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	if err := client.WithContext(ctx).Create(ev).Error; err != nil {
-		log.G(ctx).Warnf("sandboxevent: dropping %s event of sandbox %s: %v", ev.Event, ev.SandboxID, err)
-	}
+	return client.WithContext(ctx).Create(rows).Error
+}
+
+func reportDropped(ctx context.Context, ev *models.SandboxEvent, err error) {
+	droppedTotal.WithLabelValues(dropWriteFailed).Inc()
+	log.G(ctx).Warnf("sandboxevent: dropping %s event of sandbox %s: %v", ev.Event, ev.SandboxID, err)
 }
 
 // List returns the sandbox's events oldest first, starting after the event

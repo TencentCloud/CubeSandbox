@@ -98,6 +98,14 @@ export function SandboxLifecycleTimeline({
     },
   });
   const events = history.data?.events ?? [];
+  // An ended sandbox whose kill never showed up: the event may have been
+  // dropped, so say the history may be incomplete rather than imply it ran on.
+  const missingKill =
+    !live &&
+    events.length > 0 &&
+    !history.data?.hasMore &&
+    endedFetches.current >= KILL_WAIT_POLLS &&
+    !events.some((e) => e.event === 'killed');
 
   if (hideWhenEmpty && events.length === 0) {
     return null;
@@ -153,6 +161,9 @@ export function SandboxLifecycleTimeline({
         <p className="mt-2 text-xs text-muted-foreground">
           {t('lifecycle.trimmed', { count: MAX_EVENTS })}
         </p>
+      ) : null}
+      {missingKill ? (
+        <p className="mt-2 text-xs text-muted-foreground">{t('lifecycle.incomplete')}</p>
       ) : null}
       {history.data?.hasMore ? (
         <p className="mt-2 text-xs text-muted-foreground">{t('lifecycle.loadingMore')}</p>

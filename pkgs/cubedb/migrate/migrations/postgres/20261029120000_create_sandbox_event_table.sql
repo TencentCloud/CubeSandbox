@@ -11,11 +11,11 @@ SELECT cubemaster_acquire_migration_lock('cubemaster_migration_20261029120000_sb
 
 CREATE TABLE IF NOT EXISTS t_cube_sandbox_event (
   id bigserial NOT NULL,
-  sandbox_id varchar(64) NOT NULL,
+  sandbox_id varchar(128) NOT NULL,
   event varchar(32) NOT NULL,
   template_id varchar(128) NOT NULL DEFAULT '',
   reason varchar(64) NOT NULL DEFAULT '',
-  created_at timestamp NOT NULL,
+  created_at timestamptz NOT NULL,
   PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_sandbox_event_sandbox_id ON t_cube_sandbox_event (sandbox_id, id);

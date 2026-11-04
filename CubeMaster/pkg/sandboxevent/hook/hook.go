@@ -10,6 +10,7 @@ package hook
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -56,13 +57,18 @@ func Init(ctx context.Context, client *gorm.DB) error {
 	return err
 }
 
+var registerOnce sync.Once
+
 // Register adds the recording hooks to the sandbox hook chains. Both the
 // synchronous and the asynchronous destroy path end with their own hook.
+// Only the first call registers, so events are never recorded twice.
 func Register() {
-	sandbox.RegisterAfterCreateSandboxSuccessHook(onAfterCreate)
-	sandbox.RegisterAfterDestroySandboxSuccessHook(onAfterDestroy)
-	task.RegisterAfterDestroyTaskSuccessHook(onAfterDestroy)
-	sandbox.RegisterAfterUpdateSandboxSuccessHook(onAfterUpdate)
+	registerOnce.Do(func() {
+		sandbox.RegisterAfterCreateSandboxSuccessHook(onAfterCreate)
+		sandbox.RegisterAfterDestroySandboxSuccessHook(onAfterDestroy)
+		task.RegisterAfterDestroyTaskSuccessHook(onAfterDestroy)
+		sandbox.RegisterAfterUpdateSandboxSuccessHook(onAfterUpdate)
+	})
 }
 
 func onAfterCreate(ctx context.Context, sandboxID, _, _ string, req *sandboxtypes.CreateCubeSandboxReq) error {

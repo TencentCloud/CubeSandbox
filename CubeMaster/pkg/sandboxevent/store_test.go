@@ -6,12 +6,14 @@ package sandboxevent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/glebarez/sqlite"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -159,4 +161,67 @@ func TestStopDrainsQueuedEvents(t *testing.T) {
 	// After Stop, recording is a no-op, and Init starts a fresh writer.
 	Record(context.Background(), "sb-drain", EventKilled, "", "")
 	require.NoError(t, Init(getDB()))
+}
+
+func TestRecordWritesBurstsInBatches(t *testing.T) {
+	newTestDB(t)
+	// More than two full batches plus a partial one that only the timer flushes.
+	n := 2*maxBatch + 7
+	for i := 0; i < n; i++ {
+		Record(context.Background(), "sb-burst", EventPaused, "", "")
+	}
+	var rows []models.SandboxEvent
+	require.Eventually(t, func() bool {
+		var err error
+		rows, _, err = List(context.Background(), "sb-burst", 0, MaxListLimit)
+		return err == nil && len(rows) == n
+	}, 3*time.Second, 10*time.Millisecond)
+}
+
+func TestBadRowDoesNotDropItsBatch(t *testing.T) {
+	client := newTestDB(t)
+	errBad := errors.New("bad row")
+	require.NoError(t, client.Callback().Create().Before("gorm:create").Register("test:reject_bad", func(tx *gorm.DB) {
+		switch dest := tx.Statement.Dest.(type) {
+		case []*models.SandboxEvent:
+			for _, ev := range dest {
+				if ev.SandboxID == "sb-bad" {
+					_ = tx.AddError(errBad)
+				}
+			}
+		case *models.SandboxEvent:
+			if dest.SandboxID == "sb-bad" {
+				_ = tx.AddError(errBad)
+			}
+		}
+	}))
+	before := dropped(dropWriteFailed)
+	Record(context.Background(), "sb-good", EventCreated, "", "")
+	Record(context.Background(), "sb-bad", EventCreated, "", "")
+	Record(context.Background(), "sb-good", EventKilled, "", "")
+	rows := waitForEvents(t, "sb-good", 2)
+	assert.Equal(t, EventKilled, rows[1].Event)
+	require.Eventually(t, func() bool {
+		return dropped(dropWriteFailed) == before+1
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestDroppedEventsAreCounted(t *testing.T) {
+	newTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	Stop(ctx)
+	before := dropped(dropShutdown)
+	Record(context.Background(), "sb-late", EventKilled, "", "")
+	assert.Equal(t, before+1, dropped(dropShutdown))
+	require.NoError(t, Init(getDB()))
+}
+
+// dropped reads the dropped-events counter for one reason.
+func dropped(reason string) float64 {
+	var m dto.Metric
+	if err := droppedTotal.WithLabelValues(reason).Write(&m); err != nil {
+		return -1
+	}
+	return m.GetCounter().GetValue()
 }

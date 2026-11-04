@@ -181,11 +181,15 @@ func parseSandboxEventsReq(c *gin.Context) (*SandboxEventsReq, error) {
 		req.Cursor = v
 	}
 	if limit := c.Query("limit"); limit != "" && req.Limit == 0 {
-		v, err := strconv.Atoi(limit)
+		v, err := strconv.ParseUint(limit, 10, 31)
 		if err != nil {
-			return nil, errors.New("limit must be an integer")
+			return nil, errors.New("limit must be a non-negative integer")
 		}
-		req.Limit = v
+		req.Limit = int(v)
+	}
+	// Rejected like CubeAPI and CubeOps do, rather than read as the default.
+	if req.Limit < 0 {
+		return nil, errors.New("limit must be a non-negative integer")
 	}
 	return req, nil
 }
@@ -194,7 +198,11 @@ func parseSandboxEventsReq(c *gin.Context) (*SandboxEventsReq, error) {
 // Events are stored under the full sandbox ID. The ID is first matched as
 // given, which keeps the history of a deleted sandbox readable; only when that
 // finds nothing, and the ID is not a full ID, is it resolved like the other
-// read paths, so a short ID of a live sandbox works too. An unknown ID returns an empty list.
+// read paths, so a short ID of a live sandbox works too.
+//
+// This route never answers 404: an unknown or deleted ID is an empty list.
+// CubeAPI and CubeOps take a 404 to mean an older CubeMaster without the
+// route and show an empty history, so a 404 here would hide a real error.
 func handleSandboxEventsAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	setRetCode := func(code int64) {

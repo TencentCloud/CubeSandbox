@@ -281,8 +281,6 @@ func graceFullStop() {
 
 		task.Stop(ctx)
 		scheduler.Stop(ctx)
-		// After the tasks, so in-flight destroys have recorded their kills.
-		sandboxevent.Stop(ctx)
 		close(done)
 	}()
 
@@ -292,7 +290,18 @@ func graceFullStop() {
 	case <-done:
 		CubeLog.WithContext(ctx).Error("graceFullStop succ")
 	}
+
+	// After the tasks, so in-flight destroys have recorded their kills, and
+	// with a budget of its own so slow tasks cannot leave no time to write
+	// the queued events.
+	eventCtx, eventCancel := context.WithTimeout(context.Background(), sandboxEventStopTimeout)
+	defer eventCancel()
+	sandboxevent.Stop(eventCtx)
 }
+
+// sandboxEventStopTimeout bounds writing the queued lifecycle events on
+// shutdown; a full queue is a handful of batch inserts.
+const sandboxEventStopTimeout = 5 * time.Second
 
 func serveDebug(ctx context.Context, cfg *config.Config) error {
 	if cfg.Common.Debug.Address != "" {

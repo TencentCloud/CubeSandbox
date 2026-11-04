@@ -115,6 +115,14 @@ func TestSandboxEventsAction(t *testing.T) {
 		bytes.NewReader([]byte(`{"sandboxID":"sb-gone","cursor":-1}`))))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), badBody.Ret.RetCode)
 	assert.Contains(t, badBody.Ret.RetMsg, "invalid request body")
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/cube/sandbox/events?sandbox_id=sb-gone&limit=-1", nil),
+		httptest.NewRequest(http.MethodPost, "/cube/sandbox/events",
+			bytes.NewReader([]byte(`{"sandboxID":"sb-gone","limit":-1}`))),
+	} {
+		negative := call(req)
+		assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), negative.Ret.RetCode)
+	}
 	huge := call(httptest.NewRequest(http.MethodPost, "/cube/sandbox/events",
 		bytes.NewReader(bytes.Repeat([]byte(" "), maxEventsReqBody+10))))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), huge.Ret.RetCode)

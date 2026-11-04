@@ -5,7 +5,7 @@
   "runtimeDesc": "Server-reported lifecycle fields.",
   "metadata": "Metadata",
   "noMetadata": "No metadata.",
-  "logs": "Events",
+  "logs": "Logs",
   "logsDesc": "Recent events. Auto-refresh 10s.",
   "logsLoading": "Loading…",
   "logsEmpty": "No log entries yet.",
@@ -71,6 +71,7 @@
       "timeout": "timed out",
       "create_failed": "create failed"
     },
+    "incomplete": "No kill event was recorded; this history may be incomplete.",
     "loadingMore": "Older history loaded; newer events are still loading…",
     "trimmed": "Showing the newest {{count}} events; older ones are not shown."
   }

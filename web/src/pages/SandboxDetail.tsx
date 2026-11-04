@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { sandboxApi } from '@/api/client';
 import { ApiError } from '@/lib/api';
@@ -39,7 +39,6 @@ function formatLogTime(ts: string): string {
 // ── Main page ───────────────────────────────────────────────────────────────
 export default function SandboxDetailPage() {
   const { sandboxID = '' } = useParams();
-  const nav = useNavigate();
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxDetail');
 
@@ -88,9 +87,12 @@ export default function SandboxDetailPage() {
     mutationFn: () => sandboxApi.kill(sandboxID),
     onMutate: () => setActionError(null),
     onError: onLifecycleError,
+    // Stay on the page: the detail query then 404s into the ended view,
+    // where the timeline shows the kill.
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
-      nav('/sandboxes');
+      qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
+      qc.invalidateQueries({ queryKey: ['sandbox-events', sandboxID] });
     },
   });
   const pause = useMutation({
