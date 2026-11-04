@@ -1,114 +1,130 @@
 # JuiceFS service configuration
 
-The `jfs` backend stores templates, sandbox disks, memory, and snapshots directly in a shared JuiceFS. Every node mounts the same filesystem, and Cubelet accesses it at `/data/cubelet/jfs`.
+[JuiceFS](https://juicefs.com/docs/community/introduction/) is an open-source, POSIX-compatible distributed filesystem. It separates data from metadata, storing data in object storage and metadata in a metadata engine. Supported metadata engines include Redis, MySQL, and TiKV, while supported object stores include MinIO, S3, and COS.
 
-[JuiceFS](https://juicefs.com/docs/community/introduction/) is an open-source, POSIX-compatible distributed filesystem. Its FUSE client stores file data in S3, MinIO, or another object store, while directories, inodes, slices, and reference counts live in Redis, MySQL, TiKV, or another metadata engine. Multiple nodes can mount one volume and observe a strongly consistent file view. See the official [technical architecture](https://juicefs.com/docs/community/architecture/) for details.
+See [JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for Cube's JuiceFS storage design and the [JuiceFS performance benchmark](/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark) for performance results.
 
-See [Cube + JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for CubeSandbox's JuiceFS storage design and the [JuiceFS performance benchmark](/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark) for performance results.
-
-## Why CubeSandbox uses it
-
-JuiceFS preserves Cube's file-and-CoW storage model while making it shared:
-
-- **One template serves every node.** The cluster does not rebuild and retain one template copy per compute node.
-- **Clones copy metadata only.** Cubelet uses `copy_file_range` for rootfs and memory files. JuiceFS copies slice references and uses Redirect-on-Write for modified regions. See [Clone Files or Directories](https://juicefs.com/docs/community/guide/clone/).
-- **One file model covers local and cross-node restore.** Local restore uses the shared file plus local cache; cross-node restore imports through the same mount instead of a separate export format.
-- **Hot/cold tiering.** Durable blocks live in object storage and hot blocks stay on node-local SSD/NVMe, so capacity is not limited to one node's XFS disk.
-- **Standard storage services.** Metadata can use a dedicated Redis, MySQL, or TiKV, while data can reuse Cube's bundled MinIO with a separate bucket, or use COS and other compatible object stores.
-
-The same-environment comparison in `jfs-data.html` shows advantages in template start, snapshot creation, local restore, local FromSnap, and concurrent cross-node restore. Representative results are shown below to explain the design; they are not an SLA.
-
-| Operation | JuiceFS | CubeS3lvol | Observation |
-|---|---:|---:|---|
-| Template start, concurrency 1 / 5 | 152 / 231 ms | 341 / 775 ms | About 2–3× faster |
-| Create snapshot | 652 ms | 1487 ms | About 2.3× faster |
-| Local FromSnap, concurrency 1 / 5 | 137 / 227 ms | 482 / 874 ms | About 3–4× faster |
-| Cross-node resume, concurrency 5 | 1796 ms | 3026 ms | Better under concurrency |
-| Pause after dirtying 1 GiB | 0.77 s | 4.88 s | About 6× faster |
-
-Single-concurrency cross-node resume is similar between the two backends, and cold caches or guest probes can still produce tails. See [Cube + JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for the full topology, data paths, and trade-offs.
-
-The one-click package installs separate initialization, local mount, and status-check scripts. The client runs in a container using `juicedata/mount:ce-v1.4.1` by default. The one-click build neither builds nor bundles this image.
-
-The current Kubernetes chart does not format or mount JuiceFS. A Kubernetes deployment using `jfs` must provide the same host mount on every Cube Node and make it accessible to Cubelet.
+> For more details about JuiceFS internals, see its official [technical architecture](https://juicefs.com/docs/community/architecture/).
 
 ## Prerequisites
 
-Each node needs Docker, `/dev/fuse`, and network access to the same JuiceFS metadata engine and object store. Put the local cache on SSD/NVMe when possible.
+- Every node's kernel must support FUSE.
+- Every node must be able to access the same JuiceFS metadata engine and object store.
 
-`/data/cubelet/jfs` is a separate FUSE mount on each node. Every client uses the same `CUBE_JFS_META_URL` and `CUBE_JFS_META_PASSWORD`, so all nodes see one filesystem. The control node does not need SSH access to compute nodes.
+## Installation and deployment
 
-## 1. Initialize on the control node
+The one-click installer does not enable JuiceFS storage by default. You must enable it manually.
 
-For a new installation with the bundled Redis and MinIO, copy `env.example` to `.env`, enable JFS, set the metadata password, and run `sudo ./install.sh`:
+You can configure it in the `.env` file during one-click installation, or edit Cube's global configuration file, `.one-click.env`, after installation.
 
-By default, CubeSandbox uses Redis as the JuiceFS metadata engine and MinIO as the object store. To use different storage services, see [Storage migration](#storage-migration).
+```bash
+# Create the .env file in the one-click package.
+cp env.example .env
+
+# Alternatively, edit /usr/local/services/cubetoolbox/.one-click.env after installation.
+vim /usr/local/services/cubetoolbox/.one-click.env
+```
+
+### Initialize the control node
+
+Configure and initialize the JuiceFS filesystem on the control node first, then configure each compute node.
+
+By default, Cube uses Redis on the control node as the JuiceFS metadata engine and MinIO on the control node as the object store.
+
+> **This setup is intended only for a quick trial. For production deployment, switch to another metadata engine or object store.** See [Storage migration](#storage-migration) below.
+
+Set `ONE_CLICK_ENABLE_JFS=1`:
 
 ```bash
 ONE_CLICK_ENABLE_JFS=1
-CUBE_JFS_META_PASSWORD="password"
-
-CUBE_JFS_IMAGE="juicedata/mount:ce-v1.4.1"
-CUBE_JFS_CONTAINER_NAME="cube-sandbox-jfs"
-CUBE_JFS_MOUNT_PATH="/data/cubelet/jfs"
-CUBE_JFS_ROOT="cube"
-CUBE_JFS_CACHE_DIR="/data/cubelet/jfs-cache"
-CUBE_JFS_CACHE_SIZE_MB=102400
-CUBE_JFS_MOUNT_OPTS="--writeback"
 ```
 
-On the control node, the installer derives the metadata URL from `CUBE_SANDBOX_NODE_IP` and the bucket URL from the bundled MinIO endpoint. It persists both effective values in `.one-click.env`. The selected node IP must be reachable from every compute node. Inspect the result with `grep -E '^(CUBE_JFS_META_URL|CUBE_JFS_BUCKET)=' /usr/local/services/cubetoolbox/.one-click.env`.
-
-Set `CUBE_JFS_META_URL` and `CUBE_JFS_BUCKET` explicitly to override these defaults for an external metadata engine, external object store, custom port, or different address. Do not use `127.0.0.1` for a service that compute nodes must reach.
-
-The current one-click topology supports one control node and multiple compute nodes; `ONE_CLICK_CONTROL_PLANE_IP` accepts one IPv4 address. A multi-control-node or VIP deployment must explicitly provide stable external metadata and object-store endpoints.
-
-When the documented Redis URL points to an IPv4 address owned by the control node, `init.sh` automatically starts a dedicated `cube-sandbox-jfs-redis` container with persistent volume `cube-sandbox-jfs-redis-data`, using the URL port and `CUBE_JFS_META_PASSWORD`. Other metadata URLs are treated as externally managed. With bundled MinIO, `init.sh` reuses the generated `CUBE_S3_ACCESS_KEY_ID` and `CUBE_S3_SECRET_ACCESS_KEY`; set `CUBE_JFS_ACCESS_KEY` and `CUBE_JFS_SECRET_KEY` only to override them.
-
-Keep the password out of `CUBE_JFS_META_URL`: the scripts pass `CUBE_JFS_META_PASSWORD` to JuiceFS as `META_PASSWORD`, which avoids exposing it in process arguments and routine service output. Legacy URLs such as `redis://:password@10.0.0.11:6380/0` remain supported when `CUBE_JFS_META_PASSWORD` is unset. Do not configure both forms at the same time.
-
-Protect the credentials and initialize the filesystem:
+Run the following command on the control node to initialize the JuiceFS filesystem:
 
 ```bash
-sudo chmod 600 /usr/local/services/cubetoolbox/.one-click.env
 sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/init.sh
-sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh
 ```
 
-The init script only runs on a control node. It uses `juicefs format --no-update`, creating an unformatted volume while leaving an existing volume unchanged. The mount script enables the systemd service, updates Cubelet's `[cow.jfs]` section, verifies the mount, and restarts Cubelet.
-
-## 2. Mount on each compute node
-
-For a new compute node, set `ONE_CLICK_ENABLE_JFS=1` and copy `CUBE_JFS_META_PASSWORD` from the control node. The required `ONE_CLICK_CONTROL_PLANE_IP` already identifies the control node, so the installer derives `CUBE_JFS_META_URL=redis://<control-plane-ip>:6380/0`; do not repeat that IP in the normal configuration. Set `CUBE_JFS_META_URL` explicitly only for an external metadata service or custom endpoint. Keep the client settings the same, then run `sudo ./install-compute.sh`. Compute nodes do not need the bucket or object-store credentials because format stores them in JuiceFS metadata. Then run:
+Then mount the JuiceFS filesystem on the control node:
 
 ```bash
-sudo chmod 600 /usr/local/services/cubetoolbox/.one-click.env
 sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh
 ```
 
-Repeat on every compute node. The mount always adds `--no-usage-report --prefetch 16 --max-fuse-io 1M --cache-large-write`. `--writeback` reduces foreground latency, but resources remain non-ready until staged data is uploaded.
+### Initialize compute nodes
 
-The effective JFS switch and paths are persisted in `.one-click.env`. If a later upgrade replaces Cubelet's packaged `config.toml`, the Cubelet start script restores `[cow.jfs]` `enable`, `mount_path`, `root`, and `cache_dir` before starting the process; no manual config edit is required after an upgrade.
+Edit each compute node's configuration file and set `ONE_CLICK_ENABLE_JFS=1`.
 
-## 3. Check from the control node
+```bash
+ONE_CLICK_ENABLE_JFS=1
+```
 
-After all nodes are mounted, run:
+Run the following command on each compute node to mount the JuiceFS filesystem:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh
+```
+
+> After you run `mount.sh`, JuiceFS will mount automatically at boot.
+
+### Check from the control node
+
+After all nodes are mounted, run the following script on the control node to check the JuiceFS filesystem mounts:
 
 ```bash
 sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/check.sh
 ```
 
-The script checks the control node's service, mount, and read/write path, then prints active sessions from `juicefs status`. Confirm every expected node appears. Create a `--backend jfs` template, take a snapshot, wait for `remote_status=ready`, and isolate the origin to test cross-node start. See [Cross-node restore requirements](./requirements.md).
+The output should look similar to this:
+
+```bash
+JuiceFS volume
+  Name:          cube
+  Storage:       s3
+  Bucket:        http://<control-node-ip>:9000/cube-jfs
+  Active clients: 3
+  Used space:    12288 bytes
+
+Active client sessions
+  SID  CLIENT HOST   REPORTED ADDRESSES  MOUNT PATH         MOUNT TIME
+  ---  ------------  ------------------  -----------------  ------------------------------
+  2    a26a3780ac6f  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:46:15.482143729Z
+  1    c9af1d5570f4  172.17.0.3          /data/cubelet/jfs  2026-10-28T08:43:29.693002719Z
+  3    30e38b8072fe  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:49:31.946778689Z
+```
 
 ## Node changes
 
-To add a node, install and register it normally, add the metadata password and client settings to its `.one-click.env`, run `/usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh`, then run `/usr/local/services/cubetoolbox/scripts/cube-jfs/check.sh` on the control node. The metadata URL is derived from `ONE_CLICK_CONTROL_PLANE_IP` unless explicitly overridden. Do not format again.
+### Add a node
 
-To remove a node, isolate it and clear its sandboxes as described in [Node operations](/guide/node-operations). Run `sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh unmount` on that node, then run `cubeopscli node delete <node-id>` on the control node. Unmounting does not delete shared files; do not directly remove the node directory because snapshots or paused resources may still reference it.
+1. Install and register the new Cube compute node as usual.
+2. Set `ONE_CLICK_ENABLE_JFS=1` in the new node's `.one-click.env`.
+3. Run `sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh` on the new node.
+4. Run `sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/check.sh` on the control node and confirm that the new session appears.
+
+The control node only needs to run `/usr/local/services/cubetoolbox/scripts/cube-jfs/init.sh` once during initialization. **Do not run it again when adding nodes.**
+
+### Remove a node
+
+First isolate the node and clear its sandboxes as described in [Node operations](/guide/node-operations). Then run the following command on the node to be removed:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh unmount
+```
+
+Then delete the node record on the control node:
+
+```bash
+cubeopscli node delete <node-id>
+```
+
+Unmounting a node does not delete data in the shared JuiceFS filesystem. Do not directly delete `CUBE_JFS_ROOT/nodes/<node-name>`; the cluster may still reference templates, snapshots, or paused sandbox data stored there.
 
 ## Storage migration
 
-To use another object storage service, update the configuration file:
+### Migrate from MinIO to another object store
+
+Update the configuration file to use another object store:
 
 ```bash
 ONE_CLICK_ENABLE_JFS=1
@@ -124,25 +140,36 @@ CUBE_JFS_ACCESS_KEY="<COS-SecretId>"
 CUBE_JFS_SECRET_KEY="<COS-SecretKey>"
 ```
 
-Then initialize the JuiceFS filesystem on the control and compute nodes as described in [Initialize on the control node](#1-initialize-on-the-control-node) and [Mount on each compute node](#2-mount-on-each-compute-node).
+Then follow [Installation and deployment](#installation-and-deployment) to initialize the JuiceFS filesystem on the control node and configure the compute nodes.
 
 Cube does not currently support a seamless switch from object store A to object store B. Select the intended object store during one-click installation, or migrate data according to the JuiceFS official [data synchronization guide](https://juicefs.com/docs/community/guide/sync/).
 
-For MySQL, PostgreSQL, TiKV, or another supported metadata engine, set its URL in `CUBE_JFS_META_URL`. New volumes can be initialized directly. To migrate an existing volume, stop writes and clients, use `juicefs dump` and `juicefs load` with an empty destination engine, restore object-store credentials, update every node's metadata URL, and remount. See [metadata backup and migration](https://juicefs.com/docs/community/metadata_dump_load/).
+### Use a metadata engine other than Redis
+
+`CUBE_JFS_META_URL` can point to MySQL, PostgreSQL, TiKV, or another metadata engine supported by JuiceFS. For example:
+
+```bash
+CUBE_JFS_META_URL="mysql://user:@(10.0.0.20:3306)/juicefs"
+CUBE_JFS_META_PASSWORD="password"
+```
+
+For a new cluster, set this URL and initialize the control node. To migrate an existing volume, stop writes and unmount all clients, use `juicefs dump` to export metadata from the old engine, and use `juicefs load` to import it into an empty new engine. Then update `CUBE_JFS_META_URL` on every node and remount. Object-store credentials are excluded from the dump by default and must be configured again in the new metadata engine. See the JuiceFS official [metadata backup and migration](https://juicefs.com/docs/community/metadata_dump_load/) documentation.
+
+> JuiceFS metadata storage is critical. For production deployments, a Redis cluster is recommended to reduce the risk of data loss.
 
 ## Image distribution
 
-By default, each target pulls `juicedata/mount:ce-v1.4.1` from its registry.
+By default, each target node pulls `juicedata/mount:ce-v1.4.1` from the image registry.
 
 For an offline environment, load the image in advance with `docker load`, then set `CUBE_JFS_IMAGE` in the configuration file to the local image name.
 
-When upgrading the image, use the same pinned version on every node.
+Only upgrade the JuiceFS image when necessary, and use the same pinned version on every node.
 
 ## Troubleshooting
 
 ### The service does not start
 
-Inspect systemd and container logs:
+Inspect systemd and container logs first:
 
 ```bash
 journalctl -u cube-sandbox-jfs.service -n 200 --no-pager
@@ -150,7 +177,12 @@ docker logs cube-sandbox-jfs
 docker logs cube-sandbox-jfs-redis
 ```
 
-Common causes are a missing or malformed `CUBE_JFS_META_URL`, a missing or incorrect `CUBE_JFS_META_PASSWORD`, unavailable `/dev/fuse`, a stopped Docker daemon, an image pull failure, or unreachable Redis/S3 credentials. Every node must use the same metadata URL and password.
+Common causes include:
+
+- `CUBE_JFS_META_URL` or `CUBE_JFS_META_PASSWORD` is incorrectly configured in `.one-click.env`, or the values differ between nodes.
+- `/dev/fuse` is unavailable on the node, or Docker is not running.
+- The `CUBE_JFS_IMAGE` image cannot be pulled.
+- The Redis or MinIO/S3 endpoint is unreachable, or the credentials used during formatting are no longer valid.
 
 ### The container runs but the host has no mount
 
@@ -159,11 +191,11 @@ findmnt -T /data/cubelet/jfs
 docker inspect cube-sandbox-jfs --format '{{.State.Status}}'
 ```
 
-The mount script creates a self bind and uses `rshared` propagation. A manually started container without `bind-propagation=rshared` may leave the FUSE mount visible only inside its own namespace.
+The mount script creates a self bind for the mount point and sets `rshared` propagation. Do not bypass the systemd unit by directly running a container without `bind-propagation=rshared`; otherwise, the FUSE mount may only be visible inside the container's namespace.
 
 ### Cubelet reports `jfs storage is not configured`
 
-Confirm `[cow.jfs] enable = true` and make `mount_path`, `root`, and `cache_dir` agree with `.one-click.env`. Restart Cubelet after editing its configuration:
+Confirm `[cow.jfs] enable = true`, and check that `mount_path`, `root`, and `cache_dir` match `.one-click.env`. Restart Cubelet after editing its configuration:
 
 ```bash
 sudo systemctl restart cube-sandbox-cubelet.service
@@ -171,8 +203,8 @@ sudo systemctl restart cube-sandbox-cubelet.service
 
 ### `remote_status` remains `inprogress`
 
-With `--writeback`, closed files may still have blocks in the local staging area. Cubelet waits for those blocks to upload before recording `ready`. Check the JuiceFS container logs, object-store connectivity, cache-disk capacity, and upload bandwidth. Do not delete staged cache data manually.
+With `--writeback`, closed files may still have blocks in the local staging area. Cubelet waits for those blocks to upload before recording `ready`. Check the JuiceFS container logs, object-store connectivity, cache-disk capacity, and upload bandwidth. Do not manually delete staging data in the cache directory.
 
 ### Restore remains pinned to the origin
 
-Confirm that the resource has `backend=jfs` and `remote_status=ready`, every node uses the same metadata URL and `root`, and the target satisfies the [cross-node restore requirements](./requirements.md). A host mount still pins the sandbox to its origin.
+Confirm that the resource has `backend=jfs` and `remote_status=ready`, every node uses the same metadata URL and `root`, and the target node's CPU and kernel satisfy the [cross-node restore requirements](./requirements.md). A host mount still pins the sandbox to its origin.

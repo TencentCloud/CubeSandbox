@@ -44,7 +44,7 @@ end
 if not container_port or not ins_id then
     ngx.log(ngx.ERR, "LEVEL_WARN||",
         string.format("request %s carries no routing attributes in Host or E2b-Sandbox-* headers: host=%s sandbox_id=%s",
-            ngx.var.http_x_cube_request_id, ngx.var.http_host, ngx.var.http_e2b_sandbox_id))
+            tostring(ngx.var.http_x_cube_request_id), tostring(ngx.var.http_host), tostring(ngx.var.http_e2b_sandbox_id)))
     utils:respond_bad_request()
 end
 

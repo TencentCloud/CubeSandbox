@@ -135,6 +135,8 @@ type CommonConf struct {
 
 	DisableHostNetfile bool `yaml:"disable_host_netfile"`
 
+	// OperatorAllowOut is an administrator-owned IPv4 CIDR allowlist. Restart Cubelet after changes.
+	OperatorAllowOut   []string      `yaml:"operator_allow_out"`
 	DefaultDNSServers  []string      `yaml:"default_dns_servers"`
 	DefaultDNSSearches []string      `yaml:"default_dns_searches"`
 	DefaultDNSOptions  []string      `yaml:"default_dns_options"`
@@ -200,6 +202,12 @@ func validate(cfg *Config) error {
 		}
 	}
 	if cfg.Common != nil {
+		for _, cidr := range cfg.Common.OperatorAllowOut {
+			ip, _, err := net.ParseCIDR(cidr)
+			if err != nil || ip.To4() == nil {
+				return fmt.Errorf("invalid common.operator_allow_out IPv4 CIDR: %q", cidr)
+			}
+		}
 		for _, dns := range cfg.Common.DefaultDNSServers {
 			if net.ParseIP(dns) == nil {
 				return fmt.Errorf("invalid common.default_dns_servers entry: %q", dns)
@@ -282,6 +290,7 @@ func preHandle(config *Config) (*Config, error) {
 	if config.Common.GetBDFByIfNameCmd == "" {
 		config.Common.GetBDFByIfNameCmd = "/usr/local/services/AdamPlugins-1.0/snhost_snic_sdk/cath/bm/tools/get_bdf_by_ifname"
 	}
+	config.Common.OperatorAllowOut = normalizeStringList(config.Common.OperatorAllowOut)
 	config.Common.DefaultDNSServers = normalizeStringList(config.Common.DefaultDNSServers)
 	config.Common.DefaultDNSSearches = normalizeStringList(config.Common.DefaultDNSSearches)
 	config.Common.DefaultDNSOptions = normalizeStringList(config.Common.DefaultDNSOptions)

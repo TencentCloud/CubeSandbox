@@ -157,6 +157,7 @@ resource "random_password" "template_callback_token" {
   special = false
 }
 
+
 # Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
 # The apiserver is intranet-only, so use the intranet kubeconfig. create.sh then
 # rewrites this local file to reach the endpoint through the jumpserver tunnel.
@@ -1003,6 +1004,11 @@ resource "kubernetes_deployment" "cube_ops" {
           env {
             name  = "CUBE_OPS_BIND"
             value = "0.0.0.0:3010"
+          }
+          env {
+            # Push channel to the node-local ops-agent on compute VMs.
+            name  = "CUBE_OPS_OPSAGENT_PORT"
+            value = "8890"
           }
           env {
             name  = "CUBE_MASTER_ADDR"

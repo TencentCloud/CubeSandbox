@@ -241,7 +241,7 @@ export default withMermaid(defineConfig({
                 { text: 'Commit a Running Sandbox', link: '/guide/tutorials/template-from-sandbox' },
                 { text: 'Pre-warm a Template Service', link: '/guide/tutorials/prewarm-template-service' },
                 { text: 'Local & Remote Image Practice', link: '/guide/tutorials/template-build-practice' },
-                { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
+                { text: 'Environment Variables', link: '/guide/environment-variables' },
                 { text: 'Template Aliases', link: '/guide/template-aliases' },
                 { text: 'MCP in Sandboxes', link: '/guide/mcp-gateway' }
               ]
@@ -280,7 +280,8 @@ export default withMermaid(defineConfig({
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
-                { text: 'Component multi-version', link: '/guide/component-multiversion' }
+                { text: 'Component multi-version', link: '/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/guide/redis-cluster' }
               ]
             },
             {
@@ -470,7 +471,7 @@ export default withMermaid(defineConfig({
                 { text: '将运行中的沙箱提交为模板', link: '/zh/guide/tutorials/template-from-sandbox' },
                 { text: '预热模板服务', link: '/zh/guide/tutorials/prewarm-template-service' },
                 { text: '本地与远程镜像实战', link: '/zh/guide/tutorials/template-build-practice' },
-                { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
+                { text: '环境变量', link: '/zh/guide/environment-variables' },
                 { text: '模板别名', link: '/zh/guide/template-aliases' },
                 { text: '在沙箱中使用 MCP', link: '/zh/guide/mcp-gateway' }
               ]
@@ -509,7 +510,8 @@ export default withMermaid(defineConfig({
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
-                { text: '组件多版本', link: '/zh/guide/component-multiversion' }
+                { text: '组件多版本', link: '/zh/guide/component-multiversion' },
+                { text: 'Redis Cluster', link: '/zh/guide/redis-cluster' }
               ]
             },
             {

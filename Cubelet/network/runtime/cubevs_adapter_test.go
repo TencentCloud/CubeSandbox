@@ -24,6 +24,7 @@ type fakeCubeVSAdapter struct {
 	deleteMetadataErr      error
 	deletePortMappingErr   error
 	updatedPolicies        []updatedPolicy
+	installedPolicies      []cubevs.MVMOptions
 	updateTAPPolicyErr     error
 	recorder               *createOrderRecorder
 	attachFilterMu         sync.Mutex
@@ -42,14 +43,16 @@ type updatedPolicy struct {
 	opts    cubevs.MVMOptions
 }
 
-func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
+func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, opts cubevs.MVMOptions) error {
+	f.installedPolicies = append(f.installedPolicies, opts)
 	if f.recorder != nil {
 		f.recorder.record("cubevs_tap")
 	}
 	return nil
 }
 
-func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
+func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, _ uint32, opts cubevs.MVMOptions) error {
+	f.installedPolicies = append(f.installedPolicies, opts)
 	f.upsertTAPDeviceCalls = append(f.upsertTAPDeviceCalls, ifindex)
 	return nil
 }

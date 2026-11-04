@@ -3,23 +3,35 @@
 
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   templateApi,
+  snapshotApi,
   type TemplateCompatMatrix,
   type TemplateCompatRow,
   type TemplateNodeCompat,
   type TemplateSummary,
+  type SnapshotSummary,
 } from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { AlertTriangle, Package, Plus, Trash2, X } from 'lucide-react';
-import { formatRelative, formatDeleteError } from '@/lib/utils';
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  History,
+  Package,
+  Plus,
+  RefreshCw,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { formatRelative, formatDeleteError, copyToClipboard } from '@/lib/utils';
 
 // ── create template modal ────────────────────────────────────────────────────
 
@@ -598,6 +610,105 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
 
 // ── main page ────────────────────────────────────────────────────────────────
 
+// SnapshotIdText renders the snapshot ID with click-to-copy and a copied check.
+function SnapshotIdText({ snapshotId }: { snapshotId: string }) {
+  const { t } = useTranslation('templates');
+  const [copied, setCopied] = useState(false);
+  return (
+    <CardDescription
+      className="group/id flex items-center gap-1 cursor-pointer"
+      title={snapshotId}
+      onClick={(e) => {
+        // Block the enclosing card <Link> so copy doesn't also navigate.
+        e.preventDefault();
+        e.stopPropagation();
+        copyToClipboard(snapshotId, t('snap.copied'));
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      <span className="font-mono text-xs truncate hover:text-foreground transition-colors">
+        {snapshotId}
+      </span>
+      {copied ? (
+        <Check className="h-3 w-3 shrink-0 text-cube-ok" />
+      ) : (
+        <Copy className="h-3 w-3 shrink-0 opacity-0 group-hover/id:opacity-100 transition-opacity" />
+      )}
+    </CardDescription>
+  );
+}
+
+function snapshotStatusTone(status?: string): 'ok' | 'err' | 'warn' {
+  const s = (status ?? '').toLowerCase();
+  return s === 'ready' ? 'ok' : s === 'failed' ? 'err' : 'warn';
+}
+
+interface DeleteSnapshotModalProps {
+  snapshotID: string;
+  runtimeRefCount: number;
+  onClose: () => void;
+  onDeleted?: () => void;
+}
+
+function DeleteSnapshotModal({
+  snapshotID,
+  runtimeRefCount,
+  onClose,
+  onDeleted,
+}: DeleteSnapshotModalProps) {
+  const { t } = useTranslation('templates');
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => snapshotApi.remove(snapshotID),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['snapshots'] });
+      onDeleted?.();
+      onClose();
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <Card className="w-full max-w-sm shadow-xl">
+        <CardHeader className="flex flex-row items-center justify-between pb-3">
+          <CardTitle className="text-base text-destructive">{t('snap.delete.title')}</CardTitle>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="h-4 w-4" />
+          </button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {t('snap.delete.confirmDesc')}{' '}
+            <span className="font-mono font-medium text-foreground">{snapshotID}</span>
+            {t('snap.delete.confirmDescSuffix')}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {runtimeRefCount > 0 && `${t('snap.delete.inUseNote')} `}
+            {t('snap.delete.templateNote')}
+          </p>
+          {mutation.isError && (
+            <p className="text-xs text-destructive">{formatDeleteError(mutation.error, t)}</p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>
+              {t('snap.delete.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={mutation.isPending}
+              onClick={() => mutation.mutate()}
+            >
+              {mutation.isPending ? t('snap.delete.deleting') : t('snap.delete.confirm')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function TemplatesPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['templates'],
@@ -613,7 +724,54 @@ export default function TemplatesPage() {
   const { t } = useTranslation('templates');
   const [showCreate, setShowCreate] = useState(false);
   const [deletingID, setDeletingID] = useState<string | null>(null);
-  const [tab, setTab] = useState<'list' | 'compat'>('list');
+  const [deletingSnapshotID, setDeletingSnapshotID] = useState<string | null>(null);
+  // Tab is mirrored in ?tab= so snapshot/compat views are shareable links.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const tab: 'list' | 'snapshots' | 'compat' =
+    tabParam === 'snapshots' || tabParam === 'compat' ? tabParam : 'list';
+  const setTab = (next: 'list' | 'snapshots' | 'compat') => {
+    setSearchParams(next === 'list' ? {} : { tab: next }, { replace: true });
+  };
+  // Snapshot pagination: server next_token (a cursor) drives navigation, so
+  // deletion elsewhere cannot make the next page skip or duplicate rows.
+  const [snapPage, setSnapPage] = useState(1);
+  const [tokenStack, setTokenStack] = useState<string[]>([]); // [i] = cursor into page i+2
+  const SNAP_PAGE_SIZE = 100;
+  const {
+    data: snapshotsPage,
+    isLoading: snapshotsLoading,
+    isError: snapshotsError,
+    refetch: refetchSnapshots,
+  } = useQuery({
+    queryKey: ['snapshots', snapPage, tokenStack[snapPage - 2] ?? ''],
+    queryFn: () =>
+      snapshotApi.list({
+        limit: SNAP_PAGE_SIZE,
+        nextToken: snapPage > 1 ? (tokenStack[snapPage - 2] ?? '') : undefined,
+      }),
+    // Auto-refresh mirrors the template list; only fetched when the tab is open.
+    refetchInterval: 10_000,
+    enabled: tab === 'snapshots',
+  });
+  const snapshots = snapshotsPage?.items ?? [];
+  // A failed background refetch keeps the last good rows; only show the error with no data.
+  const showSnapshotError = snapshotsError && !snapshotsPage;
+  const hasNextSnapshotPage = snapshotsPage?.nextToken != null && snapshotsPage.nextToken !== '';
+
+  const goNextSnapshotPage = () => {
+    const cur = snapshotsPage?.nextToken;
+    if (!cur) return;
+    setTokenStack((s) => {
+      const next = s.slice(0, snapPage);
+      next[snapPage - 1] = cur;
+      return next;
+    });
+    setSnapPage((p) => p + 1);
+  };
+  const goPrevSnapshotPage = () => {
+    setSnapPage((p) => Math.max(1, p - 1));
+  };
   const compatByTemplate = new Map((compat?.templates ?? []).map((row) => [row.templateID, row]));
   const unknownTemplateCount = (compat?.templates ?? []).filter(
     (row) => row.overall === 'UNKNOWN',
@@ -623,15 +781,23 @@ export default function TemplatesPage() {
     <div className="animate-fade-in space-y-5">
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{t('title')}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {tab === 'list'
+              ? t('title')
+              : tab === 'snapshots'
+                ? t('tabs.snapshots')
+                : t('tabs.compat')}
+          </h1>
+          {tab === 'list' && <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>}
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus size={14} /> {t('create.button')}
-        </Button>
+        {tab === 'list' && (
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus size={14} /> {t('create.button')}
+          </Button>
+        )}
       </header>
 
-      {unknownTemplateCount > 0 && (
+      {tab === 'list' && unknownTemplateCount > 0 && (
         <Card className="border-cube-err/30 bg-cube-err/5">
           <div className="flex items-center justify-between gap-3 p-4 text-sm">
             <div className="flex items-center gap-2 text-cube-err">
@@ -658,6 +824,13 @@ export default function TemplatesPage() {
           {t('tabs.list')}
         </Button>
         <Button
+          variant={tab === 'snapshots' ? 'default' : 'secondary'}
+          size="sm"
+          onClick={() => setTab('snapshots')}
+        >
+          {t('tabs.snapshots')}
+        </Button>
+        <Button
           variant={tab === 'compat' ? 'default' : 'secondary'}
           size="sm"
           onClick={() => setTab('compat')}
@@ -672,6 +845,129 @@ export default function TemplatesPage() {
       </div>
 
       {tab === 'compat' && <TemplateCompatPanel matrix={compat} />}
+
+      {tab === 'snapshots' && snapshotsLoading && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-28" />
+          ))}
+        </div>
+      )}
+
+      {tab === 'snapshots' && showSnapshotError && (
+        <Card className="border-destructive/30 bg-destructive/5">
+          <div className="flex flex-col items-center gap-3 py-16 text-sm">
+            <span className="text-destructive">{t('snap.loadError')}</span>
+            <Button variant="outline" size="sm" onClick={() => void refetchSnapshots()}>
+              <RefreshCw className="h-4 w-4 mr-1.5" /> {t('snap.retry')}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {tab === 'snapshots' &&
+        !snapshotsLoading &&
+        !showSnapshotError &&
+        snapshots &&
+        snapshots.length === 0 && (
+          <Card>
+            <div className="py-16 text-center text-sm text-muted-foreground">
+              {snapPage > 1 ? t('snap.emptyPage') : t('snap.none')}
+            </div>
+          </Card>
+        )}
+
+      {tab === 'snapshots' && snapshots && snapshots.length > 0 && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {snapshots.map((snap) => (
+            <div key={snap.snapshotID} className="relative">
+              <Link to={`/snapshots/${snap.snapshotID}`} className="block">
+                <Card className="panel-hover h-full cursor-pointer">
+                  <CardHeader>
+                    <div className="flex items-center gap-3">
+                      <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
+                        <History size={18} />
+                      </span>
+                      <div className="min-w-0">
+                        <CardTitle
+                          className="text-base truncate"
+                          title={snap.displayName || snap.snapshotID}
+                        >
+                          {snap.displayName || snap.snapshotID}
+                        </CardTitle>
+                        <SnapshotIdText snapshotId={snap.snapshotID} />
+                      </div>
+                    </div>
+                    <Badge tone={snapshotStatusTone(snap.status)}>{snap.status ?? 'UNKNOWN'}</Badge>
+                  </CardHeader>
+                  <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
+                    <div>
+                      <div className="text-xs uppercase tracking-wider">{t('col.instance')}</div>
+                      <div className="mt-0.5 text-foreground/80">
+                        {snap.instanceType ?? t('instanceDefault')}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wider">{t('col.created')}</div>
+                      <div className="mt-0.5 text-foreground/80">
+                        {formatRelative(snap.createdAt)}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                    <div className="truncate">
+                      {t('snap.col.originSandbox')}:{' '}
+                      <span className="font-mono text-foreground/80">
+                        {snap.originSandboxID ?? '—'}
+                      </span>
+                    </div>
+                    <div className="truncate">
+                      {t('snap.col.version')}:{' '}
+                      <span className="text-foreground/80">{snap.version ?? '—'}</span>
+                    </div>
+                    <div className="truncate">
+                      {t('snap.col.refs')}:{' '}
+                      <span className="text-foreground/80">{snap.runtimeRefCount ?? 0}</span>
+                    </div>
+                  </div>
+                </Card>
+              </Link>
+              {/* delete button — bottom-right, always visible, avoids the header badge */}
+              <button
+                className="absolute bottom-2.5 right-2.5 z-10 flex h-7 w-7 items-center justify-center rounded-md border bg-background shadow-sm text-muted-foreground hover:text-destructive hover:border-destructive/50 transition-colors"
+                aria-label={t('snap.delete.button')}
+                title={t('snap.delete.button')}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDeletingSnapshotID(snap.snapshotID);
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'snapshots' && (snapshots.length > 0 || snapPage > 1) && (
+        <div className="flex items-center justify-center gap-3 pt-1">
+          <Button variant="outline" size="sm" disabled={snapPage <= 1} onClick={goPrevSnapshotPage}>
+            <ChevronLeft className="h-4 w-4" /> {t('snap.pagination.prev')}
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            {t('snap.pagination.page', { page: snapPage })}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!hasNextSnapshotPage}
+            onClick={goNextSnapshotPage}
+          >
+            {t('snap.pagination.next')} <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
 
       {tab === 'list' && isLoading && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -788,6 +1084,23 @@ export default function TemplatesPage() {
       {showCreate && <CreateTemplateModal onClose={() => setShowCreate(false)} />}
       {deletingID && (
         <DeleteTemplateModal templateID={deletingID} onClose={() => setDeletingID(null)} />
+      )}
+      {deletingSnapshotID && (
+        <DeleteSnapshotModal
+          snapshotID={deletingSnapshotID}
+          runtimeRefCount={
+            snapshots.find((snap) => snap.snapshotID === deletingSnapshotID)?.runtimeRefCount ?? 0
+          }
+          onClose={() => setDeletingSnapshotID(null)}
+          onDeleted={() => {
+            // If deleting emptied the last page and we're past page 1, go back
+            // and truncate the token stack to match the new page.
+            if (snapshots.length <= 1 && snapPage > 1) {
+              setTokenStack((s) => s.slice(0, snapPage - 2));
+              setSnapPage((p) => p - 1);
+            }
+          }}
+        />
       )}
     </div>
   );

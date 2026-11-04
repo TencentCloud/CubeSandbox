@@ -8,6 +8,16 @@
         answer "{{ .Name }} 60 IN A __CUBE_PROXY_DNS_ANSWER_IP__"
         fallthrough
     }
+    # *.cube.app only ever resolves to the node's IPv4 (the A templates
+    # above), so answer AAAA locally with NODATA (NOERROR, empty answer)
+    # instead of forwarding to an upstream that may be unreachable and stall
+    # clients. Do not add an AAAA record or `fallthrough` here.
+    template IN AAAA cube.app {
+        rcode NOERROR
+    }
+    template IN AAAA (.*)\.cube\.app {
+        rcode NOERROR
+    }
     log
     cache 300
     forward . /etc/resolv.conf

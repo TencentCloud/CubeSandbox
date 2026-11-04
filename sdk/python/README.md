@@ -328,7 +328,7 @@ from cubesandbox import Sandbox
 
 print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # list of running sandbox dicts
-print(Sandbox.list_v2())    # v2 API (supports filtering)
+print(Sandbox.list_v2())    # v2 E2B view: running and paused only
 ```
 
 ## Configuration
@@ -367,7 +367,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, envs, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally restricted to specified compute nodes or mounting volumes); `envs` is the E2B-compatible alias for `env_vars` |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) and optionally reset the idle timeout |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list running and paused sandboxes (v2 E2B view) |
 | `Sandbox.health(config)` | `GET /health` — service health check |
 
 ### `Sandbox` — instance methods

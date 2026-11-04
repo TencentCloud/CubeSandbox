@@ -386,7 +386,7 @@ credential) — read the field directly when the actual value is needed.
 ```ts
 console.log(await Sandbox.health()); // { status: "ok" }
 console.log(await Sandbox.list()); // list of running sandboxes
-console.log(await Sandbox.listV2()); // v2 API (supports filtering)
+console.log(await Sandbox.listV2()); // v2 E2B view: running and paused only
 ```
 
 ### Templates
@@ -452,7 +452,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | `Sandbox.create(options?)` | `POST /sandboxes` — create a new sandbox |
 | `Sandbox.connect(sandboxId, options?)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) |
 | `Sandbox.list(config?)` | `GET /sandboxes` — list running sandboxes (v1) |
-| `Sandbox.listV2(config?)` | `GET /v2/sandboxes` — list sandboxes (v2) |
+| `Sandbox.listV2(config?)` | `GET /v2/sandboxes` — list running and paused sandboxes (v2 E2B view) |
 | `Sandbox.health(config?)` | `GET /health` — service health check |
 | `Sandbox.listSnapshots(options?)` | `GET /snapshots` — list snapshots (paginated) |
 | `Sandbox.deleteSnapshot(idOrName, options?)` | `DELETE /templates/:id?snapshot_only=true` — delete a snapshot by ID or name, returns `boolean` |

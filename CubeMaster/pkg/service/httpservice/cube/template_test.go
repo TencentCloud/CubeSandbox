@@ -58,6 +58,28 @@ func TestConstructCreateReqPreservesDistributionScope(t *testing.T) {
 	assert.Equal(t, []string{"node-a", "10.0.0.2"}, got.DistributionScope)
 }
 
+func TestConstructCreateReqScrubsClientSuppliedAlias(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
+		"requestID":"req-alias",
+		"annotations":{
+			"cube.master.appsnapshot.template.id":"template-1"
+		},
+		"labels":{
+			"cube.master.appsnapshot.template.alias":"forged",
+			"user.label":"keep-me"
+		}
+	}`))
+
+	got, err := constructCreateReq(req)
+	if err != nil {
+		t.Fatalf("constructCreateReq failed: %v", err)
+	}
+	if _, ok := got.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("client-supplied alias label must be scrubbed")
+	}
+	assert.Equal(t, "keep-me", got.Labels["user.label"])
+}
+
 func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
 	origDeleteTemplateFn := deleteTemplateFn
 	t.Cleanup(func() {

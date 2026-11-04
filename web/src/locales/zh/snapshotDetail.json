@@ -1,0 +1,61 @@
+{
+  "backToSnapshots": "返回快照列表",
+  "notFound": "快照不存在或已被删除。",
+  "loadError": "加载快照详情失败，请稍后重试。",
+  "snapshotId": "快照 ID",
+  "createdAt": "创建于",
+  "section": {
+    "origin": "来源信息",
+    "originDesc": "快照的来源沙箱与节点。",
+    "replicas": "存放节点",
+    "replicasDesc": "快照数据所在的节点及其健康状态。",
+    "refs": "沙箱引用",
+    "refsDesc": "当前以此为 rootfs 的运行中沙箱。",
+    "danger": "删除快照",
+    "dangerDesc": "删除后无法恢复，副本数据将在没有沙箱引用后被回收。"
+  },
+  "fields": {
+    "status": "状态",
+    "backend": "存储后端",
+    "version": "版本",
+    "rootfsSize": "rootfs 大小",
+    "originSandbox": "来源沙箱",
+    "originNode": "来源节点",
+    "instanceType": "实例类型",
+    "snapshotID": "快照 ID",
+    "displayName": "名称",
+    "remoteStatus": "S3 同步状态",
+    "notSynced": "未同步",
+    "lastError": "错误信息",
+    "node": "节点",
+    "phase": "阶段",
+    "spec": "规格",
+    "compat": "兼容性",
+    "versions": "版本信息",
+    "lastJob": "最近任务"
+  },
+  "empty": {
+    "replicas": "暂无副本信息。",
+    "refs": "无运行中沙箱引用此快照。"
+  },
+  "delete": {
+    "button": "删除快照",
+    "confirm": "确认删除",
+    "confirmDesc": "删除后无法恢复，各节点上的副本数据将一并清理。确认继续？",
+    "confirmDescInUse": "该快照正被运行中沙箱引用，物理数据会在这些沙箱释放后由后台异步回收。确认继续？",
+    "cancel": "取消",
+    "deleting": "删除中…"
+  },
+  "errors": {
+    "templateInUse": "该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。",
+    "buildInProgress": "模板正在构建中，请等待构建完成后再删除。",
+    "cleanupMissing": "模板清理信息不完整，无法自动删除，请联系管理员。",
+    "snapshotReferenced": "该快照已被助手模板引用，请先在数字助手中删除对应模板后再试。",
+    "snapshotCreating": "快照正在创建中，请稍后再试。",
+    "snapshotDeleting": "快照正在删除中，请稍后再试。",
+    "snapshotBusy": "快照有进行中的操作，请稍后再试。"
+  },
+  "copy": "复制",
+  "copied": "已复制",
+  "clickToCopy": "点击复制: {{text}}"
+}

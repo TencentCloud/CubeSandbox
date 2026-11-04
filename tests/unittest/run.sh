@@ -78,6 +78,7 @@ cd "$REPO_ROOT" || exit 2
 
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
+	"ops-agent|Go|0|make ops-agent-test"
 	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
 	# tests in ./pkg/templatecenter: gomonkey rewrites a function's machine code
 	# to redirect it, but an inlined call site bypasses that patch, so a stub
@@ -108,6 +109,7 @@ WITH_TESTS=(
 	"blobstore|Go|0|cd pkgs/blobstore && go mod download && go test ./..."
 	# sandboxrestart is stdlib-only, so no module download is needed.
 	"sandboxrestart|Go|0|cd pkgs/sandboxrestart && go test ./..."
+	"redisx|Go|0|make redisx-test"
 	"cubebench|Shell|0|make cubebench-test"
 	# Same entry point as CI (unit-test-check).
 	"cubelet|Go|0|make cubelet-test"

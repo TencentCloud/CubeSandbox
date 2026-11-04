@@ -40,6 +40,12 @@ images:
     tag: v0.7.3
     pullPolicy: IfNotPresent
 
+  # Node-local ops-agent: applies CubeOps-desired config to dynamicconf.
+  opsAgent:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops-agent
+    tag: v0.7.3
+    pullPolicy: IfNotPresent
+
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
     tag: v0.7.3
@@ -241,7 +247,8 @@ controlPlane:
     enabled: true
     # Number of Master replicas. Master is stateless (all state in DB), so
     # multiple replicas can run concurrently without coordination. Increase
-    # for higher API throughput and availability.
+    # for higher API throughput and availability. Also feeds CubeMaster's
+    # cluster-wide concurrency estimate.
     replicas: 1
     # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
     # templates or slow networks/disks.
@@ -734,6 +741,9 @@ redis:
   # Redis Sentinel (external). Non-empty masterName enables Sentinel for
   # CubeMaster / CubeProxy / cube-lifecycle-manager; requires sentinelNodes.
   # masterName and sentinelNodes must be set together (validated at render time).
+  # Native Cluster seed endpoints (comma-separated host:port). Mutually
+  # exclusive with host/Sentinel; requires db: 0. Cluster is externally managed.
+  clusterNodes: ""
   masterName: ""
   # Comma-separated sentinel endpoints, e.g. "10.0.0.11:26379,10.0.0.12:26379".
   # Also accepts hostname and bracketed IPv6 ([2001:db8::10]:26379).
@@ -787,7 +797,19 @@ minio:
       - ReadWriteOnce
   resources: {}
 
+# Node-local ops-agent DaemonSet: applies CubeOps-desired quota config to the
+# cubelet dynamicconf on every compute node. Shares the compute placement of
+# the cubelet DaemonSet and follows cubeNode.hostNetwork so CubeOps reaches it
+# on the same address the cubelet registers.
+opsAgent:
+  port: 8890
+  resources: {}
+  extraEnv: []
+
 cubeNode:
+  # Operator-owned IPv4 CIDRs, all ports. Empty preserves existing policy.
+  # Restart Cubelet after changes; sandbox callers cannot modify this list.
+  operatorAllowOut: []
   enabled: true
   podAnnotations:
     # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
@@ -808,7 +830,9 @@ cubeNode:
   # networking on that node. Trade-offs: NetworkPolicy cannot govern sandbox
   # traffic, and cubelet / CubeS3lvol / cube-egress bind on the host (cubelet
   # is unauthenticated — firewall it like kubelet). Set false only when
-  # NetworkPolicy must apply.
+  # NetworkPolicy must apply. On the Pod network CubeOps cannot push quota to
+  # ops-agent (pushes target the node IP); quota then converges via the 300s
+  # pull reconcile instead.
   hostNetwork: true
   # One-time acknowledgement read by the cube-node-hostnet preflight Hook
   # (pre-install/pre-upgrade/pre-rollback): changing hostNetwork on an existing

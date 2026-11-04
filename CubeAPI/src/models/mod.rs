@@ -1224,6 +1224,9 @@ pub struct RefreshRequest {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListSandboxesQuery {
+    /// `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+    /// A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+    /// An empty value is the same as omitting `metadata`: no filter.
     pub metadata: Option<String>,
 }
 
@@ -1238,12 +1241,13 @@ pub struct ListSandboxesQuery {
 #[derive(Debug, Deserialize, Validate, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListSandboxesV2Query {
+    /// `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+    /// A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+    /// An empty value is the same as omitting `metadata`: no filter.
     pub metadata: Option<String>,
-    /// Filter by sandbox state. Accepted values are `running`, `paused`,
-    /// `pausing`, and `unknown`; `stopped` and `error` are accepted as aliases
-    /// for `unknown`. The `unknown` bucket also holds sandboxes that are still
-    /// being created and sandboxes whose state could not be read from their
-    /// node, so it is not a synonym for "exited".
+    /// Comma-separated states: `running`, `paused` (includes pausing), `pausing`, `unknown` (aliases `stopped`, `error`).
+    /// `pausing` is a Cube-native state: asking for it returns `pausing`; otherwise a pausing sandbox reads `paused`.
+    /// Defaults to running and paused sandboxes; any unrecognised or empty value is a 400.
     pub state: Option<String>,
     /// Continuation cursor from the previous response's `x-next-token` header.
     #[serde(rename = "nextToken")]
@@ -1887,6 +1891,11 @@ pub struct CreateTemplateRequest {
     /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
     #[serde(rename = "backend", default)]
     pub backend: Option<String>,
+    /// Container user for the template build and later sandboxes.
+    /// `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+    /// Omitted keeps the default root user.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// Body for POST /templates/:id (rebuild).

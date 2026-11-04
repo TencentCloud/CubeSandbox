@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	cubeletconfig "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"net"
 	"time"
 
@@ -132,6 +133,9 @@ func (l *local) Init(ctx context.Context, _ *workflow.InitInfo) error {
 
 func networkRuntimeConfigFromPluginConfig(config *Config) networkruntime.Config {
 	cfg := networkruntime.DefaultConfig()
+	if current := cubeletconfig.GetConfig(); current != nil && current.Common != nil {
+		cfg.OperatorAllowOut = append([]string(nil), current.Common.OperatorAllowOut...)
+	}
 	cfg.EthName = config.EthName
 	cfg.ObjectDir = config.ObjectDir
 	cfg.CIDR = config.CIDR

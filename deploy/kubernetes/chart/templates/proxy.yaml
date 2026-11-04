@@ -5,7 +5,7 @@
 {{- $proxyEntrypointChecksum := $proxyEntrypointBody | sha256sum -}}
 {{- $redisSentinel := eq (include "cube.redisSentinelEnabled" .) "true" -}}
 {{- $redisHost := "" -}}
-{{- if not $redisSentinel -}}
+{{- if and (not $redisSentinel) (not .Values.redis.clusterNodes) -}}
 {{- $redisHost = default (include "cube.redisHost" .) .Values.cubeProxy.redis.host -}}
 {{- end -}}
 {{- $redisPort := default .Values.redis.port .Values.cubeProxy.redis.port -}}
@@ -195,6 +195,8 @@ spec:
                   key: redis-password
             - name: REDIS_DB
               value: {{ include "cube.redisDB" . | quote }}
+            - name: REDIS_CLUSTER_NODES
+              value: {{ .Values.redis.clusterNodes | default "" | quote }}
             - name: REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: REDIS_SENTINEL_NODES
@@ -262,6 +264,8 @@ spec:
                   key: redis-password
             - name: CUBE_PROXY_REGISTRY_REDIS_DB
               value: {{ include "cube.redisDB" . | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES
+              value: {{ .Values.redis.clusterNodes | default "" | quote }}
             - name: CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES

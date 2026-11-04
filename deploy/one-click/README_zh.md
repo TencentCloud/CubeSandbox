@@ -297,6 +297,10 @@ MySQL/Redis 依赖默认会部署到：
 - `redis:7-alpine`
 - `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
 
+### 使用外部原生 Redis Cluster
+
+将 `CUBE_EXTERNAL_REDIS_CLUSTER_NODES` 设置为以逗号分隔的 `host:port` 种子节点列表，将 `CUBE_EXTERNAL_REDIS_DB` 设置为 `0`，并清空固定的单机 Redis 地址和 Sentinel 配置。部署脚本连接已有的 Cluster，不负责创建 Redis 集群。各组件配置、一致性限制和迁移检查见 [配置与迁移指南](../../docs/zh/guide/redis-cluster.md)。
+
 ### 使用外部 MySQL / PostgreSQL / Redis
 
 如果希望使用已有的 MySQL、PostgreSQL 或 Redis 服务器，而不是内置的本地容器，

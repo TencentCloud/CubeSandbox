@@ -191,6 +191,18 @@ tolerations:
 {{- printf "%s-master" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.opsAgentName" -}}
+{{- printf "%s-ops-agent" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- /*
+ops-agent deploys on compute nodes whenever a CubeOps endpoint is reachable:
+the built-in control plane, or an external one (compute-only mode).
+*/ -}}
+{{- define "cube.opsAgentEnabled" -}}
+{{- if and .Values.cubeNode.enabled (or (eq (include "cube.opsEnabled" .) "true") .Values.externalControlPlane.enabled) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
 {{- define "cube.apiName" -}}
 {{- printf "%s-api" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -454,6 +466,13 @@ http {
 
 {{- define "cube.masterConfigSecretName" -}}
 {{- printf "%s-master-config" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{/*
+Rendered CubeMaster conf. The master Deployment checksums it so config edits roll Pods.
+*/}}
+{{- define "cube.masterConf" -}}
+{{- tpl (.Files.Get "files/cube-master/conf.yaml") . -}}
 {{- end -}}
 
 {{/*
@@ -932,6 +951,19 @@ podAffinity in templatecenter.yaml enforces.
 {{- end -}}
 {{- end -}}
 
+{{- /*
+opsEndpoint guaranteed to carry an http(s):// scheme. The external value may
+already include one, the in-cluster FQDN does not.
+*/ -}}
+{{- define "cube.opsEndpointHTTP" -}}
+{{- $e := include "cube.opsEndpoint" . -}}
+{{- if or (hasPrefix "http://" $e) (hasPrefix "https://" $e) -}}
+{{- $e -}}
+{{- else -}}
+{{- printf "http://%s" $e -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 database.driver selects which connection section the control plane reads:
   mysql    -> mysql.*    (built-in StatefulSet when mysql.host is empty)
@@ -1044,12 +1076,12 @@ CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
 {{- end -}}
 
 {{- define "cube.redisBuiltinEnabled" -}}
-{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (not .Values.redis.clusterNodes) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
-{{- /* Master conf nodes: empty under Sentinel; else host:port. */ -}}
+{{- /* Master and TemplateCenter nodes: empty under Cluster or Sentinel. */ -}}
 {{- define "cube.redisNodes" -}}
-{{- if eq (include "cube.redisSentinelEnabled" .) "true" -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
+{{- if or .Values.redis.clusterNodes (eq (include "cube.redisSentinelEnabled" .) "true") -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
 {{- end -}}
 
 {{- /* Logical Redis DB for Master / Proxy / LCM / Ops (same instance isolation). */ -}}
@@ -1363,6 +1395,8 @@ Bootstrap: host mutation mounts for pvm / node-init.
   value: {{ if kindIs "invalid" .Values.cubeNode.network.mtu }}"auto"{{ else }}{{ .Values.cubeNode.network.mtu | toString | quote }}{{ end }}
 - name: CUBE_EGRESS_ADMIN_PORT
   value: {{ .Values.cubeEgress.adminPort | quote }}
+- name: CUBE_SANDBOX_OPERATOR_ALLOW_OUT
+  value: {{ join "," .Values.cubeNode.operatorAllowOut | quote }}
 - name: CUBE_SANDBOX_DNS_SERVERS
   {{- if .Values.cubeNode.dns.sandbox.nameservers }}
   value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}

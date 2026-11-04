@@ -51,7 +51,7 @@ spec:
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_LCM_REDIS_ADDR
-              value: {{ if $redisSentinel }}{{ "" | quote }}{{ else }}{{ printf "%s:%v" $redisHost $redisPort | quote }}{{ end }}
+              value: {{ if or .Values.redis.clusterNodes $redisSentinel }}{{ "" | quote }}{{ else }}{{ printf "%s:%v" $redisHost $redisPort | quote }}{{ end }}
             - name: CUBE_LCM_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -59,6 +59,8 @@ spec:
                   key: redis-password
             - name: CUBE_LCM_REDIS_DB
               value: {{ include "cube.redisDB" . | quote }}
+            - name: CUBE_LCM_REDIS_CLUSTER_NODES
+              value: {{ .Values.redis.clusterNodes | default "" | quote }}
             - name: CUBE_LCM_REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: CUBE_LCM_REDIS_SENTINEL_NODES

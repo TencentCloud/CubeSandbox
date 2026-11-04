@@ -231,7 +231,7 @@ postgres:
   database: cube_mvp
 ```
 
-The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
+The chart installs the `cube-redis` StatefulSet only when `redis.enabled=true` and no external host, Sentinel master, or Cluster seeds are configured.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
 CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
 Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
@@ -477,7 +477,9 @@ The lifecycle manager runs two warm replicas by default. Both replicas consume
 lifecycle events and serve resume callbacks, while a Redis lease elects the
 single replica allowed to run idle sweep/kill and stale-proxy pruning. The
 lease uses single-key Redis transactions and requires no Kubernetes RBAC.
-Production deployments should pair this with Sentinel or managed HA Redis;
+Production deployments should pair this with Sentinel, external native Redis
+Cluster (`redis.clusterNodes`, DB 0), or managed HA Redis. See the
+[Cluster configuration and migration guide](../../../docs/guide/redis-cluster.md);
 the chart's built-in single-replica Redis remains a shared failure point.
 Because Redis replication is asynchronous, a Redis failover does not provide
 strict fencing for an already in-flight leader operation. The new leader
@@ -852,3 +854,28 @@ Prepare a separate host-kernel rollback runbook for production.
 - external DNS or load balancer records.
 
 Clean those items using the platform runbook for the target environment.
+
+### Operator-managed network allowlist
+
+`cubeNode.operatorAllowOut` is an administrator-owned list of IPv4 CIDRs.
+It defaults to `[]`, preserving existing sandbox policy behavior. For example:
+
+```yaml
+cubeNode:
+  operatorAllowOut:
+    - 10.204.0.10/32 # replace with your managed resolver address
+```
+
+The chart writes `common.operator_allow_out` through
+`CUBE_SANDBOX_OPERATOR_ALLOW_OUT`. Restart Cubelet after changing the list.
+Every CubeVS policy installation (create, update, and recovery) layers this
+list onto the sandbox-authored allow_out. Sandbox callers cannot change the
+operator list; replacing or clearing their policy does not remove platform grants.
+Platform grants are not persisted as caller policy, so removing a grant and
+restarting Cubelet does not resurrect it from sandbox state.
+
+This is a general network allowance, independent of guest DNS configuration.
+It admits all ports to the selected CIDRs; it is not a DNS-port-only exception.
+No resolver or Kubernetes Service CIDR is automatically included. Configure
+only the exact resolver /32 when that is the access required. Existing CubeVS
+allow/deny precedence and domain/L7 resolver admission remain unchanged.

@@ -340,7 +340,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — 创建新沙箱（可限定计算节点或挂载卷） |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — 连接（暂停状态下自动恢复），并可选地重置空闲超时 |
 | `Sandbox.list(config)` | `GET /sandboxes` — 列出运行中沙箱（v1） |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出沙箱（v2） |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出运行中与已暂停的沙箱（v2 E2B 视图） |
 | `Sandbox.health(config)` | `GET /health` — 服务健康检查 |
 
 ### `Sandbox` — 实例方法

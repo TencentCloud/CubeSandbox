@@ -133,7 +133,11 @@ func (c *Client) List(ctx context.Context) ([]SandboxInfo, error) {
 	return sandboxes, nil
 }
 
-// ListV2 lists every running sandbox through the v2 endpoint.
+// ListV2 lists sandboxes in the E2B view through the v2 endpoint.
+//
+// It returns running and paused sandboxes; `unknown` (exited, still creating)
+// is omitted unless the server is asked for it, which this method does not do.
+// Use List for the Cube-native view that includes `unknown`.
 //
 // `GET /v2/sandboxes` answers one page at a time (`limit`, 100 by default) and
 // reports the next page's position in the `x-next-token` response header. This

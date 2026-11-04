@@ -32,7 +32,7 @@ func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 		},
 	}
 
-	createReq, storedReq, err := buildSnapshotRequests(req, "snap-123")
+	createReq, storedReq, err := buildSnapshotRequests(req, "snap-123", "snap-name")
 	if err != nil {
 		t.Fatalf("buildSnapshotRequests returned error: %v", err)
 	}
@@ -67,6 +67,48 @@ func TestSubmitSandboxSnapshotRejectsReservedPrefixName(t *testing.T) {
 	_, err := SubmitSandboxSnapshot(context.Background(), "req-1", "sb-1", "node-1", "10.0.0.1", "snap-backup", "")
 	if !errors.Is(err, ErrInvalidSnapshotName) {
 		t.Fatalf("err = %v, want ErrInvalidSnapshotName", err)
+	}
+}
+
+func TestBuildSnapshotRequestsStampsSnapshotNameAsAlias(t *testing.T) {
+	req := &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "python-runtime",
+		},
+		Labels: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "python-runtime",
+		},
+	}
+
+	createReq, storedReq, err := buildSnapshotRequests(req, "snap-456", "my-snap")
+	if err != nil {
+		t.Fatalf("buildSnapshotRequests returned error: %v", err)
+	}
+	for _, item := range []*sandboxtypes.CreateCubeSandboxReq{createReq, storedReq} {
+		if got := item.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; got != "my-snap" {
+			t.Fatalf("snapshot request alias = %q, want my-snap (replacing the source template's)", got)
+		}
+		if _, ok := item.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+			t.Fatal("inherited source template alias must be scrubbed from labels")
+		}
+	}
+}
+
+func TestBuildSnapshotRequestsUnnamedSnapshotHasNoAlias(t *testing.T) {
+	req := &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateAlias: "python-runtime",
+		},
+	}
+
+	_, storedReq, err := buildSnapshotRequests(req, "snap-789", "")
+	if err != nil {
+		t.Fatalf("buildSnapshotRequests returned error: %v", err)
+	}
+	if _, ok := storedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("unnamed snapshot must carry no alias")
 	}
 }
 
@@ -122,7 +164,7 @@ func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
 		Request:      &sandboxtypes.Request{RequestID: "req-existing"},
 		InstanceType: "cubebox",
 		Annotations:  map[string]string{},
-	}, "snap-existing")
+	}, "snap-existing", "snap")
 	if err != nil {
 		t.Fatalf("buildSnapshotRequests returned error: %v", err)
 	}
@@ -662,7 +704,7 @@ func TestExecuteSnapshotCreateJobReturnsTerminalPersistenceError(t *testing.T) {
 		Status:     JobStatusPending,
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}, "sb-1", "node-a", "10.0.0.1")
+	}, "sb-1", "node-a", "10.0.0.1", "snap-name")
 	if err == nil {
 		t.Fatal("expected executeSnapshotCreateJob to return persistence error")
 	}

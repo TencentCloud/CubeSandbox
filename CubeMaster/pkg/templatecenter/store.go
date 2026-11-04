@@ -1811,6 +1811,14 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 					return err
 				}
 				req = parsed
+				// Stamp the snapshot's display_name as the alias, replacing the
+				// source template's inherited one.
+				delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				if name := strings.TrimSpace(rec.DisplayName); name != "" {
+					req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = name
+				} else {
+					delete(req.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				}
 				if err = applyStoredCreateBackend(req, rec.Backend); err != nil {
 					return err
 				}
@@ -1832,6 +1840,13 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 			}
 			if req.Annotations == nil {
 				req.Annotations = make(map[string]string)
+			}
+			// Carry the alias on the cached request so later hits need no extra lookup.
+			if alias := strings.TrimSpace(def.DisplayName); alias != "" {
+				req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = alias
+			} else {
+				delete(req.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
 			}
 			constants.NormalizeAppSnapshotAnnotations(req.Annotations)
 			if err = applyStoredCreateBackend(req, def.StorageBackend); err != nil {
