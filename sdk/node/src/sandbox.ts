@@ -277,7 +277,7 @@ function buildNetworkPayload(
   if (net.rules) {
     const normalized = normalizeRulesArg(net.rules);
     if (normalized.length > 0) {
-      wire.rules = normalized.map(serializeRule);
+      wire.rules = normalized.map((rule, index) => serializeRule(rule, index));
     }
   }
   return wire;

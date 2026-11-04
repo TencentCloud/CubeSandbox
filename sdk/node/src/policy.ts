@@ -188,7 +188,7 @@ function serializeAction(action: Action): Record<string, unknown> {
 }
 
 /** Serialize a {@link Rule} to the wire JSON shape used by CubeEgress. */
-export function serializeRule(rule: Rule): Record<string, unknown> {
+export function serializeRule(rule: Rule, _index = 0): Record<string, unknown> {
   return {
     name: rule.name,
     match: serializeMatch(rule.match),

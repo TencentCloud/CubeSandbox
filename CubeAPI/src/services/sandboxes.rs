@@ -3708,6 +3708,62 @@ mod tests {
     }
 
     #[test]
+    fn catch_all_accepts_inject_and_custom_port() {
+        let plain = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                host: Some("*".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("catch-all without inject should pass");
+        assert!(plain.is_some());
+
+        let mut leaking = network_with_match(EgressRuleMatch {
+            host: Some("*".to_string()),
+            ..Default::default()
+        });
+        leaking.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        let cfg = build_cube_network_config(None, Some(&leaking))
+            .expect("catch-all inject should pass")
+            .expect("config");
+        let inject = cfg.rules[0].action.inject.as_ref().expect("inject");
+        assert_eq!(inject[0].header, "Authorization");
+        assert_eq!(inject[0].secret, "sek");
+
+        let mut wildcard = network_with_match(EgressRuleMatch {
+            host: Some("*.example.com".to_string()),
+            ..Default::default()
+        });
+        wildcard.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        build_cube_network_config(None, Some(&wildcard))
+            .expect("wildcard domain inject should still pass");
+
+        let cfg = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                sni: Some("*".to_string()),
+                port: Some(8443),
+                scheme: Some("https".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("custom catch-all port should pass")
+        .expect("config");
+        assert_eq!(cfg.rules[0].r#match.port, Some(8443));
+        assert_eq!(cfg.rules[0].r#match.scheme.as_deref(), Some("https"));
+        assert_eq!(cfg.rules[0].r#match.sni.as_deref(), Some("*"));
+    }
+
+    #[test]
     fn egress_match_port_requires_scheme() {
         let err = build_cube_network_config(
             None,
