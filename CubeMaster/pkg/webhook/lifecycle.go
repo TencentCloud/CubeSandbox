@@ -31,10 +31,27 @@ type LifecycleFields struct {
 	EndAtMS               int64
 	KillReason            string
 	Network               *NetworkFields
+
+	// Template lifecycle fields
+	SourceImageRef  string
+	InstanceType    string
+	BuildMode       string
+	ArtifactID      string
+	ReadyNodeCount  int32
+	ErrorMsg        string
+
+	// Snapshot lifecycle fields
+	NewGen uint32
 }
 
 func validateFields(f LifecycleFields) error {
-	if len(f.KillReason) > maxStringBytes || validateNetwork(f.Network) != nil || f.TooLarge || len(f.Metadata) > maxMetadataEntries || len(f.CPU) > 128 || len(f.Memory) > 128 || len(f.PauseMode) > 16 || len(f.ResumeMode) > 16 {
+	if len(f.KillReason) > maxStringBytes || validateNetwork(f.Network) != nil || f.TooLarge ||
+		len(f.Metadata) > maxMetadataEntries ||
+		len(f.CPU) > 128 || len(f.Memory) > 128 ||
+		len(f.PauseMode) > 16 || len(f.ResumeMode) > 16 ||
+		len(f.SourceImageRef) > maxStringBytes || len(f.InstanceType) > 128 ||
+		len(f.BuildMode) > 16 || len(f.ArtifactID) > maxStringBytes ||
+		len(f.ErrorMsg) > maxStringBytes {
 		return ErrCaptureTooLarge
 	}
 	total := 0
@@ -63,6 +80,11 @@ func cloneFields(f LifecycleFields) LifecycleFields {
 	f.Network = cloneNetwork(f.Network)
 	f.CPU = strings.Clone(f.CPU)
 	f.Memory = strings.Clone(f.Memory)
+	f.SourceImageRef = strings.Clone(f.SourceImageRef)
+	f.InstanceType = strings.Clone(f.InstanceType)
+	f.BuildMode = strings.Clone(f.BuildMode)
+	f.ArtifactID = strings.Clone(f.ArtifactID)
+	f.ErrorMsg = strings.Clone(f.ErrorMsg)
 	return f
 }
 
@@ -104,6 +126,41 @@ func PrepareLifecycle(req *types.CreateCubeSandboxReq) (string, LifecycleFields)
 	return strings.Clone(template), cloneFields(f)
 }
 
+// PrepareTemplateLifecycle builds LifecycleFields for template lifecycle events.
+// Unlike PrepareLifecycle, it does not reference CreateCubeSandboxReq because
+// template events originate from template build/delete flows that use different
+// request types.
+func PrepareTemplateLifecycle(opts TemplateLifecycleOpts) LifecycleFields {
+	f := LifecycleFields{
+		SourceImageRef: opts.SourceImageRef,
+		InstanceType:   opts.InstanceType,
+		BuildMode:      opts.BuildMode,
+		ArtifactID:     opts.ArtifactID,
+		ReadyNodeCount: opts.ReadyNodeCount,
+		ErrorMsg:       opts.ErrorMsg,
+		NewGen:         opts.NewGen,
+	}
+	if opts.Metadata != nil {
+		f.Metadata = opts.Metadata
+	}
+	if validateFields(f) != nil {
+		return LifecycleFields{TooLarge: true}
+	}
+	return cloneFields(f)
+}
+
+// TemplateLifecycleOpts carries optional fields for template lifecycle events.
+type TemplateLifecycleOpts struct {
+	SourceImageRef string
+	InstanceType   string
+	BuildMode      string
+	ArtifactID     string
+	ReadyNodeCount int32
+	ErrorMsg       string
+	NewGen         uint32
+	Metadata       map[string]string
+}
+
 func quantityInteger(raw string, memory bool) *int64 {
 	q, err := resource.ParseQuantity(raw)
 	if err != nil || q.Sign() <= 0 || q.Cmp(resource.MustParse("9223372036854775807")) >= 0 {
@@ -137,7 +194,18 @@ func quantityInteger(raw string, memory bool) *int64 {
 }
 func mapLifecycle(c *CapturedEvent) *ProtocolEventData {
 	f := cloneFields(c.input.Fields)
-	p := &ProtocolEventData{SandboxMetadata: f.Metadata, PauseMode: f.PauseMode, ResumeMode: f.ResumeMode}
+	p := &ProtocolEventData{
+		SandboxMetadata: f.Metadata,
+		PauseMode:       f.PauseMode,
+		ResumeMode:      f.ResumeMode,
+		SourceImageRef:  f.SourceImageRef,
+		InstanceType:    f.InstanceType,
+		BuildMode:       f.BuildMode,
+		ArtifactID:      f.ArtifactID,
+		ReadyNodeCount:  f.ReadyNodeCount,
+		ErrorMsg:        f.ErrorMsg,
+		NewGen:          f.NewGen,
+	}
 	if c.input.Type == TypeUpdated {
 		if f.EndAtMS > 0 {
 			v := time.UnixMilli(f.EndAtMS).UTC().Format(time.RFC3339)

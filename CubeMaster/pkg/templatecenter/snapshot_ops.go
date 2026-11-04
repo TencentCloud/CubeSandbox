@@ -635,6 +635,7 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 		return err
 	}
 	success = true
+	PublishSnapshotRollback(ctx, snapshotID, sandboxID, newGen)
 	return nil
 }
 
@@ -805,6 +806,7 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 		return err
 	}
 	success = true
+	PublishSnapshotDeleted(ctx, snapshotID, "", "")
 	return nil
 }
 

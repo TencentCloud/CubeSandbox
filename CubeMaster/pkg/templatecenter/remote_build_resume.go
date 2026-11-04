@@ -414,9 +414,14 @@ func ContinueTemplateImageJobAfterRemoteBuild(ctx context.Context, continuation 
 	err := finishTemplateImageJobAfterArtifact(ctx, continuation.jobID, continuation.req, continuation.artifact, continuation.generatedReq, !continuation.adopted)
 	if err != nil {
 		logger.Errorf("resume step 3/3 failed: %v", err)
+		PublishTemplateBuildFailed(ctx, continuation.req.TemplateID, continuation.jobID,
+			continuation.req.SourceImageRef, continuation.req.InstanceType, "remote", err.Error())
 		return err
 	}
 	logger.Infof("resume step 3/3: template is READY")
+	PublishTemplateBuildCompleted(ctx, continuation.req.TemplateID, continuation.jobID,
+		continuation.req.SourceImageRef, continuation.req.InstanceType, "remote",
+		continuation.artifact.ArtifactID, 0)
 	return nil
 }
 

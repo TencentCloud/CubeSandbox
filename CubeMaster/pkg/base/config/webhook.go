@@ -100,7 +100,7 @@ func (c WebhookConf) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, sub := range c.Subscriptions {
-		if strings.TrimSpace(sub.ID) == "" || len(sub.ID) > 1024 || !utf8.ValidString(sub.ID) || strings.IndexFunc(sub.ID, unicode.IsControl) >= 0 || seen[sub.ID] || len(sub.Events) == 0 || len(sub.Events) > 6 {
+		if strings.TrimSpace(sub.ID) == "" || len(sub.ID) > 1024 || !utf8.ValidString(sub.ID) || strings.IndexFunc(sub.ID, unicode.IsControl) >= 0 || seen[sub.ID] || len(sub.Events) == 0 || len(sub.Events) > 13 {
 			return ErrWebhookConfig
 		}
 		seen[sub.ID] = true
@@ -110,7 +110,14 @@ func (c WebhookConf) Validate() error {
 		events := map[string]bool{}
 		for _, e := range sub.Events {
 			switch e {
-			case "sandbox.lifecycle.created", "sandbox.lifecycle.killed", "sandbox.lifecycle.paused", "sandbox.lifecycle.resumed", "sandbox.lifecycle.updated", "sandbox.lifecycle.checkpointed":
+			case "sandbox.lifecycle.created", "sandbox.lifecycle.killed",
+				"sandbox.lifecycle.paused", "sandbox.lifecycle.resumed",
+				"sandbox.lifecycle.updated", "sandbox.lifecycle.checkpointed",
+				"template.lifecycle.build.started", "template.lifecycle.build.completed",
+				"template.lifecycle.build.failed", "template.lifecycle.deleted",
+				"template.lifecycle.migrated",
+				"template.lifecycle.snapshot.created", "template.lifecycle.snapshot.deleted",
+				"template.lifecycle.snapshot.rollback.completed":
 			default:
 				return ErrWebhookConfig
 			}

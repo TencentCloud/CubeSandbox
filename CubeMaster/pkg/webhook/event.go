@@ -16,6 +16,20 @@ const (
 	TypeResumed      = "sandbox.lifecycle.resumed"
 	TypeUpdated      = "sandbox.lifecycle.updated"
 	TypeCheckpointed = "sandbox.lifecycle.checkpointed"
+
+	// Template lifecycle events
+	TypeTemplateBuildStarted   = "template.lifecycle.build.started"
+	TypeTemplateBuildCompleted = "template.lifecycle.build.completed"
+	TypeTemplateBuildFailed    = "template.lifecycle.build.failed"
+	TypeTemplateDeleted        = "template.lifecycle.deleted"
+	// TypeTemplateMigrated is emitted when a template is redistributed
+	// to a new set of nodes via the redo/migrate flow.
+	TypeTemplateMigrated = "template.lifecycle.migrated"
+
+	// Snapshot lifecycle events
+	TypeSnapshotCreated  = "template.lifecycle.snapshot.created"
+	TypeSnapshotDeleted  = "template.lifecycle.snapshot.deleted"
+	TypeSnapshotRollback = "template.lifecycle.snapshot.rollback.completed"
 )
 
 // Origin identifies internal operations and is never part of the public body.
@@ -31,6 +45,42 @@ const (
 func validType(eventType string) bool {
 	switch eventType {
 	case TypeCreated, TypeKilled, TypePaused, TypeResumed, TypeUpdated, TypeCheckpointed:
+		return true
+	case TypeTemplateBuildStarted, TypeTemplateBuildCompleted, TypeTemplateBuildFailed,
+		TypeTemplateDeleted, TypeTemplateMigrated:
+		return true
+	case TypeSnapshotCreated, TypeSnapshotDeleted, TypeSnapshotRollback:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSandboxEvent reports whether the event type belongs to the sandbox category.
+func IsSandboxEvent(eventType string) bool {
+	switch eventType {
+	case TypeCreated, TypeKilled, TypePaused, TypeResumed, TypeUpdated, TypeCheckpointed:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTemplateEvent reports whether the event type belongs to the template category.
+func IsTemplateEvent(eventType string) bool {
+	switch eventType {
+	case TypeTemplateBuildStarted, TypeTemplateBuildCompleted, TypeTemplateBuildFailed,
+		TypeTemplateDeleted, TypeTemplateMigrated:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSnapshotEvent reports whether the event type belongs to the snapshot category.
+func IsSnapshotEvent(eventType string) bool {
+	switch eventType {
+	case TypeSnapshotCreated, TypeSnapshotDeleted, TypeSnapshotRollback:
 		return true
 	default:
 		return false

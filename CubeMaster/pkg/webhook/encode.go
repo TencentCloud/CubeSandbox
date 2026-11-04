@@ -54,10 +54,12 @@ func Encode(c *CapturedEvent, p *ProtocolEventData) (*Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	category, label := eventCategoryAndLabel(c.input.Type)
 	in := c.input
 	body, err := json.Marshal(envelope{
 		ID: in.ID, Version: VersionV2, Type: in.Type,
 		Timestamp: in.OccurredAt.Format(time.RFC3339Nano),
+		EventCategory: category, EventLabel: label,
 		SandboxID: in.SandboxID, SandboxExecutionID: in.ExecutionID,
 		SandboxTemplateID: in.TemplateID, SandboxBuildID: in.BuildID,
 		SandboxTeamID: in.TeamID, EventData: data,
@@ -68,13 +70,52 @@ func Encode(c *CapturedEvent, p *ProtocolEventData) (*Event, error) {
 	return &Event{id: in.ID, eventType: in.Type, occurredAt: in.OccurredAt, body: body}, nil
 }
 
+func eventCategoryAndLabel(eventType string) (string, string) {
+	switch eventType {
+	case TypeCreated:
+		return "sandbox", "created"
+	case TypeKilled:
+		return "sandbox", "killed"
+	case TypePaused:
+		return "sandbox", "paused"
+	case TypeResumed:
+		return "sandbox", "resumed"
+	case TypeUpdated:
+		return "sandbox", "updated"
+	case TypeCheckpointed:
+		return "sandbox", "checkpointed"
+	case TypeTemplateBuildStarted:
+		return "template", "build.started"
+	case TypeTemplateBuildCompleted:
+		return "template", "build.completed"
+	case TypeTemplateBuildFailed:
+		return "template", "build.failed"
+	case TypeTemplateDeleted:
+		return "template", "deleted"
+	case TypeTemplateMigrated:
+		return "template", "migrated"
+	case TypeSnapshotCreated:
+		return "snapshot", "created"
+	case TypeSnapshotDeleted:
+		return "snapshot", "deleted"
+	case TypeSnapshotRollback:
+		return "snapshot", "rollback.completed"
+	default:
+		return "", ""
+	}
+}
+
 func protocolData(eventType string, p *ProtocolEventData) (map[string]any, error) {
 	if (p.Execution != nil && eventType != TypePaused && eventType != TypeKilled) ||
 		(p.PauseMode != "" && eventType != TypePaused) ||
 		(p.ResumeMode != "" && eventType != TypeResumed) ||
 		(p.KillReason != "" && eventType != TypeKilled) ||
 		((p.SetTimeout != nil || p.NetworkEgress != nil) && eventType != TypeUpdated) {
-		return nil, fmt.Errorf("%w: fields do not belong to event type", ErrInvalidEvent)
+		// Template and snapshot events carry their own data via TemplateInfo/ErrorMsg,
+		// so the above guard does not apply to them.
+		if !IsTemplateEvent(eventType) && !IsSnapshotEvent(eventType) {
+			return nil, fmt.Errorf("%w: fields do not belong to event type", ErrInvalidEvent)
+		}
 	}
 	data := make(map[string]any)
 	if p.SandboxMetadata != nil {
@@ -111,6 +152,32 @@ func protocolData(eventType string, p *ProtocolEventData) (map[string]any, error
 			reason = "unknown"
 		}
 		data["kill_reason"] = reason
+	case TypeTemplateBuildStarted:
+		data["source_image_ref"] = p.SourceImageRef
+		data["instance_type"] = p.InstanceType
+		data["build_mode"] = p.BuildMode
+	case TypeTemplateBuildCompleted:
+		data["source_image_ref"] = p.SourceImageRef
+		data["artifact_id"] = p.ArtifactID
+		data["instance_type"] = p.InstanceType
+		data["build_mode"] = p.BuildMode
+		if p.ReadyNodeCount >= 0 {
+			data["ready_node_count"] = p.ReadyNodeCount
+		}
+	case TypeTemplateBuildFailed:
+		data["source_image_ref"] = p.SourceImageRef
+		data["error_message"] = p.ErrorMsg
+		data["build_mode"] = p.BuildMode
+	case TypeTemplateDeleted:
+		data["instance_type"] = p.InstanceType
+	case TypeTemplateMigrated:
+		data["instance_type"] = p.InstanceType
+	case TypeSnapshotCreated:
+		data["backend"] = p.InstanceType
+	case TypeSnapshotDeleted:
+		data["error_message"] = p.ErrorMsg
+	case TypeSnapshotRollback:
+		data["new_gen"] = p.NewGen
 	}
 	if eventType == TypePaused || eventType == TypeKilled {
 		execution := ExecutionData{}

@@ -14,6 +14,17 @@ type ProtocolEventData struct {
 	PauseMode       string
 	ResumeMode      string
 	KillReason      string
+
+	// Template lifecycle fields
+	SourceImageRef string `json:"source_image_ref,omitempty"`
+	InstanceType   string `json:"instance_type,omitempty"`
+	BuildMode      string `json:"build_mode,omitempty"`
+	ArtifactID     string `json:"artifact_id,omitempty"`
+	ReadyNodeCount int32  `json:"ready_node_count,omitempty"`
+	ErrorMsg       string `json:"error_message,omitempty"`
+
+	// Snapshot lifecycle fields
+	NewGen uint32 `json:"new_gen,omitempty"`
 }
 
 type ExecutionData struct {

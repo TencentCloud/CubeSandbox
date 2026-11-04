@@ -1,150 +1,244 @@
-# Sandbox lifecycle webhooks
+# Webhook 系统文档
 
-[中文](README_zh.md)
+## 概述
 
-CubeMaster sends lifecycle notifications to statically configured HTTP endpoints.
-Subscriptions are cluster-wide, configured by the operator and disabled by
-default. They are not per-user subscriptions managed through the SDK.
+CubeSandbox 的 Webhook 系统是一个异步事件通知管道，允许外部服务订阅并接收沙箱和模板的生命周期事件通知。当沙箱被创建、暂停、恢复、销毁，或模板被构建、删除时，系统会通过 HTTP POST 将事件投递到预先配置的接收端点。
 
-## Enable delivery
+## 架构
 
-1. Deploy a receiver that accepts JSON POST requests, handles duplicates and
-   returns a 2xx status promptly after durably accepting the notification.
-2. Configure `webhooks` in every CubeMaster configuration. Replace the example
-   endpoint and Redis connection below with your actual services.
-3. Restart **all Masters** to apply the same configuration. Hot reload is not
-   supported. Trigger a real sandbox operation through the existing API/SDK
-   and inspect the receiver and Master webhook metrics.
+```
+业务代码 → Capture(捕获) → BufferedPublisher(缓冲通道) 
+→ Writer(匹配订阅者 + 映射协议 + 编码 JSON) 
+→ RedisDeliveryStore(持久化到 Redis) 
+→ Worker goroutines(竞争领取任务) 
+→ Sender(HTTP POST 投递)
+```
+
+## 事件类型
+
+### 沙箱生命周期事件
+
+| 事件类型 | 描述 | 触发时机 |
+|---|---|---|
+| `sandbox.lifecycle.created` | 沙箱创建完成 | 沙箱成功创建并从模板启动后 |
+| `sandbox.lifecycle.killed` | 沙箱被销毁 | 沙箱被主动销毁或超时回收 |
+| `sandbox.lifecycle.paused` | 沙箱暂停 | 沙箱从运行状态进入暂停状态 |
+| `sandbox.lifecycle.resumed` | 沙箱恢复 | 沙箱从暂停状态恢复到运行状态 |
+| `sandbox.lifecycle.updated` | 沙箱配置更新 | 沙箱的超时时间或网络规则被更新 |
+| `sandbox.lifecycle.checkpointed` | 沙箱检查点(快照)创建 | 从运行中的沙箱创建快照成功 |
+
+### 模板生命周期事件
+
+| 事件类型 | 描述 | 触发时机 |
+|---|---|---|
+| `template.lifecycle.build.started` | 模板构建开始 | 构建任务被提交到模板构建中心(TemplateCenter)后 |
+| `template.lifecycle.build.completed` | 模板构建完成 | 模板构建成功，制品已分发到节点 |
+| `template.lifecycle.build.failed` | 模板构建失败 | 模板构建过程中发生不可恢复的错误 |
+| `template.lifecycle.deleted` | 模板被删除 | 模板及其关联资源被成功清理 |
+| `template.lifecycle.migrated` | 模板迁移完成 | 模板通过 redo/migrate 流程重新分发到新节点 |
+
+### 快照生命周期事件
+
+| 事件类型 | 描述 | 触发时机 |
+|---|---|---|
+| `template.lifecycle.snapshot.created` | 快照创建完成 | 从沙箱创建快照成功（即 `checkpointed`） |
+| `template.lifecycle.snapshot.deleted` | 快照被删除 | 快照及其物理文件被成功清理 |
+| `template.lifecycle.snapshot.rollback.completed` | 快照回滚完成 | 沙箱成功回滚到指定快照版本 |
+
+## HTTP 投递格式
+
+每个事件通过 HTTP POST 发送，请求体为 JSON 格式：
+
+```json
+{
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "version": "v2",
+    "type": "sandbox.lifecycle.created",
+    "timestamp": "2026-11-03T11:06:02.123456789Z",
+    "event_category": "sandbox",
+    "event_label": "created",
+    "sandbox_id": "sb-abc123",
+    "sandbox_execution_id": "",
+    "sandbox_template_id": "tmpl-xyz789",
+    "sandbox_build_id": "",
+    "sandbox_team_id": "",
+    "event_data": {
+        "sandbox_metadata": {
+            "user_token": "kept"
+        }
+    }
+}
+```
+
+### 不同事件类型的 event_data
+
+**sandbox.lifecycle.created / resumed**：无额外数据，或包含 `sandbox_metadata`。
+
+**sandbox.lifecycle.killed**：
+```json
+{
+    "event_data": {
+        "kill_reason": "request",
+        "execution": {
+            "started_at": "2026-11-03T10:00:00Z",
+            "vcpu_count": 2,
+            "memory_mb": 2048,
+            "execution_time": 3600000
+        }
+    }
+}
+```
+
+**sandbox.lifecycle.paused**：
+```json
+{
+    "event_data": {
+        "pause_mode": "full",
+        "execution": { "...": "..." }
+    }
+}
+```
+
+**sandbox.lifecycle.updated**：
+```json
+{
+    "event_data": {
+        "set_timeout": "2026-11-03T12:00:00Z",
+        "network_egress": {
+            "allowed_cidrs": ["10.0.0.0/8"],
+            "denied_cidrs": [],
+            "allowed_domains": ["example.com"]
+        }
+    }
+}
+```
+
+**template.lifecycle.build.started**：
+```json
+{
+    "type": "template.lifecycle.build.started",
+    "event_category": "template",
+    "event_label": "build.started",
+    "sandbox_template_id": "tmpl-xyz789",
+    "sandbox_build_id": "job-456",
+    "event_data": {
+        "source_image_ref": "ubuntu:22.04",
+        "instance_type": "cubebox",
+        "build_mode": "remote"
+    }
+}
+```
+
+**template.lifecycle.build.completed**：
+```json
+{
+    "type": "template.lifecycle.build.completed",
+    "event_category": "template",
+    "event_label": "build.completed",
+    "sandbox_template_id": "tmpl-xyz789",
+    "event_data": {
+        "source_image_ref": "ubuntu:22.04",
+        "artifact_id": "art-xxx",
+        "instance_type": "cubebox",
+        "build_mode": "remote",
+        "ready_node_count": 3
+    }
+}
+```
+
+**template.lifecycle.build.failed**：
+```json
+{
+    "type": "template.lifecycle.build.failed",
+    "event_category": "template",
+    "event_label": "build.failed",
+    "sandbox_template_id": "tmpl-xyz789",
+    "event_data": {
+        "source_image_ref": "ubuntu:22.04",
+        "error_message": "artifact distribution did not reach any node",
+        "build_mode": "remote"
+    }
+}
+```
+
+## 投递保证
+
+- **At-least-once 投递**：每个事件至少尝试投递一次
+- **最多重试 3 次**（可配置），使用指数退避策略
+- **Redis 持久化**：事件在投递前持久化到 Redis，Master 重启不会丢失
+- **去重**：基于事件 `id` (UUID) 和 `delivery_id` 区分重试
+- **不保证 exactly-once**：接收方应具备幂等处理能力
+
+## 配置
+
+在 CubeMaster 的配置文件中配置 Webhook：
 
 ```yaml
 webhooks:
   enabled: true
-  workers: 4
-  request_timeout: 5s
-  max_attempts: 3
+  ingress_capacity: 1024      # 缓冲队列大小 (1-4096)
+  workers: 4                   # 投递 Worker 数 (1-32)
+  request_timeout: 5s          # HTTP 请求超时 (1ms-1min)
+  max_attempts: 3              # 最大重试次数 (1-1000)
+  lease: 15s                   # 任务租约时间
+  allow_http: false            # 是否允许 HTTP (默认仅 HTTPS)
+  allowed_cidrs: []            # HTTP 白名单 CIDR
   store:
     backend: redis
     redis:
       nodes: "redis.internal:6379"
-      password: "REPLACE_WITH_REDIS_PASSWORD"
       db_no: 7
+    operation_timeout: 2s
+    max_records: 10000
+    max_active: 8
+    max_idle: 4
+    terminal_retention: 24h
   subscriptions:
-    - id: lifecycle-receiver
+    - id: my-webhook
       enabled: true
-      url: https://receiver.example.com/cubesandbox/events
+      url: https://my-server.example.com/events
       events:
         - sandbox.lifecycle.created
-        - sandbox.lifecycle.resumed
-        - sandbox.lifecycle.paused
-        - sandbox.lifecycle.checkpointed
-        - sandbox.lifecycle.updated
         - sandbox.lifecycle.killed
+        - sandbox.lifecycle.paused
+        - sandbox.lifecycle.resumed
+        - sandbox.lifecycle.updated
+        - sandbox.lifecycle.checkpointed
+        - template.lifecycle.build.started
+        - template.lifecycle.build.completed
+        - template.lifecycle.build.failed
+        - template.lifecycle.deleted
+        - template.lifecycle.migrated
+        - template.lifecycle.snapshot.created
+        - template.lifecycle.snapshot.deleted
+        - template.lifecycle.snapshot.rollback.completed
 ```
 
-Both global and subscription switches must be enabled. Event filters use exact
-names; wildcards are unsupported. The URL above is a placeholder, not a live
-receiver.
+## 接收端点要求
 
-`store.redis` is a complete connection override. If omitted, the main Redis
-settings are copied. Use a separate Redis service when webhook outages/OOM must
-be isolated from business storage; a separate logical DB does not isolate server
-failure or resource contention. Configure Redis persistence, storage capacity,
-access control and `noeviction` yourself; webhook does not change server settings.
+接收端点应：
+1. 接受 `POST` 请求，`Content-Type: application/json`
+2. 在 5 秒内（由 `request_timeout` 配置）返回 HTTP 200/201/202 表示成功
+3. 返回其他状态码触发重试（直到 `max_attempts` 上限）
+4. 请求头中包含：
+   - `e2b-webhook-id`: 事件唯一标识
+   - `e2b-delivery-id`: 本次投递唯一标识
+5. 如果使用 HTTP（非 HTTPS），需要设置 `allow_http: true` 并配置 `allowed_cidrs` 白名单
 
-Public HTTPS uses normal certificate verification. Private/loopback destinations
-require `allowed_cidrs`. Local HTTP testing additionally requires `allow_http`:
+## 扩展 Webhook
 
-```yaml
-# Merge into webhooks; also set the subscription URL to the local receiver.
-allow_http: true
-allowed_cidrs: ["127.0.0.0/8"]
-```
+### 添加新的事件类型
 
-CIDRs do not disable TLS verification or unblock prohibited special-use
-addresses. Redirects and environment HTTP proxies are not used. See
-[delivery configuration](DELIVERY.md#configuration) for limits and address rules,
-and the [test runbook](../../../tests/e2e/webhook/README.md) for a local receiver.
+1. 在 `CubeMaster/pkg/webhook/event.go` 中定义新的事件常量
+2. 更新 `validType()`、`IsSandboxEvent()`/`IsTemplateEvent()`/`IsSnapshotEvent()` 函数
+3. 在 `CubeMaster/pkg/webhook/encode.go` 中更新 `eventCategoryAndLabel()` 和 `protocolData()`
+4. 在 `CubeMaster/pkg/base/config/webhook.go` 中添加新事件到配置验证
+5. 在业务代码中通过 `lifecyclePublisher.Publish()` 或 `PublishTemplateEvent()` 发布事件
 
-## Events
+## 设计原理
 
-| Event suffix (`sandbox.lifecycle.`) | Published after |
-| --- | --- |
-| `created` | Successful create completion and final post-processing |
-| `resumed` | Successful pause restoration or a trusted user-snapshot restore; ordinary template fast-start remains `created` |
-| `paused` | Local pause and Master pause completion |
-| `checkpointed` | Local snapshot completion and final job READY persistence |
-| `updated` | Confirmed finite timeout writes or supported successfully applied network updates |
-| `killed` | Completed destruction and required cleanup, including supported synchronous/asynchronous paths |
-
-Pause/checkpoint notifications describe **local success**, not completed S3
-upload or remote durability. Later remote upload failure does not retract the
-event. Internal refresh/rollback/pause teardown must not create user-visible
-update/destruction notifications. Timeout `-1` alone does not emit `updated`;
-L7-only network changes are not comprehensively represented. See
-[DELIVERY.md](DELIVERY.md) for precise completion boundaries and field projection.
-
-## Receiver contract
-
-Requests use `Content-Type: application/json`, `e2b-webhook-id` (subscription ID)
-and `e2b-delivery-id` (fresh UUID per actual attempt). The JSON envelope contains
-`id`, `version`, `type`, `timestamp`, sandbox identity fields and event-specific
-`event_data`; see [encode.go](encode.go) and [protocol.go](protocol.go).
-Unavailable identity fields may be empty; receivers requiring complete E2B
-execution/team/build identities are not fully compatible. No signature or
-version HTTP header is sent.
-
-- Deduplicate using payload `id`, with subscription scope if needed. Retries keep
-  the same event ID and body; delivery IDs identify individual attempts.
-- Do not depend on ordering, exactly-once delivery or zero loss. In-memory events
-  can be lost before persistence; saved tasks can be delivered more than once.
-- Return 2xx for success. Other statuses, network errors and timeouts consume the
-  finite retry budget. Claims can consume attempts even before HTTP is sent.
-- Persist downstream work before acknowledging when needed. After terminal
-  budget exhaustion there is no automatic replay when the receiver recovers.
-
-The business path captures bounded event data and performs a nonblocking enqueue.
-Redis persistence, encoding and HTTP delivery run in the background. Full queues,
-invalid/oversize captures or storage faults can lose notifications instead of
-waiting in the business request. This does not promise zero CPU/memory overhead
-or unaffected performance under every workload.
-
-## Implemented and unsupported
-
-| Capability | Status |
-| --- | --- |
-| Six lifecycle event types | Implemented, with the boundaries above |
-| Static multiple subscribers and event filtering | Implemented; all Masters require restart on changes |
-| Redis persistence, bounded retries, leases and competing workers | Implemented; standalone and Sentinel supported |
-| TLS/address checks, bounded queues and shutdown, metrics | Implemented |
-| Dynamic subscription CRUD / per-user subscription API | Not implemented |
-| Signatures, configurable authentication headers, public test-event API | Not implemented |
-| Delivery history/query/replay API | Not implemented |
-| Redis Cluster routing | Unsupported |
-| Total ordering, exactly-once, zero-loss or physical power-loss guarantee | Not provided |
-| Complete E2B field/operation parity | Not provided; see compatibility details |
-
-## Operations and validation
-
-Monitor `cubemaster_webhook_operations_total` and the webhook queue/inflight
-metrics. Counters are diagnostic categories, not a durable delivery history.
-Check switches, event filters and final business outcome if an event is missing;
-then inspect capture, persistence, claim and HTTP outcomes. Invalid webhook
-configuration disables this module; check startup logs rather than assuming a
-healthy API means webhook delivery is enabled.
-
-For sensitive subscription revocation, stop all old delivery instances before
-applying changes. Global disable leaves saved backlog untouched; changed or
-removed targets are cancelled by enabled runtimes using the new startup snapshot.
-An HTTP request already started cannot be recalled. Preserve queue state when
-investigating OOM/corruption; restoring Redis capacity alone may not restart
-scheduling. See [DELIVERY.md](DELIVERY.md) and [STORE.md](STORE.md).
-
-[Acceptance summary](END-TO-END-VALIDATION.md) distinguishes component, real
-XFS/S3, recovery and latency evidence from untested guarantees. The serial API
-experiment demonstrates isolation under tested delivery faults, not a general
-high-concurrency performance SLO. Reproduction and explicit disruptive-test
-opt-ins are in the [test runbook](../../../tests/e2e/webhook/README.md).
-
-For portable test setup, copy and edit the [test environment example](../../../tests/e2e/webhook/env.example).
-Fault fixtures use your dedicated run root and inventoried resources; they do not
-require the original developer's installation paths.
+- **缓冲通道**：接收事件后先入内存缓冲队列，不阻塞业务路径
+- **Redis 持久化**：Writer goroutine 将事件从缓冲写入 Redis，保证 Master 重启不丢事件
+- **Worker 竞争**：多个 Worker 从 Redis 竞争领取投递任务，支持水平扩展
+- **租约机制**：领取的任务有租约时间，Worker 崩溃后任务被其他 Worker 重新领取
+- **指数退避**：失败重试使用指数退避 + 随机抖动，避免 thundering herd

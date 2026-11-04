@@ -48,8 +48,16 @@ func validateCapture(in CaptureInput) error {
 	if err := validateFields(in.Fields); err != nil {
 		return err
 	}
-	if in.ID == uuid.Nil || in.OccurredAt.IsZero() ||
-		!validType(in.Type) || strings.TrimSpace(in.SandboxID) == "" {
+	if in.ID == uuid.Nil || in.OccurredAt.IsZero() || !validType(in.Type) {
+		return ErrInvalidEvent
+	}
+	if IsSandboxEvent(in.Type) && strings.TrimSpace(in.SandboxID) == "" {
+		return ErrInvalidEvent
+	}
+	if IsTemplateEvent(in.Type) && strings.TrimSpace(in.TemplateID) == "" {
+		return ErrInvalidEvent
+	}
+	if IsSnapshotEvent(in.Type) && strings.TrimSpace(in.TemplateID) == "" {
 		return ErrInvalidEvent
 	}
 	if !in.Origin.Allows(in.Type) {
