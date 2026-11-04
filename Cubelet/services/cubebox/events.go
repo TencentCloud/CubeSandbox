@@ -209,9 +209,6 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 			return nil
 		}
 		CubeLog.Errorf("TaskExit event %+v", e)
-		if strings.HasPrefix(e.ID, "exec-") {
-			return nil
-		}
 		cntr, cb, err = em.c.cubeboxManger.FindContainerOfCubebox(ctx, e.ID)
 		if err != nil && !errdefs.IsNotFound(err) {
 			return fmt.Errorf("failed to find container of cubebox: %w", err)
@@ -287,7 +284,7 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 		CubeLog.WithFields(CubeLog.Fields{"ContainerId": e.ContainerID}).Error("container oom")
 		cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 			status.ExitCode = 137
-			status.Reason = "OOMKilled"
+			status.Reason = string(restartpolicy.ReasonOOMKilled)
 			status.FinishedAt = time.Now().UnixNano()
 			return status, nil
 		})
