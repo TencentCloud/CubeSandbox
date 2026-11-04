@@ -100,6 +100,7 @@ impl Modify for SecurityAddon {
     components(schemas(
         ApiError,
         handlers::health::HealthResponse,
+        // Web type generation needs these dashboard models without CubeAPI routes.
         crate::models::ClusterOverview,
         crate::models::NodeView,
         crate::models::ComponentVersionView,
