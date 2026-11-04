@@ -217,8 +217,33 @@ func TestColdBootWritableLayerRejectsAPathOutsideTheDiskDirectory(t *testing.T) 
 			if err := os.WriteFile(filepath.Join(specDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := coldBootWritableLayer(specDir); err == nil {
-				t.Fatalf("layer %q must be rejected", layer)
+			_, err := coldBootWritableLayer(specDir)
+			if err == nil || !strings.Contains(err.Error(), snapshotmode.ErrFilesystemOnlyGuestRuntime) {
+				t.Fatalf("layer %q: err = %v, want the stable identifier", layer, err)
+			}
+		})
+	}
+}
+
+// The fallback derives the layer from the package's container id, so it is the
+// same untrusted input the recorded layer is validated as.
+func TestColdBootContainerIDRejectsAPathOutsideTheDiskDirectory(t *testing.T) {
+	for name, containerID := range map[string]string{
+		"parent":    "../other/disk",
+		"nested":    "a/b",
+		"absolute":  "/data/cubelet/disk/x",
+		"dot":       ".",
+		"backslash": `a\b`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			specDir := t.TempDir()
+			metadata := `{"app_snapshot_container_id":"` + strings.ReplaceAll(containerID, `\`, `\\`) + `"}`
+			if err := os.WriteFile(filepath.Join(specDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := coldBootWritableLayer(specDir)
+			if err == nil || !strings.Contains(err.Error(), snapshotmode.ErrFilesystemOnlyGuestRuntime) {
+				t.Fatalf("container id %q: err = %v, want the stable identifier", containerID, err)
 			}
 		})
 	}

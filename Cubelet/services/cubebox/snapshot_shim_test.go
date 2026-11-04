@@ -112,14 +112,40 @@ func TestSnapshotRenewalFailureRejectsCompletedRootfs(t *testing.T) {
 // only reliable signal: a memory capture always writes snapshot/state.json.
 func TestCapturedGuestMemoryDetectsTheFullPathArtifact(t *testing.T) {
 	dir := t.TempDir()
-	require.False(t, capturedGuestMemory(dir), "an empty capture dir has no VM state")
+	captured, err := capturedGuestMemory(dir)
+	require.NoError(t, err)
+	require.False(t, captured, "an empty capture dir has no VM state")
 
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "snapshot"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", "config.json"), []byte("{}"), 0o644))
-	require.False(t, capturedGuestMemory(dir), "a filesystem-only capture writes only config.json")
+	captured, err = capturedGuestMemory(dir)
+	require.NoError(t, err)
+	require.False(t, captured, "a filesystem-only capture writes only config.json")
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", "state.json"), []byte("{}"), 0o644))
-	require.True(t, capturedGuestMemory(dir))
+	captured, err = capturedGuestMemory(dir)
+	require.NoError(t, err)
+	require.True(t, captured)
+}
+
+// A capture directory that cannot be inspected is a local failure, not evidence
+// about shim capability: reporting it as captured memory would tell the operator
+// to upgrade a shim that may well be current.
+func TestCapturedGuestMemoryReportsAnUninspectableCapture(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where the capture directory belongs makes every stat below
+	// it fail with ENOTDIR, for any uid.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot"), []byte("not a directory"), 0o644))
+
+	captured, err := capturedGuestMemory(dir)
+	require.Error(t, err)
+	require.False(t, captured)
+
+	svc := &service{}
+	captureErr := svc.captureSnapshotWithShim(context.Background(), nil, "snap-1", dir, "", "pause", "/dev/vdb", snapshotmode.FsOnly)
+	require.NotErrorIs(t, captureErr, errFilesystemOnlyCapturedMemory)
+	require.Empty(t, filesystemOnlyUnsupportedMessage(captureErr, "v0.7.3", snapshotmode.FsOnly))
+	require.Contains(t, captureErr.Error(), "inspect snapshot capture")
 }
 
 func TestFilesystemOnlyUnsupportedMessageCoversTheMemoryArtifact(t *testing.T) {

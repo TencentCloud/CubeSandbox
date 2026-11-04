@@ -24,6 +24,7 @@ COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
 COPY pkgs/proto/go.mod pkgs/proto/go.sum /pkgs/proto/
 COPY pkgs/sandboxrestart/go.mod /pkgs/sandboxrestart/
 COPY pkgs/redisx/go.mod pkgs/redisx/go.sum /pkgs/redisx/
+COPY pkgs/snapshotmode/go.mod /pkgs/snapshotmode/
 RUN go mod download
 
 COPY CubeMaster/ ./
@@ -33,6 +34,7 @@ COPY pkgs/cubedb/ /pkgs/cubedb/
 COPY pkgs/proto/ /pkgs/proto/
 COPY pkgs/sandboxrestart/ /pkgs/sandboxrestart/
 COPY pkgs/redisx/ /pkgs/redisx/
+COPY pkgs/snapshotmode/ /pkgs/snapshotmode/
 
 ENV CGO_ENABLED=0
 RUN set -eux; \

@@ -173,19 +173,20 @@ func coldBootWritableLayer(snapshotSpecDir string) (string, error) {
 		return "", fmt.Errorf("%s: read snapshot metadata: %v",
 			snapshotmode.ErrFilesystemOnlyGuestRuntime, err)
 	}
-	if layer := strings.TrimSpace(metadata.RootfsWritableLayer); layer != "" {
-		if err := validateWritableLayerSubdir(layer); err != nil {
-			return "", fmt.Errorf("%s: recorded writable layer %q: %v",
-				snapshotmode.ErrFilesystemOnlyGuestRuntime, layer, err)
+	layer := strings.TrimSpace(metadata.RootfsWritableLayer)
+	if layer == "" {
+		containerID := strings.TrimSpace(metadata.AppSnapshotContainerID)
+		if containerID == "" {
+			return "", fmt.Errorf("%s: snapshot does not record its writable layer",
+				snapshotmode.ErrFilesystemOnlyGuestRuntime)
 		}
-		return layer, nil
+		layer = "disk/" + containerID
 	}
-	containerID := strings.TrimSpace(metadata.AppSnapshotContainerID)
-	if containerID == "" {
-		return "", fmt.Errorf("%s: snapshot does not record its writable layer",
-			snapshotmode.ErrFilesystemOnlyGuestRuntime)
+	if err := validateWritableLayerSubdir(layer); err != nil {
+		return "", fmt.Errorf("%s: recorded writable layer %q: %v",
+			snapshotmode.ErrFilesystemOnlyGuestRuntime, layer, err)
 	}
-	return "disk/" + containerID, nil
+	return layer, nil
 }
 
 // validateWritableLayerSubdir keeps a package-supplied path inside the disk

@@ -100,6 +100,10 @@ A few behaviors worth knowing:
 - A sandbox created from an fs-only snapshot behaves like any other sandbox
   afterwards: `restart` reuses the captured writable layer so files survive,
   and you can take another fs-only snapshot of it later.
+- Plugin volumes recorded by the origin sandbox are not inherited by a sandbox
+  created from an fs-only snapshot: a writable one is rejected at capture, a
+  read-only one is dropped at create. Re-attach it with `volumeMounts` in the
+  create request if the guest needs it.
 
 If the call fails, the error code tells you why:
 

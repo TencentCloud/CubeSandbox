@@ -48,22 +48,27 @@ var errFilesystemOnlyCapturedMemory = errors.New("shim captured guest memory for
 const snapshotVMMStateFile = "state.json"
 
 // capturedGuestMemory reports whether the shim wrote a VM state file for this
-// capture. See snapshotVMMStateFile.
+// capture, and separately whether the capture directory could be inspected at
+// all. See snapshotVMMStateFile.
 //
 // A leftover file from an earlier attempt cannot produce a false positive:
 // each attempt starts with a cleared work directory and a create_new config
 // write, so a re-run into a dirty directory fails outright.
-func capturedGuestMemory(specDir string) bool {
+func capturedGuestMemory(specDir string) (bool, error) {
 	if strings.TrimSpace(specDir) == "" {
-		return false
+		return false, nil
 	}
 	_, err := os.Stat(filepath.Join(specDir, "snapshot", snapshotVMMStateFile))
-	if err == nil {
-		return true
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		// The package cannot be inspected, which says nothing about whether
+		// the shim supports filesystem-only captures.
+		return false, fmt.Errorf("inspect snapshot capture %s: %w", specDir, err)
 	}
-	// Uninspectable directory: fail closed rather than publish a package
-	// that claims to be filesystem-only but may not be.
-	return !errors.Is(err, fs.ErrNotExist)
 }
 
 func snapshotCaptureError(err error) error {
@@ -139,12 +144,19 @@ func (s *service) captureSnapshotWithShim(
 		shimUpdateActionAnnotation: shimSnapshotCaptureAction,
 		shimSnapshotCaptureConfig:  string(config),
 	})
-	// The artifact, not the reply, proves which capture path ran.
-	if mode.IsFsOnly() && capturedGuestMemory(path) {
-		if err == nil {
-			return errFilesystemOnlyCapturedMemory
+	if mode.IsFsOnly() {
+		// The artifact, not the reply, proves which capture path ran.
+		captured, inspectErr := capturedGuestMemory(path)
+		switch {
+		case inspectErr != nil:
+			// Unverifiable artifact: refuse it without blaming the shim.
+			return errors.Join(inspectErr, err)
+		case captured:
+			if err == nil {
+				return errFilesystemOnlyCapturedMemory
+			}
+			return fmt.Errorf("%w: %v", errFilesystemOnlyCapturedMemory, err)
 		}
-		return fmt.Errorf("%w: %v", errFilesystemOnlyCapturedMemory, err)
 	}
 	return err
 }

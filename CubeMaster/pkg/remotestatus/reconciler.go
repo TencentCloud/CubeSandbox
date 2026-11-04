@@ -255,6 +255,9 @@ func remotePackageDefect(item workItem) string {
 	if err := json.Unmarshal([]byte(item.exportUUIDs), &uuids); err != nil {
 		return fmt.Sprintf("exported uuids are unreadable: %v", err)
 	}
+	// A missing metadata export means the exporter found no metadata object to
+	// ship, so the package cannot be restored on any node. It is a property of
+	// this package, not of the Cubelet version that wrote the list.
 	if strings.TrimSpace(uuids.Metadata) == "" {
 		return "package exported no metadata, so it cannot be cold booted"
 	}
