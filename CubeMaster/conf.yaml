@@ -23,6 +23,8 @@ log:
   file_size: 100
   file_num: 10
   level: "info"
+  # "true" writes log lines through a bounded queue. A full queue drops lines.
+  async_flush: "false"
 
 cubelet_conf:
   grpc:

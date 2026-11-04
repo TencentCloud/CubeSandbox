@@ -34,29 +34,29 @@ func (l *realtimecreatelimit) String() string {
 func (l *realtimecreatelimit) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
+	rejects := newRejectLog(selCtx.Ctx)
 	for i := range inList {
 
 		realGlobalcnt := localcache.RealTimeCreateConcurrentLimit(inList[i])
 		limitcnt := localcache.CreateConcurrentLimit(inList[i])
 		if realGlobalcnt >= limitcnt {
-			log.G(selCtx.Ctx).Errorf("%s RealTimeCreateConcurrentLimit exceed:%d", inList[i].IP, realGlobalcnt)
+			rejects.errorf("%s RealTimeCreateConcurrentLimit exceed:%d", inList[i].IP, realGlobalcnt)
 			continue
 		}
 
 		localcnt := localcache.LocalCreateConcurrentLimit(inList[i])
 		gotGlobalLocalcnt := localcnt * localcache.HealthyMasterNodes()
 		if gotGlobalLocalcnt >= limitcnt {
-			log.G(selCtx.Ctx).Errorf("%s LocalCreateConcurrentLimit exceed,localcnt:%d,gotGlobalLocalcnt:%d",
+			rejects.errorf("%s LocalCreateConcurrentLimit exceed,localcnt:%d,gotGlobalLocalcnt:%d",
 				inList[i].IP, localcnt, gotGlobalLocalcnt)
 			continue
 		}
 
 		nodes.Append(inList[i])
 	}
+	rejects.flush(l.ID())
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
 	}
 	// When every candidate is dropped by the create-concurrency limit, stamp a
 	// reject reason so the subsequent no_node failure is classified as

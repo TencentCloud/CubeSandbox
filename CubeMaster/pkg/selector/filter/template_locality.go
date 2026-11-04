@@ -43,9 +43,10 @@ func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeLi
 	}
 
 	nodes := make(node.NodeList, 0, inList.Len())
+	rejects := newRejectLog(selCtx.Ctx)
 	for i := range inList {
 		if !templateNodeAllowed(reqRes, inList[i]) {
-			log.G(selCtx.Ctx).Warnf("%v select:%v template=%s not in template scope", l.ID(), inList[i].ID(), reqRes.TemplateID)
+			rejects.warnf("%v select:%v template=%s not in template scope", l.ID(), inList[i].ID(), reqRes.TemplateID)
 			continue
 		}
 		if reqRes.TemplateID != "" && !reqRes.AllowNonLocalTemplate {
@@ -57,7 +58,7 @@ func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeLi
 				templateLocal = localcache.GetImageStateByNode(reqRes.TemplateID, inList[i].ID()) != nil
 			}
 			if !templateLocal {
-				log.G(selCtx.Ctx).Warnf("%v select:%v template=%s not local", l.ID(), inList[i].ID(), reqRes.TemplateID)
+				rejects.warnf("%v select:%v template=%s not local", l.ID(), inList[i].ID(), reqRes.TemplateID)
 				continue
 			}
 			if reqRes.EnforceSnapshotStorage {
@@ -68,17 +69,16 @@ func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeLi
 					storageAllowed = snapshotStorageNodeAllowed(inList[i])
 				}
 				if !storageAllowed {
-					log.G(selCtx.Ctx).Warnf("%v select:%v template=%s snapshot storage unavailable", l.ID(), inList[i].ID(), reqRes.TemplateID)
+					rejects.warnf("%v select:%v template=%s snapshot storage unavailable", l.ID(), inList[i].ID(), reqRes.TemplateID)
 					continue
 				}
 			}
 		}
 		nodes.Append(inList[i])
 	}
+	rejects.flush(l.ID())
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
 	}
 	return nodes, nil
 }

@@ -86,3 +86,31 @@ func TestLeastRandomSelectClearsStaleItems(t *testing.T) {
 		}
 	}
 }
+
+func TestSetSnapshotFactsCopiedOnFreeze(t *testing.T) {
+	s := New("random")
+	facts := map[string]SnapshotNodeFacts{
+		"n1": {TemplateLocal: true, TemplateLocalKnown: true},
+	}
+	s.SetSnapshotFacts(facts)
+	s.FreezeMetadata()
+	facts["n1"] = SnapshotNodeFacts{}
+	got, ok := s.SnapshotFacts("n1")
+	if !ok || !got.TemplateLocal || !got.TemplateLocalKnown {
+		t.Fatalf("SetSnapshotFacts must be copied on freeze, got %+v ok=%v", got, ok)
+	}
+}
+
+func TestAdoptSnapshotFactsSkipsCopy(t *testing.T) {
+	s := New("random")
+	facts := map[string]SnapshotNodeFacts{
+		"n1": {TemplateLocal: true, TemplateLocalKnown: true},
+	}
+	s.AdoptSnapshotFacts(facts)
+	s.FreezeMetadata()
+	facts["n1"] = SnapshotNodeFacts{TemplateLocalKnown: true}
+	got, ok := s.SnapshotFacts("n1")
+	if !ok || got.TemplateLocal || !got.TemplateLocalKnown {
+		t.Fatalf("AdoptSnapshotFacts shares the caller map, got %+v ok=%v", got, ok)
+	}
+}

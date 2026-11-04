@@ -93,8 +93,6 @@ func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error
 	}
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), newNodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), newNodes.Len())
 	}
 	return newNodes, nil
 }

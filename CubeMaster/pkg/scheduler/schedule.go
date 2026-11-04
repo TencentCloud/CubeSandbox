@@ -54,6 +54,14 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	// A SelectorCtx may be reused across handleCubelet retries; drop any
 	// reject reason stamped by a previous attempt before this one starts.
 	selCtx.SetRejectReason("")
+	preN, guardN, filterN := -1, -1, -1
+	defer func() {
+		if log.IsDebug() {
+			return
+		}
+		log.G(selCtx.Ctx).Infof("scheduler select profile=%s prefilter=%d guards=%d filter=%d",
+			pipeline.Name, preN, guardN, filterN)
+	}()
 
 	if err := runPreFilter(selCtx); err != nil {
 		legacy := len(pipeline.Guards) == 0
@@ -71,6 +79,7 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 			return backoffSelectWithPipeline(selCtx, pipeline)
 		}
 	}
+	preN = selCtx.Nodes().Len()
 	freezeSnapshot(selCtx, pipeline)
 
 	// The guard stage is subject to the no_candidate policy too: with the
@@ -85,6 +94,7 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 		log.G(selCtx.Ctx).Errorf("scheduler_Select guards fail,try BackoffSelect")
 		return backoffSelectWithPipeline(selCtx, pipeline)
 	}
+	guardN = selCtx.Nodes().Len()
 	if err := runProfileFilters(selCtx, pluginKindFilter, pipeline.Filters); err != nil {
 		legacy := len(pipeline.Guards) == 0
 		if pipeline.NoCandidate != profile.NoCandidateBackoff ||
@@ -99,6 +109,7 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 		}
 		return backoffSelectWithPipeline(selCtx, pipeline)
 	}
+	filterN = selCtx.Nodes().Len()
 
 	if err := runProfileScores(selCtx, pipeline.Scores); err != nil {
 		return nil, err
@@ -237,7 +248,7 @@ func freezeSnapshot(selCtx *selctx.SelectorCtx, pipeline *profile.Pipeline) {
 		}
 		facts[candidate.ID()] = value
 	}
-	selCtx.SetSnapshotFacts(facts)
+	selCtx.AdoptSnapshotFacts(facts)
 	// Only gRPC external plugins consume SnapshotNodes; skip the per-attempt
 	// O(len(candidates)) node deep clone when the pipeline has none.
 	if pipelineReadsSnapshot(pipeline) {
@@ -335,15 +346,19 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profil
 		err   error
 	}
 	results := make([]filterResult, len(filters))
-	candidates := make(map[string]struct{}, len(selCtx.Nodes()))
-	for _, candidate := range selCtx.Nodes() {
+	// Index bookkeeping: one id->index map for the request, then []int32
+	// counts and a reused []bool seen set. String-keyed maps per filter
+	// dominated this stage's allocations.
+	nodes := selCtx.Nodes()
+	idToIndex := make(map[string]int, len(nodes))
+	for i, candidate := range nodes {
 		if candidate == nil || candidate.ID() == "" {
 			return ret.Err(errorcode.ErrorCode_MasterInternalError, "scheduler candidate has an empty id")
 		}
-		if _, duplicate := candidates[candidate.ID()]; duplicate {
+		if _, duplicate := idToIndex[candidate.ID()]; duplicate {
 			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "duplicate scheduler candidate id %q", candidate.ID())
 		}
-		candidates[candidate.ID()] = struct{}{}
+		idToIndex[candidate.ID()] = i
 	}
 	eg, _ := errgroup.WithContext(selCtx.Ctx)
 	for index := range filters {
@@ -366,9 +381,10 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profil
 	}
 	_ = eg.Wait()
 
-	counts := make(map[string]int, len(selCtx.Nodes()))
+	counts := make([]int32, len(nodes))
+	seen := make([]bool, len(nodes))
 	for index, result := range results {
-		seen := make(map[string]struct{}, len(result.nodes))
+		clear(seen)
 		if result.err == nil {
 			for _, candidate := range result.nodes {
 				switch {
@@ -377,12 +393,13 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profil
 				case candidate.ID() == "":
 					result.err = fmt.Errorf("filter plugin %q returned a node with an empty id", filters[index].Name)
 				default:
-					if _, exists := candidates[candidate.ID()]; !exists {
+					idx, exists := idToIndex[candidate.ID()]
+					if !exists {
 						result.err = fmt.Errorf("filter plugin %q returned non-candidate node %q", filters[index].Name, candidate.ID())
-					} else if _, duplicate := seen[candidate.ID()]; duplicate {
+					} else if seen[idx] {
 						result.err = fmt.Errorf("filter plugin %q returned duplicate node %q", filters[index].Name, candidate.ID())
 					} else {
-						seen[candidate.ID()] = struct{}{}
+						seen[idx] = true
 					}
 				}
 				if result.err != nil {
@@ -393,20 +410,21 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profil
 		if result.err != nil {
 			if filters[index].Failure == profile.FilterFailOpen {
 				log.G(selCtx.Ctx).Warnf("RISK: scheduler filter %q failed open: %v", filters[index].Name, result.err)
-				for _, candidate := range selCtx.Nodes() {
-					counts[candidate.ID()]++
+				for i := range counts {
+					counts[i]++
 				}
 				continue
 			}
 			return ret.Err(errorcode.ErrorCode_MasterInternalError, result.err.Error())
 		}
 		for _, candidate := range result.nodes {
-			counts[candidate.ID()]++
+			counts[idToIndex[candidate.ID()]]++
 		}
 	}
-	result := make(node.NodeList, 0, len(selCtx.Nodes()))
-	for _, candidate := range selCtx.Nodes() {
-		if counts[candidate.ID()] == len(filters) {
+	result := make(node.NodeList, 0, len(nodes))
+	need := int32(len(filters))
+	for i, candidate := range nodes {
+		if counts[i] == need {
 			result = append(result, candidate)
 		}
 	}
@@ -454,17 +472,20 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 	_ = eg.Wait()
 
 	totalWeight := 0.0
-	aggregated := make(map[string]*node.NodeScore, len(selCtx.Nodes()))
-	candidates := make(map[string]*node.Node, len(selCtx.Nodes()))
-	for _, candidate := range selCtx.Nodes() {
+	nodes := selCtx.Nodes()
+	idToIndex := make(map[string]int, len(nodes))
+	for i, candidate := range nodes {
 		if candidate == nil || candidate.ID() == "" {
 			return ret.Err(errorcode.ErrorCode_MasterInternalError, "scheduler candidate has an empty id")
 		}
-		if _, duplicate := candidates[candidate.ID()]; duplicate {
+		if _, duplicate := idToIndex[candidate.ID()]; duplicate {
 			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "duplicate scheduler candidate id %q", candidate.ID())
 		}
-		candidates[candidate.ID()] = candidate
+		idToIndex[candidate.ID()] = i
 	}
+	aggregated := make([]*node.NodeScore, len(nodes))
+	scoredCount := 0
+	seen := make([]bool, len(nodes))
 	for index, result := range results {
 		binding := scores[index]
 		if result.skip {
@@ -479,8 +500,9 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 			// ForceEnabled plugin must not return.
 			continue
 		}
+		clear(seen)
+		seenCount := 0
 		if result.err == nil {
-			seen := make(map[string]struct{}, len(result.nodes))
 			for _, scored := range result.nodes {
 				switch {
 				case scored == nil:
@@ -488,24 +510,26 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 				case scored.ID() == "":
 					result.err = fmt.Errorf("score plugin %q returned an empty node id", binding.Name)
 				default:
-					if _, exists := candidates[scored.ID()]; !exists {
+					idx, exists := idToIndex[scored.ID()]
+					if !exists {
 						result.err = fmt.Errorf("score plugin %q returned non-candidate node %q", binding.Name, scored.ID())
-					} else if _, duplicate := seen[scored.ID()]; duplicate {
+					} else if seen[idx] {
 						result.err = fmt.Errorf("score plugin %q returned duplicate node %q", binding.Name, scored.ID())
 					} else if math.IsNaN(scored.Score) || math.IsInf(scored.Score, 0) {
 						result.err = fmt.Errorf("score plugin %q returned invalid score for node %q", binding.Name, scored.ID())
 					} else if binding.ForceEnabled && (scored.Score < 0 || scored.Score > 100) {
 						result.err = fmt.Errorf("score plugin %q returned %v for node %q outside [0,100]", binding.Name, scored.Score, scored.ID())
 					} else {
-						seen[scored.ID()] = struct{}{}
+						seen[idx] = true
+						seenCount++
 					}
 				}
 				if result.err != nil {
 					break
 				}
 			}
-			if result.err == nil && binding.ForceEnabled && len(seen) != len(candidates) {
-				result.err = fmt.Errorf("score plugin %q returned %d scores for %d candidates", binding.Name, len(seen), len(candidates))
+			if result.err == nil && binding.ForceEnabled && seenCount != len(nodes) {
+				result.err = fmt.Errorf("score plugin %q returned %d scores for %d candidates", binding.Name, seenCount, len(nodes))
 			}
 		}
 		if result.err != nil {
@@ -514,8 +538,8 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 				return ret.Err(errorcode.ErrorCode_MasterInternalError, result.err.Error())
 			case profile.ScoreDefaultScore:
 				log.G(selCtx.Ctx).Warnf("scheduler score %q failed; using default score %.2f: %v", binding.Name, binding.DefaultScore, result.err)
-				result.nodes = make(node.NodeScoreList, 0, len(selCtx.Nodes()))
-				for _, candidate := range selCtx.Nodes() {
+				result.nodes = make(node.NodeScoreList, 0, len(nodes))
+				for _, candidate := range nodes {
 					result.nodes = append(result.nodes, &node.NodeScore{InsID: candidate.ID(), OrigNode: candidate, MvmNum: candidate.MvmNum, Score: binding.DefaultScore})
 				}
 			default: // legacy skip-on-error behavior
@@ -534,18 +558,20 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 		}
 		totalWeight += weight
 		for _, scored := range result.nodes {
-			candidate := candidates[scored.ID()]
-			if existing := aggregated[scored.ID()]; existing != nil {
+			idx := idToIndex[scored.ID()]
+			candidate := nodes[idx]
+			if existing := aggregated[idx]; existing != nil {
 				existing.Score += scored.Score * weight
 			} else {
-				aggregated[scored.ID()] = &node.NodeScore{
+				aggregated[idx] = &node.NodeScore{
 					InsID: scored.ID(), OrigNode: candidate, MvmNum: candidate.MvmNum, Score: scored.Score * weight,
 				}
+				scoredCount++
 			}
 		}
 	}
-	if len(aggregated) == 0 {
-		if selCtx.Nodes().Len() == 0 {
+	if scoredCount == 0 {
+		if len(nodes) == 0 {
 			return ret.Err(errorcode.ErrorCode_SelectNodesNoRes, ErrNoRes.Error())
 		}
 		return nil
@@ -553,21 +579,27 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 	if totalWeight == 0 {
 		totalWeight = 1
 	}
-	result := make(node.NodeScoreList, 0, len(aggregated))
-	for _, candidate := range selCtx.Nodes() {
-		if scored := aggregated[candidate.ID()]; scored != nil {
-			scored.Score /= totalWeight
-			result = append(result, scored)
+	result := make(node.NodeScoreList, 0, scoredCount)
+	var posted map[string]*node.NodeScore
+	if scheduler.postScore != nil {
+		posted = make(map[string]*node.NodeScore, scoredCount)
+	}
+	for i, scored := range aggregated {
+		if scored == nil {
+			continue
+		}
+		scored.Score /= totalWeight
+		result = append(result, scored)
+		if posted != nil {
+			posted[nodes[i].ID()] = scored
 		}
 	}
 	if scheduler.postScore != nil {
-		_ = scheduler.postScore.PostedScore(selCtx, aggregated)
+		_ = scheduler.postScore.PostedScore(selCtx, posted)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Score > result[j].Score })
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("runProfileScores profile=%s:%v", selCtx.GetProfileName(), result.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("runProfileScores profile=%s:%v", selCtx.GetProfileName(), result.Len())
 	}
 	selCtx.SetNodeScoreList(result)
 	if selCtx.Nodes().Len() == 0 {

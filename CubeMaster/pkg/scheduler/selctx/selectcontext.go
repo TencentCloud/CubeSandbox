@@ -19,14 +19,15 @@ import (
 )
 
 type SelectorCtx struct {
-	Ctx             context.Context
-	ReqRes          *RequestResource
-	RequestLabels   map[string]string
-	SnapshotVersion string
-	lastBadFilters  []*node.Node
-	result          node.NodeList
-	snapshot        node.NodeList
-	snapshotFacts   map[string]SnapshotNodeFacts
+	Ctx                context.Context
+	ReqRes             *RequestResource
+	RequestLabels      map[string]string
+	SnapshotVersion    string
+	lastBadFilters     []*node.Node
+	result             node.NodeList
+	snapshot           node.NodeList
+	snapshotFacts      map[string]SnapshotNodeFacts
+	snapshotFactsOwned bool
 
 	// profileName is stamped by Select and may be read concurrently by the
 	// create path after a timeout, so it goes through atomic accessors.
@@ -167,13 +168,16 @@ func (s *SelectorCtx) freeze(cloneNodes bool) {
 		}
 		s.RequestLabels = labels
 	}
-	if s.snapshotFacts != nil {
+	// AdoptSnapshotFacts already handed us a map nobody else mutates. Copying
+	// it again was a full extra allocation on every create.
+	if s.snapshotFacts != nil && !s.snapshotFactsOwned {
 		facts := make(map[string]SnapshotNodeFacts, len(s.snapshotFacts))
 		for nodeID, value := range s.snapshotFacts {
 			facts[nodeID] = value
 		}
 		s.snapshotFacts = facts
 	}
+	s.snapshotFactsOwned = true
 	s.SnapshotVersion = fmt.Sprintf("%d-%d", time.Now().UnixNano(), snapshotSequence.Add(1))
 }
 
@@ -212,6 +216,14 @@ func (s *SelectorCtx) SnapshotNodes() node.NodeList {
 
 func (s *SelectorCtx) SetSnapshotFacts(facts map[string]SnapshotNodeFacts) {
 	s.snapshotFacts = facts
+	s.snapshotFactsOwned = false
+}
+
+// AdoptSnapshotFacts stores facts that the caller will not mutate. freeze then
+// skips the defensive copy.
+func (s *SelectorCtx) AdoptSnapshotFacts(facts map[string]SnapshotNodeFacts) {
+	s.snapshotFacts = facts
+	s.snapshotFactsOwned = true
 }
 
 func (s *SelectorCtx) SnapshotFacts(nodeID string) (SnapshotNodeFacts, bool) {

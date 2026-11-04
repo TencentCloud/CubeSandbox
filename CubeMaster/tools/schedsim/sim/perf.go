@@ -764,7 +764,7 @@ func freezeSnapshotFacts(selCtx *selctx.SelectorCtx, pipeline *profile.Pipeline)
 		}
 		facts[candidate.ID()] = value
 	}
-	selCtx.SetSnapshotFacts(facts)
+	selCtx.AdoptSnapshotFacts(facts)
 	if pipelineReadsSnapshot(pipeline) {
 		selCtx.FreezeSnapshot()
 	} else {
