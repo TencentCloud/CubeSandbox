@@ -1,18 +1,16 @@
 #!/bin/sh
 set -eu
 
-ROUTE_TABLE=100
+ROUTE_TABLE="${CUBE_EGRESS_ROUTE_TABLE:-10901}"
 RULE_PRIORITY=10900
 ROUTE_MARK=0x1000/0x1000
-CLUSTER_CIDR_SET=CUBE-EGRESS-CLUSTER-CIDRS
-CLUSTER_CIDR_SET_NEXT=CUBE-EGRESS-CLUSTER-CIDRS-NEXT
 SNAT_CHAIN=CUBE-EGRESS-SNAT
+EGRESS_HOST_IFACES="cube-egress-p0 cube-egress-p1"
 RAW_CLUSTER_CIDRS="${CUBE_EGRESS_CLUSTER_CIDRS:?CUBE_EGRESS_CLUSTER_CIDRS is required}"
 NODE_NAME="${NODE_NAME:?NODE_NAME is required}"
 CUBE_ROUTER_NAT_IP="${CUBE_ROUTER_NAT_IP:?CUBE_ROUTER_NAT_IP is required}"
 STATE_DIR="${CUBE_EGRESS_STATE_DIR:-/run/cube-egress}"
-RP_FILTER_PATH="${CUBE_EGRESS_RP_FILTER_PATH:-/host-sysctl/rp_filter}"
-RP_FILTER_STATE="${STATE_DIR}/rp-filter.previous"
+RP_FILTER_SYSCTL_ROOT="${CUBE_EGRESS_RP_FILTER_SYSCTL_ROOT:-/host-sysctl/conf}"
 
 log() {
   printf '[egress-configurer] %s\n' "$*"
@@ -98,7 +96,6 @@ load_state_snapshots() {
   # A fresh node has no policy-routing table yet. iproute2 reports that as a
   # non-zero exit, but it is an empty initial state that reconcile must create.
   ROUTE_STATE="$(ip route show table "${ROUTE_TABLE}" 2>/dev/null || true)"
-  IPSET_STATE="$(ipset save "${CLUSTER_CIDR_SET}" 2>/dev/null || true)"
 }
 
 peer_gateway() {
@@ -136,8 +133,12 @@ ensure_route_mark_ownership() {
 
 expected_mark_chain() {
   printf -- '-N CUBE-EGRESS-MARK\n'
-  printf -- '-A CUBE-EGRESS-MARK -m set --match-set %s dst -j MARK --set-xmark %s\n' \
-    "${CLUSTER_CIDR_SET}" "${ROUTE_MARK}"
+  while IFS= read -r cidr; do
+    printf -- '-A CUBE-EGRESS-MARK -d %s -j MARK --set-xmark %s\n' \
+      "${cidr}" "${ROUTE_MARK}"
+  done <<EOF
+$(cluster_cidrs)
+EOF
 }
 
 expected_mark_jump() {
@@ -248,49 +249,6 @@ preflight_iptables_ownership() {
   }
 }
 
-preflight_ipset_ownership() {
-  [ -z "${IPSET_STATE}" ] && return 0
-  first_line="$(printf '%s\n' "${IPSET_STATE}" | sed -n '1p')"
-  case "${first_line}" in
-    "create ${CLUSTER_CIDR_SET} hash:net "* | \
-    "create ${CLUSTER_CIDR_SET} hash:net")
-      ;;
-    *)
-      log "ipset ${CLUSTER_CIDR_SET} is occupied: ${first_line}"
-      return 1
-      ;;
-  esac
-}
-
-expected_ipset_members() {
-  while IFS= read -r cidr; do
-    printf 'add %s %s\n' "${CLUSTER_CIDR_SET}" "${cidr}"
-  done <<EOF
-$(cluster_cidrs)
-EOF
-}
-
-ensure_cluster_cidr_set() {
-  current_members="$(
-    printf '%s\n' "${IPSET_STATE}" |
-      awk -v name="${CLUSTER_CIDR_SET}" '$1 == "add" && $2 == name' |
-      sort
-  )"
-  expected_members="$(expected_ipset_members | sort)"
-  [ "${current_members}" = "${expected_members}" ] && return 0
-
-  ipset create "${CLUSTER_CIDR_SET}" hash:net family inet -exist
-  ipset create "${CLUSTER_CIDR_SET_NEXT}" hash:net family inet -exist
-  ipset flush "${CLUSTER_CIDR_SET_NEXT}"
-  while IFS= read -r cidr; do
-    ipset add "${CLUSTER_CIDR_SET_NEXT}" "${cidr}"
-  done <<EOF
-$(cluster_cidrs)
-EOF
-  ipset swap "${CLUSTER_CIDR_SET_NEXT}" "${CLUSTER_CIDR_SET}"
-  ipset destroy "${CLUSTER_CIDR_SET_NEXT}"
-}
-
 ensure_mark_chain() {
   iptables -w -t mangle -N CUBE-EGRESS-MARK 2>/dev/null || true
 
@@ -355,7 +313,7 @@ ensure_forward_chain() {
   )"
   leading_rules="$(
     printf '%s\n' "${FILTER_RULES}" |
-      sed -n '/^-A /p' |
+      sed -n '/^-A FORWARD /p' |
       sed -n '1p'
   )"
   if [ "${current_rules}" != "${expected_rules}" ] ||
@@ -410,17 +368,17 @@ ensure_snat_chain() {
   fi
 }
 
+# Return traffic arrives on cube-egress-pN with source <cube-router-nat-ip>,
+# whose reverse path resolves via cube-router, so strict rp_filter would drop
+# it. Only these two interfaces need rp_filter=0; they are created and removed
+# with the Proxy Pod, so the setting needs no save/restore and never touches
+# the node-wide conf/all baseline that CubeEgress and other components share.
 ensure_rp_filter() {
-  current="$(cat "${RP_FILTER_PATH}")"
-  case "${current}" in
-    0 | 1 | 2) ;;
-    *) log "invalid rp_filter value: ${current}"; return 1 ;;
-  esac
-  if [ ! -f "${RP_FILTER_STATE}" ]; then
-    printf '%s\n' "${current}" > "${RP_FILTER_STATE}.tmp"
-    mv "${RP_FILTER_STATE}.tmp" "${RP_FILTER_STATE}"
-  fi
-  [ "${current}" = 0 ] || printf '0\n' > "${RP_FILTER_PATH}"
+  for iface in ${EGRESS_HOST_IFACES}; do
+    [ -e "${RP_FILTER_SYSCTL_ROOT}/${iface}/rp_filter" ] || continue
+    current="$(cat "${RP_FILTER_SYSCTL_ROOT}/${iface}/rp_filter")"
+    [ "${current}" = 0 ] || printf '0\n' > "${RP_FILTER_SYSCTL_ROOT}/${iface}/rp_filter"
+  done
 }
 
 expected_policy_rule() {
@@ -469,6 +427,7 @@ ensure_route_table_ownership() {
         ;;
       *)
         log "route table ${ROUTE_TABLE} is occupied: ${route}"
+        log "set egressProxy.routeTable to a table no other component uses"
         return 1
         ;;
     esac
@@ -546,10 +505,8 @@ ip link show cube-router >/dev/null
 load_state_snapshots
 ensure_route_mark_ownership
 preflight_iptables_ownership
-preflight_ipset_ownership
 preflight_policy_rule_ownership
 ensure_route_table_ownership
-ensure_cluster_cidr_set
 ensure_mark_chain
 ensure_forward_chain
 ensure_snat_chain

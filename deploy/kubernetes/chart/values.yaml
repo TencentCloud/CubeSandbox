@@ -117,13 +117,11 @@ images:
   egressConfigurer:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-configurer
     tag: v0.7.3
-    digest: ""
     pullPolicy: IfNotPresent
 
   egressProxy:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-proxy
     tag: v0.7.3
-    digest: ""
     pullPolicy: IfNotPresent
 
   cubeS3lvol:
@@ -1262,6 +1260,14 @@ egressProxy:
   # Only these original sandbox destinations are routed through EgressProxy.
   # Explicitly configure every Kubernetes Pod and Service CIDR.
   clusterCIDRs: []
+  # Dedicated routing table for EgressProxy. Table 100 belongs to CubeEgress
+  # (local default dev lo for L7 TPROXY), tables 101-110 are commonly taken by
+  # Cilium/kube-router, 200-252 by Calico/systemd-networkd, and 253-255 are
+  # reserved by the kernel. 10901 sits in the application-private high range
+  # and is adjacent to the fixed rule priority 10900. Override it if a node
+  # already uses this table; the Configurer refuses to touch foreign state and
+  # reports the conflict.
+  routeTable: 10901
 
 # Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
 # in the cube-node Big Pod. Off by default, same as one-click. Enabling it

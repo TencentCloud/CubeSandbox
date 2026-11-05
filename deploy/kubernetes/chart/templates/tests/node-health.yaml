@@ -119,9 +119,7 @@ spec:
             | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
             | awk -F'"' '{print $4}')"
           echo "${container_names}" | grep -qxF 'cube-egress'
-          {{- if not .Values.egressProxy.enabled }}
           echo "${container_names}" | grep -qxF 'cube-egress-net'
-          {{- end }}
           {{- end }}
 
           {{- if .Values.egressProxy.enabled }}

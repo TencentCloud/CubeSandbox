@@ -418,6 +418,15 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- end }}
 {{- $_ := set $seenClusterCIDRs . true }}
 {{- end }}
+{{- $routeTable := .Values.egressProxy.routeTable | int }}
+{{- $inLowRange := and (ge $routeTable 1) (le $routeTable 252) }}
+{{- $inHighRange := and (ge $routeTable 10000) (le $routeTable 20000) }}
+{{- if not (or $inLowRange $inHighRange) }}
+{{- fail (printf "egressProxy.routeTable must be in 1-252 or 10000-20000, got %v (253-255 are reserved by the kernel)" $routeTable) }}
+{{- end }}
+{{- if eq $routeTable 100 }}
+{{- fail "egressProxy.routeTable cannot be 100: that table belongs to CubeEgress L7 TPROXY (local default dev lo). Pick a dedicated table such as the default 10901." }}
+{{- end }}
 {{- if not .Values.images.egressConfigurer.repository }}
 {{- fail "egressProxy.enabled=true requires images.egressConfigurer.repository" }}
 {{- end }}

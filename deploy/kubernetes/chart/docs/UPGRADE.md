@@ -1,306 +1,204 @@
-# CubeSandbox Chart 升级指南
+# EgressProxy 升级与回滚指南
 
 [English](./UPGRADE_EN.md) | 中文
 
-本文说明当前 Helm Chart 的升级边界和操作流程。文档以 Chart 模板、values
-和组件入口脚本的实际行为为准，不包含尚未实现的发布控制器或监控能力。
+本文只覆盖可选的节点本地 veth EgressProxy（`egressProxy.enabled`）。本文不描述
+Big Pod 替换：该行为由 base Chart 提供，并由官方
+[升级文档](https://cubesandbox.com/zh/guide/kubernetes/upgrade) 说明，本 PR 没有
+修改它。
 
-> **网络契约：** 原地接管要求 `cubeNode.hostNetwork: true`（Chart 默认值）和
-> `dnsPolicy: ClusterFirstWithHostNet`。`cubeNode.hostNetwork: false` 仍使用
-> Pod 网络，替换 Big Pod 会销毁该 netns。在已有 Release 上切换该开关仍由
-> `cubeNode.hostNetworkChangeAck` 和 host-network preflight Hook 拦住。
-> 扩大发布前先在单个计算节点做 canary。
+`egressProxy` 与 `cubeNode.hostNetwork`、cubelet PID、sandbox cgroup、hostPath
+布局、shim 重连都无关。开启或关闭它只会增加或移除 EgressProxy 数据面。
 
-## 原地升级与 EgressProxy 总体架构
+## 1. 该特性安装了什么
 
-`cube-node` Big Pod 升级时 Pod 会被替换，但 sandbox 运行时、状态和网络留在
-宿主机，由新 Pod 重新接管。EgressProxy 使用独立 DaemonSet，与 Big Pod
-生命周期解耦，使存量 sandbox 在升级期间仍可访问集群服务，并受用户定义的
-Kubernetes NetworkPolicy 控制。
+`egressProxy.enabled=true` 时，Chart 新增：
 
-```mermaid
-flowchart LR
-    subgraph K8S["Kubernetes 管理层：可替换"]
-        OLD["旧 cube-node Big Pod<br/>旧 cubelet"]
-        UPDATE["DaemonSet 更新<br/>替换 Pod"]
-        NEW["新 cube-node Big Pod<br/>新 cubelet<br/>hostPID + hostNetwork"]
-        OLD --> UPDATE --> NEW
-    end
-
-    subgraph HOST["计算节点宿主持久层：Big Pod 更新不删除"]
-        RUNTIME["CubeShim + VMM<br/>宿主 cgroup 中持续运行"]
-        STATE["hostPath + socket<br/>/data/cubelet<br/>/data/cube-shim"]
-        SANDBOX["存量 Sandbox<br/>ID、guest、进程不变"]
-        ROUTER["Cube Router<br/>sandbox netns / TAP 保持"]
-
-        STATE --- RUNTIME
-        RUNTIME --> SANDBOX
-        ROUTER --- SANDBOX
-    end
-
-    subgraph EGRESS["独立 EgressProxy 数据面：不随 Big Pod 更新"]
-        CONFIG["Configurer DaemonSet<br/>维护 mark、table 100 和主备健康"]
-        RULES["节点策略路由<br/>mangle/PREROUTING<br/>mark → table 100"]
-        VETH["节点本地 veth<br/>Primary / Standby"]
-        PROXY["EgressProxy Pod<br/>转发 + SNAT"]
-        POLICY["用户 NetworkPolicy"]
-        SERVICE["Kubernetes Service / Pod"]
-
-        CONFIG -.->|"配置宿主规则"| RULES
-        CONFIG -.->|"选择健康路径"| VETH
-        RULES --> VETH --> PROXY
-        PROXY -->|"以 Pod 身份进入 CNI"| POLICY --> SERVICE
-    end
-
-    OLD -.->|"旧控制连接"| STATE
-    NEW ==>|"读取原状态和 socket<br/>重新接管存量运行时"| STATE
-    NEW ==>|"复用宿主网络数据面"| ROUTER
-    SANDBOX -->|"访问 clusterCIDRs"| ROUTER
-    ROUTER -->|"沙箱流量进入节点"| RULES
-
-    classDef replaceable fill:#e8f1ff,stroke:#3973ac,color:#102a43;
-    classDef persistent fill:#e9f8ee,stroke:#2f855a,color:#173b2b;
-    classDef egress fill:#fff4df,stroke:#b7791f,color:#4a2d0b;
-    class OLD,UPDATE,NEW replaceable;
-    class RUNTIME,STATE,SANDBOX,ROUTER persistent;
-    class CONFIG,RULES,VETH,PROXY,POLICY,SERVICE egress;
-```
-
-图中的关键边界：
-
-- Big Pod 的 UID、容器和 cubelet PID 会变化；sandbox ID、创建时间、
-  CubeShim/VMM PID、guest boot ID 和网络命名空间保持不变。
-- CubeShim、VMM 脱离 `kubepods` cgroup，状态和 socket 位于 hostPath，因此
-  旧 Pod 删除不会销毁存量 sandbox。
-- 新 cubelet 读取相同 hostPath，并通过既有 socket 重新接管 CubeShim/VMM；
-  这是“接管”，不是重新创建 sandbox。
-- EgressProxy、Configurer 是独立 DaemonSet。Big Pod 更新不重建它们，也不删除
-  节点的本地 veth、策略路由或用户 NetworkPolicy。
-- 只有 sandbox 访问 `clusterCIDRs` 的请求被 Cube Router 标记并送入 table 100，
-  再经本地 veth 进入 EgressProxy；其他节点、Pod 和非集群流量不走该链路。
-- EgressProxy 以 Pod 身份从 CNI 发出请求，因此用户可以用 NetworkPolicy 控制
-  sandbox 能访问哪些 Kubernetes Service 或 Pod。
-
-## 1. 当前升级模型
-
-计算节点由四个原生 `apps/v1` DaemonSet 组成：
-
-| 组件 | 职责 | 更新影响 |
+| 资源 | 网络 | 作用 |
 | --- | --- | --- |
-| `cube-node-installer` | 安装 shim、kernel 和 guest 产物 | 不承载运行时数据面 |
-| `cube-node-pvm` | 在明确授权的节点安装 PVM 宿主机内核 | 可能修改内核、GRUB 并触发重启 |
-| `cube-node-bootstrap` | 检查并准备 KVM、XFS 和节点目录 | 不承载运行时数据面 |
-| `cube-node` | 运行 cubelet、CubeEgress 和 host 网络运行时 | Pod 模板变化会重建 Big Pod |
+| `<release>-egress-configurer` DaemonSet | host 网络 | 调和宿主 iptables、ip rule 和 table 10901；选择健康 Proxy |
+| `<release>-egress-proxy-primary` DaemonSet | Pod 网络 | 持有 `cube-egress-p0`，转发并 SNAT 为自身 PodIP |
+| `<release>-egress-proxy-standby` DaemonSet | Pod 网络 | 持有 `cube-egress-p1`，转发路径同上 |
+| `cube-egress` namespace | — | 承载上述三个 DaemonSet，卸载时保留 |
 
-原地接管使用默认的 host 网络：
+三个 DaemonSet 都使用 `OnDelete`。对外有 `egressProxy.enabled`、
+`egressProxy.clusterCIDRs` 和 `egressProxy.routeTable`（默认 10901）三个配置项；
+priority 10900、mark、veth 名称和 link-local 前缀固定，不可配置。
 
-```yaml
-hostPID: true
-hostNetwork: true
-dnsPolicy: ClusterFirstWithHostNet
+`routeTable` 之所以要独立可配：表 100 归 CubeEgress 所有（L7 TPROXY 的
+`local default dev lo`），101–110 常被 Cilium/kube-router 占用，200–252 常被
+Calico/systemd-networkd 占用，253–255 是内核保留。默认 10901 位于应用私有高位段，
+与固定 rule priority 10900 相邻便于识别；若节点上已被占用，改这个值即可。
+
+`egressProxy.enabled=true` 要求 `cubeNode.network.cubeRouter.enabled=true`，否则
+Chart 校验直接失败。Cube Router 会向 Big Pod template 注入环境变量，因此**首次
+开启会替换一次 Big Pod**。EgressProxy 资源本身与这次替换无关，但发布编排需要
+把它算进去。
+
+`clusterCIDRs` 接受 1~32 条，只支持 IPv4。
+
+## 2. 升级边界与限制
+
+只有目标命中 `clusterCIDRs` 的 sandbox 流量才会被标记并进入 table 10901，其余流量
+继续走节点主路由。
+
+以下限制对用户可见，必须如实告知：
+
+- 策略粒度是 EgressProxy Pod / 节点，无法按单个 sandbox 区分；
+- 主、备不共享 conntrack，切换会中断已建立连接；
+- 只支持 IPv4，不支持双栈；
+- `clusterCIDRs` 需手工维护，必须覆盖全部 Pod 与 Service CIDR；
+- Chart 不创建、不修改、不删除、也不推荐任何 NetworkPolicy；
+- Configurer 以 host 网络运行并需要 `NET_ADMIN`，Proxy 的 initContainer 需要
+  privileged，因此必须有范围受限的 Pod Security admission 豁免；
+- 没有自动 drain、发布编排或指标端点；
+- 与 CubeEgress 共存，不牺牲 L7 拦截，具体见第 3 节。
+
+## 3. 与 CubeEgress 共存
+
+CubeEgress 的 L7 透明拦截与 EgressProxy 可以同节点同时运行，`cube-egress-net`
+sidecar 始终随 Big Pod 部署，不会因为开启 EgressProxy 而被移除。
+
+两者靠三处隔离保证互不干扰：
+
+| 维度 | CubeEgress | EgressProxy |
+| --- | --- | --- |
+| 入口 | `-i cube-dev` | `-i cube-router -s <router-nat-ip>` |
+| iptables 链 | `TRANSPROXY`（mangle） | `CUBE-EGRESS-MARK` / `CUBE-EGRESS` / `CUBE-EGRESS-SNAT` |
+| fwmark | `0xCE010000` / `0xCE020000`，mask `0xFFFF0000` | `0x1000`，mask `0x1000` |
+| 路由表 | 100（`local default dev lo`） | 10901（默认） |
+
+分流语义由 CubeVS 的 `classify_egress_flow()` 决定，优先级是：
+
+1. 命中 L7 规则的流 → 打 L7 mark 并注入 `cube-dev`，走 CubeEgress，**不进入**
+   EgressProxy；
+2. 其余发往 `clusterCIDRs` 的流 → 打 `0x1000` 并进入 `cube-router`，走 EgressProxy；
+3. 其余流量 → 节点主路由。
+
+因此 L7 策略优先于 NetworkPolicy；一个被 L7 规则接管的 Service 即使被
+NetworkPolicy 拒绝，仍会按 L7 策略放行。需要 NetworkPolicy 拒绝的 Service，
+不要给它配置 L7 规则。
+
+确认共存是否生效：
+
+```bash
+# L7 链计数器应随 L7 流量增长
+iptables -t mangle -L TRANSPROXY -v -n
+# 两条链路的路由表应同时存在
+ip rule show | grep -E 'lookup (100|10901)'
 ```
-
-默认更新策略是 `RollingUpdate`，`maxUnavailable: 1`。如需逐节点人工控制，
-可配置：
-
-```yaml
-cubeNode:
-  updateStrategy:
-    type: OnDelete
-```
-
-`OnDelete` 模式下，Helm 只更新 DaemonSet Pod template，不会自动删除旧 Pod。
-
-## 2. 存量 sandbox 保留边界
-
-Big Pod 重建时，Chart 通过以下机制保留存量 sandbox：
-
-- shim、VMM 使用宿主机 PID namespace，并由 cubelet 的 sandbox cgroup pool
-  脱离 Big Pod 容器 cgroup 运行；
-- `/data/cubelet`、`/data/cube-shim`、`/run/containerd` 对应目录和
-  `/run/vc` 对应目录使用 hostPath；
-- 实际 socket hostPath 默认为 `/data/cubelet/run/containerd` 和
-  `/data/cubelet/run/vc`，避免与节点容器运行时目录冲突；
-- cubelet 启动后通过已有 bootstrap state 和 socket 连接存量 shim。
-
-`hostPID` 和 `hostNetwork` 本身不能保证进程存活。存量 sandbox 保留依赖
-hostPID、宿主机 sandbox cgroup pool、hostPath 状态与 socket，以及新 cubelet
-对存量 shim 的重连。
-
-以下变更不能按普通 cubelet 滚动升级处理：
-
-- Cube Router 或内嵌网络运行时配置变化；
-- Cube Router、sandbox CIDR、网卡或底层网络配置变化；
-- shim、VMM、guest 或其状态格式不兼容；
-- hostPath、socket 目录或节点内核变化。
-
-这些变更应作为维护操作单独验证。文档不承诺它们升级期间连接无损。
-
-## 3. EgressProxy 边界
-
-数据路径、固定网络参数和故障切换逻辑见
-[EGRESS_VETH.md](./EGRESS_VETH.md)，本节只保留升级相关约束。
-
-`egressProxy.enabled=true` 时，Chart 部署：
-
-- `cube-node` 中的持久化 Cube Router 数据面；
-- HostNetwork 的 `egress-configurer` DaemonSet；
-- Pod 网络中的主、备 `egress-proxy` DaemonSet；
-- 固定的 `cube-egress` namespace。
-
-Proxy Pod 通过本地 veth 与宿主机连接。Configurer 在宿主机维护 veth 健康
-探测、iptables 和策略路由。Big Pod 重建不会删除这些对象，Cube Router
-接口也保持不变。
-
-升级相关限制：
-
-- 用户 NetworkPolicy 选择 EgressProxy Pod，当前不能按单个 sandbox 区分；
-- Proxy Pod 重建会丢失其网络命名空间中的 conntrack，经过该副本的
-  长连接可能中断；
-- Configurer 和两个 Proxy DaemonSet 固定使用 `OnDelete`，镜像更新必须按
-  发布顺序逐节点替换；
-- Chart 没有实现连接 drain、自动发布编排或 Prometheus 指标采集。
-
-新安装由 Chart 创建 `cube-egress` namespace。升级时如果该 namespace 已经
-存在且不属于当前 Helm release，Chart 复用它但不接管所有权，避免覆盖其中
-的用户策略或其他资源。由当前 release 创建的 namespace 在后续升级中继续由
-Helm 管理，但使用 `helm.sh/resource-policy: keep` 保留；关闭功能或卸载
-release 不删除 namespace，也不会间接删除其中的用户 NetworkPolicy。
-
-关闭 `egressProxy` 或删除 Configurer Pod 时，Pod 的 `preStop` 会先暂停协调循环，
-再清理本组件拥有的宿主机规则。卸载 release 时还会在 `post-delete` 阶段按节点
-运行一次兜底清理。
-清理逻辑只删除所有权校验通过的
-`CUBE-EGRESS-*` 链、固定 FORWARD 规则、priority 10900 policy rule 和 table
-100 专用路由。发现同名外部对象时清理失败并阻止继续操作，不覆盖或删除外部
-配置。关闭时必须使用 `helm upgrade --wait`，并在 Configurer Pod 删除后检查
-各节点规则；卸载时必须使用 `helm uninstall --wait`，并确认 `post-delete`
-清理 hook 在全部计算节点完成。节点不可达、强制删除 Pod 或绕过 kubelet 时
-无法执行 `preStop`，需要节点恢复后运行同一清理镜像，不宣称自动清理此类异常
-残留。
 
 ## 4. 发布前检查
 
-### 4.1 渲染与静态检查
-
 ```bash
 helm lint deploy/kubernetes/chart
-
-deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
-deploy/kubernetes/chart/scripts/test-egress-proxy-guard.sh
+bash deploy/kubernetes/chart/scripts/test-egress-proxy-guard.sh
+bash deploy/kubernetes/chart/scripts/test-egress-policy-rules.sh
+bash deploy/kubernetes/chart/scripts/test-egress-cleanup.sh
 ```
 
-生产 values 应额外执行一次 `helm template`，确认：
+用生产 values 渲染一次，确认：
 
-- 目标镜像和 tag/digest 正确；
-- 计算节点 selector 只匹配预期节点；
-- PVM selector 包含 `cube.tencent.com/allow-pvm-bootstrap=true`；
-- `cube-node` 更新策略符合本次发布方式；
-- EgressProxy 只渲染主备 DaemonSet、Configurer 和 namespace；
-- 渲染结果不包含 EgressProxy NetworkPolicy、隧道 Secret、Service 或
-  StatefulSet。
+- EgressProxy 镜像 tag 或 digest 符合本次发布；
+- 只渲染 Configurer、primary、standby 和 namespace；
+- 渲染结果不含 EgressProxy 的 NetworkPolicy、隧道 Secret、Service、StatefulSet
+  或 PodDisruptionBudget；
+- `clusterCIDRs` 覆盖目标集群全部 Pod 与 Service CIDR，且不与 sandbox CIDR 重叠。
 
-### 4.2 节点检查
+每个目标节点在发布前确认：
 
-确认：
-
-- `/dev/kvm`、XFS、内核和节点准备状态满足要求；
-- sandbox CIDR 不与 Node、Pod、Service、VPC 和 DNS 网段重叠；
-- `/data/cubelet` 等 hostPath 容量充足；
-- 当前 sandbox、shim 和 VMM 状态正常；
-- EgressProxy 启用时，Configurer 和全部 Proxy Pod Ready；当前活动 Peer 的
-  主进程健康响应成功；mangle 链在 Service DNAT 前只标记
-  `clusterCIDRs`；策略规则同时匹配 cube-router 入接口、Router NATIP 和
-  `routeMark`；table 100 同时保留活动默认路由和 `unreachable default`。
-
-Chart 不提供节点 drain、禁止新建 sandbox 或升级状态机。需要这些能力时，
-必须由现有运维系统在 Helm 升级之外完成。
+- 两个 Proxy Pod 与 Configurer 均 Ready；
+- 当前活动 Peer 健康检查通过；
+- mangle 链在 Service DNAT 之前只标记 `clusterCIDRs`；
+- 策略规则同时匹配 cube-router 入接口、Router NATIP 和 route mark；
+- table 10901 同时保留活动默认路由和 fail-closed 的 `unreachable default`。
 
 ## 5. 推荐发布顺序
 
-“原地升级”采用文档开头架构：Big Pod 会重建，sandbox 留在宿主机并由新
-cubelet 接管。readiness 只证明新 Big Pod 基础服务正常，不能替代存量
-sandbox 验收。
+三个 EgressProxy DaemonSet 都是 `OnDelete`，`helm upgrade` 不会自动替换 Pod。
+逐节点处理：
 
-推荐先升级不承载运行时数据面的 installer、PVM 和 bootstrap 组件；如启用
-EgressProxy，先确认主备 Proxy DaemonSet 和 Configurer 健康，再按上述隔离
-边界更新 `cube-node` DaemonSet。全节点完成后，使用用户自定义 NetworkPolicy
-验证允许和拒绝结果，并回归入站访问与 sandbox 生命周期。
-
-如果 `cubeNode.updateStrategy.type=OnDelete`，逐节点执行：
+1. 替换并验证 Configurer，确认宿主规则和活动路由保持正常；
+2. 替换非活动 Proxy；
+3. 确认新 Proxy Ready 且具备接管能力；
+4. 将活动路径切换到已更新的 Proxy；
+5. 替换原活动 Proxy；
+6. 全程保证节点上至少一个 Proxy 健康，故障切换后不主动回切。
 
 ```bash
-kubectl -n <namespace> delete pod <old-cube-node-pod>
-kubectl -n <namespace> wait \
-  --for=condition=Ready pod/<new-cube-node-pod> \
-  --timeout=10m
+kubectl -n cube-egress get daemonset
+kubectl -n cube-egress delete pod <old-egress-configurer-pod>
+kubectl -n cube-egress delete pod <old-inactive-egress-proxy-pod>
 ```
 
-新 Pod 名称需要在删除后重新查询。不要同时删除多个计算节点上的 Big Pod。
-
-默认 `RollingUpdate` 模式由 DaemonSet 控制器按 `maxUnavailable` 执行，
-无需人工删除 Pod，但仍需持续观察 sandbox 恢复结果。
-
-Configurer 和两个 Proxy DaemonSet 固定为 `OnDelete`，不跟随上述
-`cube-node` 更新策略。更新 EgressProxy 镜像时：
-
-1. 逐节点替换 Configurer Pod，并确认宿主规则和当前活动路由保持正常；
-2. 逐节点替换非活动 Proxy Pod；
-3. 确认替换后的 Proxy Ready 且具备接管能力；
-4. 将活动路径切换到已更新的 Proxy；
-5. 逐节点替换原活动 Proxy Pod；
-6. 全程确认每个节点至少一个 Proxy 健康，不主动回切。
-
-Helm 回滚同样只更新 Proxy Pod template，需按上述顺序人工替换 Pod。回滚后
-继续使用当前健康路径。
+不要在同一个节点同时删除两个 Proxy：双路径都 down 时 table 10901 只剩
+`unreachable default`，被标记的集群流量按设计 fail closed。
 
 ## 6. 验收
 
-每个节点至少检查：
+每个更新过的节点检查：
 
-- 新 Big Pod Ready；
-- cubelet 端口 9999 和 `/data/cubelet/cubelet.sock` 正常；
-- 更新前的 sandbox ID 仍存在且可执行命令；
-- shim、VMM PID 和 guest boot ID 在要求无损的升级中保持不变；
-- HostPort 入站访问正常；
-- EgressProxy 启用时，用户策略允许和拒绝的结果均符合策略定义；
-- 节点进程、HostNetwork Pod 和普通 Pod 的网络路径未被 Egress 规则误伤。
+- Configurer、primary、standby 均 Ready；
+- DNAT 前的 mark 仍只命中 `clusterCIDRs`；
+- table 10901 的活动默认路由指向预期 veth；
+- 用户 NetworkPolicy 的允许用例成功、拒绝用例被拦截；
+- 普通 Pod、host 网络 Pod 与节点自身流量未被 EgressProxy 规则误伤；
+- 停掉两个 Proxy 后，被标记的集群流量超时，而不是回落到主路由；
+- Big Pod 替换后，既有 veth ifindex 与 table 10901 活动路径保持不变。
 
-当前 readiness probe 只检查 cubelet 的 9999 端口和 `/data/cubelet/cubelet.sock`，不会验证
-全部存量 sandbox 已恢复。因此必须执行业务侧存量 sandbox 抽检，不能只依赖
-Pod Ready。
+readiness 不能证明策略已生效，必须执行业务侧允许与拒绝双向抽检。
 
-## 7. 回滚
+## 7. 关闭与卸载
 
-Helm 回滚只回滚 Kubernetes 资源：
+把 `egressProxy.enabled` 改为 `false` 会移除三个 DaemonSet。Configurer 的
+`preStop` 会执行带所有权校验的清理：删除自有 chain、固定 FORWARD 规则、
+priority 10900 策略规则和 table 10901 路由。
+
+```bash
+helm upgrade <release> deploy/kubernetes/chart -n <namespace> \
+  -f runtime-values.yaml --wait
+```
+
+Configurer Pod 消失后核对：
+
+```bash
+ip rule show | grep 10900
+ip route show table 10901
+iptables-save | grep CUBE-EGRESS
+```
+
+Chart 不再提供 `post-delete` 清理 Hook。卸载依赖 Configurer Pod 的 `preStop`：
+Helm 删除 DaemonSet 后 kubectl 会逐个终止 Pod，每个 Pod 在
+`terminationGracePeriodSeconds: 60` 内完成清理。因此卸载**必须**使用
+`--wait`，并在其返回后逐节点执行上面的三条核对命令。
+
+强制删除 Pod、节点不可达或绕过 kubelet 时不会执行 `preStop`。这类场景需要在
+节点恢复后手工运行同一清理镜像；不宣称自动清理。
+
+## 8. 回滚
 
 ```bash
 helm history <release> -n <namespace>
 helm rollback <release> <revision> -n <namespace> --wait --timeout 10m
 ```
 
-回滚前确认旧镜像能够读取当前 sandbox 和网络状态。以下内容不会被 Helm 回滚：
+Helm 只回滚 Kubernetes 资源，不会恢复宿主的 veth、iptables、策略规则或
+table 10901 路由。这些只有在新 values 把 `egressProxy.enabled` 改为 `false`
+或卸载 release 时才会清理。
 
-- PVM 宿主机内核、GRUB、udev、fstab 和 XFS；
-- hostPath 中的数据和 socket；
-- Chart 之外创建的 NetworkPolicy 或运维资源。
+`rp_filter` 不在回滚范围内，也不需要回滚：它只写在 `cube-egress-p0/p1` 两个
+接口上，接口随 Proxy Pod 删除而消失，节点全局基线与 CubeEgress 都不受影响。
 
-回滚不执行 EgressProxy 清理 hook；仅当新 values 将 `egressProxy.enabled`
-改为 `false` 或卸载 release 时才清理宿主规则。
+回滚 Proxy 镜像同样按第 5 节的手工顺序执行：回滚后继续使用当前健康路径，
+不主动回切。
 
-不要为回滚删除 `/data/cubelet`、`/data/cube-shim`、
-`/usr/local/services/cubetoolbox` 或其他 hostPath。需要回退宿主机变更时，
-应使用经过验证的节点恢复流程。
-
-## 8. 上线门禁
+## 9. 上线门禁
 
 满足以下条件后才能推广：
 
-1. Helm lint、template 和 Chart guard 通过。
-2. 明确本次变更是否会修改 Big Pod template。
-3. Cube Router、内嵌网络运行时、shim、VMM 或状态格式变化已单独验证兼容性。
-4. 至少一个节点完成升级和回滚验证。
-5. 存量 sandbox、入站 HostPort 和出站网络验证通过。
-6. EgressProxy 启用时，用户自定义 NetworkPolicy 的允许和拒绝结果均符合
-   用户定义，且 Chart 升级和回滚不触碰这些策略。
-7. 已记录 Helm revision、镜像版本、values 和宿主机变更。
+1. Helm lint、template 与 guard 脚本通过。
+2. 至少一个节点完成开启、Proxy 镜像更新、关闭、再开启的完整循环。
+3. 用户 NetworkPolicy 的允许与拒绝结果均符合策略定义。
+4. 清理后节点上不残留 `CUBE-EGRESS*` 链、priority 10900 规则或 table 10901 路由。
+5. Pod Security admission 豁免已获批并记录。
+6. 已记录镜像、values、Helm revision 和实测 CNI 版本。

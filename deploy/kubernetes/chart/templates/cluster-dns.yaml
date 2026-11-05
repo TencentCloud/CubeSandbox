@@ -1,6 +1,6 @@
 {{- if eq (include "cube.configureClusterDNS" .) "true" }}
 {{- $domain := .Values.cubeProxy.domain -}}
-{{- $domainPattern := replace "." "[.]" $domain -}}
+{{- $domainRegex := replace "." "\\." $domain -}}
 {{- $svcFQDN := include "cube.proxyServiceFQDN" . -}}
 {{- $clusterDomain := include "cube.clusterDomain" . -}}
 {{- $markerBegin := printf "# BEGIN cube-sandbox-dns %s" .Release.Name -}}
@@ -8,7 +8,6 @@
 {{- $coreDNSNamespace := "kube-system" -}}
 {{- $coreDNSConfigMap := "coredns" -}}
 {{- $coreDNSKey := "Corefile" -}}
-{{- $queryNameTemplate := "{{ .Name }}" -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -27,10 +26,8 @@ data:
     {{ $domain }}:53 {
         errors
         cache 60
-        template IN ANY {{ $domain }} {
-            match "^(.+[.])?{{ $domainPattern }}[.]$"
-            answer "{{ $queryNameTemplate }} 60 IN CNAME {{ $svcFQDN }}."
-        }
+        rewrite name exact {{ $domain }}. {{ $svcFQDN }}.
+        rewrite name regex (.*)\.{{ $domainRegex }}\.? {{ $svcFQDN }}.
         kubernetes {{ $clusterDomain }}
         forward . /etc/resolv.conf
     }

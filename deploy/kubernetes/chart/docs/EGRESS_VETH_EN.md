@@ -30,7 +30,7 @@ flowchart LR
   subgraph NODE["Cube compute node"]
     SB["Sandbox"] --> CR["CubeVS / cube-router"] --> MARK["Pre-DNAT clusterCIDR match<br/>route mark"]
     MARK -->|"not marked"| MAIN["Node main routing table"]
-    MARK -->|"marked"| RULE["ip rule / table 100"]
+    MARK -->|"marked"| RULE["ip rule / table 10901"]
     RULE -->|"primary"| HV0["cube-egress-p0"] --> P["Primary EgressProxy<br/>forward + conntrack + SNAT"]
     RULE -.->|"failover"| HV1["cube-egress-p1"] --> S["Standby EgressProxy<br/>forward + conntrack + SNAT"]
   end
@@ -43,7 +43,7 @@ Cluster path:
 
 ```text
 Sandbox → CubeVS → cube-router → pre-DNAT CIDR match → route mark
-→ table 100 → local veth → EgressProxy Pod → SNAT → Pod eth0
+→ table 10901 → local veth → EgressProxy Pod → SNAT → Pod eth0
 → CNI / NetworkPolicy → Service or PodIP
 ```
 
@@ -100,7 +100,8 @@ A short-lived privileged initContainer with `hostPID: true`:
 
 The long-running Proxy container is not privileged and retains only
 `NET_ADMIN`. Both Proxy DaemonSets use `OnDelete`, preventing simultaneous
-primary/standby replacement on a node.
+primary/standby replacement on a node. The replacement order and rollback steps
+are in [UPGRADE_EN.md](./UPGRADE_EN.md).
 
 ## 5. CIDR steering
 
@@ -116,21 +117,32 @@ iptables -t mangle -I PREROUTING 1 \
 
 ip rule add priority 10900 \
   iif cube-router from <router-nat-ip>/32 \
-  fwmark 0x1000/0x1000 lookup 100
+  fwmark 0x1000/0x1000 lookup 10901
 ```
 
+Each `clusterCIDRs` entry becomes its own `-d` rule (at most 32), and the whole
+chain is written atomically by a single `iptables-restore --noflush`. That is why
+no ipset is needed for atomic replacement, and why `ip_set`/`xt_set` kernel
+modules are no longer required.
+
 Matching must occur before Service DNAT, while the original ClusterIP remains
-visible. Unmarked traffic never enters table 100.
+visible. Unmarked traffic never enters table 10901.
+
+The table defaults to 10901 and is overridable via `egressProxy.routeTable`. It
+does not reuse table 100 because that table belongs to CubeEgress (L7 TPROXY
+needs `local default dev lo`), and two `/0` defaults in one table would shadow
+each other. The fwmark spaces are also disjoint (`0xCE010000`/`0xFFFF0000` vs
+`0x1000`/`0x1000`), so separate tables let both run on the same node.
 
 ## 6. Proxy forwarding
 
-The active route points table 100 to one local peer and always coexists with a
+The active route points table 10901 to one local peer and always coexists with a
 fail-closed route:
 
 ```bash
-ip route replace table 100 \
+ip route replace table 10901 \
   default via 169.254.240.2 dev cube-egress-p0 metric 100
-ip route replace table 100 unreachable default metric 32767
+ip route replace table 10901 unreachable default metric 32767
 ```
 
 Inside the Proxy namespace, forwarding permits only `egress-host0 → eth0` and

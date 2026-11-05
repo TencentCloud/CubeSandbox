@@ -13,7 +13,7 @@
 - 正常链路不使用加密隧道、UDP 封装或用户态代理；
 - 每个计算节点都有本地主、备 EgressProxy；
 - EgressProxy 全部不可用时，集群 CIDR 流量 fail closed；
-- Cube Big Pod 更新不重建 veth、策略路由和存量 sandbox；
+- Cube Big Pod 更新不会重建本方案的 veth 与策略路由；
 - 目标 Pod 观察到的来源地址是 EgressProxy PodIP；
 - sandbox 经 EgressProxy 发出的集群访问请求可被用户自定义 NetworkPolicy 管理；
 - Chart 不创建、修改、删除或推荐任何具体 NetworkPolicy；
@@ -35,7 +35,7 @@ flowchart LR
     SB["Sandbox"]
     CR["CubeVS / cube-router"]
     MARK["DNAT 前匹配 clusterCIDRs<br/>设置 route mark"]
-    RULE["ip rule / table 100"]
+    RULE["ip rule / table 10901"]
     MAIN["节点主路由"]
 
     subgraph P["Primary EgressProxy Pod"]
@@ -73,7 +73,7 @@ Sandbox
 → cube-router
 → DNAT 前匹配 clusterCIDRs
 → route mark
-→ table 100
+→ table 10901
 → 本地 veth
 → EgressProxy Pod
 → conntrack / SNAT
@@ -193,15 +193,23 @@ template，不会替换现有 Proxy Pod。主备替换顺序和回滚操作统�
 
 ```bash
 iptables -t mangle -A CUBE-EGRESS-MARK \
-  -d <cluster-cidr> \
+  -d <cluster-cidr-1> \
   -j MARK \
   --set-xmark 0x1000/0x1000
+iptables -t mangle -A CUBE-EGRESS-MARK \
+  -d <cluster-cidr-2> \
+  -j MARK \
+  --set-xmark 0x1000/0x1000
+# ...每个 clusterCIDRs 条目一条，最多 32 条
 
 iptables -t mangle -I PREROUTING 1 \
   -s <router-nat-ip>/32 \
   -i cube-router \
   -j CUBE-EGRESS-MARK
 ```
+
+每个 CIDR 展开为一条独立的 `-d` 规则，整链由一次 `iptables-restore --noflush`
+原子写入，因此不需要 ipset 做原子替换，也不依赖 `ip_set`/`xt_set` 内核模块。
 
 必须在 Service DNAT 前匹配原始 ClusterIP。否则 ClusterIP 可能先转换为 NodeIP，
 导致后续按目标 CIDR 的策略路由失效。
@@ -213,22 +221,27 @@ ip rule add priority 10900 \
   iif cube-router \
   from <router-nat-ip>/32 \
   fwmark 0x1000/0x1000 \
-  lookup 100
+  lookup 10901
 ```
 
-未命中 `clusterCIDRs` 的报文没有 mark，不进入 table 100。
+未命中 `clusterCIDRs` 的报文没有 mark，不进入 table 10901。
+
+表号默认 10901 且可用 `egressProxy.routeTable` 覆盖。之所以不复用表 100：表 100
+归 CubeEgress 所有（L7 TPROXY 需要 `local default dev lo`），而两张表的 `/0`
+默认路由会互相遮蔽。两者 fwmark 位段也不相交（`0xCE010000`/`0xFFFF0000` 对
+`0x1000`/`0x1000`），配合独立表即可同节点共存。
 
 ## 6. Proxy 转发
 
 Primary 对应的正常路由：
 
 ```bash
-ip route replace table 100 \
+ip route replace table 10901 \
   default via 169.254.240.2 \
   dev cube-egress-p0 \
   metric 100
 
-ip route replace table 100 \
+ip route replace table 10901 \
   unreachable default \
   metric 32767
 ```
@@ -275,15 +288,15 @@ cube-egress-p1 → 169.254.240.6:19091
 
 1. 当前活动 Proxy 健康时保持粘滞；
 2. 当前 Proxy 探测失败时选择另一个健康 Proxy；
-3. 切换只替换 table 100 的活动默认路由；
+3. 切换只替换 table 10901 的活动默认路由；
 4. 两个 Proxy 均失败时删除活动默认路由；
-5. table 100 始终保留 `unreachable default`；
+5. table 10901 始终保留 `unreachable default`；
 6. Proxy 恢复后不自动回切。
 
 切换到 standby：
 
 ```bash
-ip route replace table 100 \
+ip route replace table 10901 \
   default via 169.254.240.6 \
   dev cube-egress-p1 \
   metric 100
@@ -292,7 +305,7 @@ ip route replace table 100 \
 两个 Proxy 均失败：
 
 ```text
-table 100:
+table 10901:
   unreachable default metric 32767
 ```
 
@@ -338,7 +351,7 @@ EgressProxy Pod/节点，不支持按单个 sandbox 设置不同 NetworkPolicy�
 - 只标记来自 `cube-router`、源地址为 Router NATIP、目标属于
   `clusterCIDRs` 的报文；
 - 不处理节点 `OUTPUT`；
-- table 100 保留 `unreachable default`；
+- table 10901 保留 `unreachable default`；
 - FORWARD 第一条规则先处理已标记流量，禁止回落其他 CNI 放行链；
 - initContainer 完成 veth 创建后退出；
 - Proxy 主容器禁止长期 privileged；

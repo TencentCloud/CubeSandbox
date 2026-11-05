@@ -16,7 +16,6 @@ helm template egress-guard "${CHART_DIR}" \
   --set-string redis.password=test \
   --set egressProxy.enabled=true \
   --set cubeNode.network.cubeRouter.enabled=true \
-  --set cubeEgress.network.enabled=false \
   --set-string 'egressProxy.clusterCIDRs[0]=10.244.0.0/16' \
   > "${rendered}"
 
@@ -70,15 +69,18 @@ assert_contains 'meta.helm.sh/release-name' \
 assert_contains 'ownedByRelease' \
   "${CHART_DIR}/templates/egress-proxy-namespace.yaml"
 assert_contains 'helm.sh/resource-policy: keep' "${rendered}"
-assert_contains 'name: egress-guard-cube-egress-cleanup-uninstall' "${rendered}"
-assert_contains 'helm.sh/hook: post-delete' "${rendered}"
-assert_contains 'helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded' "${rendered}"
-assert_contains 'readinessProbe:' "${rendered}"
-assert_contains '/tmp/cleanup-complete' "${rendered}"
-assert_contains 'name: egress-disabled-cube-egress-cleanup-uninstall' \
-  "${disabled_rendered}"
 assert_contains 'preStop:' "${rendered}"
 assert_contains '/opt/cube-egress/cleanup.sh' "${rendered}"
+assert_contains 'terminationGracePeriodSeconds: 60' "${rendered}"
+# CubeEgress coexistence: the L7 sidecar must stay in the Big Pod even when
+# EgressProxy is enabled, and the two must use disjoint routing tables.
+assert_contains 'name: cube-egress-net' "${rendered}"
+assert_contains 'CUBE_EGRESS_ROUTE_TABLE' "${rendered}"
+assert_contains 'value: "10901"' "${rendered}"
+assert_not_contains 'lookup 100' "${rendered}"
+# The post-delete cleanup hook was removed; preStop owns cleanup now.
+assert_not_contains 'egress-cleanup-uninstall' "${rendered}"
+assert_not_contains 'egress-cleanup-uninstall' "${disabled_rendered}"
 
 if helm template missing-egress-cidr "${CHART_DIR}" \
   --set-string mysql.password=test \
@@ -86,7 +88,6 @@ if helm template missing-egress-cidr "${CHART_DIR}" \
   --set-string redis.password=test \
   --set egressProxy.enabled=true \
   --set cubeNode.network.cubeRouter.enabled=true \
-  --set cubeEgress.network.enabled=false \
   > /dev/null 2>&1; then
   echo "egressProxy.clusterCIDRs must be required" >&2
   exit 1
@@ -98,7 +99,6 @@ if helm template invalid-egress-cidr "${CHART_DIR}" \
   --set-string redis.password=test \
   --set egressProxy.enabled=true \
   --set cubeNode.network.cubeRouter.enabled=true \
-  --set cubeEgress.network.enabled=false \
   --set-string 'egressProxy.clusterCIDRs[0]=10.999.0.0/16' \
   > /dev/null 2>&1; then
   echo "invalid egressProxy.clusterCIDRs entry was accepted" >&2
@@ -111,7 +111,6 @@ if helm template duplicate-egress-cidr "${CHART_DIR}" \
   --set-string redis.password=test \
   --set egressProxy.enabled=true \
   --set cubeNode.network.cubeRouter.enabled=true \
-  --set cubeEgress.network.enabled=false \
   --set-string 'egressProxy.clusterCIDRs[0]=10.244.0.0/16' \
   --set-string 'egressProxy.clusterCIDRs[1]=10.244.0.0/16' \
   > /dev/null 2>&1; then

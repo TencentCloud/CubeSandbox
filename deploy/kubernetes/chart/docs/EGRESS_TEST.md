@@ -58,7 +58,7 @@ Secret。
 cube-egress-p0  169.254.240.1/30
 cube-egress-p1  169.254.240.5/30
 10900: from 172.20.0.2 fwmark 0x1000/0x1000
-       iif cube-router lookup 100
+       iif cube-router lookup 10901
 ```
 
 活动路由示例：
@@ -106,29 +106,26 @@ EgressProxy。测试集群的独立网络策略可能继续拒绝该目标，这
 通过 TCP 健康检查识别到数据面进程失效，并在 10 秒内切换到 Standby。恢复
 Primary 后仍保持 Standby，符合粘滞切换设计。
 
-## 7. Cube Big Pod 更新
+## 7. Big Pod 替换时的 EgressProxy 状态
 
 本节来自同日较早的独立 sandbox 轮次，不与第 2 节最终性能 sandbox 混用。
-通过 annotation 变更真实滚动三个 `cube-node` Pod。sandbox 所在节点更新前后：
+通过 annotation 变更真实滚动三个 `cube-node` Pod。本节只记录 EgressProxy
+数据面是否受影响，不涉及 sandbox 运行时连续性（那属于 Big Pod 升级文档的范围）。
 
 | 检查项 | 更新前 | 更新后 |
 | --- | --- | --- |
-| sandbox ID | `d6d9...2eb8` | 不变 |
-| sandbox 创建时间 | `2026-07-28 09:47:49` | 不变 |
-| shim PID | `1877986` | 不变 |
-| network-agent PID | `261923` | 不变 |
 | Primary veth ifindex | `659` | 不变 |
 | Standby veth ifindex | `658` | 不变 |
-| table 100 活动路由 | Primary | Primary |
+| table 10901 活动路由 | Primary | Primary |
 
-滚动后 sandbox 仍能访问集群 Service。
+Big Pod 替换没有重建 EgressProxy 的 veth 与 table 10901 路由。
 
 ## 8. 性能
 
 性能测试使用同一 sandbox 和同一份 64 MiB 文件，分别覆盖同节点/跨节点及
 PodIP/Service IP。直连基线仅在测试期间暂停该节点 Configurer 调和，并在
 `CUBE-EGRESS-MARK` 顶部临时插入集群 CIDR 的 `RETURN`；测试结束后立即删除
-临时规则、恢复调和，并确认正式 mark 规则和 table 100 路由已恢复。
+临时规则、恢复调和，并确认正式 mark 规则和 table 10901 路由已恢复。
 
 吞吐基准交错测试 PodIP 和 Service IP，使用相同请求脚本及样本数，避免顺序
 执行带来的 CPU 调度和缓存偏差。
@@ -196,7 +193,7 @@ fail=0
 ## 10. 集群验收
 
 - 执行 `egressProxy.enabled=true → false` 后，三个计算节点的 priority 10900
-  规则、table 100 路由和 `CUBE-EGRESS*` 规则均被 Pod `preStop` 清理；
+  规则、table 10901 路由和 `CUBE-EGRESS*` 规则均被 Pod `preStop` 清理；
 - 再次启用后，三个节点均重新建立预期数据路径；
 - 三个 Primary、三个 Standby Proxy Pod 全部 Ready；
 - 三个 Configurer Pod 全部 Ready；
@@ -205,14 +202,14 @@ fail=0
   `/admin/healthz`，严格校验 HTTP 2xx；
 - 集群中不存在旧 EgressProxy StatefulSet、Service、PDB、NetworkPolicy、
   隧道 Secret 或旧接口；
-- Helm release values 的 `egressProxy` 只有 `enabled` 和 `clusterCIDRs`。
+- Helm release values 的 `egressProxy` 只有 `enabled`、`clusterCIDRs` 和 `routeTable`。
 
 ## 11. 测试资源
 
-通用服务和客户端见
-[egress-test-resources.yaml](../scripts/egress-test-resources.yaml)，长连接脚本见
-[egress-long-connection.sh](../scripts/egress-long-connection.sh)。
+长连接探针脚本为
+[egress-long-connection.sh](../scripts/egress-long-connection.sh)。测试用的
+Service、Deployment 与 NetworkPolicy 均按验收需要临时创建，不随仓库分发，
+以免被误认为产品内置资源或推荐策略。
 
-用户 NetworkPolicy 不保存在上述资源文件中，避免被误认为产品内置策略。
 验收结束后已销毁测试 sandbox，并删除测试工作负载和 `cube-egress-test`
 namespace；产品 `cube-egress` namespace 中无测试 NetworkPolicy。

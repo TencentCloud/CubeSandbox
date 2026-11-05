@@ -31,7 +31,7 @@ run_owned_cleanup_case() (
         ;;
       "mangle:-S:CUBE-EGRESS-MARK")
         printf '%s\n' '-N CUBE-EGRESS-MARK'
-        printf '%s\n' '-A CUBE-EGRESS-MARK -m set --match-set CUBE-EGRESS-CLUSTER-CIDRS dst -j MARK --set-xmark 0x1000/0x1000'
+        printf '%s\n' '-A CUBE-EGRESS-MARK -d 10.244.0.0/16 -j MARK --set-xmark 0x1000/0x1000'
         ;;
       "filter:-S:CUBE-EGRESS")
         printf '%s\n' '-N CUBE-EGRESS'
@@ -81,12 +81,12 @@ run_owned_cleanup_case() (
   ip() {
     case "$*" in
       "-4 rule show priority 10900")
-        printf '10900:\tfrom 172.20.0.2 fwmark 0x1000/0x1000 iif cube-router lookup 100\n'
+        printf '10900:\tfrom 172.20.0.2 fwmark 0x1000/0x1000 iif cube-router lookup 10901\n'
         ;;
       "-4 rule del priority 10900 "*)
         printf 'delete-policy-rule\n' >>"${action_file}"
         ;;
-      "route del table 100 "*)
+      "route del table 10901 "*)
         printf 'delete-route\n' >>"${action_file}"
         ;;
       *)
@@ -95,34 +95,12 @@ run_owned_cleanup_case() (
     esac
   }
 
-  ipset() {
-    case "$*" in
-      "save CUBE-EGRESS-CLUSTER-CIDRS")
-        printf '%s\n' \
-          'create CUBE-EGRESS-CLUSTER-CIDRS hash:net family inet' \
-          'add CUBE-EGRESS-CLUSTER-CIDRS 10.244.0.0/16'
-        ;;
-      "destroy CUBE-EGRESS-CLUSTER-CIDRS-NEXT")
-        ;;
-      "destroy CUBE-EGRESS-CLUSTER-CIDRS")
-        printf 'destroy-cidr-set\n' >>"${action_file}"
-        ;;
-      *)
-        fail "unexpected ipset command: $*"
-        ;;
-    esac
-  }
-
-  rm() {
-    :
-  }
 
   # shellcheck source=/dev/null
   . "${CLEANUP}"
   grep -F 'delete-mark-jump' "${action_file}" >/dev/null
   grep -F 'delete-policy-rule' "${action_file}" >/dev/null
   grep -F 'delete-snat-jump' "${action_file}" >/dev/null
-  grep -F 'destroy-cidr-set' "${action_file}" >/dev/null
   [ "$(grep -c '^delete-route$' "${action_file}")" -eq 3 ]
 )
 

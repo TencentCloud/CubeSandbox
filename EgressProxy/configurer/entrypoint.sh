@@ -9,12 +9,6 @@ log() {
   printf '[egress-configurer] %s\n' "$*"
 }
 
-# These matches are modular on some node kernels. Load them once rather than
-# adding module-management commands to every reconcile cycle.
-modprobe ip_set
-modprobe ip_set_hash_net
-modprobe xt_set
-
 rm -f "${CLEANUP_REQUEST_FILE}"
 
 while true; do

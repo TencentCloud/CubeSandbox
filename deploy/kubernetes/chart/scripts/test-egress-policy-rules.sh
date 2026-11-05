@@ -39,7 +39,7 @@ run_create_case() (
 
   preflight_policy_rule_ownership
   ensure_policy_rule
-  grep -F 'fwmark 0x1000/0x1000 lookup 100' "${action_file}" >/dev/null ||
+  grep -F 'fwmark 0x1000/0x1000 lookup 10901' "${action_file}" >/dev/null ||
     fail "mark-scoped policy rule was not created"
 )
 
@@ -101,38 +101,28 @@ run_iptables_collision_case() (
   fi
 )
 
-run_ipset_atomic_case() (
+run_mark_chain_cidr_case() (
   export CUBE_EGRESS_RECONCILE_LIBRARY_ONLY=1
   export CUBE_EGRESS_CLUSTER_CIDRS=10.0.0.1/24,10.1.0.0/16
   export NODE_NAME=test-node
   export CUBE_ROUTER_NAT_IP=172.20.0.2
   # shellcheck source=/dev/null
   . "${RECONCILE}"
-  IPSET_STATE=""
-  action_file="$(mktemp)"
-  trap 'rm -f "${action_file}"' EXIT
-  ipset() {
-    printf '%s\n' "$*" >> "${action_file}"
-  }
-
-  ensure_cluster_cidr_set
-  expected_actions="$(cat <<'EOF'
-create CUBE-EGRESS-CLUSTER-CIDRS hash:net family inet -exist
-create CUBE-EGRESS-CLUSTER-CIDRS-NEXT hash:net family inet -exist
-flush CUBE-EGRESS-CLUSTER-CIDRS-NEXT
-add CUBE-EGRESS-CLUSTER-CIDRS-NEXT 10.0.0.0/24
-add CUBE-EGRESS-CLUSTER-CIDRS-NEXT 10.1.0.0/16
-swap CUBE-EGRESS-CLUSTER-CIDRS-NEXT CUBE-EGRESS-CLUSTER-CIDRS
-destroy CUBE-EGRESS-CLUSTER-CIDRS-NEXT
-EOF
-)"
-  [ "$(cat "${action_file}")" = "${expected_actions}" ] ||
-    fail "CIDR ipset was not replaced atomically"
 
   expected_chain="$(expected_mark_chain)"
-  printf '%s\n' "${expected_chain}" |
-    grep -F -- '--match-set CUBE-EGRESS-CLUSTER-CIDRS dst' >/dev/null ||
-    fail "mark chain does not use the CIDR ipset"
+  expected_chain="$(cat <<'EOF'
+-N CUBE-EGRESS-MARK
+-A CUBE-EGRESS-MARK -d 10.0.0.0/24 -j MARK --set-xmark 0x1000/0x1000
+-A CUBE-EGRESS-MARK -d 10.1.0.0/16 -j MARK --set-xmark 0x1000/0x1000
+EOF
+)"
+  [ "$(expected_mark_chain)" = "${expected_chain}" ] ||
+    fail "mark chain did not expand one rule per normalized cluster CIDR"
+
+  # The chain must not depend on ipset any more.
+  printf '%s\n' "${expected_chain}" | grep -q -- '--match-set' &&
+    fail "mark chain still references an ipset"
+  true
 )
 
 run_missing_route_table_snapshot_case() (
@@ -146,13 +136,10 @@ run_missing_route_table_snapshot_case() (
   iptables() {
     :
   }
-  ipset() {
-    return 1
-  }
   ip() {
     case "$*" in
       "-4 rule show") : ;;
-      "route show table 100") return 2 ;;
+      "route show table 10901") return 2 ;;
       *) fail "missing route-table case unexpected ip command: $*" ;;
     esac
   }
@@ -166,7 +153,7 @@ run_create_case
 run_idempotent_case
 run_collision_case
 run_iptables_collision_case
-run_ipset_atomic_case
+run_mark_chain_cidr_case
 run_missing_route_table_snapshot_case
 
 preflight_line="$(

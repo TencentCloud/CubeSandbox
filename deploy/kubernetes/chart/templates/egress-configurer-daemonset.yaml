@@ -24,6 +24,10 @@ spec:
       hostNetwork: true
       automountServiceAccountToken: false
       dnsPolicy: ClusterFirstWithHostNet
+      # preStop runs the ownership-checked cleanup; it waits up to
+      # RECONCILE_INTERVAL_SECONDS + 10 for the reconcile loop to yield, so the
+      # default 30s grace period leaves too little headroom.
+      terminationGracePeriodSeconds: 60
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -45,7 +49,6 @@ spec:
               add:
                 - NET_ADMIN
                 - NET_RAW
-                - SYS_MODULE
             seccompProfile:
               type: RuntimeDefault
           lifecycle:
@@ -62,6 +65,8 @@ spec:
               value: {{ .Values.cubeNode.network.cubeRouter.natIP | quote }}
             - name: CUBE_EGRESS_CLUSTER_CIDRS
               value: {{ join "," .Values.egressProxy.clusterCIDRs | quote }}
+            - name: CUBE_EGRESS_ROUTE_TABLE
+              value: {{ .Values.egressProxy.routeTable | quote }}
             - name: XTABLES_LOCKFILE
               value: /run/cube-egress/xtables.lock
           readinessProbe:
@@ -91,7 +96,7 @@ spec:
               mountPath: /lib/modules
               readOnly: true
             - name: rp-filter
-              mountPath: /host-sysctl/rp_filter
+              mountPath: /host-sysctl/conf
       volumes:
         - name: run
           hostPath:
@@ -103,6 +108,6 @@ spec:
             type: Directory
         - name: rp-filter
           hostPath:
-            path: /proc/sys/net/ipv4/conf/all/rp_filter
-            type: File
+            path: /proc/sys/net/ipv4/conf
+            type: Directory
 {{- end }}

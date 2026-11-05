@@ -1,228 +1,228 @@
-# CubeSandbox Chart Upgrade Guide
+# EgressProxy Upgrade and Rollback Guide
 
 English | [中文](./UPGRADE.md)
 
-This document defines the upgrade boundary and operational procedure implemented
-by the current Helm templates, values, and component entrypoints. It does not
-assume an external rollout controller or monitoring system.
+This guide covers only the optional node-local veth EgressProxy
+(`egressProxy.enabled`). It does not describe Big Pod replacement: that behaviour
+is provided by the base chart and by the official
+[Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) guide, and this PR
+does not change it.
 
-> **Network contract:** in-place handoff requires `cubeNode.hostNetwork: true`
-> (the chart default) and `dnsPolicy: ClusterFirstWithHostNet`.
-> `cubeNode.hostNetwork: false` keeps the Pod network, and replacing the Big Pod
-> then destroys that netns. Changing the switch on an existing release is still
-> gated by `cubeNode.hostNetworkChangeAck` and the host-network preflight Hook.
-> Validate one canary compute node before a wider rollout.
+`egressProxy` has no effect on `cubeNode.hostNetwork`, the cubelet PID, sandbox
+cgroups, hostPath layout, or shim reconnection. Enabling or disabling it only
+adds or removes the EgressProxy data plane.
 
-## In-place sandbox handoff and EgressProxy
+## 1. What the feature installs
 
-Kubernetes replaces the Big Pod; it does not update the Pod image in place.
-Compatible sandbox runtimes, state, and network objects remain on the node and
-the replacement Big Pod reattaches to them. EgressProxy runs in independent
-DaemonSets, so its data path is not tied to the Big Pod lifecycle.
+With `egressProxy.enabled=true` the chart adds:
 
-```mermaid
-flowchart LR
-    subgraph K8S["Kubernetes-managed and replaceable"]
-        OLD["Old cube-node Big Pod<br/>old cubelet"]
-        UPDATE["DaemonSet rollout<br/>Pod replacement"]
-        NEW["New cube-node Big Pod<br/>new cubelet<br/>hostPID + hostNetwork"]
-        OLD --> UPDATE --> NEW
-    end
-
-    subgraph HOST["Node-persistent runtime"]
-        RUNTIME["CubeShim + VMM<br/>host cgroup"]
-        STATE["hostPath + sockets<br/>/data/cubelet<br/>/data/cube-shim"]
-        SANDBOX["Existing Sandbox<br/>same ID, guest, and processes"]
-        ROUTER["Cube Router<br/>same netns and TAP"]
-        STATE --- RUNTIME
-        RUNTIME --> SANDBOX
-        ROUTER --- SANDBOX
-    end
-
-    subgraph EGRESS["Independent EgressProxy data plane"]
-        CONFIG["Configurer DaemonSet<br/>mark, table 100, health"]
-        RULES["mangle/PREROUTING<br/>mark to table 100"]
-        VETH["Node-local veth<br/>primary / standby"]
-        PROXY["EgressProxy Pod<br/>forward + SNAT"]
-        POLICY["User NetworkPolicy"]
-        SERVICE["Kubernetes Service / Pod"]
-        CONFIG -.-> RULES
-        CONFIG -.-> VETH
-        RULES --> VETH --> PROXY
-        PROXY --> POLICY --> SERVICE
-    end
-
-    OLD -.-> STATE
-    NEW ==>|"read state and reconnect sockets"| STATE
-    NEW ==>|"reuse node network state"| ROUTER
-    SANDBOX -->|"clusterCIDRs only"| ROUTER --> RULES
-```
-
-The Big Pod UID, containers, and cubelet PID change. For a compatible upgrade,
-the sandbox ID and creation time, CubeShim/VMM PIDs, guest boot ID, sandbox
-network namespace, and TAP remain unchanged. This is handoff, not sandbox
-recreation.
-
-## 1. Upgrade model
-
-The compute plane uses four native `apps/v1` DaemonSets:
-
-| Component | Responsibility | Upgrade impact |
+| Resource | Network | Purpose |
 | --- | --- | --- |
-| `cube-node-installer` | Stages shim, kernel, and guest artifacts | Does not carry the live data plane |
-| `cube-node-pvm` | Installs the PVM host kernel on explicitly authorized nodes | May change kernel/GRUB and reboot the node |
-| `cube-node-bootstrap` | Validates and prepares KVM, XFS, and host directories | Does not carry the live data plane |
-| `cube-node` | Runs cubelet, CubeEgress, and the host network runtime | Pod-template changes replace the Big Pod |
+| `<release>-egress-configurer` DaemonSet | host network | Reconciles host iptables, ip rule and table 10901; selects the healthy proxy |
+| `<release>-egress-proxy-primary` DaemonSet | Pod network | Owns `cube-egress-p0`, forwards and SNATs to its own Pod IP |
+| `<release>-egress-proxy-standby` DaemonSet | Pod network | Owns `cube-egress-p1`, same forwarding path |
+| `cube-egress` namespace | — | Namespace for the three DaemonSets, kept on uninstall |
 
-In-place handoff uses the default host network:
+All three DaemonSets use `OnDelete`. The exposed values are
+`egressProxy.enabled`, `egressProxy.clusterCIDRs` and `egressProxy.routeTable`
+(default 10901); priority 10900, the mark, veth names and the link-local prefix
+are fixed.
 
-```yaml
-hostPID: true
-hostNetwork: true
-dnsPolicy: ClusterFirstWithHostNet
-```
+`routeTable` is configurable because no single number is universally free:
+table 100 belongs to CubeEgress (`local default dev lo` for L7 TPROXY), 101-110
+are commonly taken by Cilium/kube-router, 200-252 by Calico/systemd-networkd,
+and 253-255 are reserved by the kernel. The default 10901 sits in the
+application-private high range next to the fixed rule priority 10900. Override
+it when a node already uses that table.
 
-The default strategy is `RollingUpdate` with `maxUnavailable: 1`. For explicit
-per-node control:
+`egressProxy.enabled=true` requires `cubeNode.network.cubeRouter.enabled=true`;
+the chart fails validation otherwise. Cube Router adds env to the Big Pod
+template, so the first enablement **replaces the Big Pod once**. The EgressProxy
+resources themselves are independent of that replacement, but plan the rollout
+accordingly.
 
-```yaml
-cubeNode:
-  updateStrategy:
-    type: OnDelete
-```
+The chart accepts 1 to 32 entries in `clusterCIDRs`, IPv4 only.
 
-With `OnDelete`, Helm updates only the DaemonSet Pod template; old Pods continue
-running until an operator deletes them.
+## 2. Upgrade boundary and limits
 
-## 2. Existing-sandbox preservation boundary
+Only sandbox traffic whose destination matches `clusterCIDRs` is marked and
+steered into table 10901. Everything else keeps the node main route.
 
-The handoff depends on all of the following:
+Real limits, all visible to users:
 
-- shim and VMM run in the host PID namespace, and cubelet's sandbox cgroup
-  pool places them outside the Big Pod cgroup;
-- `/data/cubelet`, `/data/cube-shim`, and runtime socket directories are
-  hostPath-backed;
-- the replacement cubelet reconnects to existing shim sockets and state.
-
-`hostPID` and `hostNetwork` alone do not preserve a sandbox. Preservation also
-depends on the host sandbox cgroup pool, hostPath state and sockets, and the
-replacement cubelet reconnecting to existing shims.
-
-Treat these changes as maintenance operations rather than ordinary cubelet
-rollouts:
-
-- Cube Router or embedded network-runtime configuration;
-- sandbox CIDR, interface, or lower-level networking;
-- incompatible shim, VMM, guest, or persisted-state formats;
-- hostPath/socket layout or host-kernel changes.
-
-The chart does not promise connection preservation across those changes.
-
-## 3. EgressProxy upgrade boundary
-
-With `egressProxy.enabled=true`, the chart deploys a HostNetwork Configurer and
-primary/standby EgressProxy DaemonSets on the Pod network. Node-local veth,
-iptables, and policy routing steer only sandbox traffic whose destination is in
-`clusterCIDRs`. Egress leaves through the Proxy Pod identity and can therefore
-be governed by user-defined NetworkPolicy.
-
-Important limits:
-
-- policy selection is per EgressProxy Pod/node, not per sandbox;
-- primary and standby do not share conntrack, so failover can break established
+- policy selection is per EgressProxy Pod / node, not per sandbox;
+- primary and standby do not share conntrack, so failover breaks established
   connections;
-- all three EgressProxy DaemonSets use `OnDelete`;
-- the chart has no automated drain or rollout orchestrator;
-- the chart never creates, modifies, deletes, or recommends a NetworkPolicy.
+- IPv4 only; there is no dual-stack support;
+- `clusterCIDRs` is manual and must list every Pod and Service CIDR;
+- the chart never creates, modifies, deletes, or recommends a NetworkPolicy;
+- the Configurer runs as host network with `NET_ADMIN`, and the Proxy
+  initContainer is privileged, so a scoped Pod Security admission exemption is
+  required;
+- there is no automated drain, rollout orchestrator, or metric endpoint;
+- CubeEgress coexistence is preserved rather than traded away; see section 3.
 
-Disabling EgressProxy or uninstalling the release runs ownership-checked cleanup
-for the component's dedicated chains, rule priority, and table-100 routes. A
-forced Pod deletion or unreachable node can bypass `preStop`; in that case run
-the same cleanup image after the node recovers.
+## 3. Coexistence with CubeEgress
+
+CubeEgress L7 interception and EgressProxy run side by side on the same node.
+The `cube-egress-net` sidecar is always deployed with the Big Pod and is never
+removed by enabling EgressProxy.
+
+Three separations keep them independent:
+
+| Dimension | CubeEgress | EgressProxy |
+| --- | --- | --- |
+| Ingress | `-i cube-dev` | `-i cube-router -s <router-nat-ip>` |
+| iptables chains | `TRANSPROXY` (mangle) | `CUBE-EGRESS-MARK` / `CUBE-EGRESS` / `CUBE-EGRESS-SNAT` |
+| fwmark | `0xCE010000` / `0xCE020000`, mask `0xFFFF0000` | `0x1000`, mask `0x1000` |
+| Routing table | 100 (`local default dev lo`) | 10901 (default) |
+
+Steering is decided by CubeVS `classify_egress_flow()`, in this order:
+
+1. a flow matching an L7 rule gets the L7 mark and is injected into `cube-dev`,
+   handled by CubeEgress and **never entering** EgressProxy;
+2. other flows to `clusterCIDRs` get `0x1000` and enter `cube-router`, handled by
+   EgressProxy;
+3. everything else keeps the node main route.
+
+L7 policy therefore wins over NetworkPolicy: a Service captured by an L7 rule is
+still allowed by that rule even if a NetworkPolicy would deny it. Do not attach
+L7 rules to Services that must be denied by NetworkPolicy.
+
+Confirm coexistence is live:
+
+```bash
+# L7 chain counters should grow with L7 traffic
+iptables -t mangle -L TRANSPROXY -v -n
+# both routing tables should be present
+ip rule show | grep -E 'lookup (100|10901)'
+```
 
 ## 4. Preflight
 
-Run static checks:
-
 ```bash
 helm lint deploy/kubernetes/chart
-deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
-deploy/kubernetes/chart/scripts/test-egress-proxy-guard.sh
+bash deploy/kubernetes/chart/scripts/test-egress-proxy-guard.sh
+bash deploy/kubernetes/chart/scripts/test-egress-policy-rules.sh
+bash deploy/kubernetes/chart/scripts/test-egress-cleanup.sh
 ```
 
-Render production values and verify image tags/digests, node selectors, PVM
-authorization, Big Pod update strategy, and the expected EgressProxy resources.
-The render must not contain an EgressProxy NetworkPolicy, tunnel Secret,
-Service, or StatefulSet.
+Render the production values and confirm:
 
-On every target node verify KVM/XFS/kernel readiness, non-overlapping sandbox
-and cluster CIDRs, hostPath capacity, and existing sandbox, shim, and VMM
-health. When EgressProxy is enabled, also verify both Proxy Pods,
-the Configurer, pre-DNAT mark rules, the policy rule, active route, and
-fail-closed `unreachable default` in table 100.
+- the EgressProxy image tag or digest is what you intend to ship;
+- exactly the Configurer, primary, standby and namespace render;
+- the render contains no NetworkPolicy, tunnel Secret, Service, StatefulSet or
+  PodDisruptionBudget for EgressProxy;
+- `clusterCIDRs` covers every Pod and Service CIDR on the target cluster and
+  does not overlap the sandbox CIDR.
 
-The privileged Proxy initContainer and HostNetwork Configurer require a scoped
-Pod Security admission exemption. Do not enable the feature if the cluster
-cannot grant that exception.
+On each target node confirm before rollout:
+
+- both Proxy Pods and the Configurer are Ready;
+- the active peer answers its health check;
+- the mangle chain marks `clusterCIDRs` before Service DNAT;
+- the policy rule matches the cube-router input interface, the Router NAT IP and
+  the route mark;
+- table 10901 holds both the active default route and the fail-closed
+  `unreachable default`.
 
 ## 5. Recommended rollout
 
-Upgrade installer/bootstrap components first. If EgressProxy is enabled, ensure
-its primary, standby, and Configurer are healthy before replacing a Big Pod.
+EgressProxy images are not rolled by `helm upgrade` alone because all three
+DaemonSets are `OnDelete`. Process one node at a time:
 
-For `OnDelete`, process one compute node at a time:
+1. replace and validate the Configurer, and confirm host rules and the active
+   route stayed healthy;
+2. replace the inactive Proxy;
+3. confirm the new Proxy is Ready and can take traffic;
+4. switch the active path to the updated Proxy;
+5. replace the former active Proxy;
+6. keep at least one healthy Proxy on the node throughout, and do not force a
+   switch-back after failover.
 
 ```bash
-kubectl -n <namespace> delete pod <old-cube-node-pod>
-kubectl -n <namespace> wait \
-  --for=condition=Ready pod/<new-cube-node-pod> \
-  --timeout=10m
+kubectl -n cube-egress get daemonset
+kubectl -n cube-egress delete pod <old-egress-configurer-pod>
+kubectl -n cube-egress delete pod <old-inactive-egress-proxy-pod>
 ```
 
-Query the replacement Pod name after deletion. Do not delete multiple compute
-nodes concurrently. With the default RollingUpdate strategy, continuously
-validate sandbox handoff while the controller respects `maxUnavailable`.
+Do not delete both Proxies on the same node at the same time: with both paths
+down, table 10901 keeps only the `unreachable default` and marked cluster traffic
+fails closed by design.
 
-For an EgressProxy image update, process each node in this order:
+## 6. Acceptance
 
-1. replace and validate the Configurer;
-2. replace the inactive Proxy;
-3. verify the new inactive Proxy can take traffic;
-4. switch the active path;
-5. replace the former active Proxy;
-6. keep at least one healthy Proxy throughout and do not force a switch-back.
+For each updated node verify:
 
-## 6. Acceptance criteria
+- Configurer, primary Proxy and standby Proxy are Ready;
+- the pre-DNAT mark still matches only `clusterCIDRs`;
+- the active table-100 default points at the expected veth;
+- a user NetworkPolicy allow case succeeds and a deny case is blocked;
+- ordinary Pod traffic, host-network Pod traffic and node traffic are not
+  captured by the EgressProxy rules;
+- with both Proxies stopped, marked cluster traffic times out instead of
+  falling back to the main route;
+- existing veth ifindex and the table-100 active path are unchanged after a
+  Big Pod replacement.
 
-For each upgraded node verify:
+Readiness alone does not prove policy enforcement. Always run a business-level
+sample through an allowed and a denied destination.
 
-- the replacement Big Pod is Ready;
-- cubelet port 9999 and `/data/cubelet/cubelet.sock` are healthy;
-- a pre-existing sandbox keeps its ID and can execute a command;
-- shim/VMM PID and guest boot ID remain unchanged when continuity is required;
-- HostPort ingress still works;
-- user-defined NetworkPolicy allows and denies exactly what the user specified;
-- node, HostNetwork Pod, and ordinary Pod traffic is not captured accidentally.
+## 7. Disable and uninstall
 
-Readiness does not prove that every existing sandbox was reattached. Always run
-a business-level sample against pre-existing sandboxes.
+Setting `egressProxy.enabled=false` removes the three DaemonSets. The
+Configurer `preStop` runs ownership-checked cleanup for its chains, the fixed
+FORWARD rule, the priority-10900 policy rule and the table-10901 routes.
 
-## 7. Rollback
+```bash
+helm upgrade <release> deploy/kubernetes/chart -n <namespace> \
+  -f runtime-values.yaml --wait
+```
+
+Verify after the Configurer Pod is gone:
+
+```bash
+ip rule show | grep 10900
+ip route show table 10901
+iptables-save | grep CUBE-EGRESS
+```
+
+There is no `post-delete` cleanup hook. Uninstall relies on each Configurer
+Pod's `preStop` within `terminationGracePeriodSeconds: 60`. Uninstall **must**
+use `--wait`, and the three checks above must still be run per node afterwards.
+
+A forced Pod deletion, an unreachable node, or a bypassed kubelet skips
+`preStop`. In that case run the same cleanup image on the node after it
+recovers; cleanup is not automatic in that scenario.
+
+## 8. Rollback
 
 ```bash
 helm history <release> -n <namespace>
 helm rollback <release> <revision> -n <namespace> --wait --timeout 10m
 ```
 
-Before rollback, verify that the old image can read the current runtime and
-network state. Helm does not roll back host kernel/GRUB/udev/fstab/XFS changes,
-hostPath data, sockets, or user-owned NetworkPolicy. Never delete
-`/data/cubelet`, `/data/cube-shim`, or the toolbox tree as part of rollback.
+Helm rolls back only Kubernetes resources. It does not restore host veth
+interfaces, iptables state, policy rules or table-10901 routes. Those are only
+cleaned when the new values set `egressProxy.enabled=false` or the release is
+uninstalled.
 
-## 8. Release gate
+`rp_filter` needs no rollback: it is set only on the `cube-egress-p0/p1`
+interfaces, which disappear with the Proxy Pod, so the node-wide baseline is
+never touched.
 
-Promote only after lint/template/guard checks pass, one node completes both
-upgrade and rollback, existing sandbox/ingress/egress checks pass, and all
-images, values, Helm revisions, and host changes are recorded. Compatibility
-for Cube Router, the embedded network runtime, shim/VMM, guest, and persisted-state changes must be proven
-separately.
+Rolling back the Proxy image follows the same manual order as section 5: after
+rollback, continue using whichever path is currently healthy and do not force a
+switch-back.
+
+## 9. Release gate
+
+Promote only after:
+
+1. Helm lint, template and the guard scripts pass.
+2. One node completes enable, Proxy image update, disable and re-enable.
+3. NetworkPolicy allow and deny results match the user's policy.
+4. Cleanup leaves no `CUBE-EGRESS*` chain, priority-10900 rule or table-100
+   route behind.
+5. The Pod Security admission exemption is granted and documented.
+6. Images, values, Helm revisions and the tested CNI version are recorded.

@@ -5,8 +5,8 @@ English | [中文](./EGRESS_TEST.md)
 ## 1. Result
 
 The local-veth design in [EGRESS_VETH_EN.md](./EGRESS_VETH_EN.md) was validated
-on a Cilium test cluster on 2026-07-28. Functional, failover, Big Pod handoff,
-latency, throughput, long-connection, cleanup, and Helm gates passed.
+on a Cilium test cluster on 2026-07-28. Functional, failover, latency,
+throughput, long-connection, cleanup, and Helm gates passed.
 
 NetworkPolicy used during acceptance was temporary and user-defined. It is not
 a chart resource, built-in policy, or product recommendation, and it was
@@ -51,7 +51,7 @@ StatefulSet, Service, PDB, NetworkPolicy, or tunnel Secret was rendered.
 
 Every compute node had primary and standby local veth interfaces, policy rule
 priority 10900 matching the Router NAT IP and route mark, an active default in
-table 100, and an `unreachable default` fallback.
+table 10901, and an `unreachable default` fallback.
 
 A real sandbox reached the allowed Service. Mark, host-forwarding, and Proxy
 SNAT counters increased together, and the destination observed the local
@@ -85,13 +85,12 @@ Stopping only the primary Proxy health process, while leaving the veth UP,
 also triggered standby takeover within 10 seconds. This proves that selection
 does not rely on link state alone.
 
-## 7. Big Pod replacement
+## 7. EgressProxy state across Big Pod replacement
 
 All three `cube-node` Pods were rolled through a real Pod-template annotation
-change. On the node hosting the sampled sandbox, the sandbox ID and creation
-time, shim PID, network-agent PID, primary/standby veth ifindex, and table-100
-active path remained unchanged. The sandbox continued to access a Kubernetes
-Service after the rollout.
+change. On the sampled node, the primary/standby veth ifindex and the table-100
+active path remained unchanged, so the EgressProxy data plane was not rebuilt by
+the Big Pod replacement.
 
 ## 8. Performance
 
@@ -155,14 +154,14 @@ retested without route changes.
 - All eight Helm test suites succeeded.
 - No old StatefulSet, Service, PDB, NetworkPolicy, tunnel Secret, or tunnel
   interface remained.
-- Release values exposed only `enabled` and `clusterCIDRs` for EgressProxy.
+- Release values exposed only `enabled`, `clusterCIDRs` and `routeTable` for EgressProxy.
 
 ## 11. Test resources
 
-Generic service/client resources are in
-[egress-test-resources.yaml](../scripts/egress-test-resources.yaml), and the
-long-connection probe is
-[egress-long-connection.sh](../scripts/egress-long-connection.sh).
+The long-connection probe is
+[egress-long-connection.sh](../scripts/egress-long-connection.sh). The Services,
+Deployments and NetworkPolicy used during acceptance were created ad hoc and are
+not shipped with the repository, so they cannot be mistaken for built-in
+resources or a recommended policy.
 
-No user NetworkPolicy is stored in those files. The test sandbox, workloads,
-and test namespace were deleted after acceptance.
+The test sandbox, workloads, and test namespace were deleted after acceptance.

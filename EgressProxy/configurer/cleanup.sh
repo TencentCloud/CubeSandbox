@@ -1,48 +1,46 @@
 #!/bin/sh
 set -eu
 
-ROUTE_TABLE=100
+ROUTE_TABLE="${CUBE_EGRESS_ROUTE_TABLE:-10901}"
 RULE_PRIORITY=10900
 ROUTE_MARK=0x1000/0x1000
-CLUSTER_CIDR_SET=CUBE-EGRESS-CLUSTER-CIDRS
-CLUSTER_CIDR_SET_NEXT=CUBE-EGRESS-CLUSTER-CIDRS-NEXT
 SNAT_CHAIN=CUBE-EGRESS-SNAT
 CUBE_ROUTER_NAT_IP="${CUBE_ROUTER_NAT_IP:?CUBE_ROUTER_NAT_IP is required}"
 STATE_DIR="${CUBE_EGRESS_STATE_DIR:-/run/cube-egress}"
 CLEANUP_REQUEST_FILE="${STATE_DIR}/cleanup-requested"
 RECONCILE_INTERVAL_SECONDS="${CUBE_EGRESS_RECONCILE_INTERVAL_SECONDS:-10}"
 CLEANUP_WAIT_SECONDS="${CUBE_EGRESS_CLEANUP_WAIT_SECONDS:-$((RECONCILE_INTERVAL_SECONDS + 10))}"
-RP_FILTER_PATH="${CUBE_EGRESS_RP_FILTER_PATH:-/host-sysctl/rp_filter}"
-RP_FILTER_STATE="${STATE_DIR}/rp-filter.previous"
+RP_FILTER_SYSCTL_ROOT="${CUBE_EGRESS_RP_FILTER_SYSCTL_ROOT:-/host-sysctl/conf}"
+EGRESS_HOST_IFACES="cube-egress-p0 cube-egress-p1"
 
 log() {
   printf '[egress-cleanup] %s\n' "$*"
 }
 
+# A chain we created is either an empty shell, the per-CIDR shape emitted by
+# reconcile (one "-d <cidr> -j MARK" rule per cluster CIDR), or the legacy
+# single ipset rule from an earlier release. Anything else is foreign state and
+# must not be deleted.
 mark_chain_is_owned() {
-  chain="$1"
-  [ "${chain}" = "-N CUBE-EGRESS-MARK" ] && return 0
-  [ "${chain}" = "$(cat <<'EOF'
--N CUBE-EGRESS-MARK
--A CUBE-EGRESS-MARK -m set --match-set CUBE-EGRESS-CLUSTER-CIDRS dst -j MARK --set-xmark 0x1000/0x1000
-EOF
-)" ]
-}
-
-preflight_owned_ipset() {
-  state="$(ipset save "${CLUSTER_CIDR_SET}" 2>/dev/null || true)"
-  [ -z "${state}" ] && return 0
-  printf '%s\n' "${state}" |
-    awk -v name="${CLUSTER_CIDR_SET}" '
-      NR == 1 {
-        if ($1 != "create" || $2 != name || $3 != "hash:net") exit 1
+  printf '%s\n' "$1" | awk '
+    NR == 1 {
+      if ($0 != "-N CUBE-EGRESS-MARK") exit 1
+      next
+    }
+    $1 == "-A" && $2 == "CUBE-EGRESS-MARK" {
+      if ($0 ~ /^-A CUBE-EGRESS-MARK -d [0-9.]+\/[0-9]+ -j MARK --set-xmark 0x1000\/0x1000$/) {
+        rules++
         next
       }
-      $1 != "add" || $2 != name { exit 1 }
-    ' || {
-      log "refusing to remove foreign ipset ${CLUSTER_CIDR_SET}"
-      return 1
+      if ($0 == "-A CUBE-EGRESS-MARK -m set --match-set CUBE-EGRESS-CLUSTER-CIDRS dst -j MARK --set-xmark 0x1000/0x1000") {
+        legacy++
+        next
+      }
+      exit 1
     }
+    { exit 1 }
+    END { exit !((rules > 0 && legacy == 0) || (legacy == 1 && rules == 0)) }
+  '
 }
 
 cleanup_mark_rules() {
@@ -144,20 +142,16 @@ cleanup_snat_rules() {
   fi
 }
 
-restore_rp_filter() {
-  [ -f "${RP_FILTER_STATE}" ] || return 0
-  previous="$(cat "${RP_FILTER_STATE}")"
-  case "${previous}" in
-    0 | 1 | 2) ;;
-    *) log "invalid saved rp_filter value: ${previous}"; return 1 ;;
-  esac
-  current="$(cat "${RP_FILTER_PATH}")"
-  if [ "${current}" = 0 ]; then
-    printf '%s\n' "${previous}" > "${RP_FILTER_PATH}"
-  else
-    log "rp_filter changed externally to ${current}; leaving it unchanged"
-  fi
-  rm -f "${RP_FILTER_STATE}"
+# rp_filter is set per cube-egress-pN interface, and those interfaces are
+# destroyed with the Proxy Pod. There is no global baseline to restore, so
+# cleanup only has to report a residual value if the interface somehow outlives
+# the Pod.
+report_rp_filter() {
+  for iface in ${EGRESS_HOST_IFACES}; do
+    path="${RP_FILTER_SYSCTL_ROOT}/${iface}/rp_filter"
+    [ -e "${path}" ] || continue
+    log "interface ${iface} still present with rp_filter=$(cat "${path}")"
+  done
 }
 
 cleanup_policy_routing() {
@@ -182,14 +176,11 @@ cleanup_policy_routing() {
 }
 
 cleanup_owned_state() {
-  preflight_owned_ipset
   cleanup_mark_rules
-  ipset destroy "${CLUSTER_CIDR_SET_NEXT}" 2>/dev/null || true
-  ipset destroy "${CLUSTER_CIDR_SET}" 2>/dev/null || true
   cleanup_forward_rules
   cleanup_snat_rules
   cleanup_policy_routing
-  restore_rp_filter
+  report_rp_filter
 }
 
 touch "${CLEANUP_REQUEST_FILE}"

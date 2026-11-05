@@ -52,16 +52,16 @@ run_case() (
 
   ip() {
     case "$*" in
-      "route show table 100")
+      "route show table 10901")
         print_routes
         ;;
-      "route replace table 100 default via "*)
+      "route replace table 10901 default via "*)
         printf 'replace:%s\n' "$9" >>"${action_file}"
         ;;
-      "route del table 100 default metric 100")
+      "route del table 10901 default metric 100")
         printf 'delete:%s\n' "${current_iface}" >>"${action_file}"
         ;;
-      "route replace table 100 unreachable default metric 32767")
+      "route replace table 10901 unreachable default metric 32767")
         ;;
       *)
         fail "${case_name}: unexpected ip command: $*"
@@ -107,7 +107,7 @@ run_route_table_collision_case() (
 
   ip() {
     case "$*" in
-      "route show table 100")
+      "route show table 10901")
         printf '10.0.0.0/8 via 192.0.2.1 dev eth9\n'
         ;;
       *)
