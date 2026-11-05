@@ -751,7 +751,7 @@ func TestRunSnapshotCreateJobRejectsMismatchedModeFromCubelet(t *testing.T) {
 		},
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}); err != nil {
+	}, snapshotWebhook{}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 	if persisted == nil {

@@ -94,7 +94,7 @@ func p4Checkpoint(t *testing.T, backend, failure string) error {
 		return &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil
 	})
 	req := &sandboxtypes.CreateCubeSandboxReq{Request: &sandboxtypes.Request{RequestID: "req"}, InstanceType: "cubebox", Backend: backend, Annotations: map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "original-template"}, WebhookMetadata: webhook.UserMetadata(map[string]string{"user_token": "kept"})}
-	_, err := executeSnapshotCreateJob(parent, &sandboxtypes.TemplateImageJobInfo{JobID: "job", TemplateID: "snap-new", Status: JobStatusPending}, req, "sb", "node", "127.0.0.1")
+	_, err := executeSnapshotCreateJob(parent, &sandboxtypes.TemplateImageJobInfo{JobID: "job", TemplateID: "snap-new", Status: JobStatusPending}, req, "sb", "node", "127.0.0.1", "")
 	require.Equal(t, "original-template", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	return err
 }
@@ -138,7 +138,7 @@ func TestP4CheckpointFinalBoundary(t *testing.T) {
 				require.Equal(t, "snap-new", created["snapshot_id"])
 				require.Equal(t, "sb", created["sandbox_id"])
 				require.Equal(t, "original-template", created["sandbox_template_id"])
-				_, e = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip")
+				_, e = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip", "")
 				require.NoError(t, e)
 				require.Empty(t, p.Events())
 			})
@@ -180,7 +180,7 @@ func TestP4CheckpointUploadResult(t *testing.T) {
 			// Seed the persisted READY result of the controlled storage dependency.
 			require.NoError(t, db.Create(&models.SnapshotRecord{SnapshotID: "snap-new", OriginNodeIP: "127.0.0.1", Backend: "s3", Status: "READY", RemoteStatus: constants.RemoteStatusInProgress}).Error)
 			webhooktest.ReconcileUpload(t, db, constants.SnapshotTableName, "snap-new", terminal, p)
-			_, err = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip")
+			_, err = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip", "")
 			require.NoError(t, err)
 			// checkpointed + snapshot.created from the local success; the upload
 			// result neither adds nor retracts one.
