@@ -115,7 +115,7 @@ func applyCubeEgressCAToRootfs(ctx context.Context, rootfsDir string, pemBytes [
 	if err != nil {
 		return res, fmt.Errorf("bake cube_egress CA into rootfs: %w", err)
 	}
-	if !res.Baked {
+	if res.BundlePath == "" {
 		return res, fmt.Errorf(
 			"with_cube_ca=true but the cube_egress CA could not be installed into the image rootfs; "+
 				"no trust store was written or seeded. reasons=%v",

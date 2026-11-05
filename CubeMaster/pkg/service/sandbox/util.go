@@ -1046,7 +1046,11 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 	if v, ok := req.Annotations[constants.CubeAnnotationsInsRegion]; !ok || v == "" {
 		out.Annotations[constants.CubeAnnotationsInsRegion] = config.GetConfig().Log.Region
 	}
-	if err := setCreateTimeEnvVarsAnnotation(out.Annotations, req.CreateTimeEnvVars); err != nil {
+	envdEnvs, err := envdInitEnvVars(req)
+	if err != nil {
+		return err
+	}
+	if err := setCreateTimeEnvVarsAnnotation(out.Annotations, envdEnvs); err != nil {
 		return err
 	}
 	return nil
