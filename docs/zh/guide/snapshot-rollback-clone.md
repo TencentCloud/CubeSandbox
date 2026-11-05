@@ -86,14 +86,17 @@ assert out.strip() == "hello"
 | 用它创建的沙箱 | 恢复内存，进程继续 | 冷启动，进程全新 |
 | 之后的 `pause()` / `resume()` | 保留内存 | 保留内存（首次 pause 是全量捕获） |
 | `rollback(snapshot)` 回滚到它 | 支持 | **拒绝**（`snapshot_filesystem_only_rollback_unsupported`） |
-| 外部挂载（plugin 卷、host mount） | 快照记录挂载配置，恢复后重新挂载 | 快照不记录挂载，也不能在创建时补挂（会返回错误码） |
+| 外部挂载（plugin 卷、host mount） | 快照记录挂载配置，恢复后重新挂载 | 快照不记录挂载；用这份快照创建时重新声明即可 |
 | 配置了 restart 策略时 `restart` | 保留文件 | 保留文件（复用捕获时的可写层） |
 
 几个值得注意的行为：
 
 - fs-only **不是增量链**：每份快照都是独立的时间点镜像，打 N 次就存 N 份。容量按「多份独立镜像」规划，不要假设「只存文件系统所以很小」——实际占用取决于存储后端的 CoW/reflink 能力。
 - 从 fs-only 快照创建的沙箱之后与普通沙箱无异：配置了 restart 策略时，`restart` 复用捕获的可写层、文件保留、进程重建；也可以对它**再打 fs-only 快照**，新包会记录它实际使用的可写层。
-- fs-only 包只记录根文件系统：既没有卷数据，也没有挂载配置，源沙箱上的挂载（无论哪种类型）都不会保留。plugin 卷与 host mount 也不能在创建时重新指定——冷启动的 guest 不会挂任何外部卷，请求会直接返回 `snapshot_filesystem_only_external_mount_unsupported`，而不是静默给一个空目录。新沙箱确实需要时请改用 full 快照。
+- fs-only 包只记录根文件系统，不携带任何外部挂载。用它创建沙箱时：
+  - **必须重新声明**要用的 plugin 卷与 host mount（含容器路径）；没声明的不会挂载。
+  - 没有"必须与快照一致"的限制：快照本来就没有挂载记录，挂载完全由本次请求决定。
+  - 沙箱可以落在任意节点，声明的宿主路径在该节点上解析；挂不上（宿主路径不存在、卷不存在）就让创建失败，不会留下空目录。
 
 调用失败时，错误码会说明原因：
 
@@ -102,8 +105,7 @@ assert out.strip() == "hello"
 | 409 | `snapshot_filesystem_only_unsupported_node` | 控制面或节点 agent 不支持 fs-only 模式 | 升级版本较旧的一侧；不会静默退回 full 快照 |
 | 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | 节点不支持冻结文件系统 / 该 rootfs 类型 | 集群侧能力缺口，重试前先确认节点状态 |
 | 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | 冻结或解冻在捕获过程中失败 | 集群侧问题，重试前先确认节点状态 |
-| 409 | `snapshot_filesystem_only_shared_volume_unsupported` | 源沙箱挂了**可写** plugin volume | 共享卷不属于镜像、冷启动会看到别人的数据，先卸载再快照 |
-| 400 | `snapshot_filesystem_only_external_mount_unsupported` | 用 fs-only 快照创建沙箱时挂了 plugin 卷或 host mount | 冷启动不会挂任何外部卷；去掉挂载或改用 full 快照 |
+| 409 | `snapshot_filesystem_only_shared_volume_unsupported` | 源沙箱挂了**可写** plugin volume | 可写 plugin volume 不属于被捕获的根文件系统；请先用不含该卷的沙箱再打快照 |
 | 409 | `snapshot_filesystem_only_multi_container_unsupported` | 沙箱带有额外的用户容器 | 一份包只记录一个可写层，请使用单容器沙箱 |
 
 响应里的 `mode` 永远是**实际记录**的模式；与请求不一致时调用直接失败（409 `snapshot_mode_conflict`），不会把这份产物返回给你，因此不会静默拿到一份 full 快照。

@@ -75,7 +75,6 @@ const CLIENT_ERROR_CODES: &[&str] = &[
     "snapshot_mode_invalid",
     "snapshot_mode_conflict",
     "snapshot_filesystem_only_rollback_unsupported",
-    "snapshot_filesystem_only_external_mount_unsupported",
 ];
 
 /// Every stable identifier that can travel with a CubeMaster rejection.
@@ -86,7 +85,6 @@ const STABLE_CODES: &[&str] = &[
     "snapshot_mode_invalid",
     "snapshot_mode_conflict",
     "snapshot_filesystem_only_rollback_unsupported",
-    "snapshot_filesystem_only_external_mount_unsupported",
     "snapshot_filesystem_only_unsupported_node",
     "snapshot_filesystem_only_node_capability_unknown",
     "snapshot_filesystem_only_not_ready",

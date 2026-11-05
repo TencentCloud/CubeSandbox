@@ -302,7 +302,7 @@ A create request can set `restartPolicy`. The meaning matches Kubernetes `restar
 
 ### Backoff and restart limit
 
-A restart keeps the disk, the network, and the sandbox ID, then cold-starts. Memory is not kept.
+A restart keeps the disk, the network, the volume and host mounts, and the sandbox ID, then cold-starts. Memory is not kept.
 
 Repeated failures wait 10 seconds, then double, capped at 300 seconds; after 10 minutes of stability the restart count resets. The restart limit is `restartBackoff.maxRestarts` (default `0` means unlimited); a global cap can be set with `cubelet_conf.max_restarts_cap` (once set, even `0` is tightened to that cap). After the limit the sandbox stops restarting and is not brought up again, but it still counts toward the node's `MvmNum` quota until idle timeout or an explicit destroy.
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -124,6 +125,9 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 	}
 
 	for _, src := range hdv.GetVolumeSources() {
+		if err := validateHostDirSourceName(src.GetName()); err != nil {
+			return fmt.Errorf("prepareHostDirVolume: %w", err)
+		}
 		if src.GetHostPath() == "" {
 			return fmt.Errorf("prepareHostDirVolume: volume %q has empty host_path", src.GetName())
 		}
@@ -162,6 +166,15 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 
 		log.G(ctx).Infof("[hostdir] bound %s -> %s (ro=%v, shareDir=%s)",
 			src.GetHostPath(), bindDest, readOnly, shareDir)
+	}
+	return nil
+}
+
+// validateHostDirSourceName requires a single path segment, so a volume stays
+// inside its own directory under the share dir.
+func validateHostDirSourceName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("volume source name %q must be a single path segment", name)
 	}
 	return nil
 }

@@ -44,7 +44,7 @@ from framework.assertions import assert_command_ok
 from framework.build_throttle import template_build_slot
 from framework.capabilities import (
     NETWORK_SANDBOX_TO_SANDBOX,
-    capabilities_for_backend,
+    require_capabilities,
 )
 from framework.cleanup import safe_kill
 from framework.config import SdkE2EConfig
@@ -75,11 +75,7 @@ def _require_sandbox_to_sandbox(sdk_backend: str) -> None:
     """Gate every test here, including ones that create adapters directly
     (the marker-based gate in the sdk_sandbox fixture does not run for them).
     """
-    if NETWORK_SANDBOX_TO_SANDBOX not in capabilities_for_backend(sdk_backend):
-        pytest.skip(
-            f"backend {sdk_backend!r} does not support capability "
-            f"{NETWORK_SANDBOX_TO_SANDBOX!r}"
-        )
+    require_capabilities(sdk_backend, NETWORK_SANDBOX_TO_SANDBOX)
 
 
 def _template_image() -> str:
