@@ -111,12 +111,6 @@ const (
 	EnvMaxConcurrentBuilds       = "CUBE_TEMPLATE_CENTER_MAX_CONCURRENT_BUILDS"
 	legacyEnvMaxConcurrentBuilds = "CUBE_TC_MAX_CONCURRENT_BUILDS"
 
-	// EnvPurgeLocalArtifactAfterUpload deletes the local ext4 copy of a built
-	// artifact once the object store holds it and CubeMaster has been told how
-	// to download it. Off by default: with a co-located Master the local file
-	// is a warm cache that keeps that download on local disk.
-	EnvPurgeLocalArtifactAfterUpload = "CUBE_TEMPLATE_CENTER_PURGE_LOCAL_ARTIFACT_AFTER_UPLOAD"
-
 	// S3/MinIO artifact storage. Names are aliases of configenv so existing
 	// t.Setenv(tcconfig.EnvS3*) call sites keep working.
 	EnvS3Endpoint           = configenv.EnvS3Endpoint
@@ -155,17 +149,6 @@ func MaxConcurrentBuilds() int {
 		return DefaultMaxConcurrentBuilds
 	}
 	return n
-}
-
-// PurgeLocalArtifactAfterUpload reports whether TC should delete its local ext4
-// copy once the artifact is durable in the object store.
-//
-// Off unless explicitly enabled: the flag trades a local download cache for a
-// flat build-host disk, and only pays off when the artifact bytes live in a
-// bucket rather than on the host that also serves them.
-func PurgeLocalArtifactAfterUpload() bool {
-	v, _ := lookup(EnvPurgeLocalArtifactAfterUpload, "")
-	return boolValue(v)
 }
 
 // S3Config returns the S3/MinIO artifact storage configuration. Enabled is

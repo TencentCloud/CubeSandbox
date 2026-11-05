@@ -338,21 +338,24 @@ func runBuildLocked(
 	}
 
 	// Step 8: Upload to the configured blob backend, then report BUILT.
-	// backend=s3 keeps today's fallback-to-local-disk on upload failure.
-	// backend=fs is explicit: a failed put is a failed build.
+	// A failed Put now fails the build in every backend. The old s3 branch
+	// fell back to reporting BUILT with no storage backend, which serves the
+	// artifact from TC's disk -- and that only works when CubeMaster happens to
+	// share THIS replica's artifact directory. With a remote Master, or with a
+	// second TC replica, the row then points at a file that is not there.
+	// Failing keeps the outcome independent of topology, lets the job retry,
+	// and stops the ext4 leaking on every failed upload.
 	artifactURL := ""
 	uploaded := false
 	if s3CfgEnabled && s3Client != nil {
-		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
-			if s3Client.BackendName() == "fs" {
-				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
-				return fmt.Errorf("upload artifact to fs store: %w", err)
-			}
-			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
-		} else {
-			uploaded = true
-			artifactURL = artifactPresignedURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
+		url, err := uploadBuiltArtifact(ctx, s3Client, artifactID, &result, logger)
+		if err != nil {
+			logger.Errorf("%v", err)
+			reportFailed(templatecenter.JobPhaseBuildingExt4, err.Error())
+			return err
 		}
+		uploaded = true
+		artifactURL = url
 	}
 
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
@@ -362,19 +365,15 @@ func runBuildLocked(
 		return err
 	}
 
-	// Step 10: Optional local cleanup. Once the bucket holds the object and
-	// CubeMaster can address it, the ext4 this build just wrote is only a
-	// cache; removing it keeps a build host's disk flat instead of growing by
-	// one artifact per build. Deliberately after the report: a failed report
+	// Step 10: Reclaim the local ext4. In s3 mode the bucket is the copy
+	// CubeMaster serves from, so the file this build wrote is leftover the
+	// moment BUILT is reported. Deliberately after the report: a failed report
 	// must still leave the artifact complete somewhere this replica controls.
 	backend := ""
 	if s3Client != nil {
 		backend = s3Client.BackendName()
 	}
-	purged := false
-	if shouldPurgeLocalArtifact(tcconfig.PurgeLocalArtifactAfterUpload(), uploaded, artifactURL, backend) {
-		purged = purgeLocalArtifactCopy(result.Ext4Path, logger)
-	}
+	purged := purgeBuiltArtifactAfterReport(result.Ext4Path, uploaded, artifactURL, backend, logger)
 
 	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d local_copy_purged=%t",
 		artifactID, result.SHA256, result.SizeBytes, purged)
@@ -568,31 +567,68 @@ func isBuildInProgress(storeDir string) bool {
 	return inProgress
 }
 
-// shouldPurgeLocalArtifact decides whether the ext4 this build just wrote may be
-// deleted once the build has been reported BUILT.
+// artifactUploader is the slice of *s3store.Client the post-build stage needs.
+// An interface so the upload-failure and reclaim matrix is exercised by tests
+// without a live bucket.
+type artifactUploader interface {
+	Upload(ctx context.Context, artifactID, localPath, sha256 string) (string, error)
+	BackendName() string
+	Stat(ctx context.Context, artifactID string) (bool, error)
+	PresignedGetURL(ctx context.Context, artifactID string) (string, error)
+}
+
+// uploadBuiltArtifact puts the ext4 this build just produced into the durable
+// store and returns the download address to report with BUILT.
 //
-// Every condition is required:
+// A failed Put fails the build and removes the local copy. Reporting BUILT
+// anyway (the old s3 branch) left storage_backend empty, which makes CubeMaster
+// serve the artifact from TC's disk -- correct only when Master shares this
+// replica's artifact directory, and wrong on a remote Master or a second TC
+// replica. Deleting the copy here is safe precisely because the build fails: no
+// row will ever reference that file, and the retry rebuilds from scratch.
+func uploadBuiltArtifact(
+	ctx context.Context,
+	store artifactUploader,
+	artifactID string,
+	result *image.BuildResult,
+	logger *cubelog.Entry,
+) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	if _, err := store.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
+		logger.Warnf("upload artifact %s to %s store failed, discarding the local copy: %v",
+			artifactID, store.BackendName(), err)
+		purgeLocalArtifactCopy(result.Ext4Path, logger)
+		return "", fmt.Errorf("upload artifact to %s store: %w", store.BackendName(), err)
+	}
+	return artifactPresignedURL(ctx, true, store, artifactID, logger), nil
+}
+
+// purgeBuiltArtifactAfterReport removes the local ext4 once BUILT has been
+// reported and a durable copy exists that CubeMaster can address.
 //
-//   - optIn: the operator set CUBE_TEMPLATE_CENTER_PURGE_LOCAL_ARTIFACT_AFTER_UPLOAD.
-//     Default off, because deleting the local copy is a trade: it reclaims disk
-//     but turns this replica's warm download cache into a bucket fetch.
-//   - uploaded: the Put to the object store succeeded. A failed upload leaves the
-//     local file as the artifact's only copy -- the fallback backend=s3
-//     documents -- so it must survive.
-//   - backend "s3": the fs backend's root may BE this artifact store (one-click
-//     defaults to a local directory), so nothing is reclaimed there and
-//     unlinking could destroy the durable copy.
-//   - artifactURL non-empty: CubeMaster needs an address for the object. Without
-//     a presigned URL or locator it falls back to serving the artifact from the
-//     shared directory, i.e. from the very file this would delete.
-func shouldPurgeLocalArtifact(optIn, uploaded bool, artifactURL, backend string) bool {
-	if !optIn || !uploaded {
+// Three cases keep the file:
+//
+//   - no upload happened: nothing durable exists to fall back to.
+//   - backend other than "s3": with CUBE_ARTIFACT_STORE_BACKEND=fs the store
+//     root may BE this artifact directory, so the file is the durable copy.
+//   - uploaded but no download URL: TC has then stamped storage_backend=s3
+//     while artifact_url stayed empty, and CubeMaster answers 502 for such a
+//     row (artifactDownloadURL returns "" for an empty stored URL and the s3
+//     branch never falls back to TC's disk). Deleting the bytes would leave no
+//     recoverable copy on this replica, so they are kept -- loudly, because the
+//     artifact is unservable until the store signing is fixed.
+func purgeBuiltArtifactAfterReport(ext4Path string, uploaded bool, artifactURL, backend string, logger *cubelog.Entry) bool {
+	if !uploaded || backend != "s3" {
 		return false
 	}
-	if backend != "s3" {
+	if strings.TrimSpace(artifactURL) == "" {
+		logger.Warnf("keeping local artifact copy %s: the upload succeeded but no download URL was recorded, "+
+			"so CubeMaster cannot serve this artifact (it answers 502 for an s3-backed row without one)", ext4Path)
 		return false
 	}
-	return strings.TrimSpace(artifactURL) != ""
+	return purgeLocalArtifactCopy(ext4Path, logger)
 }
 
 // purgeLocalArtifactCopy unlinks the artifact's ext4 and, when that leaves the
@@ -617,13 +653,22 @@ func purgeLocalArtifactCopy(ext4Path string, logger *cubelog.Entry) bool {
 		return false
 	}
 	dir := filepath.Dir(abs)
-	if !managedArtifactDir(dir) {
-		// Same guard the artifact deleter uses: never unlink outside the roots TC
-		// writes artifacts to, so a bad path cannot delete arbitrary files.
+	// Same guard the artifact deleter uses: never unlink outside the roots TC
+	// writes artifacts to, so a bad path cannot delete arbitrary files.
+	// managedArtifactDir resolves symlinks, which matters here because
+	// os.Remove(path THROUGH a symlinked directory) deletes the target and TC
+	// runs as root.
+	//
+	// The unlink below then goes through the SAME canonical directory the guard
+	// approved, so a symlink cannot be swapped in between the check and the
+	// removal to redirect the unlink elsewhere.
+	canonicalDir, ok := managedArtifactDirCanonical(dir)
+	if !ok {
 		logger.Warnf("purge local artifact copy: %s is outside the managed artifact roots, refusing", ext4Path)
 		return false
 	}
-	if err := os.Remove(abs); err != nil {
+	target := filepath.Join(canonicalDir, filepath.Base(abs))
+	if err := os.Remove(target); err != nil {
 		if os.IsNotExist(err) {
 			// Already gone (sibling replica, `tpl merge`, previous run).
 			return false
@@ -631,10 +676,10 @@ func purgeLocalArtifactCopy(ext4Path string, logger *cubelog.Entry) bool {
 		logger.Warnf("purge local artifact copy %s failed: %v", ext4Path, err)
 		return false
 	}
-	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
-		logger.Debugf("keeping local artifact dir %s after purge (not empty): %v", dir, err)
+	if err := os.Remove(canonicalDir); err != nil && !os.IsNotExist(err) {
+		logger.Debugf("keeping local artifact dir %s after purge (not empty): %v", canonicalDir, err)
 	}
-	logger.Infof("purged local artifact copy %s; the durable copy is in the object store", abs)
+	logger.Infof("purged local artifact copy %s; the durable copy is in the object store", target)
 	return true
 }
 
