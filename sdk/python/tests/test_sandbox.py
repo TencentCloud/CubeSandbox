@@ -2441,6 +2441,39 @@ class TestRollback:
         m.json.return_value = body if body is not None else {}
         return m
 
+    def test_create_snapshot_sends_the_requested_mode(self):
+        """`mode` is the whole contract: a request without it is a full
+        snapshot, which pauses the sandbox and stores guest memory."""
+        sb = make_sandbox()
+        body = {"snapshotID": "snap-1", "names": ["snap-1"], "mode": "fs-only"}
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response(body)) as post_m:
+            info = sb.create_snapshot(mode="fs-only")
+        url = post_m.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{sb.sandbox_id}/snapshots")
+        assert post_m.call_args.kwargs["json"] == {"mode": "fs-only"}
+        assert info.snapshot_id == "snap-1"
+        assert info.mode == "fs-only"
+
+    def test_create_snapshot_omits_the_mode_when_not_requested(self):
+        """The server default is full; sending nothing keeps old servers happy."""
+        sb = make_sandbox()
+        body = {"snapshotID": "snap-1", "names": ["snap-1"], "mode": "full"}
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response(body)) as post_m:
+            info = sb.create_snapshot()
+        assert post_m.call_args.kwargs["json"] == {}
+        assert info.mode == "full"
+
+    def test_snapshot_info_defaults_to_full_mode(self):
+        """An older control plane omits `mode`; the artifact it produced is full."""
+        sb = make_sandbox()
+        body = {"snapshotID": "snap-1", "names": ["snap-1"]}
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response(body)):
+            info = sb.create_snapshot()
+        assert info.mode == "full"
+
     def test_rollback_returns_response_body(self):
         sb = make_sandbox()
         body = {"sandboxID": sb.sandbox_id, "snapshotID": "snap-1", "status": "success"}

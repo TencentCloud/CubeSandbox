@@ -45,6 +45,11 @@ AUTH_SIMPLE_KEY = "auth_simple_key"
 MCP_GATEWAY = "mcp_gateway"
 # Node-local restart policy (Never / OnFailure / Always) and restartStatus.
 RESTART_POLICY = "restart_policy"
+# Filesystem-only snapshots (rootfs + metadata, no guest memory) and cold boot
+# from them. `Sandbox.create_snapshot(mode=...)` is part of the SDK; `fork` has
+# no mode argument yet and the negative cases must read the raw HTTP status, so
+# those calls go through the API.
+FILESYSTEM_ONLY_SNAPSHOT = "filesystem_only_snapshot"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -88,6 +93,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         NETWORK_L7_CUSTOM_PORT,
         MCP_GATEWAY,
         RESTART_POLICY,
+        FILESYSTEM_ONLY_SNAPSHOT,
     }
 )
 

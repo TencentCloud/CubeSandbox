@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -138,6 +139,7 @@ func snapshotInfoFromRecord(rec *models.SnapshotRecord, replicas []ReplicaStatus
 		OriginHostFactsJSON:       rec.OriginHostFactsJSON,
 		StorageBackend:            rec.Backend,
 		Backend:                   rec.Backend,
+		Mode:                      snapshotmode.Normalize(rec.Mode).String(),
 		RemoteStatus:              rec.RemoteStatus,
 		RootfsSizeBytesAtSnapshot: rec.RootfsSizeBytesAtSnapshot,
 		LastError:                 rec.LastError,
@@ -192,6 +194,7 @@ func requestFromSnapshotJSON(raw string) (*sandboxtypes.CreateCubeSandboxReq, er
 type RestoreSource struct {
 	SnapshotID          string
 	Backend             string
+	Mode                snapshotmode.Mode
 	RemoteStatus        string
 	OriginNodeID        string
 	OriginNodeIP        string
@@ -213,6 +216,7 @@ func GetSnapshotRestoreSource(ctx context.Context, snapshotID string) (*RestoreS
 	return &RestoreSource{
 		SnapshotID:          rec.SnapshotID,
 		Backend:             rec.Backend,
+		Mode:                snapshotmode.Normalize(rec.Mode),
 		RemoteStatus:        rec.RemoteStatus,
 		OriginNodeID:        rec.OriginNodeID,
 		OriginNodeIP:        rec.OriginNodeIP,

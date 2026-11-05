@@ -613,6 +613,11 @@ message RunCubeSandboxRequest {
   // Empty means Never. OnFailure and Always persist the request for later restarts.
   string restart_policy = 18;
   RestartBackoffConfig restart_backoff = 19;
+
+  // snapshot_mode describes the snapshot this sandbox is created from:
+  // "full" (memory restore) or "fs-only" (cold boot). Empty means full.
+  // It is set by Master from the snapshot record; clients cannot set it.
+  string snapshot_mode = 20;
 }
 
 message RunCubeSandboxResponse {
@@ -931,6 +936,8 @@ message CommitSandboxRequest {
   string snapshot_dir = 4;
   // CoW backend from Master (xfs｜s3). Empty means xfs.
   string backend = 5;
+  // Snapshot artifact mode: "full" or "fs-only". Empty means full.
+  string snapshot_mode = 6;
 }
 
 message CommitSandboxResponse {
@@ -971,6 +978,8 @@ message CommitSandboxResponse {
   // S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
   // Filled before this RPC returns. Empty on xfs.
   string remote_uuids = 18;
+  // Canonical mode this commit actually produced: "full" or "fs-only".
+  string snapshot_mode = 19;
 }
 
 message RollbackSandboxRequest {

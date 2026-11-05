@@ -26,6 +26,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 func TestCreateSnapshotSuccessResponse(t *testing.T) {
@@ -48,7 +50,7 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		}
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return &types.TemplateImageJobInfo{
 			JobID:        "op-1",
 			TemplateID:   "snap-1",
@@ -107,7 +109,7 @@ func TestCreateSnapshotRejectsReservedPrefixNameAsParamsError(t *testing.T) {
 	resolveSnapshotHostFn = func(context.Context, string, string) (string, string, error) {
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return nil, fmt.Errorf("%w: %q", templatecenter.ErrInvalidSnapshotName, displayName)
 	}
 
@@ -134,6 +136,47 @@ func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {
 	}
 }
 
+// Cubelet wraps the stable identifier in a sentence and Master stores that text
+// in the job's error_message, so the status must be derived from the identifier
+// by containment.
+func TestSnapshotErrorCodeClassifiesStableIdentifiers(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{
+			err:  fmt.Errorf("failed to capture sandbox snapshot: %s: guest agent too old", snapshotmode.ErrFilesystemOnlyFreezeUnsupported),
+			want: int(errorcode.ErrorCode_Conflict),
+		},
+		{
+			err:  fmt.Errorf("failed to capture sandbox snapshot: %s: not a blk-cube disk", snapshotmode.ErrFilesystemOnlyRootfsUnsupported),
+			want: int(errorcode.ErrorCode_Conflict),
+		},
+		{
+			err:  fmt.Errorf("%s: snap-1", snapshotmode.ErrFilesystemOnlyRollback),
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			err:  fmt.Errorf("%s: node heartbeat missing", snapshotmode.ErrFilesystemOnlyNodeUnknown),
+			want: int(errorcode.ErrorCode_MasterUnavailable),
+		},
+		{
+			// Server-side failure: no client action, keeps the existing default.
+			err:  fmt.Errorf("%s: FIFREEZE failed", snapshotmode.ErrFilesystemOnlyFreezeFailed),
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			// Not-found messages quote the requested id, so an id that looks
+			// like an identifier must not turn a 404 into a 400.
+			err:  fmt.Errorf("%w: snapshot %s", templatecenter.ErrSnapshotNotFound, snapshotmode.ErrSnapshotModeInvalid),
+			want: int(errorcode.ErrorCode_NotFound),
+		},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, snapshotErrorCode(tc.err), tc.err.Error())
+	}
+}
+
 func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
 	registerKnownSandboxTestID(t)
 
@@ -149,7 +192,7 @@ func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
 	resolveSnapshotHostFn = func(ctx context.Context, requestID, sandboxID string) (string, string, error) {
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return &types.TemplateImageJobInfo{JobID: "op-2", TemplateID: "snap-2", RequestID: requestID}, nil
 	}
 	getSnapshotInfoFn = func(ctx context.Context, snapshotID string, includeRequest bool) (*templatecenter.SnapshotInfo, error) {
@@ -189,7 +232,7 @@ func TestCreateSnapshotDetachesExecutionFromCanceledRequest(t *testing.T) {
 		}
 		return "node-a", "10.0.0.1", nil
 	}
-	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("snapshot execution context should not be canceled with the HTTP request: %v", ctx.Err())
@@ -499,6 +542,84 @@ func TestBindSnapshotCreateReplicaAllowsPluginVolumeCrossNode(t *testing.T) {
 	assert.Equal(t, "true", req.Annotations[constants.CubeAnnotationSnapshotCrossNode])
 }
 
+// A filesystem-only package carries no external mount and cold boot mounts none,
+// so the restore has no origin dependency: placement must not be pinned even
+// when the snapshot itself was taken from a sandbox with a raw host mount.
+func TestBindFilesystemOnlySnapshotDoesNotPinToOrigin(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
+	origSource := getSnapshotRestoreSourceFn
+	origDecide := decideRestorePlacementFn
+	origReplica := resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() {
+		getSnapshotRestoreSourceFn = origSource
+		decideRestorePlacementFn = origDecide
+		resolveSnapshotReadyReplicaFn = origReplica
+	})
+	getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+		return &templatecenter.RestoreSource{
+			SnapshotID: "snap-1", Backend: constants.SnapshotBackendS3,
+			RemoteStatus: constants.RemoteStatusReady, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1",
+			Mode: snapshotmode.FsOnly,
+		}, nil
+	}
+	decideRestorePlacementFn = func(_ context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
+		assert.False(t, in.PinToOrigin)
+		assert.Equal(t, restoreplace.FilesystemColdBoot, in.Kind)
+		return &restoreplace.Placement{NodeID: "node-b", NodeIP: "10.0.0.2", CrossNode: true}, nil
+	}
+	resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+		return templatecenter.ReplicaStatus{NodeID: "node-b"}, nil
+	}
+
+	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-1", &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{},
+	}))
+}
+
+// The cold boot cannot mount an external volume, so accepting one would leave
+// the guest with an empty directory the caller believes is shared data.
+func TestBindFilesystemOnlySnapshotRejectsCallerExternalMounts(t *testing.T) {
+	cases := map[string]*types.CreateCubeSandboxReq{
+		"host mount": {
+			Annotations: map[string]string{
+				sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt/shared"}]`,
+			},
+		},
+		"plugin volume": {
+			Annotations: map[string]string{
+				sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/mnt/data"}]`,
+			},
+			Volumes: []*types.Volume{{Name: "data"}},
+		},
+	}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			stubSnapshotReadyForNewUse(t)
+			origSource := getSnapshotRestoreSourceFn
+			origDecide := decideRestorePlacementFn
+			t.Cleanup(func() {
+				getSnapshotRestoreSourceFn = origSource
+				decideRestorePlacementFn = origDecide
+			})
+			getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+				return &templatecenter.RestoreSource{
+					SnapshotID: "snap-1", Backend: constants.SnapshotBackendS3,
+					RemoteStatus: constants.RemoteStatusReady, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1",
+					Mode: snapshotmode.FsOnly,
+				}, nil
+			}
+			decideRestorePlacementFn = func(context.Context, restoreplace.Input) (*restoreplace.Placement, error) {
+				t.Fatal("placement must not run for a rejected request")
+				return nil, nil
+			}
+
+			err := bindSnapshotCreateReplica(context.Background(), "snap-1", req)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), snapshotmode.ErrFilesystemOnlyExternalMount)
+		})
+	}
+}
+
 func TestSnapshotRestorePinsOnlyRawHostMountFromStoredTemplate(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
 	templateReq := &types.CreateCubeSandboxReq{Annotations: map[string]string{
@@ -612,6 +733,152 @@ func TestReconcileSnapshotPluginVolumes(t *testing.T) {
 			assert.Equal(t, tt.wantAnnotation, hasAnnotation)
 		})
 	}
+}
+
+// emptyDirVolume builds a sandbox-local volume, the kind a filesystem-only
+// template keeps: it is created per sandbox and carries no node dependency.
+func emptyDirVolume(name string) *types.Volume {
+	return &types.Volume{
+		Name:         name,
+		VolumeSource: &types.VolumeSource{EmptyDir: &types.EmptyDirVolumeSource{}},
+	}
+}
+
+func hostDirVolume(name, hostPath string) *types.Volume {
+	return &types.Volume{
+		Name: name,
+		VolumeSource: &types.VolumeSource{
+			HostDirVolumeSources: &types.HostDirVolumeSources{
+				VolumeSources: []*types.HostDirSource{{Name: name, HostPath: hostPath}},
+			},
+		},
+	}
+}
+
+func mountNames(ctr *types.Container) []string {
+	names := make([]string, 0, len(ctr.VolumeMounts))
+	for _, mount := range ctr.VolumeMounts {
+		names = append(names, mount.GetName())
+	}
+	return names
+}
+
+// A filesystem-only snapshot carries the rootfs only, so every external mount
+// the origin sandbox recorded must be dropped: the volumes, the container
+// mounts that reference them and the annotations that would re-inject them.
+// Dropping only some of the three leaves the request with dangling references
+// or a mount the cold-booted guest never gets.
+func TestStripSnapshotExternalMountsStripsOnlyTheTemplateSide(t *testing.T) {
+	templateReq := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			sandbox.AnnotationPluginVolumeMounts:  `[{"name":"data","container_path":"/mnt/data"},{"name":"ghost","container_path":"/mnt/ghost"}]`,
+			sandbox.AnnotationPluginVolumeSources: `[{"name":"data","plugin":"p1"}]`,
+			sandbox.AnnotationHostDirMount:        `[{"hostPath":"/data/shared","mountPath":"/mnt/shared"}]`,
+		},
+		Volumes: []*types.Volume{
+			{Name: "data"},   // declared by the annotation
+			{Name: "legacy"}, // no source at all: a plugin volume too
+			hostDirVolume("hostdir-0", "/data/shared"),
+			emptyDirVolume("scratch"),
+		},
+		Containers: []*types.Container{{
+			VolumeMounts: []*cubeboxv1.VolumeMounts{
+				{Name: "data", ContainerPath: "/mnt/data"},
+				{Name: "hostdir-0", ContainerPath: "/mnt/shared"},
+				{Name: "ghost", ContainerPath: "/mnt/ghost"}, // declared, volume absent
+				{Name: "scratch", ContainerPath: "/scratch"},
+			},
+		}},
+	}
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			sandbox.AnnotationPluginVolumeMounts: `[{"name":"mine","container_path":"/mnt/mine"}]`,
+		},
+		Volumes: []*types.Volume{{Name: "mine"}},
+	}
+
+	stripSnapshotExternalMounts(templateReq)
+
+	assert.Equal(t, []string{"scratch"}, volumeNames(templateReq.Volumes))
+	assert.Equal(t, []string{"scratch"}, mountNames(templateReq.Containers[0]),
+		"container mounts of stripped volumes must not survive as dangling references")
+	for _, key := range []string{
+		sandbox.AnnotationPluginVolumeMounts,
+		sandbox.AnnotationPluginVolumeSources,
+		sandbox.AnnotationHostDirMount,
+	} {
+		_, ok := templateReq.Annotations[key]
+		assert.False(t, ok, "%s must be stripped from the template request", key)
+	}
+	// The caller's own mounts are untouched: that verdict belongs to the
+	// cold-boot check, not to the template strip.
+	assert.Equal(t, []string{"mine"}, volumeNames(req.Volumes))
+	assert.Contains(t, req.Annotations, sandbox.AnnotationPluginVolumeMounts)
+}
+
+// A cold-booted guest mounts no external volume, so a create that asks for one
+// must fail instead of silently leaving it empty.
+func TestRejectFilesystemOnlyExternalMounts(t *testing.T) {
+	cases := map[string]struct {
+		req       *types.CreateCubeSandboxReq
+		wantError bool
+	}{
+		"host mount annotation": {
+			req: &types.CreateCubeSandboxReq{Annotations: map[string]string{
+				sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt"}]`,
+			}},
+			wantError: true,
+		},
+		"plugin volume": {
+			req: &types.CreateCubeSandboxReq{
+				Annotations: map[string]string{
+					sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/mnt/data"}]`,
+				},
+				Volumes: []*types.Volume{{Name: "data"}},
+			},
+			wantError: true,
+		},
+		"host dir volume without annotation": {
+			req: &types.CreateCubeSandboxReq{
+				Volumes: []*types.Volume{hostDirVolume("hostdir-0", "/data/shared")},
+			},
+			wantError: true,
+		},
+		"explicit plugin source": {
+			req: &types.CreateCubeSandboxReq{
+				Volumes: []*types.Volume{{
+					Name:         "data",
+					VolumeSource: &types.VolumeSource{PluginVolume: &types.PluginVolumeSource{}},
+				}},
+			},
+			wantError: true,
+		},
+		"sandbox-local volumes only": {
+			req: &types.CreateCubeSandboxReq{
+				Volumes: []*types.Volume{emptyDirVolume("tmp")},
+			},
+		},
+		"nil request": {req: nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := rejectFilesystemOnlyExternalMounts(tc.req)
+			if !tc.wantError {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), snapshotmode.ErrFilesystemOnlyExternalMount)
+		})
+	}
+}
+
+func volumeNames(volumes []*types.Volume) []string {
+	names := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		names = append(names, volume.Name)
+	}
+	return names
 }
 
 func TestBindSnapshotCreateReplicaHostMountFailsWithoutOriginMetadata(t *testing.T) {
@@ -913,4 +1180,29 @@ func TestSnapshotColdReplicaDropsCallerShimOverride(t *testing.T) {
 	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-cold", req))
 	assert.NotContains(t, req.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	assert.Equal(t, "snap-cold", req.Annotations[constants.CubeAnnotationRuntimeSnapshotID])
+}
+
+// CubeAPI reads the ret envelope from the top level of the body, exactly like
+// every other /cube route. A nested {"res":{...}} would hide a non-success ret
+// and be read as "no modes supported" instead of as an error.
+func TestCapabilitiesResponseKeepsTheFlatEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/cube/capabilities?request_id=req-1", nil)
+	ctx.Request = ctx.Request.WithContext(
+		CubeLog.WithRequestTrace(ctx.Request.Context(), &CubeLog.RequestTrace{}),
+	)
+
+	handleCapabilitiesAction(ctx)
+
+	body := recorder.Body.String()
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, body, `"ret"`, "ret must be at the top level")
+	assert.NotContains(t, body, `"res"`, "the envelope must not be nested under res")
+	assert.Contains(t, body, `"snapshot_modes":["full","fs-only"]`,
+		"the contract is the set of modes this build accepts")
+	assert.NotContains(t, body, `"filesystem_only_snapshot"`,
+		"a feature switch is not part of the contract; the build supports both modes")
+	assert.Contains(t, body, `"requestID":"req-1"`)
 }

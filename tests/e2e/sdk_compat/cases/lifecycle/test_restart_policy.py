@@ -6,9 +6,10 @@
 These cover the user-visible rules: exit 0 restarts only Always, a non-zero
 main-process exit restarts OnFailure and Always, Never does not restart,
 backoff uses the configured interval, multiplier and cap, a stable period
-clears the streak, pause during backoff abandons that restart, and resume
-clears the count. Host-side scenarios (killing the hypervisor, restarting
-cubelet, CubeMaster down) are not driven from this suite.
+clears the streak, pause during backoff abandons that restart, and resume keeps
+the count because a pause is not a restart. Host-side scenarios (killing the
+hypervisor, restarting cubelet, CubeMaster down) are not driven from this
+suite.
 
 The template must expose envd on port 49983 so the default liveness probe
 can see a guest crash.
@@ -762,13 +763,13 @@ def test_stable_period_resets_count_and_backoff(sdk_sandbox, sdk_e2e_config):
     livenessProbe=_CLOSED_PORT_PROBE,
     timeout=1800,
 )
-def test_pause_during_backoff_abandons_restart_and_resume_clears_count(sdk_sandbox, sdk_e2e_config):
+def test_pause_during_backoff_abandons_restart_and_resume_keeps_count(sdk_sandbox, sdk_e2e_config):
     """Pause during the first backoff, before that restart has been created.
 
     The closed-port probe fails without killing the guest, so the original VM
-    can be snapshotted and resumed. The restart has not completed, so the
-    count is still 0; staying paused past nextRestartAt drops that attempt,
-    and resume comes back with the count still 0.
+    can be snapshotted and resumed. No restart had completed, so the count is
+    still 0; staying paused past nextRestartAt drops that attempt, and resume
+    keeps the count at 0 because pause is not a restart.
     """
     sandbox_id = sdk_sandbox.sandbox_id
     wait_until_data_plane_ready(
@@ -839,7 +840,8 @@ def test_pause_and_resume_after_cold_restart(sdk_sandbox, sdk_e2e_config):
 
     A cold restart runs the guest main process under the sandbox id, so the
     pause snapshot records that id instead of the template's container id.
-    Resume must reconnect to the restored process instead of starting it again.
+    Resume must reconnect to the restored process instead of starting it again,
+    and must keep the restart count: pause is not a restart.
     """
     sandbox_id = sdk_sandbox.sandbox_id
     wait_until_data_plane_ready(

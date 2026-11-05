@@ -22,7 +22,7 @@ use crate::memory_manager::MemoryManager;
 use crate::migration::get_vm_snapshot;
 use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
-use crate::vm::{Error as VmError, Vm, VmState};
+use crate::vm::{write_vm_config_only, Error as VmError, Vm, VmState};
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use crate::vm_config::CompatibleMode;
 use crate::vm_config::{
@@ -747,6 +747,13 @@ impl Vmm {
     }
 
     fn vm_snapshot(&mut self, snapshot_config: &SnapshotConfig) -> result::Result<(), VmError> {
+        // Config-only snapshot: the guest keeps running and only the VM
+        // configuration is serialized. `Vm::snapshot()` requires a paused VM
+        // and would also produce state and memory, so it must not be entered.
+        if !snapshot_config.include_memory {
+            let vm_config = self.vm_config.as_ref().ok_or(VmError::VmNotRunning)?;
+            return write_vm_config_only(snapshot_config, vm_config).map_err(VmError::SnapshotSend);
+        }
         if let Some(ref mut vm) = self.vm {
             vm.snapshot()
                 .map_err(VmError::Snapshot)

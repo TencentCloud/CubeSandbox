@@ -19,11 +19,11 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse, ForkResult,
-        LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff, RestartStatus,
-        Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
-        SandboxOnTimeout, SandboxState, SandboxVolumeMount,
+        normalize_request, EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse,
+        ForkResult, LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff,
+        RestartStatus, Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig,
+        SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
+        SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
     },
 };
 
@@ -32,6 +32,10 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_NOT_FOUND_AT_CUBELET: i32 = 130406;
 const RET_CODE_CONFLICT: i32 = 130409;
+/// `errorcode.PreConditionFailed`: the request is impossible in the current
+/// state (e.g. a cold boot whose guest artifacts are missing on this node).
+/// It is a 409, not a server fault: retrying the same node cannot succeed.
+const RET_CODE_PRECONDITION: i32 = 130568;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 /// Sentinel for a fork result with neither sandbox nor ret (130502 is
@@ -732,11 +736,19 @@ impl SandboxService {
         let source = self.fetch_sandbox_detail(sandbox_id).await?;
         let envd_version = envd_version_from_annotations(&source.annotations);
         let alias = template_alias_from_annotations(&source.annotations);
+        let mode = normalize_request(body.mode.as_deref(), None, None)
+            .map_err(|e| AppError::BadRequest(e.message()))?;
+        if mode == SnapshotMode::FsOnly {
+            // Fork derives from a fresh fs-only snapshot, so the same
+            // control-plane preflight applies before any work starts.
+            super::snapshots::ensure_filesystem_only_supported(&self.cubemaster).await?;
+        }
 
         let req = ForkSandboxRequest {
             request_id: new_request_id(),
             count: body.count,
             timeout: body.timeout,
+            mode: Some(mode.as_str().to_string()),
         };
         let resp = self
             .cubemaster
@@ -1236,6 +1248,11 @@ fn internal_error(error: impl std::fmt::Display) -> AppError {
 // the envelope reaches the caller, so a rejection of the client's own input has to be
 // classified here — the ret.into_result()/ensure_* checks never observe it.
 fn params_error_or_internal(e: CubeMasterError) -> AppError {
+    if let CubeMasterError::Api { ret_code, ret_msg } = &e {
+        if *ret_code == RET_CODE_PRECONDITION {
+            return AppError::Conflict(ret_msg.clone());
+        }
+    }
     if e.is_invalid_path_parameter() || e.is_params_error() {
         // Same reasoning as templates::map_err: the caller sent something invalid, so
         // this is a 400. Reporting it as 500 misleads clients into retrying a request
@@ -2117,15 +2134,11 @@ mod tests {
     use tokio::sync::Mutex;
 
     async fn spawn_fake_cubemaster(app: Router) -> SandboxService {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener addr");
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("server should run");
-        });
         SandboxService::new(
-            CubeMasterClient::new(format!("http://{}", addr), reqwest::Client::new()),
+            CubeMasterClient::new(
+                crate::services::test_support::serve(app).await,
+                reqwest::Client::new(),
+            ),
             "cubebox".to_string(),
             "cube.app".to_string(),
         )
@@ -2827,6 +2840,7 @@ mod tests {
                 ForkRequest {
                     count: 2,
                     timeout: None,
+                    mode: None,
                 },
             )
             .await
@@ -2896,6 +2910,7 @@ mod tests {
                 ForkRequest {
                     count: 2,
                     timeout: None,
+                    mode: None,
                 },
             )
             .await
@@ -2932,6 +2947,7 @@ mod tests {
                     ForkRequest {
                         count: bad,
                         timeout: None,
+                        mode: None,
                     },
                 )
                 .await

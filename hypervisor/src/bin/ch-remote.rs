@@ -272,6 +272,7 @@ fn snapshot_command(
         destination_url: String::from(url),
         snapshot_type,
         memory_vol_url,
+        include_memory: true,
     };
 
     simple_api_command(

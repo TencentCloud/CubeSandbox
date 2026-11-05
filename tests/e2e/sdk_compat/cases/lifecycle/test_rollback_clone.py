@@ -9,7 +9,7 @@ import pytest
 
 from framework.assertions import assert_code_ok
 from framework.capabilities import ROLLBACK_CLONE, RUN_CODE
-from framework.cleanup import safe_kill
+from framework.cleanup import delete_snapshot_after_runtime_release, safe_kill
 
 pytestmark = [
     pytest.mark.e2e,
@@ -21,28 +21,6 @@ pytestmark = [
 
 def _state_path(sdk_sandbox) -> str:
     return f"/tmp/sdk-compat-rollback-clone-{sdk_sandbox.sandbox_id}.txt"
-
-
-def _delete_snapshot_after_runtime_release(
-    sdk_sandbox,
-    snapshot_id: str,
-    *,
-    timeout: float,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            sdk_sandbox.delete_snapshot(snapshot_id)
-            return
-        except Exception as exc:  # noqa: BLE001 - normalize backend conflict text
-            message = str(exc).lower()
-            runtime_ref_conflict = (
-                "active runtime ref" in message
-                or "attempt is already in progress" in message
-            )
-            if not runtime_ref_conflict or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
 
 
 def test_rollback_restores_snapshot_filesystem_state(
@@ -74,7 +52,7 @@ def test_rollback_restores_snapshot_filesystem_state(
         cleanup_errors.extend(safe_kill(sdk_sandbox, sdk_e2e_config))
         if snapshot_id:
             try:
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,
@@ -124,7 +102,7 @@ def test_rollback_restores_kernel_state(sdk_sandbox, sdk_e2e_config):
         cleanup_errors.extend(safe_kill(sdk_sandbox, sdk_e2e_config))
         if snapshot_id:
             try:
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,

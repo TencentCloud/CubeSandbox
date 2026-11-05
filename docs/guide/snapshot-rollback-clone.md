@@ -2,7 +2,7 @@
 
 This guide covers three advanced APIs provided by the Cube Sandbox Python SDK:
 
-- **Snapshot**: Persists the complete state (memory + filesystem) of a running sandbox as a reusable image. The snapshot can later be used to spawn new sandboxes or trigger a rollback.
+- **Snapshot**: Persists the state of a running sandbox as a reusable image. A **full** snapshot keeps memory and filesystem; an **fs-only** snapshot keeps the filesystem alone. Either can spawn new sandboxes; rollback requires a full snapshot.
 - **Clone**: Calls `clone()` on a running sandbox to immediately derive N fully independent copies. Each copy starts from the source sandbox's current state and runs in isolation.
 - **Rollback**: Restores a running sandbox to a previously captured snapshot state in place — the sandbox ID stays the same and execution can continue right away.
 
@@ -61,6 +61,68 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
 ```
 
 A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id_or_name)` to clean up when it is no longer needed. It accepts either a snapshot ID or the name you passed to `create_snapshot`, and returns `True` when the snapshot was deleted or `False` when it did not exist. The SDK only matches snapshots, never templates: a name that matches no snapshot returns `False` even if a template alias has that name, and the template is left untouched. If a name matches several snapshots the call fails with HTTP 409 and nothing is deleted; use the `snap-` ID instead. This requires a CubeAPI that supports `snapshot_only`; older servers ignore it and still route a name that matches no snapshot to the template of that name.
+
+### Filesystem-only snapshots
+
+Pass `mode="fs-only"` to capture the filesystem without guest memory. The guest
+is never paused: it keeps running and stays writable as soon as the call
+returns. The price is that a sandbox created from such a snapshot **cold boots**
+— the files are there, but every process is new.
+
+```python
+snap = sb.create_snapshot(mode="fs-only")
+assert snap.mode == "fs-only"
+
+child = Sandbox.create(template=snap.snapshot_id)
+# Files written before the snapshot are visible...
+out = child.run_code("print(open('/tmp/data.txt').read())").logs.stdout[0]
+assert out.strip() == "hello"
+# ...but processes are not.
+```
+
+What to expect:
+
+| Aspect | `mode="full"` (default) | `mode="fs-only"` |
+|---|---|---|
+| Guest memory | saved | not saved |
+| Source sandbox during the call | briefly paused | stays running |
+| Sandbox created from it | memory restored, processes continue | cold boot, fresh processes |
+| `pause()` / `resume()` afterwards | memory kept | memory kept (first pause is a full capture) |
+| `rollback(snapshot)` to it | supported | **rejected** (`snapshot_filesystem_only_rollback_unsupported`) |
+| External mounts (plugin volume, host mount) | recorded in the snapshot and re-mounted | not recorded, and cannot be attached at create (returns an error code) |
+| `restart` with a restart policy | files preserved | files preserved (the captured writable layer is reused) |
+
+A few behaviors worth knowing:
+
+- Every fs-only snapshot is an independent point-in-time image, not an
+  incremental chain — take N snapshots and you store N images. Size for that
+  rather than assuming "filesystem only, so it must be small"; the real
+  footprint depends on the backend's CoW support.
+- A sandbox created from an fs-only snapshot behaves like any other sandbox
+  afterwards: `restart` reuses the captured writable layer so files survive,
+  and you can take another fs-only snapshot of it later.
+- An fs-only package records no volume data and no mount configuration: every
+  mount the origin sandbox had is gone, whatever its kind. Plugin volumes and raw
+  host mounts cannot be re-attached on create either — a cold-booted guest mounts
+  no external volume, so the request is rejected with
+  `snapshot_filesystem_only_external_mount_unsupported` instead of silently
+  leaving the path empty. Use a full snapshot when the new sandbox needs them.
+
+If the call fails, the error code tells you why:
+
+| HTTP | Error code | Cause | What to do |
+|---|---|---|---|
+| 409 | `snapshot_filesystem_only_unsupported_node` | The control plane or the node agent does not support the fs-only mode | Upgrade whichever side is older; it never falls back to a full snapshot silently |
+| 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | The node cannot freeze the filesystem / this rootfs type | Cluster-side capability gap; check the node before retrying |
+| 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | Freeze or thaw failed mid-capture | Cluster-side problem; check the node before retrying |
+| 409 | `snapshot_filesystem_only_shared_volume_unsupported` | The sandbox has a **writable** plugin volume | The volume is not part of the image and would leak another sandbox's data on cold boot; detach it first |
+| 400 | `snapshot_filesystem_only_external_mount_unsupported` | Creating from an fs-only snapshot with a plugin volume or host mount attached | A cold-booted guest mounts no external volume; create without it or use a full snapshot |
+| 409 | `snapshot_filesystem_only_multi_container_unsupported` | The sandbox has extra user containers | One package records one writable layer; use a single-container sandbox |
+
+The response `mode` always reports what was actually recorded. When it differs
+from what you asked for, the call fails with 409 `snapshot_mode_conflict`
+instead of returning the artifact, so you never silently receive a full
+snapshot.
 
 ### Listing snapshots
 
@@ -142,7 +204,7 @@ Each fork succeeds or fails independently. The return value has exactly `count` 
 
 ## Rollback
 
-`sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable.
+`sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable. Rollback requires a **full** snapshot — rolling back to an fs-only snapshot is rejected with `snapshot_filesystem_only_rollback_unsupported` (see the comparison table above).
 
 ```python
 sb = Sandbox.create(template=TEMPLATE_ID)

@@ -153,6 +153,9 @@ func constructCreateReq(r *http.Request) (*types.CreateCubeSandboxReq, error) {
 	if req.Annotations == nil {
 		req.Annotations = map[string]string{}
 	}
+	// Snapshot mode is a property of the snapshot record, never client input.
+	// Master's internal builders set it after this function returns.
+	req.SnapshotMode = ""
 	// The alias is server-derived from the template/snapshot display_name; drop
 	// any client-supplied value so metadata cannot spoof create/get_info/list.
 	delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)

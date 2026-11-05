@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import shlex
 import sys
-import time
 import uuid
 from dataclasses import dataclass
 
@@ -18,7 +17,7 @@ import pytest
 from adapters import create_adapter, create_adapter_with_capacity_retry
 from framework.assertions import assert_command_ok
 from framework.capabilities import HOST_MOUNT, ROLLBACK_CLONE, VOLUME_PLUGIN
-from framework.cleanup import safe_kill
+from framework.cleanup import delete_snapshot_after_runtime_release, safe_kill
 from framework.host_mount import (
     host_mount_metadata,
     mount_option,
@@ -228,27 +227,6 @@ def _cleanup_host_state_after_failure(
             cleanup_errors.extend(safe_kill(cleanup, sdk_e2e_config))
 
 
-def _delete_snapshot_after_runtime_release(
-    owner,
-    snapshot_id: str,
-    *,
-    timeout: float,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            owner.delete_snapshot(snapshot_id)
-            return
-        except Exception as exc:  # noqa: BLE001
-            retryable = (
-                "active runtime ref" in str(exc).lower()
-                or "attempt is already in progress" in str(exc).lower()
-            )
-            if not retryable or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
-
-
 def test_snapshot_restores_rootfs_and_keeps_both_external_sources_current(
     sdk_backend,
     sdk_e2e_config,
@@ -301,7 +279,7 @@ def test_snapshot_restores_rootfs_and_keeps_both_external_sources_current(
 
             cleanup_errors.extend(safe_kill(restored, sdk_e2e_config))
             restored = None
-            _delete_snapshot_after_runtime_release(
+            delete_snapshot_after_runtime_release(
                 owner,
                 snapshot_id,
                 timeout=sdk_e2e_config.default_timeout,
@@ -323,7 +301,7 @@ def test_snapshot_restores_rootfs_and_keeps_both_external_sources_current(
                     cleanup_errors.extend(safe_kill(sandbox, sdk_e2e_config))
             if snapshot_id is not None and owner is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         owner,
                         snapshot_id,
                         timeout=sdk_e2e_config.default_timeout,
@@ -383,7 +361,7 @@ def test_snapshot_restore_fails_after_plugin_volume_is_deleted(
                 cleanup_errors.extend(safe_kill(source, sdk_e2e_config))
             if snapshot_id is not None and owner is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         owner,
                         snapshot_id,
                         timeout=sdk_e2e_config.default_timeout,
@@ -450,7 +428,7 @@ def test_rollback_reverts_rootfs_but_keeps_plugin_and_host_data_current(
                 cleanup_errors.extend(safe_kill(source, sdk_e2e_config))
             if snapshot_id is not None and source is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         source,
                         snapshot_id,
                         timeout=sdk_e2e_config.default_timeout,
@@ -543,12 +521,12 @@ def test_snapshot_restore_chain_remaps_plugin_and_host_mounts_each_generation(
 
             cleanup_errors.extend(safe_kill(second, sdk_e2e_config))
             second = None
-            _delete_snapshot_after_runtime_release(
+            delete_snapshot_after_runtime_release(
                 owner,
                 snapshot_ids.pop(),
                 timeout=sdk_e2e_config.default_timeout,
             )
-            _delete_snapshot_after_runtime_release(
+            delete_snapshot_after_runtime_release(
                 owner,
                 snapshot_ids.pop(),
                 timeout=sdk_e2e_config.default_timeout,
@@ -570,7 +548,7 @@ def test_snapshot_restore_chain_remaps_plugin_and_host_mounts_each_generation(
             if owner is not None:
                 for snapshot_id in reversed(snapshot_ids):
                     try:
-                        _delete_snapshot_after_runtime_release(
+                        delete_snapshot_after_runtime_release(
                             owner,
                             snapshot_id,
                             timeout=sdk_e2e_config.default_timeout,
@@ -782,7 +760,7 @@ def test_read_only_plugin_and_host_mounts_remain_read_only_after_restore(
                     cleanup_errors.extend(safe_kill(sandbox, sdk_e2e_config))
             if snapshot_id is not None and owner is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         owner,
                         snapshot_id,
                         timeout=sdk_e2e_config.default_timeout,

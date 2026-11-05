@@ -174,7 +174,9 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 		SavedContainerIDs: ids,
 		RestartPrior:      prior,
 		LocalRunTemplate:  template,
-		BaseWorkflowInfo:  workflow.BaseWorkflowInfo{SandboxID: sandboxID},
+		// Reuse the layer captured by the snapshot this sandbox cold-booted from.
+		SnapshotWritableLayer: old.RootfsWritableLayer,
+		BaseWorkflowInfo:      workflow.BaseWorkflowInfo{SandboxID: sandboxID},
 	}
 	createCtx, createCancel := context.WithTimeout(base, deadline)
 	defer createCancel()
@@ -238,19 +240,17 @@ func applyRestartBookkeeping(box *cubeboxstore.CubeBox, p *workflow.RestartPrior
 	box.RestartState = restartpolicy.StateRunning
 }
 
-// clearRestartCountForResume applies the pause/resume rule: coming back from
-// pause is not a restart, the policy stays, and the restart streak is forgotten.
-func clearRestartCountForResume(box *cubeboxstore.CubeBox) {
+// markResumedAfterPause applies the pause/resume rule: pause is not a restart,
+// so the restart count and the exit diagnostics survive, while the replaced
+// VM's destroy-failure streak is dropped. StatusSeq is bumped so this report
+// supersedes the paused one.
+func markResumedAfterPause(box *cubeboxstore.CubeBox) {
 	if box == nil {
 		return
 	}
-	changed := box.RestartCount != 0 || box.RestartState != restartpolicy.StateRunning || box.DestroyFailCount != 0
-	box.RestartCount = 0
 	box.DestroyFailCount = 0
 	box.RestartState = restartpolicy.StateRunning
-	if changed {
-		box.StatusSeq++
-	}
+	box.StatusSeq++
 }
 
 // restartTransition is one write of the restart fields on a CubeBox.

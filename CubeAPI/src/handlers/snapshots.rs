@@ -10,8 +10,12 @@ use axum::{
 };
 
 use crate::{
+    error::AppError,
     error::AppResult,
-    models::{ApiError, CreateSnapshotRequest, ListSnapshotsQuery, RollbackRequest, SnapshotInfo},
+    models::{
+        normalize_request, ApiError, CreateSnapshotRequest, ListSnapshotsQuery, RollbackRequest,
+        SnapshotInfo,
+    },
     state::AppState,
 };
 
@@ -26,8 +30,10 @@ use crate::{
     request_body = CreateSnapshotRequest,
     responses(
         (status = 201, description = "Snapshot created", body = SnapshotInfo),
-        (status = 400, description = "Snapshot name starts with a reserved tpl-/snap- prefix", body = ApiError),
+        (status = 400, description = "Snapshot name starts with a reserved tpl-/snap- prefix, or the requested snapshot mode is invalid", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "The control plane refused the capture or recorded a different mode than the one requested", body = ApiError),
+        (status = 503, description = "Filesystem-only support could not be verified; retry", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
@@ -36,12 +42,14 @@ pub async fn create_snapshot(
     Path(sandbox_id): Path<String>,
     Json(body): Json<CreateSnapshotRequest>,
 ) -> AppResult<impl IntoResponse> {
-    tracing::debug!(sandbox_id = %sandbox_id, name = ?body.name, "create_snapshot");
+    tracing::debug!(sandbox_id = %sandbox_id, name = ?body.name, mode = ?body.mode, "create_snapshot");
 
+    let mode = normalize_request(body.mode.as_deref(), body.memory, body.keep_memory)
+        .map_err(|e| AppError::BadRequest(e.message()))?;
     let info: SnapshotInfo = state
         .services
         .snapshots
-        .create(&sandbox_id, body.name, body.backend)
+        .create(&sandbox_id, body.name, body.backend, mode)
         .await?;
 
     tracing::info!(

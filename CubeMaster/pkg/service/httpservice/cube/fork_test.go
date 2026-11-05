@@ -7,6 +7,7 @@ package cube
 import (
 	"context"
 	"fmt"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,7 +86,7 @@ func stubForkCreateSeams(t *testing.T, reclaim *forkReclaimRecord) {
 	resolveSourceAliasFn = func(_ context.Context, _ string) string {
 		return ""
 	}
-	createSnapshotFn = func(_ context.Context, _, sandboxID, _, _, _, _ string) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(_ context.Context, _, sandboxID, _, _, _, _ string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
 		return &types.TemplateImageJobInfo{
 			TemplateID: testForkSnapshotID,
 			SandboxID:  sandboxID,
@@ -130,7 +131,7 @@ func TestForkFromSourceReclaimsSnapshotOnTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 1)
@@ -155,7 +156,7 @@ func TestForkFromSourceReclaimUsesDistinctRequestID(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	waitReclaimed(t, &reclaim)
@@ -185,7 +186,7 @@ func TestForkDeriveSeedsNodeAffinity(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp.Results[0].Sandbox)
@@ -214,7 +215,7 @@ func TestForkFromSourceReclaimsSnapshotOnPartialSuccess(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 2, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 2, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 2)
@@ -307,7 +308,7 @@ func TestForkDeriveUsesPerSlotRequestIDs(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 3, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 3, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	ids := map[string]bool{}
@@ -335,7 +336,7 @@ func TestForkDerivePanicDegradesToPerForkError(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 2, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 2, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 2)
@@ -362,7 +363,7 @@ func TestForkSandboxNotFoundMapsTo404(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, snapshotmode.Full, resp)
 
 	require.Error(t, err)
 	assert.Equal(t, int(errorcode.ErrorCode_NotFound), snapshotErrorCode(err))
@@ -385,13 +386,13 @@ func TestSnapshotErrorCodeMapsContextDeadlineToInternal(t *testing.T) {
 // TestBuildForkCreateReqStampsInheritedAlias verifies a non-empty source alias
 // is stamped onto the derived create request (and omitted when empty).
 func TestBuildForkCreateReqStampsInheritedAlias(t *testing.T) {
-	req, err := buildForkCreateReq("req-1", "snap-1", nil, nil, "python-runtime")
+	req, err := buildForkCreateReq("req-1", "snap-1", nil, nil, "python-runtime", snapshotmode.Full)
 	require.NoError(t, err)
 	require.NotNil(t, req)
 	assert.Equal(t, "python-runtime",
 		req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias])
 
-	reqEmpty, err := buildForkCreateReq("req-2", "snap-1", nil, nil, "")
+	reqEmpty, err := buildForkCreateReq("req-2", "snap-1", nil, nil, "", snapshotmode.Full)
 	require.NoError(t, err)
 	_, ok := reqEmpty.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]
 	assert.False(t, ok, "empty source alias must not stamp an alias annotation")
@@ -416,7 +417,7 @@ func TestForkDerivePropagatesSourceAlias(t *testing.T) {
 
 	ctx := context.Background()
 	resp := &forkSandboxResponse{Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}}
-	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, resp)
+	err := forkSandboxFromSource(ctx, "req-fork", testForkSandboxID, 1, nil, snapshotmode.Full, resp)
 
 	require.NoError(t, err)
 	assert.Equal(t, "python-runtime", <-aliasCh)

@@ -726,3 +726,26 @@ else
 		printf '  %-8s %s\n' "SKIP" "web (npm not available on host)"; \
 	fi
 endif
+
+# Live snapshot E2E (filesystem-only + regression). Requires a running cluster
+# that supports fs-only snapshots:
+#   make e2e-fs-only CUBE_API_URL=http://HOST:3000 CUBE_TEMPLATE_ID=tpl-...
+# This target always passes --run-e2e so the suite never silently skips, and
+# fails loudly when the cluster is unreachable or does not advertise fs-only.
+.PHONY: e2e-fs-only
+e2e-fs-only:
+	@test -n "$(CUBE_API_URL)" || (echo "CUBE_API_URL is required" >&2; exit 1)
+	@test -n "$(CUBE_TEMPLATE_ID)" || (echo "CUBE_TEMPLATE_ID is required" >&2; exit 1)
+	cd tests/e2e/sdk_compat && \
+		CUBE_API_URL="$(CUBE_API_URL)" \
+		CUBE_TEMPLATE_ID="$(CUBE_TEMPLATE_ID)" \
+		CUBE_PROXY_NODE_IP="$(CUBE_PROXY_NODE_IP)" \
+		PYTHONPATH="$(ROOT_DIR)/sdk/python" \
+		SDK_E2E_BACKENDS="$${SDK_E2E_BACKENDS:-cubesandbox}" \
+		python3 -m pytest \
+			cases/lifecycle/test_filesystem_only_snapshot.py \
+			cases/lifecycle/test_rollback_clone.py \
+			cases/lifecycle/test_fork.py \
+			cases/lifecycle/test_pause_resume.py \
+			cases/volume/test_snapshot_reference.py \
+			--run-e2e -q

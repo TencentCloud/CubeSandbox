@@ -29,6 +29,10 @@ use super::config::{Fs, ANNO_VMM_FS, VIRTIO_FS_ID, VIRTIO_FS_TAG};
 use super::device;
 use super::disk::Disk;
 use super::pmem::Pmem;
+use super::snapshot_mode::{
+    SnapshotMode, ERR_FREEZE_FAILED, ERR_FREEZE_UNSUPPORTED, ERR_ROOTFS_UNSUPPORTED,
+    ERR_THAW_FAILED,
+};
 use crate::common::types::PropagationMount;
 use crate::common::utils::{self, AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -62,6 +66,25 @@ const RECONNECT_BACKOFF_MS: u64 = 200;
 /// only binds when an attempt hangs.
 const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How often the snapshot recovery task re-checks the lease and retries a
+/// release that failed.
+const SNAPSHOT_RECOVERY_INTERVAL: Duration = Duration::from_secs(10);
+/// Upper bound on release attempts after the lease expired without a renewal;
+/// the sandbox is destroyed beyond it.
+const SNAPSHOT_RECOVERY_ATTEMPTS: u32 = 6;
+/// Deadline for the guest freeze RPC; must exceed the agent's own 30 s timeout.
+const FREEZE_RPC_TIMEOUT: Duration = Duration::from_secs(35);
+
+/// RPC context for guest freeze/thaw calls; the ttrpc client applies the
+/// context timeout to the response wait, so this bounds the call.
+fn freeze_rpc_context() -> Context {
+    context::with_timeout(FREEZE_RPC_TIMEOUT.as_nanos() as i64)
+}
+
+/// Outer `tokio::time::timeout` backstop for the same calls; must sit strictly
+/// above [`FREEZE_RPC_TIMEOUT`], which is the timer that normally ends the call.
+const FREEZE_CALL_BACKSTOP: Duration = Duration::from_secs(FREEZE_RPC_TIMEOUT.as_secs() + 2);
+
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
     Normal,
@@ -69,19 +92,46 @@ enum SandBoxState {
     Exited,
 }
 
+/// What the capture window is holding still. `Rootfs` keeps the VM running;
+/// only the guest filesystem is frozen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SnapshotHold {
+    VmPaused,
+    Rootfs { mount_point: String },
+}
+
 enum SnapshotFreezeState {
     Idle,
-    Frozen { id: String, deadline: Instant },
-    Expired { id: String },
+    Frozen {
+        id: String,
+        deadline: Instant,
+        hold: SnapshotHold,
+    },
+    Expired {
+        id: String,
+    },
 }
 
 impl SnapshotFreezeState {
+    /// Records a failed hold. The state is only cleared once a thaw proves
+    /// the guest is writable again; until then the recovery task owns the disk.
+    fn failed_hold(&mut self, released: bool) {
+        if released {
+            *self = Self::Idle;
+            return;
+        }
+        if let Self::Frozen { deadline, .. } = self {
+            // No renewal is coming: let the recovery task start releasing now.
+            *deadline = Instant::now();
+        }
+    }
+
     fn resume_needed(&self, snapshot_id: &str) -> CResult<bool> {
         match self {
             Self::Idle => Ok(false),
             Self::Frozen { id, .. } if id == snapshot_id => Ok(true),
             Self::Expired { id } if id == snapshot_id => {
-                Err("snapshot freeze lease expired; VM was automatically resumed".into())
+                Err("snapshot freeze lease expired; the shim released the sandbox itself".into())
             }
             _ => Err("snapshot id does not match frozen VM".into()),
         }
@@ -1466,6 +1516,8 @@ impl SandBox {
         spec_dir: &str,
         memory_vol_url: Option<String>,
         snapshot_type: SnapshotType,
+        mode: SnapshotMode,
+        rootfs_host_path: Option<&str>,
     ) -> CResult<()> {
         if snapshot_id.is_empty() || !std::path::Path::new(spec_dir).is_absolute() {
             return Err("snapshot id and absolute destination are required".into());
@@ -1478,15 +1530,53 @@ impl SandBox {
         {
             return Err("sandbox is not available for snapshot capture".into());
         }
+        if !mode.has_memory() && memory_vol_url.is_some() {
+            return Err("filesystem-only snapshot must not carry a memory volume".into());
+        }
 
         let ch = self.ch.as_ref().ok_or("hypervisor is unavailable")?.clone();
+        // Every deterministic precondition is checked before the recovery
+        // window is armed: only the freeze itself may leave the guest in a
+        // state that has to be released.
+        let hold = match mode {
+            SnapshotMode::Full => SnapshotHold::VmPaused,
+            SnapshotMode::FsOnly => {
+                let mount_point = self.rootfs_guest_mount_point(rootfs_host_path)?;
+                // Checks run before the VM is touched.
+                self.ensure_filesystem_freeze_supported().await?;
+                SnapshotHold::Rootfs { mount_point }
+            }
+        };
+
+        // Arm the recovery window before touching the guest.
         *self.snapshot_frozen.lock().await = SnapshotFreezeState::Frozen {
             id: snapshot_id.to_string(),
             deadline: Instant::now() + Duration::from_secs(300),
+            hold: hold.clone(),
         };
         self.arm_snapshot_recovery(snapshot_id, ch.clone());
-        if let Err(error) = ch.lock().await.pause_vm().await {
-            *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
+        let hold_result = match &hold {
+            SnapshotHold::VmPaused => ch.lock().await.pause_vm().await,
+            SnapshotHold::Rootfs { mount_point } => self.freeze_rootfs(mount_point).await,
+        };
+        if let Err(error) = hold_result {
+            let released = match &hold {
+                // A failed pause leaves no disk frozen.
+                SnapshotHold::VmPaused => true,
+                SnapshotHold::Rootfs { mount_point } => {
+                    // Only a successful thaw proves the guest is writable again.
+                    self.thaw_rootfs(mount_point).await.is_ok()
+                }
+            };
+            self.snapshot_frozen.lock().await.failed_hold(released);
+            if !released {
+                // The caller must treat this sandbox as failed; the recovery
+                // task owns the disk from here.
+                return Err(format!(
+                    "{ERR_FREEZE_FAILED}: {error}; disk may still be frozen and thaw failed"
+                )
+                .into());
+            }
             return Err(error);
         }
 
@@ -1500,11 +1590,12 @@ impl SandBox {
                     &format!("file://{}", snapshot_dir.display()),
                     memory_vol_url,
                     snapshot_type,
+                    mode.has_memory(),
                 )
                 .await?;
             // The memory dump can outlast the initial lease. Extend it before
             // releasing the hypervisor lock for metadata I/O.
-            if let SnapshotFreezeState::Frozen { id, deadline } =
+            if let SnapshotFreezeState::Frozen { id, deadline, .. } =
                 &mut *self.snapshot_frozen.lock().await
             {
                 if id == snapshot_id {
@@ -1517,7 +1608,10 @@ impl SandBox {
         .await;
 
         if let Err(capture_error) = capture_result {
-            let resume_result = ch.lock().await.resume_vm().await;
+            let resume_result = match &hold {
+                SnapshotHold::VmPaused => ch.lock().await.resume_vm().await,
+                SnapshotHold::Rootfs { mount_point } => self.thaw_rootfs(mount_point).await,
+            };
             match resume_result {
                 Ok(()) => {
                     *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
@@ -1538,12 +1632,12 @@ impl SandBox {
     pub async fn renew_snapshot_frozen(&self, snapshot_id: &str) -> CResult<()> {
         let mut frozen = self.snapshot_frozen.lock().await;
         match &mut *frozen {
-            SnapshotFreezeState::Frozen { id, deadline } if id == snapshot_id => {
+            SnapshotFreezeState::Frozen { id, deadline, .. } if id == snapshot_id => {
                 *deadline = Instant::now() + Duration::from_secs(30);
                 Ok(())
             }
             SnapshotFreezeState::Expired { id } if id == snapshot_id => {
-                Err("snapshot freeze lease expired; VM was automatically resumed".into())
+                Err("snapshot freeze lease expired; the shim released the sandbox itself".into())
             }
             _ => Err("snapshot is no longer frozen".into()),
         }
@@ -1553,40 +1647,80 @@ impl SandBox {
         let marker = self.snapshot_frozen.clone();
         let snapshot_id = snapshot_id.to_string();
         let log = self.log.clone();
+        let sandbox_id = self.id.clone();
+        let client = self.client.clone();
         tokio::spawn(async move {
+            let mut failures: u32 = 0;
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let mut frozen = marker.lock().await;
-                match &*frozen {
-                    SnapshotFreezeState::Frozen { id, deadline } if id == &snapshot_id => {
-                        if Instant::now() < *deadline {
-                            continue;
+                tokio::time::sleep(SNAPSHOT_RECOVERY_INTERVAL).await;
+                // Release the marker lock before the slow thaw RPC so
+                // `renew_snapshot_frozen` is not blocked by it.
+                let hold = {
+                    let frozen = marker.lock().await;
+                    match &*frozen {
+                        SnapshotFreezeState::Frozen { id, deadline, hold }
+                            if id == &snapshot_id =>
+                        {
+                            if Instant::now() < *deadline {
+                                // Cubelet renewed the lease while we were waiting.
+                                failures = 0;
+                                continue;
+                            }
+                            hold.clone()
                         }
+                        _ => return,
                     }
-                    _ => return,
-                }
-                let Ok(hypervisor) = ch.try_lock() else {
-                    continue;
                 };
-                match hypervisor.resume_vm().await {
+                let result = match &hold {
+                    SnapshotHold::VmPaused => match ch.try_lock() {
+                        Ok(hypervisor) => hypervisor.resume_vm().await,
+                        Err(_) => continue,
+                    },
+                    SnapshotHold::Rootfs { mount_point } => {
+                        thaw_rootfs_with_reconnect(&sandbox_id, client.as_ref(), mount_point).await
+                    }
+                };
+                match result {
                     Ok(()) => {
-                        *frozen = SnapshotFreezeState::Expired {
+                        // The guest is writable again; `Expired` makes
+                        // renew/resume fail closed.
+                        *marker.lock().await = SnapshotFreezeState::Expired {
                             id: snapshot_id.clone(),
                         };
                         warnf!(
                             log,
-                            "snapshot {} auto-resumed after Cubelet did not resume it",
+                            "snapshot {} auto-released after Cubelet did not resume it",
                             snapshot_id
                         );
                         return;
                     }
                     Err(error) => {
-                        warnf!(
+                        failures += 1;
+                        if failures < SNAPSHOT_RECOVERY_ATTEMPTS {
+                            warnf!(
+                                log,
+                                "snapshot {} auto-release failed ({}/{}): {}",
+                                snapshot_id,
+                                failures,
+                                SNAPSHOT_RECOVERY_ATTEMPTS,
+                                error
+                            );
+                            continue;
+                        }
+                        // The guest cannot be released; destroy the VM (the
+                        // monitor marks the sandbox Exited).
+                        *marker.lock().await = SnapshotFreezeState::Expired {
+                            id: snapshot_id.clone(),
+                        };
+                        errf!(
                             log,
-                            "snapshot {} auto-resume failed: {}",
+                            "snapshot {} could not be released after {} attempts; destroying the VM: {}",
                             snapshot_id,
+                            SNAPSHOT_RECOVERY_ATTEMPTS,
                             error
                         );
+                        let _ = ch.lock().await.delete_vm().await;
+                        return;
                     }
                 }
             }
@@ -1598,15 +1732,105 @@ impl SandBox {
         if !frozen.resume_needed(snapshot_id)? {
             return Ok(());
         }
-        self.ch
-            .as_ref()
-            .ok_or("hypervisor is unavailable")?
-            .lock()
-            .await
-            .resume_vm()
-            .await?;
+        let hold = match &*frozen {
+            SnapshotFreezeState::Frozen { hold, .. } => hold.clone(),
+            _ => return Err("snapshot is no longer frozen".into()),
+        };
+        match hold {
+            SnapshotHold::VmPaused => {
+                self.ch
+                    .as_ref()
+                    .ok_or("hypervisor is unavailable")?
+                    .lock()
+                    .await
+                    .resume_vm()
+                    .await?;
+            }
+            SnapshotHold::Rootfs { mount_point } => {
+                self.thaw_rootfs(&mount_point).await?;
+            }
+        }
         *frozen = SnapshotFreezeState::Idle;
         Ok(())
+    }
+
+    /// Resolves the guest mount point of the writable rootfs disk. The caller
+    /// passes the host path it created; the shim owns the host->guest index
+    /// mapping and never guesses "the first disk".
+    fn rootfs_guest_mount_point(&self, host_path: Option<&str>) -> CResult<String> {
+        let path =
+            host_path.ok_or("rootfs host path is required for a filesystem-only snapshot")?;
+        let index = self.conf.disk_path_map.get(path).ok_or_else(|| {
+            format!("{ERR_ROOTFS_UNSUPPORTED}: rootfs path {path} is not a blk-cube disk; cannot locate its guest mount")
+        })?;
+        Ok(Disk::guest_mount_point(*index))
+    }
+
+    async fn freeze_rootfs(&self, mount_point: &str) -> CResult<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or("agent connection is unavailable; cannot freeze the rootfs")?
+            .lock()
+            .await
+            .clone();
+        let req = agent::FreezeRootfsRequest {
+            mount_point: mount_point.to_string(),
+            ..Default::default()
+        };
+        // The context is what bounds the call (ttrpc applies its timeout to the
+        // response wait); this outer timer is only a backstop, so it must sit
+        // above it, never at the same value.
+        match tokio::time::timeout(
+            FREEZE_CALL_BACKSTOP,
+            client.freeze_rootfs(freeze_rpc_context(), &req),
+        )
+        .await
+        {
+            Ok(result) => result.map(|_| ()).map_err(|e| {
+                format!("{ERR_FREEZE_FAILED}: freeze {mount_point} failed: {e}").into()
+            }),
+            Err(_) => Err(format!(
+                "{ERR_FREEZE_FAILED}: freeze {mount_point} timed out after {}s",
+                FREEZE_RPC_TIMEOUT.as_secs()
+            )
+            .into()),
+        }
+    }
+
+    /// Asks the guest whether this agent build can freeze a filesystem. The
+    /// answer is a property of the agent image, which is independent of the
+    /// shim version that passed the Cubelet gate.
+    async fn ensure_filesystem_freeze_supported(&self) -> CResult<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| format!("{ERR_FREEZE_UNSUPPORTED}: agent connection is unavailable"))?
+            .lock()
+            .await
+            .clone();
+        let req = agent::GuestDetailsRequest::default();
+        // Same budget as freeze/thaw: this probe gates the whole capture, so a
+        // short timeout here would report "unsupported" for a guest that is
+        // merely slow to answer.
+        let details = client
+            .get_guest_details(freeze_rpc_context(), &req)
+            .await
+            .map_err(|e| format!("{ERR_FREEZE_UNSUPPORTED}: get guest details failed: {e}"))?;
+        if !details.support_filesystem_freeze {
+            return Err(format!(
+                "{ERR_FREEZE_UNSUPPORTED}: guest agent does not support filesystem freeze"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn thaw_rootfs(&self, mount_point: &str) -> CResult<()> {
+        // A frozen disk must be released even when the cached agent channel
+        // died with the connection that froze it; reconnect instead of giving
+        // up and leaving the sandbox wedged.
+        thaw_rootfs_with_reconnect(&self.id, self.client.as_ref(), mount_point).await
     }
 
     pub async fn snapshot_is_frozen(&self) -> bool {
@@ -1797,13 +2021,9 @@ impl SandBox {
             return Err(e);
         }
 
-        // VmDelete pushes a VmShutdown event into the hypervisor's event
-        // queue. The fresh monitor_vm spawned by resume_vm_with_config
-        // would otherwise consume that stale event on its first iteration
-        // and treat the freshly-restored VM as crashed: aborted=true →
-        // SandBoxState::Exited → notify_vm_shutdown to all containers,
-        // poisoning the next pause/resume request with "sandbox not in
-        // normal state". Drain everything left in the queue here.
+        // Drain stale VmShutdown events left by the delete so the fresh
+        // monitor spawned by resume_vm_with_config does not treat the
+        // restored VM as crashed.
         if let Some(ch_arc) = self.ch.as_ref() {
             let ch = ch_arc.lock().await;
             while let Ok(ev) = ch.try_wait_notify() {
@@ -1872,6 +2092,48 @@ impl SandBox {
     }
 }
 
+/// Thaw with an explicit reconnect, for callers whose cached agent channel
+/// may be stale (background recovery, resume).
+async fn thaw_rootfs_with_reconnect(
+    sandbox_id: &str,
+    client: Option<&Arc<Mutex<agent_ttrpc::AgentServiceClient>>>,
+    mount_point: &str,
+) -> CResult<()> {
+    if let Some(client) = client {
+        let client = client.lock().await.clone();
+        let req = agent::ThawRootfsRequest {
+            mount_point: mount_point.to_string(),
+            ..Default::default()
+        };
+        if tokio::time::timeout(
+            FREEZE_CALL_BACKSTOP,
+            client.thaw_rootfs(freeze_rpc_context(), &req),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    let conn = AsyncUtils::connect_agent(&sandbox_id.to_string()).await?;
+    let client = agent_ttrpc::AgentServiceClient::new(conn);
+    let req = agent::ThawRootfsRequest {
+        mount_point: mount_point.to_string(),
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        FREEZE_CALL_BACKSTOP,
+        client.thaw_rootfs(freeze_rpc_context(), &req),
+    )
+    .await
+    .map_err(|_| format!("{ERR_THAW_FAILED}: thaw {mount_point} timed out after reconnect"))?
+    .map(|_| ())
+    .map_err(|e| {
+        format!("{ERR_THAW_FAILED}: thaw {mount_point} failed after reconnect: {e}").into()
+    })
+}
+
 fn recreate_dir(path: &str, context: &str) -> CResult<()> {
     let _ = std::fs::remove_dir_all(path);
     if let Err(e) = std::fs::create_dir_all(path) {
@@ -1936,7 +2198,164 @@ mod tests {
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
-    use super::SnapshotFreezeState;
+    use super::{
+        freeze_rpc_context, SnapshotFreezeState, SnapshotHold, SnapshotMode,
+        ERR_FREEZE_UNSUPPORTED, ERR_ROOTFS_UNSUPPORTED, FREEZE_CALL_BACKSTOP, FREEZE_RPC_TIMEOUT,
+    };
+    use cube_hypervisor::SnapshotType;
+
+    fn new_ut_sandbox() -> SandBox {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        SandBox::new("ut".to_string(), Log::default(), false, tx)
+    }
+
+    /// Drops the peer so every agent RPC on this client fails immediately.
+    fn attach_dead_agent(sb: &mut SandBox) {
+        let (client_fd, peer_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .unwrap();
+        drop(peer_fd);
+        let client = ttrpc::r#async::Client::new(client_fd.into_raw_fd());
+        sb.client = Some(Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(
+            client,
+        ))));
+    }
+
+    #[tokio::test]
+    async fn filesystem_only_capture_rejects_a_memory_volume() {
+        let mut sb = new_ut_sandbox();
+        let err = sb
+            .capture_snapshot_frozen(
+                "snap-1",
+                "/tmp/spec",
+                Some("dev://memory".to_string()),
+                SnapshotType::Full,
+                SnapshotMode::FsOnly,
+                Some("/data/rootfs.img"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must not carry a memory volume"));
+        assert!(!sb.snapshot_is_frozen().await);
+    }
+
+    #[tokio::test]
+    async fn filesystem_only_capture_requires_a_rootfs_mount() {
+        let mut sb = new_ut_sandbox();
+        let err = sb
+            .capture_snapshot_frozen(
+                "snap-1",
+                "/tmp/spec",
+                None,
+                SnapshotType::Full,
+                SnapshotMode::FsOnly,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("rootfs host path is required"));
+        assert!(!sb.snapshot_is_frozen().await);
+
+        // A host path that is not a blk-cube disk cannot be mapped to a guest
+        // mount either; refuse before touching the VM.
+        let err = sb
+            .capture_snapshot_frozen(
+                "snap-1",
+                "/tmp/spec",
+                None,
+                SnapshotType::Full,
+                SnapshotMode::FsOnly,
+                Some("/data/not-a-disk"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(ERR_ROOTFS_UNSUPPORTED));
+        assert!(!sb.snapshot_is_frozen().await);
+    }
+
+    #[tokio::test]
+    async fn filesystem_only_capture_rejects_an_agent_without_freeze_support() {
+        let mut sb = new_ut_sandbox();
+        sb.conf
+            .disk_path_map
+            .insert("/data/rootfs.img".to_string(), 1);
+        attach_dead_agent(&mut sb);
+
+        let err = sb
+            .capture_snapshot_frozen(
+                "snap-1",
+                "/tmp/spec",
+                None,
+                SnapshotType::Full,
+                SnapshotMode::FsOnly,
+                Some("/data/rootfs.img"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(ERR_FREEZE_UNSUPPORTED));
+        assert!(!sb.snapshot_is_frozen().await);
+    }
+
+    #[test]
+    fn the_freeze_calls_use_their_own_timeout_budget() {
+        assert_eq!(
+            freeze_rpc_context().timeout_nano,
+            FREEZE_RPC_TIMEOUT.as_nanos() as i64,
+            "freeze/thaw must not inherit the sandbox-wide short context"
+        );
+        assert!(
+            FREEZE_CALL_BACKSTOP > FREEZE_RPC_TIMEOUT,
+            "the outer timer must never fire before the RPC budget"
+        );
+    }
+
+    #[test]
+    fn a_failed_hold_is_only_dropped_when_the_release_is_proven() {
+        let mut state = SnapshotFreezeState::Frozen {
+            id: "snap-1".to_string(),
+            deadline: std::time::Instant::now(),
+            hold: SnapshotHold::Rootfs {
+                mount_point: "/run/blk-cube/vdb".to_string(),
+            },
+        };
+        state.failed_hold(false);
+        match &state {
+            SnapshotFreezeState::Frozen { deadline, .. } => assert!(
+                *deadline <= std::time::Instant::now(),
+                "a failed capture must hand the disk to the recovery task immediately"
+            ),
+            _ => panic!("an unproven release must stay Frozen"),
+        }
+        state.failed_hold(true);
+        assert!(matches!(state, SnapshotFreezeState::Idle));
+    }
+
+    #[tokio::test]
+    async fn resume_keeps_the_hold_when_the_guest_cannot_be_reached() {
+        let mut sb = new_ut_sandbox();
+        attach_dead_agent(&mut sb);
+        *sb.snapshot_frozen.lock().await = SnapshotFreezeState::Frozen {
+            id: "snap-1".to_string(),
+            deadline: std::time::Instant::now(),
+            hold: SnapshotHold::Rootfs {
+                mount_point: "/run/blk-cube/vdb".to_string(),
+            },
+        };
+
+        assert!(sb.resume_snapshot_frozen("snap-1").await.is_err());
+        assert!(sb.snapshot_is_frozen().await);
+    }
+
+    #[tokio::test]
+    async fn resume_without_a_hold_is_a_noop() {
+        let mut sb = new_ut_sandbox();
+        sb.resume_snapshot_frozen("snap-1").await.unwrap();
+        assert!(!sb.snapshot_is_frozen().await);
+    }
 
     #[tokio::test]
     async fn expired_snapshot_freeze_rejects_resume_and_renew() {

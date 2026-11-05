@@ -5,6 +5,8 @@
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod volumes;
 
 use crate::{

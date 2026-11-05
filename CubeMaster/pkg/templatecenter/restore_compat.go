@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 // ErrRestoreCompatNoFactors is returned when a bare-factor candidate-node query
@@ -81,10 +82,18 @@ func EvaluateSnapshotRestoreCompat(ctx context.Context, snapshotID, targetNode s
 		TargetNode: targetNode,
 	}
 
+	// A filesystem-only snapshot cold-boots without guest memory, so origin
+	// host facts are informational only.
+	fsOnly := snapshotmode.Normalize(info.Mode).IsFsOnly()
+
 	origin := parseFrozenHostFacts(info.OriginHostFactsJSON)
 	if origin == nil {
-		result.Reason = RestoreCompatReasonOriginFingerprintUnknown
-		return result, nil
+		if !fsOnly {
+			result.Reason = RestoreCompatReasonOriginFingerprintUnknown
+			return result, nil
+		}
+		// Compare against empty facts: dimensions stay reported but not required.
+		origin = &nodemeta.HostFacts{}
 	}
 
 	target, ok := nodemeta.GetNodeHostFacts(ctx, targetNode)
@@ -99,7 +108,7 @@ func EvaluateSnapshotRestoreCompat(ctx context.Context, snapshotID, targetNode s
 		targetVersions = nil
 	}
 
-	dims := buildHostFactDimensions(origin, target)
+	dims := buildHostFactDimensions(origin, target, !fsOnly)
 	dims = append(dims, buildGuestDimensions(originGuestImage, originAgent, targetVersions)...)
 	result.Dimensions = dims
 	result.Compatible = allRequiredDimensionsMatch(dims)
@@ -158,10 +167,10 @@ func parseFrozenHostFacts(raw string) *nodemeta.HostFacts {
 // facts are collected and reported but demoted to informational so boot-param
 // drift, rolling kvm.ko upgrades and marketing model strings do not split the
 // node pool. The kvm_module_taint gate stays required — see below.
-func buildHostFactDimensions(origin, target *nodemeta.HostFacts) []RestoreCompatDimension {
+func buildHostFactDimensions(origin, target *nodemeta.HostFacts, hostFactsRequired bool) []RestoreCompatDimension {
 	dims := []RestoreCompatDimension{
-		newDimension("cpuid_hash", true, origin.CPUIDHash, target.CPUIDHash),
-		newDimension("host_kernel_release", true, origin.HostKernelRelease, target.HostKernelRelease),
+		newDimension("cpuid_hash", hostFactsRequired, origin.CPUIDHash, target.CPUIDHash),
+		newDimension("host_kernel_release", hostFactsRequired, origin.HostKernelRelease, target.HostKernelRelease),
 		// Informational only: reported for debugging and a future tighter policy.
 		newDimension("cpu_vendor", false, origin.CPUVendor, target.CPUVendor),
 		newDimension("cpu_model", false, origin.CPUModel, target.CPUModel),
@@ -350,12 +359,16 @@ func ListCompatibleNodesForSnapshot(ctx context.Context, snapshotID string, incl
 		OriginNode: info.OriginNodeID,
 		Nodes:      []CompatibleNode{},
 	}
+	fsOnly := snapshotmode.Normalize(info.Mode).IsFsOnly()
 	origin := parseFrozenHostFacts(info.OriginHostFactsJSON)
 	if origin == nil {
-		result.Reason = RestoreCompatReasonOriginFingerprintUnknown
-		return result, nil
+		if !fsOnly {
+			result.Reason = RestoreCompatReasonOriginFingerprintUnknown
+			return result, nil
+		}
+		origin = &nodemeta.HostFacts{}
 	}
-	nodes, err := listCompatibleNodes(ctx, origin, includeAll)
+	nodes, err := listCompatibleNodesForMode(ctx, origin, includeAll, !fsOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +411,20 @@ func ListCompatibleNodesForFactors(ctx context.Context, factors *nodemeta.HostFa
 // each is reported with its dimensions so a caller can diagnose why a node was
 // rejected.
 func listCompatibleNodes(ctx context.Context, origin *nodemeta.HostFacts, includeAll bool) ([]CompatibleNode, error) {
-	candidates, err := queryCandidatesFn(ctx, origin.CPUIDHash, origin.HostKernelRelease, includeAll)
+	return listCompatibleNodesForMode(ctx, origin, includeAll, true)
+}
+
+// listCompatibleNodesForMode applies the shared judgment with an explicit
+// host-fact requirement. Filesystem-only snapshots pass false: they carry no
+// guest memory, so every healthy node is a candidate and the origin's CPU /
+// kernel are reported as informational only. The candidate query then matches
+// all healthy nodes instead of the two equality keys.
+func listCompatibleNodesForMode(
+	ctx context.Context,
+	origin *nodemeta.HostFacts,
+	includeAll, hostFactsRequired bool,
+) ([]CompatibleNode, error) {
+	candidates, err := queryCandidatesFn(ctx, origin.CPUIDHash, origin.HostKernelRelease, includeAll || !hostFactsRequired)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +433,7 @@ func listCompatibleNodes(ctx context.Context, origin *nodemeta.HostFacts, includ
 		if c == nil || c.HostFacts == nil {
 			continue
 		}
-		dims := buildHostFactDimensions(origin, c.HostFacts)
+		dims := buildHostFactDimensions(origin, c.HostFacts, hostFactsRequired)
 		compatible := allRequiredDimensionsMatch(dims)
 		if !compatible && !includeAll {
 			continue

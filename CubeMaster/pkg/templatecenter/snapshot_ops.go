@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
 )
 
@@ -73,6 +74,7 @@ type snapshotCreateJobRequest struct {
 	NodeIP          string `json:"node_ip"`
 	DisplayName     string `json:"display_name,omitempty"`
 	Backend         string `json:"backend,omitempty"`
+	Mode            string `json:"mode,omitempty"`
 	SpecFingerprint string `json:"spec_fingerprint,omitempty"`
 }
 
@@ -108,7 +110,7 @@ type snapshotRollbackResult struct {
 // existed). This removes the historical requirement that callers re-supply the
 // original CreateCubeSandboxReq, which was the original motivation for this
 // refactor.
-func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
+func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
@@ -125,10 +127,21 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	}
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
+	mode = snapshotmode.Normalize(mode.String())
 
 	originReq, err := loadSandboxCreateRequestFn(ctx, sandboxID)
 	if err != nil {
 		return nil, err
+	}
+	if mode.IsFsOnly() {
+		writable, err := sandbox.WritablePluginVolumeMounts(originReq)
+		if err != nil {
+			return nil, err
+		}
+		if len(writable) > 0 {
+			return nil, fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
+				ErrFilesystemOnlySharedVolume, strings.Join(writable, ", "))
+		}
 	}
 	// Client-supplied backend is ignored. Ordinary snapshot follows the
 	// sandbox spec Master persisted at create (itself inherited from the
@@ -162,7 +175,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			}
 			storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
 			storedReq.Backend = normalizedBackend
-			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, storedReq) {
+			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, mode, storedReq) {
 				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
 			}
 			jobID = existing.JobID
@@ -200,6 +213,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			NodeIP:          nodeIP,
 			DisplayName:     displayName,
 			Backend:         normalizedBackend,
+			Mode:            mode.String(),
 			SpecFingerprint: fingerprint,
 		})
 		if err != nil {
@@ -233,6 +247,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			OriginHostFactsJSON:       originHostFactsJSON(ctx, nodeID),
 			DisplayName:               displayName,
 			Backend:                   normalizedBackend,
+			Mode:                      mode.String(),
 			RemoteStatus:              constants.SnapshotRemoteStatus(normalizedBackend),
 			RootfsSizeBytesAtSnapshot: parseSystemDiskSizeBytes(storedReq),
 			Status:                    StatusCreating,
@@ -321,15 +336,28 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	})
 
 	commitBackend := storageBackendFromCreate(createReq)
-	if rec, recErr := getSnapshotRecord(ctx, snapshotID); recErr == nil && rec != nil && strings.TrimSpace(rec.Backend) != "" {
-		commitBackend = rec.Backend
+	// The snapshot record is written in the same transaction as this job, so a
+	// read failure or a missing row is a real error. Defaulting to full here
+	// would silently capture memory for a filesystem-only request.
+	rec, recErr := getSnapshotRecord(ctx, snapshotID)
+	if recErr == nil && rec == nil {
+		recErr = fmt.Errorf("snapshot %s has no record", snapshotID)
 	}
+	if recErr != nil {
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil,
+			fmt.Errorf("load snapshot record for %s: %w", snapshotID, recErr), commitBackend)
+	}
+	if backend := strings.TrimSpace(rec.Backend); backend != "" {
+		commitBackend = backend
+	}
+	mode := snapshotmode.Normalize(rec.Mode)
 	commitRsp, err := cubelet.CommitSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
-		RequestID:   uuid.NewString(),
-		SandboxID:   sandboxID,
-		TemplateID:  snapshotID,
-		SnapshotDir: createReq.SnapshotDir,
-		Backend:     commitBackend,
+		RequestID:    uuid.NewString(),
+		SandboxID:    sandboxID,
+		TemplateID:   snapshotID,
+		SnapshotDir:  createReq.SnapshotDir,
+		Backend:      commitBackend,
+		SnapshotMode: mode.String(),
 	})
 	if err != nil {
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil, err, commitBackend)
@@ -340,6 +368,15 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 			msg = commitRsp.GetRet().GetRetMsg()
 		}
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp, errors.New(msg), commitBackend)
+	}
+
+	// The artifact must match the request in both directions: a full request
+	// answered with a filesystem-only artifact would be recorded as "has
+	// memory" and only fail at restore time. An older Cubelet answers with an
+	// empty mode, which Normalize reads as full, so this stays compatible.
+	if produced := snapshotmode.Normalize(commitRsp.GetSnapshotMode()); produced != mode {
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp,
+			fmt.Errorf("cubelet produced snapshot mode %q for a %s request", commitRsp.GetSnapshotMode(), mode), commitBackend)
 	}
 
 	snapshotPath := commitRsp.GetSnapshotPath()
@@ -383,8 +420,10 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"last_error":                    "",
 		"rootfs_size_bytes_at_snapshot": commitRsp.GetRootfsSizeBytes(),
 	}
+	exportUUIDs := ""
 	if constants.IsRemoteTrackedBackend(commitBackend) {
 		raw := strings.TrimSpace(commitRsp.GetRemoteUuids())
+		exportUUIDs = raw
 		if raw != "" {
 			snapUpdates["export_uuids"] = raw
 			snapUpdates["remote_status"] = constants.RemoteStatusInProgress
@@ -399,7 +438,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	if snapUpdates["remote_status"] == constants.RemoteStatusInProgress {
-		remotestatus.WatchSnapshot(ctx, snapshotID, nodeIP, commitBackend)
+		remotestatus.WatchSnapshot(ctx, snapshotID, nodeIP, commitBackend, exportUUIDs, mode)
 	}
 	// Commit yields a single authoritative envd version; persist it (best-effort)
 	// to the snapshot definition annotation so created sandboxes inherit it.
@@ -418,6 +457,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"memory_dev":        commitRsp.GetMemoryDev(),
 		"rootfs_size_bytes": commitRsp.GetRootfsSizeBytes(),
 		"backend":           firstNonEmpty(strings.TrimSpace(createReq.Backend), constants.SnapshotBackendXFS),
+		"mode":              mode.String(),
 		"origin_sandbox_id": sandboxID,
 		"origin_node_id":    nodeID,
 		"display_name":      "",
@@ -486,6 +526,11 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		}
 		if !strings.EqualFold(rec.Status, StatusReady) {
 			return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, snapshotID, rec.Status)
+		}
+		// Rollback is a memory restore. A filesystem-only artifact has no
+		// memory to load, and its disk alone would reset the guest silently.
+		if snapshotmode.Normalize(rec.Mode).IsFsOnly() {
+			return fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlyRollback, ErrFilesystemOnlyRollback, snapshotID)
 		}
 		if rec.OriginSandboxID != sandboxID {
 			return fmt.Errorf("%w: snapshot %s does not belong to sandbox %s", ErrTemplateAttemptInProgress, snapshotID, sandboxID)
@@ -1512,7 +1557,7 @@ func snapshotJobFailedError(info *sandboxtypes.TemplateImageJobInfo) error {
 // canonical spec fingerprint. Because the spec is now fetched from sandboxspec
 // on every call instead of being carried in the payload, we compare via
 // fingerprint rather than deep-equal.
-func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
+func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, mode snapshotmode.Mode, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
 	if strings.TrimSpace(raw) == "" {
 		return true
 	}
@@ -1524,6 +1569,9 @@ func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, dis
 		return false
 	}
 	if existing.Backend != "" && backend != "" && !strings.EqualFold(existing.Backend, backend) {
+		return false
+	}
+	if snapshotmode.Normalize(existing.Mode) != mode {
 		return false
 	}
 	if existing.SpecFingerprint == "" {

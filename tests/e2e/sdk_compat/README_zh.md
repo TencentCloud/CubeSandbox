@@ -448,8 +448,9 @@ tests/e2e/sdk_compat/
 当前测试域：
 
 - `cases/lifecycle/`：创建、info、connect、create options、pause/resume、
-  kill、auto-pause、auto-resume、auto-kill，以及节点本地重启策略
-  （`test_restart_policy.py`，仅 CubeSandbox）；
+  kill、auto-pause、auto-resume、auto-kill、节点本地重启策略
+  （`test_restart_policy.py`），以及文件系统快照与冷启动
+  （`test_filesystem_only_snapshot.py`；两者均仅 CubeSandbox）；
 - `cases/commands/`：stdout、stderr、退出码、环境变量、特殊字符、多行
   输出和缺失命令；
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
@@ -497,7 +498,8 @@ Capability marker：
 `filesystem_extended`、`run_code`。可选 capability 包括 `code_interpreter`、
 `pause_resume`、`set_timeout`、`rollback_clone`、`network_allow_deny`、
 `network_public_access`、`network_mask_request_host`、`platform_lifecycle`、
-`host_mount`、`volume_plugin`、`auth_simple_key` 和 `restart_policy`。
+`host_mount`、`volume_plugin`、`auth_simple_key`、`restart_policy` 和
+`filesystem_only_snapshot`。
 当前分支的 `platform_lifecycle` 与 `volume_plugin` 仅在 CubeSandbox
 capability 集合中启用。
 这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI

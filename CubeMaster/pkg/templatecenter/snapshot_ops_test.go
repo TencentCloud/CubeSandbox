@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestSubmitSandboxSnapshotRejectsReservedPrefixName(t *testing.T) {
 		return nil, nil
 	}
 
-	_, err := SubmitSandboxSnapshot(context.Background(), "req-1", "sb-1", "node-1", "10.0.0.1", "snap-backup", "")
+	_, err := SubmitSandboxSnapshot(context.Background(), "req-1", "sb-1", "node-1", "10.0.0.1", "snap-backup", "", snapshotmode.Full)
 	if !errors.Is(err, ErrInvalidSnapshotName) {
 		t.Fatalf("err = %v, want ErrInvalidSnapshotName", err)
 	}
@@ -142,11 +143,11 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 			Status:     JobStatusReady,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 
-	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "")
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "", snapshotmode.Full)
 	if err != nil {
 		t.Fatalf("SubmitSandboxSnapshot returned error: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
 		}, nil
 	})
 
-	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "")
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "", snapshotmode.Full)
 	if err != nil {
 		t.Fatalf("SubmitSandboxSnapshot returned error: %v", err)
 	}
@@ -244,7 +245,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -268,7 +269,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 		return nil
 	})
 
-	info, err := SubmitSandboxSnapshot(context.Background(), "req-pending", "sb-1", "node-1", "10.0.0.1", "snap", "")
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-pending", "sb-1", "node-1", "10.0.0.1", "snap", "", snapshotmode.Full)
 	if err != nil {
 		t.Fatalf("expected pending existing request to resume, got %v", err)
 	}
@@ -302,7 +303,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -315,7 +316,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 		}, nil
 	})
 
-	_, err := SubmitSandboxSnapshot(context.Background(), "req-failed", "sb-1", "node-1", "10.0.0.1", "snap", "")
+	_, err := SubmitSandboxSnapshot(context.Background(), "req-failed", "sb-1", "node-1", "10.0.0.1", "snap", "", snapshotmode.Full)
 	if err == nil {
 		t.Fatal("expected stored failure for existing request")
 	}
@@ -557,6 +558,11 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 	// cannot patch reliably (it may inline). Skip its real implementation by
 	// short-circuiting via package init: defer-restored later.
 	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
+	// The job reads the snapshot record for its artifact mode; the record is
+	// written in the same transaction as the job.
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendXFS}, nil
+	})
 
 	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
 		InstanceType: "cubebox",
@@ -680,6 +686,60 @@ func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T
 	}
 	if v, ok := persisted["export_uuids"]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
 		t.Fatalf("export_uuids must be empty, got %v", v)
+	}
+}
+
+// Cubelet must echo the mode it actually produced. A full artifact behind an
+// fs-only request would make Master advertise a memory-free snapshot that has
+// memory (or the reverse), so the job fails instead of recording it.
+func TestRunSnapshotCreateJobRejectsMismatchedModeFromCubelet(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	var persisted map[string]any
+	patches.ApplyFunc(cubelet.CommitSandbox, func(ctx context.Context, calleeEp string, req *cubeboxv1.CommitSandboxRequest) (*cubeboxv1.CommitSandboxResponse, error) {
+		return &cubeboxv1.CommitSandboxResponse{
+			Ret:          &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+			SnapshotPath: "/data/snapshots/snap-1",
+			SnapshotMode: string(snapshotmode.Full),
+			RemoteUuids:  `{"rootfs":"r1","memory":"m1"}`,
+		}, nil
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
+	patches.ApplyFunc(cubelet.CleanupTemplate, func(ctx context.Context, calleeEp string, req *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+		return &cubeboxv1.CleanupTemplateResponse{Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success}}, nil
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendS3, Mode: string(snapshotmode.FsOnly)}, nil
+	})
+	patches.ApplyFunc(deleteReplicasByTemplateID, func(ctx context.Context, templateID string) error { return nil })
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, templateID string, fields map[string]any) error {
+		persisted = fields
+		return nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
+	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
+
+	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
+		Backend:      constants.SnapshotBackendS3,
+		InstanceType: "cubebox",
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateID: "snap-1",
+		},
+	}, &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+	}); err != nil {
+		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
+	}
+	if persisted == nil {
+		t.Fatal("expected the snapshot to be marked failed")
+	}
+	if persisted["status"] != StatusFailed {
+		t.Fatalf("status=%v, want failed", persisted["status"])
+	}
+	lastError, _ := persisted["last_error"].(string)
+	if !strings.Contains(lastError, "produced snapshot mode") {
+		t.Fatalf("last_error=%q, want the mode mismatch", lastError)
 	}
 }
 

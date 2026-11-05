@@ -817,10 +817,19 @@ class Sandbox:
         return f"Sandbox(id={self.sandbox_id!r}, domain={self.domain!r})"
 
 
-    def create_snapshot(self, name: str | None = None) -> SnapshotInfo:
+    def create_snapshot(
+        self,
+        name: str | None = None,
+        *,
+        mode: str | None = None,
+    ) -> SnapshotInfo:
         """POST /sandboxes/:sandboxID/snapshots — Create a snapshot (1.1).
 
-        The sandbox is temporarily paused during snapshot creation.
+        A ``full`` snapshot (the default) briefly pauses the sandbox and saves
+        guest memory with the filesystem.  An ``fs-only`` snapshot saves the
+        filesystem alone: the guest is never paused, and a sandbox created from
+        it cold-boots with the same files but fresh processes.
+
         The snapshot persists independently of the sandbox lifecycle;
         it remains valid even after the sandbox is killed.
 
@@ -829,17 +838,28 @@ class Sandbox:
                 with this name already exists the new build is attached to it
                 rather than creating a new template.  Must not start with
                 ``tpl-`` or ``snap-`` (HTTP 400).
+            mode: ``"full"`` (default) or ``"fs-only"``.  ``"filesystem"`` is
+                accepted as an alias for compatibility with E2B clients.
+                Whether the cluster can produce an fs-only artifact is decided
+                by the control plane and the target node, never guessed by the
+                SDK; when it cannot, the call fails with
+                ``snapshot_filesystem_only_unsupported_node`` (409) or a more
+                specific ``snapshot_filesystem_only_*`` code.
 
         Returns:
-            :class:`SnapshotInfo` with ``snapshot_id`` and ``names``.
+            :class:`SnapshotInfo` with ``snapshot_id``, ``names`` and the
+            ``mode`` the control plane actually recorded.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
-            ApiError: On unexpected backend error.
+            ApiError: On unexpected backend error, including a control plane
+                that recorded a different mode than the one requested.
         """
         payload: dict = {}
         if name is not None:
             payload["name"] = name
+        if mode is not None:
+            payload["mode"] = mode
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshots",
             json=payload,

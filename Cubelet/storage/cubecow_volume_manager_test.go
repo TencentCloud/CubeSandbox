@@ -32,6 +32,7 @@ type fakeCowEngine struct {
 	activateErr                 error
 	deactivateErr               error
 	volumeInfos                 map[string]*cubecow.Volume
+	volumeInfoErrs              map[string]error
 	listSnapshots               map[string][]cubecow.Snapshot
 	listSnapshotsErr            error
 	deletedVolumes              []string
@@ -207,6 +208,9 @@ func (f *fakeCowEngine) ResizeVolume(name string, newSizeBytes uint64) (uint64, 
 }
 
 func (f *fakeCowEngine) GetVolumeInfo(name string) (*cubecow.Volume, error) {
+	if err := f.volumeInfoErrs[name]; err != nil {
+		return nil, err
+	}
 	if f.volumeInfos == nil {
 		return nil, nil
 	}

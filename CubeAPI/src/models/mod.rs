@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
+pub mod snapshot_mode;
+pub use snapshot_mode::{normalize_request, SnapshotMode};
+
 // ─── Common ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -703,6 +706,9 @@ pub struct ForkRequest {
     /// Optional idle TTL (seconds) applied to each forked sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
+    /// Snapshot artifact mode for the one shared fork snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn default_fork_count() -> i32 {
@@ -909,6 +915,19 @@ pub struct CreateSnapshotRequest {
     /// CoW backend (xfs | s3). Empty means xfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Snapshot artifact mode: full | fs-only | filesystem (E2B alias).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// E2B compatibility alias: false means fs-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
+    /// Deprecated E2B alias for `memory`.
+    #[serde(
+        default,
+        rename = "keepMemory",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_memory: Option<bool>,
 }
 
 /// Response for POST /sandboxes/{id}/snapshots.
@@ -923,6 +942,8 @@ pub struct SnapshotInfo {
     /// S3 sync status (pending|running|ready|failed). Empty for xfs.
     #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
     pub remote_status: Option<String>,
+    /// Snapshot artifact mode. Always one of full | fs-only.
+    pub mode: SnapshotMode,
 }
 
 /// Query parameters for GET /snapshots.
@@ -962,6 +983,8 @@ pub struct SnapshotListItem {
     /// S3 sync status (pending|running|ready|failed). Empty for xfs.
     #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
     pub remote_status: Option<String>,
+    /// Snapshot artifact mode. Always one of full | fs-only.
+    pub mode: SnapshotMode,
 }
 
 /// Request body for POST /sandboxes/{id}/rollback.

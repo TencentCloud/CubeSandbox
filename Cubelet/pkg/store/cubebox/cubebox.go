@@ -251,6 +251,14 @@ type CubeBox struct {
 	// ComponentVersions: inventory dir name → version string (no absolute paths).
 	ComponentVersions map[string]string `json:"component_versions,omitempty"`
 
+	// RootfsWritableLayer is the overlay upper directory ("disk/<container id>")
+	// the rootfs was created with. A sandbox cold-booted from a filesystem-only
+	// snapshot inherits the captured layer, and an in-place restart must mount
+	// that same directory again: deriving a fresh name would expose an empty
+	// layer and the guest would see the base image only. Empty for ordinary
+	// creates, which keep the historical naming rule.
+	RootfsWritableLayer string `json:"rootfs_writable_layer,omitempty"`
+
 	ImageReferences map[string]ImageReference
 
 	HostMetricsBaseline                    *HostMetricsBaseline `json:"host_metrics_baseline,omitempty"`

@@ -33,6 +33,7 @@ type SnapshotInfo struct {
 	OriginHostFactsJSON       string                             `json:"origin_host_facts_json,omitempty"`
 	StorageBackend            string                             `json:"storage_backend,omitempty"`
 	Backend                   string                             `json:"backend,omitempty"`
+	Mode                      string                             `json:"mode,omitempty"`
 	RemoteStatus              string                             `json:"remote_status,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                             `json:"last_error,omitempty"`

@@ -331,6 +331,8 @@ It does not change `state`, and it only appears when the policy is `OnFailure` /
 
 Auto-pause is skipped during these two transient states; idle timeout still applies, and a restart operation does not reset the idle timer (idle time is based on [client activity](#what-counts-as-activity)). The object also carries `restartCount`, `lastExitCode`, `lastExitReason`, `lastRestartAt`, and similar fields for diagnosing exits.
 
+A pause is not a restart: `pause()` followed by resume keeps `restartCount` and the exit diagnostics, and the backoff schedule continues from that count. Only the stable-period reset clears it, so a sandbox that already reached `maxRestarts` stops restarting after the next exit even if it was paused and resumed in between.
+
 ## Next Steps
 
 - [Templates Overview](./templates.md) — sandboxes boot from templates; the template's build also shapes cold-start cost.

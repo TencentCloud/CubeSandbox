@@ -48,6 +48,14 @@ type jfsControlFile interface {
 	io.Closer
 }
 
+// errJFSPackageIncomplete marks a package that exists but is missing a file
+// every restore needs (catalog, guest metadata, VM config -- plus guest memory
+// for a full package).
+// Unlike a JuiceFS lookup or CLI failure this never becomes better on its own,
+// so the status poller must settle it as failed instead of retrying forever:
+// the S3 backend already fails such a package at export time.
+var errJFSPackageIncomplete = errors.New("jfs package is missing required restore files")
+
 var (
 	jfsOpenControl    = openJFSControl
 	jfsPathObjectKeys = queryJFSControlObjectKeys
@@ -102,7 +110,7 @@ func (jfsUploader) UploadStatus(ctx context.Context, snapshotID string) (*cow.Re
 	id := strings.TrimSpace(snapshotID)
 	tracker, err := jfsUploadTrackerFor(ctx, id)
 	if err != nil {
-		if errors.Is(err, ErrSnapshotCatalogNotFound) {
+		if errors.Is(err, ErrSnapshotCatalogNotFound) || errors.Is(err, errJFSPackageIncomplete) {
 			return &cow.RemoteStatus{SnapshotID: id, State: cow.RemoteStateFailed, Message: err.Error()}, nil
 		}
 		return nil, err
@@ -334,9 +342,12 @@ func jfsPackageUploadPaths(files *cow.RemoteUUIDs) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read jfs upload catalog: %w", err)
 	}
-	required := []string{snapshotCatalogFileName}
+	// metadata.json (guest runtime identity + writable layer) and the VM config
+	// are required by every package: a filesystem-only package cold-boots from
+	// them exactly like a full one. Guest memory is the only mode-specific file.
+	required := []string{snapshotCatalogFileName, "metadata.json", "snapshot/config.json"}
 	if files.Memory != "" {
-		required = append(required, "metadata.json", "snapshot/config.json", "snapshot/state.json")
+		required = append(required, "snapshot/state.json")
 	}
 	if entry.Kind == CatalogKindPauseSnapshot {
 		required = append(required, "sandbox_spec.json")
@@ -345,10 +356,17 @@ func jfsPackageUploadPaths(files *cow.RemoteUUIDs) ([]string, error) {
 		path := filepath.Join(meta, name)
 		info, err := os.Stat(path)
 		if err != nil {
+			// A missing file will never appear by retrying; an I/O error on the
+			// JuiceFS mount may clear on its own, so only ENOENT is terminal.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("%w: check jfs restore metadata %s: %w",
+					errJFSPackageIncomplete, path, err)
+			}
 			return nil, fmt.Errorf("check jfs restore metadata %s: %w", path, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("jfs restore metadata %s is not a regular file", path)
+			return nil, fmt.Errorf("%w: jfs restore metadata %s is not a regular file",
+				errJFSPackageIncomplete, path)
 		}
 	}
 	paths := []string{files.Rootfs, files.Memory}
