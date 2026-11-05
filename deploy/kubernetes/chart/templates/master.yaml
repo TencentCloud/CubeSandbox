@@ -23,6 +23,9 @@ spec:
       annotations:
         checksum/config: {{ include "cube.masterConf" . | sha256sum | quote }}
     spec:
+      {{- with include "cube.masterServiceAccountName" . }}
+      serviceAccountName: {{ . }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
