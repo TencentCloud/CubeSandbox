@@ -22,6 +22,9 @@ type resolvedVolume struct {
 }
 
 func resolveVolume(cfg *config.Config, state binding.Binding) (resolvedVolume, error) {
+	if state.Dynamic && state.CredRef == "" {
+		return resolvedVolume{}, fmt.Errorf("dynamic private_data requires cred_ref; global credentials are reserved for legacy volumes")
+	}
 	if state.Bucket == "" {
 		state.Bucket = cfg.Bucket
 		if state.Bucket == "" {

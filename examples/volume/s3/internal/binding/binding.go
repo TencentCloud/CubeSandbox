@@ -5,7 +5,7 @@
 // plugin.
 //
 // Create receives caller input A: a JSON object naming an existing bucket, the
-// object prefix that becomes the volume root, and an optional credential
+// object prefix that becomes the volume root, and a required credential
 // reference. The plugin validates and normalizes it, provisions backend
 // storage, and returns state B: a JSON object with the resolved bucket/prefix
 // and the credential reference. Only B is persisted and later passed to
@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -42,14 +41,6 @@ const (
 	// ReservedPrefix is the plugin's own metadata namespace. A volume prefix
 	// must never live inside it.
 	ReservedPrefix = ".cube-sandbox/"
-
-	// ClaimsKey is the single ownership registry object. Dynamic creates
-	// rewrite it under a conditional PUT, which makes the conflict check and
-	// the registration one atomic step across CubeMaster instances.
-	ClaimsKey = ReservedPrefix + "volume-claims.json"
-
-	// ClaimsVersion is the registry schema version.
-	ClaimsVersion = 1
 
 	maxPrefixLen = 512
 	maxBucketLen = 255
@@ -85,33 +76,7 @@ type stateJSON struct {
 	Version int    `json:"v"`
 	Bucket  string `json:"bucket"`
 	Prefix  string `json:"prefix"`
-	CredRef string `json:"cred_ref,omitempty"`
-}
-
-// Claim records which volume owns a prefix.
-type Claim struct {
-	VolumeID  string `json:"volume_id"`
-	Bucket    string `json:"bucket,omitempty"`
-	Prefix    string `json:"prefix"`
-	CreatedAt string `json:"created_at,omitempty"`
-	// CreateID identifies the invocation that added this claim. A creator
-	// can recover a committed PUT whose response was lost without treating
-	// pre-existing ownership as something it may clean up on failure.
-	CreateID string `json:"create_id,omitempty"`
-	// DeletingAt is the RFC3339 time at which this volume's destroy took the
-	// deletion lease. It only decides when a stale lease may be taken over;
-	// it is never used to identify the lease.
-	DeletingAt string `json:"deleting_at,omitempty"`
-	// LeaseID identifies one deletion attempt. It is random per attempt, so
-	// two attempts in the same second cannot be mistaken for each other.
-	// Release and clear must match this value before touching the lease.
-	LeaseID string `json:"lease_id,omitempty"`
-}
-
-// Claims is the ownership registry persisted at ClaimsKey.
-type Claims struct {
-	Version int     `json:"v"`
-	Claims  []Claim `json:"claims"`
+	CredRef string `json:"cred_ref"`
 }
 
 // ParseCreate validates caller input A. An empty or object-with-no-fields
@@ -137,6 +102,9 @@ func ParseCreate(raw, volumeID string) (Create, error) {
 	if in.Bucket == "" && in.Prefix == "" && in.CredRef == "" {
 		return out, nil
 	}
+	if err := ValidateCredRef(in.CredRef); err != nil {
+		return Create{}, fmt.Errorf("dynamic private_data requires cred_ref: %w", err)
+	}
 
 	if in.Bucket != "" {
 		if err := ValidateBucket(in.Bucket); err != nil {
@@ -151,12 +119,7 @@ func ParseCreate(raw, volumeID string) (Create, error) {
 		}
 		out.Prefix = prefix
 	}
-	if in.CredRef != "" {
-		if err := ValidateCredRef(in.CredRef); err != nil {
-			return Create{}, err
-		}
-		out.CredRef = in.CredRef
-	}
+	out.CredRef = in.CredRef
 	out.Dynamic = true
 	return out, nil
 }
@@ -195,10 +158,8 @@ func ParseState(raw, volumeID string) (Binding, error) {
 		if err != nil {
 			return Binding{}, err
 		}
-		if st.CredRef != "" {
-			if err := ValidateCredRef(st.CredRef); err != nil {
-				return Binding{}, err
-			}
+		if err := ValidateCredRef(st.CredRef); err != nil {
+			return Binding{}, fmt.Errorf("dynamic private_data requires cred_ref: %w", err)
 		}
 		return Binding{Bucket: st.Bucket, Prefix: prefix, CredRef: st.CredRef, Dynamic: true}, nil
 	case '"':
@@ -211,6 +172,9 @@ func ParseState(raw, volumeID string) (Binding, error) {
 		if err != nil {
 			return Binding{}, err
 		}
+		if prefix != DefaultPrefix(volumeID) {
+			return Binding{}, errors.New("legacy private_data prefix must match this volume ID")
+		}
 		return Binding{Prefix: prefix}, nil
 	default:
 		// Legacy plugin state: the bare prefix, e.g. "volumes/vol-123/".
@@ -218,12 +182,18 @@ func ParseState(raw, volumeID string) (Binding, error) {
 		if err != nil {
 			return Binding{}, fmt.Errorf("private_data is not a recognized volume state: %w", err)
 		}
+		if prefix != DefaultPrefix(volumeID) {
+			return Binding{}, errors.New("legacy private_data prefix must match this volume ID")
+		}
 		return Binding{Prefix: prefix}, nil
 	}
 }
 
 // EncodeState serializes state B and enforces the API limit.
 func EncodeState(b Binding) (string, error) {
+	if err := ValidateCredRef(b.CredRef); err != nil {
+		return "", fmt.Errorf("dynamic private_data requires cred_ref: %w", err)
+	}
 	encoded, err := json.Marshal(stateJSON{
 		Version: Version,
 		Bucket:  b.Bucket,
@@ -412,121 +382,4 @@ func validateRaw(raw string) error {
 		return errors.New("private_data must not contain NUL bytes")
 	}
 	return nil
-}
-
-// EncodeClaims serializes the registry for a conditional PUT. The claim order
-// is normalized on a copy, so callers' slices are left as they were.
-func EncodeClaims(c Claims) ([]byte, error) {
-	if c.Version == 0 {
-		c.Version = ClaimsVersion
-	}
-	claims := append([]Claim{}, c.Claims...)
-	SortClaims(claims)
-	c.Claims = claims
-	return json.Marshal(c)
-}
-
-// DecodeClaims parses the registry. Empty data is an empty registry, so the
-// first dynamic volume in a bucket starts from scratch.
-func DecodeClaims(data []byte) (Claims, error) {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return Claims{Version: ClaimsVersion}, nil
-	}
-	var c Claims
-	if err := json.Unmarshal(data, &c); err != nil {
-		return Claims{}, fmt.Errorf("volume claims registry is not valid JSON: %w", err)
-	}
-	if c.Version != ClaimsVersion {
-		return Claims{}, fmt.Errorf("volume claims registry uses unsupported version %d", c.Version)
-	}
-	return c, nil
-}
-
-// HasClaim reports whether the registry already records this exact
-// volume/prefix pair.
-func HasClaim(claims []Claim, prefix, volumeID string) bool {
-	for _, c := range claims {
-		if c.Prefix == prefix && c.VolumeID == volumeID {
-			return true
-		}
-	}
-	return false
-}
-
-// Overlap reports whether two normalized prefixes are equal or nested.
-func Overlap(a, b string) bool {
-	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
-}
-
-// FindConflict returns a claim that overlaps prefix and belongs to another
-// volume (or records a different prefix for the same volume).
-func FindConflict(claims []Claim, prefix, volumeID string) (Claim, bool) {
-	for _, c := range claims {
-		if c.Prefix == "" || !Overlap(c.Prefix, prefix) {
-			continue
-		}
-		if c.VolumeID != volumeID || c.Prefix != prefix {
-			return c, true
-		}
-	}
-	return Claim{}, false
-}
-
-// FindClaim returns the claim recorded for exactly this prefix.
-func FindClaim(claims []Claim, prefix string) (Claim, bool) {
-	for _, c := range claims {
-		if c.Prefix == prefix {
-			return c, true
-		}
-	}
-	return Claim{}, false
-}
-
-// FindNested returns a claim for a prefix strictly below prefix. Deleting the
-// outer prefix would delete that volume's data, so destroy must refuse.
-func FindNested(claims []Claim, prefix string) (Claim, bool) {
-	for _, c := range claims {
-		if c.Prefix != prefix && strings.HasPrefix(c.Prefix, prefix) {
-			return c, true
-		}
-	}
-	return Claim{}, false
-}
-
-// SetClaimDeleting sets (or clears, with an empty at and leaseID) the deletion
-// lease on this volume's claim for prefix. It works on a copy so EncodeClaims
-// callers never observe a half-written registry.
-func SetClaimDeleting(claims []Claim, prefix, volumeID, at, leaseID string) []Claim {
-	out := append([]Claim{}, claims...)
-	for i := range out {
-		if out[i].Prefix == prefix && out[i].VolumeID == volumeID {
-			out[i].DeletingAt = at
-			out[i].LeaseID = leaseID
-		}
-	}
-	return out
-}
-
-// WithoutClaim removes this volume's claim for prefix, leaving other volumes'
-// claims untouched. The result is non-nil so it JSON-encodes as [] not null.
-func WithoutClaim(claims []Claim, prefix, volumeID string) []Claim {
-	out := make([]Claim, 0, len(claims))
-	for _, c := range claims {
-		if c.Prefix == prefix && c.VolumeID == volumeID {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
-// SortClaims orders claims by prefix, then volume, so the same registry always
-// encodes to the same bytes.
-func SortClaims(claims []Claim) {
-	sort.Slice(claims, func(i, j int) bool {
-		if claims[i].Prefix != claims[j].Prefix {
-			return claims[i].Prefix < claims[j].Prefix
-		}
-		return claims[i].VolumeID < claims[j].VolumeID
-	})
 }

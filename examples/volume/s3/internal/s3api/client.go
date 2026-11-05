@@ -8,10 +8,7 @@ package s3api
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -350,98 +347,6 @@ func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
 	}
 }
 
-// ErrPreconditionFailed reports that a conditional PUT lost a race with
-// another writer. The registry CAS loop retries after re-reading.
-var ErrPreconditionFailed = errors.New("precondition failed")
-
-// ReadClaims returns the ownership registry together with its ETag, which is
-// what the compare-and-swap write needs. A missing object is not an error: it
-// returns nil data and empty ETag, meaning "create it with If-None-Match: *".
-func (c *Client) ReadClaims(ctx context.Context, key string) ([]byte, string, error) {
-	obj, err := c.inner.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		if IsNotFound(err) {
-			return nil, "", nil
-		}
-		return nil, "", fmt.Errorf("get object %q: %w", key, err)
-	}
-	defer obj.Close()
-
-	// Read first so the body and ETag come from the same GET response. Stat
-	// before Read would issue HEAD, then the SDK pins GET to that HEAD's ETag:
-	// a concurrent registry update in between would fail the read with 412.
-	data, err := io.ReadAll(obj)
-	if err != nil {
-		if IsNotFound(err) {
-			return nil, "", nil
-		}
-		return nil, "", fmt.Errorf("read object %q: %w", key, err)
-	}
-	// The completed read cached this response's metadata on obj; this does
-	// not issue a separate HEAD that could observe a newer registry version.
-	info, err := obj.Stat()
-	if err != nil {
-		return nil, "", fmt.Errorf("stat object %q: %w", key, err)
-	}
-	return data, info.ETag, nil
-}
-
-// ErrConditionalWritesUnsupported reports that the endpoint rejected the
-// If-Match / If-None-Match header the ownership registry needs, typically with
-// 501 NotImplemented. Dynamic create fails closed on this error: without a
-// compare-and-swap, two CubeMaster instances could both claim overlapping
-// prefixes and one claim would silently overwrite the other.
-var ErrConditionalWritesUnsupported = errors.New(
-	"the S3 endpoint does not support conditional PUT (If-Match / If-None-Match); " +
-		"dynamic volumes need it so two CubeMaster instances cannot claim overlapping prefixes")
-
-// WriteClaims stores the registry under a conditional PUT: an empty etag means
-// "only if absent", otherwise "only if it still has this etag". A lost race
-// returns ErrPreconditionFailed instead of overwriting another writer's claims.
-//
-// This makes check-and-register atomic across CubeMaster instances on backends
-// that honour If-Match / If-None-Match on PUT (AWS S3, MinIO, R2). A backend
-// that rejects the conditional header (501) returns
-// ErrConditionalWritesUnsupported; the caller must refuse the dynamic create.
-// There is deliberately no unconditional-write fallback: a plain PUT replays a
-// stale registry snapshot and can drop another master's claim, which is the
-// lost update the registry exists to prevent.
-func (c *Client) WriteClaims(ctx context.Context, key string, data []byte, etag string) error {
-	if key == "" {
-		return fmt.Errorf("write claims: key is empty")
-	}
-	opts := minio.PutObjectOptions{ContentType: "application/json"}
-	if etag == "" {
-		opts.SetMatchETagExcept("*")
-	} else {
-		opts.SetMatchETag(etag)
-	}
-	_, err := c.inner.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), opts)
-	return claimsWriteError(key, err)
-}
-
-// claimsWriteError classifies a conditional PUT result. Kept separate so the
-// 501 and 412 outcomes are unit-testable without an S3 server.
-func claimsWriteError(key string, err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case IsPreconditionFailed(err):
-		return ErrPreconditionFailed
-	case isNotImplemented(err):
-		return fmt.Errorf("put object %q: %w", key, ErrConditionalWritesUnsupported)
-	default:
-		return fmt.Errorf("put object %q: %w", key, err)
-	}
-}
-
-// isNotImplemented reports whether the backend rejected an unsupported header
-// or method with 501 NotImplemented.
-func isNotImplemented(err error) bool {
-	resp := minio.ToErrorResponse(err)
-	return resp.StatusCode == http.StatusNotImplemented || resp.Code == "NotImplemented"
-}
-
 // checkPrefix is the last line of defence before a recursive delete: only a
 // non-empty key ending in "/" is accepted, so a malformed binding can never
 // address the whole bucket.
@@ -477,13 +382,4 @@ func IsNotFound(err error) bool {
 		return true
 	}
 	return resp.StatusCode == 404
-}
-
-// IsPreconditionFailed reports whether err is a lost conditional-PUT race.
-func IsPreconditionFailed(err error) bool {
-	if errors.Is(err, ErrPreconditionFailed) {
-		return true
-	}
-	resp := minio.ToErrorResponse(err)
-	return resp.StatusCode == http.StatusPreconditionFailed || resp.Code == "PreconditionFailed"
 }

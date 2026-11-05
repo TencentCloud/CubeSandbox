@@ -69,3 +69,13 @@ func TestResolvedRoleDoesNotFetchCredentials(t *testing.T) {
 		t.Fatal("role mapping unexpectedly materialized static credentials")
 	}
 }
+
+func TestResolveDynamicRejectsMissingCredRefBeforeGlobalFallback(t *testing.T) {
+	cfg := &config.Config{
+		Bucket: "global-bucket", Endpoint: "https://s3.example.com", Region: "us-east-1",
+		AccessKeyID: "global-ak", SecretAccessKey: "global-sk",
+	}
+	if _, err := resolveVolume(cfg, binding.Binding{Bucket: "caller-bucket", Prefix: "tenant/", Dynamic: true}); err == nil || !strings.Contains(err.Error(), "requires cred_ref") {
+		t.Fatalf("resolveVolume error = %v, want dynamic cred_ref rejection", err)
+	}
+}

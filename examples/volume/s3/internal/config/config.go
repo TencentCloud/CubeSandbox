@@ -321,7 +321,7 @@ func (c *Config) ResolveCredentials(ref string) (*Credentials, error) {
 	}
 	if ref == "" {
 		if !creds.InstanceRole && (creds.AccessKeyID == "" || creds.SecretAccessKey == "") {
-			return nil, errors.New("no credentials configured: set ACCESS_KEY_ID and SECRET_ACCESS_KEY, use CREDENTIALS=instance_role, or pass cred_ref in private_data")
+			return nil, errors.New("legacy volumes require ACCESS_KEY_ID and SECRET_ACCESS_KEY or CREDENTIALS=instance_role; dynamic volumes require cred_ref")
 		}
 		return creds, nil
 	}

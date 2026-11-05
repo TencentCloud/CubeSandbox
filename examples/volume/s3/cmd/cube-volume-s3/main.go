@@ -29,23 +29,13 @@
 // appear in private_data. A volume created without private_data keeps the
 // legacy shape: BUCKET:/volumes/<volume_id>/ and a plain prefix string.
 //
-// Dynamic prefixes are registered in .cube-sandbox/volume-claims.json. The
-// check-and-register step is a conditional PUT, so two CubeMaster instances
-// cannot both claim overlapping prefixes on a backend that honours
-// If-Match / If-None-Match (AWS S3, MinIO, R2). A backend that rejects the
-// conditional header fails the dynamic create; there is no unconditional
-// fallback, because that would reintroduce lost updates. A dynamic create also
-// requires an empty prefix (only the empty directory marker may be there): a
-// competing Destroy issued after a failed CubeMaster database write deletes the
-// whole prefix, so adopting pre-existing objects would make that rollback
-// destructive.
-//
-// Destroy takes a deletion lease in the same registry before removing objects
-// and releases the claim afterwards. A fresh lease blocks another destroy
-// from deleting concurrently; it does not identify volume generations. Each attempt has its own
-// random lease ID, so a retry cannot be mistaken for an earlier attempt even
-// within the same second; deleting_at only decides when a crashed attempt's
-// lease may be taken over. See beginDestroy.
+// Dynamic creates require an existing bucket and an empty prefix (apart from
+// its zero-byte directory marker). Destroy recursively removes that prefix.
+// The platform must therefore authorize each cred_ref/bucket/prefix binding,
+// keep prefixes for different volumes non-overlapping, and avoid reusing a
+// prefix until deletion has finished. The plugin does not provide distributed
+// coordination or adopt pre-existing data: a failed Create may be rolled back
+// with Destroy(B), which is indistinguishable from a user delete.
 //
 // Config file: volume-s3.conf next to this binary (or $CUBE_S3_CONFIG). It holds
 // a plaintext secret, so keep it root-owned and chmod 600. See
@@ -173,10 +163,11 @@ func run(ctx context.Context, opts *options) error {
 // binding through this field. A volume created without the descriptor keeps
 // the deployment-configured bucket and volumes/<id>/ layout.
 //
-// A dynamic create only proceeds on an empty prefix that no other volume owns.
-// CubeMaster may roll a failed create back with Destroy(B), and that delete
-// cannot be distinguished from a user delete, so adopting existing objects
-// would make the rollback destructive.
+// A dynamic create only proceeds on an empty prefix. CubeMaster may roll a
+// failed create back with Destroy(B), and that delete cannot be distinguished
+// from a user delete, so adopting existing objects would make rollback
+// destructive. The platform coordinates non-overlapping prefixes across
+// volumes and delays reuse until deletion has completed.
 func doCreate(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("create: --volume-id is required")
@@ -217,7 +208,7 @@ func doCreate(ctx context.Context, opts *options) error {
 	}
 
 	if req.Dynamic {
-		if err := createDynamicPrefix(ctx, client, volume.state.Bucket, volume.state.Prefix, opts.volumeID); err != nil {
+		if err := createDynamicPrefix(ctx, client, volume.state.Bucket, volume.state.Prefix); err != nil {
 			return err
 		}
 	} else {
@@ -241,14 +232,16 @@ func doCreate(ctx context.Context, opts *options) error {
 }
 
 type createStore interface {
-	claimsStore
 	BucketExists(context.Context) (bool, error)
+	PrefixHasData(context.Context, string) (bool, error)
 	CreatePrefix(context.Context, string) error
 }
 
-// createDynamicPrefix provisions only an empty, owned prefix. State B must
-// already have passed encoding and size validation before this is called.
-func createDynamicPrefix(ctx context.Context, store createStore, bucket, prefix, volumeID string) error {
+// createDynamicPrefix provisions only an empty prefix in an existing bucket.
+// State B must already have passed encoding and size validation before this is
+// called. Prefix ownership and concurrent lifecycle coordination belong to the
+// platform.
+func createDynamicPrefix(ctx context.Context, store createStore, bucket, prefix string) error {
 	exists, err := store.BucketExists(ctx)
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
@@ -263,27 +256,14 @@ func createDynamicPrefix(ctx context.Context, store createStore, bucket, prefix,
 	if hasData {
 		return fmt.Errorf("create: prefix %q already contains objects; dynamic volumes require an empty prefix (existing data is never adopted, because a rollback delete would destroy it)", prefix)
 	}
-	registered, err := claimPrefix(ctx, store, bucket, prefix, volumeID)
-	if err != nil {
-		return err
-	}
-	if err := store.CreatePrefix(ctx, prefix); err != nil {
-		// Never delete caller data on failure; release only this new claim.
-		if releaseErr := cancelRegistration(ctx, store, registered); releaseErr != nil {
-			log.Printf("warning: release prefix claim for %s after failed create: %v", volumeID, releaseErr)
-		}
-		return err
-	}
-	return nil
+	return store.CreatePrefix(ctx, prefix)
 }
 
 // doDestroy removes the volume prefix from the bucket. This is irreversible.
 //
-// It refuses to delete a prefix recorded for another volume, one that contains
-// another volume's prefix, or a dynamic prefix with no ownership claim at all,
-// so a malformed or stale binding can never widen the delete beyond the
-// volume's own data. A dynamic destroy also takes a deletion lease so two
-// concurrent destroys cannot overlap with a later reuse of the prefix.
+// ParseState and resolveVolume validate the binding before the recursive
+// delete. The platform must ensure that prefixes do not overlap and are not
+// reused until this operation completes.
 func doDestroy(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("destroy: --volume-id is required")
@@ -308,37 +288,8 @@ func doDestroy(ctx context.Context, opts *options) error {
 		return err
 	}
 
-	// Legacy volumes never touch the registry, so a legacy destroy keeps its
-	// exact pre-upgrade behaviour (a bucket policy scoped to volumes/* must
-	// keep working). Dynamic volumes take the deletion lease before the
-	// recursive delete; the claim stays in place until the data is gone.
-	var lease *deletionLease
-	if b.Dynamic {
-		lease, err = beginDestroy(ctx, client, volume.state.Prefix, opts.volumeID)
-		if err != nil {
-			return fmt.Errorf("destroy: %w", err)
-		}
-		if lease == nil {
-			// The prefix is already gone (retried destroy after a success).
-			emit(statusResponse{})
-			return nil
-		}
-	}
-
 	if err := client.RemovePrefix(ctx, volume.state.Prefix); err != nil {
-		if lease != nil {
-			// Give the lease back so a retry is not blocked for its whole
-			// duration; only a deleter that died keeps the lease.
-			if clearErr := clearDeleteLease(ctx, client, *lease); clearErr != nil {
-				log.Printf("warning: clear delete lease for %s: %v", opts.volumeID, clearErr)
-			}
-		}
 		return err
-	}
-	if lease != nil {
-		if err := finishDestroy(ctx, client, *lease); err != nil {
-			return fmt.Errorf("destroy: prefix %q removed, but claim cleanup failed: %w", b.Prefix, err)
-		}
 	}
 	emit(statusResponse{})
 	return nil

@@ -498,8 +498,8 @@ func TestResolveCredentialsWithoutAnyKeys(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	_, err = cfg.ResolveCredentials("")
-	if err == nil || !strings.Contains(err.Error(), "cred_ref") {
-		t.Fatalf("ResolveCredentials error = %v, want a cred_ref hint", err)
+	if err == nil || !strings.Contains(err.Error(), "legacy volumes require") || !strings.Contains(err.Error(), "dynamic volumes require cred_ref") {
+		t.Fatalf("ResolveCredentials error = %v, want legacy/global credential guidance", err)
 	}
 }
 

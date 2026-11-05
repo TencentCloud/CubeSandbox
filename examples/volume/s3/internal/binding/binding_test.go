@@ -95,8 +95,6 @@ func TestParseCreateDefaultsMissingFields(t *testing.T) {
 		raw        string
 		wantPrefix string
 	}{
-		{"bucket only", `{"bucket":"user-bucket"}`, "volumes/vol-1/"},
-		{"prefix only", `{"prefix":"workspaces/user-a/"}`, "workspaces/user-a/"},
 		{"ref only", `{"cred_ref":"team-a"}`, "volumes/vol-1/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,12 +120,15 @@ func TestParseCreateRejects(t *testing.T) {
 	}{
 		{"invalid json", `bucket=user-bucket`, "JSON object"},
 		{"array", `["a"]`, "JSON object"},
-		{"invalid bucket", `{"bucket":"bad/bucket"}`, "unsupported character"},
-		{"bucket traversal", `{"bucket":".."}`, "at least 3"},
-		{"invalid prefix", `{"prefix":"a/../b/"}`, `".."`},
+		{"bucket only requires reference", `{"bucket":"user-bucket"}`, "requires cred_ref"},
+		{"prefix only requires reference", `{"prefix":"workspaces/user-a/"}`, "requires cred_ref"},
+		{"bucket and prefix require reference", `{"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "requires cred_ref"},
+		{"invalid bucket", `{"bucket":"bad/bucket","cred_ref":"team-a"}`, "unsupported character"},
+		{"bucket traversal", `{"bucket":"..","cred_ref":"team-a"}`, "at least 3"},
+		{"invalid prefix", `{"prefix":"a/../b/","cred_ref":"team-a"}`, `".."`},
 		{"invalid ref", `{"cred_ref":"../escape"}`, "must not contain .."},
-		{"oversize", `{"prefix":"` + strings.Repeat("a", MaxPrivateDataLen) + `"}`, "over the"},
-		{"nul", "{\"bucket\":\"abc\",\"prefix\":\"a\\u0000b/\"}", "control"},
+		{"oversize", `{"prefix":"` + strings.Repeat("a", MaxPrivateDataLen) + `","cred_ref":"team-a"}`, "over the"},
+		{"nul", "{\"bucket\":\"abc\",\"prefix\":\"a\\u0000b/\",\"cred_ref\":\"team-a\"}", "control"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseCreate(tc.raw, "vol-1")
@@ -198,9 +199,10 @@ func TestParseStateRejects(t *testing.T) {
 		{"missing version", `{"bucket":"bcd","prefix":"a/"}`, "unsupported state version"},
 		{"no bucket", `{"v":1,"prefix":"a/"}`, "missing bucket"},
 		{"no prefix", `{"v":1,"bucket":"bcd"}`, "missing bucket"},
-		{"invalid prefix", `{"v":1,"bucket":"bcd","prefix":"../a/"}`, `".."`},
-		{"reserved prefix", `{"v":1,"bucket":"bcd","prefix":".cube-sandbox/a/"}`, "reserved"},
-		{"legacy namespace", `{"v":1,"bucket":"bcd","prefix":"volumes/x/"}`, "plugin-managed"},
+		{"invalid prefix", `{"v":1,"bucket":"bcd","prefix":"../a/","cred_ref":"team-a"}`, `".."`},
+		{"reserved prefix", `{"v":1,"bucket":"bcd","prefix":".cube-sandbox/a/","cred_ref":"team-a"}`, "reserved"},
+		{"legacy namespace", `{"v":1,"bucket":"bcd","prefix":"volumes/x/","cred_ref":"team-a"}`, "plugin-managed"},
+		{"missing cred_ref", `{"v":1,"bucket":"bcd","prefix":"a/"}`, "requires cred_ref"},
 		{"invalid ref", `{"v":1,"bucket":"bcd","prefix":"a/","cred_ref":"a/b"}`, "unsupported character"},
 		{"malformed object", `{not json`, "recognized volume state"},
 		{"unsafe legacy prefix", "volumes/../x/", "not a recognized"},
@@ -233,7 +235,7 @@ func TestEncodeStateRoundTrip(t *testing.T) {
 }
 
 func TestEncodeStateOversize(t *testing.T) {
-	_, err := EncodeState(Binding{Bucket: "bcd", Prefix: strings.Repeat("a", MaxPrivateDataLen) + "/"})
+	_, err := EncodeState(Binding{Bucket: "bcd", Prefix: strings.Repeat("a", MaxPrivateDataLen) + "/", CredRef: "team-a"})
 	if err == nil || !strings.Contains(err.Error(), "over the") {
 		t.Fatalf("EncodeState error = %v, want the size limit", err)
 	}
@@ -266,63 +268,14 @@ func TestDynamicDefaultPrefixRoundTrip(t *testing.T) {
 // Only the exact default is allowed back; a persisted state must not be able
 // to point a destructive delete at another volume's legacy prefix.
 func TestParseStateDefaultPrefixOnlyForOwnVolume(t *testing.T) {
-	if _, err := ParseState(`{"v":1,"bucket":"bcd","prefix":"volumes/vol-1/"}`, "vol-1"); err != nil {
+	if _, err := ParseState(`{"v":1,"bucket":"bcd","prefix":"volumes/vol-1/","cred_ref":"team-a"}`, "vol-1"); err != nil {
 		t.Errorf("ParseState rejected the volume's own default prefix: %v", err)
 	}
 	for _, prefix := range []string{"volumes/vol-2/", "volumes/", "volumes/vol-1/nested/"} {
-		raw := `{"v":1,"bucket":"bcd","prefix":"` + prefix + `"}`
+		raw := `{"v":1,"bucket":"bcd","prefix":"` + prefix + `","cred_ref":"team-a"}`
 		if _, err := ParseState(raw, "vol-1"); err == nil {
 			t.Errorf("ParseState accepted %q for vol-1", prefix)
 		}
-	}
-}
-
-func TestClaimsRoundTrip(t *testing.T) {
-	registry := Claims{Version: ClaimsVersion, Claims: []Claim{
-		{VolumeID: "vol-1", Bucket: "bucket-a", Prefix: "workspaces/user-a/"},
-		{VolumeID: "vol-2", Bucket: "bucket-b", Prefix: "workspaces/user-b/", DeletingAt: "2026-01-01T00:00:00Z", LeaseID: "lease-b"},
-	}}
-	encoded, err := EncodeClaims(registry)
-	if err != nil {
-		t.Fatalf("EncodeClaims: %v", err)
-	}
-	decoded, err := DecodeClaims(encoded)
-	if err != nil {
-		t.Fatalf("DecodeClaims: %v", err)
-	}
-	if len(decoded.Claims) != 2 || decoded.Version != ClaimsVersion {
-		t.Fatalf("decoded = %+v, want two claims at version %d", decoded, ClaimsVersion)
-	}
-	if got := decoded.Claims[1].DeletingAt; got != "2026-01-01T00:00:00Z" {
-		t.Errorf("DeletingAt = %q, want the lease time to round-trip", got)
-	}
-	if got := decoded.Claims[1].LeaseID; got != "lease-b" {
-		t.Errorf("LeaseID = %q, want the lease token to round-trip", got)
-	}
-	// Sorting makes the same registry encode to the same bytes regardless of
-	// insertion order, which keeps the CAS retry comparison stable.
-	reordered := Claims{Version: ClaimsVersion, Claims: []Claim{
-		registry.Claims[1], registry.Claims[0],
-	}}
-	again, err := EncodeClaims(reordered)
-	if err != nil {
-		t.Fatalf("EncodeClaims: %v", err)
-	}
-	if string(encoded) != string(again) {
-		t.Errorf("encode is order-dependent:\n%s\n%s", encoded, again)
-	}
-}
-
-func TestDecodeClaims(t *testing.T) {
-	empty, err := DecodeClaims(nil)
-	if err != nil || empty.Version != ClaimsVersion || len(empty.Claims) != 0 {
-		t.Errorf("DecodeClaims(nil) = %+v/%v, want an empty v%d registry", empty, err, ClaimsVersion)
-	}
-	if _, err := DecodeClaims([]byte("{not json")); err == nil {
-		t.Error("DecodeClaims accepted malformed JSON")
-	}
-	if _, err := DecodeClaims([]byte(`{"v":9}`)); err == nil || !strings.Contains(err.Error(), "unsupported version") {
-		t.Errorf("DecodeClaims version error = %v, want an unsupported-version error", err)
 	}
 }
 

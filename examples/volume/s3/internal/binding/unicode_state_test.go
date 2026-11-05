@@ -46,7 +46,7 @@ func TestStateSupplementaryCharactersRoundTrip(t *testing.T) {
 func TestStateEscapedByteLimit(t *testing.T) {
 	const count = 75
 	basePrefix := "boundary/" + strings.Repeat("🙂", count)
-	encoded, err := json.Marshal(stateJSON{Version: Version, Bucket: "user-bucket", Prefix: basePrefix + "/"})
+	encoded, err := json.Marshal(stateJSON{Version: Version, Bucket: "user-bucket", Prefix: basePrefix + "/", CredRef: "team-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestStateEscapedByteLimit(t *testing.T) {
 			if _, err := NormalizePrefix(prefix); err != nil {
 				t.Fatalf("fixture must meet the prefix limit: %v", err)
 			}
-			raw, err := EncodeState(Binding{Bucket: "user-bucket", Prefix: prefix, Dynamic: true})
+			raw, err := EncodeState(Binding{Bucket: "user-bucket", Prefix: prefix, CredRef: "team-a", Dynamic: true})
 			if size > MaxPrivateDataLen {
 				if err == nil || !strings.Contains(err.Error(), "over the") {
 					t.Fatalf("size=%d err=%v, want rejection of final escaped size", size, err)
