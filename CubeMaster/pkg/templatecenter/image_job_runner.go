@@ -7,7 +7,6 @@ package templatecenter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -156,8 +155,15 @@ func finishTemplateImageJobAfterArtifact(
 	// alias *before* publishing the READY status so a client that sees READY
 	// can always resolve the alias.
 	claimWarning := ""
-	info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
-	err = errors.Join(err, persistErr)
+	if persistErr != nil {
+		err = persistErr
+		if updErr := UpdateDefinitionStatus(ctx, req.TemplateID, StatusFailed, persistErr.Error()); updErr != nil {
+			logger.Errorf("mark template definition failed after replica persist error fail: %v", updErr)
+		}
+		invalidateTemplateCaches(req.TemplateID)
+	} else {
+		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
+	}
 	if err != nil {
 		if builtFreshArtifact {
 			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
