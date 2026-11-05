@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -157,8 +158,11 @@ func finishTemplateImageJobAfterArtifact(
 	claimWarning := ""
 	if persistErr != nil {
 		err = persistErr
-		if updErr := UpdateDefinitionStatus(ctx, req.TemplateID, StatusFailed, persistErr.Error()); updErr != nil {
+		if _, _, updErr := publishTemplateStatusWithAlias(ctx, req.TemplateID, jobID, StatusFailed, persistErr.Error()); updErr != nil {
 			logger.Errorf("mark template definition failed after replica persist error fail: %v", updErr)
+			if !errors.Is(updErr, ErrTemplateNotFound) {
+				err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
+			}
 		}
 		invalidateTemplateCaches(req.TemplateID)
 	} else {
