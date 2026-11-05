@@ -14,8 +14,8 @@
 
 use crate::{
     seccomp_filters::Thread, thread_helper::spawn_virtio_thread, ActivateResult, EpollHelper,
-    EpollHelperError, EpollHelperHandler, GuestMemoryMmap, VirtioCommon, VirtioDevice,
-    VirtioDeviceType, VirtioInterrupt, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
+    EpollHelperError, EpollHelperHandler, GuestMemoryMmap, GuestRegionMmap, VirtioCommon,
+    VirtioDevice, VirtioDeviceType, VirtioInterrupt, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
     VIRTIO_F_VERSION_1,
 };
 use anyhow::anyhow;
@@ -23,6 +23,7 @@ use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 use std::mem::size_of;
+use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
 use std::result;
 use std::sync::{atomic::AtomicBool, Arc, Barrier};
@@ -105,6 +106,107 @@ struct BalloonEpollHandler {
     reporting_queue_evt: Option<EventFd>,
     kill_evt: EventFd,
     pause_evt: EventFd,
+    pagemap_filter: Option<PagemapFilter>,
+}
+
+pub(crate) struct PagemapFilter {
+    file: std::fs::File,
+    host_page_size: usize,
+}
+
+impl PagemapFilter {
+    /// Validates the pagemap interface by allocating a test page, touching it,
+    /// and verifying that bit 63 (present) is actually set in /proc/self/pagemap.
+    /// If the kernel or procfs does not expose residency flags, this self-check
+    /// fails, allowing activation to fall back safely to normal reclaim.
+    fn verify_pagemap_support(file: &std::fs::File, host_page_size: usize) -> bool {
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                host_page_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return false;
+        }
+
+        // Write to touch the page, guaranteeing physical residency.
+        unsafe {
+            std::ptr::write_volatile(addr as *mut u8, 0x5a);
+        }
+
+        let pfn = (addr as u64) / (host_page_size as u64);
+        let offset = pfn * (PAGEMAP_ENTRY_SIZE as u64);
+        let mut entry_buf = [0u8; PAGEMAP_ENTRY_SIZE];
+        let read_res = file.read_exact_at(&mut entry_buf, offset);
+
+        // Free scratch memory immediately.
+        unsafe {
+            libc::munmap(addr, host_page_size);
+        }
+
+        if read_res.is_err() {
+            return false;
+        }
+
+        let entry = u64::from_ne_bytes(entry_buf);
+        // Bit 63 must be 1 for a resident page.
+        (entry & (1u64 << 63)) != 0
+    }
+}
+
+// /proc/self/pagemap 64-bit entry layout constants.
+// Cross-reference: `hypervisor/vmm/src/pagemap_anon.rs` and `hypervisor/vmm/src/soft_dirty.rs`.
+const PAGEMAP_ENTRY_SIZE: usize = 8;
+#[cfg(test)]
+const PAGEMAP_PRESENT: u64 = 1 << 63;
+#[cfg(test)]
+const PAGEMAP_SWAPPED: u64 = 1 << 62;
+const PAGEMAP_SOFT_DIRTY: u64 = 1 << 55;
+const QUICK_PROBE_PAGES: usize = 4;
+/// Maximum number of host pages scanned by the residency filter per descriptor.
+/// Descriptors exceeding this bound (e.g. malformed or oversized ranges >= 2 GiB)
+/// immediately fall back to unconditional reclaim to prevent unbounded I/O overhead.
+const MAX_FILTER_SCAN_PAGES: usize = 524_288;
+
+/// Checks whether a single 64-bit /proc/self/pagemap entry represents an ordinary,
+/// unmapped non-present hole in a private mapping that is strictly safe to skip reclaiming.
+///
+/// Uses an explicit conservative whitelist:
+/// - Entry is 0: Clean ordinary unmapped hole without physical page allocation.
+///   (Note: in environments without swap or with swap disabled via `swapoff -a`, as is standard
+///   in container runtimes, entry 0 unambiguously indicates unallocated host physical memory.)
+/// - Entry is only PAGEMAP_SOFT_DIRTY (bit 55): When snapshot cycles write "4" to
+///   `/proc/self/clear_refs` (`hypervisor/vmm/src/soft_dirty.rs`), the kernel marks VMAs
+///   `VM_SOFTDIRTY`, after which `pagemap_pte_hole()` reports bit 55 for untouched holes.
+///   Tolerating bit 55 ensures the skip filter remains effective across snapshots.
+/// - Any other bit set (bit 63 present, bit 62 swap, bit 61 file/shared-anon, uffd-wp,
+///   guard, exclusive, or any payload): MUST conservatively fall back to normal reclaim.
+#[inline]
+pub(crate) fn is_safe_to_skip_reclaim_entry(entry: u64) -> bool {
+    (entry & !PAGEMAP_SOFT_DIRTY) == 0
+}
+
+/// Returns true if this memory region has purely mapping-local reclaim semantics
+/// (i.e. discarding private CoW pages without backing file mutations or shared hole-punching),
+/// allowing reclamation to be safely skipped when the entire range is proven non-resident.
+///
+/// NOTE: In the current Cube memory backend, `MAP_PRIVATE` mappings (both anonymous and
+/// snapshot-backed file mmaps) use mapping-local pages. If the range has never been faulted
+/// into this mapping (i.e., completely non-resident), skipping `MADV_DONTNEED` is a pure no-op.
+/// Conversely, any shared mapping (`MAP_SHARED`) requires `fallocate(FALLOC_FL_PUNCH_HOLE)` to
+/// mutate the backing file or memfd, so it must not be skipped. This check is scoped to the
+/// current memory backend architecture.
+#[inline]
+pub(crate) fn can_skip_reclaim_when_nonresident(region: &GuestRegionMmap) -> bool {
+    let flags = region.flags();
+    let is_private = (flags & libc::MAP_PRIVATE) == libc::MAP_PRIVATE;
+    let is_shared = (flags & libc::MAP_SHARED) == libc::MAP_SHARED;
+    is_private && !is_shared
 }
 
 impl BalloonEpollHandler {
@@ -283,8 +385,173 @@ impl BalloonEpollHandler {
         }
     }
 
+    pub(crate) fn host_page_size() -> Option<usize> {
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if size <= 0 {
+            None
+        } else {
+            let size = size as usize;
+            if (size & (size - 1)) != 0 {
+                None
+            } else {
+                Some(size)
+            }
+        }
+    }
+
+    /// Computes the pagemap entry span (start page, page count, and byte seek offset)
+    /// for a host virtual address range.
+    ///
+    /// Linux `madvise(MADV_DONTNEED)` operates strictly on whole host pages.
+    /// In CubeSandbox, guest and host page sizes match (4 KiB on x86_64 and standard
+    /// ARM64 deployments, as configured by `CONFIG_ARM64_4K_PAGES=y`).
+    /// Reported ranges that are not host-page-aligned or not a multiple of host page size
+    /// are rejected (return `None`), conservatively falling back to standard reclaim where
+    /// the kernel protects adjacent memory.
+    pub(crate) fn calculate_pagemap_span(
+        hva: u64,
+        len: usize,
+        page_size: usize,
+    ) -> Option<(u64, usize, u64)> {
+        if page_size == 0 || (page_size & (page_size - 1)) != 0 || len == 0 {
+            return None;
+        }
+        let page_size_u64 = page_size as u64;
+
+        // Both HVA and range length must be host page aligned.
+        if hva % page_size_u64 != 0 || (len as u64) % page_size_u64 != 0 {
+            return None;
+        }
+
+        let start_page = hva.checked_div(page_size_u64)?;
+        let num_pages = (len as u64).checked_div(page_size_u64)? as usize;
+        if num_pages > MAX_FILTER_SCAN_PAGES {
+            return None;
+        }
+
+        let file_offset = start_page.checked_mul(PAGEMAP_ENTRY_SIZE as u64)?;
+        Some((start_page, num_pages, file_offset))
+    }
+
+    /// Checks if the given HVA range is confirmed non-resident via /proc/self/pagemap.
+    ///
+    /// NOTE on concurrency: This probe and subsequent descriptor processing are not atomic
+    /// with respect to guest vCPUs. If a vCPU faults in a page inside this range between
+    /// the pagemap read and skipping `MADV_DONTNEED`, that page remains resident. This is
+    /// benign and conservative: it never discards live guest data or causes data corruption.
+    /// If the guest subsequently re-allocates and frees that page, it will be re-reported
+    /// in a future cycle; if the page stays untouched, host RSS simply remains higher for
+    /// that range without impacting guest correctness.
+    fn is_hva_range_non_resident(&self, hva: u64, len: usize) -> bool {
+        let filter = match self.pagemap_filter.as_ref() {
+            Some(f) => f,
+            None => return false,
+        };
+        let (start_page, num_pages, file_offset) =
+            match Self::calculate_pagemap_span(hva, len, filter.host_page_size) {
+                Some(span) => span,
+                None => return false,
+            };
+
+        // Step 1: Quick Probe (read first min(num_pages, QUICK_PROBE_PAGES) entries)
+        let probe_count = std::cmp::min(num_pages, QUICK_PROBE_PAGES);
+        let mut probe_buf = [0u8; QUICK_PROBE_PAGES * PAGEMAP_ENTRY_SIZE];
+        let probe_bytes = probe_count * PAGEMAP_ENTRY_SIZE;
+
+        if filter
+            .file
+            .read_exact_at(&mut probe_buf[..probe_bytes], file_offset)
+            .is_err()
+        {
+            return false;
+        }
+
+        for chunk in probe_buf[..probe_bytes].chunks_exact(PAGEMAP_ENTRY_SIZE) {
+            let entry = u64::from_ne_bytes(chunk.try_into().unwrap());
+            if !is_safe_to_skip_reclaim_entry(entry) {
+                return false;
+            }
+        }
+
+        if num_pages <= QUICK_PROBE_PAGES {
+            return true;
+        }
+
+        // Step 2: Full Scan for remaining pages
+        let mut offset_pages = QUICK_PROBE_PAGES;
+        let mut buf = [0u8; 512 * PAGEMAP_ENTRY_SIZE];
+        while offset_pages < num_pages {
+            let chunk_pages = std::cmp::min(num_pages - offset_pages, 512);
+            let read_len = chunk_pages * PAGEMAP_ENTRY_SIZE;
+            let chunk_file_offset = match start_page
+                .checked_add(offset_pages as u64)
+                .and_then(|p| p.checked_mul(PAGEMAP_ENTRY_SIZE as u64))
+            {
+                Some(off) => off,
+                None => return false,
+            };
+
+            if filter
+                .file
+                .read_exact_at(&mut buf[..read_len], chunk_file_offset)
+                .is_err()
+            {
+                return false;
+            }
+
+            for chunk in buf[..read_len].chunks_exact(PAGEMAP_ENTRY_SIZE) {
+                let entry = u64::from_ne_bytes(chunk.try_into().unwrap());
+                if !is_safe_to_skip_reclaim_entry(entry) {
+                    return false;
+                }
+            }
+            offset_pages += chunk_pages;
+        }
+
+        true
+    }
+
+    fn should_skip_reported_range(
+        &self,
+        memory: &GuestMemoryMmap,
+        range_base: GuestAddress,
+        range_len: usize,
+    ) -> bool {
+        let region = match memory.find_region(range_base) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        if !can_skip_reclaim_when_nonresident(region) {
+            return false;
+        }
+
+        let hva = match memory.get_host_address(range_base) {
+            Ok(h) => h as u64,
+            Err(_) => return false,
+        };
+
+        let offset = range_base.0 - region.start_addr().0;
+        let region_limit = region.len() - offset;
+        if range_len as u64 > region_limit {
+            // Malformed/oversized descriptor: fall back to normal reclaim path
+            // to log the clamping warning.
+            return false;
+        }
+        let len = range_len;
+        if len == 0 {
+            return true;
+        }
+
+        self.is_hva_range_non_resident(hva, len)
+    }
+
     fn process_reporting_queue(&mut self, queue_index: usize) -> result::Result<(), Error> {
         let mut used_descs = false;
+        let mut skipped_descs = 0usize;
+        let mut skipped_bytes = 0u64;
+        let mut total_descs = 0usize;
+
         while let Some(mut desc_chain) =
             self.queues[queue_index].pop_descriptor_chain(self.mem.memory())
         {
@@ -295,7 +562,17 @@ impl BalloonEpollHandler {
                     Ok(desc) => desc,
                     Err(_) => break,
                 };
+                total_descs = total_descs.saturating_add(1);
                 descs_len = descs_len.saturating_add(desc.len());
+                if self.should_skip_reported_range(
+                    desc_chain.memory(),
+                    desc.addr(),
+                    desc.len() as usize,
+                ) {
+                    skipped_descs = skipped_descs.saturating_add(1);
+                    skipped_bytes = skipped_bytes.saturating_add(desc.len() as u64);
+                    continue;
+                }
                 if let Err(e) = Self::release_memory_range(
                     desc_chain.memory(),
                     desc.addr(),
@@ -309,6 +586,15 @@ impl BalloonEpollHandler {
                 .add_used(desc_chain.memory(), desc_chain.head_index(), descs_len)
                 .map_err(Error::QueueAddUsed)?;
             used_descs = true;
+        }
+
+        if skipped_descs > 0 {
+            trace!(
+                "virtio-balloon: skipped reclaim for {}/{} descriptors ({} bytes)",
+                skipped_descs,
+                total_descs,
+                skipped_bytes
+            );
         }
 
         if used_descs {
@@ -594,6 +880,47 @@ impl VirtioDevice for Balloon {
 
         self.interrupt_cb = Some(interrupt_cb.clone());
 
+        let pagemap_filter = if reporting_queue_evt.is_some() {
+            match BalloonEpollHandler::host_page_size() {
+                Some(host_page_size) => match std::fs::File::open("/proc/self/pagemap") {
+                    Ok(file) => {
+                        if PagemapFilter::verify_pagemap_support(&file, host_page_size) {
+                            info!(
+                                "{}: free page reporting residency filter enabled (host_page_size={})",
+                                self.id, host_page_size
+                            );
+                            Some(PagemapFilter {
+                                file,
+                                host_page_size,
+                            })
+                        } else {
+                            info!(
+                                "{}: free page reporting residency filter disabled: pagemap self-check failed; falling back to normal reclaim",
+                                self.id
+                            );
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        info!(
+                            "{}: free page reporting residency filter disabled: failed to open /proc/self/pagemap: {}; falling back to normal reclaim",
+                            self.id, e
+                        );
+                        None
+                    }
+                },
+                None => {
+                    info!(
+                        "{}: free page reporting residency filter disabled: failed to determine host page size; falling back to normal reclaim",
+                        self.id
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut handler = BalloonEpollHandler {
             mem,
             queues: virtqueues,
@@ -603,6 +930,7 @@ impl VirtioDevice for Balloon {
             reporting_queue_evt,
             kill_evt,
             pause_evt,
+            pagemap_filter,
         };
 
         let paused = self.common.paused.clone();
@@ -655,9 +983,9 @@ impl Migratable for Balloon {}
 #[cfg(test)]
 mod tests {
     use super::{
-        Balloon, BalloonEpollHandler, BalloonState, VirtioBalloonConfig, QUEUE_SIZE,
-        REPORTING_QUEUE_SIZE, VIRTIO_BALLOON_F_REPORTING, VIRTIO_BALLOON_MAX_PFN_BYTES,
-        VIRTIO_BALLOON_PFN_SHIFT,
+        Balloon, BalloonEpollHandler, BalloonState, VirtioBalloonConfig, PAGEMAP_ENTRY_SIZE,
+        QUEUE_SIZE, QUICK_PROBE_PAGES, REPORTING_QUEUE_SIZE, VIRTIO_BALLOON_F_REPORTING,
+        VIRTIO_BALLOON_MAX_PFN_BYTES, VIRTIO_BALLOON_PFN_SHIFT,
     };
     use crate::{
         GuestMemoryMmap, GuestRegionMmap, MmapRegion, VirtioInterrupt, VirtioInterruptType,
@@ -666,8 +994,7 @@ mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
     use std::mem::size_of;
-    use std::os::unix::io::AsRawFd;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryAtomic};
     use vm_virtio::queue::testing::VirtQueue as GuestQ;
@@ -774,12 +1101,82 @@ mod tests {
             reporting_queue_evt: None,
             kill_evt: EventFd::new(0).unwrap(),
             pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter: None,
         };
 
         handler.process_reporting_queue(0).unwrap();
 
         assert_eq!(memory.read_obj::<u8>(VALID_RANGE).unwrap(), 0);
         assert_eq!(guest_queue.used.idx.get(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reporting_queue_skips_untouched_descriptor_and_advances_used_ring() {
+        let (page_size, pagemap_file) = match (
+            BalloonEpollHandler::host_page_size(),
+            std::fs::File::open("/proc/self/pagemap"),
+        ) {
+            (Some(ps), Ok(f)) => (ps, f),
+            _ => {
+                eprintln!("Skipping reporting_queue_skips_untouched_descriptor_and_advances_used_ring: pagemap unavailable");
+                return;
+            }
+        };
+
+        const QUEUE_ADDRESS: GuestAddress = GuestAddress(0x1_0000);
+        let untouched_range = GuestAddress(0x10_0000); // 1 MiB offset
+        let resident_range = GuestAddress(0x20_0000); // 2 MiB offset
+        let total_size = 0x30_0000;
+
+        let mmap = MmapRegion::build(
+            None,
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        // Write only to resident_range, leaving untouched_range completely non-resident
+        memory.write_obj(0x5a_u8, resident_range).unwrap();
+
+        let guest_queue = GuestQ::new(QUEUE_ADDRESS, &memory, 16);
+        // Descriptor 0: Untouched non-resident page (should be skipped by filter)
+        guest_queue.dtable[0].set(untouched_range.0, page_size as u32, 0, 0);
+        // Descriptor 1: Touched resident page (must NOT be skipped, must be reclaimed)
+        guest_queue.dtable[1].set(resident_range.0, page_size as u32, 0, 0);
+        guest_queue.avail.ring[0].set(0);
+        guest_queue.avail.ring[1].set(1);
+        guest_queue.avail.idx.set(2);
+
+        let mut handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![guest_queue.create_queue()],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter: Some(super::PagemapFilter {
+                file: pagemap_file,
+                host_page_size: page_size,
+            }),
+        };
+
+        // Assert skip filter decision: untouched is skipped, resident is not skipped
+        assert!(handler.should_skip_reported_range(&memory, untouched_range, page_size));
+        assert!(!handler.should_skip_reported_range(&memory, resident_range, page_size));
+
+        // Process reporting queue through the end-to-end virtio loop
+        handler.process_reporting_queue(0).unwrap();
+
+        // 1. Used ring index advanced over both descriptors (total 2 descriptors processed)
+        assert_eq!(guest_queue.used.idx.get(), 2);
+        // 2. Resident page was properly reclaimed by MADV_DONTNEED (re-zeroed)
+        assert_eq!(memory.read_obj::<u8>(resident_range).unwrap(), 0);
     }
 
     #[test]
@@ -830,6 +1227,7 @@ mod tests {
             reporting_queue_evt: None,
             kill_evt: EventFd::new(0).unwrap(),
             pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter: None,
         };
 
         handler.process_queue(0).unwrap();
@@ -874,6 +1272,7 @@ mod tests {
             reporting_queue_evt: None,
             kill_evt: EventFd::new(0).unwrap(),
             pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter: None,
         };
 
         handler.process_queue(0).unwrap();
@@ -946,5 +1345,454 @@ mod tests {
         assert_eq!(memory.read_obj::<u8>(GuestAddress(0)).unwrap(), 0x5a);
         assert_eq!(fs::read(&path).unwrap(), vec![0x5a; PAGE_SIZE]);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_smart_filter_skip_and_fallback_semantics() {
+        use super::can_skip_reclaim_when_nonresident;
+
+        let total_size = 512 * PAGE_SIZE; // 2 MiB
+        let mmap = MmapRegion::build(
+            None,
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        assert!(can_skip_reclaim_when_nonresident(&region));
+
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+        let (host_page_size, pagemap_file) = match (
+            BalloonEpollHandler::host_page_size(),
+            std::fs::File::open("/proc/self/pagemap"),
+        ) {
+            (Some(ps), Ok(file)) => (ps, file),
+            _ => {
+                eprintln!("Skipping test_smart_filter_skip_and_fallback_semantics: /proc/self/pagemap unavailable");
+                return;
+            }
+        };
+
+        let handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter: Some(super::PagemapFilter {
+                file: pagemap_file,
+                host_page_size,
+            }),
+        };
+
+        // 1. Fresh unwritten range: 100% non-resident -> should skip!
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 2. Touch first page: resident at beginning -> Quick Probe detects -> should NOT skip!
+        memory.write_obj(0x42_u8, GuestAddress(0)).unwrap();
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 3. Clear first page with madvise
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), total_size).unwrap();
+
+        // 4. Touch page beyond QUICK_PROBE_PAGES: Quick probe passes, Full Scan detects -> should NOT skip!
+        let later_addr = GuestAddress(((QUICK_PROBE_PAGES + 1) * host_page_size) as u64);
+        memory.write_obj(0x42_u8, later_addr).unwrap();
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 5. Shared mapping bypass: MAP_SHARED must NEVER be skipped by smart filter
+        let shared_mmap = MmapRegion::build(
+            None,
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+        )
+        .unwrap();
+        let shared_region = GuestRegionMmap::new(shared_mmap, GuestAddress(0)).unwrap();
+        assert!(!can_skip_reclaim_when_nonresident(&shared_region));
+        let shared_mem = GuestMemoryMmap::from_regions(vec![shared_region]).unwrap();
+        assert!(!handler.should_skip_reported_range(&shared_mem, GuestAddress(0), total_size));
+
+        // 6. Snapshot-backed MAP_PRIVATE: eligible for smart filter
+        let (snap_path, snap_file) = temp_file("filter-snap", &vec![0u8; total_size]);
+        let snap_mmap = MmapRegion::build(
+            Some(FileOffset::new(snap_file, 0)),
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let snap_region = GuestRegionMmap::new(snap_mmap, GuestAddress(0)).unwrap();
+        assert!(can_skip_reclaim_when_nonresident(&snap_region));
+        let snap_mem = GuestMemoryMmap::from_regions(vec![snap_region]).unwrap();
+        assert!(handler.should_skip_reported_range(&snap_mem, GuestAddress(0), total_size));
+        fs::remove_file(snap_path).unwrap();
+
+        // 7. Malformed / oversized descriptor: range_len > region_limit -> must fall back (NOT skip)
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size + 4096));
+
+        // 8. Zero-length descriptor: short-circuit to true (no-op)
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), 0));
+    }
+
+    #[test]
+    fn test_calculate_pagemap_span_page_sizes() {
+        // --- 4 KiB Host Page Size ---
+        let page_size_4k = 4096usize;
+        let hva_4k = 0x7fff_0000_0000u64; // Aligned to 4K
+        let len_2m = 2 * 1024 * 1024usize; // 2 MiB = 512 pages
+
+        let span_4k =
+            BalloonEpollHandler::calculate_pagemap_span(hva_4k, len_2m, page_size_4k).unwrap();
+        assert_eq!(span_4k.0, hva_4k / 4096); // start_page
+        assert_eq!(span_4k.1, 512); // num_pages
+        assert_eq!(span_4k.2, (hva_4k / 4096) * PAGEMAP_ENTRY_SIZE as u64); // file_offset
+
+        // Unaligned HVA for 4K: rejected (return None) to conservatively fall back to normal reclaim
+        assert!(
+            BalloonEpollHandler::calculate_pagemap_span(hva_4k + 1, len_2m, page_size_4k).is_none()
+        );
+        assert!(
+            BalloonEpollHandler::calculate_pagemap_span(hva_4k + 4095, len_2m, page_size_4k)
+                .is_none()
+        );
+
+        // Unaligned len for 4K: rejected (return None) to avoid sub-page madvise errors
+        assert!(
+            BalloonEpollHandler::calculate_pagemap_span(hva_4k, len_2m + 1, page_size_4k).is_none()
+        );
+        assert!(
+            BalloonEpollHandler::calculate_pagemap_span(hva_4k, len_2m + 4095, page_size_4k)
+                .is_none()
+        );
+
+        // --- 64 KiB Host Page Size ---
+        let page_size_64k = 65536usize;
+        let hva_64k = 0x7fff_0000_0000u64; // Aligned to 64K
+        let span_64k =
+            BalloonEpollHandler::calculate_pagemap_span(hva_64k, len_2m, page_size_64k).unwrap();
+        assert_eq!(span_64k.0, hva_64k / 65536); // start_page
+        assert_eq!(span_64k.1, 32); // 2 MiB / 64 KiB = 32 pages
+        assert_eq!(span_64k.2, (hva_64k / 65536) * PAGEMAP_ENTRY_SIZE as u64); // file_offset
+
+        // Sub-host-page 4K descriptor inside 64K host page is unaligned to 64K: rejected
+        assert!(
+            BalloonEpollHandler::calculate_pagemap_span(hva_64k + 4096, 4096, page_size_64k)
+                .is_none()
+        );
+
+        // --- Oversized descriptor scan bound check ---
+        let oversized_len = (super::MAX_FILTER_SCAN_PAGES + 1) * page_size_4k;
+        assert!(
+            BalloonEpollHandler::calculate_pagemap_span(hva_4k, oversized_len, page_size_4k)
+                .is_none()
+        );
+
+        // --- Invalid Page Size / Unavailable ---
+        assert!(BalloonEpollHandler::calculate_pagemap_span(hva_4k, len_2m, 0).is_none());
+        assert!(BalloonEpollHandler::calculate_pagemap_span(hva_4k, len_2m, 4095).is_none());
+        assert!(BalloonEpollHandler::calculate_pagemap_span(hva_4k, len_2m, 4097).is_none());
+    }
+
+    #[test]
+    fn test_smart_filter_capability_fallback_when_disabled() {
+        let total_size = 512 * PAGE_SIZE;
+        let mmap = MmapRegion::build(
+            None,
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        // Handler with pagemap_filter = None (capability probe failed or FPR disabled)
+        let handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter: None,
+        };
+
+        // When capability is unavailable, should_skip_reported_range MUST return false
+        // ensuring 100% fallback to existing reclaim path.
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+    }
+
+    #[test]
+    fn test_is_safe_to_skip_reclaim_entry() {
+        use super::{
+            is_safe_to_skip_reclaim_entry, PAGEMAP_PRESENT, PAGEMAP_SOFT_DIRTY, PAGEMAP_SWAPPED,
+        };
+
+        // Whitelist allowed:
+        // 1. Clean ordinary unmapped hole (0x0) -> Safe to skip
+        assert!(is_safe_to_skip_reclaim_entry(0));
+        // 2. Soft-dirty alone on unmapped VMA (bit 55) -> Safe to skip
+        assert!(is_safe_to_skip_reclaim_entry(PAGEMAP_SOFT_DIRTY));
+
+        // Everything else MUST conservatively fallback (must NOT skip):
+        // 3. Present page (bit 63)
+        assert!(!is_safe_to_skip_reclaim_entry(PAGEMAP_PRESENT));
+        assert!(!is_safe_to_skip_reclaim_entry(PAGEMAP_PRESENT | 0x12345));
+        assert!(!is_safe_to_skip_reclaim_entry(
+            PAGEMAP_PRESENT | PAGEMAP_SOFT_DIRTY
+        ));
+
+        // 4. Swapped page (bit 62)
+        assert!(!is_safe_to_skip_reclaim_entry(PAGEMAP_SWAPPED));
+        assert!(!is_safe_to_skip_reclaim_entry(PAGEMAP_SWAPPED | 0x54321));
+        assert!(!is_safe_to_skip_reclaim_entry(
+            PAGEMAP_SWAPPED | PAGEMAP_SOFT_DIRTY
+        ));
+
+        // 5. File-page or shared-anon (bit 61)
+        assert!(!is_safe_to_skip_reclaim_entry(1u64 << 61));
+
+        // 6. UFFD-WP write-protected (bit 57)
+        assert!(!is_safe_to_skip_reclaim_entry(1u64 << 57));
+
+        // 7. Page exclusively mapped (bit 56)
+        assert!(!is_safe_to_skip_reclaim_entry(1u64 << 56));
+
+        // 8. Reserved/future bits (bits 58..=60)
+        assert!(!is_safe_to_skip_reclaim_entry(1u64 << 58));
+        assert!(!is_safe_to_skip_reclaim_entry(1u64 << 59));
+        assert!(!is_safe_to_skip_reclaim_entry(1u64 << 60));
+
+        // 9. Soft-dirty combined with any unknown/future/marker bit
+        assert!(!is_safe_to_skip_reclaim_entry(
+            PAGEMAP_SOFT_DIRTY | (1u64 << 58)
+        ));
+        assert!(!is_safe_to_skip_reclaim_entry(PAGEMAP_SOFT_DIRTY | 0x1));
+
+        // 10. Unexpected or undocumented non-zero payload when not present/swapped
+        assert!(!is_safe_to_skip_reclaim_entry(0x1));
+        assert!(!is_safe_to_skip_reclaim_entry(0xdead_beef));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_real_pagemap_anonymous_mmap_lifecycle() {
+        let (page_size, pagemap_file) = match (
+            BalloonEpollHandler::host_page_size(),
+            std::fs::File::open("/proc/self/pagemap"),
+        ) {
+            (Some(ps), Ok(f)) => (ps, f),
+            _ => {
+                eprintln!("Skipping test_real_pagemap_anonymous_mmap_lifecycle: /proc/self/pagemap unavailable");
+                return;
+            }
+        };
+        let total_size = 512 * page_size; // 512 host pages
+
+        let mmap = MmapRegion::build(
+            None,
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        let pagemap_filter = Some(super::PagemapFilter {
+            file: pagemap_file,
+            host_page_size: page_size,
+        });
+
+        let handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter,
+        };
+
+        // 1. Untouched fresh anonymous memory -> Real pagemap shows 0 -> Safe to skip!
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 2. Touch first host page -> Real pagemap shows present bit -> Must fallback reclaim!
+        memory.write_obj(0x5a_u8, GuestAddress(0)).unwrap();
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 3. Touch 10th host page -> Probe passes, full scan detects presence -> Fallback reclaim!
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), total_size).unwrap();
+        // After madvise DONTNEED, whole range is non-resident again -> Safe to skip!
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        let later_addr = GuestAddress((10 * page_size) as u64);
+        memory.write_obj(0x5a_u8, later_addr).unwrap();
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 4. Clean up with madvise -> Real pagemap returns 0 again -> Safe to skip!
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), total_size).unwrap();
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_real_pagemap_file_backed_mmap_lifecycle() {
+        let (page_size, pagemap_file) = match (
+            BalloonEpollHandler::host_page_size(),
+            std::fs::File::open("/proc/self/pagemap"),
+        ) {
+            (Some(ps), Ok(f)) => (ps, f),
+            _ => {
+                eprintln!("Skipping test_real_pagemap_file_backed_mmap_lifecycle: /proc/self/pagemap unavailable");
+                return;
+            }
+        };
+        let total_size = 512 * page_size;
+
+        // Sparse backing file (all holes)
+        let (file_path, file) = temp_file("filter-file-lifecycle", &[]);
+        file.set_len(total_size as u64).unwrap();
+
+        let mmap = MmapRegion::build(
+            Some(FileOffset::new(file, 0)),
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        let pagemap_filter = Some(super::PagemapFilter {
+            file: pagemap_file,
+            host_page_size: page_size,
+        });
+
+        let handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter,
+        };
+
+        // 1. Untouched sparse private mapping -> Safe to skip
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 2. Private CoW write to first host page -> Present -> Must fallback reclaim
+        memory.write_obj(0xa5_u8, GuestAddress(0)).unwrap();
+        assert!(!handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        // 3. Reset via MADV_DONTNEED -> Discards CoW page, returns to unmapped -> Safe to skip
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), total_size).unwrap();
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
+
+        fs::remove_file(file_path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_pagemap_filter_self_check_semantics() {
+        let (page_size, pagemap_file) = match (
+            BalloonEpollHandler::host_page_size(),
+            std::fs::File::open("/proc/self/pagemap"),
+        ) {
+            (Some(ps), Ok(f)) => (ps, f),
+            _ => {
+                eprintln!("Skipping test_pagemap_filter_self_check_semantics: /proc/self/pagemap unavailable");
+                return;
+            }
+        };
+
+        // 1. Genuine /proc/self/pagemap on supported host: self-check MUST succeed.
+        assert!(super::PagemapFilter::verify_pagemap_support(
+            &pagemap_file,
+            page_size
+        ));
+
+        // 2. Simulated failure: an unpopulated or mock file that returns zeroes
+        // (i.e. Bit 63 is never set) must fail the self-check, triggering safe fallback.
+        let (mock_path, mock_file) = temp_file("mock-pagemap-zeroes", &vec![0u8; 4096]);
+        assert!(!super::PagemapFilter::verify_pagemap_support(
+            &mock_file, page_size
+        ));
+        fs::remove_file(mock_path).unwrap();
+    }
+
+    // Global lock to serialise tests that mutate process-wide /proc/self/clear_refs,
+    // mirroring the protection used in `hypervisor/vmm/src/soft_dirty.rs`.
+    static CLEAR_REFS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_real_pagemap_soft_dirty_hole_classification() {
+        let _guard = CLEAR_REFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (page_size, pagemap_file) = match (
+            BalloonEpollHandler::host_page_size(),
+            std::fs::File::open("/proc/self/pagemap"),
+        ) {
+            (Some(ps), Ok(f)) => (ps, f),
+            _ => {
+                eprintln!(
+                    "Skipping test_real_pagemap_soft_dirty_hole_classification: /proc/self/pagemap unavailable"
+                );
+                return;
+            }
+        };
+
+        // Write "4" to /proc/self/clear_refs to trigger VM_SOFTDIRTY on VMAs, simulating
+        // a post-snapshot state where pagemap_pte_hole() reports bit 55 for untouched holes.
+        if std::fs::write("/proc/self/clear_refs", b"4").is_err() {
+            eprintln!(
+                "Skipping test_real_pagemap_soft_dirty_hole_classification: cannot write /proc/self/clear_refs"
+            );
+            return;
+        }
+
+        let total_size = 512 * page_size;
+        let mmap = MmapRegion::build(
+            None,
+            total_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        let pagemap_filter = Some(super::PagemapFilter {
+            file: pagemap_file,
+            host_page_size: page_size,
+        });
+
+        let handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+            pagemap_filter,
+        };
+
+        // Untouched hole must still be safely skipped even when bit 55 is present.
+        assert!(handler.should_skip_reported_range(&memory, GuestAddress(0), total_size));
     }
 }
