@@ -2,7 +2,7 @@
 
 [JuiceFS](https://juicefs.com/docs/community/introduction/) is an open-source, POSIX-compatible distributed filesystem. It separates data from metadata, storing data in object storage and metadata in a metadata engine. Supported metadata engines include Redis, MySQL, and TiKV, while supported object stores include MinIO, S3, and COS.
 
-See [JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for Cube's JuiceFS storage design and the [JuiceFS performance benchmark](/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark) for performance results.
+CubeSandbox builds its cross-node storage on JuiceFS. See [JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for the design and the [JuiceFS performance benchmark](/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark) for performance results.
 
 ::: warning Preview
 The JuiceFS storage backend is currently in preview and intended for quick trials and early validation. Configuration options, deployment scripts, and runtime behavior may still change in later releases. The default control-node Redis/MinIO pairing is for trials only; validate in a non-production environment first, and switch to more reliable metadata and object stores as described in [Storage migration](#storage-migration) before production use.
@@ -13,7 +13,7 @@ The JuiceFS storage backend is currently in preview and intended for quick trial
 - Every node's kernel must support FUSE.
 - Every node must be able to access the same JuiceFS metadata engine and object store.
 
-## Installation and deployment
+## One-click installation
 
 The one-click installer does not enable JuiceFS storage by default. You must enable it manually.
 
@@ -95,6 +95,151 @@ Active client sessions
   3    30e38b8072fe  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:49:31.946778689Z
 ```
 
+### Storage migration
+
+#### Migrate from MinIO to another object store
+
+Update the configuration file to use another object store:
+
+```bash
+ONE_CLICK_ENABLE_JFS=1
+
+# The existing Redis can be reused; a new volume requires a new, empty metadata address.
+CUBE_JFS_META_URL="redis://<redis-host>:6379/0"
+CUBE_JFS_META_PASSWORD="<redis-password>"
+
+# Tencent Cloud COS example
+CUBE_JFS_STORAGE="cos"
+CUBE_JFS_BUCKET="https://<bucket>-<appid>.cos.<region>.myqcloud.com"
+CUBE_JFS_ACCESS_KEY="<COS-SecretId>"
+CUBE_JFS_SECRET_KEY="<COS-SecretKey>"
+```
+
+Then follow [One-click installation](#one-click-installation) to initialize the JuiceFS filesystem on the control node and configure the compute nodes.
+
+Cube does not currently support a seamless switch from object store A to object store B. Select the intended object store during one-click installation, or migrate data according to the JuiceFS official [data synchronization guide](https://juicefs.com/docs/community/guide/sync/).
+
+#### Use a metadata engine other than Redis
+
+`CUBE_JFS_META_URL` can point to MySQL, PostgreSQL, TiKV, or another metadata engine supported by JuiceFS. For example:
+
+```bash
+CUBE_JFS_META_URL="mysql://user:@(10.0.0.20:3306)/juicefs"
+CUBE_JFS_META_PASSWORD="password"
+```
+
+For a new cluster, set this URL and initialize the control node. To migrate an existing volume, stop writes and unmount all clients, use `juicefs dump` to export metadata from the old engine, and use `juicefs load` to import it into an empty new engine. Then update `CUBE_JFS_META_URL` on every node and remount. Object-store credentials are excluded from the dump by default and must be configured again in the new metadata engine. See the JuiceFS official [metadata backup and migration](https://juicefs.com/docs/community/metadata_dump_load/) documentation.
+
+> JuiceFS metadata storage is critical. For production deployments, a Redis cluster is recommended to reduce the risk of data loss.
+
+## Kubernetes Helm deployment
+
+First follow the [Kubernetes Helm install guide](/guide/kubernetes/install) to prepare Helm and the cluster.
+
+```bash
+cp deploy/kubernetes/chart/runtime-values.example.yaml runtime-values.yaml
+```
+
+JuiceFS is not enabled by default; edit the `runtime-values.yaml` file you pass to Helm:
+
+```yaml
+cubeJuiceFS:
+  enabled: true
+```
+
+Enabling it adds a dedicated Redis for JuiceFS, a format Job that runs once, and a DaemonSet that mounts the filesystem on every compute node.
+
+Then follow the [Helm install](/guide/kubernetes/install#_5-helm-install) section and run the install command for your topology (multi-node / Tencent Cloud TKE / single-node):
+
+```bash
+# Standard multi-node install
+helm upgrade --install cube ./deploy/kubernetes/chart \
+  -n cube-system \
+  --create-namespace \
+  -f runtime-values.yaml \
+  --wait \
+  --timeout 90m
+```
+
+If Cube is already installed but JuiceFS was never enabled, the first upgrade that enables it recreates the Cube Node Pods. Stop or migrate every running sandbox on the compute nodes first, then temporarily set:
+
+```yaml
+cubeJuiceFS:
+  enabled: true
+  lifecycleChangeAck: true
+```
+
+After the first `helm upgrade` succeeds, set `lifecycleChangeAck` back to `false` and run the same `helm upgrade` once more.
+
+> The second upgrade only clears the one-time acknowledgement from the Helm release; it does not restart Cube Node, JuiceFS, or the Redis. You can keep `false` afterwards or remove the line from `runtime-values.yaml` — `lifecycleChangeAck` is not a day-to-day JuiceFS setting.
+
+For later changes to the JuiceFS image, storage endpoints, or mount options, see the [Kubernetes upgrade guide](/guide/kubernetes/upgrade#changing-juicefs-enablement-or-storage-configuration).
+
+### Verify the Kubernetes deployment
+
+```bash
+kubectl get job,daemonset,pod -n cube-system
+
+kubectl exec -n cube-system daemonset/cube-juicefs -c juicefs -- \
+  findmnt -T /data/cubelet/jfs
+
+kubectl exec -n cube-system daemonset/cube-node -c cubelet -- \
+  findmnt -T /data/cubelet/jfs
+```
+
+Both mount checks must report `fuse.juicefs`. Then create a template with `--backend jfs`; existing XFS templates are not converted automatically.
+
+### Storage migration
+
+By default the chart creates a dedicated JuiceFS Redis and uses the `cube-jfs` bucket in the chart-managed MinIO. This section replaces those two defaults; the external Redis and the external object store can be replaced independently, and configuring both at once is not required.
+
+#### Migrate from MinIO to another object store
+
+Create the object-store Secret first so credentials are not stored in plain text in the Helm values:
+
+```bash
+kubectl -n cube-system create secret generic cube-jfs-object \
+  --from-literal=access-key='<access-key>' \
+  --from-literal=secret-key='<secret-key>'
+```
+
+Then add `storage` to `runtime-values.yaml`:
+
+```yaml
+cubeJuiceFS:
+  enabled: true
+  storage:
+    type: s3
+    bucket: https://<bucket>-<appid>.cos.<region>.myqcloud.com/cube-jfs
+    existingSecret: cube-jfs-object
+```
+
+`storage.bucket` is the complete JuiceFS `--bucket` value, not just the bucket name. For S3-compatible path-style services, include the bucket in the URL, for example `http://minio.example.com:9000/cube-jfs`.
+
+Cube does not currently support a seamless switch from object store A to object store B. Select the intended object store at installation time, or migrate data according to the JuiceFS official [data synchronization guide](https://juicefs.com/docs/community/guide/sync/).
+
+#### Use a metadata engine other than Redis
+
+> JuiceFS metadata storage is critical. For production deployments, a Redis cluster is recommended to reduce the risk of data loss.
+
+To replace only Redis, first create the password Secret:
+
+```bash
+kubectl -n cube-system create secret generic cube-jfs-meta \
+  --from-literal=meta-password='<redis-password>'
+```
+
+Then add `metadata` to `runtime-values.yaml`:
+
+```yaml
+cubeJuiceFS:
+  enabled: true
+  metadata:
+    url: redis://redis.example.com:6379/0
+    existingSecret: cube-jfs-meta
+    secretRevision: initial
+```
+
 ## Node changes
 
 ### Add a node
@@ -121,43 +266,6 @@ cubeopscli node delete <node-id>
 ```
 
 Unmounting a node does not delete data in the shared JuiceFS filesystem. Do not directly delete `CUBE_JFS_ROOT/nodes/<node-name>`; the cluster may still reference templates, snapshots, or paused sandbox data stored there.
-
-## Storage migration
-
-### Migrate from MinIO to another object store
-
-Update the configuration file to use another object store:
-
-```bash
-ONE_CLICK_ENABLE_JFS=1
-
-# The existing Redis can be reused; a new volume requires a new, empty metadata address.
-CUBE_JFS_META_URL="redis://<redis-host>:6379/0"
-CUBE_JFS_META_PASSWORD="<redis-password>"
-
-# Tencent Cloud COS example
-CUBE_JFS_STORAGE="cos"
-CUBE_JFS_BUCKET="https://<bucket>-<appid>.cos.<region>.myqcloud.com"
-CUBE_JFS_ACCESS_KEY="<COS-SecretId>"
-CUBE_JFS_SECRET_KEY="<COS-SecretKey>"
-```
-
-Then follow [Installation and deployment](#installation-and-deployment) to initialize the JuiceFS filesystem on the control node and configure the compute nodes.
-
-Cube does not currently support a seamless switch from object store A to object store B. Select the intended object store during one-click installation, or migrate data according to the JuiceFS official [data synchronization guide](https://juicefs.com/docs/community/guide/sync/).
-
-### Use a metadata engine other than Redis
-
-`CUBE_JFS_META_URL` can point to MySQL, PostgreSQL, TiKV, or another metadata engine supported by JuiceFS. For example:
-
-```bash
-CUBE_JFS_META_URL="mysql://user:@(10.0.0.20:3306)/juicefs"
-CUBE_JFS_META_PASSWORD="password"
-```
-
-For a new cluster, set this URL and initialize the control node. To migrate an existing volume, stop writes and unmount all clients, use `juicefs dump` to export metadata from the old engine, and use `juicefs load` to import it into an empty new engine. Then update `CUBE_JFS_META_URL` on every node and remount. Object-store credentials are excluded from the dump by default and must be configured again in the new metadata engine. See the JuiceFS official [metadata backup and migration](https://juicefs.com/docs/community/metadata_dump_load/) documentation.
-
-> JuiceFS metadata storage is critical. For production deployments, a Redis cluster is recommended to reduce the risk of data loss.
 
 ## JFS configuration notes
 
@@ -192,7 +300,7 @@ Place the cache directory on a dedicated fast data disk and keep `CUBE_JFS_CACHE
 
 By default, each target node pulls `juicedata/mount:ce-v1.4.1` from the image registry.
 
-For an offline environment, load the image in advance with `docker load`, then set `CUBE_JFS_IMAGE` in the configuration file to the local image name.
+For an offline environment, load the image in advance with `docker load`, then set `CUBE_JFS_IMAGE` in the configuration file to the local image name. Kubernetes deployments set `images.juicefs.repository` / `tag` in the values instead.
 
 Only upgrade the JuiceFS image when necessary, and use the same pinned version on every node.
 
@@ -239,3 +347,15 @@ With `--writeback`, closed files may still have blocks in the local staging area
 ### Restore remains pinned to the origin
 
 Confirm that the resource has `backend=jfs` and `remote_status=ready`, every node uses the same metadata URL and `root`, and the target node's CPU and kernel satisfy the [cross-node restore requirements](./requirements.md). A host mount still pins the sandbox to its origin.
+
+### Kubernetes: the format Job failed on the first install
+
+Wrong metadata or object-storage credentials exhaust the format Job's retries; mount Pods then stay in `Init:CrashLoopBackOff` waiting for a volume that never becomes ready. Fix the credentials, delete the failed Job, and re-run the same `helm upgrade` — the Job is not retried on its own because its name only changes when its spec changes:
+
+```bash
+kubectl -n cube-system delete job -l app.kubernetes.io/component=cube-juicefs-format
+```
+
+### Kubernetes: the chart-created JuiceFS metadata Secret was deleted
+
+The metadata Secret holds the password of the chart-managed JuiceFS Redis. Helm upgrades keep its current password via a lookup, so never delete it: the chart would generate a new random password while the running Redis still uses the old one, and every new JuiceFS Pod would fail to authenticate. If it happens anyway, set `cubeJuiceFS.metadata.password` to the password the Redis actually uses (read it from the Redis Pod's `/etc/redis/redis-auth.conf` before kubelet syncs the deletion), set `cubeJuiceFS.lifecycleChangeAck: true`, re-run the upgrade, and remove the acknowledgement afterwards.

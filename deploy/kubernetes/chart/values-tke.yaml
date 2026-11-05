@@ -53,6 +53,12 @@ redis:
   persistence:
     storageClassName: cube-cbs-wffc
 
+cubeJuiceFS:
+  metadata:
+    redis:
+      persistence:
+        storageClassName: cube-cbs-wffc
+
 minio:
   persistence:
     storageClassName: cube-cbs-wffc

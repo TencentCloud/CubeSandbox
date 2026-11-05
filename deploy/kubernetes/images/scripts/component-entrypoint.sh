@@ -677,6 +677,90 @@ patch_cow_s3_opt_in() {
   log "cow.s3 enable=true socket_path=${sock}"
 }
 
+patch_cow_jfs_opt_in() {
+  local cfg="$1"
+  local mount_path="$2"
+  local root="$3"
+  local cache_dir="$4"
+  local node_name="$5"
+  local header='[plugins."io.cubelet.internal.v1.storage".cow.jfs]'
+  local tmp
+
+  [[ -n "${mount_path}" ]] || fail "CUBE_JFS_MOUNT_PATH is empty"
+  [[ -n "${root}" ]] || fail "CUBE_JFS_ROOT is empty"
+  [[ -n "${cache_dir}" ]] || fail "CUBE_JFS_CACHE_DIR is empty"
+  [[ -n "${node_name}" ]] || fail "CUBE_SANDBOX_NODE_ID is empty while JuiceFS is enabled"
+
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  awk \
+    -v header="${header}" \
+    -v mount_path="${mount_path}" \
+    -v root="${root}" \
+    -v cache_dir="${cache_dir}" \
+    -v node_name="${node_name}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    function flush_jfs() {
+      if (!in_jfs) return
+      if (!found_enable) print "    enable = true"
+      if (!found_mount) print "    mount_path = \"" mount_path "\""
+      if (!found_root) print "    root = \"" root "\""
+      if (!found_cache) print "    cache_dir = \"" cache_dir "\""
+      if (!found_node) print "    node_name = \"" node_name "\""
+      in_jfs = 0
+    }
+    is_table($0, header) {
+      flush_jfs()
+      in_jfs = 1
+      seen_header++
+      found_enable = found_mount = found_root = found_cache = found_node = 0
+      print
+      next
+    }
+    in_jfs && /^[[:space:]]*\[/ {
+      flush_jfs()
+    }
+    in_jfs && /^[[:space:]]*enable[[:space:]]*=/ {
+      print "    enable = true"; found_enable = 1; next
+    }
+    in_jfs && /^[[:space:]]*mount_path[[:space:]]*=/ {
+      print "    mount_path = \"" mount_path "\""; found_mount = 1; next
+    }
+    in_jfs && /^[[:space:]]*root[[:space:]]*=/ {
+      print "    root = \"" root "\""; found_root = 1; next
+    }
+    in_jfs && /^[[:space:]]*cache_dir[[:space:]]*=/ {
+      print "    cache_dir = \"" cache_dir "\""; found_cache = 1; next
+    }
+    in_jfs && /^[[:space:]]*node_name[[:space:]]*=/ {
+      print "    node_name = \"" node_name "\""; found_node = 1; next
+    }
+    { print }
+    END {
+      flush_jfs()
+      if (seen_header == 0) {
+        print ""
+        print "    " header
+        print "    enable = true"
+        print "    mount_path = \"" mount_path "\""
+        print "    root = \"" root "\""
+        print "    cache_dir = \"" cache_dir "\""
+        print "    node_name = \"" node_name "\""
+      }
+    }
+  ' "${cfg}" > "${tmp}"
+
+  if [[ "$(grep -Ec '^[[:space:]]*\[plugins\."io\.cubelet\.internal\.v1\.storage"\.cow\.jfs\]' "${tmp}" || true)" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "expected exactly one live ${header}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+  log "cow.jfs enable=true mount_path=${mount_path} root=${root} cache_dir=${cache_dir} node_name=${node_name}"
+}
+
 detect_primary_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '
     {
@@ -1042,6 +1126,14 @@ run_cubelet() {
   fi
   if [[ -n "${CUBE_S3LVOL_SOCKET:-}" ]]; then
     patch_cow_s3_opt_in "${cfg}" "${CUBE_S3LVOL_SOCKET}"
+  fi
+  if [[ "${CUBE_JFS_ENABLED:-0}" == "1" ]]; then
+    patch_cow_jfs_opt_in \
+      "${cfg}" \
+      "${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}" \
+      "${CUBE_JFS_ROOT:-cube}" \
+      "${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}" \
+      "${CUBE_SANDBOX_NODE_ID:-}"
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"

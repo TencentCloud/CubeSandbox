@@ -72,6 +72,16 @@ spec:
             - name: CUBE_S3LVOL_SOCKET
               value: {{ include "cube.s3lvolSocketPath" . | quote }}
             {{- end }}
+            {{- if .Values.cubeJuiceFS.enabled }}
+            - name: CUBE_JFS_ENABLED
+              value: "1"
+            - name: CUBE_JFS_MOUNT_PATH
+              value: {{ .Values.cubeJuiceFS.mountPath | quote }}
+            - name: CUBE_JFS_ROOT
+              value: {{ .Values.cubeJuiceFS.root | quote }}
+            - name: CUBE_JFS_CACHE_DIR
+              value: {{ .Values.cubeJuiceFS.cacheDir | quote }}
+            {{- end }}
           ports:
             - name: cubelet-grpc
               containerPort: 9999

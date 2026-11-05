@@ -1,0 +1,158 @@
+{{- if and (eq (include "cube.juicefsEnabled" .) "true") (eq ((((.Values.cubeJuiceFS).metadata).url) | default "") "") }}
+{{- $meta := .Values.cubeJuiceFS.metadata }}
+{{- $redis := $meta.redis }}
+{{- $persistence := $redis.persistence }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.juicefsRedisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-juicefs-redis
+data:
+  redis.conf: |
+    include /etc/redis/redis-auth.conf
+    bind 0.0.0.0
+    port {{ $redis.port }}
+    dir /data
+    protected-mode yes
+    appendonly yes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.juicefsRedisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-juicefs-redis
+spec:
+  clusterIP: None
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-juicefs-redis
+  ports:
+    - name: redis
+      port: {{ $redis.port }}
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cube.juicefsRedisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-juicefs-redis
+  annotations:
+    cube.tencent.com/juicefs-redis-persistence-hash: {{ include "cube.juicefsRedisPersistenceHash" . | quote }}
+spec:
+  serviceName: {{ include "cube.juicefsRedisName" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-juicefs-redis
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-juicefs-redis
+      annotations:
+        cube.tencent.com/juicefs-metadata-credential-hash: {{ include "cube.juicefsMetadataCredentialHash" . | quote }}
+    spec:
+      {{- if .Values.controlPlane.enabled }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- else }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis
+          image: {{ include "cube.image" $redis.image | quote }}
+          imagePullPolicy: {{ $redis.image.pullPolicy }}
+          args: ["/etc/redis/redis.conf"]
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.juicefsMetadataSecretName" . }}
+                  key: {{ $meta.passwordKey | default "meta-password" }}
+          ports:
+            - name: redis
+              containerPort: {{ $redis.port }}
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "REDISCLI_AUTH=\"$REDIS_PASSWORD\" redis-cli -p {{ $redis.port }} ping | grep -x PONG"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "REDISCLI_AUTH=\"$REDIS_PASSWORD\" redis-cli -p {{ $redis.port }} ping | grep -x PONG"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "REDISCLI_AUTH=\"$REDIS_PASSWORD\" redis-cli -p {{ $redis.port }} ping | grep -x PONG"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: redis-data
+              mountPath: /data
+          {{- with $redis.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: redis-config
+          projected:
+            sources:
+              - configMap:
+                  name: {{ include "cube.juicefsRedisName" . }}
+              - secret:
+                  name: {{ include "cube.juicefsMetadataSecretName" . }}
+                  items:
+                    - key: redis-auth.conf
+                      path: redis-auth.conf
+        {{- if not $persistence.enabled }}
+        - name: redis-data
+          emptyDir: {}
+        {{- else if or $persistence.hostPath $persistence.existingClaim }}
+        - name: redis-data
+          {{- if $persistence.hostPath }}
+          hostPath:
+            path: {{ $persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.juicefsRedisPVCName" . }}
+          {{- end }}
+        {{- end }}
+  {{- if and $persistence.enabled (not $persistence.hostPath) (not $persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          app.kubernetes.io/name: {{ include "cube.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
+          app.kubernetes.io/component: cube-juicefs-redis
+      spec:
+        accessModes:
+          {{- toYaml $persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ $persistence.size | quote }}
+        {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" $persistence) -}}
+        {{- if $sc }}
+        storageClassName: {{ $sc | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}
