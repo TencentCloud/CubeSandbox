@@ -64,6 +64,10 @@ func (e *Engine) CreateVolumeFromSnapshot(string, string) (string, error) {
 	return "", fmt.Errorf(nativeBuildHint)
 }
 
+func (e *Engine) PromoteVolumeToSnapshot(string, string, string) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
+}
+
 func (e *Engine) ActivateVolume(string) (string, error) {
 	return "", fmt.Errorf(nativeBuildHint)
 }
