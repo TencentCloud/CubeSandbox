@@ -195,3 +195,202 @@ fn getxattr_disabled_returns_enosys() {
         .unwrap();
     assert_eq!(err.raw_os_error(), Some(libc::ENOSYS));
 }
+
+#[test]
+fn remaining_xattrs_do_not_open_regular_file() {
+    let fixture = Fixture::new(true);
+    let path = fixture.path.join("file");
+    fs::write(&path, b"hello world").unwrap();
+    let inode = fixture.inode("file");
+    let name = CString::new("user.virtiofsd_test").unwrap();
+    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    assert!(fd >= 0);
+    let mut watch = unsafe { File::from_raw_fd(fd) };
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert!(
+        unsafe {
+            libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_OPEN | libc::IN_CLOSE_NOWRITE)
+        } >= 0
+    );
+
+    fixture.set_xattr(inode, &name, b"value");
+    let mut events = [0; 1024];
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().raw_os_error(),
+        Some(libc::EAGAIN),
+        "setxattr must not open or close the data file"
+    );
+    fixture.fs.listxattr(fixture.ctx, inode, 0).unwrap();
+    fixture.fs.listxattr(fixture.ctx, inode, 4096).unwrap();
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().raw_os_error(),
+        Some(libc::EAGAIN),
+        "listxattr must not open or close the data file"
+    );
+    fixture.fs.removexattr(fixture.ctx, inode, &name).unwrap();
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().raw_os_error(),
+        Some(libc::EAGAIN),
+        "removexattr must not open or close the data file"
+    );
+}
+
+#[test]
+fn remaining_xattr_semantics_for_files_directories_and_unlinked_inodes() {
+    let fixture = Fixture::new(true);
+    fs::write(fixture.path.join("file"), b"data").unwrap();
+    fs::create_dir(fixture.path.join("dir")).unwrap();
+    fs::write(fixture.path.join("unlinked"), b"data").unwrap();
+    let unlinked = fixture.inode("unlinked");
+    fs::remove_file(fixture.path.join("unlinked")).unwrap();
+    let name = CString::new("user.virtiofsd_test").unwrap();
+    for inode in [fixture.inode("file"), fixture.inode("dir"), unlinked] {
+        fixture
+            .fs
+            .setxattr(
+                fixture.ctx,
+                inode,
+                &name,
+                b"first",
+                libc::XATTR_CREATE as u32,
+                SetxattrFlags::empty(),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .fs
+                .setxattr(
+                    fixture.ctx,
+                    inode,
+                    &name,
+                    b"duplicate",
+                    libc::XATTR_CREATE as u32,
+                    SetxattrFlags::empty()
+                )
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EEXIST)
+        );
+        fixture
+            .fs
+            .setxattr(
+                fixture.ctx,
+                inode,
+                &name,
+                b"replacement",
+                libc::XATTR_REPLACE as u32,
+                SetxattrFlags::empty(),
+            )
+            .unwrap();
+        assert!(matches!(
+            fixture.fs.getxattr(fixture.ctx, inode, &name, 32).unwrap(),
+            GetxattrReply::Value(value) if value == b"replacement"
+        ));
+        let count = match fixture.fs.listxattr(fixture.ctx, inode, 0).unwrap() {
+            ListxattrReply::Count(count) => count,
+            _ => panic!("expected xattr list size"),
+        };
+        assert!(count >= name.as_bytes_with_nul().len() as u32);
+        assert!(matches!(
+            fixture.fs.listxattr(fixture.ctx, inode, count).unwrap(),
+            ListxattrReply::Names(names) if names.split(|byte| *byte == 0).any(|entry| entry == name.as_bytes())
+        ));
+        assert_eq!(
+            fixture
+                .fs
+                .listxattr(fixture.ctx, inode, 1)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ERANGE)
+        );
+        fixture.fs.removexattr(fixture.ctx, inode, &name).unwrap();
+        assert_eq!(
+            fixture
+                .fs
+                .removexattr(fixture.ctx, inode, &name)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ENODATA)
+        );
+        assert_eq!(
+            fixture
+                .fs
+                .setxattr(
+                    fixture.ctx,
+                    inode,
+                    &name,
+                    b"missing",
+                    libc::XATTR_REPLACE as u32,
+                    SetxattrFlags::empty()
+                )
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ENODATA)
+        );
+    }
+}
+
+#[test]
+fn remaining_xattrs_disabled_return_enosys() {
+    let fixture = Fixture::new(false);
+    let name = CString::new("user.virtiofsd_test").unwrap();
+    assert_eq!(
+        fixture
+            .fs
+            .setxattr(
+                fixture.ctx,
+                fuse::ROOT_ID,
+                &name,
+                b"value",
+                0,
+                SetxattrFlags::empty()
+            )
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ENOSYS)
+    );
+    assert_eq!(
+        fixture
+            .fs
+            .listxattr(fixture.ctx, fuse::ROOT_ID, 0)
+            .err()
+            .unwrap()
+            .raw_os_error(),
+        Some(libc::ENOSYS)
+    );
+    assert_eq!(
+        fixture
+            .fs
+            .removexattr(fixture.ctx, fuse::ROOT_ID, &name)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ENOSYS)
+    );
+}
+
+#[test]
+fn setxattr_clears_remapped_file_capabilities_without_reopening() {
+    let mut fixture = Fixture::new(true);
+    fs::write(fixture.path.join("file"), b"data").unwrap();
+    let inode = fixture.inode("file");
+    let capability = CString::new("user.remapped_capability").unwrap();
+    let name = CString::new("user.virtiofsd_test").unwrap();
+    fixture.set_xattr(inode, &capability, b"capability");
+    fixture.fs.cfg.xattr_security_capability = Some(capability.clone());
+    fixture.set_xattr(inode, &name, b"value");
+    assert_eq!(
+        fixture
+            .fs
+            .getxattr(fixture.ctx, inode, &capability, 0)
+            .err()
+            .unwrap()
+            .raw_os_error(),
+        Some(libc::ENODATA)
+    );
+    fixture.set_xattr(inode, &name, b"replacement");
+    assert!(matches!(
+        fixture.fs.getxattr(fixture.ctx, inode, &name, 32).unwrap(),
+        GetxattrReply::Value(value) if value == b"replacement"
+    ));
+}
