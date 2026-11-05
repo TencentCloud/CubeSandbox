@@ -8,7 +8,7 @@
 
 ## 适合收录的内容
 
-- LangChain、Dify、OpenClaw、Claude Code 等 Agent 框架集成
+- LangChain、LangGraph、Dify、OpenClaw、Claude Code 等 Agent 框架集成
 - SDK 接线方式与平台相关配置说明
 - 带示例仓库的端到端集成方案
 - 兼容性说明、限制条件与推荐配置
@@ -51,5 +51,6 @@ lang: zh-CN
 | [Claude Code 集成指南](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain 集成指南](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [OpenAI Agents SDK 集成指南](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
+| [LangGraph 集成指南](./langgraph.md) | Mikey1129 | 2026-08-29 | integration, langgraph, agent |
 | [Ubuntu 桌面沙箱指南](./ubuntu-desktop.md) | jinlong | 2026-09-15 | integration, ubuntu-desktop, novnc, gui-automation |
 | [OpenCode 集成指南（插件钩子方案）](./opencode-plugin.md) | Tantanovo | 2026-07-31 | integration, opencode, coding-agent, plugin |

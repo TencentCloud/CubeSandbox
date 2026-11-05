@@ -8,7 +8,7 @@ This section collects integration guides for agent frameworks, developer tools, 
 
 ## What belongs here
 
-- Agent framework integrations such as LangChain, Dify, OpenClaw, or Claude Code
+- Agent framework integrations such as LangChain, LangGraph, Dify, OpenClaw, or Claude Code
 - SDK wiring guides and platform-specific setup notes
 - End-to-end integration patterns with example repositories
 - Compatibility notes, caveats, and recommended configuration defaults
@@ -52,4 +52,5 @@ lang: en-US
 | [LangChain Integration Guide](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [OpenCode Integration Guide (Plugin Hook)](./opencode-plugin.md) | Tantanovo | 2026-07-31 | integration, opencode, coding-agent, plugin |
 | [OpenAI Agents SDK Integration Guide](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
+| [LangGraph Integration Guide](./langgraph.md) | Mikey1129 | 2026-08-29 | integration, langgraph, agent |
 | [Ubuntu Desktop Sandbox Guide](./ubuntu-desktop.md) | jinlong | 2026-09-15 | integration, ubuntu-desktop, novnc, gui-automation |
