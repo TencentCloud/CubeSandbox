@@ -118,12 +118,14 @@ func DeleteTemplateWithOptions(ctx context.Context, templateID, instanceType str
 	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
 		return err
 	}
-	return withTemplateWriteLock(templateID, func() error {
-		targets, err := discoverTemplateCleanupTargets(ctx, templateID, instanceType)
-		if err != nil {
-			return err
-		}
-		return deleteTemplateWithTargets(ctx, templateID, targets, opts)
+	return withTemplateLifecycleLock(ctx, templateID, func() error {
+		return withTemplateWriteLock(templateID, func() error {
+			targets, err := discoverTemplateCleanupTargets(ctx, templateID, instanceType)
+			if err != nil {
+				return err
+			}
+			return deleteTemplateWithTargets(ctx, templateID, targets, opts)
+		})
 	})
 }
 

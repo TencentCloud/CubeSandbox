@@ -245,6 +245,24 @@ func updateTemplateImageJob(ctx context.Context, jobID string, values map[string
 	return updateTemplateImageJobTx(store.db.WithContext(ctx), jobID, values)
 }
 
+func templateImageJobActive(ctx context.Context, jobID string) (bool, error) {
+	var count int64
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ? AND status IN ?", jobID, []string{JobStatusPending, JobStatusRunning, JobStatusBuilt}).
+		Count(&count).Error
+	return count > 0, err
+}
+
+// updateTemplateImageJobIfActive prevents a force delete that marked the job
+// FAILED from being overwritten by the build goroutine's late READY update.
+func updateTemplateImageJobIfActive(ctx context.Context, jobID string, values map[string]any) (bool, error) {
+	values["updated_at"] = time.Now()
+	result := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ? AND status IN ?", jobID, []string{JobStatusPending, JobStatusRunning, JobStatusBuilt}).
+		Updates(values)
+	return result.RowsAffected > 0, result.Error
+}
+
 func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) error {
 	values["updated_at"] = time.Now()
 	result := tx.Table(constants.TemplateImageJobTableName).

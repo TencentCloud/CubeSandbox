@@ -19,6 +19,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
+var resolveJFSRedoLifecycleNodes = resolveTemplateNodes
+
+func jfsRedoLifecycleTargets(sourceReq *types.CreateTemplateFromImageReq, redoReq *types.RedoTemplateFromImageReq, current []*node.Node) ([]*node.Node, error) {
+	if redoReq == nil || (!redoReq.FailedOnly && len(redoReq.DistributionScope) == 0) {
+		return current, nil
+	}
+	return resolveJFSRedoLifecycleNodes(sourceReq.InstanceType, sourceReq.DistributionScope)
+}
+
 func normalizeRedoTemplateImageRequest(req *types.RedoTemplateFromImageReq) (*types.RedoTemplateFromImageReq, error) {
 	if req == nil {
 		return nil, errors.New("request is nil")
@@ -457,78 +466,109 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		resumePhase = JobPhaseSnapshotting
 	}
 
-	if err := cleanupTemplateReplicasOnNodes(ctx, req.TemplateID, existingReplicas, readyTargets, pinnedCleanupBackend(storageBackendFromCreate(generatedReq))); err != nil {
-		failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, fmt.Sprintf("cleanup template replicas before redo snapshot failed: %v", err))
-		return
+	cleanupBackend := pinnedCleanupBackend(storageBackendFromCreate(generatedReq))
+	cleanupTargets := readyTargets
+	eagerAdoptReq := &workingReq
+	if constants.IsJFSBackend(cleanupBackend) {
+		// Redo's requested scope may be narrowed (including failed-only), but
+		// an earlier eager fan-out populated the original create scope. Clean
+		// and re-adopt that complete scope so stale catalogs outside this
+		// attempt cannot become findJFSTemplate's source.
+		cleanupTargets, err = jfsRedoLifecycleTargets(sourceReq, req, targets)
+		if err != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, fmt.Sprintf("resolve original jfs adoption scope: %v", err))
+			return
+		}
+		eagerAdoptReq = sourceReq
 	}
-	storedReq, err := normalizeStoredTemplateRequest(generatedReq)
-	if err != nil {
-		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
-		return
-	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
-		StorageBackend: storageBackendFromCreate(generatedReq),
-	}); err != nil {
-		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
-		return
-	}
-	if _, err := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
-		ArtifactID: artifact.ArtifactID,
-		JobID:      jobID,
-	}); err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseSnapshotting,
+	finalize := func() {
+		if err := cleanupTemplateReplicasOnNodes(ctx, req.TemplateID, existingReplicas, cleanupTargets, cleanupBackend); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, fmt.Sprintf("cleanup template replicas before redo snapshot failed: %v", err))
+			return
+		}
+		storedReq, err := normalizeStoredTemplateRequest(generatedReq)
+		if err != nil {
+			failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
+			return
+		}
+		if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
+			StorageBackend: storageBackendFromCreate(generatedReq),
+		}); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
+			return
+		}
+		if _, err := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
+			ArtifactID: artifact.ArtifactID,
+			JobID:      jobID,
+		}); err != nil {
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseSnapshotting,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   err.Error(),
+			})
+			return
+		}
+		claimWarning, err := refreshTemplateReplicaSummary(ctx, req.TemplateID, jobID)
+		if err != nil {
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseSnapshotting,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   err.Error(),
+			})
+			return
+		}
+		info, err := GetTemplateInfo(ctx, req.TemplateID)
+		if err != nil {
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseSnapshotting,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   err.Error(),
+			})
+			return
+		}
+		finalStatus := JobStatusReady
+		finalPhase := JobPhaseReady
+		if info.Status == StatusFailed {
+			finalStatus = JobStatusFailed
+			finalPhase = JobPhaseSnapshotting
+		}
+		resultPayload, _ := json.Marshal(info)
+		errorMessage := info.LastError
+		if errorMessage == "" && claimWarning != "" {
+			errorMessage = claimWarning
+		}
+		jobValues := map[string]any{
+			"status":          finalStatus,
+			"phase":           finalPhase,
 			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
+			"artifact_id":     artifact.ArtifactID,
+			"artifact_status": artifact.Status,
+			"template_status": info.Status,
+			"result_json":     string(resultPayload),
+			"error_message":   errorMessage,
+		}
+		if finalStatus == JobStatusReady && eagerAdoptJFSBackend(eagerAdoptReq, generatedReq) {
+			if _, publishErr := eagerAdoptAndPublishJFSTemplateLocked(ctx, jobID, eagerAdoptReq, generatedReq, req.TemplateID, jobValues); publishErr != nil {
+				log.G(ctx).Errorf("coordinate redo eager jfs adoption: %v", publishErr)
+			}
+			return
+		}
+		_ = updateTemplateImageJob(ctx, jobID, jobValues)
+	}
+	if constants.IsJFSBackend(cleanupBackend) {
+		if _, lockErr := withActiveJFSTemplateLifecycle(ctx, jobID, req.TemplateID, func() error {
+			finalize()
+			return nil
+		}); lockErr != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, fmt.Sprintf("coordinate jfs redo lifecycle: %v", lockErr))
+		}
 		return
 	}
-	// refreshTemplateReplicaSummary claims the alias *before* publishing the
-	// READY status so a client that observes the template as READY can always
-	// resolve the alias (closes the redo/claim publish-ordering race).
-	claimWarning, err := refreshTemplateReplicaSummary(ctx, req.TemplateID, jobID)
-	if err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseSnapshotting,
-			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
-		return
-	}
-	info, err := GetTemplateInfo(ctx, req.TemplateID)
-	if err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseSnapshotting,
-			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
-		return
-	}
-	finalStatus := JobStatusReady
-	finalPhase := JobPhaseReady
-	if info.Status == StatusFailed {
-		finalStatus = JobStatusFailed
-		finalPhase = JobPhaseSnapshotting
-	}
-	resultPayload, _ := json.Marshal(info)
-	errorMessage := info.LastError
-	if errorMessage == "" && claimWarning != "" {
-		errorMessage = claimWarning
-	}
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-		"status":          finalStatus,
-		"phase":           finalPhase,
-		"progress":        100,
-		"artifact_id":     artifact.ArtifactID,
-		"artifact_status": artifact.Status,
-		"template_status": info.Status,
-		"result_json":     string(resultPayload),
-		"error_message":   errorMessage,
-	})
+	finalize()
 }

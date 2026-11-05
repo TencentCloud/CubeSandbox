@@ -13,6 +13,22 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
+// jfs keeps replica rows meaning "built the shared package": distribution
+// only caches the ext4 and must not fabricate replica rows, on any alias
+// or spelling of the backend.
+func TestDistributionTracksReplicas(t *testing.T) {
+	for _, backend := range []string{"jfs", "JuiceFS", "juicefs"} {
+		if distributionTracksReplicas(backend) {
+			t.Fatalf("backend %q must not track replica rows during distribution", backend)
+		}
+	}
+	for _, backend := range []string{"xfs", "s3", "cubecow", ""} {
+		if !distributionTracksReplicas(backend) {
+			t.Fatalf("backend %q must track replica rows during distribution", backend)
+		}
+	}
+}
+
 func TestTemplateBuildTargetsBuildsJFSOnOneSchedulableNode(t *testing.T) {
 	a, b, c := testNode("a", "10.0.0.1"), testNode("b", "10.0.0.2"), testNode("c", "10.0.0.3")
 	a.SetSchedulingDisabled(true)

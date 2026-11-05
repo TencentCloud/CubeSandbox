@@ -12,12 +12,49 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
-	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 var adoptJFSTemplate = storage.AdoptJFSTemplate
+
+// AdoptJFSTemplate is the Master-facing eager adoption entry: right after
+// the build node publishes the template, Master asks every in-scope node to
+// clone the shared package into its own tree so first-use creates skip the
+// inline adoption. The seam is shared with prepareSharedTemplate, so this
+// is exactly the fallback path, invoked early. Idempotent: a node that
+// already holds the template (including the builder) answers success with
+// adopted=false.
+func (s *service) AdoptJFSTemplate(ctx context.Context, req *cubebox.AdoptJFSTemplateRequest) (*cubebox.AdoptJFSTemplateResponse, error) {
+	templateID := strings.TrimSpace(req.GetTemplateID())
+	rsp := &cubebox.AdoptJFSTemplateResponse{
+		RequestID:  req.GetRequestID(),
+		TemplateID: templateID,
+		Ret:        &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+	}
+	if templateID == "" {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = "templateID is required"
+		return rsp, nil
+	}
+	if err := pathutil.ValidateSafeID(templateID); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	adopted, err := adoptJFSTemplate(ctx, templateID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	rsp.Adopted = adopted
+	log.G(ctx).Infof("jfs template %s adopt rpc: adopted=%t", templateID, adopted)
+	return rsp, nil
+}
 
 // prepareSharedTemplate makes the jfs template a create starts from usable
 // on this node. Master builds a jfs template on one node only and may place

@@ -122,93 +122,103 @@ func finishTemplateImageJobAfterArtifact(
 		}
 		return failErr
 	}
-	var info *TemplateInfo
-	storedReq, err := normalizeStoredTemplateRequest(generatedReq)
-	if err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseCreatingTemplate,
-			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
-		return err
-	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
-		StorageBackend: req.Backend,
-	}); err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseCreatingTemplate,
-			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
-		return err
-	}
-	logger.Infof("template definition written; creating replicas on %d node(s)", len(readyTargets))
-	replicas, persistErr := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
-		ArtifactID: artifact.ArtifactID,
-		JobID:      jobID,
-	})
-	// claimWarning is populated by finalizeTemplateReplicas, which claims the
-	// alias *before* publishing the READY status so a client that sees READY
-	// can always resolve the alias.
-	claimWarning := ""
-	if persistErr != nil {
-		err = persistErr
-	} else {
-		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
-	}
-	if err != nil {
-		if builtFreshArtifact {
-			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
-				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
-			}
+	finalize := func() error {
+		var info *TemplateInfo
+		storedReq, err := normalizeStoredTemplateRequest(generatedReq)
+		if err != nil {
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseCreatingTemplate,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   err.Error(),
+			})
+			return err
 		}
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseCreatingTemplate,
-			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
-		return err
-	}
-	// Alias was already claimed by finalizeTemplateReplicas (before the READY
-	// status was published) to avoid the create/claim publish-ordering race.
-	resultPayload, _ := json.Marshal(info)
-	// Keep TC's BUILT report if this job was built remotely: writing the
-	// template payload straight over result_json used to erase the only durable
-	// proof of where the ext4 came from, on failed jobs too.
-	resultPayload = preserveRemoteBuildReport(ctx, jobID, resultPayload)
-	jobStatus := JobStatusReady
-	jobPhase := JobPhaseReady
-	if info.Status == StatusFailed {
-		if builtFreshArtifact {
-			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
-				logger.Errorf("cleanup fresh rootfs artifact after failed template status fail: %v", cleanupErr)
-			}
+		if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
+			StorageBackend: req.Backend,
+		}); err != nil {
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseCreatingTemplate,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   err.Error(),
+			})
+			return err
 		}
-		jobStatus = JobStatusFailed
-		jobPhase = JobPhaseCreatingTemplate
+		logger.Infof("template definition written; creating replicas on %d node(s)", len(readyTargets))
+		replicas, persistErr := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
+			ArtifactID: artifact.ArtifactID,
+			JobID:      jobID,
+		})
+		claimWarning := ""
+		if persistErr != nil {
+			err = persistErr
+		} else {
+			info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
+		}
+		if err != nil {
+			if builtFreshArtifact {
+				if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
+					logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
+				}
+			}
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseCreatingTemplate,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   err.Error(),
+			})
+			return err
+		}
+		resultPayload, _ := json.Marshal(info)
+		resultPayload = preserveRemoteBuildReport(ctx, jobID, resultPayload)
+		jobStatus := JobStatusReady
+		jobPhase := JobPhaseReady
+		if info.Status == StatusFailed {
+			if builtFreshArtifact {
+				if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
+					logger.Errorf("cleanup fresh rootfs artifact after failed template status fail: %v", cleanupErr)
+				}
+			}
+			jobStatus = JobStatusFailed
+			jobPhase = JobPhaseCreatingTemplate
+		}
+		errorMessage := info.LastError
+		if errorMessage == "" && claimWarning != "" {
+			errorMessage = claimWarning
+		}
+		jobValues := map[string]any{
+			"status":          jobStatus,
+			"phase":           jobPhase,
+			"progress":        100,
+			"template_status": info.Status,
+			"result_json":     string(resultPayload),
+			"error_message":   errorMessage,
+		}
+		if jobStatus == JobStatusReady && eagerAdoptJFSBackend(req, generatedReq) {
+			published, publishErr := eagerAdoptAndPublishJFSTemplateLocked(ctx, jobID, req, generatedReq, req.TemplateID, jobValues)
+			if publishErr != nil {
+				return fmt.Errorf("coordinate eager jfs adoption: %w", publishErr)
+			}
+			if !published {
+				return nil
+			}
+		} else {
+			_ = updateTemplateImageJob(ctx, jobID, jobValues)
+		}
+		if jobStatus == JobStatusFailed {
+			return fmt.Errorf("template creation failed: %s", errorMessage)
+		}
+		return nil
 	}
-	errorMessage := info.LastError
-	if errorMessage == "" && claimWarning != "" {
-		errorMessage = claimWarning
+	if eagerAdoptJFSBackend(req, generatedReq) {
+		_, lifecycleErr := withActiveJFSTemplateLifecycle(ctx, jobID, req.TemplateID, finalize)
+		return lifecycleErr
 	}
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-		"status":          jobStatus,
-		"phase":           jobPhase,
-		"progress":        100,
-		"template_status": info.Status,
-		"result_json":     string(resultPayload),
-		"error_message":   errorMessage,
-	})
-	if jobStatus == JobStatusFailed {
-		return fmt.Errorf("template creation failed: %s", errorMessage)
-	}
-	return nil
+	return finalize()
 }
 
 func errorString(err error) string {

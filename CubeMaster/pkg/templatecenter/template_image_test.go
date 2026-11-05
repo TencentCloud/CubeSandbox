@@ -1673,6 +1673,16 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	distributedSHA := ""
 	generatedToken := ""
 	generatedSHA := ""
+	terminalReady := false
+	adoptedBeforeReady := false
+
+	stubEagerAdoptSeams(t, targets, nil, func(_ context.Context, target *node.Node) (*cubeboxv1.AdoptJFSTemplateResponse, error) {
+		if terminalReady {
+			t.Fatal("redo job became READY before eager adoption completed")
+		}
+		adoptedBeforeReady = true
+		return successAdopt(context.Background(), target)
+	})
 
 	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
 		return &models.TemplateImageJob{
@@ -1683,6 +1693,12 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		}, nil
 	})
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		if values["status"] == JobStatusReady {
+			if !adoptedBeforeReady {
+				t.Fatal("redo terminal READY update happened before eager adoption")
+			}
+			terminalReady = true
+		}
 		return nil
 	})
 	patches.ApplyFunc(unmarshalTemplateImageJobRequest, func(payload string) (*types.CreateTemplateFromImageReq, error) {
@@ -1692,6 +1708,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
 			WritableLayerSize: "20Gi",
 			SourceImageRef:    "docker.io/library/nginx:latest",
+			Backend:           "jfs",
 		}, nil
 	})
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
@@ -1795,6 +1812,9 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	}
 	if distributedSHA != freshArtifact.Ext4SHA256 || generatedSHA != freshArtifact.Ext4SHA256 {
 		t.Fatalf("distributed sha=%q generated sha=%q, want refreshed %q", distributedSHA, generatedSHA, freshArtifact.Ext4SHA256)
+	}
+	if !adoptedBeforeReady || !terminalReady {
+		t.Fatalf("adoptedBeforeReady=%v terminalReady=%v, want both true", adoptedBeforeReady, terminalReady)
 	}
 }
 
