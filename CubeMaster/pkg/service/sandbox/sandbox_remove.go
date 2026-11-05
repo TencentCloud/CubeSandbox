@@ -253,7 +253,9 @@ func callCubeletTask(ctx context.Context, callEp string, req *cubebox.DestroyCub
 }
 
 // stampDestroyStorageBackend copies the sandbox's persisted CoW backend onto
-// the Cubelet Destroy request so S3 sandboxes delete on the S3 Store.
+// the Cubelet Destroy request so S3 sandboxes delete on the S3 Store. The
+// returned spec is also the killed event's provenance, so it is loaded
+// best-effort even when nothing needs stamping.
 func stampDestroyStorageBackend(ctx context.Context, sandboxID string, req *cubebox.DestroyCubeSandboxRequest) *types.CreateCubeSandboxReq {
 	if req == nil {
 		return nil
@@ -261,15 +263,18 @@ func stampDestroyStorageBackend(ctx context.Context, sandboxID string, req *cube
 	if req.Annotations == nil {
 		req.Annotations = map[string]string{}
 	}
-	if strings.TrimSpace(req.Annotations[constants.CubeAnnotationStorageBackend]) != "" {
-		return nil
-	}
+	// Deliberately NOT short-circuited on an already-stamped annotation: the
+	// spec is the only source of sandbox_template_id and user metadata for
+	// sandbox.lifecycle.killed, and returning nil here would strip both
+	// whenever the caller happened to set the backend itself.
 	spec, err := sandboxspec.Get(ctx, sandboxID)
-	if err != nil || spec == nil {
-		return nil
+	if err != nil {
+		spec = nil
 	}
-	if b, ok, err := constants.OptionalSnapshotBackend(spec.Backend); err == nil && ok {
-		req.Annotations[constants.CubeAnnotationStorageBackend] = b
+	if spec != nil && strings.TrimSpace(req.Annotations[constants.CubeAnnotationStorageBackend]) == "" {
+		if b, ok, err := constants.OptionalSnapshotBackend(spec.Backend); err == nil && ok {
+			req.Annotations[constants.CubeAnnotationStorageBackend] = b
+		}
 	}
 	return spec
 }

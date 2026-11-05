@@ -6,6 +6,7 @@ package webhook
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -40,7 +41,8 @@ func TestEncodeSixEvents(t *testing.T) {
 			require.JSONEq(t, `{`+tc.wantData+`
 				"id":"d12727fc-ab97-43d8-80cf-556cc1215017",
 				"version":"v2","type":"`+tc.typ+`","timestamp":"2026-10-14T12:00:00Z",
-				"event_category":"","event_label":"","sandbox_id":"sb-1",
+				"event_category":"sandbox","event_label":"`+strings.TrimPrefix(tc.typ, "sandbox.lifecycle.")+`",
+				"sandbox_id":"sb-1",
 				"sandbox_execution_id":"","sandbox_template_id":"tpl-1",
 				"sandbox_build_id":"","sandbox_team_id":""}`, string(e.Body()))
 			again, err := Encode(c, &tc.protocol)

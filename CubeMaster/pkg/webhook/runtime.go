@@ -115,7 +115,21 @@ func startRuntime(c config.WebhookConf, p SubscriptionProvider, s DeliveryStore,
 	go r.maintain()
 	return r
 }
-func (r *Runtime) Publisher() Publisher { return r }
+
+// Publisher exposes this runtime as the process-wide publisher when webhooks
+// are actually running, and a NopPublisher otherwise.
+//
+// Returning r unconditionally made PublisherHolder.Enabled() lie: *Runtime is
+// not NopPublisher, so a disabled or invalid config still reported "enabled"
+// and every create/update/delete/pause path did the Prepare/Capture work before
+// handing the event to a publisher that drops it. r.buffer is nil exactly when
+// newRuntime took one of those early exits.
+func (r *Runtime) Publisher() Publisher {
+	if r == nil || r.buffer == nil {
+		return NopPublisher{}
+	}
+	return r
+}
 
 // Prebind finite labels: the business path performs atomic increments only,
 // never a metric-vector lookup or registry lock.

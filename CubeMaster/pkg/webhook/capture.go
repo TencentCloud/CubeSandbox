@@ -23,6 +23,7 @@ type CaptureInput struct {
 	Origin      Origin
 	SandboxID   string
 	TemplateID  string
+	SnapshotID  string
 	ExecutionID string
 	BuildID     string
 	TeamID      string
@@ -39,7 +40,7 @@ func validateCapture(in CaptureInput) error {
 	// Check size before scanning strings, including whitespace validation.
 	for _, s := range []string{
 		in.Type, string(in.Origin), in.SandboxID, in.TemplateID,
-		in.ExecutionID, in.BuildID, in.TeamID,
+		in.SnapshotID, in.ExecutionID, in.BuildID, in.TeamID,
 	} {
 		if len(s) > maxStringBytes {
 			return ErrCaptureTooLarge
@@ -57,7 +58,10 @@ func validateCapture(in CaptureInput) error {
 	if IsTemplateEvent(in.Type) && strings.TrimSpace(in.TemplateID) == "" {
 		return ErrInvalidEvent
 	}
-	if IsSnapshotEvent(in.Type) && strings.TrimSpace(in.TemplateID) == "" {
+	// A snapshot event is identified by the snapshot, not by a template: either
+	// id may be present, but a subscriber that filters on snapshot_id must never
+	// receive an event without one.
+	if IsSnapshotEvent(in.Type) && strings.TrimSpace(in.SnapshotID) == "" {
 		return ErrInvalidEvent
 	}
 	if !in.Origin.Allows(in.Type) {
@@ -85,6 +89,7 @@ func Capture(in CaptureInput) (*CapturedEvent, error) {
 	in.Type = strings.Clone(in.Type)
 	in.Origin = Origin(strings.Clone(string(in.Origin)))
 	in.TemplateID = strings.Clone(in.TemplateID)
+	in.SnapshotID = strings.Clone(in.SnapshotID)
 	in.SandboxID = strings.Clone(in.SandboxID)
 	in.ExecutionID = strings.Clone(in.ExecutionID)
 	in.BuildID = strings.Clone(in.BuildID)

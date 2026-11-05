@@ -26,19 +26,23 @@ func (e *Event) OccurredAt() time.Time { return e.occurredAt }
 func (e *Event) Body() []byte          { return append([]byte(nil), e.body...) }
 
 type envelope struct {
-	ID                 uuid.UUID      `json:"id"`
-	Version            string         `json:"version"`
-	Type               string         `json:"type"`
-	Timestamp          string         `json:"timestamp"`
-	EventCategory      string         `json:"event_category"`
-	EventLabel         string         `json:"event_label"`
-	SandboxID          string         `json:"sandbox_id"`
-	SandboxExecutionID string         `json:"sandbox_execution_id"`
-	SandboxTemplateID  string         `json:"sandbox_template_id"`
-	SandboxBuildID     string         `json:"sandbox_build_id"`
-	SandboxTeamID      string         `json:"sandbox_team_id"`
-	EventData          map[string]any `json:"event_data,omitempty"`
-	EventsTTLDays      int            `json:"events_ttl_days,omitempty"`
+	ID                 uuid.UUID `json:"id"`
+	Version            string    `json:"version"`
+	Type               string    `json:"type"`
+	Timestamp          string    `json:"timestamp"`
+	EventCategory      string    `json:"event_category"`
+	EventLabel         string    `json:"event_label"`
+	SandboxID          string    `json:"sandbox_id"`
+	SandboxExecutionID string    `json:"sandbox_execution_id"`
+	SandboxTemplateID  string    `json:"sandbox_template_id"`
+	// snapshot_id, not sandbox_snapshot_id: a snapshot is its own resource, not
+	// an attribute of the sandbox that produced it, and every other Cube API
+	// surface already spells it snapshot_id.
+	SnapshotID     string         `json:"snapshot_id,omitempty"`
+	SandboxBuildID string         `json:"sandbox_build_id"`
+	SandboxTeamID  string         `json:"sandbox_team_id"`
+	EventData      map[string]any `json:"event_data,omitempty"`
+	EventsTTLDays  int            `json:"events_ttl_days,omitempty"`
 }
 
 // Encode validates explicit protocol data and marshals once in the background.
@@ -58,10 +62,10 @@ func Encode(c *CapturedEvent, p *ProtocolEventData) (*Event, error) {
 	in := c.input
 	body, err := json.Marshal(envelope{
 		ID: in.ID, Version: VersionV2, Type: in.Type,
-		Timestamp: in.OccurredAt.Format(time.RFC3339Nano),
+		Timestamp:     in.OccurredAt.Format(time.RFC3339Nano),
 		EventCategory: category, EventLabel: label,
 		SandboxID: in.SandboxID, SandboxExecutionID: in.ExecutionID,
-		SandboxTemplateID: in.TemplateID, SandboxBuildID: in.BuildID,
+		SandboxTemplateID: in.TemplateID, SnapshotID: in.SnapshotID, SandboxBuildID: in.BuildID,
 		SandboxTeamID: in.TeamID, EventData: data,
 	})
 	if err != nil {
@@ -172,6 +176,9 @@ func protocolData(eventType string, p *ProtocolEventData) (map[string]any, error
 		data["instance_type"] = p.InstanceType
 	case TypeTemplateMigrated:
 		data["instance_type"] = p.InstanceType
+		if p.ReadyNodeCount >= 0 {
+			data["ready_node_count"] = p.ReadyNodeCount
+		}
 	case TypeSnapshotCreated:
 		data["backend"] = p.InstanceType
 	case TypeSnapshotDeleted:

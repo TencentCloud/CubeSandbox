@@ -68,16 +68,39 @@ func NewRedisDeliveryStore(conf config.RedisConf, o RedisStoreOptions) (*RedisDe
 func (s *RedisDeliveryStore) Close() error { return s.pool.Close() }
 
 // Mark server-error connections unusable (notably READONLY after failover).
-// NOSCRIPT is the sole safe fallback and shares the original context budget.
+// Only failures that leave the socket state unknown are closed: the Lua
+// application replies this store maps to typed errors -- CAPACITY, CONFLICT,
+// STALE, INVALID -- and NOSCRIPT arrive as ordinary redis.Error values on a
+// healthy connection, and discarding the pooled socket for them means
+// re-dialing under exactly the backpressure that produced CAPACITY.
 type deliveryConn struct{ redis.Conn }
 
 func (c *deliveryConn) DoContext(ctx context.Context, cmd string, args ...interface{}) (interface{}, error) {
 	v, err := redis.DoContext(c.Conn, ctx, cmd, args...)
-	if err != nil && !strings.HasPrefix(err.Error(), "NOSCRIPT ") {
+	if err != nil && connectionUnusable(err) {
 		c.Conn.Close()
 	}
 	return v, err
 }
+
+// connectionUnusable reports whether err means the socket must not be reused.
+func connectionUnusable(err error) bool {
+	var serverErr redis.Error
+	if errors.As(err, &serverErr) {
+		switch {
+		case strings.HasPrefix(string(serverErr), "READONLY "),
+			strings.HasPrefix(string(serverErr), "LOADING "):
+			return true
+		}
+		// Any other server reply is a complete protocol exchange on a working
+		// connection, including the script's own error replies.
+		return false
+	}
+	// Not a server reply: I/O error, cancellation, or a protocol break, so the
+	// number of pending replies is unknown.
+	return true
+}
+
 func (c *deliveryConn) ReceiveContext(ctx context.Context) (interface{}, error) {
 	return redis.ReceiveContext(c.Conn, ctx)
 }

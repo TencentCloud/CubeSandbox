@@ -192,7 +192,18 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 	createCtx.Wait()
 	createCtx.endTime = time.Now()
 
-	go func() { <-createCtx.done; createCtx.dealMetric() }()
+	// dealMetric reads the response the worker writes, so it runs after done is
+	// closed. done is not guaranteed to close, though: a buffered task the
+	// scheduler drops never reaches Handle, and waiting on it alone would pin
+	// createCtx (and its trace) for the lifetime of the process. Fall back to
+	// the request context, which is already bounded by create_timeout_insec.
+	go func() {
+		select {
+		case <-createCtx.done:
+		case <-createCtx.ctx.Done():
+		}
+		createCtx.dealMetric()
+	}()
 	return
 }
 

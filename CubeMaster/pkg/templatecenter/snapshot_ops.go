@@ -475,6 +475,11 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 	success = true
 	lifecyclePublisher.Publish(webhook.TypeCheckpointed, sandboxID, captured.template, captured.fields)
+	// The snapshot row is READY and its replica registered, so this is the
+	// boundary template.lifecycle.snapshot.created is contracted to fire on --
+	// the same moment as checkpointed, but identified by the snapshot instead of
+	// the sandbox so a subscriber can correlate it with snapshot.deleted.
+	PublishSnapshotCreated(ctx, snapshotID, sandboxID, captured.template, firstNonEmpty(strings.TrimSpace(createReq.Backend), constants.SnapshotBackendXFS))
 	logger.Infof("snapshot create finished successfully")
 	return nil
 }

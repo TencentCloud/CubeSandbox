@@ -33,12 +33,12 @@ type LifecycleFields struct {
 	Network               *NetworkFields
 
 	// Template lifecycle fields
-	SourceImageRef  string
-	InstanceType    string
-	BuildMode       string
-	ArtifactID      string
-	ReadyNodeCount  int32
-	ErrorMsg        string
+	SourceImageRef string
+	InstanceType   string
+	BuildMode      string
+	ArtifactID     string
+	ReadyNodeCount int32
+	ErrorMsg       string
 
 	// Snapshot lifecycle fields
 	NewGen uint32
@@ -253,6 +253,25 @@ func (h *PublisherHolder) Enabled() bool {
 	return !off
 }
 func (h *PublisherHolder) PublishContext(ctx context.Context, kind, sandbox, template string, f LifecycleFields) {
+	h.publish(ctx, CaptureInput{Type: kind, SandboxID: sandbox, TemplateID: template, Fields: f})
+}
+
+// PublishSnapshotContext publishes a snapshot lifecycle event. Snapshot events
+// are identified by the snapshot they describe, not by a template: carrying the
+// snapshot id in TemplateID made snapshot.deleted indistinguishable from a
+// template event on the wire, and left snapshot.created unable to name both the
+// sandbox it came from and the snapshot it produced.
+//
+// template may still be set: a snapshot created from a sandbox that was started
+// from a template is that template's fork, so both ids are actionable.
+func (h *PublisherHolder) PublishSnapshotContext(ctx context.Context, kind, sandbox, template, snapshot string, f LifecycleFields) {
+	h.publish(ctx, CaptureInput{Type: kind, SandboxID: sandbox, TemplateID: template, SnapshotID: snapshot, Fields: f})
+}
+
+// publish fills in the identity every event shares and hands it to the
+// configured publisher. The two entry points above differ only in which
+// resource ids they carry.
+func (h *PublisherHolder) publish(ctx context.Context, in CaptureInput) {
 	s := h.slot.Load()
 	if s == nil {
 		return
@@ -260,10 +279,34 @@ func (h *PublisherHolder) PublishContext(ctx context.Context, kind, sandbox, tem
 	if _, off := s.publisher.(NopPublisher); off {
 		return
 	}
-	ev, err := Capture(CaptureInput{ID: uuid.New(), Type: kind, Origin: OriginFromContext(ctx), SandboxID: sandbox, TemplateID: template, OccurredAt: time.Now(), Fields: f})
+	in.ID = uuid.New()
+	in.Origin = OriginFromContext(ctx)
+	in.BuildID = BuildIDFromContext(ctx)
+	in.OccurredAt = time.Now()
+	ev, err := Capture(in)
 	if err == nil {
 		s.publisher.TryPublish(ev)
 	}
+}
+
+type buildIDKey struct{}
+
+// WithBuildID carries a build (job) id to the capture, so template build events
+// can be correlated with the job that produced them.
+func WithBuildID(ctx context.Context, buildID string) context.Context {
+	if strings.TrimSpace(buildID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, buildIDKey{}, buildID)
+}
+
+// BuildIDFromContext returns the build id attached by WithBuildID, if any.
+func BuildIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(buildIDKey{}).(string)
+	return id
 }
 
 type originKey struct{}

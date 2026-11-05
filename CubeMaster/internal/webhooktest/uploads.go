@@ -36,7 +36,7 @@ func SnapshotDB(t *testing.T) *gorm.DB {
 func ReconcileUpload(t *testing.T, db *gorm.DB, table, snapshotID, terminal string, p *webhook.BufferedPublisher) {
 	t.Helper()
 	before := len(p.Events())
-	require.Equal(t, 1, before, "local success must already have published")
+	require.NotZero(t, before, "local success must already have published")
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(ip string) string { return ip })

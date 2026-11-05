@@ -116,19 +116,28 @@ func TestP4CheckpointFinalBoundary(t *testing.T) {
 					require.Empty(t, p.Events())
 					return
 				}
-				select {
-				case c := <-p.Events():
+				published := map[string]map[string]any{}
+				for len(p.Events()) > 0 {
+					c := <-p.Events()
 					d, e := webhook.MapToProtocol(c)
 					require.NoError(t, e)
 					ev, e := webhook.Encode(c, d)
 					require.NoError(t, e)
 					var b map[string]any
 					require.NoError(t, json.Unmarshal(ev.Body(), &b))
-					require.Equal(t, "original-template", b["sandbox_template_id"])
-					require.Equal(t, webhook.TypeCheckpointed, ev.Type())
-				default:
-					t.Fatal("missing checkpoint")
+					published[ev.Type()] = b
 				}
+				checkpointed, ok := published[webhook.TypeCheckpointed]
+				require.True(t, ok, "missing checkpoint")
+				require.Equal(t, "original-template", checkpointed["sandbox_template_id"])
+				// The snapshot the checkpoint produced is its own resource: it
+				// names itself, the sandbox it came from, and the template that
+				// sandbox forked, so it can be correlated with snapshot.deleted.
+				created, ok := published[webhook.TypeSnapshotCreated]
+				require.True(t, ok, "missing snapshot.created")
+				require.Equal(t, "snap-new", created["snapshot_id"])
+				require.Equal(t, "sb", created["sandbox_id"])
+				require.Equal(t, "original-template", created["sandbox_template_id"])
 				_, e = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip")
 				require.NoError(t, e)
 				require.Empty(t, p.Events())
@@ -173,7 +182,9 @@ func TestP4CheckpointUploadResult(t *testing.T) {
 			webhooktest.ReconcileUpload(t, db, constants.SnapshotTableName, "snap-new", terminal, p)
 			_, err = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip")
 			require.NoError(t, err)
-			require.Len(t, p.Events(), 1)
+			// checkpointed + snapshot.created from the local success; the upload
+			// result neither adds nor retracts one.
+			require.Len(t, p.Events(), 2)
 		})
 	}
 }

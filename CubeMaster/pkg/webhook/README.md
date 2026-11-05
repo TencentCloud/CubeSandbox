@@ -60,6 +60,7 @@ CubeSandbox 的 Webhook 系统是一个异步事件通知管道，允许外部�
     "sandbox_id": "sb-abc123",
     "sandbox_execution_id": "",
     "sandbox_template_id": "tmpl-xyz789",
+    "snapshot_id": "",
     "sandbox_build_id": "",
     "sandbox_team_id": "",
     "event_data": {
@@ -161,6 +162,45 @@ CubeSandbox 的 Webhook 系统是一个异步事件通知管道，允许外部�
 }
 ```
 
+### 快照事件的标识字段
+
+快照事件以 `snapshot_id` 作为自己的标识，而不是把快照 id 塞进
+`sandbox_template_id`——否则消费端无法区分一个模板和一个快照。
+
+**template.lifecycle.snapshot.created**（与 `sandbox.lifecycle.checkpointed`
+同一时刻发出，两者描述的是同一件事的两个资源）：
+```json
+{
+    "type": "template.lifecycle.snapshot.created",
+    "event_category": "snapshot",
+    "event_label": "created",
+    "sandbox_id": "sb-abc123",
+    "sandbox_template_id": "tmpl-xyz789",
+    "snapshot_id": "snap-new456",
+    "event_data": {
+        "backend": "s3"
+    }
+}
+```
+
+**template.lifecycle.snapshot.deleted** / **snapshot.rollback.completed**：
+只带 `snapshot_id`（回滚事件另外带上发起回滚的 `sandbox_id`），
+`sandbox_template_id` 为空。
+
+```json
+{
+    "type": "template.lifecycle.snapshot.deleted",
+    "event_category": "snapshot",
+    "event_label": "deleted",
+    "sandbox_id": "",
+    "sandbox_template_id": "",
+    "snapshot_id": "snap-new456",
+    "event_data": {
+        "error_message": ""
+    }
+}
+```
+
 ## 投递保证
 
 - **At-least-once 投递**：每个事件至少尝试投递一次
@@ -233,7 +273,8 @@ webhooks:
 2. 更新 `validType()`、`IsSandboxEvent()`/`IsTemplateEvent()`/`IsSnapshotEvent()` 函数
 3. 在 `CubeMaster/pkg/webhook/encode.go` 中更新 `eventCategoryAndLabel()` 和 `protocolData()`
 4. 在 `CubeMaster/pkg/base/config/webhook.go` 中添加新事件到配置验证
-5. 在业务代码中通过 `lifecyclePublisher.Publish()` 或 `PublishTemplateEvent()` 发布事件
+5. 在业务代码中通过对应的 `Publish*` 辅助函数发布事件；新增事件类型时要同时加上
+   辅助函数和发出它的生产者，只在前四步登记的类型等于一个永远收不到事件的订阅
 
 ## 设计原理
 
