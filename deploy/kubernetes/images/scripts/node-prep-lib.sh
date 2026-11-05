@@ -3,9 +3,12 @@
 # Source from pvm-host-bootstrap / wait-pvm-host / cube-node-init /
 # write-node-prep-ready / wait-node-prep.
 #
-# Fingerprint fields for node-prep-ready (version=1):
+# Fingerprint fields for node-prep-ready (version=2):
 #   version, mode (full|noop), kernel, boot_args (space-separated required tokens),
-#   prep_generation, pvm_enabled, node_init_enabled, host_ports (reserved-port set)
+#   prep_generation, pvm_enabled, node_init_enabled, host_ports (reserved-port set),
+#   storage_* (seven host storage directories and the loopback image path).
+# Version 1 lacks storage proof: bootstrap invalidates it and reruns node-init
+# before writing version 2; the Big Pod waiter waits for that replacement.
 #
 # Fingerprint fields for pvm-host-ready (version=1):
 #   version, kernel, boot_args, desired_pattern
@@ -26,6 +29,16 @@ NODE_INIT_ENABLED="${NODE_INIT_ENABLED:-0}"
 PREP_MODE="${PREP_MODE:-}"
 KERNEL_BOOT_ARGS="${KERNEL_BOOT_ARGS:-${PVM_KERNEL_BOOT_ARGS:-}}"
 DESIRED_KERNEL_PATTERN="${DESIRED_KERNEL_PATTERN:-}"
+# Keep the writer, node-init, invalidator and waiter on the same path defaults.
+# These are host-side paths, not the fixed runtime container mount paths.
+DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
+DATA_LOG="${DATA_LOG:-/data/log}"
+DATA_CUBE_SHIM="${DATA_CUBE_SHIM:-/data/cube-shim}"
+DATA_SNAPSHOT_PACK="${DATA_SNAPSHOT_PACK:-/data/snapshot_pack}"
+DATA_CUBE_SHARED="${DATA_CUBE_SHARED:-/data/cube-shared}"
+DATA_SHARED="${DATA_SHARED:-/data/shared}"
+TMP_CUBE="${TMP_CUBE:-/tmp/cube}"
+LOOPBACK_IMAGE_PATH="${LOOPBACK_IMAGE_PATH:-/data/cubelet-xfs.img}"
 
 node_prep_host_path() {
   if [ -n "$HOST_ROOT" ] && [ "$HOST_ROOT" != "/" ]; then
@@ -142,6 +155,40 @@ pvm_is_mutating() {
   [ -f "$(pvm_mutating_path)" ]
 }
 
+node_prep_storage_fingerprint() {
+  printf 'storage_data_cubelet=%s\n' "$DATA_CUBELET"
+  printf 'storage_data_log=%s\n' "$DATA_LOG"
+  printf 'storage_data_cube_shim=%s\n' "$DATA_CUBE_SHIM"
+  printf 'storage_data_snapshot_pack=%s\n' "$DATA_SNAPSHOT_PACK"
+  printf 'storage_data_cube_shared=%s\n' "$DATA_CUBE_SHARED"
+  printf 'storage_data_shared=%s\n' "$DATA_SHARED"
+  printf 'storage_tmp_cube=%s\n' "$TMP_CUBE"
+  printf 'storage_loopback_image_path=%s\n' "$LOOPBACK_IMAGE_PATH"
+}
+
+node_prep_storage_fingerprint_matches_file() {
+  ready="$(node_prep_ready_path)"
+  [ -f "$ready" ] || return 1
+  [ "$(sed -n 's/^version=//p' "$ready")" = "2" ] || return 1
+  expected_storage="$(node_prep_storage_fingerprint)"
+  actual_storage="$(sed -n '/^storage_/p' "$ready")"
+  [ "$expected_storage" = "$actual_storage" ]
+}
+
+# Run before any bootstrap work, including the PVM waiter. Do not compare the
+# whole fingerprint here: effective PVM policy is resolved later on this node.
+invalidate_stale_node_prep_ready() {
+  ready="$(node_prep_ready_path)"
+  [ -f "$ready" ] || return 0
+  old_generation="$(sed -n 's/^prep_generation=//p' "$ready")"
+  old_node_init="$(sed -n 's/^node_init_enabled=//p' "$ready")"
+  if [ "$old_generation" != "$PREP_GENERATION" ] \
+    || [ "$old_node_init" != "$(node_prep_bool01 "$NODE_INIT_ENABLED")" ] \
+    || ! node_prep_storage_fingerprint_matches_file; then
+    invalidate_node_prep_ready
+  fi
+}
+
 node_prep_compute_fingerprint() {
   apply_effective_pvm_env
   mode="$(node_prep_resolve_mode)"
@@ -152,7 +199,7 @@ node_prep_compute_fingerprint() {
   if [ "$mode" = "full" ] && [ "$pvm" = "1" ]; then
     boot_args="$(node_prep_normalize_boot_args)"
   fi
-  printf 'version=1\n'
+  printf 'version=2\n'
   printf 'mode=%s\n' "$mode"
   printf 'kernel=%s\n' "$kernel"
   printf 'boot_args=%s\n' "$boot_args"
@@ -160,6 +207,7 @@ node_prep_compute_fingerprint() {
   printf 'pvm_enabled=%s\n' "$pvm"
   printf 'node_init_enabled=%s\n' "$ninit"
   printf 'host_ports=%s\n' "${HOST_PORT_RESERVED_PORTS:-}"
+  node_prep_storage_fingerprint
 }
 
 node_prep_kernel_ready() {
@@ -228,8 +276,10 @@ node_prep_fingerprint_matches_file() {
   return 0
 }
 
-# Big Pod validation deliberately derives all mutable policy from the hostPath
-# sentinel. This keeps Helm values out of the frozen cube-node Pod template.
+# Big Pod validation derives PVM/kernel/prep-generation policy from the hostPath
+# sentinel, keeping unrelated bootstrap policy out of the frozen Pod template.
+# Storage is different: its hostPath volumes already change that template, so
+# require preparation for this Pod's paths before accepting the host policy.
 node_prep_host_sentinel_is_ready() {
   ready="$(node_prep_ready_path)"
   [ -f "$ready" ] || return 1
@@ -243,7 +293,8 @@ node_prep_host_sentinel_is_ready() {
   pvm="$(sed -n 's/^pvm_enabled=//p' "$ready")"
   ninit="$(sed -n 's/^node_init_enabled=//p' "$ready")"
 
-  [ "$version" = "1" ] || return 1
+  [ "$version" = "2" ] || return 1
+  node_prep_storage_fingerprint_matches_file || return 1
   case "$mode" in full|noop) ;; *) return 1 ;; esac
   [ -n "$kernel" ] && [ "$kernel" = "$(uname -r 2>/dev/null || true)" ] || return 1
   [ -n "$prep_generation" ] || return 1

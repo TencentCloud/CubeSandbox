@@ -11,6 +11,20 @@ CubeSandbox is installed.
 
 Release: {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
+{{- if ne .Values.hostPaths.dataShared "/data/shared" }}
+
+WARNING (custom hostPaths.dataShared requires Host Mount migration):
+  Earlier chart versions also mounted the custom host directory inside the Big
+  Pod at {{ .Values.hostPaths.dataShared }}, so callers used
+  {{ .Values.hostPaths.dataShared }}/... as metadata["host-mount"] source paths.
+  With the fixed mount contract, callers MUST use /data/shared/... instead.
+  CubeMaster extra_conf.allowed_host_mount_prefixes MUST be updated to the matching
+  /data/shared/ prefix (or narrower subdirectories), including when CubeMaster is
+  external to this release.
+  Coordinate the caller and allowlist changes with the upgrade; old custom-prefix
+  Host Mount requests will fail after upgrade. New installs use /data/shared/ too.
+  The host directory stays {{ .Values.hostPaths.dataShared }}; no data is migrated.
+{{- end }}
 
 Persistence (CubeMaster / MySQL / Redis / MinIO):
 {{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath ((.Values.minio).persistence.hostPath) }}

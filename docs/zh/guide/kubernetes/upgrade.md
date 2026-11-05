@@ -145,6 +145,52 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 ---
 
+## 修改宿主机存储路径
+
+::: warning 存储升级的一次性提示
+从 `wait-node-prep` 尚未包含这八个存储环境变量的 Chart 升级时，
+会修改 `cube-node` Pod template，**即使所有 `hostPaths` 值未改动或仍为默认值**。
+使用默认的 `RollingUpdate` 策略时，这会重建每个计算节点上的 Big Pod。
+
+**本次升级前先排空计算节点上的沙箱**（参阅[节点相关操作](../node-operations.md)）：
+- **Pod 网络**（`cubeNode.hostNetwork: false`）：重建会销毁 netns，
+  中断现有沙箱网络，必须排空。
+- **宿主机网络（默认）**：tap 设备会保留，但在 cubelet 重启后沙箱存活得到实机验证前，
+  排空仍是支持的升级流程。
+:::
+
+Chart 的 `hostPaths` 存储配置选择宿主机目录；运行时容器仍使用固定的 `/data/...`
+和 `/tmp/cube` 路径。修改宿主机路径会重建受影响的 Pod，且**不会迁移现有数据**。
+升级前应排空受影响的计算节点并安排数据保留，包括日志、`dataCubeShared/volume`
+和 `dataShared` 下的数据。
+
+- `hostPaths.runContainerd` 和 `hostPaths.runVc` 独立于 `hostPaths.dataCubelet`。
+  如果 socket/VM 状态目录也要随 Cubelet 存储搬迁，需显式更新这两个配置。
+- 启用 loopback XFS 时，`bootstrap.nodeInit.dataCubelet.loopback.imagePath`
+  独立决定镜像文件的位置。应将其放在预期的宿主机文件系统上；修改
+  `hostPaths.dataCubelet` 不会移动该镜像。
+- 七个存储路径（`dataCubelet`、`dataLog`、`dataCubeShim`、`dataSnapshotPack`、
+  `dataCubeShared`、`dataShared`、`tmpCube`）以及
+  `bootstrap.nodeInit.dataCubelet.loopback.imagePath` 已包含在 version-2 node-prep
+  指纹中。修改它们会使就绪标记失效，并重新运行已启用的 node-init 目录准备和
+  XFS 检查。Big Pod 会等待与自身存储路径匹配的标记；无关的 PVM/内核策略仍从
+  宿主机标记读取。其他准备配置（包括 loopback 大小或启用状态）发生变化时，
+  仍需将 `cubeNodeBootstrap.prepGeneration` 改为新值。
+- 应同时将 `images.nodeInit` 和 `images.waitNodePrep` 升级到包含此指纹格式的
+  构建（后者包含标记写入器和等待器）。Bootstrap 会使旧 version-1 node-prep
+  标记失效，重新运行已启用的准备步骤并写入 version 2；新等待器在此期间拒绝
+  旧标记。独立的 PVM host 标记仍为 version 1，不会阻塞此迁移。默认路径也会
+  执行这次准备。恢复工作负载前，应确认 bootstrap 完成且目标 XFS 已挂载。
+  如果禁用了 node-init，则必须事先在外部完成存储准备。修改路径或 generation
+  都不会将数据复制到新路径。
+
+已有的自定义 `hostPaths.dataShared` 现在会在 Big Pod 内暴露为 `/data/shared`。
+例如，配置 `hostPaths.dataShared: /mnt/shared` 时，宿主机上的 `/mnt/shared/project`
+应在 `metadata["host-mount"]` 中请求为 `/data/shared/project`。
+恢复沙箱创建前，应将调用方路径和 CubeMaster 的 `extra_conf.allowed_host_mount_prefixes`
+更新为对应的 `/data/shared/` 前缀（或更小范围的子目录）。旧的自定义宿主机前缀
+不再能在 Pod 内解析。参阅[持久化存储](../persistent-storage.md)。
+
 ## 特殊场景
 
 ### A. 改 PVM kernel pattern / boot args（会 reboot）
@@ -184,6 +230,14 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 ```
 
 这会清掉 Chart 管理的对象；宿主机 hostPath / 内核改动需脚本与平台 runbook 另行处理。
+
+使用自定义存储路径时，清理脚本不会读取 Helm values。请通过 `DATA_CUBELET`、
+`DATA_CUBE_SHIM`、`DATA_CUBE_SHARED`、`DATA_LOG`、`DATA_SNAPSHOT_PACK`、`TMP_CUBE`、
+`TOOLBOX_ROOT`、`BOOTSTRAP_STATE` 和 `LOOPBACK_IMAGE_PATH` 显式传入对应宿主机路径。
+先用 `sudo env DRY_RUN=1 ... ./deploy/kubernetes/chart/scripts/cleanup-node-host.sh`
+检查目标，再决定是否实际清理。脚本只清理日志目录中的 `Cubelet`、`CubeShim` 和
+`CubeVmm` 子目录，并保留独立的 `hostPaths.dataShared` 用户数据目录；不要把清理根目录
+指向该用户数据目录或其父目录。
 
 ---
 

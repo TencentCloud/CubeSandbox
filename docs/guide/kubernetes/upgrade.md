@@ -149,6 +149,60 @@ Also: `cubeNode.env`, `cubeNode.podAnnotations`, network-related env, and `globa
 
 ---
 
+## Changing host storage paths
+
+::: warning One-time storage upgrade
+Upgrading from a chart whose `wait-node-prep` lacks the eight storage environment
+variables changes the `cube-node` Pod template **even when all `hostPaths` values
+are unchanged or default**. With the default `RollingUpdate` strategy, this
+recreates the Big Pod on every compute node.
+
+**Drain compute nodes before this upgrade** (see [Node Operations](../node-operations.md)):
+- **Pod network** (`cubeNode.hostNetwork: false`): recreation destroys the netns and
+  interrupts existing sandbox networking. Drain is mandatory.
+- **Host network (default)**: taps survive, but drain remains the supported procedure
+  until sandbox survival through a cubelet restart is live-validated.
+:::
+
+The chart's `hostPaths` storage values select host directories; runtime containers
+keep their fixed `/data/...` and `/tmp/cube` paths. Changing a host path recreates
+the affected Pods and **does not migrate existing data**. Drain the affected
+compute nodes and plan data preservation before the upgrade, including logs,
+`dataCubeShared/volume`, and data under `dataShared`.
+
+- `hostPaths.runContainerd` and `hostPaths.runVc` are independent of
+  `hostPaths.dataCubelet`. Update them explicitly if the socket/VM state trees
+  should move with Cubelet storage.
+- With loopback XFS enabled, `bootstrap.nodeInit.dataCubelet.loopback.imagePath`
+  independently selects the backing image. Put it on the intended host filesystem;
+  changing `hostPaths.dataCubelet` does not move the image.
+- The seven storage paths (`dataCubelet`, `dataLog`, `dataCubeShim`,
+  `dataSnapshotPack`, `dataCubeShared`, `dataShared`, `tmpCube`) and
+  `bootstrap.nodeInit.dataCubelet.loopback.imagePath` are included in the
+  version-2 node-prep fingerprint. Changes invalidate readiness and rerun enabled
+  node-init directory preparation and XFS checks. The Big Pod waits for a marker
+  matching its storage paths; unrelated PVM/kernel policy remains host-derived.
+  For other preparation settings, including loopback size/enabled changes, still
+  change `cubeNodeBootstrap.prepGeneration` to a new value.
+- Upgrade `images.nodeInit` and `images.waitNodePrep` together to builds containing
+  this fingerprint format (the latter contains both the writer and waiter).
+  Bootstrap invalidates legacy version-1 node-prep markers, reruns enabled
+  preparation, and writes version 2; the new waiter rejects the old marker while
+  this happens. The separate PVM host marker remains version 1 and does not block
+  this migration. This one-time re-preparation also applies to default paths.
+  Verify bootstrap completion and the target XFS mount before resuming workloads.
+  If node-init is disabled, storage must already be prepared externally. Neither
+  a path change nor a generation change copies data to the new paths.
+
+For an existing custom `hostPaths.dataShared`, the host directory is now exposed
+inside the Big Pod at `/data/shared`. For example, host `/mnt/shared/project`
+with `hostPaths.dataShared: /mnt/shared` is requested as `/data/shared/project`
+in `metadata["host-mount"]`. Update callers and CubeMaster's
+`extra_conf.allowed_host_mount_prefixes` to the matching `/data/shared/` prefix
+(or a narrower subdirectory) before resuming sandbox creation. Requests using the
+old custom host prefix no longer resolve inside the Pod. See
+[Persistent Storage](../persistent-storage.md).
+
 ## Special cases
 
 ### A. Changing PVM kernel pattern / boot args (will reboot)
@@ -188,6 +242,15 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 ```
 
 This removes Chart-managed objects; hostPath / kernel changes need the script and platform runbooks separately.
+
+For custom storage, the cleanup script does not read Helm values. Pass the host
+paths explicitly through `DATA_CUBELET`, `DATA_CUBE_SHIM`, `DATA_CUBE_SHARED`,
+`DATA_LOG`, `DATA_SNAPSHOT_PACK`, `TMP_CUBE`, `TOOLBOX_ROOT`, `BOOTSTRAP_STATE`,
+and `LOOPBACK_IMAGE_PATH`. Review the targets first with
+`sudo env DRY_RUN=1 ... ./deploy/kubernetes/chart/scripts/cleanup-node-host.sh`.
+The script removes only the `Cubelet`, `CubeShim`, and `CubeVmm` subdirectories
+under the log root and preserves the separate `hostPaths.dataShared` user-data
+tree. Do not point a cleanup root at that user-data tree or any of its ancestors.
 
 ---
 
