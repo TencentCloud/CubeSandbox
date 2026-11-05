@@ -100,7 +100,10 @@ afterEach(() => {
 describe("Volume CRUD", () => {
   it("versioned create preserves opaque input including empty strings and UTF-8 limits", async () => {
     setHandler(() => ({ status: 201, json: { volumeID: "vol-pd", name: "vol-pd", token: "tok" } }));
-    const inputs = ["", "  opaque 桶 '\" \\ $()\n ", "a".repeat(1024), "界".repeat(341) + "a"];
+    const inputs = [
+      "", "  opaque 桶 '\" \\ $()\n ", "a".repeat(1024), "界".repeat(341) + "a",
+      "é中\u2028\uFFFF\uFFFD", "literal \\ud83d\\ude00",
+    ];
     for (const [index, privateData] of inputs.entries()) {
       const cfg = new Config({ apiUrl: `http://127.0.0.1:${port}`, apiKey: "test-key" });
       const volume = await Volume.createWithPrivateData({ name: "vol-pd", driver: "s3", privateData, config: cfg });
@@ -116,12 +119,16 @@ describe("Volume CRUD", () => {
   });
 
   it("versioned create rejects invalid input before sending a request", async () => {
-    for (const privateData of ["a".repeat(1025), "界".repeat(342), "private-data-sentinel\0tail"]) {
+    for (const privateData of ["a".repeat(1025), "界".repeat(342), "😀", "𠀀", "private-data-sentinel\0tail"]) {
       const error = await Volume.createWithPrivateData({ privateData, config: makeConfig() }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect(String(error)).toContain("private_data");
       expect(String(error)).not.toContain(privateData);
       expect(String(error)).not.toContain("private-data-sentinel");
+    }
+    for (const privateData of ["\ud800", "before\udfffafter"]) {
+      const error = await Volume.createWithPrivateData({ privateData, config: makeConfig() }).catch((e: unknown) => e);
+      expect(String(error)).toBe("Error: private_data must be valid UTF-8");
     }
     await expect(Volume.createWithPrivateData({ name: "bad/name", privateData: "", config: makeConfig() })).rejects.toThrow(/volume name/);
     expect(requests).toHaveLength(0);

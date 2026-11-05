@@ -2331,8 +2331,9 @@ pub struct NewVolumeV2 {
     #[serde(flatten)]
     pub base: NewVolume,
     /// Opaque input forwarded unchanged to the volume plugin's Create hook.
-    /// At most 1024 UTF-8 bytes, with no NUL. Use credential references, never
-    /// plaintext credentials. This field is not included in volume responses.
+    /// Valid UTF-8, at most 1024 bytes, with no NUL or characters outside the
+    /// Basic Multilingual Plane. Use credential references, never plaintext
+    /// credentials. This field is not included in volume responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_data: Option<String>,
 }

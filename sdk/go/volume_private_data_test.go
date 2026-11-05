@@ -14,7 +14,7 @@ import (
 )
 
 func TestCreateVolumeWithPrivateDataSendsOpaqueInput(t *testing.T) {
-	for _, input := range []string{"", "  opaque 桶 '\" \\ $()\n ", strings.Repeat("a", 1024), strings.Repeat("界", 341) + "a", "\ufffd", strings.Repeat("\U0001f642", 256)} {
+	for _, input := range []string{"", "  opaque 桶 '\" \\ $()\n ", strings.Repeat("a", 1024), strings.Repeat("界", 341) + "a", "é中\u2028\uFFFF\ufffd", `literal \ud83d\ude00`} {
 		var got map[string]any
 		calls := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +51,7 @@ func TestCreateVolumeWithPrivateDataSendsOpaqueInput(t *testing.T) {
 
 func TestCreateVolumeWithPrivateDataRejectsInvalidInputBeforeRequest(t *testing.T) {
 	client := newNoRequestClient(t)
-	for _, input := range []string{strings.Repeat("a", 1025), strings.Repeat("界", 342), "private-data-sentinel\x00tail"} {
+	for _, input := range []string{strings.Repeat("a", 1025), strings.Repeat("界", 342), "😀", "𠀀", "private-data-sentinel\x00tail"} {
 		_, err := client.CreateVolumeWithPrivateData(context.Background(), CreateVolumeWithPrivateDataOptions{PrivateData: input})
 		if err == nil || !strings.Contains(err.Error(), "private_data") || strings.Contains(err.Error(), input) || strings.Contains(err.Error(), "private-data-sentinel") {
 			t.Fatalf("expected a sanitized validation error, got %v", err)
@@ -59,6 +59,16 @@ func TestCreateVolumeWithPrivateDataRejectsInvalidInputBeforeRequest(t *testing.
 	}
 	if _, err := client.CreateVolumeWithPrivateData(context.Background(), CreateVolumeWithPrivateDataOptions{Name: "bad/name"}); err == nil {
 		t.Fatal("expected existing name validation")
+	}
+}
+
+func TestCreateVolumeWithPrivateDataRejectsSupplementaryCharactersBeforeRequest(t *testing.T) {
+	client := newNoRequestClient(t)
+	for _, input := range []string{"😀", "𠀀", "\U00010000"} {
+		_, err := client.CreateVolumeWithPrivateData(context.Background(), CreateVolumeWithPrivateDataOptions{PrivateData: input})
+		if err == nil || err.Error() != "private_data must not contain characters outside the BMP" {
+			t.Errorf("input %q error = %v, want fixed BMP error", input, err)
+		}
 	}
 }
 

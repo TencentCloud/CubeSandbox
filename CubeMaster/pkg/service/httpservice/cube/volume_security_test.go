@@ -69,7 +69,7 @@ func TestVolumeHTTP_PrivateDataNULInputRejectedBeforeReservation(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { require.NoError(t, db.Callback().Create().Remove(callback)) })
-	_, result := doVolumeRequest(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, "vol-nul-input", fake.Name(), "sentinel-before\x00sentinel-after"))
+	_, result := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, "vol-nul-input", fake.Name(), "sentinel-before\x00sentinel-after"), http.StatusBadRequest)
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), result.Ret.RetCode)
 	assert.Contains(t, result.Ret.RetMsg, "NUL")
 	assert.NotContains(t, result.Ret.RetMsg, "sentinel")
@@ -77,15 +77,90 @@ func TestVolumeHTTP_PrivateDataNULInputRejectedBeforeReservation(t *testing.T) {
 	assert.Zero(t, fake.createCalls)
 }
 
+func TestVolumeHTTP_PrivateDataNonBMPInputRejectedBeforeReservation(t *testing.T) {
+	for _, input := range []string{"before😀after", "𠀀"} {
+		t.Run(input, func(t *testing.T) {
+			r, db, fake := newVolumeTestEngine(t)
+			reservations := 0
+			const callback = "test:count_non_bmp_input_reservations"
+			require.NoError(t, db.Callback().Create().Before("gorm:create").Register(callback, func(tx *gorm.DB) {
+				if tx.Statement.Table == models.VolumeTableName {
+					reservations++
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, db.Callback().Create().Remove(callback)) })
+			_, result := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume",
+				volumeCreateBody(t, "vol-non-bmp-input", fake.Name(), input), http.StatusBadRequest)
+			assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), result.Ret.RetCode)
+			assert.Contains(t, result.Ret.RetMsg, "outside the BMP")
+			assert.NotContains(t, result.Ret.RetMsg, input)
+			assert.Zero(t, reservations)
+			assert.Zero(t, fake.createCalls)
+			assert.Zero(t, fake.destroyCalls)
+			var count int64
+			require.NoError(t, db.Model(&models.VolumeRecord{}).Count(&count).Error)
+			assert.Zero(t, count)
+		})
+	}
+}
+
+func TestVolumeHTTP_PrivateDataBMPBoundaryStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		input  string
+		status int
+	}{
+		{"last_bmp", "\uFFFF", http.StatusOK},
+		{"first_supplementary", "\U00010000", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db, fake := newVolumeTestEngine(t)
+			const volumeID = "vol-bmp-boundary"
+			w, result := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume",
+				volumeCreateBody(t, volumeID, fake.Name(), tc.input), tc.status)
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			var count int64
+			require.NoError(t, db.Model(&models.VolumeRecord{}).Count(&count).Error)
+			if tc.status == http.StatusOK {
+				assert.Zero(t, result.Ret.RetCode)
+				assert.Equal(t, 1, fake.createCalls)
+				assert.Equal(t, tc.input, fake.createInputs[volumeID])
+				assert.EqualValues(t, 1, count)
+			} else {
+				assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), result.Ret.RetCode)
+				assert.Contains(t, result.Ret.RetMsg, "outside the BMP")
+				assert.Zero(t, fake.createCalls)
+				assert.Zero(t, count)
+			}
+			assert.Zero(t, fake.destroyCalls)
+		})
+	}
+}
+
 func TestVolumeHTTP_PrivateDataNULOutputRollsBackReturnedState(t *testing.T) {
 	r, db, fake := newVolumeTestEngine(t)
 	fake.privateData = "returned-before\x00returned-after"
-	_, result := doVolumeRequest(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, "vol-nul-state", fake.Name(), "valid-input"))
+	_, result := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, "vol-nul-state", fake.Name(), "valid-input"), http.StatusBadRequest)
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), result.Ret.RetCode)
 	assert.Contains(t, result.Ret.RetMsg, "NUL")
 	assert.NotContains(t, result.Ret.RetMsg, "returned-before")
 	assert.Equal(t, 1, fake.destroyCalls)
 	assert.Equal(t, fake.privateData, fake.destroyInputs["vol-nul-state"])
+	var count int64
+	require.NoError(t, db.Model(&models.VolumeRecord{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestVolumeHTTP_PrivateDataNonBMPOutputRollsBackCompleteReturnedState(t *testing.T) {
+	r, db, fake := newVolumeTestEngine(t)
+	fake.privateData = "state-B-😀-must-be-preserved"
+	_, result := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume",
+		volumeCreateBody(t, "vol-non-bmp-state", fake.Name(), "valid-input-A"), http.StatusBadRequest)
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), result.Ret.RetCode)
+	assert.Contains(t, result.Ret.RetMsg, "outside the BMP")
+	assert.NotContains(t, result.Ret.RetMsg, "state-B")
+	assert.Equal(t, 1, fake.destroyCalls)
+	assert.Equal(t, fake.privateData, fake.destroyInputs["vol-non-bmp-state"], "rollback must receive complete B")
 	var count int64
 	require.NoError(t, db.Model(&models.VolumeRecord{}).Count(&count).Error)
 	assert.Zero(t, count)
@@ -146,8 +221,15 @@ func TestVolumeHTTP_RollbackFailureStillDeletesReservation(t *testing.T) {
 				}))
 				t.Cleanup(func() { require.NoError(t, db.Callback().Update().Remove(callback)) })
 			}
-			_, result := doVolumeRequest(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, "vol-cleanup-failure", fake.Name(), "caller-input-A"))
-			assert.NotZero(t, result.Ret.RetCode)
+			wantStatus := http.StatusOK
+			wantCode := errorcode.ErrorCode_DBError
+			if phase == "invalid_state" {
+				wantStatus = http.StatusBadRequest
+				wantCode = errorcode.ErrorCode_MasterParamsError
+			}
+			_, result := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume",
+				volumeCreateBody(t, "vol-cleanup-failure", fake.Name(), "caller-input-A"), wantStatus)
+			assert.Equal(t, int(wantCode), result.Ret.RetCode)
 			assert.Equal(t, 1, fake.destroyCalls)
 			assert.Equal(t, fake.privateData, fake.destroyInputs["vol-cleanup-failure"])
 			var count int64

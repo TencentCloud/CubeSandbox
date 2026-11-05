@@ -153,6 +153,11 @@ type volumeRetEnvelope struct {
 
 func doVolumeRequest(t *testing.T, r *gin.Engine, method, path, body string) (*httptest.ResponseRecorder, volumeRetEnvelope) {
 	t.Helper()
+	return doVolumeRequestWithStatus(t, r, method, path, body, http.StatusOK)
+}
+
+func doVolumeRequestWithStatus(t *testing.T, r *gin.Engine, method, path, body string, wantStatus int) (*httptest.ResponseRecorder, volumeRetEnvelope) {
+	t.Helper()
 	var req *http.Request
 	if body != "" {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
@@ -162,7 +167,7 @@ func doVolumeRequest(t *testing.T, r *gin.Engine, method, path, body string) (*h
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.Code, "CubeMaster volume handlers always use HTTP 200 + ret envelope; body=%s", w.Body.String())
+	require.Equal(t, wantStatus, w.Code, "unexpected HTTP status; body=%s", w.Body.String())
 
 	var env volumeRetEnvelope
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env), "body=%s", w.Body.String())
@@ -240,8 +245,12 @@ func TestVolumeHTTP_PrivateDataInputBytes(t *testing.T) {
 				}
 			}))
 			t.Cleanup(func() { require.NoError(t, db.Callback().Create().Remove(callbackName)) })
-			_, env := doVolumeRequest(t, r, http.MethodPost, "/cube/volume",
-				volumeCreateBody(t, volumeID, fake.Name(), tc.input))
+			wantStatus := http.StatusBadRequest
+			if tc.valid {
+				wantStatus = http.StatusOK
+			}
+			_, env := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume",
+				volumeCreateBody(t, volumeID, fake.Name(), tc.input), wantStatus)
 			var count int64
 			require.NoError(t, db.Model(&models.VolumeRecord{}).Count(&count).Error)
 			if tc.valid {
@@ -273,6 +282,8 @@ func TestVolumeHTTP_PrivateDataInputErrorTraceMatchesResponse(t *testing.T) {
 		volumeCreateBody(t, "vol-input-trace", fake.Name(), strings.Repeat("x", models.MaxPrivateDataLen+1))))
 	c.Request = req.WithContext(CubeLog.WithRequestTrace(req.Context(), rt))
 	handleCreateVolume(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	var env volumeRetEnvelope
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
 	require.NotNil(t, env.Ret)
@@ -437,8 +448,8 @@ func TestVolumeHTTP_PrivateDataTooLongRejected(t *testing.T) {
 	fake.privateData = strings.Repeat("a", models.MaxPrivateDataLen+1)
 	volumeID := "vol-pd-long"
 
-	w, env := doVolumeRequest(t, r, http.MethodPost, "/cube/volume",
-		volumeCreateBody(t, volumeID, fake.Name(), "caller-input-A"))
+	w, env := doVolumeRequestWithStatus(t, r, http.MethodPost, "/cube/volume",
+		volumeCreateBody(t, volumeID, fake.Name(), "caller-input-A"), http.StatusBadRequest)
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), env.Ret.RetCode)
 	assert.Contains(t, env.Ret.RetMsg, "private_data")
 	assert.True(t, fake.wasDestroyed(volumeID), "plugin Destroy must run after oversized private_data")

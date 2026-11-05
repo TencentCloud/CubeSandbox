@@ -2223,7 +2223,8 @@ components:
             - 'null'
             description: |-
               Opaque input forwarded unchanged to the volume plugin's Create hook.
-              At most 1024 UTF-8 bytes, with no NUL. Use credential references, never
+              Valid UTF-8, at most 1024 bytes, with no NUL or characters outside
+              the Basic Multilingual Plane. Use credential references, never
               plaintext credentials. This field is not included in volume responses.
       description: |-
         Request body for POST /v2/volumes, extending the legacy creation request

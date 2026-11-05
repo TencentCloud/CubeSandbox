@@ -276,8 +276,12 @@ export class Volume extends VolumeInfo {
   }
 
   /**
-   * Create via POST /v2/volumes. privateData is opaque text of at most 1024
-   * UTF-8 bytes without NUL; use credential references, never plaintext secrets.
+   * Create via POST /v2/volumes. Requires CubeAPI, every serving CubeMaster,
+   * and Cubelet at version 0.8.0 or newer, a plugin that supports this
+   * protocol, and this SDK at version 0.8.0 or newer.
+   * privateData must be valid UTF-8 of at most 1024 bytes without NUL or
+   * characters outside the BMP; use credential references, never plaintext
+   * secrets.
    * Empty strings are forwarded. Existing get/delete/mount APIs still apply.
    * Unsupported servers return an error; this never falls back to /volumes.
    */
@@ -295,6 +299,15 @@ export class Volume extends VolumeInfo {
     }
     if (options.privateData.includes("\0")) {
       throw new Error("private_data must not contain NUL");
+    }
+    for (const character of options.privateData) {
+      const codePoint = character.codePointAt(0)!;
+      if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+        throw new Error("private_data must be valid UTF-8");
+      }
+      if (codePoint > 0xffff) {
+        throw new Error("private_data must not contain characters outside the BMP");
+      }
     }
     return Volume.createRequest(options, options.privateData);
   }

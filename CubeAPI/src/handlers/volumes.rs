@@ -122,6 +122,11 @@ pub async fn create_volume_v2(
                 "private_data must not contain NUL".to_string(),
             ));
         }
+        if private_data.chars().any(|character| character > '\u{FFFF}') {
+            return Err(AppError::BadRequest(
+                "private_data must not contain characters outside the BMP".to_string(),
+            ));
+        }
     }
 
     let vol = state
@@ -264,9 +269,10 @@ mod tests {
     }
 
     async fn volume_server_with_key(key: Option<String>) -> (TestServer, Requests) {
-        async fn create(State(requests): State<Requests>, Json(body): Json<Value>) -> Json<Value> {
-            requests.lock().unwrap().push(body);
-            Json(json!({
+        volume_server_with_master_response(
+            key,
+            StatusCode::OK,
+            json!({
                 "ret": {"ret_code": 0, "ret_msg": "ok"},
                 "volume": {
                     "volumeID": "vol-private-data",
@@ -274,7 +280,22 @@ mod tests {
                     "token": "test-token",
                     "private_data": "plugin-state-B-sentinel"
                 }
-            }))
+            }),
+        )
+        .await
+    }
+
+    async fn volume_server_with_master_response(
+        key: Option<String>,
+        status: StatusCode,
+        response: Value,
+    ) -> (TestServer, Requests) {
+        async fn create(
+            State((requests, status, response)): State<(Requests, StatusCode, Value)>,
+            Json(body): Json<Value>,
+        ) -> (StatusCode, Json<Value>) {
+            requests.lock().unwrap().push(body);
+            (status, Json(response))
         }
 
         let requests = Requests::default();
@@ -282,7 +303,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let master = Router::new()
             .route("/cube/volume", post(create))
-            .with_state(requests.clone());
+            .with_state((requests.clone(), status, response));
         tokio::spawn(async move { axum::serve(listener, master).await.unwrap() });
         let config = ServerConfig {
             cubemaster_url: format!("http://{address}"),
@@ -292,6 +313,42 @@ mod tests {
         let state = AppState::new(config, arc(NoopLogger)).await;
         let server = TestServer::new(crate::routes::build_router(state)).unwrap();
         (server, requests)
+    }
+
+    #[tokio::test]
+    async fn create_volume_preserves_master_private_data_error_for_both_http_statuses() {
+        let message = "private_data must not contain characters outside the BMP";
+        for master_status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+            let (server, requests) = volume_server_with_master_response(
+                None,
+                master_status,
+                json!({"ret": {"ret_code": 130400, "ret_msg": message}}),
+            )
+            .await;
+            for path in ["/volumes", "/v2/volumes"] {
+                // Valid A reaches Master. Its rejection can represent invalid
+                // plugin-returned B; the API must preserve the parameter error.
+                let response = server
+                    .post(path)
+                    .json(&json!({"name": "vol-private-data", "private_data": "valid-input-A"}))
+                    .await;
+                assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+                let error: ApiError = response.json();
+                assert_eq!(error.code, 400);
+                assert_eq!(
+                    error.message,
+                    format!("CubeMaster returned error code 130400: {message}")
+                );
+                let mut captured = requests.lock().unwrap();
+                assert_eq!(captured.len(), 1);
+                let request = captured.pop().unwrap();
+                if path == "/v2/volumes" {
+                    assert_eq!(request["private_data"], "valid-input-A");
+                } else {
+                    assert!(request.get("private_data").is_none());
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -382,11 +439,13 @@ mod tests {
         for input in [
             "a".repeat(1025),
             "界".repeat(342),
+            "😀".to_string(),
+            "𠀀".to_string(),
             "private-data-sentinel\0tail".to_string(),
         ] {
             let response = server
                 .post("/v2/volumes")
-                .json(&json!({"name": "vol-private-data", "private_data": input}))
+                .json(&json!({"name": "vol-private-data", "private_data": input.clone()}))
                 .await;
             assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
             let error: ApiError = response.json();
@@ -395,6 +454,45 @@ mod tests {
             assert!(!error.message.contains("private-data-sentinel"));
             assert!(requests.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn create_volume_accepts_bmp_private_data_without_rewriting() {
+        let (server, requests) = volume_server().await;
+        for input in [
+            "é".to_string(),
+            "中".to_string(),
+            "\u{2028}".to_string(),
+            "\u{FFFF}".to_string(),
+            "\u{FFFD}".to_string(),
+            "a".repeat(1024),
+            r"literal \ud83d\ude00".to_string(),
+        ] {
+            let response = server
+                .post("/v2/volumes")
+                .json(&json!({"name": "vol-private-data", "private_data": input.clone()}))
+                .await;
+            assert_eq!(response.status_code(), StatusCode::CREATED);
+            let request = requests.lock().unwrap().pop().unwrap();
+            assert_eq!(request["private_data"], input);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_volume_rejects_escaped_supplementary_private_data_before_master() {
+        let (server, requests) = volume_server().await;
+        let response = server
+            .post("/v2/volumes")
+            .text(r#"{"name":"vol-private-data","private_data":"\ud83d\ude00"}"#)
+            .content_type("application/json")
+            .await;
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+        let error: ApiError = response.json();
+        assert_eq!(
+            error.message,
+            "private_data must not contain characters outside the BMP"
+        );
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

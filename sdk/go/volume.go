@@ -71,8 +71,8 @@ type CreateVolumeOptions struct {
 
 // CreateVolumeWithPrivateDataOptions configures the versioned create API.
 // PrivateData is opaque plugin input, never plaintext credentials. It is not
-// returned in VolumeInfo. It must be valid UTF-8. An empty string is forwarded
-// explicitly.
+// returned in VolumeInfo. It must be valid UTF-8, at most 1024 bytes, contain
+// no NUL or characters outside the BMP. An empty string is forwarded explicitly.
 type CreateVolumeWithPrivateDataOptions struct {
 	Name        string
 	Driver      string
@@ -86,10 +86,11 @@ func (c *Client) CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*V
 
 // CreateVolumeWithPrivateData creates via POST /v2/volumes. Existing get,
 // list, delete and sandbox mount APIs work with the returned volume ID.
-// Requires support in CubeAPI, every serving CubeMaster, and the selected
-// plugin. Upgrade all serving CubeMasters before using this method: an older
-// Master can silently ignore the input even when the API reports success.
-// This method never falls back to /volumes.
+// Requires CubeAPI, every serving CubeMaster, and Cubelet at version 0.8.0 or
+// newer, a plugin that supports this protocol, and this SDK at version 0.8.0
+// or newer. Upgrade all serving CubeMasters
+// before using this method: an older Master can silently ignore the input even
+// when the API reports success. This method never falls back to /volumes.
 func (c *Client) CreateVolumeWithPrivateData(ctx context.Context, opts CreateVolumeWithPrivateDataOptions) (*VolumeInfo, error) {
 	if !utf8.ValidString(opts.PrivateData) {
 		return nil, fmt.Errorf("private_data must be valid UTF-8")
@@ -99,6 +100,11 @@ func (c *Client) CreateVolumeWithPrivateData(ctx context.Context, opts CreateVol
 	}
 	if strings.ContainsRune(opts.PrivateData, '\x00') {
 		return nil, fmt.Errorf("private_data must not contain NUL")
+	}
+	for _, r := range opts.PrivateData {
+		if r > 0xffff {
+			return nil, fmt.Errorf("private_data must not contain characters outside the BMP")
+		}
 	}
 	return c.createVolume(ctx, opts.Name, opts.Driver, &opts.PrivateData)
 }

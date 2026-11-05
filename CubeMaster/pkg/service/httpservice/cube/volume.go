@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -100,14 +102,23 @@ func volumeItemFromRecord(r *models.VolumeRecord) VolumeItem {
 	}
 }
 
-// validatePluginPrivateData validates state before persistence, independently
-// of Controller transport: a later Node hook may use binary argv.
+// validatePluginPrivateData validates caller input before reservation and
+// plugin state before persistence, independent of Controller transport: a
+// later Node hook may use binary argv.
 func validatePluginPrivateData(privateData string) error {
 	if len(privateData) > models.MaxPrivateDataLen {
-		return fmt.Errorf("plugin private_data exceeds max length %d", models.MaxPrivateDataLen)
+		return fmt.Errorf("private_data exceeds max length %d", models.MaxPrivateDataLen)
+	}
+	if !utf8.ValidString(privateData) {
+		return errors.New("private_data must be valid UTF-8")
 	}
 	if strings.ContainsRune(privateData, '\x00') {
-		return errors.New("plugin private_data must not contain NUL")
+		return errors.New("private_data must not contain NUL")
+	}
+	for _, r := range privateData {
+		if r > 0xffff {
+			return errors.New("private_data must not contain characters outside the BMP")
+		}
 	}
 	return nil
 }
@@ -152,6 +163,8 @@ func handleListVolumes(c *gin.Context) {
 }
 
 // handleCreateVolume implements POST /cube/volume
+// private_data content validation failures use HTTP 400 with the existing
+// parameter-error envelope; other responses retain their legacy status.
 func handleCreateVolume(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	var req CreateVolumeReq
@@ -160,14 +173,8 @@ func handleCreateVolume(c *gin.Context) {
 		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "invalid request")})
 		return
 	}
-	if len(req.PrivateData) > models.MaxPrivateDataLen {
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, fmt.Sprintf(
-			"private_data exceeds max length %d", models.MaxPrivateDataLen,
-		))})
-		return
-	}
-	if strings.ContainsRune(req.PrivateData, '\x00') {
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "private_data must not contain NUL")})
+	if err := validatePluginPrivateData(req.PrivateData); err != nil {
+		common.WriteResponse(c.Writer, http.StatusBadRequest, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
 		return
 	}
 
@@ -241,7 +248,7 @@ func handleCreateVolume(c *gin.Context) {
 		_ = volumeDB().WithContext(c.Request.Context()).
 			Where("volume_id = ?", volumeID).
 			Delete(&models.VolumeRecord{}).Error
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
+		common.WriteResponse(c.Writer, http.StatusBadRequest, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
 		return
 	}
 

@@ -374,17 +374,27 @@ class Volume:
     ) -> "Volume":
         """Create via POST /v2/volumes with opaque plugin input.
 
-        Pass a string of at most 1024 UTF-8 bytes without NUL. Use credential
-        references, never plaintext credentials. Empty strings are forwarded.
+        Pass valid UTF-8 of at most 1024 bytes without NUL or characters
+        outside the BMP. Use credential references, never plaintext
+        credentials. Empty strings are forwarded.
+        Requires CubeAPI, every serving CubeMaster, and Cubelet at version
+        0.8.0 or newer, a plugin that supports this protocol, and this SDK at
+        version 0.8.0 or newer.
         Query, delete and mount the returned volume through the existing APIs.
         Unsupported servers raise an error; this does not fall back to /volumes.
         """
         if not isinstance(private_data, str):
             raise TypeError("private_data must be a string")
-        if len(private_data.encode("utf-8")) > MAX_VOLUME_PRIVATE_DATA_LEN:
+        try:
+            encoded_private_data = private_data.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ValueError("private_data must be valid UTF-8") from None
+        if len(encoded_private_data) > MAX_VOLUME_PRIVATE_DATA_LEN:
             raise ValueError(f"private_data exceeds max length {MAX_VOLUME_PRIVATE_DATA_LEN}")
         if "\0" in private_data:
             raise ValueError("private_data must not contain NUL")
+        if any(ord(character) > 0xFFFF for character in private_data):
+            raise ValueError("private_data must not contain characters outside the BMP")
         return cls._create(name, driver, config, private_data)
 
     @classmethod
