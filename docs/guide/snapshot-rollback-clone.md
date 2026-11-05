@@ -89,6 +89,7 @@ What to expect:
 | Sandbox created from it | memory restored, processes continue | cold boot, fresh processes |
 | `pause()` / `resume()` afterwards | memory kept | memory kept (first pause is a full capture) |
 | `rollback(snapshot)` to it | supported | **rejected** (`snapshot_filesystem_only_rollback_unsupported`) |
+| External mounts (plugin volume, host mount) | recorded in the snapshot and re-mounted | not recorded, and cannot be attached at create (returns an error code) |
 | `restart` with a restart policy | files preserved | files preserved (the captured writable layer is reused) |
 
 A few behaviors worth knowing:
@@ -100,10 +101,12 @@ A few behaviors worth knowing:
 - A sandbox created from an fs-only snapshot behaves like any other sandbox
   afterwards: `restart` reuses the captured writable layer so files survive,
   and you can take another fs-only snapshot of it later.
-- Plugin volumes recorded by the origin sandbox are not inherited by a sandbox
-  created from an fs-only snapshot: a writable one is rejected at capture, a
-  read-only one is dropped at create. Re-attach it with `volumeMounts` in the
-  create request if the guest needs it.
+- An fs-only package records no volume data and no mount configuration: every
+  mount the origin sandbox had is gone, whatever its kind. Plugin volumes and raw
+  host mounts cannot be re-attached on create either — a cold-booted guest mounts
+  no external volume, so the request is rejected with
+  `snapshot_filesystem_only_external_mount_unsupported` instead of silently
+  leaving the path empty. Use a full snapshot when the new sandbox needs them.
 
 If the call fails, the error code tells you why:
 
@@ -113,6 +116,7 @@ If the call fails, the error code tells you why:
 | 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | The node cannot freeze the filesystem / this rootfs type | Cluster-side capability gap; check the node before retrying |
 | 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | Freeze or thaw failed mid-capture | Cluster-side problem; check the node before retrying |
 | 409 | `snapshot_filesystem_only_shared_volume_unsupported` | The sandbox has a **writable** plugin volume | The volume is not part of the image and would leak another sandbox's data on cold boot; detach it first |
+| 400 | `snapshot_filesystem_only_external_mount_unsupported` | Creating from an fs-only snapshot with a plugin volume or host mount attached | A cold-booted guest mounts no external volume; create without it or use a full snapshot |
 | 409 | `snapshot_filesystem_only_multi_container_unsupported` | The sandbox has extra user containers | One package records one writable layer; use a single-container sandbox |
 
 The response `mode` always reports what was actually recorded. When it differs

@@ -552,7 +552,7 @@ Snapshot 会保存稳定的 Volume ID、容器挂载路径和只读属性，但�
 
 从快照创建沙箱时可以省略 `volumeMounts`，快照记录的挂载会自动重新挂载。官方 e2b 客户端会在每次创建时重新传入 `volumeMounts`，这同样可以接受，但必须与快照完全一致（相同的卷、路径和只读属性）。只要有任何不同，请求就会返回 HTTP 400（`volumeMounts must match the snapshot's volume mounts`），因为快照的 VM 内存中挂载已经固定，无法改挂到其他位置。
 
-fs-only 快照是例外：它既不携带 Volume 数据，也不携带 VM 内存，因此快照记录的挂载会被丢弃而不是重新挂载，上面的 400 一致性校验也不适用。需要在创建时显式传入 `volumeMounts` 才能重新挂载。
+fs-only 快照是例外：它既不携带 Volume 数据，也不携带 VM 内存，因此快照记录的挂载会被丢弃而不是重新挂载，上面的 400 一致性校验也不适用。用这类快照创建沙箱时也不能挂载 Volume——冷启动的 guest 不会挂任何外部卷，请求会返回 `snapshot_filesystem_only_external_mount_unsupported`。新沙箱需要该 Volume 时请改用 full 快照。
 
 因此它采用 **external-reference（外部引用）**语义：
 

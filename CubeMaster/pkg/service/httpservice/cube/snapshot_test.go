@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
@@ -541,6 +542,84 @@ func TestBindSnapshotCreateReplicaAllowsPluginVolumeCrossNode(t *testing.T) {
 	assert.Equal(t, "true", req.Annotations[constants.CubeAnnotationSnapshotCrossNode])
 }
 
+// A filesystem-only package carries no external mount and cold boot mounts none,
+// so the restore has no origin dependency: placement must not be pinned even
+// when the snapshot itself was taken from a sandbox with a raw host mount.
+func TestBindFilesystemOnlySnapshotDoesNotPinToOrigin(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
+	origSource := getSnapshotRestoreSourceFn
+	origDecide := decideRestorePlacementFn
+	origReplica := resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() {
+		getSnapshotRestoreSourceFn = origSource
+		decideRestorePlacementFn = origDecide
+		resolveSnapshotReadyReplicaFn = origReplica
+	})
+	getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+		return &templatecenter.RestoreSource{
+			SnapshotID: "snap-1", Backend: constants.SnapshotBackendS3,
+			RemoteStatus: constants.RemoteStatusReady, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1",
+			Mode: snapshotmode.FsOnly,
+		}, nil
+	}
+	decideRestorePlacementFn = func(_ context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
+		assert.False(t, in.PinToOrigin)
+		assert.Equal(t, restoreplace.FilesystemColdBoot, in.Kind)
+		return &restoreplace.Placement{NodeID: "node-b", NodeIP: "10.0.0.2", CrossNode: true}, nil
+	}
+	resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+		return templatecenter.ReplicaStatus{NodeID: "node-b"}, nil
+	}
+
+	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-1", &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{},
+	}))
+}
+
+// The cold boot cannot mount an external volume, so accepting one would leave
+// the guest with an empty directory the caller believes is shared data.
+func TestBindFilesystemOnlySnapshotRejectsCallerExternalMounts(t *testing.T) {
+	cases := map[string]*types.CreateCubeSandboxReq{
+		"host mount": {
+			Annotations: map[string]string{
+				sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt/shared"}]`,
+			},
+		},
+		"plugin volume": {
+			Annotations: map[string]string{
+				sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/mnt/data"}]`,
+			},
+			Volumes: []*types.Volume{{Name: "data"}},
+		},
+	}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			stubSnapshotReadyForNewUse(t)
+			origSource := getSnapshotRestoreSourceFn
+			origDecide := decideRestorePlacementFn
+			t.Cleanup(func() {
+				getSnapshotRestoreSourceFn = origSource
+				decideRestorePlacementFn = origDecide
+			})
+			getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+				return &templatecenter.RestoreSource{
+					SnapshotID: "snap-1", Backend: constants.SnapshotBackendS3,
+					RemoteStatus: constants.RemoteStatusReady, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1",
+					Mode: snapshotmode.FsOnly,
+				}, nil
+			}
+			decideRestorePlacementFn = func(context.Context, restoreplace.Input) (*restoreplace.Placement, error) {
+				t.Fatal("placement must not run for a rejected request")
+				return nil, nil
+			}
+
+			err := bindSnapshotCreateReplica(context.Background(), "snap-1", req)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), snapshotmode.ErrFilesystemOnlyExternalMount)
+		})
+	}
+}
+
 func TestSnapshotRestorePinsOnlyRawHostMountFromStoredTemplate(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
 	templateReq := &types.CreateCubeSandboxReq{Annotations: map[string]string{
@@ -656,17 +735,60 @@ func TestReconcileSnapshotPluginVolumes(t *testing.T) {
 	}
 }
 
-// A filesystem-only snapshot carries the rootfs only, so the volumes recorded
-// by the origin sandbox must not be inherited by a new guest. The request's own
-// mounts are the caller's choice and stay.
-func TestStripSnapshotPluginVolumesStripsOnlyTheTemplateSide(t *testing.T) {
+// emptyDirVolume builds a sandbox-local volume, the kind a filesystem-only
+// template keeps: it is created per sandbox and carries no node dependency.
+func emptyDirVolume(name string) *types.Volume {
+	return &types.Volume{
+		Name:         name,
+		VolumeSource: &types.VolumeSource{EmptyDir: &types.EmptyDirVolumeSource{}},
+	}
+}
+
+func hostDirVolume(name, hostPath string) *types.Volume {
+	return &types.Volume{
+		Name: name,
+		VolumeSource: &types.VolumeSource{
+			HostDirVolumeSources: &types.HostDirVolumeSources{
+				VolumeSources: []*types.HostDirSource{{Name: name, HostPath: hostPath}},
+			},
+		},
+	}
+}
+
+func mountNames(ctr *types.Container) []string {
+	names := make([]string, 0, len(ctr.VolumeMounts))
+	for _, mount := range ctr.VolumeMounts {
+		names = append(names, mount.GetName())
+	}
+	return names
+}
+
+// A filesystem-only snapshot carries the rootfs only, so every external mount
+// the origin sandbox recorded must be dropped: the volumes, the container
+// mounts that reference them and the annotations that would re-inject them.
+// Dropping only some of the three leaves the request with dangling references
+// or a mount the cold-booted guest never gets.
+func TestStripSnapshotExternalMountsStripsOnlyTheTemplateSide(t *testing.T) {
 	templateReq := &types.CreateCubeSandboxReq{
 		Annotations: map[string]string{
-			sandbox.AnnotationPluginVolumeMounts:  `[{"name":"data","container_path":"/mnt/data"}]`,
+			sandbox.AnnotationPluginVolumeMounts:  `[{"name":"data","container_path":"/mnt/data"},{"name":"ghost","container_path":"/mnt/ghost"}]`,
 			sandbox.AnnotationPluginVolumeSources: `[{"name":"data","plugin":"p1"}]`,
 			sandbox.AnnotationHostDirMount:        `[{"hostPath":"/data/shared","mountPath":"/mnt/shared"}]`,
 		},
-		Volumes: []*types.Volume{{Name: "data"}, {Name: "scratch"}},
+		Volumes: []*types.Volume{
+			{Name: "data"},   // declared by the annotation
+			{Name: "legacy"}, // no source at all: a plugin volume too
+			hostDirVolume("hostdir-0", "/data/shared"),
+			emptyDirVolume("scratch"),
+		},
+		Containers: []*types.Container{{
+			VolumeMounts: []*cubeboxv1.VolumeMounts{
+				{Name: "data", ContainerPath: "/mnt/data"},
+				{Name: "hostdir-0", ContainerPath: "/mnt/shared"},
+				{Name: "ghost", ContainerPath: "/mnt/ghost"}, // declared, volume absent
+				{Name: "scratch", ContainerPath: "/scratch"},
+			},
+		}},
 	}
 	req := &types.CreateCubeSandboxReq{
 		Annotations: map[string]string{
@@ -675,9 +797,11 @@ func TestStripSnapshotPluginVolumesStripsOnlyTheTemplateSide(t *testing.T) {
 		Volumes: []*types.Volume{{Name: "mine"}},
 	}
 
-	stripSnapshotPluginVolumes(templateReq)
+	stripSnapshotExternalMounts(templateReq)
 
 	assert.Equal(t, []string{"scratch"}, volumeNames(templateReq.Volumes))
+	assert.Equal(t, []string{"scratch"}, mountNames(templateReq.Containers[0]),
+		"container mounts of stripped volumes must not survive as dangling references")
 	for _, key := range []string{
 		sandbox.AnnotationPluginVolumeMounts,
 		sandbox.AnnotationPluginVolumeSources,
@@ -686,10 +810,67 @@ func TestStripSnapshotPluginVolumesStripsOnlyTheTemplateSide(t *testing.T) {
 		_, ok := templateReq.Annotations[key]
 		assert.False(t, ok, "%s must be stripped from the template request", key)
 	}
-	// The caller's own mounts are untouched: stripping them would silently
-	// drop volumes the user asked for.
+	// The caller's own mounts are untouched: that verdict belongs to the
+	// cold-boot check, not to the template strip.
 	assert.Equal(t, []string{"mine"}, volumeNames(req.Volumes))
 	assert.Contains(t, req.Annotations, sandbox.AnnotationPluginVolumeMounts)
+}
+
+// A cold-booted guest mounts no external volume, so a create that asks for one
+// must fail instead of silently leaving it empty.
+func TestRejectFilesystemOnlyExternalMounts(t *testing.T) {
+	cases := map[string]struct {
+		req       *types.CreateCubeSandboxReq
+		wantError bool
+	}{
+		"host mount annotation": {
+			req: &types.CreateCubeSandboxReq{Annotations: map[string]string{
+				sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt"}]`,
+			}},
+			wantError: true,
+		},
+		"plugin volume": {
+			req: &types.CreateCubeSandboxReq{
+				Annotations: map[string]string{
+					sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/mnt/data"}]`,
+				},
+				Volumes: []*types.Volume{{Name: "data"}},
+			},
+			wantError: true,
+		},
+		"host dir volume without annotation": {
+			req: &types.CreateCubeSandboxReq{
+				Volumes: []*types.Volume{hostDirVolume("hostdir-0", "/data/shared")},
+			},
+			wantError: true,
+		},
+		"explicit plugin source": {
+			req: &types.CreateCubeSandboxReq{
+				Volumes: []*types.Volume{{
+					Name:         "data",
+					VolumeSource: &types.VolumeSource{PluginVolume: &types.PluginVolumeSource{}},
+				}},
+			},
+			wantError: true,
+		},
+		"sandbox-local volumes only": {
+			req: &types.CreateCubeSandboxReq{
+				Volumes: []*types.Volume{emptyDirVolume("tmp")},
+			},
+		},
+		"nil request": {req: nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := rejectFilesystemOnlyExternalMounts(tc.req)
+			if !tc.wantError {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), snapshotmode.ErrFilesystemOnlyExternalMount)
+		})
+	}
 }
 
 func volumeNames(volumes []*types.Volume) []string {

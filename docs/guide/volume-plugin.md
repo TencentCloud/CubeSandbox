@@ -556,8 +556,10 @@ When creating a sandbox from a snapshot, `volumeMounts` may be omitted: the snap
 
 Filesystem-only snapshots are the exception: they carry neither Volume data nor
 VM memory, so the snapshot's recorded mounts are dropped instead of reattached
-and the consistency check above does not apply. Pass `volumeMounts` explicitly
-on create to mount them again.
+and the consistency check above does not apply. A create from such a snapshot
+cannot attach a Volume at all — a cold-booted guest mounts none — and is rejected
+with `snapshot_filesystem_only_external_mount_unsupported`. Use a full snapshot
+when the restored sandbox needs the Volume.
 
 This produces **external-reference** behavior:
 
