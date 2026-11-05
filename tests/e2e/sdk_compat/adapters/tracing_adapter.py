@@ -373,6 +373,18 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.get_host(port),
         )
 
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        return self._trace.capture(
+            "get_exposed_port_endpoint",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "port": port,
+            },
+            lambda: self._wrapped.get_exposed_port_endpoint(port),
+            output=lambda endpoint: {"endpoint": endpoint},
+        )
+
     def traffic_access_token(self) -> str | None:
         return self._trace.capture(
             "traffic_access_token",

@@ -432,3 +432,4 @@ def _serialize_results(results: list[Result]) -> list[dict[str, Any]]:
         item["text"] = result.text
         serialized.append(item)
     return serialized
+

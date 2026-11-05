@@ -728,6 +728,21 @@ export class Sandbox {
     return (await resp.json()) as Record<string, any>;
   }
 
+  /**
+   * GET /sandboxes/:id/exposed-ports/:port — return the hostIP:hostPort
+   * endpoint of a template-declared exposed port. The endpoint works
+   * identically for off-node, host-side, and in-sandbox callers (same-node
+   * sandbox callers are served by CubeVS hairpin).
+   */
+  async getExposedPortEndpoint(port: number): Promise<string> {
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/exposed-ports/${port}`,
+    );
+    await checkControlResponse(resp);
+    return ((await resp.json()) as { endpoint: string }).endpoint;
+  }
+
   /** POST /sandboxes/:id/pause — pause a sandbox (preserves memory snapshot). */
   async pause(options: PauseOptions = {}): Promise<void> {
     const wait = options.wait ?? true;

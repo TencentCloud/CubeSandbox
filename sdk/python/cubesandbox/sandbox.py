@@ -22,7 +22,14 @@ from ._config import (
 )
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
-from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
+from ._models import (
+    Execution,
+    ExecutionError,
+    OutputMessage,
+    Result,
+    SandboxInfo,
+    SnapshotInfo,
+)
 from ._policy import (
     Rule,
     _build_network_payload,
@@ -192,6 +199,25 @@ class Sandbox:
         e.g. ``49999-<sandboxID>.cube.app``
         """
         return f"{port}-{self.sandbox_id}.{self.domain}"
+
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        """Return the hostIP:hostPort endpoint of a template-declared exposed port.
+
+        The port must be declared via the template's ``--expose-port``. The
+        returned endpoint works identically for off-node, host-side, and
+        in-sandbox callers (same-node sandbox callers are served by CubeVS
+        hairpin; requires nodes running the hairpin-capable CubeVS).
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist or the port
+                is not exposed.
+            ApiError: On unexpected backend error.
+        """
+        resp = self._session.get(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/exposed-ports/{port}",
+        )
+        _check_response(resp)
+        return resp.json()["endpoint"]
 
     def get_mcp_url(self) -> str:
         """Return the streamable-HTTP URL of the sandbox MCP gateway.

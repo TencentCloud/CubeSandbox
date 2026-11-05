@@ -8,19 +8,51 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
 use validator::Validate;
 
 use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ConnectSandboxV2, ForkRequest, ForkResult, ListSandboxesQuery,
-        ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest, ResumedSandbox, Sandbox,
-        SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response,
-        SetTimeoutRequest, UpdateSandboxNetworkRequest,
+        ApiError, ConnectSandbox, ConnectSandboxV2, ExposedPortEndpoint, ForkRequest, ForkResult,
+        ListSandboxesQuery, ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest,
+        ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query,
+        SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
+
+// ─── GET /sandboxes/:sandboxID/exposed-ports/:containerPort ──────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/exposed-ports/{containerPort}",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox ID"),
+        ("containerPort" = i32, Path, description = "Container port declared via the template's expose-port list"),
+    ),
+    responses(
+        (status = 200, description = "Exposed port endpoint", body = ExposedPortEndpoint),
+        (status = 400, description = "Invalid container port", body = ApiError),
+        (status = 404, description = "Sandbox not found or port not exposed", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+    )
+)]
+pub async fn get_sandbox_exposed_port(
+    State(state): State<AppState>,
+    Path((sandbox_id, container_port)): Path<(String, i32)>,
+) -> AppResult<impl IntoResponse> {
+    // The endpoint is always the hostIP:hostPort form. CubeVS hairpin makes it
+    // reachable for same-node sandbox callers too, so no caller-IP based
+    // same-node detection is needed (and the caller address is not trusted).
+    let endpoint = state
+        .services
+        .sandboxes
+        .get_exposed_port_endpoint(&sandbox_id, container_port)
+        .await?;
+    Ok(Json(endpoint))
+}
 
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 

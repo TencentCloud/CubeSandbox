@@ -1072,6 +1072,32 @@ class TestGetInfo:
         assert "envdAccessToken" not in info.copy()
         assert secret not in json.dumps(info)
 
+    def test_get_exposed_port_endpoint_host_port(self):
+        sb = make_sandbox()
+        body = {
+            "sandboxID": SANDBOX_ID,
+            "containerPort": 8080,
+            "mode": "host_port",
+            "endpoint": "9.135.152.214:20006",
+            "hostIP": "9.135.152.214",
+            "hostPort": 20006,
+            "sandboxIP": "192.168.0.20",
+        }
+        with patch.object(sb._session, "get", return_value=mock_response(body)) as get:
+            endpoint = sb.get_exposed_port_endpoint(8080)
+        assert endpoint == "9.135.152.214:20006"
+        url = get.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{SANDBOX_ID}/exposed-ports/8080")
+        # No caller-IP parameter is ever sent.
+        assert "callerHostIP" not in url
+
+    def test_get_exposed_port_endpoint_not_exposed(self):
+        sb = make_sandbox()
+        resp = mock_response({"message": "port 8081 is not exposed"}, status=404)
+        with patch.object(sb._session, "get", return_value=resp):
+            with pytest.raises(SandboxNotFoundError):
+                sb.get_exposed_port_endpoint(8081)
+
     def test_get_info_returns_sandbox_info(self):
         sb = make_sandbox()
         with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):

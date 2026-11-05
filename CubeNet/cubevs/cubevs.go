@@ -204,6 +204,7 @@ const (
 	packetClassSNAT        = uint8(0)
 	packetClassL7Proxy     = uint8(1)
 	packetClassPortMapping = uint8(2)
+	packetClassHairpin     = uint8(3)
 	// programs that power CubeVS.
 	programNameFromEnvoy = "from_envoy"
 	programNameFromCube  = "from_cube"
