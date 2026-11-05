@@ -35,6 +35,11 @@ class SandboxAdapter(ABC):
     def info(self) -> SandboxInfo:
         raise NotImplementedError
 
+    def is_running(self) -> bool:
+        """Data-plane liveness probe. Defaults to unsupported for backends
+        whose SDK does not expose it (e.g. old e2b versions)."""
+        raise UnsupportedCapability(self.backend, "is_running")
+
     @abstractmethod
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
         raise NotImplementedError

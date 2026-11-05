@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import { fetch, type Dispatcher } from "undici";
 
-import { Commands } from "./commands.js";
+import { Commands, ENVD_PORT } from "./commands.js";
 import { Config, NEVER_TIMEOUT, resolveConfig, type ConfigOptions } from "./config.js";
 import {
   ApiError,
@@ -726,6 +726,52 @@ export class Sandbox {
     const resp = await controlFetch(this.config, `${this.config.apiUrl}/sandboxes/${this.sandboxId}`);
     await checkControlResponse(resp);
     return (await resp.json()) as Record<string, any>;
+  }
+
+  /**
+   * Report whether the sandbox is currently running (matches E2B's API).
+   * Checks control-plane state first so a paused sandbox is answered without
+   * a data-plane probe (which would trigger CLM auto-resume). The envd /health
+   * probe runs only for running/unknown states.
+   */
+  async isRunning(options: { requestTimeoutMs?: number } = {}): Promise<boolean> {
+    let state: unknown;
+    try {
+      state = (await this.getInfo()).state;
+    } catch (err) {
+      if (err instanceof SandboxNotFoundError) {
+        return false;
+      }
+      throw err;
+    }
+    if (state === "paused" || state === "pausing") {
+      return false;
+    }
+
+    const url = this.dataUrl(ENVD_PORT, "/health");
+    const signal = AbortSignal.timeout(options.requestTimeoutMs ?? this.config.requestTimeoutMs);
+    let resp: Awaited<ReturnType<typeof fetch>>;
+    try {
+      // envd /health is unauthenticated, so no X-Access-Token is sent.
+      resp = await fetch(url, {
+        headers: this.trafficTokenHeaders(),
+        dispatcher: this.dataDispatcher,
+        signal,
+      });
+    } catch {
+      // Unreachable proxy / stale socket — sandbox not reachable.
+      return false;
+    }
+    // Only the status matters; cancel the body so the connection returns to
+    // the pool instead of leaking across a polling loop.
+    void resp.body?.cancel().catch(() => undefined);
+    if (resp.status === 404 || resp.status === 502 || resp.status === 503 || resp.status === 410) {
+      return false;
+    }
+    if (resp.status >= 400) {
+      throw new ApiError(`isRunning failed: HTTP ${resp.status}`, resp.status);
+    }
+    return true;
   }
 
   /**

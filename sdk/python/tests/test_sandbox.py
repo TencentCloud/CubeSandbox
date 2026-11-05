@@ -15,6 +15,7 @@ import struct
 import threading
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -1240,6 +1241,81 @@ class TestGetInfo:
                           return_value=mock_response({"message": "not found"}, status=404)):
             with pytest.raises(SandboxNotFoundError):
                 sb.get_info()
+
+
+# ── GET /health (is_running) ──────────────────────────────────────────────────
+
+class TestIsRunning:
+    def _info(self, state):
+        return SimpleNamespace(state=state)
+
+    def _sandbox(self, handler):
+        """A sandbox with a mocked data-plane client."""
+        sb = make_sandbox()
+        sb._client = httpx.Client(transport=httpx.MockTransport(handler))
+        return sb
+
+    def test_running_state_probes_data_plane_true(self):
+        sb = self._sandbox(lambda req: httpx.Response(204))
+        with patch.object(sb, "get_info", return_value=self._info("running")):
+            assert sb.is_running() is True
+
+    def test_paused_returns_false_without_data_plane(self):
+        seen = []
+        sb = self._sandbox(lambda req: seen.append(req) or httpx.Response(500))
+        with patch.object(sb, "get_info", return_value=self._info("paused")):
+            assert sb.is_running() is False
+        assert seen == []  # paused must not touch the data plane
+
+    def test_pausing_returns_false_without_data_plane(self):
+        seen = []
+        sb = self._sandbox(lambda req: seen.append(req) or httpx.Response(500))
+        with patch.object(sb, "get_info", return_value=self._info("pausing")):
+            assert sb.is_running() is False
+        assert seen == []
+
+    def test_not_found_returns_false(self):
+        sb = make_sandbox()
+        with patch.object(sb, "get_info", side_effect=SandboxNotFoundError("gone", 404)):
+            assert sb.is_running() is False
+
+    def test_running_data_plane_false_on_404_502_503_410(self):
+        for status in (404, 502, 503, 410):
+            sb = make_sandbox()
+            sb._client = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(status)))
+            with patch.object(sb, "get_info", return_value=self._info("running")):
+                assert sb.is_running() is False, f"status {status}"
+
+    def test_running_data_plane_raises_on_403(self):
+        sb = make_sandbox()
+        sb._client = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(403)))
+        with patch.object(sb, "get_info", return_value=self._info("running")):
+            with pytest.raises(ApiError):
+                sb.is_running()
+
+    def test_running_data_plane_transport_error_returns_false(self):
+        def handler(req):
+            raise httpx.ConnectError("connection refused")
+
+        sb = make_sandbox()
+        sb._client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "get_info", return_value=self._info("running")):
+            assert sb.is_running() is False
+
+    def test_running_data_plane_probes_envd_health_path(self):
+        seen = {}
+
+        def handler(req):
+            seen["host"] = req.url.host
+            seen["path"] = req.url.path
+            return httpx.Response(204)
+
+        sb = make_sandbox()
+        sb._client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "get_info", return_value=self._info("running")):
+            assert sb.is_running() is True
+        assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"
+        assert seen["path"] == "/health"
 
 
 # ── DELETE /sandboxes/:id ─────────────────────────────────────────────────────
