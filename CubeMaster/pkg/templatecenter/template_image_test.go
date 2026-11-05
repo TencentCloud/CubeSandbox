@@ -1567,6 +1567,26 @@ func TestNormalizeRedoTemplateImageRequest(t *testing.T) {
 	}
 }
 
+func TestIsJFSTemplateRedo(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		definition *models.TemplateDefinition
+		sourceReq  *types.CreateTemplateFromImageReq
+		want       bool
+	}{
+		{name: "request backend", sourceReq: &types.CreateTemplateFromImageReq{Backend: "jfs"}, want: true},
+		{name: "definition fallback", definition: &models.TemplateDefinition{StorageBackend: "juicefs"}, sourceReq: &types.CreateTemplateFromImageReq{}, want: true},
+		{name: "request takes precedence", definition: &models.TemplateDefinition{StorageBackend: "jfs"}, sourceReq: &types.CreateTemplateFromImageReq{Backend: "xfs"}},
+		{name: "xfs", definition: &models.TemplateDefinition{StorageBackend: "xfs"}, sourceReq: &types.CreateTemplateFromImageReq{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isJFSTemplateRedo(tc.definition, tc.sourceReq); got != tc.want {
+				t.Fatalf("isJFSTemplateRedo() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDetermineRedoModeSupportsScopedFailures(t *testing.T) {
 	if got := determineRedoMode(&types.RedoTemplateFromImageReq{
 		TemplateID:        "tpl-1",
