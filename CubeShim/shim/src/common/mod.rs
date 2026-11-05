@@ -29,6 +29,11 @@ pub const PAUSE_VM_SNAPSHOT_BASE: &str = "/data/cubelet/root/pausevm";
 pub const GUEST_PROPAGATION_DIR: &str = "/run/propagation";
 pub const ANNO_PROPAGATION_MNTS: &str = "cube.propagation.mounts";
 pub const ANNO_PROPAGATION_CONTAINER_MNTS: &str = "cube.propagation.container.mounts";
+// Duplicated from agent/cube/src/rootfs.rs. A rename there stops
+// should_skip_app_snapshot_create_rpc from matching and silently skips the
+// agent-side create for containers that do carry exec mounts.
+pub const ANNO_PROPAGATION_EXEC_MNTS: &str = "cube.propagation.exec.mounts";
+pub const ANNO_PROPAGATION_CONTAINER_UMNTS: &str = "cube.propagation.container.umounts";
 
 /// Container-level annotation injected by the shim into OCI spec annotations.
 /// When present and equal to "true", the agent will create stdout/stderr pipes
