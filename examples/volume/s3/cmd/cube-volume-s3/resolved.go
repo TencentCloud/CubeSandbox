@@ -51,7 +51,7 @@ func (v resolvedVolume) mountSpec(cfg *config.Config, volumeID string) s3fsmnt.S
 	spec := s3fsmnt.Spec{
 		Bucket: v.state.Bucket, Subdir: strings.TrimSuffix(v.state.Prefix, "/"),
 		Endpoint: c.Endpoint, Region: c.Region, Addressing: c.Addressing,
-		InstanceRole: c.InstanceRole, AccessKeyID: c.AccessKeyID, ExtraOpts: c.ExtraOpts,
+		Dynamic: v.state.Dynamic, InstanceRole: c.InstanceRole, AccessKeyID: c.AccessKeyID, ExtraOpts: c.ExtraOpts,
 	}
 	if !c.InstanceRole {
 		if !v.state.Dynamic && cfg.PasswdFile != "" {

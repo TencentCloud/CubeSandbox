@@ -134,3 +134,14 @@ func TestMountDirFromMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestPasswdFileFromMetadata(t *testing.T) {
+	if got := passwdFileFromMetadata(`{"passwd_file":"/etc/cube/.passwd-s3fs-dynamic-v1"}`); got != "/etc/cube/.passwd-s3fs-dynamic-v1" {
+		t.Errorf("passwdFileFromMetadata = %q", got)
+	}
+	for _, raw := range []string{"", "not json", `{}`} {
+		if got := passwdFileFromMetadata(raw); got != "" {
+			t.Errorf("passwdFileFromMetadata(%q) = %q, want empty", raw, got)
+		}
+	}
+}

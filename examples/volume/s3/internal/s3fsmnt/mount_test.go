@@ -76,7 +76,7 @@ func TestMountArgsForDynamicSpec(t *testing.T) {
 		Endpoint:        "https://cos.ap-guangzhou.myqcloud.com",
 		Region:          "ap-guangzhou",
 		Addressing:      config.AddressingPath,
-		PasswdFile:      "/etc/cube/.passwd-s3fs-volume-vol-1",
+		PasswdFile:      "/etc/cube/.passwd-s3fs-dynamic-vol-1",
 		AccessKeyID:     "AKA",
 		SecretAccessKey: "SKA",
 	}
@@ -89,7 +89,7 @@ func TestMountArgsForDynamicSpec(t *testing.T) {
 	for _, want := range []string{
 		"-ourl=https://cos.ap-guangzhou.myqcloud.com",
 		"-oendpoint=ap-guangzhou",
-		"-opasswd_file=/etc/cube/.passwd-s3fs-volume-vol-1",
+		"-opasswd_file=/etc/cube/.passwd-s3fs-dynamic-vol-1",
 		"-oallow_other",
 		"-ouse_path_request_style",
 	} {
@@ -183,6 +183,235 @@ func TestEnsurePasswdFileForDynamicSpec(t *testing.T) {
 	}
 	if got, want := string(body), "user-bucket:AKA:SKA\n"; got != want {
 		t.Errorf("passwd = %q, want %q", got, want)
+	}
+}
+
+func dynamicMountFixture(t *testing.T) (*Manager, string, Spec) {
+	t.Helper()
+	m := testManager(t)
+	m.cfg.PasswdDir = filepath.Join(t.TempDir(), "passwd")
+	volumeID := "vol-1"
+	spec := Spec{
+		Bucket: "user-bucket", Subdir: "workspaces/user-a", Endpoint: "http://minio:9000",
+		Region: "us-east-1", PasswdFile: m.cfg.PasswdFileForVolume(volumeID),
+		AccessKeyID: "reference-ak", SecretAccessKey: "reference-sk", Dynamic: true,
+	}
+	return m, volumeID, spec
+}
+
+func TestMountWithSpecCleansDynamicPasswdOnFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mountDir   bool
+		commandErr error
+		wantError  string
+	}{
+		{name: "mount directory creation", wantError: "create mount dir"},
+		{name: "s3fs error", mountDir: true, commandErr: errors.New("s3fs denied"), wantError: "s3fs denied"},
+		{name: "exit zero without mount", mountDir: true, wantError: "not a mountpoint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, volumeID, spec := dynamicMountFixture(t)
+			base := t.TempDir()
+			if !tc.mountDir {
+				base = filepath.Join(base, "not-a-directory")
+				if err := os.WriteFile(base, []byte("block mkdir"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.mountChecker = func(string) (bool, error) { return false, nil }
+			m.commandRunner = func(name string, _ ...string) ([]byte, error) {
+				if name != "s3fs" {
+					t.Fatalf("unexpected command %q", name)
+				}
+				return []byte("simulated mount output"), tc.commandErr
+			}
+			_, err := m.MountWithSpec(base, volumeID, spec)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("MountWithSpec error = %v, want it to contain %q", err, tc.wantError)
+			}
+			if _, statErr := os.Stat(spec.PasswdFile); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Errorf("dynamic passwd file remains after confirmed mount failure: stat error=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestMountWithSpecPreservesPasswdWhenMountMayBeActive(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secondCall bool
+		mountErr   error
+		wantError  bool
+	}{
+		{name: "mount active despite command error", secondCall: true, mountErr: errors.New("late s3fs error")},
+		{name: "mount state unknown", mountErr: errors.New("s3fs error"), wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, volumeID, spec := dynamicMountFixture(t)
+			checks := 0
+			m.mountChecker = func(string) (bool, error) {
+				checks++
+				if checks == 1 {
+					return false, nil
+				}
+				if tc.secondCall {
+					return true, nil
+				}
+				return false, errors.New("mount status unavailable")
+			}
+			m.commandRunner = func(string, ...string) ([]byte, error) { return []byte("s3fs output"), tc.mountErr }
+			mnt, err := m.MountWithSpec(t.TempDir(), volumeID, spec)
+			if tc.wantError && err == nil {
+				t.Fatal("MountWithSpec succeeded with unknown mount state")
+			}
+			if !tc.wantError && (err != nil || mnt == "") {
+				t.Fatalf("MountWithSpec = %q, %v; want the active mount preserved", mnt, err)
+			}
+			if _, statErr := os.Stat(spec.PasswdFile); statErr != nil {
+				t.Errorf("passwd file removed while mount may be active: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRemoveVolumePasswdFileIsBoundToVolume(t *testing.T) {
+	m, volumeID, _ := dynamicMountFixture(t)
+	path := m.cfg.PasswdFileForVolume(volumeID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("bucket:ak:sk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveVolumePasswdFile(volumeID, ""); err != nil {
+		t.Fatalf("fallback cleanup: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("dynamic passwd file remains: %v", err)
+	}
+	if err := m.RemoveVolumePasswdFile(volumeID, ""); err != nil {
+		t.Errorf("missing file cleanup = %v, want idempotent success", err)
+	}
+
+	other := m.cfg.PasswdFileForVolume("vol-2")
+	external := filepath.Join(t.TempDir(), "external-passwd")
+	for name, hint := range map[string]string{
+		"other volume":       other,
+		"legacy shared file": m.cfg.PasswdFile,
+		"external path":      external,
+		"prefix lookalike":   path + "-extra",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(hint, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.RemoveVolumePasswdFile(volumeID, hint); err == nil {
+				t.Fatalf("accepted untrusted hint %q", hint)
+			}
+			if _, err := os.Stat(hint); err != nil {
+				t.Errorf("untrusted path was removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestRemoveVolumePasswdFileRefusesDirectory(t *testing.T) {
+	m, volumeID, _ := dynamicMountFixture(t)
+	path := m.cfg.PasswdFileForVolume(volumeID)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveVolumePasswdFile(volumeID, path); err == nil {
+		t.Fatal("removed a directory as a passwd file")
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("directory was altered: info=%v err=%v", info, err)
+	}
+}
+
+func TestLegacySharedPasswdSymlinkRemainsSupported(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "operator-managed-passwd")
+	link := filepath.Join(dir, "legacy-passwd")
+	if err := os.WriteFile(target, []byte("old:ak:sk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	spec := Spec{Bucket: "legacy", PasswdFile: link, AccessKeyID: "new-ak", SecretAccessKey: "new-sk"}
+	if err := ensurePasswdFile(spec); err != nil {
+		t.Fatalf("legacy shared passwd symlink: %v", err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("legacy passwd path is no longer a symlink: info=%v err=%v", info, err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "legacy:new-ak:new-sk\n" {
+		t.Fatalf("legacy symlink target = %q, %v", got, err)
+	}
+}
+
+func TestDynamicPasswdCleanupRemovesSymlinkWithoutFollowingTarget(t *testing.T) {
+	cfg := &config.Config{PasswdDir: t.TempDir()}
+	manager := New(cfg)
+	const volumeID = "vol-link"
+	path := cfg.PasswdFileForVolume(volumeID)
+	target := filepath.Join(t.TempDir(), "external-passwd")
+	if err := os.WriteFile(target, []byte("external:ak:sk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := manager.RemoveVolumePasswdFile(volumeID, path); err != nil {
+		t.Fatalf("RemoveVolumePasswdFile: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("dynamic symlink remains: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "external:ak:sk\n" {
+		t.Fatalf("symlink target changed: %q, %v", got, err)
+	}
+}
+
+func TestDynamicPasswdCleanupDoesNotFollowMetadataSymlinkAndDotDot(t *testing.T) {
+	root := t.TempDir()
+	passwdDir := filepath.Join(root, "passwd")
+	outsideDir := filepath.Join(root, "outside")
+	redirectTarget := filepath.Join(outsideDir, "inner")
+	if err := os.MkdirAll(passwdDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(redirectTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{PasswdDir: passwdDir}
+	const volumeID = "vol-redirect"
+	expected := cfg.PasswdFileForVolume(volumeID)
+	if err := os.Symlink(redirectTarget, filepath.Join(passwdDir, "redirect")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	metadataPath := filepath.Join(passwdDir, "redirect") + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(expected)
+	if filepath.Clean(metadataPath) != filepath.Clean(expected) {
+		t.Fatal("fixture must normalize to the expected path")
+	}
+	external := filepath.Join(outsideDir, filepath.Base(expected))
+	if err := os.WriteFile(external, []byte("external secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(expected, []byte("volume secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := New(cfg).RemoveVolumePasswdFile(volumeID, metadataPath); err != nil {
+		t.Fatalf("RemoveVolumePasswdFile: %v", err)
+	}
+	if _, err := os.Stat(external); err != nil {
+		t.Fatalf("metadata path redirected deletion outside PASSWD_DIR: %v", err)
+	}
+	if _, err := os.Stat(expected); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("fixed dynamic passwd file remains: %v", err)
 	}
 }
 

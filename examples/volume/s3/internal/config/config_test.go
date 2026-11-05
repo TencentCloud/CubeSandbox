@@ -516,6 +516,31 @@ func TestPasswdFileForVolume(t *testing.T) {
 	}
 }
 
+func TestIsDynamicPasswdFileRequiresExactVolumePath(t *testing.T) {
+	cfg := &Config{PasswdDir: filepath.Join(t.TempDir(), "passwd")}
+	want := cfg.PasswdFileForVolume("vol-1")
+	for _, tc := range []struct {
+		name string
+		id   string
+		path string
+		want bool
+	}{
+		{"exact", "vol-1", want, true},
+		{"normalized exact", "vol-1", filepath.Join(filepath.Dir(want), "..", filepath.Base(filepath.Dir(want)), filepath.Base(want)), true},
+		{"different volume", "vol-1", cfg.PasswdFileForVolume("vol-2"), false},
+		{"legacy shared file", "vol-1", filepath.Join(filepath.Dir(want), ".passwd-s3fs-volume-bucket"), false},
+		{"outside directory", "vol-1", filepath.Join(t.TempDir(), filepath.Base(want)), false},
+		{"prefix only", "vol-1", filepath.Join(filepath.Dir(want), filepath.Base(want)+"-extra"), false},
+		{"invalid volume id", "../vol-1", want, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cfg.IsDynamicPasswdFile(tc.id, tc.path); got != tc.want {
+				t.Errorf("IsDynamicPasswdFile(%q, %q) = %v, want %v", tc.id, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 // A volume ID may equal the default bucket name; the dynamic passwd file must
 // still not collide with the legacy per-bucket file.
 func TestPasswdFileForVolumeDoesNotCollideWithLegacy(t *testing.T) {

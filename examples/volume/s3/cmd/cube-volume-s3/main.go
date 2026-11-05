@@ -343,12 +343,16 @@ func doAttach(ctx context.Context, opts *options) error {
 	}
 
 	log.Printf("attach ready: host_path=%s", mnt)
+	metadata := map[string]string{
+		"mount_dir": mnt,
+		"volume_id": opts.volumeID,
+	}
+	if b.Dynamic && !volume.credentials.InstanceRole {
+		metadata["passwd_file"] = spec.PasswdFile
+	}
 	emit(attachResponse{
 		HostPath: mnt,
-		Metadata: map[string]string{
-			"mount_dir": mnt,
-			"volume_id": opts.volumeID,
-		},
+		Metadata: metadata,
 	})
 	return nil
 }
@@ -368,6 +372,9 @@ func doDetach(opts *options) error {
 		log.Printf("skipping unmount: volume still in use (refcount_after=%d)", opts.refCount)
 		emit(statusResponse{})
 		return nil
+	}
+	if err := binding.ValidateVolumeID(opts.volumeID); err != nil {
+		return fmt.Errorf("detach: %w", err)
 	}
 
 	cfg, err := config.Load("")
@@ -391,6 +398,10 @@ func doDetach(opts *options) error {
 		return err
 	}
 
+	if err := mounts.RemoveVolumePasswdFile(opts.volumeID, passwdFileFromMetadata(opts.metadata)); err != nil {
+		log.Printf("warning: remove dynamic passwd file for volume %s: %v", opts.volumeID, err)
+	}
+
 	log.Printf("detach done volumeID=%s (bucket data preserved; delete volume to remove backend data)",
 		opts.volumeID)
 	emit(statusResponse{})
@@ -408,6 +419,19 @@ func mountDirFromMetadata(metadata string) string {
 		return ""
 	}
 	return m["mount_dir"]
+}
+
+// passwdFileFromMetadata reads the dynamic s3fs credential path recorded by
+// Attach. The caller validates it against the configured path for volumeID.
+func passwdFileFromMetadata(metadata string) string {
+	if metadata == "" {
+		return ""
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(metadata), &m); err != nil {
+		return ""
+	}
+	return m["passwd_file"]
 }
 
 // emit writes the single JSON line CubeMaster / Cubelet read from stdout.

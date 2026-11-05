@@ -458,6 +458,18 @@ func (c *Config) PasswdFileForVolume(volumeID string) string {
 	return filepath.Join(dir, DynamicPasswdFilePrefix+volumeID)
 }
 
+// IsDynamicPasswdFile reports whether path is exactly the dynamic credential
+// file derived for volumeID under this configuration. It intentionally does
+// not accept prefix matches, sibling volumes, legacy shared files, or paths
+// outside PasswdDir.
+func (c *Config) IsDynamicPasswdFile(volumeID, path string) bool {
+	if binding.ValidateVolumeID(volumeID) != nil || path == "" {
+		return false
+	}
+	want := filepath.Clean(c.PasswdFileForVolume(volumeID))
+	return filepath.Clean(path) == want
+}
+
 func (c *Config) validate() error {
 	switch c.Credentials {
 	case CredentialsStatic:
