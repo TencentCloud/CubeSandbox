@@ -1,5 +1,5 @@
 [Unit]
-Description=Cube Sandbox cube-egress host network reconciler (TPROXY + ip rule)
+Description=Cube Sandbox cube-egress host network rules (TPROXY + ip rule)
 After=network-online.target cube-sandbox-cubelet.service
 Wants=network-online.target
 Requires=cube-sandbox-cubelet.service
@@ -7,17 +7,24 @@ ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=yes
+# cubelet creates cube-dev shortly after it starts, so at boot this unit
+# can win the race. The start script blocks until the interface exists
+# instead of installing nothing (#2141); without infinity systemd's
+# default 90s start timeout would kill the wait and mark the unit failed.
+TimeoutStartSec=infinity
+# If the init run does fail (e.g. a lost race against a cubelet restart,
+# or cubelet itself failing and dragging this unit down via Requires=),
+# retry instead of staying dead until the next reboot — the same silent
+# loss of egress that #2141 describes.
+Restart=on-failure
+RestartSec=5s
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
-ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-reconciler.sh
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-start.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-stop.sh
-Restart=on-failure
-RestartSec=5
-# Readiness is reported via STATUS= (waiting / ready / reconciled).
-# Use cube-egress-net-check.sh for a real readiness check — don't
-# rely on "active (running)" alone (the process is always running).
 
 [Install]
 WantedBy=cube-sandbox-control.target cube-sandbox-compute.target
