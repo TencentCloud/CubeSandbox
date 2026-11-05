@@ -65,10 +65,13 @@ def process_binary(pid, variable):
     if pid <= 1:
         raise ValueError("Expected a running dedicated service PID")
     expected = owned_path(setting(variable))
-    actual = Path(subprocess.check_output(["sudo", "readlink", f"/proc/{pid}/exe"], text=True).strip()).resolve()
-    if actual != expected:
+    # Namespace bind aliases can change /proc's displayed pathname. Compare
+    # actual executable identity; a replaced file at the same path must fail.
+    match = subprocess.run(["sudo", "test", f"/proc/{pid}/exe", "-ef", str(expected)],
+                           capture_output=True)
+    if match.returncode != 0:
         raise ValueError(f"PID {pid} does not use the inventoried {variable}")
-    return actual
+    return expected
 
 
 def endpoint(name):

@@ -28,10 +28,17 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 	defer p.Reset()
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var failedJob error
 	if failure == "cancel-at-claim" {
 		cancel()
 	}
 	p.ApplyFunc(cubelet.GetCubeletAddr, func(ip string) string { return ip })
+	// The claimed job reads the snapshot record committed with its job row.
+	p.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		require.NoError(t, ctx.Err(), "claimed job must outlive caller cancellation")
+		require.Equal(t, "snap-new", snapshotID)
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: backend}, nil
+	})
 	p.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, _ string, _ string, _ int32) (bool, error) {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
@@ -44,7 +51,8 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 	p.ApplyFunc(resolveExistingSnapshotJobByID, func(context.Context, string) (*sandboxtypes.TemplateImageJobInfo, error) {
 		return &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil
 	})
-	p.ApplyFunc(cubelet.CommitSandbox, func(ctx context.Context, _ string, _ *cubebox.CommitSandboxRequest) (*cubebox.CommitSandboxResponse, error) {
+	p.ApplyFunc(cubelet.CommitSandbox, func(ctx context.Context, _ string, req *cubebox.CommitSandboxRequest) (*cubebox.CommitSandboxResponse, error) {
+		require.Equal(t, backend, req.GetBackend())
 		if failure == "cancel-during" || failure == "cancel-failure" {
 			cancel()
 		}
@@ -70,13 +78,16 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 		}
 		return nil
 	})
-	p.ApplyFunc(updateSnapshotFields, func(context.Context, string, map[string]any) error {
-		if failure == "snapshot" {
+	p.ApplyFunc(updateSnapshotFields, func(_ context.Context, _ string, m map[string]any) error {
+		if m["status"] == StatusReady && failure == "snapshot" {
 			return errors.New("snapshot")
 		}
 		return nil
 	})
 	p.ApplyFunc(updateTemplateImageJob, func(_ context.Context, _ string, m map[string]any) error {
+		if m["status"] == JobStatusFailed {
+			failedJob = errors.New(m["error_message"].(string))
+		}
 		if m["status"] == JobStatusReady && failure == "ready" {
 			return errors.New("ready")
 		}
@@ -88,10 +99,17 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 		require.Equal(t, "snapshot-name", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias])
 		return errors.New("warn-only cache")
 	})
-	p.ApplyFunc(failSnapshotCreateJob, func(_ context.Context, _, _, _, _ string, _ *cubebox.CommitSandboxResponse, e error, _ string) error {
-		return e
+	// Exercise the real failure cleanup, whose successful FAILED writes can
+	// return nil. Only its external RPC/database/cache dependencies are stubbed.
+	p.ApplyFunc(cubelet.CleanupTemplate, func(context.Context, string, *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
+		return &cubebox.CleanupTemplateResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}}, nil
 	})
+	p.ApplyFunc(deleteReplicasByTemplateID, func(context.Context, string) error { return nil })
+	p.ApplyFunc(invalidateTemplateCaches, func(string) {})
 	p.ApplyFunc(finalizeSnapshotJobByID, func(context.Context, string) (*sandboxtypes.TemplateImageJobInfo, error) {
+		if failedJob != nil {
+			return nil, failedJob
+		}
 		if failure == "query" {
 			return nil, errors.New("query")
 		}
@@ -111,10 +129,15 @@ func TestCheckpointFinalBoundary(t *testing.T) {
 				SetWebhookPublisher(p)
 				defer SetWebhookPublisher(nil)
 				e = runCheckpointFixture(t, backend, failure)
-				if failure == "" || failure == "unclaimed" || failure == "uploading" || failure == "cancel-after-claim" || failure == "cancel-during" {
+				switch failure {
+				case "", "unclaimed", "uploading", "cancel-after-claim", "cancel-during":
 					require.NoError(t, e)
-				} else {
-					require.Error(t, e)
+				case "cancel-at-claim":
+					require.ErrorIs(t, e, context.Canceled)
+				case "cancel-failure":
+					require.EqualError(t, e, "local commit failed after caller cancellation")
+				default:
+					require.EqualError(t, e, failure)
 				}
 				if failure != "" && failure != "query" && failure != "uploading" && failure != "cancel-after-claim" && failure != "cancel-during" {
 					require.Empty(t, p.Events())

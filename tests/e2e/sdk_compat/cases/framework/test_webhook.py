@@ -66,6 +66,14 @@ def test_payload_values_and_missing_fields():
 
 def test_metadata_provenance_and_destroy_missing_fields():
     created = event("created")
+    created["event_data"] = {"sandbox_metadata": {}}
+    assert_payload(created, "created", metadata={})
+    with pytest.raises(AssertionError, match="trusted current create"):
+        assert_payload(created, "created")
+    created["event_data"] = {}
+    assert_payload(created, "created")
+    with pytest.raises(KeyError, match="sandbox_metadata"):
+        assert_payload(created, "created", metadata={})
     created["event_data"] = {"sandbox_metadata": {"user_token": "fixture-only"}}
     assert_payload(created, "created", metadata={"user_token": "fixture-only"})
     with pytest.raises(AssertionError, match="trusted current create"):
@@ -107,11 +115,13 @@ def test_master_fixture_restores_config_and_mode_after_failure(tmp_path, monkeyp
         if args[0] == "systemctl":
             return {"ExecStart": "{ path=" + str(binary) + " ; }", "MainPID": str(pid),
                     "Environment": "CUBE_MASTER_CONFIG_PATH=" + str(config)}[args[args.index("-p") + 1]]
-        assert args[:2] == ["sudo", "readlink"]
-        return str(binary)
+        raise AssertionError(f"unexpected process inspection: {args}")
 
     def command(args, **_):
         nonlocal pid
+        if args[:2] == ["sudo", "test"]:
+            assert args == ["sudo", "test", f"/proc/{pid}/exe", "-ef", str(binary)]
+            return subprocess.CompletedProcess(args, 0, "", "")
         assert args == ["sudo", "systemctl", "restart", "webhook-1903-unit.service"]
         pid += 1
         return subprocess.CompletedProcess(args, 0, "", "")

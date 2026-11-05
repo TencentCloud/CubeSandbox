@@ -24,7 +24,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
@@ -474,6 +473,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return err
 	}
 	success = true
+	publishCheckpoint(ctx)
 	logger.Infof("snapshot create finished successfully")
 	return nil
 }
@@ -1404,20 +1404,13 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 		"node_ip":     nodeIP,
 	})
 	defer cancel()
-	var template string
-	var fields webhook.LifecycleFields
-	if lifecyclePublisher.Enabled() {
-		template, fields = webhook.PrepareLifecycle(req)
-	}
+	jobCtx = withCheckpointNotification(jobCtx, req, sandboxID)
 	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID, displayName)
 	if err != nil {
 		return nil, err
 	}
 	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq); err != nil {
 		return nil, err
-	}
-	if lifecyclePublisher.Enabled() {
-		lifecyclePublisher.Publish(webhook.TypeCheckpointed, sandboxID, template, fields)
 	}
 	return finalizeSnapshotJobByID(ctx, info.JobID)
 }

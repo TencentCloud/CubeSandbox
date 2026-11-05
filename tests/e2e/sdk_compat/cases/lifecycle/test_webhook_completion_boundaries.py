@@ -383,11 +383,8 @@ def test_real_metadata_boundaries_preserve_business_and_known_fields(sdk_backend
                        timeout=15, description="network event without persisted user metadata")
             created = new_events(master.observed(sandbox), "created")
             assert len(created) == 1
-            if kind == "empty":
-                assert "sandbox_metadata" not in created[0].get("event_data", {})
-            else:
-                assert_payload(created[0], "created", metadata=metadata)
-                assert created[0]["event_data"]["sandbox_metadata"] == metadata
+            assert_payload(created[0], "created", metadata=metadata)
+            assert created[0]["event_data"]["sandbox_metadata"] == metadata
             network_events = new_events(master.observed(sandbox), "updated", field="network_egress")
             assert len(network_events) == 1
             assert_payload(network_events[0], "updated", template="")

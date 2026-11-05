@@ -13,10 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/cube"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -24,8 +20,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
-	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
-	ec "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,7 +40,6 @@ func appPublisherPublicCreate(t *testing.T, mode string) {
 	t.Setenv("CUBE_MASTER_CONFIG_PATH", path)
 	cfg, e := config.Init()
 	require.NoError(t, e)
-	cfg.Common.MockCreateDirectHandle = true
 	bodies := make(chan []byte, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -74,17 +67,13 @@ func appPublisherPublicCreate(t *testing.T, mode string) {
 		p.ApplyFunc(webhook.PrepareLifecycle, func(*types.CreateCubeSandboxReq) (string, webhook.LifecycleFields) { panic("App disabled fields") })
 		p.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("App disabled Capture") })
 	}
-	n := &node.Node{InsID: "node", IP: "127.0.0.1"}
-	p.ApplyFunc(localcache.IncrNodeConcurrent, func(*node.Node) error { return nil })
-	p.ApplyFunc(localcache.DecrNodeConcurrent, func(*node.Node) error { return nil })
-	p.ApplyFunc(localcache.GetNodesByIp, func(string) (*node.Node, bool) { return n, true })
-	p.ApplyFunc(localcache.GetNode, func(string) (*node.Node, bool) { return n, true })
-	p.ApplyFunc(localcache.SetSandboxProxyMap, func(context.Context, *proxytypes.SandboxProxyMap) error { return nil })
-	p.ApplyFunc(sandbox.ConstructCubeletReq, func(context.Context, *types.CreateCubeSandboxReq) (*cubebox.RunCubeSandboxRequest, error) {
-		return &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"}, nil
-	})
-	p.ApplyFunc(cubelet.Create, func(context.Context, string, *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
-		return &cubebox.RunCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}, SandboxID: "app-real-create", SandboxIP: "10.0.0.1"}, nil
+	// Exercise App -> Holder -> producer -> Runtime -> HTTP. Business creation
+	// has its own tests; do not start scheduler/metrics workers in this wiring test.
+	createCalls := 0
+	p.ApplyFunc(sandbox.CreateSandbox, func(ctx context.Context, req *types.CreateCubeSandboxReq) *types.CreateCubeSandboxRes {
+		createCalls++
+		require.NotNil(t, CubeLog.GetTraceInfo(ctx))
+		return &types.CreateCubeSandboxRes{Ret: &types.Ret{RetCode: 200}, SandboxID: "app-create"}
 	})
 	req := &types.CreateCubeSandboxReq{Volumes: []*types.Volume{{Name: "tmp", VolumeSource: &types.VolumeSource{EmptyDir: &types.EmptyDirVolumeSource{}}}}, Request: &types.Request{RequestID: "r"}, InsIp: "127.0.0.1", InstanceType: "cubebox", Annotations: map[string]string{constants.AnnotationsDebug: "true"}, Containers: []*types.Container{{Image: &types.ImageSpec{}, Resources: &types.Resource{Cpu: "1", Mem: "1Gi"}}}}
 	payload, e := json.Marshal(req)
@@ -93,8 +82,9 @@ func appPublisherPublicCreate(t *testing.T, mode string) {
 	cube.RegisterCubeRoutes(router.Group("/cube"))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("POST", "/cube/sandbox", bytes.NewReader(payload)).WithContext(CubeLog.WithRequestTrace(context.Background(), &CubeLog.RequestTrace{})))
+	require.Equal(t, 1, createCalls)
 	require.Equal(t, 200, w.Code)
-	require.Contains(t, w.Body.String(), "app-real-create")
+	require.Contains(t, w.Body.String(), "app-create")
 	if mode != "enabled" {
 		require.Equal(t, before, webhookCounter(t, "capture", "accepted"))
 		require.Empty(t, bodies)
@@ -103,7 +93,13 @@ func appPublisherPublicCreate(t *testing.T, mode string) {
 
 	select {
 	case body := <-bodies:
-		require.Contains(t, string(body), "app-real-create")
+		var event struct {
+			Type      string `json:"type"`
+			SandboxID string `json:"sandbox_id"`
+		}
+		require.NoError(t, json.Unmarshal(body, &event))
+		require.Equal(t, webhook.TypeCreated, event.Type)
+		require.Equal(t, "app-create", event.SandboxID)
 	case <-time.After(8 * time.Second):
 		t.Fatal("App did not inject runtime into create")
 	}

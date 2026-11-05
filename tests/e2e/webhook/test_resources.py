@@ -4,6 +4,8 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -59,15 +61,42 @@ class ResourceChecks(unittest.TestCase):
         with patch("subprocess.check_output", return_value="{ path=" + escaped + " ; argv[]=master ; }"):
             self.assertEqual(checked_unit("webhook-1903-custom-master.service"), "webhook-1903-custom-master.service")
         with patch.dict(os.environ, {"WEBHOOK_TEST_MASTER_BINARY": str(binary)}):
-            with patch("subprocess.check_output", return_value=str(binary)):
+            with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
                 self.assertEqual(process_binary(123, "MASTER_BINARY"), binary)
-            with patch("subprocess.check_output", return_value="/usr/bin/cubemaster"), self.assertRaises(ValueError):
+            with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1)), self.assertRaises(ValueError):
                 process_binary(123, "MASTER_BINARY")
         with patch("subprocess.check_output") as show, self.assertRaises(ValueError):
             checked_unit("production.service")
         show.assert_not_called()
         with patch("subprocess.check_output", return_value="{ path=/usr/bin/master ; argv[]=master ; }"), self.assertRaises(ValueError):
             checked_unit("webhook-1903-custom-master.service")
+
+    @unittest.skipUnless(sys.platform == "linux", "/proc executable identity is Linux-specific")
+    def test_process_identity_survives_namespace_alias_but_rejects_replacement(self):
+        binary = self.root / "sleep"
+        shutil.copyfile(shutil.which("sleep"), binary)
+        binary.chmod(0o700)
+        child = subprocess.Popen([str(binary), "60"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.terminate)
+        real_run = subprocess.run
+
+        def without_sudo(args, **kwargs):
+            self.assertEqual(args[:2], ["sudo", "test"])
+            return real_run(["test", *args[2:]], **kwargs)
+
+        with patch.dict(os.environ, {"WEBHOOK_TEST_NODE_BINARY": str(binary)}), \
+                patch("subprocess.run", side_effect=without_sudo), \
+                patch("subprocess.check_output", return_value="/namespace/alias/sleep") as readlink:
+            self.assertEqual(process_binary(child.pid, "NODE_BINARY"), binary)
+            # A different inode at the same pathname must not be accepted even
+            # when its bytes and basename are identical to the running binary.
+            binary.rename(self.root / "running-sleep")
+            shutil.copyfile(shutil.which("sleep"), binary)
+            binary.chmod(0o700)
+            with self.assertRaises(ValueError):
+                process_binary(child.pid, "NODE_BINARY")
+            readlink.assert_not_called()
 
 
     def test_endpoint_uses_operator_port(self):

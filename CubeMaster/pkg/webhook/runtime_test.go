@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,7 +17,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/hotswap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -327,45 +324,34 @@ func TestRuntimeParentCancellation(t *testing.T) {
 	require.Equal(t, PublishStopped, r.TryPublish(nil).Status)
 }
 
-type configUpdateChannel chan *config.Config
+func TestRuntimeKeepsStartupSubscriptionSnapshot(t *testing.T) {
+	paths := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.RequestURI()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := localConf()
+	c.Subscriptions = []Subscription{{ID: "one", Enabled: true, URL: srv.URL + "/old?token=original", Events: []string{TypeCreated}}}
+	r, err := NewRuntime(testCtx, c)
+	require.NoError(t, err)
+	defer r.Shutdown(testCtx)
 
-func (c configUpdateChannel) OnEvent(v interface{}) {
+	// Change the source slices, then decode an invalid replacement. The running
+	// webhook owns its startup snapshot; generic file-watcher behavior is separate.
+	c.Subscriptions[0].URL = srv.URL + "/new"
+	c.Subscriptions[0].Events[0] = TypeKilled
+	c.Subscriptions[0].Enabled = false
+	require.NoError(t, yaml.Unmarshal([]byte("enabled: true\nworkers: invalid-secret\n"), &c))
+	require.True(t, c.Invalid)
+	require.True(t, r.provider.List()[0].Enabled)
+	require.Equal(t, PublishAccepted, r.TryPublish(runtimeCaptured(t)).Status)
 	select {
-	case c <- v.(*config.Config):
-	default:
+	case path := <-paths:
+		require.Equal(t, "/old?token=original", path)
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup subscription did not receive event")
 	}
-}
-func TestWatcherDoesNotReplaceSubscriptionSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	original := "webhooks:\n  enabled: true\n  subscriptions: [{id: one, enabled: true, url: 'https://example.test/old?token=private', events: [sandbox.lifecycle.created]}]\n"
-	require.NoError(t, os.WriteFile(path, []byte(original), 0600))
-	watcher, err := hotswap.NewWatcher(path, 1, &config.Config{})
-	require.NoError(t, err)
-	changes := make(configUpdateChannel, 8)
-	watcher.AppendWatcher(changes)
-	data, err := watcher.Init()
-	require.NoError(t, err)
-	defer watcher.Close()
-	p, err := NewStaticConfigSubscriptionProvider(data.(*config.Config).Webhooks)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, []byte("webhooks: {enabled: true, workers: invalid-secret}\n"), 0600))
-	// WriteFile may deliver a notification between truncate and write. Wait
-	// for the completed invalid update, not the transient empty document.
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case cfg := <-changes:
-			if cfg.Webhooks.Invalid {
-				goto updated
-			}
-		case <-deadline:
-			t.Fatal("watcher did not report invalid local update")
-		}
-	}
-updated:
-
-	require.True(t, p.List()[0].Enabled)
-	require.Contains(t, p.List()[0].URL, "/old?")
 }
 
 func TestRuntimeRevokedTargets(t *testing.T) {
