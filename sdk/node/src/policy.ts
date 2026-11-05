@@ -97,8 +97,18 @@ export type NetworkRules = Rule[] | E2BPerHostRules;
 
 /** Render the final injected header value (preview helper). */
 export function renderInject(inject: Inject): string {
-  const fmt = inject.format ?? "${SECRET}";
-  return fmt.replace("${SECRET}", inject.secret);
+  // Fall back on an empty format too, not just null/undefined: CubeEgress
+  // treats `fmt == ""` as `${SECRET}` (access_phase.lua) and the Python/Go
+  // renderers do the same, so `format: ""` must preview the bare secret.
+  const fmt = inject.format || "${SECRET}";
+  // The replacer is a function on purpose. A *string* replacement makes
+  // `String.prototype.replace` apply JS's `$` substitution rules to the secret
+  // (`$$` becomes `$`, `$&` becomes the match, and the backtick forms splice
+  // in surrounding text), so `pa$$word` would preview as `pa$word` and a secret
+  // containing `$&` would splice the literal `${SECRET}` back into the header.
+  // CubeEgress builds its replacement with Lua's `string.gsub`, which has no
+  // such rules. A function replacer still replaces only the first occurrence.
+  return fmt.replace("${SECRET}", () => inject.secret);
 }
 
 /**
