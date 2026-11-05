@@ -393,10 +393,14 @@ const volume = await Volume.createWithPrivateData({
 }); // POST /v2/volumes
 ```
 
-`privateData` is a string of at most 1024 UTF-8 bytes without NUL. Use credential
-references, never plaintext credentials. Empty strings are forwarded. API versions
-without `/v2/volumes` return an error without a legacy fallback. The returned
-`Volume` uses the existing query, delete and sandbox mount APIs.
+This method requires CubeAPI, every serving CubeMaster, and Cubelet at
+**0.8.0 or newer**, a plugin that supports this protocol, and the Node SDK at
+**0.8.0 or newer**. `privateData` must be valid
+UTF-8 of at most 1024 bytes, contain no NUL, and contain no characters outside
+the BMP. Invalid surrogate pairs and supplementary-plane characters are
+rejected before any request. Empty strings are forwarded. API versions without
+`/v2/volumes` return an error without a legacy fallback. The returned `Volume`
+uses the existing query, delete and sandbox mount APIs.
 
 Upgrade order: check or upgrade the Controller/Node plugins for Create input A
 and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,

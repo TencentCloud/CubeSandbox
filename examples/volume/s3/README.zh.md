@@ -18,7 +18,7 @@ CubeSandbox 的沙箱默认是临时的，销毁即丢数据。Volume 插件给�
 
 **与 COS 插件的关系：** 本插件参照 COS 插件实现，区别是后端从腾讯云 COS 换成任意 S3 兼容 Endpoint，且挂载驱动 s3fs 同时支持 `amd64` 和 `arm64`（cosfs 仅 `amd64`）。两者可在同一集群并存（默认安装就同时注册了 `cos` 和 `s3`）。
 
-> **版本要求：** Cube 平台 **≥ 0.6.0**，Python SDK **`cubesandbox` ≥ 0.6.0**。
+> **版本要求：** 基础 Volume 能力需要 Cube 平台 **≥ 0.6.0** 和 Python SDK **`cubesandbox` ≥ 0.6.0**。使用 `private_data` 的动态 S3 卷需要 **CubeAPI、CubeMaster、Cubelet ≥ 0.8.0**、支持该协议的插件，以及使用新 SDK 方法时 **Python/Go/Node SDK ≥ 0.8.0**：Python `Volume.create_with_private_data`、Go `Client.CreateVolumeWithPrivateData`、Node `Volume.createWithPrivateData`。请调用 `POST /v2/volumes`；这些方法不会回退到 `/volumes`。
 > 协议与 Hook 细节：[Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md)。
 
 ---
@@ -40,7 +40,7 @@ CubeSandbox 的沙箱默认是临时的，销毁即丢数据。Volume 插件给�
 |------|------|
 | 运行中的 Cube 集群 | 至少包含 **CubeMaster**、**Cubelet**、**CubeAPI**（端口通常为 `3000`） |
 | 沙箱模板 | 一个 `templateID`（见 [§7](#7-使用-sdk-验证)） |
-| S3 兼容存储 | 一个存储桶，以及对该桶具备读写权限的访问密钥对（旧版 Volume 在桶不存在时可自动创建；动态 Volume 的桶必须已存在，且 Endpoint 需支持条件写——见[动态桶与凭证引用](#动态桶与凭证引用)） |
+| S3 兼容存储 | 一个存储桶，以及对该桶具备读写权限的访问密钥对（旧版 Volume 在桶不存在时可自动创建；动态 Volume 的桶必须已存在——见[动态桶与凭证引用](#动态桶与凭证引用)） |
 | 本地权限 | 在 CubeMaster / Cubelet 主机上具备 `sudo`，用于安装软件、修改配置、重启服务 |
 
 **单机开发：** CubeMaster 与 Cubelet 在同一台主机，只需安装一次依赖。
@@ -369,15 +369,11 @@ python3 verify_volume.py
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥对错误、缺少桶权限，或 `REGION` 与 Endpoint 期望的 SigV4 地域不匹配 |
 | 动态创建报 `bucket "..." does not exist` | 动态桶从不自动创建：先建桶，或修正 `private_data` 中的 `bucket` |
 | 报 `credential reference "x" is unreadable` | `<x>.conf` 必须同时存在于 CubeMaster **和** Cubelet 主机的 `CREDENTIALS_DIR` 中，由 root 所有、权限 `0600` |
-| 报 `prefix "..." is already assigned to volume "..."` | 该前缀或其父/子前缀已属于其他 Volume；换一个前缀，或先删除旧 Volume |
-| 报 `volume claims registry is not valid JSON` / `unsupported version` | 该桶的 `.cube-sandbox/volume-claims.json` 已损坏，或由更新版本的插件写入。动态创建会直接失败；确认该桶没有动态 Volume 后再修复或删除该对象 |
-| 报 `does not support conditional PUT (If-Match / If-None-Match)` | 后端不支持动态卷所需的原子登记。换用支持条件写的 Endpoint（AWS S3、MinIO、R2）或支持该能力的网关；旧版 Volume 不受影响 |
+| 报 `dynamic private_data requires cred_ref` | 任何非空动态描述都必须带合法 `cred_ref`；全局凭证只用于旧版 Volume |
 | 报 `prefix "..." already contains objects` | 动态卷要求空前缀，否则创建回滚会删掉已有数据。换一个空前缀，或在创建完成后再导入数据 |
-| 报 `refusing to delete prefix "...": no ownership claim records it` | 登记中已没有该动态卷的归属，但前缀下仍有对象。请检查 `.cube-sandbox/volume-claims.json`，不要手工删除数据 |
-| 报 `destroy of prefix "..." is already in progress` | 另一个删除持有 30 分钟的删除租约。等它完成后再重试；租约过期后才会被接管 |
-| 报 `ownership was contended N times` | 同一个桶上有大量并发创建；重试创建 |
+| 前缀重叠或删除期间复用前缀 | 插件不协调不同卷的前缀。平台必须分配互不重叠、互不嵌套的前缀，并等 Destroy 完成后再复用 |
 | 动态 Volume 挂载到了错误的桶/前缀 | Cubelet 版本较旧，没有把 `private_data` 转发给 Attach；先升级 Cubelet |
-| 报 `private_data must be a JSON object` | 创建时没有使用 `POST /v2/volumes` 或 SDK 的 `WithPrivateData` / `create_with_private_data` 方法 |
+| 报 `private_data must be a JSON object` | 插件无法将 `private_data` 解码为预期的 JSON 对象。检查 JSON 语法、是否重复编码、是否传入字符串或数组等非对象值，以及字段类型是否为字符串。 |
 | 存储桶名包含点号 | s3fs 默认使用 virtual-hosted 风格寻址，带点号的桶名会导致 TLS 校验失败。请改用不含点号的桶名，或在 `volume-s3.conf` 中设置 `S3FS_EXTRA_OPTS=-ouse_path_request_style`（MinIO 通常也需要该选项）。凭证引用文件也可以单独设置 `ADDRESSING_STYLE=path` |
 | 报 `ADDRESSING_STYLE=... conflicts with ... use_path_request_style` | 移除冲突的全局 path-style 选项；引用文件使用 `ADDRESSING_STYLE`，不能单独设置挂载参数 |
 | SDK 写入失败 | 未设置 `CUBE_PROXY_NODE_IP`；CubeAPI 或模板未就绪 |
@@ -397,11 +393,15 @@ python3 verify_volume.py
 
 使用 `POST /v2/volumes`，或 SDK 的显式方法：Python `Volume.create_with_private_data`、Go `CreateVolumeWithPrivateData`、Node `Volume.createWithPrivateData`。旧接口 `POST /volumes` 行为不变。
 
+动态卷要求 CubeAPI、CubeMaster、Cubelet ≥ 0.8.0；使用这些 SDK 方法时 Python/Go/Node SDK 也须 ≥ 0.8.0。新路由和 SDK 方法不会回退到 `POST /volumes`。
+
+动态卷使用与旧版卷相同的基础 S3 操作：`HeadBucket`、`ListObjects`、`PutObject` 和 `RemoveObjects`，不依赖条件 PUT。已用 MinIO 与真实腾讯云 COS 桶（凭证仅限单一前缀）验证：创建、挂载、写入、Detach、重挂载、Destroy 与非空前缀拒绝均符合文档描述。
+
 | 字段 | 必填 | 含义 |
 |------|------|------|
 | `bucket` | 否 | 调用方自有的、已存在的存储桶；省略时使用 `volume-s3.conf` 的 `BUCKET`。动态桶**从不自动创建**：桶不存在时创建失败。 |
 | `prefix` | 否 | 桶内的 Volume 根前缀；省略时为 `volumes/<volume_id>/`，该状态能原样解析回来。会去掉开头的 `/`、补上结尾的 `/`，拒绝 `.`/`..`/空路径段。调用方不能自选 `volumes/` 下的其他前缀，也不能使用 `.cube-sandbox/`：这两个命名空间属于插件。**前缀必须是空的**：已存在对象时创建失败（见下文）。 |
-| `cred_ref` | 否 | 凭证引用文件名；省略时使用 `volume-s3.conf` 中的密钥。 |
+| `cred_ref` | 动态描述必填 | 凭证引用文件名。动态卷不会回退到全局密钥；全局密钥只供旧版卷使用。 |
 
 **落库的内容。** Create 会在 `private_data` 中返回解析后的状态，例如：
 
@@ -422,21 +422,23 @@ REGION=ap-guangzhou
 ADDRESSING_STYLE=path
 ```
 
-明文密钥不会进入 `private_data`、数据库、沙箱 annotation 或日志。动态 Volume 的 s3fs 凭证文件写在 `PASSWD_DIR`（默认 `/etc/cube`）下的 `.passwd-s3fs-dynamic-<volume_id>`，位于挂载目录之外，权限 `0600`。它与旧版的按桶文件 `.passwd-s3fs-volume-<bucket>` 刻意不同名，因此即使卷 ID 恰好等于桶名也不会互相覆盖。轮换引用文件后，下次 attach 生效；已经挂载的 Volume 需要重新挂载才能用上新凭证。
+明文密钥不会进入 `private_data`、数据库、沙箱 annotation 或日志。插件只检查 `cred_ref` 格式并读取宿主机凭证文件，不会授权某租户能否使用该引用、桶或前缀；调用 API 前由平台负责授权。动态 Volume 的 s3fs 凭证文件写在 Cubelet 的 `PASSWD_DIR`（默认 `/etc/cube`）下的 `.passwd-s3fs-dynamic-<volume_id>`，位于挂载目录之外，权限 `0600`。最终 Detach 在成功卸载后删除该卷文件；文件已不存在视为清理完成，删除失败会记日志。Destroy 在 CubeMaster 上运行，不清理节点文件；该路径也绝不删除旧版按桶共享文件 `.passwd-s3fs-volume-<bucket>`。轮换引用文件后，下次 attach 生效；已经挂载的 Volume 需要重新挂载才能用上新凭证。
+
+**腾讯云 COS 写大文件需要分片权限。** 文件达到 `multipart_size`（默认 10 MB）后，s3fs 会从单次 PUT 切换为分片上传。只授予 `GetObject`/`HeadObject`/`PutObject`/`DeleteObject` 的租户策略因此会在较大写入时失败：实测 20 MiB 写入返回 `EPERM`，s3fs 日志显示 `POST ?uploads` 被 403 `AccessDenied` 拒绝。请在同一前缀上补授 `cos:InitiateMultipartUpload`、`cos:UploadPart`、`cos:CompleteMultipartUpload` 和 `cos:AbortMultipartUpload`。补齐这四项后，同样的 20 MiB 写入可经单分片分片上传完成，桶内对象与本地内容逐字节一致。若策略无法扩展，可用 `S3FS_EXTRA_OPTS=-omultipart_size=512` 让低于该值的文件继续走单次 PUT（已用 20 MiB 写入验证），代价是超大文件的重试粒度变粗。
+
+Attach 会在节点本地 metadata 中返回动态 passwd 路径。Detach 会将该提示与配置推导的卷路径核对，并且只删除推导出的固定路径。挂载失败后，只有确认没有活动挂载时才清理凭证文件；若挂载仍活动或状态未知，则保留该文件。
 
 `ADDRESSING_STYLE` 取 `auto`、`path` 或 `virtual`，引用文件显式设置时覆盖全局模式。引用文件只接受密钥、endpoint、region 和寻址模式；`S3FS_EXTRA_OPTS` 统一在全局配置，引用文件中的非空值会被拒绝。引用选择 virtual 或 auto 时，会在挂载前移除继承的 path-style 选项。
 
-**前缀重叠保护。** 插件在 `.cube-sandbox/volume-claims.json` 维护归属登记；新前缀若与已有前缀相同、包含或被包含，都会被拒绝。冲突检查与登记是一次条件写（`If-Match` / `If-None-Match`），两个 CubeMaster 实例无法同时占住重叠前缀：写失败的请求会重新读取登记并报冲突。这要求 Endpoint 支持条件 PUT（AWS S3、MinIO、R2 均支持）；若后端返回 501，动态创建会直接以 `does not support conditional PUT` 失败。插件刻意不回退到普通写入：用旧快照覆盖登记会丢掉另一个 Master 刚写入的归属。Destroy 只删除本 Volume 的前缀，绝不删桶；若发现另一个 Volume 的前缀嵌套在其下，或没有登记记录，也会拒绝删除。
+**前缀归属由平台负责。** 插件不检查其他卷是否使用相同、父级或子级前缀。平台必须分配唯一、互不重叠的前缀，且直到前一次 Destroy 完成后才能复用。插件不提供分布式删除栅栏或生命周期协调。
 
-**动态创建只接受空前缀。** CubeMaster 先预留数据库行，再在 Create 成功返回后持久化绑定 B；如果这次写库失败，它会用刚拿到的绑定调用 Destroy 回滚。插件无法区分这次回滚删除和用户明确删除卷，因此 Create 拒绝已经含有对象的前缀，只有早先失败尝试留下的 0 字节 `prefix/` 目录对象可以忽略。否则一旦写库失败，回滚会递归删掉这个卷从未写入过的数据。解析后的状态仍然会在访问桶之前完成编码与大小校验，插件创建失败时不会递归删除前缀数据。
+**动态创建只接受空前缀。** 仅该前缀自己的 0 字节 `prefix/` 目录 marker 除外。不支持接管已有数据：CubeMaster 创建失败时可能调用 Destroy(B) 回滚，插件无法区分回滚清理和用户明确删除。插件会先编码并检查状态 B 大小，再访问 S3；随后检查桶已存在、前缀没有对象，最后写 marker。写 marker 失败只返回错误，不会递归删除数据。空前缀检查是预先检查，不是原子占用；平台必须串行化冲突创建并确保各卷前缀不重叠。
 
-**Destroy 会先取删除租约。** 删除对象前，Destroy 在登记中写入租约，并在数据删完后才释放登记。每次删除尝试都会生成随机 `lease_id`；`deleting_at` 只记录取得租约的时间，并用于判断崩溃进程留下的租约何时（30 分钟后）可以被接管。释放和清理严格比较 `lease_id`，因此较早尝试延迟重发的清理，即使与后来的尝试发生在同一秒，也不会清掉新租约。发现新租约的重复删除会被拒绝并报 `deletion in progress`，不再并发删除；没有登记的动态前缀，除非已经为空，也会被拒绝。租约不能识别卷的代际：旧 DELETE 若在取得租约前被延迟，仍可能影响同 ID、同前缀重建的新卷；单次删除超过租约时间也可能与后来的新属主重叠。这些生命周期边界需要另行协调，租约不是完整的分布式删除栅栏。
+**Destroy 会递归删除所选前缀。** 桶本身会保留，前缀已不存在时按成功处理。由于前缀归属与删除/重建协调由平台负责，若删除的前缀与其他卷重叠，也会删除其他卷对象。动态创建不支持已有数据集；当前没有 adopt 或 mount-only 模式。
 
-**创建登记丢响应恢复。** 新登记携带本次创建调用的随机 `create_id`。登记 PUT 报错（包括 SDK 重发后最终返回 412）时，Create 会重读并识别本次已提交的登记；随后目录写入失败时会释放本次新增登记，而不会清理调用开始前就存在的归属。如果登记持续不可读，或请求在恢复前已取消，不能保证自动对账；换用其他卷 ID 重试前应先核对归属。
+**Unicode 状态编码。** 插件保留将状态 B 中补充字符写成 JSON 代理对转义的逻辑；Attach 和 Destroy 会在插件内部解码回原前缀。这使返回状态文本保持在 BMP 内，兼容现有 utf8mb3 数据库连接。CubeAPI、CubeMaster 和 SDK 创建方法会拒绝外层 JSON 解码后的 `private_data` 字符串中含有 U+FFFF 以上字符，因此调用方不能在 A 中直接传这些字符。由 ASCII 字符组成的字面量 `\uD83D\uDE00` 仍按原样传递，框架不会再解析该字符串。最终编码后的 B 仍须不超过 1024 字节；一个补充字符代理对转义占 12 个 ASCII 字节。
 
-**Unicode 状态编码。** 插件把状态 B 中的四字节字符写成标准 JSON 代理对转义，Attach 和 Destroy 解码后恢复原前缀；旧的未转义 JSON 状态仍可读取。这样内置 S3 流程可在现有 utf8mb3 数据库连接下使用补充字符，无需修改 opaque 状态契约或共享数据库驱动。最终编码后的 B 仍须不超过 1024 字节：一个四字节字符转义后占 12 字节，因此部分前缀会先达到状态上限，再达到独立的 512 字节前缀上限。超限会在访问桶之前拒绝。其他插件若直接返回原始补充字符，仍受其数据库连接字符集限制。
-
-**兼容性与升级顺序。** 动态状态要求 Cubelet 已支持把 `private_data` 转发给 Attach。升级顺序：所有 Volume 插件（CubeMaster **和** Cubelet）→ CubeMaster → CubeAPI → SDK。未传 `private_data` 的旧版 Volume 仍使用 `volumes/<id>/` 的普通前缀状态，挂载方式完全不变；插件不会为它读写归属登记，因此只授权 `volumes/*` 的桶策略继续可用。
+**兼容性与升级顺序。** 基础 Volume 能力要求 Cube ≥ 0.6.0。动态 `private_data` 要求 CubeAPI、所有服务卷操作的 CubeMaster 与 Cubelet ≥ 0.8.0，且所选插件支持该协议；使用新 SDK 方法还要求 SDK ≥ 0.8.0。升级顺序：插件（CubeMaster **和** Cubelet）→ 所有 CubeMaster → CubeAPI → SDK。新 API 和 SDK 方法不会回退到 `/volumes`。旧版 Volume 仍使用 `volumes/<id>/` 状态和全局凭证。
 
 ---
 
@@ -445,7 +447,6 @@ ADDRESSING_STYLE=path
 ```
 <bucket>/volumes/<volumeID>/       ← 旧版 Volume（创建时未传 private_data）
 <bucket>/workspaces/user-a/...     ← 动态 Volume（前缀来自 private_data）
-<bucket>/.cube-sandbox/volume-claims.json  ← 动态 Volume 的归属登记
 ```
 
 attach 时用 s3fs 把 `BUCKET:/<前缀>` 挂载到宿主机的 `/data/cube-shared/volume/s3-<volumeID>/`，Cubelet 再通过 virtiofs 暴露给 microVM。旧版 Volume 的前缀是 `volumes/<volumeID>`；动态 Volume 使用解析后状态中的前缀。
@@ -454,8 +455,8 @@ attach 时用 s3fs 把 `BUCKET:/<前缀>` 挂载到宿主机的 `/data/cube-shar
 
 | Hook | 角色 | refCount | 行为 |
 |------|------|----------|------|
-| Create | Controller | — | 旧版：若桶不存在则创建，然后 PUT 0 字节的 `volumes/<id>/` 对象。动态：要求用户桶已存在、前缀为空，先登记前缀归属，再 PUT 前缀目录对象（s3fs 目录对象） |
-| Destroy | Controller | — | 列举并删除该前缀下的所有对象（动态 Volume 在删除前先取登记中的删除租约） |
+| Create | Controller | — | 旧版：若桶不存在则创建，然后 PUT 0 字节的 `volumes/<id>/` 对象。动态：要求桶已存在且前缀为空，然后 PUT 前缀目录对象（s3fs 目录对象） |
+| Destroy | Controller | — | 列举并递归删除该前缀下的所有对象；保留桶本身 |
 | Attach | Node | `0` | 执行 `s3fs` 挂载并返回 `host_path` |
 | Attach | Node | `> 0` | 返回已有 `host_path`，不重复挂载 |
 | Detach | Node | `> 0` | 空操作 |
@@ -463,14 +464,15 @@ attach 时用 s3fs 把 `BUCKET:/<前缀>` 挂载到宿主机的 `/data/cube-shar
 
 ### 设计说明
 
-- **默认单桶，一个集群可多桶。** 不传 `private_data` 时，所有 Volume 都位于配置的 `BUCKET` 下、使用 `volumes/<id>/` 前缀。传 `private_data` 时，每个 Volume 自带桶、前缀和凭证引用，无需重新部署或重启插件。不传 `private_data` 的多桶场景仍可通过多个插件实例、不同 `driver` 名实现。
+- **默认单桶，一个集群可多桶。** 不传 `private_data` 时，所有 Volume 都位于配置的 `BUCKET` 下、使用 `volumes/<id>/` 前缀。传 `private_data` 时，每个 Volume 指定桶、前缀和必需的凭证引用，无需重新部署或重启插件。不传 `private_data` 的多桶场景仍可通过多个插件实例、不同 `driver` 名实现。
 - **不依赖任何 S3 命令行工具。** 控制面在插件二进制内使用 [minio-go](https://github.com/minio/minio-go)：每个控制节点只需一个约 8MB 的静态二进制，而不是约 100MB 的 AWS CLI 安装。
 - **仅旧版 Volume 自动建桶。** Create 会先检查桶是否存在。桶已存在时**不需要** `s3:CreateBucket`；只有桶还不存在时插件才会创建（内置 MinIO 的典型情况）。动态 Volume 的桶由用户所有，必须已存在。
 - **Destroy 只容忍 not-found。** 桶或 key 不存在说明前缀已经没了；其他任何错误都会向上传播，避免 CubeMaster 删掉 Volume 记录而桶里对象仍然残留。
 - **凭证不会进入沙箱。** 凭证保存在 CubeMaster/Cubelet 上 root 所有、权限 `600` 的配置或凭证引用文件中，microVM 只看到一个文件系统；`private_data` 只携带引用，不携带密钥。
-- **`private_data` 携带绑定关系**（Create → Attach / Destroy），上限 1024 字节，不会返回给 SDK 客户端。插件把调用方输入当作请求，把插件返回的状态当作唯一事实来源。
-- **原子归属登记，失败即拒绝。** 动态前缀登记在 `.cube-sandbox/volume-claims.json`，写入使用条件 PUT。插件拒绝重叠前缀，不会删除包含其他 Volume 的前缀，并要求创建时前缀为空。AWS S3、MinIO、R2 支持 PUT 上的 `If-Match` / `If-None-Match`；后端返回 501 时动态创建直接失败，而不是退回普通写入——普通写入可能覆盖掉并发写入的归属。旧版 Volume 完全不碰归属登记，保持只授权 `volumes/*` 的桶策略可用。
-- **带超时的删除栅栏。** 动态 Destroy 先写入带随机 `lease_id` 的租约，前缀删完后才释放登记。租约有效期内，重复的并发删除会被拒绝；崩溃的删除进程留下的租约在 30 分钟后可被接管。释放与清理比较租约 ID 而不是时间戳，同秒重试不会互相清租约。长时间删除和跨越同 ID 卷重建的旧请求，仍是生命周期边界。
+- **`private_data` 携带绑定关系**（Create → Attach / Destroy），须为有效 UTF-8、不超过 1024 字节、不含 NUL 且不超出 U+FFFF，不会返回给 SDK 客户端。插件把调用方输入当作请求，把插件返回的状态当作唯一事实来源。
+- **平台负责授权与协调。** 插件校验 `cred_ref` 格式并读取其凭证文件，但不授权租户是否能使用该引用、桶或前缀。平台必须分配唯一、互不重叠的前缀，串行化冲突创建，并在 Destroy 完成后才复用前缀。
+- **前缀生命周期。** 动态 Create 要求桶事先存在且前缀为空，不会接管已有数据。Destroy 递归删除选定前缀但不删桶。已有数据集需等独立的 adopt/mount-only 设计。
+- **节点凭证清理。** 最终 Detach 成功卸载后删除该卷的动态 passwd 文件；文件不存在视为已清理，删除失败记日志。旧版按桶共享的 passwd 文件不会被删除。
 - **并发控制。** 按 Volume 粒度的 `flock` 串行化同一节点上同一 Volume 的 attach/detach，避免两个沙箱同时启动导致重复挂载。
 - **Destroy 不可恢复**，会删除整个 Volume 前缀。API 的引用计数保护（有沙箱持有 Volume 时 `DELETE /volumes` 返回 409）是防止删除已挂载 Volume 的机制 —— 真正的风险点是节点崩溃后引用计数失真：集群级计数可能归零而某节点仍持有挂载。
 
@@ -485,7 +487,7 @@ examples/volume/s3/
 ├── volume-s3.conf.example
 ├── cmd/cube-volume-s3/main.go     # flag 解析、Hook 分发、stdout JSON
 └── internal/
-    ├── binding/                   # private_data 解析/校验、前缀规则、归属登记
+    ├── binding/                   # private_data 解析/校验与前缀规则
     ├── config/                    # volume-s3.conf 与凭证引用解析
     ├── s3api/                     # 基于 minio-go 的 create / destroy
     ├── s3fsmnt/                   # s3fs 挂载 / 卸载

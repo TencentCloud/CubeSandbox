@@ -4,7 +4,7 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 
 > **版本要求**
 >
-> Volume 能力需要 **Cube 平台 ≥ 0.6.0**（CubeMaster、CubeAPI、Cubelet 均需升级），以及 **Python SDK `cubesandbox` ≥ 0.6.0**（提供 `Volume` 与 `Sandbox.create(volume_mounts=...)`）。**Go SDK**（`sdk/go`）自仓库 master 起提供等价能力（`Client.CreateVolume` 等与 `CreateOptions.VolumeMounts`）。低于上述版本的环境无 Volume API，请勿混用旧版 SDK 调用 `/volumes`。
+> 基础 Volume 能力需要 **Cube 平台 ≥ 0.6.0**（CubeMaster、CubeAPI、Cubelet 均需升级），Python Volume API 还需 **Python SDK `cubesandbox` ≥ 0.6.0**。通过插件 `private_data` 创建卷需要 **CubeAPI、CubeMaster、Cubelet ≥ 0.8.0**、所选插件支持该协议，以及使用 SDK 方法时 **Python/Go/Node SDK ≥ 0.8.0**。该功能使用 `POST /v2/volumes`，不会回退到 `POST /volumes`。
 
 > **当前进展**（API / SDK）
 >
@@ -12,11 +12,15 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 > |------|------|
 > | REST `GET /volumes` — 列出 Volume | ✅ 已支持（Cube ≥ 0.6.0） |
 > | REST `POST /volumes` — 创建 Volume | ✅ 已支持 |
+> | REST `POST /v2/volumes` — 携带可选 `private_data` 创建 | ✅ Cube ≥ 0.8.0；不回退 `/volumes` |
 > | REST `GET /volumes/{volumeID}` — 查询 Volume + token | ✅ 已支持 |
 > | REST `DELETE /volumes/{volumeID}` — 删除 Volume | ✅ 已支持（仍被挂载时返回 409） |
 > | Python SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ 已支持（SDK ≥ 0.6.0） |
+> | Python SDK `Volume.create_with_private_data` | ✅ Cube + SDK ≥ 0.8.0；不回退 `/volumes` |
 > | Python SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ 已支持（e2b dict 映射） |
 > | Go SDK `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume` | ✅ 已支持 |
+> | Go SDK `Client.CreateVolumeWithPrivateData` / `CreateVolumeWithPrivateDataOptions` | ✅ Cube + SDK ≥ 0.8.0；不回退 `/volumes` |
+> | Node SDK `Volume.createWithPrivateData` | ✅ Cube + SDK ≥ 0.8.0；不回退 `/volumes` |
 > | Go SDK `CreateOptions.VolumeMounts`（含 `ReadOnly`） | ✅ 已支持 |
 > | 同一 Volume 被多个沙箱同时挂载 | ✅ 已支持 |
 > | 按沙箱只读挂载 | ✅ Cube SDK 扩展（Python `VolumeMount(..., read_only=True)`，Go `VolumeMount{ReadOnly: true}`）；官方 e2b SDK 自身没有只读挂载选项 |
@@ -299,11 +303,13 @@ flowchart LR
 
 ### `private_data` 契约
 
-旧 CubeAPI `POST /volumes` 保持既有的 `name`/`driver` 请求定义。独立的 `POST /v2/volumes` 接受可选 `private_data`，并将其原样转发到 CubeMaster 内部 `POST /cube/volume`。超过 1024 个 UTF-8 字节或包含 NUL 时，新入口在调用 Master 前返回 HTTP 400。省略或 null 输入时，发往 Master 的请求省略该字段；显式空字符串按空值转发。两者返回相同的卷响应，共用既有查询、删除和沙箱挂载 API。
+旧 CubeAPI `POST /volumes` 保持既有的 `name`/`driver` 请求定义。独立的 `POST /v2/volumes` 接受可选 `private_data`，并将其原样转发到 CubeMaster 内部 `POST /cube/volume`。超过 1024 个 UTF-8 字节、包含 NUL 或含有 BMP 以外字符时，新入口在调用 Master 前返回 HTTP 400。省略或 null 输入时，发往 Master 的请求省略该字段；显式空字符串按空值转发。两者返回相同的卷响应，共用既有查询、删除和沙箱挂载 API。
 
 SDK 通过显式新方法访问新创建入口：Go `Client.CreateVolumeWithPrivateData`、Python `Volume.create_with_private_data`、Node `Volume.createWithPrivateData`。原创建方法继续调用 `/volumes`。新方法要求 CubeAPI、所有处理卷操作的 CubeMaster 和所选插件均支持该契约，不会自动回退旧入口。使用前须遵循下文的升级顺序：即使新 API 返回 201，旧 Master 仍可能静默忽略输入。
 
-CubeMaster 将其视为不透明字符串，不解析 JSON、不 trim 空白、不规范化存储路径。调用方输入与 Create 返回状态均限制为 **1024 字节**（Go `len`，不是字符数），且不得含 NUL。该规则适用于所有 Controller 类型，因为同一状态后续可能交给 binary Node 插件。具体内容由插件解释和校验。
+CubeMaster 将其视为不透明字符串，不解析 JSON、不 trim 空白、不规范化存储路径。调用方输入 A 与 Create 返回状态 B 必须是有效 UTF-8，最长 **1024 字节**（Go `len`，不是字符数），不得含 NUL，且字符范围不得超出 U+FFFF。该规则适用于所有 Controller 类型，因为同一状态后续可能交给 binary Node 插件。校验在外层 JSON 解码后进行；内容中由 ASCII 字符组成的字面量 `\uD83D\uDE00` 会原样透传，不会再解析一遍。
+
+上述内容校验失败时，CubeMaster 返回 **HTTP 400**，响应体保留 `ret.ret_code = 130400`。非法 A 在预留数据库行和调用插件前被拒绝；非法 B 先走既有的 best-effort 回滚及预留行清理，再返回该响应。CubeAPI 将此错误映射为 HTTP 400，也兼容较早 Master 的 HTTP 200 + `130400` 响应。请求解码失败和其他内部错误分支保持原有响应约定。
 
 - Create 接收输入 A，可以返回不同的状态 B。只持久化 B，并将 B 转发给 Attach 和正常 Destroy。
 - 返回空值就保存空值，不回退到 A。

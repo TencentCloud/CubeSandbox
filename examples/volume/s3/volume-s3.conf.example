@@ -55,13 +55,12 @@ ENDPOINT=https://<your-s3-endpoint>
 # CREDENTIALS_DIR=/etc/cube/s3-credentials
 # Or set CUBE_S3_CREDENTIALS_DIR in the service environment.
 
-# Dynamic volumes require an endpoint that supports conditional PUT
-# (If-Match / If-None-Match on PutObject), e.g. AWS S3, MinIO or R2. The
-# ownership registry is updated with a compare-and-swap; a backend that
-# answers 501 fails the dynamic create instead of falling back to an
-# unconditional write. They also require an empty prefix: Create never adopts
-# existing objects, because a rollback after a failed database write would
-# recursively delete them. Legacy volumes are unaffected by both rules.
+# Dynamic volumes require a pre-existing bucket and an empty prefix. Existing
+# data is not adopted because CubeMaster may call Destroy(B) to roll back a
+# failed create. The platform must authorize cred_ref/bucket/prefix, assign
+# unique non-overlapping prefixes, serialize conflicting creates, and delay
+# prefix reuse until Destroy completes. The plugin does not provide distributed
+# coordination or a delete fence. Legacy volumes keep using the global keys.
 
 # Dynamic volumes get their own s3fs passwd file named
 # .passwd-s3fs-dynamic-<volume_id> in this directory. The name differs from

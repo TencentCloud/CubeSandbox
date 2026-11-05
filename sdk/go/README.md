@@ -249,9 +249,12 @@ volume, err := client.CreateVolumeWithPrivateData(ctx, cubesandbox.CreateVolumeW
 }) // POST /v2/volumes
 ```
 
-`PrivateData` must be valid UTF-8, limited to 1024 bytes without NUL. Invalid
-UTF-8 is rejected before any HTTP request, rather than replaced during JSON encoding.
-Valid input is passed unchanged.
+The `private_data` create API requires CubeAPI, every serving CubeMaster, and
+Cubelet at **0.8.0 or newer**, a plugin that supports this protocol, and the Go
+SDK at **0.8.0 or newer**.
+`PrivateData` must be valid UTF-8, limited to 1024 bytes, contain no NUL, and
+contain no characters outside the BMP. Invalid input is rejected before any
+HTTP request. Valid input is passed unchanged.
 Use credential references, never plaintext credentials. Empty strings are
 forwarded; API versions without `/v2/volumes` return an error without a legacy fallback.
 The returned `VolumeInfo` works with the existing query, delete and mount APIs.

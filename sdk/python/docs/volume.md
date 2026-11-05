@@ -38,7 +38,7 @@ You can also pass an explicit `Config` to every method via `config=`.
 | Method | HTTP | Parameters | Returns |
 |---|---|---|---|
 | `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | See parameter table below | `Volume` |
-| `Volume.create_with_private_data(name=None, *, private_data, driver=None, config=None)` | `POST /v2/volumes` | Opaque string input | `Volume` |
+| `Volume.create_with_private_data(name=None, *, private_data, driver=None, config=None)` | `POST /v2/volumes` | Opaque string input; Cube/SDK ≥ 0.8.0 | `Volume` |
 | `Volume.connect(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`: identifier | `Volume` |
 | `Volume.list(*, config=None)` | `GET /volumes` | — | `list[VolumeInfo]` (**`token` always empty**) |
 | `Volume.get_info(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`: identifier | `VolumeInfo` (with `token`) |
@@ -68,11 +68,16 @@ Modeled on e2b, where `Volume.create(name)` takes no driver:
 ### Plugin input
 
 For plugin input, use `Volume.create_with_private_data("my-data", driver="my-storage", private_data='{"cred_ref":"account-7"}')`.
-It requires support in CubeAPI, every serving CubeMaster, and the plugin; existing `Volume.create` calls keep
-their original definition and route. `private_data` must be a string of at most
-1024 UTF-8 bytes without NUL. Use credential references, never plaintext secrets.
-Empty strings are forwarded; API versions without `/v2/volumes` raise an error without a legacy
-fallback. Query, delete and mount the returned `Volume` through the existing APIs.
+It requires CubeAPI, every serving CubeMaster, and Cubelet at version 0.8.0 or
+newer, a plugin that supports this protocol, and the Python SDK at version
+0.8.0 or newer. Existing `Volume.create` calls keep their
+original definition and route. `private_data` must be valid UTF-8 of at most
+1024 bytes, contain no NUL, and contain no characters outside the BMP. Use
+credential references, never plaintext secrets. Empty strings are forwarded;
+API versions without `/v2/volumes` raise an error without a legacy fallback.
+Validation checks the decoded string once: ASCII text such as the literal
+`\uD83D\uDE00` remains opaque and is not parsed again. Query, delete and mount
+the returned `Volume` through the existing APIs.
 
 Upgrade order: check or upgrade the Controller/Node plugins for Create input A
 and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,

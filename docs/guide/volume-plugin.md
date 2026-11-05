@@ -4,7 +4,7 @@ CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent
 
 > **Version requirement**
 >
-> Volume features require **Cube platform ≥ 0.6.0** (CubeMaster, CubeAPI, and Cubelet must all be upgraded), plus **Python SDK `cubesandbox` ≥ 0.6.0** (`Volume` and `Sandbox.create(volume_mounts=...)`). The **Go SDK** (`sdk/go`) provides equivalent support as of repository master (`Client.CreateVolume` etc. and `CreateOptions.VolumeMounts`). Environments below these versions have no Volume API — do not call `/volumes` with an older SDK.
+> Basic Volume features require **Cube platform ≥ 0.6.0** (CubeMaster, CubeAPI, and Cubelet must all be upgraded) and **Python SDK `cubesandbox` ≥ 0.6.0** for the Python Volume API. Creating a volume with opaque plugin `private_data` requires **CubeAPI, CubeMaster, and Cubelet ≥ 0.8.0**, a plugin that supports this protocol, and **Python/Go/Node SDK ≥ 0.8.0** when using an SDK method. This uses `POST /v2/volumes`; it never falls back to `POST /volumes`.
 
 > **Current status** (API / SDK)
 >
@@ -12,11 +12,15 @@ CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent
 > |------------|--------|
 > | REST `GET /volumes` — list volumes | ✅ Supported (Cube ≥ 0.6.0) |
 > | REST `POST /volumes` — create volume | ✅ Supported |
+> | REST `POST /v2/volumes` — create with optional `private_data` | ✅ Cube ≥ 0.8.0; no fallback to `/volumes` |
 > | REST `GET /volumes/{volumeID}` — get volume + token | ✅ Supported |
 > | REST `DELETE /volumes/{volumeID}` — delete volume | ✅ Supported (409 when still mounted) |
 > | Python SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ Supported (SDK ≥ 0.6.0) |
+> | Python SDK `Volume.create_with_private_data` | ✅ Cube + SDK ≥ 0.8.0; no fallback to `/volumes` |
 > | Python SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ Supported (e2b dict mapping) |
 > | Go SDK `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume` | ✅ Supported |
+> | Go SDK `Client.CreateVolumeWithPrivateData` / `CreateVolumeWithPrivateDataOptions` | ✅ Cube + SDK ≥ 0.8.0; no fallback to `/volumes` |
+> | Node SDK `Volume.createWithPrivateData` | ✅ Cube + SDK ≥ 0.8.0; no fallback to `/volumes` |
 > | Go SDK `CreateOptions.VolumeMounts` (incl. `ReadOnly`) | ✅ Supported |
 > | One volume mounted by multiple sandboxes | ✅ Supported |
 > | Per-sandbox read-only attachment | ✅ Cube SDK extension (Python `VolumeMount(..., read_only=True)`, Go `VolumeMount{ReadOnly: true}`); the official e2b SDK itself has no read-only mount option |
@@ -299,11 +303,13 @@ Output (stdout JSON, exit 0):
 
 ### `private_data` contract
 
-Legacy CubeAPI `POST /volumes` keeps its existing `name`/`driver` request definition. The separate `POST /v2/volumes` accepts optional `private_data` and forwards it unchanged to CubeMaster's internal `POST /cube/volume`. It returns HTTP 400 for values over 1024 UTF-8 bytes or containing NUL, before calling CubeMaster. Omitted or null input omits the field in the Master request; an explicit empty string is forwarded as empty. Both APIs return the same volume response and share existing query, delete and sandbox mount APIs.
+Legacy CubeAPI `POST /volumes` keeps its existing `name`/`driver` request definition. The separate `POST /v2/volumes` accepts optional `private_data` and forwards it unchanged to CubeMaster's internal `POST /cube/volume`. It returns HTTP 400 before calling CubeMaster for values over 1024 UTF-8 bytes, containing NUL, or containing characters outside the BMP. Omitted or null input omits the field in the Master request; an explicit empty string is forwarded as empty. Both APIs return the same volume response and share existing query, delete and sandbox mount APIs.
 
 SDKs expose the new creation path explicitly: Go `Client.CreateVolumeWithPrivateData`, Python `Volume.create_with_private_data`, and Node `Volume.createWithPrivateData`. Existing create methods continue to call `/volumes`. New methods require support in CubeAPI, every CubeMaster serving volume operations, and the selected plugin; they never fall back to the legacy route. Follow the [upgrade order](#private_data-upgrade-order) before using them: an older Master can silently discard the input even when the new API returns 201.
 
-CubeMaster treats the value as an opaque string: it does not parse JSON, trim whitespace, or normalize storage paths. Both the caller input and Create's returned state are limited to **1024 bytes** (Go `len`, not character count) and must not contain NUL. This applies to every Controller transport because the same state may later be sent to a binary Node plugin. The plugin validates and interprets its contents.
+CubeMaster treats the value as an opaque string: it does not parse JSON, trim whitespace, or normalize storage paths. Both caller input A and Create's returned state B must be valid UTF-8, at most **1024 bytes** (Go `len`, not character count), contain no NUL, and use only characters through U+FFFF. This applies to every Controller transport because the same state may later be sent to a binary Node plugin. Validation happens after the outer JSON request has been decoded; ASCII text such as the literal characters `\uD83D\uDE00` is passed unchanged and is not parsed a second time.
+
+CubeMaster returns **HTTP 400** with `ret.ret_code = 130400` when this content validation fails. Invalid A is rejected before reserving a database row or calling the plugin. Invalid B triggers the existing best-effort rollback and reservation cleanup before that response. CubeAPI maps this envelope to HTTP 400 and also accepts the HTTP 200 + `130400` envelope from earlier Masters. Request-decoding failures and other internal error paths retain their existing response conventions.
 
 - Create receives caller input A and may return different state B. Only B is persisted and forwarded to Attach and normal Destroy.
 - An empty return is stored as empty; CubeMaster does not fall back to A.

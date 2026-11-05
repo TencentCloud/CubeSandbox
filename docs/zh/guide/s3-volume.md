@@ -28,6 +28,11 @@
 pip install 'cubesandbox>=0.6.0'
 ```
 
+此最低版本用于基础 Volume 创建、挂载和删除。通过 `private_data` 使用动态
+S3 绑定要求 CubeAPI、所有 CubeMaster 与 Cubelet ≥ 0.8.0，且
+`cubesandbox` ≥ 0.8.0。请调用 `Volume.create_with_private_data` 或
+`POST /v2/volumes`；新入口不会回退到 `/volumes`。
+
 ::: warning 用 cubesandbox，不要用官方 e2b SDK
 官方 e2b Python SDK 会把请求硬编码发到 e2b.cloud 后端，**不能用于 CubeSandbox**。请使用 `cubesandbox`。
 :::
@@ -183,7 +188,9 @@ volumeS3:
 
 ### 桶必须提前创建吗？
 
-不必。Create 会先 `head-bucket`，桶不存在时自动创建；桶已存在则直接用，不需要 `s3:CreateBucket` 权限。
+旧版卷使用配置的桶，Create 会先检查，不存在时自动创建。所有动态卷解析后使用的桶
+都必须预先存在，包括省略 `private_data.bucket`、回落到配置 `BUCKET` 的情况。
+动态 Create 从不自动建桶。
 
 ---
 
