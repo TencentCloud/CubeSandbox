@@ -58,6 +58,7 @@ type compatibleCandidate struct {
 var (
 	lookupNodeFn              = defaultLookupNode
 	selectNodeFn              = defaultSelectNode
+	selectPinnedFn            = scheduler.SelectPinned
 	listCompatibleFn          = defaultListCompatible
 	queryHostFactCandidatesFn = nodemeta.QueryHostFactCandidates
 )
@@ -185,7 +186,8 @@ func originSchedulable(ctx context.Context, origin *node.Node, in Input) bool {
 	if ip := strings.TrimSpace(origin.HostIP()); ip != "" {
 		scope = append(scope, ip)
 	}
-	selected, err := selectNodeFn(ctx, in.InstanceType, cloneReqResForOrigin(in.ReqRes, scope), scope)
+	sel := newSelector(ctx, in.InstanceType, cloneReqResForOrigin(in.ReqRes, scope))
+	selected, err := selectPinnedFn(sel, node.NodeList{origin})
 	if err != nil || selected == nil {
 		return false
 	}
@@ -246,7 +248,7 @@ func defaultLookupNode(nodeID, nodeIP string) *node.Node {
 	return nil
 }
 
-func defaultSelectNode(ctx context.Context, instanceType string, reqRes *selctx.RequestResource, _ []string) (*node.Node, error) {
+func newSelector(ctx context.Context, instanceType string, reqRes *selctx.RequestResource) *selctx.SelectorCtx {
 	name := "random"
 	if cfg := config.GetConfig(); cfg != nil && cfg.Scheduler != nil {
 		name = cfg.Scheduler.LeastSelectName
@@ -268,7 +270,11 @@ func defaultSelectNode(ctx context.Context, instanceType string, reqRes *selctx.
 			sel.Affinity.NodePrefererd = np
 		}
 	}
-	return scheduler.Select(sel)
+	return sel
+}
+
+func defaultSelectNode(ctx context.Context, instanceType string, reqRes *selctx.RequestResource, _ []string) (*node.Node, error) {
+	return scheduler.Select(newSelector(ctx, instanceType, reqRes))
 }
 
 func defaultListCompatible(ctx context.Context, origin *nodemeta.HostFacts) ([]compatibleCandidate, error) {

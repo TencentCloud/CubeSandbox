@@ -16,6 +16,9 @@ type Conf struct {
 	FileNum         int    `yaml:"file_num"`
 	Level           string `yaml:"level"`
 	EnableLogMetric bool   `yaml:"enable_log_metric"`
+	// AsyncFlush is "true" to enqueue log lines instead of writing them under
+	// the logger lock. A full queue drops lines.
+	AsyncFlush string `yaml:"async_flush"`
 }
 
 // UnmarshalYAML accepts the snake_case keys used by the shipped configuration

@@ -45,7 +45,7 @@
 控制节点的前置条件请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
 
 :::: warning 保持节点时间同步
-如果计算节点的时间落后于控制节点，其心跳时间可能看起来已超过 15 秒的过期窗口，导致该节点被标记为不健康，模板也不会下发到该节点。时间恢复同步后，CubeMaster 通常会自动补齐缺失的模板副本；如需立即触发重新下发，可执行 [template redo](./cubemaster-scheduler-config.md#新增计算节点后的-template-redo)。
+如果计算节点的时间落后于控制节点，其心跳时间可能看起来已超过 15 秒的过期窗口，导致该节点被标记为不健康，模板也不会下发到该节点。时间恢复同步后，CubeMaster 通常会自动补齐缺失的模板副本；如需立即触发重新下发，可执行 [template redo](./cubemaster-scheduler-config.md#扩容后的-template-redo)。
 ::::
 
 ## 第一步：准备发布包

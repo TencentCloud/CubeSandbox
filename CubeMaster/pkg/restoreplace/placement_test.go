@@ -23,11 +23,13 @@ func resetPlacementSeams(t *testing.T) {
 	t.Helper()
 	origLookup := lookupNodeFn
 	origSelect := selectNodeFn
+	origPinned := selectPinnedFn
 	origList := listCompatibleFn
 	origQuery := queryHostFactCandidatesFn
 	t.Cleanup(func() {
 		lookupNodeFn = origLookup
 		selectNodeFn = origSelect
+		selectPinnedFn = origPinned
 		listCompatibleFn = origList
 		queryHostFactCandidatesFn = origQuery
 	})
@@ -83,7 +85,7 @@ func TestDecidePrefersOriginWhenSchedulable(t *testing.T) {
 	resetPlacementSeams(t)
 	origin := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
 	lookupNodeFn = func(nodeID, nodeIP string) *node.Node { return origin }
-	selectNodeFn = func(ctx context.Context, instanceType string, reqRes *selctx.RequestResource, scope []string) (*node.Node, error) {
+	selectPinnedFn = func(sel *selctx.SelectorCtx, pinned node.NodeList) (*node.Node, error) {
 		return origin, nil
 	}
 	listCompatibleFn = func(ctx context.Context, origin *nodemeta.HostFacts) ([]compatibleCandidate, error) {
@@ -448,5 +450,27 @@ func TestDecideCrossNodeFailsWhenQueryHasNoMatchingPeer(t *testing.T) {
 	_, err := Decide(context.Background(), s3ReadyInput("node-a"))
 	if err == nil || !strings.Contains(err.Error(), "no compatible node") {
 		t.Fatalf("want no-compatible-node, got %v", err)
+	}
+}
+
+func TestDecideSkipsOriginOutsideRequestedScope(t *testing.T) {
+	resetPlacementSeams(t)
+	origin := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	lookupNodeFn = func(nodeID, nodeIP string) *node.Node { return origin }
+	selectPinnedFn = func(sel *selctx.SelectorCtx, pinned node.NodeList) (*node.Node, error) {
+		t.Fatal("origin outside the requested scope must not be checked")
+		return origin, nil
+	}
+	selectNodeFn = func(ctx context.Context, instanceType string, reqRes *selctx.RequestResource, scope []string) (*node.Node, error) {
+		t.Fatal("xfs must not select a peer")
+		return nil, nil
+	}
+
+	in := s3ReadyInput("node-a")
+	in.Backend = constants.SnapshotBackendXFS
+	in.RequestedScope = []string{"node-z"}
+	_, err := Decide(context.Background(), in)
+	if err == nil || !strings.Contains(err.Error(), "cannot restore cross-node") {
+		t.Fatalf("want origin-only failure, got %v", err)
 	}
 }
