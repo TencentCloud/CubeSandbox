@@ -2,9 +2,11 @@
 
 [JuiceFS](https://juicefs.com/docs/community/introduction/) is an open-source, POSIX-compatible distributed filesystem. It separates data from metadata, storing data in object storage and metadata in a metadata engine. Supported metadata engines include Redis, MySQL, and TiKV, while supported object stores include MinIO, S3, and COS.
 
-See [JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for Cube's JuiceFS storage design and the [JuiceFS performance benchmark](/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark) for performance results.
+See [JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for Cube's JuiceFS storage design and the [JuiceFS performance benchmark](/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark) for performance results.
 
-> For more details about JuiceFS internals, see its official [technical architecture](https://juicefs.com/docs/community/architecture/).
+::: warning Preview
+The JuiceFS storage backend is currently in preview and intended for quick trials and early validation. Configuration options, deployment scripts, and runtime behavior may still change in later releases. The default control-node Redis/MinIO pairing is for trials only; validate in a non-production environment first, and switch to more reliable metadata and object stores as described in [Storage migration](#storage-migration) before production use.
+:::
 
 ## Prerequisites
 
@@ -156,6 +158,35 @@ CUBE_JFS_META_PASSWORD="password"
 For a new cluster, set this URL and initialize the control node. To migrate an existing volume, stop writes and unmount all clients, use `juicefs dump` to export metadata from the old engine, and use `juicefs load` to import it into an empty new engine. Then update `CUBE_JFS_META_URL` on every node and remount. Object-store credentials are excluded from the dump by default and must be configured again in the new metadata engine. See the JuiceFS official [metadata backup and migration](https://juicefs.com/docs/community/metadata_dump_load/) documentation.
 
 > JuiceFS metadata storage is critical. For production deployments, a Redis cluster is recommended to reduce the risk of data loss.
+
+## JFS configuration notes
+
+The `CUBE_JFS_*` variables can be adjusted in `.env` / `.one-click.env`. Most of them should be left unchanged; this section covers the ones worth attention.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CUBE_JFS_MOUNT_PATH` | `/data/cubelet/jfs` | Mount point |
+| `CUBE_JFS_CACHE_DIR` | `/data/cubelet/jfs-cache` | Local cache directory holding both the read cache and write staging; put it on the node's NVMe/SSD data disk |
+| `CUBE_JFS_CACHE_SIZE_MB` | `102400` (100 GiB) | Upper bound for the read cache |
+
+### Cache directory and sizing
+
+`CUBE_JFS_CACHE_DIR` holds two kinds of data. See [JuiceFS cross-node storage architecture](/architecture/juicefs-storage) for the directory layout:
+
+- Read cache (`raw/`): blocks fetched back from object storage, evicted LRU-style at any time and bounded by `CUBE_JFS_CACHE_SIZE_MB`.
+- Write staging (`rawstaging/`): with `--writeback`, dirty blocks not yet uploaded to object storage. They are deleted once uploaded and do not count against `CUBE_JFS_CACHE_SIZE_MB`.
+
+The default `CUBE_JFS_CACHE_SIZE_MB` is 100 GiB, matching the setup used by the [performance benchmark](/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark). It is an **upper bound, not a reservation** — the cache grows on demand:
+
+- If the disk has less than 100 GiB free, mounting still succeeds; the read cache simply grows to whatever is actually available.
+- JuiceFS defaults to `--free-space-ratio 0.1`: once free space on the cache filesystem falls below 10%, the client proactively evicts read-cache blocks with an LRU-like 2-random algorithm until free space recovers above the threshold. Evicted blocks must be fetched from object storage again on their next read, so the cache hit rate drops.
+
+  **Note that the 10% threshold is calculated against the total capacity of the data disk hosting the cache directory**: with `/data/cubelet/jfs-cache` on a 1000 GiB `/data` disk, even a cache at its full 100 GiB limit leaves far more than 10% free, so this fallback never fires — the effective bound on the read cache is `CUBE_JFS_CACHE_SIZE_MB`.
+- If the disk keeps being filled by data outside the cache (Cubelet data, images, staging), eviction only frees space temporarily: the client evicts repeatedly to hold the threshold, the read cache shrinks, and more and more reads fall back to object storage — a noticeable performance drop.
+- When free space drops below half the threshold (5% by default), staging writes are restricted too: JuiceFS uploads staged blocks early to release space, and new writes may fall back to synchronous writes to object storage. Tune `--free-space-ratio` (for example 0.2) via `CUBE_JFS_MOUNT_OPTS` if needed.
+- Staging has no separate quota: if the data disk actually fills up, new `--writeback` writes fail outright and operations such as snapshot and pause may error. Always reserve space for staging and other data.
+
+Place the cache directory on a dedicated fast data disk and keep `CUBE_JFS_CACHE_SIZE_MB` within 70%–80% of that disk's free space. On smaller data disks (for example 100–200 GiB), scale the value down proportionally. Read-cache eviction is normally triggered by `CUBE_JFS_CACHE_SIZE_MB` first; `--free-space-ratio` mainly acts as a fallback when the cache disk keeps being filled by other data — most notably a staging backlog. The roomier the cache disk, the later this fallback fires, so also monitor overall cache-disk usage.
 
 ## Image distribution
 

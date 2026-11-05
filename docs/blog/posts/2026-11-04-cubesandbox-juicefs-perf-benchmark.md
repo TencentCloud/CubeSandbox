@@ -1,6 +1,6 @@
 ---
 title: "CubeSandbox JuiceFS Multi-Node Performance Benchmark"
-date: 2026-10-28
+date: 2026-11-04
 author: kamilu
 description: This report presents CubeSandbox lifecycle performance on three PVM cloud instances using shared JuiceFS storage. It covers template start, snapshots, pause and resume, plus cross-node snapshot start and pause/resume from c2 to c3.
 featured: false
@@ -34,8 +34,8 @@ All nodes used the following software environment:
 | OS | TencentOS Server 4.4 |
 | Kernel | `6.6.69-opencloudos9.cubesandbox.pvm.host-g0de43d6b3bcd` |
 | CPU topology | 1 socket × 16 cores × 1 thread, 1 NUMA node |
-| CubeSandbox version | v0.7.3 package with core components built from the tested branch |
-| Test date | 2026-10-28 |
+| CubeSandbox version | v0.8.0 package |
+| Test date | 2026-11-04 |
 
 ### 2.2 Deployment topology
 
@@ -135,7 +135,7 @@ Record the resulting template ID for the following tests.
 
 ### 3.1 Scripts
 
-The benchmark uses `tests/perf/cubebench_jfs_local.py` and `tests/perf/cubebench_jfs_cross_node.py`. Both run on c1. The cross-node script requests cross-node scheduling through CubeAPI; its database queries and optional node isolation use Docker/MySQL and `cubeopscli` locally on c1. Shared logic is in `tests/perf/jfs_bench_common.py`.
+The benchmark uses `tests/perf/cubebench_jfs_local.py` and `tests/perf/cubebench_jfs_cross_node.py`. Both run directly on c1.
 
 ### 3.2 SDK and environment variables
 
@@ -156,11 +156,9 @@ export CUBE_CONTROL_NODE=c1
 export CUBE_NODES="c1=<c1-ip>,c2=<c2-ip>,c3=<c3-ip>"
 ```
 
-Neither local nor cross-node tests require SSH: run them on `CUBE_CONTROL_NODE`. `CUBE_CONTROL_NODE` is required because it identifies the node that hosts the local Docker/MySQL and `cubeopscli` control-plane dependencies. Do not include departed nodes in `CUBE_NODES`, otherwise cross-node recovery may fail while isolating or restoring scheduling state.
-
 ### 3.3 Full commands
 
-Local and cross-node results are written to separate JSON files. First run the c2 local benchmark on c1:
+First run the JuiceFS local lifecycle benchmark on c1:
 
 ```bash
 python3 tests/perf/cubebench_jfs_local.py \
@@ -169,7 +167,7 @@ python3 tests/perf/cubebench_jfs_local.py \
   --origin c2 \
   --samples 10 \
   --concurrency 1 5 10 \
-  --warmups 1 \
+  --warmups 3 \
   --round-gap 10 \
   --label "$(date +%F), c2 local, bundled MinIO" \
   --out /tmp/jfs-local-perf.json
@@ -186,7 +184,7 @@ python3 tests/perf/cubebench_jfs_cross_node.py \
   --target c3 \
   --samples 10 \
   --concurrency 1 5 10 \
-  --warmups 1 \
+  --warmups 3 \
   --round-gap 10 \
   --allow-node-isolation \
   --label "$(date +%F), c2-to-c3, bundled MinIO" \
@@ -207,7 +205,7 @@ python3 tests/perf/cubebench_jfs_report.py \
 | Scenario | Measurement |
 |---|---|
 | Template start | Create a sandbox from a template on c2 until the SDK create call returns |
-| Snapshot creation | Create a snapshot of a sandbox on c2 and wait for remote data readiness |
+| Snapshot creation | Create a snapshot of a sandbox on c2 until the snapshot API returns |
 | Snapshot ready | Time after snapshot API return until CubeMaster records `remote_status=ready` |
 | Local snapshot start | Start from a reused snapshot on c2 |
 | Pause | Call pause on c2 until the sandbox is paused |
@@ -217,9 +215,9 @@ python3 tests/perf/cubebench_jfs_report.py \
 | Cross-node warm snapshot start | Reuse one snapshot for repeated starts on c3 |
 | Cross-node resume | Pause on c2, isolate all nodes except c3, then resume on c3 |
 
-Each scenario is measured at concurrency 1, 5, and 10, retaining 10 valid samples per cell. `--warmups 1` runs one concurrent warmup batch before measurement. `fromsnap-cold` skips warmups because it uses a new snapshot for every sample. The command waits 10 seconds after each batch.
+Each scenario is measured at concurrency 1, 5, and 10, retaining 10 valid samples per cell.
 
-The scripts measure each worker's API call and immediate readiness wait. Cleanup is outside the metric. Values in this report are the average of 10 valid samples per group.
+Before the suite, all sandboxes were removed and the JuiceFS disk cache and Linux page cache were cleared on c1, c2, and c3. Caches were not cleared between cells or batches. The scripts measure each worker's API call and immediate readiness wait. Cleanup is outside the metric. Values in this report are the average of 10 valid samples per group.
 
 ## 4. Results
 
@@ -229,51 +227,50 @@ Tables show average latency only. All values are in `ms`.
 
 | Metric | Concurrency 1 | Concurrency 5 | Concurrency 10 |
 |---|---:|---:|---:|
-| Template start | 157.7 ms | 231.0 ms | 352.4 ms |
-| Snapshot creation | 606.6 ms | 1210.0 ms | 1817.9 ms |
-| Snapshot data ready | 240.2 ms | 508.9 ms | 2635.4 ms |
-| Snapshot creation to data ready | 846.9 ms | 1718.9 ms | 4453.3 ms |
+| Template start | 159.8 ms | 252.7 ms | 353.1 ms |
+| Snapshot creation | 594.0 ms | 1187.7 ms | 1909.7 ms |
+| Snapshot data ready | 59.3 ms | 463.0 ms | 2294.7 ms |
+| Snapshot creation to data ready | 653.3 ms | 1650.7 ms | 4204.4 ms |
 
-Template start grows smoothly with concurrency. At concurrency 10, the snapshot API averaged about 1.82 seconds; waiting for writeback data to become safe for cross-node reads added about 2.64 seconds on average.
+Template start grows smoothly with concurrency. At concurrency 10, the snapshot API averaged about 1.91 seconds; waiting for writeback data to become safe for cross-node reads added about 2.29 seconds on average.
 
 ### 4.2 Local snapshot start, pause, and resume
 
 | Metric | Concurrency 1 | Concurrency 5 | Concurrency 10 |
 |---|---:|---:|---:|
-| Local snapshot start | 162.3 ms | 381.8 ms | 350.7 ms |
-| Pause | 623.3 ms | 1048.8 ms | 1602.8 ms |
-| Paused package data ready | 239.4 ms | 808.6 ms | 2846.2 ms |
-| Pause to data ready | 862.8 ms | 1857.5 ms | 4449.0 ms |
-| Local resume | 380.0 ms | 953.6 ms | 1473.5 ms |
+| Local snapshot start | 158.6 ms | 238.2 ms | 362.1 ms |
+| Pause | 613.8 ms | 1077.0 ms | 1484.7 ms |
+| Paused package data ready | 60.1 ms | 793.3 ms | 2830.3 ms |
+| Pause to data ready | 674.0 ms | 1870.3 ms | 4315.0 ms |
+| Local resume | 390.6 ms | 1036.8 ms | 1496.7 ms |
 
-The pause API returns once data has entered local staging. “Paused package data ready” continues waiting until related staging blocks finish uploading. At high concurrency, local resume and background upload both contend for shared FUSE, disk, and object-storage queues.
+After three warmup batches, local snapshot start is close to template start at every concurrency. The pause API returns once data has entered local staging. “Paused package data ready” continues waiting until related staging blocks finish uploading. At high concurrency, local resume and background upload both contend for shared FUSE, disk, and object-storage queues.
 
 ### 4.3 Cross-node snapshot start
 
 | Metric | Concurrency 1 | Concurrency 5 | Concurrency 10 |
 |---|---:|---:|---:|
-| c2→c3 cold start | 743.8 ms | 1073.6 ms | 1543.2 ms |
-| c2→c3 warm start | 213.7 ms | 339.8 ms | 512.8 ms |
+| c2→c3 cold start | 766.8 ms | 1111.9 ms | 2410.6 ms |
+| c2→c3 warm start | 199.5 ms | 241.5 ms | 311.9 ms |
 
-A cold start needs c3 to read data not previously read there for that snapshot. The warm scenario reuses the snapshot and cache, so it is noticeably faster. This test did not explicitly drop c3 JuiceFS or Linux page cache, so cold-start results are not strict cold-cache measurements.
+A cold start needs c3 to read data not previously read there for that snapshot. The warm scenario reuses the snapshot and cache, so it is noticeably faster. JuiceFS and Linux page caches were cleared before the complete suite, but not between samples or cells, so cold-start results are not strict per-sample cold-cache measurements.
 
 ### 4.4 Cross-node pause and resume
 
 | Metric | Concurrency 1 | Concurrency 5 | Concurrency 10 |
 |---|---:|---:|---:|
-| c2 pause | 631.0 ms | 1077.2 ms | 1769.8 ms |
-| Paused package data ready | 242.4 ms | 808.8 ms | 2804.7 ms |
-| Pause to data ready | 873.3 ms | 1886.0 ms | 4574.4 ms |
-| c3 resume | 907.7 ms | 1427.1 ms | 2416.7 ms |
+| c2 pause | 616.4 ms | 1082.1 ms | 1768.1 ms |
+| Paused package data ready | 60.6 ms | 799.4 ms | 2605.3 ms |
+| Pause to data ready | 677.0 ms | 1881.5 ms | 4373.4 ms |
+| c3 resume | 1044.4 ms | 1666.8 ms | 2611.1 ms |
 
 All 10 samples completed with c3 as the scheduling target. Cross-node resume includes creating target-node-private objects on c3, starting the VMM, and waiting for the guest health check. It excludes the time spent by the test script isolating nodes and restoring scheduling state.
 
 ## 5. Conclusions and notes
 
-- **Template start scales well with concurrency.** Average latency at concurrency 1, 5, and 10 was 158, 231, and 352 ms.
+- **Template start scales well with concurrency.** Average latency at concurrency 1, 5, and 10 was 160, 253, and 353 ms.
 - **Snapshots and pauses have API and asynchronous readiness phases.** With writeback, API return does not mean another node can safely read every block; wait for `remote_status=ready` before cross-node consumption.
-- **Cross-node behavior was validated.** Snapshots made on c2 started on c3, and sandboxes paused on c2 resumed on c3.
-- **Cache state materially affects cross-node start.** At concurrency 10, the first start averaged 1.54 seconds and the warm result 0.51 seconds. Reports must state their cache conditions.
-- **High-concurrency resume leaves optimization headroom.** Local resume at concurrency 10 averaged 1.47 seconds, versus 2.42 seconds for cross-node resume. Further analysis can split storage clone, VMM restore, and guest-probe time.
+- **Cross-node behavior was validated.** Snapshots made on c2 started on c3, and sandboxes paused on c2 resumed on c3; all formal samples landed on the target node.
+- **Runtime-snapshot warmup materially affects measured start latency.** Three warmup batches substantially reduce startup transients before formal sampling; pure cold-start scenarios perform noticeably worse.
 
 Before reproducing these results, read [`tests/perf/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/tests/perf/README.md) for safety guidance, parameter constraints, and cross-node isolation behavior.

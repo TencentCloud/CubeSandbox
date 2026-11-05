@@ -8,7 +8,7 @@ aside: false
 
 > 相关部署步骤见 [JuiceFS 服务配置](../guide/cross-node-snapshot/juicefs.md)
 >
-> 性能测试数据见 [JuiceFS 性能测试](/zh/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark)
+> 性能测试数据见 [JuiceFS 性能测试](/zh/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark)
 
 ## 设计目标
 
