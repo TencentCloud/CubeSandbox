@@ -52,7 +52,7 @@ cubemastercli tpl create-from-image \
 ```
 
 `--probe 49983 --probe-path /health` points Cube at envd (guaranteed to
-return `204` within ~1s); nginx's `:80` stays exposed for your actual
+return `204` when ready); nginx's `:80` stays exposed for your actual
 traffic.
 
 ## Try it with the E2B SDK
@@ -72,3 +72,30 @@ cp env.example .env
 
 python3 test_files.py
 ```
+
+## Explicit Rust selection
+
+Go remains the default. From the repository root, build the optional Rust base
+and select it with the existing example argument:
+
+```bash
+make cube-base-rust CUBE_BASE_RUST_IMAGE=cubesandbox-base:rust-local
+docker build --build-arg CUBE_BASE_IMAGE=cubesandbox-base:rust-local \
+  -t cubesandbox-demo-nginx:rust-local examples/cubesandbox-base-nginx
+```
+
+Rust uses writable cgroup v2 for its additional process resource groups. If
+initialization fails, including in ordinary Docker with read-only cgroups, it
+logs the reason and continues without those additional groups, matching Go.
+Existing VM/platform limits remain separate. Test both paths with the isolated
+image tests in [docker/README.md](../../docker/README.md); do not grant access to
+host cgroups or the host clock to make the probe pass.
+The entrypoint supervises envd and nginx under tini; nginx is not PID 1.
+Template readiness probes **49983/health**, which must return 204; port 80 only
+checks nginx. Startup duration depends on the platform and image.
+
+For actual template creation, daemon identity, CubeSandbox SDK command/file
+assertions and the optional Go/Rust timing comparison, see the
+[existing SDK E2E entry points](../../tests/e2e/sdk_compat/README.md#selected-envd-acceptance).
+A local Docker tag works only when the template builder can access that same
+Docker image store; it is not automatically available on remote build nodes.

@@ -105,6 +105,8 @@ ENVD_LOCAL_PATH=/abs/path/to/envd \
 
 When this variable is set, the host wrapper copies the file into `deploy/one-click/.work/envd`; the builder container then builds `cubemastercli` with that file embedded. If `ENVD_LOCAL_PATH` is omitted, the packaged `cubemastercli` does not include a default `envd`, and template builds that opt in to envd injection must pass `--envd-path` at runtime.
 
+To explicitly embed the repository Rust implementation, first run `make cube-envd` from the repository root and pass the resulting `_output/bin/cube-envd/amd64/envd` (or `arm64/envd` on an arm64 build host) as `ENVD_LOCAL_PATH`. The input must match the bundle architecture. See [optional Rust image and self-build instructions](../../docker/README.md#optional-repository-built-rust-daemon). Go remains the default image implementation; omitting the input still embeds no daemon.
+
 This entry point will:
 
 - Compile `cubemaster`, `cubemastercli`, `templatecenter`, `cubelet`, `cubecli`, `cube-api`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image. The network runtime is embedded in `cubelet` and no standalone network runtime binary is built.

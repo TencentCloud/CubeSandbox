@@ -1,5 +1,7 @@
 # 自定义模板镜像
 
+如需显式选择仓库 Rust 实现，请参阅 [本地构建与运行前提](https://github.com/TencentCloud/CubeSandbox/blob/master/docker/README.md#optional-repository-built-rust-daemon)。下文 Go 镜像示例仍为默认路径。
+
 本教程介绍如何为**你自己的应用或容器镜像**加入 `envd`，以便通过 CubeSandbox SDK 和 E2B SDK 操作沙箱。
 
 从 OCI 镜像创建模板以及配置应用端口和 readiness probe 的通用流程，请参阅[从 OCI 镜像制作模板](./template-from-image.md)。
@@ -163,6 +165,8 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 对于 `cubebox` 类型，CubeMaster 还会保留注入标记，在创建沙箱时自动包装主容器的启动命令：先在后台运行 `/usr/local/bin/envd`，再执行镜像原有命令，并补充暴露 `49983` 端口。因此这种方式无需修改原镜像的入口程序。非 `cubebox` 类型不会应用该启动包装。
 
 ## 4. 入口脚本契约
+
+当前源码构建的镜像使用自包含 Bash 入口；自定义镜像需保留 `/bin/bash` 和标准 coreutils。入口监督两个子进程，使带用户 CMD 时的 daemon 退出也可见，并将关闭等待限制在五秒内。已发布标签可能仍采用下文的旧行为；上面的单文件 COPY 示例保持可用。
 
 `cube-entrypoint.sh` 实现了一个非常简单的 "envd 后台 + 用户应用前台" 的
 组合模式：
