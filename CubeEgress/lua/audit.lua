@@ -194,6 +194,7 @@ local function build_record(event)
         },
         credentials = credentials_block(d),
         security = security,
+        dns_auth = d.dns_auth,
         -- populate these from header/body filters when
         -- audit_level == "full". For now the fields exist for schema
         -- stability but stay null.
@@ -320,6 +321,7 @@ function _M.write_security_event(reason, decision)
             inject_dropped = d.inject_dropped,
             inject_skipped = d.injected_skipped,
         },
+        dns_auth = d.dns_auth,
     }
     local line, err = cjson.encode(rec)
     if not line then
