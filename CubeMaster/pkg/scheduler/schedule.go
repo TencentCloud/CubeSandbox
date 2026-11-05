@@ -55,11 +55,14 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	// reject reason stamped by a previous attempt before this one starts.
 	selCtx.SetRejectReason("")
 	preN, guardN, filterN := -1, -1, -1
+	// The per-request summary is a debug aid: at info level it serialised one
+	// JSON line per Select, which dominated the hot path under clone bursts.
+	// Candidate counts stay observable through the stage histograms below.
 	defer func() {
-		if log.IsDebug() {
+		if !log.IsDebug() {
 			return
 		}
-		log.G(selCtx.Ctx).Infof("scheduler select profile=%s prefilter=%d guards=%d filter=%d",
+		log.G(selCtx.Ctx).Debugf("scheduler select profile=%s prefilter=%d guards=%d filter=%d",
 			pipeline.Name, preN, guardN, filterN)
 	}()
 
@@ -91,7 +94,7 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 		if pipeline.NoCandidate != profile.NoCandidateBackoff || !isNoCandidateError(err) {
 			return nil, err
 		}
-		log.G(selCtx.Ctx).Errorf("scheduler_Select guards fail,try BackoffSelect")
+		log.G(selCtx.Ctx).Warnf("scheduler_Select guards fail,try BackoffSelect")
 		return backoffSelectWithPipeline(selCtx, pipeline)
 	}
 	guardN = selCtx.Nodes().Len()
@@ -103,7 +106,7 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 			return nil, err
 		}
 
-		log.G(selCtx.Ctx).Errorf("scheduler_Select fail,try BackoffSelect")
+		log.G(selCtx.Ctx).Warnf("scheduler_Select fail,try BackoffSelect")
 		if len(pipeline.Guards) == 0 {
 			return BackoffSelect(selCtx)
 		}
@@ -375,7 +378,7 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profil
 			}
 			pluginStart := time.Now()
 			results[index].nodes, results[index].err = filters[index].Selector.Select(selCtx)
-			ObservePluginDuration(ProfileNameOf(selCtx), kind, filters[index].Name, time.Since(pluginStart))
+			observePlugin(filters[index].Observer, ProfileNameOf(selCtx), kind, filters[index].Name, time.Since(pluginStart))
 			return nil
 		})
 	}
@@ -465,7 +468,7 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 			}
 			pluginStart := time.Now()
 			results[index].nodes, results[index].err = selector.Select(selCtx)
-			ObservePluginDuration(ProfileNameOf(selCtx), pluginKindScore, scores[index].Name, time.Since(pluginStart))
+			observePlugin(scores[index].Observer, ProfileNameOf(selCtx), pluginKindScore, scores[index].Name, time.Since(pluginStart))
 			return nil
 		})
 	}

@@ -39,7 +39,7 @@ func (l *cpuFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
-	rejects := newRejectLog(selCtx.Ctx)
+	rejects := newRejectLog(selCtx)
 	for i := range inList {
 
 		quotaCpuFree := inList[i].QuotaCpu -

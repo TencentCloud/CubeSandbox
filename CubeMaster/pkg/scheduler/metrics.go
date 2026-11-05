@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/profile"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
@@ -67,11 +68,21 @@ const (
 )
 
 // Plugin pipeline stage kinds for scheduler_plugin_duration_seconds.
+// The values live in the profile package so compiled bindings and the metric
+// helpers cannot drift apart.
 const (
-	pluginKindGuard  = "guard"
-	pluginKindFilter = "filter"
-	pluginKindScore  = "score"
+	pluginKindGuard  = profile.PluginKindGuard
+	pluginKindFilter = profile.PluginKindFilter
+	pluginKindScore  = profile.PluginKindScore
 )
+
+func init() {
+	// Resolve each binding's duration series once, at profile compile time,
+	// so Select does not repeat the 3-label lookup on every plugin call.
+	profile.ResolvePluginObserver = func(profileName, pluginName, kind string) prometheus.Observer {
+		return pluginDuration.WithLabelValues(profileName, pluginName, kind)
+	}
+}
 
 // Reschedule reason categories for handleCubelet retries, derived from the
 // cubelet/master error code. The classification order in rescheduleReason is
@@ -218,6 +229,17 @@ func observeScheduleAttempt(profile string, err error, rejectReason string, d ti
 // most when a plugin is slow enough to trip its failure policy.
 func ObservePluginDuration(profile, kind, plugin string, d time.Duration) {
 	pluginDuration.WithLabelValues(profile, plugin, kind).Observe(d.Seconds())
+}
+
+// observePlugin records one plugin invocation. A compiled binding carries the
+// series resolved at compile time; a hand-built binding (tests) leaves it nil
+// and falls back to the label lookup.
+func observePlugin(resolved prometheus.Observer, profileName, kind, plugin string, d time.Duration) {
+	if resolved != nil {
+		resolved.Observe(d.Seconds())
+		return
+	}
+	ObservePluginDuration(profileName, kind, plugin, d)
 }
 
 // classifyAttemptError maps the Select failure error code to a small reason

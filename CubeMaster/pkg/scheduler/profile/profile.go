@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
@@ -51,6 +53,11 @@ type FilterPlugin struct {
 	Name     string
 	Selector filter.Selector
 	Failure  FilterFailurePolicy
+	// Observer is the plugin-duration series for this binding, resolved once
+	// at compile time. Nil when the metric registry hook is not installed
+	// (unit tests that build plugins by hand); callers then fall back to a
+	// label lookup.
+	Observer prometheus.Observer
 }
 
 type ScorePlugin struct {
@@ -60,6 +67,8 @@ type ScorePlugin struct {
 	Failure      ScoreFailurePolicy
 	DefaultScore float64
 	ForceEnabled bool
+	// Observer is the plugin-duration series for this binding. See FilterPlugin.
+	Observer prometheus.Observer
 }
 
 type Pipeline struct {
@@ -186,7 +195,10 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 				}
 				return nil, err
 			}
-			pipeline.Filters = append(pipeline.Filters, FilterPlugin{Name: name, Selector: selector, Failure: FilterFailClosed})
+			pipeline.Filters = append(pipeline.Filters, FilterPlugin{
+				Name: name, Selector: selector, Failure: FilterFailClosed,
+				Observer: pluginObserver(pipeline.Name, name, PluginKindFilter),
+			})
 			set.addCloser(selector)
 		}
 	}
@@ -210,6 +222,7 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 			}
 			pipeline.Scores = append(pipeline.Scores, ScorePlugin{
 				Name: name, Selector: selector, Weight: weight, Failure: ScoreSkip,
+				Observer: pluginObserver(pipeline.Name, name, PluginKindScore),
 			})
 			set.addCloser(selector)
 		}
@@ -255,7 +268,10 @@ func compileProfile(ctx context.Context, sched *config.WrapperSchedulerConf, con
 		if buildErr != nil {
 			return nil, fmt.Errorf("build mandatory guard %q: %w", name, buildErr)
 		}
-		pipeline.Guards = append(pipeline.Guards, FilterPlugin{Name: name, Selector: selector, Failure: FilterFailClosed})
+		pipeline.Guards = append(pipeline.Guards, FilterPlugin{
+			Name: name, Selector: selector, Failure: FilterFailClosed,
+			Observer: pluginObserver(pipeline.Name, name, PluginKindGuard),
+		})
 		set.addCloser(selector)
 	}
 	guardSet := make(map[string]struct{}, len(mandatoryGuardNames))
@@ -280,7 +296,10 @@ func compileProfile(ctx context.Context, sched *config.WrapperSchedulerConf, con
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		pipeline.Filters = append(pipeline.Filters, FilterPlugin{Name: name, Selector: selector, Failure: filterFailure})
+		pipeline.Filters = append(pipeline.Filters, FilterPlugin{
+			Name: name, Selector: selector, Failure: filterFailure,
+			Observer: pluginObserver(pipeline.Name, name, PluginKindFilter),
+		})
 		set.addCloser(selector)
 	}
 	seenScores := make(map[string]struct{}, len(conf.Scores))
@@ -314,6 +333,7 @@ func compileProfile(ctx context.Context, sched *config.WrapperSchedulerConf, con
 		pipeline.Scores = append(pipeline.Scores, ScorePlugin{
 			Name: name, Selector: selector, Weight: weight, Failure: scoreFailure,
 			DefaultScore: pluginConf.DefaultScore, ForceEnabled: true,
+			Observer: pluginObserver(pipeline.Name, name, PluginKindScore),
 		})
 		set.addCloser(selector)
 	}

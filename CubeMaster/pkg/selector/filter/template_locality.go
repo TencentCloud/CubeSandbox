@@ -43,7 +43,7 @@ func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeLi
 	}
 
 	nodes := make(node.NodeList, 0, inList.Len())
-	rejects := newRejectLog(selCtx.Ctx)
+	rejects := newRejectLog(selCtx)
 	for i := range inList {
 		if !templateNodeAllowed(reqRes, inList[i]) {
 			rejects.warnf("%v select:%v template=%s not in template scope", l.ID(), inList[i].ID(), reqRes.TemplateID)

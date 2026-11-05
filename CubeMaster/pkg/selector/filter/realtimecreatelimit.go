@@ -34,7 +34,7 @@ func (l *realtimecreatelimit) String() string {
 func (l *realtimecreatelimit) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
-	rejects := newRejectLog(selCtx.Ctx)
+	rejects := newRejectLog(selCtx)
 	for i := range inList {
 
 		realGlobalcnt := localcache.RealTimeCreateConcurrentLimit(inList[i])

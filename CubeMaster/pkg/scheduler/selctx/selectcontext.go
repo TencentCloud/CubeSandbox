@@ -42,6 +42,27 @@ type SelectorCtx struct {
 
 	Affinity     Affinity
 	InstanceType string
+
+	// rejectLogShown is the per-request budget for per-node reject lines,
+	// shared by every filter in the pipeline. Filters run concurrently over
+	// the same candidate set, so a per-filter budget multiplied log volume by
+	// the filter count without adding diagnostic value.
+	rejectLogShown atomic.Int32
+}
+
+// rejectLogBudget is how many per-node reject lines one request prints in
+// total across all filters before the rest collapse into a counted summary.
+const rejectLogBudget = 3
+
+// TakeRejectLogSlot reserves one per-request reject-log budget slot. It
+// returns false once the budget is exhausted; callers then count the rejection
+// instead of logging it. The counter is shared across concurrently running
+// filters, so the budget is honoured for the request as a whole.
+func (s *SelectorCtx) TakeRejectLogSlot() bool {
+	if s == nil {
+		return false
+	}
+	return s.rejectLogShown.Add(1) <= rejectLogBudget
 }
 
 // SetProfileName records the profile that routed this request.
