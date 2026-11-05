@@ -43,6 +43,25 @@ Two notes around a switch:
 - node-init re-runs on already-ready nodes (prepGeneration was bumped) and stops at a host port conflict, leaving cubelet unstarted there.
 - `helm rollback` / `--atomic` are gated only when the target revision ships this Hook; older targets are unguarded — drain first. They replay the target's stored values, so to flip the mode back use `helm upgrade` with `hostNetworkChangeAck: true`, not `helm rollback`.
 
+## Changing JuiceFS enablement or storage configuration
+
+When JuiceFS is enabled, its mount DaemonSet uses `OnDelete`: ordinary Helm
+upgrades do not automatically unmount a live node. Enabling, disabling, or
+changing the mount path, root, metadata/object backend, image, or mount options
+on an existing release is blocked by the same preflight Hook.
+
+Drain every compute node first, set `cubeJuiceFS.lifecycleChangeAck: true` for
+that upgrade, and remove it afterwards. For an enabled-to-enabled change,
+delete each `cube-juicefs` Pod only after its node is drained so the new
+`OnDelete` template takes effect. Disabling JuiceFS deletes the DaemonSet and
+unmounts every node, so no JFS-backed sandbox may remain.
+
+Do not use `helm rollback` to return to a revision that predates this preflight
+Hook: the older target cannot block an unsafe unmount. `helm upgrade --atomic`
+can also roll back to such an ungated revision after a failed upgrade. Drain
+all compute nodes before either operation; to change or disable JuiceFS, prefer
+an acknowledged `helm upgrade`.
+
 ## What are you upgrading, and which workload do you change?
 
 The compute plane is split into four lines. For day-to-day upgrades, **only change the image tags of the matching components**—avoid casually changing Big Pod env / volumeMount / container lists (those also recreate the Pod).

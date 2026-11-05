@@ -26,14 +26,14 @@ Official docs (source of truth; do not keep a parallel copy under this chart):
 
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
-- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
+- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, compute DaemonSets, DNS / Proxy / Egress, compute-only mode
 - [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
 ## Architecture
 
-See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
+See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, core and optional compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
@@ -318,7 +318,7 @@ The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
-# Optional: pin master / mysql / redis / minio PVCs at once.
+# Optional: pin stateful PVCs (including optional JuiceFS Redis) at once.
 persistence:
   storageClassName: ""   # empty → cluster default SC
 
