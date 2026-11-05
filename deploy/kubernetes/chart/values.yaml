@@ -119,6 +119,12 @@ images:
     tag: v0.7.3
     pullPolicy: IfNotPresent
 
+  # JuiceFS client image used by the format Job and per-node mount DaemonSet.
+  juicefs:
+    repository: juicedata/mount
+    tag: ce-v1.4.1
+    pullPolicy: IfNotPresent
+
   webui:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui
     tag: v0.7.3
@@ -160,8 +166,8 @@ storageClass:
   # parameters:
   #   type: cbs
 
-# Convenience: pin CubeMaster / MySQL / Redis / MinIO PVCs
-# to one StorageClass name when the component-level storageClassName is empty.
+# Convenience: pin CubeMaster / MySQL / Redis / MinIO and optional JuiceFS
+# Redis PVCs to one StorageClass when the component-level value is empty.
 # Empty (default) means omit storageClassName on the PVC → cluster default SC.
 # Component-level non-empty values always win (used by values-tke.yaml). Mix
 # different SCs by setting the component fields explicitly instead of this key.
@@ -922,6 +928,9 @@ cubeNode:
         - |
           ss -lntp 2>/dev/null | grep -q ':9999' || exit 1
           test -S /data/cubelet/cubelet.sock
+          if [[ "${CUBE_JFS_ENABLED:-0}" == "1" ]]; then
+            test "$(findmnt -rn -M "${CUBE_JFS_MOUNT_PATH}" -o FSTYPE 2>/dev/null)" = "fuse.juicefs"
+          fi
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 6
@@ -1237,9 +1246,9 @@ cubeEgress:
 # Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
 # in the cube-node Big Pod. Off by default, same as one-click. Enabling it
 # recreates the Big Pod and adds ~2 CPU
-# + 19 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
-# The 19 GiB request is 16 GiB tgtMemMB plus the default 1 GiB RAM cache and
-# process overhead, still under the 20 GiB limit.
+# + 23 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
+# The 23 GiB request is 16 GiB tgtMemMB, the default 1 GiB RAM cache, a 4 GiB
+# process-shared write-back ring, and process overhead.
 cubeS3lvol:
   enabled: false
   # Optional cluster-wide pin. Empty: the sidecar hashes the full Kubernetes
@@ -1254,6 +1263,8 @@ cubeS3lvol:
   # Whole-object RAM cache slots per lvstore. With 1 MiB chunks, 1024 is
   # 1 GiB of resident memory; set 0 to keep only the disk cache.
   cacheHotBufs: 1024
+  # The write-back ring defaults to 4 GiB per lvstore. The sidecar verifies
+  # that its host-backed /dev/shm mount is tmpfs and has enough free space.
   journalMB: 1024
   walMB: 32768
   cacheMB: 490496
@@ -1290,9 +1301,85 @@ cubeS3lvol:
   resources:
     requests:
       cpu: "2"
-      memory: "19Gi"
+      memory: "23Gi"
     limits:
-      memory: "20Gi"
+      memory: "24Gi"
+
+# Optional shared JuiceFS CoW backend for cross-node templates, snapshots, and
+# pause/resume. The chart formats the volume idempotently and mounts the same
+# filesystem on every Cube compute node. Off by default.
+cubeJuiceFS:
+  enabled: false
+  # One-upgrade acknowledgement for enabling/disabling JuiceFS or changing
+  # where/how it stores data (metadata URL, bucket, volume name, mount path,
+  # or mount options). Drain every compute node first, then remove it.
+  lifecycleChangeAck: false
+  volumeName: cube
+  mountPath: /data/cubelet/jfs
+  root: cube
+  cacheDir: /data/cubelet/jfs-cache
+  cacheSizeMB: 102400
+  terminationGracePeriodSeconds: 120
+  mountOptions:
+    - --writeback
+    - --prefetch
+    - "16"
+    - --max-fuse-io
+    - 1M
+    - --cache-large-write
+  metadata:
+    # Empty deploys a dedicated Redis StatefulSet for JuiceFS. It never shares
+    # Cube's application Redis. Set url to use an operator-managed Redis/service
+    # or another JuiceFS-supported metadata engine instead.
+    url: ""
+    database: 0
+    existingSecret: ""
+    secretName: ""
+    passwordKey: meta-password
+    # Bump when rotating an operator-managed existingSecret so the lifecycle
+    # preflight requires a drain and the OnDelete mount Pods can be restarted.
+    secretRevision: ""
+    # Empty generates a password on first install and keeps it on upgrades.
+    password: ""
+    redis:
+      image:
+        repository: redis
+        tag: "7-alpine"
+        pullPolicy: IfNotPresent
+      port: 6379
+      persistence:
+        enabled: true
+        existingClaim: ""
+        hostPath: ""
+        size: 10Gi
+        storageClassName: ""
+        accessModes:
+          - ReadWriteOnce
+      resources: {}
+  storage:
+    type: s3
+    # Empty uses http://<chart-minio>:9000/cube-jfs. External object storage
+    # must use a full JuiceFS bucket URL and credentials below.
+    bucket: ""
+    existingSecret: ""
+    secretName: ""
+    accessKeyKey: access-key
+    secretKeyKey: secret-key
+    accessKey: ""
+    secretKey: ""
+  probes:
+    startup:
+      periodSeconds: 5
+      failureThreshold: 60
+    readiness:
+      periodSeconds: 10
+      failureThreshold: 3
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      memory: "2Gi"
 
 bootstrap:
   pvmHostKernel:

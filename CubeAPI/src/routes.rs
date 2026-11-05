@@ -98,6 +98,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
         .route("/v2/sandboxes", post(sandboxes::create_sandbox_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
+        .route(
+            "/sandboxes/:sandboxID/exposed-ports/:containerPort",
+            get(sandboxes::get_sandbox_exposed_port),
+        )
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
             "/sandboxes/:sandboxID/logs",
@@ -1103,6 +1107,82 @@ mod tests {
                 "GET /snapshots?limit={query:?} must send limit={expected} to \
                  CubeMaster, got {observed:?} — the documented \"default 100, \
                  max 100\" contract is not being applied"
+            );
+        }
+    }
+
+    /// `GET /snapshots?name=` must reach CubeMaster, and an empty/whitespace
+    /// name must be dropped rather than relayed as an empty query parameter.
+    #[tokio::test]
+    async fn list_snapshots_forwards_name_to_cubemaster() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{extract::Query, routing::get, Json, Router};
+        use serde_json::Value;
+
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_handler = Arc::clone(&seen);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            let router = Router::new().route(
+                "/cube/snapshot",
+                get(move |Query(params): Query<Value>| {
+                    let seen = Arc::clone(&seen_for_handler);
+                    async move {
+                        seen.lock().unwrap().push(
+                            params
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                        );
+                        Json(serde_json::json!({
+                            "requestID": "list-snapshots-request",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "data": [],
+                            "next_token": "",
+                        }))
+                    }
+                }),
+            );
+            axum::serve(listener, router)
+                .await
+                .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (query, expected) in [
+            (Some("prod"), Some("prod")),
+            (Some("snap-abc123"), Some("snap-abc123")),
+            (Some("   "), None),
+            (None, None),
+        ] {
+            let mut request = server.get("/snapshots");
+            if let Some(name) = query {
+                request = request.add_query_param("name", name);
+            }
+            let resp = request.await;
+            assert_eq!(
+                resp.status_code(),
+                StatusCode::OK,
+                "GET /snapshots?name={query:?} should succeed (got {} body={:?})",
+                resp.status_code(),
+                resp.text(),
+            );
+            let observed = seen.lock().unwrap().last().cloned().flatten();
+            assert_eq!(
+                observed.as_deref(),
+                expected,
+                "GET /snapshots?name={query:?} must send name={expected:?} to CubeMaster, got {observed:?}"
             );
         }
     }

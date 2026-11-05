@@ -32,6 +32,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 const (
@@ -358,7 +359,10 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
 			captureStarted = true
-			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, templateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+			captureErr := s.captureSnapshotWithShim(
+				frozenCtx, cb, templateID, layout.MetaWork,
+				memoryObject.DevPath, snapshotTypeFull, "", snapshotmode.Full,
+			)
 			if shimSnapshotUnsupported(captureErr) {
 				captureStarted = false
 			}
@@ -392,7 +396,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		// never frozen and no artifact was committed -- the whole transaction can
 		// safely be redone on the legacy path. The legacy path never re-enters
 		// the coordinated one, so this retries at most once.
-		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr, snapshotmode.Full) {
 			logShimDegradedToLegacy(stepLog, shimCapability.Version)
 			snapshotErr, rootfsErr = runLegacy()
 		}

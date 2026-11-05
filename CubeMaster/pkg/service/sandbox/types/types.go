@@ -81,6 +81,11 @@ type CreateCubeSandboxReq struct {
 	// Empty means xfs.
 	Backend string `json:"backend,omitempty"`
 
+	// SnapshotMode is the artifact mode of the snapshot this sandbox is created
+	// from. Master sets it from the snapshot record; the public create DTO never
+	// exposes it (constructCreateReq clears any client value).
+	SnapshotMode string `json:"snapshot_mode,omitempty"`
+
 	// RestartPolicy is Never, OnFailure or Always. Empty means Never.
 	RestartPolicy  string                          `json:"restart_policy,omitempty"`
 	RestartBackoff *cubeboxv1.RestartBackoffConfig `json:"restart_backoff,omitempty"`
@@ -582,6 +587,8 @@ type ListCubeSandboxRes struct {
 	Data      []*SandboxBriefData `json:"data,omitempty"`
 }
 
+// SandboxBriefData is the list view of one sandbox. CreateAt and PauseAt are
+// Unix nanoseconds; EndAt is Unix milliseconds.
 type SandboxBriefData struct {
 	SandboxID  string `json:"sandbox_id,omitempty"`
 	Status     int32  `json:"status,omitempty"`
@@ -625,23 +632,29 @@ type GetCubeSandboxRes struct {
 	Data      []*SandboxData `json:"data,omitempty"`
 }
 
+// SandboxData is the detail view of one sandbox. CreateAt is Unix
+// nanoseconds; EndAt is Unix milliseconds.
 type SandboxData struct {
-	SandboxID              string             `json:"sandbox_id,omitempty"`
-	Status                 int32              `json:"status,omitempty"`
-	HostID                 string             `json:"host_id,omitempty"`
-	HostIP                 string             `json:"host_ip,omitempty"`
-	SandboxIP              string             `json:"sandbox_ip,omitempty"`
-	TemplateID             string             `json:"template_id,omitempty"`
-	Annotations            map[string]string  `json:"annotations,omitempty"`
-	Labels                 map[string]string  `json:"labels,omitempty"`
-	Containers             []*ContainerInfo   `json:"containers,omitempty"`
-	NameSpace              string             `json:"namespace,omitempty"`
-	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
-	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
-	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
-	EndAt                  int64              `json:"end_at,omitempty"`
-	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
-	RestartStatus          *RestartStatus     `json:"restart_status,omitempty"`
+	SandboxID              string            `json:"sandbox_id,omitempty"`
+	Status                 int32             `json:"status,omitempty"`
+	HostID                 string            `json:"host_id,omitempty"`
+	HostIP                 string            `json:"host_ip,omitempty"`
+	SandboxIP              string            `json:"sandbox_ip,omitempty"`
+	TemplateID             string            `json:"template_id,omitempty"`
+	Annotations            map[string]string `json:"annotations,omitempty"`
+	Labels                 map[string]string `json:"labels,omitempty"`
+	Containers             []*ContainerInfo  `json:"containers,omitempty"`
+	NameSpace              string            `json:"namespace,omitempty"`
+	ExposedPortEndpoint    string            `json:"exposed_port_endpoint,omitempty"`
+	ExposedPortMode        string            `json:"exposed_port_mode,omitempty"`
+	RequestedContainerPort int32             `json:"requested_container_port,omitempty"`
+	// ExposedPortHostPort is the node-level host port when ExposedPortMode is
+	// host_port, so callers do not have to parse ExposedPortEndpoint.
+	ExposedPortHostPort int32              `json:"exposed_port_host_port,omitempty"`
+	CreateAt            int64              `json:"create_at,omitempty"`
+	EndAt               int64              `json:"end_at,omitempty"`
+	VolumeMounts        []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	RestartStatus       *RestartStatus     `json:"restart_status,omitempty"`
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is

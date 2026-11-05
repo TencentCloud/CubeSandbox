@@ -353,6 +353,27 @@ func TestSDK_ListSnapshots_PassesNextTokenHeader(t *testing.T) {
 	}
 }
 
+// TestSDK_ListSnapshots_ForwardsName verifies the SDK route relays `name` to
+// CubeMaster so list-by-name (or ID) works end to end.
+func TestSDK_ListSnapshots_ForwardsName(t *testing.T) {
+	var captured map[string]string
+	cm := &fakeCM{
+		listSnapshots: func(_ context.Context, params map[string]string) (json.RawMessage, error) {
+			captured = params
+			return raw(`{"ret": {"ret_code": 0}, "data": [], "next_token": ""}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/snapshots?name=prod")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if captured["name"] != "prod" {
+		t.Errorf("CM name = %q, want prod", captured["name"])
+	}
+}
+
 // TestSDK_ListSnapshots_Empty verifies the SDK returns [] (not a {requestID}
 // object) when CubeMaster omits `data` for an empty list.
 func TestSDK_ListSnapshots_Empty(t *testing.T) {

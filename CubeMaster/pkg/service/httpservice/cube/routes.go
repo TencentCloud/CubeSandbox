@@ -43,6 +43,9 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(ImageAction, createImageGinHandler)
 	g.DELETE(ImageAction, deleteImageGinHandler)
 
+	// Control-plane capabilities so clients can fail fast on unsupported modes.
+	g.GET(CapabilitiesAction, handleCapabilitiesAction)
+
 	// Snapshot (NOTE: DELETE /snapshot collection-level is NOT registered —
 	// the original mux only registered DELETE /snapshot/{snapshot_id})
 	g.POST(SnapshotAction, createSnapshotGinHandler)

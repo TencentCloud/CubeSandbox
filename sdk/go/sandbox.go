@@ -51,6 +51,25 @@ func (s *Sandbox) GetInfo(ctx context.Context) (*SandboxInfo, error) {
 	return &info, nil
 }
 
+// GetExposedPortEndpoint returns the hostIP:hostPort endpoint of a
+// template-declared exposed port. The endpoint works identically for
+// off-node, host-side, and in-sandbox callers (same-node sandbox callers are
+// served by CubeVS hairpin).
+func (s *Sandbox) GetExposedPortEndpoint(ctx context.Context, port int) (string, error) {
+	if err := s.ensureClient(); err != nil {
+		return "", err
+	}
+
+	path := fmt.Sprintf("/sandboxes/%s/exposed-ports/%d", url.PathEscape(s.SandboxID), port)
+	var endpoint struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := s.client.doJSON(ctx, http.MethodGet, path, nil, &endpoint, http.StatusOK); err != nil {
+		return "", err
+	}
+	return endpoint.Endpoint, nil
+}
+
 func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {
 	if err := s.ensureClient(); err != nil {
 		return err

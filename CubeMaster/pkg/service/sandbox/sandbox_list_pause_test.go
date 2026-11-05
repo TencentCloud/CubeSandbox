@@ -394,6 +394,7 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	const sandboxID = "sb-agree"
 	spec := specWithIdentity()
 	rec := readyInfoRecord(sandboxID)
+	createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
@@ -401,6 +402,9 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	})
 	patches.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
 		return spec, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetCreatedAt, func(context.Context, string) (time.Time, error) {
+		return createdAt, nil
 	})
 
 	infoRsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
@@ -410,10 +414,13 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	listed := applyPauseBindings(t.Context(), nil, []*pausesnap.Record{rec}, pauseBindingMerge{
 		appendMissing: true,
 		specs:         map[string]*types.CreateCubeSandboxReq{sandboxID: spec},
+		createdAts:    map[string]time.Time{sandboxID: createdAt},
 	})
 	require.Len(t, listed, 1)
 	require.Equal(t, infoRsp.Data[0].Status, listed[0].Status)
 	require.Equal(t, infoRsp.Data[0].Labels, listed[0].Labels)
 	require.Equal(t, infoRsp.Data[0].TemplateID, listed[0].TemplateID)
 	require.Equal(t, infoRsp.Data[0].Annotations[constants.CubeAnnotationPauseSnapshotID], listed[0].Annotations[constants.CubeAnnotationPauseSnapshotID])
+	require.Equal(t, createdAt.UnixNano(), listed[0].CreateAt)
+	require.Equal(t, infoRsp.Data[0].CreateAt, listed[0].CreateAt)
 }

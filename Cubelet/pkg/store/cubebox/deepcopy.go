@@ -34,6 +34,9 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		RequestSource:                          cb.RequestSource,
 		UserDeleteMark:                         cb.UserDeleteMark.DeepCopy(),
 		HostMetricsBaselineMissingAtAssignment: cb.HostMetricsBaselineMissingAtAssignment,
+		// Store.Sync serialises this copy: a field left out never reaches
+		// the database.
+		RootfsWritableLayer: cb.RootfsWritableLayer,
 	}
 
 	if cb.PortMappings != nil {

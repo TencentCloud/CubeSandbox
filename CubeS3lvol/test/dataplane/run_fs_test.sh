@@ -358,6 +358,32 @@ else
 	exit 1
 fi
 
+# Exercise the NVMe FUA bit directly. fsync below reliably emits FLUSH, but the
+# kernel may satisfy synchronous filesystem writes with either FLUSH or FUA;
+# without an explicit command a green filesystem run does not prove the latter
+# reaches the ordinary shm-acknowledged write path.
+dd if=/dev/urandom of="${WORKDIR}/fua.bin" bs=4K count=1 status=none
+SECTOR_SIZE="$(blockdev --getss "${A_DEV}")"
+if nvme write "${A_DEV}" --start-block=0 \
+		--block-count="$((4096 / SECTOR_SIZE - 1))" --data-size=4096 \
+		--data="${WORKDIR}/fua.bin" --force-unit-access \
+		>"${WORKDIR}/fua.out" 2>"${WORKDIR}/fua.err"; then
+	dd if="${A_DEV}" of="${WORKDIR}/fua.read" bs=4K count=1 iflag=direct \
+		status=none
+	if cmp -s "${WORKDIR}/fua.bin" "${WORKDIR}/fua.read"; then
+		pass "an NVMe FUA write completed and read back correctly"
+	else
+		fail "the NVMe FUA write returned success but read back different data"
+	fi
+else
+	fail "the explicit NVMe FUA write failed"
+	sed 's/^/       /' "${WORKDIR}/fua.err"
+fi
+if ! rcow_target_alive; then
+	fail "target exited while issuing an NVMe FUA write"
+	exit 1
+fi
+
 # ==========================================================================
 echo ""
 echo "=== [3] mkfs.xfs"

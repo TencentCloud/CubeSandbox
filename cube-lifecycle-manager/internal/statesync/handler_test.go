@@ -25,6 +25,12 @@ type fakeRedis struct {
 	setErr     error
 	setCalls   int
 	casUpdated *bool
+	// beforeCAS, when set, runs under the lock just before the CAS compare.
+	// Tests use it to model a peer writing between Handle's read and CAS.
+	beforeCAS func(states map[string]string)
+	// getErrAfterCAS makes every GetState after the first CAS fail.
+	getErrAfterCAS error
+	casSeen        bool
 }
 
 func newFakeRedis() *fakeRedis {
@@ -36,6 +42,9 @@ func (f *fakeRedis) GetState(_ context.Context, sid string) (string, bool, error
 	defer f.mu.Unlock()
 	if f.getErr != nil {
 		return "", false, f.getErr
+	}
+	if f.casSeen && f.getErrAfterCAS != nil {
+		return "", false, f.getErrAfterCAS
 	}
 	v, ok := f.states[sid]
 	return v, ok, nil
@@ -65,8 +74,12 @@ func (f *fakeRedis) WriteStateCAS(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.setCalls++
+	f.casSeen = true
 	if f.setErr != nil {
 		return false, f.setErr
+	}
+	if f.beforeCAS != nil {
+		f.beforeCAS(f.states)
 	}
 	if f.casUpdated != nil {
 		return *f.casUpdated, nil
@@ -210,6 +223,175 @@ func TestHandle_SkipDuringResumingTransition(t *testing.T) {
 	}
 	if got := p.recorded(); len(got) != 0 {
 		t.Fatalf("proxy push must not fire during transition: %+v", got)
+	}
+}
+
+// A peer replica owns "resuming" and will write Redis running itself; the
+// leader must still record running so a stale paused RuntimeState does not
+// make the sweeper skip the sandbox forever after the key expires.
+func TestHandle_ResumingTransitionRecordsMatchingOutcome(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = "resuming"
+	reg.SetRuntimeState("sbx-1", lifecycle.StatePaused)
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
+
+	if got := r.states["sbx-1"]; got != "resuming" {
+		t.Fatalf("state must remain resuming, got %q", got)
+	}
+	if r.setCalls != 0 {
+		t.Fatalf("must not write Redis during transition: %d", r.setCalls)
+	}
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("proxy push must not fire during transition: %+v", got)
+	}
+	entry := reg.Get("sbx-1")
+	if entry.RuntimeState != lifecycle.StateRunning {
+		t.Fatalf("RuntimeState = %q, want running", entry.RuntimeState)
+	}
+	if entry.LastActiveMs != 1_700_000_500_000 {
+		t.Fatalf("LastActiveMs not bumped: %d", entry.LastActiveMs)
+	}
+}
+
+func TestHandle_PausingTransitionRecordsMatchingOutcome(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = "pausing"
+	reg.SetRuntimeState("sbx-1", lifecycle.StateRunning)
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StatePaused, lifecycle.ActorCubeMaster))
+
+	if got := r.states["sbx-1"]; got != "pausing" {
+		t.Fatalf("state must remain pausing, got %q", got)
+	}
+	if r.setCalls != 0 {
+		t.Fatalf("must not write Redis during transition: %d", r.setCalls)
+	}
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("proxy push must not fire during transition: %+v", got)
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StatePaused {
+		t.Fatalf("RuntimeState = %q, want paused", got)
+	}
+}
+
+// Redis read failures leave no verdict to contradict the event. Dropping it
+// would strand the leader's RuntimeState exactly like a skipped event.
+func TestHandle_GetStateErrorRecordsLocally(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	reg.SetRuntimeState("sbx-1", lifecycle.StatePaused)
+	r.getErr = errors.New("redis get boom")
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
+
+	if r.setCalls != 0 || len(p.recorded()) != 0 {
+		t.Fatalf("no external writes expected: set=%d push=%+v", r.setCalls, p.recorded())
+	}
+	entry := reg.Get("sbx-1")
+	if entry.RuntimeState != lifecycle.StateRunning || entry.LastActiveMs != 1_700_000_500_000 {
+		t.Fatalf("event not recorded locally: %+v", entry)
+	}
+}
+
+func TestHandle_CASErrorRecordsLocally(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = lifecycle.StateRunning
+	reg.SetRuntimeState("sbx-1", lifecycle.StateRunning)
+	r.setErr = errors.New("redis set boom")
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StatePaused, lifecycle.ActorCubeMaster))
+
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("proxy push must not fire when CAS fails: %+v", got)
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StatePaused {
+		t.Fatalf("RuntimeState = %q, want paused", got)
+	}
+}
+
+// A peer took "resuming" between Handle's read and CAS; the event is that
+// resume's outcome, so the leader must record it like the marker path does.
+func TestHandle_CASLostToMatchingMarkerRecordsLocally(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = lifecycle.StatePaused
+	reg.SetRuntimeState("sbx-1", lifecycle.StatePaused)
+	r.beforeCAS = func(states map[string]string) { states["sbx-1"] = "resuming" }
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
+
+	if got := r.states["sbx-1"]; got != "resuming" {
+		t.Fatalf("peer marker overwritten: %q", got)
+	}
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("proxy push must not fire on lost CAS: %+v", got)
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StateRunning {
+		t.Fatalf("RuntimeState = %q, want running", got)
+	}
+}
+
+func TestHandle_CASLostToDisagreeingStateKeepsRegistry(t *testing.T) {
+	// initial is what Handle reads first; beforeCAS then changes it so the
+	// CAS is lost and Handle has to judge the newer value.
+	cases := []struct {
+		name    string
+		initial string
+		latest  *string // nil = key removed
+		getErr  bool
+	}{
+		{name: "mismatched marker", initial: lifecycle.StatePaused, latest: strPtr("pausing")},
+		{name: "other terminal", initial: "", latest: strPtr(lifecycle.StatePaused)},
+		{name: "key removed", initial: lifecycle.StatePaused},
+		{name: "re-read fails", initial: lifecycle.StatePaused, latest: strPtr("resuming"), getErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, r, _, reg := buildDeps(t)
+			if tc.initial != "" {
+				r.states["sbx-1"] = tc.initial
+			}
+			reg.SetRuntimeState("sbx-1", lifecycle.StatePaused)
+			r.beforeCAS = func(states map[string]string) {
+				if tc.latest == nil {
+					delete(states, "sbx-1")
+					return
+				}
+				states["sbx-1"] = *tc.latest
+			}
+			if tc.getErr {
+				r.getErrAfterCAS = errors.New("redis get boom")
+			}
+
+			Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
+
+			entry := reg.Get("sbx-1")
+			if entry.RuntimeState != lifecycle.StatePaused || entry.LastActiveMs != 0 {
+				t.Fatalf("disagreeing newer state changed registry: %+v", entry)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestHandle_TransitionIgnoresMismatchedOutcome(t *testing.T) {
+	cases := []struct{ marker, event string }{
+		{"pausing", lifecycle.StateRunning},
+		{"resuming", lifecycle.StatePaused},
+	}
+	for _, tc := range cases {
+		t.Run(tc.marker, func(t *testing.T) {
+			d, r, _, reg := buildDeps(t)
+			r.states["sbx-1"] = tc.marker
+			reg.SetRuntimeState("sbx-1", "prior")
+
+			Handle(context.Background(), d, stateEvent("sbx-1", tc.event, lifecycle.ActorCubeMaster))
+
+			entry := reg.Get("sbx-1")
+			if entry.RuntimeState != "prior" || entry.LastActiveMs != 0 {
+				t.Fatalf("mismatched event changed registry: %+v", entry)
+			}
+		})
 	}
 }
 

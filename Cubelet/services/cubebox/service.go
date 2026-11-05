@@ -303,15 +303,9 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // the host can match a still-running shim back to the sandbox, and the new
 // attempt is handed a tap/IP that is still in use.
 //
-// The check runs here, at the entry point, rather than in the create flow's
-// cubebox step where it used to live. By that step the flow has already
-// allocated network and volume for the new attempt, so the only way to fail
-// without stranding those allocations was an error code the workflow engine
-// answers with a failover — and failover destroys the sandbox with this same
-// ID, which on this path is the PAUSED sandbox the user asked to resume. A
-// transient gate failure therefore destroyed the very state it existed to
-// protect. Running before any allocation removes the trade-off: the caller
-// gets a retryable PreConditionFailed, and nothing is allocated or destroyed.
+// The check runs here, before the create flow allocates network and volume:
+// failing later would strand those allocations and, via failover, destroy the
+// paused sandbox the user asked to resume.
 func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
 	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
 	if desired == "" {
@@ -392,10 +386,19 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 
+	// Unknown mode values must fail rather than silently default to full.
+	mode, modeErr := parseCommitSnapshotMode(req.GetSnapshotMode())
+	if modeErr != nil {
+		rsp.Ret.RetMsg = modeErr.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+
 	start := time.Now()
 	createInfo := &workflow.CreateContext{
-		ReqInfo:  req,
-		Failover: true,
+		ReqInfo:      req,
+		Failover:     true,
+		SnapshotMode: mode,
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 

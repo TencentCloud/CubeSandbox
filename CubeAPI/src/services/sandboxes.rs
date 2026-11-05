@@ -19,11 +19,11 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse, ForkResult,
-        LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff, RestartStatus,
-        Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
-        SandboxOnTimeout, SandboxState, SandboxVolumeMount,
+        normalize_request, EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse,
+        ForkResult, LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff,
+        RestartStatus, Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig,
+        SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
+        SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
     },
 };
 
@@ -32,6 +32,10 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_NOT_FOUND_AT_CUBELET: i32 = 130406;
 const RET_CODE_CONFLICT: i32 = 130409;
+/// `errorcode.PreConditionFailed`: the request is impossible in the current
+/// state (e.g. a cold boot whose guest artifacts are missing on this node).
+/// It is a 409, not a server fault: retrying the same node cannot succeed.
+const RET_CODE_PRECONDITION: i32 = 130568;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 /// Sentinel for a fork result with neither sandbox nor ret (130502 is
@@ -327,23 +331,11 @@ impl SandboxService {
 
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        // Keep the raw list time so its `now` fallback cannot hide the info time.
-        let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;
-        let started_at = summary
-            .as_ref()
-            .and_then(|s| {
-                s.started_at
-                    .or_else(|| datetime_from_unix_nanos(s.create_at))
-            })
-            .or(d.started_at)
-            .unwrap_or_else(chrono::Utc::now);
+        let started_at = d.started_at.unwrap_or_else(chrono::Utc::now);
         // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
         // no end instant) instead of collapsing it onto started_at, which
         // would read as "already expired".
-        let end_at = summary
-            .as_ref()
-            .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at);
+        let end_at = d.end_at;
 
         let envd_version = envd_version_from_annotations(&d.annotations);
         let alias = template_alias_from_annotations(&d.annotations);
@@ -365,6 +357,54 @@ impl SandboxService {
             state: sandbox_state_from_status(d.status),
             volume_mounts: map_volume_mounts(&d.volume_mounts),
             restart_status: map_restart_status(d.restart_status),
+        })
+    }
+
+    /// Resolve the exposed-port endpoint for one container port.
+    ///
+    /// The endpoint is always host_port (hostIP:hostPort). CubeVS hairpin
+    /// makes that form reachable from same-node sandboxes as well, so no
+    /// caller-address based mode selection is performed.
+    pub async fn get_exposed_port_endpoint(
+        &self,
+        sandbox_id: &str,
+        container_port: i32,
+    ) -> AppResult<crate::models::ExposedPortEndpoint> {
+        if container_port <= 0 {
+            return Err(AppError::BadRequest(format!(
+                "containerPort {} is invalid",
+                container_port
+            )));
+        }
+        let resp = self
+            .cubemaster
+            .get_sandbox_exposed_port(sandbox_id, container_port)
+            .await
+            .map_err(map_exposed_port_err(sandbox_id, container_port))?;
+        let item = resp
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))?;
+        if item.exposed_port_endpoint.is_empty() {
+            return Err(AppError::NotFound(format!(
+                "sandbox {} has no exposed-port mapping for container port {}",
+                sandbox_id, container_port
+            )));
+        }
+        let is_host_port = item.exposed_port_mode == "host_port";
+        Ok(crate::models::ExposedPortEndpoint {
+            sandbox_id: sandbox_id.to_string(),
+            container_port,
+            mode: item.exposed_port_mode,
+            endpoint: item.exposed_port_endpoint,
+            host_ip: is_host_port
+                .then_some(item.host_ip)
+                .filter(|s| !s.is_empty()),
+            host_port: is_host_port
+                .then_some(item.exposed_port_host_port)
+                .filter(|p| *p > 0),
+            sandbox_ip: (!item.sandbox_ip.is_empty()).then_some(item.sandbox_ip),
         })
     }
 
@@ -696,11 +736,19 @@ impl SandboxService {
         let source = self.fetch_sandbox_detail(sandbox_id).await?;
         let envd_version = envd_version_from_annotations(&source.annotations);
         let alias = template_alias_from_annotations(&source.annotations);
+        let mode = normalize_request(body.mode.as_deref(), None, None)
+            .map_err(|e| AppError::BadRequest(e.message()))?;
+        if mode == SnapshotMode::FsOnly {
+            // Fork derives from a fresh fs-only snapshot, so the same
+            // control-plane preflight applies before any work starts.
+            super::snapshots::ensure_filesystem_only_supported(&self.cubemaster).await?;
+        }
 
         let req = ForkSandboxRequest {
             request_id: new_request_id(),
             count: body.count,
             timeout: body.timeout,
+            mode: Some(mode.as_str().to_string()),
         };
         let resp = self
             .cubemaster
@@ -937,38 +985,6 @@ impl SandboxService {
             .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
     }
 
-    async fn fetch_sandbox_summary(
-        &self,
-        sandbox_id: &str,
-        host_id: &str,
-    ) -> AppResult<Option<SandboxInfo>> {
-        if host_id.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let req = ListSandboxRequest {
-            request_id: new_request_id(),
-            instance_type: self.instance_type.clone(),
-            start_idx: None,
-            size: None,
-            host_id: Some(host_id.to_string()),
-            filter: None,
-        };
-
-        let resp = self
-            .cubemaster
-            .list_sandboxes(&req)
-            .await
-            .map_err(internal_error)?;
-
-        resp.ret.into_result().map_err(internal_error)?;
-
-        Ok(resp
-            .sandboxes
-            .into_iter()
-            .find(|sandbox| sandbox.sandbox_id == sandbox_id))
-    }
-
     fn sandbox_response(
         &self,
         template_id: String,
@@ -1198,6 +1214,32 @@ fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResul
     Ok(())
 }
 
+// ResolveExposedPortEndpoint failures all describe the same client-visible
+// condition — this (sandbox, port) pair has no usable endpoint: the port was
+// not declared via the template's expose-port list, or the sandbox has no
+// proxy metadata at all. Surface them as 404, not a retryable-looking 500.
+// A bare 130404 ("sandbox id not found") is 404 regardless of the message.
+fn map_exposed_port_err(
+    sandbox_id: &str,
+    container_port: i32,
+) -> impl Fn(CubeMasterError) -> AppError {
+    let sandbox_id = sandbox_id.to_string();
+    move |e| match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_msg, .. }
+            if ret_msg.contains("container port") || ret_msg.contains("proxy metadata") =>
+        {
+            AppError::NotFound(format!(
+                "sandbox {} container port {} is not exposed: {}",
+                sandbox_id, container_port, ret_msg
+            ))
+        }
+        other => internal_error(other),
+    }
+}
+
 fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
 }
@@ -1206,6 +1248,11 @@ fn internal_error(error: impl std::fmt::Display) -> AppError {
 // the envelope reaches the caller, so a rejection of the client's own input has to be
 // classified here — the ret.into_result()/ensure_* checks never observe it.
 fn params_error_or_internal(e: CubeMasterError) -> AppError {
+    if let CubeMasterError::Api { ret_code, ret_msg } = &e {
+        if *ret_code == RET_CODE_PRECONDITION {
+            return AppError::Conflict(ret_msg.clone());
+        }
+    }
     if e.is_invalid_path_parameter() || e.is_params_error() {
         // Same reasoning as templates::map_err: the caller sent something invalid, so
         // this is a 400. Reporting it as 500 misleads clients into retrying a request
@@ -2087,15 +2134,11 @@ mod tests {
     use tokio::sync::Mutex;
 
     async fn spawn_fake_cubemaster(app: Router) -> SandboxService {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener addr");
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("server should run");
-        });
         SandboxService::new(
-            CubeMasterClient::new(format!("http://{}", addr), reqwest::Client::new()),
+            CubeMasterClient::new(
+                crate::services::test_support::serve(app).await,
+                reqwest::Client::new(),
+            ),
             "cubebox".to_string(),
             "cube.app".to_string(),
         )
@@ -2622,7 +2665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paused_sandbox_detail_uses_list_start_time_fallback() {
+    async fn paused_sandbox_detail_uses_info_create_at() {
         async fn info_handler() -> Json<Value> {
             Json(serde_json::json!({
                 "requestID": "req-info",
@@ -2631,6 +2674,7 @@ mod tests {
                     "sandbox_id": "sb-paused",
                     "host_id": "host-1",
                     "status": 5,
+                    "create_at": 1_700_000_000_000_000_000i64,
                     "containers": [{
                         "container_id": "sb-paused",
                         "type": "sandbox",
@@ -2640,42 +2684,21 @@ mod tests {
             }))
         }
 
-        async fn list_handler() -> Json<Value> {
-            Json(serde_json::json!({
-                "requestID": "req-list",
-                "ret": { "ret_code": 0, "ret_msg": "ok" },
-                "data": [{
-                    "sandbox_id": "sb-paused",
-                    "host_id": "host-1",
-                    "status": 5,
-                    "create_at": 1_700_000_000_000_000_000i64
-                }]
-            }))
-        }
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
 
-        let service = spawn_fake_cubemaster(
-            Router::new()
-                .route("/cube/sandbox/info", get(info_handler))
-                .route("/cube/sandbox/list", post(list_handler)),
-        )
-        .await;
-
-        let listed = service
-            .list(None, None, 10)
-            .await
-            .expect("list should succeed");
         let detail = service
             .get_sandbox("sb-paused")
             .await
             .expect("detail should succeed");
         let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
             .expect("valid sandbox creation time");
-        assert_eq!(listed[0].started_at, expected);
-        assert_eq!(detail.started_at, listed[0].started_at);
+        assert_eq!(detail.started_at, expected);
     }
 
     #[tokio::test]
-    async fn paused_sandbox_detail_uses_info_time_when_list_time_missing() {
+    async fn paused_sandbox_detail_falls_back_to_container_create_at() {
         async fn info_handler() -> Json<Value> {
             Json(serde_json::json!({
                 "requestID": "req-info",
@@ -2693,24 +2716,9 @@ mod tests {
             }))
         }
 
-        async fn list_handler() -> Json<Value> {
-            Json(serde_json::json!({
-                "requestID": "req-list",
-                "ret": { "ret_code": 0, "ret_msg": "ok" },
-                "data": [{
-                    "sandbox_id": "sb-paused",
-                    "host_id": "host-1",
-                    "status": 5
-                }]
-            }))
-        }
-
-        let service = spawn_fake_cubemaster(
-            Router::new()
-                .route("/cube/sandbox/info", get(info_handler))
-                .route("/cube/sandbox/list", post(list_handler)),
-        )
-        .await;
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
 
         let detail = service
             .get_sandbox("sb-paused")
@@ -2832,6 +2840,7 @@ mod tests {
                 ForkRequest {
                     count: 2,
                     timeout: None,
+                    mode: None,
                 },
             )
             .await
@@ -2901,6 +2910,7 @@ mod tests {
                 ForkRequest {
                     count: 2,
                     timeout: None,
+                    mode: None,
                 },
             )
             .await
@@ -2937,6 +2947,7 @@ mod tests {
                     ForkRequest {
                         count: bad,
                         timeout: None,
+                        mode: None,
                     },
                 )
                 .await
@@ -3784,6 +3795,62 @@ mod tests {
                 },
             }]),
         }
+    }
+
+    #[test]
+    fn catch_all_accepts_inject_and_custom_port() {
+        let plain = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                host: Some("*".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("catch-all without inject should pass");
+        assert!(plain.is_some());
+
+        let mut leaking = network_with_match(EgressRuleMatch {
+            host: Some("*".to_string()),
+            ..Default::default()
+        });
+        leaking.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        let cfg = build_cube_network_config(None, Some(&leaking))
+            .expect("catch-all inject should pass")
+            .expect("config");
+        let inject = cfg.rules[0].action.inject.as_ref().expect("inject");
+        assert_eq!(inject[0].header, "Authorization");
+        assert_eq!(inject[0].secret, "sek");
+
+        let mut wildcard = network_with_match(EgressRuleMatch {
+            host: Some("*.example.com".to_string()),
+            ..Default::default()
+        });
+        wildcard.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        build_cube_network_config(None, Some(&wildcard))
+            .expect("wildcard domain inject should still pass");
+
+        let cfg = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                sni: Some("*".to_string()),
+                port: Some(8443),
+                scheme: Some("https".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("custom catch-all port should pass")
+        .expect("config");
+        assert_eq!(cfg.rules[0].r#match.port, Some(8443));
+        assert_eq!(cfg.rules[0].r#match.scheme.as_deref(), Some("https"));
+        assert_eq!(cfg.rules[0].r#match.sni.as_deref(), Some("*"));
     }
 
     #[test]

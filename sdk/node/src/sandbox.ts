@@ -172,6 +172,7 @@ export interface ListSnapshotsOptions {
   sandboxId?: string;
   limit?: number;
   nextToken?: string;
+  name?: string;
   config?: Config | ConfigOptions;
 }
 
@@ -276,7 +277,7 @@ function buildNetworkPayload(
   if (net.rules) {
     const normalized = normalizeRulesArg(net.rules);
     if (normalized.length > 0) {
-      wire.rules = normalized.map(serializeRule);
+      wire.rules = normalized.map((rule, index) => serializeRule(rule, index));
     }
   }
   return wire;
@@ -639,6 +640,7 @@ export class Sandbox {
     if (options.sandboxId !== undefined) params.set("sandboxID", options.sandboxId);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.nextToken !== undefined) params.set("nextToken", options.nextToken);
+    if (options.name !== undefined) params.set("name", options.name);
     const query = params.toString();
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/snapshots${query ? `?${query}` : ""}`);
     await checkControlResponse(resp);
@@ -724,6 +726,21 @@ export class Sandbox {
     const resp = await controlFetch(this.config, `${this.config.apiUrl}/sandboxes/${this.sandboxId}`);
     await checkControlResponse(resp);
     return (await resp.json()) as Record<string, any>;
+  }
+
+  /**
+   * GET /sandboxes/:id/exposed-ports/:port — return the hostIP:hostPort
+   * endpoint of a template-declared exposed port. The endpoint works
+   * identically for off-node, host-side, and in-sandbox callers (same-node
+   * sandbox callers are served by CubeVS hairpin).
+   */
+  async getExposedPortEndpoint(port: number): Promise<string> {
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/exposed-ports/${port}`,
+    );
+    await checkControlResponse(resp);
+    return ((await resp.json()) as { endpoint: string }).endpoint;
   }
 
   /** POST /sandboxes/:id/pause — pause a sandbox (preserves memory snapshot). */

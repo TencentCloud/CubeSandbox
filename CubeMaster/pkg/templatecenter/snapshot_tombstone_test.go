@@ -38,6 +38,32 @@ func TestMatchesSnapshotRecordListOptionsHidesTombstone(t *testing.T) {
 	}
 }
 
+func TestMatchesSnapshotRecordListOptionsNameMatchesNameOrID(t *testing.T) {
+	ready := &models.SnapshotRecord{SnapshotID: "snap-1", DisplayName: "prod", Status: StatusReady}
+
+	// Name matches display name or snapshot ID, case-insensitive.
+	for _, name := range []string{"prod", "PROD", "snap-1", "SNAP-1"} {
+		if !matchesSnapshotRecordListOptions(ready, ListSnapshotsOptions{Name: name}) {
+			t.Fatalf("name %q should match snapshot", name)
+		}
+	}
+	// Substrings and unrelated values never match.
+	for _, name := range []string{"pro", "snap-", "tpl-1"} {
+		if matchesSnapshotRecordListOptions(ready, ListSnapshotsOptions{Name: name}) {
+			t.Fatalf("name %q should not match snapshot", name)
+		}
+	}
+	// name AND backend must both hold.
+	if matchesSnapshotRecordListOptions(ready, ListSnapshotsOptions{Name: "prod", Backend: "s3"}) {
+		t.Fatal("name match must not bypass a non-matching backend")
+	}
+	// A name hit must not resurrect a tombstoned snapshot without status.
+	tomb := &models.SnapshotRecord{SnapshotID: "snap-2", DisplayName: "old", Status: StatusDeleted}
+	if matchesSnapshotRecordListOptions(tomb, ListSnapshotsOptions{Name: "snap-2"}) {
+		t.Fatal("name matching an ID must not expose a DELETED snapshot by default")
+	}
+}
+
 func TestGetSnapshotInfoHidesTombstone(t *testing.T) {
 	for _, status := range []string{StatusDeleted, StatusDeleting} {
 		t.Run(status, func(t *testing.T) {
@@ -665,4 +691,53 @@ func stubListTemplatesDB(t *testing.T, defs []models.TemplateDefinition, jobs []
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestRollbackSandboxToSnapshotRejectsFilesystemOnlyTarget(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{
+			SnapshotID:      snapshotID,
+			Status:          StatusReady,
+			OriginSandboxID: "sb-1",
+			Mode:            "fs-only",
+		}, nil
+	})
+
+	_, err := RollbackSandboxToSnapshot(context.Background(), "req-rb", "sb-1", "snap-fs", "cubebox", "")
+	if !errors.Is(err, ErrFilesystemOnlyRollback) {
+		t.Fatalf("RollbackSandboxToSnapshot error = %v, want ErrFilesystemOnlyRollback", err)
+	}
+}
+
+func TestRollbackSandboxToSnapshotAcceptsLegacyEmptyMode(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		// Rows created before the mode column exist are always full.
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Status: StatusReady, OriginSandboxID: "sb-1"}, nil
+	})
+	patches.ApplyFunc(getSandboxData, func(ctx context.Context, sandboxID, instanceType string) (*sandboxtypes.SandboxData, error) {
+		return nil, errors.New("stop after mode check")
+	})
+
+	_, err := RollbackSandboxToSnapshot(context.Background(), "req-rb", "sb-1", "snap-legacy", "cubebox", "")
+	if errors.Is(err, ErrFilesystemOnlyRollback) {
+		t.Fatalf("legacy empty mode must be treated as full, got %v", err)
+	}
 }

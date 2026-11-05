@@ -1507,7 +1507,9 @@ type RestartStats struct {
 	LastSuccessfulRestartAt int64                  `protobuf:"varint,2,opt,name=last_successful_restart_at,json=lastSuccessfulRestartAt,proto3" json:"last_successful_restart_at,omitempty"`
 	LastFailedRestartAt     int64                  `protobuf:"varint,3,opt,name=last_failed_restart_at,json=lastFailedRestartAt,proto3" json:"last_failed_restart_at,omitempty"`
 	LastRestartAt           int64                  `protobuf:"varint,4,opt,name=last_restart_at,json=lastRestartAt,proto3" json:"last_restart_at,omitempty"`
-	// Running, Restarting, BackOff, GaveUp. Empty when no policy is set.
+	// Running, Restarting, BackOff, GaveUp, Succeeded, Failed.
+	// Succeeded and Failed are terminal restart states. Empty until a non-Never
+	// policy is set or the sandbox has exited.
 	RestartState   string `protobuf:"bytes,5,opt,name=restart_state,json=restartState,proto3" json:"restart_state,omitempty"`
 	LastExitCode   int32  `protobuf:"varint,6,opt,name=last_exit_code,json=lastExitCode,proto3" json:"last_exit_code,omitempty"`
 	LastExitReason string `protobuf:"bytes,7,opt,name=last_exit_reason,json=lastExitReason,proto3" json:"last_exit_reason,omitempty"`
@@ -3001,8 +3003,12 @@ type RunCubeSandboxRequest struct {
 	// Empty means Never. OnFailure and Always persist the request for later restarts.
 	RestartPolicy  string                `protobuf:"bytes,18,opt,name=restart_policy,json=restartPolicy,proto3" json:"restart_policy,omitempty"`
 	RestartBackoff *RestartBackoffConfig `protobuf:"bytes,19,opt,name=restart_backoff,json=restartBackoff,proto3" json:"restart_backoff,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// snapshot_mode describes the snapshot this sandbox is created from:
+	// "full" (memory restore) or "fs-only" (cold boot). Empty means full.
+	// It is set by Master from the snapshot record; clients cannot set it.
+	SnapshotMode  string `protobuf:"bytes,20,opt,name=snapshot_mode,json=snapshotMode,proto3" json:"snapshot_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunCubeSandboxRequest) Reset() {
@@ -3131,6 +3137,13 @@ func (x *RunCubeSandboxRequest) GetRestartBackoff() *RestartBackoffConfig {
 		return x.RestartBackoff
 	}
 	return nil
+}
+
+func (x *RunCubeSandboxRequest) GetSnapshotMode() string {
+	if x != nil {
+		return x.SnapshotMode
+	}
+	return ""
 }
 
 type RunCubeSandboxResponse struct {
@@ -3774,7 +3787,7 @@ type CubeSandbox struct {
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// containerd namespace.
 	Namespace string `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	// Creation time of the sandbox.
+	// Creation time of the sandbox in nanoseconds.
 	CreatedAt int64 `protobuf:"varint,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// containers Sandbox.Spec.Containers
 	Containers []*Container `protobuf:"bytes,4,rep,name=containers,proto3" json:"containers,omitempty"`
@@ -4916,7 +4929,9 @@ type CommitSandboxRequest struct {
 	// Custom snapshot directory path. If empty, uses default path.
 	SnapshotDir string `protobuf:"bytes,4,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
 	// CoW backend from Master (xfs｜s3). Empty means xfs.
-	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
+	Backend string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
+	// Snapshot artifact mode: "full" or "fs-only". Empty means full.
+	SnapshotMode  string `protobuf:"bytes,6,opt,name=snapshot_mode,json=snapshotMode,proto3" json:"snapshot_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4986,6 +5001,13 @@ func (x *CommitSandboxRequest) GetBackend() string {
 	return ""
 }
 
+func (x *CommitSandboxRequest) GetSnapshotMode() string {
+	if x != nil {
+		return x.SnapshotMode
+	}
+	return ""
+}
+
 type CommitSandboxResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -5024,7 +5046,9 @@ type CommitSandboxResponse struct {
 	ShimVersion string `protobuf:"bytes,17,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
 	// S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
 	// Filled before this RPC returns. Empty on xfs.
-	RemoteUuids   string `protobuf:"bytes,18,opt,name=remote_uuids,json=remoteUuids,proto3" json:"remote_uuids,omitempty"`
+	RemoteUuids string `protobuf:"bytes,18,opt,name=remote_uuids,json=remoteUuids,proto3" json:"remote_uuids,omitempty"`
+	// Canonical mode this commit actually produced: "full" or "fs-only".
+	SnapshotMode  string `protobuf:"bytes,19,opt,name=snapshot_mode,json=snapshotMode,proto3" json:"snapshot_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5181,6 +5205,13 @@ func (x *CommitSandboxResponse) GetShimVersion() string {
 func (x *CommitSandboxResponse) GetRemoteUuids() string {
 	if x != nil {
 		return x.RemoteUuids
+	}
+	return ""
+}
+
+func (x *CommitSandboxResponse) GetSnapshotMode() string {
+	if x != nil {
+		return x.SnapshotMode
 	}
 	return ""
 }
@@ -7195,7 +7226,7 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\rplugin_volume\x18\v \x01(\v24.cubelet.services.volumeplugin.v1.PluginVolumeSourceR\fpluginVolume\"l\n" +
 	"\x06Volume\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12N\n" +
-	"\rvolume_source\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.VolumeSourceR\fvolumeSource\"\xca\a\n" +
+	"\rvolume_source\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.VolumeSourceR\fvolumeSource\"\xef\a\n" +
 	"\x15RunCubeSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12=\n" +
 	"\avolumes\x18\a \x03(\v2#.cubelet.services.cubebox.v1.VolumeR\avolumes\x12L\n" +
@@ -7213,7 +7244,8 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x13cube_network_config\x18\x10 \x01(\v2..cubelet.services.cubebox.v1.CubeNetworkConfigH\x00R\x11cubeNetworkConfig\x88\x01\x01\x12\x18\n" +
 	"\abackend\x18\x11 \x01(\tR\abackend\x12%\n" +
 	"\x0erestart_policy\x18\x12 \x01(\tR\rrestartPolicy\x12Z\n" +
-	"\x0frestart_backoff\x18\x13 \x01(\v21.cubelet.services.cubebox.v1.RestartBackoffConfigR\x0erestartBackoff\x1a>\n" +
+	"\x0frestart_backoff\x18\x13 \x01(\v21.cubelet.services.cubebox.v1.RestartBackoffConfigR\x0erestartBackoff\x12#\n" +
+	"\rsnapshot_mode\x18\x14 \x01(\tR\fsnapshotMode\x1a>\n" +
 	"\x10AnnotationsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a9\n" +
@@ -7402,7 +7434,7 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x0ekernel_version\x18\r \x01(\tR\rkernelVersion\x12!\n" +
 	"\fenvd_version\x18\x0e \x01(\tR\venvdVersion\x12!\n" +
 	"\fshim_version\x18\x0f \x01(\tR\vshimVersion\x12!\n" +
-	"\fremote_uuids\x18\x10 \x01(\tR\vremoteUuids\"\xaf\x01\n" +
+	"\fremote_uuids\x18\x10 \x01(\tR\vremoteUuids\"\xd4\x01\n" +
 	"\x14CommitSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +
@@ -7410,7 +7442,8 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"templateID\x18\x03 \x01(\tR\n" +
 	"templateID\x12!\n" +
 	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\x12\x18\n" +
-	"\abackend\x18\x05 \x01(\tR\abackend\"\x9c\x05\n" +
+	"\abackend\x18\x05 \x01(\tR\abackend\x12#\n" +
+	"\rsnapshot_mode\x18\x06 \x01(\tR\fsnapshotMode\"\xc1\x05\n" +
 	"\x15CommitSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -7438,7 +7471,8 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x0ekernel_version\x18\x0f \x01(\tR\rkernelVersion\x12!\n" +
 	"\fenvd_version\x18\x10 \x01(\tR\venvdVersion\x12!\n" +
 	"\fshim_version\x18\x11 \x01(\tR\vshimVersion\x12!\n" +
-	"\fremote_uuids\x18\x12 \x01(\tR\vremoteUuids\"\xa3\x02\n" +
+	"\fremote_uuids\x18\x12 \x01(\tR\vremoteUuids\x12#\n" +
+	"\rsnapshot_mode\x18\x13 \x01(\tR\fsnapshotMode\"\xa3\x02\n" +
 	"\x16RollbackSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +

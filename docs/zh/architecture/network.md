@@ -270,6 +270,22 @@ Go API 提供了 `AddPortMapping()`、`DelPortMapping()`、`ListPortMapping()` �
 
 Cubelet 内嵌网络运行时为沙箱 port mapping 分配宿主端口时，**仅使用** `20000`--`29999`。产品创建路径通过 `exposedPorts` 声明容器端口，并始终请求自动分配宿主端口（`HostPort=0`），用户无法指定具体 host port。运行时再从该管理段中分配空闲端口，并在创建响应中返回映射结果。
 
+### 7.5 同机互访（hairpin）
+
+端口映射的 DNAT 只挂在宿主机主网卡的 ingress 上（`from_world` 仅当报文来自主网卡时才查 `remote_port_mapping`），因此它天然只覆盖宿主机外部的客户端。同机沙箱之间的访问有两条路径：
+
+- **推荐：直连**。同机调用方使用 `对端沙箱IP:容器端口`，经 cube-dev egress 的 `from_envoy` 直达。CubeProxy 与 CubeMaster 的端口映射端点接口都对同机调用方做了这种特判。
+- **hairpin：同机访问 `nodeIP:hostPort`**。适用于不便区分同机/跨机的客户端。数据面在 `from_cube` 中识别目的为 `nodenic_ip` 且 `remote_port_mapping[dport]` 命中的 TCP 报文，先按普通出口流程做 SNAT（源改写为 `snat_ip:临时端口`，照常经过 `classify_egress_flow` 策略检查），再环回进主网卡 ingress（`BPF_F_INGRESS`）交给 `from_world` 完成 DNAT。回包在 `from_cube` 的 `local_port_mapping` 快路径中按"对端地址是否为本机 SNAT 地址（`nodenic_ip` 或 `snat_iplist` 中的地址）"分流：本机回包环回主网卡 ingress 走 `tcp_nat_session` 反向 NAT，外部回包照旧出物理网卡。整条路径不依赖交换机 hairpin。
+
+使用 hairpin 的注意点：
+
+- **策略照常生效**。hairpin 流量不豁免沙箱的 egress 策略。沙箱默认预装的始终拒绝私网段（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 等）会拒绝访问私网母机 IP —— 需要在沙箱网络配置中为母机 IP/网段显式配置 `allowOut`，否则同机 hairpin 访问会被拒绝（fail-fast RST）。
+- **不支持对母机 IP 配置 L7 域名规则**：hairpin 报文若被判定为 L7 代理流量会被直接 RST（L7 代理解析的是外部服务，从宿主协议栈无法触达 hostPort）。
+- SNAT 临时端口段（`30000` 起）与 hostPort 段（`20000`--`29999`）不重叠，回包在主网卡 ingress 上不会误命中 `remote_port_mapping`。
+- 每条 hairpin 连接会建立一对常规 SNAT 会话（egress + ingress），由现有会话回收器按超时清理；沙箱回滚的 generation 语义与普通出口连接一致。
+
+面向使用者的访问方式选择与操作步骤见[沙箱间互访指南](../guide/sandbox-to-sandbox.md)。
+
 ---
 
 ## 8. TAP 设备生命周期

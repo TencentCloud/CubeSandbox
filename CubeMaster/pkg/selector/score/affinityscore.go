@@ -11,18 +11,35 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
+// affinityScore is the node-affinity preference score plugin: it scores nodes
+// by soft affinity terms (PreferredSchedulingTerms) as a soft scheduling
+// preference.
 type affinityScore struct {
 	weight float64
 }
 
+func affinityScoreConf() *config.AffinityScore {
+	sched := config.GetConfig().Scheduler
+	if sched == nil || sched.Score == nil {
+		return nil
+	}
+	return sched.Score.ScorePluginConf.AffinityScore
+}
+
+// NewAffinityScore tolerates a missing legacy plugin_conf block: the scorer
+// then has no weight of its own and a profile entry must carry one. Scoring
+// itself only depends on the request's affinity terms, not on global config.
 func NewAffinityScore() *affinityScore {
-	if config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore == nil {
-		panic("config.Scheduler.Score.ScorePluginConf.AffinityScore is nil")
+	conf := affinityScoreConf()
+	if conf == nil {
+		CubeLog.Warnf("scheduler.score.plugin_conf.affinity_score is not configured; affinity_score needs an explicit profile weight to take effect")
+		return &affinityScore{}
 	}
 	return &affinityScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore.Weight,
+		weight: conf.Weight,
 	}
 }
 
@@ -37,10 +54,14 @@ func (l *affinityScore) String() string {
 func (l *affinityScore) Weight() float64 {
 	return l.weight
 }
+
 func (l *affinityScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore.Disable
+	conf := affinityScoreConf()
+	return conf == nil || conf.Disable
 }
 
+// Select scores each candidate node by affinity preference; all zeros when no
+// preference terms are configured.
 func (l *affinityScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
 	err error) {
 	defer func() {

@@ -70,6 +70,10 @@ service AgentService {
 	rpc GetOOMEvent(GetOOMEventRequest) returns (OOMEvent);
 	rpc AddSwap(AddSwapRequest) returns (google.protobuf.Empty);
 	rpc GetVolumeStats(VolumeStatsRequest) returns (VolumeStatsResponse);
+	// FreezeRootfs flushes and freezes an ext4 mount inside the guest so the
+	// block device is consistent without guest memory. ThawRootfs undoes it.
+	rpc FreezeRootfs(FreezeRootfsRequest) returns (FreezeRootfsResponse);
+	rpc ThawRootfs(ThawRootfsRequest) returns (google.protobuf.Empty);
 	rpc ResizeVolume(ResizeVolumeRequest) returns (google.protobuf.Empty);
 
 }
@@ -448,6 +452,26 @@ message GuestDetailsResponse {
 	AgentDetails agent_details = 2;
 
 	bool support_mem_hotplug_probe = 3;
+
+	// SupportFilesystemFreeze reports that the agent can execute FIFREEZE /
+	// FITHAW for a mounted filesystem.
+	bool support_filesystem_freeze = 4;
+}
+
+message FreezeRootfsRequest {
+	// MountPoint is the guest path of the filesystem to freeze. It must be an
+	// ext4 mount other than "/"; the agent does not guess paths.
+	string mount_point = 1;
+}
+
+message FreezeRootfsResponse {
+	// Device is the st_dev of the frozen filesystem, for logging only.
+	uint64 device = 1;
+}
+
+message ThawRootfsRequest {
+	// MountPoint must match the mount that is currently frozen.
+	string mount_point = 1;
 }
 
 message MemHotplugByProbeRequest {

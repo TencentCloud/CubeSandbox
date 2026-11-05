@@ -148,6 +148,32 @@ The established-connection cases use the guest-side holder in
 flow is re-evaluated when the guest next sends, so nothing would be observed on
 an idle socket.
 
+`cases/network/test_sandbox_to_sandbox.py` covers sandbox-to-sandbox
+data-plane access (`network_sandbox_to_sandbox`, CubeSandbox only), mirroring
+`examples/code-sandbox-quickstart/sandbox-curl-sandbox.py` and
+`sandbox-port-mapping.py`:
+
+- an HTTP service in sandbox B reached from sandbox A through CubeProxy Host
+  routing (`curl --resolve` pins `<port>-<sandboxID>.<domain>` to the proxy
+  node IP, so no wildcard DNS is needed inside the sandbox);
+- the same path with B created `allow_public_traffic=False`: no token gets
+  HTTP 403, B's traffic access token gets 200;
+- node host-port mapping: B is created from a module-provisioned template
+  exposing the service port, the `hostIP:hostPort` endpoint is discovered via
+  the SDK's `get_exposed_port_endpoint` (a caller-IP override forces
+  `host_port` mode),
+  and A is created with `allow_out` for the node IP so the case also holds
+  when the node IP falls inside the built-in always-denied private ranges;
+- egress policy applied to hairpin traffic: a deny-all A is rejected when
+  curling `nodeIP:hostPort`.
+
+All cases create B from a module-provisioned template that declares the
+service port (same pattern as `test_mask_request_host.py`), which makes them
+scheduler-placement independent: the CubeProxy route resolves cross-node via
+the host-port mapping, and same-node pairs exercise the in-software hairpin
+loopback while cross-node pairs traverse the wire, both satisfying the same
+assertions. Neither group needs public internet.
+
 `cases/lifecycle/test_pause_resume_network.py` covers the same create-time
 policies after an SDK pause + connect resume:
 
@@ -156,6 +182,16 @@ policies after an SDK pause + connect resume:
   listed target;
 - restricted public access still requires a traffic access token after resume
   (CubeProxy HostIP rewrite path).
+
+`cases/network/test_l7_catch_all.py` covers a `"*"` L7 rule
+(`network_l7_egress` + `network_dns_allow`, CubeSandbox only):
+
+- a name resolved inside the sandbox can use ports 80 and 443, and the HTTPS
+  response is allowed by the catch-all;
+- another open port on that name stays closed;
+- a public IP that was never looked up stays closed;
+- a rule for one name is applied before the catch-all;
+- creating a catch-all rule that injects credentials is accepted.
 
 Shared TCP / public-access probe helpers live in
 `framework/network_probe.py`.

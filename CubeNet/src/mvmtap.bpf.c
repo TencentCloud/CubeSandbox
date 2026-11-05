@@ -232,6 +232,9 @@ enum tcp_nat_result {
 	TCP_NAT_OK,
 	TCP_NAT_RESET,
 	TCP_L7PROXY_OK,
+	/* SNATed same-host port-mapping access: from_cube loops the packet back
+	 * into the primary NIC ingress instead of using the packed ifindex. */
+	TCP_HAIRPIN_OK,
 };
 
 /* do_tcp_nat() returns a 64-bit value that encodes both the status enum
@@ -288,6 +291,35 @@ static __always_inline struct snat_ip *pick_snat_ip_port(__u32 mvm_ip, const str
 	}
 
 	return NULL;
+}
+
+/* Returns true if ip is one of this node's own SNAT addresses (the primary
+ * NIC address is checked separately by the caller). A port-mapping reply
+ * destined to a local SNAT address belongs to a same-host hairpin connection
+ * and must loop back through the primary NIC ingress instead of egressing
+ * the wire. */
+static __always_inline bool is_snat_ip(__u32 ip)
+{
+	struct snat_ip *snat_ip;
+
+	_Static_assert(MAX_SNAT_IPS == 4, "is_snat_ip() is unrolled for exactly 4 slots");
+
+/* snat_iplist is a small fixed-size ARRAY; probe each slot with a constant
+ * index. Written unrolled: a runtime loop here trips the verifier's jump
+ * complexity limit inside from_cube, and clang refuses to unroll it. */
+#define IS_SNAT_IP_SLOT(idx)						\
+	({								\
+		__u32 i_ = (idx);					\
+		snat_ip = bpf_map_lookup_elem(&snat_iplist, &i_);	\
+		snat_ip && snat_ip->ip == ip;				\
+	})
+
+	if (IS_SNAT_IP_SLOT(0) || IS_SNAT_IP_SLOT(1) ||
+	    IS_SNAT_IP_SLOT(2) || IS_SNAT_IP_SLOT(3))
+		return true;
+	return false;
+
+#undef IS_SNAT_IP_SLOT
 }
 
 /* Reserve the reverse-flow key for an L7 proxy session. L7 traffic is not
@@ -760,14 +792,26 @@ do_create:
 	case FLOW_SNAT:
 	default:
 		if (key.dst_ip == nodenic_ip) {
-			/* Keep the sandbox address. A SNAT pool address is the node IP. */
-			if (!create_l7_ingress_session(&key))
-				return TCP_NAT_DROP;
-			l7_endpoint.ifindex = cubegw0_ifindex;
-			l7_endpoint.ip = key.src_ip;
-			snat_ip = &l7_endpoint;
-			snat_port = key.src_port;
-			goto create_session;
+			__u16 host_dport = key.dst_port;
+
+			if (bpf_map_lookup_elem(&remote_port_mapping, &host_dport)) {
+				/* Same-host nodeIP:hostPort access: take the ordinary
+				 * SNAT path, flagged so every packet of the flow returns
+				 * TCP_HAIRPIN_OK and loops back for from_world's
+				 * port-mapping DNAT. */
+				packet_class = HAIRPIN_PACKET;
+			} else {
+				/* Node-local delivery to an unmapped node-IP port
+				 * injects into cube-dev. Keep the sandbox address. A
+				 * SNAT pool address is the node IP. */
+				if (!create_l7_ingress_session(&key))
+					return TCP_NAT_DROP;
+				l7_endpoint.ifindex = cubegw0_ifindex;
+				l7_endpoint.ip = key.src_ip;
+				snat_ip = &l7_endpoint;
+				snat_port = key.src_port;
+				goto create_session;
+			}
 		}
 		create_snat = true;
 		goto prepare_snat;
@@ -824,8 +868,13 @@ do_update:
 prepare_snat:
 	/* Resolve external L2 before allocating or mutating TCP session state.
 	 * prepare_egress_l2 never drops the packet (unresolved on-link falls back
-	 * to the gateway MAC), so session state can be installed right after. */
-	prepare_egress_l2(skb, l2, key.dst_ip);
+	 * to the gateway MAC), so session state can be installed right after.
+	 * Same-host hairpin packets (dst == nodenic_ip) skip this: their L2 is
+	 * rewritten by from_world's tcp_nat_proxy after the ingress loopback,
+	 * and resolving L2 for the node's own address would pollute the
+	 * direct_neigh cache and trigger pointless neighbor scans. */
+	if (key.dst_ip != nodenic_ip)
+		prepare_egress_l2(skb, l2, key.dst_ip);
 
 	if (create_snat) {
 		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
@@ -897,6 +946,11 @@ do_nat:
 	if (err)
 		return TCP_NAT_DROP;
 
+	/* Hairpin: the packet is SNATed but must loop back into the primary NIC
+	 * ingress for from_world's port-mapping DNAT; the packed ifindex is
+	 * unused for this status. */
+	if (sess->packet_class == HAIRPIN_PACKET)
+		return TCP_NAT_PACK(0, TCP_HAIRPIN_OK);
 	return TCP_NAT_PACK(sess->node_ifindex, TCP_NAT_OK);
 }
 
@@ -1097,6 +1151,10 @@ int from_cube(struct __sk_buff *skb)
 		mvm_port.listen_port = l4->source;
 		host_port = bpf_map_lookup_elem(&local_port_mapping, &mvm_port);
 		if (host_port) {
+			/* Spill the reply destination before snat_tcp() invalidates
+			 * the packet pointers; it decides the redirect below. */
+			__be32 reply_daddr = l3->daddr;
+
 			if (l4->syn && !l4->ack)
 				return TC_ACT_SHOT;
 
@@ -1129,6 +1187,18 @@ int from_cube(struct __sk_buff *skb)
 			if (err)
 				return TC_ACT_SHOT;
 
+			/* Same-host hairpin reply: when the peer address is one of
+			 * this node's own SNAT addresses, the connection was opened
+			 * by a local sandbox via nodeIP:hostPort (do_tcp_nat flags
+			 * the forward path TCP_HAIRPIN_OK). Loop the reply back
+			 * into the primary NIC ingress so from_world/tcp_nat_session
+			 * can reverse the SNAT; egressing the wire would rely on
+			 * switch hairpinning, which most networks do not provide.
+			 * reply_daddr must be spilled before snat_tcp(): the
+			 * csum/store helpers above invalidate all packet pointers
+			 * for the verifier. */
+			if (reply_daddr == nodenic_ip || is_snat_ip(reply_daddr))
+				return bpf_redirect(nodenic_ifindex, BPF_F_INGRESS);
 			return bpf_redirect(nodenic_ifindex, 0);
 		}
 	}
@@ -1142,6 +1212,14 @@ int from_cube(struct __sk_buff *skb)
 
 	if (proto == IPPROTO_TCP) {
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_HAIRPIN_OK)
+			/* Same-host nodeIP:hostPort access: do_tcp_nat SNATed the
+			 * packet; loop it back into the primary NIC ingress, where
+			 * from_world's tcp_nat_proxy applies the port-mapping DNAT.
+			 * The target must be nodenic_ifindex: the DNAT gate is tied
+			 * to the primary NIC (nodenic.bpf.c do_tcp_nat()), and under
+			 * route-aware egress the SNAT device is cubeRouter. */
+			return bpf_redirect(nodenic_ifindex, BPF_F_INGRESS);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
 			return redirect_egress(TCP_NAT_IFINDEX(tcp_ret));
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)

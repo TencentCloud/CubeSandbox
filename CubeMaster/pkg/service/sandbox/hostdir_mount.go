@@ -231,6 +231,32 @@ type pluginVolumeMountEntry struct {
 	Readonly      bool   `json:"readonly,omitempty"`
 }
 
+// WritablePluginVolumeMounts returns the plugin volume names a create request
+// mounts read-write. A filesystem-only snapshot captures only the rootfs, so
+// forking or snapshotting such a sandbox would silently share or drop data the
+// user believes is part of the image; callers reject the operation instead.
+func WritablePluginVolumeMounts(req *types.CreateCubeSandboxReq) ([]string, error) {
+	if req == nil || req.Annotations == nil {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(req.Annotations[AnnotationPluginVolumeMounts])
+	if raw == "" {
+		return nil, nil
+	}
+	var entries []pluginVolumeMountEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", AnnotationPluginVolumeMounts, err)
+	}
+	var writable []string
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name)
+		if name != "" && !entry.Readonly {
+			writable = append(writable, name)
+		}
+	}
+	return writable, nil
+}
+
 // injectPluginVolumeMounts reads the "plugin-volume-mounts" annotation and
 // ensures the corresponding VolumeMounts exist on every container.
 // This is the counterpart to CubeAPI's annotation-based forwarding of

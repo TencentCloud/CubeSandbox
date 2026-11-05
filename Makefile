@@ -329,6 +329,9 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	cd "$(CUBES3LVOL_DIR)" && make -j"$$(nproc)"
 	cd "$(CUBES3LVOL_DIR)" && mkdir -p /tmp/s3lvol-dpdk && \
 		RTE_RUNTIME_DIR=/tmp/s3lvol-dpdk make check-offline
+	cd "$(CUBES3LVOL_DIR)" && rm -f test/integration/s3_dynamic_json_test && \
+		$(MAKE) -C test/integration S3LVOL_ASAN=1 s3_dynamic_json_test && \
+		ASAN_OPTIONS=detect_leaks=1 ./test/integration/s3_dynamic_json_test
 else
 	$(MAKE) builder-image
 	$(MAKE) builder-run \
@@ -518,7 +521,7 @@ cubelet-test: builder-image
 # cleanup or a later unprivileged builder may require ownership repair.
 .PHONY: cubelet-mount-test
 cubelet-mount-test: builder-image
-	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox'
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox && CUBELET_REQUIRE_MOUNT_TESTS=1 CI=true go test -count=1 cmd/cubelet/state_tmpfs.go cmd/cubelet/root_shared_mount.go cmd/cubelet/state_tmpfs_test.go cmd/cubelet/root_shared_mount_test.go'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
@@ -723,3 +726,26 @@ else
 		printf '  %-8s %s\n' "SKIP" "web (npm not available on host)"; \
 	fi
 endif
+
+# Live snapshot E2E (filesystem-only + regression). Requires a running cluster
+# that supports fs-only snapshots:
+#   make e2e-fs-only CUBE_API_URL=http://HOST:3000 CUBE_TEMPLATE_ID=tpl-...
+# This target always passes --run-e2e so the suite never silently skips, and
+# fails loudly when the cluster is unreachable or does not advertise fs-only.
+.PHONY: e2e-fs-only
+e2e-fs-only:
+	@test -n "$(CUBE_API_URL)" || (echo "CUBE_API_URL is required" >&2; exit 1)
+	@test -n "$(CUBE_TEMPLATE_ID)" || (echo "CUBE_TEMPLATE_ID is required" >&2; exit 1)
+	cd tests/e2e/sdk_compat && \
+		CUBE_API_URL="$(CUBE_API_URL)" \
+		CUBE_TEMPLATE_ID="$(CUBE_TEMPLATE_ID)" \
+		CUBE_PROXY_NODE_IP="$(CUBE_PROXY_NODE_IP)" \
+		PYTHONPATH="$(ROOT_DIR)/sdk/python" \
+		SDK_E2E_BACKENDS="$${SDK_E2E_BACKENDS:-cubesandbox}" \
+		python3 -m pytest \
+			cases/lifecycle/test_filesystem_only_snapshot.py \
+			cases/lifecycle/test_rollback_clone.py \
+			cases/lifecycle/test_fork.py \
+			cases/lifecycle/test_pause_resume.py \
+			cases/volume/test_snapshot_reference.py \
+			--run-e2e -q

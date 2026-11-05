@@ -1421,6 +1421,122 @@ exit 1
 {{- if ((.Values.cubeS3lvol).enabled) -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{- define "cube.juicefsEnabled" -}}
+{{- if ((.Values.cubeJuiceFS).enabled) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsName" -}}
+{{- printf "%s-juicefs" (include "cube.fullname" .) | trunc 42 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "cube.juicefsRedisName" -}}
+{{- printf "%s-redis" (include "cube.juicefsName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "cube.juicefsRedisPVCName" -}}
+{{- $redis := default dict ((.Values.cubeJuiceFS.metadata).redis) -}}
+{{- $persistence := default dict $redis.persistence -}}
+{{- if (($persistence.existingClaim) | default "") -}}
+{{- $persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-data" (include "cube.juicefsRedisName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsRedisPersistenceHash" -}}
+{{- $redis := default dict ((.Values.cubeJuiceFS.metadata).redis) -}}
+{{- $persistence := default dict $redis.persistence -}}
+{{- $spec := dict
+  "enabled" ($persistence.enabled)
+  "existingClaim" (($persistence.existingClaim) | default "")
+  "hostPath" (($persistence.hostPath) | default "")
+  "size" (($persistence.size) | default "")
+  "storageClassName" (include "cube.persistenceStorageClassName" (dict "root" . "component" $persistence))
+  "accessModes" ($persistence.accessModes | default list)
+}}
+{{- toJson $spec | sha256sum -}}
+{{- end -}}
+
+{{- define "cube.juicefsMetadataCredentialHash" -}}
+{{- $meta := default dict ((.Values.cubeJuiceFS).metadata) -}}
+{{- if ne (($meta.password) | default "") "" -}}
+{{- $meta.password | sha256sum -}}
+{{- else if ne (($meta.existingSecret) | default "") "" -}}
+external-secret
+{{- else -}}
+generated-secret
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsMetadataURL" -}}
+{{- $meta := default dict ((.Values.cubeJuiceFS).metadata) -}}
+{{- if ne (($meta.url) | default "") "" -}}
+{{- $meta.url -}}
+{{- else -}}
+{{- $db := 0 -}}
+{{- if hasKey $meta "database" -}}{{- $db = $meta.database | int -}}{{- end -}}
+{{- $redis := default dict $meta.redis -}}
+{{- printf "redis://%s.%s.svc.%s:%v/%v" (include "cube.juicefsRedisName" .) .Release.Namespace (include "cube.clusterDomain" .) ($redis.port | default 6379) $db -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsBucket" -}}
+{{- $storage := default dict ((.Values.cubeJuiceFS).storage) -}}
+{{- if ne (($storage.bucket) | default "") "" -}}
+{{- $storage.bucket -}}
+{{- else -}}
+{{- printf "%s/cube-jfs" (trimSuffix "/" (include "cube.minioEndpoint" .)) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsMetadataSecretName" -}}
+{{- $meta := default dict ((.Values.cubeJuiceFS).metadata) -}}
+{{- if ne (($meta.existingSecret) | default "") "" -}}
+{{- $meta.existingSecret -}}
+{{- else if ne (($meta.secretName) | default "") "" -}}
+{{- $meta.secretName -}}
+{{- else -}}
+{{- printf "%s-meta" (include "cube.juicefsName" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsStorageSecretName" -}}
+{{- $storage := default dict ((.Values.cubeJuiceFS).storage) -}}
+{{- if ne (($storage.existingSecret) | default "") "" -}}
+{{- $storage.existingSecret -}}
+{{- else if ne (($storage.secretName) | default "") "" -}}
+{{- $storage.secretName -}}
+{{- else -}}
+{{- printf "%s-storage" (include "cube.juicefsName" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.juicefsConfigHash" -}}
+{{- $meta := default dict ((.Values.cubeJuiceFS).metadata) -}}
+{{- $storage := default dict ((.Values.cubeJuiceFS).storage) -}}
+{{- $spec := dict
+  "enabled" ((.Values.cubeJuiceFS).enabled)
+  "image" .Values.images.juicefs
+  "volumeName" .Values.cubeJuiceFS.volumeName
+  "mountPath" .Values.cubeJuiceFS.mountPath
+  "root" .Values.cubeJuiceFS.root
+  "cacheDir" .Values.cubeJuiceFS.cacheDir
+  "cacheSizeMB" .Values.cubeJuiceFS.cacheSizeMB
+  "mountOptions" .Values.cubeJuiceFS.mountOptions
+  "metadataURL" (include "cube.juicefsMetadataURL" .)
+  "metadataSecret" (include "cube.juicefsMetadataSecretName" .)
+  "metadataPasswordKey" (($meta.passwordKey) | default "meta-password")
+  "metadataCredentialHash" (include "cube.juicefsMetadataCredentialHash" .)
+  "metadataSecretRevision" (($meta.secretRevision) | default "")
+  "storageType" (($storage.type) | default "s3")
+  "bucket" (include "cube.juicefsBucket" .)
+  "storageSecret" (include "cube.juicefsStorageSecretName" .)
+  "storageAccessKeyKey" (($storage.accessKeyKey) | default "access-key")
+  "storageSecretKeyKey" (($storage.secretKeyKey) | default "secret-key")
+}}
+{{- toJson $spec | sha256sum -}}
+{{- end -}}
+
 {{/* Ports cube-node binds on the host under cubeNode.hostNetwork, for the
 node-init conflict check. Only ports whose holder we can name are listed; see
 deploy/kubernetes/images/scripts/node-prep-lib.sh. */}}

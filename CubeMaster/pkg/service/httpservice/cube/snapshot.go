@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 var (
@@ -48,11 +49,12 @@ const snapshotResponseWriteDeadlineBuffer = 30 * time.Second
 // and the optional display name; the canonical create-time spec is loaded
 // internally from sandboxspec (Phase 1).
 type snapshotCreateRequest struct {
-	RequestID       string `json:"request_id,omitempty"`
-	LegacyRequestID string `json:"requestID,omitempty"`
-	SandboxID       string `json:"sandbox_id,omitempty"`
-	DisplayName     string `json:"display_name,omitempty"`
-	Backend         string `json:"backend,omitempty"`
+	RequestID       string  `json:"request_id,omitempty"`
+	LegacyRequestID string  `json:"requestID,omitempty"`
+	SandboxID       string  `json:"sandbox_id,omitempty"`
+	DisplayName     string  `json:"display_name,omitempty"`
+	Backend         string  `json:"backend,omitempty"`
+	Mode            *string `json:"mode,omitempty"`
 }
 
 type snapshotRollbackRequest struct {
@@ -123,6 +125,7 @@ type snapshotResource struct {
 	OriginNodeIP              string                         `json:"origin_node_ip,omitempty"`
 	StorageBackend            string                         `json:"storage_backend,omitempty"`
 	Backend                   string                         `json:"backend,omitempty"`
+	Mode                      string                         `json:"mode,omitempty"`
 	RemoteStatus              string                         `json:"remote_status,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                         `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                         `json:"last_error,omitempty"`
@@ -336,6 +339,29 @@ func deleteSnapshotGinHandler(c *gin.Context) {
 	extendSnapshotWriteDeadline(c.Writer)
 	common.WriteAPI(c, deleteSnapshot(c.Request, rt, c.Param("snapshot_id")))
 }
+
+// capabilitiesResponse is the snapshot modes this Master build accepts on
+// create and fork; per-sandbox eligibility is reported per request through the
+// stable error identifiers.
+type capabilitiesResponse struct {
+	*types.Res
+	SnapshotModes []string `json:"snapshot_modes"`
+}
+
+func handleCapabilitiesAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	response := &capabilitiesResponse{
+		Res: &types.Res{
+			RequestID: requestIDFromQuery(c.Request),
+			Ret:       &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"},
+		},
+		SnapshotModes: []string{string(snapshotmode.Full), string(snapshotmode.FsOnly)},
+	}
+	rt.RequestID = response.Res.RequestID
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	common.WriteAPI(c, response)
+}
+
 func handleSnapshotStorageAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	refreshParam := strings.TrimSpace(c.Query("refresh"))
@@ -506,6 +532,19 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	} else {
 		req.SandboxID = resolved
 	}
+	mode := snapshotmode.Full
+	if req.Mode != nil {
+		parsed, err := snapshotmode.Parse(*req.Mode)
+		if err != nil {
+			return &snapshotResponse{
+				Res: &types.Res{Ret: &types.Ret{
+					RetCode: int(errorcode.ErrorCode_MasterParamsError),
+					RetMsg:  snapshotmode.ErrSnapshotModeInvalid + ": " + err.Error(),
+				}},
+			}
+		}
+		mode = parsed
+	}
 	requestID := firstNonEmptyTrimmed(req.RequestID, req.LegacyRequestID)
 	if requestID == "" {
 		return &snapshotResponse{
@@ -536,7 +575,7 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"RequestId":   requestID,
 		"SandboxHost": hostIP,
 	}))
-	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName, req.Backend)
+	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName, req.Backend, mode)
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
@@ -724,9 +763,10 @@ func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (strin
 }
 
 func snapshotErrorCode(err error) int {
-	switch {
-	case err == nil:
+	if err == nil {
 		return int(errorcode.ErrorCode_Success)
+	}
+	switch {
 	case isSnapshotConflictError(err):
 		return int(errorcode.ErrorCode_Conflict)
 	case errors.Is(err, templatecenter.ErrSnapshotNotFound),
@@ -740,9 +780,21 @@ func snapshotErrorCode(err error) int {
 		return int(errorcode.ErrorCode_DBError)
 	case errors.Is(err, context.DeadlineExceeded):
 		return int(errorcode.ErrorCode_MasterInternalError)
-	default:
-		return int(errorcode.ErrorCode_MasterParamsError)
 	}
+	// A stable identifier outranks the default: it survives the trip from
+	// Cubelet through the job's error_message, where it sits inside a longer
+	// sentence and is therefore matched by containment. This runs after the
+	// sentinel checks so an id that merely looks like an identifier (not-found
+	// messages quote the requested id) keeps its own status.
+	switch snapshotmode.Classify(err.Error()) {
+	case snapshotmode.KindClientError:
+		return int(errorcode.ErrorCode_MasterParamsError)
+	case snapshotmode.KindPrecondition:
+		return int(errorcode.ErrorCode_Conflict)
+	case snapshotmode.KindUnavailable:
+		return int(errorcode.ErrorCode_MasterUnavailable)
+	}
+	return int(errorcode.ErrorCode_MasterParamsError)
 }
 
 func isMySQLLockError(err error) bool {
@@ -796,6 +848,7 @@ func snapshotResourceFromInfo(info *templatecenter.SnapshotInfo) *snapshotResour
 		OriginNodeIP:              info.OriginNodeIP,
 		StorageBackend:            firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
 		Backend:                   firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
+		Mode:                      info.Mode,
 		RemoteStatus:              info.RemoteStatus,
 		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,
 		LastError:                 info.LastError,
@@ -880,6 +933,7 @@ func parsePositiveIntQuery(r *http.Request, key string) int {
 func isSnapshotConflictError(err error) bool {
 	switch {
 	case errors.Is(err, templatecenter.ErrTemplateAttemptInProgress),
+		errors.Is(err, templatecenter.ErrFilesystemOnlySharedVolume),
 		errors.Is(err, templatecenter.ErrTemplateInUse),
 		errors.Is(err, templatecenter.ErrTemplateHasNoReadyReplica),
 		errors.Is(err, templatecenter.ErrSnapshotReplicaMetadataIncomplete),

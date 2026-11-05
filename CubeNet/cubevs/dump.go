@@ -926,6 +926,8 @@ func packetClassToString(class uint8) string {
 		return "l7_proxy"
 	case packetClassPortMapping:
 		return "port_mapping"
+	case packetClassHairpin:
+		return "hairpin"
 	default:
 		return fmt.Sprintf("unknown(%d)", class)
 	}

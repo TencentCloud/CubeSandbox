@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 var (
@@ -242,6 +243,19 @@ func applyTemplateImageSpec(imageSpecIn *types.ImageSpec, imageSpecOut *types.Im
 			imageSpecOut.Annotations = make(map[string]string)
 		}
 		maps.Copy(imageSpecOut.Annotations, imageSpecIn.Annotations)
+	}
+}
+
+// applySnapshotTemplateAnnotationsAndLabels preserves the placement-selected
+// shim while copying the saved snapshot request. Static operator configuration
+// uses the ordinary merge and keeps its component override precedence.
+func applySnapshotTemplateAnnotationsAndLabels(reqIn, reqOut *types.CreateCubeSandboxReq) {
+	key := constants.CubeAnnotationComponentCubeShimVersion
+	selected, bound := reqOut.Annotations[key]
+	applyTemplateAnnotationsAndLabels(reqIn, reqOut)
+	delete(reqOut.Annotations, key)
+	if bound {
+		reqOut.Annotations[key] = selected
 	}
 }
 
@@ -503,11 +517,18 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
-		if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
+		pinToOrigin := snapshotRestoreHasRawHostMount(reqInOut, templateReq)
+		src, err := bindSnapshotCreateReplicaForCreate(ctx, templateID, reqInOut, pinToOrigin)
+		if err != nil {
 			return err
 		}
-		pinToOrigin := snapshotRestoreHasRawHostMount(reqInOut, templateReq)
-		if err := bindSnapshotCreateReplicaWithHostMount(ctx, templateID, reqInOut, pinToOrigin); err != nil {
+		if src != nil && src.Mode.IsFsOnly() {
+			// The snapshot holds the rootfs only, and a cold-booted guest mounts
+			// none of the origin's external volumes. Drop them here so the merged
+			// request carries no dangling reference; the caller's own mounts are
+			// refused before placement, in bindSnapshotCreateReplicaForCreate.
+			stripSnapshotExternalMounts(templateReq)
+		} else if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
 			return err
 		}
 	}
@@ -517,7 +538,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		log.G(ctx).Infof("getTemplateParam success:template=%s %s", templateID, summarizeTemplateRequest(templateReq))
 	}
 
-	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
+		applySnapshotTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	} else {
+		applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	}
 	if err := templatecenter.InheritCreateBackendFromTemplate(reqInOut, templateReq); err != nil {
 		return err
 	}
@@ -609,6 +634,127 @@ func reconcileSnapshotPluginVolumes(snapshotID string, req, templateReq *types.C
 	req.Volumes = kept
 	delete(req.Annotations, sandbox.AnnotationPluginVolumeMounts)
 	return nil
+}
+
+// externalVolumeNames lists the volumes in req that a guest booted from a
+// filesystem-only snapshot cannot mount: plugin volumes (declared by the
+// plugin-volume-mounts annotation, by an explicit plugin source, or by having
+// no source at all) and raw host directories.
+//
+// Sandbox-local sources (emptyDir, sandboxPath, image) stay: they belong to the
+// sandbox spec rather than to a node, and the rootfs scratch volume every create
+// carries is one of them. They are not a promise that a caller can add a new
+// mount this way -- the create API only accepts names that resolve to volumes.
+func externalVolumeNames(req *types.CreateCubeSandboxReq) []string {
+	if req == nil {
+		return nil
+	}
+	declared := map[string]struct{}{}
+	if mounts, err := parseSnapshotPluginVolumeMounts(req.Annotations[sandbox.AnnotationPluginVolumeMounts]); err == nil {
+		for name := range mounts {
+			declared[name] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	var names []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for _, volume := range req.Volumes {
+		if volume == nil {
+			continue
+		}
+		name := strings.TrimSpace(volume.Name)
+		source := volume.VolumeSource
+		if source == nil || source.PluginVolume != nil || source.HostDirVolumeSources != nil {
+			add(name)
+			continue
+		}
+		if _, ok := declared[name]; ok {
+			add(name)
+		}
+	}
+	// A mount declared by the annotation but missing from Volumes still leaves a
+	// container reference behind; name it so the strip can drop that reference.
+	for name := range declared {
+		add(name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// stripSnapshotExternalMounts removes every external mount the origin sandbox
+// recorded from a filesystem-only template: the volumes, the container mounts
+// that reference them, and the annotations that would inject them again. Doing
+// all three keeps the merged request free of dangling mount references.
+//
+// Only the template side is touched: the request's own mounts are the caller's
+// choice and are refused separately when a cold boot cannot honour them.
+func stripSnapshotExternalMounts(templateReq *types.CreateCubeSandboxReq) {
+	if templateReq == nil {
+		return
+	}
+	drop := map[string]struct{}{}
+	for _, name := range externalVolumeNames(templateReq) {
+		drop[name] = struct{}{}
+	}
+	if len(drop) > 0 {
+		kept := templateReq.Volumes[:0]
+		for _, volume := range templateReq.Volumes {
+			if volume != nil {
+				if _, ok := drop[strings.TrimSpace(volume.Name)]; ok {
+					continue
+				}
+			}
+			kept = append(kept, volume)
+		}
+		templateReq.Volumes = kept
+
+		for _, ctr := range templateReq.Containers {
+			if ctr == nil {
+				continue
+			}
+			keptMounts := ctr.VolumeMounts[:0]
+			for _, mount := range ctr.VolumeMounts {
+				if mount != nil {
+					if _, ok := drop[strings.TrimSpace(mount.GetName())]; ok {
+						continue
+					}
+				}
+				keptMounts = append(keptMounts, mount)
+			}
+			ctr.VolumeMounts = keptMounts
+		}
+	}
+	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeMounts)
+	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeSources)
+	delete(templateReq.Annotations, sandbox.AnnotationHostDirMount)
+}
+
+// rejectFilesystemOnlyExternalMounts refuses a create that would attach an
+// external mount to a guest booted from a filesystem-only snapshot: nothing
+// would mount it, so accepting the request would silently drop the user's data.
+func rejectFilesystemOnlyExternalMounts(req *types.CreateCubeSandboxReq) error {
+	if req == nil {
+		return nil
+	}
+	var detail []string
+	if sandbox.CreateRequestHasHostMount(req) {
+		detail = append(detail, "host-mount")
+	}
+	detail = append(detail, externalVolumeNames(req)...)
+	if len(detail) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: a sandbox created from a filesystem-only snapshot cannot mount external storage (%s); use a full snapshot",
+		snapshotmode.ErrFilesystemOnlyExternalMount, strings.Join(detail, ", "))
 }
 
 func parseSnapshotPluginVolumeMounts(raw string) (map[string]snapshotPluginVolumeMount, error) {
@@ -708,19 +854,40 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 }
 
 func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) error {
+	_, err := bindSnapshotCreateReplicaForCreate(ctx, snapshotID, reqInOut, pinToOrigin)
+	return err
+}
+
+// bindSnapshotCreateReplicaForCreate places the sandbox and returns the
+// restore source it used; nil on the legacy local fallback. A filesystem-only
+// source is never pinned to its origin, and a request that attaches an external
+// mount to it is rejected here, before placement.
+func bindSnapshotCreateReplicaForCreate(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) (*templatecenter.RestoreSource, error) {
+	delete(reqInOut.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
-		return err
+		return nil, err
 	}
 	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
-		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
+		// A filesystem-only package carries no external mount and cold boot
+		// re-establishes none (Cubelet only emits container mount propagation
+		// for WantsSnapshotRestore, which a cold boot is not), so such a restore
+		// has neither an origin dependency nor a way to honour one the caller
+		// asks for.
+		if src.Mode.IsFsOnly() {
+			if err := rejectFilesystemOnlyExternalMounts(reqInOut); err != nil {
+				return nil, err
+			}
+			pinToOrigin = false
+		}
+		return src, bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
 	} else if err != nil && !errors.Is(err, templatecenter.ErrSnapshotNotFound) &&
 		!errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
-		return err
+		return nil, err
 	}
 	if pinToOrigin {
-		return fmt.Errorf("snapshot %s with host mount requires origin restore metadata", snapshotID)
+		return nil, fmt.Errorf("snapshot %s with host mount requires origin restore metadata", snapshotID)
 	}
-	return bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
+	return nil, bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
 }
 
 // fromSnapshotPlacement pins FromSnap to the snapshot origin unless the
@@ -746,6 +913,10 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 	if reqInOut != nil {
 		requestedScope = append([]string(nil), reqInOut.DistributionScope...)
 	}
+	kind := restoreplace.MemoryRestore
+	if src.Mode.IsFsOnly() {
+		kind = restoreplace.FilesystemColdBoot
+	}
 	return decideRestorePlacementFn(ctx, restoreplace.Input{
 		SnapshotID:          src.SnapshotID,
 		Backend:             src.Backend,
@@ -757,6 +928,7 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 		ReqRes:              reqRes,
 		RequestedScope:      requestedScope,
 		PinToOrigin:         pinToOrigin,
+		Kind:                kind,
 	})
 }
 
@@ -784,6 +956,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 		selectedNodeID = strings.TrimSpace(placement.NodeIP)
 	}
 	reqInOut.DistributionScope = []string{selectedNodeID}
+	reqInOut.SnapshotMode = src.Mode.String()
 
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}
@@ -923,6 +1096,8 @@ func injectReplicaComponentVersionAnnotations(annotations map[string]string, rep
 	set(constants.CubeAnnotationComponentCubeImageVersion, replica.GuestImageVersion)
 	set(constants.CubeAnnotationComponentCubeAgentVersion, replica.AgentVersion)
 	set(constants.CubeAnnotationComponentCubeKernelVersion, replica.KernelVersion)
+	// Snapshot callers clear untrusted shim pins before selecting a replica.
+	// Ordinary templates keep the operator pin merged into the request.
 	set(constants.CubeAnnotationComponentCubeShimVersion, replica.ShimVersion)
 }
 

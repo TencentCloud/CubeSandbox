@@ -148,6 +148,85 @@ func TestCreateRejectsInvalidRulePortScheme(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsCatchAllWithoutInject(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	disabled := false
+	if _, err := client.Create(context.Background(), CreateOptions{
+		AllowInternetAccess: &disabled,
+		Network: NetworkOptions{Rules: []Rule{
+			{Name: "audit_all_http", Match: Match{Scheme: "http", Host: "*"}, Action: Action{Allow: true, Audit: "metadata"}},
+			{Name: "audit_all_https", Match: Match{Scheme: "https", SNI: "*"}, Action: Action{Allow: true, Audit: "metadata"}},
+		}},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestCreateAcceptsCatchAllInjectAndCustomPort(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "leak",
+			Match:  Match{Host: "*"},
+			Action: Action{Allow: true, Inject: []Inject{{Header: "Authorization", Secret: "sek"}}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("Create inject: %v", err)
+	}
+	inject := got["network"].(map[string]any)["rules"].([]any)[0].(map[string]any)["action"].(map[string]any)["inject"].([]any)
+	if inject[0].(map[string]any)["header"] != "Authorization" || inject[0].(map[string]any)["secret"] != "sek" {
+		t.Fatalf("inject=%v, want Authorization/sek", inject)
+	}
+
+	_, err = client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "scoped",
+			Match:  Match{Host: "*.example.com"},
+			Action: Action{Allow: true, Inject: []Inject{{Header: "Authorization", Secret: "sek"}}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("wildcard inject rejected: %v", err)
+	}
+	host := got["network"].(map[string]any)["rules"].([]any)[0].(map[string]any)["match"].(map[string]any)["host"]
+	if host != "*.example.com" {
+		t.Fatalf("host=%v, want *.example.com", host)
+	}
+
+	_, err = client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "wide",
+			Match:  Match{Host: "*", Port: 8443, Scheme: "https"},
+			Action: Action{Allow: true},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("Create custom port: %v", err)
+	}
+	match := got["network"].(map[string]any)["rules"].([]any)[0].(map[string]any)["match"].(map[string]any)
+	if match["port"].(float64) != 8443 || match["scheme"] != "https" || match["host"] != "*" {
+		t.Fatalf("match=%v, want * port 8443 https", match)
+	}
+}
+
 func TestCreateRejectsOversizedInjectSecret(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -325,6 +404,9 @@ func TestSnapshotLifecycle(t *testing.T) {
 			if r.URL.Query().Get("sandboxID") != testSandboxID || r.URL.Query().Get("limit") != "50" {
 				t.Fatalf("query=%s", r.URL.RawQuery)
 			}
+			if r.URL.Query().Get("name") != "prod" {
+				t.Fatalf("name query=%s", r.URL.RawQuery)
+			}
 			w.Header().Set("x-next-token", "tok-2")
 			fmt.Fprint(w, `[{"snapshotID":"snap-1","names":["n1"]}]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-1":
@@ -351,7 +433,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("CreateSnapshot=%#v err=%v", snap, err)
 	}
 
-	items, next, err := client.ListSnapshots(ctx, ListSnapshotsOptions{SandboxID: testSandboxID, Limit: 50})
+	items, next, err := client.ListSnapshots(ctx, ListSnapshotsOptions{SandboxID: testSandboxID, Limit: 50, Name: "prod"})
 	if err != nil || len(items) != 1 || next != "tok-2" {
 		t.Fatalf("ListSnapshots items=%#v next=%q err=%v", items, next, err)
 	}

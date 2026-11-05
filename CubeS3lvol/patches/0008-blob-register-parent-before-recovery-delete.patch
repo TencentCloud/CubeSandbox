@@ -1,0 +1,106 @@
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -4272,6 +4272,9 @@
+ 
+ 	ctx->blobid = ctx->blob->id;
+ 
++	/* Recovery has not registered this blob yet. Deletion must still unlink
++	 * it from its parent snapshot, including when that parent was loaded earlier. */
++	bs_blob_list_add(ctx->blob);
+ 	spdk_blob_close(ctx->blob, bs_delete_corrupted_close_cb, ctx);
+ }
+ 
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -7167,6 +7167,83 @@
+ 
+ 		thresholds.general_threshold++;
+ 	}
++}
++
++
++static void
++blob_recover_incomplete_nested_snapshot(void)
++{
++	struct spdk_blob_store *bs;
++	struct spdk_bs_dev *dev = init_dev();
++	struct spdk_blob_opts opts;
++	struct spdk_blob *blob;
++	spdk_blob_id blobid, parentid, unfinishedid, ids[2];
++	size_t count;
++
++	spdk_bs_init(dev, NULL, bs_op_with_handle_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0 && g_bs != NULL);
++	bs = g_bs;
++	ut_spdk_blob_opts_init(&opts);
++	opts.num_clusters = 10;
++	spdk_bs_create_blob_ext(bs, &opts, blob_op_with_id_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0);
++	blobid = g_blobid;
++	spdk_bs_create_snapshot(bs, blobid, NULL, blob_op_with_id_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0);
++	parentid = g_blobid;
++	spdk_bs_create_snapshot(bs, blobid, NULL, blob_op_with_id_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0);
++	unfinishedid = g_blobid;
++	/* Recovery iterates metadata IDs in order. This fixture must load the
++	 * parent before it deletes the unfinished child to exercise the bug. */
++	SPDK_CU_ASSERT_FATAL(parentid < unfinishedid);
++
++	/* Persist the state of an interrupted nested snapshot: its metadata is
++	 * present, but the writable child still names the previous parent. */
++	spdk_bs_open_blob(bs, blobid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0 && g_blob != NULL);
++	blob = g_blob;
++	CU_ASSERT(blob_set_xattr(blob, BLOB_SNAPSHOT, &parentid, sizeof(parentid), true) == 0);
++	spdk_blob_sync_md(blob, blob_op_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0);
++	spdk_blob_close(blob, blob_op_complete, NULL);
++	poll_threads();
++	spdk_bs_open_blob(bs, unfinishedid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0 && g_blob != NULL);
++	blob = g_blob;
++	blob->md_ro = false;
++	CU_ASSERT(blob_set_xattr(blob, SNAPSHOT_IN_PROGRESS, &blobid, sizeof(blobid), true) == 0);
++	spdk_blob_sync_md(blob, blob_op_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0);
++	spdk_blob_close(blob, blob_op_complete, NULL);
++	poll_threads();
++
++	ut_bs_dirty_load(&bs, NULL);
++	SPDK_CU_ASSERT_FATAL(bs != NULL);
++	CU_ASSERT(spdk_blob_get_parent_snapshot(bs, blobid) == parentid);
++	count = SPDK_COUNTOF(ids);
++	CU_ASSERT(spdk_blob_get_clones(bs, parentid, ids, &count) == 0);
++	CU_ASSERT(count == 1 && ids[0] == blobid);
++	spdk_bs_open_blob(bs, parentid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_bserrno == 0 && g_blob != NULL);
++	CU_ASSERT(spdk_blob_get_num_allocated_clusters(g_blob) == 10);
++	spdk_blob_close(g_blob, blob_op_complete, NULL);
++	poll_threads();
++	spdk_bs_open_blob(bs, unfinishedid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == -ENOENT);
++	spdk_bs_unload(bs, bs_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
+ }
+ 
+ static void
+@@ -10633,6 +10710,7 @@
+ 		CU_ADD_TEST(suite, blobstore_clean_power_failure);
+ 		CU_ADD_TEST(suite, blob_delete_snapshot_power_failure);
+ 		CU_ADD_TEST(suite, blob_create_snapshot_power_failure);
++		CU_ADD_TEST(suite, blob_recover_incomplete_nested_snapshot);
+ 		CU_ADD_TEST(suite_bs, blob_inflate_rw);
+ 		CU_ADD_TEST(suite_bs, blob_inflate_unmap);
+ 		CU_ADD_TEST(suite_bs, blob_snapshot_freeze_io);

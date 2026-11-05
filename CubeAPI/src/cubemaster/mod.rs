@@ -126,6 +126,31 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// GET /cube/sandbox/info with container_port — resolve the exposed-port
+    /// endpoint in host_port form (hostIP:hostPort). CubeMaster otherwise falls
+    /// back to the connection's RemoteAddr when no caller header is present,
+    /// which could select tap_ip for a same-node CubeAPI. Send an unspecified
+    /// sentinel (not a user-supplied address) to make the host_port choice
+    /// explicit and independent of deployment topology. CubeVS hairpin makes
+    /// that form reachable for same-node sandbox callers as well.
+    pub async fn get_sandbox_exposed_port(
+        &self,
+        sandbox_id: &str,
+        container_port: i32,
+    ) -> Result<GetSandboxResponse, CubeMasterError> {
+        let url = format!("{}/cube/sandbox/info", self.base_url);
+        let port = container_port.to_string();
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("sandbox_id", sandbox_id), ("container_port", &port)])
+            .header("X-Cube-Caller-Host-IP", "0.0.0.0")
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// POST /cube/sandbox/update — pause or resume a sandbox (action: "pause" | "resume").
     pub async fn update_sandbox(
         &self,
@@ -525,6 +550,19 @@ impl CubeMasterClient {
     pub async fn get_volume(&self, volume_id: &str) -> Result<GetVolumeResponse, CubeMasterError> {
         validate_volume_id(volume_id)?;
         let url = format!("{}/cube/volume/{}", self.base_url, volume_id);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/capabilities — the snapshot modes this Master accepts;
+    /// empty means filesystem-only is unsupported.
+    pub async fn get_capabilities(&self) -> Result<CapabilitiesResponse, CubeMasterError> {
+        let url = format!("{}/cube/capabilities", self.base_url);
         let resp = self
             .inner
             .get(&url)
@@ -1282,12 +1320,26 @@ pub struct GetSandboxDataItem {
     pub containers: Vec<GetSandboxContainerItem>,
     #[serde(default)]
     pub namespace: String,
+    /// Sandbox creation time in Unix nanoseconds. `end_at` below is
+    /// millisecond-based.
+    #[serde(default)]
+    pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub host_ip: String,
+    #[serde(default)]
+    pub sandbox_ip: String,
+    #[serde(default)]
+    pub exposed_port_endpoint: String,
+    #[serde(default)]
+    pub exposed_port_mode: String,
+    #[serde(default)]
+    pub exposed_port_host_port: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1562,7 +1614,8 @@ impl GetSandboxResponse {
             instance_type: instance_type.to_string(),
             status,
             template_id,
-            started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
+            started_at: datetime_from_unix_nanos(item.create_at)
+                .or_else(|| primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at))),
             end_at: item.end_at,
             cpu_count: cpu_milli / 1000,
             cpu_milli,
@@ -1725,6 +1778,9 @@ pub struct CreateSnapshotRequest {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Canonical snapshot mode: full | fs-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Snapshot resource as returned by CubeMaster.
@@ -1750,10 +1806,24 @@ pub struct SnapshotResource {
     pub backend: String,
     #[serde(default)]
     pub remote_status: String,
+    /// Snapshot mode. Older Masters omit it; empty means full.
+    #[serde(default)]
+    pub mode: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// GET /cube/capabilities — the fields CubeAPI consumes.
+///
+/// The list is the set of `mode` values this Master accepts on create and fork.
+/// It is empty when the Master predates the endpoint or its modes contract,
+/// which is exactly the answer the caller needs: treated as "cannot do it".
+#[derive(Debug, Deserialize, Default)]
+pub struct CapabilitiesResponse {
+    #[serde(default)]
+    pub snapshot_modes: Vec<String>,
 }
 
 /// Slimmed mirror of CubeMaster's nested `operation` block returned alongside
@@ -1944,6 +2014,9 @@ pub struct ForkSandboxRequest {
     /// Optional idle TTL (seconds) applied to each forked sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
+    /// Canonical snapshot mode for the one shared fork snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn is_zero(value: &i32) -> bool {
@@ -2418,6 +2491,50 @@ mod tests {
         non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
         GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
     };
+
+    #[tokio::test]
+    async fn exposed_port_info_uses_explicit_host_port_sentinel() {
+        use axum::{extract::Request, routing::get, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None::<String>));
+        let captured = seen.clone();
+        let app = Router::new().route(
+            "/cube/sandbox/info",
+            get(move |request: Request| {
+                let captured = captured.clone();
+                async move {
+                    let value = request
+                        .headers()
+                        .get("X-Cube-Caller-Host-IP")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    *captured.lock().unwrap() = Some(value);
+                    axum::Json(serde_json::json!({
+                        "requestID": "req-test",
+                        "ret": {"ret_code": 200, "ret_msg": "success"},
+                        "data": []
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client =
+            super::CubeMasterClient::new(format!("http://{address}"), reqwest::Client::new());
+        let response = client
+            .get_sandbox_exposed_port("sb-test", 8080)
+            .await
+            .unwrap();
+        assert!(response.data.is_empty());
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("0.0.0.0"));
+        server.abort();
+    }
 
     #[test]
     fn non_empty_str_trims_surrounding_whitespace() {

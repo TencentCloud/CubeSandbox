@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import shlex
 import sys
-import time
 import uuid
 
 import pytest
@@ -28,7 +27,7 @@ from framework.capabilities import (
     VOLUME_PLUGIN,
     capabilities_for_backend,
 )
-from framework.cleanup import safe_kill
+from framework.cleanup import delete_snapshot_after_runtime_release, safe_kill
 from framework.volume import managed_volume
 
 pytestmark = [
@@ -73,22 +72,6 @@ def _run_ok(sandbox, command: str, *, timeout: int) -> str:
     result = sandbox.run_command(command, timeout=timeout)
     assert_command_ok(result)
     return result.stdout.strip()
-
-
-def _delete_snapshot_after_runtime_release(owner, snapshot_id: str, *, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            owner.delete_snapshot(snapshot_id)
-            return
-        except Exception as exc:  # noqa: BLE001
-            retryable = (
-                "active runtime ref" in str(exc).lower()
-                or "attempt is already in progress" in str(exc).lower()
-            )
-            if not retryable or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
 
 
 def _snapshot_source(sdk_backend, sdk_e2e_config, volume_mounts, *, role: str):
@@ -155,7 +138,7 @@ def test_snapshot_restore_accepts_identical_volume_mounts(sdk_backend, sdk_e2e_c
 
             cleanup_errors.extend(safe_kill(restored, sdk_e2e_config))
             restored = None
-            _delete_snapshot_after_runtime_release(
+            delete_snapshot_after_runtime_release(
                 owner, snapshot_id, timeout=sdk_e2e_config.default_timeout
             )
             snapshot_id = None
@@ -166,7 +149,7 @@ def test_snapshot_restore_accepts_identical_volume_mounts(sdk_backend, sdk_e2e_c
                     cleanup_errors.extend(safe_kill(sandbox, sdk_e2e_config))
             if snapshot_id is not None and owner is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         owner, snapshot_id, timeout=sdk_e2e_config.default_timeout
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -218,7 +201,7 @@ def test_snapshot_restore_accepts_identical_read_only_volume_mounts(sdk_backend,
 
             cleanup_errors.extend(safe_kill(restored, sdk_e2e_config))
             restored = None
-            _delete_snapshot_after_runtime_release(
+            delete_snapshot_after_runtime_release(
                 owner, snapshot_id, timeout=sdk_e2e_config.default_timeout
             )
             snapshot_id = None
@@ -228,7 +211,7 @@ def test_snapshot_restore_accepts_identical_read_only_volume_mounts(sdk_backend,
                 cleanup_errors.extend(safe_kill(restored, sdk_e2e_config))
             if snapshot_id is not None and owner is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         owner, snapshot_id, timeout=sdk_e2e_config.default_timeout
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -280,7 +263,7 @@ def test_snapshot_restore_rejects_changed_volume_mounts(sdk_backend, sdk_e2e_con
                 cleanup_errors.extend(safe_kill(accepted, sdk_e2e_config))
             assert not unexpected, f"changed volumeMounts were accepted: {unexpected}"
 
-            _delete_snapshot_after_runtime_release(
+            delete_snapshot_after_runtime_release(
                 owner, snapshot_id, timeout=sdk_e2e_config.default_timeout
             )
             snapshot_id = None
@@ -288,7 +271,7 @@ def test_snapshot_restore_rejects_changed_volume_mounts(sdk_backend, sdk_e2e_con
             active_failure = sys.exc_info()[0] is not None
             if snapshot_id is not None and owner is not None:
                 try:
-                    _delete_snapshot_after_runtime_release(
+                    delete_snapshot_after_runtime_release(
                         owner, snapshot_id, timeout=sdk_e2e_config.default_timeout
                     )
                 except Exception as exc:  # noqa: BLE001

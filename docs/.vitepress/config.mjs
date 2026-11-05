@@ -156,7 +156,6 @@ export default withMermaid(defineConfig({
             text: 'Community',
             items: [
               { text: 'Developer', link: '/dev/' },
-              { text: 'Roadmap', link: '/guide/roadmap' },
               { text: 'Cube 100 Program', link: '/guide/cube100' },
               { text: 'Contributing', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING.md' }
             ]
@@ -226,6 +225,7 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
+                    { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' },
                     { text: 'Python', link: '/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/guide/tutorials/sdk/nodejs' }
@@ -252,6 +252,7 @@ export default withMermaid(defineConfig({
                 { text: 'Network Policy', link: '/guide/network-policy' },
                 { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
                 { text: 'Security Proxy', link: '/guide/security-proxy' },
+                { text: 'Sandbox-to-Sandbox Access', link: '/guide/sandbox-to-sandbox' },
                 { text: 'Restrict Public Access', link: '/guide/restrict-public-access' },
                 { text: 'Authentication', link: '/guide/authentication' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
@@ -278,7 +279,13 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Node Operations', link: '/guide/node-operations' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
-                { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
+                {
+                  text: 'Scheduling',
+                  items: [
+                    { text: 'Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
+                    { text: 'Scheduler Plugins', link: '/guide/scheduler-plugin' }
+                  ]
+                },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
                 { text: 'Component multi-version', link: '/guide/component-multiversion' },
                 { text: 'Redis Cluster', link: '/guide/redis-cluster' }
@@ -289,8 +296,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
-                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
-                { text: 'QualityStatus', link: '/guide/quality-status' }
+                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
             },
             {
@@ -299,6 +305,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Overview', link: '/guide/troubleshooting/' },
                 { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
+                { text: 'PVM Host Initramfs (Unsigned Modules)', link: '/guide/troubleshooting/pvm-host-boot-unsigned-modules' },
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
@@ -386,7 +393,6 @@ export default withMermaid(defineConfig({
             text: '社区',
             items: [
               { text: '开发者', link: '/zh/dev/' },
-              { text: '路线图', link: '/zh/guide/roadmap' },
               { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
               { text: '参与贡献', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING_zh.md' }
             ]
@@ -456,6 +462,7 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
+                    { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' },
                     { text: 'Python', link: '/zh/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/zh/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/zh/guide/tutorials/sdk/nodejs' }
@@ -482,6 +489,7 @@ export default withMermaid(defineConfig({
                 { text: '网络策略', link: '/zh/guide/network-policy' },
                 { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
                 { text: '安全代理', link: '/zh/guide/security-proxy' },
+                { text: '沙箱间互访', link: '/zh/guide/sandbox-to-sandbox' },
                 { text: '限制公开访问', link: '/zh/guide/restrict-public-access' },
                 { text: 'API 鉴权', link: '/zh/guide/authentication' },
                 { text: 'HTTPS 与域名解析', link: '/zh/guide/https-and-domain' },
@@ -508,7 +516,13 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '节点相关操作', link: '/zh/guide/node-operations' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
-                { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
+                {
+                  text: '调度',
+                  items: [
+                    { text: '调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
+                    { text: '调度插件扩展', link: '/zh/guide/scheduler-plugin' }
+                  ]
+                },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
                 { text: '组件多版本', link: '/zh/guide/component-multiversion' },
                 { text: 'Redis Cluster', link: '/zh/guide/redis-cluster' }
@@ -519,8 +533,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
-                { text: '性能基准', link: '/zh/guide/performance-benchmark' },
-                { text: '质量状态', link: '/zh/guide/quality-status' }
+                { text: '性能基准', link: '/zh/guide/performance-benchmark' }
               ]
             },
             {
@@ -529,6 +542,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '排障概览', link: '/zh/guide/troubleshooting/' },
                 { text: '部署问题', link: '/zh/guide/troubleshooting/deployment' },
+                { text: 'PVM 宿主内核 initramfs（模块未签名）', link: '/zh/guide/troubleshooting/pvm-host-boot-unsigned-modules' },
                 { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },

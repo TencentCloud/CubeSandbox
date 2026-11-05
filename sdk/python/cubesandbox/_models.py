@@ -197,12 +197,17 @@ class SnapshotInfo:
 
     snapshot_id: str
     names: list[str] = field(default_factory=list)
+    #: Artifact mode the control plane recorded: ``"full"`` or ``"fs-only"``.
+    #: Servers that predate filesystem-only snapshots omit it; the default
+    #: keeps their responses truthful (everything they can produce is full).
+    mode: str = "full"
 
     @classmethod
     def from_dict(cls, data: dict) -> "SnapshotInfo":
         return cls(
             snapshot_id=data.get("snapshotID", ""),
             names=data.get("names") or [],
+            mode=data.get("mode") or "full",
         )
 
 
@@ -432,3 +437,4 @@ def _serialize_results(results: list[Result]) -> list[dict[str, Any]]:
         item["text"] = result.text
         serialized.append(item)
     return serialized
+

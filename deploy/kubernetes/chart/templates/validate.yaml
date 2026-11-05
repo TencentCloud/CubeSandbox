@@ -441,6 +441,99 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if eq (include "cube.juicefsEnabled" .) "true" }}
+{{- $jfs := .Values.cubeJuiceFS }}
+{{- $meta := default dict $jfs.metadata }}
+{{- $storage := default dict $jfs.storage }}
+{{- if not .Values.cubeNode.enabled }}
+{{- fail "cubeJuiceFS.enabled=true requires cubeNode.enabled=true" }}
+{{- end }}
+{{- if not .Values.images.juicefs.repository }}
+{{- fail "cubeJuiceFS.enabled=true requires images.juicefs.repository" }}
+{{- end }}
+{{- if not $jfs.volumeName }}
+{{- fail "cubeJuiceFS.volumeName is required" }}
+{{- end }}
+{{- if or (not (regexMatch "^/[A-Za-z0-9._/-]+$" $jfs.mountPath)) (not (hasPrefix (printf "%s/" (trimSuffix "/" .Values.hostPaths.dataCubelet)) $jfs.mountPath)) }}
+{{- fail "cubeJuiceFS.mountPath must be an absolute child of hostPaths.dataCubelet" }}
+{{- end }}
+{{- if or (not (regexMatch "^/[A-Za-z0-9._/-]+$" $jfs.cacheDir)) (not (hasPrefix (printf "%s/" (trimSuffix "/" .Values.hostPaths.dataCubelet)) $jfs.cacheDir)) }}
+{{- fail "cubeJuiceFS.cacheDir must be an absolute child of hostPaths.dataCubelet" }}
+{{- end }}
+{{- range $component := splitList "/" (trimPrefix "/" $jfs.mountPath) }}
+{{- if or (eq $component "") (eq $component ".") (eq $component "..") }}
+{{- fail "cubeJuiceFS.mountPath must be a clean absolute path without empty, . or .. components" }}
+{{- end }}
+{{- end }}
+{{- range $component := splitList "/" (trimPrefix "/" $jfs.cacheDir) }}
+{{- if or (eq $component "") (eq $component ".") (eq $component "..") }}
+{{- fail "cubeJuiceFS.cacheDir must be a clean absolute path without empty, . or .. components" }}
+{{- end }}
+{{- end }}
+{{- if or (eq $jfs.mountPath $jfs.cacheDir) (hasPrefix (printf "%s/" (trimSuffix "/" $jfs.mountPath)) $jfs.cacheDir) (hasPrefix (printf "%s/" (trimSuffix "/" $jfs.cacheDir)) $jfs.mountPath) }}
+{{- fail "cubeJuiceFS.mountPath and cubeJuiceFS.cacheDir must not overlap" }}
+{{- end }}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._/-]*$" $jfs.root) }}
+{{- fail "cubeJuiceFS.root must be a clean relative path" }}
+{{- end }}
+{{- range $component := splitList "/" $jfs.root }}
+{{- if or (eq $component "") (eq $component ".") (eq $component "..") }}
+{{- fail "cubeJuiceFS.root must not contain empty, . or .. components" }}
+{{- end }}
+{{- end }}
+{{- if or (contains "\"" $jfs.volumeName) (contains "\n" $jfs.volumeName) }}
+{{- fail "cubeJuiceFS.volumeName must not contain quotes or newlines" }}
+{{- end }}
+{{- if regexMatch "^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*:[^/@]+@" (($meta.url) | default "") }}
+{{- fail "cubeJuiceFS.metadata.url must not embed a password; put it in metadata.existingSecret/passwordKey or metadata.password" }}
+{{- end }}
+{{- if eq (($meta.url) | default "") "" }}
+{{- if ne (($meta.existingSecret) | default "") "" }}
+{{- fail "cubeJuiceFS.metadata.existingSecret is only supported with an external metadata.url; the chart-managed dedicated JuiceFS Redis uses its chart-created Secret" }}
+{{- end }}
+{{- $redis := default dict $meta.redis }}
+{{- $redisPersistence := default dict $redis.persistence }}
+{{- if not $redis.image.repository }}
+{{- fail "cubeJuiceFS.metadata.redis.image.repository is required for the dedicated JuiceFS Redis" }}
+{{- end }}
+{{- if or (lt ($redis.port | int) 1) (gt ($redis.port | int) 65535) }}
+{{- fail "cubeJuiceFS.metadata.redis.port must be in 1..65535" }}
+{{- end }}
+{{- if and $redisPersistence.hostPath $redisPersistence.existingClaim }}
+{{- fail "cubeJuiceFS.metadata.redis.persistence.hostPath and existingClaim are mutually exclusive" }}
+{{- end }}
+{{- if and $redisPersistence.enabled (not $redisPersistence.hostPath) (not $redisPersistence.existingClaim) (not $redisPersistence.size) }}
+{{- fail "cubeJuiceFS.metadata.redis.persistence.size is required when the chart creates the dedicated Redis PVC" }}
+{{- end }}
+{{- $liveJFSRedis := lookup "apps/v1" "StatefulSet" .Release.Namespace (include "cube.juicefsRedisName" .) }}
+{{- if $liveJFSRedis }}
+{{- $livePersistenceHash := dig "metadata" "annotations" "cube.tencent.com/juicefs-redis-persistence-hash" "" $liveJFSRedis }}
+{{- $desiredPersistenceHash := include "cube.juicefsRedisPersistenceHash" . }}
+{{- if ne $livePersistenceHash $desiredPersistenceHash }}
+{{- fail "cubeJuiceFS.metadata.redis.persistence is immutable after the dedicated Redis StatefulSet is created. Keep the installed values; expand the bound PVC directly when supported, or back up JuiceFS metadata and migrate to a new Redis/PVC." }}
+{{- end }}
+{{- end }}
+{{- $jfsDB := 0 }}
+{{- if hasKey $meta "database" }}
+{{- if not (regexMatch "^[0-9]+$" (toString $meta.database)) }}
+{{- fail "cubeJuiceFS.metadata.database must be an integer in 0..15 for the dedicated JuiceFS Redis" }}
+{{- end }}
+{{- $jfsDB = $meta.database | int }}
+{{- end }}
+{{- if or (lt $jfsDB 0) (gt $jfsDB 15) }}
+{{- fail "cubeJuiceFS.metadata.database must be an integer in 0..15 for the dedicated JuiceFS Redis" }}
+{{- end }}
+{{- end }}
+{{- if eq (($storage.bucket) | default "") "" }}
+{{- if ne (include "cube.minioBuiltinEnabled" .) "true" }}
+{{- fail "cubeJuiceFS.storage.bucket is required when chart-managed MinIO is disabled" }}
+{{- end }}
+{{- else if eq (($storage.existingSecret) | default "") "" }}
+{{- if or (eq (($storage.accessKey) | default "") "") (eq (($storage.secretKey) | default "") "") }}
+{{- fail "external cubeJuiceFS.storage.bucket requires storage.existingSecret or storage.accessKey+secretKey" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if eq (include "cube.opsEnabled" .) "true" }}
 {{- if hasKey (.Values.cubeOps | default dict) "persistence" }}
 {{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3 or cubeOps.store.fs.persistence. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}

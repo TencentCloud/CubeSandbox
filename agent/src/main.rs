@@ -43,6 +43,7 @@ mod config;
 mod console;
 mod device;
 mod fixes;
+mod fsfreeze;
 mod linux_abi;
 mod metrics;
 mod mount;

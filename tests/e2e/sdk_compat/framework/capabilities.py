@@ -33,6 +33,10 @@ NETWORK_L7_EGRESS = "network_l7_egress"
 NETWORK_NODE_LOCAL = "network_node_local"
 # Template CubeNetworkConfig merged with per-create network options.
 NETWORK_TEMPLATE_MERGE = "network_template_merge"
+# Sandbox-to-sandbox data plane: CubeProxy Host routing between sandboxes and
+# node host-port mapping (same-host hairpin included), with egress policy
+# enforced on the hairpin path.
+NETWORK_SANDBOX_TO_SANDBOX = "network_sandbox_to_sandbox"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 VOLUME_PLUGIN = "volume_plugin"
@@ -41,6 +45,11 @@ AUTH_SIMPLE_KEY = "auth_simple_key"
 MCP_GATEWAY = "mcp_gateway"
 # Node-local restart policy (Never / OnFailure / Always) and restartStatus.
 RESTART_POLICY = "restart_policy"
+# Filesystem-only snapshots (rootfs + metadata, no guest memory) and cold boot
+# from them. `Sandbox.create_snapshot(mode=...)` is part of the SDK; `fork` has
+# no mode argument yet and the negative cases must read the raw HTTP status, so
+# those calls go through the API.
+FILESYSTEM_ONLY_SNAPSHOT = "filesystem_only_snapshot"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -75,6 +84,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         NETWORK_L7_EGRESS,
         NETWORK_NODE_LOCAL,
         NETWORK_TEMPLATE_MERGE,
+        NETWORK_SANDBOX_TO_SANDBOX,
         NETWORK_DYNAMIC_UPDATE,
         PLATFORM_LIFECYCLE,
         HOST_MOUNT,
@@ -83,6 +93,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         NETWORK_L7_CUSTOM_PORT,
         MCP_GATEWAY,
         RESTART_POLICY,
+        FILESYSTEM_ONLY_SNAPSHOT,
     }
 )
 

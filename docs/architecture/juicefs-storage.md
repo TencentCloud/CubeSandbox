@@ -8,7 +8,7 @@ This page describes CubeSandbox's JuiceFS-based cross-node storage architecture 
 
 > For deployment, see [JuiceFS service configuration](../guide/cross-node-snapshot/juicefs.md).
 >
-> For performance data, see [JuiceFS performance benchmarks](/blog/posts/2026-10-28-cubesandbox-juicefs-perf-benchmark).
+> For performance data, see [JuiceFS performance benchmarks](/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark).
 
 ## Goals
 

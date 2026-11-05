@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -84,45 +82,24 @@ func correctLegacySnapshotMetadataVersions(cb *cubeboxstore.CubeBox, snapshotPat
 		)
 	}
 
-	metadataPath := filepath.Join(snapshotPath, "metadata.json")
-	body, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return fmt.Errorf("read legacy snapshot metadata: %w", err)
-	}
-
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(body, &metadata); err != nil {
-		return fmt.Errorf("parse legacy snapshot metadata: %w", err)
-	}
-	if metadata == nil {
-		return fmt.Errorf("parse legacy snapshot metadata: expected JSON object")
-	}
-	if versions.GuestImage != "" {
-		metadata["image_version"], err = json.Marshal(versions.GuestImage)
-		if err != nil {
-			return fmt.Errorf("marshal legacy snapshot image version: %w", err)
-		}
-	}
-	if versions.Agent != "" {
-		metadata["agent_version"], err = json.Marshal(versions.Agent)
-		if err != nil {
-			return fmt.Errorf("marshal legacy snapshot agent version: %w", err)
-		}
-	}
-
-	body, err = json.Marshal(metadata)
-	if err != nil {
-		return fmt.Errorf("marshal legacy snapshot metadata: %w", err)
-	}
-	tmpPath := metadataPath + ".tmp"
-	if err := os.WriteFile(tmpPath, body, 0o644); err != nil {
-		return fmt.Errorf("write legacy snapshot metadata: %w", err)
-	}
-	if err := os.Rename(tmpPath, metadataPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("publish legacy snapshot metadata: %w", err)
-	}
-	return nil
+	return mutateSnapshotPackageMetadata(snapshotPath, "legacy snapshot metadata",
+		func(metadata map[string]json.RawMessage) error {
+			if versions.GuestImage != "" {
+				encoded, err := json.Marshal(versions.GuestImage)
+				if err != nil {
+					return fmt.Errorf("marshal legacy snapshot image version: %w", err)
+				}
+				metadata["image_version"] = encoded
+			}
+			if versions.Agent != "" {
+				encoded, err := json.Marshal(versions.Agent)
+				if err != nil {
+					return fmt.Errorf("marshal legacy snapshot agent version: %w", err)
+				}
+				metadata["agent_version"] = encoded
+			}
+			return nil
+		})
 }
 
 func checkCommitSnapshotDestination(ctx context.Context, backend, snapshotID string, inspect func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error)) error {

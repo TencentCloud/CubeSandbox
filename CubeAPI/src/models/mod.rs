@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
+pub mod snapshot_mode;
+pub use snapshot_mode::{normalize_request, SnapshotMode};
+
 // ─── Common ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -703,6 +706,9 @@ pub struct ForkRequest {
     /// Optional idle TTL (seconds) applied to each forked sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
+    /// Snapshot artifact mode for the one shared fork snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn default_fork_count() -> i32 {
@@ -909,6 +915,19 @@ pub struct CreateSnapshotRequest {
     /// CoW backend (xfs | s3). Empty means xfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Snapshot artifact mode: full | fs-only | filesystem (E2B alias).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// E2B compatibility alias: false means fs-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
+    /// Deprecated E2B alias for `memory`.
+    #[serde(
+        default,
+        rename = "keepMemory",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_memory: Option<bool>,
 }
 
 /// Response for POST /sandboxes/{id}/snapshots.
@@ -923,6 +942,8 @@ pub struct SnapshotInfo {
     /// S3 sync status (pending|running|ready|failed). Empty for xfs.
     #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
     pub remote_status: Option<String>,
+    /// Snapshot artifact mode. Always one of full | fs-only.
+    pub mode: SnapshotMode,
 }
 
 /// Query parameters for GET /snapshots.
@@ -937,6 +958,8 @@ pub struct ListSnapshotsQuery {
     /// Pagination cursor from previous response header x-next-token.
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
+    /// Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0)
+    pub name: Option<String>,
     /// Filter by CoW backend (xfs | s3).
     pub backend: Option<String>,
 }
@@ -960,6 +983,8 @@ pub struct SnapshotListItem {
     /// S3 sync status (pending|running|ready|failed). Empty for xfs.
     #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
     pub remote_status: Option<String>,
+    /// Snapshot artifact mode. Always one of full | fs-only.
+    pub mode: SnapshotMode,
 }
 
 /// Request body for POST /sandboxes/{id}/rollback.
@@ -1291,6 +1316,21 @@ mod tests {
         assert_eq!(rules[0].name, "n");
         // The deny verdict is exactly what E2B's shape cannot carry.
         assert!(!rules[0].action.allow);
+    }
+
+    #[test]
+    fn update_network_converts_e2b_catch_all_host() {
+        let (_, net) = update_parts(
+            r#"{"rules": {"*": [{"transform": {"headers": {"Authorization": "sek"}}}]}}"#,
+        )
+        .expect("catch-all host should convert");
+        let rules = net.expect("policy").rules.expect("rules");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "e2b-transform-*");
+        assert_eq!(rules[0].r#match.host.as_deref(), Some("*"));
+        let inject = rules[0].action.inject.as_ref().expect("inject");
+        assert_eq!(inject[0].header, "Authorization");
+        assert_eq!(inject[0].secret, "sek");
     }
 
     #[test]
@@ -2182,4 +2222,26 @@ pub struct VolumeAndToken {
     /// Auth token returned by the volume plugin. Empty string when not applicable.
     #[serde(default)]
     pub token: String,
+}
+
+/// Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+///
+/// `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+/// hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+/// sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+/// node).
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ExposedPortEndpoint {
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: String,
+    #[serde(rename = "containerPort")]
+    pub container_port: i32,
+    pub mode: String,
+    pub endpoint: String,
+    #[serde(rename = "hostIP", skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+    #[serde(rename = "hostPort", skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<i32>,
+    #[serde(rename = "sandboxIP", skip_serializing_if = "Option::is_none")]
+    pub sandbox_ip: Option<String>,
 }

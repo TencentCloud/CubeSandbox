@@ -6,6 +6,9 @@ package selctx
 
 import "golang.org/x/exp/rand"
 
+// randomSelect picks every element with equal probability; the weighted.W
+// interface's weight parameter is ignored. Call RemoveAll before reuse to
+// clear stale candidates.
 type randomSelect struct {
 	items []interface{}
 	r     *rand.Rand
@@ -23,6 +26,8 @@ func (r *randomSelect) All() map[interface{}]int {
 	return nil
 }
 
-func (r *randomSelect) RemoveAll() {}
+func (r *randomSelect) RemoveAll() {
+	r.items = nil
+}
 
 func (r *randomSelect) Reset() {}

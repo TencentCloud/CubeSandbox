@@ -275,15 +275,16 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.set_timeout(timeout),
         )
 
-    def create_snapshot(self, name: str | None = None) -> str:
+    def create_snapshot(self, name: str | None = None, *, mode: str | None = None) -> str:
         return self._trace.capture(
             "create_snapshot",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
                 "name": name,
+                "mode": mode,
             },
-            lambda: self._wrapped.create_snapshot(name=name),
+            lambda: self._wrapped.create_snapshot(name=name, mode=mode),
             output=lambda snapshot_id: {"snapshot_id": snapshot_id},
         )
 
@@ -355,6 +356,13 @@ class TracingSandboxAdapter(SandboxAdapter):
             self._wrapped.list_snapshot_ids,
         )
 
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        return self._trace.capture(
+            "list_snapshot_ids_by_name",
+            {"backend": self.backend, "name": name},
+            lambda: self._wrapped.list_snapshot_ids_by_name(name),
+        )
+
     def get_host(self, port: int) -> str:
         return self._trace.capture(
             "get_host",
@@ -364,6 +372,18 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "port": port,
             },
             lambda: self._wrapped.get_host(port),
+        )
+
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        return self._trace.capture(
+            "get_exposed_port_endpoint",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "port": port,
+            },
+            lambda: self._wrapped.get_exposed_port_endpoint(port),
+            output=lambda endpoint: {"endpoint": endpoint},
         )
 
     def traffic_access_token(self) -> str | None:

@@ -93,6 +93,13 @@ var (
 	ErrInvalidAlias                 = errors.New("alias is invalid")
 	ErrInvalidSnapshotName          = errors.New("snapshot name is invalid")
 	ErrTemplateNotReady             = errors.New("template is not ready")
+	// ErrFilesystemOnlyRollback rejects a rollback whose target snapshot has no
+	// guest memory. Rollback restores memory, so the artifact cannot satisfy
+	// it; creating a new sandbox from the snapshot is the supported path.
+	ErrFilesystemOnlyRollback = errors.New("snapshot is filesystem-only and cannot be rolled back")
+	// ErrFilesystemOnlySharedVolume rejects an fs-only snapshot of a sandbox
+	// with writable plugin volumes: the snapshot only contains the rootfs.
+	ErrFilesystemOnlySharedVolume = errors.New("filesystem-only snapshots do not support writable plugin volumes")
 )
 
 type localStore struct {

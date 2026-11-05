@@ -78,6 +78,78 @@ Either:
 EOF
 }
 
+# juicefs_change_decision <live|absent> <live_hash> <desired> <desired_hash> <ack> <fresh_install>
+#   keep    - a fresh installation (nothing to disrupt), no lifecycle change on
+#             an existing release, or an absent DaemonSet staying absent
+#   ack-ok  - the lifecycle changes and the operator acknowledged the disruption
+#   block   - the lifecycle changes without an acknowledgement
+juicefs_change_decision() {
+  local live_state="$1" live_hash="$2" desired ack desired_hash fresh_install
+  desired="$(normalize_bool "${3:-}")"
+  desired_hash="$4"
+  ack="$(normalize_bool "${5:-}")"
+  fresh_install="$(normalize_bool "${6:-false}")"
+
+  if [[ "${live_state}" == "absent" ]]; then
+    # Creating the DaemonSet. A fresh installation has no running sandbox to
+    # disrupt, but enabling on an existing release recreates every cube-node
+    # Pod, so it keeps requiring the acknowledgement there.
+    if [[ "${desired}" == "false" || "${fresh_install}" == "true" ]]; then
+      printf 'keep\n'
+      return 0
+    fi
+  fi
+  if [[ "${live_state}" == "present" && "${desired}" == "true" && -n "${live_hash}" && "${live_hash}" == "${desired_hash}" ]]; then
+    printf 'keep\n'
+    return 0
+  fi
+  if [[ "${ack}" == "true" ]]; then
+    printf 'ack-ok\n'
+    return 0
+  fi
+  printf 'block\n'
+}
+
+check_juicefs_existing_release() {
+  local ns="$1" fresh_install="$2"
+  local ds desired desired_hash ack live_hash err decision state
+  ds="${CUBE_JUICEFS_DS_NAME:-}"
+  desired="${CUBE_JUICEFS_DESIRED_ENABLED:-false}"
+  desired_hash="${CUBE_JUICEFS_DESIRED_HASH:-}"
+  ack="${CUBE_JUICEFS_LIFECYCLE_CHANGE_ACK:-false}"
+  [[ -n "${ds}" ]] || fail "CUBE_JUICEFS_DS_NAME is required"
+  [[ -n "${desired_hash}" ]] || fail "CUBE_JUICEFS_DESIRED_HASH is required"
+
+  err="$(mktemp)"
+  if live_hash="$(kubectl "${kubectl_opts[@]}" -n "${ns}" get daemonset "${ds}" \
+    -o jsonpath='{.metadata.annotations.cube\.tencent\.com/juicefs-config-hash}' 2>"${err}")"; then
+    state=present
+  elif grep -q "NotFound" "${err}"; then
+    state=absent
+    live_hash=""
+  else
+    cat "${err}" >&2
+    rm -f "${err}"
+    fail "could not read JuiceFS DaemonSet ${ns}/${ds}"
+  fi
+  rm -f "${err}"
+
+  decision="$(juicefs_change_decision "${state}" "${live_hash}" "${desired}" "${desired_hash}" "${ack}" "${fresh_install}")"
+  case "${decision}" in
+    keep)
+      if [[ "$(normalize_bool "${ack}")" == "true" ]]; then
+        log "WARNING: cubeJuiceFS.lifecycleChangeAck is set while JuiceFS lifecycle is unchanged; remove it"
+      fi
+      ;;
+    ack-ok)
+      log "WARNING: applying acknowledged JuiceFS lifecycle change; every compute node must already be drained"
+      ;;
+    block)
+      fail "JuiceFS lifecycle changes on an existing release require draining every compute node first. Keep the current cubeJuiceFS settings, or set cubeJuiceFS.lifecycleChangeAck: true after the drain and remove it after the upgrade."
+      ;;
+  esac
+}
+
 main() {
   local ns ds desired ack live err decision
 
@@ -100,10 +172,23 @@ main() {
       fail "could not read DaemonSet ${ns}/${ds}"
     fi
     rm -f "${err}"
+    # A missing cube-node DaemonSet usually means a fresh install, but it can
+    # also be a manually deleted or half-installed release. Guard only what
+    # exists: a leftover JuiceFS mount DaemonSet still requires the ack, while
+    # creating one from nothing disrupts nothing.
+    if [[ -n "${CUBE_JUICEFS_DS_NAME:-}" ]]; then
+      check_juicefs_existing_release "${ns}" true
+    fi
     log "no DaemonSet ${ns}/${ds} yet (fresh install); hostNetwork=${desired}"
     return 0
   fi
   rm -f "${err}"
+
+  # On an existing release, creating the JuiceFS DaemonSet (first enable)
+  # recreates every cube-node Pod, so it needs the acknowledgement too.
+  if [[ -n "${CUBE_JUICEFS_DS_NAME:-}" ]]; then
+    check_juicefs_existing_release "${ns}" false
+  fi
 
   decision="$(hostnet_change_decision "${live}" "${desired}" "${ack}")"
   case "${decision}" in

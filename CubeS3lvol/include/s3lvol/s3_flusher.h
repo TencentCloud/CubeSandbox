@@ -63,6 +63,7 @@
 
 struct s3_flusher;
 struct s3_wal;
+struct s3_writeback;
 
 typedef void (*s3_flusher_cb)(void *cb_arg, int status);
 
@@ -99,6 +100,8 @@ struct s3_flusher_opts {
 
 struct s3_flusher_stats {
 	uint64_t rounds;           /* flush rounds started */
+	uint64_t ring_head_rounds; /* rounds selected from oldest shm records */
+	uint64_t ring_head_in_flight_skips;
 	uint64_t chunks_flushed;
 	uint64_t blocks_flushed;
 	uint64_t failures;
@@ -116,6 +119,9 @@ int s3_flusher_create(struct s3_overlay *overlay, struct s3_wal *wal,
 		      s3_flusher_upload_fn upload_fn, void *upload_ctx,
 		      const struct s3_flusher_opts *opts,
 		      struct s3_flusher **out);
+
+void s3_flusher_set_writeback(struct s3_flusher *f,
+			      struct s3_writeback *writeback);
 
 /**
  * Stop and release. *The caller must drain first* -- this asserts that no

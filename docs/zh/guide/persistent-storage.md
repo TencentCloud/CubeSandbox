@@ -113,6 +113,7 @@ persist data
 Host Mount 是对宿主机目录的**外部引用**。创建 Snapshot 时，Cube 只保存 VM 的内存、根文件系统状态和挂载配置，不会把 `hostPath` 中的文件复制进 Snapshot。因此，宿主目录中的数据始终保持独立，并遵循以下语义：
 
 - **Pause / Resume 和 FromSnap**：恢复时会沿用原来的挂载配置，并在源节点重新挂载相同的 `hostPath`。带 Host Mount 的沙箱会固定在源节点，不会跨节点恢复；如果源节点不可用或宿主目录不存在，恢复将失败。
+- **从 fs-only 快照创建**：这类快照只包含根文件系统，不记录挂载配置。恢复出的沙箱不会挂载任何 `hostPath`，创建时若仍带 Host Mount，请求会返回 `snapshot_filesystem_only_external_mount_unsupported`。新沙箱需要该挂载时请改用 full 快照。
 - **Rollback**：VM 内存以及 Host Mount 路径之外的根文件系统状态会回到 Snapshot 创建时的状态，但 Host Mount 中的数据不会回滚。Snapshot 创建后在宿主目录中新增、修改或删除的文件仍保持最新状态。
 - **Clone**：每个克隆拥有独立的 VM 状态，但会引用相同的宿主目录。任一沙箱对读写挂载所做的修改都可通过共享目录被源沙箱和其他克隆访问，具体一致性遵循底层文件系统语义；只读挂载在克隆中仍保持只读。
 - **销毁沙箱或删除 Snapshot**：不会删除 Host Mount 指向的宿主目录及其文件。

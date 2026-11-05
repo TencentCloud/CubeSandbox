@@ -1,0 +1,54 @@
+/**
+ * Mermaid diagram responsive display and styling fixes.
+ * Prevents Mermaid flowchart text and bottom content from being cut off.
+ */
+
+/* Container wrapper: provide smooth horizontal scrolling for wide diagrams on narrow viewports */
+.vp-doc .mermaid {
+  overflow-x: auto;
+  margin: 24px 0;
+  padding: 8px 0;
+  width: 100%;
+  text-align: center;
+  background-color: transparent;
+}
+
+/* Ensure Mermaid SVG centers naturally and scales height responsively */
+.vp-doc .mermaid svg {
+  display: block;
+  margin: 0 auto;
+  height: auto;
+  overflow: visible;
+}
+
+/*
+ * Reset VitePress .vp-doc typography styles cascading into Mermaid foreignObject.
+ * VitePress applies `.vp-doc p { margin: 16px 0; line-height: 28px; }`, which breaks
+ * text measurement inside Mermaid foreignObjects, ballooning node heights and causing
+ * vertical misalignment as well as flowchart bottom clipping.
+ */
+.vp-doc .mermaid foreignObject,
+.vp-doc .mermaid foreignObject div,
+.vp-doc .mermaid foreignObject span,
+.vp-doc .mermaid foreignObject p {
+  margin: 0 !important;
+  padding: 0 !important;
+  line-height: 1.6 !important;
+  letter-spacing: normal !important;
+  border: none !important;
+}
+
+.vp-doc .mermaid foreignObject {
+  overflow: visible;
+}
+
+/* Ensure node labels are vertically and horizontally centered inside node rectangles */
+.vp-doc .mermaid .nodeLabel {
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: center !important;
+  align-items: center !important;
+  height: 100% !important;
+  line-height: 1.6 !important;
+  text-align: center !important;
+}

@@ -1,5 +1,5 @@
 ---
-title: 质量状态
+title: 每日性能测试报告
 sidebar: false
 aside: false
 ---

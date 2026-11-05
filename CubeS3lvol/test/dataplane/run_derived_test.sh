@@ -64,9 +64,10 @@
 #  directly rather than through B -- B may be gone. While C is still that reader,
 #  deleting sa or sb is deferred and neither prefix loses objects; deleting the
 #  writable volumes under those snapshots is not. The intents are withdrawn so the
-#  convergence steps still have the snapshots. After C has decoupled its own
-#  snapshot, the same deletes are issued again and must finish without
-#  rcow_release_export.
+#  convergence steps still have the snapshots. Decoupling sb or sc targets the
+#  hidden template of that import, not the published snapshot, so B's manifest
+#  stays a reference to A. After C has decoupled its template, the same deletes
+#  are issued again and must finish without rcow_release_export.
 #
 #  Usage:
 #    sudo -E ./test/dataplane/run_derived_test.sh -e <endpoint> -b <bucket> [-r <region>]
@@ -605,7 +606,7 @@ pass "stale prefixes from earlier runs removed"
 
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-	"${TGT_BIN}" -m 0x3 --no-huge -s 2048 -r "${RPC_SOCK}" \
+	"${TGT_BIN}" -m "${S3LVOL_TGT_CPUMASK:-0x3}" --no-huge -s 2048 -r "${RPC_SOCK}" \
 	>"${TGT_LOG}" 2>&1 &
 TGT_PID=$!
 for _ in $(seq 120); do [ -S "${RPC_SOCK}" ] && break; sleep 0.25; done
@@ -717,9 +718,9 @@ create_lvstore "${B_LVS}" "${B_WAL_BDEV}" || {
 B_CREATED=1
 pass "lvstore ${B_LVS} created"
 
-# decouple:false is the whole point: vb stays an esnap clone, so the head remains
-# A's objects and only the tail becomes B's. Decoupled, B would own every chunk
-# and there would be nothing to inherit.
+# decouple:false is the whole point: the hidden template stays an esnap, so the
+# head remains A's objects and only the tail becomes B's. Decoupled, the template
+# would own every chunk and there would be nothing to inherit.
 raw_rpc rcow_import_lvol \
 	"$(printf '{"lvol_name":"vb","export_uuid":"%s","lvs_name":"%s","decouple":false}' \
 		"${EXP_A}" "${B_LVS}")" >"${WORKDIR}/import_b.json" 2>&1 || {
@@ -1014,11 +1015,12 @@ check_target "deferred deletes" || exit 1
 
 # ==========================================================================
 echo
-echo "=== [6] converge B's snapshot and redirect its published export"
+echo "=== [6] decouple B's chain onto its hidden template"
 
-# Keep C's old generation in its imports registry. After B rewrites the manifest
-# and A's objects disappear, C must encounter a 404, refetch generation 1 and
-# continue against B's local objects.
+# Naming sb redirects onto __rcow_tpl_<A's export>. That copies the template.
+# It does not rewrite the export published from sb: rewrite matches the
+# decoupled blob's name, which is the template, not sb. A's objects stay, and
+# C keeps reading the original reference manifest.
 unexpose "${CUR_NSID}"
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${C_LVS}")" \
 	>/dev/null 2>&1 || { fail "unload ${C_LVS} before convergence"; exit 1; }
@@ -1032,46 +1034,48 @@ raw_rpc rcow_attach_lvstore \
 B_CREATED=1
 pass "B re-attached with its reference snapshot and export"
 
+B_TPL="__rcow_tpl_${EXP_A}"
+B_GEN_BEFORE="$(manifest_field "${EXP_B}" generation)"
 raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "sb")" \
 	>/dev/null 2>"${WORKDIR}/decouple_sb.err" || {
 	fail "start decoupling sb"; sed 's/^/       /' "${WORKDIR}/decouple_sb.err"; exit 1; }
 if wait_for_decouple; then
-	pass "sb decoupled and its export rewrite completed"
+	pass "sb's hidden template finished decoupling"
 else
-	fail "sb decouple/export rewrite did not finish"
+	fail "sb's template decouple did not finish"
 	exit 1
 fi
+if grep -q "lvol 'sb' reads export through hidden template '${B_TPL}'" "${TGT_LOG}"; then
+	pass "decouple of sb targeted ${B_TPL}"
+else
+	fail "decouple of sb did not target the hidden template"
+fi
+if grep -qF "'${B_TPL}' no longer reads export" "${TGT_LOG}"; then
+	pass "${B_TPL} no longer reads A's export"
+else
+	fail "${B_TPL} did not finish leaving the export"
+fi
 
-want "B's export generation advanced after convergence" \
-	"$(manifest_field "${EXP_B}" generation)" "1"
-want "B's converged export remains zero-copy ref" \
+want "B's published export generation is unchanged" \
+	"$(manifest_field "${EXP_B}" generation)" "${B_GEN_BEFORE}"
+want "B's export remains zero-copy ref" \
 	"$(manifest_field "${EXP_B}" layout)" "ref"
 SRCS="$(manifest_field "${EXP_B}" srcs)"
-info "converged srcs: ${SRCS}"
+info "srcs after template decouple: ${SRCS}"
 if printf '%s' "${SRCS}" | grep -q "${A_LVS}"; then
-	fail "converged export still references A: ${SRCS}"
+	pass "B's published export still references A"
 else
-	pass "converged export no longer references A"
+	fail "B's published export dropped A: ${SRCS}"
 fi
-if printf '%s' "$(manifest_field "${EXP_B}" source)" | grep -q "${B_LVS}"; then
-	pass "converged export references B's local objects"
+if grep -q "export ${EXP_B} now references local snapshot" "${TGT_LOG}"; then
+	fail "decoupling the template rewrote sb's published export"
 else
-	fail "converged export's primary source does not name B"
-fi
-if grep -q "export ${EXP_B} now references local snapshot 'sb' at generation 1" \
-	"${TGT_LOG}"; then
-	pass "B logged the automatic manifest redirection"
-else
-	fail "automatic manifest redirection was not logged"
+	pass "sb's published export was not rewritten"
 fi
 
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${B_LVS}")" \
-	>/dev/null 2>&1 || { fail "unload ${B_LVS} after convergence"; exit 1; }
+	>/dev/null 2>&1 || { fail "unload ${B_LVS} after the template decouple"; exit 1; }
 B_CREATED=0
-
-remove_prefix "${A_LVS}/" >"${WORKDIR}/remove_a.log" 2>&1 || {
-	fail "remove A's source objects"; exit 1; }
-pass "A's source prefix removed after B converged"
 
 raw_rpc rcow_attach_lvstore \
 	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
@@ -1083,29 +1087,29 @@ DEV="$(attach "${C_LVS}/vc")"
 [ -b "${DEV}" ] || { fail "vc did not return after C re-attached"; exit 1; }
 drop_caches
 if [ "${DID_ZERO}" -eq 1 ]; then
-	want "C refetches the rewritten manifest and still reads the zeroed prefix" \
+	want "C still reads the zeroed prefix through B's original export" \
 		"$(read_md5_range "${DEV}" "${ZERO_OFF_MB}" "${ZERO_LEN_MB}")" \
 		"${ZERO_MD5}"
-	want "C still reads the rest of the head after refetch" \
+	want "C still reads the rest of the head from A" \
 		"$(read_md5_range "${DEV}" "${HEAD_REST_OFF_MB}" "${HEAD_REST_MB}")" \
 		"${HEAD_REST_MD5}"
 else
-	want "C refetches the rewritten manifest and still reads the head" \
+	want "C still reads the head from A through B's original export" \
 		"$(read_md5_at "${DEV}" "${HEAD_OFF_MB}")" "${HEAD_MD5}"
 fi
-want "C still reads B's tail with A gone" \
+want "C still reads B's tail" \
 	"$(read_md5_at "${DEV}" "${TAIL_OFF_MB}")" "${TAILB_MD5}"
 if grep -q "export ${EXP_B}: now reading generation 1" "${TGT_LOG}"; then
-	pass "C switched from its cached manifest to generation 1"
+	fail "C refetched a generation B's template decouple does not publish"
 else
-	fail "C did not log a manifest refetch to generation 1"
+	pass "C kept B's original manifest"
 fi
 
-check_target "automatic export convergence" || exit 1
+check_target "template decouple leaves the published export" || exit 1
 
 # ==========================================================================
 echo
-echo "=== [7] persist the refetched generation, then derive and decouple"
+echo "=== [7] derive from the original manifest, then decouple C's template"
 
 unexpose "${CUR_NSID}"
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${C_LVS}")" \
@@ -1122,23 +1126,21 @@ DEV="$(attach "${C_LVS}/vc")"
 [ -b "${DEV}" ] || { fail "vc did not return after refetch persist"; exit 1; }
 drop_caches
 if [ "${DID_ZERO}" -eq 1 ]; then
-	want "C still reads zeroes after restart on the persisted generation" \
+	want "C still reads zeroes after restart on the original manifest" \
 		"$(read_md5_range "${DEV}" "${ZERO_OFF_MB}" "${ZERO_LEN_MB}")" \
 		"${ZERO_MD5}"
 	want "C still reads the rest of the head after restart" \
 		"$(read_md5_range "${DEV}" "${HEAD_REST_OFF_MB}" "${HEAD_REST_MB}")" \
 		"${HEAD_REST_MD5}"
 else
-	want "C still reads the head after restart on the persisted generation" \
+	want "C still reads the head after restart on the original manifest" \
 		"$(read_md5_at "${DEV}" "${HEAD_OFF_MB}")" "${HEAD_MD5}"
 fi
 want "C still reads B's tail after restart" \
 	"$(read_md5_at "${DEV}" "${TAIL_OFF_MB}")" "${TAILB_MD5}"
 
-# C's data plane has generation 1. Derive and same-bucket decouple used to
-# read imp->m, which stayed on generation 0 and named A's objects -- already
-# deleted. Restart used the persisted registry copy of the same stale
-# generation.
+# C still reads B's original reference export, which names A. Snapshot and
+# export that chain, then decouple sc, which copies C's hidden template.
 raw_rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${C_LVS}")" \
 	>/dev/null 2>&1 || true
 raw_rpc rcow_create_snapshot '{"lvol_name":"vc","snapshot_name":"sc"}' \
@@ -1153,9 +1155,9 @@ pass "sc exported as ${EXP_C}"
 SRCS="$(manifest_field "${EXP_C}" srcs)"
 info "derived-after-refetch srcs: ${SRCS}"
 if printf '%s' "${SRCS}" | grep -q "${A_LVS}"; then
-	fail "derived export after refetch still names A's prefix: ${SRCS}"
+	pass "derived export still names A's prefix"
 else
-	pass "derived export after refetch does not name A's deleted prefix"
+	fail "derived export dropped A's prefix: ${SRCS}"
 fi
 
 raw_rpc rcow_decouple_lvol '{"lvol_name":"sc"}' \
@@ -1163,7 +1165,7 @@ raw_rpc rcow_decouple_lvol '{"lvol_name":"sc"}' \
 	fail "decouple sc after refetch"
 	sed 's/^/       /' "${WORKDIR}/decouple_sc.err"; exit 1; }
 if wait_for_decouple; then
-	pass "sc decoupled against the refetched generation"
+	pass "sc's hidden template finished decoupling"
 else
 	fail "sc decouple after refetch did not finish"
 	exit 1
@@ -1189,9 +1191,9 @@ check_target "derive/decouple after refetch" || exit 1
 echo
 echo "=== [8] delete the chain once C no longer reads it"
 
-# sc was the esnap, and decoupling it dropped C's import. Nothing renews A's or
-# B's lease any more. vc is still the host's namespace, so it has to be removed
-# before the blob delete; sc was never exposed.
+# Decoupling sc copied C's hidden template and dropped C's import. Nothing
+# renews A's or B's lease any more. vc is still the host's namespace, so it
+# has to be removed before the blob delete; sc was never exposed.
 unexpose "${CUR_NSID}"
 CUR_NSID=""
 

@@ -475,6 +475,9 @@ spec:
           test -e /dev/kvm
           test -d {{ .Values.hostPaths.dataCubelet | quote }}
           test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
+          {{- if .Values.cubeJuiceFS.enabled }}
+          awk '$2 == {{ .Values.cubeJuiceFS.mountPath | quote }} && $3 == "fuse.juicefs" { found=1 } END { exit !found }' /proc/mounts
+          {{- end }}
       volumeMounts:
         - name: dev
           mountPath: /dev
@@ -482,6 +485,9 @@ spec:
         - name: data-cubelet
           mountPath: {{ .Values.hostPaths.dataCubelet }}
           readOnly: true
+          {{- if .Values.cubeJuiceFS.enabled }}
+          mountPropagation: HostToContainer
+          {{- end }}
         - name: tmp-cube
           mountPath: {{ .Values.hostPaths.tmpCube }}
           readOnly: true

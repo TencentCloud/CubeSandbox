@@ -6,17 +6,19 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
@@ -31,24 +33,36 @@ import (
 // node reading those blocks fails, so the package is ready only once none of
 // its blocks is staged.
 
-const jfsStagingDir = "rawstaging"
+const (
+	jfsStagingDir              = "rawstaging"
+	jfsControlInfoV2           = uint32(1005)
+	jfsControlProgress         = byte(0xFE)
+	jfsControlData             = byte(0xFF)
+	jfsControlInfoBodySize     = uint32(11)
+	jfsControlMaxResponseBytes = 256 << 20
+)
+
+type jfsControlFile interface {
+	io.Reader
+	io.Writer
+	io.Closer
+}
+
+// errJFSPackageIncomplete marks a package that exists but is missing a file
+// every restore needs (catalog, guest metadata, VM config -- plus guest memory
+// for a full package).
+// Unlike a JuiceFS lookup or CLI failure this never becomes better on its own,
+// so the status poller must settle it as failed instead of retrying forever:
+// the S3 backend already fails such a package at export time.
+var errJFSPackageIncomplete = errors.New("jfs package is missing required restore files")
 
 var (
-	jfsBinary = func() string {
-		if p, err := exec.LookPath("juicefs"); err == nil {
-			return p
-		}
-		return "/usr/local/bin/juicefs"
-	}
-	jfsInfoOutput = func(ctx context.Context, path string) ([]byte, error) {
-		return exec.CommandContext(ctx, jfsBinary(), "info", path).CombinedOutput()
-	}
-	jfsObjectKeyRE = regexp.MustCompile(`chunks/\d+/\d+/\d+_\d+_\d+`)
-	// A status burst must not turn into an unbounded number of JuiceFS CLI
-	// processes. The limit must remain above the normal lifecycle concurrency:
-	// each package inspects its files serially, so a smaller pool serializes
-	// otherwise independent packages and delays READY under burst load.
-	jfsInfoLimit = make(chan struct{}, 16)
+	jfsOpenControl    = openJFSControl
+	jfsPathObjectKeys = queryJFSControlObjectKeys
+	jfsObjectKeyRE    = regexp.MustCompile(`chunks/\d+/\d+/\d+_\d+_\d+`)
+	// Each query opens its own control handle, allowing concurrent queries on
+	// Linux. Keep a bounded pool so independent packages do not serialize.
+	jfsControlQueryLimit = make(chan struct{}, 16)
 
 	jfsUploadTrackers sync.Map // snapshot ID -> *jfsUploadTracker
 )
@@ -62,7 +76,7 @@ const (
 
 // jfsUploadTracker keeps the immutable object list of one finished package.
 // UploadStatus is a query API, so repeated calls reuse this state instead of
-// spawning `juicefs info` once per file on every 100 ms status poll.
+// querying JuiceFS's control file once per file on every 100 ms status poll.
 type jfsUploadTracker struct {
 	mu sync.Mutex
 
@@ -96,7 +110,7 @@ func (jfsUploader) UploadStatus(ctx context.Context, snapshotID string) (*cow.Re
 	id := strings.TrimSpace(snapshotID)
 	tracker, err := jfsUploadTrackerFor(ctx, id)
 	if err != nil {
-		if errors.Is(err, ErrSnapshotCatalogNotFound) {
+		if errors.Is(err, ErrSnapshotCatalogNotFound) || errors.Is(err, errJFSPackageIncomplete) {
 			return &cow.RemoteStatus{SnapshotID: id, State: cow.RemoteStateFailed, Message: err.Error()}, nil
 		}
 		return nil, err
@@ -328,9 +342,12 @@ func jfsPackageUploadPaths(files *cow.RemoteUUIDs) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read jfs upload catalog: %w", err)
 	}
-	required := []string{snapshotCatalogFileName}
+	// metadata.json (guest runtime identity + writable layer) and the VM config
+	// are required by every package: a filesystem-only package cold-boots from
+	// them exactly like a full one. Guest memory is the only mode-specific file.
+	required := []string{snapshotCatalogFileName, "metadata.json", "snapshot/config.json"}
 	if files.Memory != "" {
-		required = append(required, "metadata.json", "snapshot/config.json", "snapshot/state.json")
+		required = append(required, "snapshot/state.json")
 	}
 	if entry.Kind == CatalogKindPauseSnapshot {
 		required = append(required, "sandbox_spec.json")
@@ -339,10 +356,17 @@ func jfsPackageUploadPaths(files *cow.RemoteUUIDs) ([]string, error) {
 		path := filepath.Join(meta, name)
 		info, err := os.Stat(path)
 		if err != nil {
+			// A missing file will never appear by retrying; an I/O error on the
+			// JuiceFS mount may clear on its own, so only ENOENT is terminal.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("%w: check jfs restore metadata %s: %w",
+					errJFSPackageIncomplete, path, err)
+			}
 			return nil, fmt.Errorf("check jfs restore metadata %s: %w", path, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("jfs restore metadata %s is not a regular file", path)
+			return nil, fmt.Errorf("%w: jfs restore metadata %s is not a regular file",
+				errJFSPackageIncomplete, path)
 		}
 	}
 	paths := []string{files.Rootfs, files.Memory}
@@ -424,17 +448,11 @@ func jfsObjectKeys(ctx context.Context, paths ...string) ([]string, error) {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		select {
-		case jfsInfoLimit <- struct{}{}:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		out, err := jfsInfoOutput(ctx, p)
-		<-jfsInfoLimit
+		pathKeys, err := jfsPathObjectKeys(ctx, p)
 		if err != nil {
-			return nil, fmt.Errorf("juicefs info %s: %v: %s", p, err, strings.TrimSpace(string(out)))
+			return nil, fmt.Errorf("query JuiceFS object keys for %s: %w", p, err)
 		}
-		for _, key := range jfsObjectKeyRE.FindAllString(string(out), -1) {
+		for _, key := range pathKeys {
 			if _, ok := seen[key]; ok {
 				continue
 			}
@@ -443,6 +461,149 @@ func jfsObjectKeys(ctx context.Context, paths ...string) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+func openJFSControl(path string) (jfsControlFile, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	dir := path
+	if !info.IsDir() {
+		dir = filepath.Dir(path)
+	}
+	control := filepath.Join(dir, ".jfs.control")
+	file, err := os.OpenFile(control, os.O_RDWR, 0)
+	if os.IsNotExist(err) {
+		control = filepath.Join(dir, ".control")
+		file, err = os.OpenFile(control, os.O_RDWR, 0)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open JuiceFS control file %s: %w", control, err)
+	}
+	return file, nil
+}
+
+func queryJFSControlObjectKeys(ctx context.Context, path string) ([]string, error) {
+	select {
+	case jfsControlQueryLimit <- struct{}{}:
+		defer func() { <-jfsControlQueryLimit }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat JuiceFS path: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, fmt.Errorf("stat JuiceFS path %s has no inode", path)
+	}
+	control, err := jfsOpenControl(path)
+	if err != nil {
+		return nil, err
+	}
+	defer control.Close()
+
+	request := make([]byte, 8+jfsControlInfoBodySize)
+	binary.BigEndian.PutUint32(request[0:4], jfsControlInfoV2)
+	binary.BigEndian.PutUint32(request[4:8], jfsControlInfoBodySize)
+	binary.BigEndian.PutUint64(request[8:16], stat.Ino)
+	// recursive, raw and strict remain false.
+	if n, err := control.Write(request); err != nil {
+		return nil, fmt.Errorf("write JuiceFS InfoV2 request: %w", err)
+	} else if n != len(request) {
+		return nil, fmt.Errorf("write JuiceFS InfoV2 request: %w", io.ErrShortWrite)
+	}
+	data, err := readJFSControlData(ctx, control)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Failed  bool
+		Reason  string
+		Objects []struct {
+			Key string
+		}
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("decode JuiceFS InfoV2 response: %w", err)
+	}
+	if response.Failed {
+		return nil, fmt.Errorf("JuiceFS InfoV2 failed: %s", response.Reason)
+	}
+	keys := make([]string, 0, len(response.Objects))
+	for _, object := range response.Objects {
+		if key := jfsObjectKeyRE.FindString(object.Key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+
+func readJFSControlData(ctx context.Context, reader io.Reader) ([]byte, error) {
+	const readSize = 128 << 10
+	buf := make([]byte, readSize)
+	var pending []byte
+	delay := time.Millisecond
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n, err := reader.Read(buf)
+		if n > 0 {
+			pending = append(pending, buf[:n]...)
+		parse:
+			for len(pending) > 0 {
+				switch pending[0] {
+				case jfsControlProgress:
+					if len(pending) < 17 {
+						break parse
+					}
+					pending = pending[17:]
+					continue
+				case jfsControlData:
+					if len(pending) < 5 {
+						break parse
+					}
+					size := binary.BigEndian.Uint32(pending[1:5])
+					if size > jfsControlMaxResponseBytes {
+						return nil, fmt.Errorf("JuiceFS control response too large: %d bytes", size)
+					}
+					if uint64(len(pending)-5) < uint64(size) {
+						break parse
+					}
+					return append([]byte(nil), pending[5:5+size]...), nil
+				default:
+					if len(pending) == 1 {
+						if errno := syscall.Errno(pending[0]); errno != 0 {
+							return nil, fmt.Errorf("JuiceFS control response: %w", errno)
+						}
+					}
+					return nil, fmt.Errorf("invalid JuiceFS control response marker 0x%02x", pending[0])
+				}
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("read JuiceFS control response: %w", err)
+			}
+			// The control file may split a large response across reads. Keep
+			// draining available data without applying the EOF retry backoff.
+			delay = time.Millisecond
+			continue
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("read JuiceFS control response: %w", err)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(delay*2, 300*time.Millisecond)
+	}
 }
 
 func jfsStagedObjectKeys(keys, stagingRoots []string) (int, error) {

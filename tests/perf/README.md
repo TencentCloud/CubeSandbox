@@ -106,7 +106,7 @@ source tests/perf/.env
 
 ### 完整命令
 
-本机与跨节点结果分别写入独立 JSON。先在 c1 执行 c2 本机测试：
+先在 c1 执行 JuiceFS 本机相关性能测试：
 
 ```bash
 python3 tests/perf/cubebench_jfs_local.py \
@@ -115,7 +115,7 @@ python3 tests/perf/cubebench_jfs_local.py \
   --origin c2 \
   --samples 10 \
   --concurrency 1 5 10 \
-  --warmups 1 \
+  --warmups 3 \
   --round-gap 10 \
   --label "$(date +%F), c2 local, bundled MinIO" \
   --out /tmp/jfs-local-perf.json
@@ -131,7 +131,7 @@ python3 tests/perf/cubebench_jfs_cross_node.py \
   --target c3 \
   --samples 10 \
   --concurrency 1 5 10 \
-  --warmups 1 \
+  --warmups 3 \
   --round-gap 10 \
   --allow-node-isolation \
   --label "$(date +%F), c2-to-c3, bundled MinIO" \
@@ -151,6 +151,8 @@ python3 tests/perf/cubebench_jfs_report.py \
 
 `--samples` 必须为正数，并能被 `--concurrency` 中的每个并发数整除。例如，并发为 `1 5 10` 时，样本数可使用 `10`、`20` 等值。
 
+与 [CubeSandbox JuiceFS 多节点性能基准测试报告](../../docs/zh/blog/posts/2026-11-04-cubesandbox-juicefs-perf-benchmark.md) 同口径对比时：整套测试开始前删除全部沙箱，并清理各节点 JuiceFS 磁盘缓存与 Linux 页缓存；测试格与批次之间不再清缓存。runtime snapshot 恢复的前一到两个批次可能仍在将 guest 页面载入本地缓存并出现瞬时探活延迟，因此正式对比建议 `--warmups 3`；`fromsnap-cold` 按设计始终不执行 warmup。
+
 ### 参数说明
 
 ```text
@@ -160,7 +162,7 @@ template                 READY 的 JFS 模板 ID
 --target NODE            跨节点脚本的目标节点名，必填
 --samples N              每个场景、每个并发度的有效样本总数，默认 10
 --concurrency N [...]    并发度列表，默认 1 5 10
---warmups N              正式计数前的预热批次数，默认 1
+--warmups N              正式计数前的预热批次数，默认 1；runtime snapshot 场景建议 3
 --round-gap SECONDS      每批测试后的固定等待时间
 --gap-range MIN MAX      每批测试后的随机等待时间
 --allow-node-isolation   允许 pause-cross 临时修改集群调度状态

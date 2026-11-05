@@ -619,6 +619,60 @@ class TestNetworkRules:
         assert wire["match"]["path"] == "/v1/chat"
         assert wire["match"]["sni"] == "api.deepseek.com"
 
+    def _rules_payload(self, rules):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": rules}, config=make_config())
+        return m.call_args.kwargs["json"]
+
+    def test_create_network_rules_catch_all_without_inject(self):
+        from cubesandbox import Action, Match, Rule
+        rules = [
+            Rule(name="audit_all_http", match=Match(scheme="http", host="*"),
+                 action=Action(allow=True, audit="metadata")),
+            Rule(name="audit_all_https", match=Match(scheme="https", sni="*"),
+                 action=Action(allow=True, audit="metadata")),
+        ]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["match"] == {"scheme": "http", "host": "*"}
+        assert body["network"]["rules"][1]["match"] == {"scheme": "https", "sni": "*"}
+
+    def test_create_network_rules_catch_all_allows_inject(self):
+        from cubesandbox import Action, Inject, Match, Rule
+        rules = [Rule(
+            name="leak",
+            match=Match(host="*"),
+            action=Action(allow=True, inject=[Inject(header="Authorization", secret="sek")]),
+        )]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["action"]["inject"] == [
+            {"header": "Authorization", "secret": "sek"},
+        ]
+
+    def test_create_network_rules_wildcard_inject_still_allowed(self):
+        from cubesandbox import Action, Inject, Match, Rule
+        rules = [Rule(
+            name="scoped",
+            match=Match(host="*.example.com"),
+            action=Action(allow=True, inject=[Inject(header="Authorization", secret="sek")]),
+        )]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["match"]["host"] == "*.example.com"
+
+    def test_create_network_rules_catch_all_allows_custom_port(self):
+        rules = [{"name": "wide", "match": {"host": "*", "port": 8443, "scheme": "https"},
+                  "action": {"allow": True}}]
+        body = self._rules_payload(rules)
+        assert body["network"]["rules"][0]["match"] == {
+            "host": "*", "port": 8443, "scheme": "https",
+        }
+
+    def test_create_network_rules_e2b_star_allows_inject(self):
+        body = self._rules_payload({"*": [{"transform": {"headers": {"Authorization": "sek"}}}]})
+        rule = body["network"]["rules"][0]
+        assert rule["match"]["host"] == "*"
+        assert rule["name"] == "e2b-transform-*"
+        assert rule["action"]["inject"] == [{"header": "Authorization", "secret": "sek"}]
+
     def test_create_network_rules_with_inject(self):
         from cubesandbox import Action, Inject, Match, Rule
         rules = [Rule(
@@ -1017,6 +1071,32 @@ class TestGetInfo:
         assert "envdAccessToken" not in info.to_dict()
         assert "envdAccessToken" not in info.copy()
         assert secret not in json.dumps(info)
+
+    def test_get_exposed_port_endpoint_host_port(self):
+        sb = make_sandbox()
+        body = {
+            "sandboxID": SANDBOX_ID,
+            "containerPort": 8080,
+            "mode": "host_port",
+            "endpoint": "9.135.152.214:20006",
+            "hostIP": "9.135.152.214",
+            "hostPort": 20006,
+            "sandboxIP": "192.168.0.20",
+        }
+        with patch.object(sb._session, "get", return_value=mock_response(body)) as get:
+            endpoint = sb.get_exposed_port_endpoint(8080)
+        assert endpoint == "9.135.152.214:20006"
+        url = get.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{SANDBOX_ID}/exposed-ports/8080")
+        # No caller-IP parameter is ever sent.
+        assert "callerHostIP" not in url
+
+    def test_get_exposed_port_endpoint_not_exposed(self):
+        sb = make_sandbox()
+        resp = mock_response({"message": "port 8081 is not exposed"}, status=404)
+        with patch.object(sb._session, "get", return_value=resp):
+            with pytest.raises(SandboxNotFoundError):
+                sb.get_exposed_port_endpoint(8081)
 
     def test_get_info_returns_sandbox_info(self):
         sb = make_sandbox()
@@ -2361,6 +2441,39 @@ class TestRollback:
         m.json.return_value = body if body is not None else {}
         return m
 
+    def test_create_snapshot_sends_the_requested_mode(self):
+        """`mode` is the whole contract: a request without it is a full
+        snapshot, which pauses the sandbox and stores guest memory."""
+        sb = make_sandbox()
+        body = {"snapshotID": "snap-1", "names": ["snap-1"], "mode": "fs-only"}
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response(body)) as post_m:
+            info = sb.create_snapshot(mode="fs-only")
+        url = post_m.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{sb.sandbox_id}/snapshots")
+        assert post_m.call_args.kwargs["json"] == {"mode": "fs-only"}
+        assert info.snapshot_id == "snap-1"
+        assert info.mode == "fs-only"
+
+    def test_create_snapshot_omits_the_mode_when_not_requested(self):
+        """The server default is full; sending nothing keeps old servers happy."""
+        sb = make_sandbox()
+        body = {"snapshotID": "snap-1", "names": ["snap-1"], "mode": "full"}
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response(body)) as post_m:
+            info = sb.create_snapshot()
+        assert post_m.call_args.kwargs["json"] == {}
+        assert info.mode == "full"
+
+    def test_snapshot_info_defaults_to_full_mode(self):
+        """An older control plane omits `mode`; the artifact it produced is full."""
+        sb = make_sandbox()
+        body = {"snapshotID": "snap-1", "names": ["snap-1"]}
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response(body)):
+            info = sb.create_snapshot()
+        assert info.mode == "full"
+
     def test_rollback_returns_response_body(self):
         sb = make_sandbox()
         body = {"sandboxID": sb.sandbox_id, "snapshotID": "snap-1", "status": "success"}
@@ -2486,6 +2599,25 @@ class TestDeleteSnapshot:
         with patch("requests.Session.delete", return_value=resp):
             with pytest.raises(ApiError):
                 Sandbox.delete_snapshot("prod", config=make_config())
+
+
+class TestListSnapshots:
+    def test_forwards_name_query_param(self):
+        cfg = make_config()
+        body = [{"snapshotID": "snap-1", "names": ["prod"]}]
+        resp = mock_response(body)
+        resp.headers = {"x-next-token": ""}
+        with patch("requests.Session.get", return_value=resp) as get:
+            Sandbox.list_snapshots(name="prod", config=cfg)
+        assert get.call_args.kwargs["params"] == {"name": "prod"}
+
+    def test_omits_name_when_not_set(self):
+        cfg = make_config()
+        resp = mock_response([])
+        resp.headers = {}
+        with patch("requests.Session.get", return_value=resp) as get:
+            Sandbox.list_snapshots(config=cfg)
+        assert get.call_args.kwargs["params"] == {}
 
 
 # ── Sandbox.clone ─────────────────────────────────────────────────────────────

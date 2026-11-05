@@ -277,7 +277,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if flowOpts.RestartPrior != nil && (flowOpts.IsRestart || flowOpts.RestartPrior.StatusSeq != 0 || flowOpts.RestartPrior.RestartCount != 0 || flowOpts.RestartPrior.LastExitReason != "" || len(flowOpts.RestartPrior.OriginalRequest) > 0) {
 		applyRestartBookkeeping(sandBox, flowOpts.RestartPrior, flowOpts.IsRestart)
 		if flowOpts.IsPauseResume() {
-			clearRestartCountForResume(sandBox)
+			markResumedAfterPause(sandBox)
 		}
 	} else if restartpolicy.KeepsRequest(realReq.GetRestartPolicy()) {
 		if err := sandBox.SetOriginalRequest(realReq); err != nil {
@@ -299,7 +299,9 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 	log.G(ctx).Infof("create sandbox with namespace %s", sandBox.Namespace)
 
-	seedCubeBoxComponentVersionsFromRequest(sandBox, flowOpts)
+	if err := seedCubeBoxComponentVersionsFromRequest(sandBox, flowOpts); err != nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+	}
 	if err := EnsureCubeBoxComponents(ctx, sandBox); err != nil {
 		return err
 	}
@@ -898,7 +900,7 @@ func (l *local) containerOciSpec(ctx context.Context, containerReq *cubebox.Cont
 
 	opts, err := l.cbriBeforeCreateContainer(ctx, flowOpts, sandBox, ci)
 	if err != nil {
-		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "cbri before create container failed: %v", err)
+		return nil, cbriCreateError(err)
 	}
 	specOpts = append(specOpts, opts...)
 
@@ -1071,6 +1073,18 @@ func genGeneralContainerSpecOpt(ctx context.Context,
 	}
 
 	return specOpts
+}
+
+// cbriCreateError maps a CBRI failure to the code this endpoint advertises:
+// precondition failures (missing guest artifacts) keep their stable
+// identifier, everything else keeps the historical generic 400.
+func cbriCreateError(err error) error {
+	if status, ok := ret.FromError(err); ok &&
+		status.Code() == errorcode.ErrorCode_PreConditionFailed {
+		return err
+	}
+	return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat,
+		"cbri before create container failed: %v", err)
 }
 
 func (l *local) cbriBeforeCreateContainer(ctx context.Context,
@@ -1263,6 +1277,10 @@ func (l *local) prepareVolumePmemsMounts(ctx context.Context, flowOpts *workflow
 // volume. A restart cold-boots and must mount the same directory. A sandbox
 // that did not come from a template keeps using its container id.
 func writableLayerSubdir(flowOpts *workflow.CreateContext, containerID, index string) string {
+	if flowOpts != nil && flowOpts.SnapshotWritableLayer != "" {
+		// A cold boot reuses the layer the snapshot captured.
+		return flowOpts.SnapshotWritableLayer
+	}
 	if flowOpts != nil && flowOpts.IsRestart && flowOpts.ReqInfo != nil {
 		templateID := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID])
 		if templateID != "" {
@@ -1318,7 +1336,13 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 	annotations := make(map[string]string)
 	annotations[constants.AnnotationsRootfsWritableKey] = blkPath
 	index, _ := ctx.Value(constants.KCubeIndexContext).(string)
-	annotations[constants.AnnotationsRootfsWlayerSubdir] = writableLayerSubdir(flowOpts, containerReq.GetId(), index)
+	layer := writableLayerSubdir(flowOpts, containerReq.GetId(), index)
+	annotations[constants.AnnotationsRootfsWlayerSubdir] = layer
+	if cb := cubeboxstore.GetCubeBox(ctx); cb != nil && flowOpts != nil && flowOpts.SnapshotWritableLayer != "" {
+		// Remember the captured layer so an in-place restart mounts the same
+		// directory instead of deriving an empty one from the new container id.
+		cb.RootfsWritableLayer = layer
+	}
 	log.G(ctx).Debugf("writable rootfs:%+v", blkPath)
 
 	return oci.WithAnnotations(annotations), nil

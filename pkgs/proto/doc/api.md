@@ -594,7 +594,7 @@ ContainerStateValue is the wrapper of ContainerState.
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  | ID of the CubeSandbox. |
 | namespace | [string](#string) |  | containerd namespace. |
-| created_at | [int64](#int64) |  | Creation time of the sandbox. |
+| created_at | [int64](#int64) |  | Creation time of the sandbox in nanoseconds. |
 | containers | [Container](#cubelet-services-cubebox-v1-Container) | repeated | containers Sandbox.Spec.Containers |
 | port_mappings | [PortMapping](#cubelet-services-cubebox-v1-PortMapping) | repeated | Local cubevs portmapping |
 | labels | [CubeSandbox.LabelsEntry](#cubelet-services-cubebox-v1-CubeSandbox-LabelsEntry) | repeated |  |
