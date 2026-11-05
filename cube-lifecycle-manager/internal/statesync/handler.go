@@ -24,9 +24,15 @@
 // The event source (CubeMaster) is stateless with respect to the CLM's
 // SETNX-based transition locks ("pausing", "resuming"). To avoid a state
 // event racing an in-flight sweeper.tryPause or resumer.doResume, Handle
-// skips reconciliation whenever the current state key holds a transition
-// marker; the CLM's own flow will write the terminal state moments
-// later, so the event is redundant.
+// skips the Redis / CubeProxy writes whenever the current state key holds a
+// transition marker; the lock owner writes the terminal state moments later.
+//
+// The local registry is different: the owner may be another replica, and
+// this replica only learns the outcome from this event. Whenever an external
+// write is skipped (transition in progress, Redis unavailable, CAS lost),
+// Handle still records the event's state locally unless Redis contradicts
+// it. Otherwise a stale "paused" RuntimeState makes the leader's sweeper
+// skip the sandbox forever once the state key expires.
 package statesync
 
 import (
@@ -133,8 +139,12 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 
 	cur, _, err := d.Redis.GetState(ctx, ev.SandboxID)
 	if err != nil {
-		log.Warn("state event: get current state failed",
-			zap.String("sandbox_id", ev.SandboxID), zap.Error(err))
+		// Redis gives no verdict, so the event is the newest fact we have.
+		// Standbys record it unconditionally for the same reason.
+		recordWarmState(d, ev.SandboxID, newState, now)
+		log.Warn("state event: get current state failed; recorded locally",
+			zap.String("sandbox_id", ev.SandboxID),
+			zap.String("new", newState), zap.Error(err))
 		return
 	}
 
@@ -143,26 +153,45 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 	// external event here would race against that write and could clobber
 	// a "resuming" lock with a "paused" verdict — the opposite of what we
 	// want.
+	//
+	// The lock owner may be another replica (a standby serving
+	// /internal/resume) whose terminal write only updates its own registry.
+	// CubeMaster publishes this event before replying to the owner, so we
+	// usually observe it while the lock is still held. Record a matching
+	// outcome locally: a stale "paused" RuntimeState would otherwise make
+	// the sweeper skip the sandbox forever once the Redis key expires.
 	if cur == "pausing" || cur == "resuming" {
+		recorded := recordIfAgrees(d, ev.SandboxID, newState, cur, now)
 		log.Info("state event skipped: transition in progress",
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.String("cur", cur),
-			zap.String("new", newState))
+			zap.String("new", newState),
+			zap.Bool("recorded", recorded))
 		return
 	}
 
 	updated, err := d.Redis.WriteStateCAS(ctx, ev.SandboxID, cur, newState, d.TTL)
 	if err != nil {
-		log.Warn("state event: set state failed",
+		// Unknown write result; as with a failed read, keep the event.
+		recordWarmState(d, ev.SandboxID, newState, now)
+		log.Warn("state event: set state failed; recorded locally",
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.String("new", newState), zap.Error(err))
 		return
 	}
 	if !updated {
+		// A newer write landed between the read and the CAS, typically a
+		// peer taking a transition marker. Re-read and record only if that
+		// newer value agrees with this event; a stale event must not roll
+		// the registry back.
+		latest, _, readErr := d.Redis.GetState(ctx, ev.SandboxID)
+		recorded := readErr == nil && recordIfAgrees(d, ev.SandboxID, newState, latest, now)
 		log.Info("state event skipped: state changed concurrently",
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.String("cur", cur),
-			zap.String("new", newState))
+			zap.String("latest", latest),
+			zap.String("new", newState),
+			zap.Bool("recorded", recorded))
 		return
 	}
 	recordWarmState(d, ev.SandboxID, newState, now)
@@ -179,6 +208,32 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 		zap.String("new", newState),
 		zap.String("actor", ev.State.Actor),
 		zap.String("source", ev.State.Source))
+}
+
+// recordIfAgrees records newState locally when the observed Redis value
+// agrees with it: the same terminal state, or a transition marker whose
+// successful outcome is newState. Any other value (a different terminal
+// state, a mismatched marker, an absent key after rollback) means a newer
+// write disagrees, so the registry is left alone.
+func recordIfAgrees(d Deps, sandboxID, newState, redisState string, now func() time.Time) bool {
+	if redisState != newState && transitionOutcome(redisState) != newState {
+		return false
+	}
+	recordWarmState(d, sandboxID, newState, now)
+	return true
+}
+
+// transitionOutcome maps a transition marker to the terminal state its
+// owner writes on success.
+func transitionOutcome(marker string) string {
+	switch marker {
+	case "pausing":
+		return lifecycle.StatePaused
+	case "resuming":
+		return lifecycle.StateRunning
+	default:
+		return ""
+	}
 }
 
 // applyCubeletRunning moves a sandbox from restarting or backoff back to
