@@ -244,6 +244,19 @@ TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供�
 
 因为 artifact 存储是共享的 / 可寻址的，构建期记录的路径与对象引用对 reconciler 始终有效，即使中途发生 TC 重启也不需要把 job “绑死”在某个实例上。
 
+当对象存储才是持久副本时，TC 写出的 ext4 并不是副本，只是构建中间产物。因此 TC
+在构建收尾阶段就把它删掉，构建节点不会再“每构建一次就多留一个 artifact”：
+
+- 上传成功（`s3` 后端）：在 BUILT 上报成功后立即删除本地副本。这类 artifact 由
+  CubeMaster 从对象存储流式读取，本地文件此后不会再被任何流程读到。
+- 上传失败：构建上报 FAILED，本地副本同样删除。旧行为是照样上报 BUILT、不写
+  storage backend，此时 artifact 由 TC 的磁盘提供——只有 Master 恰好共享该副本的
+  artifact 目录时才成立，换成远端 Master 或第二个 TC 副本就取不到了。
+
+两种情况会保留本地文件：`CUBE_ARTIFACT_STORE_BACKEND=fs` 时存储根可能就是同一个
+目录，文件本身就是持久副本；以及上传成功但没能记录下载 URL 时，Master 对这类记录
+返回 502（并不会回退读 TC 的磁盘），保留字节是此时唯一的可恢复副本。
+
 ## 10. 已知限制与后续项
 
 以下问题在当前版本里仍然存在：
