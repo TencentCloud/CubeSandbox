@@ -22,10 +22,12 @@ const (
 )
 
 var (
-	ErrAuthentication   = errors.New("cubesandbox: authentication failed")
-	ErrSandboxNotFound  = errors.New("cubesandbox: sandbox not found")
-	ErrTemplateNotFound = errors.New("cubesandbox: template not found")
-	ErrVolumeNotFound   = errors.New("cubesandbox: volume not found")
+	ErrAuthentication           = errors.New("cubesandbox: authentication failed")
+	ErrSandboxNotFound          = errors.New("cubesandbox: sandbox not found")
+	ErrTemplateNotFound         = errors.New("cubesandbox: template not found")
+	ErrVolumeNotFound           = errors.New("cubesandbox: volume not found")
+	ErrVolumePathNotFound       = errors.New("cubesandbox: volume path not found")
+	ErrVolumeContentUnavailable = errors.New("cubesandbox: volume content unavailable")
 	// ErrVolumeInUse matches the HTTP 409 the server returns when deleting a
 	// volume that is still mounted by one or more sandboxes.
 	ErrVolumeInUse = errors.New("cubesandbox: volume is still in use")
@@ -65,6 +67,10 @@ func (e *APIError) Is(target error) bool {
 		return e.Kind == apiErrorKindVolumeNotFound
 	case ErrVolumeInUse:
 		return e.Kind == apiErrorKindVolumeInUse
+	case ErrVolumePathNotFound:
+		return e.Kind == "volume_path_not_found"
+	case ErrVolumeContentUnavailable:
+		return e.Kind == "volume_content_unavailable"
 	default:
 		return false
 	}

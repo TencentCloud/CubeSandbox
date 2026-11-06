@@ -33,6 +33,8 @@ type Config struct {
 	SandboxDomain  string
 	Timeout        time.Duration
 	RequestTimeout time.Duration
+	// VolumeAPIURL is the explicitly deployed volume-content gateway, not CubeAPI.
+	VolumeAPIURL string
 }
 
 // NewConfigFromEnv builds Config from environment variables.
@@ -43,6 +45,7 @@ func NewConfigFromEnv() Config {
 	cfg := Config{
 		APIURL:         firstEnv("CUBE_API_URL", "E2B_API_URL"),
 		APIKey:         firstEnv("CUBE_API_KEY", "E2B_API_KEY"),
+		VolumeAPIURL:   firstEnv("CUBE_VOLUME_API_URL"),
 		TemplateID:     strings.TrimSpace(os.Getenv("CUBE_TEMPLATE_ID")),
 		MCPTemplateID:  strings.TrimSpace(os.Getenv("CUBE_MCP_TEMPLATE_ID")),
 		ProxyNodeIP:    strings.TrimSpace(os.Getenv("CUBE_PROXY_NODE_IP")),
