@@ -335,26 +335,25 @@ func refreshTemplateQueryCaches(ctx context.Context) {
 		return
 	}
 	// Re-load the full list by calling the underlying query directly (bypass
-	// the cache read in ListTemplates to avoid a self-hit), then re-cache it.
+	// the cache read in ListTemplates to avoid a self-hit). The underlying
+	// query caches the raw DB view before applying dynamic node membership.
 	infos, err := listTemplatesFromDB(ctx)
 	if err != nil {
 		log.G(ctx).Warnf("template query cache refresh: list templates fail: %v", err)
 		return
 	}
-	setTemplateListCache(infos)
 	// Re-warm per-template entries that are currently cached, so their TTL
 	// restarts and their content is up to date.
 	for _, info := range infos {
 		if _, ok := templateInfoCache.Get(info.TemplateID); !ok {
 			continue
 		}
-		full, err := getTemplateInfoFromDB(ctx, info.TemplateID)
+		_, err := getTemplateInfoFromDB(ctx, info.TemplateID)
 		if err != nil {
 			// Template may have been deleted by a peer replica; drop the stale entry.
 			templateInfoCache.Delete(info.TemplateID)
 			continue
 		}
-		setTemplateInfoCache(info.TemplateID, full)
 	}
 }
 
