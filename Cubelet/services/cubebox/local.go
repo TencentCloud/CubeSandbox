@@ -258,12 +258,13 @@ type local struct {
 	config    *CubeConfig
 	shims     *v2.ShimManager
 
-	criImage       *cubeimages.CubeImageService
-	cbriManager    cbri.APIManager
-	cubeboxManger  cubes.CubeboxAPI
-	envdHTTPClient *http.Client
-	envdInitPort   int
-	destroyFn      func(context.Context, *workflow.DestroyContext) error
+	criImage              *cubeimages.CubeImageService
+	cbriManager           cbri.APIManager
+	cubeboxManger         cubes.CubeboxAPI
+	envdHTTPClient        *http.Client
+	envdInitPort          int
+	diagnosticsMarkerPath string // optional override for isolated tests
+	destroyFn             func(context.Context, *workflow.DestroyContext) error
 
 	// newContainerFn is the container-creation step the create flow starts
 	// with. It is a field so a test can drive the record bookkeeping that has
