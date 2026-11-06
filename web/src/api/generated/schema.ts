@@ -28,6 +28,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** List sandboxes in every state, `pausing` and `unknown` included; GET /v2/sandboxes is the E2B view. */
         get: operations["list_sandboxes"];
         put?: never;
         post: operations["create_sandbox"];
@@ -63,6 +64,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["connect_sandbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/exposed-ports/{containerPort}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_sandbox_exposed_port"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -478,6 +495,12 @@ export interface components {
             code: number;
             message: string;
         };
+        BlockIoQosConfig: {
+            /** Format: int32 */
+            iops?: number | null;
+            /** Format: int32 */
+            throughputMiBps?: number | null;
+        };
         ClusterOverview: {
             /**
              * Format: int64
@@ -561,6 +584,12 @@ export interface components {
         CreateSnapshotRequest: {
             /** @description CoW backend (xfs | s3). Empty means xfs. */
             backend?: string | null;
+            /** @description Deprecated E2B alias for `memory`. */
+            keepMemory?: boolean | null;
+            /** @description E2B compatibility alias: false means fs-only. */
+            memory?: boolean | null;
+            /** @description Snapshot artifact mode: full | fs-only | filesystem (E2B alias). */
+            mode?: string | null;
             name?: string | null;
         };
         /** @description Body for POST /templates (create from image). */
@@ -619,6 +648,7 @@ export interface components {
              * @description HTTP probe port.
              */
             probePort?: number | null;
+            qos?: null | components["schemas"]["QosConfig"];
             /** @description Registry password for private source images. */
             registryPassword?: string | null;
             /** @description Registry username for private source images. */
@@ -628,6 +658,12 @@ export interface components {
              *     with the `tpl-` prefix; clients must use the returned `templateID`.
              */
             templateID?: string;
+            /**
+             * @description Container user for the template build and later sandboxes.
+             *     `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+             *     Omitted keeps the default root user.
+             */
+            user?: string | null;
             /**
              * @description Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
              *     Omitted or null defaults to true on CubeMaster.
@@ -731,6 +767,25 @@ export interface components {
             [key: string]: components["schemas"]["E2bNetworkRule"][];
         };
         /**
+         * @description Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+         *
+         *     `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+         *     hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+         *     sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+         *     node).
+         */
+        ExposedPortEndpoint: {
+            /** Format: int32 */
+            containerPort: number;
+            endpoint: string;
+            hostIP?: string | null;
+            /** Format: int32 */
+            hostPort?: number | null;
+            mode: string;
+            sandboxID: string;
+            sandboxIP?: string | null;
+        };
+        /**
          * @description Per-fork error entry inside a fork response element. CubeMaster's business
          *     ret_code is carried in `code`.
          */
@@ -746,6 +801,8 @@ export interface components {
              * @description Number of fork sandboxes to derive (1..=100). Defaults to 1 when absent.
              */
             count?: number;
+            /** @description Snapshot artifact mode for the one shared fork snapshot. */
+            mode?: string | null;
             /**
              * Format: int32
              * @description Optional idle TTL (seconds) applied to each forked sandbox.
@@ -824,6 +881,12 @@ export interface components {
         };
         /** @enum {string} */
         LogLevel: "debug" | "info" | "warn" | "error";
+        NetworkQosConfig: {
+            /** Format: int32 */
+            bandwidthMbps?: number | null;
+            /** Format: int32 */
+            packetsPerSecond?: number | null;
+        };
         /**
          * @description Request body for POST /sandboxes
          *     Field names match exactly what the E2B SDK sends.
@@ -982,6 +1045,10 @@ export interface components {
             quotaMemMB: number;
             versions?: components["schemas"]["ComponentVersionView"][];
         };
+        QosConfig: {
+            blockIo?: null | components["schemas"]["BlockIoQosConfig"];
+            network?: null | components["schemas"]["NetworkQosConfig"];
+        };
         /** @description Body for POST /templates/:id (rebuild). */
         RebuildTemplateRequest: {
             [key: string]: unknown;
@@ -1087,6 +1154,7 @@ export interface components {
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
+            configuredQos?: null | components["schemas"]["QosConfig"];
             /** Format: int32 */
             cpuCount: number;
             /**
@@ -1223,6 +1291,8 @@ export interface components {
         SnapshotInfo: {
             /** @description CoW backend that produced this snapshot (xfs | s3). */
             backend?: string | null;
+            /** @description Snapshot artifact mode. Always one of full | fs-only. */
+            mode: components["schemas"]["SnapshotMode"];
             names: string[];
             /** @description S3 sync status (pending|running|ready|failed). Empty for xfs. */
             remoteStatus?: string | null;
@@ -1234,6 +1304,8 @@ export interface components {
             backend?: string | null;
             /** Format: date-time */
             createdAt?: string | null;
+            /** @description Snapshot artifact mode. Always one of full | fs-only. */
+            mode: components["schemas"]["SnapshotMode"];
             names: string[];
             originSandboxID?: string | null;
             /** @description S3 sync status (pending|running|ready|failed). Empty for xfs. */
@@ -1243,6 +1315,11 @@ export interface components {
             /** Format: date-time */
             updatedAt?: string | null;
         };
+        /**
+         * @description Canonical snapshot artifact mode.
+         * @enum {string}
+         */
+        SnapshotMode: "full" | "fs-only";
         TemplateAliasLookupResponse: {
             public: boolean;
             templateID: string;
@@ -1301,6 +1378,7 @@ export interface components {
             aliases: string[];
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
+            configuredQos?: null | components["schemas"]["QosConfig"];
             createRequest?: unknown;
             createdAt?: string | null;
             instanceType?: string | null;
@@ -1430,6 +1508,11 @@ export interface operations {
     list_sandboxes: {
         parameters: {
             query?: {
+                /**
+                 * @description `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+                 *     A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+                 *     An empty value is the same as omitting `metadata`: no filter.
+                 */
                 metadata?: string;
             };
             header?: never;
@@ -1445,6 +1528,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ListedSandbox"][];
+                };
+            };
+            /** @description Invalid metadata */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description Unexpected backend error */
@@ -1670,6 +1762,58 @@ export interface operations {
             };
             /** @description Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_sandbox_exposed_port: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox ID */
+                sandboxID: string;
+                /** @description Container port declared via the template's expose-port list */
+                containerPort: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Exposed port endpoint */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExposedPortEndpoint"];
+                };
+            };
+            /** @description Invalid container port */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found or port not exposed */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2089,7 +2233,7 @@ export interface operations {
                     "application/json": components["schemas"]["SnapshotInfo"];
                 };
             };
-            /** @description Snapshot name starts with a reserved tpl-/snap- prefix */
+            /** @description Snapshot name starts with a reserved tpl-/snap- prefix, or the requested snapshot mode is invalid */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2107,8 +2251,26 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
+            /** @description The control plane refused the capture or recorded a different mode than the one requested */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description Unexpected backend error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Filesystem-only support could not be verified; retry */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2179,6 +2341,8 @@ export interface operations {
                 limit?: number;
                 /** @description Pagination cursor from previous response header x-next-token. */
                 nextToken?: string;
+                /** @description Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0) */
+                name?: string;
                 /** @description Filter by CoW backend (xfs | s3). */
                 backend?: string;
             };
@@ -2771,13 +2935,16 @@ export interface operations {
     list_sandboxes_v2: {
         parameters: {
             query?: {
+                /**
+                 * @description `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+                 *     A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+                 *     An empty value is the same as omitting `metadata`: no filter.
+                 */
                 metadata?: string;
                 /**
-                 * @description Filter by sandbox state. Accepted values are `running`, `paused`,
-                 *     `pausing`, and `unknown`; `stopped` and `error` are accepted as aliases
-                 *     for `unknown`. The `unknown` bucket also holds sandboxes that are still
-                 *     being created and sandboxes whose state could not be read from their
-                 *     node, so it is not a synonym for "exited".
+                 * @description Comma-separated states: `running`, `paused` (includes pausing), `pausing`, `unknown` (aliases `stopped`, `error`).
+                 *     `pausing` is a Cube-native state: asking for it returns `pausing`; otherwise a pausing sandbox reads `paused`.
+                 *     Defaults to running and paused sandboxes; any unrecognised or empty value is a 400.
                  */
                 state?: string;
                 /** @description Continuation cursor from the previous response's `x-next-token` header. */
@@ -2801,7 +2968,7 @@ export interface operations {
                     "application/json": components["schemas"]["ListedSandbox"][];
                 };
             };
-            /** @description Malformed nextToken */
+            /** @description Malformed nextToken, invalid state or invalid metadata */
             400: {
                 headers: {
                     [name: string]: unknown;
