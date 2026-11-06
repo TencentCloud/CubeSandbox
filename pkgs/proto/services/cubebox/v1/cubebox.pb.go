@@ -87,11 +87,11 @@ func (MountPropagation) EnumDescriptor() ([]byte, []int) {
 type StorageMedium int32
 
 const (
-	//use blk device the default is for the node
+	// use blk device the default is for the node
 	StorageMedium_StorageMediumDefault StorageMedium = 0
-	//use memory (e.g. tmpfs on linux)
+	// use memory (e.g. tmpfs on linux)
 	StorageMedium_StorageMediumMemory StorageMedium = 1
-	//use cubemsg
+	// use cubemsg
 	StorageMedium_StorageMediumCubeMsg StorageMedium = 2
 )
 
@@ -2530,9 +2530,9 @@ func (x *SysCall) GetArgs() []*LinuxSeccompArg {
 // ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definitions/quantity/#Quantity
 type Resource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	//Cpu的限制，单位为core数
+	// Cpu的限制，单位为core数
 	Cpu string `protobuf:"bytes,1,opt,name=cpu,proto3" json:"cpu,omitempty"`
-	//内存限制，单位可以为字节
+	// 内存限制，单位可以为字节
 	Mem string `protobuf:"bytes,2,opt,name=mem,proto3" json:"mem,omitempty"`
 	// mvm内对容器的cpu限制，单位为core数
 	CpuLimit string `protobuf:"bytes,3,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
