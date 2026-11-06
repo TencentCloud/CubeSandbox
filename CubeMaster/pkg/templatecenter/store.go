@@ -191,52 +191,77 @@ type definitionCreateOptions struct {
 	RootfsSizeBytesAtSnapshot uint64
 }
 
-// TemplateListOptions controls pagination of ListTemplatesWithOptions.
-// A zero value returns the full list (backwards compatible).
+const (
+	DefaultTemplateListLimit = 50
+	MaxTemplateListLimit     = 200
+)
+
+// TemplateListOptions controls database pagination. A zero Limit uses the
+// finite default; callers that need every row must iterate pages explicitly.
 type TemplateListOptions struct {
-	Limit  int
-	Offset int
+	Limit     int
+	Offset    int
+	SkipTotal bool
 }
 
 // TemplateListResult carries the requested page plus the total entry count
 // measured before slicing, so paged clients can compute page counts.
 type TemplateListResult struct {
 	Templates []TemplateInfo
-	Total     int
+	Total     int // -1 when the caller explicitly skips the exact count.
+	HasMore   bool
 }
 
-// ListTemplates returns all templates (backwards compatible).
+// ListTemplates retains the historical all-rows contract for internal callers,
+// but walks bounded database pages rather than loading unbounded associations
+// in one query.
 func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
-	result, err := ListTemplatesWithOptions(ctx, TemplateListOptions{})
-	if err != nil {
-		return nil, err
+	out := make([]TemplateInfo, 0)
+	for offset := 0; ; offset += MaxTemplateListLimit {
+		result, err := ListTemplatesWithOptions(ctx, TemplateListOptions{Limit: MaxTemplateListLimit, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, result.Templates...)
+		if len(out) >= result.Total || len(result.Templates) == 0 {
+			return out, nil
+		}
 	}
-	return result.Templates, nil
 }
 
-// ListTemplatesWithOptions returns templates with optional limit/offset paging
-// over a totally ordered list, so pages concatenate to the unpaged result.
+// ListTemplatesWithOptions returns one truly database-paged slice over the
+// union of definitions and latest CREATE/REDO job-only entries.
 func ListTemplatesWithOptions(ctx context.Context, opts TemplateListOptions) (*TemplateListResult, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
-	infos, err := listTemplatesCached(ctx)
-	if err != nil {
-		return nil, err
-	}
-	total := len(infos)
-	if opts.Limit <= 0 && opts.Offset <= 0 {
-		return &TemplateListResult{Templates: infos, Total: total}, nil
-	}
-	return &TemplateListResult{Templates: sliceTemplateInfos(infos, opts), Total: total}, nil
+	opts = normalizeTemplateListOptions(opts)
+	return listTemplatesPageFromDB(ctx, opts)
 }
 
-// listTemplatesCached serves the aggregate list from the query cache on a hit
-// and falls back to the DB query, which re-populates the cache.
-func listTemplatesCached(ctx context.Context) ([]TemplateInfo, error) {
-	if cached, ok := getCachedTemplateList(); ok {
-		return cached, nil
+// NormalizeTemplateListOptions is the exported form used by HTTP handlers so
+// the response limit/offset match the page the store actually served.
+func NormalizeTemplateListOptions(opts TemplateListOptions) TemplateListOptions {
+	return normalizeTemplateListOptions(opts)
+}
+
+func normalizeTemplateListOptions(opts TemplateListOptions) TemplateListOptions {
+	if opts.Limit <= 0 {
+		opts.Limit = DefaultTemplateListLimit
 	}
+	if opts.Limit > MaxTemplateListLimit {
+		opts.Limit = MaxTemplateListLimit
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	return opts
+}
+
+// listTemplatesCached is retained for package compatibility. The full-list
+// cache is deliberately bypassed: serving a page must never require materializing
+// every definition and historical job first.
+func listTemplatesCached(ctx context.Context) ([]TemplateInfo, error) {
 	return listTemplatesFromDB(ctx)
 }
 
@@ -257,77 +282,171 @@ func sliceTemplateInfos(infos []TemplateInfo, opts TemplateListOptions) []Templa
 	return infos
 }
 
-// listTemplatesFromDB is the uncached ListTemplates implementation. Called by
-// ListTemplates on a cache miss and by the backstop refresh goroutine (which
-// must bypass the cache to avoid a self-hit). Re-caches the result before
-// returning so the next read hits the cache.
+// listTemplatesFromDB is retained as a bounded default-page helper for older
+// package-local call sites and tests.
 func listTemplatesFromDB(ctx context.Context) ([]TemplateInfo, error) {
-	var defs []models.TemplateDefinition
-	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Order("updated_at desc, template_id asc").Find(&defs).Error; err != nil {
-		return nil, err
-	}
-	// Only CREATE/REDO jobs carry the source image identity used for display.
-	// A COMMIT/MIGRATE/snapshot row carries no source image ref, and a MIGRATE
-	// row would otherwise win the attempt_no ordering and blank image_info.
-	var jobs []models.TemplateImageJob
-	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
-		Where("operation IN ?", createRedoJobOperations).
-		Order("template_id asc, attempt_no desc, id desc").Find(&jobs).Error; err != nil {
-		return nil, err
-	}
-	latestJobByTemplateID := make(map[string]*models.TemplateImageJob, len(jobs))
-	for i := range jobs {
-		job := &jobs[i]
-		if _, exists := latestJobByTemplateID[job.TemplateID]; exists {
-			continue
-		}
-		latestJobByTemplateID[job.TemplateID] = job
-	}
-
-	hiddenIDs, err := hiddenSnapshotIDs(ctx)
+	result, err := listTemplatesPageFromDB(ctx, normalizeTemplateListOptions(TemplateListOptions{}))
 	if err != nil {
 		return nil, err
 	}
+	return result.Templates, nil
+}
 
-	out := make([]TemplateInfo, 0, len(defs))
+type templateListIDRow struct {
+	TemplateID string    `gorm:"column:template_id"`
+	SortTime   time.Time `gorm:"column:sort_ts"`
+}
+
+func templateListVisibleCTE() string {
+	return fmt.Sprintf(`
+WITH ranked_jobs AS (
+	SELECT j.template_id, j.updated_at,
+		ROW_NUMBER() OVER (PARTITION BY j.template_id ORDER BY j.attempt_no DESC, j.id DESC) AS row_num
+	FROM %s j
+	WHERE j.deleted_at IS NULL
+	  AND j.operation IN ?
+	  AND TRIM(j.template_id) <> ''
+	  AND NOT EXISTS (
+		SELECT 1 FROM %s d
+		WHERE d.deleted_at IS NULL AND d.template_id = j.template_id
+	  )
+),
+visible_templates AS (
+	SELECT d.template_id, d.updated_at AS sort_ts
+	FROM %s d
+	WHERE d.deleted_at IS NULL
+	  AND TRIM(d.template_id) <> ''
+	  AND LOWER(TRIM(COALESCE(d.kind, ''))) <> LOWER(?)
+	  AND NOT EXISTS (
+		SELECT 1 FROM %s s
+		WHERE s.deleted_at IS NULL
+		  AND s.snapshot_id = d.template_id
+		  AND s.status IN ?
+	  )
+	UNION ALL
+	SELECT j.template_id, j.updated_at AS sort_ts
+	FROM ranked_jobs j
+	WHERE j.row_num = 1
+	  AND NOT EXISTS (
+		SELECT 1 FROM %s s
+		WHERE s.deleted_at IS NULL
+		  AND s.snapshot_id = j.template_id
+		  AND s.status IN ?
+	  )
+)`,
+		constants.TemplateImageJobTableName,
+		constants.TemplateDefinitionTableName,
+		constants.TemplateDefinitionTableName,
+		constants.SnapshotTableName,
+		constants.SnapshotTableName,
+	)
+}
+
+func templateListQueryArgs() []any {
+	hiddenStatuses := []string{StatusDeleted, StatusDeleting}
+	return []any{
+		createRedoJobOperations,
+		pausesnap.KindPauseSnapshot,
+		hiddenStatuses,
+		hiddenStatuses,
+	}
+}
+
+func listTemplatesPageFromDB(ctx context.Context, opts TemplateListOptions) (*TemplateListResult, error) {
+	cte := templateListVisibleCTE()
+	args := templateListQueryArgs()
+	var countRow struct {
+		Total int64 `gorm:"column:total"`
+	}
+	countRow.Total = -1
+	if !opts.SkipTotal {
+		if err := store.db.WithContext(ctx).Raw(cte+"\nSELECT COUNT(*) AS total FROM visible_templates", args...).Scan(&countRow).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	pageLimit := opts.Limit
+	if opts.SkipTotal {
+		pageLimit++
+	}
+	pageArgs := append(append([]any{}, args...), pageLimit, opts.Offset)
+	var ids []templateListIDRow
+	if err := store.db.WithContext(ctx).Raw(
+		cte+"\nSELECT template_id, sort_ts FROM visible_templates ORDER BY sort_ts DESC, template_id ASC LIMIT ? OFFSET ?",
+		pageArgs...,
+	).Scan(&ids).Error; err != nil {
+		return nil, err
+	}
+	hasMore := len(ids) > opts.Limit
+	if hasMore {
+		ids = ids[:opts.Limit]
+	}
+	if len(ids) == 0 {
+		return &TemplateListResult{Templates: []TemplateInfo{}, Total: int(countRow.Total)}, nil
+	}
+
+	templateIDs := make([]string, 0, len(ids))
+	for _, row := range ids {
+		templateIDs = append(templateIDs, row.TemplateID)
+	}
+	var defs []models.TemplateDefinition
+	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
+		Where("template_id IN ?", templateIDs).
+		Find(&defs).Error; err != nil {
+		return nil, err
+	}
+	defByID := make(map[string]models.TemplateDefinition, len(defs))
 	for _, def := range defs {
-		// Pause-produced snaps are internal Resume artifacts (Kind=pause_snapshot).
-		// Keep them out of template/snapshot list surfaces.
-		if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
-			continue
-		}
-		if _, skip := hiddenIDs[def.TemplateID]; skip {
-			continue
-		}
-		imageInfo := extractImageInfoFromRequestJSON(def.RequestJSON)
-		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
-			imageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
-		}
-		info := templateInfoFromDefinition(def)
-		info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
-		info.ImageInfo = imageInfo
-		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
-			info.JobID = latestJobIDFromJob(latestJob)
-		}
-		out = append(out, info)
+		defByID[def.TemplateID] = def
 	}
-	seen := make(map[string]struct{}, len(out))
-	for _, item := range out {
-		seen[item.TemplateID] = struct{}{}
+
+	latestJobsSQL := fmt.Sprintf(`
+WITH ranked_page_jobs AS (
+	SELECT j.*, ROW_NUMBER() OVER (
+		PARTITION BY j.template_id ORDER BY j.attempt_no DESC, j.id DESC
+	) AS row_num
+	FROM %s j
+	WHERE j.deleted_at IS NULL
+	  AND j.operation IN ?
+	  AND j.template_id IN ?
+)
+SELECT * FROM ranked_page_jobs WHERE row_num = 1`,
+		constants.TemplateImageJobTableName,
+	)
+	var jobs []models.TemplateImageJob
+	if err := store.db.WithContext(ctx).Raw(latestJobsSQL, createRedoJobOperations, templateIDs).Scan(&jobs).Error; err != nil {
+		return nil, err
 	}
-	for _, job := range jobs {
-		if _, ok := seen[job.TemplateID]; ok {
+	jobByID := make(map[string]*models.TemplateImageJob, len(jobs))
+	for i := range jobs {
+		jobByID[jobs[i].TemplateID] = &jobs[i]
+	}
+
+	out := make([]TemplateInfo, 0, len(ids))
+	for _, row := range ids {
+		if def, ok := defByID[row.TemplateID]; ok {
+			info := templateInfoFromDefinition(def)
+			info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
+			info.ImageInfo = extractImageInfoFromRequestJSON(def.RequestJSON)
+			if job := jobByID[row.TemplateID]; job != nil {
+				info.ImageInfo = composeImageInfo(job.SourceImageRef, job.SourceImageDigest)
+				info.JobID = latestJobIDFromJob(job)
+			}
+			out = append(out, info)
 			continue
 		}
-		if _, skip := hiddenIDs[job.TemplateID]; skip {
-			continue
+		if job := jobByID[row.TemplateID]; job != nil {
+			out = append(out, templateInfoFromJob(job))
 		}
-		out = append(out, templateInfoFromJob(&job))
-		seen[job.TemplateID] = struct{}{}
 	}
-	setTemplateListCache(out)
-	return out, nil
+	out, err := applyUnregisteredTemplateListView(ctx, out)
+	if err != nil {
+		return nil, err
+	}
+	if !opts.SkipTotal {
+		hasMore = opts.Offset+len(out) < int(countRow.Total)
+	}
+	return &TemplateListResult{Templates: out, Total: int(countRow.Total), HasMore: hasMore}, nil
 }
 
 // hiddenSnapshotIDs returns DELETED/DELETING snapshot IDs so ListTemplates
@@ -592,6 +711,17 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	// longer exist).
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
+	for _, container := range cloned.Containers {
+		if container == nil || container.Image == nil || container.Image.Annotations == nil {
+			continue
+		}
+		imageAnnotations := container.Image.Annotations
+		delete(imageAnnotations, constants.CubeAnnotationRootfsArtifactRefreshToken)
+		if strings.TrimSpace(imageAnnotations[constants.CubeAnnotationRootfsArtifactTicketURL]) != "" {
+			delete(imageAnnotations, constants.CubeAnnotationRootfsArtifactURL)
+			delete(imageAnnotations, constants.CubeAnnotationRootfsArtifactToken)
+		}
+	}
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	return cloned, nil
 }
@@ -818,6 +948,11 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		replica.ErrorMessage = err.Error()
 		return replica, ""
 	}
+	if err := injectArtifactRefreshToken(ctx, nodeReq, opts.ArtifactID, target.ID()); err != nil {
+		replica.Phase = ReplicaPhaseFailed
+		replica.ErrorMessage = err.Error()
+		return replica, ""
+	}
 	ensureRuntimeTemplateRequest(nodeReq)
 	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
 	if err != nil {
@@ -856,6 +991,46 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	replica.CleanupRequired = false
 	replica.ErrorMessage = ""
 	return replica, envdVersion
+}
+
+func injectArtifactRefreshToken(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq, artifactID, nodeID string) error {
+	artifactID = strings.TrimSpace(artifactID)
+	if req == nil || artifactID == "" {
+		return nil
+	}
+	artifact, err := getRootfsArtifactByID(ctx, artifactID)
+	if err != nil {
+		return fmt.Errorf("load artifact refresh authorization: %w", err)
+	}
+	if err := ensureArtifactStableLocator(ctx, artifact); err != nil {
+		return err
+	}
+	downloadAnnotations, err := artifactDownloadAnnotations(ctx, artifact, "")
+	if err != nil {
+		return err
+	}
+	token, err := BuildArtifactDownloadRefreshToken(ctx, artifact, nodeID, time.Now())
+	if err != nil {
+		return err
+	}
+	downloadAnnotations[constants.CubeAnnotationRootfsArtifactRefreshToken] = token
+	for _, container := range req.Containers {
+		if container == nil || container.Image == nil {
+			continue
+		}
+		annotations := container.Image.Annotations
+		if strings.TrimSpace(annotations[constants.CubeAnnotationRootfsArtifactID]) != artifactID {
+			continue
+		}
+		for _, key := range []string{constants.CubeAnnotationRootfsArtifactURL, constants.CubeAnnotationRootfsArtifactToken,
+			constants.CubeAnnotationRootfsArtifactTicketURL, constants.CubeAnnotationRootfsArtifactDownloadOrigin, constants.CubeAnnotationRootfsArtifactRefreshToken} {
+			delete(annotations, key)
+		}
+		for key, value := range downloadAnnotations {
+			annotations[key] = value
+		}
+	}
+	return nil
 }
 
 func summarizeStatus(replicas []ReplicaStatus) (status string, lastError string) {
@@ -939,23 +1114,99 @@ func createDefinition(ctx context.Context, templateID string, storedReq *sandbox
 	})
 }
 
-// ensureTemplateDefinitionWithOptions checks whether a definition already exists
-// and creates one if missing, threading alias metadata (DisplayName) via opts.
+// ensureTemplateDefinitionWithOptions creates a missing definition or synchronizes
+// a rebuilt artifact before replicas can publish READY. The bool reports creation.
 func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
-	if _, err := GetDefinition(ctx, templateID); err == nil {
-		return false, nil
-	} else if !errors.Is(err, ErrTemplateNotFound) {
-		return false, err
+	if !isReady() {
+		return false, ErrTemplateStoreNotInitialized
 	}
-	if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, opts); err != nil {
-		return false, err
-	}
-	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
-	}
-	// A new definition changes the aggregate list and the per-template info.
-	invalidateTemplateCaches(templateID)
-	return true, nil
+	created := false
+	err := withTemplateWriteLock(templateID, func() error {
+		cacheReq := storedReq
+		changed := false
+		err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			def, err := lockTemplateDefinitionTx(tx, templateID)
+			if errors.Is(err, ErrTemplateNotFound) {
+				if err := createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts); err != nil {
+					return err
+				}
+				created, changed = true, true
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if def.Status == StatusDeleting {
+				return ErrTemplateNotFound
+			}
+			currentReq := &sandboxtypes.CreateCubeSandboxReq{}
+			if err := json.Unmarshal([]byte(def.RequestJSON), currentReq); err != nil {
+				return err
+			}
+			artifactID := rootfsArtifactIDFromCreateRequest(storedReq)
+			if def.RootfsArtifactID == artifactID && rootfsArtifactIDFromCreateRequest(currentReq) == artifactID {
+				if err := applyStoredCreateBackend(currentReq, def.StorageBackend); err != nil {
+					return err
+				}
+				cacheReq = currentReq
+				return nil
+			}
+			if artifactID == "" || def.Kind == TemplateKindSnapshot {
+				return errors.New("cannot replace template definition without a rootfs artifact or for a snapshot")
+			}
+			var ready int64
+			if err := tx.Model(&models.TemplateReplica{}).
+				Where("template_id = ? AND status = ? AND (artifact_id <> ? OR artifact_id IS NULL)", templateID, ReplicaStatusReady, artifactID).
+				Count(&ready).Error; err != nil {
+				return err
+			}
+			if ready > 0 {
+				return fmt.Errorf("cannot replace artifact for template %s: %d ready replicas still reference another artifact", templateID, ready)
+			}
+			payload, err := json.Marshal(storedReq)
+			if err != nil {
+				return err
+			}
+			alias := def.DisplayName
+			if alias == "" {
+				alias = aliasFromRequestJSON(def.RequestJSON)
+			}
+			requestJSON, _, err := applyAliasToRequestJSON(string(payload), alias)
+			if err != nil {
+				return err
+			}
+			backend := opts.StorageBackend
+			if normalized, ok, err := constants.OptionalSnapshotBackend(backend); err != nil {
+				return err
+			} else if ok {
+				backend = normalized
+			}
+			if err := tx.Model(def).Updates(map[string]any{
+				"request_json":       requestJSON,
+				"rootfs_artifact_id": artifactID,
+				"instance_type":      instanceType,
+				"version":            version,
+				"storage_backend":    backend,
+				"status":             StatusPending,
+				"last_error":         "",
+			}).Error; err != nil {
+				return err
+			}
+			changed = true
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if changed {
+			invalidateTemplateCaches(templateID)
+		}
+		if cacheErr := setTemplateRequestCache(templateID, cacheReq); cacheErr != nil {
+			log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
+		}
+		return nil
+	})
+	return created && err == nil, err
 }
 
 // finalizeTemplateReplicas publishes the aggregate template status computed from
@@ -1021,7 +1272,7 @@ func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError s
 func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, error) {
 	templateID = strings.TrimSpace(templateID)
 	if cached, ok := getCachedTemplateInfo(templateID); ok {
-		return cached, nil
+		return applyUnregisteredTemplateInfoView(cached), nil
 	}
 	return getTemplateInfoFromDB(ctx, templateID)
 }
@@ -1043,8 +1294,29 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 			return nil, defErr
 		}
 		info := templateInfoFromJob(job)
+		replicas, replicaErr := ListReplicas(ctx, templateID)
+		if replicaErr != nil {
+			return nil, replicaErr
+		}
+		info.Replicas = make([]ReplicaStatus, 0, len(replicas))
+		for _, replica := range replicas {
+			info.Replicas = append(info.Replicas, replicaModelToStatus(replica))
+		}
+		if len(info.Replicas) == 0 &&
+			(strings.TrimSpace(job.NodeID) != "" || strings.TrimSpace(job.NodeIP) != "") {
+			// A job-only recovery row may predate replica persistence. Its
+			// locator is still the best placement evidence for the dynamic
+			// registry view.
+			info.Replicas = append(info.Replicas, ReplicaStatus{
+				NodeID:       job.NodeID,
+				NodeIP:       job.NodeIP,
+				InstanceType: job.InstanceType,
+				Status:       strings.ToUpper(info.Status),
+				ArtifactID:   job.ArtifactID,
+			})
+		}
 		setTemplateInfoCache(templateID, &info)
-		return &info, nil
+		return applyUnregisteredTemplateInfoView(&info), nil
 	}
 	// Pause snaps are not user-visible templates/snapshots.
 	if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
@@ -1087,7 +1359,7 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 		break
 	}
 	setTemplateInfoCache(templateID, out)
-	return out, nil
+	return applyUnregisteredTemplateInfoView(out), nil
 }
 
 func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
@@ -1101,15 +1373,24 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 	if status == "" {
 		status = JobStatusPending
 	}
+	backend := ""
+	var request struct {
+		Backend string `json:"backend"`
+	}
+	if json.Unmarshal([]byte(job.RequestJSON), &request) == nil {
+		backend, _ = constants.NormalizeSnapshotBackend(request.Backend)
+	}
 	return TemplateInfo{
-		TemplateID:   job.TemplateID,
-		InstanceType: job.InstanceType,
-		Version:      DefaultTemplateVersion,
-		Status:       status,
-		LastError:    job.ErrorMessage,
-		CreatedAt:    formatUTCRFC3339(job.CreatedAt),
-		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
-		JobID:        latestJobIDFromJob(job),
+		TemplateID:     job.TemplateID,
+		Backend:        backend,
+		StorageBackend: backend,
+		InstanceType:   job.InstanceType,
+		Version:        DefaultTemplateVersion,
+		Status:         status,
+		LastError:      job.ErrorMessage,
+		CreatedAt:      formatUTCRFC3339(job.CreatedAt),
+		ImageInfo:      composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
+		JobID:          latestJobIDFromJob(job),
 	}
 }
 
@@ -1293,6 +1574,9 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 						return err
 					}
 					if err == nil {
+						if (status == StatusReady || status == StatusPartiallyReady) && job.ArtifactID != "" && target.RootfsArtifactID != job.ArtifactID {
+							return fmt.Errorf("cannot publish template %s as %s: definition artifact %q does not match job artifact %q", templateID, status, target.RootfsArtifactID, job.ArtifactID)
+						}
 						claimantJobRowID = job.ID
 						alias = strings.TrimSpace(aliasFromRequestJSON(job.RequestJSON))
 						if strings.TrimSpace(target.DisplayName) != "" {
@@ -1781,9 +2065,37 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {
 		return nil, err
 	} else if hit {
-		reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
-		ensureRuntimeTemplateRequest(req)
-		return req, nil
+		current := true
+		if strings.HasPrefix(templateID, "tpl-") && rootfsArtifactIDFromCreateRequest(req) != "" {
+			if !isReady() {
+				return nil, ErrTemplateStoreNotInitialized
+			}
+			// A redo may finish on another Master; its local invalidation cannot
+			// evict this process's cached artifact or digest.
+			def := &models.TemplateDefinition{}
+			err := store.db.WithContext(ctx).Select("rootfs_artifact_id", "storage_backend", "status").
+				Where("template_id = ?", templateID).First(def).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) || def.Status == StatusDeleting {
+				templateDefinitionCache.Delete(templateID)
+				return nil, ErrTemplateNotFound
+			}
+			if err != nil {
+				return nil, err
+			}
+			current = def.RootfsArtifactID == rootfsArtifactIDFromCreateRequest(req)
+			if current {
+				if err := applyStoredCreateBackend(req, def.StorageBackend); err != nil {
+					return nil, err
+				}
+			} else {
+				templateDefinitionCache.Delete(templateID)
+			}
+		}
+		if current {
+			reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
+			ensureRuntimeTemplateRequest(req)
+			return req, nil
+		}
 	}
 	reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheMiss, time.Since(cacheStart))
 
@@ -2077,22 +2389,40 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	record := &models.TemplateReplica{}
-	// Do not reuse the *gorm.DB chain after First on PostgreSQL: GORM may emit
-	// UPDATE ... FROM t_cube_template_replica (SQLSTATE 42712).
-	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
-		First(record).Error
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
+	upsert := func(tx *gorm.DB) error {
+		record := &models.TemplateReplica{}
+		// Do not reuse the *gorm.DB chain after First on PostgreSQL: GORM may emit
+		// UPDATE ... FROM t_cube_template_replica (SQLSTATE 42712).
+		err := tx.Table(constants.TemplateReplicaTableName).
+			Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+			First(record).Error
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			return tx.Table(constants.TemplateReplicaTableName).
+				Create(replicaStatusToModel(templateID, instanceType, replica)).Error
+		}
+		return tx.Table(constants.TemplateReplicaTableName).
+			Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+			Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+	}
+	if replica.Status != ReplicaStatusReady || replica.ArtifactID == "" {
+		return upsert(store.db.WithContext(ctx))
+	}
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		def, err := lockTemplateDefinitionTx(tx, templateID)
+		if err != nil {
 			return err
 		}
-		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-			Create(replicaStatusToModel(templateID, instanceType, replica)).Error
-	}
-	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
-		Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+		if def.Status == StatusDeleting {
+			return ErrTemplateNotFound
+		}
+		if def.RootfsArtifactID != replica.ArtifactID {
+			return fmt.Errorf("template %s artifact %q does not match ready replica artifact %q", templateID, def.RootfsArtifactID, replica.ArtifactID)
+		}
+		return upsert(tx)
+	})
 }
 
 func EnsureReadyReplica(ctx context.Context, templateID string) error {

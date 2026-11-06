@@ -125,6 +125,11 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	}
 	storeRootfsDir := filepath.Join(storeDir, "rootfs")
 	ext4Path := filepath.Join(storeDir, opts.ArtifactID+".ext4")
+	if _, err := os.Lstat(ext4Path); err == nil {
+		return BuildResult{}, fmt.Errorf("artifact %s already exists; refusing to replace it", opts.ArtifactID)
+	} else if !os.IsNotExist(err) {
+		return BuildResult{}, fmt.Errorf("check artifact destination: %w", err)
+	}
 	// Build into a temp sibling and atomically rename into place. The artifact
 	// is only ever visible under its final name once it is COMPLETE: a crash
 	// mid-mkfs leaves a full-size sparse file whose stat and even sha256 look

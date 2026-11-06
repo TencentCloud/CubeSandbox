@@ -1030,25 +1030,17 @@ func snapshotDeleteLocators(targets *templateCleanupTargets) ([]templateCleanupL
 	if targets == nil {
 		return nil, nil
 	}
-	locators := make([]templateCleanupLocator, 0, len(targets.Replicas))
+	merged := &templateCleanupTargets{}
 	for _, replica := range targets.Replicas {
-		locators = append(locators, templateCleanupLocator{
+		merged.addLocator(templateCleanupLocator{
 			NodeID: replica.NodeID,
 			NodeIP: replica.NodeIP,
 		})
 	}
-	if len(locators) > 0 {
-		return locators, nil
-	}
 	for _, locator := range targets.Locators {
-		if strings.TrimSpace(locator.NodeID) != "" || strings.TrimSpace(locator.NodeIP) != "" {
-			locators = append(locators, templateCleanupLocator{
-				NodeID: locator.NodeID,
-				NodeIP: locator.NodeIP,
-			})
-		}
+		merged.addLocator(locator)
 	}
-	return locators, nil
+	return merged.Locators, nil
 }
 
 func nextSnapshotAttempt(ctx context.Context, snapshotID string) (int32, string, error) {

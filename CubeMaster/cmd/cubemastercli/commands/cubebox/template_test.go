@@ -6,20 +6,218 @@ package cubebox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
+
+func TestTemplateBackendCLIRequest(t *testing.T) {
+	oldServers, oldPort := serverList, port
+	t.Cleanup(func() { serverList, port = oldServers, oldPort })
+	for _, command := range []string{"create", "build"} {
+		for _, backend := range []string{"xfs", "s3", "cos", "minio", "cow", "fs", "unsupported"} {
+			t.Run(command+"/"+backend, func(t *testing.T) {
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					var body map[string]interface{}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if backend != "xfs" && backend != "s3" {
+						t.Error("invalid backend reached HTTP")
+						return
+					}
+					want := backend
+					if body["backend"] != want {
+						t.Errorf("sent backend=%v, want %s", body["backend"], want)
+					}
+					if command == "create" {
+						annotations, _ := body["annotations"].(map[string]interface{})
+						if annotations[constants.CubeAnnotationStorageBackend] != want {
+							t.Error("request annotation was not overridden")
+						}
+					}
+					fmt.Fprint(w, `{"ret":{"ret_code":200},"template_id":"tpl-test"}`)
+				}))
+				defer server.Close()
+				host, serverPort, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				app := cli.NewApp()
+				app.Flags = []cli.Flag{cli.StringFlag{Name: "address"}, cli.StringFlag{Name: "port"}, cli.DurationFlag{Name: "timeout", Value: time.Second}}
+				app.Commands = []cli.Command{TemplateCommand}
+				args := []string{"cubemastercli", "--address", host, "--port", serverPort, "tpl", command, "--backend", backend}
+				if command == "create" {
+					file := t.TempDir() + "/request.json"
+					if err := os.WriteFile(file, []byte(`{"backend":"s3","annotations":{"cube.master.storage.backend":"s3"}}`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					args = append(args, "--file", file)
+				} else {
+					args = append(args, "--image", "example/image:test", "--writable-layer-size", "1Gi", "--detach")
+				}
+				err = app.Run(args)
+				if backend != "xfs" && backend != "s3" {
+					if err == nil || calls != 0 {
+						t.Fatalf("invalid backend reached HTTP: error=%v calls=%d", err, calls)
+					}
+				} else if err != nil || calls != 1 {
+					t.Fatalf("CLI request failed: error=%v calls=%d", err, calls)
+				}
+			})
+		}
+	}
+}
+
+func TestApplyTemplateBackendFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "s3"}, {[]string{"--backend", "xfs"}, "xfs"},
+		{[]string{"--backend", "S3"}, "s3"}, {[]string{"--backend", " XFS "}, "xfs"},
+	} {
+		req := &types.CreateCubeSandboxReq{Backend: "s3", Annotations: map[string]string{constants.CubeAnnotationStorageBackend: "s3"}}
+		if err := applyTemplateBackendFlag(newCreateContext(t, tc.args), req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Backend != tc.want || req.Annotations[constants.CubeAnnotationStorageBackend] != tc.want {
+			t.Fatalf("args=%v: backend=%s annotations=%v", tc.args, req.Backend, req.Annotations)
+		}
+	}
+	for _, backend := range []string{"", "cos", "minio", "cow", "fs", "unsupported-store"} {
+		if _, err := normalizeCLIBackend(backend); err == nil {
+			t.Fatalf("unsupported backend %q accepted", backend)
+		}
+	}
+	if !reflect.DeepEqual(TemplateCreateFromImageCommand.Aliases, []string{"build"}) {
+		t.Fatal("tpl build alias missing")
+	}
+}
+
+func listClientContext(t *testing.T, timeout time.Duration) *cli.Context {
+	t.Helper()
+	global := flag.NewFlagSet("global", flag.ContinueOnError)
+	global.Duration("timeout", timeout, "")
+	parent := cli.NewContext(cli.NewApp(), global, nil)
+	set := flag.NewFlagSet("list", flag.ContinueOnError)
+	for _, f := range TemplateListCommand.Flags {
+		f.Apply(set)
+	}
+	return cli.NewContext(parent.App, set, parent)
+}
+
+func TestWalkTemplatePagesUsesActualPageLength(t *testing.T) {
+	var offsets []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		offsets = append(offsets, offset)
+		if r.URL.Query().Get("skip_total") != "true" {
+			t.Error("count was not skipped")
+		}
+		fmt.Fprintf(w, `{"ret":{"ret_code":200},"total":-1,"limit":1,"offset":%d,"has_more":%t,"data":[{"template_id":"tpl-%d"}]}`, offset, offset < 2, offset)
+	}))
+	defer server.Close()
+	count := 0
+	err := walkTemplatePages(listClientContext(t, time.Second), server.URL, "test", true, func(page *templateListResponse) error { count += len(page.Data); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 || !reflect.DeepEqual(offsets, []int{0, 1, 2}) {
+		t.Fatalf("count=%d offsets=%v", count, offsets)
+	}
+}
+
+func TestStreamTemplatePagesFlushesBeforeNextRequest(t *testing.T) {
+	var out bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if offset == 1 && !strings.Contains(out.String(), "tpl-0") {
+			t.Error("first page not emitted before fetching second")
+		}
+		fmt.Fprintf(w, `{"ret":{"ret_code":200},"total":-1,"limit":1,"offset":%d,"has_more":%t,"data":[{"template_id":"tpl-%d"}]}`, offset, offset == 0, offset)
+	}))
+	defer server.Close()
+	if err := streamAllTemplatePages(listClientContext(t, time.Second), server.URL, "test", &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out.String(), "TEMPLATE_ID") != 1 || !strings.Contains(out.String(), "tpl-1") {
+		t.Fatalf("unexpected output %q", out.String())
+	}
+}
+
+func TestWalkTemplatePagesRejectsShiftedRows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("offset") == "0" {
+			fmt.Fprint(w, `{"ret":{"ret_code":200},"total":3,"has_more":true,"data":[{"template_id":"a"},{"template_id":"b"}]}`)
+		} else {
+			fmt.Fprint(w, `{"ret":{"ret_code":200},"total":3,"has_more":false,"data":[{"template_id":"b"}]}`)
+		}
+	}))
+	defer server.Close()
+	rows := 0
+	err := walkTemplatePages(listClientContext(t, time.Second), server.URL, "test", true, func(page *templateListResponse) error { rows += len(page.Data); return nil })
+	if err == nil || !strings.Contains(err.Error(), "changed during traversal") || rows != 2 {
+		t.Fatalf("rows=%d err=%v", rows, err)
+	}
+}
+
+func TestWalkTemplatePagesStopsWithoutProgress(t *testing.T) {
+	for _, body := range []string{
+		`{"ret":{"ret_code":200},"total":-1,"has_more":true,"data":[]}`,
+		`{"ret":{"ret_code":200},"total":10,"data":[{"template_id":"tpl-repeated"}]}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+		err := walkTemplatePages(listClientContext(t, time.Second), server.URL, "test", true, func(*templateListResponse) error { return nil })
+		server.Close()
+		if err == nil {
+			t.Fatal("non-progressing traversal did not fail")
+		}
+	}
+}
+
+func TestWalkTemplatePagesSharesDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(70 * time.Millisecond):
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		fmt.Fprintf(w, `{"ret":{"ret_code":200},"total":-1,"has_more":true,"data":[{"template_id":"tpl-%d"}]}`, offset)
+	}))
+	defer server.Close()
+	err := walkTemplatePages(listClientContext(t, 110*time.Millisecond), server.URL, "test", true, func(*templateListResponse) error { return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected global deadline, got %v", err)
+	}
+}
+
+func TestTemplateListQuerySkipsTotalWhenRequested(t *testing.T) {
+	ctx := newCmdContext(t, TemplateListCommand, []string{"--no-total", "--limit", "25", "--offset", "25"})
+	if got := templateListQuery(ctx); got != "limit=25&offset=25&skip_total=true" {
+		t.Fatalf("query=%q", got)
+	}
+}
 
 func newCreateFromImageContext(t *testing.T, args []string) *cli.Context {
 	t.Helper()

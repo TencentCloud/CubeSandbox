@@ -27,16 +27,32 @@ func TestRewriteDownloadHostLeavesS3PresignedURLUntouched(t *testing.T) {
 	}
 }
 
-// TestRewriteDownloadHostRewritesCubeMasterRoute keeps the original behavior
-// for CubeMaster's own download route: the recorded MasterNodeIP may not be
-// reachable from this cubelet, so the host must still be swapped for the
-// locally configured cubemaster_http_addr.
-func TestRewriteDownloadHostRewritesCubeMasterRoute(t *testing.T) {
-	raw := "http://10.0.0.5:8089/cube/template/rootfs_artifact/download?artifact_id=rfs-x&token=tok"
+// TestRewriteDownloadHostLeavesLegacyMasterDownloadRouteUntouched: only the
+// Master ticket route is rewritten. A legacy Master byte-download URL is no
+// longer a supported destination and must not be redirected to Master.
+func TestRewriteDownloadHostLeavesLegacyMasterDownloadRouteUntouched(t *testing.T) {
+	raw := "http://10.0.0.5:8089/cube/template/artifact/download?artifact_id=rfs-x&token=tok"
+	if got := rewriteDownloadHost(raw, "cubemaster.svc:8089"); got != raw {
+		t.Fatalf("rewriteDownloadHost rewrote legacy Master download URL to %q", got)
+	}
+}
+
+// TestRewriteDownloadHostRewritesTicketURL: the recorded MasterNodeIP may not
+// be reachable from this cubelet, so the ticket route's host is swapped for
+// the locally configured cubemaster_http_addr.
+func TestRewriteDownloadHostRewritesTicketURL(t *testing.T) {
+	raw := "http://10.0.0.5:8089/internal/template/artifacts/artifact-1/download-ticket"
 	got := rewriteDownloadHost(raw, "cubemaster.svc:8089")
-	want := "http://cubemaster.svc:8089/cube/template/rootfs_artifact/download?artifact_id=rfs-x&token=tok"
+	want := "http://cubemaster.svc:8089/internal/template/artifacts/artifact-1/download-ticket"
 	if got != want {
 		t.Fatalf("rewriteDownloadHost = %q, want %q", got, want)
+	}
+}
+
+func TestRewriteDownloadHostLeavesTemplateCenterURLUntouched(t *testing.T) {
+	raw := "http://tc.internal:8090/internal/artifacts/artifact-1/ext4"
+	if got := rewriteDownloadHost(raw, "cubemaster.svc:8089"); got != raw {
+		t.Fatalf("rewriteDownloadHost rewrote TC URL to %q", got)
 	}
 }
 

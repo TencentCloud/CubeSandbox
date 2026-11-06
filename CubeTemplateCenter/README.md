@@ -75,12 +75,13 @@ Internal endpoints (called by CubeMaster):
 | POST | `/tc/api/v1/build` | submit a build job |
 | POST | `/tc/api/v1/artifact/upload` | ingest a local ext4 uploaded by CubeMaster (`tpl merge`) into TC's artifact store / S3-backed storage |
 | POST | `/tc/api/v1/artifact/delete` | delete artifact data (local file / S3 object) |
+| GET / HEAD | `/internal/artifacts/:artifact_id/ext4` | serve an fs-backed ext4 directly to an authorized Cubelet |
 
 Public routes reverse-proxied from CubeMaster (actually served by TC):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / HEAD | `/cube/template/artifact/download` | artifact download (streams from local disk; 302 to the presigned URL for S3 artifacts) |
+| GET / HEAD | `/cube/template/artifact/download` | legacy pre-ticket download compatibility |
 | GET / POST | `/cube/template/compat` | template compat matrix read/write |
 
 Build-status polls (`/cube/template/build/:build_id/status`, `/cube/template/from-image?job_id=`) stay local on CubeMaster (they read the job rows Master writes); TC registers them too for direct-to-TC access.
@@ -88,6 +89,9 @@ Build-status polls (`/cube/template/build/:build_id/status`, `/cube/template/fro
 Probes and metrics: `GET /health`, `GET /metrics` (Prometheus).
 
 When a build finishes, TC reports back: `POST $CUBE_MASTER_ADDR/internal/template/jobs/:job_id/status`.
+Before each new Cubelet download attempt, CubeMaster issues a short-lived ticket at
+`GET /internal/template/artifacts/:artifact_id/download-ticket`; bytes then flow
+directly from TC (fs/local/CBS/CFS) or S3/MinIO to Cubelet.
 
 ## Layout
 

@@ -32,6 +32,17 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+func testFSArtifact(id string) *models.RootfsArtifact {
+	return &models.RootfsArtifact{
+		ArtifactID:              id,
+		TemplateSpecFingerprint: "fingerprint-1",
+		Ext4SHA256:              "sha256-1",
+		Ext4SizeBytes:           1024,
+		StorageBackend:          "fs",
+		OwnerTCDownloadBase:     "http://tc.example",
+	}
+}
+
 func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
@@ -570,13 +581,7 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
 		NetworkType:       cubeboxv1.NetworkType_tap.String(),
 	}
-	artifact := &models.RootfsArtifact{
-		ArtifactID:              "artifact-1",
-		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
-		DownloadToken:           "token-1",
-	}
+	artifact := testFSArtifact("artifact-1")
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{
 		Entrypoint: []string{"/bin/sh"},
 		Cmd:        []string{"-c", "echo ok"},
@@ -601,8 +606,16 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	if got.Containers[0].Image == nil || got.Containers[0].Image.Image != "artifact-1" {
 		t.Fatalf("artifact image was not injected")
 	}
-	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != "http://master.example/cube/template/artifact/download?artifact_id=artifact-1&token=token-1" {
-		t.Fatalf("unexpected artifact download url: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL])
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != "" {
+		t.Fatalf("new distribution must not embed a Master proxy URL: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL])
+	}
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL] != "http://master.example/internal/template/artifacts/artifact-1/download-ticket" {
+		t.Fatalf("unexpected artifact ticket url: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL])
+	}
+	// fs bytes are fetched directly from the owning TemplateCenter, so the
+	// pinned origin is the TC's, never the ticket-issuing Master's.
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactDownloadOrigin] != "http://tc.example" {
+		t.Fatalf("unexpected download origin: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactDownloadOrigin])
 	}
 	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactSHA256] != "sha256-1" {
 		t.Fatalf("unexpected artifact sha annotation")
@@ -618,7 +631,12 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 }
 
-func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t *testing.T) {
+func TestGenerateTemplateCreateRequestIssuesTicketForS3Artifacts(t *testing.T) {
+	oldPresign := presignArtifactGetURLWithTTL
+	t.Cleanup(func() { presignArtifactGetURLWithTTL = oldPresign })
+	presignArtifactGetURLWithTTL = func(_ context.Context, artifact *models.RootfsArtifact, _ time.Duration) (string, error) {
+		return "https://minio.example/bucket/" + artifact.ArtifactID + "?X-Amz-Signature=fresh", nil
+	}
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-s3"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
@@ -632,7 +650,7 @@ func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t
 		TemplateSpecFingerprint: "fingerprint-s3",
 		Ext4SHA256:              "sha256-s3",
 		Ext4SizeBytes:           2048,
-		DownloadToken:           "token-s3",
+		StorageBackend:          "s3",
 		MasterNodeIP:            "http://0.0.0.0:8089",
 		ArtifactURL:             "http://minio:9000/cube-volumes/artifact-s3.ext4?sig=stale",
 	}
@@ -640,13 +658,23 @@ func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
 	}
-	want := "http://master.example/cube/template/artifact/download?artifact_id=artifact-s3&token=token-s3"
-	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != want {
-		t.Fatalf("artifact download url=%q, want %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL], want)
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != "" {
+		t.Fatalf("S3 distribution must not embed a Master proxy URL: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL])
+	}
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL] != "http://master.example/internal/template/artifacts/artifact-s3/download-ticket" {
+		t.Fatalf("unexpected ticket url: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL])
+	}
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactDownloadOrigin] != "https://minio.example" {
+		t.Fatalf("unexpected S3 origin: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactDownloadOrigin])
 	}
 }
 
-func TestGenerateTemplateCreateRequestFallsBackToArtifactRowForS3WhenNoExplicitBase(t *testing.T) {
+func TestGenerateTemplateCreateRequestUsesArtifactRowMasterForTicketURL(t *testing.T) {
+	oldPresign := presignArtifactGetURLWithTTL
+	t.Cleanup(func() { presignArtifactGetURLWithTTL = oldPresign })
+	presignArtifactGetURLWithTTL = func(_ context.Context, artifact *models.RootfsArtifact, _ time.Duration) (string, error) {
+		return "https://minio.example/bucket/" + artifact.ArtifactID + "?X-Amz-Signature=fresh", nil
+	}
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-s3-row"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
@@ -660,7 +688,7 @@ func TestGenerateTemplateCreateRequestFallsBackToArtifactRowForS3WhenNoExplicitB
 		TemplateSpecFingerprint: "fingerprint-s3-row",
 		Ext4SHA256:              "sha256-s3-row",
 		Ext4SizeBytes:           2048,
-		DownloadToken:           "token-s3-row",
+		StorageBackend:          "s3",
 		MasterNodeIP:            "http://master-from-row:8089",
 		ArtifactURL:             "http://minio:9000/cube-volumes/artifact-s3-row.ext4?sig=stale",
 	}
@@ -668,9 +696,9 @@ func TestGenerateTemplateCreateRequestFallsBackToArtifactRowForS3WhenNoExplicitB
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
 	}
-	want := "http://master-from-row:8089/cube/template/artifact/download?artifact_id=artifact-s3-row&token=token-s3-row"
-	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != want {
-		t.Fatalf("artifact download url=%q, want %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL], want)
+	want := "http://master-from-row:8089/internal/template/artifacts/artifact-s3-row/download-ticket"
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL] != want {
+		t.Fatalf("artifact ticket url=%q, want %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL], want)
 	}
 }
 
@@ -686,13 +714,7 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 			DnsConfig: &types.DNSConfig{Servers: []string{"8.8.8.8", "1.1.1.1"}},
 		},
 	}
-	artifact := &models.RootfsArtifact{
-		ArtifactID:              "artifact-1",
-		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
-		DownloadToken:           "token-1",
-	}
+	artifact := testFSArtifact("artifact-1")
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
@@ -749,13 +771,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 			}},
 		},
 	}
-	artifact := &models.RootfsArtifact{
-		ArtifactID:              "artifact-1",
-		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
-		DownloadToken:           "token-1",
-	}
+	artifact := testFSArtifact("artifact-1")
 
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
 	require.NoError(t, err)
@@ -806,13 +822,7 @@ func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
 		NetworkType:       cubeboxv1.NetworkType_tap.String(),
 		EnableIvshmem:     &enabled,
 	}
-	artifact := &models.RootfsArtifact{
-		ArtifactID:              "artifact-1",
-		TemplateSpecFingerprint: "fingerprint-1",
-		Ext4SHA256:              "sha256-1",
-		Ext4SizeBytes:           1024,
-		DownloadToken:           "token-1",
-	}
+	artifact := testFSArtifact("artifact-1")
 	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
@@ -1449,6 +1459,7 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 			Ext4SizeBytes:        int64(len(artifactData)),
 			DownloadToken:        "token-1",
 			MasterNodeIP:         "http://master.example",
+			OwnerTCDownloadBase:  "http://tc.example:8090",
 			Status:               ArtifactStatusReady,
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
@@ -1500,6 +1511,8 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		Ext4SHA256:              artifactSHA,
 		Ext4SizeBytes:           int64(len(artifactData)),
 		DownloadToken:           staleToken,
+		MasterNodeIP:            "http://master.example",
+		OwnerTCDownloadBase:     "http://tc.example:8090",
 		Status:                  ArtifactStatusFailed,
 		GeneratedRequestJSON:    `{}`,
 		ImageConfigJSON:         `{}`,
@@ -1529,7 +1542,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	lookupCalls := 0
 	distributedToken := ""
 	distributedSHA := ""
-	generatedToken := ""
+	generatedTicketURL := ""
 	generatedSHA := ""
 
 	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
@@ -1590,7 +1603,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		distributedToken = artifact.DownloadToken
 		distributedSHA = artifact.Ext4SHA256
 		if generatedReq != nil && len(generatedReq.Containers) > 0 && generatedReq.Containers[0].Image != nil {
-			generatedToken = generatedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactToken]
+			generatedTicketURL = generatedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL]
 			generatedSHA = generatedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactSHA256]
 		}
 		return targets, 1, 1, 0, nil
@@ -1648,8 +1661,12 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	if lookupCalls != 3 {
 		t.Fatalf("artifact lookups = %d, want reusability gate + foreign re-check + locked reload", lookupCalls)
 	}
-	if distributedToken != freshToken || generatedToken != freshToken {
-		t.Fatalf("distributed token=%q generated token=%q, want refreshed %q", distributedToken, generatedToken, freshToken)
+	if distributedToken != freshToken {
+		t.Fatalf("distributed token=%q, want refreshed %q", distributedToken, freshToken)
+	}
+	wantTicketURL := "http://master.example/internal/template/artifacts/" + artifactID + "/download-ticket"
+	if generatedTicketURL != wantTicketURL {
+		t.Fatalf("generated ticket url=%q, want %q", generatedTicketURL, wantTicketURL)
 	}
 	if distributedSHA != freshArtifact.Ext4SHA256 || generatedSHA != freshArtifact.Ext4SHA256 {
 		t.Fatalf("distributed sha=%q generated sha=%q, want refreshed %q", distributedSHA, generatedSHA, freshArtifact.Ext4SHA256)

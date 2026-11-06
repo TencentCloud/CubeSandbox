@@ -9,21 +9,30 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 )
 
 // stubRemoteTier pins the topology discriminator and the network seam for
 // one test, restoring both on cleanup.
-func stubRemoteTier(t *testing.T, remote bool, probe func(ctx context.Context, url string) (int, http.Header, []byte, error)) {
+func stubRemoteTier(t *testing.T, remote bool, probe func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error)) {
 	t.Helper()
 	origTier := artifactServedByRemoteTier
 	artifactServedByRemoteTier = func() bool { return remote }
-	t.Cleanup(func() { artifactServedByRemoteTier = origTier })
+	t.Setenv(constants.TemplateCallbackTokenEnv, "existing-component-token")
+	t.Setenv(constants.TemplateCenterDownloadAddrEnv, "http://tc.example:8090")
+	servabilityProbeMu.Lock()
+	servabilityProbeCache = map[string]artifactServabilityProbe{}
+	servabilityProbeMu.Unlock()
+	t.Cleanup(func() {
+		artifactServedByRemoteTier = origTier
+	})
 	if probe != nil {
 		origGet := getArtifactDownloadRange
 		getArtifactDownloadRange = probe
@@ -31,8 +40,8 @@ func stubRemoteTier(t *testing.T, remote bool, probe func(ctx context.Context, u
 	}
 }
 
-func servableProbe(status int, artifactID string) func(ctx context.Context, url string) (int, http.Header, []byte, error) {
-	return func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+func servableProbe(status int, artifactID string) func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
+	return func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
 		h := http.Header{}
 		h.Set("X-Cube-Artifact-Id", artifactID)
 		h.Set("ETag", "deadbeef")
@@ -40,10 +49,46 @@ func servableProbe(status int, artifactID string) func(ctx context.Context, url 
 	}
 }
 
-func envelopeProbe(code int, msg string) func(ctx context.Context, url string) (int, http.Header, []byte, error) {
-	return func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+func envelopeProbe(code int, msg string) func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
+	return func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
 		body := fmt.Sprintf(`{"ret":{"ret_code":%d,"ret_msg":%q}}`, code, msg)
 		return http.StatusOK, http.Header{}, []byte(body), nil
+	}
+}
+
+func TestArtifactServabilityUsesComponentAuthWithoutNodeTicket(t *testing.T) {
+	stubRemoteTier(t, true, nil)
+	status := http.StatusOK
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodHead || r.URL.Path != "/tc/api/v1/artifacts/probe-artifact/ext4" {
+			t.Error("incorrect probe route")
+		}
+		if r.Header.Get(constants.TemplateCallbackTokenHeader) != "existing-component-token" {
+			t.Error("component auth missing")
+		}
+		if r.Header.Get("X-Cube-Artifact-Token") != "" || r.Header.Get("X-Cube-Node-ID") != "" {
+			t.Error("probe used a node ticket")
+		}
+		w.Header().Set("X-Cube-Artifact-Id", "probe-artifact")
+		w.WriteHeader(status)
+	}))
+	defer server.Close()
+	artifact := &models.RootfsArtifact{ArtifactID: "probe-artifact", Generation: 1, StorageBackend: "fs", MasterNodeIP: "http://master.invalid", OwnerTCDownloadBase: server.URL}
+	for _, tc := range []struct {
+		status int
+		want   artifactServability
+	}{{200, artifactServabilityServable}, {404, artifactServabilityMissing}, {401, artifactServabilityUnknown}, {503, artifactServabilityUnknown}} {
+		status = tc.status
+		got, reason := probeArtifactServability(t.Context(), artifact)
+		if got != tc.want {
+			t.Fatalf("status=%d got=%v reason=%s", status, got, reason)
+		}
+	}
+	t.Setenv(constants.TemplateCallbackTokenEnv, "")
+	if got, _ := probeArtifactServability(t.Context(), artifact); got != artifactServabilityUnknown || calls != 4 {
+		t.Fatal("missing auth should not contact TC")
 	}
 }
 
@@ -95,7 +140,7 @@ func TestVerifyArtifactServabilityRemoteServable(t *testing.T) {
 
 func TestVerifyArtifactServabilityLocalOwnershipSkipsRemoteProbe(t *testing.T) {
 	probeCalled := false
-	stubRemoteTier(t, true, func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+	stubRemoteTier(t, true, func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
 		probeCalled = true
 		return 0, nil, nil, errors.New("must not be called for local ownership")
 	})
@@ -123,7 +168,10 @@ func TestVerifyArtifactServabilityRemoteMissingDemotes(t *testing.T) {
 	stubRemoteTier(t, true, envelopeProbe(int(errorcode.ErrorCode_NotFound), "artifact source missing"))
 	demoted := ""
 	origDemote := demoteUnservableRootfsArtifact
-	demoteUnservableRootfsArtifact = func(ctx context.Context, artifactID, reason string) { demoted = artifactID }
+	demoteUnservableRootfsArtifact = func(ctx context.Context, artifact *models.RootfsArtifact, reason string) (bool, error) {
+		demoted = artifact.ArtifactID
+		return true, nil
+	}
 	t.Cleanup(func() { demoteUnservableRootfsArtifact = origDemote })
 
 	artifact := &models.RootfsArtifact{
@@ -146,12 +194,15 @@ func TestVerifyArtifactServabilityRemoteMissingDemotes(t *testing.T) {
 }
 
 func TestVerifyArtifactServabilityRemoteUnknownKeepsRow(t *testing.T) {
-	stubRemoteTier(t, true, func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+	stubRemoteTier(t, true, func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
 		return 0, nil, nil, errors.New("connection refused")
 	})
 	demoteCalled := false
 	origDemote := demoteUnservableRootfsArtifact
-	demoteUnservableRootfsArtifact = func(ctx context.Context, artifactID, reason string) { demoteCalled = true }
+	demoteUnservableRootfsArtifact = func(ctx context.Context, artifact *models.RootfsArtifact, reason string) (bool, error) {
+		demoteCalled = true
+		return true, nil
+	}
 	t.Cleanup(func() { demoteUnservableRootfsArtifact = origDemote })
 
 	artifact := &models.RootfsArtifact{
@@ -173,25 +224,33 @@ func TestVerifyArtifactServabilityRemoteUnknownKeepsRow(t *testing.T) {
 	}
 }
 
-func TestVerifyArtifactServabilityProbesS3BackedDownloadEndpoint(t *testing.T) {
-	probedURL := ""
-	stubRemoteTier(t, true, func(ctx context.Context, url string) (int, http.Header, []byte, error) {
-		probedURL = url
-		return servableProbe(http.StatusPartialContent, "rfs-s3")(ctx, url)
+func TestVerifyArtifactServabilityStatsS3WithoutHTTPProbe(t *testing.T) {
+	httpCalled := false
+	stubRemoteTier(t, true, func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
+		httpCalled = true
+		return 0, nil, nil, errors.New("S3 must not be probed over HTTP")
 	})
+	oldStat := artifactServabilityS3StatFn
+	statCalled := false
+	artifactServabilityS3StatFn = func(_ context.Context, artifact *models.RootfsArtifact) (bool, error) {
+		statCalled = artifact.ArtifactID == "rfs-s3"
+		return true, nil
+	}
+	t.Cleanup(func() { artifactServabilityS3StatFn = oldStat })
 	artifact := &models.RootfsArtifact{
-		ArtifactID:    "rfs-s3",
-		Status:        ArtifactStatusReady,
-		ArtifactURL:   "http://minio:9000/bucket/rfs-s3.ext4?sig=...",
-		MasterNodeIP:  "http://master:8089",
-		DownloadToken: "tok-s3",
+		ArtifactID:     "rfs-s3",
+		Generation:     1,
+		Status:         ArtifactStatusReady,
+		StorageBackend: "s3",
+		ArtifactURL:    "http://minio:9000/bucket/rfs-s3.ext4?sig=...",
+		MasterNodeIP:   "http://master:8089",
+		DownloadToken:  "tok-s3",
 	}
 	if err := verifyArtifactServability(context.Background(), artifact); err != nil {
 		t.Fatalf("S3-backed artifact should be probed through the unified download endpoint, got %v", err)
 	}
-	want := "http://master:8089/cube/template/artifact/download?artifact_id=rfs-s3&token=tok-s3"
-	if probedURL != want {
-		t.Fatalf("probe url=%q, want %q", probedURL, want)
+	if !statCalled || httpCalled {
+		t.Fatalf("statCalled=%v httpCalled=%v", statCalled, httpCalled)
 	}
 }
 
@@ -215,7 +274,10 @@ func TestRootfsArtifactReuseVerdictRemoteTier(t *testing.T) {
 		stubRemoteTier(t, true, envelopeProbe(int(errorcode.ErrorCode_NotFound), "gone"))
 		demoted := false
 		origDemote := demoteUnservableRootfsArtifact
-		demoteUnservableRootfsArtifact = func(ctx context.Context, artifactID, reason string) { demoted = true }
+		demoteUnservableRootfsArtifact = func(ctx context.Context, artifact *models.RootfsArtifact, reason string) (bool, error) {
+			demoted = true
+			return true, nil
+		}
 		t.Cleanup(func() { demoteUnservableRootfsArtifact = origDemote })
 		err := rootfsArtifactReuseVerdict(context.Background(), record)
 		if err == nil || errors.Is(err, ErrRootfsArtifactForeign) {
@@ -227,7 +289,7 @@ func TestRootfsArtifactReuseVerdictRemoteTier(t *testing.T) {
 	})
 
 	t.Run("unknown is neither reusable nor foreign", func(t *testing.T) {
-		stubRemoteTier(t, true, func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+		stubRemoteTier(t, true, func(ctx context.Context, url string, header http.Header) (int, http.Header, []byte, error) {
 			return 0, nil, nil, errors.New("timeout")
 		})
 		err := rootfsArtifactReuseVerdict(context.Background(), record)

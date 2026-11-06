@@ -217,6 +217,7 @@ class Template:
         start_cmd: str | None = None,
         instance_type: str | None = None,
         writable_layer_size: str | None = None,
+        backend: str | None = None,
         exposed_ports: list[int] | None = None,
         probe_port: int | None = None,
         probe_path: str | None = None,
@@ -255,6 +256,8 @@ class Template:
             start_cmd: Not supported by CubeAPI's current template endpoint.
             instance_type: CubeMaster instance type (defaults server-side).
             writable_layer_size: Writable layer size, e.g. ``"1G"``.
+            backend: CoW backend for the template and its snapshots: ``"xfs"`` or ``"s3"``.
+                Omit to keep the server's xfs default.
             exposed_ports: Container ports to expose.
             probe_port: HTTP probe port.
             probe_path: HTTP probe path.
@@ -303,6 +306,8 @@ class Template:
             payload["instanceType"] = instance_type
         if writable_layer_size is not None:
             payload["writableLayerSize"] = writable_layer_size
+        if backend is not None:
+            payload["backend"] = backend
         if exposed_ports is not None:
             payload["exposedPorts"] = exposed_ports
         if probe_port is not None:

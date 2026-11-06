@@ -101,7 +101,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 // by artifact ID equality. This allows artifact IDs to be unique per build
 // while still preventing redundant builds of the same spec.
 func buildArtifactID(fingerprint string) string {
-	return fmt.Sprintf("rfs-%s-%s", fingerprint[:24], uuid.New().String()[:8])
+	return fmt.Sprintf("rfs-%.24s-%s", fingerprint, strings.ReplaceAll(uuid.NewString(), "-", ""))
 }
 
 // BuildTemplateSpecFingerprintWithEnvdSHA exports the fingerprint builder so

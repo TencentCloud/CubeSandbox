@@ -8,12 +8,13 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"gorm.io/gorm"
 )
 
 func validRemoteBuildResultForCallbackTest(t *testing.T) *RemoteBuildResult {
@@ -49,9 +50,55 @@ func patchRemoteBuildPrepareDependencies(t *testing.T, updates *[]map[string]any
 	})
 	t.Cleanup(patches.Reset)
 
-	oldDB := store.db
-	store.db = &gorm.DB{}
-	t.Cleanup(func() { store.db = oldDB })
+	db := newMigrateSharedStoreTestDB(t)
+	require.NoError(t, db.AutoMigrate(&models.TemplateImageJob{}))
+	require.NoError(t, db.Create(&models.TemplateImageJob{
+		JobID:      "job-1",
+		TemplateID: "tpl-1",
+		Status:     status,
+		Phase:      phase,
+		ResultJSON: `{"artifact_id":"rfs-callback"}`,
+	}).Error)
+}
+
+func TestRemoteBuildResultValidateRejectsInvalidS3Locator(t *testing.T) {
+	t.Setenv("CUBE_S3_ENDPOINT", "http://minio:9000")
+	t.Setenv("CUBE_S3_BUCKET", "artifact-bucket")
+	t.Setenv("CUBE_S3_ACCESS_KEY_ID", "access")
+	t.Setenv("CUBE_S3_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("CUBE_S3_ARTIFACT_PREFIX", "template-artifacts")
+
+	result := validRemoteBuildResultForCallbackTest(t)
+	result.StorageBackend = "s3"
+	result.ObjectKey = "template-artifacts/rfs-callback.ext4"
+	result.StorageRef = "file:///legacy/rfs-callback.ext4"
+	if err := result.Validate(); err == nil || !strings.Contains(err.Error(), "invalid S3 storage_ref") {
+		t.Fatalf("Validate() error = %v, want invalid S3 storage_ref", err)
+	}
+
+	result.StorageRef = "s3://artifact-bucket/template-artifacts?endpoint=http%3A%2F%2Fminio%3A9000"
+	result.Ext4Path = ""
+	require.NoError(t, result.Validate(), "S3 report must not depend on a Master-local ext4 path")
+}
+
+func TestRemoteBuildResultValidateAcceptsTCFSLocator(t *testing.T) {
+	result := validRemoteBuildResultForCallbackTest(t)
+	result.StorageBackend = "fs"
+	result.ObjectKey = "rfs-callback.ext4"
+	result.StorageRef = "file:///var/lib/templatecenter/artifacts/rfs-callback.ext4"
+	result.OwnerTCDownloadBase = "http://templatecenter:8090"
+	result.Ext4Path = ""
+	require.NoError(t, result.Validate(), "TC-FS report must not depend on a Master-local ext4 path")
+}
+
+func TestValidateReadyArtifactForAdoptionRequiresS3Locator(t *testing.T) {
+	artifact := &models.RootfsArtifact{
+		ArtifactID:     "rfs-ready-without-locator",
+		StorageBackend: "s3",
+		ObjectKey:      "template-artifacts/rfs-ready-without-locator.ext4",
+	}
+	err := validateReadyArtifactForAdoption(t.Context(), artifact)
+	require.ErrorContains(t, err, "storage_ref is empty")
 }
 
 func TestPrepareRemoteBuildCallbackRegistersBeforeDistribution(t *testing.T) {
@@ -93,6 +140,7 @@ func TestPrepareRemoteBuildCallbackRegistersBeforeDistribution(t *testing.T) {
 		"status":                    JobStatusRunning,
 		"phase":                     JobPhaseDistributing,
 		"progress":                  70,
+		"error_message":             "",
 	}
 	if !reflect.DeepEqual(updates[0], want) {
 		t.Fatalf("job update = %#v, want %#v", updates[0], want)
@@ -116,8 +164,14 @@ func TestPrepareRemoteBuildCallbackLeavesBuiltOnRegistrationError(t *testing.T) 
 		t.Fatalf("error = %v, want %v", err, wantErr)
 	}
 	if len(updates) != 0 {
-		t.Fatalf("registration error must leave the BUILT job untouched, got updates %#v", updates)
+		t.Fatalf("registration error must not claim distribution, got updates %#v", updates)
 	}
+	var saved models.TemplateImageJob
+	require.NoError(t, store.db.Where("job_id = ?", "job-1").First(&saved).Error)
+	require.Equal(t, JobStatusBuilt, saved.Status)
+	require.Equal(t, JobPhaseReady, saved.Phase)
+	require.JSONEq(t, `{"artifact_id":"rfs-callback"}`, saved.ResultJSON)
+	require.Contains(t, saved.ErrorMessage, wantErr.Error())
 }
 
 func TestPrepareRemoteBuildCallbackSkipsAlreadyClaimedDistribution(t *testing.T) {

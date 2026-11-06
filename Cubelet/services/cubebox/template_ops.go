@@ -749,6 +749,13 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid templateID: %v", err)
 		return rsp, nil
 	}
+	unlockTemplate, err := appSnapshotTemplateLocks.LockContext(ctx, rsp.TemplateID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("lock template cleanup: %v", err)
+		return rsp, nil
+	}
+	defer unlockTemplate()
 	// snapshot_path is deprecated as of v4: cubelet resolves it from local
 	// catalog. We still validate it for backward compatibility so old masters
 	// can keep talking to new cubelets during a coordinated upgrade.

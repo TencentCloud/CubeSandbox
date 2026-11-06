@@ -698,6 +698,41 @@ func TestSnapshotDeleteLocatorsFallsBackToCallerProvidedLocators(t *testing.T) {
 	// SnapshotPath from its local catalog.
 }
 
+func TestSnapshotDeleteLocatorsMergeReplicaOriginAndJobNodes(t *testing.T) {
+	locators, err := snapshotDeleteLocators(&templateCleanupTargets{
+		Replicas: []models.TemplateReplica{
+			{NodeID: "node-replica", NodeIP: "10.0.0.1"},
+			{NodeID: "node-shared"},
+		},
+		Locators: []templateCleanupLocator{
+			{NodeID: "node-shared", NodeIP: "10.0.0.2"},
+			{NodeID: "node-origin", NodeIP: "10.0.0.3"},
+			{NodeID: "node-job", NodeIP: "10.0.0.4"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("snapshotDeleteLocators returned error: %v", err)
+	}
+	if len(locators) != 4 {
+		t.Fatalf("locators = %+v, want replica/origin/job union", locators)
+	}
+	got := make(map[string]string, len(locators))
+	for _, locator := range locators {
+		got[locator.NodeID] = locator.NodeIP
+	}
+	want := map[string]string{
+		"node-replica": "10.0.0.1",
+		"node-shared":  "10.0.0.2",
+		"node-origin":  "10.0.0.3",
+		"node-job":     "10.0.0.4",
+	}
+	for nodeID, nodeIP := range want {
+		if got[nodeID] != nodeIP {
+			t.Fatalf("locator %s ip=%q, want %q (all=%+v)", nodeID, got[nodeID], nodeIP, locators)
+		}
+	}
+}
+
 func TestValidateSnapshotMetricsRejectsMissingKeys(t *testing.T) {
 	err := validateSnapshotMetrics(map[string]uint64{
 		"total_bytes": 1024,

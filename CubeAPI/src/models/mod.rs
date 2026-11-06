@@ -1445,6 +1445,10 @@ pub struct ListTemplatesQuery {
     /// Optional CubeMaster instance_type filter (currently no server-side filter;
     /// reserved for future use).
     pub instance_type: Option<String>,
+    /// Max templates to return. Omitted and 0 use CubeMaster's finite default (50).
+    pub limit: Option<i32>,
+    /// Number of templates to skip.
+    pub offset: Option<i32>,
 }
 
 /// Summary row returned by GET /templates.
@@ -1530,6 +1534,11 @@ pub struct CreateTemplateRequest {
     /// Writable layer size for the rootfs, e.g. "1G".
     #[serde(rename = "writableLayerSize", default)]
     pub writable_layer_size: Option<String>,
+    /// CoW backend for this template and its sandboxes/snapshots.
+    /// Accepted values are `xfs` and `s3` (case-insensitive); omitted or empty
+    /// keeps the existing xfs default.
+    #[serde(default)]
+    pub backend: Option<String>,
     /// Ports the container listens on.
     #[serde(rename = "exposedPorts", default)]
     pub exposed_ports: Option<Vec<u16>>,

@@ -81,12 +81,10 @@ func TestRemoteBuildResultFromResultJSONEmptyArtifactURL(t *testing.T) {
 	}
 }
 
-// An S3-backed result (artifact_url set) must replay even when the local
-// ext4 is gone: the bucket object is the durable copy and cubelets pull from
-// the presigned URL, so on a multi-replica / un-colocated deployment the
-// replay may land on a master that never shared TC's disk. Local-disk
-// results keep the stat guard.
-func TestRemoteBuildResultFromResultJSONS3SkipsLocalStat(t *testing.T) {
+// Replayed build results must not require the TC-owned ext4 on the Master's
+// disk. Both S3 and TC-local artifacts are validated against the actual owner
+// during distribution, not against a path on an unrelated Master.
+func TestRemoteBuildResultFromResultJSONSkipsMasterLocalStat(t *testing.T) {
 	storeRoot := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", storeRoot)
 	missing := filepath.Join(storeRoot, "gone.ext4") // inside the store root, but never written
@@ -113,8 +111,11 @@ func TestRemoteBuildResultFromResultJSONS3SkipsLocalStat(t *testing.T) {
 		t.Fatal("ArtifactURL lost in replay")
 	}
 
-	// Local-disk: same missing file is still an error.
-	if _, err := remoteBuildResultFromResultJSON(mkPayload("")); err == nil {
-		t.Fatal("local-disk replay with a missing ext4 must fail")
+	result, err = remoteBuildResultFromResultJSON(mkPayload(""))
+	if err != nil {
+		t.Fatalf("TC-local replay must not require the ext4 on the Master: %v", err)
+	}
+	if result.Ext4Path != missing || result.MasterNodeIP != "http://master:8080" || result.ArtifactURL != "" {
+		t.Fatalf("TC-local artifact locator lost in replay: %+v", result)
 	}
 }

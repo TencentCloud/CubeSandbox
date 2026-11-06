@@ -157,6 +157,14 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 		}
 	}
 
+	if status, ok := values["status"].(string); ok {
+		status = strings.ToUpper(strings.TrimSpace(status))
+		if status == "" {
+			delete(values, "status")
+		} else {
+			values["status"] = status
+		}
+	}
 	if len(values) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no updatable fields in payload"})
 		return
@@ -183,6 +191,10 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 				return
 			}
 		} else if err := templatecenter.UpdateTemplateImageJobIfTransitionAllowed(ctx, jobID, values, newStatus); err != nil {
+			if errors.Is(err, templatecenter.ErrStaleJobProgress) {
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
+				return
+			}
 			if errors.Is(err, templatecenter.ErrTerminalJobStatusFlip) {
 				log.G(ctx).Warnf("template job status callback rejected: job_id=%s err=%v", jobID, err)
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -193,7 +205,11 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 			return
 		}
 	} else {
-		if err := templatecenter.UpdateTemplateImageJob(ctx, jobID, values); err != nil {
+		if err := templatecenter.UpdateTemplateImageJobBuildProgress(ctx, jobID, values); err != nil {
+			if errors.Is(err, templatecenter.ErrStaleJobProgress) {
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
+				return
+			}
 			log.G(ctx).Errorf("template job status callback: update fail: job_id=%s err=%v", jobID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -259,6 +275,8 @@ func remoteBuildResultFromPayload(payload map[string]any) *templatecenter.Remote
 		ArtifactURL:             payloadString(payload, "artifact_url"),
 		StorageBackend:          payloadString(payload, "storage_backend"),
 		ObjectKey:               payloadString(payload, "object_key"),
+		StorageRef:              payloadString(payload, "storage_ref"),
+		OwnerTCDownloadBase:     payloadString(payload, "owner_tc_download_base"),
 		CubeEgressCABaked:       payloadBool(payload, "cube_egress_ca_baked"),
 		CubeEgressCAFingerprint: payloadString(payload, "cube_egress_ca_fingerprint"),
 		CubeEgressCATargets:     int(payloadInt64(payload, "cube_egress_ca_targets_written")),

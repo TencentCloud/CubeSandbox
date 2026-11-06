@@ -17,7 +17,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
-	"os"
 	"strings"
 )
 
@@ -387,52 +386,4 @@ func GetRootfsArtifactInfo(ctx context.Context, artifactID string) (*types.Rootf
 		return nil, err
 	}
 	return artifactModelToInfo(record), nil
-}
-
-// GetRootfsArtifactForRedirect loads the artifact row and validates the
-// download token, but does NOT open the ext4 file. Used by the download
-// handler to decide whether to 302-redirect to the artifact's presigned S3
-// URL (artifact_url non-empty) or fall through to the local-file stream
-// (artifact_url empty, i.e. legacy/local-disk artifacts).
-func GetRootfsArtifactForRedirect(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
-	record, err := getRootfsArtifactByID(ctx, artifactID)
-	if err != nil {
-		return nil, err
-	}
-	if record.DownloadToken != "" && token != record.DownloadToken {
-		return nil, fmt.Errorf("invalid artifact token")
-	}
-	return record, nil
-}
-
-func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, *os.File, error) {
-	record, err := getRootfsArtifactByID(ctx, artifactID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if record.DownloadToken != "" && token != record.DownloadToken {
-		return nil, nil, fmt.Errorf("invalid artifact token")
-	}
-	f, err := os.Open(record.Ext4Path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// This is where the row/file drift is usually discovered: the row is
-			// READY, distribution accepted it, and a cubelet is pulling right now.
-			//
-			// resolveMissingArtifact decides whether it is safe to demote. If this
-			// node owns the artifact the row is demoted so the next create
-			// rebuilds it, instead of every retry taking the reuse path and dying
-			// on this same line forever (issue #852). If the artifact belongs to
-			// another CubeMaster the row is left alone and the error says so:
-			// the pull was routed to a node that never had the file (issue #1005),
-			// and demoting here would destroy an artifact that is perfectly fine
-			// elsewhere.
-			if verdict := resolveMissingArtifact(ctx, record); verdict != artifactMissingVerdictNone {
-				return nil, nil, fmt.Errorf("artifact source missing: %w", missingArtifactError(record, verdict))
-			}
-			return nil, nil, fmt.Errorf("artifact source missing: %w", err)
-		}
-		return nil, nil, err
-	}
-	return record, f, nil
 }

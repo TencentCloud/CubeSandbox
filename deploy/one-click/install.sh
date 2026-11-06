@@ -109,6 +109,7 @@ init_external_dep_defaults() {
   CUBE_SANDBOX_MINIO_BUCKET="${CUBE_SANDBOX_MINIO_BUCKET:-cube-volumes}"
   CUBE_SANDBOX_MINIO_API_PORT="${CUBE_SANDBOX_MINIO_API_PORT:-9000}"
   CUBE_S3_ENDPOINT="${CUBE_S3_ENDPOINT:-}"
+  CUBE_S3_NODE_ENDPOINT="${CUBE_S3_NODE_ENDPOINT:-}"
   CUBE_S3_ACCESS_KEY_ID="${CUBE_S3_ACCESS_KEY_ID:-}"
   CUBE_S3_SECRET_ACCESS_KEY="${CUBE_S3_SECRET_ACCESS_KEY:-}"
   CUBE_S3_BUCKET="${CUBE_S3_BUCKET:-cube-volumes}"
@@ -120,6 +121,7 @@ init_external_dep_defaults() {
   CUBE_S3LVOL_PATH_STYLE="${CUBE_S3LVOL_PATH_STYLE:-}"
   CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
   CUBE_ARTIFACT_STORE_BACKEND="${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+  CUBE_ARTIFACT_DOWNLOAD_TTL="${CUBE_ARTIFACT_DOWNLOAD_TTL:-1h}"
   CUBE_OPS_STORE_BACKEND="${CUBE_OPS_STORE_BACKEND:-s3}"
   CUBE_OPS_STORE_FS_ROOT="${CUBE_OPS_STORE_FS_ROOT:-/var/lib/cubeops/blobs}"
   CUBE_OPS_STORE_FS_PUBLIC_URL="${CUBE_OPS_STORE_FS_PUBLIC_URL:-}"
@@ -336,6 +338,18 @@ ensure_template_callback_token() {
 }
 ensure_template_callback_token
 
+# Separate capability key for Cubelet's short-lived direct artifact downloads.
+# Reusing the build callback token would unnecessarily couple two trust scopes.
+ensure_artifact_download_signing_key() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+  CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY="${CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY:-}"
+  if [[ -z "${CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY}" ]]; then
+    CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY="$(generate_alnum_secret 48)"
+    log "generated CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY (48 chars); it will be saved to .one-click.env"
+  fi
+}
+ensure_artifact_download_signing_key
+
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
@@ -502,11 +516,10 @@ generate_templatecenter_config() {
   local mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
   local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
   local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
-  # TC is co-located with CubeMaster and only the local master calls it, so
-  # loopback is the safe default. CUBETEMPLATECENTER_HTTP_BIND overrides for a
-  # split deployment; the build endpoint is unauthenticated, so exposing it is
-  # the operator's explicit choice.
-  local http_bind="${CUBETEMPLATECENTER_HTTP_BIND:-127.0.0.1}"
+  # Cubelets now download fs-backed artifacts directly from TC using a
+  # short-lived HMAC capability. Bind to the detected routable node address;
+  # operators may still override it for a split deployment.
+  local http_bind="${CUBETEMPLATECENTER_HTTP_BIND:-${CUBE_SANDBOX_NODE_IP}}"
   # CubeMaster's HTTP base URL for TC to report build results. Defaults to the
   # local CubeMaster (co-located in one-click); override for split deployments.
   # Can also be set via CUBE_MASTER_ADDR env (env wins over this yaml value).
@@ -2139,6 +2152,12 @@ persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"
 if [[ -n "${CUBE_TEMPLATE_CALLBACK_TOKEN:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TEMPLATE_CALLBACK_TOKEN" "${CUBE_TEMPLATE_CALLBACK_TOKEN}"
 fi
+if [[ -n "${CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY" "${CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_DOWNLOAD_TTL" "${CUBE_ARTIFACT_DOWNLOAD_TTL}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR" \
+    "${CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR:-http://${CUBE_SANDBOX_NODE_IP}:8090}"
+fi
 
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ENABLED" "${CUBE_SANDBOX_MINIO_ENABLED}"
 if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
@@ -2151,6 +2170,11 @@ if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
 fi
 if [[ -n "${CUBE_S3_ENDPOINT}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ENDPOINT" "${CUBE_S3_ENDPOINT}"
+  if [[ -n "${CUBE_S3_NODE_ENDPOINT:-}" ]]; then
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_NODE_ENDPOINT" "${CUBE_S3_NODE_ENDPOINT}"
+  else
+    remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_NODE_ENDPOINT"
+  fi
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ACCESS_KEY_ID" "${CUBE_S3_ACCESS_KEY_ID}"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_SECRET_ACCESS_KEY" "${CUBE_S3_SECRET_ACCESS_KEY}"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_BUCKET" "${CUBE_S3_BUCKET}"
@@ -2158,6 +2182,7 @@ if [[ -n "${CUBE_S3_ENDPOINT}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS" "${CUBE_S3_S3FS_EXTRA_OPTS}"
 else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ENDPOINT"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_NODE_ENDPOINT"
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ACCESS_KEY_ID"
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_SECRET_ACCESS_KEY"
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_BUCKET"

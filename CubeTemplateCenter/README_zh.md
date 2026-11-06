@@ -157,6 +157,7 @@ chart 会拒绝以下组合：
 | POST | `/tc/api/v1/build` | 提交 `from-image` 构建任务 |
 | POST | `/tc/api/v1/artifact/upload` | 接收 CubeMaster 通过 `tpl merge` 上传的本地 ext4，写入 TC artifact store |
 | POST | `/tc/api/v1/artifact/delete` | 删除 artifact 物理数据（本地文件 / S3 对象） |
+| GET / HEAD | `/internal/artifacts/:artifact_id/ext4` | 向持有短期授权的 Cubelet 直传 fs-backed ext4 |
 
 ### 通过 CubeMaster 暴露的用户路径
 
@@ -166,7 +167,7 @@ chart 会拒绝以下组合：
 | GET | `/cube/template/from-image?job_id=...` | CubeMaster（本地） | 查询 `from-image` job 状态 |
 | POST | `/cube/template/migrate` | CubeMaster（本地） | 提交 artifact migrate job（CLI 命令：`tpl merge`） |
 | GET | `/cube/template/migrate?job_id=...` | CubeMaster（本地） | 查询 migrate job 状态 |
-| GET / HEAD | `/cube/template/artifact/download` | TC（经 CubeMaster 反代） | 下载 artifact；S3-backed 时 302 到 presigned URL |
+| GET / HEAD | `/cube/template/artifact/download` | 兼容路径 | 兼容升级前、不含 ticket 注解的副本 |
 | GET / POST | `/cube/template/compat` | TC（经 CubeMaster 反代） | 读写模板 compat 矩阵 |
 
 另外，`/cube/template/build/:build_id/status` 仍由 CubeMaster 本地服务，用于 `tpl commit` 的 build-status / build-watch。
@@ -176,6 +177,9 @@ chart 会拒绝以下组合：
 - 健康检查：`GET /health`
 - 指标：`GET /metrics`
 - 构建完成后 TC 主动回调 CubeMaster：`POST $CUBE_MASTER_ADDR/internal/template/jobs/:job_id/status`
+- 新链路中，Cubelet 每次下载前从 CubeMaster 的
+  `GET /internal/template/artifacts/:artifact_id/download-ticket` 取得短期授权；
+  ext4 字节随后由 TC（本地盘/CBS/CFS/fs）或 S3/MinIO 直接传给 Cubelet。
 
 ## 目录
 

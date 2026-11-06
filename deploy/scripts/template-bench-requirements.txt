@@ -1,0 +1,2 @@
+requests>=2.28.0
+pymysql>=1.0.2

@@ -16,6 +16,7 @@ import (
 
 const (
 	EnvS3Endpoint             = "CUBE_S3_ENDPOINT"
+	EnvS3NodeEndpoint         = "CUBE_S3_NODE_ENDPOINT"
 	EnvS3Bucket               = "CUBE_S3_BUCKET"
 	EnvS3AccessKeyID          = "CUBE_S3_ACCESS_KEY_ID"
 	LegacyEnvS3AccessKey      = "CUBE_S3_ACCESS_KEY"
@@ -29,8 +30,9 @@ const (
 	EnvArtifactStoreFSRoot    = "CUBE_ARTIFACT_STORE_FS_ROOT"
 	EnvRootfsArtifactStoreDir = "CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR"
 
-	// DefaultArtifactStoreDir is the on-disk artifact store when no env
-	// override is set. Master and TC must resolve the same path.
+	// DefaultArtifactStoreDir is the historical on-disk artifact root when no
+	// override is set. TC owns new fs-backed downloads; deployments may still
+	// mount this path into Master so pre-ticket artifacts survive upgrades.
 	DefaultArtifactStoreDir = "/data/CubeMaster/storage"
 )
 
@@ -38,6 +40,7 @@ const (
 type ArtifactS3 struct {
 	Enabled      bool
 	Endpoint     string
+	NodeEndpoint string
 	Bucket       string
 	AccessKey    string
 	SecretKey    string
@@ -52,6 +55,7 @@ type ArtifactS3 struct {
 func ParseArtifactS3() ArtifactS3 {
 	cfg := ArtifactS3{
 		Endpoint:     EnvOr(EnvS3Endpoint),
+		NodeEndpoint: EnvOr(EnvS3NodeEndpoint),
 		Bucket:       EnvOr(EnvS3Bucket),
 		Region:       EnvOr(EnvS3Region),
 		Prefix:       EnvOr(EnvS3ArtifactPrefix),

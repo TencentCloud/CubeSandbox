@@ -318,6 +318,8 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		InstanceType: createReq.InstanceType,
 		Spec:         calculateRequestSpec(createReq),
 		Status:       ReplicaStatusReady,
+		Phase:        ReplicaPhaseReady,
+		LastJobID:    jobID,
 	}
 	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion(), commitRsp.GetShimVersion())
 	if err := UpsertReplica(ctx, templateID, createReq.InstanceType, replica); err != nil {
@@ -326,11 +328,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 	setTemplateLocalityCache(templateID, []ReplicaStatus{replica})
 
-	templateStatus := StatusReady
-	expectedNodes := int32(localcache.GetHealthyNodesByInstanceType(-1, createReq.InstanceType).Len())
-	if expectedNodes > 1 {
-		templateStatus = StatusPartiallyReady
-	}
+	expectedNodes, templateStatus := commitReplicaSummary(int32(localcache.GetHealthyNodesByInstanceType(-1, createReq.InstanceType).Len()))
 	if err := UpdateDefinitionStatus(ctx, templateID, templateStatus, ""); err != nil {
 		cleanupOnFailure(err)
 		return
@@ -343,11 +341,19 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"progress":            100,
 		"expected_node_count": expectedNodes,
 		"ready_node_count":    1,
-		"failed_node_count":   max(expectedNodes-1, 0),
+		"failed_node_count":   0,
 		"template_status":     templateStatus,
 		"error_message":       "",
 	})
 	logger.Infof("template commit job finished successfully")
+}
+
+func commitReplicaSummary(healthyNodes int32) (int32, string) {
+	expected := max(healthyNodes, 1)
+	if expected > 1 {
+		return expected, StatusPartiallyReady
+	}
+	return expected, StatusReady
 }
 
 func max(a, b int32) int32 {

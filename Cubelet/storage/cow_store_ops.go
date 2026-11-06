@@ -259,7 +259,13 @@ func CommitRootfsFromBuildFor(ctx context.Context, backend, id string) (*CowSnap
 	if err != nil {
 		return nil, err
 	}
-	volume, err := store.CommitTemplateRootfs(ctx, cowTemplateBuildRootfsName(id), id)
+	committer, ok := store.(interface {
+		CommitTemplateRootfsFromBuild(context.Context, string, string) (*cow.Object, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("cow store %s does not support idempotent build-rootfs commit", store.Name())
+	}
+	volume, err := committer.CommitTemplateRootfsFromBuild(ctx, cowTemplateBuildRootfsName(id), id)
 	if err != nil {
 		return nil, err
 	}

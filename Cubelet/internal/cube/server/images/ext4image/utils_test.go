@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/artifactticket"
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
@@ -58,6 +60,52 @@ func writeRawImageFile(t *testing.T, instanceType, imageRef string, content []by
 func writeRawKernelFile(t *testing.T, instanceType, imageRef string, content []byte) {
 	t.Helper()
 	writeTestFile(t, pmem.GetRawKernelFilePath(instanceType, imageRef), content)
+}
+
+// directDownloadAnnotationsForTest builds ticket-protocol annotations whose
+// Master ticket endpoint hands out a TemplateCenter-sourced ticket pointing
+// at dataURL, i.e. the only download path Cubelet supports.
+func directDownloadAnnotationsForTest(t *testing.T, dataURL, sha string, size int64) map[string]string {
+	t.Helper()
+	oldNodeID := artifactDownloadNodeID
+	artifactDownloadNodeID = func() (string, error) { return "node-under-test", nil }
+	t.Cleanup(func() { artifactDownloadNodeID = oldNodeID })
+	const artifactID = "artifact-under-test"
+	master := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(constants.ArtifactDownloadNodeIDHeader) != "node-under-test" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(artifactticket.Ticket{
+			Source: artifactticket.SourceTemplateCenter, URL: dataURL, Token: "download-token",
+			ExpiresAt: time.Now().Add(time.Hour), ServerTime: time.Now(),
+			ArtifactID: artifactID, Generation: 1, SizeBytes: size, SHA256: sha,
+		})
+	}))
+	t.Cleanup(master.Close)
+	origin, err := artifactticket.URLOrigin(dataURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		constants.MasterAnnotationRootfsArtifactTicketURL:      master.URL + "/internal/template/artifacts/" + artifactID + "/download-ticket",
+		constants.MasterAnnotationRootfsArtifactID:             artifactID,
+		constants.MasterAnnotationRootfsArtifactRefreshToken:   "refresh-token",
+		constants.MasterAnnotationRootfsArtifactDownloadOrigin: origin,
+		constants.MasterAnnotationRootfsArtifactSHA256:         sha,
+	}
+}
+
+func TestArtifactDownloadResolverRejectsLegacyMasterURL(t *testing.T) {
+	_, err := artifactDownloadResolverForSpec(&cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL: "http://master.example/cube/template/artifact/download?artifact_id=a&token=t",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "legacy Master-proxied") {
+		t.Fatalf("error = %v, want legacy Master-proxied rejection", err)
+	}
+	if isRetryableArtifactDownloadError(err) {
+		t.Fatal("legacy annotation rejection must be fatal")
+	}
 }
 
 func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *testing.T) {
@@ -114,8 +162,8 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	writeRawKernelFile(t, "cubebox", "artifact-2", oldKernel)
 	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{
 		Annotations: map[string]string{
-			constants.MasterAnnotationRootfsArtifactURL:    "http://unused.example/artifact.ext4",
-			constants.MasterAnnotationRootfsArtifactSHA256: "deadbeef",
+			constants.MasterAnnotationRootfsArtifactTicketURL: "http://unused.example/internal/template/artifacts/artifact-2/download-ticket",
+			constants.MasterAnnotationRootfsArtifactSHA256:    "deadbeef",
 		},
 	})
 
@@ -293,10 +341,9 @@ func TestDownloadArtifactWithIndependentKernelSource(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(rootfs) }))
 	defer server.Close()
 	sum := sha256.Sum256(rootfs)
-	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{Annotations: map[string]string{
-		constants.MasterAnnotationRootfsArtifactURL:    server.URL,
-		constants.MasterAnnotationRootfsArtifactSHA256: hex.EncodeToString(sum[:]),
-	}})
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{
+		Annotations: directDownloadAnnotationsForTest(t, server.URL, hex.EncodeToString(sum[:]), int64(len(rootfs))),
+	})
 	if err := EnsurePmemFile(ctx, "cubebox", "rfs-download"); err != nil {
 		t.Fatal(err)
 	}
@@ -333,10 +380,9 @@ func TestEnsurePmemRootfsMixedEntrypointsReusePreparedFile(t *testing.T) {
 	defer server.Close()
 
 	sum := sha256.Sum256(rootfs)
-	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{Annotations: map[string]string{
-		constants.MasterAnnotationRootfsArtifactURL:    server.URL,
-		constants.MasterAnnotationRootfsArtifactSHA256: hex.EncodeToString(sum[:]),
-	}})
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{
+		Annotations: directDownloadAnnotationsForTest(t, server.URL, hex.EncodeToString(sum[:]), int64(len(rootfs))),
+	})
 
 	const concurrency = 8
 	start := make(chan struct{})

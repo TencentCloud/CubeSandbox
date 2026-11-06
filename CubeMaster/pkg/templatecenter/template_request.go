@@ -54,21 +54,12 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 			},
 		},
 	}
-	// Always hand Cubelets / create-requests the CubeMaster download endpoint,
-	// never a direct S3 presigned URL. The endpoint is the one address the
-	// deployment guarantees every node can reach; it can then proxy to
-	// CubeTemplateCenter / S3 as needed. This avoids K8s multi-node drift where
-	// some nodes can dial the object store endpoint and others cannot.
-	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL(downloadBaseURL, artifact), artifact.ArtifactID, artifact.DownloadToken)
-	imageAnnotations := map[string]string{
-		constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-		constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
-		constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
-		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
-		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
-		constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
-		constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
+	imageAnnotations, err := artifactDownloadAnnotations(ctx, artifact, downloadBaseURL)
+	if err != nil {
+		return nil, err
 	}
+	imageAnnotations[constants.CubeAnnotationWritableLayerSize] = req.WritableLayerSize
+	imageAnnotations[constants.CubeAnnotationTemplateSpecFingerprint] = artifact.TemplateSpecFingerprint
 	command := imageCfg.Entrypoint
 	args := imageCfg.Cmd
 	if req.ContainerOverrides != nil {
@@ -201,22 +192,6 @@ func probeOrNil(overrides *types.ContainerOverrides) *types.Probe {
 		return nil
 	}
 	return overrides.Probe
-}
-
-func buildDownloadURL(baseURL, artifactID, token string) string {
-	trimmed := strings.TrimRight(NormalizeBaseURL(baseURL), "/")
-	if trimmed == "" {
-		trimmed = "http://" + artifactRootHostHint()
-	}
-	u, err := url.Parse(trimmed + "/cube/template/artifact/download")
-	if err != nil {
-		return trimmed
-	}
-	query := u.Query()
-	query.Set("artifact_id", artifactID)
-	query.Set("token", token)
-	u.RawQuery = query.Encode()
-	return u.String()
 }
 
 // HostReachableByOtherNodes reports whether a host[:port] value can be dialed
@@ -359,14 +334,6 @@ func effectiveArtifactDownloadBaseURL(fallback string, artifact *models.RootfsAr
 		}
 	}
 	return ""
-}
-
-func artifactRootHostHint() string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		return "127.0.0.1"
-	}
-	return host
 }
 
 func quantityToGi(value string) (int64, error) {

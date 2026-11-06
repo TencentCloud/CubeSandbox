@@ -118,6 +118,7 @@ func (a *App) Run() {
 		reconciler := reconcile.New(db)
 		if deleter != nil {
 			reconciler.SetDeleter(deleter)
+			reconciler.SetLocalSweeper(func(ctx context.Context) error { return deleter.SweepLocal(ctx, executor) })
 		}
 		recov.GoWithRecover(func() {
 			reconciler.Run(ctx)

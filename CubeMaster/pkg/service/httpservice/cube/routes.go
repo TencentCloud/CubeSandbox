@@ -104,11 +104,13 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// returned 200, the follow-up poll 502'd). Serve them where the rows live.
 	//
 	// The proxied remainder is uncached and safe on TC: the compat matrix is
-	// a plain DB read/write and the artifact download is file serving (or an
-	// S3 proxy stream). Routes are enumerated explicitly (mirroring
-	// RegisterTemplateRoutes) rather than via a wildcard catch-all, so the
-	// local routes can be carved out; keep this list in sync with
-	// RegisterTemplateRoutes below.
+	// a plain DB read/write. Template rootfs bytes are never served or
+	// proxied by these /cube routes: Cubelet obtains a short-lived ticket from
+	// /internal/template/artifacts/:artifact_id/download-ticket and downloads
+	// directly from S3 or the owning TemplateCenter. Routes are enumerated
+	// explicitly (mirroring RegisterTemplateRoutes) rather than via a wildcard
+	// catch-all, so the local routes can be carved out; keep this list in sync
+	// with RegisterTemplateRoutes below.
 	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
 	g.POST(TemplateMigrateAction, handleTemplateMigrateAction)
@@ -122,11 +124,8 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 
 	g.GET(TemplateCompatAction, proxyToTemplateCenter)
 	g.POST(TemplateCompatAction, proxyToTemplateCenter)
-	g.GET(TemplateArtifactDownloadAction, proxyToTemplateCenter)
-	g.HEAD(TemplateArtifactDownloadAction, proxyToTemplateCenter)
 
-	// Artifact / CA download: served locally from the shared artifact disk so
-	// Cubelet does not pay a second network hop through TC.
+	// CA download and rootfs-artifact metadata lookup.
 	g.GET(CADownloadActionPrefix+":filename", downloadCAGinHandler)
 	g.HEAD(CADownloadActionPrefix+":filename", headCAGinHandler)
 	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
@@ -163,16 +162,16 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 // Mirrors the proxied subset of the Template + Artifact/CA + RootfsArtifact
 // block of RegisterCubeRoutes. Keep in sync with that function.
 func RegisterTemplateRoutes(g *gin.RouterGroup) {
-	// Uncached reads + build status + file serving only. The cached reads
-	// (info/list) and every write live on CubeMaster — see the doc comment.
+	// Uncached reads + build status only. The cached reads (info/list) and
+	// every write live on CubeMaster — see the doc comment. Rootfs bytes are
+	// served to nodes only by TC's ticket-authenticated
+	// /internal/artifacts/:artifact_id/ext4 route (see CubeTemplateCenter).
 	g.GET(TemplateCompatAction, getTemplateCompatGinHandler)
 	g.POST(TemplateCompatAction, updateTemplateCompatGinHandler)
 	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
 	g.GET(TemplateFromImageAction, getTemplateFromImageGinHandler)
-	g.GET(TemplateArtifactDownloadAction, downloadTemplateArtifactGinHandler)
-	g.HEAD(TemplateArtifactDownloadAction, headTemplateArtifactGinHandler)
 
-	// Artifact / CA download
+	// CA download and rootfs-artifact metadata lookup.
 	g.GET(CADownloadActionPrefix+":filename", downloadCAGinHandler)
 	g.HEAD(CADownloadActionPrefix+":filename", headCAGinHandler)
 	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
@@ -184,4 +183,5 @@ func RegisterTemplateRoutes(g *gin.RouterGroup) {
 // NOT part of the public /cube API surface.
 func RegisterInternalTemplateRoutes(g *gin.RouterGroup) {
 	g.POST("/internal/template/jobs/:job_id/status", handleTemplateJobStatusCallback)
+	g.GET("/internal/template/artifacts/:artifact_id/download-ticket", handleArtifactDownloadTicket)
 }

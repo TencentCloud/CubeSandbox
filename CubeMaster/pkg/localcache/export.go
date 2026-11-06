@@ -53,6 +53,7 @@ func Init(ctx context.Context) error {
 	l.event = make(chan *Event, 1000)
 	l.cache = cache.New(0, 0)
 	l.locality = newTemplateLocality()
+	l.nodeRegistryReady.Store(false)
 	l.db = db.Init(config.GetDbConfig())
 	l.dbAddr = config.GetDbConfig().Addr
 	l.totalSelfNodes = config.GetConfig().Common.DefaultHeadlessServiceNodesNum
@@ -84,6 +85,14 @@ func Init(ctx context.Context) error {
 
 func GetCacheItems() map[string]cache.Item {
 	return l.cache.Items()
+}
+
+// NodeRegistryReady reports whether localcache has a confirmed authoritative
+// node-registry view. A non-empty load is ready immediately; an empty
+// CubeOps view becomes ready only after the empty-response debounce confirms
+// scale-to-zero.
+func NodeRegistryReady() bool {
+	return l.nodeRegistryReady.Load()
 }
 
 func GetNodes(n int) node.NodeList {

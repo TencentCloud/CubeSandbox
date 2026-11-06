@@ -339,6 +339,8 @@ impl CubeMasterClient {
         &self,
         template_id: Option<&str>,
         include_request: bool,
+        limit: Option<i32>,
+        offset: Option<i32>,
     ) -> Result<TemplateListResponse, CubeMasterError> {
         let url = format!("{}/cube/template", self.base_url);
         let mut req = self.inner.get(&url);
@@ -347,6 +349,12 @@ impl CubeMasterClient {
         }
         if include_request {
             req = req.query(&[("include_request", "true")]);
+        }
+        if let Some(limit) = limit {
+            req = req.query(&[("limit", limit.to_string())]);
+        }
+        if let Some(offset) = offset {
+            req = req.query(&[("offset", offset.to_string())]);
         }
         let resp = req.send().await.map_err(CubeMasterError::Http)?;
         parse_response(resp).await
@@ -1898,6 +1906,14 @@ pub struct TemplateListResponse {
     pub request_id: String,
     #[serde(default)]
     pub data: Vec<TemplateSummaryItem>,
+    #[serde(default)]
+    pub total: i64,
+    #[serde(default)]
+    pub limit: i32,
+    #[serde(default)]
+    pub offset: i32,
+    #[serde(default)]
+    pub has_more: bool,
     pub ret: RetCode,
 }
 
@@ -2048,6 +2064,9 @@ pub struct CreateTemplateFromImageReq {
     /// Writable layer size, e.g. "1G".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable_layer_size: Option<String>,
+    /// CoW backend (xfs | s3). Omitted keeps CubeMaster's xfs default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     /// Human-readable stable template alias.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,

@@ -63,8 +63,13 @@ type SnapshotCatalogEntry struct {
 	BuildRootfsVol  string `json:"build_rootfs_vol,omitempty"`
 	BuildRootfsKind string `json:"build_rootfs_kind,omitempty"`
 	RootfsSizeBytes uint64 `json:"rootfs_size_bytes,omitempty"`
+	// TemplateSpecFingerprint binds an AppSnapshot package to the immutable
+	// source request that produced it. It also turns an incomplete catalog
+	// written before object creation into a durable retry intent.
+	TemplateSpecFingerprint string `json:"template_spec_fingerprint,omitempty"`
 	// ComponentVersions: inventory dir name → version string (no absolute paths).
 	ComponentVersions map[string]string `json:"component_versions,omitempty"`
+	EnvdVersion       string            `json:"envd_version,omitempty"`
 	// Kind distinguishes the producer/semantics of this catalog entry so
 	// CleanupTemplate/GetLocalSnapshot consumers can branch where needed.
 	// Empty == legacy entry (pre-v4) and should be treated as a runtime

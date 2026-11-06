@@ -491,22 +491,16 @@ func TestGetTemplateInfoHidesTombstoneDespiteDefinition(t *testing.T) {
 }
 
 func TestListTemplatesHidesTombstonedDefinition(t *testing.T) {
-	oldDB := store.db
-	defer func() { store.db = oldDB }()
-
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(hiddenSnapshotIDs, func(ctx context.Context) (map[string]struct{}, error) {
-		return map[string]struct{}{"snap-tomb": {}}, nil
-	})
-
-	store.db = stubListTemplatesDB(t,
-		[]models.TemplateDefinition{
-			{TemplateID: "snap-tomb", Kind: TemplateKindSnapshot, Status: StatusReady},
-			{TemplateID: "tpl-live", Status: StatusReady},
-		},
-		nil,
-	)
+	db := newTemplateListSQLiteDB(t)
+	if err := db.Create(&[]models.TemplateDefinition{
+		{TemplateID: "snap-tomb", Kind: TemplateKindSnapshot, Status: StatusReady},
+		{TemplateID: "tpl-live", Status: StatusReady},
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.SnapshotRecord{SnapshotID: "snap-tomb", Status: StatusDeleted}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	out, listErr := ListTemplates(context.Background())
 	if listErr != nil {

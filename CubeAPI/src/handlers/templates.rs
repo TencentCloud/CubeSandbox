@@ -37,9 +37,9 @@ use crate::{
 )]
 pub async fn list_templates(
     State(state): State<AppState>,
-    Query(_params): Query<ListTemplatesQuery>,
+    Query(params): Query<ListTemplatesQuery>,
 ) -> AppResult<impl IntoResponse> {
-    let items = state.services.templates.list_templates().await?;
+    let items = state.services.templates.list_templates(params).await?;
     Ok((StatusCode::OK, Json(items)))
 }
 

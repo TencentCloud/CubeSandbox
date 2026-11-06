@@ -348,6 +348,64 @@ func TestCommitTemplateRootfsCreatesSnapshotKind(t *testing.T) {
 	assert.Empty(t, volume.FilePath)
 }
 
+func TestCommitTemplateRootfsFromBuildReusesExistingSameOrigin(t *testing.T) {
+	source := cowTemplateBuildRootfsName("snap")
+	target := cowTemplateRootfsName("snap")
+	engine := &fakeCowEngine{
+		createSnapshotErr: &cubecow.CowError{Code: cubecow.SemAlreadyExists, RawRC: int32(cubecow.SemAlreadyExists)},
+		volumeInfos: map[string]*cubecow.Volume{
+			target: {DevicePath: "/dev/mapper/" + target, SizeBytes: 1024},
+		},
+		listSnapshots: map[string][]cubecow.Snapshot{
+			source: {{Name: target, OriginVolume: source}},
+		},
+	}
+	manager := &CowVolumeManager{engine: engine}
+
+	volume, err := manager.CommitTemplateRootfsFromBuild(context.Background(), source, "snap")
+	require.NoError(t, err)
+	require.NotNil(t, volume)
+	assert.Equal(t, target, volume.VolumeName)
+	assert.Equal(t, "/dev/mapper/"+target, volume.FilePath)
+	assert.Equal(t, [][2]string{{source, target}}, engine.createSnapshots)
+}
+
+func TestCommitTemplateRootfsFromBuildRejectsExistingDifferentOrigin(t *testing.T) {
+	source := cowTemplateBuildRootfsName("snap")
+	target := cowTemplateRootfsName("snap")
+	engine := &fakeCowEngine{
+		createSnapshotErr: &cubecow.CowError{Code: cubecow.SemAlreadyExists, RawRC: int32(cubecow.SemAlreadyExists)},
+		listSnapshots: map[string][]cubecow.Snapshot{
+			source: {{Name: target, OriginVolume: "sb-other-rootfs"}},
+		},
+	}
+	manager := &CowVolumeManager{engine: engine}
+
+	volume, err := manager.CommitTemplateRootfsFromBuild(context.Background(), source, "snap")
+	require.Error(t, err)
+	assert.Nil(t, volume)
+	assert.Contains(t, err.Error(), "does not match expected")
+	assert.Empty(t, engine.deletedSnapshots)
+}
+
+func TestCommitTemplateRootfsFromBuildRejectsExistingUnknownOrigin(t *testing.T) {
+	source := cowTemplateBuildRootfsName("snap")
+	target := cowTemplateRootfsName("snap")
+	engine := &fakeCowEngine{
+		createSnapshotErr: &cubecow.CowError{Code: cubecow.SemAlreadyExists, RawRC: int32(cubecow.SemAlreadyExists)},
+		listSnapshots: map[string][]cubecow.Snapshot{
+			source: {{Name: target}},
+		},
+	}
+	manager := &CowVolumeManager{engine: engine}
+
+	volume, err := manager.CommitTemplateRootfsFromBuild(context.Background(), source, "snap")
+	require.Error(t, err)
+	assert.Nil(t, volume)
+	assert.Contains(t, err.Error(), "does not match expected")
+	assert.Empty(t, engine.deletedSnapshots)
+}
+
 func TestCommitTemplateMemoryProducesActivatedSnapshot(t *testing.T) {
 	engine := &fakeCowEngine{
 		createSnapshotPath: "/dev/mapper/tpl-snap-memory",

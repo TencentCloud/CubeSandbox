@@ -5,11 +5,59 @@
 package templatecenter
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
+
+func TestListBackfillDefinitionsIncludesPartiallyReady(t *testing.T) {
+	db := newMigrateSharedStoreTestDB(t)
+	for _, status := range []string{StatusReady, StatusPartiallyReady, StatusFailed, StatusPending} {
+		if err := db.Create(&models.TemplateDefinition{TemplateID: "tpl-" + status, Status: status}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	defs, err := listBackfillDefinitions(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs) != 2 {
+		t.Fatalf("backfill definitions = %v, want READY and PARTIALLY_READY only", defs)
+	}
+	for _, def := range defs {
+		if def.TemplateID != "tpl-"+StatusReady && def.TemplateID != "tpl-"+StatusPartiallyReady {
+			t.Fatalf("unexpected definition: %+v", def)
+		}
+	}
+}
+
+func TestBackfillRejectsWarmCommit(t *testing.T) {
+	db := newMigrateSharedStoreTestDB(t)
+	if err := db.AutoMigrate(&models.TemplateImageJob{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range []models.TemplateImageJob{
+		{JobID: "job-old-cold", TemplateID: "tpl-warm", Operation: JobOperationCreate, ArtifactID: "rfs-ancestor", AttemptNo: 10},
+		{JobID: "job-new-warm", TemplateID: "tpl-warm", Operation: JobOperationCommit, ArtifactID: "rfs-ancestor", AttemptNo: 1},
+	} {
+		if err := db.Create(&job).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldArtifact := backfillArtifact
+	t.Cleanup(func() { backfillArtifact = oldArtifact })
+	backfillArtifact = func(context.Context, string) (*models.RootfsArtifact, error) {
+		t.Fatal("warm commit must not load its ancestor cold rootfs artifact")
+		return nil, nil
+	}
+	err := backfillTemplateReplicas(t.Context(), backfillDefinition{TemplateID: "tpl-warm", RootfsArtifactID: "rfs-ancestor"})
+	if err == nil || !strings.Contains(err.Error(), "warm COMMIT") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func testNode(id, ip string) *node.Node { return &node.Node{InsID: id, IP: ip} }
 

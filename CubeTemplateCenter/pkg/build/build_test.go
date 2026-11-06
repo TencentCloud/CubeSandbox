@@ -5,7 +5,9 @@ package build
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +15,41 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/s3store"
 )
+
+func TestReusableArtifactDataUsesStoredVersionedKey(t *testing.T) {
+	root := t.TempDir()
+	client, err := s3store.NewClient(s3store.Config{Driver: "fs", FSRoot: root, ArtifactPrefix: "templates"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "source.ext4")
+	if err := os.WriteFile(path, []byte("ext4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key, err := client.UploadVersioned(t.Context(), "rfs-versioned", path, fmt.Sprintf("%x", sha256.Sum256([]byte("ext4"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID: "rfs-versioned", StorageBackend: "fs", StorageRef: client.StorageRef(),
+		ObjectKey: key, Ext4Path: filepath.Join(t.TempDir(), "missing.ext4"),
+	}
+	if _, ok := reusableArtifactData(t.Context(), artifact, true, client); !ok {
+		t.Fatal("published versioned object was incorrectly treated as missing")
+	}
+	originalRef := artifact.StorageRef
+	artifact.StorageRef = "file:///another-store"
+	if _, ok := reusableArtifactData(t.Context(), artifact, true, client); ok {
+		t.Fatal("artifact from another store was incorrectly reused")
+	}
+	artifact.StorageRef = originalRef
+	artifact.ObjectKey = "templates/missing.ext4"
+	if _, ok := reusableArtifactData(t.Context(), artifact, true, client); ok {
+		t.Fatal("missing published object was incorrectly reused")
+	}
+}
 
 // Regression coverage for the P1 bug where READY-artifact reuse only ever
 // checked os.Stat(Ext4Path), so an S3-backed artifact built by a sibling TC

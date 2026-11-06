@@ -106,6 +106,11 @@ const (
 	EnvNodeIP       = "CUBE_TEMPLATE_CENTER_NODE_IP"
 	sharedEnvNodeIP = "CUBE_SANDBOX_NODE_IP"
 
+	// EnvDownloadBase is the routable origin Cubelets use for authorized
+	// direct artifact downloads. It is required in service-network topologies
+	// where EnvNodeIP does not address the TemplateCenter listener.
+	EnvDownloadBase = constants.TemplateCenterDownloadAddrEnv
+
 	// EnvMaxConcurrentBuilds caps simultaneous builds. Unset or a non-positive
 	// value means DefaultMaxConcurrentBuilds.
 	EnvMaxConcurrentBuilds       = "CUBE_TEMPLATE_CENTER_MAX_CONCURRENT_BUILDS"
@@ -114,6 +119,7 @@ const (
 	// S3/MinIO artifact storage. Names are aliases of configenv so existing
 	// t.Setenv(tcconfig.EnvS3*) call sites keep working.
 	EnvS3Endpoint           = configenv.EnvS3Endpoint
+	EnvS3NodeEndpoint       = configenv.EnvS3NodeEndpoint
 	EnvS3Bucket             = configenv.EnvS3Bucket
 	EnvS3AccessKey          = configenv.EnvS3AccessKeyID
 	legacyEnvS3AccessKey    = configenv.LegacyEnvS3AccessKey
@@ -274,6 +280,25 @@ func MasterEndpoint() string {
 func CallbackToken() string {
 	v, _ := lookup(constants.TemplateCallbackTokenEnv, "CUBE_TC_CALLBACK_TOKEN")
 	return v
+}
+
+// DownloadBaseURL returns the stable node-facing TemplateCenter origin.
+func DownloadBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv(EnvDownloadBase)); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	cfg := config.GetConfig()
+	if cfg == nil || cfg.Common == nil {
+		return ""
+	}
+	host := NodeIP()
+	if host == "" {
+		host = strings.TrimSpace(cfg.Common.HttpBind)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(cfg.Common.HttpPort))
 }
 
 // ReconcileDisabled reports whether the background sweep is switched off.

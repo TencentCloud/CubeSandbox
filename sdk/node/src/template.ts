@@ -159,6 +159,8 @@ export interface TemplateBuildOptions {
   startCmd?: string;
   instanceType?: string;
   writableLayerSize?: string;
+  /** CoW backend for the template and its snapshots. Defaults to xfs. */
+  backend?: "xfs" | "s3";
   exposedPorts?: number[];
   probePort?: number;
   probePath?: string;
@@ -236,6 +238,7 @@ export class Template {
     if (options.writableLayerSize !== undefined) {
       payload.writableLayerSize = options.writableLayerSize;
     }
+    if (options.backend !== undefined) payload.backend = options.backend;
     if (options.exposedPorts !== undefined) payload.exposedPorts = options.exposedPorts;
     if (options.probePort !== undefined) payload.probePort = options.probePort;
     if (options.probePath !== undefined) payload.probePath = options.probePath;

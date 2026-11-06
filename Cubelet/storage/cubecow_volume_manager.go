@@ -193,6 +193,18 @@ func (m *XfsCow) CommitTemplateRootfs(ctx context.Context, sourceName, templateI
 	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
 }
 
+// CommitTemplateRootfsFromBuild is the idempotent AppSnapshot-only variant.
+// An existing destination is reusable only when cubecow proves it was created
+// from this template's deterministic build-rootfs source.
+func (m *XfsCow) CommitTemplateRootfsFromBuild(ctx context.Context, sourceName, templateID string) (*cowVolume, error) {
+	snapshotName := cowTemplateRootfsName(templateID)
+	devPath, err := m.createOrResolveSnapshotPathFromSource(ctx, sourceName, snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
+}
+
 func (m *XfsCow) CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	name := cowTemplateMemoryName(templateID)
 	devPath, err := m.createTemplateVolumePath(name, sizeBytes)
@@ -403,7 +415,7 @@ func (m *XfsCow) ensureSnapshotOrigin(sourceName, snapshotName string) error {
 		if snapshot.Name != snapshotName {
 			continue
 		}
-		if snapshot.OriginVolume != "" && snapshot.OriginVolume != sourceName {
+		if snapshot.OriginVolume != sourceName {
 			return fmt.Errorf("existing snapshot %s origin %s does not match expected %s", snapshotName, snapshot.OriginVolume, sourceName)
 		}
 		return nil

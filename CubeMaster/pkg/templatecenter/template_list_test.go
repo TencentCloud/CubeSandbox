@@ -11,13 +11,102 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/glebarez/sqlite"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
+
+type templateListSQLRecorder struct {
+	logger.Interface
+	queries []string
+}
+
+func (r *templateListSQLRecorder) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	sql, _ := fc()
+	r.queries = append(r.queries, sql)
+}
+
+func TestTemplateInfoFromJobBackend(t *testing.T) {
+	for _, tc := range []struct{ request, want string }{
+		{`{"backend":"S3"}`, "s3"}, {`{"backend":"xfs"}`, "xfs"}, {`{}`, "xfs"}, {`invalid`, ""},
+	} {
+		info := templateInfoFromJob(&models.TemplateImageJob{RequestJSON: tc.request})
+		if info.Backend != tc.want || info.StorageBackend != tc.want {
+			t.Fatalf("request=%s info=%+v", tc.request, info)
+		}
+	}
+}
+
+func TestListTemplatesLightweightPagination(t *testing.T) {
+	db := newTemplateListSQLiteDB(t)
+	for i := 0; i < 3; i++ {
+		if err := db.Create(&models.TemplateDefinition{TemplateID: fmt.Sprintf("tpl-%d", i), Status: StatusReady}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorder := &templateListSQLRecorder{Interface: logger.Discard}
+	db.Logger = recorder
+	for _, tc := range []struct {
+		offset, wantLen int
+		more            bool
+	}{{0, 2, true}, {2, 1, false}, {99, 0, false}} {
+		page, err := ListTemplatesWithOptions(t.Context(), TemplateListOptions{Limit: 2, Offset: tc.offset, SkipTotal: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Total != -1 || len(page.Templates) != tc.wantLen || page.HasMore != tc.more {
+			t.Fatalf("offset=%d page=%+v", tc.offset, page)
+		}
+	}
+	if len(recorder.queries) == 0 {
+		t.Fatal("SQL recorder did not observe any queries")
+	}
+	for _, query := range recorder.queries {
+		if strings.Contains(query, "COUNT(*) AS total FROM visible_templates") {
+			t.Fatal("lightweight page executed exact COUNT")
+		}
+	}
+}
+
+func TestListTemplatesBoundsHistoricalJobs(t *testing.T) {
+	db := newTemplateListSQLiteDB(t)
+	defs := make([]models.TemplateDefinition, 250)
+	jobs := make([]models.TemplateImageJob, 0, 2000)
+	for i := range defs {
+		id := fmt.Sprintf("tpl-%04d", i)
+		defs[i] = models.TemplateDefinition{TemplateID: id, Status: StatusReady}
+		for attempt := 0; attempt < 8; attempt++ {
+			jobs = append(jobs, models.TemplateImageJob{TemplateID: id, JobID: fmt.Sprintf("job-%d-%d", i, attempt), Operation: JobOperationCreate, AttemptNo: int32(attempt + 1)})
+		}
+	}
+	if err := db.CreateInBatches(defs, 50).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateInBatches(jobs, 50).Error; err != nil {
+		t.Fatal(err)
+	}
+	page, err := ListTemplatesWithOptions(t.Context(), TemplateListOptions{Limit: 99999, SkipTotal: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Templates) != MaxTemplateListLimit || !page.HasMore {
+		t.Fatalf("unbounded page: %+v", page)
+	}
+	page, err = ListTemplatesWithOptions(t.Context(), TemplateListOptions{Limit: 10, Offset: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != len(defs) || len(page.Templates) != 10 {
+		t.Fatalf("historical jobs incorrectly inflated list: %+v", page)
+	}
+}
 
 // ---- sliceTemplateInfos ----
 
@@ -64,10 +153,134 @@ func TestSliceTemplateInfos(t *testing.T) {
 
 // ---- ListTemplatesWithOptions ----
 
-func TestListTemplatesWithOptionsServesPagesFromCache(t *testing.T) {
+func newTemplateListSQLiteDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "-"), time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range []any{
+		&models.TemplateDefinition{},
+		&models.TemplateImageJob{},
+		&models.SnapshotRecord{},
+		&models.TemplateReplica{},
+	} {
+		if err := db.AutoMigrate(model); err != nil {
+			t.Fatal(err)
+		}
+	}
 	oldDB := store.db
-	defer func() { store.db = oldDB }()
-	store.db = stubListTemplatesDB(t, nil, nil)
+	oldRegistryAuthoritative := cleanupNodeRegistryAuthoritative
+	store.db = db
+	cleanupNodeRegistryAuthoritative = func() bool { return false }
+	t.Cleanup(func() {
+		store.db = oldDB
+		cleanupNodeRegistryAuthoritative = oldRegistryAuthoritative
+	})
+	return db
+}
+
+func TestListTemplatesWithOptionsUsesDatabasePagination(t *testing.T) {
+	db := newTemplateListSQLiteDB(t)
+	base := time.Now().UTC().Truncate(time.Second)
+	defs := []models.TemplateDefinition{
+		{TemplateID: "tpl-b", Status: StatusReady, Model: gorm.Model{CreatedAt: base, UpdatedAt: base.Add(4 * time.Minute)}},
+		{TemplateID: "tpl-a", Status: StatusReady, Model: gorm.Model{CreatedAt: base, UpdatedAt: base.Add(4 * time.Minute)}},
+		{TemplateID: "pause-hidden", Kind: pausesnap.KindPauseSnapshot, Status: StatusReady, Model: gorm.Model{UpdatedAt: base.Add(6 * time.Minute)}},
+		{TemplateID: "snap-deleted", Kind: TemplateKindSnapshot, Status: StatusReady, Model: gorm.Model{UpdatedAt: base.Add(5 * time.Minute)}},
+	}
+	if err := db.Create(&defs).Error; err != nil {
+		t.Fatal(err)
+	}
+	jobs := []models.TemplateImageJob{
+		{TemplateID: "job-only", JobID: "job-old", Operation: JobOperationCreate, AttemptNo: 1, Status: JobStatusFailed, Model: gorm.Model{UpdatedAt: base.Add(time.Minute)}},
+		{TemplateID: "job-only", JobID: "job-new", Operation: JobOperationRedo, AttemptNo: 2, Status: JobStatusReady, Model: gorm.Model{UpdatedAt: base.Add(3 * time.Minute)}},
+		{TemplateID: "ignored-migrate", JobID: "job-migrate", Operation: JobOperationMigrate, AttemptNo: 1, Status: JobStatusReady, Model: gorm.Model{UpdatedAt: base.Add(10 * time.Minute)}},
+	}
+	if err := db.Create(&jobs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.SnapshotRecord{SnapshotID: "snap-deleted", Status: StatusDeleted}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if first.Total != 3 || len(first.Templates) != 2 {
+		t.Fatalf("first page = total %d len %d, want 3/2", first.Total, len(first.Templates))
+	}
+	if first.Templates[0].TemplateID != "tpl-a" || first.Templates[1].TemplateID != "tpl-b" {
+		t.Fatalf("stable first page order = %v, want [tpl-a tpl-b]", []string{first.Templates[0].TemplateID, first.Templates[1].TemplateID})
+	}
+
+	second, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	if second.Total != 3 || len(second.Templates) != 1 ||
+		second.Templates[0].TemplateID != "job-only" ||
+		second.Templates[0].JobID != "job-new" {
+		t.Fatalf("second page = %+v, want latest job-only entry and total 3", second)
+	}
+
+	pastEnd, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{Limit: 2, Offset: 99})
+	if err != nil {
+		t.Fatalf("past-end page: %v", err)
+	}
+	if pastEnd.Total != 3 || len(pastEnd.Templates) != 0 {
+		t.Fatalf("past-end page = total %d len %d, want 3/0", pastEnd.Total, len(pastEnd.Templates))
+	}
+}
+
+func TestListTemplatesWithOptionsDefaultsToFinitePage(t *testing.T) {
+	db := newTemplateListSQLiteDB(t)
+	defs := make([]models.TemplateDefinition, 0, DefaultTemplateListLimit+5)
+	for i := 0; i < DefaultTemplateListLimit+5; i++ {
+		defs = append(defs, models.TemplateDefinition{
+			TemplateID: fmt.Sprintf("tpl-%03d", i),
+			Status:     StatusReady,
+		})
+	}
+	if err := db.Create(&defs).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{})
+	if err != nil {
+		t.Fatalf("ListTemplatesWithOptions: %v", err)
+	}
+	if got.Total != len(defs) || len(got.Templates) != DefaultTemplateListLimit {
+		t.Fatalf("default page = total %d len %d, want %d/%d", got.Total, len(got.Templates), len(defs), DefaultTemplateListLimit)
+	}
+}
+
+func TestListTemplatesBackCompatReturnsAll(t *testing.T) {
+	db := newTemplateListSQLiteDB(t)
+	defs := make([]models.TemplateDefinition, 0, DefaultTemplateListLimit+5)
+	for i := 0; i < DefaultTemplateListLimit+5; i++ {
+		defs = append(defs, models.TemplateDefinition{
+			TemplateID: fmt.Sprintf("tpl-%03d", i),
+			Status:     StatusReady,
+		})
+	}
+	if err := db.Create(&defs).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ListTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(got) != len(defs) {
+		t.Fatalf("ListTemplates returned %d entries, want %d", len(got), len(defs))
+	}
+}
+
+func TestListTemplatesWithOptionsIgnoresLegacyFullListCache(t *testing.T) {
+	newTemplateListSQLiteDB(t)
 	templateListCache.Flush()
 	defer templateListCache.Flush()
 
@@ -77,64 +290,12 @@ func TestListTemplatesWithOptionsServesPagesFromCache(t *testing.T) {
 		{TemplateID: "tpl-c"},
 	})
 
-	got, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{})
+	page, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{Limit: 2})
 	if err != nil {
-		t.Fatalf("unpaged ListTemplatesWithOptions: %v", err)
+		t.Fatalf("ListTemplatesWithOptions: %v", err)
 	}
-	if got.Total != 3 || len(got.Templates) != 3 {
-		t.Fatalf("unpaged = total %d len %d, want 3/3", got.Total, len(got.Templates))
-	}
-
-	// Consecutive pages must concatenate to the full cached list.
-	var paged []string
-	for offset := 0; ; offset += 2 {
-		page, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{Limit: 2, Offset: offset})
-		if err != nil {
-			t.Fatalf("page offset=%d: %v", offset, err)
-		}
-		if page.Total != 3 {
-			t.Fatalf("page offset=%d total = %d, want 3", offset, page.Total)
-		}
-		for _, info := range page.Templates {
-			paged = append(paged, info.TemplateID)
-		}
-		if len(page.Templates) == 0 {
-			break
-		}
-	}
-	want := []string{"tpl-a", "tpl-b", "tpl-c"}
-	if len(paged) != len(want) {
-		t.Fatalf("paged concat = %v, want %v", paged, want)
-	}
-	for i := range want {
-		if paged[i] != want[i] {
-			t.Fatalf("paged concat = %v, want %v", paged, want)
-		}
-	}
-
-	page, err := ListTemplatesWithOptions(context.Background(), TemplateListOptions{Limit: 2, Offset: 3})
-	if err != nil {
-		t.Fatalf("past-end page: %v", err)
-	}
-	if page.Total != 3 || len(page.Templates) != 0 {
-		t.Fatalf("past-end page = total %d len %d, want 3/0", page.Total, len(page.Templates))
-	}
-}
-
-func TestListTemplatesBackCompatReturnsAll(t *testing.T) {
-	oldDB := store.db
-	defer func() { store.db = oldDB }()
-	store.db = stubListTemplatesDB(t, nil, nil)
-	templateListCache.Flush()
-	defer templateListCache.Flush()
-
-	setTemplateListCache([]TemplateInfo{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}})
-	got, err := ListTemplates(context.Background())
-	if err != nil {
-		t.Fatalf("ListTemplates: %v", err)
-	}
-	if len(got) != 2 || got[0].TemplateID != "tpl-a" {
-		t.Fatalf("ListTemplates = %v", got)
+	if page.Total != 0 || len(page.Templates) != 0 {
+		t.Fatalf("database page unexpectedly came from legacy cache: %+v", page)
 	}
 }
 
@@ -230,58 +391,6 @@ func inClauseExpr(tx *gorm.DB) *clause.Expr {
 		return &expr
 	}
 	return nil
-}
-
-// orderBySQL extracts the raw ORDER BY text of a statement, if any.
-func orderBySQL(tx *gorm.DB) string {
-	ob, ok := tx.Statement.Clauses["ORDER BY"].Expression.(clause.OrderBy)
-	if !ok {
-		return ""
-	}
-	for _, col := range ob.Columns {
-		if col.Column.Raw {
-			return col.Column.Name
-		}
-	}
-	return ""
-}
-
-// TestListTemplatesFromDBOrdersTotally pins the paging contract: the
-// definition query must order by a unique key combination so equal-second
-// rows keep a stable order across cache refreshes.
-func TestListTemplatesFromDBOrdersTotally(t *testing.T) {
-	oldDB := store.db
-	defer func() { store.db = oldDB }()
-	templateListCache.Flush()
-	defer templateListCache.Flush()
-
-	sqlDB, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:3306)/unused?parseTime=true")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := gorm.Open(gormmysql.New(gormmysql.Config{
-		Conn:                      sqlDB,
-		SkipInitializeWithVersion: true,
-	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var gotOrder string
-	if err := db.Callback().Query().Replace("gorm:query", func(tx *gorm.DB) {
-		if _, ok := tx.Statement.Dest.(*[]models.TemplateDefinition); ok {
-			gotOrder = orderBySQL(tx)
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-	store.db = db
-
-	if _, err := listTemplatesFromDB(context.Background()); err != nil {
-		t.Fatalf("listTemplatesFromDB: %v", err)
-	}
-	if !strings.Contains(gotOrder, "updated_at desc") || !strings.Contains(gotOrder, "template_id asc") {
-		t.Fatalf("definition order = %q, want a unique tiebreaker like 'updated_at desc, template_id asc'", gotOrder)
-	}
 }
 
 // stubChunkedReplicasDB records each batch's IN ids and answers one READY

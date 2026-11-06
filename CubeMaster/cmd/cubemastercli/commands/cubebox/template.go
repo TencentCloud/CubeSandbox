@@ -6,14 +6,17 @@ package cubebox
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -61,9 +64,12 @@ type templateResponse struct {
 }
 
 type templateListResponse struct {
-	Ret   *types.Ret        `json:"ret,omitempty"`
-	Data  []templateSummary `json:"data,omitempty"`
-	Total int               `json:"total,omitempty"`
+	Ret     *types.Ret        `json:"ret,omitempty"`
+	Data    []templateSummary `json:"data,omitempty"`
+	Total   int               `json:"total,omitempty"`
+	Limit   int               `json:"limit,omitempty"`
+	Offset  int               `json:"offset,omitempty"`
+	HasMore bool              `json:"has_more"`
 }
 
 type templateSummary struct {
@@ -345,6 +351,35 @@ var TemplateCommand = cli.Command{
 	},
 }
 
+const templateBackendUsage = "runtime CoW backend (xfs|s3); s3 uses the node's configured S3-compatible store"
+
+func normalizeCLIBackend(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case constants.SnapshotBackendXFS:
+		return constants.SnapshotBackendXFS, nil
+	case constants.SnapshotBackendS3:
+		return constants.SnapshotBackendS3, nil
+	default:
+		return "", fmt.Errorf("unsupported backend %q (want %q or %q)", raw, constants.SnapshotBackendXFS, constants.SnapshotBackendS3)
+	}
+}
+
+func applyTemplateBackendFlag(c *cli.Context, req *types.CreateCubeSandboxReq) error {
+	if !c.IsSet("backend") {
+		return nil
+	}
+	backend, err := normalizeCLIBackend(c.String("backend"))
+	if err != nil {
+		return err
+	}
+	req.Backend = backend
+	if req.Annotations == nil {
+		req.Annotations = map[string]string{}
+	}
+	req.Annotations[constants.CubeAnnotationStorageBackend] = backend
+	return nil
+}
+
 var TemplateCreateCommand = cli.Command{
 	Name:  "create",
 	Usage: "create template snapshots on healthy nodes",
@@ -365,6 +400,10 @@ var TemplateCreateCommand = cli.Command{
 		cli.StringFlag{
 			Name:  "instance-type",
 			Usage: "override instance type in request body",
+		},
+		cli.StringFlag{
+			Name:  "backend",
+			Usage: templateBackendUsage,
 		},
 		cli.StringSliceFlag{
 			Name:  "node",
@@ -425,6 +464,9 @@ var TemplateCreateCommand = cli.Command{
 		}
 		if scope := c.StringSlice("node"); len(scope) > 0 {
 			req.DistributionScope = scope
+		}
+		if err := applyTemplateBackendFlag(c, req); err != nil {
+			return err
 		}
 		req.CubeNetworkConfig = mergeCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 
@@ -873,15 +915,16 @@ var TemplateCommitCommand = cli.Command{
 }
 
 var TemplateCreateFromImageCommand = cli.Command{
-	Name:  "create-from-image",
-	Usage: "build ext4 rootfs from OCI image and create template asynchronously",
+	Name:    "create-from-image",
+	Aliases: []string{"build"},
+	Usage:   "build ext4 rootfs from OCI image and create template asynchronously",
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "image", Usage: "source OCI image reference"},
 		cli.StringFlag{Name: "alias", Usage: "human-readable stable alias for the template (e.g. my-app); sandboxes can reference the template by this alias instead of the generated template ID; valid: [a-z0-9-], max 64 chars"},
 		cli.StringFlag{Name: "writable-layer-size", Usage: "immutable writable layer size, e.g. 20Gi"},
 		cli.StringSliceFlag{Name: "expose-port", Usage: "container port to expose for the template; repeat the flag to specify multiple ports"},
 		cli.StringFlag{Name: "instance-type", Value: "cubebox", Usage: "instance type"},
-		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3); omit to keep the historical xfs path"},
+		cli.StringFlag{Name: "backend", Usage: templateBackendUsage},
 		cli.StringFlag{Name: "network-type", Value: "tap", Usage: "network type"},
 		cli.StringSliceFlag{Name: "node", Usage: "create template only on the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},
@@ -927,6 +970,13 @@ var TemplateCreateFromImageCommand = cli.Command{
 		if err != nil {
 			return err
 		}
+		backend := ""
+		if c.IsSet("backend") {
+			backend, err = normalizeCLIBackend(c.String("backend"))
+			if err != nil {
+				return err
+			}
+		}
 		req := &types.CreateTemplateFromImageReq{
 			Request:        &types.Request{RequestID: uuid.New().String()},
 			SourceImageRef: c.String("image"),
@@ -937,7 +987,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 			ExposedPorts:       exposedPorts,
 			InstanceType:       c.String("instance-type"),
 			NetworkType:        c.String("network-type"),
-			Backend:            c.String("backend"),
+			Backend:            backend,
 			RegistryUsername:   c.String("registry-username"),
 			RegistryPassword:   c.String("registry-password"),
 			ContainerOverrides: containerOverrides,
@@ -1207,11 +1257,20 @@ var TemplateListCommand = cli.Command{
 		},
 		cli.IntFlag{
 			Name:  "limit",
-			Usage: "max templates to return (0 = all)",
+			Value: 50,
+			Usage: "max templates to return (server maximum 200)",
 		},
 		cli.IntFlag{
 			Name:  "offset",
 			Usage: "number of templates to skip",
+		},
+		cli.BoolFlag{
+			Name:  "all",
+			Usage: "walk server pages; table output is flushed after each page",
+		},
+		cli.BoolFlag{
+			Name:  "no-total",
+			Usage: "skip the exact database count; use has_more for navigation (requires an updated server)",
 		},
 		cli.StringFlag{
 			Name:  "output,o",
@@ -1227,15 +1286,30 @@ var TemplateListCommand = cli.Command{
 		port = c.GlobalString("port")
 		requestID := uuid.New().String()
 		host := serverList[rand.Int()%len(serverList)]
-		url := fmt.Sprintf("http://%s/cube/template", net.JoinHostPort(host, port))
-		paged := false
-		if query := templateListQuery(c); query != "" {
-			url += "?" + query
-			paged = true
+		baseURL := fmt.Sprintf("http://%s/cube/template", net.JoinHostPort(host, port))
+		if c.Bool("all") && (c.IsSet("limit") || c.IsSet("offset")) {
+			return errors.New("--all cannot be combined with --limit or --offset")
+		}
+		if !c.Bool("all") && c.Int("limit") <= 0 {
+			return errors.New("--limit must be greater than zero; use --all to fetch every template")
+		}
+		if c.Int("offset") < 0 {
+			return errors.New("--offset must be non-negative")
 		}
 
-		rsp := &templateListResponse{}
-		if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
+		if c.Bool("all") && !c.Bool("json") {
+			return streamAllTemplatePages(c, baseURL, requestID, os.Stdout)
+		}
+		var rsp *templateListResponse
+		var err error
+		if c.Bool("all") {
+			rsp, err = fetchAllTemplatePages(c, baseURL, requestID)
+		} else {
+			requestURL := baseURL + "?" + templateListQuery(c)
+			rsp = &templateListResponse{}
+			err = doHttpReq(c, requestURL, http.MethodGet, requestID, nil, rsp)
+		}
+		if err != nil {
 			log.Printf("template list request err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
@@ -1250,58 +1324,153 @@ var TemplateListCommand = cli.Command{
 			commands.PrintAsJSON(rsp)
 			return nil
 		}
-		if paged {
+		if rsp.Total >= 0 {
 			log.Printf("total: %d\n", rsp.Total)
+		} else {
+			log.Printf("total: not counted (--no-total)\n")
 		}
-		wideOutput := strings.EqualFold(strings.TrimSpace(c.String("output")), "wide")
-		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		tabHeader := "TEMPLATE_ID\tALIAS\tSTATUS\tBACKEND\tJOB_ID\tCREATED_AT\tIMAGE_INFO"
-		if wideOutput {
-			tabHeader = "TEMPLATE_ID\tALIAS\tSTATUS\tBACKEND\tJOB_ID\tLAST_ERROR\tCREATED_AT\tIMAGE_INFO"
-		}
-		fmt.Fprintln(w, tabHeader)
-		for _, item := range rsp.Data {
-			jobID := item.JobID
-			if jobID == "" {
-				jobID = "-"
+		if !c.Bool("all") && (rsp.HasMore || (rsp.Offset+len(rsp.Data) < rsp.Total)) {
+			nextOffset := rsp.Offset + len(rsp.Data)
+			if rsp.Limit == 0 {
+				nextOffset = c.Int("offset") + len(rsp.Data)
 			}
-			alias := item.DisplayName
-			if alias == "" {
-				alias = "-"
-			}
-			backend := firstNonEmptyCLI(item.Backend, item.StorageBackend)
-			var row string
-			if wideOutput {
-				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
-					item.TemplateID, alias, item.Status, backend, jobID, item.LastError, item.CreatedAt, item.ImageInfo)
+			if rsp.Total >= 0 {
+				log.Printf("showing %d of %d (offset %d); next page: --offset %d, or --all\n", len(rsp.Data), rsp.Total, c.Int("offset"), nextOffset)
 			} else {
-				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
-					item.TemplateID, alias, item.Status, backend, jobID, item.CreatedAt, item.ImageInfo)
+				log.Printf("showing %d (offset %d); next page: --offset %d --no-total, or --all\n", len(rsp.Data), c.Int("offset"), nextOffset)
 			}
-			fmt.Fprintln(w, row)
 		}
-		return w.Flush()
+		return printTemplateListPage(os.Stdout, rsp, strings.EqualFold(strings.TrimSpace(c.String("output")), "wide"), true)
 	},
 }
 
-// templateListQuery builds the paging query string for tpl ls; empty when no
-// paging flag is set, keeping the request identical to the historical one.
+// templateListQuery always emits a finite page. Full traversal is explicit via
+// --all and fetchAllTemplatePages.
 func templateListQuery(c *cli.Context) string {
 	query := url.Values{}
-	if c.IsSet("limit") {
-		if limit := c.Int("limit"); limit > 0 {
-			query.Set("limit", strconv.Itoa(limit))
-		}
+	query.Set("limit", strconv.Itoa(c.Int("limit")))
+	if c.Bool("no-total") {
+		query.Set("skip_total", "true")
 	}
-	if c.IsSet("offset") {
-		if offset := c.Int("offset"); offset > 0 {
-			query.Set("offset", strconv.Itoa(offset))
-		}
-	}
-	if len(query) == 0 {
-		return ""
+	if offset := c.Int("offset"); offset > 0 {
+		query.Set("offset", strconv.Itoa(offset))
 	}
 	return query.Encode()
+}
+
+func walkTemplatePages(c *cli.Context, baseURL, requestID string, skipTotal bool, visit func(*templateListResponse) error) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if timeout := c.GlobalDuration("timeout"); timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	lastPage := ""
+	seen := make(map[string]struct{})
+	for offset := 0; ; {
+		query := url.Values{"limit": {"200"}, "offset": {strconv.Itoa(offset)}}
+		if skipTotal {
+			query.Set("skip_total", "true")
+		}
+		page := &templateListResponse{}
+		if err := doHttpReqContext(ctx, c, baseURL+"?"+query.Encode(), http.MethodGet, requestID, nil, "", page); err != nil {
+			return err
+		}
+		if page.Ret == nil {
+			return errors.New("empty response")
+		}
+		if page.Ret.RetCode != 200 {
+			return errors.New(page.Ret.RetMsg)
+		}
+		if page.Limit > 0 && page.Offset != offset {
+			return fmt.Errorf("template page did not advance: requested offset %d, received %d", offset, page.Offset)
+		}
+		if len(page.Data) > 0 {
+			identity := page.Data[0].TemplateID + "\x00" + page.Data[len(page.Data)-1].TemplateID
+			if identity == lastPage {
+				return errors.New("template server repeated a page; traversal stopped")
+			}
+			lastPage = identity
+			for _, item := range page.Data {
+				if item.TemplateID == "" {
+					return errors.New("template server returned an empty template ID")
+				}
+				if _, exists := seen[item.TemplateID]; exists {
+					return fmt.Errorf("template list changed during traversal (duplicate %s); retry --all", item.TemplateID)
+				}
+				seen[item.TemplateID] = struct{}{}
+			}
+		} else if page.HasMore {
+			return errors.New("template server returned an empty page with has_more=true")
+		}
+		if err := visit(page); err != nil {
+			return err
+		}
+		if len(page.Data) == 0 {
+			return nil
+		}
+		next := offset + len(page.Data)
+		if next <= offset {
+			return errors.New("template page offset overflow")
+		}
+		if !page.HasMore && (page.Total < 0 || next >= page.Total) {
+			return nil
+		}
+		offset = next
+	}
+}
+
+func fetchAllTemplatePages(c *cli.Context, baseURL, requestID string) (*templateListResponse, error) {
+	result := &templateListResponse{}
+	err := walkTemplatePages(c, baseURL, requestID, c.Bool("no-total"), func(page *templateListResponse) error {
+		result.Ret = page.Ret
+		result.Total = page.Total
+		result.Data = append(result.Data, page.Data...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func streamAllTemplatePages(c *cli.Context, baseURL, requestID string, out io.Writer) error {
+	header, count := true, 0
+	err := walkTemplatePages(c, baseURL, requestID, true, func(page *templateListResponse) error {
+		if err := printTemplateListPage(out, page, strings.EqualFold(strings.TrimSpace(c.String("output")), "wide"), header); err != nil {
+			return err
+		}
+		header = false
+		count += len(page.Data)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("template traversal stopped after %d rows: %w", count, err)
+	}
+	log.Printf("listed: %d templates\n", count)
+	return nil
+}
+
+func printTemplateListPage(out io.Writer, page *templateListResponse, wide, header bool) error {
+	w := tabwriter.NewWriter(out, 4, 8, 4, ' ', 0)
+	if header {
+		if wide {
+			fmt.Fprintln(w, "TEMPLATE_ID\tALIAS\tSTATUS\tBACKEND\tJOB_ID\tLAST_ERROR\tCREATED_AT\tIMAGE_INFO")
+		} else {
+			fmt.Fprintln(w, "TEMPLATE_ID\tALIAS\tSTATUS\tBACKEND\tJOB_ID\tCREATED_AT\tIMAGE_INFO")
+		}
+	}
+	for _, item := range page.Data {
+		alias, jobID := firstNonEmptyCLI(item.DisplayName, "-"), firstNonEmptyCLI(item.JobID, "-")
+		backend := firstNonEmptyCLI(item.Backend, item.StorageBackend)
+		if wide {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.TemplateID, alias, item.Status, backend, jobID, item.LastError, item.CreatedAt, item.ImageInfo)
+		} else {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.TemplateID, alias, item.Status, backend, jobID, item.CreatedAt, item.ImageInfo)
+		}
+	}
+	return w.Flush()
 }
 
 func printTemplateSummary(rsp *templateResponse) {
