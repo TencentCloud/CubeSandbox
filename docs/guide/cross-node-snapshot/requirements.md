@@ -51,26 +51,26 @@ Master evaluates persisted database state:
 
 The state machine is `pending → inprogress → ready / failed`. `ready` means rootfs, memory, and metadata are complete on the shared backend. Data that is not ready remains usable on the origin but cannot migrate. `xfs` leaves the status empty and therefore restores only on the origin.
 
-### CPU, kernel, and KVM are compatible
+### CPU and kernel compatibility
 
-Restoring memory state requires a target compatible with the origin. Current automatic gates are:
+Restoring memory state requires the origin and the target node to be CPU- and kernel-compatible.
 
-- `cpuid_hash` equals the origin value;
-- `host_kernel_release` equals the origin value;
-- target `kvm_module_taint` is empty.
+To see the cluster's compatibility classes directly, run `cubeopscli node groups`: it groups every node by the two equality gates (`cpuid_hash` + `host_kernel_release`) and shows how many node types the cluster mixes and which nodes belong to each class.
 
-Inspect `HostFacts` with `cubeopscli node list --json`:
+```bash
+$ cubeopscli node groups
+GROUP    CPU_VENDOR     CPU_MODEL             COUNT  NODES
+type-1   GenuineIntel   Intel(R) Xeon(R) ...  3      node-1,node-2,node-3
+type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5
+```
+
+Per-node `HostFacts` are also available with `cubeopscli node list --json`.
 
 | Field | Meaning | Current gate |
 |---|---|---|
 | `cpuid_hash` | CPU identity and feature hash | Equality |
 | `host_kernel_release` | `uname -r` | Equality |
 | `kvm_module_taint` | Forced, out-of-tree, or unsigned KVM module marker | Reject non-empty target |
-| `host_kernel_fingerprint` | Kernel release and normalized cmdline fingerprint | Display only |
-| `cpu_vendor` | CPU vendor | Display only |
-| `kvm_api_version` | KVM API version | Display only |
-
-Cubelet computes `cpuid_hash` as SHA-256 over identity fields and sorted features from the first logical CPU in `/proc/cpuinfo`. x86 inputs include vendor, family, model, stepping, and flags; ARM inputs include implementer, architecture, variant, part, revision, and Features. Compare full `HostFacts` manually on heterogeneous-core machines.
 
 ## Inspection commands
 
@@ -89,6 +89,10 @@ cubemastercli cubebox template info <template-id>
 # Node health, isolation, and HostFacts
 cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
+
+# Restore-compatibility classes: groups of nodes sharing cpuid_hash and host_kernel_release
+cubeopscli --address 127.0.0.1 --port 3010 node groups
+cubeopscli --address 127.0.0.1 --port 3010 node groups --detail
 ```
 
 | Object | Field | Purpose |
@@ -98,6 +102,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 | Snapshot | `origin_node_id`, `origin_node_ip` | Origin identity |
 | Snapshot | `replicas` | Per-node status, phase, and error |
 | Template | `BACKEND` | Backend inherited by derived resources |
-| Node | `HostFacts` | CPU, kernel, and KVM comparison |
+| Node | `HostFacts` | CPU and kernel comparison |
+| Node group | shared `cpuid_hash` + `host_kernel_release` | Restore-compatibility class and members |
 
 See [Node Operations](../node-operations.md) for isolation and [CLI Tools](../cli-tools.md) for full command documentation.

@@ -24,7 +24,7 @@ import (
 var NodeCommand = cli.Command{
 	Name:    "node",
 	Aliases: []string{"nodes"},
-	Usage:   "list / isolate / unisolate / delete / quota CubeOps nodes",
+	Usage:   "list / groups / isolate / unisolate / delete / quota CubeOps nodes",
 	Subcommands: []cli.Command{
 		{
 			Name:    "list",
@@ -38,6 +38,7 @@ var NodeCommand = cli.Command{
 			},
 			Action: listAction,
 		},
+		groupsCommand,
 		quotaCommand,
 		{
 			Name:      "isolate",
