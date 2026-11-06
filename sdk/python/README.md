@@ -286,7 +286,7 @@ across sandbox restarts and can be shared between sandboxes.
 ```python
 from cubesandbox import Sandbox, Volume, VolumeMount
 
-# Create a volume — name is optional (server generates a UUID when omitted).
+# Create a volume — name is required by the E2B-compatible Python signature.
 # Omitting driver is e2b-compatible: NO driver is sent, so the backend uses its
 # first configured plugin. Pass a non-empty driver to pin a specific plugin.
 vol = Volume.create("my-data")                   # default plugin
@@ -308,9 +308,9 @@ with Sandbox.create(
     print(sb.files.read("/dataset/note.txt"))
 
 # List / get_info / connect / destroy
-for v in Volume.list():                 # list[VolumeInfo] (token always "")
+for v in Volume.list():                 # list[VolumeInfo], ID and name only
     print(v.volume_id, v.name)
-Volume.get_info(vol.volume_id)          # -> VolumeInfo (with token)
+Volume.get_info(vol.volume_id)          # -> VolumeAndToken (token and optional domain)
 vol = Volume.connect(vol.volume_id)     # -> live Volume instance
 Volume.destroy(vol.volume_id)           # -> bool; kill any mounting sandbox first (no auto-detach)
 ```
@@ -320,6 +320,73 @@ The access mode is selected per sandbox attachment. The same Volume can be read-
 Volume `name` must match `^[a-zA-Z0-9_-]+$` and be at most 128 characters;
 invalid names raise `ValueError` before any network call. See
 [`docs/volume.md`](docs/volume.md) for the full API, parameters and error codes.
+
+### Direct volume access without a sandbox
+
+The synchronous `Volume` content methods access an E2B-shaped volume-content
+gateway directly. They never create/connect a helper sandbox and do not require
+a template or `CUBE_PROXY_NODE_IP`. Existing `/volumes` management routes alone
+are insufficient: deploy a content gateway and obtain a valid volume-scoped token.
+The repository's default S3 plugin does not issue that capability.
+
+```python
+import os
+from contextlib import closing
+from cubesandbox import Volume
+
+vol = Volume(os.environ["CUBE_VOLUME_ID"], "dataset", os.environ["CUBE_VOLUME_CONTENT_TOKEN"])
+opts = {"api_url": os.environ["CUBE_VOLUME_API_URL"]}
+path = os.environ["CUBE_VOLUME_TEST_PATH"]
+data = vol.read_file(path, format="bytes", **opts)
+info = vol.get_info(path, **opts)
+with closing(vol.read_file(path, format="stream", **opts)) as chunks:
+    for chunk in chunks:
+        pass
+```
+
+`vol.list(path)` is a content operation; `Volume.list()` is management.
+Likewise, `vol.get_info(path)` returns `VolumeEntryStat`, while
+`Volume.get_info(volume_id)` returns `VolumeAndToken`. Headers/token/address can
+be supplied per call; file methods retain a synchronous iterator for streams.
+HTTPX timeouts are transport phase/idle limits, not a guaranteed wall-clock deadline.
+See [the fixed E2B contract](../../docs/e2b-volume-contract.md) and
+[the direct-access scope](../../docs/volume-direct-access.md).
+
+### Direct-volume E2E tests
+
+From `sdk/python`, install the current source rather than a released SDK:
+
+```sh
+python3 -m pip install -e '.[dev]'
+python3 -m pytest -q tests/test_volume.py tests/test_volume_content.py
+python3 -m pytest -q tests/test_volume_direct_e2e.py --run-e2e
+```
+
+The live test requires `CUBE_VOLUME_API_URL` (or `E2B_VOLUME_API_URL`),
+`CUBE_VOLUME_ID`, `CUBE_VOLUME_CONTENT_TOKEN`, and `CUBE_VOLUME_TEST_PATH` pointing
+to a stable existing file. Inject credentials through the environment; do not
+commit them or pass them on the command line. HTTPS is required outside loopback.
+
+Optional settings:
+
+| Variable | Purpose |
+|---|---|
+| `CUBE_VOLUME_TEST_SHA256` | Expected 64-character SHA-256 of the existing file |
+| `CUBE_VOLUME_TEXT_PATH` | Additional existing UTF-8 file for text-format checks |
+| `CUBE_VOLUME_TEST_DIR` | Directory for listing; defaults to the file's parent |
+| `CUBE_VOLUME_TEST_MANAGEMENT=1` | Also query existing list/detail/connect APIs; requires explicit `CUBE_API_URL`/`E2B_API_URL` and management credentials if enforced |
+| `CUBE_VOLUME_E2E_WRITE=1` | Explicitly enable write/mkdir/metadata/remove cases with a read-write token |
+| `CUBE_VOLUME_WRITE_ROOT` | Existing writable parent for unique `sdk-e2e-*` directories; defaults to `/` |
+
+Default execution reads only; it never creates/destroys a volume or sandbox.
+Mutation tests remove only their unique files/directories, never the supplied
+volume. Cleanup failures report paths for manual removal. A process crash may
+leave test data. Calls to Sandbox creation/connection and non-volume HTTP routes
+fail the tests; backend VM/lease behavior still needs server-side verification.
+All live cases skip without `--run-e2e`; missing required settings fail once enabled.
+These tests are not a live E2B differential comparison or a full tenant/symlink
+isolation certification. Large-file checks buffer the baseline once; use a file
+that fits the test runner's memory.
 
 ### List & health check
 
@@ -401,13 +468,13 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` — create a volume; omit `driver` for e2b-compatible behavior (backend's first plugin), or pass a non-empty `driver` (e.g. `"cos"`) to pin a plugin → `Volume` |
-| `Volume.connect(volume_id, *, config)` | `GET /volumes/:id` — connect to an existing volume → `Volume` |
-| `Volume.list(config)` | `GET /volumes` — list volumes → `list[VolumeInfo]` (no token) |
-| `Volume.get_info(volume_id, *, config)` | `GET /volumes/:id` — get one volume's info (with token) → `VolumeInfo` |
-| `Volume.destroy(volume_id, *, config)` | `DELETE /volumes/:id` — delete a volume → `bool` |
+| `Volume.create(name, **opts)` | `POST /volumes` — create a volume → `Volume`; optional Cube `driver` extension |
+| `Volume.connect(volume_id, **opts)` | `GET /volumes/:id` — connect without creating a sandbox → `Volume` |
+| `Volume.list(**opts)` | `GET /volumes` → `list[VolumeInfo]`, ID/name only |
+| `Volume.get_info(volume_id, **opts)` | `GET /volumes/:id` → `VolumeAndToken`, token and optional domain |
+| `Volume.destroy(volume_id, **opts)` | `DELETE /volumes/:id` → `bool` |
 
-Mount a volume into a sandbox with `Sandbox.create(volume_mounts={path: vol})`. Use `VolumeMount(vol, read_only=True)` for a read-only attachment; this does not turn the volume into an immutable snapshot. `Volume.create` / `connect` return a live `Volume` instance; `list` / `get_info` return `VolumeInfo`. Both expose `.volume_id`, `.name`, `.token`. Full reference: [`docs/volume.md`](docs/volume.md).
+Mounting via `Sandbox.create(volume_mounts={path: vol})` is separate from direct content access. `VolumeMount(vol, read_only=True)` controls only that sandbox attachment. `create` / `connect` return a `Volume`, `list` returns `VolumeInfo` entries, and class-level `get_info` returns `VolumeAndToken`. Only the handle/detail carries token; list entries do not. Instance content methods: `read_file`, `write_file`, `list`, `make_dir`, `get_info`, `update_metadata`, `exists`, `remove`. Full reference: [`docs/volume.md`](docs/volume.md).
 
 ### `Execution` object
 

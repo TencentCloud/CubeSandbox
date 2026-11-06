@@ -262,7 +262,7 @@ with Sandbox.create(metadata={"host-mount": mounts}) as sb:
 ```python
 from cubesandbox import Sandbox, Volume, VolumeMount
 
-# 创建卷 —— name 可选（省略时服务端生成 UUID）。
+# 创建卷 —— E2B 兼容的 Python 签名要求传入 name。
 # 省略 driver 即 e2b 兼容：不发送 driver，后端使用第一个已配置的插件。
 # 传入非空 driver 可绑定指定插件（如 cos、cfs）。
 vol = Volume.create("my-data")                   # 默认插件
@@ -284,9 +284,9 @@ with Sandbox.create(
     print(sb.files.read("/dataset/note.txt"))
 
 # 列出 / 查询信息 / 连接 / 销毁
-for v in Volume.list():                 # list[VolumeInfo]（token 恒为 ""）
+for v in Volume.list():                 # list[VolumeInfo]，仅有 ID 和 name
     print(v.volume_id, v.name)
-Volume.get_info(vol.volume_id)          # -> VolumeInfo（含 token）
+Volume.get_info(vol.volume_id)          # -> VolumeAndToken（token 和可选 domain）
 vol = Volume.connect(vol.volume_id)     # -> 返回 Volume 实例
 Volume.destroy(vol.volume_id)           # -> bool；先杀掉所有挂载它的沙箱（不会自动 detach）
 ```
@@ -296,6 +296,63 @@ Volume.destroy(vol.volume_id)           # -> bool；先杀掉所有挂载它的�
 卷的 `name` 必须匹配 `^[a-zA-Z0-9_-]+$` 且不超过 128 字符；非法名称
 会在任何网络请求之前抛出 `ValueError`。完整 API、参数和错误码请参阅
 [`docs/volume.zh.md`](docs/volume.zh.md)。
+
+### 不启动沙箱，直通访问卷内容
+
+同步 `Volume` 内容方法直接访问 E2B 协议的卷内容网关，不创建或连接辅助沙箱，
+不需要模板或 `CUBE_PROXY_NODE_IP`。只有现有 `/volumes` 管理接口还不够：需要
+已部署的内容网关和真实卷级凭证，默认 S3 插件不签发这种内容凭证。
+
+```python
+import os
+from contextlib import closing
+from cubesandbox import Volume
+
+vol = Volume(os.environ["CUBE_VOLUME_ID"], "dataset", os.environ["CUBE_VOLUME_CONTENT_TOKEN"])
+opts = {"api_url": os.environ["CUBE_VOLUME_API_URL"]}
+path = os.environ["CUBE_VOLUME_TEST_PATH"]
+data = vol.read_file(path, format="bytes", **opts)
+info = vol.get_info(path, **opts)
+with closing(vol.read_file(path, format="stream", **opts)) as chunks:
+    for chunk in chunks:
+        pass
+```
+
+`vol.list(path)` 是列目录，`Volume.list()` 是管理列表；`vol.get_info(path)` 返回
+`VolumeEntryStat`，`Volume.get_info(volume_id)` 返回 `VolumeAndToken`。
+支持逐次地址、token、headers 等参数；同步流提前退出时用 `closing` 释放连接。
+HTTPX 超时仍是传输阶段/空闲限制，不是严格总传输期限。
+详见[固定 E2B 合同](../../docs/e2b-volume-contract.md)和[直通范围](../../docs/volume-direct-access.md)。
+
+### 直通卷 E2E 测试
+
+在 `sdk/python` 安装当前源码后运行：
+
+```sh
+python3 -m pip install -e '.[dev]'
+python3 -m pytest -q tests/test_volume.py tests/test_volume_content.py
+python3 -m pytest -q tests/test_volume_direct_e2e.py --run-e2e
+```
+
+必填环境变量：`CUBE_VOLUME_API_URL`（或 `E2B_VOLUME_API_URL`）、`CUBE_VOLUME_ID`、
+`CUBE_VOLUME_CONTENT_TOKEN`、`CUBE_VOLUME_TEST_PATH`，最后一项指向稳定的已有文件。
+凭证从环境注入，不写入文件或命令行；非本机网关须用 HTTPS。
+
+| 可选环境变量 | 用途 |
+|---|---|
+| `CUBE_VOLUME_TEST_SHA256` | 已有文件的 64 位十六进制 SHA-256，校验真实预期内容 |
+| `CUBE_VOLUME_TEXT_PATH` | 额外的已有 UTF-8 文件，验证文本格式 |
+| `CUBE_VOLUME_TEST_DIR` | 列目录路径，默认测试文件的父目录 |
+| `CUBE_VOLUME_TEST_MANAGEMENT=1` | 启用已有管理列表/详情/connect 验证；需显式 `CUBE_API_URL`/`E2B_API_URL` 和服务要求的管理凭证 |
+| `CUBE_VOLUME_E2E_WRITE=1` | 单独启用写文件、建目录、修改元数据、删除路径；需读写 token |
+| `CUBE_VOLUME_WRITE_ROOT` | 唯一 `sdk-e2e-*` 测试目录的已有可写父目录，默认 `/` |
+
+默认只读，不创建/删除卷，不启动沙箱。写入测试只清理自己新建的唯一目录与文件，
+不会删除传入的卷；清理失败会报告待手动删除的路径，进程崩溃可能留下测试数据。
+测试拦截 SDK 沙箱创建/连接及非卷 HTTP 路由；服务端是否偷偷启动 VM、租约是否正确
+仍需服务端观测验证。未加 `--run-e2e` 时全部跳过；开启后缺必填配置会失败。
+这不是完整 E2B 服务差分或租户/符号链接隔离认证。流测试会缓冲一次基准文件，
+请选择测试机器内存可容纳的文件。
 
 ### 列表与健康检查
 
@@ -374,13 +431,13 @@ with Sandbox.create(config=cfg) as sb:
 
 | 方法 | 说明 |
 |---|---|
-| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` — 创建卷；省略 `driver` 即 e2b 兼容（后端第一个插件），或传非空 `driver`（如 `"cos"`）绑定插件 → `Volume` |
-| `Volume.connect(volume_id, *, config)` | `GET /volumes/:id` — 连接已存在的卷 → `Volume` |
-| `Volume.list(config)` | `GET /volumes` — 列出卷 → `list[VolumeInfo]`（不含 token） |
-| `Volume.get_info(volume_id, *, config)` | `GET /volumes/:id` — 查询单个卷信息（含 token）→ `VolumeInfo` |
-| `Volume.destroy(volume_id, *, config)` | `DELETE /volumes/:id` — 删除卷 → `bool` |
+| `Volume.create(name, **opts)` | `POST /volumes` → `Volume`；可选 Cube `driver` 扩展 |
+| `Volume.connect(volume_id, **opts)` | `GET /volumes/:id` → `Volume`，不创建沙箱 |
+| `Volume.list(**opts)` | `GET /volumes` → `list[VolumeInfo]`，仅 ID/name |
+| `Volume.get_info(volume_id, **opts)` | `GET /volumes/:id` → `VolumeAndToken`，包含 token/可选 domain |
+| `Volume.destroy(volume_id, **opts)` | `DELETE /volumes/:id` → `bool` |
 
-通过 `Sandbox.create(volume_mounts={path: vol})` 将卷挂载进沙箱。使用 `VolumeMount(vol, read_only=True)` 可将单次挂载设为只读；这不会把卷变成不可变快照。`Volume.create` / `connect` 返回 `Volume` 实例，`list` / `get_info` 返回 `VolumeInfo`；二者都暴露 `.volume_id`、`.name`、`.token`。完整参考：[`docs/volume.zh.md`](docs/volume.zh.md)。
+沙箱挂载与直通访问是两条独立链路；`VolumeMount(vol, read_only=True)` 仅控制一次沙箱挂载。`create` / `connect` 返回 `Volume`，类级 `list` 返回 `VolumeInfo` 列表，类级 `get_info` 返回 `VolumeAndToken`；列表条目没有 token 字段。同步实例内容方法包括 `read_file`、`write_file`、`list`、`make_dir`、`get_info`、`update_metadata`、`exists`、`remove`。完整参考：[`docs/volume.zh.md`](docs/volume.zh.md)。
 
 ### `Execution` 对象
 
