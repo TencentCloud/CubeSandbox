@@ -37,6 +37,24 @@ use crate::sandbox::net::Interface;
 use crate::sandbox::pmem::Pmem;
 
 pub const SHIM_PID_FILE: &str = "shim.pid";
+pub const RETAINED_SHIM_PREFIX: &str = "containerd-shim-cube-rs-retained-";
+
+pub fn is_retained_shim_name(name: &std::ffi::OsStr) -> bool {
+    let path = std::path::Path::new(name);
+    if path.parent().and_then(|p| p.file_name()) != Some(std::ffi::OsStr::new("delayed-log-shims"))
+    {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(RETAINED_SHIM_PREFIX))
+        .is_some_and(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
 pub const VMM_PID_FILE: &str = "vmm.pid";
 pub const ADDRESS_FILE: &str = "address";
 pub const VM_PATH: &str = "/run/vc/vm/";
@@ -747,6 +765,21 @@ impl CPath {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_shim_name_requires_the_alias_directory_and_hash() {
+        let valid = format!(
+            "/root/delayed-log-shims/{}{}",
+            super::RETAINED_SHIM_PREFIX,
+            "a".repeat(64)
+        );
+        assert!(super::is_retained_shim_name(valid.as_ref()));
+        assert!(!super::is_retained_shim_name(
+            "/usr/bin/containerd-shim-cube-rs".as_ref()
+        ));
+        assert!(!super::is_retained_shim_name(
+            "/root/delayed-log-shims/containerd-shim-cube-rs-retained-invalid".as_ref()
+        ));
+    }
     use super::*;
 
     #[test]

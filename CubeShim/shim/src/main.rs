@@ -37,6 +37,17 @@ fn main() {
         return;
     }
     let flags = parse(&os_args[1..]).expect("Invalid params");
+    // Start and delete are separate invocations. The alias is an explicit
+    // per-shim policy; never accept flags inherited from Cubelet itself.
+    if !flags.action.is_empty() {
+        if common::utils::is_retained_shim_name(&os_args[0]) {
+            std::env::set_var("CUBELET_DELAY_SANDBOX_LOG_CLEANUP", "1");
+            std::env::set_var("CUBELET_MANAGED_SANDBOX_LOG_CLEANUP", "1");
+        } else {
+            std::env::remove_var("CUBELET_DELAY_SANDBOX_LOG_CLEANUP");
+            std::env::remove_var("CUBELET_MANAGED_SANDBOX_LOG_CLEANUP");
+        }
+    }
     if flags.version {
         print_version();
         return;

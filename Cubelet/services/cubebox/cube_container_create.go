@@ -57,6 +57,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/logcleanup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -1457,6 +1458,18 @@ func (l *local) runContainer(
 	ociRuntime cubeconfig.Runtime) (err error) {
 
 	start := time.Now()
+	var taskOpts []containerd.NewTaskOpts
+	delayShimLogs := l.config != nil && l.config.SandboxLogCleanupEnabled && strings.HasPrefix(ociRuntime.Type, "io.containerd.cube")
+	if delayShimLogs {
+		shimPath, err := delayedCleanupShimPath(l.config.RootPath, runtimePathFor(cubebox), ociRuntime.Type)
+		if err != nil {
+			return fmt.Errorf("prepare delayed log cleanup shim: %w", err)
+		}
+		taskOpts = append(taskOpts, containerd.WithRuntimePath(shimPath))
+	} else {
+		taskOpts = append(taskOpts, withRuntimePathOpt(cubebox))
+	}
+
 	newContainer := l.newContainerFn
 	if newContainer == nil {
 		newContainer = l.client.NewContainer
@@ -1470,6 +1483,37 @@ func (l *local) runContainer(
 	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, time.Since(start))
 
 	ci.Container = c
+	if delayShimLogs && ci.IsPod && cubebox.Annotations[constants.MasterAnnotationsAppSnapshotCreate] != "true" {
+		// Never move output while a previous shim of this ID can still write.
+		if _, err := os.Lstat(filepath.Join(logcleanup.Root, ci.ID)); err == nil {
+			if l.shims == nil {
+				return fmt.Errorf("shim manager unavailable while preparing sandbox logs")
+			}
+			if _, err := l.shims.Get(ctx, ci.ID); err == nil {
+				return fmt.Errorf("previous shim for %s is still registered", ci.ID)
+			} else if !errdefs.IsNotFound(err) {
+				return fmt.Errorf("check previous shim for %s: %w", ci.ID, err)
+			}
+			procCtx, cancel := context.WithTimeout(ctx, logCleanupProcTimeout)
+			orphans, err := findOrphanShimsChecked(procCtx, orphanShimProcRoot, ci.ID, true)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("check previous shim processes for %s: %w", ci.ID, err)
+			}
+			if len(orphans) != 0 {
+				return fmt.Errorf("previous shim for %s is still running", ci.ID)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check previous sandbox logs for %s: %w", ci.ID, err)
+		}
+		namespace := cubebox.Namespace
+		if namespace == "" {
+			namespace = namespaces.Default
+		}
+		if err := logcleanup.Prepare(logcleanup.Root, ci.ID, namespace); err != nil {
+			return fmt.Errorf("prepare sandbox logs for %s: %w", ci.ID, err)
+		}
+	}
 
 	var ioCreater cio.Creator
 	if ci.IsDebugStdout {
@@ -1478,10 +1522,6 @@ func (l *local) runContainer(
 	} else {
 		ioCreater = taskio.New(true)
 	}
-
-	var taskOpts []containerd.NewTaskOpts
-
-	taskOpts = append(taskOpts, withRuntimePathOpt(cubebox))
 
 	endpoint := cubebox.Endpoint
 	if endpoint.IsValid() {
@@ -1955,6 +1995,10 @@ func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeB
 }
 
 func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {
+	return containerd.WithRuntimePath(runtimePathFor(cubebox))
+}
+
+func runtimePathFor(cubebox *cubeboxstore.CubeBox) string {
 	var runtimePath string
 	if cubebox.OciRuntime != nil && cubebox.OciRuntime.Path != "" {
 		runtimePath = cubebox.OciRuntime.Path
@@ -1970,7 +2014,7 @@ func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {
 	if p, ok := cubebox.Annotations[constants.AnnotationCubeletInternalRuntimePath]; ok {
 		runtimePath = p
 	}
-	return containerd.WithRuntimePath(runtimePath)
+	return runtimePath
 }
 
 func (l *local) genHooksOpts(ctx context.Context, flowOpts *workflow.CreateContext, containerReq *cubebox.ContainerConfig) (oci.SpecOpts, error) {

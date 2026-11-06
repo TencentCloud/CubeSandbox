@@ -152,6 +152,9 @@ func deleteOrphanShim(ctx context.Context, id string, s orphanShim) error {
 		"-id", id,
 		"-bundle", dir,
 		"delete")
+	// Preserve the policy of the actual orphan, including across a config
+	// change. Path remains the verified running image; argv0 carries policy.
+	cmd.Args[0] = s.argv0
 	cmd.Dir = dir
 	cmd.Env = shimDeleteEnv(s)
 	var stderr bytes.Buffer
@@ -164,10 +167,8 @@ func deleteOrphanShim(ctx context.Context, id string, s orphanShim) error {
 }
 
 // shimDeleteEnv is the environment of the delete invocation: the variables
-// containerd's shim.Command adds, PATH, and the two the shim reads for its
-// logging. Nothing else from Cubelet is passed on; the delete path reads no
-// other variable. TTRPC_ADDRESS is not used by the delete itself, but the shim
-// bootstrap refuses to start without it.
+// containerd's shim.Command adds, PATH and shim logging variables.
+// TTRPC_ADDRESS is required by the shim bootstrap.
 func shimDeleteEnv(s orphanShim) []string {
 	path := os.Getenv("PATH")
 	if path == "" {
@@ -197,30 +198,66 @@ func shimDeleteEnv(s orphanShim) []string {
 // containerd shim. The image is what the delete executes, and argv is under
 // the control of whoever started the process.
 func findOrphanShims(ctx context.Context, procRoot, id string) []orphanShim {
-	entries, err := os.ReadDir(procRoot)
+	found, err := findOrphanShimsChecked(ctx, procRoot, id, false)
 	if err != nil {
 		log.G(ctx).Warnf("scan %s for orphan shims of %s: %v", procRoot, id, err)
-		return nil
+	}
+	return found
+}
+
+// findOrphanShimsChecked lets log cleanup fail closed if the process table
+// cannot be scanned. The older reaper still retains its best-effort behavior.
+func findOrphanShimsChecked(ctx context.Context, procRoot, id string, strict bool) ([]orphanShim, error) {
+	if strict && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return nil, err
 	}
 	self := os.Getpid()
 	euid := uint32(os.Geteuid())
 	var found []orphanShim
 	for _, e := range entries {
+		if strict && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil || pid <= 1 || pid == self {
 			continue
 		}
 		ident, err := utils.ReadProcessIdentityAt(procRoot, pid)
 		if err != nil {
+			if strict && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("inspect process %d: %w", pid, err)
+			}
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "cmdline"))
 		if err != nil {
+			if strict && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("read process %d command: %w", pid, err)
+			}
 			continue
 		}
-		s, err := parseShimServer(strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00"), id)
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if strict && transientShimOfID(argv, id) {
+			s := orphanShim{argv0: argv[0], ident: ident}
+			if err := verifyShimProcess(filepath.Join(procRoot, e.Name()), euid, &s); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, fmt.Errorf("verify possible shim %d: %w", pid, err)
+			}
+			found = append(found, s)
+			continue
+		}
+		s, err := parseShimServer(argv, id)
 		if err == nil {
 			err = verifyShimProcess(filepath.Join(procRoot, e.Name()), euid, &s)
+			if strict && err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("verify possible shim %d: %w", pid, err)
+			}
 		}
 		if err != nil {
 			if !errors.Is(err, errNotShimOfID) {
@@ -231,7 +268,24 @@ func findOrphanShims(ctx context.Context, procRoot, id string) []orphanShim {
 		s.ident = ident
 		found = append(found, s)
 	}
-	return found
+	return found, nil
+}
+
+// A start or delete invocation may still be starting or stopping a shim. The
+// reaper ignores it, but log rotation and cleanup must wait until it exits.
+func transientShimOfID(argv []string, id string) bool {
+	if len(argv) < 3 || !strings.HasPrefix(filepath.Base(argv[0]), shimBinaryPrefix) {
+		return false
+	}
+	if action := argv[len(argv)-1]; action != "start" && action != "delete" {
+		return false
+	}
+	for i := 1; i+1 < len(argv); i++ {
+		if argv[i] == "-id" && argv[i+1] == id {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyShimProcess checks the owner and the running image of a candidate.
