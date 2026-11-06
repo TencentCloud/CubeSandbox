@@ -1914,6 +1914,11 @@ pub struct CreateTemplateRequest {
     /// Writable layer size for the rootfs, e.g. "1G".
     #[serde(rename = "writableLayerSize", default)]
     pub writable_layer_size: Option<String>,
+    /// CoW backend for this template and its sandboxes/snapshots.
+    /// Accepted values are `xfs` and `s3` (case-insensitive); omitted or empty
+    /// keeps the existing xfs default.
+    #[serde(default)]
+    pub backend: Option<String>,
     /// Ports the container listens on.
     #[serde(rename = "exposedPorts", default)]
     pub exposed_ports: Option<Vec<u16>>,
@@ -1973,10 +1978,6 @@ pub struct CreateTemplateRequest {
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
-    /// CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
-    /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
-    #[serde(rename = "backend", default)]
-    pub backend: Option<String>,
     /// Container user for the template build and later sandboxes.
     /// `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
     /// Omitted keeps the default root user.

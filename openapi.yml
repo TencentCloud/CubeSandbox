@@ -1552,7 +1552,10 @@ components:
           type:
           - string
           - 'null'
-          description: CoW backend for this template and its sandboxes/snapshots (xfs | s3). Omitted keeps the historical xfs path.
+          description: |-
+            CoW backend for this template and its sandboxes/snapshots.
+            Accepted values are `xfs` and `s3` (case-insensitive); omitted or empty
+            keeps the existing xfs default.
         command:
           type:
           - array

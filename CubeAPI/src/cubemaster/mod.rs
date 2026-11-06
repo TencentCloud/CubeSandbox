@@ -2337,6 +2337,9 @@ pub struct CreateTemplateFromImageReq {
     /// Writable layer size, e.g. "1G".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable_layer_size: Option<String>,
+    /// CoW backend (xfs | s3). Omitted keeps CubeMaster's xfs default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     /// Human-readable stable template alias.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
@@ -2368,9 +2371,6 @@ pub struct CreateTemplateFromImageReq {
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
-    /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

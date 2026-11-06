@@ -355,6 +355,37 @@ var TemplateCommand = cli.Command{
 	},
 }
 
+const templateBackendUsage = "runtime CoW backend (xfs|s3|jfs); s3 uses the node's configured S3-compatible store, jfs uses JuiceFS"
+
+func normalizeCLIBackend(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case constants.SnapshotBackendXFS:
+		return constants.SnapshotBackendXFS, nil
+	case constants.SnapshotBackendS3:
+		return constants.SnapshotBackendS3, nil
+	case constants.SnapshotBackendJFS:
+		return constants.SnapshotBackendJFS, nil
+	default:
+		return "", fmt.Errorf("unsupported backend %q (want xfs, s3 or jfs)", raw)
+	}
+}
+
+func applyTemplateBackendFlag(c *cli.Context, req *types.CreateCubeSandboxReq) error {
+	if !c.IsSet("backend") {
+		return nil
+	}
+	backend, err := normalizeCLIBackend(c.String("backend"))
+	if err != nil {
+		return err
+	}
+	req.Backend = backend
+	if req.Annotations == nil {
+		req.Annotations = map[string]string{}
+	}
+	req.Annotations[constants.CubeAnnotationStorageBackend] = backend
+	return nil
+}
+
 var TemplateCreateCommand = cli.Command{
 	Name:  "create",
 	Usage: "create template snapshots on healthy nodes",
@@ -375,6 +406,10 @@ var TemplateCreateCommand = cli.Command{
 		cli.StringFlag{
 			Name:  "instance-type",
 			Usage: "override instance type in request body",
+		},
+		cli.StringFlag{
+			Name:  "backend",
+			Usage: templateBackendUsage,
 		},
 		cli.StringSliceFlag{
 			Name:  "node",
@@ -435,6 +470,9 @@ var TemplateCreateCommand = cli.Command{
 		}
 		if scope := c.StringSlice("node"); len(scope) > 0 {
 			req.DistributionScope = scope
+		}
+		if err := applyTemplateBackendFlag(c, req); err != nil {
+			return err
 		}
 		req.CubeNetworkConfig = mergeCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 
@@ -888,15 +926,16 @@ var TemplateCommitCommand = cli.Command{
 }
 
 var TemplateCreateFromImageCommand = cli.Command{
-	Name:  "create-from-image",
-	Usage: "build ext4 rootfs from OCI image and create template asynchronously",
+	Name:    "create-from-image",
+	Aliases: []string{"build"},
+	Usage:   "build ext4 rootfs from OCI image and create template asynchronously",
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "image", Usage: "source OCI image reference"},
 		cli.StringFlag{Name: "alias", Usage: "human-readable stable alias for the template (e.g. my-app); sandboxes can reference the template by this alias instead of the generated template ID; valid: [a-z0-9-], max 64 chars"},
 		cli.StringFlag{Name: "writable-layer-size", Usage: "immutable writable layer size, e.g. 20Gi"},
 		cli.StringSliceFlag{Name: "expose-port", Usage: "container port to expose for the template; repeat the flag to specify multiple ports"},
 		cli.StringFlag{Name: "instance-type", Value: "cubebox", Usage: "instance type"},
-		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3|jfs; jfs keeps volumes and snapshots on the JuiceFS mount); omit to keep the historical xfs path"},
+		cli.StringFlag{Name: "backend", Usage: templateBackendUsage},
 		cli.StringFlag{Name: "network-type", Value: "tap", Usage: "network type"},
 		cli.StringSliceFlag{Name: "node", Usage: "create template only on the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},
@@ -948,6 +987,13 @@ var TemplateCreateFromImageCommand = cli.Command{
 		if err != nil {
 			return err
 		}
+		backend := ""
+		if c.IsSet("backend") {
+			backend, err = normalizeCLIBackend(c.String("backend"))
+			if err != nil {
+				return err
+			}
+		}
 		req := &types.CreateTemplateFromImageReq{
 			Request:        &types.Request{RequestID: uuid.New().String()},
 			SourceImageRef: c.String("image"),
@@ -958,7 +1004,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 			ExposedPorts:       exposedPorts,
 			InstanceType:       c.String("instance-type"),
 			NetworkType:        c.String("network-type"),
-			Backend:            c.String("backend"),
+			Backend:            backend,
 			RegistryUsername:   c.String("registry-username"),
 			RegistryPassword:   c.String("registry-password"),
 			Qos:                qosConfig,
