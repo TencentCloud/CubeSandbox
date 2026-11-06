@@ -231,6 +231,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/exposed-ports/{containerPort}:
+    get:
+      tags:
+      - handlers::sandboxes
+      operationId: get_sandbox_exposed_port
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox ID
+        required: true
+        schema:
+          type: string
+      - name: containerPort
+        in: path
+        description: Container port declared via the template's expose-port list
+        required: true
+        schema:
+          type: integer
+          format: int32
+      responses:
+        '200':
+          description: Exposed port endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExposedPortEndpoint'
+        '400':
+          description: Invalid container port
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found or port not exposed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /sandboxes/{sandboxID}/fork:
     post:
       tags:
@@ -554,7 +598,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SnapshotInfo'
         '400':
-          description: Snapshot name starts with a reserved tpl-/snap- prefix
+          description: Snapshot name starts with a reserved tpl-/snap- prefix, or the requested snapshot mode is invalid
           content:
             application/json:
               schema:
@@ -571,14 +615,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '503':
-          description: Filesystem-only support could not be verified; retry
+        '500':
+          description: Unexpected backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '500':
-          description: Unexpected backend error
+        '503':
+          description: Filesystem-only support could not be verified; retry
           content:
             application/json:
               schema:
@@ -649,7 +693,7 @@ paths:
           type: string
       - name: name
         in: query
-        description: Filter by snapshot name or ID.
+        description: Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0)
         required: false
         schema:
           type: string
@@ -1462,6 +1506,22 @@ components:
           format: int32
         message:
           type: string
+    BlockIoQosConfig:
+      type: object
+      properties:
+        iops:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+        throughputMiBps:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+      additionalProperties: false
     ClusterOverview:
       type: object
       required:
@@ -1605,7 +1665,7 @@ components:
           type:
           - boolean
           - 'null'
-          description: 'Deprecated E2B compatibility alias: false means fs-only.'
+          description: Deprecated E2B alias for `memory`.
         memory:
           type:
           - boolean
@@ -1751,6 +1811,13 @@ components:
           format: int32
           description: HTTP probe port.
           minimum: 0
+        qos:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/QosConfig'
+            description: |-
+              Optional template-level QoS. Every sandbox created from this template
+              receives the same independent ingress and egress network ceilings.
         registryPassword:
           type:
           - string
@@ -1956,6 +2023,43 @@ components:
 
         A JSON array and a JSON object cannot be confused, so the shape alone
         discriminates.
+    ExposedPortEndpoint:
+      type: object
+      description: |-
+        Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+
+        `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+        hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+        sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+        node).
+      required:
+      - sandboxID
+      - containerPort
+      - mode
+      - endpoint
+      properties:
+        containerPort:
+          type: integer
+          format: int32
+        endpoint:
+          type: string
+        hostIP:
+          type:
+          - string
+          - 'null'
+        hostPort:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        mode:
+          type: string
+        sandboxID:
+          type: string
+        sandboxIP:
+          type:
+          - string
+          - 'null'
     ForkError:
       type: object
       description: |-
@@ -2145,6 +2249,22 @@ components:
       - info
       - warn
       - error
+    NetworkQosConfig:
+      type: object
+      properties:
+        bandwidthMbps:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+        packetsPerSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+      additionalProperties: false
     NewSandbox:
       type: object
       description: |-
@@ -2427,6 +2547,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ComponentVersionView'
+    QosConfig:
+      type: object
+      properties:
+        blockIo:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/BlockIoQosConfig'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/NetworkQosConfig'
+      additionalProperties: false
     RebuildTemplateRequest:
       type: object
       description: Body for POST /templates/:id (rebuild).
@@ -2632,6 +2764,10 @@ components:
           - 'null'
         clientID:
           type: string
+        configuredQos:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/QosConfig'
         cpuCount:
           type: integer
           format: int32
@@ -2923,6 +3059,9 @@ components:
           - string
           - 'null'
           format: date-time
+        mode:
+          $ref: '#/components/schemas/SnapshotMode'
+          description: Snapshot artifact mode. Always one of full | fs-only.
         names:
           type: array
           items:
@@ -2940,9 +3079,6 @@ components:
           type: string
         status:
           type: string
-        mode:
-          $ref: '#/components/schemas/SnapshotMode'
-          description: Snapshot artifact mode. Always one of full | fs-only.
         updatedAt:
           type:
           - string
@@ -3093,6 +3229,10 @@ components:
           - boolean
           - 'null'
           description: Whether public internet access is allowed for sandboxes from this template.
+        configuredQos:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/QosConfig'
         createRequest: {}
         createdAt:
           type:
