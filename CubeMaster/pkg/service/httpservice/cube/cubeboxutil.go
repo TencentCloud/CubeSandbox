@@ -132,7 +132,20 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 
 	ctr.Syscalls = templateCtr.Syscalls
 	ctr.Sysctls = templateCtr.Sysctls
-	ctr.SecurityContext = templateCtr.SecurityContext
+	// The request's security context wins over the template's, the same way
+	// image, resources, command and args already do above. A caller that asks
+	// for a non-privileged container must not get the template's privileged
+	// one back; a caller that says nothing still inherits the template, so
+	// existing behaviour is unchanged.
+	if ctr.SecurityContext == nil {
+		ctr.SecurityContext = templateCtr.SecurityContext
+	} else if ctr.SecurityContext.Capabilities == nil && templateCtr.SecurityContext != nil {
+		// The caller did not express a capability set of its own; keep the
+		// template's so a partial request does not silently drop it.
+		merged := *ctr.SecurityContext
+		merged.Capabilities = templateCtr.SecurityContext.Capabilities
+		ctr.SecurityContext = &merged
+	}
 
 	ctr.Envs = append(ctr.Envs, templateCtr.Envs...)
 	applyTemplateVolumeMounts(templateCtr, ctr)
