@@ -2,6 +2,7 @@ pytest>=7.0
 pytest-xdist>=3.0
 httpx>=0.27
 requests>=2
+PyYAML>=6.0
 
 # Optional backends:
 # - cubesandbox is loaded from ../../../../sdk/python by default.

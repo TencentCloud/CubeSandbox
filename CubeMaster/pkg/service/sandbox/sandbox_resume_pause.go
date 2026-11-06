@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -67,8 +68,11 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	// Client-supplied backend is ignored. Pause follows the sandbox spec
 	// Master persisted at create (itself inherited from the template).
 	req.Backend = ""
+	var template string
+	var fields webhook.LifecycleFields
 	if spec, specErr := sandboxspec.Get(ctx, req.SandboxID); specErr == nil && spec != nil {
 		req.Backend = spec.Backend
+		template, fields = webhook.PrepareLifecycle(spec)
 	}
 	snapID, err := pausesnap.Begin(ctx, req.SandboxID, nodeID, hostIP, req.InstanceType, req.Backend)
 	if err != nil {
@@ -92,7 +96,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
 	log.G(ctx).Infof("pause: sandbox=%s snap=%s host=%s", req.SandboxID, snapID, hostIP)
-	cubeRsp, err := cubelet.UpdateWithTimeout(ctx, calleeEndpoint, cubeletReq, pauseCubeletRPCTimeout)
+	cubeRsp, err := cubelet.UpdateWithTimeout(webhook.WithOrigin(ctx, webhook.OriginPauseTeardown), calleeEndpoint, cubeletReq, pauseCubeletRPCTimeout)
 	if err != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
 		msg := "cubelet pause response is nil"
 		if err != nil {
@@ -141,6 +145,8 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		remotestatus.WatchPause(ctx, snapID, hostIP, req.Backend)
 	}
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID)
+	fields.PauseMode = "full"
+	lifecyclePublisher.Publish(webhook.TypePaused, req.SandboxID, template, fields)
 	return rsp
 }
 
@@ -343,6 +349,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	}
 
 	createReq := loadResumeSandboxSpec(ctx, req.SandboxID)
+	template, fields := webhook.PrepareLifecycle(createReq)
 	placement, err := resumePlacement(ctx, rec, instanceType, createReq)
 	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
@@ -478,6 +485,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 			"sandbox %s resumed on %s but CubeProxy kept its pre-pause route and will not reach it: %v",
 			req.SandboxID, targetIP, purgeErr)
 		log.G(ctx).Errorf("resume: %s", rsp.Ret.RetMsg)
+	} else {
+		fields.ResumeMode = "restore"
+		lifecyclePublisher.Publish(webhook.TypeResumed, req.SandboxID, template, fields)
 	}
 	return rsp
 }

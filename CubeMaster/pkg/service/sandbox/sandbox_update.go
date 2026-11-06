@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -121,7 +122,7 @@ func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
 	// refreshTimeoutMeta updates lifecycle metadata through the timeout
 	// provider. Resume does not return endAt, so the computed value is
 	// intentionally ignored.
-	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
+	refreshTimeoutMeta(webhook.WithOrigin(ctx, webhook.OriginResumeTimeoutRefresh), req.SandboxID, *req.Timeout)
 }
 
 func applyLifecycleLockError(rsp *types.Res, err error) {
@@ -233,7 +234,12 @@ func updateSandboxNetworkOnNode(ctx context.Context, req *types.UpdateNetworkReq
 	if result.RetCode != int(errorcode.ErrorCode_Success) {
 		return result
 	}
-	persistSandboxNetworkSpec(ctx, req, hostIP)
+	spec := persistSandboxNetworkSpec(ctx, req, hostIP)
+	if lifecyclePublisher.Enabled() {
+		template, fields := webhook.PrepareLifecycle(spec)
+		fields.Network = &webhook.NetworkFields{AllowOut: req.CubeNetworkConfig.AllowOut, DenyOut: req.CubeNetworkConfig.DenyOut, DenyInternet: req.CubeNetworkConfig.AllowInternetAccess != nil && !*req.CubeNetworkConfig.AllowInternetAccess}
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, req.SandboxID, template, fields)
+	}
 	return result
 }
 
@@ -241,12 +247,12 @@ func updateSandboxNetworkOnNode(ctx context.Context, req *types.UpdateNetworkReq
 // and resume replay the new policy instead of the one the sandbox was born
 // with. Best-effort by design: the node already enforces the new policy, and
 // sandboxspec is recovery-friendly.
-func persistSandboxNetworkSpec(ctx context.Context, req *types.UpdateNetworkRequest, hostIP string) {
+func persistSandboxNetworkSpec(ctx context.Context, req *types.UpdateNetworkRequest, hostIP string) *types.CreateCubeSandboxReq {
 	spec, err := sandboxspec.Get(ctx, req.SandboxID)
 	if err != nil || spec == nil {
 		log.G(ctx).Warnf("update network: load sandbox spec failed, clone will replay the old policy: sandbox=%s err=%v",
 			req.SandboxID, err)
-		return
+		return nil
 	}
 	spec.CubeNetworkConfig = req.CubeNetworkConfig.DeepCopy()
 	opts := sandboxspec.PutOptions{HostIP: hostIP}
@@ -257,6 +263,7 @@ func persistSandboxNetworkSpec(ctx context.Context, req *types.UpdateNetworkRequ
 		log.G(ctx).Errorf("update network: persist sandbox spec failed, clone will replay the old policy: sandbox=%s err=%v",
 			req.SandboxID, err)
 	}
+	return spec
 }
 
 // resolveSandboxHostIP finds the node currently hosting the sandbox, trying the

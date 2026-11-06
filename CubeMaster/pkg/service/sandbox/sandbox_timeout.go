@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 )
 
 // SetTimeout implements POST /cube/sandbox/timeout. It is the master-side
@@ -123,7 +124,10 @@ func sandboxExists(ctx context.Context, sandboxID string) bool {
 
 func refreshTimeoutMeta(ctx context.Context, sandboxID string, timeoutSeconds int) int64 {
 	if p := getTimeoutProvider(); p != nil {
-		endAt, err := p.RefreshTimeout(ctx, sandboxID, timeoutSeconds)
+		endAt, applied, err := p.RefreshTimeout(ctx, sandboxID, timeoutSeconds)
+		if applied && err == nil && timeoutSeconds >= 0 && endAt > 0 {
+			lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, sandboxID, "", webhook.LifecycleFields{EndAtMS: endAt})
+		}
 		if err != nil {
 			log.G(ctx).Errorf("lifecycle: RefreshTimeout sandbox=%s failed: %v", sandboxID, err)
 		} else if timeoutSeconds < 0 {

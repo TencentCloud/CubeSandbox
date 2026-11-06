@@ -206,6 +206,9 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 	if err := runTemplateJobCleanup(ctx, templateID); err != nil {
 		return err
 	}
+
+	// Publish template deleted event after successful cleanup.
+	PublishTemplateDeleted(ctx, templateID, targets.InstanceType)
 	return nil
 }
 
