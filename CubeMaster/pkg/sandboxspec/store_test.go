@@ -5,13 +5,18 @@
 package sandboxspec
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/gorm"
 )
 
 // TestCanonicalizeRequestStripsTransientSnapshotAnnotations locks in the v4+
@@ -76,4 +81,36 @@ func TestCanonicalizeRequestPreservesMaskRequestHost(t *testing.T) {
 	require.NotNil(t, out.CubeNetworkConfig.MaskRequestHost)
 	assert.Equal(t, mask, *out.CubeNetworkConfig.MaskRequestHost)
 	assert.NotSame(t, &mask, out.CubeNetworkConfig.MaskRequestHost)
+}
+
+func TestGetAnnotationsReadsOnlyPersistedAnnotations(t *testing.T) {
+	originalDB := getDB()
+	t.Cleanup(func() {
+		dbMu.Lock()
+		db = originalDB
+		dbMu.Unlock()
+	})
+
+	testDB, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "sandbox-spec.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, testDB.AutoMigrate(&models.SandboxSpec{}))
+	require.NoError(t, Init(testDB))
+
+	const networkQos = `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}},"Version":1}`
+	require.NoError(t, testDB.Create(&models.SandboxSpec{
+		SandboxID: "sb-qos",
+		RequestJSON: `{"annotations":{"cube.master.net":` +
+			`"{\"Qos\":{\"BandWidth\":{\"Size\":1250000,\"RefillTime\":100}},\"Version\":1}",` +
+			`"unrelated":"keep"},"containers":"not-decoded-by-annotation-reader"}`,
+	}).Error)
+
+	annotations, err := GetAnnotations(context.Background(), "sb-qos")
+	require.NoError(t, err)
+	assert.Equal(t, networkQos, annotations[constants.CubeAnnotationsNetWork])
+	assert.Equal(t, "keep", annotations["unrelated"])
+
+	annotations["unrelated"] = "changed"
+	again, err := GetAnnotations(context.Background(), "sb-qos")
+	require.NoError(t, err)
+	assert.Equal(t, "keep", again["unrelated"])
 }

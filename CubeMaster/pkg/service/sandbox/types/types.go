@@ -10,6 +10,7 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
@@ -645,6 +646,7 @@ type SandboxData struct {
 	EndAt               int64              `json:"end_at,omitempty"`
 	VolumeMounts        []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus       *RestartStatus     `json:"restart_status,omitempty"`
+	ConfiguredQos       *qos.Config        `json:"configured_qos,omitempty"`
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is
@@ -724,6 +726,7 @@ type CreateTemplateFromImageReq struct {
 	WritableLayerSize  string              `json:"writable_layer_size,omitempty"`
 	ExposedPorts       []int32             `json:"exposed_ports,omitempty"`
 	DistributionScope  []string            `json:"distribution_scope,omitempty"`
+	Qos                *qos.Config         `json:"qos,omitempty"`
 	ContainerOverrides *ContainerOverrides `json:"container_overrides,omitempty"`
 	Wait               bool                `json:"wait,omitempty"`
 
