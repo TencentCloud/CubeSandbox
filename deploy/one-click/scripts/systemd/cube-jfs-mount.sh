@@ -108,9 +108,16 @@ do_start() {
     export META_PASSWORD="${CUBE_JFS_META_PASSWORD}"
     meta_env_args+=(--env META_PASSWORD)
   fi
+  # Minimal privileges instead of --privileged (verified on TencentOS 4.4,
+  # SELinux disabled, no AppArmor): the container only needs the FUSE
+  # character device and CAP_SYS_ADMIN to call mount(2) for the FUSE mount.
+  # The rshared bind propagation below is applied by dockerd itself and does
+  # not need a privileged container. On hosts with an enforcing LSM
+  # (AppArmor/SELinux) an equivalent security-opt allow rule may be needed.
   # shellcheck disable=SC2086 # READ_OPTS and EXTRA_OPTS are lists of options.
   exec docker run --rm --name "${CONTAINER_NAME}" \
-    --privileged \
+    --device /dev/fuse \
+    --cap-add SYS_ADMIN \
     "${meta_env_args[@]}" \
     --mount "type=bind,source=${MOUNT_PATH},target=${MOUNT_PATH},bind-propagation=rshared" \
     --mount "type=bind,source=${CACHE_DIR},target=${CACHE_DIR}" \
