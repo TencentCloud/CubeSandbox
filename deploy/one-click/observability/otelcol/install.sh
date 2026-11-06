@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# CVM / one-click systemd collector. See docs/guide/observability.md.
+# one-click/systemd Collector for CVM nodes. See docs/guide/observability.md.
 # Metrics and logs are independent opt-in pipelines. The script does not
 # change Cubelet configuration.
 set -euo pipefail

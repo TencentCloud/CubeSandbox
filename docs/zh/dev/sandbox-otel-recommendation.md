@@ -151,7 +151,7 @@ receivers:
 - Helm：`--set observability.enabled=true`
 
 Terraform 部署不包含可观测性安装。日志后端通过
-`CUBE_LOGS_BACKEND=loki|elasticsearch`（one-click / systemd）或
+`CUBE_LOGS_BACKEND=loki|elasticsearch`（one-click/systemd）或
 `observability.logs.backend`（Helm）选择。一次只启用一个日志后端。
 
 通用配置与安装命令见

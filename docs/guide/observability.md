@@ -15,9 +15,9 @@ Collected by default:
   `/data/cubelet/log/<sandbox-id>/{stdout,stderr}`.
 
 Helm can additionally collect CRI logs for an allowlist of CubeSandbox
-containers under `/var/log/pods`. It runs a separate Collector DaemonSet, is
-disabled by default, and is not available in the one-click or standalone
-Kubernetes installers.
+containers under `/var/log/pods`. This optional Collector DaemonSet is disabled
+by default and is available only through the Helm chart, not the one-click/systemd
+installer.
 
 Prometheus, Grafana, and one log backend (Loki by default, or Elasticsearch)
 ship with both installers. Both can also export to external backends.
@@ -614,15 +614,15 @@ Implementation details are documented in the
 | `CUBE_SANDBOX_NODE_IP` | auto-detected | `10.0.0.20` | systemd only: node label; set it when auto-detection is unsuitable |
 | `CUBE_METRICS_OTLP_HTTP_ENDPOINT` | empty | `http://10.0.0.10:9092/api/v1/otlp` | OTLP/HTTP base endpoint; omit `/v1/metrics` |
 | `CUBE_METRICS_REMOTE_WRITE_URL` | empty | `http://10.0.0.10:9092/api/v1/write` | Prometheus Remote Write URL; alternative to metrics OTLP |
-| `CUBE_METRICS_AUTHORIZATION` / `CUBE_METRICS_REMOTE_WRITE_TOKEN` | empty | `Bearer ...` | Metrics authentication for one-click / systemd; choose a complete header or a bare token |
+| `CUBE_METRICS_AUTHORIZATION` / `CUBE_METRICS_REMOTE_WRITE_TOKEN` | empty | `Bearer ...` | Metrics authentication for one-click/systemd; choose a complete header or a bare token |
 | `CUBE_METRICS_TENANT_ID` | empty | `cube-prod` | Metrics `X-Scope-OrgID` |
 | `CUBE_LOGS_ES_ENDPOINT` | empty | `http://10.0.0.10:9200` | Elasticsearch endpoint |
 | `CUBE_LOGS_ES_INDEX` | `cubesandbox-logs` | `cube-prod-logs` | Elasticsearch index |
-| `CUBE_LOGS_ES_USER` / `CUBE_LOGS_ES_PASSWORD` | empty | `cube` / `...` | one-click / systemd: ES Basic Auth; both values are required |
-| `CUBE_LOGS_ES_API_KEY` | empty | `...` | one-click / systemd: ES API key; alternative to Basic Auth |
+| `CUBE_LOGS_ES_USER` / `CUBE_LOGS_ES_PASSWORD` | empty | `cube` / `...` | one-click/systemd: ES Basic Auth; both values are required |
+| `CUBE_LOGS_ES_API_KEY` | empty | `...` | one-click/systemd: ES API key; alternative to Basic Auth |
 | `CUBE_LOGS_ES_TLS_INSECURE_SKIP_VERIFY` | `false` | `true` | Skip ES TLS verification for temporary diagnostics only |
 | `CUBE_LOGS_OTLP_HTTP_ENDPOINT` | empty | `http://10.0.0.10:3100/otlp` | OTLP/HTTP logs base endpoint; alternative to Elasticsearch |
-| `CUBE_LOGS_AUTHORIZATION` / `CUBE_LOGS_TOKEN` | empty | `Bearer ...` | Log authentication for one-click / systemd; choose a complete header or a bare token |
+| `CUBE_LOGS_AUTHORIZATION` / `CUBE_LOGS_TOKEN` | empty | `Bearer ...` | Log authentication for one-click/systemd; choose a complete header or a bare token |
 | `CUBE_LOGS_TENANT_ID` | empty | `cube-prod` | Logs `X-Scope-OrgID` |
 | `CUBE_LOGS_SANDBOX_ID` | `*` | `019abc-example` | Optional sandbox ID filter for the systemd collector |
 | `CUBE_LOGS_FILE_START_AT` | `beginning` | `end` | systemd only: initial file position, either `beginning` or `end` |
@@ -671,8 +671,8 @@ CUBE_LOGS_OTLP_HTTP_ENDPOINT=https://loki.example.com/otlp
 CUBE_LOGS_AUTHORIZATION='Bearer <logs-token>'
 ```
 
-- one-click and standalone systemd use these variables in their respective
-  `.env` files;
+- the one-click/systemd installer reads these variables from the node's `.env`
+  file;
 - Helm references a Secret through
   `observability.metrics.auth.existingSecret` and
   `observability.logs.auth.existingSecret`; see [2.2](#22-kubernetes-helm);
@@ -875,8 +875,8 @@ same.
 | Component logs (Helm opt-in) | Read CRI/containerd logs only for `observability.logs.components.containers` from `/var/log/pods`; start at end and use one pipeline per component | Separate read-only component-log Collector DaemonSet on matching control/compute nodes; one-click does not support this option |
 | State and retry | Use `file_storage` for file offsets and OTLP queues, a WAL for Remote Write, and an in-memory queue with at most five retries for Elasticsearch | File state lives on the host for systemd and at `/var/lib/cube-sandbox/otelcol-k8s` per Kubernetes node; component logs use a separate `-components` host path |
 
-The log receiver keeps each original line in `Body`. The systemd and standalone
-Kubernetes generators set a `1MiB` maximum log-record size.
+For the systemd collector, each original log line is kept in `Body`, with a
+maximum log-record size of `1MiB`.
 
 Both backends retain these semantic fields (Loki normalizes `.` in OTel
 attribute names to `_`):

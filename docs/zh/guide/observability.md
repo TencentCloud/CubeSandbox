@@ -49,17 +49,17 @@ Cubelet 安装完成后执行以下检查。全新 one-click 环境先按
 [2.1](#21-one-click) 完成第一台节点安装：
 
 ```bash
-# Cubelet version and service
+# Cubelet 版本与服务状态
 /usr/local/services/cubetoolbox/Cubelet/bin/cubecli version
 sudo systemctl is-active cube-sandbox-cubelet.service
 
-# Sandbox resource endpoint and per-sandbox ID label
+# 沙箱资源指标接口与沙箱 ID 标签
 curl -fsS http://127.0.0.1:9998/v1/metrics/resource | \
   grep -E '^cubesandbox_(host_sandbox|guest_workload|node_sandbox_)'
 curl -fsS http://127.0.0.1:9998/v1/metrics/resource | \
   grep 'sandbox_id='
 
-# Standard sandbox stdout/stderr log path while a sandbox is active
+# 沙箱运行期间的 stdout/stderr 日志路径
 SANDBOX_ID=019abc-example
 ls -l "/data/cubelet/log/${SANDBOX_ID}"/{stdout,stderr}
 ```
@@ -107,7 +107,7 @@ CVM/systemd 内置安装器要求 64 位 Linux、systemd、`curl`、`tar` 和 `p
 
 ```dotenv
 CUBE_LOGS_BACKEND=loki
-# Or:
+# 或者：
 # CUBE_LOGS_BACKEND=elasticsearch
 ```
 
@@ -137,9 +137,9 @@ one-click 继续使用原有 `.env` 和安装入口，默认不开启可观测�
    one-click 根目录。仅在首次安装时复制模板：
 
 ```bash
-# Source checkout:
+# 源码仓库：
 cd deploy/one-click
-# Extracted release:
+# 解压后的发布包：
 # cd /path/to/cube-sandbox-one-click
 [[ -f .env ]] || cp env.example .env
 chmod 600 .env
@@ -187,7 +187,7 @@ sudo /usr/local/services/cubetoolbox/observability/install.sh status
 sudo systemctl --no-pager --full status cube-sandbox-otelcol.service
 curl -fsS http://127.0.0.1:9092/-/ready
 curl -fsS http://127.0.0.1:3100/ready
-# Elasticsearch users replace the previous line with:
+# 使用 Elasticsearch 时，将上一行替换为：
 # curl -fsS http://127.0.0.1:9200/
 ```
 
@@ -381,7 +381,7 @@ Redis 凭据及节点选择等部署参数；可观测性 Value 只是在原有�
 `Bearer ...`、ES 的 `ApiKey ...`），不要通过 `--set` 明文传入：
 
 ```yaml
-# Example only. Create these Secrets through the cluster's secret-management workflow.
+# 仅作示例。请通过集群的 Secret 管理流程创建这些 Secret。
 apiVersion: v1
 kind: Secret
 metadata:
@@ -524,13 +524,13 @@ sudo env \
 ### 3.3 验收与卸载
 
 ```bash
-# systemd all-in-one 完整安装
+# 检查 systemd 全栈节点
 sudo ./deploy/one-click/observability/install.sh status
 
-# 仅安装 Collector 的 systemd 计算节点
+# 检查仅安装 Collector 的 systemd 计算节点
 sudo systemctl --no-pager --full status cube-sandbox-otelcol.service
 
-# 卸载独立安装的 systemd 组件，数据目录保留
+# 卸载手动安装的 systemd 组件，保留数据目录
 sudo ./deploy/one-click/observability/install.sh uninstall all
 ```
 
@@ -563,19 +563,19 @@ kubectl -n cube-system rollout status daemonset/cube-component-otelcol
 | 变量 | 默认值 | 示例 | 说明 |
 | --- | --- | --- | --- |
 | `CUBE_OBSERVABILITY_CLUSTER_ID` | `cubesandbox` | `cube-prod` | 写入指标和日志的集群标签 |
-| `CUBE_LOGS_BACKEND` | `loki` | `elasticsearch` | one-click / systemd 选择的日志后端 |
+| `CUBE_LOGS_BACKEND` | `loki` | `elasticsearch` | one-click/systemd 选择的日志后端 |
 | `CUBE_SANDBOX_NODE_IP` | 自动探测 | `10.0.0.20` | 仅 systemd：节点标签；无法自动探测或需要固定标签时显式设置 |
 | `CUBE_METRICS_OTLP_HTTP_ENDPOINT` | 空 | `http://10.0.0.10:9092/api/v1/otlp` | OTLP/HTTP 基础地址，不要附加 `/v1/metrics` |
 | `CUBE_METRICS_REMOTE_WRITE_URL` | 空 | `http://10.0.0.10:9092/api/v1/write` | Prometheus Remote Write 地址；与 OTLP 指标地址二选一 |
-| `CUBE_METRICS_AUTHORIZATION` / `CUBE_METRICS_REMOTE_WRITE_TOKEN` | 空 | `Bearer ...` | one-click / systemd 的指标鉴权，完整 Header 与纯 Token 二选一 |
+| `CUBE_METRICS_AUTHORIZATION` / `CUBE_METRICS_REMOTE_WRITE_TOKEN` | 空 | `Bearer ...` | one-click/systemd 的指标鉴权，完整 Header 与纯 Token 二选一 |
 | `CUBE_METRICS_TENANT_ID` | 空 | `cube-prod` | 指标输出的 `X-Scope-OrgID` |
 | `CUBE_LOGS_ES_ENDPOINT` | 空 | `http://10.0.0.10:9200` | Elasticsearch 地址 |
 | `CUBE_LOGS_ES_INDEX` | `cubesandbox-logs` | `cube-prod-logs` | 日志索引名 |
-| `CUBE_LOGS_ES_USER` / `CUBE_LOGS_ES_PASSWORD` | 空 | `cube` / `...` | one-click / systemd：ES Basic Auth，必须成对设置 |
-| `CUBE_LOGS_ES_API_KEY` | 空 | `...` | one-click / systemd：ES API Key，与 Basic Auth 二选一 |
+| `CUBE_LOGS_ES_USER` / `CUBE_LOGS_ES_PASSWORD` | 空 | `cube` / `...` | one-click/systemd：ES Basic Auth，必须成对设置 |
+| `CUBE_LOGS_ES_API_KEY` | 空 | `...` | one-click/systemd：ES API Key，与 Basic Auth 二选一 |
 | `CUBE_LOGS_ES_TLS_INSECURE_SKIP_VERIFY` | `false` | `true` | 跳过 ES TLS 校验，只建议临时诊断 |
 | `CUBE_LOGS_OTLP_HTTP_ENDPOINT` | 空 | `http://10.0.0.10:3100/otlp` | OTLP/HTTP 日志基础地址；与 Elasticsearch 二选一 |
-| `CUBE_LOGS_AUTHORIZATION` / `CUBE_LOGS_TOKEN` | 空 | `Bearer ...` | one-click / systemd 日志鉴权，完整 Header 与纯 Token 二选一 |
+| `CUBE_LOGS_AUTHORIZATION` / `CUBE_LOGS_TOKEN` | 空 | `Bearer ...` | one-click/systemd 日志鉴权，完整 Header 与纯 Token 二选一 |
 | `CUBE_LOGS_TENANT_ID` | 空 | `cube-prod` | 日志输出的 `X-Scope-OrgID` |
 | `CUBE_LOGS_SANDBOX_ID` | `*` | `019abc-example` | systemd 形态可限制为一个沙箱 ID |
 | `CUBE_LOGS_FILE_START_AT` | `beginning` | `end` | 仅 systemd：首次读取位置，可选 `beginning` 或 `end` |
@@ -597,8 +597,8 @@ ONE_CLICK_ENABLE_OBSERVABILITY=1
 CUBE_OBSERVABILITY_CLUSTER_ID=cube-prod
 CUBE_LOGS_BACKEND=loki
 
-# Standard all-in-one/compute nodes derive these automatically.
-# Set them only for a self-managed or external backend.
+# 标准 all-in-one/计算节点会自动推导这些地址。
+# 仅在使用自建或外部后端时手动设置。
 CUBE_METRICS_OTLP_HTTP_ENDPOINT=http://10.0.0.10:9092/api/v1/otlp
 CUBE_LOGS_OTLP_HTTP_ENDPOINT=http://10.0.0.10:3100/otlp
 ```
@@ -620,7 +620,7 @@ CUBE_LOGS_OTLP_HTTP_ENDPOINT=https://loki.example.com/otlp
 CUBE_LOGS_AUTHORIZATION='Bearer <logs-token>'
 ```
 
-- one-click 和独立 systemd：在各自 `.env` 中设置上述变量；
+- one-click/systemd：在对应节点的 `.env` 中设置上述变量；
 - Helm：创建 Secret 后通过 `observability.metrics.auth.existingSecret` 和
   `observability.logs.auth.existingSecret` 引用，完整示例见 [2.2](#22-kubernetes-helm)；
 - Elasticsearch：使用 `CUBE_LOGS_ES_API_KEY`，或成对设置
@@ -685,7 +685,7 @@ helm template cube ./deploy/kubernetes/chart \
 
 ```yaml
 receivers:
-  # Scrape sandbox resource metrics from the local Cubelet only.
+  # 仅从本机 Cubelet 抓取沙箱资源指标。
   prometheus:
     trim_metric_suffixes: false
     config:
@@ -696,7 +696,7 @@ receivers:
           metrics_path: /v1/metrics/resource
           static_configs:
             - targets: ["127.0.0.1:9998"]
-  # CUBE_LOGS_SANDBOX_ID replaces "*"; the default collects every sandbox.
+  # CUBE_LOGS_SANDBOX_ID 可替换“*”；默认采集所有沙箱。
   filelog/sandbox:
     include:
       - /data/cubelet/log/*/stdout
@@ -730,8 +730,8 @@ processors:
   memory_limiter:
     check_interval: 1s
     limit_mib: 256
-  # Values come from CUBE_OBSERVABILITY_CLUSTER_ID and
-  # CUBE_SANDBOX_NODE_IP (auto-detected when unset).
+  # 值来自 CUBE_OBSERVABILITY_CLUSTER_ID 和 CUBE_SANDBOX_NODE_IP；
+  # 未设置时会自动探测节点地址。
   resource/metrics:
     attributes:
       - {key: cluster, value: "cube-prod", action: upsert}
@@ -762,7 +762,7 @@ processors:
 
 exporters:
   otlp_http/metrics:
-    # CUBE_METRICS_OTLP_HTTP_ENDPOINT; the Collector appends /v1/metrics.
+    # 使用 CUBE_METRICS_OTLP_HTTP_ENDPOINT；Collector 会追加 /v1/metrics。
     endpoint: "http://10.0.0.10:9092/api/v1/otlp"
     compression: gzip
     sending_queue:
@@ -772,7 +772,7 @@ exporters:
       enabled: true
       max_elapsed_time: 0
   otlp_http/logs:
-    # CUBE_LOGS_OTLP_HTTP_ENDPOINT; the Collector appends /v1/logs.
+    # 使用 CUBE_LOGS_OTLP_HTTP_ENDPOINT；Collector 会追加 /v1/logs。
     endpoint: "http://10.0.0.10:3100/otlp"
     compression: gzip
     sending_queue:
@@ -785,7 +785,7 @@ exporters:
 extensions:
   health_check:
     endpoint: 127.0.0.1:13133
-  # Persist file offsets and the OTLP sending queue across process restarts.
+  # 在进程重启后保留文件读取位置和 OTLP 发送队列。
   file_storage:
     directory: /var/lib/cube-sandbox/otelcol/storage
     create_directory: true
@@ -793,7 +793,7 @@ extensions:
 service:
   extensions: [health_check, file_storage]
   pipelines:
-    # Metrics and logs are independent pipelines.
+    # 指标和日志使用相互独立的数据管道。
     metrics:
       receivers: [prometheus]
       processors: [memory_limiter, resource/metrics, batch]
@@ -841,10 +841,10 @@ label；`cubesandbox_sandbox_id`、`log_iostream` 等保留为 structured metada
 这避免每个沙箱生成新的高基数 stream。常用 LogQL：
 
 ```logql
-# All sandbox stderr
+# 所有沙箱的 stderr
 {service_name="cubesandbox-sandbox"} | log_iostream="stderr"
 
-# Error-like messages from one sandbox
+# 单个沙箱中的错误类消息
 {service_name="cubesandbox-sandbox"}
   | cubesandbox_sandbox_id="<sandbox-id>"
   |~ "(?i)error|fatal|panic"
@@ -854,13 +854,13 @@ label；`cubesandbox_sandbox_id`、`log_iostream` 等保留为 structured metada
 过滤条件：
 
 ```text
-# All sandbox stderr
+# 所有沙箱的 stderr
 service_name:"cubesandbox-sandbox" AND log_iostream:"stderr"
 
-  # Error-like messages from sandbox stdout/stderr
+# 沙箱 stdout/stderr 中的错误类消息
 cubesandbox_log_source:"sandbox-init" AND Body:(ERROR OR FATAL OR panic)
 
-# One sandbox
+# 单个沙箱
 cubesandbox_sandbox_id:"<sandbox-id>"
 ```
 
@@ -868,11 +868,11 @@ cubesandbox_sandbox_id:"<sandbox-id>"
 
 | 参数 | 当前内置值 | 建议 |
 | --- | --- | --- |
-| 指标抓取周期 / 超时 | systemd、独立 K8s：`5s / 3s`；Helm：`15s / 10s` | systemd/独立 K8s 保持内置值；Helm 周期不得小于固定的 `10s` 超时，较大规模建议保留默认 `15s` |
+| 指标抓取周期 / 超时 | one-click/systemd：`5s / 3s`；Helm：`15s / 10s` | one-click/systemd 保持内置值；Helm 周期不得小于固定的 `10s` 超时，较大规模建议保留默认 `15s` |
 | `CUBE_LOGS_FILE_START_AT`（仅 systemd） | `beginning` | 需要读取当前文件全部内容时保留 `beginning`；只采集 Collector 启动后新增内容时使用 `end` |
 | `CUBE_LOGS_SANDBOX_ID`（仅 systemd） | `*` | 正常运行保持 `*`；只在单沙箱排障或临时降低日志量时指定 ID |
 | Memory limiter | 固定 `256MiB`；Kubernetes Pod memory request/limit 为 `128Mi / 512Mi` | 先使用默认值；仅提高 Pod limit 不会改变 limiter，目前安装器未提供 limiter 调参入口 |
-| Batch | `1024` 条；systemd/独立 K8s 超时 `2s`，Helm 超时 `5s` | 低延迟优先保持当前值；不要直接修改生成文件，后续重新安装会覆盖手工修改 |
+| Batch | `1024` 条；one-click/systemd 超时 `2s`，Helm 超时 `5s` | 低延迟优先保持当前值；不要直接修改生成文件，后续重新安装会覆盖手工修改 |
 | OTLP 发送队列 | `1000`，使用磁盘 `file_storage`，失败持续重试 | 保证 `/var/lib/cube-sandbox/otelcol` 或 Kubernetes 节点状态目录有足够空间 |
 | Elasticsearch 发送队列 | 内存队列 `1000`、`10` 个 consumer，最多重试 `5` 次 | 持续故障可能最终丢弃日志，应监控 Collector 日志和后端可用性 |
 | Remote Write | 使用 WAL | 保证 WAL 所在目录有足够空间，并监控远端写入失败 |
@@ -896,22 +896,22 @@ Helm 内置 Prometheus、所选日志后端和 Grafana 默认使用 PVC。可在
 内存失败计数应立即触发或只使用很短的等待时间，并根据业务负载调整阈值：
 
 ```promql
-# CPU usage above 80% of a finite sandbox CPU limit
+# 有限 CPU 配额的沙箱使用率超过 80%
 100 * rate(cubesandbox_host_sandbox_cpu_usage_seconds_total[5m])
   / clamp_min(cubesandbox_host_sandbox_cpu_limit_cores, 0.001) > 80
 
-# CPU throttled periods above 20%
+# CPU 节流周期占比超过 20%
 100 * rate(cubesandbox_host_sandbox_cpu_throttled_periods_total[5m])
   / clamp_min(rate(cubesandbox_host_sandbox_cpu_periods_total[5m]), 0.001) > 20
 
-# Memory usage above 85% of a finite sandbox memory limit
+# 有限内存配额的沙箱使用率超过 85%
 100 * cubesandbox_host_sandbox_memory_current_bytes
   / clamp_min(cubesandbox_host_sandbox_memory_limit_bytes, 1) > 85
 
-# Any memory-limit failure during the last five minutes
+# 最近五分钟内出现内存限制失败
 increase(cubesandbox_host_sandbox_memory_failures_total[5m]) > 0
 
-# A sandbox exists but its resource sample is unavailable
+# 沙箱存在但当前没有可用资源采样
 cubesandbox_node_sandbox_count
   - cubesandbox_node_sandbox_available_count > 0
 ```
@@ -963,12 +963,6 @@ Grafana 自动加载两张看板：
   （Elasticsearch），两者使用统一 UID `cubesandbox-logs`：stderr 占比、日志量
   Top 沙箱、按 stdout/stderr 与节点的日志量、沙箱日志查询，以及默认折叠的
   **Component logs** 分组（仅在 Helm 开启组件日志后有数据）。
-
-one-click/systemd 安装后可用
-`sudo ./deploy/one-click/observability/install.sh status` 检查 Collector 与后端，并用
-`curl -fsS http://127.0.0.1:3100/ready` 检查默认 Loki；选择 Elasticsearch 时使用
-`curl -fsS 'http://127.0.0.1:9200/cubesandbox-logs*/_count'`。沙箱销毁会删除本地
-日志目录，因此 Collector 必须在沙箱存活期间持续 tail 并写入远端后端。
 
 one-click/systemd 安装后可用
 `sudo ./deploy/one-click/observability/install.sh status` 检查 Collector 与后端，并用

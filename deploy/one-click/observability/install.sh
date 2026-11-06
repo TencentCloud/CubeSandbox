@@ -3,8 +3,8 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # CubeSandbox one-click Observability Installer & Orchestrator.
-# Supports CVM (systemd / one-click) installation. Kubernetes installation
-# entrypoints live under deploy/kubernetes; Terraform observability is out of scope.
+# Supports CVM (one-click/systemd) installation. Kubernetes observability is
+# installed through deploy/kubernetes/chart; Terraform does not install it.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
