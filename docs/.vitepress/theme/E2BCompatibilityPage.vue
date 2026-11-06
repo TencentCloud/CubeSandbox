@@ -132,7 +132,7 @@ const cubeApi = [
       { m: 'POST', path: '/sandboxes/{id}/pause', status: 'bad', en: 'keep_memory=false is rejected — pause always keeps the memory snapshot.', zh: 'keep_memory=false 被拒绝；暂停总是保留内存。' },
       { m: 'POST', path: '/sandboxes/{id}/timeout', status: 'ok', en: 'Identical; -1 means never timing out.', zh: '完全一致；-1 表示永不超时。' },
       { m: 'POST', path: '/sandboxes/{id}/fork', status: 'ok', en: 'Identical per-fork results from one snapshot.', zh: '一致；一次快照派生多份，逐个返回结果。' },
-      { m: 'POST', path: '/sandboxes/{id}/snapshots', status: 'bad', en: 'mode="filesystem" is rejected — snapshots always keep memory.', zh: 'mode="filesystem" 被拒绝；快照总是保留内存。' },
+      { m: 'POST', path: '/sandboxes/{id}/snapshots', status: 'ok', en: 'Aligned: memory=false persists the filesystem only (mapped to Cube\'s fs-only); the default keeps memory.', zh: '已对齐：memory=false 只保存文件系统（映射为 Cube 的 fs-only），默认保留内存。' },
       { m: 'PUT', path: '/sandboxes/{id}/network', status: 'warn', en: 'Missing egress_proxy and https_ports.', zh: '缺 egress_proxy、https_ports 参数。' },
       { m: 'GET', path: '/sandboxes/{id}/metrics', status: 'missing', en: 'No such route; use Cubelet metrics instead.', zh: '无此路由；请使用 Cubelet 指标。' },
       { m: 'POST', path: '/sandboxes/{id}/resume', status: 'ext', en: 'Cube only: explicit resume.', zh: 'Cube 独有：显式恢复。' },
