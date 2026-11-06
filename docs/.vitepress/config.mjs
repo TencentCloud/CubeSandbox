@@ -345,7 +345,10 @@ export default withMermaid(defineConfig({
                     { text: 'Huajiao', link: '/guide/usecases/huajiao' },
                     { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' },
                     { text: 'Galxe Alva', link: '/guide/usecases/galxe-alva' },
-                    { text: 'LambChat', link: '/guide/usecases/lambchat' }
+                    { text: 'LambChat', link: '/guide/usecases/lambchat' },
+                    { text: 'ouc-online', link: '/guide/usecases/ouc-online' },
+                    { text: 'KakuriZai', link: '/guide/usecases/kakurizai' },
+                    { text: 'OMA', link: '/guide/usecases/oma' }
                   ]
                 }
               ]
@@ -583,7 +586,10 @@ export default withMermaid(defineConfig({
                     { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
                     { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' },
                     { text: 'Galxe Alva', link: '/zh/guide/usecases/galxe-alva' },
-                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' }
+                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' },
+                    { text: 'ouc-online', link: '/zh/guide/usecases/ouc-online' },
+                    { text: 'KakuriZai', link: '/zh/guide/usecases/kakurizai' },
+                    { text: 'OMA', link: '/zh/guide/usecases/oma' }
                   ]
                 }
               ]
