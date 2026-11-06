@@ -204,52 +204,77 @@ type definitionCreateOptions struct {
 	RootfsSizeBytesAtSnapshot uint64
 }
 
-// TemplateListOptions controls pagination of ListTemplatesWithOptions.
-// A zero value returns the full list (backwards compatible).
+const (
+	DefaultTemplateListLimit = 50
+	MaxTemplateListLimit     = 200
+)
+
+// TemplateListOptions controls database pagination. A zero Limit uses the
+// finite default; callers that need every row must iterate pages explicitly.
 type TemplateListOptions struct {
-	Limit  int
-	Offset int
+	Limit     int
+	Offset    int
+	SkipTotal bool
 }
 
 // TemplateListResult carries the requested page plus the total entry count
 // measured before slicing, so paged clients can compute page counts.
 type TemplateListResult struct {
 	Templates []TemplateInfo
-	Total     int
+	Total     int // -1 when the caller explicitly skips the exact count.
+	HasMore   bool
 }
 
-// ListTemplates returns all templates (backwards compatible).
+// ListTemplates retains the historical all-rows contract for internal callers,
+// but walks bounded database pages rather than loading unbounded associations
+// in one query.
 func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
-	result, err := ListTemplatesWithOptions(ctx, TemplateListOptions{})
-	if err != nil {
-		return nil, err
+	out := make([]TemplateInfo, 0)
+	for offset := 0; ; offset += MaxTemplateListLimit {
+		result, err := ListTemplatesWithOptions(ctx, TemplateListOptions{Limit: MaxTemplateListLimit, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, result.Templates...)
+		if len(out) >= result.Total || len(result.Templates) == 0 {
+			return out, nil
+		}
 	}
-	return result.Templates, nil
 }
 
-// ListTemplatesWithOptions returns templates with optional limit/offset paging
-// over a totally ordered list, so pages concatenate to the unpaged result.
+// ListTemplatesWithOptions returns one truly database-paged slice over the
+// union of definitions and latest CREATE/REDO job-only entries.
 func ListTemplatesWithOptions(ctx context.Context, opts TemplateListOptions) (*TemplateListResult, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
-	infos, err := listTemplatesCached(ctx)
-	if err != nil {
-		return nil, err
-	}
-	total := len(infos)
-	if opts.Limit <= 0 && opts.Offset <= 0 {
-		return &TemplateListResult{Templates: infos, Total: total}, nil
-	}
-	return &TemplateListResult{Templates: sliceTemplateInfos(infos, opts), Total: total}, nil
+	opts = normalizeTemplateListOptions(opts)
+	return listTemplatesPageFromDB(ctx, opts)
 }
 
-// listTemplatesCached serves the aggregate list from the query cache on a hit
-// and falls back to the DB query, which re-populates the cache.
-func listTemplatesCached(ctx context.Context) ([]TemplateInfo, error) {
-	if cached, ok := getCachedTemplateList(); ok {
-		return cached, nil
+// NormalizeTemplateListOptions is the exported form used by HTTP handlers so
+// the response limit/offset match the page the store actually served.
+func NormalizeTemplateListOptions(opts TemplateListOptions) TemplateListOptions {
+	return normalizeTemplateListOptions(opts)
+}
+
+func normalizeTemplateListOptions(opts TemplateListOptions) TemplateListOptions {
+	if opts.Limit <= 0 {
+		opts.Limit = DefaultTemplateListLimit
 	}
+	if opts.Limit > MaxTemplateListLimit {
+		opts.Limit = MaxTemplateListLimit
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	return opts
+}
+
+// listTemplatesCached is retained for package compatibility. The full-list
+// cache is deliberately bypassed: serving a page must never require materializing
+// every definition and historical job first.
+func listTemplatesCached(ctx context.Context) ([]TemplateInfo, error) {
 	return listTemplatesFromDB(ctx)
 }
 
@@ -270,77 +295,167 @@ func sliceTemplateInfos(infos []TemplateInfo, opts TemplateListOptions) []Templa
 	return infos
 }
 
-// listTemplatesFromDB is the uncached ListTemplates implementation. Called by
-// ListTemplates on a cache miss and by the backstop refresh goroutine (which
-// must bypass the cache to avoid a self-hit). Re-caches the result before
-// returning so the next read hits the cache.
+// listTemplatesFromDB is retained as a bounded default-page helper for older
+// package-local call sites and tests.
 func listTemplatesFromDB(ctx context.Context) ([]TemplateInfo, error) {
-	var defs []models.TemplateDefinition
-	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Order("updated_at desc, template_id asc").Find(&defs).Error; err != nil {
-		return nil, err
-	}
-	// Only CREATE/REDO jobs carry the source image identity used for display.
-	// A COMMIT/MIGRATE/snapshot row carries no source image ref, and a MIGRATE
-	// row would otherwise win the attempt_no ordering and blank image_info.
-	var jobs []models.TemplateImageJob
-	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
-		Where("operation IN ?", createRedoJobOperations).
-		Order("template_id asc, attempt_no desc, id desc").Find(&jobs).Error; err != nil {
-		return nil, err
-	}
-	latestJobByTemplateID := make(map[string]*models.TemplateImageJob, len(jobs))
-	for i := range jobs {
-		job := &jobs[i]
-		if _, exists := latestJobByTemplateID[job.TemplateID]; exists {
-			continue
-		}
-		latestJobByTemplateID[job.TemplateID] = job
-	}
-
-	hiddenIDs, err := hiddenSnapshotIDs(ctx)
+	result, err := listTemplatesPageFromDB(ctx, normalizeTemplateListOptions(TemplateListOptions{}))
 	if err != nil {
 		return nil, err
 	}
+	return result.Templates, nil
+}
 
-	out := make([]TemplateInfo, 0, len(defs))
+type templateListIDRow struct {
+	TemplateID string    `gorm:"column:template_id"`
+	SortTime   time.Time `gorm:"column:sort_ts"`
+}
+
+func templateListVisibleCTE() string {
+	return fmt.Sprintf(`
+WITH ranked_jobs AS (
+	SELECT j.template_id, j.updated_at,
+		ROW_NUMBER() OVER (PARTITION BY j.template_id ORDER BY j.attempt_no DESC, j.id DESC) AS row_num
+	FROM %s j
+	WHERE j.deleted_at IS NULL
+	  AND j.operation IN ?
+	  AND TRIM(j.template_id) <> ''
+	  AND NOT EXISTS (
+		SELECT 1 FROM %s d
+		WHERE d.deleted_at IS NULL AND d.template_id = j.template_id
+	  )
+),
+visible_templates AS (
+	SELECT d.template_id, d.updated_at AS sort_ts
+	FROM %s d
+	WHERE d.deleted_at IS NULL
+	  AND TRIM(d.template_id) <> ''
+	  AND LOWER(TRIM(COALESCE(d.kind, ''))) <> LOWER(?)
+	  AND NOT EXISTS (
+		SELECT 1 FROM %s s
+		WHERE s.deleted_at IS NULL
+		  AND s.snapshot_id = d.template_id
+		  AND s.status IN ?
+	  )
+	UNION ALL
+	SELECT j.template_id, j.updated_at AS sort_ts
+	FROM ranked_jobs j
+	WHERE j.row_num = 1
+	  AND NOT EXISTS (
+		SELECT 1 FROM %s s
+		WHERE s.deleted_at IS NULL
+		  AND s.snapshot_id = j.template_id
+		  AND s.status IN ?
+	  )
+)`,
+		constants.TemplateImageJobTableName,
+		constants.TemplateDefinitionTableName,
+		constants.TemplateDefinitionTableName,
+		constants.SnapshotTableName,
+		constants.SnapshotTableName,
+	)
+}
+
+func templateListQueryArgs() []any {
+	hiddenStatuses := []string{StatusDeleted, StatusDeleting}
+	return []any{
+		createRedoJobOperations,
+		pausesnap.KindPauseSnapshot,
+		hiddenStatuses,
+		hiddenStatuses,
+	}
+}
+
+func listTemplatesPageFromDB(ctx context.Context, opts TemplateListOptions) (*TemplateListResult, error) {
+	cte := templateListVisibleCTE()
+	args := templateListQueryArgs()
+	var countRow struct {
+		Total int64 `gorm:"column:total"`
+	}
+	countRow.Total = -1
+	if !opts.SkipTotal {
+		if err := store.db.WithContext(ctx).Raw(cte+"\nSELECT COUNT(*) AS total FROM visible_templates", args...).Scan(&countRow).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	pageLimit := opts.Limit
+	if opts.SkipTotal {
+		pageLimit++
+	}
+	pageArgs := append(append([]any{}, args...), pageLimit, opts.Offset)
+	var ids []templateListIDRow
+	if err := store.db.WithContext(ctx).Raw(
+		cte+"\nSELECT template_id, sort_ts FROM visible_templates ORDER BY sort_ts DESC, template_id ASC LIMIT ? OFFSET ?",
+		pageArgs...,
+	).Scan(&ids).Error; err != nil {
+		return nil, err
+	}
+	hasMore := len(ids) > opts.Limit
+	if hasMore {
+		ids = ids[:opts.Limit]
+	}
+	if len(ids) == 0 {
+		return &TemplateListResult{Templates: []TemplateInfo{}, Total: int(countRow.Total)}, nil
+	}
+
+	templateIDs := make([]string, 0, len(ids))
+	for _, row := range ids {
+		templateIDs = append(templateIDs, row.TemplateID)
+	}
+	var defs []models.TemplateDefinition
+	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
+		Where("template_id IN ?", templateIDs).
+		Find(&defs).Error; err != nil {
+		return nil, err
+	}
+	defByID := make(map[string]models.TemplateDefinition, len(defs))
 	for _, def := range defs {
-		// Pause-produced snaps are internal Resume artifacts (Kind=pause_snapshot).
-		// Keep them out of template/snapshot list surfaces.
-		if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
-			continue
-		}
-		if _, skip := hiddenIDs[def.TemplateID]; skip {
-			continue
-		}
-		imageInfo := extractImageInfoFromRequestJSON(def.RequestJSON)
-		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
-			imageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
-		}
-		info := templateInfoFromDefinition(def)
-		info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
-		info.ImageInfo = imageInfo
-		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
-			info.JobID = latestJobIDFromJob(latestJob)
-		}
-		out = append(out, info)
+		defByID[def.TemplateID] = def
 	}
-	seen := make(map[string]struct{}, len(out))
-	for _, item := range out {
-		seen[item.TemplateID] = struct{}{}
+
+	latestJobsSQL := fmt.Sprintf(`
+WITH ranked_page_jobs AS (
+	SELECT j.*, ROW_NUMBER() OVER (
+		PARTITION BY j.template_id ORDER BY j.attempt_no DESC, j.id DESC
+	) AS row_num
+	FROM %s j
+	WHERE j.deleted_at IS NULL
+	  AND j.operation IN ?
+	  AND j.template_id IN ?
+)
+SELECT * FROM ranked_page_jobs WHERE row_num = 1`,
+		constants.TemplateImageJobTableName,
+	)
+	var jobs []models.TemplateImageJob
+	if err := store.db.WithContext(ctx).Raw(latestJobsSQL, createRedoJobOperations, templateIDs).Scan(&jobs).Error; err != nil {
+		return nil, err
 	}
-	for _, job := range jobs {
-		if _, ok := seen[job.TemplateID]; ok {
+	jobByID := make(map[string]*models.TemplateImageJob, len(jobs))
+	for i := range jobs {
+		jobByID[jobs[i].TemplateID] = &jobs[i]
+	}
+
+	out := make([]TemplateInfo, 0, len(ids))
+	for _, row := range ids {
+		if def, ok := defByID[row.TemplateID]; ok {
+			info := templateInfoFromDefinition(def)
+			info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
+			info.ImageInfo = extractImageInfoFromRequestJSON(def.RequestJSON)
+			if job := jobByID[row.TemplateID]; job != nil {
+				info.ImageInfo = composeImageInfo(job.SourceImageRef, job.SourceImageDigest)
+				info.JobID = latestJobIDFromJob(job)
+			}
+			out = append(out, info)
 			continue
 		}
-		if _, skip := hiddenIDs[job.TemplateID]; skip {
-			continue
+		if job := jobByID[row.TemplateID]; job != nil {
+			out = append(out, templateInfoFromJob(job))
 		}
-		out = append(out, templateInfoFromJob(&job))
-		seen[job.TemplateID] = struct{}{}
 	}
-	setTemplateListCache(out)
-	return out, nil
+	if !opts.SkipTotal {
+		hasMore = opts.Offset+len(out) < int(countRow.Total)
+	}
+	return &TemplateListResult{Templates: out, Total: int(countRow.Total), HasMore: hasMore}, nil
 }
 
 // hiddenSnapshotIDs returns DELETED/DELETING snapshot IDs so ListTemplates
