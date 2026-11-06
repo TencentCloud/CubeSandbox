@@ -1059,7 +1059,11 @@ int dns_finish(struct __sk_buff *skb)
 	if (!matched)
 		return finish_udp_nat(skb, mvm_meta);
 
-	dns_track_allowed_query(skb, state, matched, qname_hash);
+	/* Matched but not tracked: drop. Delivering the query would let the
+	 * guest cache the answer, and the response would never be learned.
+	 */
+	if (!dns_track_allowed_query(skb, state, matched, qname_hash))
+		return TC_ACT_SHOT;
 	return finish_udp_nat(skb, mvm_meta);
 }
 
