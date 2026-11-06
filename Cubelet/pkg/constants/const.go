@@ -293,6 +293,10 @@ const (
 	AnnotationAppSnapshotContainerID   = "cube.appsnapshot.container.id"
 	AnnotationSnapshotDisable          = "cube.snapshot.disable"
 	AnnotationAppSnapshotFinished      = "cube.appsnapshot.finished"
+	// AnnotationMemoryDirtyLog opts guest RAM into KVM dirty-page logging so a
+	// pause only writes pages touched since the restore. Only Cubelet stamps
+	// it, explicitly "true"/"false", from host.memory.dirty_log.
+	AnnotationMemoryDirtyLog = "cube.memory.dirty_log"
 
 	DefaultSnapshotDir = "/usr/local/services/cubetoolbox/cube-snapshot"
 
