@@ -437,12 +437,12 @@ func (em *eventMonitor) handleContainerExit(ctx context.Context, e *eventtypes.T
 	}
 	cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Pid = pid
-		status.FinishedAt = exitTime
 		status.ExitCode = int32(e.ExitStatus)
-		// TaskExit can follow TaskOOM; retain the more specific OOM reason.
-		if status.Reason != string(restartpolicy.ReasonOOMKilled) {
+		// TaskExit can follow TaskOOM; retain OOM only when it marked this run finished.
+		if status.Reason != string(restartpolicy.ReasonOOMKilled) || status.FinishedAt == 0 || status.FinishedAt < status.StartedAt {
 			status.Reason = string(restartpolicy.ReasonForTaskExit(e.Pid, e.ExitStatus))
 		}
+		status.FinishedAt = exitTime
 		return status, nil
 	})
 
