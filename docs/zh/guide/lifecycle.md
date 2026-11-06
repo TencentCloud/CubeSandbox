@@ -21,7 +21,7 @@
 
 `GET /sandboxes/<id>` 可以返回 `errorReason`，这是 CubeSandbox 扩展，e2b API 中没有对应字段。它包含主容器已保存的状态或退出原因：主容器由 `FirstContainerName` 指定，旧记录中该字段为空时回退到沙箱 ID（`box.ID`）。其他容器的原因和内部状态消息不会返回。原因缺失、为空或仅包含空白字符时会省略该字段，使用旧版 Cubelet 或 CubeMaster 时也是如此。
 
-普通容器退出会记录 `"Completed"`（退出码为 0）、`"Error"`（非零退出码，包括进程被终止）或 `"SandboxCrashed"`（shim 消失）。`"OOMKilled"` 表示因内存不足退出，后续退出事件不会覆盖这个更具体的原因。Cubelet 的退出状态映射为公开 API 的 `state: "unknown"`；详情 API 不返回 `"exited"` 状态。`"PauseFailed"` 表示暂停失败，此时容器可能仍然存活：状态通常为 `"unknown"`，但 Cubelet 重启后可能为 `"running"`。原因字段不改变 `state`，也不会在沙箱删除后保留历史。`restartStatus` 单独记录最近一次退出和重启决策。
+普通容器退出会记录 `"Completed"`（退出码为 0）、`"Error"`（非零退出码，包括进程被终止）或 `"SandboxCrashed"`（shim 消失）。`"OOMKilled"` 表示因内存不足退出，同一次运行的后续退出事件不会覆盖这个更具体的原因；恢复时若容器不再处于退出状态，则清除退出原因。Cubelet 的退出状态映射为公开 API 的 `state: "unknown"`；详情 API 不返回 `"exited"` 状态。`"PauseFailed"` 表示暂停失败，此时容器可能仍然存活：状态通常为 `"unknown"`，但 Cubelet 重启后可能为 `"running"`。原因字段不改变 `state`，也不会在沙箱删除后保留历史。`restartStatus` 单独记录最近一次退出和重启决策。查看主容器当前保存的状态时使用 `errorReason`，查看重启管理器最近记录的退出原因时使用 `restartStatus.lastExitReason`；重启记录尚未更新、暂停或删除导致跳过记录，或 `errorReason` 为 `"PauseFailed"` 时，两者可能不同。
 
 状态转换主要由两个参数驱动：
 
